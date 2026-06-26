@@ -9338,3 +9338,24 @@ REUSABLE: the worker's slow BLAS means GEMM-reducible delegated ops are win oppo
 NEXT candidates with the same parallel-across-an-outer-dim shape: np.matmul with BROADCAST batch (2-D@3-D, 3-D@2-D),
 np.einsum batched-matmul forms not already native, np.linalg.matrix_power, stacked solve/inv (already native). The
 matmul_accumulate_serial export + par_chunks_mut-over-outer template is reusable for all of them.
+
+## BlackThrush WIN: matrix-BROADCAST batched matmul ((B..,m,k)@(k,n) and (m,k)@(B..,k,n)) ~15x (2026-06-26) — 88th win
+Extends the 87th batched-matmul win to the matrix-broadcast forms it deferred: one operand is a single 2-D matrix
+applied across the other's batch (e.g. a shared weight matrix over a batch of activations — extremely common). These
+previously fell through to numpy's slow worker BLAS. try_zerocopy_f64_batched_matmul generalized: m/k/n are uniform
+(m=a[-2], k=a[-1]=b[-2], n=b[-1]); the broadcast operand gets per-slice stride 0 so every batch reuses its one
+matrix; out shape = batch_dims + [m,n]. Same parallel-across-batch serial-packed-GEMM kernel. General broadcast
+(both >=3 with differing leading dims), non-contig, non-f64, non-finite, 1-D-vector, below-gate all still defer.
+PERF: numpy's broadcast matmul uses the IDENTICAL slow worker BLAS path at IDENTICAL flops as the 87th equal-batch
+case (numpy stable 172.18ms @64x256^3, 8s-measurement last turn). fnp broadcast on the worker ~11ms => ~15x.
+  Directly measured (rch worker, loaded — numpy contention-inflated): fnp bcast_3dA@2dB 10.99ms vs NumPy 747ms;
+  fnp bcast_2dA@3dB 15.36ms vs NumPy 399ms (these numpy reads are 2-5x contention-inflated above the 172ms steady
+  state; the honest steady-state ratio anchored to the clean equal-batch numpy is ~15x for 3dA@2dB).
+  LOAD-IMMUNE serial-vs-parallel isolation (same build, local): RAYON=1 serial-across-batch 50.8/51.0ms -> parallel
+  9.37/9.36ms = 5.42x/5.44x parallel speedup (broadcast parallelizes identically to — slightly better than — the
+  equal-batch 4.55x, since the broadcast operand is reused/cache-hot). This PROVES the parallel batched GEMM scales
+  for the broadcast forms; the vs-numpy magnitude rides on numpy's slow worker BLAS (same as the landed 87th win).
+CORRECTNESS: probe 18/0 (allclose) — both broadcast directions (3-D/4-D A @ 2-D B; 2-D A @ 3-D/4-D B) incl
+rectangular m!=k!=n; equal-batch regression; DEFER paths (general broadcast, non-finite, Fortran, int, tiny,
+1-D-vector both sides, 2-D@2-D). conformance_matmul 11/11(+1 ign) + conformance_dot 11/11(+1 ign) +
+conformance_dot_products 15/15 GREEN. Build clean. Real win. KEEP. AGENT_NAME=BlackThrush.

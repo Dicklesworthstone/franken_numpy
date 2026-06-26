@@ -4070,7 +4070,7 @@ b3db = rng.standard_normal((256, 128, 128))\n";
                 });
             }
         }
-        // Batched (3-D) matmul: currently delegates to numpy (native gate is 2-D only).
+        // Batched (3-D) matmul: native parallel-across-batch packed GEMM vs numpy slow BLAS.
         for (tag, ak, bk) in [("64x256x256", "a3d", "b3d"), ("256x128x128", "a3db", "b3db")] {
             let a = ns.get_item(ak).expect("a3d");
             let b = ns.get_item(bk).expect("b3d");
@@ -4081,6 +4081,35 @@ b3db = rng.standard_normal((256, 128, 128))\n";
                 bch.iter(|| black_box(np_m.call1((&a, &b)).expect("numpy call")));
             });
         }
+        // Matrix-BROADCAST batched matmul: one 2-D operand applied across the other's batch.
+        let bcast_setup = "import numpy as np\n\
+rng = np.random.default_rng(2)\n\
+ab = rng.standard_normal((64, 256, 256))\n\
+wb = rng.standard_normal((256, 256))\n\
+aw = rng.standard_normal((256, 256))\n\
+bb = rng.standard_normal((64, 256, 256))\n";
+        py.run(
+            std::ffi::CString::new(bcast_setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("bcast setup");
+        let ab = ns.get_item("ab").expect("ab");
+        let wb = ns.get_item("wb").expect("wb");
+        let aw = ns.get_item("aw").expect("aw");
+        let bb = ns.get_item("bb").expect("bb");
+        group.bench_function("fnp_matmul_bcast_3dA_2dB_64x256x256", |bch| {
+            bch.iter(|| black_box(m_fn.call1((&ab, &wb)).expect("fnp call")));
+        });
+        group.bench_function("numpy_matmul_bcast_3dA_2dB_64x256x256", |bch| {
+            bch.iter(|| black_box(np_m.call1((&ab, &wb)).expect("numpy call")));
+        });
+        group.bench_function("fnp_matmul_bcast_2dA_3dB_64x256x256", |bch| {
+            bch.iter(|| black_box(m_fn.call1((&aw, &bb)).expect("fnp call")));
+        });
+        group.bench_function("numpy_matmul_bcast_2dA_3dB_64x256x256", |bch| {
+            bch.iter(|| black_box(np_m.call1((&aw, &bb)).expect("numpy call")));
+        });
     });
 
     group.finish();

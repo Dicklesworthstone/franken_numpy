@@ -49224,16 +49224,18 @@ fn python_explicit_out_is_absent_or_none(py: Python<'_>, out: Option<&Py<PyAny>>
     out.is_none_or(|value| value.bind(py).is_none())
 }
 
-// Batched (ndim>=3) f64 np.matmul where numpy walks the batch single-threaded
-// through its (slow, reference) BLAS on the deployment/worker host. We parallelize
-// ACROSS the batch axis — each batch slice is one serial packed GEMM
-// (matmul_accumulate_serial) distributed over the rayon pool — so the aggregate
-// throughput beats numpy. Gate: both EXACT ndarray, f64, C-contiguous, SAME batch
-// shape (no broadcasting), ndim>=3, aligned contraction, all finite (matches the
-// 2-D native gate's allclose contract — BLAS vs packed-GEMM can order 0*inf/NaN
-// differently), and enough total flops to amortize the parallel fan-out. Everything
-// else (broadcast batch, 2-D operand, non-contiguous, non-f64, out=) falls through
-// to numpy.
+// Batched f64 np.matmul where numpy walks the batch single-threaded through its
+// (slow, reference) BLAS on the deployment/worker host. We parallelize ACROSS the
+// batch axis — each batch slice is one serial packed GEMM (matmul_accumulate_serial)
+// distributed over the rayon pool — so the aggregate throughput beats numpy. Three
+// batch shapes are handled: (1) both ndim>=3 with EQUAL leading dims; (2) a ndim>=3,
+// b a single 2-D matrix BROADCAST across a's batch ((B..,m,k)@(k,n)); (3) a a single
+// 2-D matrix, b ndim>=3 ((m,k)@(B..,k,n)). A broadcast (2-D) operand uses stride 0 so
+// every slice reuses its one matrix. Gate: both EXACT ndarray, f64, C-contiguous,
+// aligned contraction, all finite (matches the 2-D native gate's allclose contract —
+// BLAS vs packed-GEMM can order 0*inf/NaN differently), and enough total flops to
+// amortize the fan-out. Everything else (GENERAL broadcast batch with differing
+// leading dims, non-contiguous, non-f64, out=) falls through to numpy.
 fn try_zerocopy_f64_batched_matmul(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -49258,16 +49260,33 @@ fn try_zerocopy_f64_batched_matmul(
     }
     let a_shape: Vec<usize> = a_obj.getattr("shape")?.extract()?;
     let b_shape: Vec<usize> = b_obj.getattr("shape")?.extract()?;
-    let nd = a_shape.len();
-    if nd < 3 || b_shape.len() != nd || a_shape[..nd - 2] != b_shape[..nd - 2] {
+    let a_nd = a_shape.len();
+    let b_nd = b_shape.len();
+    if a_nd < 2 || b_nd < 2 {
         return Ok(None);
     }
-    let (m, k) = (a_shape[nd - 2], a_shape[nd - 1]);
-    let (k2, n) = (b_shape[nd - 2], b_shape[nd - 1]);
+    // m, k, n are uniform across all supported cases: m = a[-2], k = a[-1] = b[-2], n = b[-1].
+    let m = a_shape[a_nd - 2];
+    let k = a_shape[a_nd - 1];
+    let k2 = b_shape[b_nd - 2];
+    let n = b_shape[b_nd - 1];
     if k != k2 || m == 0 || k == 0 || n == 0 {
         return Ok(None);
     }
-    let batch: usize = a_shape[..nd - 2].iter().product();
+    // Determine which operand carries the batch. Supported: equal-batch (both ndim>=3, same
+    // leading dims) and MATRIX-BROADCAST (one operand exactly 2-D applied across the other's
+    // batch). General broadcast (both >=3 with differing/expandable batch dims) defers to numpy.
+    let (batch_dims, a_batched, b_batched): (Vec<usize>, bool, bool) =
+        if a_nd >= 3 && b_nd == a_nd && a_shape[..a_nd - 2] == b_shape[..b_nd - 2] {
+            (a_shape[..a_nd - 2].to_vec(), true, true)
+        } else if a_nd >= 3 && b_nd == 2 {
+            (a_shape[..a_nd - 2].to_vec(), true, false)
+        } else if a_nd == 2 && b_nd >= 3 {
+            (b_shape[..b_nd - 2].to_vec(), false, true)
+        } else {
+            return Ok(None);
+        };
+    let batch: usize = batch_dims.iter().product();
     let total_flops = batch
         .saturating_mul(m)
         .saturating_mul(k)
@@ -49277,6 +49296,12 @@ fn try_zerocopy_f64_batched_matmul(
     if batch < 2 || total_flops < BATCHED_GEMM_MIN_FLOPS || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
+    let (mk, kn, mn) = (m * k, k * n, m * n);
+    // Per-batch slice strides: 0 for a broadcast (2-D) operand, full matrix size otherwise.
+    let a_stride = if a_batched { mk } else { 0 };
+    let b_stride = if b_batched { kn } else { 0 };
+    let a_total = if a_batched { batch * mk } else { mk };
+    let b_total = if b_batched { batch * kn } else { kn };
     let Ok(a_buf) = PyBuffer::<f64>::get(a_obj) else {
         return Ok(None);
     };
@@ -49289,7 +49314,7 @@ fn try_zerocopy_f64_batched_matmul(
     let Some(b_cells) = b_buf.as_slice(py) else {
         return Ok(None);
     };
-    if a_cells.len() != batch * m * k || b_cells.len() != batch * k * n {
+    if a_cells.len() != a_total || b_cells.len() != b_total {
         return Ok(None);
     }
     use rayon::prelude::*;
@@ -49301,8 +49326,9 @@ fn try_zerocopy_f64_batched_matmul(
     if a_raw.par_iter().any(|v| !v.is_finite()) || b_raw.par_iter().any(|v| !v.is_finite()) {
         return Ok(None);
     }
-    let mut out_shape = a_shape.clone();
-    out_shape[nd - 1] = n; // m at nd-2 stays; contracted k becomes n
+    let mut out_shape = batch_dims;
+    out_shape.push(m);
+    out_shape.push(n);
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "float64")?;
     let out = numpy.call_method(
@@ -49314,21 +49340,23 @@ fn try_zerocopy_f64_batched_matmul(
     let Some(out_cells) = out_buf.as_mut_slice(py) else {
         return Ok(None);
     };
-    let out_n = batch * m * n;
+    let out_n = batch * mn;
     // SAFETY: fresh numpy.empty buffer we own (no alias with a/b).
     let out_raw: &mut [f64] =
         unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, out_n) };
-    let (mk, kn, mn) = (m * k, k * n, m * n);
-    // One serial packed GEMM per batch slice, distributed across the pool. The kernel
-    // ACCUMULATES, so each output chunk is zeroed first.
+    // One serial packed GEMM per batch slice, distributed across the pool; a broadcast operand
+    // (stride 0) reuses its single matrix every slice. The kernel ACCUMULATES, so each output
+    // chunk is zeroed first.
     out_raw
         .par_chunks_mut(mn)
         .enumerate()
         .for_each(|(bi, ochunk)| {
             ochunk.fill(0.0);
+            let a_off = bi * a_stride;
+            let b_off = bi * b_stride;
             matmul_accumulate_serial(
-                &a_raw[bi * mk..bi * mk + mk],
-                &b_raw[bi * kn..bi * kn + kn],
+                &a_raw[a_off..a_off + mk],
+                &b_raw[b_off..b_off + kn],
                 m,
                 k,
                 n,
