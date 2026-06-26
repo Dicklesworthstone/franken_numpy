@@ -50686,7 +50686,9 @@ fn log2(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     // Passthrough: native scalar-libm log2 is 1.44-3.35x slower than numpy's SIMD
-    // kernel at every size (2026-06-12). SIMD-bound, bead 8vdtg.
+    // kernel at every size (2026-06-12; re-confirmed 2026-06-26 BlackThrush — even the
+    // 64-thread parallel unary path is 1.47x SLOWER than numpy's vectorized log2, 95 vs
+    // 65ms@8M: this cheap transcendental is SIMD-bound, numpy's polynomial dominates).
     core_numpy_passthrough(py, "log2", args, kwargs)
 }
 
@@ -50702,6 +50704,8 @@ fn log10(
 ) -> PyResult<Py<PyAny>> {
     // Passthrough: native scalar-libm log10 was 1.85-2.29x slower than numpy's
     // SIMD at every size (2026-06-12). Byte-identical. SIMD-bound, bead 8vdtg.
+    // (Re-confirmed 2026-06-26 BlackThrush: parallel unary path only reaches parity
+    // 1.03x — no win, numpy's vectorized log10 already saturates.)
     core_numpy_passthrough(py, "log10", args, kwargs)
 }
 
@@ -50716,7 +50720,9 @@ fn exp2(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     // Passthrough: native scalar-libm exp2 is 1.60-3.65x slower than numpy's SIMD
-    // kernel at every size (2026-06-12). SIMD-bound, bead 8vdtg.
+    // kernel at every size (2026-06-12; re-confirmed 2026-06-26 BlackThrush — even the
+    // 64-thread parallel unary path is 1.48x SLOWER than numpy's vectorized exp2, 94 vs
+    // 64ms@8M: this cheap transcendental is SIMD-bound).
     core_numpy_passthrough(py, "exp2", args, kwargs)
 }
 

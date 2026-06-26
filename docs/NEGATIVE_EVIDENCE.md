@@ -9134,3 +9134,19 @@ REUSABLE: before adding a costly warning-preservation scan to a routed op, READ 
 assert VALUES (array_equal / isinf-isnan pattern, or filterwarnings('ignore')), the scan is unnecessary and the
 op ships value-exact at full speed. The binary-kernel-routing vein (float_power/nextafter/remainder/power/fmod/
 heaviside/maximum/minimum/copysign/divide = 10 ops) is now ~exhausted for cheap f64 binary ufuncs.
+
+## BlackThrush REJECT: parallelize log2/log10/exp2 unary (SIMD-bound, native parallel still LOSES) (2026-06-26)
+After the binary vein exhausted, probed the UNARY transcendental analog: log2/log10/exp2 core_numpy_passthrough
+behind a SERIAL "1.4-3.65x slower native" note (bead 8vdtg), while their cousin log1p (same native parallel path
+native_unary_promoting_or_passthrough) WINS 0.82x. HYPOTHESIS: parallel scalar libm would beat numpy's single-
+threaded SIMD, like the binary transcendentals (float_power/arctan2). MEASURED (built the route, criterion-style
+local 8M f64, fnp vs numpy): **log2 95.5 vs 65.2ms = 1.47x LOSS; exp2 94.5 vs 63.8ms = 1.48x LOSS; log10 96.0
+vs 93.0ms = 1.03x PARITY (no win).** Serial isolation: log2 162ms / log10 195ms / exp2 169ms (2.1-2.6x slower
+serial). So the parallel path DOES help (log2 162->95ms, ~1.7x from parallelism) but the scalar libm log2/exp2 is
+so much slower per-element than numpy's vectorized polynomial that 64-way parallelism + bandwidth STILL can't
+catch it. CONTRAST with log1p WIN: numpy's OWN log1p is slow (116ms, accuracy-bound 1+x), so fnp's parallel
+log1p (96ms) beats it — but numpy's log2/exp2 are cheap-and-fast (~65ms), no headroom. **RULE: the parallel-
+libm-beats-SIMD lever only works when numpy's own kernel for that op is SLOW (>~90ms@8M); for cheap transcendentals
+where numpy's SIMD is ~65ms, native scalar parallel LOSES.** Reverted the routing (kept passthrough); updated the
+inline notes to record the re-confirmation. The "1.4-3.65x slower" passthrough decision was and remains CORRECT.
+REVERTED zero-gain code. No code behavior change shipped (passthrough preserved). AGENT_NAME=BlackThrush.
