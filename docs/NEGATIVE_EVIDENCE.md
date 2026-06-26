@@ -8652,6 +8652,30 @@ the 1<<21 gate x non-pow2 (chunk remainder) x 2-D x custom nan/posinf/neginf rep
 x all-finite x +-0.0. Build clean. Real win (fnp BEATS numpy 4.8-15x, immune to false-loss). KEEP.
 AGENT_NAME=BlackThrush.
 
+## BlackThrush NO-SHIP: stacked Cholesky 8x8 wrapper-hoist probes (2026-06-25)
+BOLD-VERIFY land-or-dig pass found no unlanded measured worktree win to land, then dug the current
+`python_linalg_boundary` Cholesky rows after reviewing the alien-graveyard vectorized/morsel guidance and the
+existing Cholesky no-ship predicates. The biggest fresh measured gap was stacked `np.linalg.cholesky`
+`batch4000_8x8`: current FNP 4,678,673 ns vs NumPy 2,050,996 ns = **2.281x LOSS** on remote RCH `ovh-a`
+(`AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a
+rch exec -- cargo bench -j 1 -p fnp-python --profile release --bench criterion_python_surface --
+python_linalg_boundary --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher`).
+
+Two wrapper-only candidate levers were measured and rejected:
+- Broad stacked pre-delegate hoist (one exact-ndarray shape read, dtype lookup only for 2-D) kept Cholesky
+  conformance green (`conformance_linalg_decomp cholesky`: 6 passed) and fixed 8x8 to parity on `hz2`
+  (2,194,505 ns vs 2,199,314 ns = 0.998x), but introduced/confirmed a material 32x32 loss:
+  full sweep 6,199,875 ns vs 5,332,969 ns = **1.163x LOSS**; repeat exact 32x32 6,033,688 ns vs
+  5,460,677 ns = **1.105x LOSS**. Reverted.
+- Narrow 8x8-only early delegate avoided the broad 32x32 path change and kept conformance green
+  (`conformance_linalg_decomp cholesky`: 6 passed), but measured as zero-gain on exact 8x8:
+  2,220,103 ns vs 2,218,855 ns = **1.0006x LOSS/parity** on `hz2`. Reverted.
+
+Verdict: **NO-SHIP**. Do not retry stacked Cholesky wrapper micro-hoists, dtype-check shuffles, or shape-probe
+reordering as the next Cholesky lever. The earlier scalar/SoA/SIMD/validation-hoist no-ship predicates still
+stand; a credible retry needs a structurally different batched panel/packed layout or a NumPy/LAPACK boundary
+change that proves 8x8 and 32x32 together in the same RCH sweep. No production code kept. AGENT_NAME=BlackThrush.
+
 ## BlackThrush WIN: parallelize f32 np.around/round (3.80x over numpy) (2026-06-25) — 54th win
 Extended the 47th-win f64 around lever to the f32 zero-copy sibling try_zerocopy_f32_around (serial loop
 with three branchless mode forms: decimals==0 round-ties-even, positive scaled mul/round/div, negative
