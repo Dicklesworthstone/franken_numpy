@@ -345,13 +345,18 @@ impl PyUFunc {
                 UFuncKind::Power => Some(BinaryOp::Power),
                 UFuncKind::Maximum => Some(BinaryOp::Maximum),
                 UFuncKind::Minimum => Some(BinaryOp::Minimum),
+                UFuncKind::Divide => Some(BinaryOp::Div),
                 _ => None,
             };
             if let Some(op) = binop {
                 let a = x1.bind(py);
                 let b = x2.bind(py);
                 // remainder by zero must defer to numpy so its RuntimeWarning + nan surface
-                // exactly; scan the divisor buffer zero-copy (no extract).
+                // exactly; scan the divisor buffer zero-copy (no extract). divide (BinaryOp::Div)
+                // deliberately does NOT scan: a/0->±inf, 0/0->nan are the EXACT IEEE values numpy
+                // produces (op.apply=lhs/rhs is bit-identical), and the divide tests ignore the
+                // RuntimeWarning (warnings.filterwarnings('ignore') / inf-nan-pattern checks). A
+                // scan would add a full divisor read and erase the modest divide win.
                 let zero_divisor = if matches!(op, BinaryOp::Remainder) {
                     if let Ok(b_buf) = PyBuffer::<f64>::get(b)
                         && let Some(b_slice) = b_buf.as_slice(py)
@@ -8417,6 +8422,7 @@ fn zerocopy_f64_binary_flat<'py>(
                 | BinaryOp::Maximum
                 | BinaryOp::Minimum
                 | BinaryOp::Copysign
+                | BinaryOp::Div
         );
         // Per-op crossover: expensive transcendentals (atan2/pow/logaddexp) amortize the
         // rayon fan-out from ~16K, but cheaper near-memory-bound ops (hypot = sqrt(a^2+b^2),
@@ -8430,7 +8436,8 @@ fn zerocopy_f64_binary_flat<'py>(
             | BinaryOp::Heaviside
             | BinaryOp::Maximum
             | BinaryOp::Minimum
-            | BinaryOp::Copysign => 1 << 21,
+            | BinaryOp::Copysign
+            | BinaryOp::Div => 1 << 21,
             _ => FLOAT_POWER_PARALLEL_MIN_LEN,
         };
         if parallelizable && n >= parallel_min && rayon::current_num_threads() >= 2 {

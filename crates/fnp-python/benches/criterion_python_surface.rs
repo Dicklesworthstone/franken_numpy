@@ -3890,6 +3890,7 @@ bnz = np.where(b == 0.0, 1.0, b)\n";
             ("maximum", &a, &b),
             ("minimum", &a, &b),
             ("copysign", &a, &b),
+            ("divide", &a, &b),
         ] {
             let fnp_fn = module.getattr(op).expect("fnp op");
             let numpy_fn = numpy.getattr(op).expect("numpy op");
