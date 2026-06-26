@@ -3906,8 +3906,49 @@ bnz = np.where(b == 0.0, 1.0, b)\n";
     group.finish();
 }
 
+fn bench_sort_axis_boundary(c: &mut Criterion) {
+    // np.sort / np.argsort along the LAST (contiguous) axis of a 2-D f64 array — newly routed
+    // through the per-lane parallel sort (numpy sorts each lane single-threaded, sequentially).
+    let mut group = c.benchmark_group("python_sort_axis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+m = rng.standard_normal((2048, 2048))\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("sort axis setup");
+        let m = ns.get_item("m").expect("m");
+        for op in ["sort", "argsort"] {
+            let fnp_fn = module.getattr(op).expect("fnp op");
+            let numpy_fn = numpy.getattr(op).expect("numpy op");
+            group.bench_function(format!("fnp_{op}_lastaxis_2048x2048"), |bch| {
+                bch.iter(|| black_box(fnp_fn.call1((&m,)).expect("fnp call")));
+            });
+            group.bench_function(format!("numpy_{op}_lastaxis_2048x2048"), |bch| {
+                bch.iter(|| black_box(numpy_fn.call1((&m,)).expect("numpy call")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_sort_axis_boundary,
     bench_parallel_binary_boundary,
     bench_take_axis_boundary,
     bench_take_along_axis_boundary,

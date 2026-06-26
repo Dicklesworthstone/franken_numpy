@@ -9150,3 +9150,34 @@ libm-beats-SIMD lever only works when numpy's own kernel for that op is SLOW (>~
 where numpy's SIMD is ~65ms, native scalar parallel LOSES.** Reverted the routing (kept passthrough); updated the
 inline notes to record the re-confirmation. The "1.4-3.65x slower" passthrough decision was and remains CORRECT.
 REVERTED zero-gain code. No code behavior change shipped (passthrough preserved). AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallel per-lane sort + argsort along the LAST axis (2.34x / 4.01x) (2026-06-26) — 76th+77th wins
+NEW VEIN (structurally different from the binary/unary elementwise levers). np.sort/np.argsort had a parallel
+fast path ONLY for 1-D f64 (par_sort of a single array, wins ~1.6x/9x); EVERY 2-D+/per-axis call fell to
+core_numpy_passthrough = exact parity (numpy sorts each lane single-threaded and walks the lanes SEQUENTIALLY).
+FIX: try_zerocopy_f64_sort_lastaxis / try_zerocopy_f64_argsort_lastaxis — for ndim>=2 c-contiguous f64 sorted
+along the LAST (contiguous) axis, copy into a fresh numpy.empty then dst.par_chunks_mut(cols) sorts each lane
+INDEPENDENTLY across the rayon pool (embarrassingly parallel across rows; each lane serial sort_unstable_by
+partial_cmp). argsort fills local 0..cols indices per lane (numpy axis=-1 semantics) + sorts by value. Bit-exact:
+sort yields the same multiset per lane regardless of algorithm; argsort defers (Ok(None)->numpy) on ANY lane tie
+(numpy quicksort UNSTABLE = algorithm-specific order; distinct values give the unique permutation) or ANY NaN
+(numpy's NaN-at-end). axis resolution: axis kwarg MISSING (numpy default -1) or -1 or ndim-1 = last; explicit
+axis=None (flatten) and non-last axis defer; any kind/order kwarg defers. Shared axis_spec_is_last() helper.
+PERF (criterion, remote rch worker hz2 = truth; python_sort_axis_boundary, 2048x2048 f64 last-axis):
+  sort:    fnp  9.936ms vs NumPy 23.206ms = 0.428x (2.34x faster) [non-overlapping CIs]
+  argsort: fnp 13.415ms vs NumPy 53.867ms = 0.249x (4.01x faster) [non-overlapping CIs]
+  (local serial vs parallel isolation, same build: sort 42.3ms / argsort 73.0ms SERIAL = EXACT parity with numpy
+   (1.00-1.01x), parallel 24.7/8.1ms WIN — proving the win is purely parallelism across lanes, not box noise.)
+CORRECTNESS: probe 44/0 across sort+argsort x shapes (2048x2048, 4096x1024, 1024x4096, 256x16384, (2,1M),
+(1M,4), 3-D (8,4,4096)/(64,64,512)) x axis default/-1/ndim-1 x DEFER paths: axis=0 (non-last), axis=None
+(flatten), NaN (->numpy NaN-at-end), ties (argsort->numpy unstable), non-contiguous (F-order), kind=stable,
+int dtype, 1-D. conformance_sorting 1/1 + conformance_sort_search 33/34 + conformance_lexsort 16/16 GREEN for
+all sort/argsort cases. Build clean. Real wins. KEEP. AGENT_NAME=BlackThrush.
+REUSABLE: ops with a 1-D-only parallel fast path that PASSTHROUGH for >1-D (grep ndim==1 gates next to
+core_numpy_passthrough) are a vein — per-lane work along the contiguous last axis parallelizes across lanes
+(par_chunks_mut(lane_len)) and beats numpy's sequential per-lane walk. NaN/tie/non-last-axis defer keeps it exact.
+PRE-EXISTING RED (NOT mine, surfaced): conformance_sort_search::searchsorted_python_container_surfaces_match_numpy
+FAILS on origin/main ("invalid side error") — introduced by peer commit 074eae7e ("bold-verify searchsorted numpy
+win"), an ancestor of origin/main; my diff touches ZERO searchsorted code (sort/argsort only). numpy raises a
+different error message/type than fnp for an invalid `side=` value on a Python-container searchsorted. Filed as a
+blocker observation for whoever owns searchsorted; does not block this sort/argsort landing.

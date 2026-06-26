@@ -40691,6 +40691,83 @@ fn try_zerocopy_f64_sort_flat(
     Ok(Some(out.unbind()))
 }
 
+// Returns true iff `axis_spec` selects the LAST axis of an `ndim`-D array. axis_spec encodes
+// the kwarg: None = axis kwarg MISSING (numpy default = last axis); Some(None) = explicit
+// axis=None (flatten — NOT the last axis); Some(Some(k)) = explicit integer axis.
+fn axis_spec_is_last(axis_spec: Option<Option<isize>>, ndim: usize) -> bool {
+    match axis_spec {
+        None => true,                       // missing -> default -1 (last)
+        Some(None) => false,                // axis=None -> flatten (handled elsewhere)
+        Some(Some(k)) => k == -1 || k == (ndim as isize) - 1,
+    }
+}
+
+// Parallel per-lane f64 sort along the LAST (contiguous) axis of an ndim>=2 C-contiguous
+// array. numpy sorts each lane single-threaded and walks the lanes sequentially; here each
+// contiguous row is an independent sort distributed across the rayon pool (embarrassingly
+// parallel across rows). Bit-exact: sorting yields the same multiset per lane regardless of
+// algorithm; any NaN -> defer (numpy's NaN-at-end ordering). Defers for non-2D+/non-f64/
+// non-contiguous/non-last-axis/below-crossover.
+fn try_zerocopy_f64_sort_lastaxis(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    axis_spec: Option<Option<isize>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
+        return Ok(None);
+    }
+    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    if ndim < 2 || !a.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()? {
+        return Ok(None);
+    }
+    if !axis_spec_is_last(axis_spec, ndim) {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let cols = shape[ndim - 1];
+    let rows: usize = shape[..ndim - 1].iter().product();
+    // Need at least 2 lanes to parallelize and 2 elements per lane to sort.
+    const SORT_AXIS_PARALLEL_MIN: usize = 1 << 20;
+    if rows < 2 || cols < 2 || rows * cols < SORT_AXIS_PARALLEL_MIN
+        || rayon::current_num_threads() < 2
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    if n != rows * cols {
+        return Ok(None);
+    }
+    use rayon::prelude::*;
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let src: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    if src.par_iter().any(|v| v.is_nan()) {
+        return Ok(None);
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+    let out = numpy.call_method("empty", (shape_tuple,), Some(&kwargs))?;
+    let out_buffer = PyBuffer::<f64>::get(&out)?;
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
+    let dst: &mut [f64] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+    dst.copy_from_slice(src);
+    // Each contiguous lane is sorted independently; rayon distributes the lanes across cores.
+    dst.par_chunks_mut(cols)
+        .for_each(|lane| lane.sort_unstable_by(|x, y| x.partial_cmp(y).expect("no NaN")));
+    Ok(Some(out.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn sort(
@@ -40698,20 +40775,31 @@ fn sort(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Fast path: np.sort(a) / np.sort(a, axis in {-1,0,None}) on a 1-D f64 array, default
-    // kind. Any kind/order kwarg or other axis -> passthrough (handles every other surface).
+    // Fast paths: np.sort on f64 C-contiguous, default kind. 1-D (axis -1/0/None) -> parallel
+    // flat sort; ndim>=2 along the LAST axis (axis missing/-1/ndim-1) -> parallel per-lane sort.
+    // Any kind/order kwarg, explicit axis=None on >1-D (flatten), or a non-last axis -> passthrough.
     if args.len() == 1 {
-        let axis_ok = match kwargs {
-            None => true,
-            Some(kw) => kw.iter().all(|(k, v)| {
-                k.extract::<String>().ok().as_deref() == Some("axis")
-                    && (v.is_none()
-                        || v.extract::<isize>().map(|x| x == -1 || x == 0).unwrap_or(false))
-            }),
-        };
-        if axis_ok {
+        let mut other_kwarg = false;
+        let mut axis_spec: Option<Option<isize>> = None; // outer None = "axis" kwarg missing
+        if let Some(kw) = kwargs {
+            for (k, v) in kw.iter() {
+                if k.extract::<String>().ok().as_deref() == Some("axis") {
+                    axis_spec = Some(if v.is_none() { None } else { Some(v.extract::<isize>()?) });
+                } else {
+                    other_kwarg = true;
+                }
+            }
+        }
+        if !other_kwarg {
             let numpy = py.import("numpy")?;
-            if let Some(out) = try_zerocopy_f64_sort_flat(py, &numpy, &args.get_item(0)?)? {
+            let a = args.get_item(0)?;
+            // 1-D: axis missing/None/-1/0 all collapse to the single axis.
+            if matches!(axis_spec, None | Some(None) | Some(Some(-1)) | Some(Some(0)))
+                && let Some(out) = try_zerocopy_f64_sort_flat(py, &numpy, &a)?
+            {
+                return Ok(out);
+            }
+            if let Some(out) = try_zerocopy_f64_sort_lastaxis(py, &numpy, &a, axis_spec)? {
                 return Ok(out);
             }
         }
@@ -40783,7 +40871,88 @@ fn try_zerocopy_f64_argsort_flat(
     Ok(Some(out.unbind()))
 }
 
-// Passthrough to NumPy for everything except the parallel flat-f64-distinct fast path above.
+// Parallel per-lane f64 argsort along the LAST (contiguous) axis of an ndim>=2 C-contiguous
+// array. Each lane's indices (0..cols, local per numpy's axis=-1 semantics) are sorted by
+// value independently, distributed across the rayon pool. Like the flat argsort, numpy's
+// quicksort is UNSTABLE so ties are algorithm-specific: any lane with a tie (or any NaN) ->
+// defer the whole op to numpy. Distinct values give the unique permutation numpy returns.
+fn try_zerocopy_f64_argsort_lastaxis(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    axis_spec: Option<Option<isize>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
+        return Ok(None);
+    }
+    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    if ndim < 2 || !a.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()? {
+        return Ok(None);
+    }
+    if !axis_spec_is_last(axis_spec, ndim) {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let cols = shape[ndim - 1];
+    let rows: usize = shape[..ndim - 1].iter().product();
+    const ARGSORT_AXIS_PARALLEL_MIN: usize = 1 << 20;
+    if rows < 2 || cols < 2 || rows * cols < ARGSORT_AXIS_PARALLEL_MIN
+        || rayon::current_num_threads() < 2
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    if n != rows * cols {
+        return Ok(None);
+    }
+    use rayon::prelude::*;
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    if data.par_iter().any(|v| v.is_nan()) {
+        return Ok(None);
+    }
+    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+    let out = numpy.call_method1("empty", (shape_tuple, numpy.getattr("intp")?))?;
+    let out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
+    let perm: &mut [i64] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    // Each lane: fill local indices 0..cols, sort by the lane's values (no NaN -> total order).
+    perm.par_chunks_mut(cols).enumerate().for_each(|(r, prow)| {
+        let base = r * cols;
+        let vrow = &data[base..base + cols];
+        for (j, s) in prow.iter_mut().enumerate() {
+            *s = j as i64;
+        }
+        prow.sort_unstable_by(|&x, &y| {
+            vrow[x as usize]
+                .partial_cmp(&vrow[y as usize])
+                .expect("no NaN after check")
+        });
+    });
+    // Any lane with a tie -> numpy's unstable order is algorithm-specific; defer the whole op.
+    let sorted: &[i64] = perm;
+    let has_tie = sorted.par_chunks(cols).enumerate().any(|(r, prow)| {
+        let base = r * cols;
+        let vrow = &data[base..base + cols];
+        (1..cols).any(|j| vrow[prow[j] as usize] == vrow[prow[j - 1] as usize])
+    });
+    if has_tie {
+        return Ok(None);
+    }
+    Ok(Some(out.unbind()))
+}
+
+// Passthrough to NumPy for everything except the parallel flat / last-axis f64-distinct paths.
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn argsort(
@@ -40792,17 +40961,26 @@ fn argsort(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if args.len() == 1 {
-        let axis_ok = match kwargs {
-            None => true,
-            Some(kw) => kw.iter().all(|(k, v)| {
-                k.extract::<String>().ok().as_deref() == Some("axis")
-                    && (v.is_none()
-                        || v.extract::<isize>().map(|x| x == -1 || x == 0).unwrap_or(false))
-            }),
-        };
-        if axis_ok {
+        let mut other_kwarg = false;
+        let mut axis_spec: Option<Option<isize>> = None; // outer None = "axis" kwarg missing
+        if let Some(kw) = kwargs {
+            for (k, v) in kw.iter() {
+                if k.extract::<String>().ok().as_deref() == Some("axis") {
+                    axis_spec = Some(if v.is_none() { None } else { Some(v.extract::<isize>()?) });
+                } else {
+                    other_kwarg = true;
+                }
+            }
+        }
+        if !other_kwarg {
             let numpy = py.import("numpy")?;
-            if let Some(out) = try_zerocopy_f64_argsort_flat(py, &numpy, &args.get_item(0)?)? {
+            let a = args.get_item(0)?;
+            if matches!(axis_spec, None | Some(None) | Some(Some(-1)) | Some(Some(0)))
+                && let Some(out) = try_zerocopy_f64_argsort_flat(py, &numpy, &a)?
+            {
+                return Ok(out);
+            }
+            if let Some(out) = try_zerocopy_f64_argsort_lastaxis(py, &numpy, &a, axis_spec)? {
                 return Ok(out);
             }
         }
