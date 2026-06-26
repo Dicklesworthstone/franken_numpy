@@ -8894,3 +8894,29 @@ both sides, 2-D index shape, all-negative) + 10/0 dtype probe (int64/32/16/8, ui
 bool via take_typed). conformance_take_put 20/20 GREEN. Build clean. Real win (5.2x >> false-loss noise floor).
 Landed via isolated worktree off origin/main (concurrent peer holds uncommitted rustfmt of the shared lib.rs).
 KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush NO-SHIP: post-searchsorted boundary sweep found only tiny/near-noise losses (2026-06-26)
+BOLD-VERIFY land-or-dig pass found no unmerged measured worktree win to land: `git branch --no-merged main`
+was empty, and the live `.scratch` / `.worktrees` candidates were either behind `main` or carried old no-ship
+work. After pulling the 62nd landed win (`np.take` flat gather), ran a fresh per-crate criterion sweep from an
+isolated worktree, remote rch worker hz2, warm target dir:
+`AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a
+rch exec -- cargo bench -j 1 -p fnp-python --profile release --bench criterion_python_surface --
+'python_buffer_extract|python_concat_hstack_boundary|python_indices_construction_boundary|python_char_ascii_boundary|python_sort_complex_boundary|python_unique_medium_boundary'
+--sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher`.
+Measured ratios vs NumPy:
+  diag_indices(64, 2): fnp 1.205us vs NumPy 0.602us = 2.002x LOSS, but absolute delta is 0.603us/iter.
+  diag_indices(4096, 2): fnp 2.608us vs NumPy 1.876us = 1.390x LOSS, absolute delta 0.732us/iter.
+  unique_f64_repeated_50k: fnp 2.179ms vs NumPy 1.976ms = 1.103x LOSS, near-noise and reverses at larger sizes.
+  unique_f64_repeated_512k: fnp 26.561ms vs NumPy 26.641ms = 0.997x parity/slight win.
+  unique_f64_repeated_1m_gate: fnp 19.307ms vs NumPy 62.379ms = 0.309x WIN.
+  unique_f64_distinct_1m_gate: fnp 13.522ms vs NumPy 57.183ms = 0.236x WIN.
+  char.upper u20 ascii 1m: fnp 25.184ms vs NumPy 213.865ms = 0.118x WIN.
+  char.lower u20 ascii 1m: fnp 31.110ms vs NumPy 207.774ms = 0.150x WIN.
+  sort complex-real f64 200k: fnp 8.706ms vs NumPy 8.785ms = 0.991x parity/slight win.
+  sort complex-real f64 1m: fnp 9.872ms vs NumPy 53.630ms = 0.184x WIN.
+REJECT: do not spend a source-code lever on `diag_indices` wrapper/cached-delegate work from this evidence.
+The ratio looks bad only because the operation is sub-3us; the absolute delta is below a microsecond and below
+the campaign's meaningful hot-path threshold. Also reject `unique_f64_repeated_50k`: it is a 1.10x small-row
+loss while the larger/gated rows are parity-to-3.2x faster. No source edit was kept; zero-gain code reverted by
+not applying any candidate patch. Code conformance unchanged by construction. AGENT_NAME=BlackThrush.
