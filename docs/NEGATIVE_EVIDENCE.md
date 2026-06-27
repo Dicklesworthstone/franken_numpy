@@ -9519,3 +9519,43 @@ char case-conversion wins (upper/lower/swapcase/capitalize/title) were measured 
 parity on the worker's newer numpy — worth a worker re-measure, but they're harmless (native ties the C ufunc, defers
 non-ASCII). NEXT lever must be neither BLAS- nor numpy-version-sensitive: target ops where fnp's PARALLELISM is the
 edge (numpy single-threaded regardless of version), re-measured on the worker.
+
+## BlackThrush WIN: vector norm on a NON-LAST axis for the order-free ords (ord in {+inf,-inf,0}) — 4.8-9.8x over NumPy (2026-06-26) — 91st win
+Followed the char.add REJECT's own lesson: pick a lever that is neither BLAS- nor numpy-version-sensitive — an op where
+fnp's PARALLELISM is the edge (NumPy runs it single-threaded regardless of version). `np.linalg.norm(x, ord, axis=k)`
+for a NON-LAST integer axis was that lever. The landed last-axis vector-norm fast path
+(`try_zerocopy_f64_vector_norm_axis`) gated `ax != ndim-1` and delegated EVERY non-last axis to NumPy, which
+materializes the whole `abs(x)` temporary then runs a serial per-axis reduce — slow and single-threaded.
+
+Extended the fast path to non-last single axes, but ONLY for the ORDER-INDEPENDENT ords: `+inf` (max|x|), `-inf`
+(min|x|), and the newly-added `0` (count of nonzero, `VectorNormKind::Count`). These reductions are
+associative+commutative, so the result is bit-for-bit identical under ANY traversal order — sidestepping the blocker
+that kills L2/L1 here (NumPy's strided axis summation order is not reproducible bit-exactly by a parallel reduce, so
+L2/L1 on a non-last axis still return None and delegate). The kernel sweeps memory CONTIGUOUSLY (not a strided
+per-lane gather): outer>=2 parallelizes across the independent contiguous outer blocks (each reduces its `alen` rows
+into its own `inner`-wide slice); outer==1 (e.g. axis 0) splits the single block's rows into bands with privatized
+per-column accumulators, then combines. NaN propagates bit-identically to `lane_extreme_abs_f64`.
+
+PERF (criterion, remote RCH worker ovh-a, per-crate `fnp-python`, release; `python_norm_nonlast_axis_boundary`,
+10 samples; median fnp vs median NumPy):
+  ord=+inf  axis=0 (4096,2048):   fnp 1.401ms vs NumPy 8.221ms = 5.87x
+  ord=-inf  axis=0 (4096,2048):   fnp 1.624ms vs NumPy 8.266ms = 5.09x
+  ord=0     axis=0 (4096,2048):   fnp 1.441ms vs NumPy 9.283ms = 6.44x
+  ord=+inf  axis=0 (8192,1024):   fnp 1.331ms vs NumPy 8.800ms = 6.61x
+  ord=-inf  axis=0 (8192,1024):   fnp 1.496ms vs NumPy 8.012ms = 5.35x
+  ord=0     axis=0 (8192,1024):   fnp 1.388ms vs NumPy 9.968ms = 7.18x
+  ord=+inf  axis=1 (256,256,64):  fnp 0.652ms vs NumPy 6.397ms = 9.81x
+  ord=-inf  axis=1 (256,256,64):  fnp 0.794ms vs NumPy 6.520ms = 8.21x
+  ord=0     axis=1 (256,256,64):  fnp 0.793ms vs NumPy 5.769ms = 7.28x
+  ord=+inf  axis=0 (256,256,64):  fnp 0.933ms vs NumPy 4.867ms = 5.22x
+  ord=-inf  axis=0 (256,256,64):  fnp 1.065ms vs NumPy 5.116ms = 4.80x
+  ord=0     axis=0 (256,256,64):  fnp 0.782ms vs NumPy 5.780ms = 7.39x
+
+CORRECTNESS: differential probe vs NumPy, BIT-EXACT (np.array_equal / allclose rtol=0 atol=0 equal_nan), 0 fails over
+60+ cases: every non-last axis (incl negative-axis forms) x ord {+inf,-inf,0} x keepdims {F,T} on 2-D/3-D/4-D shapes;
+new last-axis ord=0 (Count); NaN/inf/whole-zero-column/signed-zero handling (-0.0 not counted, matches NumPy);
+all-zero count==0; below-parallel-gate small shapes; int input. Plus regressions held: L2/L1 on non-last axes STILL
+delegate and match NumPy (ord None/2/1), and the existing last-axis L2/L1/+-inf win path is unchanged. The existing
+`norm_axis_vector_l2_matches_numpy` conformance test (rtol=0,atol=0) still passes (its middle-axis L2 case delegates
+exactly as before). NOT a no-ship: real measured parallelism win, bit-exact, neither BLAS- nor numpy-version-sensitive.
+KEEP. AGENT_NAME=BlackThrush.

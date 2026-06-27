@@ -2324,6 +2324,78 @@ fn bench_norm_axis_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+// Vector norm along a NON-LAST axis for the order-independent ords (ord in {+inf,
+// -inf, 0}). numpy runs a serial materialize-then-reduce; the native block-parallel /
+// band-privatized column reduction (try_zerocopy_f64_vector_norm_axis non-last branch)
+// is bit-exact for these order-free reductions. L2/L1 are NOT here (they delegate -
+// numpy's strided summation order is not reproducible bit-for-bit in parallel).
+fn bench_norm_nonlast_axis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_norm_nonlast_axis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_norm = module.getattr("norm").expect("fnp_python.norm");
+        let numpy_norm = numpy
+            .getattr("linalg")
+            .expect("numpy.linalg")
+            .getattr("norm")
+            .expect("numpy.linalg.norm");
+
+        let inf = f64::INFINITY;
+        // (label, shape, axis)
+        let cases: [(&str, Vec<i64>, i64); 4] = [
+            ("4096x2048_ax0", vec![4096, 2048], 0),
+            ("8192x1024_ax0", vec![8192, 1024], 0),
+            ("256x256x64_ax1", vec![256, 256, 64], 1),
+            ("256x256x64_ax0", vec![256, 256, 64], 0),
+        ];
+        for (label, shape, axis) in cases {
+            let size: i64 = shape.iter().product();
+            let shape_tuple = PyTuple::new(py, shape.iter().copied()).expect("shape tuple");
+            let input = numpy
+                .call_method1("linspace", (-4.0_f64, 6.0_f64, size))
+                .expect("norm nonlast f64 input")
+                .call_method1("reshape", (shape_tuple,))
+                .expect("norm nonlast reshape");
+
+            for (ord_label, ord_val) in [("inf", inf), ("ninf", -inf), ("zero", 0.0_f64)] {
+                let fnp_kwargs = PyDict::new(py);
+                fnp_kwargs.set_item("ord", ord_val).expect("fnp ord kwarg");
+                fnp_kwargs.set_item("axis", axis).expect("fnp axis kwarg");
+                let numpy_kwargs = PyDict::new(py);
+                numpy_kwargs.set_item("ord", ord_val).expect("numpy ord kwarg");
+                numpy_kwargs.set_item("axis", axis).expect("numpy axis kwarg");
+
+                group.bench_function(format!("fnp_norm_{ord_label}_{label}"), |bench| {
+                    bench.iter(|| {
+                        let result = fnp_norm
+                            .call((&input,), Some(&fnp_kwargs))
+                            .expect("fnp norm nonlast call");
+                        black_box(result);
+                    });
+                });
+                group.bench_function(format!("numpy_norm_{ord_label}_{label}"), |bench| {
+                    bench.iter(|| {
+                        let result = numpy_norm
+                            .call((&input,), Some(&numpy_kwargs))
+                            .expect("numpy norm nonlast call");
+                        black_box(result);
+                    });
+                });
+            }
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_norm_frobenius_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_norm_frobenius_boundary");
     group.sample_size(10);
@@ -4237,6 +4309,7 @@ criterion_group!(
     bench_polyval_boundary,
     bench_gradient_axis_boundary,
     bench_norm_axis_boundary,
+    bench_norm_nonlast_axis_boundary,
     bench_norm_frobenius_boundary,
     bench_compress_boundary,
     bench_roll_boundary,
