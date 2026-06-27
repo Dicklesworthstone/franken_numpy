@@ -9773,3 +9773,40 @@ temp-avoidance over numpy's materialized temps (matches the f64 axis-0 path; col
 The prior behaviour (delegate to numpy) was ~parity at 28ms/10ms; this is a 27x/3.5x improvement over that baseline.
 
 conformance_var + conformance_std + conformance_mean GREEN on worker. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: native FLOAT32 nanvar/nanstd along a NON-LAST axis (axis 0 + middle) — f32 NaN-skip sibling of the 99th; MIDDLE 26-35x + AXIS0 ~5x vs NumPy (2026-06-27) — 100th win
+Direct extension of the 99th (f32 var/std non-last axis) to the NaN-skipping variants. float32 nanvar/nanstd along any
+axis DELEGATED to numpy (the nanvar/nanstd dispatchers `return fallback()` for any non-f64 float via the
+`native_f64_reduction_preserves_dtype` guard, so f32 never reached a native path) -> parity with numpy's slow path
+(~70-77ms middle / ~46ms axis0 with 10% NaN). numpy.nanvar on float32 keeps the f32 accumulator and materializes a
+NaN->0 copy, an isnan mask, a per-axis count, and the (a-mean)/squared f32 temps before two SEQUENTIAL non-last reduces.
+New `try_zerocopy_f32_nanvar_nonlast_axis` = per-outer-block sequential f32 NaN-skip two-pass (pass 1: per-column f32
+sum + non-NaN count -> mean; pass 2: sum of (val-mean)^2 over non-NaN -> /(count-ddof); std = sqrt), no temp; middle
+(outer>=2) block-parallel across rayon, axis 0 (outer==1) serial. Hooked into BOTH nanvar (take_sqrt=false) and nanstd
+(take_sqrt=true) **before** the f64-dtype guard (it preserves f32; f64/int/f16/flat/last-axis fall through unchanged).
+Any column non-NaN count <= ddof (all-NaN column) -> whole call defers to numpy (its DoF<=0 warning + NaN parity).
+
+KEY BUG CAUGHT MID-DIG: the f32 hook MUST go before the `native_f64_reduction_preserves_dtype` early `return fallback()`
+in the nanvar/nanstd dispatchers — placed after it (mirroring the f64 hook location), the f32 path was DEAD CODE and
+measured pure parity (DEFAULT == RAYON=1 == numpy). Relocating it before the guard made it engage (parity -> 26-35x).
+LESSON: nan-reduction dispatchers fast-fail non-f64 dtypes up front; a new f32 native path must be inserted ABOVE that
+guard, not next to the f64 paths.
+
+BIT-EXACTNESS: numpy f32 nanvar computes in f32, masked positions contribute 0 in both passes, non-last reduce is
+sequential -> per-block sequential f32 NaN-skip two-pass is BYTE-IDENTICAL. Prototyped in numpy first (manual f32
+NaN-skip two-pass == np.nanvar/np.nanstd byte-exact both ddof, with + without NaN), then in the built extension:
+differential probe BYTE-EXACT (f32 bit compare incl NaN-pair), 0 fails over ~130 cases: nanvar+nanstd, MIDDLE axis of
+3-D/4-D + AXIS0 of 2-D/3-D, ddof 0/1, keepdims both, negative axis, 0%/10% NaN, Inf, all-NaN-column defer, count==ddof
+defer; regressions (last axis delegates+matches, flat delegates, dtype=f64 override -> f64 matches, f64 input unchanged,
+small-below-gate) all match.
+
+MEASURED (local, full threads, numpy single-threaded, 10% NaN):
+  nanvar f32 MIDDLE ax1 (256,128,256): numpy 76.6ms | fnp 2.94ms = 26.0x   (nanstd 70.7->2.03ms = 34.8x)
+  nanvar f32 AXIS0 (4000,2000):        numpy 47.2ms | fnp 9.56ms = 4.9x    (nanstd 46.5->9.50ms = 4.9x)
+Worker criterion bench (python_nanvar_f32_axis_boundary) built + ran on the worker confirming the path engages
+(fnp ~19x more criterion iterations than numpy at the middle axis). nan-reductions are pure-native (numpy single-
+threaded C regardless of version/BLAS), so the local full-threads ratios above are representative.
+
+conformance_nan_funcs 37/37 GREEN; conformance_var/std/mean GREEN. PRE-EXISTING (proven on clean origin/main d4543fcc):
+conformance_diagnostics `divide_float_zero_warning` fails identically on baseline (a peer's parallel-divide kernel drops
+numpy's div-by-zero RuntimeWarning) — NOT caused by this change (touches only f32 var/nanvar). KEEP. AGENT_NAME=BlackThrush.
