@@ -4,6 +4,47 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-27 - NO-SHIP: `diag_indices` repro is wrapper overhead; dense eigvalsh still needs SBR stage 2
+
+`BlackThrush`/`cod-a`. Land-or-dig recheck found no clean measured bench
+worktree win still off `main`; the active wins had already landed, and the live
+tree only carried old untracked artifacts. The first fresh current-main probe
+reproduced `diag_indices` as a visible ratio loss, but the operation is still a
+Python-wrapper microcall with only a few microseconds of absolute spread:
+
+| Probe | Worker | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---|---:|---:|---:|---|
+| `diag_indices(64, 2)` | `vmi1264463` | 4,570 | 1,714 | 2.666x | no source; wrapper overhead |
+| `diag_indices(4096, 2)` | `vmi1264463` | 6,910 | 4,819 | 1.434x | no source; wrapper overhead |
+
+`build_diag_indices_tuple` already follows NumPy's semantic construction:
+`idx = np.arange(n); (idx,) * ndim`, preserving the shared-array aliasing
+contract. A native rewrite would either reimplement `arange` allocation through
+NumPy buffers (the rejected old path) or delegate to the same NumPy call with
+extra PyO3 wrapper cost. No code was kept.
+
+The biggest durable measured gap remains dense symmetric `eigvalsh_nxn/512`.
+Fresh current-main routing evidence:
+
+| Probe | Worker | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---|---:|---:|---:|---|
+| current `eigvalsh_nxn/512` | `hz2` | 46,891,795 | 32,457,835 | 1.445x | current loss |
+| current `sbr_stage1_band_nxn/512` vs NumPy full eigvalsh | `hz2` | 30,753,074 | 32,457,835 | 0.948x | incomplete primitive |
+
+`/alien-graveyard` maps this to communication-avoiding dense linear algebra.
+`/alien-artifact-coding` and `/extreme-software-optimization` point to the same
+next lever as the prior SBR evidence: implement the missing compact
+band-to-tridiagonal stage 2, or a band-aware eigvalsh pipeline. Do not ship SBR
+stage 1 alone, and do not route the dense matrix through stage 1 only to unpack
+and run the existing dense tridiagonal reducer; those leave the dominant work in
+place.
+
+Commands:
+- `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -j 1 -p fnp-python --profile release --bench criterion_python_surface -- python_indices_construction_boundary --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher --noplot`
+- `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -j 1 -p fnp-linalg --profile release --bench criterion_linalg -- 'eigvalsh_nxn/size/512|sbr_stage1_band_nxn/size/512' --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher --noplot`
+- `ssh hz2 'OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -'` for the matching NumPy `eigvalsh` comparator on the benchmark's generated SPD matrix.
+- `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -j 1 -p fnp-linalg eigvalsh --profile release -- --nocapture` passed: 8 unit eigvalsh tests and 3 golden eigvalsh tests green, with integration/metamorphic shards filtered by the focused pattern. AGENT_NAME=BlackThrush.
+
 ## 2026-06-27 - NO-SHIP: f64 `np.frexp` Python-overhead trims do not move the hz2 residual
 
 `BlackThrush`/`cod-b`. After re-scanning live bench worktrees, no clean measured
