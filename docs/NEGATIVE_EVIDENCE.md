@@ -10013,3 +10013,34 @@ BIT-EXACT: bincount counts are integer increments (associative + commutative), s
 forward pass, and the unchecked scatter changes only the bounds check, not the arithmetic. Verified np.array_equal vs
 NumPy across dtypes {i64,i32,i16,i8,u8,u32}, with minlength, weighted (float, allclose), and empty/single-element edge
 cases. conformance_histogram_bincount 33/33 + conformance_count_nonzero_zerocopy 1/1 GREEN. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: np.histogram (f64 + all int dtypes) fold-trap fix + mis-tuned gate — 1.49-5.3x LOSS -> 0.12-0.24x WIN at >=4M vs NumPy (2026-06-27) — 105th win
+The non-reduce sweep's 2nd-biggest loss (after the 104th bincount). histogram_typed (f64 + every int width via
+to_f64) had a privatized parallel bin-tally gated at 1<<16 (64K) BUT built with `par_iter().fold(|| vec![0i64;nbins],
+...)` — the FOLD-TRAP: rayon's fold allocates AND merges a fresh nbins-wide accumulator for EVERY work-stealing job it
+splits the iterator into (hundreds at 4M), not one per thread. Result: catastrophic small/medium-N losses (measured:
+500K B=256 5.30x, 2M 4.11x, 4M 2.09x vs NumPy) — the exact loss the original sweep flagged at 4M=1.49x.
+
+TWO FIXES (in histogram_typed; histogram_f32 is serial-only, untouched):
+  1. FOLD-TRAP: `par_iter().fold()` -> `par_chunks(n.div_ceil(nthreads)).fold()` — exactly nthreads nbins-vec
+     accumulators + nthreads merges (same shape as the 104th bincount tally), instead of one per rayon split. This
+     ALONE turned 500K from 5.30x LOSS to 0.77x and dropped the parallel-beats-serial crossover from ~8M to ~2M.
+  2. GATE: HISTOGRAM_PARALLEL_MIN_ELEMS 1<<16 -> 1<<21 (2M). Below 2M the serial path (parity vs numpy's vectorized
+     C reduce — a numpy-SIMD kernel floor) handles it; at/above, the fixed parallel tally wins. Also added
+     `get_unchecked` in the (now per-thread-chunked) parallel tally: the equal-width index is provably in [0,nbins-1]
+     after numpy's +/-1-ULP edge corrections, so the per-element bounds check (vs numpy's C loop) is dropped.
+
+MEASURED (local, 10th-pctile; B=256 unless noted):
+  N=4M  1.49-2.09x LOSS -> 0.23x WIN | N=4M B=50 0.24x | N=8M -> 0.21x | N=16M 0.42x -> 0.12x WIN
+  Worker criterion python_histogram_boundary: f64_8m_256 fnp 10.14ms | NumPy 45.65ms = 0.22x (4.5x faster).
+WHY NOT ~0-GAIN: every size improves — small/medium N go from CATASTROPHIC parallel losses (5.3x) to the serial
+parity path, and >=4M wins 4-8x (the fold-trap fix is what makes the parallel path actually fast). The remaining
+<2M residual (~1.2-1.3x in an unloaded moment) is a numpy-SIMD kernel floor (numpy histogram vectorizes the index
+compute + uses a fast bincount), NOT a regression — the OLD code lost 4-5x there. The serial-path get_unchecked
+variant was prototyped and REVERTED as ~0-gain (kernel floor dominates; kept the diff minimal).
+
+BIT-EXACT: bin tallies are integer increments (assoc+comm) and the index formula is numpy's own equal-width
+algorithm with the same +/-1-ULP edge corrections (already conformance-verified for the parallel path); the unchecked
+indexing changes only the bounds check. Differential probe: 147 checks (dtypes {f64,f32,i64,i32,i16,u8} x sizes
+straddling the 2M gate x bins {10,50,256,1000} + range=/density= kwargs) 0 fails. conformance_histogram_bincount
+33/33 + conformance_histogram2d_dd 19/19 GREEN. AGENT_NAME=BlackThrush.

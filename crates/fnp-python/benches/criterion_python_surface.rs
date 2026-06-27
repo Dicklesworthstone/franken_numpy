@@ -1376,6 +1376,34 @@ fn bench_histogram_boundary(c: &mut Criterion) {
                 black_box(result);
             });
         });
+
+        // Large f64 inputs (256 bins): >= the 2M parallel gate, where the privatized
+        // par_chunks tally (fold-trap fixed) beats numpy's single-threaded reduce 4-8x.
+        let big_kwargs = PyDict::new(py);
+        big_kwargs.set_item("bins", 256_i64).expect("bins kwarg");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+x4 = rng.standard_normal(4_000_000)\n\
+x8 = rng.standard_normal(8_000_000)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("histogram big setup");
+        let x4 = ns.get_item("x4").expect("x4");
+        let x8 = ns.get_item("x8").expect("x8");
+        for (label, x) in [("f64_4m_256", &x4), ("f64_8m_256", &x8)] {
+            group.bench_function(format!("fnp_histogram_{label}"), |bench| {
+                bench.iter(|| black_box(hist.call((x,), Some(&big_kwargs)).expect("fnp hist big")));
+            });
+            group.bench_function(format!("numpy_histogram_{label}"), |bench| {
+                bench.iter(|| {
+                    black_box(numpy_hist.call((x,), Some(&big_kwargs)).expect("numpy hist big"))
+                });
+            });
+        }
     });
 
     group.finish();
