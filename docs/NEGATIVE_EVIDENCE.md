@@ -4,6 +4,43 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-27 - DIAGNOSIS (no-ship): `batch_inv` moderate-n residual is a FLOP-COUNT wall (solve-vs-dense-identity ~4/3 n^3 vs LAPACK getri ~n^3), NOT a vectorization gap — `split_at_mut`/SIMD micro-opts are ceilinged; real lever = getri-style sparse inverse. Plus sweep6 converged.
+
+`BlackThrush`. Follow-up to the prior SURVEY entry's "batch_inv lone residual".
+Read the kernels (`fnp-linalg::lu_factor_unblocked_into` :492 and
+`inv_nxn_into_out` :1149). Both the LU rank-1 trailing update and the inv
+forward/back substitution are ALREADY in AXPY form (`row_i[j] -= scalar *
+row_k[j]` over a contiguous run) — autovectorizable; there is NO loop-carried dot
+like Cholesky had, so the proven `cholesky_dot_add_ordered` 4-wide-unroll does NOT
+apply, and a `split_at_mut` noalias rewrite (to drop LLVM's runtime overlap check)
+is ceilinged at ~0-gain: vectorization is not the bottleneck.
+
+ROOT CAUSE of the measured ~2.5x SERIAL gap (RAYON=1, n=64) is FLOP COUNT.
+`inv_nxn_into_out` does LU (~n^3/3 FMA) then solves against the FULL permuted
+DENSE identity (forward n^3/2 + back n^3/2 = ~n^3 FMA, NOT exploiting the
+identity's leading zeros) = ~4/3 n^3 FMA. LAPACK getrf+getri is ~n^3 FMA (getri
+inverts U in place via dtrtri then solves X·L = U^-1, exploiting triangular
+sparsity). So fnp does ~33% more FMAs AND each is a touch slower = the 2.5x. Even
+PERFECT vectorization cannot beat getri while doing 4/3 the work. This is why
+batch_inv only loses at MODERATE n where numpy's per-lane getri dominates; at small
+n fnp's lane-parallelism wins (T32 0.42x) and at n>=128 numpy CLIFFS (fnp 166x).
+
+RETRY PREDICATE (the real, bit-exact lever — substantial, CONTENDED fnp-linalg):
+rewrite `inv_nxn_into_out` getri-style to cut the solve from ~n^3 to ~2n^3/3 FMA
+(invert U in place by back-substitution exploiting U's triangular structure, then
+solve against L^-1; OR exploit the permuted-identity RHS sparsity so the forward
+solve skips the `x -= l*0` leading-zero ops — bit-identical since 0-ops change
+nothing). Brings fnp to getri's ~n^3 flop count -> moderate-n parity, and the
+existing lane-parallelism would then push it to a WIN. Measure RAYON=1 FIRST to
+isolate kernel quality from parallel noise (parallel batch_inv is B-and-n-noisy:
+n=32/48/80/96 already win 0.42-0.54x, only n=16/64 intermittently lose).
+
+Also this pass: sweep6 (np.unique +counts/+index/+inverse/+all, all/any-axis,
+sum/prod/max with initial=/where=, cumsum dtype=, char split/replace/count/
+startswith/encode/title, nanargmax/argwhere/flatnonzero) = ALL win/parity at full
+threads (unique 0.018-0.20x = 5-55x WINS; char_title 0.20x; nanargmax 0.05x; zero
+r>1.30 losses). 5th broad sweep confirming the user-facing surface is converged.
+
 ## 2026-06-27 - SURVEY (no-ship): dtype/FFT/indexing/linalg sweep CONVERGED; 5 apparent losses were thread-count/cache artifacts; `batch_inv` moderate-n (~32-96) ~1.27x is the lone residual (per-lane kernel wall)
 
 `BlackThrush`. Broad dig over previously-unswept territory found NO new shippable
