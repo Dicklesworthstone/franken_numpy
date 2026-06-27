@@ -1149,6 +1149,7 @@ pub fn inv_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
 
 /// Inverse A^-1 from packed LU + row permutation, exploiting identity-RHS
 /// sparsity. Solving against natural I yields M = U^-1 L^-1, then A^-1 = M P.
+#[allow(clippy::needless_range_loop)]
 fn inv_from_lu_unblocked(lu: &[f64], perm: &[usize], n: usize) -> Vec<f64> {
     let mut x = vec![0.0; n * n];
     for i in 0..n {
@@ -1200,13 +1201,11 @@ fn two_rows_mut(x: &mut [f64], a: usize, b: usize, n: usize) -> (&mut [f64], &[f
     }
 }
 
-/// Write `A^-1` (n*n) directly into `out`, reusing the caller's lu/perm scratch — no
-/// per-lane lu/perm/eye/result allocation. Byte-identical to `inv_nxn`'s finite path
-/// (LU + solve against the identity): the permutation of the identity RHS is
-/// `out[i][col] = I[perm[i]][col] = (perm[i]==col)`, so no eye buffer is needed; the
-/// forward/back is `lu_forward_back_multi`'s unblocked form (the only path for
-/// `n < LU_BLOCK_MIN`). Non-finite inputs defer to `inv_nxn` for exact NaN-diagonal
-/// semantics.
+/// Write `A^-1` (n*n) directly into `out`, reusing the caller's lu/perm scratch - no
+/// per-lane lu/perm/eye/result allocation. Byte-identical to `inv_nxn`'s finite
+/// small-n path: solve against the natural identity, exploit the zero prefix in
+/// the unit-lower forward pass, then apply the final column permutation in-place.
+/// Non-finite inputs defer to `inv_nxn` for exact NaN-diagonal semantics.
 fn inv_nxn_into_out(
     a: &[f64],
     n: usize,
@@ -1227,32 +1226,41 @@ fn inv_nxn_into_out(
     let matrix_max_abs = a.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
     let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
     lu_factor_unblocked_into(a, n, singularity_threshold, lu, perm)?;
-    // Pb where b = identity: out[i][col] = (perm[i] == col) ? 1 : 0.
+    // Natural identity first: L^-1 is unit-lower triangular, so rows before the
+    // current pivot column are guaranteed zero and can be skipped bit-for-bit.
+    out.fill(0.0);
     for i in 0..n {
-        let p_i = perm[i];
-        for col in 0..n {
-            out[i * n + col] = if p_i == col { 1.0 } else { 0.0 };
-        }
+        out[i * n + i] = 1.0;
     }
-    // Forward (unit-lower L), then back (upper U), n columns at a time.
     for i in 1..n {
         for j in 0..i {
             let l_ij = lu[i * n + j];
-            for col in 0..n {
-                out[i * n + col] -= l_ij * out[j * n + col];
+            let (row_i, row_j) = two_rows_mut(out, i, j, n);
+            for col in 0..=j {
+                row_i[col] -= l_ij * row_j[col];
             }
         }
     }
     for i in (0..n).rev() {
         for j in (i + 1)..n {
             let u_ij = lu[i * n + j];
-            for col in 0..n {
-                out[i * n + col] -= u_ij * out[j * n + col];
+            let (row_i, row_j) = two_rows_mut(out, i, j, n);
+            for (dst, &src) in row_i.iter_mut().zip(row_j.iter()) {
+                *dst -= u_ij * src;
             }
         }
         let u_ii = lu[i * n + i];
-        for col in 0..n {
-            out[i * n + col] /= u_ii;
+        let row_i = &mut out[i * n..i * n + n];
+        for value in row_i {
+            *value /= u_ii;
+        }
+    }
+    for i in 0..n {
+        let row_start = i * n;
+        lu[..n].copy_from_slice(&out[row_start..row_start + n]);
+        let row_i = &mut out[row_start..row_start + n];
+        for k in 0..n {
+            row_i[perm[k]] = lu[k];
         }
     }
     Ok(())
@@ -8150,9 +8158,9 @@ pub fn batch_inv(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgError>
     }
     // Tiny matrices: write each inverse DIRECTLY into the flat output through
     // per-thread reusable (lu, perm) scratch — no per-lane lu/perm/eye/result alloc,
-    // no Vec<Vec>, no flatten. inv is n*n (m=n RHS columns), so like matrix-RHS solve
-    // its per-lane O(n^3) compute overtakes the alloc savings beyond small n; gate to
-    // the regime where the win is clear. Byte-identical to per-lane inv_nxn.
+    // no Vec<Vec>, no flatten. This direct writer follows `inv_nxn`'s sparse
+    // identity-RHS path, so it also avoids dense forward-substitution zero work.
+    // Byte-identical to per-lane inv_nxn.
     // NO-SHIP 2026-06-21 (BlackThrush): raising this gate to 128 to also direct-write
     // n=16..64 did NOT fix the moderate-batch loss — a SERIAL A/B (RAYON=1, numpy loop
     // already serial) is a stable 2.3-2.5x at n=16/32/64, i.e. the native inv_nxn
@@ -11624,8 +11632,16 @@ mod tests {
     #[test]
     fn batch_inv_scratch_matches_per_lane_inv_nxn_bits() {
         // Zero-alloc batch_inv must be BYTE-IDENTICAL to per-lane inv_nxn.
-        for &n in &[2usize, 3, 5, 8, 15] {
-            let batch = 2048usize;
+        for &(n, batch) in &[
+            (2usize, 2048usize),
+            (3, 2048),
+            (5, 2048),
+            (8, 2048),
+            (15, 2048),
+            (16, 512),
+            (32, 128),
+            (48, 32),
+        ] {
             let ms = n * n;
             let a: Vec<f64> = (0..batch * ms)
                 .map(|i| {

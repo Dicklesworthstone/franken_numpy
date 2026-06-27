@@ -389,7 +389,14 @@ fn bench_batch_inv(c: &mut Criterion) {
 
     // Compute-bound per-lane sizes (n >= 128): O(n^3) work dominates fixed
     // per-call overhead, the regime where lane parallelism pays.
-    for (batch, n) in [(64usize, 128usize), (16, 256)] {
+    for (batch, n) in [
+        (8192usize, 8usize),
+        (2048, 16),
+        (512, 32),
+        (256, 48),
+        (64, 128),
+        (16, 256),
+    ] {
         let (data, shape) = generate_batch_invertible(batch, n);
         let id = format!("{batch}x{n}x{n}");
         group.bench_with_input(BenchmarkId::new("shape", id), &shape, |bench, shape| {

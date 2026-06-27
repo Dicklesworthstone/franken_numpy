@@ -74,6 +74,41 @@ as "just write a better matmul kernel" (it exists). Surface CONVERGED otherwise;
 two open gaps are micro-kernel walls (this GEMM = FMA-golden-locked; moderate-n inv
 getrf/getri per-flop microkernel).
 
+## 2026-06-27 - KEEP: sparse identity-RHS direct writer for tiny `batch_inv`; reject wider n<=48 gate
+
+`BlackThrush`. Fresh dig after the small-`inv_nxn` sparse identity keep. No
+clean unlanded measured bench-worktree win remained, so this pass tested the next
+direct consequence of the same FLOP-count diagnosis in `batch_inv`: the n<16
+direct writer still solved a dense permuted identity RHS even though `inv_nxn`
+now uses the natural identity and skips the guaranteed zero prefix in the
+unit-lower forward solve.
+
+FIX: make `inv_nxn_into_out` use the same sparse natural-identity solve as
+`inv_nxn`, then apply the final column permutation into `out` using the caller's
+LU scratch row as the temporary buffer. Keep the scratch gate at n<16; a wider
+n<=48 direct-write gate was measured and rejected because n=32/48 regressed.
+
+MEASURED against ORIG code state `b4183b1e` in
+`/data/projects/.scratch/franken_numpy-blackthrush-unary-20260627T1745` plus
+the same newly added `batch_inv` bench rows, local `rch exec` fallback,
+`RAYON_NUM_THREADS=1`, same target dir and command shape (`-p fnp-linalg`,
+release profile, `criterion_linalg`, sample size 10):
+
+| Probe | ORIG ns | Candidate ns | Candidate/ORIG | Verdict |
+|---|---:|---:|---:|---|
+| `batch_inv/shape/8192x8x8` | 6,199,479 | 3,898,861 | 0.629x | keep |
+| `batch_inv/shape/2048x16x16` | 6,236,195 | 5,876,114 | 0.942x | guard row: gate excludes n=16 |
+| `batch_inv/shape/512x32x32` | 7,641,823 | 7,269,442 | 0.951x | guard row: no regression |
+| `batch_inv/shape/256x48x48` | 9,555,990 | 9,470,995 | 0.991x | guard row: no regression |
+
+NO-SHIP subprobe (full-thread local run): widening the scratch gate to n<=48 produced
+`512x32x32 = 2,540,191 ns` (1.348x vs ORIG) and
+`256x48x48 = 2,463,676 ns` (1.181x vs ORIG), so the broader gate was reverted.
+
+Benchmark command: `AGENT_NAME=BlackThrush RAYON_NUM_THREADS=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-linalg --profile release --bench criterion_linalg -- 'batch_inv/shape/(8192x8x8|2048x16x16|512x32x32|256x48x48)' --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher --noplot`.
+
+Conformance command: `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-linalg --profile release batch_inv_scratch_matches_per_lane_inv_nxn_bits -- --nocapture` passed (`1 passed; 0 failed; 331 filtered out`). AGENT_NAME=BlackThrush.
+
 ## 2026-06-27 - KEEP: sparse identity-RHS inverse for small `inv_nxn`
 
 `BlackThrush`. Landed the measured bench-worktree lever from
