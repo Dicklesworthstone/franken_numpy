@@ -9810,3 +9810,35 @@ threaded C regardless of version/BLAS), so the local full-threads ratios above a
 conformance_nan_funcs 37/37 GREEN; conformance_var/std/mean GREEN. PRE-EXISTING (proven on clean origin/main d4543fcc):
 conformance_diagnostics `divide_float_zero_warning` fails identically on baseline (a peer's parallel-divide kernel drops
 numpy's div-by-zero RuntimeWarning) — NOT caused by this change (touches only f32 var/nanvar). KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: sort_complex real-f64 large path uses unstable parallel sort when signed-zero parity is irrelevant (2026-06-27) — 101st win
+BOLD-VERIFY land-or-dig pass found no unmerged measured worktree win missing from `main`: the dirty scratch/worktree
+candidate was stale and already represented by landed main commits. The remaining measured gap with an actionable
+single lever was `python_sort_complex_boundary`: the existing f64 exact-ndarray path copied input into the first half of
+the complex128 output buffer, used stable `par_sort_by`, then expanded to interleaved real/imag slots. Stable ordering is
+only observably required for signed-zero parity; positive duplicate values are byte-identical after reordering.
+
+FIX: combine the pre-sort NaN scan with a negative-zero scan. NaN-bearing real arrays still delegate to NumPy. Inputs
+containing negative zero keep the old stable `par_sort_by` path so NumPy's signed-zero ordering remains intact. The
+common NaN-free/no-negative-zero large f64 path now uses `par_sort_unstable_by`, avoiding stable-sort overhead while
+leaving dtype, fallback, shape, and interleaving behavior unchanged.
+
+COMMAND NOTE: the user-requested release bench form was attempted first:
+`AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -j 1 -p fnp-python --release --bench criterion_python_surface -- python_sort_complex_boundary --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher --noplot`
+Cargo rejected it on worker vmi1264463 with `error: unexpected argument '--release' found`; this repo/toolchain requires
+the accepted release-bench equivalent `--profile release`.
+
+CURRENT-MAIN GAP CHECK (worker vmi1264463, per-crate fnp-python, release profile, high variance/load but same command):
+  sort_complex real f64 200k: fnp 4.283ms vs NumPy 4.758ms = 0.900x parity/slight win.
+  sort_complex real f64 1m:   fnp 97.250ms vs NumPy 29.484ms = 3.30x LOSS.
+
+KEEP PROOF (same worker hz2, same target key and command shape; control path temporarily restored, then candidate reapplied):
+  control stable 200k:   fnp 8.750ms vs NumPy 8.784ms = 0.996x parity.
+  candidate unstable 200k: fnp 8.840ms vs NumPy 8.950ms = 0.988x parity; +1.0% vs control, within noise.
+  control stable 1m:     fnp 7.713ms vs NumPy 54.618ms = 0.141x (7.08x faster than NumPy).
+  candidate unstable 1m: fnp 6.531ms vs NumPy 54.708ms = 0.119x (8.38x faster than NumPy; 1.18x faster than control).
+
+The vmi126 candidate pin fell back to hz2 because vmi126 was occupied by other rch work; the decisive keep proof is
+therefore the hz2 same-worker control/candidate pair, not a cross-worker comparison. The 200k row is intentionally
+treated as parity/noise; this lever is kept for the 1m large parallel path only. Targeted conformance for sort_complex
+signed-zero, NaN fallback, complex/list/matrix fallback, and scalar error parity is GREEN. KEEP. AGENT_NAME=BlackThrush.
