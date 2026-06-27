@@ -10152,3 +10152,33 @@ count_nonzero_python_container_surfaces_match_numpy flaps RED on the "list fallb
 `fnp.count_nonzero([0,2,0,3])` == np.int64(2) on BOTH local and remote numpy 2.4.3, and it passes LOCALLY (34/34) and
 passed in the pre-change rch run — pure rch-pool/parallel-load flakiness (cf. the documented cov_* / divide-warning
 worker flakiness). AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: np.asarray(ndarray, dtype=<convert>) wasted-extract elimination — 2-3x LOSS -> 0.95-1.03x parity vs NumPy (2026-06-27) — 107th win
+LEVER: wasted-work-before-delegation (same shape as the convolve/searchsorted/sort wins — do the cheap defer test
+BEFORE the expensive copy). A land-or-dig dig over UNSWEPT veins (f16 / einsum patterns / exotic dtypes) found two real
+gaps; the broad+safe one was asarray-with-dtype: `fnp.asarray(a, dtype=<different dtype>)` ran 2-3x slower than numpy for
+EVERY conversion (f64->f32 1.96x, f32->f64 2.98x, i32->f64 3.02x, f16->f32 2.12x, all at N=4M). asarray is a hot,
+ubiquitous op.
+
+ROOT: `native_asarray_like` (the native pre-check shared by asarray/asanyarray) correctly DELEGATES a dtype conversion
+to numpy (numpy owns narrowing / rounding / NaN-to-int coercion rules), BUT only AFTER calling
+`extract_precise_numeric_array(a)` — which copies the ENTIRE input into a UFuncArray. A few lines later it hits
+`if target_dtype != source_dtype { return Ok(None) }` and throws that copy away, then the caller runs numpy.asarray from
+scratch. So a conversion paid: full-array fnp copy + numpy's own cast = ~2-3x numpy alone (the wasted copy is pure tax).
+
+FIX (fnp-python only, ~10 lines): before the extract, when a dtype is requested AND the input is an ndarray whose dtype
+(read cheaply from `a.dtype.name`, no data touch) differs from the target, return None immediately -> numpy owns the
+cast in a single vectorized C pass. Same-dtype inputs (no conversion) still flow to the identity view fast-path or the
+native build; only the always-delegated conversion case short-circuits, so the outcome is byte-identical (numpy is the
+oracle for the cast) — just without the wasted copy.
+
+MEASURED (4M, INTERLEAVED, 10th-pctile, local): f64->f32 1.96x->1.02x, f32->f64 2.98x->1.03x, i32->f64 3.02x->1.02x,
+f16->f32 2.12x->1.01x, f64->i32 ->1.02x, i64->i32 ->1.03x. Worker criterion python_asarray_dtype_boundary:
+f64_to_f32 fnp 3.25ms vs numpy 3.43ms = 0.95x, i32_to_f64 fnp 3.61ms vs numpy 3.58ms = 1.01x.
+WHY NOT ~0-GAIN: every conversion shape swings from a 2-3x LOSS to parity (loss-elimination across a whole op family);
+the eliminated cost is a full extra O(n) copy of the input, not noise.
+CORRECTNESS: 11-case probe (7 conversions incl. narrowing f64->i32 / i64->i8 exact + dtype match; identity returns a
+view = shares_memory True; non-contiguous same-dtype; list+dtype; copy=False+convert raises like numpy) 0 fails.
+conformance_asarray + conformance_array_creation + conformance_array_creation_base 32/32 GREEN. The OTHER gap the dig
+found (einsum 'ij,ij->ij' / 'i,i->i' no-contraction Hadamard, 3-4x — generic-extraction, no fast path) is left as an
+open lead (einsum is peer-contended; this asarray fix is the broad uncontended win). AGENT_NAME=BlackThrush.

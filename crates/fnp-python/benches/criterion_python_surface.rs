@@ -5027,8 +5027,59 @@ b = np.array(['suffix'+str(i%50) for i in range(300000)], dtype='<U10')\n";
     group.finish();
 }
 
+fn bench_asarray_dtype_boundary(c: &mut Criterion) {
+    // np.asarray(ndarray, dtype=<convert>) — a dtype CONVERSION delegates the cast
+    // to numpy, but the native pre-check used to copy the whole input into a
+    // UFuncArray before discarding it (a wasted full-array copy on top of numpy's
+    // own cast = a 2-3x regression). The fix delegates BEFORE that extract; this
+    // guards the conversion path stays at parity with numpy.
+    let mut group = c.benchmark_group("python_asarray_dtype_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+f64 = rng.standard_normal(4_000_000)\n\
+i32 = rng.integers(0, 1000, 4_000_000).astype(np.int32)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("asarray setup");
+        let f64 = ns.get_item("f64").expect("f64");
+        let i32 = ns.get_item("i32").expect("i32");
+        let fnp_asarray = module.getattr("asarray").expect("fnp asarray");
+        let np_asarray = numpy.getattr("asarray").expect("np asarray");
+        for (name, arr, to) in [
+            ("f64_to_f32", &f64, "float32"),
+            ("i32_to_f64", &i32, "float64"),
+        ] {
+            let kw = PyDict::new(py);
+            kw.set_item("dtype", to).expect("dtype kwarg");
+            group.bench_function(format!("fnp_asarray_{name}_4m"), |bch| {
+                bch.iter(|| black_box(fnp_asarray.call((arr,), Some(&kw)).expect("fnp call")));
+            });
+            group.bench_function(format!("numpy_asarray_{name}_4m"), |bch| {
+                bch.iter(|| black_box(np_asarray.call((arr,), Some(&kw)).expect("numpy call")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_asarray_dtype_boundary,
     bench_char_add_boundary,
     bench_matmul_boundary,
     bench_sort_kind_boundary,
