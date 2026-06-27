@@ -9743,3 +9743,33 @@ int), 0 fails: f64 axis=0 across shapes incl non-block-multiple inner (257 / 123
 / signed-zero, keepdims; int ALL widths {i8,i16,i32,i64,u8,u16,u32,u64} axis=0 incl int64/uint64 full-range + wrap;
 plus regressions (middle axis / last axis / flat / 2-D / below-gate unchanged and matching). conformance_ptp
 (ptp_native + ptp_zerocopy_f64_axis byte+golden) + conformance_reductions GREEN on worker. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: native FLOAT32 var/std along a NON-LAST axis (axis 0 + middle) — f32 sibling of the f64 temp-reduce family; MIDDLE 27-33x + AXIS0 2.6-3.5x vs NumPy (2026-06-27) — 99th win
+The f64 var/std temp-reduce family is native across all axes (93rd middle, 47942af4 axis0, last/trailing), but the
+FLOAT32 input path had NO native axis fast path -> every f32 var/std along an axis DELEGATED to numpy (parity ~28ms
+middle / ~10ms axis0). numpy's `_var` keeps the float32 accumulator (float32 arrays reduce in float32 unless dtype= is
+given) and on a NON-LAST axis reduces SEQUENTIALLY while materializing the (a-mean) and (a-mean)^2 whole-array f32
+temps before each strided reduce. New `try_zerocopy_f32_var_nonlast_axis` runs a per-outer-block sequential f32 two-pass
+(sum->mean, then sum of (x-mean)^2) entirely in f32 with no temp: a MIDDLE axis (outer>=2) fans its independent
+contiguous blocks across rayon; axis 0 (outer==1) streams the single block serially (cache-friendly; column-block
+parallelism is the row-major trap rejected for the f64 axis-0 path). Hooked into both var (take_sqrt=false) and std
+(take_sqrt=true) after the f64 axis paths; gated f32 + non-last axis + dtype=None + no out. LAST axis returns None
+(numpy sums it PAIRWISE in f32 — not matched here; smaller gap anyway).
+
+BIT-EXACTNESS: numpy `_var` for float32 input computes in float32, and a non-last reduce is sequential (pairwise is
+only the innermost contiguous dim), so a per-block sequential f32 two-pass is BYTE-IDENTICAL. Verified first in a numpy
+prototype (manual f32 sequential two-pass == np.var, byte-exact both ddof) THEN in the built extension: differential
+probe BYTE-EXACT (float32 bit compare incl NaN-pair), 0 fails over ~90 cases: var+std, MIDDLE axis of 3-D/4-D + AXIS0
+of 2-D/3-D, ddof 0/1, keepdims both, negative axis, NaN/Inf propagation; regressions (last axis delegates+matches,
+flat delegates, dtype=float64 override -> f64 matches numpy, f64 input unchanged, small-below-gate) all match.
+
+MEASURED (criterion, worker, median):
+  var f32 MIDDLE ax1 (256,128,256): numpy 49.2ms | fnp 2.61ms = 18.9x    (std 30.8ms->1.61ms = 19.1x)
+  var f32 AXIS0 (4000,2000):        numpy 12.4ms | fnp 5.29ms = 2.3x     (std ~2.5x)
+Local full-threads (numpy single-threaded): var MIDDLE 28.37->1.03ms 27.5x, std 30.55->0.93ms 32.8x; var AXIS0 10.79->3.07ms 3.5x, std 8.47->3.25ms 2.6x.
+WHY NOT ~0-GAIN (RAYON_NUM_THREADS=1 vs default, SAME build): MIDDLE serial 3.59ms (already 8.5x over numpy via temp
+avoidance) -> parallel 1.03ms adds a further 3.5x. AXIS0 is serial by design (single block) -> the 3.5x is pure
+temp-avoidance over numpy's materialized temps (matches the f64 axis-0 path; column-block parallelism rejected there).
+The prior behaviour (delegate to numpy) was ~parity at 28ms/10ms; this is a 27x/3.5x improvement over that baseline.
+
+conformance_var + conformance_std + conformance_mean GREEN on worker. KEEP. AGENT_NAME=BlackThrush.

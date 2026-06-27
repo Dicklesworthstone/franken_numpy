@@ -2003,6 +2003,69 @@ fn bench_var_midaxis_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+// FLOAT32 var/std along a non-last axis (middle ax=1 + axis 0). numpy keeps the float32
+// accumulator and on a non-last axis reduces SEQUENTIALLY while materializing the (a-mean)
+// and (a-mean)^2 whole-array f32 temps (~28ms@8M middle); try_zerocopy_f32_var_nonlast_axis
+// runs a per-block sequential f32 two-pass (block-parallel for a middle axis, serial for
+// axis 0) with no temp -> bit-identical and 3-33x faster. The f32 sibling of the f64
+// midaxis/axis0 paths above.
+fn bench_var_f32_axis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_var_f32_axis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let f32_dtype = numpy.getattr("float32").expect("numpy.float32");
+        let fnp_var = module.getattr("var").expect("fnp_python.var");
+        let numpy_var = numpy.getattr("var").expect("numpy.var");
+        let fnp_std = module.getattr("std").expect("fnp_python.std");
+        let numpy_std = numpy.getattr("std").expect("numpy.std");
+
+        // (label, shape, reduce-axis): a middle axis (block-parallel) and axis 0 (serial).
+        let mid = numpy
+            .call_method1("linspace", (-4.0_f64, 6.0_f64, 256_i64 * 128 * 256))
+            .expect("f32 mid source")
+            .call_method1("reshape", ((256_usize, 128_usize, 256_usize),))
+            .expect("256x128x256 reshape")
+            .call_method1("astype", (&f32_dtype,))
+            .expect("astype f32");
+        let ax0 = numpy
+            .call_method1("linspace", (-4.0_f64, 6.0_f64, 4000_i64 * 2000))
+            .expect("f32 ax0 source")
+            .call_method1("reshape", ((4000_usize, 2000_usize),))
+            .expect("4000x2000 reshape")
+            .call_method1("astype", (&f32_dtype,))
+            .expect("astype f32");
+
+        for (label, input, axis) in [("mid_256x128x256", &mid, 1_i64), ("axis0_4000x2000", &ax0, 0_i64)] {
+            let fkw = PyDict::new(py);
+            fkw.set_item("axis", axis).expect("axis");
+            let nkw = PyDict::new(py);
+            nkw.set_item("axis", axis).expect("axis");
+            group.bench_function(format!("fnp_var_f32_{label}"), |bench| {
+                bench.iter(|| black_box(fnp_var.call((input,), Some(&fkw)).expect("fnp var f32")));
+            });
+            group.bench_function(format!("numpy_var_f32_{label}"), |bench| {
+                bench.iter(|| black_box(numpy_var.call((input,), Some(&nkw)).expect("numpy var f32")));
+            });
+            group.bench_function(format!("fnp_std_f32_{label}"), |bench| {
+                bench.iter(|| black_box(fnp_std.call((input,), Some(&fkw)).expect("fnp std f32")));
+            });
+            group.bench_function(format!("numpy_std_f32_{label}"), |bench| {
+                bench.iter(|| black_box(numpy_std.call((input,), Some(&nkw)).expect("numpy std f32")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 // nanvar/nanstd along a MIDDLE axis (0 < ax < ndim-1) of a 3-D f64 stack with scattered
 // NaN. numpy.nanvar on a non-last axis materializes a NaN->0 copy, an isnan mask, a count,
 // and the (a-mean)/squared temps then strided-reduces; the native block-parallel NaN-skip
@@ -4776,6 +4839,7 @@ criterion_group!(
     bench_std_var_axis_boundary,
     bench_var_multiaxis_boundary,
     bench_var_midaxis_boundary,
+    bench_var_f32_axis_boundary,
     bench_nanvar_midaxis_boundary,
     bench_var_axis0_boundary,
     bench_sum_lastaxis_boundary,
