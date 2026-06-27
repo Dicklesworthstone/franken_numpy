@@ -10115,3 +10115,40 @@ change, proven on clean origin/main b354ad1a): conformance_sort_search::searchso
 fails on the "invalid side error" case — numpy 2.4.3 reworded its ValueError message ("search side must be 'left' or
 'right' (got 'middle')") vs fnp-ufunc's hardcoded ("searchsorted: side must be 'left' or 'right', got 'middle'"); a
 pure error-string drift in fnp-ufunc's searchsorted, untouched by this fnp-python sort-gate change. AGENT_NAME=BlackThrush.
+
+## BlackThrush CONFORMANCE FIX + NEGATIVE EVIDENCE: searchsorted invalid-`side` error now matches NumPy (RED->GREEN); broad perf re-sweep finds the surface CONVERGED (2026-06-27)
+LAND-OR-DIG dig pass. No measured perf win sat unmerged. Re-swept the surface vs NumPy three ways with the
+load-robust INTERLEAVED harness (both sides hit the same contention so the RATIO stays valid even at load avg 60/64):
+  (1) general sweep2 (matmul/dot/sort/pad/fft/flip/diff/reductions/gather/misc),
+  (2) less-common sweep3 (set-ops/digitize/gradient/trapz/polyval/packbits/where-nonzero/repeat-tile/norm/tri/avg),
+  (3) dtype-variant sweep (f32 + complex128/64 + int32 sort/argsort/reduce/scan/cumsum/cumprod/abs/conj/angle/norm/diff).
+RESULT: every family is a WIN or PARITY. The only apparent "losses" were all confirmed NON-levers under interleaved
+re-measurement:
+  - inner/vdot/dot 1-D 4M: sweep2 showed inner 1.97x but interleaved = 0.81-1.07x PARITY (vdot is a pure numpy
+    passthrough; its 0.68x was tmin noise). A 1-D dot is memory-bound, but fnp already matches numpy's single-thread ddot.
+  - matvec (gemv) 2048-8192: sweep2 1.43x but interleaved = 0.87-1.26x and BIT-EXACT (exact=True at every size) =
+    fnp delegates/matches numpy's dgemv order; the 1.43x was noise.
+  - bincount weighted 4M: sweep3 1.10x but interleaved 10th-pctile = 0.98-1.07x PARITY across N=2M..16M, K=1K/1M
+    (the K=1M 1.04x is cache-miss-bound scatter, not the bounds check; serial path is bit-exact by numpy input-order
+    accumulation and CANNOT parallelize). get_unchecked there would be ~0-gain -> NOT applied (per REVERT ~0-gain).
+  - flip/rot90/trace/diagonal/ravel: O(1) views, microsecond binding overhead (irreducible pyo3 crossing).
+  - matmul/dot 2-D GEMM, irfft/fft2: BLAS / pocketfft floors (no C-BLAS; FFT passthrough) — documented human-decision floors.
+CONCLUSION: after 106 landed wins the numeric/reduction/scan/sort/set/gather/dtype surface is CONVERGED; remaining
+gaps are architectural floors only. No new perf lever to ship.
+
+SHIPPED (the one real, deterministic divergence the dig surfaced): `fnp.searchsorted(a, v, side=<invalid>)` raised
+fnp's house-style ValueError ("searchsorted: side must be 'left' or 'right', got 'middle'") while numpy 2.4.3 raises
+"search side must be 'left' or 'right' (got 'middle')" — a hard conformance RED (conformance_sort_search::
+searchsorted_python_container_surfaces_match_numpy). FIX (fnp-python wrapper, ROBUST + version-proof): an early guard
+`if side != "left" && side != "right"` delegates the whole call to numpy.searchsorted, so numpy owns the error and the
+message tracks whatever numpy version is installed (hardcoding numpy's literal in Rust would silently re-break on the
+next numpy rewording; delegating never does). Stays entirely in fnp-python — fnp-ufunc untouched. Valid sides
+("left"/"right") are byte-unchanged (the guard is a 2-string compare before any work — zero perf impact on the hot path).
+VERIFIED: 7-case probe (3 invalid-side variants incl. with-sorter + valid left/right/scalar/sorter) all match numpy;
+LOCAL conformance_sort_search 34/34 GREEN (both searchsorted AND count_nonzero pass with consistent numpy 2.4.3).
+NOTE on the rch pool: under `rch exec` on the saturated shared worker (load ~60/64, tests run in parallel),
+count_nonzero_python_container_surfaces_match_numpy flaps RED on the "list fallback" case, but it is NOT this change
+(separate function, no shared state) and NOT a numpy divergence: standalone `np.count_nonzero([0,2,0,3])` == 
+`fnp.count_nonzero([0,2,0,3])` == np.int64(2) on BOTH local and remote numpy 2.4.3, and it passes LOCALLY (34/34) and
+passed in the pre-change rch run — pure rch-pool/parallel-load flakiness (cf. the documented cov_* / divide-warning
+worker flakiness). AGENT_NAME=BlackThrush.
