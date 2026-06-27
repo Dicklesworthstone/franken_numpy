@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-27 - NO-SHIP: f64 `np.frexp` Python-overhead trims do not move the hz2 residual
+
+`BlackThrush`/`cod-b`. After re-scanning live bench worktrees, no clean measured
+off-main win remained unlanded: the searchsorted/digitize/unique/frexp wins were
+already ancestors of current `main`, and the only non-ancestor live worktree was
+a DLAQR3 no-ship. The dig target stayed the largest recent actionable residual:
+`python_frexp_boundary/frexp_f64_1m`, recorded above as `340.714 us` vs NumPy
+`286.968 us` (`1.187x` FNP/NumPy) on `hz2`.
+
+NO-SHIP 1: allocate the mantissa/exponent outputs directly at final ndarray
+shape and skip the post-kernel reshape views. Same-worker `hz2` rebench regressed
+to FNP `789.245 us` vs NumPy `292.004 us` (`2.703x`), so the hunk was reverted.
+
+NO-SHIP 2: keep only the narrower exact-ndarray dtype probe (`dtype.kind` +
+`dtype.itemsize`) instead of calling the generic `numpy_dtype_is_f64` helper
+that routes through `np.asarray`. Same-worker `hz2` rebench measured FNP
+`342.643 us` vs NumPy `287.622 us` (`1.191x`), effectively flat/slightly worse
+than the recorded `1.187x` residual. Reverted; no source retained.
+AGENT_NAME=BlackThrush.
+
 ## 2026-06-27 - KEEP: f64 `np.frexp` exponent-bit classifier narrows the remaining hz2 gap
 
 `BlackThrush`/`cod-a`. Land-or-dig pass first checked live bench worktrees and
