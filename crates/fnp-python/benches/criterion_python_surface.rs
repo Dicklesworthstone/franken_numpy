@@ -397,6 +397,95 @@ fn bench_max_min_reduction_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+// ptp (max-min) over a reduction axis. numpy computes ptp as two strided passes
+// (max then min) plus a subtract temp; fnp fuses min+max into one streaming pass.
+// The axis=0 single-outer-group case used to fold over rows allocating an
+// inner-wide plane per fold segment (~2.6x slower than numpy at large inner); the
+// column-block parallel rewrite makes it a single pass. axis=1 (middle) is the
+// already-fast block-parallel non-last path, kept here as a regression guard.
+fn bench_ptp_axis0_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_ptp_axis0_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_ptp = module.getattr("ptp").expect("fnp_python.ptp");
+        let numpy_ptp = numpy.getattr("ptp").expect("numpy.ptp");
+
+        // 3-D axis=0: outer==1, inner=128*256=32768 — the fixed single-group path.
+        let input3d = numpy
+            .call_method1("linspace", (-1.0_f64, 1.0_f64, 256_usize * 128_usize * 256_usize))
+            .expect("8M f64 3d source")
+            .call_method1("reshape", ((256_usize, 128_usize, 256_usize),))
+            .expect("256x128x256 reshape");
+        group.bench_function("fnp_ptp_axis0_f64_256x128x256", |bench| {
+            bench.iter(|| {
+                let result = fnp_ptp
+                    .call1((&input3d, 0_i64))
+                    .expect("fnp ptp 3d axis=0 call");
+                black_box(result);
+            });
+        });
+        group.bench_function("numpy_ptp_axis0_f64_256x128x256", |bench| {
+            bench.iter(|| {
+                let result = numpy_ptp
+                    .call1((&input3d, 0_i64))
+                    .expect("numpy ptp 3d axis=0 call");
+                black_box(result);
+            });
+        });
+
+        // 2-D axis=0 (2048x2048): outer==1, inner=2048.
+        let input2d = numpy
+            .call_method1("linspace", (-1.0_f64, 1.0_f64, 2048_usize * 2048_usize))
+            .expect("4M f64 source")
+            .call_method1("reshape", ((2048_usize, 2048_usize),))
+            .expect("2048x2048 reshape");
+        group.bench_function("fnp_ptp_axis0_f64_2048x2048", |bench| {
+            bench.iter(|| {
+                let result = fnp_ptp
+                    .call1((&input2d, 0_i64))
+                    .expect("fnp ptp 2d axis=0 call");
+                black_box(result);
+            });
+        });
+        group.bench_function("numpy_ptp_axis0_f64_2048x2048", |bench| {
+            bench.iter(|| {
+                let result = numpy_ptp
+                    .call1((&input2d, 0_i64))
+                    .expect("numpy ptp 2d axis=0 call");
+                black_box(result);
+            });
+        });
+
+        // axis=1 (middle) regression guard: already-fast block-parallel non-last path.
+        group.bench_function("fnp_ptp_axis1_f64_256x128x256", |bench| {
+            bench.iter(|| {
+                let result = fnp_ptp
+                    .call1((&input3d, 1_i64))
+                    .expect("fnp ptp 3d axis=1 call");
+                black_box(result);
+            });
+        });
+        group.bench_function("numpy_ptp_axis1_f64_256x128x256", |bench| {
+            bench.iter(|| {
+                let result = numpy_ptp
+                    .call1((&input3d, 1_i64))
+                    .expect("numpy ptp 3d axis=1 call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_bool_minmax_reduction_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_bool_minmax_reduction_boundary");
     group.sample_size(10);
@@ -4664,6 +4753,7 @@ criterion_group!(
     bench_narrow_int_unary_boundary,
     bench_remainder_mod_boundary,
     bench_max_min_reduction_boundary,
+    bench_ptp_axis0_boundary,
     bench_bool_minmax_reduction_boundary,
     bench_prod_reduction_boundary,
     bench_ediff1d_boundary,

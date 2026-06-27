@@ -9717,3 +9717,29 @@ CORRECTNESS: differential probe vs NumPy, BIT-EXACT (np.array_equal), 0 fails ov
 {i8,i16,i32,i64,u8,u16,u32,u64} x all axes (last/middle/axis0) x shapes (3-D/4-D/2-D), negative axis, int64/uint64
 overflow-WRAP (numpy wraps in the accumulator dtype), int8->int64 promotion, flat, small-below-gate. conformance_cumsum
 + conformance_cumsum_zerocopy + conformance_cumulative GREEN on the worker. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: ptp (max-min) along axis=0 — fuse min+max into one column-block-parallel streaming pass; f64 6.3x WIN (was 2.57x LOSS) + int 1.6-1.7x LOSS -> WIN over NumPy (2026-06-27) — 98th win
+np.ptp computes peak-to-peak as TWO strided reduction passes (max then min) plus a subtract temp; fnp already fuses
+min+max into ONE streaming pass for the LAST axis (per-lane) and MIDDLE axes (outer>=2, block-parallel — both WINs).
+But the axis=0 case (outer==1, single outer group) used a rayon `fold` over the `axis_len` ROWS that allocated a fresh
+`inner`-wide accumulator plane (max + min + nan) PER fold segment and merged them pairwise — pathological at large
+`inner` (inner=32768 at (256,128,256)): MEASURED 2.57x SLOWER than numpy (f64) and 1.6-1.7x slower (int64/int32).
+Rewrote BOTH the f64 (try_zerocopy_f64_ptp_axis) and the generic-int (ptp_axis_typed) axis=0 branches to parallelize
+across COLUMN BLOCKS of the `inner`-wide output (`result.par_chunks_mut(1024)`), each block streaming all `axis_len`
+rows for its own columns with L1-resident running max/min(/nan) accumulators and writing ptp straight to the output — a
+single streaming pass over the array, no per-segment plane allocation (mirrors the existing fast min/max axis-0
+column-block strategy in try_zerocopy_f64_minmax_parallel).
+
+MEASURED (criterion, worker vmi, f64):
+  ptp axis=0 (256,128,256) inner=32768:  numpy 6.02ms | fnp 0.957ms = 6.3x faster (was 2.57x LOSS)
+  ptp axis=0 (2048,2048)   inner=2048:   numpy 2.75ms | fnp 2.11ms  = 1.3x faster
+WHY IT'S NOT ~0-GAIN (load-immune, SAME build, RAYON_NUM_THREADS=1 vs default, local full threads):
+  ptp axis=0 (256,128,256): numpy 8.44ms | fnp serial(RAYON=1) 6.08ms (fused single pass already 1.4x) | fnp parallel 1.51ms = 5.6x vs numpy, 4.0x vs serial
+The serial fused single-pass ALREADY beats numpy's two-pass (6.08 vs 8.44ms); the column-block parallelism adds a
+further ~4x on top. Int (full threads, local): int64 (256,128,256) 1.60x LOSS -> WIN; int32 1.69x LOSS -> WIN.
+
+CORRECTNESS: differential probe vs NumPy, BIT-EXACT (uint64-view incl -0.0 + NaN-pair for f64; np.array_equal for
+int), 0 fails: f64 axis=0 across shapes incl non-block-multiple inner (257 / 12345), scattered-NaN / all-NaN-col / inf
+/ signed-zero, keepdims; int ALL widths {i8,i16,i32,i64,u8,u16,u32,u64} axis=0 incl int64/uint64 full-range + wrap;
+plus regressions (middle axis / last axis / flat / 2-D / below-gate unchanged and matching). conformance_ptp
+(ptp_native + ptp_zerocopy_f64_axis byte+golden) + conformance_reductions GREEN on worker. KEEP. AGENT_NAME=BlackThrush.
