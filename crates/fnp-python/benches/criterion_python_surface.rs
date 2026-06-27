@@ -1914,6 +1914,89 @@ fn bench_var_midaxis_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+// nanvar/nanstd along a MIDDLE axis (0 < ax < ndim-1) of a 3-D f64 stack with scattered
+// NaN. numpy.nanvar on a non-last axis materializes a NaN->0 copy, an isnan mask, a count,
+// and the (a-mean)/squared temps then strided-reduces; the native block-parallel NaN-skip
+// two-pass (try_zerocopy_f64_nanvar_nonlast_axis) is bit-exact and far faster.
+fn bench_nanvar_midaxis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_nanvar_midaxis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_nanvar = module.getattr("nanvar").expect("fnp_python.nanvar");
+        let numpy_nanvar = numpy.getattr("nanvar").expect("numpy.nanvar");
+        let fnp_nanstd = module.getattr("nanstd").expect("fnp_python.nanstd");
+        let numpy_nanstd = numpy.getattr("nanstd").expect("numpy.nanstd");
+
+        for (label, d0, d1, d2) in [
+            ("256x256x64", 256_usize, 256_usize, 64_usize),
+            ("128x512x64", 128_usize, 512_usize, 64_usize),
+        ] {
+            let size = (d0 * d1 * d2) as i64;
+            // Build a 3-D f64 array, then poke ~10% NaN into it (deterministic stride).
+            let input = numpy
+                .call_method1("linspace", (-4.0_f64, 6.0_f64, size))
+                .expect("nanvar midaxis f64 input")
+                .call_method1("reshape", ((d0, d1, d2),))
+                .expect("nanvar midaxis 3-D shape");
+            let flat = input.call_method1("reshape", ((size,),)).expect("flat view");
+            let idx = numpy
+                .call_method1("arange", (0_i64, size, 10_i64))
+                .expect("nan index stride");
+            let nan = numpy.getattr("nan").expect("np.nan");
+            flat.call_method1("__setitem__", (idx, nan))
+                .expect("inject NaN");
+
+            let fnp_kwargs = PyDict::new(py);
+            fnp_kwargs.set_item("axis", 1_i64).expect("fnp axis kwarg");
+            let numpy_kwargs = PyDict::new(py);
+            numpy_kwargs.set_item("axis", 1_i64).expect("numpy axis kwarg");
+
+            group.bench_function(format!("fnp_nanvar_f64_axis1_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_nanvar
+                        .call((&input,), Some(&fnp_kwargs))
+                        .expect("fnp nanvar axis1 call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_nanvar_f64_axis1_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_nanvar
+                        .call((&input,), Some(&numpy_kwargs))
+                        .expect("numpy nanvar axis1 call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("fnp_nanstd_f64_axis1_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_nanstd
+                        .call((&input,), Some(&fnp_kwargs))
+                        .expect("fnp nanstd axis1 call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_nanstd_f64_axis1_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_nanstd
+                        .call((&input,), Some(&numpy_kwargs))
+                        .expect("numpy nanstd axis1 call");
+                    black_box(result);
+                });
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_var_axis0_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_var_axis0_boundary");
     group.sample_size(10);
@@ -4454,6 +4537,7 @@ criterion_group!(
     bench_std_var_axis_boundary,
     bench_var_multiaxis_boundary,
     bench_var_midaxis_boundary,
+    bench_nanvar_midaxis_boundary,
     bench_var_axis0_boundary,
     bench_sum_lastaxis_boundary,
     bench_prod_lastaxis_boundary,

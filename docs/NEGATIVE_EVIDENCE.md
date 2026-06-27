@@ -9622,3 +9622,31 @@ small-below-gate / int input all unchanged and matching). conformance_std + conf
 This is the same family as the 91st (norm non-last) -- numpy materializes a temp on EVERY axis for var/std, so unlike
 min/max (92nd, bandwidth-bound -> only non-last wins) the win here is huge (28-40x) because numpy's non-last var is
 temp-bound AND strided. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: native parallel f64 nanvar/nanstd along a MIDDLE axis (27-29x over NumPy) (2026-06-26) — 94th win
+Direct extension of the 93rd win (var/std middle axis) to the NaN-ignoring variants. nanvar/nanstd covered {last axis,
+trailing-tuple, axis 0}; a single MIDDLE axis (0 < ax < ndim-1, ndim >= 3) fell through to numpy, which on a non-last
+axis is EVEN slower than plain var: numpy.nanvar materializes a NaN->0 copy, an isnan mask, a per-column count, the
+(a-mean) broadcast and the squared temp before two STRIDED sequential reduces (~22ms for a 4M-element f64 stack vs
+~9ms for plain var). New `try_zerocopy_f64_nanvar_nonlast_axis`: each contiguous OUTER block is exactly an axis-0
+nanvar problem, so it runs the same NaN-skipping sequential two-pass per block (pass 1 -> per-column sum + non-NaN
+count -> mean; pass 2 -> sum of (v-mean)^2 over non-NaN -> var; std = sqrt) with NO temporary, fanning the independent
+contiguous blocks across the rayon pool. If ANY column of ANY block has non-NaN count <= ddof the WHOLE call defers to
+numpy (so its "Degrees of freedom <= 0" warning + per-lane NaN parity stay exact).
+
+BIT-EXACTNESS: numpy reduces a non-last axis SEQUENTIALLY (pairwise is only the innermost contiguous dim) and masked
+(NaN) positions contribute 0 in both; verified rtol=0 atol=0. Inf is not NaN so it is included (matches numpy).
+
+PERF (criterion, remote RCH worker, per-crate fnp-python, release; python_nanvar_midaxis_boundary ~10% scattered NaN,
+median fnp vs NumPy):
+  nanvar axis=1 (256,256,64):  fnp 0.792ms vs NumPy 22.413ms = 28.3x
+  nanstd axis=1 (256,256,64):  fnp 0.765ms vs NumPy 21.668ms = 28.3x
+  nanvar axis=1 (128,512,64):  fnp 0.783ms vs NumPy 22.519ms = 28.7x
+  nanstd axis=1 (128,512,64):  fnp 0.815ms vs NumPy 22.532ms = 27.6x
+
+CORRECTNESS: differential probe vs NumPy, BIT-EXACT (allclose rtol=0 atol=0 equal_nan), 0 fails over ~70 cases for
+nanvar+nanstd: middle axes of 3-D/4-D shapes (incl negative axis), ddof {0,1}, keepdims {F,T}, ~10% scattered NaN,
+Inf-present, all-NaN lane (count==0 -> defer + warn + NaN), count==ddof (defer), count>ddof (compute), plus regressions
+(axis-0 / last-axis / flat / 2-D-axis0/axis1 / small-below-gate all unchanged and matching). nanvar/nanstd lib
+conformance tests GREEN on the worker. Same family as 91st/93rd; the NaN variant is an even bigger win (27-29x) because
+numpy's non-last nanvar materializes MORE temps. KEEP. AGENT_NAME=BlackThrush.
