@@ -4,6 +4,58 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-27 - NO-SHIP (measured A/B, CLOSES the prior-entry lead): lowering `TRIDIAG_MATVEC_PAR_MIN` 1024→256 regresses `eigvalsh_nxn/512` 1.41x
+
+`BlackThrush`. Follow-up to the same-day lead below (committed `3e437ba0`): no
+measured bench-worktree win remained off `main` (HEAD `3e437ba0` == origin,
+fnp-linalg untouched since), so I dug by running the exact A/B the lead's retry
+predicate called for — this pass had an admissible clean worker (`hz2`). Result:
+the lead is a DEAD END. The matvec parallel gate is correctly tuned, not
+mis-tuned; lowering it is a pure perf regression.
+
+The change is golden-safe / bit-exact (the parallel matvec path is identical
+arithmetic to the serial scan, and the n=64 eigvalsh golden stays serial), so
+this is a perf result only, not a correctness one.
+
+MEASURED (same worker `hz2`, same invocation, `--sample-size 10`):
+
+| `eigvalsh_nxn` | baseline gate=1024 (ns) | candidate gate=256 (ns) | cand/base | role |
+|---|---:|---:|---:|---|
+| `/128` | 1,417,241 | 1,368,642 | 0.97x | control — gate inert at n≤256 (serial both); flat ⇒ same worker |
+| `/256` | 9,978,346 | 9,859,123 | 0.99x | control — gate inert; flat ⇒ same worker |
+| `/512` | 46,708,882 | 65,798,495 | **1.41x SLOWER** | gate engages; parallel matvec LOSES |
+
+The n=128/256 rows are controls: gate=256 leaves their matvecs serial (trailing
+height <256), so identical code — their flatness proves the 512 regression is the
+gate change, not worker drift.
+
+ROOT (confirms the in-source comment "measured break-even is past n=1024",
+lib.rs:4166): the dlatrd panel matvec `u=A_ps·v` is invoked once per reduced
+column — ≈500 times at n=512 — and each call pays a rayon work-stealing dispatch
+(~tens of µs). At n=512 every trailing height h<1024, so per-call parallel
+compute (~few µs across 64 cores) is dwarfed by per-call dispatch; doing it ~500×
+makes the whole reduction 1.41x slower. The trailing rank-2k update is already
+efficiently parallel (only ≈n/nb≈8 dispatches per reduction, gated on
+`h>=MATMUL_PARALLEL_MIN_DIM`), so the per-column matvec is the lone
+dispatch-bound primitive and its high gate is correct.
+
+DECISION: reverted to `TRIDIAG_MATVEC_PAR_MIN=1024` (zero net source change; tree
+clean). LEAD CLOSED — do not retry lowering this gate (nor 384/512: at 512 the
+largest engaged h is still ≤511 ≪ 1024 break-even). The only remaining
+`eigvalsh_nxn/512` lever is structural — SBR stage-2 (band→tridiag bulge chase),
+which restructures the dominant work but reassociates the reduction sum and so
+requires a human golden re-pin (precedent: the `scaled_hypot` re-pin,
+lib.rs:12709). The gap remains a durable ~1.445x KERNEL-bench loss and is NOT
+user-facing (Python `eigvalsh`/`eigh`/`cond`/`det`/`inv`/`solve` already delegate
+2-D dense to NumPy LAPACK).
+
+Benchmark command (ran clean on `hz2`, 143s/build each):
+`AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo bench -j 1 -p fnp-linalg --profile release --bench criterion_linalg -- 'eigvalsh_nxn/size/(128|256|512)' --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher --noplot`
+(Command note: `cargo bench --release` is rejected by Cargo here; `--profile
+release` is the accepted release-bench spelling.) Conformance: net source change
+is zero (gate restored to 1024), and the A/B kept the eigvalsh golden path (n=64)
+serial throughout, so the bit-exact contract is untouched. AGENT_NAME=BlackThrush.
+
 ## 2026-06-27 - LEAD (golden-safe, unmeasured this pass): `eigvalsh_nxn/512` dlatrd panel matvec runs serial because `TRIDIAG_MATVEC_PAR_MIN=1024` excludes n=512
 
 `BlackThrush`. Land-or-dig pass. No measured bench-worktree win remained off
