@@ -9459,3 +9459,25 @@ still skip it. The existing `unique_plain_f64_bit_exact_matches_numpy` conforman
 binary-grid input plus standard-normal fallback, rounded non-grid fallback, NaN/inf fallback, signed-zero fallback,
 and constant rows by comparing raw output-byte SHA-256 against NumPy. This is a real measured win, not another hash
 table no-ship. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush REJECT: native np.char.add / np.strings.add (UCS4 concat) — worker numpy is a fast C ufunc (2026-06-26)
+Pivoted off the BLAS vein to numpy string ops (np.char.*), which the LOCAL sweep showed as slow python-level loops:
+np.char.add(300k '<U16'+'<U10') measured 21ms LOCALLY at parity (fnp delegates). Hypothesized a native UCS4
+codepoint-copy (trailing-null-strip, fixed '<U(wa+wb)' output, parallel over elements) would win like the landed
+case-conversions (upper/lower 6-14x). Built try_zerocopy_unicode_add + char.add/strings.add overrides. DISPROVEN on
+the worker:
+PERF (criterion, remote rch worker hz2, 6s measurement; python_char_add_boundary, 300k):
+  char.add: fnp 7.624ms vs NumPy 6.920ms = 1.10x LOSS (CIs overlap — parity/slight loss, NOT a win).
+ROOT — a NEW flavor of the local-vs-worker trap (NOT BLAS this time): the WORKER runs a NEWER numpy (python3.14)
+whose string ops are C-level UFUNCS (numpy.strings-backed), so np.char.add is FAST (6.9ms); my LOCAL numpy is older
+with slow per-element Python char loops (21ms). The native add (numpy.zeros alloc + per-element rposition scan + copy)
+matches but does not beat the worker's C ufunc. CORRECTNESS was perfect (probe 24/0 allclose: char+strings x basic/
+embedded-null/empty/full-width/2-D/unicode/large/single + defer paths scalar/broadcast/S-dtype) — purely a perf reject.
+REVERTED the native add (lib.rs unchanged); KEPT the python_char_add_boundary bench as the evidence harness.
+LESSON: the local-vs-worker measurement gap has (at least) TWO causes — (1) BLAS: local fast OpenBLAS vs worker slow
+reference BLAS (matmul family, flips local-loss->worker-win); (2) NUMPY VERSION: worker newer numpy has fast C string
+ufuncs vs local older python-loop char ops (flips local-win-looking->worker-parity). CAVEAT: the previously-landed
+char case-conversion wins (upper/lower/swapcase/capitalize/title) were measured on the OLD-numpy local box and may be
+parity on the worker's newer numpy — worth a worker re-measure, but they're harmless (native ties the C ufunc, defers
+non-ASCII). NEXT lever must be neither BLAS- nor numpy-version-sensitive: target ops where fnp's PARALLELISM is the
+edge (numpy single-threaded regardless of version), re-measured on the worker.

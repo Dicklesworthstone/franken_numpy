@@ -4135,8 +4135,57 @@ bb = rng.standard_normal((64, 256, 256))\n";
     group.finish();
 }
 
+// np.char.add / np.strings.add (string concatenation) — numpy runs a slow per-element Python
+// loop; fnp has a native parallel UCS4 codepoint-copy path.
+fn bench_char_add_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_char_add_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+a = np.array(['Hello World '+str(i%1000) for i in range(300000)], dtype='<U16')\n\
+b = np.array(['suffix'+str(i%50) for i in range(300000)], dtype='<U10')\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("char add setup");
+        let a = ns.get_item("a").expect("a");
+        let b = ns.get_item("b").expect("b");
+        let fnp_add = module
+            .getattr("char")
+            .expect("char")
+            .getattr("add")
+            .expect("fnp char.add");
+        let np_add = numpy
+            .getattr("char")
+            .expect("char")
+            .getattr("add")
+            .expect("np char.add");
+        group.bench_function("fnp_char_add_300k", |bch| {
+            bch.iter(|| black_box(fnp_add.call1((&a, &b)).expect("fnp call")));
+        });
+        group.bench_function("numpy_char_add_300k", |bch| {
+            bch.iter(|| black_box(np_add.call1((&a, &b)).expect("numpy call")));
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_char_add_boundary,
     bench_matmul_boundary,
     bench_sort_kind_boundary,
     bench_sort_axis_boundary,
