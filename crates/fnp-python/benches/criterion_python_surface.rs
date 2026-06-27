@@ -3653,6 +3653,40 @@ fn bench_einsum_boundary(c: &mut Criterion) {
                 );
             });
         });
+
+        // TRANSPOSED full contraction ("ijk,jik->": same label set, different order, scalar out):
+        // a strided elementwise-then-sum over a transposed operand the native kernel ran 28x
+        // slower than numpy; fnp now delegates it (same-order "ijk,ijk->" stays native/winning).
+        let tc = numpy
+            .call_method1("arange", (160_usize * 160 * 160,))
+            .expect("tc raw")
+            .call_method1("astype", ("float64",))
+            .expect("tc f64")
+            .call_method1("reshape", ((160_usize, 160, 160),))
+            .expect("tc shape");
+        let tc2 = tc
+            .call_method1("transpose", ((1_usize, 0, 2),))
+            .expect("tc transpose")
+            .call_method0("copy")
+            .expect("tc2 contig");
+        group.bench_function("fnp_einsum_transpose_full_ijk_jik_f64", |bench| {
+            bench.iter(|| {
+                black_box(
+                    fnp_einsum
+                        .call1(("ijk,jik->", &tc, &tc2))
+                        .expect("fnp einsum transpose-full call"),
+                );
+            });
+        });
+        group.bench_function("numpy_einsum_transpose_full_ijk_jik_f64", |bench| {
+            bench.iter(|| {
+                black_box(
+                    numpy_einsum
+                        .call1(("ijk,jik->", &tc, &tc2))
+                        .expect("numpy einsum transpose-full call"),
+                );
+            });
+        });
     });
 
     group.finish();

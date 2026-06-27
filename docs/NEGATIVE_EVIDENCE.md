@@ -10306,3 +10306,32 @@ the >=2-axes + strict-subset + op2-fully-contracted gate).
 CORRECTNESS: delegation IS numpy.einsum -> bit-identical. 9-case probe (every subset-multicontract loser + 1-axis
 winner + GEMM + all-shared-prefix + full-contraction) allclose 0 fails; conformance_einsum 28/28 GREEN. REMAINING
 einsum leads (own detectors needed): 3-op "i,ij,j->" 15x, transposed full "ij,ji->" 3.25x. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: np.einsum TRANSPOSED full-contraction ("ij,ji->", "ijk,jik->") delegated — 3-28x LOSS -> 1.00-1.02x parity vs NumPy (2026-06-27) — 112th win
+LEVER: delegate-the-slow-pattern (the einsum dispatcher idiom; sibling of the 110th/111th). Closes the transposed-full
+lead left open by the 111th. When both operands carry the SAME distinct label SET in a DIFFERENT order and the output is
+EMPTY (full contraction to a scalar), numpy's einsum recognises the transpose and contracts along a fast stride order,
+but the native generic sum-of-products kernel walks one operand against the other's transposed layout = strided gather:
+"ij,ji->" 3.25x, "ijk,jik->" 28x, "ijk,ikj->" 26x, "ijk,kji->" 5.3x.
+
+BOUNDARY (measured, defines the detector): the SAME-ORDER full contraction WINS natively and must stay ("ij,ij->" 0.93x,
+"ijk,ijk->" ~0.9x) — the only difference is operand-order, so the detector gates on g0 != g1 (different order) while the
+shared label SET is identical. The 109th no-contraction transpose ("ij,ji->ij", non-empty output) is a different op
+(pure broadcast product) and is untouched (its output is non-empty so this empty-output detector never fires).
+
+FIX (fnp-python only): new detector einsum_spec_is_transposed_full_contraction (2 operands; explicit "->" with EMPTY
+output; no ellipsis; each operand has no repeated label; |g0| == |g1| >= 2; g0 and g1 share the identical label SET;
+g0 != g1 i.e. different order). Matched forms delegate to numpy.einsum. Same-order full contraction is excluded by the
+g0 != g1 test so the native winner is preserved; non-empty outputs (GEMM, broadcast, 109th transpose) never match.
+
+MEASURED (INTERLEAVED 20th-pctile, local): ij,ji-> 3.25x -> 1.00x; ijk,jik-> 28x -> 1.01x; ijk,ikj-> 26x -> 1.02x;
+ijk,kji-> 5.3x -> 1.00x. PRESERVED: ij,ij-> (same-order full) 0.93x WIN, ij,jk->ik GEMM 0.16x WIN, ij,ji->ij
+no-contraction transpose (109th) 1.01x. Worker criterion python_einsum_boundary/einsum_transpose_full_ijk_jik_f64:
+fnp 1.910ms vs numpy 1.917ms = 0.996x parity (was a 28x loss).
+WHY NOT ~0-GAIN: four contraction shapes swing from 3-28x LOSS to parity; no native winner regresses (same-order full
+contraction excluded by g0 != g1).
+CORRECTNESS: delegation IS numpy.einsum -> bit-identical. 8-case probe (every transposed-full loser + same-order full
+winner + GEMM + 109th no-contraction transpose) allclose 0 fails; conformance_einsum 28/28 GREEN. REMAINING einsum
+lead (own detector needed): 3-op quadratic form "i,ij,j->" 15x / "a,abc,c->b" 27x (needs a 3-op detector distinct from
+GEMM-chain winners). einsum CONTRACTION vein now harvested for all 2-op shapes (allshared-nonprefix 110th, op2-subset-
+multicontract 111th, transposed-full 112th); the only remaining lead is the 3-op quadratic form. AGENT_NAME=BlackThrush.
