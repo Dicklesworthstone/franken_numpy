@@ -4,6 +4,39 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-27 - KEEP: active-block deflation for values-only `eigvalsh_nxn/512`
+
+`BlueStone`. Dug the current structural `eigvalsh_nxn/512` gap after confirming no
+unlanded measured bench-worktree keep was sitting off main. The new lever is
+standard active-window discipline for the eigenvalues-only symmetric tridiagonal
+QR chase: deflate only while discovering the trailing unreduced block instead of
+rescanning every off-diagonal on every sweep. This leaves the local Wilkinson
+shift / Givens chase unchanged and keeps earlier split candidates dormant until
+they become the trailing active block.
+
+MEASURED against ORIG `main` code commit `b4183b1e` (code-equivalent to
+`origin/main` `3b28cb5d`, which only added this ledger's GEMM wall entry), same
+worker `vmi1264463`, same command shape (`-p fnp-linalg`, release profile,
+`criterion_linalg`, sample size 10):
+
+| Probe | ORIG ns | Candidate ns | Candidate/ORIG | Verdict |
+|---|---:|---:|---:|---|
+| `eigvalsh_nxn/size/512` | 145,086,326 | 117,852,280 | 0.812x | keep |
+
+Benchmark commands: ORIG used `AGENT_NAME=BlueStone RCH_REQUIRE_REMOTE=1
+CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec --
+cargo bench -j 1 -p fnp-linalg --profile release --bench criterion_linalg --
+'eigvalsh_nxn/size/512' --sample-size 10 --warm-up-time 1 --measurement-time 3
+--output-format bencher --noplot`; candidate used the same command from clean
+worktree `/data/projects/.scratch/franken_numpy-bluestone-eigqr-20260627T214823Z`
+with `RCH_WORKER=vmi1264463`.
+
+Conformance command: `AGENT_NAME=BlueStone RCH_WORKER=vmi1264463
+RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b
+rch exec -- cargo test -j 1 -p fnp-linalg --profile release eigvalsh --
+--nocapture` passed (`8` unit/golden-filtered lib tests plus `3` golden
+integration tests; `0` failures). AGENT_NAME=BlueStone.
+
 ## 2026-06-27 - ROOT CAUSE (caps the whole frontier): all remaining vs-numpy COMPUTE-kernel gaps trace to the deliberate no-`fma` build (bit-reproducibility); closing them = human decision
 
 `BlackThrush`. The biggest measured gaps vs ORIG that survive after the surface

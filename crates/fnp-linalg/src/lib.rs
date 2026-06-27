@@ -5107,6 +5107,40 @@ fn scaled_hypot(x: f64, z: f64) -> f64 {
     }
 }
 
+#[inline(always)]
+fn tridiag_trailing_active_block(
+    d: &[f64],
+    e: &mut [f64],
+    n: usize,
+    eps: f64,
+) -> Option<(usize, usize)> {
+    let mut hi = n - 1;
+    while hi > 0 {
+        let split = hi - 1;
+        if e[split] == 0.0 || e[split].abs() <= eps * (d[split].abs() + d[split + 1].abs()) {
+            e[split] = 0.0;
+            hi -= 1;
+        } else {
+            break;
+        }
+    }
+    if hi == 0 {
+        return None;
+    }
+
+    let mut lo = hi - 1;
+    while lo > 0 {
+        let split = lo - 1;
+        if e[split] == 0.0 || e[split].abs() <= eps * (d[split].abs() + d[split + 1].abs()) {
+            e[split] = 0.0;
+            break;
+        }
+        lo -= 1;
+    }
+
+    Some((lo, hi))
+}
+
 /// Eigenvalues-ONLY implicit-QR iteration on a symmetric tridiagonal `(d, e)`.
 /// Identical Wilkinson-shift bulge chase as [`tridiag_eig_qr`] with `q = None`, but
 /// the per-rotation length uses [`scaled_hypot`] instead of libm `hypot` and there is
@@ -5120,25 +5154,12 @@ fn tridiag_eigvals_qr(d: &mut [f64], e: &mut [f64], n: usize) {
     let max_iter = EIGEN_QR_ITERATION_COEFF * n * n;
 
     for _iter in 0..max_iter {
-        // Deflation: set small off-diagonals to zero.
-        for i in 0..e.len() {
-            if e[i].abs() <= eps * (d[i].abs() + d[i + 1].abs()) {
-                e[i] = 0.0;
-            }
-        }
-
-        // Largest unreduced trailing block [lo..=hi].
-        let mut hi = n - 1;
-        while hi > 0 && e[hi - 1] == 0.0 {
-            hi -= 1;
-        }
-        if hi == 0 {
+        // The QR chase only touches the trailing unreduced block. Avoid the old
+        // full `e` scan each sweep; earlier blocks can be deflated when they become
+        // the trailing active block without changing the local Givens chase.
+        let Some((lo, hi)) = tridiag_trailing_active_block(d, e, n, eps) else {
             break;
-        }
-        let mut lo = hi - 1;
-        while lo > 0 && e[lo - 1] != 0.0 {
-            lo -= 1;
-        }
+        };
 
         // Wilkinson shift from the trailing 2×2.
         let delta = (d[hi - 1] - d[hi]) / 2.0;
