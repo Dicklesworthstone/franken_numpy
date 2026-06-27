@@ -2295,6 +2295,80 @@ fn bench_cumsum_lastaxis_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+// cumsum/cumprod along a MIDDLE axis (0 < ax < ndim-1) of a 3-D f64 stack. numpy runs a
+// non-last cumulative STRIDED + single-threaded; the native block-parallel slab-by-slab
+// scan (try_zerocopy_f64_cumulative_axis inner>1 path) fans independent contiguous outer
+// blocks across the pool. RAYON_NUM_THREADS=1 vs default isolates the parallelism gain.
+fn bench_cum_midaxis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_cum_midaxis_boundary");
+    group.sample_size(15);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_cumsum = module.getattr("cumsum").expect("fnp_python.cumsum");
+        let numpy_cumsum = numpy.getattr("cumsum").expect("numpy.cumsum");
+        let fnp_cumprod = module.getattr("cumprod").expect("fnp_python.cumprod");
+        let numpy_cumprod = numpy.getattr("cumprod").expect("numpy.cumprod");
+
+        for (label, d0, d1, d2) in [
+            ("256x256x64", 256_usize, 256_usize, 64_usize),
+            ("128x512x64", 128_usize, 512_usize, 64_usize),
+        ] {
+            let size = (d0 * d1 * d2) as i64;
+            let input = numpy
+                .call_method1("linspace", (-1.0_f64, 1.0_f64, size))
+                .expect("cum midaxis input")
+                .call_method1("reshape", ((d0, d1, d2),))
+                .expect("cum midaxis 3-D shape");
+            let fnp_kwargs = PyDict::new(py);
+            fnp_kwargs.set_item("axis", 1_i64).expect("fnp axis kwarg");
+            let numpy_kwargs = PyDict::new(py);
+            numpy_kwargs.set_item("axis", 1_i64).expect("numpy axis kwarg");
+
+            group.bench_function(format!("fnp_cumsum_f64_axis1_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_cumsum
+                        .call((&input,), Some(&fnp_kwargs))
+                        .expect("fnp cumsum axis1 call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_cumsum_f64_axis1_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_cumsum
+                        .call((&input,), Some(&numpy_kwargs))
+                        .expect("numpy cumsum axis1 call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("fnp_cumprod_f64_axis1_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_cumprod
+                        .call((&input,), Some(&fnp_kwargs))
+                        .expect("fnp cumprod axis1 call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_cumprod_f64_axis1_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_cumprod
+                        .call((&input,), Some(&numpy_kwargs))
+                        .expect("numpy cumprod axis1 call");
+                    black_box(result);
+                });
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_vander_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_vander_boundary");
     group.sample_size(20);
@@ -4560,6 +4634,7 @@ criterion_group!(
     bench_sum_lastaxis_boundary,
     bench_prod_lastaxis_boundary,
     bench_cumsum_lastaxis_boundary,
+    bench_cum_midaxis_boundary,
     bench_vander_boundary,
     bench_polyval_boundary,
     bench_gradient_axis_boundary,

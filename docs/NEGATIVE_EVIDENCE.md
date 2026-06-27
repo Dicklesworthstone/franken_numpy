@@ -9673,3 +9673,27 @@ middle axes of 3-D/4-D shapes (incl negative axis), keepdims {F,T}, ~10% scatter
 (-> NaN + "Mean of empty slice" warning, VERIFIED emitted), plus regressions (axis-0 / last-axis / flat /
 2-D-axis0/axis1 / small-below-gate unchanged and matching). nanmean lib conformance GREEN on the worker. KEEP.
 AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize the non-last-axis cumulative scan across outer blocks (cumsum/cumprod/nancum* MIDDLE axis, 13-20x over NumPy; +2.2-3.4x over the prior serial path) (2026-06-26) — 96th win
+NEW op class beyond the variance/norm temp-reduce family: the cumulative SCAN. `try_zerocopy_f64_cumulative_axis`
+inner>1 (non-last axis) path was SERIAL slab-by-slab (`for o in 0..outer`). Each OUTER block is an independent
+(axis_len, inner) cumulative over its leading dim (the prefix dependency is along the axis WITHIN a block, never
+across blocks), so for a MIDDLE axis (outer >= 2) the blocks fan across the rayon pool. Rewrote the inner>1 branch to
+read/write raw &[f64]/&mut[f64] (like the inner==1 last-axis path already did) and `par_chunks_mut(lane).zip(par_chunks)`
+over the disjoint `lane`-sized blocks above 1<<18 elements. Benefits cumsum/cumprod/nancumsum/nancumprod at once
+(shared helper, is_prod x skip_nan).
+
+WHY IT'S NOT ~0-GAIN (load-immune isolation, SAME build, RAYON_NUM_THREADS=1 vs default): numpy runs a non-last
+cumulative STRIDED + single-threaded (~33-38ms@4M). The prior SERIAL fnp path was already cache-friendly (contiguous
+slab-by-slab) and beat numpy ~5x (6.27ms). The parallel change adds a further 2.2-3.4x on top:
+  cumsum  axis=1 (256,256,64):  numpy 33.18ms | fnp serial(RAYON=1) 6.27ms | fnp parallel 1.82ms = 20.5x vs numpy, 3.4x vs serial
+  cumprod axis=1 (256,256,64):  numpy 33.91ms | fnp serial 6.07ms | fnp parallel 2.72ms = 13.6x vs numpy, 2.2x vs serial
+  cumsum  axis=1 (128,512,64):  numpy 33.98ms | fnp serial 6.16ms | fnp parallel 1.89ms = 20.2x vs numpy, 3.3x vs serial
+  cumprod axis=1 (128,512,64):  numpy 33.24ms | fnp serial 6.97ms | fnp parallel 2.14ms = 17.5x vs numpy, 3.3x vs serial
+(axis 0 = single block, stays serial; last axis already parallel-across-lanes; both unchanged.)
+
+CORRECTNESS: differential probe vs NumPy, BIT-EXACT byte-level (uint64 view incl -0.0 + NaN-pair), 0 fails over ~70
+cases: cumsum/cumprod/nancumsum/nancumprod over middle axes of 3-D/4-D shapes (incl negative axis), NaN-present
+(plain keeps verbatim, nancum* treat NaN as identity), -0.0 first-slab preservation, Inf, plus regressions (last axis /
+axis 0 / flat / 2-D / small-below-gate / int input unchanged and matching). conformance_cumsum + conformance_cumulative
++ cum*_zerocopy GREEN on the worker. KEEP. AGENT_NAME=BlackThrush.
