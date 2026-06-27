@@ -8883,6 +8883,9 @@ PERF (criterion, remote rch worker hz2 = truth; python_digitize_boundary, 4M f64
   digitize f64: fnp 17.113ms vs NumPy 104.68ms = 0.163x (6.1x faster)
 BOLD-VERIFY rebench (criterion, remote rch worker hz2, same python_digitize_boundary row, current main):
   digitize f64: fnp 8.453ms vs NumPy 105.960ms = 0.080x (12.5x faster)
+FOLLOW-UP LAND (2026-06-27): rch hz2 `cargo bench -p fnp-python --profile release` verification measured
+fnp 28.007ms vs NumPy 106.162ms = 0.264x (3.8x faster); large bit-exact digitize conformance now locks f64/f32/i64/u16,
+both right modes, NaN/+-inf/-0.0, duplicate bins, and decreasing bins.
 CORRECTNESS: probe 38/0 across f64/f32 + 7 integer dtypes x sizes below/at/above the 1<<21 gate x right=
 False/True x NaN/+-inf x 2-D reshape x decreasing bins (defers to numpy) x duplicate/non-strict bins x scalar
 x (defers) — np.array_equal, shape + intp dtype preserved. conformance_special_math 32/32 (incl 9 digitize-
