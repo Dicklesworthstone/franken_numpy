@@ -4,6 +4,35 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-27 - ROOT CAUSE (caps the whole frontier): all remaining vs-numpy COMPUTE-kernel gaps trace to the deliberate no-`fma` build (bit-reproducibility); closing them = human decision
+
+`BlackThrush`. The biggest measured gaps vs ORIG that survive after the surface
+converged are GEMM (4-7x/thread, see GEMM entry below) and moderate-n batched inv
+(~1.2x). Reading `.cargo/config.toml`: the workspace builds `rustflags = ["-C",
+"target-feature=+avx2"]` and DELIBERATELY omits `+fma`. The in-file comment records
+the measured reason: **"verified: `target-cpu=x86-64-v3` [adds fma] REGRESSES 16
+fnp-linalg conformance tests; `+avx2` alone keeps all 37 green"** — FMA fuses
+mul+add with NO intermediate rounding, changing the low bit, which breaks the
+bit-exact golden_sha256 tests (matmul `mat_mul_*_golden_sha256` :9767/:9973, LU,
+etc.) that lock fnp's cross-thread numeric REPRODUCIBILITY. Consequence: every
+compute-bound AXPY/GEMM/LU inner loop emits separate `mulpd`+`addpd` (~half the FMA
+peak) vs OpenBLAS's `vfmadd`, which is the dominant ~2x factor in the per-thread
+deficit (the rest is hand-tuned asm packing/prefetch/register-scheduling).
+
+THEREFORE: the remaining compute-kernel gaps are NOT independently closable by
+code micro-opts — they are ALL capped by the no-fma reproducibility decision.
+RETRY PREDICATE (single, human/architectural): enable `+fma` AND re-pin the 16
+golden conformance tests to the new FMA-rounded values (accepting that fnp matmul/LU
+become FMA-rounded, still deterministic per-build but no longer bit-equal to the
+non-FMA reference). That buys ~2x on GEMM/LU/inv inner loops (e.g. GEMM ~50-85 ->
+~150-170 GF, still ~2x under OpenBLAS's asm-tuned 340) and would flip moderate-n inv
+to a win. Per-op `f64::mul_add` WITHOUT the target feature is a SLOWER software
+emulation — do NOT sprinkle mul_add to dodge this; it regresses. So: STOP chasing
+per-kernel SIMD/FMA micro-opts as code levers — the wall is the build flag + the
+reproducibility golden, a deliberate project tradeoff. Everything else
+(elementwise/reductions/dtype/indexing/unique/einsum/sort/searchsorted/sparse-inv-
+n<=48/...) is win-or-parity. Frontier characterized; no remaining 60-min code lever.
+
 ## 2026-06-27 - WALL (quantified, no quick lever): native f64 GEMM micro-kernel is 4-7x slower PER-THREAD than OpenBLAS; masked at default-64-threads
 
 `BlackThrush`. Quantified the biggest remaining gap vs ORIG. At a FAIR thread
