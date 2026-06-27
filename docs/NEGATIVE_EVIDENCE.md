@@ -4,6 +4,56 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-27 - KEEP: `np.searchsorted` guess/galloping kernel — SORTED-query 1.76x loss -> 2.56x win, random/bench path preserved
+
+`BlackThrush`. A fresh-built current-`main` `fnp_python.so` sweep (run via
+`uv --python 3.14`/`LD_LIBRARY_PATH`, parallel ops measured at
+`RAYON_NUM_THREADS=8` to dodge the loaded-box 64-thread oversubscription that
+falsely flags every parallel reduction) found ONE real, load-immune user-facing
+loss: `np.searchsorted` with a SORTED query array (serial `RAYON=1` reproduces
+it, so it is not contention noise). Sorted-query searchsorted is a very common
+idiom (digitize, histogram edges, merging sorted streams, monotone time-series
+alignment).
+
+ROOT: numpy's `binary_search_with_guess` seeds each query at the previous result
+and gallops outward, so monotone queries stay cache-warm and run O(1) amortized
+(O(n+m) total). fnp's `search_index_f64_raw` did a plain bisection that jumps to
+`n/2` first — a cold access into the 16 MB haystack every query (O(m log n)).
+
+FIX: add `search_index_f64_raw_guess(s, key, right, hint)` — clamp `hint`, gallop
+up from it with a doubling stride to bracket the boundary (or take the `[0,hint]`
+segment), then a bounded binary search with the IDENTICAL `cond` predicate.
+Because galloping only narrows a bracket guaranteed to contain the UNIQUE
+insertion point and the final search uses the same predicate, the result is
+byte-identical to the plain search for every input (NaN/dups/oob/empty/scalar,
+both sides). Carry `guess = previous result` in the f64 serial loop and
+per-rayon-chunk in the parallel loop.
+
+MEASURED (local, fresh `.so`; ORIG = NumPy 2.4.3; haystack = sort(1M-2M f64)):
+
+| case | path | FNP | NumPy | FNP/NumPy | vs prior |
+|---|---|---:|---:|---:|---|
+| 100k SORTED queries | serial (T=1) | 894 µs | 2,290 µs | **0.39x WIN** | was 1.76x LOSS |
+| 4M RANDOM queries (the bench setup) | parallel T=8 | 115 ms | 846 ms | 0.136x WIN | preserved |
+| 4M RANDOM queries | parallel T=16 | 60 ms | 882 ms | 0.068x WIN | preserved |
+
+The galloping overhead on RANDOM queries is fully hidden by the parallel path's
+memory-level parallelism, so `python_searchsorted_boundary` (1M sorted haystack ×
+4M RANDOM queries — the only benched searchsorted case) is NOT regressed: it still
+wins 0.07-0.14x. The only cost is a within-noise (~1.07x, T=1) serial-random
+microcase, which is unbenched and fast in absolute terms — the same tradeoff
+numpy itself accepts. Net: a real user-facing loss removed with zero benched
+regression.
+
+CONFORMANCE: bit-exact by construction + a 168-case fnp-vs-numpy differential
+harness (sorted/random/duplicates/all-equal/NaN/empty/scalar/out-of-range, both
+`left`/`right`, haystack sizes 0..100k) passed 0 failures, plus the
+`searchsorted_matches_numpy_*` lib tests. Built+verified in an isolated worktree
+(the shared `main` checkout was churning under a peer's einsum WIP and had
+clobbered an earlier copy of this patch); rch remote build slots were saturated
+(`insufficient_slots`) so the build ran locally `-p fnp-python` into the role
+target dir.
+
 ## 2026-06-27 - NO-SHIP (measured A/B, CLOSES the prior-entry lead): lowering `TRIDIAG_MATVEC_PAR_MIN` 1024→256 regresses `eigvalsh_nxn/512` 1.41x
 
 `BlackThrush`. Follow-up to the same-day lead below (committed `3e437ba0`): no
