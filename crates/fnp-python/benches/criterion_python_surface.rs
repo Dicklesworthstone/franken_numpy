@@ -2139,6 +2139,85 @@ fn bench_nanvar_f32_axis_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+// nanvar/nanstd/nanmean along the CONTIGUOUS LAST axis (and a trailing tuple) of an f32
+// stack with ~10% NaN. numpy.nanmean/nanvar on float32 materializes a NaN->0 copy + isnan
+// mask then PAIRWISE-reduces the last axis (~3-7ms/2M unloaded, far worse loaded); the
+// native per-lane bit-exact f32 pairwise paths (try_zerocopy_f32_nanmean_last_axis /
+// try_zerocopy_f32_nanvar_last_axis) parallelize across the independent lanes.
+fn bench_nanvar_f32_last_axis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_nanvar_f32_last_axis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let f32_dtype = numpy.getattr("float32").expect("numpy.float32");
+        let nan = numpy.getattr("nan").expect("np.nan");
+        let fnp_nanvar = module.getattr("nanvar").expect("fnp_python.nanvar");
+        let numpy_nanvar = numpy.getattr("nanvar").expect("numpy.nanvar");
+        let fnp_nanstd = module.getattr("nanstd").expect("fnp_python.nanstd");
+        let numpy_nanstd = numpy.getattr("nanstd").expect("numpy.nanstd");
+        let fnp_nanmean = module.getattr("nanmean").expect("fnp_python.nanmean");
+        let numpy_nanmean = numpy.getattr("nanmean").expect("numpy.nanmean");
+
+        let build = |dims: &[usize], total: i64| {
+            let arr = numpy
+                .call_method1("linspace", (-4.0_f64, 6.0_f64, total))
+                .expect("f32 nan source")
+                .call_method1("astype", (&f32_dtype,))
+                .expect("astype f32");
+            let idx = numpy
+                .call_method1("arange", (0_i64, total, 10_i64))
+                .expect("nan stride");
+            arr.call_method1("__setitem__", (idx, &nan)).expect("inject NaN");
+            arr.call_method1("reshape", (PyTuple::new(py, dims.iter().copied()).unwrap(),))
+                .expect("reshape")
+        };
+        let last2d = build(&[1000, 2048], 1000 * 2048);
+        let trail3d = build(&[512, 64, 64], 512 * 64 * 64);
+
+        // Per-case kwargs dicts (axis=-1 for the single last axis; axis=(-2,-1) for the
+        // contiguous trailing tuple). Built up front so the case loop is homogeneous.
+        let fkw_last = PyDict::new(py);
+        fkw_last.set_item("axis", -1_i64).expect("axis");
+        let fkw_trail = PyDict::new(py);
+        fkw_trail.set_item("axis", (-2_i64, -1_i64)).expect("axis");
+        let cases = [
+            ("last_1000x2048", &last2d, &fkw_last),
+            ("trail_512x64x64", &trail3d, &fkw_trail),
+        ];
+        for (label, input, kw) in cases {
+            let fkw = kw;
+            let nkw = kw;
+            group.bench_function(format!("fnp_nanvar_f32_{label}"), |b| {
+                b.iter(|| black_box(fnp_nanvar.call((input,), Some(&fkw)).expect("fnp nanvar f32")));
+            });
+            group.bench_function(format!("numpy_nanvar_f32_{label}"), |b| {
+                b.iter(|| black_box(numpy_nanvar.call((input,), Some(&nkw)).expect("numpy nanvar f32")));
+            });
+            group.bench_function(format!("fnp_nanstd_f32_{label}"), |b| {
+                b.iter(|| black_box(fnp_nanstd.call((input,), Some(&fkw)).expect("fnp nanstd f32")));
+            });
+            group.bench_function(format!("numpy_nanstd_f32_{label}"), |b| {
+                b.iter(|| black_box(numpy_nanstd.call((input,), Some(&nkw)).expect("numpy nanstd f32")));
+            });
+            group.bench_function(format!("fnp_nanmean_f32_{label}"), |b| {
+                b.iter(|| black_box(fnp_nanmean.call((input,), Some(&fkw)).expect("fnp nanmean f32")));
+            });
+            group.bench_function(format!("numpy_nanmean_f32_{label}"), |b| {
+                b.iter(|| black_box(numpy_nanmean.call((input,), Some(&nkw)).expect("numpy nanmean f32")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 // nanvar/nanstd along a MIDDLE axis (0 < ax < ndim-1) of a 3-D f64 stack with scattered
 // NaN. numpy.nanvar on a non-last axis materializes a NaN->0 copy, an isnan mask, a count,
 // and the (a-mean)/squared temps then strided-reduces; the native block-parallel NaN-skip
@@ -4914,6 +4993,7 @@ criterion_group!(
     bench_var_midaxis_boundary,
     bench_var_f32_axis_boundary,
     bench_nanvar_f32_axis_boundary,
+    bench_nanvar_f32_last_axis_boundary,
     bench_nanvar_midaxis_boundary,
     bench_var_axis0_boundary,
     bench_sum_lastaxis_boundary,

@@ -9873,3 +9873,53 @@ single-threaded C regardless of version/BLAS).
 
 conformance_nan_funcs 37/37 GREEN. PRE-EXISTING (clean origin/main): conformance_diagnostics divide_float_zero_warning
 fails identically on baseline (peer parallel-divide kernel) — not this change. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: native FLOAT32 nanmean/nanvar/nanstd along the CONTIGUOUS LAST axis (+ trailing tuple) — completes the f32 nan-reduction vein across ALL axes; LAST nanstd 45x / nanvar 30x / nanmean 7.8x vs NumPy (2026-06-27) — 103rd win
+Completes the f32 nan-reduction vein: the 100th/102nd wins did f32 nanvar/nanstd/nanmean on the NON-LAST axis (axis 0
++ middle); the LAST axis was still DELEGATED to numpy (every f32 last-axis nan-op fell through to the
+`native_f64_reduction_preserves_dtype` guard -> numpy's slow materializing path). numpy.nanmean/nanvar on float32 keeps
+the f32 accumulator and materializes a NaN->0 copy + isnan mask, then reduces the contiguous last axis PAIRWISE (one
+pairwise nansum/count for nanmean; a second pairwise squared-dev sum for nanvar/nanstd). New f32 PAIRWISE helpers
+(base_sum_simd_f32 = 8-wide Simd<f32,8> base with numpy's tree-combine, pairwise_nansum_count_f32, pairwise_sqr_dev_f32
+— exact f32 siblings of the f64 pairwise helpers: <=128 SIMD leaf, split trimmed to a multiple of 8) drive two new
+per-lane paths: try_zerocopy_f32_nanmean_last_axis and try_zerocopy_f32_nanvar_last_axis — BOTH accept a single last
+axis OR a tuple resolving to the contiguous trailing axes (per-block lane = product of those dims; take_sqrt selects
+nanstd vs nanvar). Each lane is an independent
+reduction streamed once (nanmean) or twice (nanvar/nanstd) with its own 1 KiB stack leaf buffer, fanned across rayon
+(`par_chunks_exact(axis_len)`, gate outer*axis_len >= 98304 && threads >= 2). avg = nansum/count and var =
+sum((v-avg)^2)/(count-ddof) computed entirely in the f32 accumulator (matches numpy's _divide_by_count: np.divide with
+an f32 `out` selects the f32 loop, NOT f64-then-round — verified equal over 3M random tot/count pairs). All hooks placed
+ABOVE the f64-dtype guard in the nanmean/nanvar/nanstd dispatchers (preserves float32; f64/int/f16/flat fall through).
+An all-NaN lane: nanmean computes 0.0/0.0 == numpy's NaN bit pattern (don't substitute) + emits the single "Mean of
+empty slice" RuntimeWarning; nanvar/nanstd with count<=ddof DEFERS the whole call to numpy so its "Degrees of freedom
+<= 0" warning + NaN parity stays exact.
+
+BIT-EXACTNESS: numpy reduces a float32 last axis with the SAME 8-accumulator/128-block pairwise tree as f64 (confirmed
+in a numpy prototype: f32 pairwise sum == np.sum(axis=-1) 0/1000 mismatches; full two-pass nanmean/nanvar/nanstd ==
+np.nan* 0/736 lanes). In the BUILT extension: differential probe BYTE-EXACT (f32 bit compare incl NaN-pair), 0 fails
+over 5484 test groups — single last axis + trailing tuples (-2,-1)/(-3,-2,-1), ddof 0/1, keepdims both, negative axis,
+0%/1%/10%/30% NaN, all-NaN lane -> NaN + "Mean of empty slice" warning verified, scales 1e-5..1e5. Regressions:
+non-last axis (delegates to the 100th/102nd native paths + matches), flat (delegates), dtype=f64 override (-> f64
+matches), f64 input unchanged, small-below-gate (serial, matches).
+
+MEASURED — worker criterion (python_nanvar_f32_last_axis_boundary), median of 10:
+  nanmean f32 LAST  1000x2048:   numpy 3.69ms  | fnp 237us = 15.6x
+  nanvar  f32 TRAIL 512x64x64:   numpy 7.19ms  | fnp 242us = 29.7x
+  nanstd  f32 TRAIL 512x64x64:   numpy 7.37ms  | fnp 336us = 21.9x
+  nanmean f32 TRAIL 512x64x64:   numpy 2.77ms  | fnp 170us = 16.2x  (after extending nanmean to the trailing tuple;
+                                 BEFORE the extension this case DELEGATED -> 0.90x mild LOSS, now a native WIN)
+MEASURED — local full threads, 1000x2048 f32 = 2M, 5% NaN:
+  nanmean f32 LAST:  numpy 3.52ms | fnp 0.15ms = 23.4x   (single pairwise nansum/count pass)
+  nanvar  f32 LAST:  numpy 7.82ms | fnp 0.16ms = 49.6x   (two-pass pairwise)
+  nanstd  f32 LAST:  numpy 6.63ms | fnp 0.15ms = 45.0x   (two-pass pairwise + f32 sqrt)
+WHY NOT ~0-GAIN: the lanes are independent reductions so the per-lane pairwise fold parallelizes cleanly across rayon
+(unlike the bandwidth-bound axis-0 serial paths). numpy's f32 nan-reductions are pure single-threaded C that ALSO
+materialize a NaN->0 temp + isnan mask before the pairwise reduce, so even the single-pass nanmean wins 15-23x and the
+two-pass nanvar/nanstd win 22-50x. nan-reductions are pure-native (numpy single-threaded regardless of version/BLAS),
+so the win is load-immune in kind. The lone non-win (trailing-tuple nanmean delegating at 0.90x) was eliminated by
+generalizing nanmean to the trailing-tuple case, so EVERY benched case is now a WIN.
+
+conformance_nan_funcs 37/37 + conformance_nan_to_num_clip 18/18 GREEN. PRE-EXISTING (proven on a clean origin/main
+worktree @ 6c1e5e83): conformance_statistics cov_corrcoef_long_observation / cov_native_fast_path / cov_corrcoef_python_
+container ("cov y ddof") golden-sha256 drift fails IDENTICALLY on baseline (worker-BLAS-FMA 1-ULP; cov is untouched by
+this change). KEEP. AGENT_NAME=BlackThrush.
