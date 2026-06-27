@@ -4451,6 +4451,51 @@ bins = np.linspace(-4.0, 4.0, 50)\n";
     group.finish();
 }
 
+// np.bincount(int64) — a tight serial scatter `ans[x[i]]++` in NumPy. The native zero-copy
+// path drops the per-element bounds check (the max-scan proves every index is in range) so the
+// serial tally matches/beats NumPy across the common range; the privatized parallel tally only
+// engages for huge inputs (>=67M) where aggregate bandwidth beats the contention overhead on a
+// loaded many-core box. Bins span N=2M (mid) and N=64M (huge/parallel).
+fn bench_bincount_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_bincount_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+x_mid = rng.integers(0, 256, 2_000_000)\n\
+x_big = rng.integers(0, 512, 64_000_000)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("bincount setup");
+        let x_mid = ns.get_item("x_mid").expect("x_mid");
+        let x_big = ns.get_item("x_big").expect("x_big");
+        let fnp_bc = module.getattr("bincount").expect("fnp bincount");
+        let numpy_bc = numpy.getattr("bincount").expect("numpy bincount");
+        for (label, x) in [("mid_2m_k256", &x_mid), ("big_64m_k512", &x_big)] {
+            group.bench_function(format!("fnp_bincount_i64_{label}"), |b| {
+                b.iter(|| black_box(fnp_bc.call1((x,)).expect("fnp bincount")));
+            });
+            group.bench_function(format!("numpy_bincount_i64_{label}"), |b| {
+                b.iter(|| black_box(numpy_bc.call1((x,)).expect("numpy bincount")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_searchsorted_boundary(c: &mut Criterion) {
     // np.searchsorted(1M sorted haystack, 4M queries) — serial per-query binary search vs parallel.
     let mut group = c.benchmark_group("python_searchsorted_boundary");
@@ -4955,6 +5000,7 @@ criterion_group!(
     bench_take_boundary,
     bench_searchsorted_boundary,
     bench_digitize_boundary,
+    bench_bincount_boundary,
     bench_tile_boundary,
     bench_kron_boundary,
     bench_nan_to_num_boundary,

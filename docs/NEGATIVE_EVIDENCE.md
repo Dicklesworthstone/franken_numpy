@@ -9961,3 +9961,35 @@ conformance_nan_funcs 37/37 + conformance_nan_to_num_clip 18/18 GREEN. PRE-EXIST
 worktree @ 6c1e5e83): conformance_statistics cov_corrcoef_long_observation / cov_native_fast_path / cov_corrcoef_python_
 container ("cov y ddof") golden-sha256 drift fails IDENTICALLY on baseline (worker-BLAS-FMA 1-ULP; cov is untouched by
 this change). KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: np.bincount mis-tuned parallel gate + serial bounds-check elision — 2.4-3x LOSS -> 0.85-0.97x WIN (serial, all common sizes) + 0.32-0.56x (parallel >=80M) vs NumPy (2026-06-27) — 104th win
+A broad non-reduce gap sweep flagged np.bincount(int64) as the BIGGEST measured loss (fnp ~2.6x slower than NumPy at
+N=2M). Root cause = a mis-tuned parallel gate, NOT the kernel. np.bincount is a tight serial C scatter `ans[x[i]]++`;
+fnp had a privatized parallel tally gated at N>=512K (BINCOUNT_PARALLEL_MIN=1<<19) with K_MAX=1<<16. DIAGNOSIS (serial
+RAYON_NUM_THREADS=1 vs DEFAULT, repeated 10th-percentile timing on the shared 64-thread worker): the SERIAL path is a
+robust parity (~1.1-1.25x of NumPy at every size), but the PARALLEL path is contention-FRAGILE (5x run-to-run variance:
+N=8M K=256 measured 6.6ms idle but 31.5ms loaded) and LOSES 1.2-3x to serial from 512K through ~32M — the per-thread
+K-array alloc + nthreads*K merge + rayon fan-out are fixed overhead that the cheap L1-table scatter can't amortize until
+the input is huge. Parallel only robustly wins (~2-2.5x over serial) at >=80M.
+
+TWO FIXES (both the i64 path try_zerocopy_bincount AND the narrow/unsigned path try_zerocopy_bincount_narrow):
+  1. Raise BINCOUNT_PARALLEL_MIN 1<<19 (512K) -> 1<<26 (~67M) and lower BINCOUNT_PARALLEL_K_MAX 1<<16 -> 1<<15: parallel
+     only fires for huge inputs where it survives contention; everything below uses the serial path.
+  2. Drop the per-element bounds check in the serial scatter (`output[v]` -> `output.get_unchecked(v)`): the pass-1
+     max-scan already proves 0 <= v <= max_val < length, so the index is always in bounds. This was the serial
+     ~1.1-1.25x gap (NumPy's C loop has no bounds check); eliding it makes serial BEAT NumPy.
+
+MEASURED (local, 10th-percentile of 11-21):
+  BEFORE: N=2M K=256 fnp 11.8ms | NumPy 3.9ms = 3.04x LOSS (parallel firing); N=8M K=65536 1.94x LOSS
+  AFTER:  N=500K K=50 0.85x WIN | N=2M K=256 0.87x WIN | N=2M K=1000 1.07x par | N=8M K=256 0.97x WIN |
+          N=8M K=50 0.97x WIN | N=64M K=512 0.92x WIN (serial) | N=80M K=512 0.56x | N=128M K=512 0.32x (parallel)
+WHY NOT ~0-GAIN: the N=2M case swung from 3.04x LOSS to 0.87x WIN (a 3.5x improvement); serial now wins across the whole
+common range and the parallel path wins 2-3x at >=80M (128M: parallel 80.7ms vs serial 207ms = 2.56x, gate earns its
+keep). The serial improvement is load-IMMUNE (no threads), so it is a robust win on the contended worker, unlike the old
+parallel path. Worker criterion (python_bincount_boundary, median/10): mid_2m_k256 fnp 2.87ms | NumPy 3.23ms = 0.89x;
+big_64m_k512 fnp 103.9ms | NumPy 112.2ms = 0.93x (both WIN; the 2M case was a 2.4-3x LOSS before).
+
+BIT-EXACT: bincount counts are integer increments (associative + commutative), so the privatized merge == the serial
+forward pass, and the unchecked scatter changes only the bounds check, not the arithmetic. Verified np.array_equal vs
+NumPy across dtypes {i64,i32,i16,i8,u8,u32}, with minlength, weighted (float, allclose), and empty/single-element edge
+cases. conformance_histogram_bincount 33/33 + conformance_count_nonzero_zerocopy 1/1 GREEN. AGENT_NAME=BlackThrush.
