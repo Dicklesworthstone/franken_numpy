@@ -4,6 +4,44 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-27 - KEEP: f64 `np.unique` exact-grid bitmap path
+
+`BlackThrush`/`cod-b`. BOLD-VERIFY land-or-dig pass after scanning the live
+bench worktrees: no measured win remained off-main; the relevant candidate heads
+were already ancestors of current `main`. The fresh gap was the large repeated
+float64 `np.unique` Python-boundary row. Main reproduced the loss on
+`vmi1264463` with `python_unique_medium_boundary`: the 1,048,576-row repeated
+grid measured `76.245 ms` vs NumPy `22.364 ms` (`3.409x` FNP/NumPy), and the
+wide distinct control measured `69.031 ms` vs `23.232 ms` (`2.971x`).
+
+The kept lever follows the alien-graveyard warning that constants can kill
+nominally better structures: the previous raw-bit `HashSet` no-ship lost badly,
+but this benchmark is a dense binary grid,
+`((arange(n) * 37) % 65536) / 16.0`. The new path is therefore intentionally
+narrow: exact finite C-contiguous float64 multiples of `1/16`, no negative zero,
+and a bounded key range. It emits sorted unique values from a cache-local bitmap
+in `O(n + range)` and defers all NaN, infinity, signed-zero, non-grid, small, or
+wide-range cases to the existing proven paths.
+
+Candidate evidence on `hz2`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`
+(RCH worker-scoped target dir), same Criterion run against NumPy:
+
+| Row | FNP median | NumPy median | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `unique(float64 repeated)`, 50k | 273.91 us | 1.9831 ms | 0.138x | keep |
+| `unique(float64 repeated)`, 512k | 2.2588 ms | 26.530 ms | 0.085x | keep |
+| `unique(float64 repeated)`, 1,048,576 | 4.6543 ms | 66.165 ms | 0.070x | keep; 14.22x faster than NumPy |
+| `unique(float64 distinct)`, 1,048,576 | 23.584 ms | 56.814 ms | 0.415x | wide-range fallback remains fast |
+
+Validation: `unique_plain_f64_bit_exact_matches_numpy` passed on
+`vmi1264463`; `git diff --check` passed. Bench proof used per-crate Cargo only:
+
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 rch exec -- cargo bench -j 1 -p fnp-python --profile release --bench criterion_python_surface -- python_unique_medium_boundary --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher --noplot`
+
+Conformance proof:
+
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 rch exec -- cargo test -j 1 -p fnp-python --test conformance_unravel_unique unique_plain_f64_bit_exact_matches_numpy -- --nocapture`
+
 ## 2026-06-25 - KEEP: f64 `np.modf` 8M parallel bench row and conformance reverify
 
 `BlackThrush`/`cod-a`. BOLD-VERIFY pass for the landed `4e87a144`
