@@ -2090,6 +2090,8 @@ fn bench_nanvar_f32_axis_boundary(c: &mut Criterion) {
         let numpy_nanvar = numpy.getattr("nanvar").expect("numpy.nanvar");
         let fnp_nanstd = module.getattr("nanstd").expect("fnp_python.nanstd");
         let numpy_nanstd = numpy.getattr("nanstd").expect("numpy.nanstd");
+        let fnp_nanmean = module.getattr("nanmean").expect("fnp_python.nanmean");
+        let numpy_nanmean = numpy.getattr("nanmean").expect("numpy.nanmean");
 
         // Build an f32 array with ~10% NaN (deterministic stride), reshape to target.
         let build = |dims: &[usize], total: i64| {
@@ -2124,6 +2126,12 @@ fn bench_nanvar_f32_axis_boundary(c: &mut Criterion) {
             });
             group.bench_function(format!("numpy_nanstd_f32_{label}"), |b| {
                 b.iter(|| black_box(numpy_nanstd.call((input,), Some(&nkw)).expect("numpy nanstd f32")));
+            });
+            group.bench_function(format!("fnp_nanmean_f32_{label}"), |b| {
+                b.iter(|| black_box(fnp_nanmean.call((input,), Some(&fkw)).expect("fnp nanmean f32")));
+            });
+            group.bench_function(format!("numpy_nanmean_f32_{label}"), |b| {
+                b.iter(|| black_box(numpy_nanmean.call((input,), Some(&nkw)).expect("numpy nanmean f32")));
             });
         }
     });

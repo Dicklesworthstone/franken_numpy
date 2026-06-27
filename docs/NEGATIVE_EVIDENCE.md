@@ -9842,3 +9842,34 @@ The vmi126 candidate pin fell back to hz2 because vmi126 was occupied by other r
 therefore the hz2 same-worker control/candidate pair, not a cross-worker comparison. The 200k row is intentionally
 treated as parity/noise; this lever is kept for the 1m large parallel path only. Targeted conformance for sort_complex
 signed-zero, NaN fallback, complex/list/matrix fallback, and scalar error parity is GREEN. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: native FLOAT32 nanmean along a NON-LAST axis (axis 0 + middle) — completes the f32 nan-reduction sub-vein; MIDDLE 31x + AXIS0 3.3x vs NumPy (2026-06-27) — 102nd win
+Final member of the f32 nan-reduction sub-vein (after 100th f32 nanvar/nanstd). float32 nanmean along any axis
+DELEGATED to numpy (the nanmean dispatcher `return fallback()`s non-f64 floats via the
+`native_f64_reduction_preserves_dtype` guard) -> parity with numpy's slow path (~62ms middle / ~24ms axis0 with 10%
+NaN). numpy.nanmean on float32 keeps the f32 accumulator and materializes a NaN->0 copy + isnan mask then runs TWO
+strided non-last reduces (nansum + count). New `try_zerocopy_f32_nanmean_nonlast_axis` = per-outer-block sequential f32
+SINGLE NaN-skip pass (per-column f32 sum + non-NaN count -> sum/count), no temp: middle (outer>=2) block-parallel
+across rayon, axis 0 (outer==1) serial. Hooked into nanmean BEFORE the f64-dtype guard (preserves f32; f64/int/f16/
+flat/last fall through). An all-NaN column yields 0.0/0.0 == numpy's NaN bit pattern (COMPUTE, not defer) + emits the
+single "Mean of empty slice" RuntimeWarning (matches the f64 path).
+
+BIT-EXACTNESS: numpy f32 nanmean computes in f32, masked positions add 0, non-last reduce is sequential -> per-block
+sequential f32 single pass is BYTE-IDENTICAL. Prototyped in numpy first (manual f32 NaN-skip pass == np.nanmean
+byte-exact, incl all-NaN column), then in the built extension: differential probe BYTE-EXACT (f32 bit compare incl
+NaN-pair), 0 fails over ~70 cases: MIDDLE axis of 3-D/4-D + AXIS0 of 2-D/3-D, keepdims both, negative axis, 0%/10% NaN,
+Inf, all-NaN-column -> NaN + verified "Mean of empty slice" warning emitted; regressions (last axis delegates+matches,
+flat delegates, dtype=f64 override -> f64 matches, f64 input unchanged, small-below-gate) all match.
+
+MEASURED:
+  worker criterion: nanmean f32 MIDDLE ax1 (256,128,256): numpy 66.2ms | fnp 3.26ms = 20.3x (robust, parallel)
+  local full threads (10% NaN): MIDDLE numpy 62.0->fnp 2.02ms = 30.7x; AXIS0 numpy 23.8->fnp 7.16ms = 3.3x
+WHY NOT ~0-GAIN (RAYON_NUM_THREADS=1 vs default): MIDDLE serial 8.76ms (already 7x over numpy via temp/strided-reduce
+avoidance) -> parallel 2.02ms adds a further 4.3x. AXIS0 is serial by design (single block, temp-avoidance only): 3.3x
+local, but the worker reading (fnp ~21.7ms vs numpy ~24.9ms = 1.15x) is contention-degraded + noisy (fnp 15-27ms
+range) on the loaded shared box — a serial bandwidth-bound pass is sensitive to a loaded worker; it stays a WIN (never
+a loss) but the MIDDLE-axis parallel win (20-31x) is the robust headline. nan-reductions are pure-native (numpy
+single-threaded C regardless of version/BLAS).
+
+conformance_nan_funcs 37/37 GREEN. PRE-EXISTING (clean origin/main): conformance_diagnostics divide_float_zero_warning
+fails identically on baseline (peer parallel-divide kernel) — not this change. KEEP. AGENT_NAME=BlackThrush.
