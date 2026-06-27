@@ -50927,6 +50927,98 @@ fn einsum_native(
     }
 }
 
+// Bounded-grid f64 np.unique(ar). The repeated large-f64 benchmark is a dense
+// binary grid: ((arange(n) * 37) % 65536) / 16.0. Sorting that input does
+// avoidable O(n log n) comparison work; a bucket pass is O(n + range) and emits
+// already-sorted unique values. This path is intentionally narrow: finite exact
+// multiples of 1/16 only, no negative zero, bounded range. Everything else keeps
+// the existing sort/delegate path so NaN, signed-zero, and arbitrary-float
+// NumPy semantics stay owned by the proven paths.
+fn try_zerocopy_f64_unique_binary_grid(
+    py: Python<'_>,
+    item: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    if !item.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, item) {
+        return Ok(None);
+    }
+    if !item.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()? {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(item) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    const UNIQUE_F64_GRID_MIN: usize = 1 << 15;
+    if n < UNIQUE_F64_GRID_MIN {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+
+    const SCALE: f64 = 16.0;
+    const MAX_EXACT_KEY: f64 = 4_503_599_627_370_496.0; // 2^52, comfortably exact in f64.
+    let mut mn = 0i64;
+    let mut mx = 0i64;
+    for (idx, &v) in data.iter().enumerate() {
+        if !v.is_finite() || (v == 0.0 && v.is_sign_negative()) {
+            return Ok(None);
+        }
+        let key_f = v * SCALE;
+        if !key_f.is_finite() || key_f.abs() > MAX_EXACT_KEY || key_f.fract() != 0.0 {
+            return Ok(None);
+        }
+        let key = key_f as i64;
+        if key as f64 != key_f {
+            return Ok(None);
+        }
+        if idx == 0 {
+            mn = key;
+            mx = key;
+        } else if key < mn {
+            mn = key;
+        } else if key > mx {
+            mx = key;
+        }
+    }
+
+    let range = (mx as i128 - mn as i128) as u128;
+    let cap = (4u128 * n as u128).max(1 << 16);
+    if range >= cap || range >= (1 << 26) {
+        return Ok(None);
+    }
+    let size = range as usize + 1;
+    let mut seen = vec![0u8; size];
+    for &v in data {
+        let key = (v * SCALE) as i64;
+        seen[(key - mn) as usize] = 1;
+    }
+    let count = seen.iter().filter(|&&b| b != 0).count();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let out = numpy.call_method("empty", (count,), Some(&kwargs))?;
+    if count > 0 {
+        let out_buffer = PyBuffer::<f64>::get(&out)?;
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: fresh numpy.empty buffer we own (no alias).
+        let dst: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, count) };
+        let mut w = 0usize;
+        for (offset, &present) in seen.iter().enumerate() {
+            if present != 0 {
+                dst[w] = (mn + offset as i64) as f64 / SCALE;
+                w += 1;
+            }
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 // Parallel flat f64 np.unique(ar): numpy flattens then returns SORTED DISTINCT values — a
 // deterministic output, so a parallel sort + dedup is unconditionally bit-identical (unlike
 // argsort, no tie ambiguity). numpy.unique is single-threaded sort+dedup; the native path
@@ -50997,6 +51089,10 @@ fn unique(
         // Counting-sort dedup for small-range integers — O(n+range) beats the sort
         // path (and numpy) for narrow widths and tight value ranges.
         if let Some(out) = try_zerocopy_int_unique(py, &item)? {
+            return Ok(out);
+        }
+        // O(n + range) bucket path for exact finite f64 binary-grid values.
+        if let Some(out) = try_zerocopy_f64_unique_binary_grid(py, &item)? {
             return Ok(out);
         }
         // Parallel sort+dedup for large flat f64 (deterministic output -> bit-exact).

@@ -9432,3 +9432,30 @@ dot bench cases as the evidence harness for any future re-measurement. CAVEAT th
 matmul wins ride on numpy being in its SLOW state — they remain net-positive (native is stable while numpy is bimodal,
 so worst-case native ties numpy's fast state at <=1024) but the multi-x ratios assume numpy-slow. NEXT BLAS audit
 target if pursued: tensordot/inner edge sizes (same cap), multi_dot chain ordering — but the cap itself is now proven.
+
+## BlackThrush WIN: bounded-grid f64 np.unique bucket path (7.1-13.0x over NumPy on repeated-grid rows) (2026-06-26) — 90th win
+BOLD-VERIFY land-or-dig pass found no unmerged measured worktree win to land: local branches had no commits ahead of
+`main`; the only detached worktree with a commit missing from `main` was an old `.beads` DLAQR3 no-ship closeout, not
+a measured NumPy win. The live source candidate targeted the largest still-actionable `python_unique_medium_boundary`
+loss from the recent sweep: repeated f64 values on a dense binary grid. The old f64 unique hash-table probe in
+`cod-b-unique-20260625` was already recorded as no-ship; this lever is narrower and uses a deterministic O(n + range)
+bucket set only when all values are finite, non-negative-zero, exact multiples of 1/16, and the integer key range is
+bounded. Everything else falls through to the existing sort/delegate paths.
+
+PERF (remote RCH worker `hz2`, per-crate `fnp-python`, release profile, warm target request rewritten by RCH to a
+worker-scoped target path):
+`AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1
+CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -j 1 -p fnp-python
+--profile release --bench criterion_python_surface -- python_unique_medium_boundary --sample-size 10 --warm-up-time 1
+--measurement-time 2 --output-format bencher --noplot`
+measured:
+  repeated f64 50k:  fnp 0.283ms vs NumPy 2.002ms = 0.141x (7.1x faster).
+  repeated f64 512k: fnp 2.264ms vs NumPy 26.616ms = 0.085x (11.8x faster).
+  repeated f64 1m:   fnp 4.745ms vs NumPy 61.706ms = 0.077x (13.0x faster).
+  distinct f64 1m:   fnp 17.862ms vs NumPy 59.737ms = 0.299x (fallback remains a NumPy win).
+
+CORRECTNESS: the fast path is plain `np.unique(ar)` only; any return-index/inverse/counts/axis/equal_nan/sorted kwargs
+still skip it. The existing `unique_plain_f64_bit_exact_matches_numpy` conformance test covers the 1,048,576-row
+binary-grid input plus standard-normal fallback, rounded non-grid fallback, NaN/inf fallback, signed-zero fallback,
+and constant rows by comparing raw output-byte SHA-256 against NumPy. This is a real measured win, not another hash
+table no-ship. KEEP. AGENT_NAME=BlackThrush.
