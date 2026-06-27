@@ -9592,3 +9592,33 @@ keepdims, +-inf-present (finite path), NaN-present (delegates, propagates), and 
 (-0.0 mixed so it is the column max/min -> delegates and matches NumPy exactly). Small (<gate) serial path + int dtype
 unchanged. conformance_max + conformance_reductions GREEN on the worker. KEEP (non-last axis); the flat/last/axis-0
 parallelization is the recorded REJECT. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: native parallel f64 var/std along a MIDDLE axis (28-40x over NumPy) (2026-06-26) — 93rd win
+Generalized the var/std fast paths from {last axis, trailing-axis tuple, axis 0} to a single MIDDLE axis
+(0 < ax < ndim-1, ndim >= 3), which previously fell through to numpy. numpy.var/std along a NON-LAST axis is
+pathologically slow: it materializes the (a - mean) broadcast and (a - mean)^2 whole-array temporaries and then runs a
+STRIDED reduce (~9-10ms for a 4M-element f64 stack). New `try_zerocopy_f64_var_nonlast_axis`: each contiguous OUTER
+block (one `axis_len * inner` slab) is exactly an axis-0 variance problem, so it runs the same SEQUENTIAL two-pass
+(pass 1 -> per-column mean, pass 2 -> sum of squared deviations) as the landed axis-0 path, with NO temporary, and the
+independent contiguous blocks fan across the rayon pool (cache-friendly -- unlike the column-block parallelism rejected
+for axis 0, the block split here reads each block's full cache lines).
+
+BIT-EXACTNESS: numpy reduces a non-last axis SEQUENTIALLY (not pairwise -- pairwise is only the innermost contiguous
+dim; verified for axis 0 and confirmed here at rtol=0 atol=0). In C-order, a fixed output (o, j) accumulates its
+`axis_len` elements in index order == our per-block sequential stream, so the sum order matches numpy exactly. NaN/Inf
+propagate through the straight (a-mean)^2 exactly as numpy does (no NaN->0 leaf), so no non-finite defer is needed.
+axis_len <= ddof defers (numpy warns + NaN).
+
+PERF (criterion, remote RCH worker, per-crate fnp-python, release; python_var_midaxis_boundary, median fnp vs NumPy):
+  var axis=1 (256,256,64):  fnp 0.248ms vs NumPy 9.775ms = 39.5x
+  std axis=1 (256,256,64):  fnp 0.288ms vs NumPy 9.489ms = 32.9x
+  var axis=1 (128,512,64):  fnp 0.286ms vs NumPy 9.080ms = 31.8x
+  std axis=1 (128,512,64):  fnp 0.312ms vs NumPy 8.907ms = 28.5x
+
+CORRECTNESS: differential probe vs NumPy, BIT-EXACT (allclose rtol=0 atol=0 equal_nan), 0 fails over ~60 cases for
+var+std: middle axes of 3-D/4-D shapes (incl negative axis), ddof {0,1}, keepdims {F,T}, NaN/Inf propagation,
+ddof>=axis_len defer (warns+NaN), plus regressions (axis-0 / last-axis / trailing-tuple / flat / 2-D-axis0/axis1 /
+small-below-gate / int input all unchanged and matching). conformance_std + conformance_statistics GREEN on the worker.
+This is the same family as the 91st (norm non-last) -- numpy materializes a temp on EVERY axis for var/std, so unlike
+min/max (92nd, bandwidth-bound -> only non-last wins) the win here is huge (28-40x) because numpy's non-last var is
+temp-bound AND strided. KEEP. AGENT_NAME=BlackThrush.
