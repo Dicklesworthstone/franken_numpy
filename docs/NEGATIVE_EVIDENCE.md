@@ -4,6 +4,41 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-27 - KEEP: f64 `np.frexp` exponent-bit classifier narrows the remaining hz2 gap
+
+`BlackThrush`/`cod-a`. Land-or-dig pass first checked live bench worktrees and
+found no measured off-main win that was both unmerged and cleanly landable on
+current `main`. The fresh lever therefore targeted the remaining
+`python_frexp_boundary/frexp_f64_1m` loss already recorded below: prior `hz2`
+truth row was FNP `499.190 us` vs NumPy `308.622 us` (`1.617x` FNP/NumPy), even
+after the existing parallel two-output path.
+
+FIX: specialize `frexp_one` around the IEEE exponent field. Normal finite f64
+values now take a direct mantissa/exponent bit rewrite without float equality,
+`is_nan`, or `is_infinite` branches. Zero/signed-zero, infinities, NaN quieting,
+and subnormal scaling stay on explicit special paths, so byte-level NumPy parity
+is preserved.
+
+MEASURED:
+
+| Worker / row | FNP median | NumPy median | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| prior `hz2` main, `frexp_f64_1m` | 499.190 us | 308.622 us | 1.617x | target loss |
+| candidate `hz2`, `frexp_f64_1m` | 340.714 us | 286.968 us | 1.187x | keep; 1.46x faster FNP, still not faster than NumPy |
+| candidate `ovh-a`, `frexp_f64_1m` | 246.026 us | 1.598740 ms | 0.154x | routing evidence only; NumPy row is worker-contaminated |
+| old-path control `vmi1227854`, `frexp_f64_1m` | 576.891 us | 1.590971 ms | 0.363x | routing evidence only; not the hz2 target loss |
+
+Command note: the requested `cargo bench --release` shape was attempted and
+Cargo rejected `--release` for this bench invocation; this repo/toolchain uses
+the accepted release-bench equivalent `--profile release`.
+
+Benchmark command: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -j 1 -p fnp-python --profile release --bench criterion_python_surface -- python_frexp_boundary --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher --noplot`.
+
+Conformance proof: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -j 1 -p fnp-python --test conformance_frexp --test conformance_frexp_modf -- --nocapture`
+=> `conformance_frexp` 9/9 and `conformance_frexp_modf` 14/14 passed on
+`vmi1264463`. KEEP as a nonzero gap-narrowing lever; retry only with a deeper
+approach that pushes `hz2` below NumPy. AGENT_NAME=BlackThrush.
+
 ## 2026-06-27 - KEEP: f64 `np.unique` exact-grid bitmap path
 
 `BlackThrush`/`cod-b`. BOLD-VERIFY land-or-dig pass after scanning the live
