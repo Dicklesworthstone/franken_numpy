@@ -26,11 +26,24 @@ large n (measured default-thread: 512 0.70x WIN, 2048 0.75x WIN; the n=1024 1.97
 49->85 GF with no 1024 dip). matvec 2048 WINS 0.56x; small matmul (256) parity;
 rectangular (4096x512x512, 2048x2048x64) parity. So GEMM is NOT a user-facing
 default-thread loss, but the per-thread micro-kernel is 4-7x off peak. RETRY
-PREDICATE: a BLIS-style register-blocked SIMD micro-kernel (packed A/B panels,
-mr x nr FMA tile, std::simd) — a multi-day, CORE-contended, architectural project,
-NOT a 60-min lever. Recorded so this is targeted (or deferred) deliberately, not
-rediscovered as a fresh "matmul is slow" idea. Surface CONVERGED otherwise; the two
-open gaps are both micro-kernel walls (this GEMM + moderate-n inv getrf/getri).
+PREDICATE (CORRECTED after reading the kernel — the earlier "write a BLIS kernel"
+framing was WRONG, fnp ALREADY HAS one): `packed_gemm_serial` (fnp-linalg.rs:6943)
+is ALREADY register-blocked (PACKED_MR=4 x PACKED_NR=8 tile) AND B-panel-packed.
+The inner loop is DELIBERATELY non-FMA (`*slot += av * bv`, separate mul then add)
+because bit-identity is LOCKED by `mat_mul_flat/rect_*_golden_sha256` tests
+(lib.rs:9767, 9973 — "every output element sums k in the SAME ascending order").
+So the 4-7x residual is FMA + hand-tuned-assembly: OpenBLAS uses FMA (mul+add fused,
+no intermediate rounding, ~2x inner-loop throughput) + asm register/prefetch tuning.
+**FMA is BIT-LOCKED by the golden** — adopting it breaks `*_golden_sha256` and
+trades fnp's matmul cross-thread BIT-REPRODUCIBILITY for speed = HUMAN/architectural
+DECISION, NOT a code lever (same wall-class as cov SIMD-across-obs + cholesky-SIMD).
+The only BIT-EXACT sub-lever is A-packing (currently only B is packed; A is read
+stride-k as 4 interleaved streams) — preserves ascending-k order so it passes the
+golden, but the win is modest/uncertain (prefetchers likely handle 4 streams) and
+it's CORE-contended; not obviously worth it. Recorded so this is not rediscovered
+as "just write a better matmul kernel" (it exists). Surface CONVERGED otherwise; the
+two open gaps are micro-kernel walls (this GEMM = FMA-golden-locked; moderate-n inv
+getrf/getri per-flop microkernel).
 
 ## 2026-06-27 - KEEP: sparse identity-RHS inverse for small `inv_nxn`
 
