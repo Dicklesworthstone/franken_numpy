@@ -9384,3 +9384,30 @@ LESSON (3rd confirmation this session): ANY delegation justified by a LOCAL "nat
 SUSPECT — the local box has fast OpenBLAS, the worker/deployment has slow reference BLAS. matmul, batched-matmul, and
 now matrix_power all FLIP from local-loss to worker-win. Audit other BLAS-delegations (multi_dot, tensordot edge
 sizes, the 2-D matmul MAX_DIM=1024 cap) the same way: re-measure on the worker before trusting a local-loss verdict.
+
+## BlackThrush REJECT: sort_complex comparator-only gap reduction still loses on same-worker vmi1227854 (2026-06-26)
+BOLD-VERIFY land-or-dig pass found no unmerged measured worktree win to land: `git branch --no-merged main`
+was empty, and the live `.scratch` / `.worktrees` candidates were either behind `main`, already represented by
+landed commits, or carried old no-ship work. The largest fresh measured gap in the broad `fnp-python` sweep was
+`python_sort_complex_boundary` on worker `vmi1227854` before the now-landed comparator-inline commit:
+  sort complex-real f64 200k: fnp 1.650ms vs NumPy 1.563ms = 1.056x LOSS.
+  sort complex-real f64 1m:   fnp 12.522ms vs NumPy 9.064ms = 1.381x LOSS.
+
+The obvious micro-lever was to remove per-comparison NaN checks after the up-front NaN scan in
+`try_zerocopy_f64_sort_complex_flat`; `main` already contains that source change as `9c639cdc`
+(`fnp-python: inline the complex-real sort comparator on the NaN-free zerocopy path`). Re-bench on the SAME worker
+with the same warm target dir and per-crate release profile:
+`AGENT_NAME=BlackThrush RCH_WORKER=vmi1227854 RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1
+CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -j 1 -p fnp-python
+--profile release --bench criterion_python_surface -- python_sort_complex_boundary --sample-size 10 --warm-up-time 1
+--measurement-time 3 --output-format bencher --noplot`
+measured:
+  sort complex-real f64 200k: fnp 1.540ms vs NumPy 1.477ms = 1.042x LOSS (6.7% faster FNP than baseline, still loss).
+  sort complex-real f64 1m:   fnp 10.702ms vs NumPy 8.850ms = 1.209x LOSS (14.5% faster FNP than baseline, still loss).
+
+Reject as a NEW lever: comparator inlining reduces the gap but does not beat NumPy on the decisive same-worker
+measurement. A cross-worker `hz2` routing run showed a misleading 1m win (`fnp 8.424ms vs NumPy 53.274ms = 0.158x`)
+because NumPy was slow on that worker; do not use that as keep proof. No additional source code was shipped in this
+pass. Next useful lever must be structural (different sort kernel, threshold/delegation policy, or a broader
+real-f64 complex-sort strategy), not another comparator micro-tweak. Code conformance unchanged by this docs-only
+evidence commit. AGENT_NAME=BlackThrush.
