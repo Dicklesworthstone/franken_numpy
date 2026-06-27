@@ -1131,12 +1131,73 @@ pub fn inv_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
         return Ok(vec![f64::NAN; n * n]);
     }
     let (lu, perm, _) = lu_decompose_for_det(a, n)?;
-    // Create identity matrix as RHS
-    let mut eye = vec![0.0; n * n];
-    for i in 0..n {
-        eye[i * n + i] = 1.0;
+    // For small unblocked inverses, solve against the natural identity first:
+    // L^-1 is unit-lower-triangular, so the forward pass can skip x -= l*0 terms.
+    // Larger sizes keep the dense multi-RHS path, where fixed-width vector loops
+    // and the blocked TRSM crossover dominate the triangular sparsity savings.
+    const INV_SPARSE_MAX_N: usize = 48;
+    if n <= INV_SPARSE_MAX_N {
+        Ok(inv_from_lu_unblocked(&lu, &perm, n))
+    } else {
+        let mut eye = vec![0.0; n * n];
+        for i in 0..n {
+            eye[i * n + i] = 1.0;
+        }
+        Ok(lu_forward_back_multi(&lu, &perm, &eye, n, n))
     }
-    Ok(lu_forward_back_multi(&lu, &perm, &eye, n, n))
+}
+
+/// Inverse A^-1 from packed LU + row permutation, exploiting identity-RHS
+/// sparsity. Solving against natural I yields M = U^-1 L^-1, then A^-1 = M P.
+fn inv_from_lu_unblocked(lu: &[f64], perm: &[usize], n: usize) -> Vec<f64> {
+    let mut x = vec![0.0; n * n];
+    for i in 0..n {
+        x[i * n + i] = 1.0;
+    }
+    for i in 1..n {
+        for j in 0..i {
+            let l_ij = lu[i * n + j];
+            let (row_i, row_j) = two_rows_mut(&mut x, i, j, n);
+            for col in 0..=j {
+                row_i[col] -= l_ij * row_j[col];
+            }
+        }
+    }
+    for i in (0..n).rev() {
+        for j in (i + 1)..n {
+            let u_ij = lu[i * n + j];
+            let (row_i, row_j) = two_rows_mut(&mut x, i, j, n);
+            for col in 0..n {
+                row_i[col] -= u_ij * row_j[col];
+            }
+        }
+        let u_ii = lu[i * n + i];
+        let row_i = &mut x[i * n..i * n + n];
+        for col in 0..n {
+            row_i[col] /= u_ii;
+        }
+    }
+    let mut tmp = vec![0.0; n];
+    for i in 0..n {
+        tmp.copy_from_slice(&x[i * n..i * n + n]);
+        let row_i = &mut x[i * n..i * n + n];
+        for k in 0..n {
+            row_i[perm[k]] = tmp[k];
+        }
+    }
+    x
+}
+
+#[inline]
+fn two_rows_mut(x: &mut [f64], a: usize, b: usize, n: usize) -> (&mut [f64], &[f64]) {
+    debug_assert_ne!(a, b);
+    if a < b {
+        let (lo, hi) = x.split_at_mut(b * n);
+        (&mut lo[a * n..a * n + n], &hi[..n])
+    } else {
+        let (lo, hi) = x.split_at_mut(a * n);
+        (&mut hi[..n], &lo[b * n..b * n + n])
+    }
 }
 
 /// Write `A^-1` (n*n) directly into `out`, reusing the caller's lu/perm scratch — no
@@ -11732,6 +11793,37 @@ mod tests {
                 assert!(
                     approx_equal(sum, expected, 1e-10),
                     "A*A^-1 [{i}][{j}] = {sum}, expected {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inv_nxn_sparse_identity_path_matches_dense_lu_solve_bits() {
+        for &n in &[16usize, 32] {
+            let mut a = vec![0.0; n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    a[i * n + j] = if i == j {
+                        (n * 2) as f64
+                    } else {
+                        ((i + j) % 5) as f64 * 0.1
+                    };
+                }
+            }
+            let (lu, perm, _) = super::lu_decompose_for_det(&a, n).expect("lu");
+            let mut eye = vec![0.0; n * n];
+            for i in 0..n {
+                eye[i * n + i] = 1.0;
+            }
+            let dense = super::lu_forward_back_multi(&lu, &perm, &eye, n, n);
+            let sparse = super::inv_nxn(&a, n).expect("sparse identity inv");
+            assert_eq!(sparse.len(), dense.len());
+            for (idx, (got, want)) in sparse.iter().zip(&dense).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "n={n} sparse inverse bit drift at {idx}: got {got:?}, want {want:?}"
                 );
             }
         }

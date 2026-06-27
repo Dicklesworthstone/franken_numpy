@@ -4,6 +4,37 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-27 - KEEP: sparse identity-RHS inverse for small `inv_nxn`
+
+`BlackThrush`. Landed the measured bench-worktree lever from
+`/data/projects/.scratch/franken_numpy-blackthrush-unary-20260627T1745`.
+The live residual was the current ledger's `batch_inv` / `inv_nxn` moderate-n
+kernel wall: dense LU solve against an identity RHS does ~4/3 n^3 work while
+the relevant getri-style path can exploit triangular identity structure.
+
+FIX: for `inv_nxn` with `n <= 48`, solve LU against the natural identity so the
+forward substitution walks only the nonzero lower-triangular prefix, then apply
+the column permutation. Larger sizes keep the dense multi-RHS path. The new
+unit test proves bit identity against the old dense LU solve for n=16 and n=32.
+
+MEASURED against ORIG `main` commit `090bb6bc`, same worker `hz2`, same command
+shape (`-p fnp-linalg`, release profile, `criterion_linalg`, sample size 10):
+
+| Probe | ORIG ns | Candidate ns | Candidate/ORIG | Verdict |
+|---|---:|---:|---:|---|
+| `inv_nxn/size/16` | 4,489 | 2,692 | 0.600x | keep |
+| `inv_nxn/size/32` | 21,189 | 14,144 | 0.667x | keep |
+| `inv_nxn/size/64` | 94,684 | 89,248 | 0.943x | guard row: no regression |
+| `inv_nxn/size/128` | 507,846 | 447,864 | 0.882x | guard row: no regression |
+
+Benchmark command: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-linalg --profile release --bench criterion_linalg -- 'inv_nxn/size/(16|32|64|128)' --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher --noplot`.
+
+Conformance command: `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-linalg --profile release inv_nxn_sparse_identity_path_matches_dense_lu_solve_bits -- --nocapture` passed (`1 passed; 0 failed; 331 filtered out`). AGENT_NAME=BlackThrush.
+
+Command note: `cargo bench --release` was attempted through `rch exec` and
+rejected by Cargo (`unexpected argument '--release'`); `--profile release` is
+the accepted release-equivalent spelling in this workspace.
+
 ## 2026-06-27 - DIAGNOSIS (no-ship): `batch_inv` moderate-n residual is a FLOP-COUNT wall (solve-vs-dense-identity ~4/3 n^3 vs LAPACK getri ~n^3), NOT a vectorization gap — `split_at_mut`/SIMD micro-opts are ceilinged; real lever = getri-style sparse inverse. Plus sweep6 converged.
 
 `BlackThrush`. Follow-up to the prior SURVEY entry's "batch_inv lone residual".
