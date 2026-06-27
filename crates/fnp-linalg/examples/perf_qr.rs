@@ -35,12 +35,15 @@ fn main() {
             let t = Instant::now();
             let (q, r) = qr_nxn(&a, n).unwrap();
             times.push(t.elapsed().as_secs_f64() * 1e3);
-            checksum = q.iter().chain(r.iter()).fold(0xcbf29ce484222325u64, |h, x| {
-                x.to_bits()
-                    .to_le_bytes()
-                    .iter()
-                    .fold(h, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3))
-            });
+            checksum = q
+                .iter()
+                .chain(r.iter())
+                .fold(0xcbf29ce484222325u64, |h, x| {
+                    x.to_bits()
+                        .to_le_bytes()
+                        .iter()
+                        .fold(h, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+                });
         }
         let ms = median(times);
         println!("n={n:5} {ms:9.3} ms  checksum=0x{checksum:016x}");

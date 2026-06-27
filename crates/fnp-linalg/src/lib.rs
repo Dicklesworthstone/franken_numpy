@@ -2993,7 +2993,11 @@ const TRIDIAG_PANEL_NB: usize = 64;
 // trailing-matrix memory traffic of the unblocked per-column left+right sweep
 // (which is DRAM-bound). Same reflectors as the unblocked path → tolerance
 // equivalent (reassociated updates; never bit-exact). Returns (d, e).
-fn tridiag_reduce_blocked(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+fn tridiag_reduce_blocked(
+    a: &[f64],
+    n: usize,
+    accumulate_q: bool,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let mut work = a.to_vec();
     let mut d = vec![0.0f64; n];
     let mut e = vec![0.0f64; n - 1];
@@ -3591,7 +3595,11 @@ fn hessenberg_qr_iter(h: &mut [f64], mut z: Option<&mut [f64]>, n: usize) {
             // Exceptional shift to break a rare cycle: complex shifts of magnitude
             // ~the local subdiagonal scale.
             let sa = h[m * n + (m - 1)].abs()
-                + if m >= lo + 2 { h[(m - 1) * n + (m - 2)].abs() } else { 0.0 };
+                + if m >= lo + 2 {
+                    h[(m - 1) * n + (m - 2)].abs()
+                } else {
+                    0.0
+                };
             (1.5 * sa, sa * sa)
         } else {
             let tr = h[(p - 2) * n + (p - 2)] + h[(p - 1) * n + (p - 1)];
@@ -3607,7 +3615,11 @@ fn hessenberg_qr_iter(h: &mut [f64], mut z: Option<&mut [f64]>, n: usize) {
         let h01 = h[lo * n + (lo + 1)];
         let mut x = h00 * h00 + h01 * h10 - s * h00 + t;
         let mut y = h10 * (h00 + h11 - s);
-        let mut zz = if lo + 2 <= m { h10 * h[(lo + 2) * n + (lo + 1)] } else { 0.0 };
+        let mut zz = if lo + 2 <= m {
+            h10 * h[(lo + 2) * n + (lo + 1)]
+        } else {
+            0.0
+        };
 
         let mut k = lo;
         while k <= p - 2 {
@@ -10103,7 +10115,9 @@ mod tests {
                 d[hi] - e[hi - 1].abs()
             } else {
                 let sign = if delta >= 0.0 { 1.0 } else { -1.0 };
-                d[hi] - e[hi - 1] * e[hi - 1] / (delta + sign * (delta * delta + e[hi - 1] * e[hi - 1]).sqrt())
+                d[hi]
+                    - e[hi - 1] * e[hi - 1]
+                        / (delta + sign * (delta * delta + e[hi - 1] * e[hi - 1]).sqrt())
             };
             let mut x = d[lo] - shift;
             let mut z = e[lo];
@@ -10168,7 +10182,10 @@ mod tests {
                 assert!(maxq < 1e-12, "Q mismatch {maxq:e}");
             }
             let (o, nn) = (med(to), med(tn));
-            println!("n={n:5} stride-n={o:9.2}ms transposed={nn:9.2}ms speedup={:.2}x", o / nn);
+            println!(
+                "n={n:5} stride-n={o:9.2}ms transposed={nn:9.2}ms speedup={:.2}x",
+                o / nn
+            );
         }
     }
 
@@ -10269,7 +10286,11 @@ mod tests {
                 let sd = disc.sqrt();
                 let l1 = (trace + sd) / 2.0;
                 let l2 = (trace - sd) / 2.0;
-                if (l1 - a22).abs() < (l2 - a22).abs() { l1 } else { l2 }
+                if (l1 - a22).abs() < (l2 - a22).abs() {
+                    l1
+                } else {
+                    l2
+                }
             } else if iter % 10 == 0 {
                 a22 + h[(p - 1) * n + (p - 2)].abs()
             } else {
@@ -10282,7 +10303,11 @@ mod tests {
                 let ff = h[k * n + k];
                 let gg = h[(k + 1) * n + k];
                 let r = ff.hypot(gg);
-                let (c, s) = if r > 0.0 { (ff / r, gg / r) } else { (1.0, 0.0) };
+                let (c, s) = if r > 0.0 {
+                    (ff / r, gg / r)
+                } else {
+                    (1.0, 0.0)
+                };
                 cos_vals[k] = c;
                 sin_vals[k] = s;
                 for j in k..n {
@@ -10315,7 +10340,9 @@ mod tests {
             let mut s = seed | 1;
             (0..n * n)
                 .map(|_| {
-                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    s = s
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
                     ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
                 })
                 .collect()
@@ -10338,7 +10365,11 @@ mod tests {
             let mut ed = super::extract_schur_eigenvalues(&hd, n);
             es.sort_by(|a, b| a.partial_cmp(b).unwrap());
             ed.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let maxd = es.iter().zip(&ed).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+            let maxd = es
+                .iter()
+                .zip(&ed)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f64, f64::max);
             assert!(maxd < 1e-6, "eigenvalue mismatch {maxd:e} (n={n})");
             for _ in 0..it {
                 let mut h1 = h0.clone();
@@ -10350,7 +10381,12 @@ mod tests {
                 super::hessenberg_qr_iter(&mut h2, None, n);
                 tn.push(t.elapsed().as_secs_f64() * 1e3);
             }
-            println!("n={n:5} single-shift={:9.2}ms double-shift={:9.2}ms speedup={:.2}x", med(to.clone()), med(tn.clone()), med(to) / med(tn));
+            println!(
+                "n={n:5} single-shift={:9.2}ms double-shift={:9.2}ms speedup={:.2}x",
+                med(to.clone()),
+                med(tn.clone()),
+                med(to) / med(tn)
+            );
         }
     }
 
@@ -10429,7 +10465,9 @@ mod tests {
             let mut s = seed | 1;
             (0..n * n)
                 .map(|_| {
-                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    s = s
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
                     ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
                 })
                 .collect()
@@ -10439,7 +10477,11 @@ mod tests {
             // bit-exactness of the new contiguous left apply vs the stride-n ref.
             let hs = hessenberg_reduce_stridn_ref(&a, n);
             let (hn, _q) = super::hessenberg_reduce(&a, n);
-            let maxd = hs.iter().zip(&hn).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+            let maxd = hs
+                .iter()
+                .zip(&hn)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f64, f64::max);
             assert!(maxd == 0.0, "Hessenberg not bit-exact: {maxd:e} (n={n})");
             let med = |mut xs: Vec<f64>| {
                 xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -10457,7 +10499,12 @@ mod tests {
                 std::hint::black_box(&r);
                 tn.push(t.elapsed().as_secs_f64() * 1e3);
             }
-            println!("n={n:5} stride-n={:9.2}ms contiguous={:9.2}ms speedup={:.2}x", med(to.clone()), med(tn.clone()), med(to) / med(tn));
+            println!(
+                "n={n:5} stride-n={:9.2}ms contiguous={:9.2}ms speedup={:.2}x",
+                med(to.clone()),
+                med(tn.clone()),
+                med(to) / med(tn)
+            );
         }
     }
 
@@ -10468,12 +10515,14 @@ mod tests {
         let threads = rayon::current_num_threads();
         if m >= 128 && k >= 128 && n >= 128 && threads >= 2 {
             let band_rows = m.div_ceil(threads * 4).max(1);
-            c.par_chunks_mut(band_rows * n).enumerate().for_each(|(bi, c_band)| {
-                let row_start = bi * band_rows;
-                let rows = c_band.len() / n;
-                let a_band = &a[row_start * k..row_start * k + rows * k];
-                super::packed_gemm_serial(a_band, b, rows, k, n, c_band);
-            });
+            c.par_chunks_mut(band_rows * n)
+                .enumerate()
+                .for_each(|(bi, c_band)| {
+                    let row_start = bi * band_rows;
+                    let rows = c_band.len() / n;
+                    let a_band = &a[row_start * k..row_start * k + rows * k];
+                    super::packed_gemm_serial(a_band, b, rows, k, n, c_band);
+                });
         } else {
             super::packed_gemm_serial(a, b, m, k, n, &mut c);
         }
@@ -10488,7 +10537,9 @@ mod tests {
             let mut s = seed | 1;
             (0..rows * cols)
                 .map(|_| {
-                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    s = s
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
                     ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
                 })
                 .collect()
@@ -10499,8 +10550,15 @@ mod tests {
             // bit-exactness of aligned vs misaligned (same serial kernel).
             let ca = super::packed_gemm(&a, &b, n, n, n);
             let cm = packed_gemm_misaligned(&a, &b, n, n, n);
-            let maxd = ca.iter().zip(&cm).map(|(x, y)| (x - y).abs()).fold(0.0f64, f64::max);
-            assert!(maxd == 0.0, "GEMM not bit-exact across band split: {maxd:e}");
+            let maxd = ca
+                .iter()
+                .zip(&cm)
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f64, f64::max);
+            assert!(
+                maxd == 0.0,
+                "GEMM not bit-exact across band split: {maxd:e}"
+            );
             let med = |mut xs: Vec<f64>| {
                 xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 xs[xs.len() / 2]
@@ -10517,7 +10575,12 @@ mod tests {
                 std::hint::black_box(&r);
                 tn.push(t.elapsed().as_secs_f64() * 1e3);
             }
-            println!("n={n:5} misaligned={:9.2}ms aligned={:9.2}ms speedup={:.2}x", med(to.clone()), med(tn.clone()), med(to) / med(tn));
+            println!(
+                "n={n:5} misaligned={:9.2}ms aligned={:9.2}ms speedup={:.2}x",
+                med(to.clone()),
+                med(tn.clone()),
+                med(to) / med(tn)
+            );
         }
     }
 
@@ -10536,9 +10599,18 @@ mod tests {
                 .then(x.1.partial_cmp(&y.1).unwrap())
         });
         // Expected sorted by (re, im): (0,-1), (0,1), (2,0).
-        assert!((pairs[0].0 - 0.0).abs() < 1e-9 && (pairs[0].1 + 1.0).abs() < 1e-9, "{pairs:?}");
-        assert!((pairs[1].0 - 0.0).abs() < 1e-9 && (pairs[1].1 - 1.0).abs() < 1e-9, "{pairs:?}");
-        assert!((pairs[2].0 - 2.0).abs() < 1e-9 && (pairs[2].1 - 0.0).abs() < 1e-9, "{pairs:?}");
+        assert!(
+            (pairs[0].0 - 0.0).abs() < 1e-9 && (pairs[0].1 + 1.0).abs() < 1e-9,
+            "{pairs:?}"
+        );
+        assert!(
+            (pairs[1].0 - 0.0).abs() < 1e-9 && (pairs[1].1 - 1.0).abs() < 1e-9,
+            "{pairs:?}"
+        );
+        assert!(
+            (pairs[2].0 - 2.0).abs() < 1e-9 && (pairs[2].1 - 0.0).abs() < 1e-9,
+            "{pairs:?}"
+        );
     }
 
     // Inline unblocked two-sided tridiagonalization WITH Q accumulation, for the
@@ -10563,7 +10635,11 @@ mod tests {
             if cn < f64::EPSILON * work[j * n + j].abs().max(1.0) {
                 continue;
             }
-            let sign = if work[(j + 1) * n + j] >= 0.0 { 1.0 } else { -1.0 };
+            let sign = if work[(j + 1) * n + j] >= 0.0 {
+                1.0
+            } else {
+                -1.0
+            };
             for vi in &mut v[..=j] {
                 *vi = 0.0;
             }
@@ -10644,7 +10720,12 @@ mod tests {
                 std::hint::black_box(&r2);
                 tn.push(t.elapsed().as_secs_f64() * 1e3);
             }
-            println!("n={n:5} unblocked-Q={:9.2}ms blocked-Q={:9.2}ms speedup={:.2}x", med(to.clone()), med(tn.clone()), med(to) / med(tn));
+            println!(
+                "n={n:5} unblocked-Q={:9.2}ms blocked-Q={:9.2}ms speedup={:.2}x",
+                med(to.clone()),
+                med(tn.clone()),
+                med(to) / med(tn)
+            );
         }
     }
 
@@ -10679,7 +10760,8 @@ mod tests {
                         r += q[i * n + k] * tqt[k * n + j];
                         o += q[k * n + i] * q[k * n + j];
                     }
-                    max_recon = max_recon.max((r - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
+                    max_recon =
+                        max_recon.max((r - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
                     let t = if i == j { 1.0 } else { 0.0 };
                     max_orth = max_orth.max((o - t).abs());
                 }
@@ -10745,7 +10827,10 @@ mod tests {
             }
             let (u, b) = (med(tu2), med(tb));
             let _ = med(tu);
-            println!("n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x", u / b);
+            println!(
+                "n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x",
+                u / b
+            );
         }
     }
 
@@ -10767,7 +10852,11 @@ mod tests {
             if cn < f64::EPSILON * work[j * n + j].abs().max(1.0) {
                 continue;
             }
-            let sign = if work[(j + 1) * n + j] >= 0.0 { 1.0 } else { -1.0 };
+            let sign = if work[(j + 1) * n + j] >= 0.0 {
+                1.0
+            } else {
+                -1.0
+            };
             for vi in &mut v[..=j] {
                 *vi = 0.0;
             }
@@ -10835,7 +10924,8 @@ mod tests {
                     for k in 0..n {
                         s += qb[i * n + k] * rb[k * n + j];
                     }
-                    max_recon = max_recon.max((s - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
+                    max_recon =
+                        max_recon.max((s - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
                     // Q^T·Q
                     let mut o = 0.0;
                     for k in 0..n {
@@ -10843,8 +10933,10 @@ mod tests {
                     }
                     let target = if i == j { 1.0 } else { 0.0 };
                     max_orth = max_orth.max((o - target).abs());
-                    max_q = max_q.max((qb[i * n + j] - qu[i * n + j]).abs() / (1.0 + qu[i * n + j].abs()));
-                    max_r = max_r.max((rb[i * n + j] - ru[i * n + j]).abs() / (1.0 + ru[i * n + j].abs()));
+                    max_q = max_q
+                        .max((qb[i * n + j] - qu[i * n + j]).abs() / (1.0 + qu[i * n + j].abs()));
+                    max_r = max_r
+                        .max((rb[i * n + j] - ru[i * n + j]).abs() / (1.0 + ru[i * n + j].abs()));
                 }
             }
             assert!(max_recon < 1e-9, "Q·R=A err {max_recon:e} (n={n})");
@@ -10882,7 +10974,10 @@ mod tests {
                 tb.push(t.elapsed().as_secs_f64() * 1e3);
             }
             let (u, b) = (med(tu), med(tb));
-            println!("n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x", u / b);
+            println!(
+                "n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x",
+                u / b
+            );
         }
     }
 
@@ -10956,7 +11051,10 @@ mod tests {
             for idx in 0..n * m {
                 max_diff = max_diff.max((xb[idx] - xu[idx]).abs() / (1.0 + xu[idx].abs()));
             }
-            assert!(max_diff < 1e-9, "blocked vs unblocked TRSM err {max_diff:e} (n={n})");
+            assert!(
+                max_diff < 1e-9,
+                "blocked vs unblocked TRSM err {max_diff:e} (n={n})"
+            );
             // A·X must reconstruct B (identity).
             let mut max_recon = 0.0f64;
             for i in 0..n {
@@ -10969,7 +11067,10 @@ mod tests {
                     max_recon = max_recon.max((s - target).abs());
                 }
             }
-            assert!(max_recon < 1e-7, "A·X=I reconstruction err {max_recon:e} (n={n})");
+            assert!(
+                max_recon < 1e-7,
+                "A·X=I reconstruction err {max_recon:e} (n={n})"
+            );
         }
     }
 
@@ -11041,7 +11142,10 @@ mod tests {
                 tb.push(t.elapsed().as_secs_f64() * 1e3);
             }
             let (u, b) = (med(tu), med(tb));
-            println!("n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x", u / b);
+            println!(
+                "n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x",
+                u / b
+            );
         }
     }
 
@@ -11061,13 +11165,20 @@ mod tests {
                     for k in 0..=j {
                         s += lb[i * n + k] * lb[j * n + k];
                     }
-                    max_recon = max_recon.max((s - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
-                    max_diff =
-                        max_diff.max((lb[i * n + j] - lr[i * n + j]).abs() / (1.0 + lr[i * n + j].abs()));
+                    max_recon =
+                        max_recon.max((s - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
+                    max_diff = max_diff
+                        .max((lb[i * n + j] - lr[i * n + j]).abs() / (1.0 + lr[i * n + j].abs()));
                 }
             }
-            assert!(max_recon < 1e-9, "blocked L·L^T=A err {max_recon:e} (n={n})");
-            assert!(max_diff < 1e-9, "blocked vs unblocked err {max_diff:e} (n={n})");
+            assert!(
+                max_recon < 1e-9,
+                "blocked L·L^T=A err {max_recon:e} (n={n})"
+            );
+            assert!(
+                max_diff < 1e-9,
+                "blocked vs unblocked err {max_diff:e} (n={n})"
+            );
         }
     }
 
@@ -11095,7 +11206,10 @@ mod tests {
                 tb.push(t.elapsed().as_secs_f64() * 1e3);
             }
             let (u, b) = (med(tu), med(tb));
-            println!("n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x", u / b);
+            println!(
+                "n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x",
+                u / b
+            );
         }
     }
 
@@ -11160,7 +11274,10 @@ mod tests {
             let thr = (n as f64) * f64::EPSILON * max_abs;
             let (lu, perm, _sign) = super::lu_decompose_blocked(&a, n, thr).expect("blocked lu");
             let (_lu_ref, perm_ref) = lu_unblocked_ref(&a, n);
-            assert_eq!(perm, perm_ref, "pivot sequence must match unblocked (n={n})");
+            assert_eq!(
+                perm, perm_ref,
+                "pivot sequence must match unblocked (n={n})"
+            );
             let mut max_err = 0.0f64;
             for i in 0..n {
                 for j in 0..n {
@@ -11180,7 +11297,10 @@ mod tests {
                     max_err = max_err.max((s - pa).abs() / (1.0 + pa.abs()));
                 }
             }
-            assert!(max_err < 1e-9, "blocked P·A=L·U reconstruction err {max_err:e} (n={n})");
+            assert!(
+                max_err < 1e-9,
+                "blocked P·A=L·U reconstruction err {max_err:e} (n={n})"
+            );
         }
     }
 
@@ -11208,7 +11328,10 @@ mod tests {
                 tb.push(t.elapsed().as_secs_f64() * 1e3);
             }
             let (u, b) = (med(tu), med(tb));
-            println!("n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x", u / b);
+            println!(
+                "n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x",
+                u / b
+            );
         }
     }
 

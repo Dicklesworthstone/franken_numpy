@@ -1314,10 +1314,7 @@ impl ArrayStorage {
                 .iter_mut()
                 .zip(vals)
                 .for_each(|(o, &v)| *o = (v as f32, 0.0)),
-            Self::Complex128(out) => out
-                .iter_mut()
-                .zip(vals)
-                .for_each(|(o, &v)| *o = (v, 0.0)),
+            Self::Complex128(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = (v, 0.0)),
             Self::String(out) => out
                 .iter_mut()
                 .zip(vals)

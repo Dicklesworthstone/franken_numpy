@@ -8856,7 +8856,9 @@ fn try_zerocopy_any_roll_axis(
     }
     let out_typed = out_u8.call_method1("view", (&a_dtype,))?;
     let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = out_typed.call_method1("reshape", (&output_shape,))?.unbind();
+    let output = out_typed
+        .call_method1("reshape", (&output_shape,))?
+        .unbind();
     Ok(Some(output))
 }
 
@@ -9134,7 +9136,12 @@ fn try_zerocopy_int_compact(
     if !arr.is_exact_instance(&ndarray_type) || !cond.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    if cond.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
+    if cond
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?
+        != "b"
+    {
         return Ok(None);
     }
     let a_dtype = arr.getattr("dtype")?;
@@ -10098,14 +10105,60 @@ fn try_zerocopy_int_cumsum_axis(
     let add_i64 = |x: i64, y: i64| x.wrapping_add(y);
     let add_u64 = |x: u64, y: u64| x.wrapping_add(y);
     let result = match (kind.as_str(), itemsize) {
-        ("i", 1) => cumsum_axis_typed::<i8, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, add_i64)?,
-        ("i", 2) => cumsum_axis_typed::<i16, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, add_i64)?,
-        ("i", 4) => cumsum_axis_typed::<i32, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, add_i64)?,
-        ("i", 8) => cumsum_axis_typed::<i64, i64, _, _>(py, &numpy, a, axis, "int64", |v| v, add_i64)?,
-        ("u", 1) => cumsum_axis_typed::<u8, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, add_u64)?,
-        ("u", 2) => cumsum_axis_typed::<u16, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, add_u64)?,
-        ("u", 4) => cumsum_axis_typed::<u32, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, add_u64)?,
-        ("u", 8) => cumsum_axis_typed::<u64, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v, add_u64)?,
+        ("i", 1) => {
+            cumsum_axis_typed::<i8, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, add_i64)?
+        }
+        ("i", 2) => cumsum_axis_typed::<i16, i64, _, _>(
+            py,
+            &numpy,
+            a,
+            axis,
+            "int64",
+            |v| v as i64,
+            add_i64,
+        )?,
+        ("i", 4) => cumsum_axis_typed::<i32, i64, _, _>(
+            py,
+            &numpy,
+            a,
+            axis,
+            "int64",
+            |v| v as i64,
+            add_i64,
+        )?,
+        ("i", 8) => {
+            cumsum_axis_typed::<i64, i64, _, _>(py, &numpy, a, axis, "int64", |v| v, add_i64)?
+        }
+        ("u", 1) => cumsum_axis_typed::<u8, u64, _, _>(
+            py,
+            &numpy,
+            a,
+            axis,
+            "uint64",
+            |v| v as u64,
+            add_u64,
+        )?,
+        ("u", 2) => cumsum_axis_typed::<u16, u64, _, _>(
+            py,
+            &numpy,
+            a,
+            axis,
+            "uint64",
+            |v| v as u64,
+            add_u64,
+        )?,
+        ("u", 4) => cumsum_axis_typed::<u32, u64, _, _>(
+            py,
+            &numpy,
+            a,
+            axis,
+            "uint64",
+            |v| v as u64,
+            add_u64,
+        )?,
+        ("u", 8) => {
+            cumsum_axis_typed::<u64, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v, add_u64)?
+        }
         _ => return Ok(None),
     };
     let Some((flat, shape)) = result else {
@@ -10254,14 +10307,60 @@ fn try_zerocopy_int_cumprod_axis(
     let mul_i64 = |x: i64, y: i64| x.wrapping_mul(y);
     let mul_u64 = |x: u64, y: u64| x.wrapping_mul(y);
     let result = match (kind.as_str(), itemsize) {
-        ("i", 1) => cumsum_axis_typed::<i8, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, mul_i64)?,
-        ("i", 2) => cumsum_axis_typed::<i16, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, mul_i64)?,
-        ("i", 4) => cumsum_axis_typed::<i32, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, mul_i64)?,
-        ("i", 8) => cumsum_axis_typed::<i64, i64, _, _>(py, &numpy, a, axis, "int64", |v| v, mul_i64)?,
-        ("u", 1) => cumsum_axis_typed::<u8, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, mul_u64)?,
-        ("u", 2) => cumsum_axis_typed::<u16, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, mul_u64)?,
-        ("u", 4) => cumsum_axis_typed::<u32, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, mul_u64)?,
-        ("u", 8) => cumsum_axis_typed::<u64, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v, mul_u64)?,
+        ("i", 1) => {
+            cumsum_axis_typed::<i8, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, mul_i64)?
+        }
+        ("i", 2) => cumsum_axis_typed::<i16, i64, _, _>(
+            py,
+            &numpy,
+            a,
+            axis,
+            "int64",
+            |v| v as i64,
+            mul_i64,
+        )?,
+        ("i", 4) => cumsum_axis_typed::<i32, i64, _, _>(
+            py,
+            &numpy,
+            a,
+            axis,
+            "int64",
+            |v| v as i64,
+            mul_i64,
+        )?,
+        ("i", 8) => {
+            cumsum_axis_typed::<i64, i64, _, _>(py, &numpy, a, axis, "int64", |v| v, mul_i64)?
+        }
+        ("u", 1) => cumsum_axis_typed::<u8, u64, _, _>(
+            py,
+            &numpy,
+            a,
+            axis,
+            "uint64",
+            |v| v as u64,
+            mul_u64,
+        )?,
+        ("u", 2) => cumsum_axis_typed::<u16, u64, _, _>(
+            py,
+            &numpy,
+            a,
+            axis,
+            "uint64",
+            |v| v as u64,
+            mul_u64,
+        )?,
+        ("u", 4) => cumsum_axis_typed::<u32, u64, _, _>(
+            py,
+            &numpy,
+            a,
+            axis,
+            "uint64",
+            |v| v as u64,
+            mul_u64,
+        )?,
+        ("u", 8) => {
+            cumsum_axis_typed::<u64, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v, mul_u64)?
+        }
         _ => return Ok(None),
     };
     let Some((flat, shape)) = result else {
@@ -10488,7 +10587,9 @@ fn try_zerocopy_any_tile(
     out_shape[last] = out_shape[last].saturating_mul(n_elems);
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     Ok(Some(
-        out_typed.call_method1("reshape", (&output_shape,))?.unbind(),
+        out_typed
+            .call_method1("reshape", (&output_shape,))?
+            .unbind(),
     ))
 }
 
@@ -10602,7 +10703,9 @@ fn try_zerocopy_any_tile_multidim(
     let out_typed = out_u8.call_method1("view", (&dtype,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     Ok(Some(
-        out_typed.call_method1("reshape", (&output_shape,))?.unbind(),
+        out_typed
+            .call_method1("reshape", (&output_shape,))?
+            .unbind(),
     ))
 }
 
@@ -11044,10 +11147,7 @@ fn ediff1d_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T, T) -> T>(
 // Otherwise these extracted to an f64 Vec (~57x slower, lossy for wide ints).
 // Returns None when to_begin/to_end are present (handled by the general path), a
 // non-integer dtype, or a non-ndarray input.
-fn try_zerocopy_int_ediff1d(
-    py: Python<'_>,
-    ary: &Bound<'_, PyAny>,
-) -> PyResult<Option<Py<PyAny>>> {
+fn try_zerocopy_int_ediff1d(py: Python<'_>, ary: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
     if !ary.is_exact_instance(&ndarray_type) {
@@ -11078,10 +11178,7 @@ fn try_zerocopy_int_ediff1d(
 // Vec (~311x slower). Reuses the generic ediff1d_typed core with plain IEEE-754
 // single-precision subtraction x - y (bit-identical; nan/inf/-0.0 propagate exactly).
 // Returns None for a non-float32 dtype or a non-ndarray input.
-fn try_zerocopy_f32_ediff1d(
-    py: Python<'_>,
-    ary: &Bound<'_, PyAny>,
-) -> PyResult<Option<Py<PyAny>>> {
+fn try_zerocopy_f32_ediff1d(py: Python<'_>, ary: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
     if !ary.is_exact_instance(&ndarray_type) {
@@ -12425,7 +12522,11 @@ fn digitize_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd>(
                     let half = len / 2;
                     let mid = left + half;
                     let probe = bs[mid].get();
-                    let cond = if right_probe { probe <= key } else { probe < key };
+                    let cond = if right_probe {
+                        probe <= key
+                    } else {
+                        probe < key
+                    };
                     if cond {
                         left = mid + 1;
                         len -= half + 1;
@@ -12458,8 +12559,7 @@ fn try_zerocopy_digitize(
     if !x.is_exact_instance(&ndarray_type) || !bins.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    if x.getattr("ndim")?.extract::<usize>()? < 1
-        || bins.getattr("ndim")?.extract::<usize>()? != 1
+    if x.getattr("ndim")?.extract::<usize>()? < 1 || bins.getattr("ndim")?.extract::<usize>()? != 1
     {
         return Ok(None);
     }
@@ -12816,7 +12916,9 @@ fn flatnonzero_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
     let count = input.iter().filter(|cell| pred(cell.get())).count();
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "int64")?;
-    let out = numpy.call_method("empty", (count,), Some(&kwargs))?.unbind();
+    let out = numpy
+        .call_method("empty", (count,), Some(&kwargs))?
+        .unbind();
     if count > 0 {
         let Ok(out_buffer) = PyBuffer::<i64>::get(out.bind(py)) else {
             return Ok(None);
@@ -14065,9 +14167,14 @@ fn clip(
 
     // Zero-copy float32 clip with scalar bounds: clamp in f32, gated on a no-op
     // promotion so result dtype matches numpy; skips the cold f64 round-trip.
-    if let Some(out) =
-        try_zerocopy_f32_clip(py, a.bind(py), a_min.bind(py), a_max.bind(py), min_val, max_val)?
-    {
+    if let Some(out) = try_zerocopy_f32_clip(
+        py,
+        a.bind(py),
+        a_min.bind(py),
+        a_max.bind(py),
+        min_val,
+        max_val,
+    )? {
         return Ok(out);
     }
 
@@ -14207,7 +14314,9 @@ fn try_zerocopy_append_flat(
             slot.set(src.get());
         }
     }
-    Ok(Some(out_bytes.call_method1("view", (&arr_dtype,))?.unbind()))
+    Ok(Some(
+        out_bytes.call_method1("view", (&arr_dtype,))?.unbind(),
+    ))
 }
 
 #[pyfunction]
@@ -14520,7 +14629,9 @@ fn concatenate_mover<'py, T: pyo3::buffer::Element + Copy>(
     out_shape[ax] = out_axis;
     let restored = flat.call_method1("view", (out_dtype,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    Ok(Some(restored.call_method1("reshape", (&output_shape,))?.unbind()))
+    Ok(Some(
+        restored.call_method1("reshape", (&output_shape,))?.unbind(),
+    ))
 }
 
 // Typed-by-itemsize concatenate for the dtypes the f64 helper leaves to the cold
@@ -14794,7 +14905,10 @@ fn try_zerocopy_trim_zeros(
     let trim_f = mode.contains('f');
     let trim_b = mode.contains('b');
     let (lo, hi) = match bounds {
-        Some((first, last)) => (if trim_f { first } else { 0 }, if trim_b { last } else { n }),
+        Some((first, last)) => (
+            if trim_f { first } else { 0 },
+            if trim_b { last } else { n },
+        ),
         None => (0usize, 0usize), // all-zero / empty → empty result
     };
     let slice = pyo3::types::PySlice::new(py, lo as isize, hi as isize, 1);
@@ -16936,9 +17050,7 @@ fn histogram_typed<T: pyo3::buffer::Element + Copy>(
         let kwargs = PyDict::new(py);
         kwargs.set_item("dtype", "int64")?;
         let counts = numpy.call_method("zeros", (nbins,), Some(&kwargs))?;
-        return Ok(Some(
-            PyTuple::new(py, [counts, edges])?.into_any().unbind(),
-        ));
+        return Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()));
     }
     let Some(s) = buf.as_slice(py) else {
         let histogram_fn = numpy.getattr("histogram")?;
@@ -17019,9 +17131,7 @@ fn histogram_typed<T: pyo3::buffer::Element + Copy>(
             slot.set(slot.get() + 1);
         }
     }
-    Ok(Some(
-        PyTuple::new(py, [counts, edges])?.into_any().unbind(),
-    ))
+    Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()))
 }
 
 fn histogram_f32(
@@ -17051,9 +17161,7 @@ fn histogram_f32(
         let kwargs = PyDict::new(py);
         kwargs.set_item("dtype", "int64")?;
         let counts = numpy.call_method("zeros", (nbins,), Some(&kwargs))?;
-        return Ok(Some(
-            PyTuple::new(py, [counts, edges])?.into_any().unbind(),
-        ));
+        return Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()));
     }
     let Some(s) = buf.as_slice(py) else {
         let histogram_fn = numpy.getattr("histogram")?;
@@ -17138,9 +17246,7 @@ fn histogram_f32(
         let slot = &cs[idx];
         slot.set(slot.get() + 1);
     }
-    Ok(Some(
-        PyTuple::new(py, [counts, edges])?.into_any().unbind(),
-    ))
+    Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()))
 }
 
 // O(n) uniform-bin np.histogram for exact 1-D f64/f32/integer ndarrays with
@@ -17165,42 +17271,18 @@ fn try_zerocopy_histogram(
     match (kind.as_str(), itemsize) {
         ("f", 4) => histogram_f32(py, &numpy, a, nbins),
         ("f", 8) => histogram_typed::<f64>(py, &numpy, a, nbins, |x| x, true, |_| true),
-        ("i", 1) => {
-            histogram_typed::<i8>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
+        ("i", 1) => histogram_typed::<i8>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
+        ("i", 2) => histogram_typed::<i16>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
+        ("i", 4) => histogram_typed::<i32>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
+        ("i", 8) => {
+            histogram_typed::<i64>(py, &numpy, a, nbins, |x| x as f64, false, i64_is_f64_exact)
         }
-        ("i", 2) => {
-            histogram_typed::<i16>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
+        ("u", 1) => histogram_typed::<u8>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
+        ("u", 2) => histogram_typed::<u16>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
+        ("u", 4) => histogram_typed::<u32>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
+        ("u", 8) => {
+            histogram_typed::<u64>(py, &numpy, a, nbins, |x| x as f64, false, u64_is_f64_exact)
         }
-        ("i", 4) => {
-            histogram_typed::<i32>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
-        }
-        ("i", 8) => histogram_typed::<i64>(
-            py,
-            &numpy,
-            a,
-            nbins,
-            |x| x as f64,
-            false,
-            i64_is_f64_exact,
-        ),
-        ("u", 1) => {
-            histogram_typed::<u8>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
-        }
-        ("u", 2) => {
-            histogram_typed::<u16>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
-        }
-        ("u", 4) => {
-            histogram_typed::<u32>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
-        }
-        ("u", 8) => histogram_typed::<u64>(
-            py,
-            &numpy,
-            a,
-            nbins,
-            |x| x as f64,
-            false,
-            u64_is_f64_exact,
-        ),
         _ => Ok(None),
     }
 }
@@ -18201,7 +18283,10 @@ fn try_zerocopy_int_put(
     // Normalize indices to a contiguous int64 array; only integer index dtypes
     // are accepted (float indices raise in numpy — defer).
     let ind_arr = numpy.call_method1("asarray", (ind,))?;
-    let ind_kind = ind_arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    let ind_kind = ind_arr
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?;
     if ind_kind != "i" && ind_kind != "u" {
         return Ok(None);
     }
@@ -18477,7 +18562,11 @@ fn try_zerocopy_indices(
                 np_dt,
             )
         }
-        _ => ("i".to_string(), 8, numpy.getattr("dtype")?.call1(("int64",))?),
+        _ => (
+            "i".to_string(),
+            8,
+            numpy.getattr("dtype")?.call1(("int64",))?,
+        ),
     };
     if kind != "i" && kind != "u" {
         return Ok(None);
@@ -20946,7 +21035,8 @@ fn isin(
     }
     // Fast hashed-set membership for matched integer dtypes — runs BEFORE the cold
     // extract→UFuncArray path (~25x slower) so common id-membership skips it.
-    if let Some(out) = try_zerocopy_int_isin(py, element.bind(py), test_elements.bind(py), invert)? {
+    if let Some(out) = try_zerocopy_int_isin(py, element.bind(py), test_elements.bind(py), invert)?
+    {
         return Ok(out);
     }
     let ar1 = match extract_precise_numeric_array(py, element.bind(py), "isin(element)") {
@@ -23172,7 +23262,9 @@ where
         }
     }
     let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    Ok(Some(flat.call_method1("reshape", (&output_shape,))?.unbind()))
+    Ok(Some(
+        flat.call_method1("reshape", (&output_shape,))?.unbind(),
+    ))
 }
 
 // Dispatch the narrow-width integer shift across i8/i16/i32 and u8/u16/u32/u64.
@@ -23195,22 +23287,52 @@ fn try_zerocopy_narrow_shift(
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
     match (kind.as_str(), itemsize, is_left) {
         ("i", 1, true) => shift_typed_nw::<i8, _>(py, &numpy, a, b, "int8", "i", 1, |a, b| {
-            if (0..8).contains(&b) { a.wrapping_shl(b as u32) } else { 0 }
+            if (0..8).contains(&b) {
+                a.wrapping_shl(b as u32)
+            } else {
+                0
+            }
         }),
         ("i", 1, false) => shift_typed_nw::<i8, _>(py, &numpy, a, b, "int8", "i", 1, |a, b| {
-            if (0..8).contains(&b) { a.wrapping_shr(b as u32) } else if a < 0 { -1 } else { 0 }
+            if (0..8).contains(&b) {
+                a.wrapping_shr(b as u32)
+            } else if a < 0 {
+                -1
+            } else {
+                0
+            }
         }),
         ("i", 2, true) => shift_typed_nw::<i16, _>(py, &numpy, a, b, "int16", "i", 2, |a, b| {
-            if (0..16).contains(&b) { a.wrapping_shl(b as u32) } else { 0 }
+            if (0..16).contains(&b) {
+                a.wrapping_shl(b as u32)
+            } else {
+                0
+            }
         }),
         ("i", 2, false) => shift_typed_nw::<i16, _>(py, &numpy, a, b, "int16", "i", 2, |a, b| {
-            if (0..16).contains(&b) { a.wrapping_shr(b as u32) } else if a < 0 { -1 } else { 0 }
+            if (0..16).contains(&b) {
+                a.wrapping_shr(b as u32)
+            } else if a < 0 {
+                -1
+            } else {
+                0
+            }
         }),
         ("i", 4, true) => shift_typed_nw::<i32, _>(py, &numpy, a, b, "int32", "i", 4, |a, b| {
-            if (0..32).contains(&b) { a.wrapping_shl(b as u32) } else { 0 }
+            if (0..32).contains(&b) {
+                a.wrapping_shl(b as u32)
+            } else {
+                0
+            }
         }),
         ("i", 4, false) => shift_typed_nw::<i32, _>(py, &numpy, a, b, "int32", "i", 4, |a, b| {
-            if (0..32).contains(&b) { a.wrapping_shr(b as u32) } else if a < 0 { -1 } else { 0 }
+            if (0..32).contains(&b) {
+                a.wrapping_shr(b as u32)
+            } else if a < 0 {
+                -1
+            } else {
+                0
+            }
         }),
         ("u", 1, true) => shift_typed_nw::<u8, _>(py, &numpy, a, b, "uint8", "u", 1, |a, b| {
             if b < 8 { a.wrapping_shl(b as u32) } else { 0 }
@@ -32840,7 +32962,9 @@ fn try_zerocopy_take_along_axis(
     };
     let restored = flat.call_method1("view", (numpy.getattr(orig_name.as_str())?,))?;
     let output_shape = PyTuple::new(py, s_idx.iter().copied())?;
-    Ok(Some(restored.call_method1("reshape", (&output_shape,))?.unbind()))
+    Ok(Some(
+        restored.call_method1("reshape", (&output_shape,))?.unbind(),
+    ))
 }
 
 #[pyfunction]
@@ -32887,9 +33011,7 @@ fn take_along_axis(
     // indices); covers int/float/bool via a uintN bit-view. Skips the cold extract +
     // rebuild. Bit-identical; broadcast, axis=None, OOB indices, and other layouts
     // fall through.
-    if let Some(out) =
-        try_zerocopy_take_along_axis(py, arr.bind(py), indices.bind(py), axis)?
-    {
+    if let Some(out) = try_zerocopy_take_along_axis(py, arr.bind(py), indices.bind(py), axis)? {
         return Ok(out);
     }
 
@@ -34829,10 +34951,7 @@ fn unique_counting_typed<'py, T: pyo3::buffer::Element + Copy>(
 // (O(n+range) vs the sort path's O(n log n)). Gated to a C-contiguous integer
 // ndarray; dispatched by (kind, itemsize). Wide ranges / non-contiguous / empty
 // inputs return None so the caller keeps the existing sort path.
-fn try_zerocopy_int_unique(
-    py: Python<'_>,
-    item: &Bound<'_, PyAny>,
-) -> PyResult<Option<Py<PyAny>>> {
+fn try_zerocopy_int_unique(py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
     if !item.is_exact_instance(&ndarray_type) {
@@ -34934,7 +35053,11 @@ fn unique_counting_full_typed<'py, T: pyo3::buffer::Element + Copy>(
     }
     let size = range as usize + 1;
     let mut seen = vec![false; size];
-    let mut first_idx = if want_index { vec![0i64; size] } else { Vec::new() };
+    let mut first_idx = if want_index {
+        vec![0i64; size]
+    } else {
+        Vec::new()
+    };
     let mut counts = if want_counts || want_inverse {
         vec![0i64; size]
     } else {
@@ -34956,7 +35079,11 @@ fn unique_counting_full_typed<'py, T: pyo3::buffer::Element + Copy>(
     let mut uvals: Vec<i128> = Vec::new();
     let mut idxv: Vec<i64> = Vec::new();
     let mut cntv: Vec<i64> = Vec::new();
-    let mut rank = if want_inverse { vec![0i64; size] } else { Vec::new() };
+    let mut rank = if want_inverse {
+        vec![0i64; size]
+    } else {
+        Vec::new()
+    };
     let mut w: i64 = 0;
     for (i, &b) in seen.iter().enumerate() {
         if b {
@@ -35964,12 +36091,12 @@ fn try_zerocopy_int_sign(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Optio
         ("i", 1) => {
             sign_typed::<i8, _>(py, &numpy, a, "int8", |v| i8::from(v > 0) - i8::from(v < 0))?
         }
-        ("i", 2) => {
-            sign_typed::<i16, _>(py, &numpy, a, "int16", |v| i16::from(v > 0) - i16::from(v < 0))?
-        }
-        ("i", 4) => {
-            sign_typed::<i32, _>(py, &numpy, a, "int32", |v| i32::from(v > 0) - i32::from(v < 0))?
-        }
+        ("i", 2) => sign_typed::<i16, _>(py, &numpy, a, "int16", |v| {
+            i16::from(v > 0) - i16::from(v < 0)
+        })?,
+        ("i", 4) => sign_typed::<i32, _>(py, &numpy, a, "int32", |v| {
+            i32::from(v > 0) - i32::from(v < 0)
+        })?,
         ("i", 8) => sign_typed::<i64, _>(py, &numpy, a, "int64", |v| {
             i64::from(v > 0) - i64::from(v < 0)
         })?,
@@ -36308,13 +36435,27 @@ fn try_zerocopy_int_ptp_axis(
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
     let result = match (kind.as_str(), itemsize) {
         ("i", 1) => ptp_axis_typed::<i8, _>(py, &numpy, a, axis, "int8", |x, y| x.wrapping_sub(y))?,
-        ("i", 2) => ptp_axis_typed::<i16, _>(py, &numpy, a, axis, "int16", |x, y| x.wrapping_sub(y))?,
-        ("i", 4) => ptp_axis_typed::<i32, _>(py, &numpy, a, axis, "int32", |x, y| x.wrapping_sub(y))?,
-        ("i", 8) => ptp_axis_typed::<i64, _>(py, &numpy, a, axis, "int64", |x, y| x.wrapping_sub(y))?,
-        ("u", 1) => ptp_axis_typed::<u8, _>(py, &numpy, a, axis, "uint8", |x, y| x.wrapping_sub(y))?,
-        ("u", 2) => ptp_axis_typed::<u16, _>(py, &numpy, a, axis, "uint16", |x, y| x.wrapping_sub(y))?,
-        ("u", 4) => ptp_axis_typed::<u32, _>(py, &numpy, a, axis, "uint32", |x, y| x.wrapping_sub(y))?,
-        ("u", 8) => ptp_axis_typed::<u64, _>(py, &numpy, a, axis, "uint64", |x, y| x.wrapping_sub(y))?,
+        ("i", 2) => {
+            ptp_axis_typed::<i16, _>(py, &numpy, a, axis, "int16", |x, y| x.wrapping_sub(y))?
+        }
+        ("i", 4) => {
+            ptp_axis_typed::<i32, _>(py, &numpy, a, axis, "int32", |x, y| x.wrapping_sub(y))?
+        }
+        ("i", 8) => {
+            ptp_axis_typed::<i64, _>(py, &numpy, a, axis, "int64", |x, y| x.wrapping_sub(y))?
+        }
+        ("u", 1) => {
+            ptp_axis_typed::<u8, _>(py, &numpy, a, axis, "uint8", |x, y| x.wrapping_sub(y))?
+        }
+        ("u", 2) => {
+            ptp_axis_typed::<u16, _>(py, &numpy, a, axis, "uint16", |x, y| x.wrapping_sub(y))?
+        }
+        ("u", 4) => {
+            ptp_axis_typed::<u32, _>(py, &numpy, a, axis, "uint32", |x, y| x.wrapping_sub(y))?
+        }
+        ("u", 8) => {
+            ptp_axis_typed::<u64, _>(py, &numpy, a, axis, "uint64", |x, y| x.wrapping_sub(y))?
+        }
         _ => return Ok(None),
     };
     let Some((flat, out_shape)) = result else {
