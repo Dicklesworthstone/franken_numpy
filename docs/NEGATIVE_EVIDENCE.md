@@ -10085,3 +10085,33 @@ algorithm with the same +/-1-ULP edge corrections (already conformance-verified 
 indexing changes only the bounds check. Differential probe: 147 checks (dtypes {f64,f32,i64,i32,i16,u8} x sizes
 straddling the 2M gate x bins {10,50,256,1000} + range=/density= kwargs) 0 fails. conformance_histogram_bincount
 33/33 + conformance_histogram2d_dd 19/19 GREEN. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: np.sort f64 last-axis SHORT-LANE mis-tuned gate — 1.8-3.6x LOSS -> 0.99-1.01x parity for short lanes; wide-lane wins (0.68-0.72x) preserved (2026-06-27) — 106th win
+LEVER: mis-tuned parallel gate (same family as the 104th bincount + 105th histogram). `try_zerocopy_f64_sort_lastaxis`
+(the zero-copy path np.sort takes for a contiguous f64 last axis) gated its parallel per-lane fan-out only on
+`cols < 2` — so an array of MANY VERY SHORT rows (e.g. 65536 x 64) sent tens of thousands of tiny lanes through
+the full zero-copy machinery (whole-array `par_iter().any(is_nan)` pre-scan + numpy.empty + copy_from_slice +
+`dst.par_chunks_mut(cols).for_each(sort_unstable_by)`). For tiny lanes that per-lane closure + rayon fan-out across
+that many short chunks costs far more than numpy's tight C per-row small-sort -> a measured 1.8-3.6x LOSS at cols=64.
+
+FIX (one gate constant, fnp-python only): add `SORT_LANE_PARALLEL_MIN = 256`; lanes with `cols < 256` now return
+None and DELEGATE to numpy (parity), while `cols >= 256` keep the existing parallel path (unchanged body). The
+crossover was measured directly: cols=64 this path 3.6x slower, cols=128 still ~1.10x LOSS (lane too short to
+amortize the closure), cols=256 the FIRST clean win. So 256 is the measured crossover, not a guess. The wide-lane
+parallel win (the original reason this path exists) is fully preserved.
+
+MEASURED (4M f64 last-axis, INTERLEAVED fnp/numpy in one process, min-of-many, 64-thread loaded box):
+  cols= 32  1.8x LOSS -> 0.99x parity   | cols= 64  3.6x LOSS -> 1.00x parity   | cols=128  1.10x LOSS -> 1.01x parity
+  cols=256  -> 0.72x WIN                | cols=512  -> 0.68x WIN
+WHY NOT ~0-GAIN: every short-lane shape swings from a 1.8-3.6x LOSS to parity (loss-elimination, the mis-tuned-gate
+lever), and no previously-winning shape regresses (cols>=256 still 0.68-0.72x). Tiny-lane delegation is load-IMMUNE
+parity (numpy's own kernel), so it cannot lose on the contended worker the way the old eager-parallel path did.
+
+BIT-EXACT: the parallel body is byte-for-byte unchanged; only the gate threshold moved, so wide lanes produce the
+identical result and short lanes now route to numpy.sort (the oracle). Differential probe (sort_correct.py): 152
+checks (shapes straddling the 256 gate x f64/f32/i64 x axis=-1/0/middle x with-NaN) 0 fails. conformance_sorting +
+conformance_sort_search sort cases + conformance_lexsort GREEN (16/16 sort + 33 others). PRE-EXISTING (NOT this
+change, proven on clean origin/main b354ad1a): conformance_sort_search::searchsorted_python_container_surfaces_match_numpy
+fails on the "invalid side error" case — numpy 2.4.3 reworded its ValueError message ("search side must be 'left' or
+'right' (got 'middle')") vs fnp-ufunc's hardcoded ("searchsorted: side must be 'left' or 'right', got 'middle'"); a
+pure error-string drift in fnp-ufunc's searchsorted, untouched by this fnp-python sort-gate change. AGENT_NAME=BlackThrush.

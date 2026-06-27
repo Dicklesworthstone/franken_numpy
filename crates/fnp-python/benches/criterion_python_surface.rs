@@ -4756,6 +4756,7 @@ fn bench_sort_axis_boundary(c: &mut Criterion) {
         let setup = "import numpy as np\n\
 rng = np.random.default_rng(0)\n\
 m = rng.standard_normal((2048, 2048))\n\
+mshort = rng.standard_normal((65536, 64))\n\
 m3 = rng.standard_normal((4096, 32, 32))\n\
 m3b = rng.standard_normal((256, 256, 64))\n";
         let ns = PyDict::new(py);
@@ -4766,6 +4767,7 @@ m3b = rng.standard_normal((256, 256, 64))\n";
         )
         .expect("sort axis setup");
         let m = ns.get_item("m").expect("m");
+        let mshort = ns.get_item("mshort").expect("mshort");
         let m3 = ns.get_item("m3").expect("m3");
         let m3b = ns.get_item("m3b").expect("m3b");
         for op in ["sort", "argsort"] {
@@ -4776,6 +4778,15 @@ m3b = rng.standard_normal((256, 256, 64))\n";
             });
             group.bench_function(format!("numpy_{op}_lastaxis_2048x2048"), |bch| {
                 bch.iter(|| black_box(numpy_fn.call1((&m,)).expect("numpy call")));
+            });
+            // SHORT-LANE last axis (65536 x 64, cols=64 < SORT_LANE_PARALLEL_MIN=256): tens of
+            // thousands of tiny lanes. The eager-parallel path lost 1.8-3.6x here; gated to
+            // DELEGATE to numpy -> parity. Guards the 106th-win regression fix.
+            group.bench_function(format!("fnp_{op}_lastaxis_short_65536x64"), |bch| {
+                bch.iter(|| black_box(fnp_fn.call1((&mshort,)).expect("fnp call")));
+            });
+            group.bench_function(format!("numpy_{op}_lastaxis_short_65536x64"), |bch| {
+                bch.iter(|| black_box(numpy_fn.call1((&mshort,)).expect("numpy call")));
             });
             // axis=0 (lane sort): numpy's strided per-lane sort is ~2x its last-axis sort.
             let kw0 = PyDict::new(py);
