@@ -10247,3 +10247,35 @@ fnp 442us vs numpy 451us = 0.98x parity (was an 11.7x loss).
 WHY NOT ~0-GAIN: the broadcast losses were 10-15x and the transpose 7.5x; every one becomes win-or-parity, and the 3-D
 broadcast forms genuinely BEAT numpy.einsum (0.58-0.75x). The no-contraction einsum family is now COMPLETE
 (exact/broadcast/transpose/N-op all win-or-parity). AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: np.einsum all-shared NON-PREFIX contraction ("ijk,ijk->k") delegated — 13-18x LOSS -> 0.97-1.07x parity vs NumPy (2026-06-27) — 110th win
+LEVER: delegate-the-slow-pattern (the einsum dispatcher's established idiom — ~10 detectors already delegate non-GEMM
+contractions the native kernel loses). A focused einsum CONTRACTION sweep found 3 real losses; this is the biggest,
+cleanest cluster. When both operands carry the IDENTICAL >=3-label string and the output keeps a subset (some axes
+summed), the native kernel's speed depends sharply on WHICH axes are kept: PREFIX-kept ("ijk,ijk->i" 0.91x,
+"ijk,ijk->ij" 0.98x) and all 2-label forms ("ij,ij->i" 0.88x, "ij,ij->j" 0.95x) WIN, but NON-PREFIX-kept
+("ijk,ijk->k" 16.95x, "->j" 13.2x, "->jk" 13.9x, "->ik" 14.4x, "->ji" 14.5x, "->kj" 17.6x) are a strided reduction
+over leading/scattered axes that the generic native kernel runs 13-18x slower than numpy.
+
+ROOT: the existing einsum_spec_is_* delegate-detector family had no case for this all-shared partial-reduction form, so
+the non-prefix variants fell to the slow generic kernel (numpy fuses the strided reduce; the native pure-Rust path
+gathers + reduces axis-by-axis). multiply+sum and dot-chain rewrites beat the native kernel but still LOSE to
+numpy.einsum (e.g. ijk,ijk->k: native 66ms, mul+sum 24ms, numpy.einsum 5ms) — so delegating to numpy.einsum is the
+right fix, not a rewrite.
+
+FIX (fnp-python only): new detector einsum_spec_is_allshared_nonprefix_contraction — 2 operands with the IDENTICAL
+>=3-label string (no repeats), output a proper subset of those labels with NO repeats, and the output is NOT a
+contiguous prefix of the label string. Such forms delegate to numpy.einsum; PREFIX-kept and 2-label forms are excluded
+(>=3 labels + the prefix test), so every native WINNER is preserved. Empty output (full contraction "ij,ij->", which
+wins natively) is a prefix of every string, so it is excluded too.
+
+MEASURED (INTERLEAVED 20th-pctile, local): ijk,ijk->k 16.95x -> 1.00x; ->j 13.2x -> 0.98x; ->jk 13.9x -> 0.99x;
+->ik 14.4x -> 1.01x; ->kj 17.6x -> 1.07x; PRESERVED winners ijk,ijk->i 0.95x / ->ij 0.91x / ij,ij->i 0.88x. Worker
+criterion python_einsum_boundary/einsum_allshared_ijk_k_f64: fnp 1.244ms vs numpy 1.281ms = 0.97x parity (was 16.95x).
+WHY NOT ~0-GAIN: six contraction shapes swing from 13-18x LOSS to parity; no native winner regresses (prefix-kept and
+2-label forms are excluded by construction).
+CORRECTNESS: delegation IS numpy.einsum (the oracle) -> bit-identical. 13-case probe (every non-prefix variant +
+prefix-kept winners + 2-label + 4-label "ijkl,ijkl->l" + the no-contraction "ijk,ijk->ijk" + full "ijk,ijk->") allclose
+0 fails; conformance_einsum 28/28 GREEN. The OTHER 2 contraction losses the sweep found (3-op "i,ij,j->" 15.75x, and
+transposed full-contraction "ij,ji->" 3.25x) are left as leads (different patterns; would need their own detectors).
+AGENT_NAME=BlackThrush.

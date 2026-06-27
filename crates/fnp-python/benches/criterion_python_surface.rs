@@ -3594,6 +3594,36 @@ fn bench_einsum_boundary(c: &mut Criterion) {
                 );
             });
         });
+
+        // All-shared NON-PREFIX contraction ("ijk,ijk->k" = reduce a Hadamard product over the
+        // leading axes): the native generic kernel ran this 13-18x slower than numpy (strided
+        // reduction); fnp now delegates the non-prefix forms to numpy.einsum. Guards that the
+        // delegation holds at parity (and the prefix-kept "ijk,ijk->i" stays native/winning).
+        let nc = numpy
+            .call_method1("arange", (256_usize * 128 * 128,))
+            .expect("nc raw")
+            .call_method1("astype", ("float64",))
+            .expect("nc f64")
+            .call_method1("reshape", ((256_usize, 128, 128),))
+            .expect("nc shape");
+        group.bench_function("fnp_einsum_allshared_ijk_k_f64", |bench| {
+            bench.iter(|| {
+                black_box(
+                    fnp_einsum
+                        .call1(("ijk,ijk->k", &nc, &nc))
+                        .expect("fnp einsum allshared call"),
+                );
+            });
+        });
+        group.bench_function("numpy_einsum_allshared_ijk_k_f64", |bench| {
+            bench.iter(|| {
+                black_box(
+                    numpy_einsum
+                        .call1(("ijk,ijk->k", &nc, &nc))
+                        .expect("numpy einsum allshared call"),
+                );
+            });
+        });
     });
 
     group.finish();
