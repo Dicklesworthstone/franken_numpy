@@ -4,6 +4,77 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-27 - LEAD (golden-safe, unmeasured this pass): `eigvalsh_nxn/512` dlatrd panel matvec runs serial because `TRIDIAG_MATVEC_PAR_MIN=1024` excludes n=512
+
+`BlackThrush`. Land-or-dig pass. No measured bench-worktree win remained off
+`main`: the `matmul` GEMM-cap split already landed and HEAD `b4fea2bd` ==
+`origin/main` (0/0). A stale `.probe/fnp_python.so` (2026-06-22) re-surfaced
+already-landed wins only (bincount/histogram/argwhere/kron/tile/gradient/diff
+all fixed on `main` after that build), so local discovery was void. Dig target =
+the largest durable measured gap, dense symmetric `eigvalsh_nxn/512`. NOTE: the
+Python `eigvalsh`/`eigh`/`cond`/`det`/`inv`/`solve` wrappers already delegate
+real 2-D dense to NumPy LAPACK, so this gap is the native fnp-linalg *kernel*
+bench, not a user-facing Python-surface loss — it only becomes user-facing if a
+future native eigvalsh kernel beats LAPACK and the wrapper is re-routed.
+
+MEASURED (current `main`; `crates/fnp-linalg/src/lib.rs` untouched since the row
+below, so still live on `b4fea2bd`):
+
+| Probe | Worker | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---|---:|---:|---:|---|
+| `eigvalsh_nxn/512` | `hz2` | 46,891,795 | 32,457,835 | 1.445x | durable loss |
+| `sbr_stage1_band_nxn/512` vs NumPy full eigvalsh | `hz2` | 30,753,074 | 32,457,835 | 0.948x | incomplete primitive |
+
+NEW finding (distinct from the SBR-stage-2 path every prior eigvalsh entry
+chased): the blocked tridiagonalization's dominant dlatrd panel matvec
+`u = A_ps·v` (`lib.rs:4321`) is gated parallel only when
+`n-(j+1) >= TRIDIAG_MATVEC_PAR_MIN`, and `TRIDIAG_MATVEC_PAR_MIN = 1024`
+(`lib.rs:4170`). At n=512 the trailing size never reaches 1024, so EVERY
+column's matvec runs the serial `tridiag_symmetric_matvec_serial` — the O(n³)
+reduction's hot loop competes single-threaded against single-threaded LAPACK
+dsytrd at exactly the benchmark size. The gate was introduced by `50c2ec89`
+(2026-06-12, "parallelize dlatrd ... eigvalsh 2.3x"), which validated only the
+n>1024 regime; n=512 was left serial.
+
+Why this lever is golden-safe (unlike SBR stage-2 / a triangular half-traffic
+dsymv): the parallel matvec path (`lib.rs:4321-4338`) is documented and is
+arithmetically bit-identical to the serial scan (same per-row ascending-l
+contiguous dot; only the outer row loop becomes parallel). The eigvalsh
+bit-exact golden SHA `eigvalsh_values_only_reduction_matches_full_reduce_bits`
+(n=64, `lib.rs:12716`) stays on the serial matvec for any gate ≳ 128, so
+lowering `TRIDIAG_MATVEC_PAR_MIN` to engage 512 changes NO arithmetic and
+preserves the golden. By contrast a band→tridiag SBR stage-2, or a
+symmetry-exploiting (lower-triangle, ~½ memory traffic) dsymv, both reassociate
+the reduction sum and would require regenerating that golden SHA — a human
+decision (precedent: the `scaled_hypot` re-pin documented at `lib.rs:12709`).
+
+Why NOT shipped this pass: a parallel-gate change must be A/B-measured on a
+clean full-thread worker before landing (mis-tuned gates give false verdicts on
+serial or loaded measurements). This pass had no admissible measurement path —
+`rch` remote refused (`active_project_exclusion=2, insufficient_slots`; remote
+required, local fallback declined) and the local box was at load 45–70 / 64
+cores with no warm target, so any local parallel timing is load-poisoned. No
+source was changed; this is a recorded lead, not a candidate.
+
+Retry predicate (one cheap clean-worker A/B): bench `eigvalsh_nxn/512` with
+`TRIDIAG_MATVEC_PAR_MIN` ∈ {1024 baseline, 512, 256} (a one-line const edit).
+Adopt the lowest value that beats the serial 512 baseline without regressing the
+64–256 sizes (re-measure the small-n crossover; the n=512 matvec working set is
+~2 MB → plausibly bandwidth-bound and parallel-favorable, but the per-column
+rayon dispatch over ~500 shrinking columns may fail to amortize — so measure,
+don't assume). Confirm `eigvalsh_values_only_reduction_matches_full_reduce_bits`
+and the eigvalsh residual/known-value tests stay green (they must; arithmetic is
+unchanged). Ceiling caveat: the matvec is only one term of the reduction, so even
+a clean parallel win here may not alone flip 1.445x → <1.0x; SBR stage-2
+(band→tridiag bulge chase, golden re-pin required) remains the structural lever
+for the remainder, and `sbr_stage1_band_nxn/512` already shows the dense→band
+half can run at 0.948x of NumPy's *whole* eigvalsh.
+
+Benchmark command (rejected this pass — recorded for the retry):
+`AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo bench -j 1 -p fnp-linalg --profile release --bench criterion_linalg -- 'eigvalsh_nxn/size/512|sbr_stage1_band_nxn/size/512' --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher --noplot`
+(Command note: `cargo bench --release` is rejected by Cargo in this repo; the
+accepted release-bench spelling is `--profile release` as above.) AGENT_NAME=BlackThrush.
+
 ## 2026-06-27 - KEEP: split `np.matmul` native f64 GEMM cap from `np.dot`
 
 `BlackThrush`/`cod-a`. A measured bench-worktree candidate was present but not
