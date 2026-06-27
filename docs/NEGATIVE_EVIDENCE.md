@@ -9559,3 +9559,36 @@ delegate and match NumPy (ord None/2/1), and the existing last-axis L2/L1/+-inf 
 `norm_axis_vector_l2_matches_numpy` conformance test (rtol=0,atol=0) still passes (its middle-axis L2 case delegates
 exactly as before). NOT a no-ship: real measured parallelism win, bit-exact, neither BLAS- nor numpy-version-sensitive.
 KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: native parallel f64 min/max on a NON-LAST axis (2.1-2.9x over NumPy) + REJECT of the flat/last-axis/axis-0 cases (2026-06-26) — 92nd win
+`try_zerocopy_f64_minmax` (np.min/np.max/np.amin/np.amax) DELEGATED every f64 array >= 4096 elements to NumPy because
+its native path was a SCALAR SERIAL fold that loses to NumPy's SIMD at every size (the f64 min/max reduction is
+NaN-propagating + signed-zero-ordered, which won't autovectorize in safe Rust — the int path already parallelizes since
+it is a clean total order). But NumPy runs min/max SINGLE-THREADED; a native PARALLEL fold can still beat it where the
+margin is large. Added `try_zerocopy_f64_minmax_parallel`: a contiguous block-parallel reduction over the raw &[f64].
+
+BIT-EXACTNESS: NumPy's reduce (`acc > v ? acc : v`) is order-dependent ONLY for (a) NaN (propagated; needs scan order)
+and (b) -0.0 (`>` treats +-0.0 equal, so the last-equal signed zero wins = scan-order-dependent). We FUSE a NaN/-0.0
+detector (`x.is_nan() || x.to_bits()==0x8000_0000_0000_0000`) into the fold and return None -> delegate to NumPy the
+moment either appears; with neither present every value has a strict total order, so plain >/< max/min is
+associative+commutative and bit-identical under any parallel split.
+
+SCOPE = NON-LAST axis only (gate `inner >= 2 && outer >= 2 && len >= 1<<16`). This is the robust win: NumPy reduces a
+non-last axis with a STRIDED, temp-materializing pass (~1.7-2.4ms@4M), so our contiguous block fold keeps a ~2-3x
+margin. The contiguous shapes (flat / 1-D / last axis / axis-0 of a 2-D array) are a REJECT: NumPy's single-thread SIMD
+is already near memory bandwidth there, the margin is small, and 64 parallel threads suffer MORE from a loaded worker
+than NumPy's 1 thread -> contention-fragile (the SAME flat-min case measured 0.77x loaded and ~1.0x clean; last-axis 2D
+measured 2.33x clean but 0.92x loaded). Those stay delegated to NumPy.
+
+PERF (criterion, remote RCH worker, per-crate fnp-python, release; python_max_min_reduction_boundary, median fnp vs
+NumPy; 3 runs, ranges show worker-contention spread):
+  max axis=1 (256,256,64) non-last:  fnp 0.73ms vs NumPy 1.73-2.37ms = 2.38-2.92x WIN (robust across runs)
+  min axis=1 (256,256,64) non-last:  fnp 0.81ms vs NumPy 1.73ms      = 2.14x WIN
+  -- delegated (no regression, ~parity): max/min flat 4M ~0.9x-1.0x; max/min axis0 2048x2048 ~1.0x; max axis1 2D ~1.0x.
+
+CORRECTNESS: differential probe vs NumPy, BIT-EXACT byte-level (uint64 view incl signed-zero bit + NaN-pair), 0 fails
+over ~70 cases for max/min/amax/amin: flat + every axis on (2048,2048)/(4096,2048)/(1<<20,)/(256,256,64)/(513,1025),
+keepdims, +-inf-present (finite path), NaN-present (delegates, propagates), and the adversarial SIGNED-ZERO cases
+(-0.0 mixed so it is the column max/min -> delegates and matches NumPy exactly). Small (<gate) serial path + int dtype
+unchanged. conformance_max + conformance_reductions GREEN on the worker. KEEP (non-last axis); the flat/last/axis-0
+parallelization is the recorded REJECT. AGENT_NAME=BlackThrush.

@@ -313,6 +313,85 @@ fn bench_max_min_reduction_boundary(c: &mut Criterion) {
                 black_box(result);
             });
         });
+
+        // axis=0 (non-last, strided for numpy): the parallel native fold's biggest win.
+        group.bench_function("fnp_max_axis0_f64_2048x2048", |bench| {
+            bench.iter(|| {
+                let result = fnp_max
+                    .call1((&input, 0_i64))
+                    .expect("fnp max axis=0 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_max_axis0_f64_2048x2048", |bench| {
+            bench.iter(|| {
+                let result = numpy_max
+                    .call1((&input, 0_i64))
+                    .expect("numpy max axis=0 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_min_axis0_f64_2048x2048", |bench| {
+            bench.iter(|| {
+                let result = fnp_min
+                    .call1((&input, 0_i64))
+                    .expect("fnp min axis=0 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_min_axis0_f64_2048x2048", |bench| {
+            bench.iter(|| {
+                let result = numpy_min
+                    .call1((&input, 0_i64))
+                    .expect("numpy min axis=0 benchmark call");
+                black_box(result);
+            });
+        });
+
+        // 3-D middle axis (axis=1): block-parallel non-last path.
+        let input3d = numpy
+            .call_method1("linspace", (-1.0_f64, 1.0_f64, 256_usize * 256_usize * 64_usize))
+            .expect("4M f64 3d source")
+            .call_method1("reshape", ((256_usize, 256_usize, 64_usize),))
+            .expect("256x256x64 reshape");
+        group.bench_function("fnp_max_axis1_f64_256x256x64", |bench| {
+            bench.iter(|| {
+                let result = fnp_max
+                    .call1((&input3d, 1_i64))
+                    .expect("fnp max 3d axis=1 call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_max_axis1_f64_256x256x64", |bench| {
+            bench.iter(|| {
+                let result = numpy_max
+                    .call1((&input3d, 1_i64))
+                    .expect("numpy max 3d axis=1 call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_min_axis1_f64_256x256x64", |bench| {
+            bench.iter(|| {
+                let result = fnp_min
+                    .call1((&input3d, 1_i64))
+                    .expect("fnp min 3d axis=1 call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_min_axis1_f64_256x256x64", |bench| {
+            bench.iter(|| {
+                let result = numpy_min
+                    .call1((&input3d, 1_i64))
+                    .expect("numpy min 3d axis=1 call");
+                black_box(result);
+            });
+        });
     });
 
     group.finish();
