@@ -4043,6 +4043,10 @@ a512 = rng.standard_normal((512, 512))\n\
 b512 = rng.standard_normal((512, 512))\n\
 a1024 = rng.standard_normal((1024, 1024))\n\
 b1024 = rng.standard_normal((1024, 1024))\n\
+a1536 = rng.standard_normal((1536, 1536))\n\
+b1536 = rng.standard_normal((1536, 1536))\n\
+a2048 = rng.standard_normal((2048, 2048))\n\
+b2048 = rng.standard_normal((2048, 2048))\n\
 a3d = rng.standard_normal((64, 256, 256))\n\
 b3d = rng.standard_normal((64, 256, 256))\n\
 a3db = rng.standard_normal((256, 128, 128))\n\
@@ -4059,7 +4063,7 @@ b3db = rng.standard_normal((256, 128, 128))\n";
         for op in ["matmul", "dot"] {
             let fnp_fn = module.getattr(op).expect("fnp op");
             let numpy_fn = numpy.getattr(op).expect("numpy op");
-            for sz in ["512", "1024"] {
+            for sz in ["512", "1024", "1536", "2048"] {
                 let a = ns.get_item(format!("a{sz}")).expect("a");
                 let b = ns.get_item(format!("b{sz}")).expect("b");
                 group.bench_function(format!("fnp_{op}_{sz}x{sz}"), |bch| {

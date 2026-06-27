@@ -9411,3 +9411,24 @@ because NumPy was slow on that worker; do not use that as keep proof. No additio
 pass. Next useful lever must be structural (different sort kernel, threshold/delegation policy, or a broader
 real-f64 complex-sort strategy), not another comparator micro-tweak. Code conformance unchanged by this docs-only
 evidence commit. AGENT_NAME=BlackThrush.
+
+## BlackThrush REJECT: raising 2-D matmul native cap PY_NATIVE_GEMM_MAX_DIM 1024 -> 2048 (native LOSES at 2048) (2026-06-26)
+Followed up the previous entry's "audit the 1024 cap" suggestion: hypothesized that since the worker's numpy BLAS is
+slow, the native packed GEMM would keep winning above the 1024 cap (where matmul/dot currently delegate to numpy).
+Built with PY_NATIVE_GEMM_MAX_DIM=2048 and benched large square 2-D matmul/dot on the worker. DISPROVEN:
+PERF (criterion, remote rch worker hz2, 8s measurement):
+  matmul 1536x1536: fnp 66.67ms vs NumPy 85.98ms = 0.78x (1.29x faster — MARGINAL, numpy +/-11.5ms, not trustworthy)
+  matmul 2048x2048: fnp 150.26ms vs NumPy 109.90ms = 1.37x LOSS
+  dot 1536x1536:    fnp 69.24ms vs NumPy 61.15ms = 1.13x LOSS
+  dot 2048x2048:    fnp 137.12ms vs NumPy 95.74ms = 1.43x LOSS
+ROOT: unlike at <=1024, the native packed GEMM does NOT out-scale numpy's BLAS at 1536-2048 — AND on this run the
+worker's numpy BLAS was in its FAST multi-threaded state (2048 ~78 GFLOPS, 110ms; earlier runs had numpy 1024 at a
+SLOW 196ms). The worker numpy BLAS is bimodal/high-variance (slow some runs, fast others); the native kernel's
+single-threaded-per-band packing wins big when numpy is slow (the landed 1024 matmul/batched/matrix_power wins) but
+loses when numpy threads up AND the matrix is large enough (2048) that BLAS cache-blocking dominates. So the 1024 cap
+is the right boundary: below it native reliably wins (numpy slow OR overhead-bound small), above it numpy's BLAS
+out-scales when it threads up. REVERTED to PY_NATIVE_GEMM_MAX_DIM=1024 (lib.rs unchanged); KEPT the 1536/2048 matmul/
+dot bench cases as the evidence harness for any future re-measurement. CAVEAT this surfaces: the landed 1024-and-below
+matmul wins ride on numpy being in its SLOW state — they remain net-positive (native is stable while numpy is bimodal,
+so worst-case native ties numpy's fast state at <=1024) but the multi-x ratios assume numpy-slow. NEXT BLAS audit
+target if pursued: tensordot/inner edge sizes (same cap), multi_dot chain ordering — but the cap itself is now proven.
