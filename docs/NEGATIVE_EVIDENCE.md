@@ -4,6 +4,37 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-27 - KEEP: split `np.matmul` native f64 GEMM cap from `np.dot`
+
+`BlackThrush`/`cod-a`. A measured bench-worktree candidate was present but not
+on `main`: the shared native f64 GEMM cap had already proven too broad at 2048,
+while the isolated `matmul` 1536 route still carried a real win. This landing is
+the narrow form only: `np.dot` keeps the 1024 gate, and `np.matmul` alone may
+use the packed native GEMM path through dimension 1536.
+
+FIX: route the 2-D f64 native GEMM metadata/profile gate by operation instead
+of one shared max-dimension constant. No 2048 widening, no `dot` widening, and
+no batched/tensordot/multi_dot policy change are included.
+
+MEASURED:
+
+| Probe | Worker | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---|---:|---:|---:|---|
+| `python_matmul_boundary/fnp_matmul_1536x1536` vs `numpy_matmul_1536x1536` | `hz2` | 50,101,077 | 669,159,006 | 0.0749x | keep |
+| `python_matmul_boundary/fnp_dot_1536x1536` vs `numpy_dot_1536x1536` | `hz2` | 715,566,863 | 684,037,553 | 1.046x | guard: dot remains delegated above 1024 |
+
+The `matmul_1536` row is the shipped win. The `dot_1536` row is intentionally a
+guard row: it shows why the older shared-cap family remains negative evidence
+and why this patch does not raise `np.dot` beyond 1024.
+
+Benchmark command: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -j 1 -p fnp-python --profile release --bench criterion_python_surface -- 'python_matmul_boundary/(fnp_matmul_1536x1536|numpy_matmul_1536x1536|fnp_dot_1536x1536|numpy_dot_1536x1536)' --sample-size 10 --warm-up-time 1 --measurement-time 4 --output-format bencher --noplot`.
+
+Command note: the requested `cargo bench --release` spelling was attempted and
+Cargo rejected it before building (`unexpected argument '--release'`), so this
+entry uses the accepted release-profile spelling above.
+
+Conformance command: `AGENT_NAME=BlackThrush RCH_WORKER=hz2 RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -j 1 -p fnp-python native_matmul_dot_f64_gemm_gate_and_golden_sha256 --profile release -- --nocapture` passed (`1 passed; 0 failed; 533 filtered out`). The first remote-required test attempt hit RCH-E412 dependency preflight before Cargo; the retry ran remotely and passed. AGENT_NAME=BlackThrush.
+
 ## 2026-06-27 - NO-SHIP: `diag_indices` repro is wrapper overhead; dense eigvalsh still needs SBR stage 2
 
 `BlackThrush`/`cod-a`. Land-or-dig recheck found no clean measured bench
