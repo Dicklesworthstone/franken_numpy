@@ -3538,6 +3538,31 @@ fn bench_einsum_boundary(c: &mut Criterion) {
                 });
             });
         }
+
+        // No-contraction ELEMENTWISE einsum ("ij,ij->ij"): every operand shares the
+        // output subscripts -> a plain elementwise product. numpy's generic einsum runs
+        // it 3-4x slower than the multiply ufunc; fnp routes 2-operand elementwise to
+        // np.multiply (bit-identical, wins at small/medium, parity at large). Guards
+        // that fast path against regression.
+        let (ew_l, ew_r) = make_matmul_pair(1024);
+        group.bench_function("fnp_einsum_elementwise_f64_1024", |bench| {
+            bench.iter(|| {
+                black_box(
+                    fnp_einsum
+                        .call1(("ij,ij->ij", &ew_l, &ew_r))
+                        .expect("fnp einsum elementwise call"),
+                );
+            });
+        });
+        group.bench_function("numpy_einsum_elementwise_f64_1024", |bench| {
+            bench.iter(|| {
+                black_box(
+                    numpy_einsum
+                        .call1(("ij,ij->ij", &ew_l, &ew_r))
+                        .expect("numpy einsum elementwise call"),
+                );
+            });
+        });
     });
 
     group.finish();

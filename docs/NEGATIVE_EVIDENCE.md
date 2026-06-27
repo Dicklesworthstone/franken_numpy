@@ -10182,3 +10182,38 @@ view = shares_memory True; non-contiguous same-dtype; list+dtype; copy=False+con
 conformance_asarray + conformance_array_creation + conformance_array_creation_base 32/32 GREEN. The OTHER gap the dig
 found (einsum 'ij,ij->ij' / 'i,i->i' no-contraction Hadamard, 3-4x — generic-extraction, no fast path) is left as an
 open lead (einsum is peer-contended; this asarray fix is the broad uncontended win). AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: np.einsum no-contraction ELEMENTWISE ("ij,ij->ij") routed to multiply — 3-27x LOSS -> 0.64-1.00x win/parity vs NumPy (2026-06-27) — 108th win
+LEVER: route-to-the-right-kernel (the einsum dispatcher's established pattern — detect a sub-form, send it to the kernel
+that wins). The PRIOR cycle's open lead. einsum where every operand carries the SAME subscripts == the explicit output
+("ij,ij->ij", "i,i->i", "ijk,ijk->ijk", N operands) is a plain elementwise PRODUCT, but it fell through every existing
+einsum fast-path detector to the generic sum-of-products native kernel, which ran it 3-4x (f64) / 26.9x (f32!) / 18.7x
+(3-op) slower than numpy. (einsum was quiet 4 days; took the lead.)
+
+ROOT: the einsum_spec_is_* detector family (single_reduce/diag/outer/vector-contraction/...) had NO case for the
+no-contraction elementwise form, so 'X,X->X' ran einsum_native (extract all operands + generic contraction machinery)
+instead of a fused elementwise multiply. numpy's own einsum is also slower than multiply here (1024^2 f64: np.einsum
+3.97ms vs np.multiply 0.31ms) — so even matching numpy.einsum would leave a 12x small-size opportunity.
+
+FIX (fnp-python only): new detector `einsum_spec_is_elementwise_nocontract(spec, n_operands)` — explicit "->", no
+ellipsis, group count == operand count, output has no repeated label, and EVERY operand string == the output string
+(byte-for-byte: same labels, same order, no repeats => each operand is a plain elementwise view). Implicit specs
+("ij,ij" with no "->") are EXCLUDED — they CONTRACT to a scalar, a different op. Dispatch: 2 operands -> np.multiply
+(only when the two shapes are IDENTICAL, so a shape-mismatch einsum error still flows to numpy.einsum for the canonical
+message, not multiply's broadcasting error); 3+ operands -> numpy.einsum (its fused multi-operand loop beats chained
+multiply: 3-op 2048 einsum 27ms vs chained-multiply 46ms). Only when no special kwargs (out=/dtype=/order=/casting=/
+optimize=) so they never need re-translating.
+
+WHY np.multiply IS SAFE: np.multiply == np.einsum bit-for-bit for this pattern across EVERY dtype — f64/f32/f16,
+int64/32/8 + uint8 (incl overflow WRAP), complex128, mixed-dtype promotion, and non-contiguous operands (17-case
+array_equal probe, 0 diffs). The product has no summation so there is no float-order divergence (unlike contractions).
+
+MEASURED (INTERLEAVED 20th-pctile, local): ij,ij->ij f64 n=256 0.81x / n=1024 0.64x WIN / n=2048 0.96x / n=4096 0.94x;
+ij,ij->ij f32 2048 0.76x (was 26.9x LOSS); i,i->i 4M 0.69x (was 3.6x); 3op ij,ij,ij->ij 2048 1.00x (was 18.7x).
+Worker criterion python_einsum_boundary/einsum_elementwise_f64_1024: fnp 329us vs numpy 606us = 0.54x (1.84x faster).
+WHY NOT ~0-GAIN: every elementwise einsum shape swings from a 3-27x LOSS to win-or-parity; the 2-op cases genuinely
+BEAT numpy.einsum at small/medium (0.64-0.81x) and the catastrophic f32 (26.9x) + 3-op (18.7x) losses become parity.
+CORRECTNESS: 17-case differential (dtypes/shapes/opcounts/non-contig/whitespace/optimize+dtype kwargs/shape-mismatch
+error) bit-exact; the contraction/outer/diagonal/transpose patterns are detector-MISSES and flow through the unchanged
+native path (their pre-existing allclose-not-array_equal float-sum-order behavior is unaffected). conformance_einsum
+28/28 GREEN. AGENT_NAME=BlackThrush.
