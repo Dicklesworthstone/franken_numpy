@@ -4,6 +4,34 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-27 - WALL (quantified, no quick lever): native f64 GEMM micro-kernel is 4-7x slower PER-THREAD than OpenBLAS; masked at default-64-threads
+
+`BlackThrush`. Quantified the biggest remaining gap vs ORIG. At a FAIR thread
+budget (`RAYON_NUM_THREADS=8` vs `OPENBLAS_NUM_THREADS=8`, square f64 matmul):
+
+| n | fnp GFLOPS | numpy(OpenBLAS) GFLOPS | fnp/np time |
+|---:|---:|---:|---:|
+| 768 | 49.6 | 339 | 6.84x |
+| 1024 | 62.5 | 314 | 5.03x |
+| 1280 | 75.1 | 352 | 4.68x |
+| 1536 | 85.0 | 353 | 4.15x |
+
+fnp's native Rust GEMM tops out ~50-85 GF/8-thread; OpenBLAS holds ~340 GF — the
+classic no-C-BLAS micro-kernel gap (OpenBLAS packs panels + a register-blocked AVX
+FMA kernel; fnp's blocked-but-not-register-tiled kernel can't reach peak). CRUCIAL
+NUANCE: this is MASKED at DEFAULT threads — fnp uses all 64 rayon threads while
+numpy's OpenBLAS often runs fewer, so user-facing default matmul is ~parity/win at
+large n (measured default-thread: 512 0.70x WIN, 2048 0.75x WIN; the n=1024 1.97x
+"loss" is a 64-thread tiling/contention artifact — RAYON=8 shows clean monotonic
+49->85 GF with no 1024 dip). matvec 2048 WINS 0.56x; small matmul (256) parity;
+rectangular (4096x512x512, 2048x2048x64) parity. So GEMM is NOT a user-facing
+default-thread loss, but the per-thread micro-kernel is 4-7x off peak. RETRY
+PREDICATE: a BLIS-style register-blocked SIMD micro-kernel (packed A/B panels,
+mr x nr FMA tile, std::simd) — a multi-day, CORE-contended, architectural project,
+NOT a 60-min lever. Recorded so this is targeted (or deferred) deliberately, not
+rediscovered as a fresh "matmul is slow" idea. Surface CONVERGED otherwise; the two
+open gaps are both micro-kernel walls (this GEMM + moderate-n inv getrf/getri).
+
 ## 2026-06-27 - KEEP: sparse identity-RHS inverse for small `inv_nxn`
 
 `BlackThrush`. Landed the measured bench-worktree lever from
