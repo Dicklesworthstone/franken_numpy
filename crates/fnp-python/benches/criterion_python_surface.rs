@@ -3563,6 +3563,37 @@ fn bench_einsum_boundary(c: &mut Criterion) {
                 );
             });
         });
+
+        // No-contraction BROADCAST einsum ("ij,j->ij" = a * b[None,:]): a matrix scaled by a
+        // per-column vector. The generic native kernel ran this 10-15x slower than numpy;
+        // fnp aligns the operands (reshape to output rank) and multiplies. Guards the
+        // broadcast arm of the no-contraction fast path.
+        let bc_mat = make_matmul_pair(1024).0;
+        let bc_vec = numpy
+            .call_method1("arange", (1024_usize,))
+            .expect("bc vec raw")
+            .call_method1("astype", ("float64",))
+            .expect("bc vec f64")
+            .call_method1("__mul__", (0.0001_f64,))
+            .expect("scale bc vec");
+        group.bench_function("fnp_einsum_broadcast_ij_j_f64_1024", |bench| {
+            bench.iter(|| {
+                black_box(
+                    fnp_einsum
+                        .call1(("ij,j->ij", &bc_mat, &bc_vec))
+                        .expect("fnp einsum broadcast call"),
+                );
+            });
+        });
+        group.bench_function("numpy_einsum_broadcast_ij_j_f64_1024", |bench| {
+            bench.iter(|| {
+                black_box(
+                    numpy_einsum
+                        .call1(("ij,j->ij", &bc_mat, &bc_vec))
+                        .expect("numpy einsum broadcast call"),
+                );
+            });
+        });
     });
 
     group.finish();

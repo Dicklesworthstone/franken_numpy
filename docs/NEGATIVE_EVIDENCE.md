@@ -10217,3 +10217,33 @@ CORRECTNESS: 17-case differential (dtypes/shapes/opcounts/non-contig/whitespace/
 error) bit-exact; the contraction/outer/diagonal/transpose patterns are detector-MISSES and flow through the unchanged
 native path (their pre-existing allclose-not-array_equal float-sum-order behavior is unaffected). conformance_einsum
 28/28 GREEN. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: np.einsum no-contraction BROADCAST/TRANSPOSE ("ij,j->ij", "ijk,k->ijk", "ij,ji->ij") generalizes the 108th — 7-15x LOSS -> 0.58-1.03x win/parity vs NumPy (2026-06-27) — 109th win
+LEVER: route-to-the-right-kernel (extends the 108th). The 108th handled only the EXACT-match Hadamard ("ij,ij->ij");
+the broader NO-CONTRACTION family — broadcast ("ij,j->ij" = a*b[None,:], "ij,i->ij", "i,ij->ij", "ijk,k->ijk",
+"ijk,jk->ijk") and transpose ("ij,ji->ij") — still fell to the generic sum-of-products native kernel: 10-15x (broadcast)
+/ 7.5x (transpose) slower than numpy. (einsum still quiet; took the next lead.)
+
+GENERALIZED the 108th `einsum_spec_is_elementwise_nocontract` (operands == output) to `einsum_spec_is_nocontract`
+(explicit "->", no ellipsis, no repeated label within an operand or the output, EVERY operand label present in the
+output = nothing summed; order NOT required so transpose is matched too). New helper `try_einsum_broadcast_mul_2op`
+computes a 2-operand no-contraction einsum as a broadcasted multiply: reshape each operand to the output rank with a
+size-1 axis for every output label it lacks (a pure VIEW because its labels are a contiguous-order subsequence of the
+output), then np.multiply. The helper returns None for the TRANSPOSED/out-of-order form (would need a transpose) and
+for any dimension/size mismatch, and 3+ operands aren't routed to it — all of which fall to numpy.einsum (its fused
+loop beats chained multiply and it owns the canonical error). No-special-kwargs guard retained.
+
+WHY SAFE: a no-contraction einsum is a pure broadcasted product (NO summation -> no float-order divergence), so the
+reshape+multiply is bit-identical to numpy.einsum across every dtype. 31-case differential (broadcast 2-D/3-D/4-D,
+transpose, exact-match all dtypes incl int/i8 WRAP + complex + f16, f32/i32 broadcast, 3-op, scalar operand, size/ndim
+mismatch -> both raise, optimize kwarg fall-through, and matmul/contract/implicit/diag/outer regression guards) 0 fails.
+conformance_einsum 28/28 GREEN.
+
+MEASURED (INTERLEAVED 20th-pctile, local, @2048 unless noted): ij,j->ij 11.7x LOSS -> 1.01x; ij,i->ij 11.5x -> 1.03x;
+i,ij->ij 10.0x -> 1.03x; ijk,k->ijk 15.0x -> 0.75x WIN; ijk,jk->ijk 13.3x -> 0.58x WIN; ij,ji->ij transpose 7.5x ->
+0.91x (delegated to numpy.einsum); exact-match + 3-op unchanged (0.99-1.00x). Small sizes win more (broadcast-multiply
+beats numpy.einsum 0.81-0.87x at n<=512). Worker criterion python_einsum_boundary/einsum_broadcast_ij_j_f64_1024:
+fnp 442us vs numpy 451us = 0.98x parity (was an 11.7x loss).
+WHY NOT ~0-GAIN: the broadcast losses were 10-15x and the transpose 7.5x; every one becomes win-or-parity, and the 3-D
+broadcast forms genuinely BEAT numpy.einsum (0.58-0.75x). The no-contraction einsum family is now COMPLETE
+(exact/broadcast/transpose/N-op all win-or-parity). AGENT_NAME=BlackThrush.
