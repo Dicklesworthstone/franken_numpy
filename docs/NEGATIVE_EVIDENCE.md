@@ -4,6 +4,52 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-27 - NO-SHIP (measured A/B, 0-gain): f64 unary SERIAL-regime (256K-1M) `abs`/`square`/`rint`/`floor` ~1.1x is a single-thread MEMORY-BANDWIDTH wall, not a vectorization gap
+
+`BlackThrush`. A fresh broad sweep (set-ops / window funcs / gradient / pad /
+repeat-tile / linalg-shapes / histogram / digitize / packbits / meshgrid / select
+/ clip) found the surface converged — every probed family wins or is parity, and
+the two apparent losses (`hanning` 1.33x, `packbits` 1.47x) were both NOISE
+(`hanning` re-measured 1.11->0.99, `packbits` parity 0.99-1.01x at every size/axis;
+both are tiny-absolute ops, ~140-210us). The one residual was f64 unary ops below
+the parallel gate: `abs`/`square`/`rint`/`floor` read ~1.08-1.17x slower than
+numpy at 256K-1M (`negative` parity, `sign`/`reciprocal` WIN since numpy's are
+slower). `sqrt` is already a WIN (0.10-0.35x) via the fused zerocopy path — the
+old "sqrt 1.5x forbid(unsafe) zero-init" memory is STALE.
+
+HYPOTHESIS (plausible, FALSE): `unary_map_f64`'s serial branch (lib.rs:7174) used
+the per-element `Cell::get/set` loop while the parallel branch (>=2M) used raw
+`&[f64]`/`&mut [f64]` slices; the `unary_map_f32` comment says the Cell loop does
+NOT autovectorize (UnsafeCell is not noalias). So: hoist the raw-slice casts so the
+SERIAL loop also autovectorizes -> match numpy's SIMD ufunc -> close the 1.1x.
+Built it (`-p fnp-python`, bit-exact: 0 mismatches across abs/fabs/negative/
+positive/rint/floor/ceil/trunc/sign/square/reciprocal/degrees/radians over
+specials incl +-0/+-inf/+-nan/ties).
+
+MEASURED (RAYON=8, candidate .so vs baseline .so, 3 interleaved reps, ratio
+fnp/numpy; lower=better):
+
+| n | op | BASE mean | CAND mean | verdict |
+|---:|---|---:|---:|---|
+| 262144 | abs | 1.15 | 1.16 | no change |
+| 262144 | square | 1.18 | 1.14 | within noise |
+| 524288 | abs | 1.15 | 1.10 | within noise |
+| 1000000 | abs | 1.16 | 1.03 | soft, but BASE ranged 1.04-1.27 |
+| 1000000 | square | 1.12 | 1.06 | within noise |
+| 1000000 | floor | 1.10 | 1.08 | no change |
+
+Verdict: ~0-gain, reverted. ROOT: these ops are pure memory streaming (read 8B,
+write 8B per elem); single-thread they already saturate one core's bandwidth, so
+vectorizing the compute can't help — the SAME class as the sqrt-SIMD no-ship
+(memory-bound). The residual ~1.1x is numpy's marginally better single-core stream
+(likely non-temporal stores). Parallel is NOT the answer either: the existing
+`UNARY_PARALLEL_MIN = 1<<21` gate comment already records "131K-1M parallel LOSES;
+4M+ wins ~5-7x" — confirmed correct (rayon fan-out > aggregate-bandwidth gain
+below ~2M on this box). RETRY PREDICATE: only a streaming-store (movntpd) kernel
+could plausibly close it, and only when the output is not immediately re-read;
+not worth the target-feature complexity for a ~1.1x niche regime. The serial unary
+regime is a measured WALL, not a lever.
+
 ## 2026-06-27 - KEEP: `np.searchsorted` guess/galloping kernel — SORTED-query 1.76x loss -> 2.56x win, random/bench path preserved
 
 `BlackThrush`. A fresh-built current-`main` `fnp_python.so` sweep (run via
