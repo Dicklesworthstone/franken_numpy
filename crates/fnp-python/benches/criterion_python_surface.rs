@@ -3624,6 +3624,35 @@ fn bench_einsum_boundary(c: &mut Criterion) {
                 );
             });
         });
+
+        // Op2-subset MULTI-axis contraction ("ijk,ij->k": op2's labels are a strict subset of
+        // op1's and all contracted, >=2 axes summed): a strided multi-axis reduction the native
+        // kernel ran 36x slower than numpy; fnp now delegates it. Guards that parity.
+        let sc_mat = numpy
+            .call_method1("arange", (256_usize * 128,))
+            .expect("sc mat raw")
+            .call_method1("astype", ("float64",))
+            .expect("sc mat f64")
+            .call_method1("reshape", ((256_usize, 128),))
+            .expect("sc mat shape");
+        group.bench_function("fnp_einsum_subcontract_ijk_ij_k_f64", |bench| {
+            bench.iter(|| {
+                black_box(
+                    fnp_einsum
+                        .call1(("ijk,ij->k", &nc, &sc_mat))
+                        .expect("fnp einsum subcontract call"),
+                );
+            });
+        });
+        group.bench_function("numpy_einsum_subcontract_ijk_ij_k_f64", |bench| {
+            bench.iter(|| {
+                black_box(
+                    numpy_einsum
+                        .call1(("ijk,ij->k", &nc, &sc_mat))
+                        .expect("numpy einsum subcontract call"),
+                );
+            });
+        });
     });
 
     group.finish();

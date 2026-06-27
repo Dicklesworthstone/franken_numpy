@@ -10279,3 +10279,30 @@ prefix-kept winners + 2-label + 4-label "ijkl,ijkl->l" + the no-contraction "ijk
 0 fails; conformance_einsum 28/28 GREEN. The OTHER 2 contraction losses the sweep found (3-op "i,ij,j->" 15.75x, and
 transposed full-contraction "ij,ji->" 3.25x) are left as leads (different patterns; would need their own detectors).
 AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: np.einsum op2-subset MULTI-axis contraction ("ijk,ij->k") delegated — 2.5-36x LOSS -> ~1.0x parity vs NumPy (2026-06-27) — 111th win
+LEVER: delegate-the-slow-pattern (the einsum dispatcher idiom; sibling of the 110th). Extending the contraction sweep
+mapped a clean losing family: when the SECOND operand's labels are a strict subset of the FIRST operand's (op2 carries
+no free index of its own), ALL of op2's labels are contracted, and >=2 axes are summed, the native generic kernel runs
+a strided multi-axis reduction 2.5-36x slower than numpy: "ijk,ij->k" 36x, "ijk,ik->j" 31x, "ijk,jk->i" 12x,
+"ijkl,kl->ij" 2.5x, "ijkl,jkl->i" 2.8x.
+
+BOUNDARY (measured, defines the detector): the SINGLE-axis form WINS natively and must stay ("ijk,k->ij"/"ijk,j->ik"/
+"ijk,i->jk" all ~1.0x), a FREE index in op2 makes it a GEMM that WINS ("ij,jk->ik" 0.12x, "ijk,kl->ijl" 0.41x), and the
+all-shared full contraction wins ("ij,ij->" 0.88x). So delegating is gated on >=2 contracted axes + op2-is-a-strict-
+subset + output == op1-minus-op2 (op2 fully contracted), which excludes every native winner.
+
+FIX (fnp-python only): new detector einsum_spec_is_op2_subset_multicontract (2 operands; no repeated label in op1/op2/
+out; every op2 label in op1 = no free index; every out label is an op1 label NOT in op2; |op2| >= 2; |out| + |op2| ==
+|op1| so out is exactly op1\op2 and non-empty). Matched forms delegate to numpy.einsum. The 1-axis / GEMM / full-
+contraction forms are excluded by construction so every native winner is preserved.
+
+MEASURED (INTERLEAVED 20th-pctile, local): ijk,ij->k 36.3x -> 1.01x; ijk,ik->j 31.5x -> 1.00x; ijk,jk->i 12.0x ->
+1.00x; ijkl,kl->ij 2.5x -> 1.01x; ijkl,jkl->i 2.8x -> 1.01x. PRESERVED: ijk,k->ij 1.00x, ij,jk->ik 0.12x WIN,
+ijk,kl->ijl 0.41x WIN, ijk,ijk->i 0.96x, ij,ij-> 0.88x. Worker criterion python_einsum_boundary/
+einsum_subcontract_ijk_ij_k_f64: fnp 1.114ms vs numpy 1.085ms = 1.03x parity (was a 36x loss).
+WHY NOT ~0-GAIN: five contraction shapes swing from 2.5-36x LOSS to parity; no native winner regresses (excluded by
+the >=2-axes + strict-subset + op2-fully-contracted gate).
+CORRECTNESS: delegation IS numpy.einsum -> bit-identical. 9-case probe (every subset-multicontract loser + 1-axis
+winner + GEMM + all-shared-prefix + full-contraction) allclose 0 fails; conformance_einsum 28/28 GREEN. REMAINING
+einsum leads (own detectors needed): 3-op "i,ij,j->" 15x, transposed full "ij,ji->" 3.25x. AGENT_NAME=BlackThrush.
