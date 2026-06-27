@@ -54,6 +54,35 @@ clobbered an earlier copy of this patch); rch remote build slots were saturated
 (`insufficient_slots`) so the build ran locally `-p fnp-python` into the role
 target dir.
 
+## 2026-06-27 - KEEP: delegate hub-contraction `np.einsum` to NumPy
+
+`BlackThrush`/`cod-a`. No fully-wired measured bench-worktree win was available
+off `main`: `/data/projects/fnp-dig26-wt` carried only an unwired hub-contraction
+detector. The current ledger's remaining einsum lead was the hub-contraction
+family, where one operand contains every other operand/output label. Prior
+measured examples were `i,ij,j->` at roughly 15x loss and `a,abc,c->b` at roughly
+27x loss versus NumPy.
+
+FIX: add `einsum_spec_is_hub_contraction` and delegate matched `>=3` operand
+forms to `numpy.einsum`. This is a route-to-oracle fix, not an arithmetic
+rewrite. GEMM chains such as `ij,jk,kl->il` and outer-introducing forms such as
+`i,ij,k->jk` are excluded because no single operand covers the whole label
+universe.
+
+MEASURED:
+
+| Probe | Worker | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---|---:|---:|---:|---|
+| `python_einsum_boundary/fnp_einsum_hub_i_ij_j_scalar_f64` vs `numpy_einsum_hub_i_ij_j_scalar_f64` | `hz2` | 4,773,682 | 4,697,185 | 1.016x | keep: prior 10-27x loss family now parity |
+
+Benchmark command: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -j 1 -p fnp-python --profile release --bench criterion_python_surface -- 'python_einsum_boundary/(fnp_einsum_hub_i_ij_j_scalar_f64|numpy_einsum_hub_i_ij_j_scalar_f64)' --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher --noplot`.
+
+Conformance command: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -j 1 -p fnp-python --lib einsum_multi_operand_values_match_numpy_within_tolerance --profile release -- --nocapture` passed (`1 passed; 0 failed; 533 filtered out`). AGENT_NAME=BlackThrush.
+
+Command note: the requested `cargo bench --release` spelling remains rejected by
+Cargo in this workspace; the release-equivalent accepted form is `--profile
+release`.
+
 ## 2026-06-27 - NO-SHIP (measured A/B, CLOSES the prior-entry lead): lowering `TRIDIAG_MATVEC_PAR_MIN` 1024→256 regresses `eigvalsh_nxn/512` 1.41x
 
 `BlackThrush`. Follow-up to the same-day lead below (committed `3e437ba0`): no

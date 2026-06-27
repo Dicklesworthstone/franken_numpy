@@ -3687,6 +3687,52 @@ fn bench_einsum_boundary(c: &mut Criterion) {
                 );
             });
         });
+
+        // HUB contraction ("i,ij,j->": both vectors select axes of a central matrix and the
+        // output is scalar): numpy's einsum fuses this into one pass over the hub, while the
+        // native generic kernel was a 10-20x scalar loss. Guards the hub delegate detector.
+        let hub_n = 2048_usize;
+        let hub_left = numpy
+            .call_method1("arange", (hub_n,))
+            .expect("hub left raw")
+            .call_method1("astype", ("float64",))
+            .expect("hub left f64")
+            .call_method1("__mul__", (0.0001_f64,))
+            .expect("scale hub left");
+        let hub_matrix = numpy
+            .call_method1("arange", (hub_n * hub_n,))
+            .expect("hub matrix raw")
+            .call_method1("astype", ("float64",))
+            .expect("hub matrix f64")
+            .call_method1("reshape", ((hub_n, hub_n),))
+            .expect("hub matrix shape")
+            .call_method1("__mul__", (0.0000001_f64,))
+            .expect("scale hub matrix");
+        let hub_right = numpy
+            .call_method1("arange", (hub_n,))
+            .expect("hub right raw")
+            .call_method1("astype", ("float64",))
+            .expect("hub right f64")
+            .call_method1("__mul__", (0.0002_f64,))
+            .expect("scale hub right");
+        group.bench_function("fnp_einsum_hub_i_ij_j_scalar_f64", |bench| {
+            bench.iter(|| {
+                black_box(
+                    fnp_einsum
+                        .call1(("i,ij,j->", &hub_left, &hub_matrix, &hub_right))
+                        .expect("fnp einsum hub call"),
+                );
+            });
+        });
+        group.bench_function("numpy_einsum_hub_i_ij_j_scalar_f64", |bench| {
+            bench.iter(|| {
+                black_box(
+                    numpy_einsum
+                        .call1(("i,ij,j->", &hub_left, &hub_matrix, &hub_right))
+                        .expect("numpy einsum hub call"),
+                );
+            });
+        });
     });
 
     group.finish();
