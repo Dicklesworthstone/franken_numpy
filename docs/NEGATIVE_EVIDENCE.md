@@ -9650,3 +9650,26 @@ Inf-present, all-NaN lane (count==0 -> defer + warn + NaN), count==ddof (defer),
 (axis-0 / last-axis / flat / 2-D-axis0/axis1 / small-below-gate all unchanged and matching). nanvar/nanstd lib
 conformance tests GREEN on the worker. Same family as 91st/93rd; the NaN variant is an even bigger win (27-29x) because
 numpy's non-last nanvar materializes MORE temps. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: native parallel f64 nanmean along a MIDDLE axis (20-22x over NumPy) (2026-06-26) — 95th win
+Completes the NaN-reduction family middle-axis coverage (after nanvar/nanstd 94th). nanmean covered {flat, last axis,
+axis 0}; a single MIDDLE axis (0 < ax < ndim-1, ndim >= 3) fell through to numpy, which on a non-last axis materializes
+a NaN->0 copy + an isnan mask then runs TWO STRIDED reduces (nansum + count) (~12.7ms for a 4M-element f64 stack). New
+`try_zerocopy_f64_nanmean_nonlast_axis`: each contiguous OUTER block is exactly an axis-0 nanmean problem, so it runs
+the same single NaN-skipping pass per block (per-column sum + non-NaN count -> sum/count) with NO temporary, fanning
+the independent contiguous blocks across the rayon pool. An empty (all-NaN) lane yields 0.0/0.0 == numpy's NaN and
+emits numpy's "Mean of empty slice" RuntimeWarning (compute, not defer — matching the axis-0 path).
+
+BIT-EXACTNESS: numpy reduces a non-last axis SEQUENTIALLY and masked (NaN) positions contribute 0 in both; 0.0/0.0
+reproduces the all-NaN-lane NaN bit pattern. Verified rtol=0 atol=0. Inf is included (not NaN).
+
+PERF (criterion, remote RCH worker, per-crate fnp-python, release; python_nanvar_midaxis_boundary nanmean cases,
+~10% scattered NaN, median fnp vs NumPy):
+  nanmean axis=1 (256,256,64):  fnp 0.581ms vs NumPy 12.688ms = 21.8x
+  nanmean axis=1 (128,512,64):  fnp 0.632ms vs NumPy 12.919ms = 20.4x
+
+CORRECTNESS: differential probe vs NumPy, BIT-EXACT (allclose rtol=0 atol=0 equal_nan), 0 fails over ~30 cases:
+middle axes of 3-D/4-D shapes (incl negative axis), keepdims {F,T}, ~10% scattered NaN, Inf-present, all-NaN lane
+(-> NaN + "Mean of empty slice" warning, VERIFIED emitted), plus regressions (axis-0 / last-axis / flat /
+2-D-axis0/axis1 / small-below-gate unchanged and matching). nanmean lib conformance GREEN on the worker. KEEP.
+AGENT_NAME=BlackThrush.

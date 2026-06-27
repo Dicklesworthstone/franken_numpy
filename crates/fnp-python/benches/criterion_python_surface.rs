@@ -1934,6 +1934,8 @@ fn bench_nanvar_midaxis_boundary(c: &mut Criterion) {
         let numpy_nanvar = numpy.getattr("nanvar").expect("numpy.nanvar");
         let fnp_nanstd = module.getattr("nanstd").expect("fnp_python.nanstd");
         let numpy_nanstd = numpy.getattr("nanstd").expect("numpy.nanstd");
+        let fnp_nanmean = module.getattr("nanmean").expect("fnp_python.nanmean");
+        let numpy_nanmean = numpy.getattr("nanmean").expect("numpy.nanmean");
 
         for (label, d0, d1, d2) in [
             ("256x256x64", 256_usize, 256_usize, 64_usize),
@@ -1988,6 +1990,22 @@ fn bench_nanvar_midaxis_boundary(c: &mut Criterion) {
                     let result = numpy_nanstd
                         .call((&input,), Some(&numpy_kwargs))
                         .expect("numpy nanstd axis1 call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("fnp_nanmean_f64_axis1_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_nanmean
+                        .call((&input,), Some(&fnp_kwargs))
+                        .expect("fnp nanmean axis1 call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_nanmean_f64_axis1_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_nanmean
+                        .call((&input,), Some(&numpy_kwargs))
+                        .expect("numpy nanmean axis1 call");
                     black_box(result);
                 });
             });
