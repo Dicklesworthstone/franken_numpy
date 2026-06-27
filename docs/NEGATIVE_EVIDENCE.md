@@ -4,6 +4,51 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-27 - SURVEY (no-ship): dtype/FFT/indexing/linalg sweep CONVERGED; 5 apparent losses were thread-count/cache artifacts; `batch_inv` moderate-n (~32-96) ~1.27x is the lone residual (per-lane kernel wall)
+
+`BlackThrush`. Broad dig over previously-unswept territory found NO new shippable
+loss — the surface is converged at the CORRECT thread count. The recurring trap
+this cycle (worth internalizing): on a LIGHTLY-loaded box, measuring fnp-parallel
+ops at `RAYON_NUM_THREADS=8` UNDER-represents them and manufactures false losses;
+they must be measured at FULL threads (the inverse of the loaded-box rule where 64
+threads oversubscribe). Every apparent loss below evaporated when re-measured
+correctly:
+
+| probe | bad measure | correct measure | cause |
+|---|---|---|---|
+| `cplx_dot` 2M | 22.1x (T=8) | 0.998x @4M distinct arrays | numpy `dot(c1,c1)` on same 2M (~32MB) stayed L3-resident across the timing loop = false 123us |
+| `percentile`/`median`/`quantile` 4M | 1.4-1.9x (T=8) | 0.17-0.32x (T=64) | fnp parallel partition needs >8 threads; numpy single-threaded |
+| `corrcoef` 500x1000 | 1.90x (T=8) | 0.84x (T=64) | fnp parallel Gram |
+| `cplx_sum` 2M | 1.12x (T=8) | 0.76x (T=64) | fnp parallel reduce |
+| `fft2` 1024^2 | 1.32x (T=8) | 1.00x (T=64) | noise |
+
+Also CONVERGED (win/parity at correct threads): f16 reductions (sum/mean/var/std/
+nanvar/nanmean/min/max/prod/cumsum/sort all ~1.0), datetime64/timedelta64
+(dt_diff 0.56x win, sort/max/min parity), narrow-int (i16_cumsum 0.46x win),
+fftn/rfft2/ifft, sliding_window_view, polyval (0.45x win), roots, apply_along_axis,
+outer/triu/tril/vander (big wins), put/place/extract/compress. f16_sqrt ~0.99x
+(memory-bound, see prior entry).
+
+STALE-MEMORY CORRECTION: the "batch_cholesky 5-8x loss kernel wall" memory is now
+PARITY (B2000_n16 1.02x, B1000_n32 1.27x, B100_n128 1.01x) — the per-lane chol
+kernel was improved since that note. batch_solve WINS everywhere (0.34-0.60x), and
+numpy batched inv/solve CLIFF catastrophically at n>=128 (np.inv B100_n128 = 2.7s,
+fnp 166x faster).
+
+THE LONE RESIDUAL: `batch_inv` at MODERATE n. Thread-scaling B400_n64: T1 2.49x ->
+T8 1.43x -> T32 1.27x -> T64 1.28x (plateaus ~1.27x). B2000_n16 WINS at >=4 threads
+(T4 0.64x, T32 0.42x). So inv loses only for n~32-96: fnp `inv_nxn` is ~2.5x slower
+per-lane than LAPACK getri (T=1), and lane-parallelism narrows but cannot close it
+(numpy gets some OpenBLAS threading at n>=64 too). DISPROVEN this pass: routing
+inv -> `solve(A, I)` (bit-exact ==inv, allclose True) is SLOWER than fnp.inv at
+n=16/32 (only faster at n=64) = not a clean win. This is the documented per-lane
+kernel wall ([[batch-cholesky-noship-kernel-wall]] class: gate/alloc levers
+exhausted; real fix = blocked/SIMD getri-equivalent kernel, which risks the
+bit-exact golden = contended-linalg + human/coordination decision, not a quick
+lever). RETRY PREDICATE: a SIMD-blocked small-n inverse kernel (like the chol
+kernel that was fixed), measured serial (RAYON=1) first to isolate kernel quality
+from parallel noise.
+
 ## 2026-06-27 - NO-SHIP (measured A/B, 0-gain): f64 unary SERIAL-regime (256K-1M) `abs`/`square`/`rint`/`floor` ~1.1x is a single-thread MEMORY-BANDWIDTH wall, not a vectorization gap
 
 `BlackThrush`. A fresh broad sweep (set-ops / window funcs / gradient / pad /
