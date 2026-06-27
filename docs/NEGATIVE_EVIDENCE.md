@@ -9697,3 +9697,23 @@ cases: cumsum/cumprod/nancumsum/nancumprod over middle axes of 3-D/4-D shapes (i
 (plain keeps verbatim, nancum* treat NaN as identity), -0.0 first-slab preservation, Inf, plus regressions (last axis /
 axis 0 / flat / 2-D / small-below-gate / int input unchanged and matching). conformance_cumsum + conformance_cumulative
 + cum*_zerocopy GREEN on the worker. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize the INTEGER cumulative scan (cumsum_axis_typed) across lanes/outer blocks — int cumsum LAST axis 2.7x (was parity) + MIDDLE axis 5.4x over NumPy (2026-06-26) — 97th win
+Sibling of the 96th (f64 cumulative). `cumsum_axis_typed` (the generic int cumsum core for all widths i8/i16/i32/i64 +
+u8..u64, accumulator promoted to int64/uint64) was FULLY SERIAL for BOTH the last-axis (inner==1, `for o in 0..outer`
+over lanes) and the non-last-axis (inner>1, `for o in 0..outer` over blocks) cases — while the f64 path already
+parallelizes both. Added `T: Sync`, `A: Send + Sync`, `FC/FA: Sync` bounds and rewrote both branches to read/write raw
+&[T] / &mut [A] (ReadOnlyCell<T>/Cell<A> repr(transparent)) + `par_chunks_mut(axis_len|lane).zip(par_chunks)` over the
+disjoint independent lanes (last axis) / outer blocks (non-last, outer>=2) above 1<<18 elements. numpy runs int cumsum
+single-threaded.
+
+WHY IT'S NOT ~0-GAIN (load-immune, SAME build, RAYON_NUM_THREADS=1 vs default):
+  int64 cumsum LAST axis (8192,1024):   numpy 7.83ms | fnp serial(RAYON=1) 8.49ms (PARITY/slight loss) | fnp parallel 2.89ms = 2.71x vs numpy, 2.94x vs serial
+  int64 cumsum MIDDLE axis (256,256,64): numpy 9.55ms | fnp serial 3.58ms (already 2.67x) | fnp parallel 1.77ms = 5.38x vs numpy, 2.02x vs serial
+The last-axis case is the headline: fnp's serial int cumsum was at PARITY with numpy (8.49 vs 7.83ms) — a real gap —
+and the parallelism closes it to a 2.71x win. The parallel change adds 2.0-2.9x over the serial baseline in both.
+
+CORRECTNESS: differential probe vs NumPy, BIT-EXACT (np.array_equal), 0 fails over ~70 cases: cumsum over EVERY width
+{i8,i16,i32,i64,u8,u16,u32,u64} x all axes (last/middle/axis0) x shapes (3-D/4-D/2-D), negative axis, int64/uint64
+overflow-WRAP (numpy wraps in the accumulator dtype), int8->int64 promotion, flat, small-below-gate. conformance_cumsum
++ conformance_cumsum_zerocopy + conformance_cumulative GREEN on the worker. KEEP. AGENT_NAME=BlackThrush.

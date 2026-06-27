@@ -2369,6 +2369,63 @@ fn bench_cum_midaxis_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+// int64 cumsum along the LAST axis and a MIDDLE axis. numpy runs int cumsum
+// single-threaded (strided on a non-last axis); the native cumsum_axis_typed path now
+// fans independent contiguous lanes (last) / outer blocks (non-last) across the pool.
+// RAYON_NUM_THREADS=1 vs default isolates the parallelism gain.
+fn bench_int_cum_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_int_cum_boundary");
+    group.sample_size(15);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_cumsum = module.getattr("cumsum").expect("fnp_python.cumsum");
+        let numpy_cumsum = numpy.getattr("cumsum").expect("numpy.cumsum");
+
+        // last axis: 2-D (8192, 1024)
+        let last2d = numpy
+            .call_method1("arange", (8192_i64 * 1024_i64,))
+            .expect("int last input")
+            .call_method1("reshape", ((8192_usize, 1024_usize),))
+            .expect("int last reshape");
+        // middle axis: 3-D (256, 256, 64)
+        let mid3d = numpy
+            .call_method1("arange", (256_i64 * 256_i64 * 64_i64,))
+            .expect("int mid input")
+            .call_method1("reshape", ((256_usize, 256_usize, 64_usize),))
+            .expect("int mid reshape");
+        for (label, arr, ax) in [
+            ("last_8192x1024", &last2d, -1_i64),
+            ("mid_256x256x64", &mid3d, 1_i64),
+        ] {
+            let fk = PyDict::new(py);
+            fk.set_item("axis", ax).expect("fnp axis");
+            let nk = PyDict::new(py);
+            nk.set_item("axis", ax).expect("np axis");
+            group.bench_function(format!("fnp_cumsum_i64_{label}"), |bench| {
+                bench.iter(|| {
+                    let r = fnp_cumsum.call((arr,), Some(&fk)).expect("fnp int cumsum");
+                    black_box(r);
+                });
+            });
+            group.bench_function(format!("numpy_cumsum_i64_{label}"), |bench| {
+                bench.iter(|| {
+                    let r = numpy_cumsum.call((arr,), Some(&nk)).expect("numpy int cumsum");
+                    black_box(r);
+                });
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_vander_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_vander_boundary");
     group.sample_size(20);
@@ -4635,6 +4692,7 @@ criterion_group!(
     bench_prod_lastaxis_boundary,
     bench_cumsum_lastaxis_boundary,
     bench_cum_midaxis_boundary,
+    bench_int_cum_boundary,
     bench_vander_boundary,
     bench_polyval_boundary,
     bench_gradient_axis_boundary,
