@@ -12440,3 +12440,12 @@ not byte-identical -> NOT SHIPPED (would fail the bit-exact bar). The remaining 
 harvest; all the deterministic/IEEE-exact ones (add/mul/sub/max/min/fmod/remainder/copysign/heaviside/nextafter + ordered
 comparisons) ARE shipped. Same libm-divergence reason f16/f32 transcendentals (exp/log/sin/atan2/cbrt) stay deferred.
 AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - NO-SHIP (measured): FLOAT16 sort - numpy's signed-zero order is non-deterministic (not bit-reproducible)
+`BlackThrush`. f16 sort is a huge gap (numpy ~202ms/4M — absurdly slow) and a u16 counting/key sort would be ~20x and
+is bit-exact for the no-zero case (verified 300 trials). BUT numpy's default sort (quicksort, unstable) orders -0.0 and
++0.0 (which compare EQUAL but have distinct bits 0x8000 vs 0x0000) in an INPUT-ARRANGEMENT-DEPENDENT way — measured: the
+zero block comes out scrambled (e.g. [-0,+0,+0,-0] for one input, [-0,+0,-0,+0] for another). No deterministic kernel can
+reproduce that. Realistic f16 data rounds many small values to exactly +-0, so a "defer when both signed zeros present"
+gate would fire on most arrays -> not a useful win. NOT SHIPPED. (Same class of blocker as the f16 axis min/max VALUE
+reductions: an "equal-but-distinct-bits" tie whose order numpy doesn't fix deterministically.) AGENT_NAME=BlackThrush.
