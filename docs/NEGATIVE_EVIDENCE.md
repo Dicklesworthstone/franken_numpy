@@ -12334,3 +12334,23 @@ WHY NOT ~0-GAIN: numpy f16 per-lane argextreme widens to f32 (~80ms); the per-la
 PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f16 reduction vein now: flat min/max/ptp/
 argmin/argmax + LAST-AXIS argmin/argmax. (Axis min/max/ptp VALUE reductions stay deferred — per-lane signed-zero tie is
 fold-order-dependent, can't defer per-lane.) AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 NON-LAST-axis argmin/argmax - completes f16 argextreme axis coverage
+`BlackThrush`. numpy widens f16->f32 per column to scan a non-last-axis argmin/argmax (widens AND strides = slow).
+Added try_zerocopy_f16_argextreme_axis: view uint16; par_iter_mut over the whole output (out_len = outer*inner), each
+position p -> (o=p/inner, i=p%inner) walks data[o*lane + r*inner + i] for r in 0..axis_len, first-occurrence argextreme
+(widening each to f32). ONE uniform parallel path handles axis=0 (outer==1, fans across columns) and middle axes
+(outer>1) alike. Hooked into argmax/argmin after the f64 non-last-axis path, before the f16 delegation.
+BIT-EXACT: index-based first-occurrence (strict comparison keeps earliest index) and the f16->f32 widen is exact ->
+matches numpy (verified vs numpy: 2-D axis=0 + 3-D middle axis, incl ties / signed zeros). Any NaN in the array DEFERS
+the whole call to numpy (par_iter any-NaN pre-scan -> return None) for numpy's first-NaN-index semantics.
+
+PERF (criterion, rch worker = truth; f16, 4000x4000 = 16M, axis=0, kernel path):
+  argmax axis=0 f16: fnp 15.57 ms vs NumPy 96.76 ms = 0.161x / ~6.2x faster (strided; cache/load-noisy)
+  argmin axis=0 f16: fnp 7.03 ms vs NumPy 59.47 ms = 0.118x / ~8.5x faster
+CORRECTNESS: new conformance test f16_nonlast_axis_argmin_argmax_bit_exact_matches_numpy -> identical index array vs numpy
+(2-D axis=0 + 3-D middle axis) incl ties / signed zeros + the NaN DEFER path.
+WHY NOT ~0-GAIN: numpy f16 per-axis argextreme widens to f32 + strides (slow single-thread); the strided parallel scan
+fans every (o,i) across cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2.
+**f16 argmin/argmax now COMPLETE on every axis (flat + last + non-last). f16 reduction vein: min/max/ptp/argmin/argmax
+flat + argmin/argmax all-axes.** AGENT_NAME=BlackThrush.

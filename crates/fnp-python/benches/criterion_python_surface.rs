@@ -5298,6 +5298,25 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
                 });
             });
         }
+        // f16 NON-last-axis (axis=0) argmax/argmin: numpy widens f16->f32 per column.
+        let kw_axis0 = PyDict::new(py);
+        kw_axis0.set_item("axis", 0i64).expect("axis0 kwarg");
+        for op in ["argmax", "argmin"] {
+            let fnp_fn = module.getattr(op).expect("fnp arg op");
+            let numpy_fn = numpy.getattr(op).expect("numpy arg op");
+            group.bench_function(format!("fnp_{op}_axis0_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(fnp_fn.call((&hsq2,), Some(&kw_axis0)).expect("fnp f16 axis0 arg"))
+                });
+            });
+            group.bench_function(format!("numpy_{op}_axis0_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(
+                        numpy_fn.call((&hsq2,), Some(&kw_axis0)).expect("numpy f16 axis0 arg"),
+                    )
+                });
+            });
+        }
         // f32 fmod/copysign: numpy runs f32 binary ufuncs single-threaded (fmod ~138ms @16M);
         // there was no f32 binary zero-copy path. Native parallel f32 kernel wins (bit-exact).
         let f32_setup = "import numpy as np\n\
