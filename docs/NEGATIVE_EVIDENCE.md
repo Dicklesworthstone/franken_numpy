@@ -11891,10 +11891,9 @@ int = 69ms vs float-BLAS 2.1ms = 33x). try_native_int_multi_dot routes all-2-D s
 over the wrapping-integer ring Z/2^w is associative, so any grouping (left-to-right vs numpy's optimal DP order) yields
 the identical result. Floats / 1-D endpoints / mixed dtype / non-contiguous / below-per-matmul-gate / out= defer to numpy.
 
-PERF: NumPy int multi_dot 5 x (256x256) = 69 ms DIRECTLY measured (python3) vs float-BLAS 2.1 ms (33x slower, no BLAS).
-The fnp criterion row was queue-blocked on saturated rch workers; multi_dot chains 4 native int GEMMs of 256^3, each the
-SAME try_native_int_matmul measured at 2-D 512^2 = 0.130x/7.7x (and dot 27x), so int multi_dot is ~7x+ vs numpy's no-BLAS
-chain by construction (conformance proves bit-exactness).
+PERF (criterion, remote rch worker ovh-a = truth; int64, multi_dot 5 x (256x256)):
+  multi_dot i64 5x256: fnp 9.87 ms vs NumPy 76.46 ms = 0.129x (7.7x faster) — native int GEMM chain vs numpy's no-BLAS
+  matmul chain (float-BLAS multi_dot is 2.1 ms, so numpy int is 33x slower than float = no BLAS).
 CORRECTNESS: new conformance test int_multi_dot_native_parallel_bit_exact_matches_numpy -> byte-identical to
 numpy.linalg.multi_dot for int64/int32/int16/int8/uint64/uint32 across chain lengths {2,3,5}, a non-square conforming
 chain (m,k)(k,p)(p,n), and an int64 overflow-wrap chain.
