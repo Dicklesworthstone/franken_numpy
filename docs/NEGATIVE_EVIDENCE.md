@@ -4,6 +4,33 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-28 - DATA (load-insensitive, fnp-vs-fnp): native GEMM kernel ceiling ~115-125 GF; the "1536 collapse" is the native(<=1536)/numpy(>1536) cap BOUNDARY, NOT a blocking bug
+
+`BlackThrush`. Chased an apparent fnp-INTERNAL anomaly that needs neither numpy nor the
+worker: fnp.matmul at n=1536 took 63ms but n=1792 took only 39ms (a SMALLER matmul slower).
+Mapped fnp's own GEMM GFLOPS across n (local, min-of-5 interleaved, fnp-vs-fnp so load-robust):
+
+| n | fnp ms | fnp GF | path |
+|---:|---:|---:|---|
+| 1024 | 27.4 | 78 | NATIVE |
+| 1280 | 33.5 | 125 | NATIVE |
+| 1536 | 63.1 | 115 | NATIVE (top of window) |
+| 1792 | 39.5 | 292 | DELEGATED->numpy |
+| 2048 | 56.2 | 306 | DELEGATED->numpy |
+| 2560 | 79.9 | 420 | DELEGATED->numpy |
+| 3072 | 101.2 | 573 | DELEGATED->numpy |
+
+Confirmed the boundary behaviorally: fnp.matmul is allclose-ONLY (native kernel, different
+summation order) at n<=1536 and BIT-EXACT (delegated to numpy) at n>=1664. Code: matmul routes
+2-D square f64 with dim in [MIN, 1536] to native (`PY_NATIVE_GEMM_MAX_DIM=1024` + the matmul
+1536 window, lib.rs:50877-50878); above 1536 -> numpy. So the "collapse" is just fnp's native
+no-FMA packed kernel (uniformly ~78-125 GF, the documented FMA wall) vs local fast OpenBLAS
+(290-573 GF) above the cap — the SAME local-fast-BLAS situation, NOT a fnp blocking bug. **Do
+NOT chase the 1536 scaling step as a kernel pathology.** USEFUL RETRY GUIDANCE: fnp's native GEMM
+ceiling is ~115-125 GF; when rch remote workers return, the native-cap should sit wherever the
+WORKER's numpy crosses below ~125 GF (on the old slow-BLAS worker that was well past 1536; on a
+faster worker the cap should DROP). This ties directly into the BLAS-gate validation BLOCKER below.
+
 ## 2026-06-28 - BLOCKER (surfaced): BLAS-backed-op gates CANNOT be validated — rch remote workers unavailable, local thinkstation1 BLAS verdict swings 3x with numpy thread-count
 
 `BlackThrush`. After the non-BLAS surface converged (~90 ops, surveys #1-#4), the ONLY
