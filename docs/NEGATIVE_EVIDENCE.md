@@ -12259,3 +12259,23 @@ scales incl inf / all-equal / mixed signed zeros + the NaN DEFER path.
 WHY NOT ~0-GAIN: numpy f16 ptp widens to f32 (~167ms); the native parallel one-pass max-min aggregates cores.
 PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f16 reduction sub-vein: flat min/max + ptp.
 OPEN: argmin/argmax (~68ms, first-index — check numpy nan-index), AXIS (non-flat) min/max/ptp. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 flat argmin/argmax - numpy widens f16 to scan
+`BlackThrush`. Completes the f16 flat reduction sub-vein (min/max/ptp/argmin/argmax). numpy widens f16->f32 to scan for
+argmin/argmax (16M ~68ms, ~20x f32). Added try_zerocopy_f16_argextreme_flat: rayon par_chunks (enumerated) each finds
+the first argextreme of the widened values (or None if it holds a NaN), combine taking the strictly-better value with
+earliest-index tie-break, return a numpy intp scalar. Hooked into argmax (take_max=true) and argmin (take_max=false)
+for axis=None && f16, ABOVE the existing f16 delegation.
+BIT-EXACT: the result is an INDEX (first occurrence of the extreme value), so it is order-independent — the f16->f32
+widen is exact and chunks combine in index order replacing only on a STRICTLY better value, matching numpy's first-
+occurrence (verified vs numpy incl ties / signed zeros / inf). No signed-zero VALUE ambiguity (index-based). Any NaN
+DEFERS to numpy (return None -> existing fallback) so numpy's first-NaN index semantics apply.
+
+PERF (criterion, rch worker = truth; f16, 16M elements, kernel path):
+  argmax f16 16M: fnp 2.60 ms vs NumPy 27.92 ms = 0.093x / ~10.7x faster
+  argmin f16 16M: fnp 2.66 ms vs NumPy 28.44 ms = 0.094x / ~10.7x faster
+CORRECTNESS: new conformance test f16_flat_argmin_argmax_bit_exact_matches_numpy -> identical first-occurrence index vs
+numpy across scales incl ties / signed zeros / inf + the NaN DEFER path.
+WHY NOT ~0-GAIN: numpy f16 argextreme widens to f32 (~68ms); the native parallel scan aggregates cores.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. **f16 FLAT reduction sub-vein COMPLETE:
+min/max/ptp/argmin/argmax. OPEN: AXIS (non-flat) f16 reductions; sum/mean ORDER-SENSITIVE (skip).** AGENT_NAME=BlackThrush.

@@ -664,6 +664,42 @@ print(ok)
 }
 
 #[test]
+fn f16_flat_argmin_argmax_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy widens f16->f32 to scan for argmin/argmax; the native parallel uint16-view scan
+    // returns the identical first-occurrence index, above the 1<<20 gate. NaN defers to numpy
+    // (first-NaN index) and must still match.
+    let script = fnp_script(
+        r#"
+n = (1 << 20) + 257
+rng = np.random.default_rng(41)
+ok = True
+for scale in (1.0, 30.0, 400.0):
+    x = (rng.standard_normal(n) * scale).astype(np.float16)
+    # force ties + signed zeros (index-based, must keep first occurrence)
+    x[100:110] = x.max(); x[200:210] = x.min()
+    x[300] = np.float16(0.0); x[301] = np.float16(-0.0)
+    x[5] = np.float16(np.inf); x[6] = np.float16(-np.inf)
+    for fnp_op, np_op in [(fnp.argmax, np.argmax), (fnp.argmin, np.argmin)]:
+        r = fnp_op(x); e = np_op(x)
+        ok = ok and int(r) == int(e)
+# NaN defers to numpy (first-NaN index) and still matches
+nan_arr = (rng.standard_normal(n) * 30.0).astype(np.float16); nan_arr[123] = np.float16(np.nan); nan_arr[7] = np.float16(np.nan)
+ok = ok and int(fnp.argmax(nan_arr)) == int(np.argmax(nan_arr))
+ok = ok and int(fnp.argmin(nan_arr)) == int(np.argmin(nan_arr))
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 argmin/argmax must match numpy first-occurrence index (kernel + NaN defer): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_flat_ptp_reduction_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy widens f16->f32 for ptp (max-min); the native parallel one-pass max-min reduce
     // narrowed to f16 must be byte-identical, above the 1<<20 gate. NaN defers to numpy.
