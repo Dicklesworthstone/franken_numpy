@@ -4,7 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
-## 2026-06-28 - WIN (LANDED): np.trapezoid f32 widening-SIMD kernel + ALL FOUR gates 1<<16 -> 1<<20 — kernel fix REVEALED a mistuned gate (64K f32 1.40x LOSS -> 0.28x win)
+## 2026-06-28 - SURVEY (trapezoid reduction COUSINS, RAYON=8): family clean; `inner` 1-D small = binding-wall non-lever
+
+`BlackThrush`. After landing both trapezoid wins, swept trapezoid's weighted-sum / reduction
+cousins at the small-medium band (64K-1M) where kernel/gate issues bite, to catch any sibling of
+the scalar-`iter().sum()` floor. NO new actionable lever:
+
+- **WIN/PARITY (leave alone):** average(weights) 0.59-0.99x, average 1.0x, nansum 0.45-0.52x,
+  diff 0.95x, ediff1d 0.97-1.02x, gradient 0.16-0.55x (big win), vdot 1.0-1.09x. All exact/close.
+- **NON-LEVER (binding wall, do NOT chase locally):** `np.inner` of two 1-D vectors read 1.20-1.21x
+  LOSS at 64K-256K, converging to parity at 1M. NOT a kernel/gate issue: `inner` of 1-D inputs is
+  m=1,n=1,k=N, which falls OUTSIDE the native-GEMM window (`k=N > PY_NATIVE_GEMM_MAX_DIM`), so fnp
+  DELEGATES to numpy.inner after reading both shapes (double `extract::<Vec<usize>>()`). The 1.2x is
+  pure pyo3 dispatch + redundant shape-extraction overhead on a delegated micro-op (the dot itself
+  is BLAS ddot ~tens of µs); it amortizes away by 1M. Same documented-irreducible class as the
+  small-array passthrough wall — and `inner`/`vdot`/`dot` are ALSO BLAS-trap ops (local OpenBLAS is
+  unusually fast = false-loss direction; worker BLAS is slow = the truth would be parity/win). Left
+  as-is. (Did NOT ship — binding-wall + BLAS-trap, fails both discriminators.)
+
+
 
 `BlackThrush`. SECOND stage on trapezoid, the textbook "kernel fix reveals a now-mistuned gate"
 sequence. After the f64 scalar->SIMD kernel landed (fe81a2d1), grepped the sibling `.iter().map(|&v|
