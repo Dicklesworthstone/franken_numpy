@@ -4,6 +4,38 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-28 - NO-SHIP: A-panel packing for bit-exact packed GEMM
+
+`BlueStone`. After confirming no measured `.scratch` / `.worktrees` keep remained
+off main, dug the current GEMM micro-kernel wall under the existing
+non-contracting scalar multiply/add policy. The only legal bit-exact sublever left
+by the FMA correction/root-cause pair below was A-panel packing: prepack full
+`PACKED_MR=4` A row tiles in `kk` order inside `packed_gemm_serial`, preserving
+each output's ascending-k summation order and therefore the existing golden bit
+pattern. The copy cost and extra memory traffic did not clear the direct GEMM row,
+so the source change was reverted and not landed.
+
+MEASURED against ORIG `origin/main` commit `7951b984` (the active-block
+`eigvalsh` keep), same worker `vmi1264463`, same command shape (`-p fnp-linalg`,
+release profile, `criterion_linalg`, sample size 10):
+
+| Probe | ORIG ns | Candidate ns | Candidate/ORIG | Verdict |
+|---|---:|---:|---:|---|
+| `multi_dot/size/512` | 9,452,636 | 10,813,261 | 1.144x | no-ship: direct GEMM regression |
+| `matrix_power_nxn/size/512` | 28,623,197 | 26,653,691 | 0.931x | no-ship: noisy secondary row, not enough to offset direct regression |
+
+Benchmark commands: ORIG used `AGENT_NAME=BlueStone RCH_WORKER=vmi1264463
+RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b-apack
+rch exec -- cargo bench -j 1 -p fnp-linalg --profile release --bench
+criterion_linalg -- 'multi_dot/size/512|matrix_power_nxn/size/512'
+--sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher
+--noplot`; candidate used the same command from scratch worktree
+`/data/projects/.scratch/franken_numpy-bluestone-apack-20260628T024353Z`.
+
+Retry predicate: do not retry A-packing alone. The remaining GEMM wall is still an
+explicit `mul_add`/FMA kernel rewrite with golden-policy decision, or a broader
+packed-panel redesign that beats `multi_dot` directly on same-worker evidence.
+
 ## 2026-06-27 - KEEP: active-block deflation for values-only `eigvalsh_nxn/512`
 
 `BlueStone`. Dug the current structural `eigvalsh_nxn/512` gap after confirming no
