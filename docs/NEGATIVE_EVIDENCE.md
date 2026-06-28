@@ -105,6 +105,28 @@ the taxonomy every phantom "loss" this session fell into:
 Net: native-op surface CONVERGED across ~65 ops (surveys #1-#3, view-ops, conversion-ops); no
 landable 60-min lever; remaining frontier = the FMA-golden human decision. AGENT_NAME=BlackThrush.
 
+## 2026-06-28 - SURVEY #4 (strided/non-contig + boolean/index — last untested local families, all converged)
+
+`BlackThrush`. Closed the final two local-valid (non-BLAS) angles, both clean (interleaved
+measurement to dodge load-window bias):
+
+- **STRIDED / NON-CONTIGUOUS / FORTRAN-ORDER inputs (16 cases): all PARITY (r=0.96-1.03).**
+  1-D `a[::2]` (sqrt/abs/sum/mean/std/max/cumsum/sort/argsort), 2-D F-order axis reductions
+  (sum/std/max/cumsum axis0/axis1), strided-row 2-D (sum/sqrt). fnp defers non-contiguous inputs to
+  numpy WITHOUT a wasted pre-copy — the "defer-before-copy" lever family (107th) has NO residual on
+  strided inputs. All bit-EXACT.
+- **BOOLEAN / INDEX ops: win-or-parity.** count_nonzero 0.57-0.63x + axis 0.39-0.41x WINS, where-3arg
+  0.49x WIN, extract 0.63x WIN; nonzero/flatnonzero/argwhere/where-1arg PARITY; any/all FULL-SCAN
+  (all-False / all-True, no short-circuit) 0.58x/0.79x WIN + f64 0.97x parity. The any/all 1.4x
+  "loss" seen on a ~50%-True mask was the O(1) SHORT-CIRCUIT case (returns at first element in ~3us =
+  pyo3-wall artifact class 4, not a scan loss — confirmed by the full-scan win above).
+
+Net: this completes ~90 ops/cases swept this session across 6 families (general-native, view, conversion,
+strided, boolean/index, + the FMA/einsum/BLAS investigations) — ALL win-or-parity, EVERY apparent loss
+reduced to one of the 4 documented measurement-artifact classes (cache-resonance / local-fast-BLAS /
+load-window-bias / pyo3-wall-O(1)). Native-op surface DEFINITIVELY converged; no landable 60-min code
+lever; the only real frontier is the FMA-golden reproducibility wall (human decision). AGENT_NAME=BlackThrush.
+
 ## 2026-06-28 - NO-SHIP: A-panel packing for bit-exact packed GEMM
 
 `BlueStone`. After confirming no measured `.scratch` / `.worktrees` keep remained
