@@ -4,6 +4,44 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-28 - SURVEY (measured, all win-or-parity): native-op families polyval/trapezoid/histogram2d/dd/cross/kron/outer/inner/tensordot/matrix_power/multi_dot/lstsq/vdot — plus the vdot-4M cache-artifact TRAP
+
+`BlackThrush`. After the `+fma` correction closed the compute-kernel frontier, dug
+for a NEW landable lever in op families I had not personally swept this pass. Built
+`fnp-python` PER-CRATE (`cargo build -p fnp-python --release`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc`) and measured fnp vs
+numpy 2.4.3 (best-of-5/6, `OPENBLAS_NUM_THREADS=8`). EVERY family is win-or-parity —
+no landable loss:
+
+| op | size | fnp/np | note |
+|---|---|---:|---|
+| polyval (Horner) | deg8 4M / deg4 8M | 0.13x / 0.084x | native fused Horner, big WIN |
+| trapezoid | 4M / 16M | 0.074x / 0.024x | big WIN |
+| histogram2d | 1M / 4M, b=64 | 0.17x / 0.19x | WIN |
+| histogramdd 3-D | 1M / 2M, b=32 | 0.23x / 0.33x | WIN |
+| cross | 1M x3 | 0.044x | big WIN |
+| kron | 256² ⊗ 8² | 0.24x | WIN |
+| outer | 4096² | 0.94x | parity |
+| inner | 4M / 16M | 1.08x / 1.01x | parity |
+| tensordot | 256²·256² | 0.97x | parity |
+| matrix_power | 128, k=3/8/16 | 0.97-1.02x | parity |
+| multi_dot 4-chain | — | 1.04x | parity |
+| lstsq | 2000x200 | 1.02x | parity |
+| einsum `i,ij,j->` / `a,abc,c->b` | 2048 / 64·128·64 | 1.00x / 1.04x | parity (hub-contraction delegates — the old "3-op quadratic 15-27x loss" lead is ALREADY CLOSED) |
+
+**TRAP recorded — vdot-4M "2x loss" is a MEASUREMENT-ORDER CACHE ARTIFACT, do NOT
+chase it.** `vdot` at n=4M first read `r=2.14x` then `r=1.43x` (apparent LOSS), but
+`vdot` is a LITERAL `numpy.vdot` passthrough (fnp-python:25111 — no native path, so a
+kernel gap is IMPOSSIBLE). Order-flip proves it: measuring fnp-first gives `r=1.43x`
+(fnp reads the cold 32MB array, numpy then reads it L3-WARM); measuring numpy-first
+gives `r=0.94x` (parity). At n=16M (128MB ≫ L3) the warm-up cannot happen and it is
+flat parity `1.05x` at BOTH orders. So the "loss" is whichever side runs SECOND on the
+same array winning the cache — not code. LESSON: for a sub-millisecond reduction on a
+~L3-sized array, ALWAYS measure both orders (or use fresh arrays per rep); a
+single-order best-of-N manufactures a phantom 2x on passthrough ops. Native-op surface
+CONFIRMED converged; no landable 60-min lever. `partition`/`argpartition` already
+delegate to numpy (documented bridge-alloc tax). AGENT_NAME=BlackThrush.
+
 ## 2026-06-28 - NO-SHIP: A-panel packing for bit-exact packed GEMM
 
 `BlueStone`. After confirming no measured `.scratch` / `.worktrees` keep remained
