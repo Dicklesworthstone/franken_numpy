@@ -280,3 +280,49 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn add_multiply_accumulate_int_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    // integer/bool add.accumulate routes to the parallel cumsum path and
+    // multiply.accumulate to cumprod. Both must stay byte-identical to numpy's own
+    // add/multiply.accumulate (same int64/uint64 promotion + overflow wrap) above the
+    // 1<<21 gate, AND match np.cumsum / np.cumprod.
+    let script = fnp_script(
+        r#"
+n = (1 << 21) + 65
+rng = np.random.default_rng(2)
+ok = True
+
+# add.accumulate over several int/bool widths, incl. an overflow-wrap case
+for x in [
+    rng.integers(-50, 50, n).astype(np.int64),
+    rng.integers(-50, 50, n).astype(np.int32),
+    rng.integers(0, 7, n).astype(np.uint8),
+    (rng.integers(0, 2, n)).astype(np.bool_),
+    np.full(n, 9_000_000_000_000_000_000, dtype=np.int64),
+]:
+    a = fnp.add.accumulate(x); e = np.add.accumulate(x)
+    ok = ok and a.dtype == e.dtype and a.shape == e.shape and a.tobytes() == e.tobytes()
+    ok = ok and a.tobytes() == np.cumsum(x).tobytes()
+
+# multiply.accumulate (wrapping product)
+for x in [
+    np.where(np.arange(n) % 11 == 0, np.int64(-3), np.int64(2)),
+    rng.integers(0, 3, n).astype(np.uint32),
+]:
+    a = fnp.multiply.accumulate(x); e = np.multiply.accumulate(x)
+    ok = ok and a.dtype == e.dtype and a.tobytes() == e.tobytes()
+    ok = ok and a.tobytes() == np.cumprod(x).tobytes()
+
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large int add/multiply.accumulate must be bit-identical to numpy + cumsum/cumprod"
+    );
+    Ok(())
+}

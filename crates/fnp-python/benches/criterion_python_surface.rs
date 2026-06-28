@@ -2725,6 +2725,20 @@ x = rng.standard_normal(8_000_000)\n";
         group.bench_function("numpy_maximum_accumulate_i64_8m", |b| {
             b.iter(|| black_box(numpy_max.call_method1("accumulate", (&xi,)).expect("np max.accum i64")));
         });
+
+        // add.accumulate(int) routes to the parallel cumsum path (== np.cumsum); a win
+        // here proves the routing engages (vs the prior full delegation to numpy serial).
+        let fnp_add = module.getattr("add").expect("fnp add");
+        let numpy_add = numpy.getattr("add").expect("numpy add");
+        let xa = numpy
+            .call_method1("arange", (8_000_000_i64,))
+            .expect("8M i64 arange");
+        group.bench_function("fnp_add_accumulate_i64_8m", |b| {
+            b.iter(|| black_box(fnp_add.call_method1("accumulate", (&xa,)).expect("fnp add.accum i64")));
+        });
+        group.bench_function("numpy_add_accumulate_i64_8m", |b| {
+            b.iter(|| black_box(numpy_add.call_method1("accumulate", (&xa,)).expect("np add.accum i64")));
+        });
     });
 
     group.finish();
