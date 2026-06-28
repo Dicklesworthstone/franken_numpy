@@ -138,6 +138,51 @@ Retry predicate: do not widen generic `tensordot`, `inner`, `dot`, or dimensions
 above 1536 from this evidence. The keep is strictly the 2-D axes=1 matmul-shaped
 case where the existing `matmul` cap already proved the native path.
 
+## 2026-06-28 - NO-SHIP: lowering 2-D `np.tensordot(..., axes=1)` native window to 512 regresses
+
+`BlackThrush`. After no clean unlanded measured bench-worktree keep remained, dug
+the same BLAS-delegation seam from a different direction: maybe `tensordot` should
+delegate the 1024 flattened-GEMM row because a first same-worker read showed it
+slower than NumPy. Candidate changed only the `tensordot` max dim to 512. It
+REGRESSED the decisive same-worker row, so the source change was reverted. The
+landed BlueStone 1536-specific `axes=1` keep above remains the right direction;
+do not retry a broad cap-lowering lever from the noisy 1024 NumPy comparator.
+
+MEASURED against ORIG `47ebc98f` on worker `vmi1264463`, same command shape
+(`-p fnp-python`, release profile, `criterion_python_surface`, sample size 10):
+
+| Probe | ORIG ns | Candidate ns | Candidate/ORIG | Comparator |
+|---|---:|---:|---:|---|
+| `python_matmul_boundary/fnp_tensordot_axes1_1024x1024` | 96,740,122 | 127,150,705 | 1.314x | no-ship regression |
+| `python_matmul_boundary/numpy_tensordot_axes1_1024x1024` | 44,458,362 | 84,394,977 | 1.899x | noisy comparator/load window |
+
+The ORIG row was already a visible FNP/NumPy loss (`2.176x`), but delegating by
+lowering the cap made FNP slower, not faster. Treat this as a load-window artifact
+and keep the current native 1024 path unless a same-worker replacement kernel
+beats ORIG directly.
+
+Benchmark commands: ORIG used `AGENT_NAME=BlackThrush RCH_WORKER=vmi1264463
+RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1
+CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec --
+cargo bench -j 1 -p fnp-python --profile release --bench
+criterion_python_surface --
+'python_matmul_boundary/(fnp_tensordot_axes1_1024x1024|numpy_tensordot_axes1_1024x1024|fnp_tensordot_axes1_1536x1536|numpy_tensordot_axes1_1536x1536)'
+--sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher
+--noplot`; candidate used the same command narrowed to
+`'fnp_tensordot_axes1_1024x1024|numpy_tensordot_axes1_1024x1024'`.
+
+Source-status: the 512-cap change was reverted before commit. This commit keeps
+only the `criterion_python_surface` 1024/1536 `tensordot` rows that reproduce the
+decision boundary, plus this ledger entry.
+
+Conformance command: `AGENT_NAME=BlackThrush RCH_WORKER=vmi1264463
+RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1
+CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec --
+cargo test -j 1 -p fnp-python --profile release
+tensordot_native_gemm_gate_keeps_numpy_parity_across_sizes -- --nocapture`
+passed (`1` targeted unit test passed; `0` failures; filtered integration shards
+reported no selected failures). AGENT_NAME=BlackThrush.
+
 ## 2026-06-28 - SURVEY (measured, all win-or-parity): native-op families polyval/trapezoid/histogram2d/dd/cross/kron/outer/inner/tensordot/matrix_power/multi_dot/lstsq/vdot — plus the vdot-4M cache-artifact TRAP
 
 `BlackThrush`. After the `+fma` correction closed the compute-kernel frontier, dug

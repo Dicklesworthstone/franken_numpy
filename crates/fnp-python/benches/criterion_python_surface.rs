@@ -5113,6 +5113,30 @@ b3db = rng.standard_normal((256, 128, 128))\n";
                 });
             }
         }
+        let fnp_tensordot = module.getattr("tensordot").expect("fnp tensordot");
+        let np_tensordot = numpy.getattr("tensordot").expect("np tensordot");
+        for sz in ["1024", "1536"] {
+            let a = ns.get_item(format!("a{sz}")).expect("a");
+            let b = ns.get_item(format!("b{sz}")).expect("b");
+            group.bench_function(format!("fnp_tensordot_axes1_{sz}x{sz}"), |bch| {
+                bch.iter(|| {
+                    black_box(
+                        fnp_tensordot
+                            .call1((&a, &b, 1_i64))
+                            .expect("fnp call"),
+                    )
+                });
+            });
+            group.bench_function(format!("numpy_tensordot_axes1_{sz}x{sz}"), |bch| {
+                bch.iter(|| {
+                    black_box(
+                        np_tensordot
+                            .call1((&a, &b, 1_i64))
+                            .expect("numpy call"),
+                    )
+                });
+            });
+        }
         // Batched (3-D) matmul: native parallel-across-batch packed GEMM vs numpy slow BLAS.
         for (tag, ak, bk) in [("64x256x256", "a3d", "b3d"), ("256x128x128", "a3db", "b3db")] {
             let a = ns.get_item(ak).expect("a3d");
