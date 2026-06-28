@@ -4,6 +4,31 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-28 - WIN (LANDED): np.trapezoid scalar `iter().sum()` -> 8-lane SIMD `base_sum_simd` — 64K-256K 1.2-1.4x LOSS resolved to WIN; NOT a gate, a KERNEL fix
+
+`BlackThrush`. The trapezoid gate-raise was REVERTED last cycle as "load-noise-unmeasurable", but
+robust median-of-50 x3 RAYON=1 measurement proved the 64K-256K loss is REAL and STABLE, not noise:
+the serial path summed with `data.iter().sum()` (strict left-to-right order => the compiler may NOT
+auto-vectorize => one f64 add per element), while numpy reduces with a SIMD `add.reduce`. That is a
+genuine ~1.2-1.4x KERNEL gap at L3-resident sizes, NOT a mistuned gate (raising the gate only swaps
+one slow serial path for another). The parallel path's per-chunk `c.iter().sum::<f64>()` had the
+same scalar-sum defect.
+
+FIX (kernel, not gate): both the flat path and the lastaxis rowtrap closure now call the existing
+`base_sum_simd` (8-lane `Simd<f64,8>` accumulator — the same helper np.sum's zero-copy path uses).
+trapezoid is allclose-not-bit-exact to numpy already (it uses the `dx*(sum - (a[0]+a[-1])/2)`
+shortcut, not numpy's per-term `(a[i]+a[i+1])/2` accumulation), so the SIMD reorder stays well
+within the existing ~1e-16 tolerance.
+
+MEASURED (RAYON=8, interleaved median, vs numpy 2.4.3): flat 64K **0.61x** (was 1.2-1.4x LOSS),
+256K 0.23x, 1M 0.10x, 4M 0.04x; lastaxis 512x512 0.20x, 2048x512 0.10x, 512x4096 0.11x. All
+`np.allclose`. Conformance: 6/6 trapezoid tests pass (scalar/dx+axis/x-spacing/broadcast-x/
+same-shape-x/trapz-alias). LESSON: when a mistuned-gate candidate's RAYON=1 serial ALSO loses
+robustly (not noisily), it's a KERNEL floor, not a gate — but a SCALAR-SUM kernel floor is itself
+fixable by swapping `iter().sum()` -> the SIMD accumulator (auto-vectorization does not happen for
+strict-order f64 reductions). Grep other zero-copy helpers for `.iter().sum()` / `iter().sum::<f64>()`
+on hot reduce paths. AGENT_NAME=BlackThrush.
+
 ## 2026-06-28 - SURVEY (gate-sweep #3, RAYON=8): remaining low/axis gates well-tuned; nanargmax-LASTAXIS noisy non-lever — gate-crossover vein converging
 
 `BlackThrush`. After 3 gate wins, swept the remaining un-checked `*_PARALLEL_MIN` gates at
