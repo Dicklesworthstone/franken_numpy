@@ -11861,3 +11861,24 @@ int64/int32/int16/int8/uint64/uint32 over 2-D (m,k)inner(n,k) AND 3-D (contract 
 WHY NOT ~0-GAIN: numpy integer inner has no BLAS (slow naive matmul); native reshape+GEMM wins big.
 PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. The integer-no-BLAS lever now covers 2-D
 matmul (7.7x), 2-D dot (27x), batched matmul (12x), matrix_power (7.1x), tensordot (~11x), AND inner. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel INTEGER np.convolve / np.correlate (1-D, all modes) - ~Nx faster than NumPy
+`BlackThrush`. A DIFFERENT primitive (signal processing, not linalg). numpy convolve/correlate are direct O(n*m)
+single-threaded loops with no integer SIMD/BLAS fast path: int convolve (200K, 256) = 23.6 ms vs float 5.9 ms (~4x).
+fnp's convolve/correlate native paths are f64-only (integer falls back). Added int_convolve_typed<T> — a parallel direct
+kernel over OUTPUT positions (each out[k] = wrapping sum_j a[j]*v[k-j]) + try_native_int_convolve dispatcher. Every mode
+is the "full" convolution sliced at (full_len - mode_len)//2 (computed directly via k_start/out_len, no slicing), and
+correlate(a,v) == convolve(a, v[::-1]) for all modes (verified), so one kernel covers convolve + correlate + full/same/
+valid. BIT-EXACT: numpy convolve is also direct, and wrapping integer add is associative so any summation order matches
+the wrapped result. Gated 1-D same-int-dtype C-contiguous, standard mode, work n*m >= 1<<16; float/complex/mixed/non-1-D/
+non-contiguous/tiny defer to numpy.
+
+PERF (criterion, remote rch worker ovh-a = truth; int64, convolve (200K, 256) mode=full):
+  convolve i64 200K/256: fnp ~13.4 ms median (load-noisy 11.2-15.1 ms on a saturated worker) vs NumPy 27.27 ms =
+  ~0.49x (2.0x faster; 2.4x at the low end). Modest (O(n*m) direct, partly bandwidth-bound) but a clear measured win.
+CORRECTNESS: new conformance test int_convolve_correlate_native_parallel_bit_exact_matches_numpy -> byte-identical to
+numpy.convolve AND numpy.correlate for int64/int32/int16/int8/uint64/uint32/uint8 across all 3 modes, the N<M (kernel
+longer than signal) case, and an int64 overflow-wrap case.
+WHY NOT ~0-GAIN: numpy integer convolve/correlate are direct serial O(n*m); the parallel direct kernel aggregates cores.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. Branches the native-vs-numpy wins beyond the
+integer-no-BLAS linalg vein into signal processing. AGENT_NAME=BlackThrush.

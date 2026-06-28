@@ -245,3 +245,44 @@ fn convolution_fnp_python_module_paths_match_numpy() {
         Ok(())
     });
 }
+
+#[test]
+fn int_convolve_correlate_native_parallel_bit_exact_matches_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        ns.set_item("fnp", &module)?;
+        ns.set_item("np", &numpy)?;
+        let script = r#"
+rng = np.random.default_rng(31)
+ok = True
+for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint8]:
+    info = np.iinfo(dt)
+    a = rng.integers(info.min // 4, info.max // 4, 5000).astype(dt)
+    v = rng.integers(info.min // 4, info.max // 4, 300).astype(dt)
+    for mode in ['full', 'same', 'valid']:
+        rc = fnp.convolve(a, v, mode); ec = np.convolve(a, v, mode)
+        ok = ok and rc.dtype == ec.dtype and rc.shape == ec.shape and rc.tobytes() == ec.tobytes()
+        rk = fnp.correlate(a, v, mode); ek = np.correlate(a, v, mode)
+        ok = ok and rk.dtype == ek.dtype and rk.shape == ek.shape and rk.tobytes() == ek.tobytes()
+    a2 = rng.integers(info.min // 8, info.max // 8, 200).astype(dt)
+    v2 = rng.integers(info.min // 8, info.max // 8, 4000).astype(dt)
+    for mode in ['full', 'same', 'valid']:
+        ok = ok and fnp.convolve(a2, v2, mode).tobytes() == np.convolve(a2, v2, mode).tobytes()
+a = np.full(4000, 5_000_000_000, dtype=np.int64)
+v = np.full(300, 5_000_000_000, dtype=np.int64)
+ok = ok and fnp.convolve(a, v, 'full').tobytes() == np.convolve(a, v, 'full').tobytes()
+result_ok = bool(ok)
+"#;
+        py.run(
+            std::ffi::CString::new(script).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let ok: bool = ns.get_item("result_ok")?.unwrap().extract()?;
+        assert!(
+            ok,
+            "native integer convolve/correlate must be bit-identical to numpy"
+        );
+        Ok(())
+    });
+}

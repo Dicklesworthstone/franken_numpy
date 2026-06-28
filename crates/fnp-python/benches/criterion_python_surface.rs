@@ -4464,6 +4464,45 @@ fn bench_clip_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_int_convolve_boundary(c: &mut Criterion) {
+    // Integer 1-D convolve/correlate: numpy is a direct serial loop (no int fast path).
+    let mut group = c.benchmark_group("python_int_convolve_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(12)\n\
+a = rng.integers(-100, 100, 200_000).astype(np.int64)\n\
+v = rng.integers(-100, 100, 256).astype(np.int64)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("int convolve setup");
+        let a = ns.get_item("a").expect("a");
+        let v = ns.get_item("v").expect("v");
+        let fnp_conv = module.getattr("convolve").expect("fnp convolve");
+        let numpy_conv = numpy.getattr("convolve").expect("numpy convolve");
+        group.bench_function("fnp_convolve_i64_200k_256", |b| {
+            b.iter(|| black_box(fnp_conv.call1((&a, &v, "full")).expect("fnp int convolve")));
+        });
+        group.bench_function("numpy_convolve_i64_200k_256", |b| {
+            b.iter(|| black_box(numpy_conv.call1((&a, &v, "full")).expect("numpy int convolve")));
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_where_boundary(c: &mut Criterion) {
     // f64 np.where(mask, a, b) arr/arr at 8M — above the 1<<21 gate. Serial Cell select
     // was numpy-parity; parallel raw-slice select aggregates bandwidth and should win.
@@ -5612,6 +5651,7 @@ criterion_group!(
     bench_sqrt_input_extraction,
     bench_around_boundary,
     bench_where_boundary,
+    bench_int_convolve_boundary,
     bench_clip_boundary,
     bench_unary_parallel_boundary,
     bench_int32_unary_boundary,
