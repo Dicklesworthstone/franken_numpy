@@ -5232,6 +5232,28 @@ bf[np.abs(bf) < 1e-3] = np.float32(1.5)\n";
                 bch.iter(|| black_box(numpy_fn.call1((&af, &bf)).expect("numpy f32 call")));
             });
         }
+        // integer gcd: numpy np.gcd is a single-threaded Euclid element loop (16M int64 ~995ms);
+        // native parallel Euclid kernel wins big (bit-exact).
+        let gcd_setup = "import numpy as np\n\
+rng = np.random.default_rng(6)\n\
+ag = rng.integers(1, 10**9, 16_000_000).astype(np.int64)\n\
+cg = rng.integers(1, 10**9, 16_000_000).astype(np.int64)\n";
+        py.run(
+            std::ffi::CString::new(gcd_setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("gcd setup");
+        let ag = ns.get_item("ag").expect("ag");
+        let cg = ns.get_item("cg").expect("cg");
+        let fnp_gcd = module.getattr("gcd").expect("fnp gcd");
+        let numpy_gcd = numpy.getattr("gcd").expect("numpy gcd");
+        group.bench_function("fnp_gcd_i64_16m", |bch| {
+            bch.iter(|| black_box(fnp_gcd.call1((&ag, &cg)).expect("fnp gcd call")));
+        });
+        group.bench_function("numpy_gcd_i64_16m", |bch| {
+            bch.iter(|| black_box(numpy_gcd.call1((&ag, &cg)).expect("numpy gcd call")));
+        });
     });
 
     group.finish();

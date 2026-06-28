@@ -449,6 +449,46 @@ print(ok)
 }
 
 #[test]
+fn int_gcd_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy np.gcd is a single-threaded element loop; the native parallel Euclid kernel must be
+    // byte-identical for every integer width, incl signed INT_MIN (|INT_MIN| wraps in two's
+    // complement) and zeros, above the 1<<18 gate.
+    let script = fnp_script(
+        r#"
+n = (1 << 18) + 257
+rng = np.random.default_rng(9)
+ok = True
+for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint16, np.uint8]:
+    info = np.iinfo(dt)
+    a = rng.integers(info.min, info.max, n, dtype=dt)
+    b = rng.integers(info.min, info.max, n, dtype=dt)
+    # seed edges: INT_MIN, INT_MAX, 0, +-1, equal pairs
+    a[0]=info.min; b[0]=info.min
+    a[1]=info.min; b[1]=dt(0)
+    a[2]=dt(0);    b[2]=dt(0)
+    a[3]=info.max; b[3]=info.min
+    a[4]=dt(0);    b[4]=info.max
+    r = fnp.gcd(a, b); e = np.gcd(a, b)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# 2-D shape preserved
+a2 = rng.integers(1, 10**9, (600, 600)).astype(np.int64)
+b2 = rng.integers(1, 10**9, (600, 600)).astype(np.int64)
+ok = ok and fnp.gcd(a2, b2).tobytes() == np.gcd(a2, b2).tobytes()
+ok = ok and fnp.gcd(a2, b2).shape == np.gcd(a2, b2).shape
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native int gcd must be bit-identical to numpy across all widths incl INT_MIN: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_unary_floor_ceil_trunc_rint_parallel_full_domain_bit_exact_matches_numpy() -> Result<(), String>
 {
     // numpy has no native f16 ALU: floor/ceil/trunc/rint widen->f32->op->narrow (compute-bound).

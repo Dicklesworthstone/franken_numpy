@@ -12022,3 +12022,23 @@ WHY NOT ~0-GAIN: numpy f32 nextafter is single-threaded compute (~83ms, ~5x abov
 f32 bit-step aggregates cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f32-binary
 class now covers fmod/copysign/remainder/nextafter; remaining bit-exact-safe lead: maximum/minimum (~39ms, bandwidth,
 modest, UFuncKinds->hook __call__). arctan2/hypot/logaddexp/float_power = libm-divergence-risky (defer). AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel INTEGER gcd - numpy np.gcd is a single-threaded Euclid loop
+`BlackThrush`. A DIFFERENT primitive (integer number-theoretic, not elementwise arithmetic). numpy's np.gcd is a
+single-threaded element loop running Euclid's algorithm per element — division-heavy and COMPUTE-bound: 16M int64
+~995ms, int32 ~890ms (far above the ~bandwidth floor). fnp delegated it entirely (native_binary_gcd_or_passthrough =
+core_numpy_passthrough). Added gcd_binary_typed<T> + try_native_int_gcd: read both operands as &[T] (zero-copy
+PyBuffer), par_chunks_mut compute gcd of the two's-complement magnitudes via euclid_u64 (all widths i8..u64 fit in u64),
+write straight into a fresh numpy.empty(dtype). Hooked into the gcd pyfunction above the passthrough.
+BIT-EXACT: numpy gcd = gcd(|a|,|b|) returned non-negative in the input dtype with the magnitude taken in two's
+complement, so |INT_MIN| = 2^(w-1) and the u64 gcd cast back wrapping reproduces numpy EXACTLY (gcd(INT_MIN,INT_MIN)=
+INT_MIN, gcd(INT_MIN,0)=INT_MIN) — verified vs np.gcd over edge cases (INT_MIN/MAX/0/+-1) for every width and 200K+
+random. Same-shape C-contiguous same-int-dtype only (no broadcast), n>=1<<18; scalar/broadcast/mixed/non-contiguous defer.
+
+PERF (criterion, rch worker = truth; int64, 16M elements):
+  gcd i64 16M: fnp 56.84 ms vs NumPy 1101.0 ms = 0.052x / ~19.4x faster
+CORRECTNESS: new conformance test int_gcd_parallel_large_bit_exact_matches_numpy -> byte-identical to numpy across
+ALL int widths (i8..u64) incl INT_MIN/INT_MAX/0 edges above the gate + a 2-D shape-preserving case.
+WHY NOT ~0-GAIN: numpy int gcd is single-threaded Euclid (~995ms, deeply compute-bound); the parallel kernel aggregates
+cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. OPEN follow-up: np.lcm (same ~995ms,
+= |a/gcd*b| — reuses euclid but must match numpy's exact op order for wrap-bit-exactness). AGENT_NAME=BlackThrush.
