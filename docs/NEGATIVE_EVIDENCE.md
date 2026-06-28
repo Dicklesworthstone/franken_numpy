@@ -12298,3 +12298,18 @@ over the full f16 domain for 6 bound pairs (incl zero/reversed) + a 2-D case.
 WHY NOT ~0-GAIN: numpy f16 clip widens to f32 (~149ms); the native parallel clamp aggregates cores.
 PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f16-no-ALU elementwise vein now also covers
 clip; array-bounds clip / None one-sided bounds still defer. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 round/around (decimals=0) - routes to the f16 rint kernel
+`BlackThrush`. np.round/np.around(f16, decimals=0) == round-half-even (rint); numpy widens f16->f32 (16M ~120ms).
+fnp's around() had f64/f32/int decimals=0 paths but f16 fell through to numpy. Added a one-line route: decimals==0 &&
+f16 -> try_zerocopy_f16_unary_widen(Rint) (the SAME native parallel widen-rint kernel already shipped for fnp.rint).
+round() and around() share the dispatcher, so both gain. decimals!=0 still defers (f16 scaling can overflow).
+BIT-EXACT: round(decimals=0) is exactly rint; the f16 widen-rint kernel was already verified byte-exact vs numpy over
+the full f16 domain (IEEE roundToIntegral, warning-free). Re-verified here for round/around specifically.
+
+PERF (criterion, rch worker = truth; f16, 16M elements):
+  round f16 16M: fnp 5.54 ms vs NumPy 126.55 ms = 0.044x / ~22.8x faster
+CORRECTNESS: new conformance test f16_round_decimals0_full_domain_bit_exact_matches_numpy -> byte-identical to numpy
+(round + around) over the full f16 domain + a 2-D case.
+WHY NOT ~0-GAIN: numpy f16 round widens to f32 (~120ms); the native parallel widen-rint aggregates cores.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. AGENT_NAME=BlackThrush.

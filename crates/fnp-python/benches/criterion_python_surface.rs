@@ -5242,6 +5242,17 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
                 });
             });
         }
+        // f16 round (decimals=0 == rint): numpy widens f16->f32 (~120ms@16M).
+        {
+            let fnp_round = module.getattr("round").expect("fnp round");
+            let numpy_round = numpy.getattr("round").expect("numpy round");
+            group.bench_function("fnp_round_f16_16m", |bch| {
+                bch.iter(|| black_box(fnp_round.call1((&ha,)).expect("fnp f16 round")));
+            });
+            group.bench_function("numpy_round_f16_16m", |bch| {
+                bch.iter(|| black_box(numpy_round.call1((&ha,)).expect("numpy f16 round")));
+            });
+        }
         // f16 flat min/max reduction: numpy widens f16->f32 to reduce (~80ms@16M); native
         // parallel f32-fold reduce wins (bit-exact, defers NaN / zero-extremum). hsq is all
         // non-negative with a non-zero max -> exercises the kernel.
