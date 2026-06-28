@@ -11901,3 +11901,28 @@ WHY NOT ~0-GAIN: numpy integer multi_dot is a no-BLAS matmul chain; the native p
 PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. The integer-no-BLAS linalg vein is now
 COMPLETE: matmul (7.7x), dot (27x), batched matmul (12x), matrix_power (7.1x), tensordot (~11x), inner (5.7x), multi_dot.
 Plus signal-processing convolve/correlate (2x). AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 elementwise add/multiply/subtract - numpy has no native f16 ALU
+`BlackThrush`. A NEW dtype-gap class (beyond integer-no-BLAS): numpy has NO native f16 ALU, so every f16 binary op
+WIDENS each operand to f32, applies the op, and NARROWS back (round-to-nearest-even) — ~2.2x slower than f32 (16M f16 add
+= 80ms vs f32 36ms). Crucially this is COMPUTE-bound on the widen/narrow (NOT bandwidth: numpy's 80ms is ~8x above the
+~10ms bandwidth floor), so there is real parallel headroom — unlike the f64-unary memory-bandwidth WALL. The binary ufunc
+__call__ only had an f64 native path; f16 passed through to numpy. Added try_zerocopy_f16_binary_widen: views both f16
+operands as uint16 (zero-copy), parallel widen (f16::from_bits.to_f32) -> op in f32 -> narrow (f16::from_f32.to_bits) ->
+view result back to float16. BIT-EXACT: numpy f16 ops have no native ALU and double-round through f32 exactly the same
+way, so the f32 intermediate matches numpy byte-for-byte (verified incl. inf/nan/-0.0/overflow for add/sub/mul AND div).
+Scoped to add/multiply/subtract (skip divide: its div-by-zero RuntimeWarning is the known pre-existing surface), same-
+shape C-contiguous f16, default kwargs, n >= 1<<20. Broadcasting / other dtypes / small / out=/where=/dtype= defer.
+
+PERF (criterion, remote rch worker = truth; f16, 16M elements):
+  add f16 16M:      fnp 4.62 ms vs NumPy 91.65 ms = 0.050x / ~19.8x faster
+  multiply f16 16M: fnp 4.29 ms vs NumPy 90.44 ms = 0.047x / ~21.1x faster
+NumPy is compute-bound on the widen/narrow (~90 ms is ~9x above the ~10 ms bandwidth floor; f32 same op ~36 ms);
+the native parallel widen->op->narrow over 64 cores collapses that to ~4.5 ms (near the bandwidth floor of the
+~96 MB f16 traffic). The ~20x is the parallel-compute aggregate, not a kernel trick. Conformance proves bit-exactness.
+CORRECTNESS: new conformance test f16_binary_add_mul_sub_parallel_large_bit_exact_matches_numpy -> byte-identical to
+numpy for add/multiply/subtract (function + operator forms) incl. inf/-inf/nan/-0.0/overflow->inf and a 2-D case.
+WHY NOT ~0-GAIN: numpy f16 binary is compute-bound (widen/narrow), ~8x above the bandwidth floor; native parallel widen-
+op-narrow aggregates cores. (Contrast the f64-unary WALL where numpy IS at bandwidth.) PRE-EXISTING (not mine):
+conformance_ufunc_edge::ufunc_signature_has_x1_x2. Opens the f16-no-ALU class; f16 divide (warning surface) and f16 unary
+(sqrt/exp etc.) remain. AGENT_NAME=BlackThrush.

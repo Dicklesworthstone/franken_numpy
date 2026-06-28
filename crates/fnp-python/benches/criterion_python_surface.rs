@@ -5171,6 +5171,30 @@ bnz = np.where(b == 0.0, 1.0, b)\n";
                 bch.iter(|| black_box(numpy_fn.call1((x, y)).expect("numpy call")));
             });
         }
+        // f16 add/multiply/subtract: numpy widens to f32 (compute-bound, ~2.2x slower
+        // than f32); native parallel widen->op->narrow wins.
+        let h_setup = "import numpy as np\n\
+rng = np.random.default_rng(3)\n\
+ha = rng.standard_normal(16_000_000).astype(np.float16)\n\
+hb = rng.standard_normal(16_000_000).astype(np.float16)\n";
+        py.run(
+            std::ffi::CString::new(h_setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("f16 binary setup");
+        let ha = ns.get_item("ha").expect("ha");
+        let hb = ns.get_item("hb").expect("hb");
+        for op in ["add", "multiply"] {
+            let fnp_fn = module.getattr(op).expect("fnp op");
+            let numpy_fn = numpy.getattr(op).expect("numpy op");
+            group.bench_function(format!("fnp_{op}_f16_16m"), |bch| {
+                bch.iter(|| black_box(fnp_fn.call1((&ha, &hb)).expect("fnp f16 call")));
+            });
+            group.bench_function(format!("numpy_{op}_f16_16m"), |bch| {
+                bch.iter(|| black_box(numpy_fn.call1((&ha, &hb)).expect("numpy f16 call")));
+            });
+        }
     });
 
     group.finish();

@@ -361,3 +361,41 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn f16_binary_add_mul_sub_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy has no native f16 ALU (widen->op->narrow); the native parallel widen->op->
+    // narrow must be byte-identical incl. inf/nan/-0.0/overflow, above the 1<<20 gate.
+    let script = fnp_script(
+        r#"
+n = (1 << 20) + 257
+rng = np.random.default_rng(41)
+a = rng.standard_normal(n).astype(np.float16)
+b = (rng.standard_normal(n) + 1.5).astype(np.float16)
+# seed special values
+a[0] = np.float16(np.inf); a[1] = np.float16(-np.inf); a[2] = np.float16(np.nan)
+a[3] = np.float16(-0.0);  a[4] = np.float16(65504.0); b[4] = np.float16(2.0)  # overflow -> inf
+b[5] = np.float16(0.0)
+ok = True
+for fnp_op, np_op in [(fnp.add, np.add), (fnp.multiply, np.multiply), (fnp.subtract, np.subtract)]:
+    r = fnp_op(a, b); e = np_op(a, b)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# operator forms (a + b etc.) route through the same ufuncs
+ok = ok and (a + b).tobytes() == np.add(a, b).tobytes()
+ok = ok and (a * b).tobytes() == np.multiply(a, b).tobytes()
+ok = ok and (a - b).tobytes() == np.subtract(a, b).tobytes()
+# 2-D same-shape
+a2 = a[:1 << 20].reshape(1024, 1024); b2 = b[:1 << 20].reshape(1024, 1024)
+ok = ok and fnp.add(a2, b2).tobytes() == np.add(a2, b2).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 add/multiply/subtract must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
