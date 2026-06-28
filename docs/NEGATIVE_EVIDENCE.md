@@ -4,6 +4,33 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-28 - WIN (LANDED): np.trapezoid f32 widening-SIMD kernel + ALL FOUR gates 1<<16 -> 1<<20 — kernel fix REVEALED a mistuned gate (64K f32 1.40x LOSS -> 0.28x win)
+
+`BlackThrush`. SECOND stage on trapezoid, the textbook "kernel fix reveals a now-mistuned gate"
+sequence. After the f64 scalar->SIMD kernel landed (fe81a2d1), grepped the sibling `.iter().map(|&v|
+v as f64).sum()` and found the **f32** trapezoid path (flat + lastaxis `row_f32` closure) had the same
+scalar-widen-sum defect: f32 32K/64K read 1.40x/1.25x LOSS. Added `base_sum_simd_f32_to_f64` (8-lane
+`Simd<f32,8>.cast::<f64>()` widening accumulate — preserves the path's deliberate f64 accumulation,
+which is MORE accurate than numpy's f32 pairwise: measured fnp_err 7.5e-6 vs np_err 3.8e-5; the f64
+lane-reorder noise ~1e-13 is far below the f32 ULP so the f32 output is effectively unchanged). That
+fixed 32K (1.40x -> 0.38x) but **64K was STILL 1.40x LOSS** — because 64K = exactly the `1<<16` gate,
+so the now-fast serial kernel was being bypassed for the parallel path, whose rayon fan-out on a tiny
+256KB array ate the entire win.
+
+RE-MEASURED serial(RAYON=1) vs parallel(RAYON=8) for ALL FOUR paths (f64/f32 x flat/lastaxis): the
+serial SIMD kernel wins at EVERY size to ~512K, parallel only pulls ahead at >=1M — a unified ~1M
+crossover. The old 64K gate was ~16x too low for all four. Raised `TRAPEZOID_PARALLEL_MIN` (f64 flat +
+f64 lastaxis) and `TRAPEZOID_F32_PARALLEL_MIN` (drives both f32 branches) 1<<16 -> 1<<20. This also
+RETRO-IMPROVES the f64 path just shipped: f64 64K 0.64x (parallel) -> 0.19x (serial).
+
+MEASURED RAYON=8 vs numpy 2.4.3 (post-fix, all WIN, was LOSS/weak at small): f32 flat 64K **0.28x**
+(was 1.40x LOSS), 128K 0.26x, 512K 0.23x, 1M 0.16x, 4M 0.02x; f64 flat 64K 0.19x (was 0.64x), 512K
+0.15x, 4M 0.04x; lastaxis f32 64K 0.20x (was 0.93x par), f64 64K 0.16x (was 0.56x). Conformance 6/6
+trapezoid tests + 46/46 cross-dtype/shape/axis/dx/x Python sweep, 0 fail. LESSON: after a kernel
+speedup, the op's parallel GATE is almost always now mistuned (the faster serial path pushes the
+crossover UP) — always RE-MEASURE serial-vs-parallel across sizes post-kernel-fix and re-tune the
+gate; the kernel fix alone left a 1.40x loss sitting at the old gate boundary. AGENT_NAME=BlackThrush.
+
 ## 2026-06-28 - WIN (LANDED): np.trapezoid scalar `iter().sum()` -> 8-lane SIMD `base_sum_simd` — 64K-256K 1.2-1.4x LOSS resolved to WIN; NOT a gate, a KERNEL fix
 
 `BlackThrush`. The trapezoid gate-raise was REVERTED last cycle as "load-noise-unmeasurable", but
