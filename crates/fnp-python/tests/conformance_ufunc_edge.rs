@@ -664,6 +664,39 @@ print(ok)
 }
 
 #[test]
+fn f16_flat_ptp_reduction_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy widens f16->f32 for ptp (max-min); the native parallel one-pass max-min reduce
+    // narrowed to f16 must be byte-identical, above the 1<<20 gate. NaN defers to numpy.
+    let script = fnp_script(
+        r#"
+n = (1 << 20) + 257
+rng = np.random.default_rng(37)
+ok = True
+for scale in (1.0, 50.0, 500.0):
+    x = (rng.standard_normal(n) * scale).astype(np.float16)
+    x[5] = np.float16(np.inf); x[6] = np.float16(-np.inf)
+    r = fnp.ptp(x); e = np.ptp(x)
+    ok = ok and r.dtype == e.dtype and r.view(np.uint16) == e.view(np.uint16)
+# all-equal -> ptp 0; mixed signed zeros -> ptp 0
+z = np.full(n, np.float16(3.0)); z[: n // 2] = np.float16(-0.0); z[n // 2 :] = np.float16(0.0)
+ok = ok and fnp.ptp(z).view(np.uint16) == np.ptp(z).view(np.uint16)
+# NaN defers to numpy and still matches
+nan_arr = (rng.standard_normal(n) * 50.0).astype(np.float16); nan_arr[9] = np.float16(np.nan)
+ok = ok and np.isnan(fnp.ptp(nan_arr)) and np.isnan(np.ptp(nan_arr))
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 ptp must be bit-identical to numpy (kernel + NaN defer): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_flat_min_max_reduction_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy widens f16->f32 to reduce; the native parallel f32-fold reduce narrowed to f16 must
     // be byte-identical for the no-NaN / non-zero-extremum case, above the 1<<20 gate. NaN and

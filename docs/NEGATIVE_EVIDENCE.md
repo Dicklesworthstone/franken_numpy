@@ -12242,3 +12242,20 @@ WHY NOT ~0-GAIN: numpy f16 reduction widens to f32 (~80ms); the native parallel 
 PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. OPEN f16 reduction follow-ups: argmin/argmax
 (~68ms, deterministic first-index — check NaN-index semantics), ptp (~167ms = max-min, both order-indep), axis (not just
 flat) min/max. sum/mean reductions are ORDER-SENSITIVE (numpy pairwise) = NOT trivially bit-exact. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 flat ptp (max - min) - the slowest f16 reduction in numpy
+`BlackThrush`. Extends the f16 reduction sub-vein. numpy widens f16->f32 for ptp (16M ~167ms = ~28x f32, the slowest
+f16 reduction). Added try_zerocopy_f16_ptp_flat: one rayon par_chunks pass computing (any_nan, f32 max, f32 min),
+result = narrow(max_f32 - min_f32), return a numpy float16 scalar. Hooked into the ptp() pyfunction for axis=None && f16,
+ABOVE the existing f16 delegation.
+BIT-EXACT: max/min are order-independent and ptp = narrow(max_f32 - min_f32) == numpy's widen-reduce (verified vs numpy
+incl signed zeros / inf / all-equal). ptp is non-negative so there is NO signed-zero tie (unlike bare min/max). Any NaN
+DEFERS to numpy (return None -> existing fallback) and still matches.
+
+PERF (criterion, rch worker = truth; f16, 16M elements, kernel path):
+  ptp f16 16M: fnp 2.65 ms vs NumPy 77.34 ms = 0.034x / ~29.1x faster
+CORRECTNESS: new conformance test f16_flat_ptp_reduction_bit_exact_matches_numpy -> byte-identical to numpy across
+scales incl inf / all-equal / mixed signed zeros + the NaN DEFER path.
+WHY NOT ~0-GAIN: numpy f16 ptp widens to f32 (~167ms); the native parallel one-pass max-min aggregates cores.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f16 reduction sub-vein: flat min/max + ptp.
+OPEN: argmin/argmax (~68ms, first-index — check numpy nan-index), AXIS (non-flat) min/max/ptp. AGENT_NAME=BlackThrush.
