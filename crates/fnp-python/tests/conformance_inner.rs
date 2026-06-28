@@ -239,3 +239,40 @@ print(all_pass)
     );
     Ok(())
 }
+
+#[test]
+fn int_inner_native_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy integer inner = no-BLAS a@b^T (slow). Native route (reshape + contiguous
+    // b^T -> int GEMM) must be byte-identical incl. overflow wrap and >2-D shapes.
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(29)
+ok = True
+for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32]:
+    info = np.iinfo(dt)
+    # 2-D inner: (m,k) inner (n,k) -> (m,n)
+    a = rng.integers(info.min // 4, info.max // 4, (90, 130)).astype(dt)
+    b = rng.integers(info.min // 4, info.max // 4, (77, 130)).astype(dt)
+    r = fnp.inner(a, b); e = np.inner(a, b)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+    # 3-D inner (contracts last axis): (x,y,k) inner (z,k) -> (x,y,z)
+    a3 = rng.integers(info.min // 8, info.max // 8, (8, 12, 64)).astype(dt)
+    b2 = rng.integers(info.min // 8, info.max // 8, (40, 64)).astype(dt)
+    r3 = fnp.inner(a3, b2); e3 = np.inner(a3, b2)
+    ok = ok and r3.dtype == e3.dtype and r3.shape == e3.shape and r3.tobytes() == e3.tobytes()
+# overflow wrap (int64)
+a = np.full((120, 100), 5_000_000_000, dtype=np.int64)
+b = np.full((110, 100), 5_000_000_000, dtype=np.int64)
+ok = ok and fnp.inner(a, b).tobytes() == np.inner(a, b).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native integer inner must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}

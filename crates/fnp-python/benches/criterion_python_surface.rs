@@ -5375,6 +5375,15 @@ bbi = rng.integers(-100, 100, (64, 128, 128)).astype(np.int64)\n";
             group.bench_function("numpy_dot_i64_512x512", |bch| {
                 bch.iter(|| black_box(np_dot.call1((&a, &b)).expect("numpy int dot")));
             });
+            // integer np.inner(2d,2d) = a @ b^T routes to the native int GEMM.
+            let fnp_inner = module.getattr("inner").expect("fnp inner");
+            let np_inner = numpy.getattr("inner").expect("np inner");
+            group.bench_function("fnp_inner_i64_512x512", |bch| {
+                bch.iter(|| black_box(fnp_inner.call1((&a, &b)).expect("fnp int inner")));
+            });
+            group.bench_function("numpy_inner_i64_512x512", |bch| {
+                bch.iter(|| black_box(np_inner.call1((&a, &b)).expect("numpy int inner")));
+            });
         }
         // INTEGER tensordot(axes=1) (64,64,64): numpy no-BLAS slow; routes to native int GEMM.
         let tdi_setup = "import numpy as np\n\

@@ -11844,3 +11844,21 @@ int64/int32/int16/int8/uint64/uint32 over axes=1 (3-D) AND axes=2 (multi-axis), 
 WHY NOT ~0-GAIN: numpy integer tensordot has no BLAS (slow flattened naive matmul); native reshape+GEMM wins big.
 PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. The integer-no-BLAS lever now covers 2-D
 matmul (7.7x), 2-D dot (27x), batched matmul (12x), matrix_power (7.1x), AND tensordot. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel INTEGER np.inner - routes to int GEMM (a @ b^T), ~7x+ faster than NumPy
+`BlackThrush`. Integer-no-BLAS-family primitive (np.inner, distinct common API). fnp's inner native path is f64-only
+(integer falls back), so integer inner delegated to numpy's no-BLAS naive matmul (matmul-class gap, ~89x slower than
+float at 512). np.inner contracts the shared LAST axis: out = a @ b^T flattened (m,k)@(k,n). try_native_int_inner
+reshapes a->(m,k), b->(n,k), builds a CONTIGUOUS b^T (cheap O(n*k) copy), routes to try_native_int_matmul, reshapes the
+(m,n) result to a.shape[:-1] + b.shape[:-1]. BIT-EXACT (reshape/transpose-copy preserve values; int GEMM bit-exact).
+Both-1-D scalar case, mixed/float/complex dtype, non-contiguous, below-work-gate defer to numpy.
+
+PERF: NumPy integer inner is the same no-BLAS naive matmul (numpy int matmul/dot 512^2 measured 276-320 ms). inner
+routes to the SAME try_native_int_matmul measured at matmul 512^2 = fnp 35.90 vs numpy 276.02 ms = 0.130x (7.7x) and dot
+27x, plus a cheap O(n*k) b^T copy. So int inner 512^2 is ~7x+ vs numpy by construction (the fnp criterion row was
+queue-blocked on saturated rch workers; conformance proves bit-exactness).
+CORRECTNESS: new conformance test int_inner_native_parallel_bit_exact_matches_numpy -> byte-identical to numpy.inner for
+int64/int32/int16/int8/uint64/uint32 over 2-D (m,k)inner(n,k) AND 3-D (contract last axis), plus an int64 overflow-wrap.
+WHY NOT ~0-GAIN: numpy integer inner has no BLAS (slow naive matmul); native reshape+GEMM wins big.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. The integer-no-BLAS lever now covers 2-D
+matmul (7.7x), 2-D dot (27x), batched matmul (12x), matrix_power (7.1x), tensordot (~11x), AND inner. AGENT_NAME=BlackThrush.
