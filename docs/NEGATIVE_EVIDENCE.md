@@ -4,6 +4,50 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-28 - NO-SHIP: lowering the 1536 matmul-shaped native GEMM window back to 1024 is worker-fragile and regresses badly on hz2
+
+`BlueStone`. LAND-OR-DIG found no measured `.scratch` / `.worktrees` keep still
+off main, then retried the documented BLAS-gate predicate now that RCH admitted
+remote workers. First ORIG routing evidence on `vmi1264463` made the current
+1536 native window look stale under load: `fnp_matmul_1536x1536` 228,079,785 ns
+vs `numpy_matmul_1536x1536` 79,746,949 ns (2.860x fnp/numpy), and
+`fnp_tensordot_axes1_1536x1536` 202,000,596 ns vs NumPy 63,083,711 ns (3.202x).
+That was NOT enough to land because the scheduler could not admit a same-worker
+candidate rerun on `vmi1264463` (`insufficient_slots=3`, `hard_preflight=1`).
+
+Candidate lever: set `PY_NATIVE_MATMUL_MAX_DIM` back to the shared 1024 cap, so
+1536 `matmul` and exact 2-D `tensordot(..., axes=1)` delegate to NumPy. RCH then
+paired candidate and ORIG on `hz2` with the same command shape (`-p fnp-python`,
+release profile, `criterion_python_surface`, sample size 10). Result: hard
+NO-SHIP; `hz2` is the slow-BLAS worker where the native 1536 window is still the
+big win.
+
+| Probe (`hz2`) | ORIG ns | Candidate ns | Candidate/ORIG | Verdict |
+|---|---:|---:|---:|---|
+| `python_matmul_boundary/fnp_matmul_1536x1536` | 47,211,473 | 936,964,117 | 19.847x | reject |
+| `python_matmul_boundary/fnp_tensordot_axes1_1536x1536` | 49,563,169 | 923,384,625 | 18.631x | reject |
+| `python_matmul_boundary/fnp_dot_1536x1536` | 732,476,476 | 830,862,733 | 1.134x | guard/noise |
+| `python_matmul_boundary/numpy_matmul_1536x1536` | 714,836,571 | 724,065,836 | 1.013x | comparator |
+| `python_matmul_boundary/numpy_tensordot_axes1_1536x1536` | 720,686,913 | 837,446,451 | 1.162x | comparator/load |
+
+Commands: `AGENT_NAME=BlueStone RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1
+RCH_TEST_SLOTS=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b
+rch exec -- cargo bench -j 1 -p fnp-python --profile release --bench
+criterion_python_surface --
+'python_matmul_boundary/(fnp_matmul_1536x1536|numpy_matmul_1536x1536|fnp_dot_1536x1536|numpy_dot_1536x1536|fnp_tensordot_axes1_1536x1536|numpy_tensordot_axes1_1536x1536)'
+--sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher
+--noplot`. Note: the user-requested `cargo bench --release` form was attempted
+remotely first and Cargo rejected it (`unexpected argument '--release'`); this
+toolchain requires `--profile release` for `cargo bench`.
+
+Conclusion: do NOT globally lower the 1536 matmul-shaped native window from one
+loaded-worker ORIG-vs-NumPy read. The BLAS gate is worker-fragile: on `vmi1264463`
+under current load NumPy wins, while on `hz2` native wins by ~15x vs NumPy and a
+cap drop is an 18-20x regression vs ORIG. A future lever must be adaptive to
+worker/runtime BLAS throughput or use a more discriminating route than a single
+static dimension cap; the static 1536 window stays. Source patch reverted.
+AGENT_NAME=BlueStone.
+
 ## 2026-06-28 - SURVEY (gate-sweep #4 + product family, RAYON=8): all remaining low gates clean; prod flat = kernel-floor parity — gate + scalar-reduce veins CONVERGED
 
 `BlackThrush`. After landing both trapezoid wins, enumerated ALL `*_PARALLEL_MIN` constants and swept
