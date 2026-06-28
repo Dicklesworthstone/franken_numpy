@@ -69,6 +69,42 @@ local "loss" is structurally a phantom.** Net this cycle: native-op surface CONV
 families (surveys #1+#2); no landable 60-min lever; remaining theoretical gaps are the FMA-golden
 wall (human decision, see corrections above). AGENT_NAME=BlackThrush.
 
+## 2026-06-28 - SURVEY #3 (view-ops + conversion-ops all clean) + the LOAD-WINDOW-BIAS measurement artifact (new class)
+
+`BlackThrush`. Continued digging for a local-measurable (non-BLAS) lever. Two more
+families verified clean, no landable loss:
+
+- **VIEW/SHAPE ops (25): all correct.** Probed `shares_memory(result, input)` vs numpy for
+  broadcast_to/expand_dims/squeeze/moveaxis/swapaxes/transpose/matrix_transpose/permute_dims/
+  ravel/reshape/diagonal/diag/fliplr/flipud/flip/rot90/atleast_1d/2d/3d/rollaxis/real/triu/tril/
+  ascontiguousarray/asfortranarray — fnp returns a VIEW exactly when numpy does (and a copy when
+  numpy copies), all values equal. The array-API alias materialization bugs (matrix_transpose
+  18000x, rollaxis 40000x) are fully fixed; no residual view-op materialization lever.
+- **CONVERSION/extract ops: win-or-parity.** nan_to_num 0.16x, around 0.24x, clip 0.33x = WINS;
+  asanyarray/real_if_close/copy = parity; asarray dtype-convert (107th) confirmed PARITY.
+
+**NEW MEASUREMENT-ARTIFACT CLASS recorded — LOAD-WINDOW BIAS on long ops.** `asarray(i32->f64)`
+(a ~20ms numpy-delegated int->float cast) read a CLEAN-looking `r=1.11-1.15x` "loss" under
+batched best-of-N (all-fnp-then-all-numpy), reproducible across both orders AND min-of-15 — looked
+real. But INTERLEAVING the fnp/numpy calls in one alternating loop (so both see identical box load)
+gave `r_min=0.991, r_med=0.973` = PARITY. The op is pure delegation (107th defers i32->f64 to numpy
+at lib.rs:33492 BEFORE any extract — verified in source), so a real kernel gap is impossible; the
+batched "loss" was a systematic ~10% load skew between the fnp measurement window and the numpy
+window (a 20ms op amplifies any box-load drift between windows). **RULE: for LONG ops (10-30ms+) on
+a loaded box, batched best-of-N has load-window bias — INTERLEAVE A/B in the same loop (alternate
+each rep) to cancel it.** This is the THIRD distinct local-measurement artifact class, completing
+the taxonomy every phantom "loss" this session fell into:
+  1. CACHE-RESONANCE (short ~sub-ms ops on ~L3-sized arrays): whoever runs SECOND is cache-warm —
+     measure both orders / fresh arrays (e.g. vdot-4M 2.1x phantom, a numpy passthrough).
+  2. LOCAL-FAST-BLAS (matmul/dot/inner/tensordot/GEMM/batched-matmul): local OpenBLAS is fast,
+     deployment WORKER BLAS is slow=truth — NEVER measure BLAS-backed ops locally (batched matmul
+     2.6-9.3x phantom; wins 7-12x on worker).
+  3. LOAD-WINDOW BIAS (long 10-30ms ops): batched A-then-B windows hit different load — INTERLEAVE.
+  Plus the pyo3-wall O(1) micro-ops (asarray same-dtype 28x, require 2x = ~µs absolute, irreducible
+  binding cost — never chase). Every apparent local loss this session reduced to one of these.
+Net: native-op surface CONVERGED across ~65 ops (surveys #1-#3, view-ops, conversion-ops); no
+landable 60-min lever; remaining frontier = the FMA-golden human decision. AGENT_NAME=BlackThrush.
+
 ## 2026-06-28 - NO-SHIP: A-panel packing for bit-exact packed GEMM
 
 `BlueStone`. After confirming no measured `.scratch` / `.worktrees` keep remained
