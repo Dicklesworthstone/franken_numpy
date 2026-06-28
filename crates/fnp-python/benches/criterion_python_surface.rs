@@ -2665,6 +2665,50 @@ fn bench_cumsum_flat_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_accumulate_extremum_boundary(c: &mut Criterion) {
+    // FLAT 1-D f64 np.maximum.accumulate(8M) — running max. numpy delegates to a serial
+    // prefix scan (dependency chain); the native two-pass parallel prefix breaks it.
+    let mut group = c.benchmark_group("python_accumulate_extremum_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+x = rng.standard_normal(8_000_000)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("accumulate setup");
+        let x = ns.get_item("x").expect("x");
+        let fnp_max = module.getattr("maximum").expect("fnp maximum");
+        let numpy_max = numpy.getattr("maximum").expect("numpy maximum");
+        group.bench_function("fnp_maximum_accumulate_f64_8m", |b| {
+            b.iter(|| black_box(fnp_max.call_method1("accumulate", (&x,)).expect("fnp max.accum")));
+        });
+        group.bench_function("numpy_maximum_accumulate_f64_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    numpy_max
+                        .call_method1("accumulate", (&x,))
+                        .expect("numpy max.accum"),
+                )
+            });
+        });
+    });
+
+    group.finish();
+}
+
 // cumsum/cumprod along a MIDDLE axis (0 < ax < ndim-1) of a 3-D f64 stack. numpy runs a
 // non-last cumulative STRIDED + single-threaded; the native block-parallel slab-by-slab
 // scan (try_zerocopy_f64_cumulative_axis inner>1 path) fans independent contiguous outer
@@ -5450,6 +5494,7 @@ criterion_group!(
     bench_prod_lastaxis_boundary,
     bench_cumsum_lastaxis_boundary,
     bench_cumsum_flat_boundary,
+    bench_accumulate_extremum_boundary,
     bench_cum_midaxis_boundary,
     bench_int_cum_boundary,
     bench_vander_boundary,

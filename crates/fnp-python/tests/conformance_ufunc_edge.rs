@@ -199,3 +199,45 @@ fn add_reduce_empty_with_initial() {
     assert_eq!(fnp_result, np_result, "reduce empty with initial");
     assert_eq!(fnp_result.trim(), "42.0");
 }
+
+#[test]
+fn maximum_minimum_accumulate_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    // Above the 1<<21 gate the native flat f64 maximum/minimum.accumulate runs the
+    // two-pass parallel prefix. max/min are associative and np_fmax/np_fmin replicate
+    // numpy's tie rule (return SECOND arg) + NaN propagation, so it must be byte-exact
+    // to numpy's serial accumulate — incl. signed-zero ties and a propagating NaN.
+    let script = fnp_script(
+        r#"
+n = (1 << 21) + 65
+rng = np.random.default_rng(0)
+
+# random data with signed zeros + a NaN that must propagate forward
+x = rng.standard_normal(n)
+x[10] = -0.0; x[11] = 0.0; x[12] = -0.0; x[13] = 0.0
+x[1234] = np.nan
+ok = True
+for ufm, npf in [(fnp.maximum, np.maximum), (fnp.minimum, np.minimum)]:
+    a = ufm.accumulate(x); e = npf.accumulate(x)
+    ok = ok and a.dtype == e.dtype and a.shape == e.shape and a.tobytes() == e.tobytes()
+
+# signed-zero-heavy, no NaN (stresses the tie bit-pattern across block boundaries)
+y = np.full(n, -0.0)
+y[1::3] = 1.5
+y[2::5] = -2.5
+y[::7] = 0.0
+for ufm, npf in [(fnp.maximum, np.maximum), (fnp.minimum, np.minimum)]:
+    a = ufm.accumulate(y); e = npf.accumulate(y)
+    ok = ok and a.tobytes() == e.tobytes()
+
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large parallel maximum/minimum.accumulate must be bit-identical to numpy"
+    );
+    Ok(())
+}

@@ -11650,3 +11650,32 @@ mechanism (like the clip/where wins that measured one width and asserted bit-ide
 LESSON: a FLAT 1-D scan is a separate lever from the across-lanes axis-scan win — single-lane prefix is
 dependency-latency-bound and parallelizes via two-pass (bit-exact only for associative integer add/mul, NOT float).
 AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native flat 1-D f64 np.maximum/minimum.accumulate two-pass parallel prefix - 8M 13.1 ms vs NumPy 60.1 ms = 0.218x (4.6x faster)
+`BlackThrush`. The ufunc `.accumulate` method DELEGATED entirely to numpy (`np_ufunc.accumulate(...)`), so running max/min
+(np.maximum.accumulate / np.minimum.accumulate — common for drawdown / running extrema) ran numpy's SERIAL prefix scan.
+max/min are associative, and a 1-D prefix is a sequential DEPENDENCY chain, so the same two-pass parallel scan that won
+for integer cumsum applies — and it is BIT-EXACT for ALL float values (unlike +, max/min have no rounding reassociation).
+
+FIX (fnp-python only): np_fmax/np_fmin replicate numpy.maximum/minimum element semantics EXACTLY — NaN-propagating and
+returns the SECOND argument on a tie (incl. signed zero): max(a,b) = a if a.is_nan() else a if a>b else b. New helper
+try_zerocopy_f64_accumulate_extremum runs a two-pass block prefix (block partials -> serial offset scan -> per-block
+re-scan from offset, ACCUMULATE_PARALLEL_MIN=1<<21) that PRESERVES numpy's argument order (acc first), so it is
+byte-identical to the serial fold incl. -0.0/+0.0 ties and a forward-propagating NaN. Hooked into the accumulate ufunc
+method for kind Maximum/Minimum, gated to default (dtype=None, out=None) f64 1-D contiguous ndarray, axis 0/-1;
+f32/int/complex, multi-D, explicit out/dtype defer to numpy.
+
+PERF (criterion, remote rch worker ovh-a = truth; python_accumulate_extremum_boundary, flat 8M f64; SAME-WORKER serial
+isolation):
+  maximum.accumulate: SERIAL (RAYON=1) 44.22 ms -> PARALLEL 13.10 ms = 3.4x over serial; vs NumPy 60.12 ms = 0.218x
+    (4.6x faster). (Even serial fnp beats numpy 1.36x — native tight loop vs numpy ufunc-accumulate dispatch — but the
+    3.4x parallel speedup is the lever.)
+CORRECTNESS: new conformance test maximum_minimum_accumulate_parallel_large_bit_exact_matches_numpy (n=(1<<21)+65 above
+the gate) -> dtype+shape+tobytes() byte-identical to numpy for BOTH maximum and minimum accumulate, on random data with
+signed zeros + a propagating NaN AND a signed-zero-heavy no-NaN array (stresses the tie bit-pattern across block
+boundaries).
+WHY NOT ~0-GAIN: 3.4x over the serial control on the same worker; 4.6x vs numpy. A NEW gap (full delegation), not a
+flag flip. Same dependency-latency-chain lever as the integer cumsum prefix win — but bit-exact for float because max/min
+are exactly associative. minimum shares the identical mechanism (measured maximum, both covered bit-exactly by the test).
+REMAINING: f32 + integer maximum/minimum.accumulate still delegate (same lever, different buffer dtype) — a clean
+follow-up. AGENT_NAME=BlackThrush.
