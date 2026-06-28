@@ -4,6 +4,38 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-28 - KEEP: 2-D `np.tensordot(..., axes=1)` uses the `matmul` 1536 native GEMM window
+
+`BlueStone`. Land-or-dig found no measured `.scratch` / `.worktrees` keep still
+off main, then dug the GEMM-reducible Python surface. `tensordot(a, b, axes=1)`
+for exact 2-D float64 arrays is the same `(m x k) @ (k x n)` contraction as
+`matmul`, but the wrapper still used the generic 1024 native-GEMM cap while
+`matmul` had a measured 1536-only win. The new lever gives only this 2-D
+`axes=1` tensordot case the `matmul` max dimension; generic tensordot, `dot`, and
+larger dimensions stay on their existing 1024/delegate policy.
+
+MEASURED against ORIG `origin/main` commit `47ebc98f`, same scratch harness,
+same command shape (`-p fnp-python`, release profile, `criterion_python_surface`,
+sample size 10). `rch exec` refused remote slots (`insufficient_slots=3`,
+`hard_preflight=1`) and ran its normal local fallback for both ORIG and candidate:
+
+| Probe | ORIG ns | Candidate ns | Candidate/ORIG | Verdict |
+|---|---:|---:|---:|---|
+| `python_matmul_boundary/fnp_tensordot_axes1_1536x1536` | 95,934,387 | 40,085,460 | 0.418x | keep |
+| `python_matmul_boundary/fnp_tensordot_axes1_1024x1024` | 16,788,663 | 17,942,338 | 1.069x | guard: unchanged native class/noisy |
+| `python_matmul_boundary/numpy_tensordot_axes1_1536x1536` | 63,002,349 | 69,457,108 | 1.102x | comparator context |
+
+Benchmark command: `AGENT_NAME=BlueStone RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1
+CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec --
+cargo bench -j 1 -p fnp-python --profile release --bench criterion_python_surface
+-- 'python_matmul_boundary/(fnp_tensordot_axes1_1024x1024|numpy_tensordot_axes1_1024x1024|fnp_tensordot_axes1_1536x1536|numpy_tensordot_axes1_1536x1536)'
+--sample-size 10 --warm-up-time 1 --measurement-time 4 --output-format bencher
+--noplot`.
+
+Retry predicate: do not widen generic `tensordot`, `inner`, `dot`, or dimensions
+above 1536 from this evidence. The keep is strictly the 2-D axes=1 matmul-shaped
+case where the existing `matmul` cap already proved the native path.
+
 ## 2026-06-28 - SURVEY (measured, all win-or-parity): native-op families polyval/trapezoid/histogram2d/dd/cross/kron/outer/inner/tensordot/matrix_power/multi_dot/lstsq/vdot — plus the vdot-4M cache-artifact TRAP
 
 `BlackThrush`. After the `+fma` correction closed the compute-kernel frontier, dug
