@@ -693,6 +693,41 @@ print(ok)
 }
 
 #[test]
+fn f16_copysign_heaviside_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy widens f16->f32 for copysign/heaviside; the native parallel kernels (copysign =
+    // uint16 sign-bit copy, heaviside = widen-piecewise) must be byte-identical incl inf/nan/-0.0,
+    // above the 1<<20 gate.
+    let script = fnp_script(
+        r#"
+n = (1 << 20) + 257
+rng = np.random.default_rng(59)
+a = (rng.standard_normal(n) * 10.0).astype(np.float16)
+b = (rng.standard_normal(n) * 3.0).astype(np.float16)
+a[0]=np.float16(np.inf); a[1]=np.float16(-np.inf); a[2]=np.float16(np.nan); a[3]=np.float16(-0.0); a[4]=np.float16(0.0)
+b[0]=np.float16(-1.0); b[2]=np.float16(7.0); b[4]=np.float16(2.5)
+ok = True
+r = fnp.copysign(a, b); e = np.copysign(a, b)
+ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+r = fnp.heaviside(a, b); e = np.heaviside(a, b)
+ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# 2-D shape preserved
+a2 = a[:1 << 20].reshape(1024, 1024); b2 = b[:1 << 20].reshape(1024, 1024)
+ok = ok and fnp.copysign(a2, b2).tobytes() == np.copysign(a2, b2).tobytes()
+ok = ok and fnp.heaviside(a2, b2).tobytes() == np.heaviside(a2, b2).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 copysign/heaviside must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_fmod_remainder_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy widens f16->f32 for fmod/remainder (the slowest f16 binary ops); the native parallel
     // widen-op-narrow must be byte-identical incl inf/nan/-0.0/mixed-signs, above the 1<<20 gate.

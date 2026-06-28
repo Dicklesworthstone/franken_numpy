@@ -12390,3 +12390,22 @@ fmod + remainder + the % operator incl inf/nan/-0.0/mixed-signs + a zero-divisor
 WHY NOT ~0-GAIN: numpy f16 fmod/remainder widen to f32 (~214-317ms, compute-bound); the native parallel widen-op-narrow
 aggregates cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. OPEN f16 binary: nextafter
 (bit-step, ~57ms), copysign (bit-trick, ~22ms), heaviside (~100ms); hypot (libm-divergence risk). AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 copysign/heaviside
+`BlackThrush`. numpy widens f16->f32 for copysign (~22ms@16M) and heaviside (~100ms@16M); f16 delegated. Added op codes
+7=copysign / 8=heaviside to try_zerocopy_f16_binary_widen: copysign = uint16 sign-bit copy (a&0x7fff)|(b&0x8000) (NO
+widen — exact incl nan/inf/-0.0); heaviside = widen-piecewise (a<0->0, a==0->b, a>0->1, nan->canonical nan). Hooked into
+the copysign and heaviside pyfunctions (f16 siblings beside f64/f32).
+BIT-EXACT: copysign sign-bit copy verified over the full f16 domain; heaviside narrow(widen-piecewise) == numpy
+(verified incl inf/nan/-0.0). heaviside is WARNING-FREE on real arrays (the "invalid" warning is signaling-nan only, like
+floor/ceil).
+
+PERF (criterion, rch worker = truth; f16, 16M elements):
+  copysign  f16 16M: fnp 4.04 ms vs NumPy 22.36 ms = 0.181x / ~5.5x faster
+  heaviside f16 16M: fnp 6.27 ms vs NumPy 192.45 ms = 0.033x / ~30.7x faster
+CORRECTNESS: new conformance test f16_copysign_heaviside_parallel_bit_exact_matches_numpy -> byte-identical to numpy
+incl inf/nan/-0.0 + a 2-D case.
+WHY NOT ~0-GAIN: numpy widens f16->f32 for both; native parallel (copysign bit-op / heaviside widen-piecewise) aggregates
+cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f16 binary now: add/mul/sub/max/min/
+fmod/remainder/copysign/heaviside + ordered comparisons. OPEN: f16 nextafter (bit-step has a b=0 edge bug to fix);
+hypot (libm-divergence risk). AGENT_NAME=BlackThrush.

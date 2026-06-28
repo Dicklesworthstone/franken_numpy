@@ -5216,6 +5216,17 @@ hb = rng.standard_normal(16_000_000).astype(np.float16)\n";
                 bch.iter(|| black_box(numpy_fn.call1((&ha, &hbnz)).expect("numpy f16 call")));
             });
         }
+        // f16 copysign/heaviside: numpy widens f16->f32 (~22ms / ~100ms @16M).
+        for op in ["copysign", "heaviside"] {
+            let fnp_fn = module.getattr(op).expect("fnp op");
+            let numpy_fn = numpy.getattr(op).expect("numpy op");
+            group.bench_function(format!("fnp_{op}_f16_16m"), |bch| {
+                bch.iter(|| black_box(fnp_fn.call1((&ha, &hb)).expect("fnp f16 call")));
+            });
+            group.bench_function(format!("numpy_{op}_f16_16m"), |bch| {
+                bch.iter(|| black_box(numpy_fn.call1((&ha, &hb)).expect("numpy f16 call")));
+            });
+        }
         // f16 unary rounding ops floor/ceil/trunc/rint: numpy has no native f16 ALU and emulates
         // via widen->f32->op->narrow (compute-bound, ~77-126ms at 16M); native parallel wins ~15-30x.
         for op in ["floor", "ceil", "trunc", "rint", "isnan", "isfinite", "signbit"] {
