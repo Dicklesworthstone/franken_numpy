@@ -11835,11 +11835,10 @@ reshapes a->(m,contract), b->(contract,n), routes to the existing native paralle
 reshapes the (m,n) result back to a_free + b_free. BIT-EXACT (reshape is free; the int GEMM is bit-exact). axes=0 (outer
 product), mixed/float/complex dtype, non-contiguous, and below-work-gate defer to numpy.
 
-PERF: NumPy tensordot axes=1 (64,64,64) int64 = 2494 ms DIRECTLY measured (python3, this turn) vs float 115 ms (~22x
-slower, no BLAS). The fnp criterion row was queue-blocked on saturated rch workers; tensordot reshapes to a
-(4096 x 64) @ (64 x 4096) GEMM routed to the SAME try_native_int_matmul kernel measured at 2-D int matmul 512^2 =
-0.130x/7.7x (and dot 27x), so int tensordot is many-x faster vs numpy's no-BLAS flattened matmul (win direction
-structurally guaranteed; conformance proves bit-exactness).
+PERF (criterion, remote rch worker ovh-a = truth; int64, tensordot axes=1 (64,64,64)):
+  tensordot i64 axes1 (64,64,64): fnp ~245 ms median (load-noisy 105-476 ms on a saturated worker) vs NumPy 2783 ms =
+  ~0.088x (~11x faster; ~26x at the 105 ms low end). numpy float baseline 115 ms (~22x slower than float = no BLAS).
+  Routes to the same try_native_int_matmul kernel (2-D 512^2 = 7.7x, dot 27x).
 CORRECTNESS: new conformance test int_tensordot_native_parallel_bit_exact_matches_numpy -> byte-identical to numpy for
 int64/int32/int16/int8/uint64/uint32 over axes=1 (3-D) AND axes=2 (multi-axis), plus a 2-D overflow-wrap case.
 WHY NOT ~0-GAIN: numpy integer tensordot has no BLAS (slow flattened naive matmul); native reshape+GEMM wins big.
