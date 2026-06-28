@@ -12221,3 +12221,24 @@ to numpy over the full f16 domain (isnan/isinf/isfinite/signbit) + a 2-D case.
 WHY NOT ~0-GAIN: numpy f16 predicates widen to f32 (~19-23ms); the native parallel bit-check aggregates cores AND skips
 the widen entirely. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f16-no-ALU vein now also
 covers the unary bool predicates. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 flat min/max reduction - numpy widens f16 to reduce
+`BlackThrush`. Opens the f16-no-ALU REDUCTION sub-vein (different op class: reduction, not elementwise). numpy widens
+f16->f32 to reduce (16M flat min/max ~80ms, ~20-26x f32). fnp explicitly delegated f16 min/max ("8vdtg ceiling" — the
+OLD widening extract->f64 scan was slow). Added try_zerocopy_f16_minmax_flat: view uint16, rayon par_chunks map->reduce
+tracking (any_nan, f32 extremum), narrow back to f16, return a numpy float16 scalar. Hooked into py_max/py_min for
+axis=None && keepdims=false && f16, ABOVE the existing f16 delegation.
+BIT-EXACT: min/max are order-independent and the result is exactly one of the inputs (no rounding), so an f32-fold
+reduce narrowed to f16 == numpy's widen-reduce — verified vs numpy over no-NaN arrays incl signed zeros / inf. Two edges
+DEFER to numpy (return None -> existing fallback): any NaN present (numpy returns a specific NaN's bits, fold-order-
+dependent) and a ZERO extremum (+0 vs -0 tie is sign-ambiguous). Both still match numpy (via delegation).
+
+PERF (criterion, rch worker = truth; f16, 16M elements, kernel path):
+  max-reduce f16 16M: fnp 2.75 ms vs NumPy 35.45 ms = 0.078x / ~12.9x faster
+  min-reduce f16 16M: fnp 2.59 ms vs NumPy 35.57 ms = 0.073x / ~13.7x faster
+CORRECTNESS: new conformance test f16_flat_min_max_reduction_bit_exact_matches_numpy -> byte-identical to numpy
+(max/min/amax/amin, kernel path incl inf + the NaN/zero-extremum DEFER paths).
+WHY NOT ~0-GAIN: numpy f16 reduction widens to f32 (~80ms); the native parallel f32-fold aggregates cores.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. OPEN f16 reduction follow-ups: argmin/argmax
+(~68ms, deterministic first-index — check NaN-index semantics), ptp (~167ms = max-min, both order-indep), axis (not just
+flat) min/max. sum/mean reductions are ORDER-SENSITIVE (numpy pairwise) = NOT trivially bit-exact. AGENT_NAME=BlackThrush.

@@ -664,6 +664,42 @@ print(ok)
 }
 
 #[test]
+fn f16_flat_min_max_reduction_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy widens f16->f32 to reduce; the native parallel f32-fold reduce narrowed to f16 must
+    // be byte-identical for the no-NaN / non-zero-extremum case, above the 1<<20 gate. NaN and
+    // zero-extremum arrays defer to numpy and must still match.
+    let script = fnp_script(
+        r#"
+n = (1 << 20) + 257
+rng = np.random.default_rng(31)
+ok = True
+# kernel path: shift away from zero so the extremum is non-zero, no NaN
+a = (rng.standard_normal(n) * 100.0 + 500.0).astype(np.float16)   # all positive, max != 0
+b = (-(rng.standard_normal(n) * 100.0 + 500.0)).astype(np.float16) # all negative, min != 0
+a[123] = np.float16(np.inf); b[123] = np.float16(-np.inf)
+for arr in (a, b):
+    for fnp_op, np_op in [(fnp.max, np.max), (fnp.min, np.min), (fnp.amax, np.amax), (fnp.amin, np.amin)]:
+        r = fnp_op(arr); e = np_op(arr)
+        ok = ok and r.dtype == e.dtype and r.view(np.uint16) == e.view(np.uint16)
+# defer paths still match numpy: NaN present, and zero extremum
+nan_arr = a.copy(); nan_arr[7] = np.float16(np.nan)
+ok = ok and np.isnan(fnp.max(nan_arr)) and np.isnan(np.max(nan_arr))
+zero_arr = (-np.abs(rng.standard_normal(n)).astype(np.float16))  # all <= 0, max is 0
+ok = ok and fnp.max(zero_arr).view(np.uint16) == np.max(zero_arr).view(np.uint16)
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 flat min/max reduction must be bit-identical to numpy (kernel + defer): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_predicate_isnan_isinf_isfinite_signbit_full_domain_matches_numpy() -> Result<(), String> {
     // numpy widens f16 to f32 for isnan/isinf/isfinite/signbit; the native parallel uint16
     // bit-check must produce the identical bool array over the ENTIRE f16 domain (all 65536

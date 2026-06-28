@@ -5229,6 +5229,19 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
                 bch.iter(|| black_box(numpy_fn.call1((&hsq,)).expect("numpy f16 unary call")));
             });
         }
+        // f16 flat min/max reduction: numpy widens f16->f32 to reduce (~80ms@16M); native
+        // parallel f32-fold reduce wins (bit-exact, defers NaN / zero-extremum). hsq is all
+        // non-negative with a non-zero max -> exercises the kernel.
+        for op in ["max", "min"] {
+            let fnp_fn = module.getattr(op).expect("fnp reduce op");
+            let numpy_fn = numpy.getattr(op).expect("numpy reduce op");
+            group.bench_function(format!("fnp_{op}reduce_f16_16m"), |bch| {
+                bch.iter(|| black_box(fnp_fn.call1((&hsq,)).expect("fnp f16 reduce call")));
+            });
+            group.bench_function(format!("numpy_{op}reduce_f16_16m"), |bch| {
+                bch.iter(|| black_box(numpy_fn.call1((&hsq,)).expect("numpy f16 reduce call")));
+            });
+        }
         // f32 fmod/copysign: numpy runs f32 binary ufuncs single-threaded (fmod ~138ms @16M);
         // there was no f32 binary zero-copy path. Native parallel f32 kernel wins (bit-exact).
         let f32_setup = "import numpy as np\n\
