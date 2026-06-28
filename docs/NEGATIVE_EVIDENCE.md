@@ -11601,3 +11601,24 @@ WHY NOT ~0-GAIN: i32 swings from a serial Cell loss to a 2.88x win; f32 control 
 parity. Same itemsize-bandwidth boundary as the 48th-win clip (4-byte wins, 8-byte loses). The where 4-byte-typed
 parallel vein is now harvested for f32 + i32 + u32; remaining int arms (1/2/8-byte) stay serial by measurement.
 AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - REJECT (~0-gain, REVERTED): parallelize np.choose typed gather — serial zerocopy already wins, rayon adds overhead
+`BlackThrush`. Tried the serial-Cell-loop lever on choose_typed<T> (the equal-shape typed gather backing np.choose):
+added a gated parallel chunked gather (CHOOSE_PARALLEL_MIN=1<<21, par_chunks_mut, out[i]=choices[idx[i]][i]) + threaded
+Send+Sync through choose_typed and choose_float_via_unsigned. fnp-vs-numpy LOOKED like a big win (3.3x), but the
+serial-isolation control proved the parallelism is ~0-gain — actually a slight regression.
+
+MEASURED (criterion, SAME worker ovh-a, python_choose_boundary, 8M index in [0,4) over 4 choice arrays):
+  f64: fnp PARALLEL (default threads) 20.06 ms  vs  fnp SERIAL (RAYON_NUM_THREADS=1) 17.59 ms  -> parallel ~14% SLOWER
+  i64: fnp PARALLEL 19.93 ms  vs  fnp SERIAL 17.24 ms  -> parallel ~16% SLOWER
+  numpy (same worker, RAYON-independent): f64 63.5 ms, i64 63.0 ms
+ROOT: the EXISTING serial zerocopy gather (choose_typed, already on main) ALREADY beats numpy.choose 3.6-3.7x
+(17.6 vs 63.5 ms) — numpy.choose is slow because of its general broadcasting/nditer machinery, not because it is
+serial. fnp's tight serial gather is already memory-bandwidth/latency saturated for this access pattern, so rayon
+fan-out only ADDS overhead (unlike np.take, whose parallel gather did win — choose's per-element multi-array indirection
++ the pre-validation pass leave less parallelizable headroom). REVERTED the parallel branch + the bench rows; choose
+stays serial (the landed win is preserved).
+LESSON: a 3x "win vs numpy" can be entirely the pre-existing serial zerocopy path — ALWAYS isolate the new lever with a
+same-worker RAYON_NUM_THREADS=1 control before claiming a parallelization win (fnp-vs-numpy alone is not enough when a
+serial fast path already exists). Same memory-bound-already-saturated class as the serial-unary WALL and roll-memmove
+parity no-ships. AGENT_NAME=BlackThrush.
