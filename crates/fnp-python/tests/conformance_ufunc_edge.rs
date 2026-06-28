@@ -399,3 +399,37 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn f16_unary_floor_ceil_trunc_rint_parallel_full_domain_bit_exact_matches_numpy() -> Result<(), String>
+{
+    // numpy has no native f16 ALU: floor/ceil/trunc/rint widen->f32->op->narrow (compute-bound).
+    // The native parallel widen path must be byte-identical to numpy over EVERY f16 bit pattern
+    // (all 65536, incl. every nan/inf/subnormal/-0.0), tiled past the 1<<20 gate to engage the
+    // parallel kernel. Also a 2-D case to exercise the shape-preserving reshape.
+    let script = fnp_script(
+        r#"
+patterns = np.arange(65536, dtype=np.uint16).view(np.float16)
+reps = ((1 << 20) // patterns.size) + 2  # > gate
+x = np.tile(patterns, reps)
+ok = True
+for fnp_op, np_op in [(fnp.floor, np.floor), (fnp.ceil, np.ceil),
+                      (fnp.trunc, np.trunc), (fnp.rint, np.rint)]:
+    r = fnp_op(x); e = np_op(x)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# 2-D shape preserved
+x2 = np.tile(patterns, (1 << 20) // patterns.size).reshape(-1, patterns.size)
+ok = ok and fnp.floor(x2).tobytes() == np.floor(x2).tobytes()
+ok = ok and fnp.floor(x2).shape == np.floor(x2).shape
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 floor/ceil/trunc/rint must be bit-identical to numpy over the full domain: {result}"
+    );
+    Ok(())
+}

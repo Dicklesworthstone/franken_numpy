@@ -11926,3 +11926,33 @@ WHY NOT ~0-GAIN: numpy f16 binary is compute-bound (widen/narrow), ~8x above the
 op-narrow aggregates cores. (Contrast the f64-unary WALL where numpy IS at bandwidth.) PRE-EXISTING (not mine):
 conformance_ufunc_edge::ufunc_signature_has_x1_x2. Opens the f16-no-ALU class; f16 divide (warning surface) and f16 unary
 (sqrt/exp etc.) remain. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 floor/ceil/trunc/rint - numpy has no native f16 ALU
+`BlackThrush`. Extends the f16-no-ALU class (after f16 binary add/multiply/subtract) to the UNARY rounding ops. numpy
+has NO native f16 ALU, so every f16 unary op WIDENS each element to f32, applies the op, and NARROWS back. For the
+rounding ops this widen/narrow is COMPUTE-bound, not bandwidth: 16M f16 floor = ~126ms, ceil/rint ~77-80ms, trunc
+similar (vs f32 ~35ms; ~2-3.6x slower), while the ~64MB input+output traffic would finish in ~6ms at bandwidth.
+Native path: try_zerocopy_f16_unary_widen views the f16 ndarray as uint16 (zero-copy), parallel widen
+(f16::from_bits.to_f32) -> op in f32 (floor/ceil/trunc/round_ties_even) -> narrow (f16::from_f32.to_bits) ->
+view result back to float16. Hooked into native_rounding_unary (floor/ceil/trunc) and rint_native, ABOVE the
+existing non-f64 numpy deferral. BIT-EXACT: numpy's f16 floor/ceil/trunc/rint are EXACTLY narrow(round_f32(widen(x)))
+and each maps to an IEEE roundToIntegral with a single correct result, so Rust's hardware roundps bits are identical
+-- verified byte-for-byte over ALL 65536 f16 bit patterns (incl every nan/inf/subnormal/-0.0). WARNING-FREE: under
+numpy's default seterr these four emit NO warnings on realistic arrays (only signaling-nan patterns, which real arrays
+never hold, raise "invalid"), so dropping numpy's float-error machinery is observably identical. Scoped to exact
+same-shape C-contiguous float16 ndarray, n>=1<<20, threads>=2; everything else (sqrt/square/reciprocal which carry
+default-on warning surfaces; abs/negative/sign which numpy already does as a cheap f16 sign-bit trick = no gap;
+non-contiguous; small) defers to numpy unchanged.
+
+PERF (criterion, rch worker = truth; f16, 16M elements):
+  floor f16 16M: fnp 3.35 ms vs NumPy 123.60 ms = 0.027x / ~36.9x faster
+  ceil  f16 16M: fnp 3.30 ms vs NumPy 127.66 ms = 0.026x / ~38.7x faster
+  trunc f16 16M: fnp 3.24 ms vs NumPy 119.89 ms = 0.027x / ~37.0x faster
+  rint  f16 16M: fnp 3.28 ms vs NumPy 131.74 ms = 0.025x / ~40.2x faster
+CORRECTNESS: new conformance test f16_unary_floor_ceil_trunc_rint_parallel_full_domain_bit_exact_matches_numpy ->
+byte-identical to numpy for floor/ceil/trunc/rint over the FULL f16 domain (all 65536 patterns tiled past the gate)
+plus a 2-D shape-preserving case.
+WHY NOT ~0-GAIN: numpy f16 unary rounding is compute-bound (widen/narrow), ~12-20x above the bandwidth floor; native
+parallel widen-op-narrow aggregates cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2.
+f16-no-ALU class now covers binary add/mul/sub + unary floor/ceil/trunc/rint; remaining f16 leads: sqrt/square/
+reciprocal (warning surface), transcendentals (libm divergence risk), reductions (order). AGENT_NAME=BlackThrush.
