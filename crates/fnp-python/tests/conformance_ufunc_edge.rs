@@ -664,6 +664,44 @@ print(ok)
 }
 
 #[test]
+fn f16_binary_maximum_minimum_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy has no native f16 ALU; maximum/minimum widen->f32->op->narrow (compute-bound). The
+    // native parallel kernel must be byte-identical incl NaN-bit propagation (LHS first), signed
+    // zeros (returns LHS on equal), and inf, above the 1<<20 gate.
+    let script = fnp_script(
+        r#"
+n = (1 << 20) + 257
+rng = np.random.default_rng(23)
+a = rng.standard_normal(n).astype(np.float16)
+b = rng.standard_normal(n).astype(np.float16)
+# seed special pairs (canonical + non-canonical nan, inf, signed zeros)
+av = np.array([np.nan, np.inf, -np.inf, 0.0, -0.0, 1.0, -0.0], dtype=np.float16)
+bv = np.array([1.0, -np.inf, np.inf, -0.0, 0.0, np.nan, 0.0], dtype=np.float16)
+a[:7] = av; b[:7] = bv
+# non-canonical nan bit patterns in the LHS
+a.view(np.uint16)[7] = 0x7e01; b[7] = np.float16(5.0)
+a.view(np.uint16)[8] = np.uint16(0x0001); b.view(np.uint16)[8] = np.uint16(0x7e05)  # b non-canonical nan
+ok = True
+for fnp_op, np_op in [(fnp.maximum, np.maximum), (fnp.minimum, np.minimum)]:
+    r = fnp_op(a, b); e = np_op(a, b)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# 2-D shape preserved
+a2 = a[:1 << 20].reshape(1024, 1024); b2 = b[:1 << 20].reshape(1024, 1024)
+ok = ok and fnp.maximum(a2, b2).tobytes() == np.maximum(a2, b2).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 maximum/minimum must be bit-identical to numpy incl NaN-bit propagation: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_unary_sqrt_square_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy has no native f16 ALU; sqrt/square widen->f32->op->narrow (compute-bound). The native
     // parallel widen path is bit-exact for the warning-free common case (sqrt of non-negatives,

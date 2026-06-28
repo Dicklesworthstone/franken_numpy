@@ -12163,3 +12163,23 @@ CORRECTNESS: new conformance test f16_unary_sqrt_square_parallel_bit_exact_match
 (kernel + defer paths). WHY NOT ~0-GAIN: numpy f16 sqrt/square are compute-bound widen/narrow; parallel aggregates cores.
 PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f16 unary vein now covers floor/ceil/trunc/
 rint + sqrt/square; reciprocal left (fiddly tiny-input overflow surface). AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 maximum/minimum - completes the f16-no-ALU binary vein
+`BlackThrush`. numpy has NO native f16 ALU, so f16 maximum/minimum widen->f32->op->narrow (compute-bound: 16M ~122ms,
+~3x f32's 38ms). Added op codes 3=maximum / 4=minimum to try_zerocopy_f16_binary_widen (the same uint16-view parallel
+widen kernel as add/mul/sub) and to the binary ufunc __call__ f16op match (UFuncKind::Maximum/Minimum).
+BIT-EXACT: numpy f16 max/min PROPAGATE the input NaN's exact bits (LHS first), return the LHS on equal (incl signed
+zeros: maximum(+0,-0)=+0=lhs), else the larger/smaller — reproduced on the u16 bits: a_nan(bit pattern)->a's bits, elif
+b_nan->b's bits, else narrow(if av>=bv{av}else{bv}) for max / (av<=bv) for min. Verified byte-exact vs numpy over ALL
+special-value pairs (canonical + NON-canonical nan, inf, +-0.0) — 4M+ pairs, 0 diffs. WARNING-FREE (max/min emit no
+default RuntimeWarning). Same-shape C-contiguous f16, n>=1<<20; everything else defers.
+
+PERF (criterion, rch worker = truth; f16, 16M elements):
+  maximum f16 16M: fnp 5.66 ms vs NumPy 132.63 ms = 0.043x / ~23.4x faster
+  minimum f16 16M: fnp 5.81 ms vs NumPy 134.86 ms = 0.043x / ~23.2x faster
+CORRECTNESS: new conformance test f16_binary_maximum_minimum_parallel_bit_exact_matches_numpy -> byte-identical to numpy
+incl NaN-bit propagation (canonical + non-canonical), signed zeros, inf, + a 2-D case.
+WHY NOT ~0-GAIN: numpy f16 max/min are compute-bound widen/narrow (~122ms); parallel aggregates cores.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f16-no-ALU vein now: binary add/mul/sub/max/
+min + unary floor/ceil/trunc/rint/sqrt/square. NaN-BIT-PROPAGATION LESSON: numpy max/min keep the input nan's raw bits
+(not canonical) — widen->narrow canonicalizes, so handle nan on the u16 bits directly. AGENT_NAME=BlackThrush.
