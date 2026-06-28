@@ -42,6 +42,33 @@ single-order best-of-N manufactures a phantom 2x on passthrough ops. Native-op s
 CONFIRMED converged; no landable 60-min lever. `partition`/`argpartition` already
 delegate to numpy (documented bridge-alloc tax). AGENT_NAME=BlackThrush.
 
+## 2026-06-28 - SURVEY #2 (measured, all win-or-parity) + RE-CONFIRMED the local-fast-BLAS TRAP on batched matmul
+
+`BlackThrush`. Second wide both-order sweep (fresh `-p fnp-python` build, `franken_numpy-cc`
+target) over ~25 more native families NOT covered by survey #1 — all win-or-parity, no
+landable loss:
+
+- BIG WINS (already optimized): intersect1d/union1d/setdiff1d 0.009-0.023x (~50-100x), average
+  weighted 0.15x, take 0.22x, angle 0.11x, unwrap 0.10x, i0 0.12x, hypot 0.11x, logaddexp 0.065x,
+  modf 0.22x, copysign 0.31x, nextafter 0.18x, sinc 0.38x, correlate-k8 0.27x, isin 0.59x, ldexp 0.78x.
+- PARITY: lexsort 1.05x, conj 0.96x, heaviside 0.99x, fmax 0.98x, fft.rfft 1.01x, fft.fft 0.96x.
+
+**TRAP RE-CONFIRMED — batched `np.matmul` read 2.6-9.3x "LOSS" locally; this is the LOCAL-FAST-BLAS
+artifact my OWN 87th-win entry (below, 2026-06-26) explicitly warns against — NOT a real loss, do
+NOT delegate.** Measured batched matmul across 8 shapes (B=2..1024, n=32..1024): ALL "lose"
+2.6-9.3x locally, and even the 2-D control "loses" 2.93x. ROOT: this local box has FAST
+multi-threaded OpenBLAS (numpy B=64x128 = 3.07ms); the deployment WORKER has SLOW reference BLAS
+(~11 GFLOPS, numpy 64x256² = 172ms) where fnp's native parallel-across-batch packed GEMM WINS
+7-12x (landed `try_zerocopy_f64_batched_matmul`, conformance-green). The 87th-win RULE: "for any
+BLAS-backed op (matmul/dot/inner/tensordot/solve) the local fast OpenBLAS makes fnp's native kernel
+look like a loss — NEVER act on a local matmul/BLAS ratio; the worker's slow BLAS is the truth."
+Caught BEFORE acting by reading the ledger — delegating would have reverted a 7-12x win to parity.
+**LESSON for sweeps: EXCLUDE all BLAS-backed ops (matmul/dot/inner/tensordot/batched-matmul/2-D
+GEMM) from LOCAL gap measurement — local OpenBLAS ≠ worker BLAS; their gates are worker-tuned and a
+local "loss" is structurally a phantom.** Net this cycle: native-op surface CONVERGED across ~40
+families (surveys #1+#2); no landable 60-min lever; remaining theoretical gaps are the FMA-golden
+wall (human decision, see corrections above). AGENT_NAME=BlackThrush.
+
 ## 2026-06-28 - NO-SHIP: A-panel packing for bit-exact packed GEMM
 
 `BlueStone`. After confirming no measured `.scratch` / `.worktrees` keep remained
