@@ -664,6 +664,37 @@ print(ok)
 }
 
 #[test]
+fn f16_predicate_isnan_isinf_isfinite_signbit_full_domain_matches_numpy() -> Result<(), String> {
+    // numpy widens f16 to f32 for isnan/isinf/isfinite/signbit; the native parallel uint16
+    // bit-check must produce the identical bool array over the ENTIRE f16 domain (all 65536
+    // patterns, tiled past the 1<<20 gate).
+    let script = fnp_script(
+        r#"
+patterns = np.arange(65536, dtype=np.uint16).view(np.float16)
+x = np.tile(patterns, ((1 << 20) // patterns.size) + 2)
+ok = True
+for fnp_op, np_op in [(fnp.isnan, np.isnan), (fnp.isinf, np.isinf),
+                      (fnp.isfinite, np.isfinite), (fnp.signbit, np.signbit)]:
+    r = fnp_op(x); e = np_op(x)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# 2-D shape preserved
+x2 = np.tile(patterns, (1 << 20) // patterns.size).reshape(-1, patterns.size)
+ok = ok and fnp.isnan(x2).tobytes() == np.isnan(x2).tobytes()
+ok = ok and fnp.isnan(x2).shape == np.isnan(x2).shape
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 isnan/isinf/isfinite/signbit must match numpy over the full domain: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_ordered_comparison_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy widens f16 to f32 for ordered comparisons (compute-bound). The native parallel
     // widen-compare must produce the identical bool array, incl NaN (all ordered comparisons

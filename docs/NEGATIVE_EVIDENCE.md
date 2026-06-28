@@ -12203,3 +12203,21 @@ CORRECTNESS: new conformance test f16_ordered_comparison_parallel_bit_exact_matc
 WHY NOT ~0-GAIN: numpy f16 ordered comparison is compute-bound (widen to f32); parallel aggregates cores.
 PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f16-no-ALU vein: binary add/mul/sub/max/min,
 unary floor/ceil/trunc/rint/sqrt/square, ordered comparisons. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 isnan/isinf/isfinite/signbit - direct uint16 bit-check -> bool
+`BlackThrush`. f16 unary PREDICATES (different primitive: unary -> bool, computed with NO widen at all). numpy widens
+f16->f32 for these (16M ~19-23ms, ~4.5x f32's ~4ms), and fnp's generic f16 path was even slower (extract rebuilds
+through the dtype bridge). Added try_zerocopy_f16_predicate (view uint16, par_chunks_mut a direct bit-check -> uint8 0/1,
+view as bool) and hooked it into isnan_native / isinf_native / isfinite_native / signbit_native (after their f64/f32
+predicate paths). Bit-checks: isnan = exp all 1 & mantissa!=0; isinf = exp all 1 & mantissa==0; isfinite = exp not all
+1; signbit = top bit. BIT-EXACT: verified == numpy over the ENTIRE f16 domain (all 65536 patterns) for all four.
+
+PERF (criterion, rch worker = truth; f16, 16M elements):
+  isnan    f16 16M: fnp 0.81 ms vs NumPy 22.28 ms = 0.037x / ~27.3x faster
+  isfinite f16 16M: fnp 0.80 ms vs NumPy 21.97 ms = 0.036x / ~27.5x faster
+  signbit  f16 16M: fnp 0.77 ms vs NumPy 25.83 ms = 0.030x / ~33.5x faster
+CORRECTNESS: new conformance test f16_predicate_isnan_isinf_isfinite_signbit_full_domain_matches_numpy -> byte-identical
+to numpy over the full f16 domain (isnan/isinf/isfinite/signbit) + a 2-D case.
+WHY NOT ~0-GAIN: numpy f16 predicates widen to f32 (~19-23ms); the native parallel bit-check aggregates cores AND skips
+the widen entirely. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f16-no-ALU vein now also
+covers the unary bool predicates. AGENT_NAME=BlackThrush.

@@ -5197,7 +5197,7 @@ hb = rng.standard_normal(16_000_000).astype(np.float16)\n";
         }
         // f16 unary rounding ops floor/ceil/trunc/rint: numpy has no native f16 ALU and emulates
         // via widen->f32->op->narrow (compute-bound, ~77-126ms at 16M); native parallel wins ~15-30x.
-        for op in ["floor", "ceil", "trunc", "rint"] {
+        for op in ["floor", "ceil", "trunc", "rint", "isnan", "isfinite", "signbit"] {
             let fnp_fn = module.getattr(op).expect("fnp unary op");
             let numpy_fn = numpy.getattr(op).expect("numpy unary op");
             group.bench_function(format!("fnp_{op}_f16_16m"), |bch| {
