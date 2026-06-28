@@ -419,6 +419,9 @@ b[2]=np.float32(3.0); b[3]=np.float32(-2.0)
 ok = True
 r = fnp.fmod(a, b); e = np.fmod(a, b)
 ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# remainder (floored-mod, sign of divisor) — bit-identical to numpy in f32
+r = fnp.remainder(a, b); e = np.remainder(a, b)
+ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
 # copysign over the same arrays (every f32 input, incl -0.0/nan/inf signs)
 r = fnp.copysign(a, b); e = np.copysign(a, b)
 ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()

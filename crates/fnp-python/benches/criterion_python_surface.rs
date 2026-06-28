@@ -5222,7 +5222,7 @@ bf[np.abs(bf) < 1e-3] = np.float32(1.5)\n";
         .expect("f32 binary setup");
         let af = ns.get_item("af").expect("af");
         let bf = ns.get_item("bf").expect("bf");
-        for op in ["fmod", "copysign"] {
+        for op in ["fmod", "copysign", "remainder"] {
             let fnp_fn = module.getattr(op).expect("fnp f32 op");
             let numpy_fn = numpy.getattr(op).expect("numpy f32 op");
             group.bench_function(format!("fnp_{op}_f32_16m"), |bch| {

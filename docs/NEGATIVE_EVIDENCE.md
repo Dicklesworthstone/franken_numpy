@@ -11981,3 +11981,25 @@ mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. Opens the f32-binary-s
 bit-exact-safe leads: remainder (~156ms, floored-mod formula), nextafter (~83ms, bit-step), maximum/minimum (~39ms,
 bandwidth); arctan2/hypot/logaddexp/float_power are bigger but libm-divergence-risky (verify allclose-vs-bitexact
 first). AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT32 remainder - extends the f32-binary-single-threaded class
+`BlackThrush`. Third op in the f32-binary-single-threaded class (after fmod/copysign). numpy runs f32 remainder
+single-threaded (~156ms @16M). Added BinaryOp::Remainder to zerocopy_f32_binary_flat (the floored-mod: rem = lhs % rhs,
+then +rhs when sign(rem)!=sign(rhs), with the -0.0.copysign(rhs) zero case — the f32 mirror of BinaryOp::apply's f64
+Remainder arm) and an f32 fast path in native_binary_remainder_or_passthrough, ABOVE its non-f64 numpy deferral.
+BIT-EXACT: the f32 floored-mod formula is byte-identical to np.remainder, VERIFIED over 2.5M f32 incl inf/-inf/nan/
+-0.0/large (0 diffs) — remainder of floats is uniquely defined, no libm divergence. Defers to numpy on any zero divisor
+(zero-copy scan) so numpy's divide RuntimeWarning + nan surface exactly. Scoped n>=1<<21, threads>=2; everything else
+defers unchanged.
+
+PERF (criterion, rch worker = truth; f32, 16M elements):
+  remainder f32 16M: fnp 31.03 ms vs NumPy 355.12 ms = 0.087x / ~11.4x faster
+WIRING NOTE: fnp.remainder is bound to remainder_ufunc (a PyUFunc), NOT the `remainder` pyfunction, so the
+f32 path had to be hooked in the binary ufunc __call__ (beside the f64 Remainder block). A first bench read
+0.93x DEAD (DEFAULT==numpy) when hooked in native_binary_remainder_or_passthrough; moving it to __call__ -> 11.4x.
+CORRECTNESS: conformance test f32_fmod_copysign_parallel_large_bit_exact_matches_numpy extended with remainder ->
+byte-identical to numpy above the gate (incl specials).
+WHY NOT ~0-GAIN: numpy f32 remainder is single-threaded compute (~156ms, ~10x above the bandwidth floor); the parallel
+f32 kernel aggregates cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f32-binary
+class now covers fmod/copysign/remainder; remaining bit-exact-safe lead: nextafter (~83ms, needs a bit-step impl);
+maximum/minimum (~39ms, modest). arctan2/hypot/logaddexp/float_power = libm-divergence-risky (defer). AGENT_NAME=BlackThrush.
