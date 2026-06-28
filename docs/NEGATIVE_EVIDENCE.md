@@ -41,6 +41,50 @@ container-surface shards remain red for pre-existing non-compress-kernel issues
 (`choose_python_container_surfaces_match_numpy`, `extract_python_container_surfaces_match_numpy` NaN
 equality case), so they are blockers for full-shard green but not caused by this reverted lever.
 
+## 2026-06-28 - NO-SHIP: extending sparse identity inverse to n=64 helps `inv_nxn` but regresses the actual `batch_inv` residual
+
+`BlackThrush`. LAND-OR-DIG found no measured `.scratch` / `.worktrees` keep
+off `main`: the dirty worktrees were already landed/covered, stale broad churn,
+or documented no-ships. Dug the documented lone residual, moderate-size
+`batch_inv`, using the alien-artifact/graveyard route: exploit the already-proven
+triangular sparsity in LU inverse instead of trying another micro-vectorization
+pass.
+
+Candidate lever: raise `INV_SPARSE_MAX_N` from 48 to 64 so the n=64 per-lane
+inverse solves against the natural identity and skips the guaranteed zero
+prefix. A wider n<=128 trial was also probed and immediately rejected.
+
+Same-effective-worker no-ship evidence (`vmi1264463`, `RAYON_NUM_THREADS=1`,
+`-p fnp-linalg`, release profile, same command shape; ORIG is current 48 gate,
+candidate is 64 gate):
+
+| Probe | ORIG ns | Candidate ns | Candidate/ORIG | Verdict |
+|---|---:|---:|---:|---|
+| `inv_nxn/size/64` | 228,128 | 163,450 | 0.716x | isolated win |
+| `inv_nxn/size/128` | 1,220,958 | 1,159,070 | 0.949x | guard/noise; n=128 not gated |
+| `batch_inv/shape/400x64x64` | 63,762,943 | 72,773,911 | 1.141x | reject: actual residual regressed |
+| `batch_inv/shape/64x128x128` | 42,550,744 | 41,462,174 | 0.974x | guard/noise; high variance |
+
+Wider n<=128 subprobe (`hz2`) was worse: `inv_nxn/64` improved
+85,715 -> 74,672 ns (0.871x), but `inv_nxn/128` was neutral
+460,137 -> 464,463 ns (1.009x) and `batch_inv/shape/64x128x128`
+regressed 4,499,242 -> 11,732,122 ns (2.607x). The source and temporary
+benchmark-row patches were reverted.
+
+Commands used: `AGENT_NAME=BlackThrush RCH_WORKER=vmi1264463
+RCH_REQUIRE_REMOTE=1 RAYON_NUM_THREADS=1
+CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec --
+cargo bench -j 1 -p fnp-linalg --profile release --bench criterion_linalg --
+'inv_nxn/size/(64|128)|batch_inv/shape/(400x64x64|64x128x128)' --sample-size
+10 --warm-up-time 1 --measurement-time 3 --output-format bencher --noplot`.
+Focused conformance for the candidate passed before rejection:
+`cargo test -j 1 -p fnp-linalg --profile release
+inv_nxn_sparse_identity_path_matches_dense_lu_solve_bits -- --nocapture`
+(`1 passed; 0 failed`). Final tree keeps no linalg source change. Retry predicate:
+do not retest the 48->64/128 threshold family; the remaining path must be a real
+getri-style/blocking change that improves `batch_inv` itself, not only isolated
+`inv_nxn`. AGENT_NAME=BlackThrush.
+
 ## 2026-06-28 - WIN (LANDED): np.where float32 typed selector parallelized - 8M f32 3.49 ms -> 1.21 ms, 0.348x vs ORIG
 
 `BlackThrush`. No unlanded measured bench-worktree win was found: the dirty bench worktrees were broad
