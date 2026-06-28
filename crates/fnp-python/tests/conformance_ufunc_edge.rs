@@ -449,6 +449,51 @@ print(ok)
 }
 
 #[test]
+fn int_power_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy runs integer a**b as a single-threaded element loop; the native parallel wrapping
+    // repeated-squaring kernel must be byte-identical for every width (overflow wraps mod 2^w,
+    // 0**0==1, negative base) above the gate. Negative exponents must still defer to numpy's
+    // ValueError (tested separately).
+    let script = fnp_script(
+        r#"
+n = (1 << 18) + 257
+rng = np.random.default_rng(13)
+ok = True
+for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint16, np.uint8]:
+    info = np.iinfo(dt)
+    a = rng.integers(info.min, info.max, n, dtype=dt)
+    b = rng.integers(0, 12, n, dtype=dt)  # non-negative exponents
+    a[0]=dt(0); b[0]=dt(0)      # 0**0 == 1
+    a[1]=dt(0); b[1]=dt(5)      # 0**5 == 0
+    a[2]=info.max; b[2]=dt(3)   # overflow wrap
+    if info.min < 0:
+        a[3]=dt(-2); b[3]=dt(7) # negative base
+        a[4]=info.min; b[4]=dt(2)
+    r = fnp.power(a, b); e = np.power(a, b)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# negative exponent must defer to numpy and raise ValueError (same as numpy)
+aa = rng.integers(1, 5, n, dtype=np.int64); bb = rng.integers(0, 4, n, dtype=np.int64)
+bb[7] = -1
+raised = False
+try:
+    fnp.power(aa, bb)
+except ValueError:
+    raised = True
+ok = ok and raised
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native int power must be bit-identical to numpy (and defer negative exponents): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn int_gcd_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy np.gcd is a single-threaded element loop; the native parallel Euclid kernel must be
     // byte-identical for every integer width, incl signed INT_MIN (|INT_MIN| wraps in two's

@@ -5237,7 +5237,9 @@ bf[np.abs(bf) < 1e-3] = np.float32(1.5)\n";
         let gcd_setup = "import numpy as np\n\
 rng = np.random.default_rng(6)\n\
 ag = rng.integers(1, 10**9, 16_000_000).astype(np.int64)\n\
-cg = rng.integers(1, 10**9, 16_000_000).astype(np.int64)\n";
+cg = rng.integers(1, 10**9, 16_000_000).astype(np.int64)\n\
+apw = rng.integers(-1000, 1000, 16_000_000).astype(np.int64)\n\
+epw = rng.integers(0, 12, 16_000_000).astype(np.int64)\n";
         py.run(
             std::ffi::CString::new(gcd_setup).unwrap().as_c_str(),
             Some(&ns),
@@ -5256,6 +5258,18 @@ cg = rng.integers(1, 10**9, 16_000_000).astype(np.int64)\n";
                 bch.iter(|| black_box(numpy_fn.call1((&ag, &cg)).expect("numpy int call")));
             });
         }
+        // integer power: numpy a**b single-threaded element loop (16M int64 ~340ms); native
+        // parallel wrapping repeated-squaring wins (bit-exact).
+        let apw = ns.get_item("apw").expect("apw");
+        let epw = ns.get_item("epw").expect("epw");
+        let fnp_pow = module.getattr("power").expect("fnp power");
+        let numpy_pow = numpy.getattr("power").expect("numpy power");
+        group.bench_function("fnp_power_i64_16m", |bch| {
+            bch.iter(|| black_box(fnp_pow.call1((&apw, &epw)).expect("fnp power call")));
+        });
+        group.bench_function("numpy_power_i64_16m", |bch| {
+            bch.iter(|| black_box(numpy_pow.call1((&apw, &epw)).expect("numpy power call")));
+        });
     });
 
     group.finish();

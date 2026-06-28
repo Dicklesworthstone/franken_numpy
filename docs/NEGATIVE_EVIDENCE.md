@@ -12061,3 +12061,22 @@ numpy across ALL int widths incl INT_MIN/overflow + a 2-D case.
 WHY NOT ~0-GAIN: numpy int lcm is single-threaded Euclid+mul (~995ms); the parallel kernel aggregates cores.
 PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. The integer gcd/lcm number-theoretic pair is
 now COMPLETE. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel INTEGER power (a ** b) - numpy int power is a single-threaded element loop
+`BlackThrush`. Another single-threaded numpy element op (distinct primitive: integer exponentiation). numpy runs
+integer a**b as a per-element loop (16M int64 ~340ms). Added pow_binary_typed<T> + try_native_int_power: par_chunks_mut
+wrapping repeated-squaring per element (acc/base in T via wrapping_mul, exponent as u64). Hooked into the binary ufunc
+__call__ (Power op, beside the f64/f32 paths) since fnp.power is a PyUFunc.
+BIT-EXACT: numpy accumulates integer power in the input dtype with wrapping multiply (overflow wraps mod 2^width,
+0**0==1, negative base handled), reproduced exactly by wrapping repeated squaring — verified vs np.power over every width
+(i8..u64) incl negative base / 2^63 overflow / 0**0. numpy raises ValueError for ANY negative integer exponent, so the
+dispatcher DEFERS (zero-copy scan of the exponent buffer for v<0) to surface numpy's own error. Same-shape C-contiguous
+same-int-dtype, n>=1<<18; scalar/broadcast/mixed/non-contiguous/negative-exponent defer.
+
+PERF (criterion, rch worker = truth; int64, 16M elements):
+  power i64 16M: fnp 36.38 ms vs NumPy 192.73 ms = 0.189x / ~5.3x faster
+CORRECTNESS: new conformance test int_power_parallel_large_bit_exact_matches_numpy -> byte-identical to numpy across ALL
+int widths incl 0**0/overflow/negative-base, AND a negative-exponent case that still raises ValueError (deferred).
+WHY NOT ~0-GAIN: numpy int power is a single-threaded element loop (~340ms); the parallel kernel aggregates cores.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. OPEN follow-up: integer floor_divide (~98ms,
+floored division + div-by-zero defer). AGENT_NAME=BlackThrush.
