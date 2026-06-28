@@ -449,6 +449,46 @@ print(ok)
 }
 
 #[test]
+fn int_floordiv_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy runs integer a//b as a single-threaded element loop; the native parallel floored-
+    // division kernel must be byte-identical for every width incl mixed signs and INT_MIN//-1,
+    // above the gate. A zero divisor must still defer to numpy (0 + RuntimeWarning).
+    let script = fnp_script(
+        r#"
+import warnings
+n = (1 << 18) + 257
+rng = np.random.default_rng(15)
+ok = True
+for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint16, np.uint8]:
+    info = np.iinfo(dt)
+    a = rng.integers(info.min, info.max, n, dtype=dt)
+    b = rng.integers(info.min, info.max, n, dtype=dt)
+    b[b == 0] = dt(1)               # non-zero divisors to exercise the kernel
+    a[0]=info.min; b[0]=dt(-1) if info.min < 0 else dt(1)   # INT_MIN // -1 wrap
+    a[1]=dt(7);  b[1]=dt(-3) if info.min < 0 else dt(3)     # mixed sign floor
+    a[2]=info.min; b[2]=info.max
+    r = fnp.floor_divide(a, b); e = np.floor_divide(a, b)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# zero divisor defers to numpy -> still byte-identical (0 + warning, suppressed)
+az = rng.integers(1, 1000, n, dtype=np.int64); bz = rng.integers(1, 7, n, dtype=np.int64)
+bz[9] = 0
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    ok = ok and fnp.floor_divide(az, bz).tobytes() == np.floor_divide(az, bz).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native int floor_divide must be bit-identical to numpy incl INT_MIN//-1 and mixed signs: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn int_power_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy runs integer a**b as a single-threaded element loop; the native parallel wrapping
     // repeated-squaring kernel must be byte-identical for every width (overflow wraps mod 2^w,

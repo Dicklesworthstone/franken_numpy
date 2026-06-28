@@ -5270,6 +5270,15 @@ epw = rng.integers(0, 12, 16_000_000).astype(np.int64)\n";
         group.bench_function("numpy_power_i64_16m", |bch| {
             bch.iter(|| black_box(numpy_pow.call1((&apw, &epw)).expect("numpy power call")));
         });
+        // integer floor_divide: numpy a//b single-threaded element loop (16M int64 ~98ms).
+        let fnp_fd = module.getattr("floor_divide").expect("fnp floor_divide");
+        let numpy_fd = numpy.getattr("floor_divide").expect("numpy floor_divide");
+        group.bench_function("fnp_floor_divide_i64_16m", |bch| {
+            bch.iter(|| black_box(fnp_fd.call1((&ag, &cg)).expect("fnp floordiv call")));
+        });
+        group.bench_function("numpy_floor_divide_i64_16m", |bch| {
+            bch.iter(|| black_box(numpy_fd.call1((&ag, &cg)).expect("numpy floordiv call")));
+        });
     });
 
     group.finish();

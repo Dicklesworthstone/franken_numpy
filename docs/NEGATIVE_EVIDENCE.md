@@ -12080,3 +12080,22 @@ int widths incl 0**0/overflow/negative-base, AND a negative-exponent case that s
 WHY NOT ~0-GAIN: numpy int power is a single-threaded element loop (~340ms); the parallel kernel aggregates cores.
 PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. OPEN follow-up: integer floor_divide (~98ms,
 floored division + div-by-zero defer). AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel INTEGER floor_divide (a // b) - numpy int floor_divide single-threaded
+`BlackThrush`. Another single-threaded numpy integer element op (// is one of the most common integer ops). numpy runs
+integer a//b as a per-element loop (16M int64 ~98ms). Added floordiv_binary_typed<T> + try_native_int_floordiv:
+par_chunks_mut floored division per element. Hooked into the binary ufunc __call__ (FloorDivide; it is a PyUFunc and is
+NOT in the f64 binop fast-path set, so this is the only native floor_divide path — no f64 regression risk).
+BIT-EXACT: numpy integer floor_divide rounds toward -inf in the input dtype with wrapping (INT_MIN // -1 wraps to
+INT_MIN), reproduced by truncating wrapping_div then subtracting 1 when the remainder is non-zero and its sign differs
+from the divisor's (unsigned = plain division) — verified vs np.floor_divide over every width incl mixed signs /
+INT_MIN//-1. numpy returns 0 + RuntimeWarning for int//0, so the dispatcher DEFERS (zero-copy scan of the divisor for 0)
+to surface numpy's warning. Same-shape C-contiguous same-int-dtype, n>=1<<18; everything else defers.
+
+PERF (criterion, rch worker = truth; int64, 16M elements):
+  floor_divide i64 16M: fnp 35.41 ms vs NumPy 105.42 ms = 0.336x / ~3.0x faster
+CORRECTNESS: new conformance test int_floordiv_parallel_large_bit_exact_matches_numpy -> byte-identical to numpy across
+ALL int widths incl mixed signs / INT_MIN//-1, plus a zero-divisor case that defers to numpy (0 + warning).
+WHY NOT ~0-GAIN: numpy int floor_divide is a single-threaded element loop (~98ms); the parallel kernel aggregates cores.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. The integer single-threaded-element-op vein
+(gcd/lcm/power/floor_divide) is now broadly harvested. AGENT_NAME=BlackThrush.
