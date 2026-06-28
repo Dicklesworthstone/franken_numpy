@@ -37,6 +37,40 @@ rch exec -- cargo test -j 1 -p fnp-linalg --profile release eigvalsh --
 --nocapture` passed (`8` unit/golden-filtered lib tests plus `3` golden
 integration tests; `0` failures). AGENT_NAME=BlueStone.
 
+## 2026-06-27 - CORRECTION (measured) to the no-`fma` ROOT-CAUSE entry below: `+fma` ALONE is BIT-INERT and gives ZERO speedup — the flag is NOT the lever
+
+`BlackThrush`. The ROOT-CAUSE entry directly below (`f6a33cc7`) states a RETRY
+PREDICATE — "enable `+fma` AND re-pin the 16 golden tests; that buys ~2x on
+GEMM/LU/inv." **I built and tested it; the predicate's mechanism is WRONG.**
+Built `fnp-linalg` with `RUSTFLAGS="-C target-feature=+avx2,+fma"`
+(`CARGO_TARGET_DIR=.../franken_numpy-blackthrush-fma-test`) and ran the full lib
+suite: **`316 passed; 0 failed; 16 ignored`** — EVERY `*_golden_sha256` (matmul
+flat/rect, LU, QR, cholesky-512, tridiag, inv n=768/1024, all batch-bits) stays
+GREEN under `+fma`. Decisive consequences:
+
+1. `+fma` ALONE does NOT change one bit of any kernel. Rust's `fp-contract` defaults
+   to OFF, so the deliberate non-FMA inner loop `*slot += av * bv` (separate mul then
+   add) is NOT auto-contracted into `vfmadd` just by enabling the target feature.
+   The flag only makes an *explicit* `f64::mul_add` use HW FMA instead of the libcall.
+2. Therefore `+fma` emits NO FMA in GEMM/LU/inv → **ZERO speedup** (golden-pass IS
+   the proof: identical bits ⇒ identical instructions ⇒ no FMA ⇒ no win). My GEMM
+   timings under `+fma` were ~same/noisier, never the predicted ~2x. The flag is a
+   no-op for these kernels.
+3. The config comment's "**16 fnp-linalg tests regress**" is `target-cpu=x86-64-v3`
+   (a broad CPU bump that changes vectorization/reassociation codegen), **NOT** `+fma`
+   alone — proven: `+fma` alone regresses `0`.
+
+So the TRUE FMA lever is NOT "flip the build flag" — it is "**rewrite every
+compute inner loop with explicit `f64::mul_add` AND ship `+fma`**". That rewrite
+(a) needs `+fma` or the `mul_add` is a SLOWER software libcall, and (b) DOES change
+the low bit (FMA rounds once), which WOULD break every `*_golden_sha256`. Net: same
+end conclusion as below — closing the GEMM/LU/inv gap means trading matmul/LU
+cross-thread BIT-REPRODUCIBILITY for speed = HUMAN/architectural decision — but the
+cost is a kernel rewrite + golden re-pin, NOT a one-line flag flip. **Do not enable
+`+fma` expecting a win; it buys nothing without the mul_add rewrite.** (Corroborates
+the peer's `bead-yvqk9` note further down: "Simd mul_add != scalar mul+add bytes;
+Rust does NOT FMA-contract.") No landable 60-min code lever; frontier unchanged.
+
 ## 2026-06-27 - ROOT CAUSE (caps the whole frontier): all remaining vs-numpy COMPUTE-kernel gaps trace to the deliberate no-`fma` build (bit-reproducibility); closing them = human decision
 
 `BlackThrush`. The biggest measured gaps vs ORIG that survive after the surface
