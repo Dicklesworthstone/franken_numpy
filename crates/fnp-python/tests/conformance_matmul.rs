@@ -323,3 +323,46 @@ print(all_pass)
     );
     Ok(())
 }
+
+#[test]
+fn int_matmul_native_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy integer matmul uses a naive serial loop (no BLAS); the native parallel ikj
+    // GEMM must be byte-identical — incl. overflow WRAP (numpy accumulates in the input
+    // dtype with wrapping multiply+add). Sizes straddle the 1<<18 work gate.
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(11)
+ok = True
+# bit-exactness across widths + shapes (square, rectangular, non-square inner)
+for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint8]:
+    for (m, k, n) in [(96, 96, 96), (128, 200, 96), (65, 130, 257)]:
+        info = np.iinfo(dt)
+        a = rng.integers(info.min // 2, info.max // 2, (m, k)).astype(dt)
+        b = rng.integers(info.min // 2, info.max // 2, (k, n)).astype(dt)
+        r = fnp.matmul(a, b); e = np.matmul(a, b)
+        ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+        # @ operator routes through matmul too
+        ok = ok and (a @ b).tobytes() == e.tobytes()
+
+# explicit overflow-wrap case (int64): large values so products+sums wrap
+a = np.full((80, 80), 5_000_000_000, dtype=np.int64)
+b = np.full((80, 80), 5_000_000_000, dtype=np.int64)
+ok = ok and fnp.matmul(a, b).tobytes() == np.matmul(a, b).tobytes()
+
+# int8 saturating-wrap case
+a = np.full((70, 70), 100, dtype=np.int8)
+b = np.full((70, 70), 100, dtype=np.int8)
+ok = ok and fnp.matmul(a, b).tobytes() == np.matmul(a, b).tobytes()
+
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native integer matmul must be bit-identical to numpy (incl. wrap): {result}"
+    );
+    Ok(())
+}

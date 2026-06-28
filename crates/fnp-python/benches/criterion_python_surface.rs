@@ -5297,6 +5297,32 @@ b3db = rng.standard_normal((256, 128, 128))\n";
                 });
             }
         }
+        // INTEGER matmul: numpy has no BLAS for ints (naive loop, 89x slower than float
+        // at 512). Native parallel ikj GEMM (bit-exact wrapping) should crush it.
+        let int_setup = "import numpy as np\n\
+rng = np.random.default_rng(7)\n\
+ai512 = rng.integers(-100, 100, (512, 512)).astype(np.int64)\n\
+bi512 = rng.integers(-100, 100, (512, 512)).astype(np.int64)\n\
+ai1024 = rng.integers(-100, 100, (1024, 1024)).astype(np.int64)\n\
+bi1024 = rng.integers(-100, 100, (1024, 1024)).astype(np.int64)\n";
+        py.run(
+            std::ffi::CString::new(int_setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("int matmul setup");
+        let fnp_mm = module.getattr("matmul").expect("fnp matmul");
+        let np_mm = numpy.getattr("matmul").expect("np matmul");
+        for sz in ["512", "1024"] {
+            let a = ns.get_item(format!("ai{sz}")).expect("ai");
+            let b = ns.get_item(format!("bi{sz}")).expect("bi");
+            group.bench_function(format!("fnp_matmul_i64_{sz}x{sz}"), |bch| {
+                bch.iter(|| black_box(fnp_mm.call1((&a, &b)).expect("fnp int matmul")));
+            });
+            group.bench_function(format!("numpy_matmul_i64_{sz}x{sz}"), |bch| {
+                bch.iter(|| black_box(np_mm.call1((&a, &b)).expect("numpy int matmul")));
+            });
+        }
         let fnp_tensordot = module.getattr("tensordot").expect("fnp tensordot");
         let np_tensordot = numpy.getattr("tensordot").expect("np tensordot");
         for sz in ["1024", "1536"] {
