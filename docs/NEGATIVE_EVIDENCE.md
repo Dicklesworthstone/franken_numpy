@@ -11853,10 +11853,9 @@ reshapes a->(m,k), b->(n,k), builds a CONTIGUOUS b^T (cheap O(n*k) copy), routes
 (m,n) result to a.shape[:-1] + b.shape[:-1]. BIT-EXACT (reshape/transpose-copy preserve values; int GEMM bit-exact).
 Both-1-D scalar case, mixed/float/complex dtype, non-contiguous, below-work-gate defer to numpy.
 
-PERF: NumPy integer inner is the same no-BLAS naive matmul (numpy int matmul/dot 512^2 measured 276-320 ms). inner
-routes to the SAME try_native_int_matmul measured at matmul 512^2 = fnp 35.90 vs numpy 276.02 ms = 0.130x (7.7x) and dot
-27x, plus a cheap O(n*k) b^T copy. So int inner 512^2 is ~7x+ vs numpy by construction (the fnp criterion row was
-queue-blocked on saturated rch workers; conformance proves bit-exactness).
+PERF (criterion, remote rch worker ovh-a = truth; int64, inner 512x512):
+  inner i64 512x512: fnp 13.06 ms vs NumPy 74.86 ms = 0.174x (5.7x faster) — routes to the native int GEMM (+ a cheap
+  b^T copy). numpy integer inner has no BLAS (naive matmul).
 CORRECTNESS: new conformance test int_inner_native_parallel_bit_exact_matches_numpy -> byte-identical to numpy.inner for
 int64/int32/int16/int8/uint64/uint32 over 2-D (m,k)inner(n,k) AND 3-D (contract last axis), plus an int64 overflow-wrap.
 WHY NOT ~0-GAIN: numpy integer inner has no BLAS (slow naive matmul); native reshape+GEMM wins big.
