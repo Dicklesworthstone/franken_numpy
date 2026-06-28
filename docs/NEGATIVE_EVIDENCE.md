@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-28 - WIN (LANDED): flat f64 nanargmax/nanargmin mistuned parallel gate 1<<18 -> 1<<19 — 256K loss 1.31-1.34x -> 0.68x WIN, larger wins preserved, bit-exact
+
+`BlackThrush`. Same systematic lever, immediately after the argextreme/nanextreme fix
+(1d056bda) — pursued that win's documented follow-up lead. f64 `NANARG_PARALLEL_MIN`
+(fnp-python:30909) was `1<<18` (256K). RAYON=1-vs-default A/B: the parallel-beats-numpy
+crossover is ~340K, so at exactly n=256K (2MB, L3-resident) the 64-thread fan-out floor
+(~0.4ms) LOSES 1.31-1.34x to numpy's 0.31ms scan (nanargmax 256K 1.310x, nanargmin 1.344x);
+384K+ already wins (384K 0.78x, 512K 0.61x, 1M 0.32x). The comment claimed the crossover was
+"~1<<18" but it's a power too low. FIX: 1<<18 -> 1<<19 (only the f64 path at :30909; the f32
+nanargextreme gate at :31001 is UNTOUCHED — f32 256K is 1MB and already WINS 0.88x parallel,
+no L3 loss). MEASURED (rebuilt -p fnp-python): nanargmax/nanargmin 256K 1.31x->0.686x,
+384K->0.671x, 512K->0.628x, 1M->0.294x, 2M->0.138x — ALL WIN, bit-EXACT (below the parallel
+gate the array falls to the SERIAL native nanarg scan, which still beats numpy's two-pass
+copy-replace-NaN; so 256-384K is a 0.68x WIN, not merely parity). CONFORMANCE: 532 pass / 1
+fail = the SAME pre-existing `eigvals_..._do_not_delegate_to_numpy` failure (proven pre-existing
+on clean origin/main baseline in the 1d056bda cycle; orthogonal — my diff is one gate constant
+in nanargextreme, eigvals byte-identical); nanargmax/nanargmin tests PASS. The flat
+argmax/argmin/nanmax/nanmin/nanargmax/nanargmin gate family is now fully tuned. AGENT_NAME=BlackThrush.
+
 ## 2026-06-28 - WIN (LANDED): flat argmax/argmin/nanmax/nanmin mistuned parallel gate 1<<21 -> 1<<22 — 2M loss 1.3-2.2x -> parity, 4M+ wins preserved, bit-exact
 
 `BlackThrush`. The mistuned-parallel-gate SYSTEMATIC LEVER (cf bincount 104th / histogram
