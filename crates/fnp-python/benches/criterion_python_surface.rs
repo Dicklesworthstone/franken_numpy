@@ -4281,6 +4281,25 @@ fn bench_linalg_boundary(c: &mut Criterion) {
             );
         }
 
+        // INTEGER matrix_power: numpy has no BLAS (repeated naive int matmul). Native
+        // binary-exp parallel GEMM should crush it.
+        let imp_setup = "import numpy as np\n\
+imp = np.random.default_rng(9).integers(-3, 3, (256, 256)).astype(np.int64)\n";
+        let imp_ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(imp_setup).unwrap().as_c_str(),
+            Some(&imp_ns),
+            Some(&imp_ns),
+        )
+        .expect("int matpow setup");
+        let imp = imp_ns.get_item("imp").expect("imp");
+        group.bench_function("fnp_matrix_power_i64_256_n5", |bench| {
+            bench.iter(|| black_box(fnp_matrix_power.call1((&imp, 5_i64)).expect("fnp int matpow")));
+        });
+        group.bench_function("numpy_matrix_power_i64_256_n5", |bench| {
+            bench.iter(|| black_box(numpy_matrix_power.call1((&imp, 5_i64)).expect("np int matpow")));
+        });
+
         for (label, input) in [
             ("batch10000_4x4", make_spd_stack(10_000, 4)),
             ("batch4000_8x8", make_spd_stack(4_000, 8)),

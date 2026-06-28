@@ -11805,3 +11805,23 @@ PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2 (nump
 BLAS lever now covers 2-D matmul (7.7x), 2-D dot (27x), and batched matmul (12x). REMAINING: integer matrix-vector is
 NOT a gap (numpy int matvec ~12ms is already fast, even beats float) - skip; register-tiled int kernel could push the
 2-D residual past 7.7x. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel INTEGER np.linalg.matrix_power (binary-exp GEMM) - numpy has no BLAS for ints
+`BlackThrush`. A different linalg primitive in the integer-no-BLAS family. fnp's native matrix_power was f64-ONLY
+(DType::F64 gate), so INTEGER matrix_power delegated to numpy, whose matrix_power does repeated naive int matmul (no
+BLAS): measured int256^5 = 50ms vs f64 0.5ms (~100x slower than the float BLAS path). Added int_matrix_power_typed<T>
+(binary exponentiation over a parallel ikj wrapping GEMM on raw Vecs) + try_native_int_matrix_power, hooked into
+matrix_power() for power>=2, 2-D square, C-contiguous integer, dim>=64. BIT-EXACT: matrix multiplication over the
+wrapping-integer ring Z/2^w is associative, so M^power is a well-defined ring element independent of the binary-exp
+grouping (matches numpy's repeated-matmul result byte-for-byte incl. overflow wrap). power 0/1, negative, floats,
+non-square, tiny dims defer to the existing paths.
+
+PERF (criterion, remote rch worker ovh-a = truth; int64, 256x256, n=5):
+  matrix_power i64 256 n5: fnp 8.60 ms vs NumPy 60.94 ms = 0.141x (7.1x faster) — native binary-exp parallel GEMM vs
+  numpy's no-BLAS repeated naive int matmul.
+CORRECTNESS: new conformance test int_matrix_power_native_parallel_bit_exact_matches_numpy -> byte-identical to
+numpy.linalg.matrix_power for int64/int32/int16/int8/uint64/uint32 across powers {2,3,5,8,13}, an int64 overflow-wrap
+case, and the n=0/n=1 delegated paths.
+WHY NOT ~0-GAIN: numpy integer matrix_power has no BLAS (repeated naive int matmul); native binary-exp parallel GEMM is
+a large win. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. The integer-no-BLAS lever now
+covers 2-D matmul (7.7x), 2-D dot (27x), batched matmul (12x), and matrix_power. AGENT_NAME=BlackThrush.

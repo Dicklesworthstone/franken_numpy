@@ -681,3 +681,38 @@ np.linalg.eigvals(a)
         "eigvals on non-square should raise same error as numpy"
     );
 }
+
+#[test]
+fn int_matrix_power_native_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy integer matrix_power = repeated naive int matmul (no BLAS). The native
+    // binary-exp parallel GEMM must be byte-identical (Z/2^w ring assoc) incl. overflow
+    // wrap, across powers and int widths.
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(19)
+ok = True
+for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32]:
+    M = rng.integers(-3, 4, (96, 96)).astype(dt)
+    for p in [2, 3, 5, 8, 13]:
+        r = fnp.matrix_power(M, p); e = np.linalg.matrix_power(M, p)
+        ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# explicit overflow wrap (int64, values grow fast)
+M = rng.integers(100000, 200000, (80, 80)).astype(np.int64)
+for p in [2, 4, 7]:
+    ok = ok and fnp.matrix_power(M, p).tobytes() == np.linalg.matrix_power(M, p).tobytes()
+# n==1 and n==0 still match (delegated paths)
+M = rng.integers(-5, 5, (70, 70)).astype(np.int64)
+ok = ok and fnp.matrix_power(M, 1).tobytes() == np.linalg.matrix_power(M, 1).tobytes()
+ok = ok and fnp.matrix_power(M, 0).tobytes() == np.linalg.matrix_power(M, 0).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native integer matrix_power must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
