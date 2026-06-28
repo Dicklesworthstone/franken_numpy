@@ -693,6 +693,40 @@ print(ok)
 }
 
 #[test]
+fn f16_nextafter_full_domain_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy widens f16->f32 for nextafter; the native uint16 bit-step must be byte-identical over
+    // the FULL f16 domain for several scalar targets b (incl 0/-0/inf/nan), tiled past the gate.
+    // numpy f16 returns x1's bits on the equal case (incl signed zeros).
+    let script = fnp_script(
+        r#"
+patterns = np.arange(65536, dtype=np.uint16).view(np.float16)
+reps = ((1 << 20) // patterns.size) + 2
+x = np.tile(patterns, reps)
+ok = True
+for bv in [1.0, -1.0, 0.0, -0.0, np.inf, -np.inf, 0.5, 65504.0]:
+    b = np.full(x.size, np.float16(bv), dtype=np.float16)
+    r = fnp.nextafter(x, b); e = np.nextafter(x, b)
+    same = ((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all()
+    ok = ok and bool(same) and r.dtype == e.dtype
+# elementwise pair (both arrays) + 2-D
+y = patterns[::-1]
+xt = np.tile(patterns, reps); yt = np.tile(y, reps)
+r = fnp.nextafter(xt, yt); e = np.nextafter(xt, yt)
+ok = ok and bool(((r.view(np.uint16)==e.view(np.uint16))|(np.isnan(r)&np.isnan(e))).all())
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 nextafter must be bit-identical to numpy over the full domain: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_copysign_heaviside_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy widens f16->f32 for copysign/heaviside; the native parallel kernels (copysign =
     // uint16 sign-bit copy, heaviside = widen-piecewise) must be byte-identical incl inf/nan/-0.0,

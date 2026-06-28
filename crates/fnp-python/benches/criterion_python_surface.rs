@@ -5216,8 +5216,8 @@ hb = rng.standard_normal(16_000_000).astype(np.float16)\n";
                 bch.iter(|| black_box(numpy_fn.call1((&ha, &hbnz)).expect("numpy f16 call")));
             });
         }
-        // f16 copysign/heaviside: numpy widens f16->f32 (~22ms / ~100ms @16M).
-        for op in ["copysign", "heaviside"] {
+        // f16 copysign/heaviside/nextafter: numpy widens f16->f32 (~22 / ~100 / ~57ms @16M).
+        for op in ["copysign", "heaviside", "nextafter"] {
             let fnp_fn = module.getattr(op).expect("fnp op");
             let numpy_fn = numpy.getattr(op).expect("numpy op");
             group.bench_function(format!("fnp_{op}_f16_16m"), |bch| {

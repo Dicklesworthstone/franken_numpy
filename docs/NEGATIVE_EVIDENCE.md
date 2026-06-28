@@ -12409,3 +12409,22 @@ WHY NOT ~0-GAIN: numpy widens f16->f32 for both; native parallel (copysign bit-o
 cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f16 binary now: add/mul/sub/max/min/
 fmod/remainder/copysign/heaviside + ordered comparisons. OPEN: f16 nextafter (bit-step has a b=0 edge bug to fix);
 hypot (libm-divergence risk). AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 nextafter - uint16 bit-step (completes f16 binary)
+`BlackThrush`. numpy widens f16->f32 for nextafter (~57ms@16M); f16 delegated. Added op 9=nextafter to
+try_zerocopy_f16_binary_widen: a uint16 bit-step toward b (nan->nan, equal->x1's bits, +-0->smallest subnormal toward
+b's sign, else step the u16 bits +/-1 by direction & sign). Hooked into the nextafter pyfunction (f16 sibling beside
+f64/f32).
+BIT-EXACT: verified byte-exact over the ENTIRE f16 domain for 8 scalar targets + an elementwise pair. **NUANCE: numpy
+f16 nextafter returns X1's bits on the equal case (incl signed zeros: nextafter(-0.0,+0.0)=-0.0) — DIFFERENT from f32,
+where numpy returns x2 (nextafter(-0.0,+0.0)=+0.0). Confirmed the shipped f32 nextafter (118410fb) is still correct for
+f32 (equal->x2). f16 uses equal->x1.** No warning surface.
+
+PERF (criterion, rch worker = truth; f16, 16M elements):
+  nextafter f16 16M: fnp 8.49 ms vs NumPy 125.39 ms = 0.068x / ~14.8x faster
+CORRECTNESS: new conformance test f16_nextafter_full_domain_bit_exact_matches_numpy -> byte-identical to numpy over the
+full f16 domain (8 scalar targets + elementwise pair).
+WHY NOT ~0-GAIN: numpy f16 nextafter widens to f32 (~57ms); the native parallel uint16 bit-step aggregates cores + skips
+the widen. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. **f16 binary COMPLETE for clean
+ops: add/mul/sub/max/min/fmod/remainder/copysign/heaviside/nextafter + ordered comparisons. Only hypot left (libm-
+divergence risk).** AGENT_NAME=BlackThrush.
