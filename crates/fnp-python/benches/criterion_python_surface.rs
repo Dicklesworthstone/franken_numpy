@@ -5246,14 +5246,16 @@ cg = rng.integers(1, 10**9, 16_000_000).astype(np.int64)\n";
         .expect("gcd setup");
         let ag = ns.get_item("ag").expect("ag");
         let cg = ns.get_item("cg").expect("cg");
-        let fnp_gcd = module.getattr("gcd").expect("fnp gcd");
-        let numpy_gcd = numpy.getattr("gcd").expect("numpy gcd");
-        group.bench_function("fnp_gcd_i64_16m", |bch| {
-            bch.iter(|| black_box(fnp_gcd.call1((&ag, &cg)).expect("fnp gcd call")));
-        });
-        group.bench_function("numpy_gcd_i64_16m", |bch| {
-            bch.iter(|| black_box(numpy_gcd.call1((&ag, &cg)).expect("numpy gcd call")));
-        });
+        for op in ["gcd", "lcm"] {
+            let fnp_fn = module.getattr(op).expect("fnp int op");
+            let numpy_fn = numpy.getattr(op).expect("numpy int op");
+            group.bench_function(format!("fnp_{op}_i64_16m"), |bch| {
+                bch.iter(|| black_box(fnp_fn.call1((&ag, &cg)).expect("fnp int call")));
+            });
+            group.bench_function(format!("numpy_{op}_i64_16m"), |bch| {
+                bch.iter(|| black_box(numpy_fn.call1((&ag, &cg)).expect("numpy int call")));
+            });
+        }
     });
 
     group.finish();

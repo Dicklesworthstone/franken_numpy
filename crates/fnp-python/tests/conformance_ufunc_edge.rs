@@ -470,11 +470,15 @@ for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint1
     a[4]=dt(0);    b[4]=info.max
     r = fnp.gcd(a, b); e = np.gcd(a, b)
     ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+    # lcm: (|a|/gcd)*|b| with dtype wrap (incl overflow + INT_MIN), bit-identical to numpy
+    r = fnp.lcm(a, b); e = np.lcm(a, b)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
 # 2-D shape preserved
 a2 = rng.integers(1, 10**9, (600, 600)).astype(np.int64)
 b2 = rng.integers(1, 10**9, (600, 600)).astype(np.int64)
 ok = ok and fnp.gcd(a2, b2).tobytes() == np.gcd(a2, b2).tobytes()
 ok = ok and fnp.gcd(a2, b2).shape == np.gcd(a2, b2).shape
+ok = ok and fnp.lcm(a2, b2).tobytes() == np.lcm(a2, b2).tobytes()
 print(ok)
 "#
         .into(),

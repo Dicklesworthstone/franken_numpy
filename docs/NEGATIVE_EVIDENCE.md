@@ -12042,3 +12042,22 @@ ALL int widths (i8..u64) incl INT_MIN/INT_MAX/0 edges above the gate + a 2-D sha
 WHY NOT ~0-GAIN: numpy int gcd is single-threaded Euclid (~995ms, deeply compute-bound); the parallel kernel aggregates
 cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. OPEN follow-up: np.lcm (same ~995ms,
 = |a/gcd*b| — reuses euclid but must match numpy's exact op order for wrap-bit-exactness). AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel INTEGER lcm - completes the int gcd/lcm number-theoretic pair
+`BlackThrush`. Companion to the int gcd win (ae176257). numpy's np.lcm is the same single-threaded Euclid element loop
+(16M int64 ~995ms). Added lcm_binary_typed<T> + try_native_int_lcm reusing the gcd magnitude machinery (euclid_u64 +
+the same to_mag/from_mag closures). Hooked into the lcm pyfunction above the passthrough.
+BIT-EXACT: numpy lcm = gcd==0 ? 0 : (|a| / gcd) * |b| computed in the input dtype with WRAPPING multiply and NO final
+abs — so the conventional non-negative lcm appears for in-range inputs while an overflowing product wraps (possibly
+negative) exactly as numpy's C loop. Verified vs np.lcm over every width (i8..u64) incl INT_MIN/overflow/mixed-sign
+(0 diffs over 500K+ per width). The q*|b| product is computed in u64 then cast back wrapping, which reproduces the
+dtype-width wrap for all widths (widths<64 can't overflow u64 so from_mag truncation is the wrap; width 64 wraps in u64).
+Same-shape C-contiguous same-int-dtype, n>=1<<18; everything else defers.
+
+PERF (criterion, rch worker = truth; int64, 16M elements):
+  lcm i64 16M: fnp 49.15 ms vs NumPy 1074.4 ms = 0.046x / ~21.9x faster
+CORRECTNESS: conformance test int_gcd_parallel_large_bit_exact_matches_numpy extended with lcm -> byte-identical to
+numpy across ALL int widths incl INT_MIN/overflow + a 2-D case.
+WHY NOT ~0-GAIN: numpy int lcm is single-threaded Euclid+mul (~995ms); the parallel kernel aggregates cores.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. The integer gcd/lcm number-theoretic pair is
+now COMPLETE. AGENT_NAME=BlackThrush.
