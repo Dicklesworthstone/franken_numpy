@@ -693,6 +693,39 @@ print(ok)
 }
 
 #[test]
+fn f16_nan_to_num_full_domain_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy widens f16->f32 for nan_to_num; the native uint16 bit-replacement must be byte-
+    // identical over the FULL f16 domain (every nan/inf/finite pattern), default args AND custom
+    // nan/posinf/neginf, tiled past the 1<<20 gate.
+    let script = fnp_script(
+        r#"
+patterns = np.arange(65536, dtype=np.uint16).view(np.float16)
+x = np.tile(patterns, ((1 << 20) // patterns.size) + 2)
+ok = True
+# default args
+r = fnp.nan_to_num(x); e = np.nan_to_num(x)
+ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# custom nan/posinf/neginf
+r = fnp.nan_to_num(x, nan=2.0, posinf=100.0, neginf=-50.0)
+e = np.nan_to_num(x, nan=2.0, posinf=100.0, neginf=-50.0)
+ok = ok and r.tobytes() == e.tobytes()
+# 2-D shape preserved
+x2 = np.tile(patterns, (1 << 20) // patterns.size).reshape(-1, patterns.size)
+ok = ok and fnp.nan_to_num(x2).tobytes() == np.nan_to_num(x2).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 nan_to_num must be bit-identical to numpy over the full domain: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_clip_scalar_bounds_full_domain_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy widens f16->f32 to clip; the native parallel uint16-view clamp must be byte-identical
     // over the ENTIRE f16 domain (all 65536 patterns, incl NaN/inf/-0.0) for several scalar bound

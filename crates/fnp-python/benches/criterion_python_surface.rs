@@ -5253,6 +5253,17 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
                 bch.iter(|| black_box(numpy_round.call1((&ha,)).expect("numpy f16 round")));
             });
         }
+        // f16 nan_to_num: numpy widens f16->f32 (~112ms@16M); native uint16 bit-replacement wins.
+        {
+            let fnp_n2n = module.getattr("nan_to_num").expect("fnp nan_to_num");
+            let numpy_n2n = numpy.getattr("nan_to_num").expect("numpy nan_to_num");
+            group.bench_function("fnp_nantonum_f16_16m", |bch| {
+                bch.iter(|| black_box(fnp_n2n.call1((&ha,)).expect("fnp f16 nan_to_num")));
+            });
+            group.bench_function("numpy_nantonum_f16_16m", |bch| {
+                bch.iter(|| black_box(numpy_n2n.call1((&ha,)).expect("numpy f16 nan_to_num")));
+            });
+        }
         // f16 flat min/max reduction: numpy widens f16->f32 to reduce (~80ms@16M); native
         // parallel f32-fold reduce wins (bit-exact, defers NaN / zero-extremum). hsq is all
         // non-negative with a non-zero max -> exercises the kernel.

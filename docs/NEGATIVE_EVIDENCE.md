@@ -12354,3 +12354,19 @@ WHY NOT ~0-GAIN: numpy f16 per-axis argextreme widens to f32 + strides (slow sin
 fans every (o,i) across cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2.
 **f16 argmin/argmax now COMPLETE on every axis (flat + last + non-last). f16 reduction vein: min/max/ptp/argmin/argmax
 flat + argmin/argmax all-axes.** AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 nan_to_num - uint16 bit-replacement
+`BlackThrush`. numpy widens f16->f32 for nan_to_num (~28ms/4M = ~112ms/16M); fnp had f64/f32/int/complex paths but f16
+fell to the cold extract-rebuild. Added try_zerocopy_f16_nan_to_num: view uint16, par_chunks_mut replace by bit pattern
+(+inf 0x7c00 -> posinf, -inf 0xfc00 -> neginf, nan exp-all-1&mant!=0 -> nan, finite unchanged), view back to float16.
+Hooked into nan_to_num after the f32 path. NO widen at all.
+BIT-EXACT: numpy's default f16 posinf/neginf are finfo(float16).max / -max (= f16::MAX/MIN = 0x7bff/0xfbff), nan default
+0.0 (0x0000); custom nan/posinf/neginf cast f64->f16. Replace-by-bit-pattern == numpy's behavior, verified byte-exact
+over the ENTIRE f16 domain (all 65536 patterns) for default AND custom args.
+
+PERF (criterion, rch worker = truth; f16, 16M elements):
+  nan_to_num f16 16M: fnp 1.86 ms vs NumPy 169.22 ms = 0.011x / ~91x faster
+CORRECTNESS: new conformance test f16_nan_to_num_full_domain_bit_exact_matches_numpy -> byte-identical to numpy over the
+full f16 domain (default + custom nan/posinf/neginf) + a 2-D case.
+WHY NOT ~0-GAIN: numpy f16 nan_to_num widens to f32 (~112ms); the native uint16 bit-replacement aggregates cores AND
+skips the widen. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. AGENT_NAME=BlackThrush.
