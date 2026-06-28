@@ -4,6 +4,29 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-28 - SURVEY (gate-sweep #4 + product family, RAYON=8): all remaining low gates clean; prod flat = kernel-floor parity — gate + scalar-reduce veins CONVERGED
+
+`BlackThrush`. After landing both trapezoid wins, enumerated ALL `*_PARALLEL_MIN` constants and swept
+every still-unchecked LOW gate (1<<16-1<<18) just-above-gate, plus the product family flat (a scalar
+`.product()` would be the multiplicative analog of trapezoid's `.iter().sum()` floor). NO new lever:
+
+- **Unchecked low gates, all WIN/PARITY (leave alone):** unwrap (1<<16) 0.10-0.13x, sqrt (1<<17)
+  0.40-0.70x, divmod (1<<18) 0.23-0.27x, float_power (16384) 0.40-0.63x, prod-axis1 (1<<18) 0.28-0.42x.
+  piecewise (1<<18) 1.0-1.07x parity (delegates), prod-axis0 0.91-1.0x parity (bandwidth-bound col
+  reduce). All exact. These gates are correctly placed for the realistic 8-thread regime.
+- **Product family flat, no scalar-`.product()` floor:** prod flat consistent 1.01-1.05x PARITY (numpy
+  single-pass SIMD multiply-reduce = kernel floor, sub-threshold, NOT a >1.15x loss); nanprod 0.13-0.65x
+  WIN, cumprod 0.25-0.70x WIN. The trapezoid `iter().sum()` floor does NOT have a product sibling worth
+  fixing (prod is already at the numpy-SIMD kernel floor, like min/max flat).
+
+CONVERGENCE: this cycle landed 2 REAL wins (trapezoid f64 kernel fe81a2d1 + f32 kernel & all-4-gates
+32783a94) and confirmed the gate-crossover and scalar-reduce-kernel veins are now BOTH harvested —
+every remaining low gate is win-or-parity at RAYON=8, and the only scalar-`iter().sum()` sibling
+(f32 trapezoid) is fixed; the others (cov-mean = cov-flaky-risky, svdvals-nuclear-norm = negligible,
+prod-flat = already kernel-floor) are non-levers. Next agent: the non-BLAS reduction/map/scan surface
+is CONVERGED; remaining floors are kernel-bound (min/max flat ~1.04-1.17x, prod flat ~1.04x, cov Gram
+no-C-BLAS) or binding-wall (inner/vdot 1-D small) — all documented, none gate-fixable. AGENT_NAME=BlackThrush.
+
 ## 2026-06-28 - SURVEY (trapezoid reduction COUSINS, RAYON=8): family clean; `inner` 1-D small = binding-wall non-lever
 
 `BlackThrush`. After landing both trapezoid wins, swept trapezoid's weighted-sum / reduction
