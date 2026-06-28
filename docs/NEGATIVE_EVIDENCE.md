@@ -11956,3 +11956,28 @@ WHY NOT ~0-GAIN: numpy f16 unary rounding is compute-bound (widen/narrow), ~12-2
 parallel widen-op-narrow aggregates cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2.
 f16-no-ALU class now covers binary add/mul/sub + unary floor/ceil/trunc/rint; remaining f16 leads: sqrt/square/
 reciprocal (warning surface), transcendentals (libm divergence risk), reductions (order). AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT32 fmod/copysign - numpy f32 binary ufuncs are single-threaded
+`BlackThrush`. There was NO float32 binary zero-copy path at all: the parallel binary kernels (fmod, copysign, ...)
+gate on numpy_dtype_is_f64 ONLY, so every f32 binary op fell straight through to numpy, which runs its binary ufuncs
+SINGLE-THREADED (16M f32: fmod ~138ms, copysign ~44ms, while the ~192MB in+in+out traffic finishes in ~15ms at
+bandwidth). Added zerocopy_f32_binary_flat (+ try_zerocopy_f32_binary wrapper): same-shape C-contiguous f32, read both
+operands as &[f32] via PyBuffer (zero-copy), par_chunks_mut apply the op straight into a fresh numpy.empty(float32).
+Hooked into the fmod and copysign pyfunctions as an f32 sibling beside the existing f64 path. BIT-EXACT: only the
+IEEE-deterministic ops are admitted — Fmod is f32 `%` (IEEE fmodf, sign of dividend, one correct result) and Copysign
+is a pure sign-bit copy — so Rust's hardware f32 op == numpy's f32 op byte-for-byte (no libm divergence). fmod defers
+to numpy on any zero divisor (zero-copy scan) so numpy's divide RuntimeWarning + nan surface exactly. Scoped n>=1<<21,
+threads>=2; scalar/broadcast/non-f32/non-contiguous/zero-divisor defer to numpy unchanged.
+
+PERF (criterion, rch worker = truth; f32, 16M elements):
+  fmod     f32 16M: fnp 23.55 ms vs NumPy 158.47 ms = 0.149x / ~6.7x faster
+  copysign f32 16M: fnp 11.98 ms vs NumPy 43.67 ms = 0.274x / ~3.6x faster
+CORRECTNESS: new conformance test f32_fmod_copysign_parallel_large_bit_exact_matches_numpy -> byte-identical to numpy
+for fmod + copysign above the gate, incl inf/-inf/nan/-0.0 and -0.0/nan/inf sign sources, a 2-D shape-preserving case,
+and a zero-divisor case (defers to numpy, still byte-identical).
+WHY NOT ~0-GAIN: numpy f32 fmod is single-threaded compute (~138ms, ~9x above the bandwidth floor); the parallel f32
+kernel aggregates cores. copysign is nearer the bandwidth floor (~44ms) so a smaller but real win. PRE-EXISTING (not
+mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. Opens the f32-binary-single-threaded class; remaining f32
+bit-exact-safe leads: remainder (~156ms, floored-mod formula), nextafter (~83ms, bit-step), maximum/minimum (~39ms,
+bandwidth); arctan2/hypot/logaddexp/float_power are bigger but libm-divergence-risky (verify allclose-vs-bitexact
+first). AGENT_NAME=BlackThrush.

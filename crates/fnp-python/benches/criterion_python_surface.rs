@@ -5207,6 +5207,31 @@ hb = rng.standard_normal(16_000_000).astype(np.float16)\n";
                 bch.iter(|| black_box(numpy_fn.call1((&ha,)).expect("numpy f16 unary call")));
             });
         }
+        // f32 fmod/copysign: numpy runs f32 binary ufuncs single-threaded (fmod ~138ms @16M);
+        // there was no f32 binary zero-copy path. Native parallel f32 kernel wins (bit-exact).
+        let f32_setup = "import numpy as np\n\
+rng = np.random.default_rng(5)\n\
+af = (rng.standard_normal(16_000_000) * 1e3).astype(np.float32)\n\
+bf = (rng.standard_normal(16_000_000) * 7.0).astype(np.float32)\n\
+bf[np.abs(bf) < 1e-3] = np.float32(1.5)\n";
+        py.run(
+            std::ffi::CString::new(f32_setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("f32 binary setup");
+        let af = ns.get_item("af").expect("af");
+        let bf = ns.get_item("bf").expect("bf");
+        for op in ["fmod", "copysign"] {
+            let fnp_fn = module.getattr(op).expect("fnp f32 op");
+            let numpy_fn = numpy.getattr(op).expect("numpy f32 op");
+            group.bench_function(format!("fnp_{op}_f32_16m"), |bch| {
+                bch.iter(|| black_box(fnp_fn.call1((&af, &bf)).expect("fnp f32 call")));
+            });
+            group.bench_function(format!("numpy_{op}_f32_16m"), |bch| {
+                bch.iter(|| black_box(numpy_fn.call1((&af, &bf)).expect("numpy f32 call")));
+            });
+        }
     });
 
     group.finish();

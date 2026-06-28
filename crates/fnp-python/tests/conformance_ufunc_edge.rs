@@ -401,6 +401,48 @@ print(ok)
 }
 
 #[test]
+fn f32_fmod_copysign_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy runs f32 binary ufuncs single-threaded; there was no f32 binary zero-copy path
+    // (only f64). The native parallel f32 kernel for fmod (lhs % rhs = IEEE fmodf) and copysign
+    // (sign-bit copy) must be byte-identical to numpy above the 1<<21 gate, incl. inf/nan/-0.0.
+    let script = fnp_script(
+        r#"
+n = (1 << 21) + 257
+rng = np.random.default_rng(7)
+a = (rng.standard_normal(n) * 1e3).astype(np.float32)
+# fmod path defers on any zero divisor, so keep divisors strictly non-zero to exercise the kernel
+b = (rng.standard_normal(n) * 7.0).astype(np.float32)
+b[np.abs(b) < 1e-3] = np.float32(1.5)
+# seed special values (no zero divisor)
+a[0]=np.float32(np.inf); a[1]=np.float32(-np.inf); a[2]=np.float32(np.nan); a[3]=np.float32(-0.0)
+b[2]=np.float32(3.0); b[3]=np.float32(-2.0)
+ok = True
+r = fnp.fmod(a, b); e = np.fmod(a, b)
+ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# copysign over the same arrays (every f32 input, incl -0.0/nan/inf signs)
+r = fnp.copysign(a, b); e = np.copysign(a, b)
+ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# 2-D shape preserved
+a2 = a[:1 << 21].reshape(2048, 1024); b2 = b[:1 << 21].reshape(2048, 1024)
+ok = ok and fnp.fmod(a2, b2).tobytes() == np.fmod(a2, b2).tobytes()
+ok = ok and fnp.fmod(a2, b2).shape == np.fmod(a2, b2).shape
+# zero-divisor case defers to numpy -> still byte-identical
+bz = b.copy(); bz[5] = np.float32(0.0)
+ok = ok and fnp.fmod(a, bz).tobytes() == np.fmod(a, bz).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f32 fmod/copysign must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_unary_floor_ceil_trunc_rint_parallel_full_domain_bit_exact_matches_numpy() -> Result<(), String>
 {
     // numpy has no native f16 ALU: floor/ceil/trunc/rint widen->f32->op->narrow (compute-bound).
