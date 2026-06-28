@@ -12099,3 +12099,23 @@ ALL int widths incl mixed signs / INT_MIN//-1, plus a zero-divisor case that def
 WHY NOT ~0-GAIN: numpy int floor_divide is a single-threaded element loop (~98ms); the parallel kernel aggregates cores.
 PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. The integer single-threaded-element-op vein
 (gcd/lcm/power/floor_divide) is now broadly harvested. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel INTEGER remainder / mod (a % b) - numpy int remainder single-threaded
+`BlackThrush`. Completes the integer single-threaded-element-op vein alongside gcd/lcm/power/floor_divide. The `%`
+operator is one of the most common integer ops. numpy runs integer a%b as a per-element loop (16M int64 ~93ms). Added
+try_native_int_remainder reusing int_binary_map_typed (the generic parallel int binary map shared with floor_divide).
+Hooked into the binary ufunc __call__ Remainder op (fnp.remainder/np.mod/the % operator all route through
+PyUFunc{Remainder}).
+BIT-EXACT: numpy integer remainder is the FLOORED remainder (result sign matches the DIVISOR) in the input dtype with
+wrapping — reproduced by wrapping_rem then adding the divisor when the remainder is non-zero and its sign differs from
+the divisor's (unsigned = plain %) — verified vs np.remainder over every width incl mixed signs. numpy returns 0 +
+RuntimeWarning for % 0, so the dispatcher DEFERS (zero-copy scan of the divisor for 0). Same-shape C-contiguous
+same-int-dtype, n>=1<<18; everything else defers.
+
+PERF (criterion, rch worker = truth; int64, 16M elements):
+  remainder i64 16M: fnp 35.24 ms vs NumPy 104.26 ms = 0.338x / ~3.0x faster
+CORRECTNESS: new conformance test int_remainder_parallel_large_bit_exact_matches_numpy -> byte-identical to numpy across
+ALL int widths (remainder + mod + the % operator) incl mixed signs, plus a zero-divisor defer case.
+WHY NOT ~0-GAIN: numpy int remainder is a single-threaded element loop (~93ms); the parallel kernel aggregates cores.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. The integer single-threaded-element-op vein
+(gcd/lcm/power/floor_divide/remainder) is now COMPLETE for the common ops. AGENT_NAME=BlackThrush.

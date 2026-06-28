@@ -449,6 +449,49 @@ print(ok)
 }
 
 #[test]
+fn int_remainder_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy runs integer a%b as a single-threaded element loop; the native parallel floored-
+    // remainder kernel (sign of divisor) must be byte-identical for every width incl mixed
+    // signs, above the gate. A zero divisor must still defer to numpy (0 + RuntimeWarning).
+    let script = fnp_script(
+        r#"
+import warnings
+n = (1 << 18) + 257
+rng = np.random.default_rng(17)
+ok = True
+for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint16, np.uint8]:
+    info = np.iinfo(dt)
+    a = rng.integers(info.min, info.max, n, dtype=dt)
+    b = rng.integers(info.min, info.max, n, dtype=dt)
+    b[b == 0] = dt(1)
+    a[0]=dt(7);  b[0]=dt(-3) if info.min < 0 else dt(3)   # mixed-sign floored remainder
+    a[1]=dt(-7) if info.min < 0 else dt(7); b[1]=dt(3)
+    a[2]=info.min; b[2]=info.max
+    for opname in ("remainder", "mod"):
+        r = getattr(fnp, opname)(a, b); e = getattr(np, opname)(a, b)
+        ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# % operator routes through the same ufunc
+a64 = rng.integers(-10**9, 10**9, n, dtype=np.int64); b64 = rng.integers(1, 1000, n, dtype=np.int64)
+ok = ok and (a64 % b64).tobytes() == np.remainder(a64, b64).tobytes()
+# zero divisor defers to numpy (0 + warning)
+bz = b64.copy(); bz[3] = 0
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    ok = ok and fnp.remainder(a64, bz).tobytes() == np.remainder(a64, bz).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native int remainder/mod must be bit-identical to numpy incl mixed signs: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn int_floordiv_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy runs integer a//b as a single-threaded element loop; the native parallel floored-
     // division kernel must be byte-identical for every width incl mixed signs and INT_MIN//-1,
