@@ -664,6 +664,35 @@ print(ok)
 }
 
 #[test]
+fn f16_clip_scalar_bounds_full_domain_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy widens f16->f32 to clip; the native parallel uint16-view clamp must be byte-identical
+    // over the ENTIRE f16 domain (all 65536 patterns, incl NaN/inf/-0.0) for several scalar bound
+    // pairs (incl zero / reversed bounds), tiled past the 1<<20 gate.
+    let script = fnp_script(
+        r#"
+patterns = np.arange(65536, dtype=np.uint16).view(np.float16)
+x = np.tile(patterns, ((1 << 20) // patterns.size) + 2)
+ok = True
+for lo, hi in [(-0.5, 0.5), (0.0, 1.0), (-1.0, 0.0), (-0.0, 0.0), (0.3, 0.7), (2.0, -1.0)]:
+    r = fnp.clip(x, lo, hi); e = np.clip(x, lo, hi)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# 2-D shape preserved
+x2 = np.tile(patterns, (1 << 20) // patterns.size).reshape(-1, patterns.size)
+ok = ok and fnp.clip(x2, -0.5, 0.5).tobytes() == np.clip(x2, -0.5, 0.5).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 clip must be bit-identical to numpy over the full domain: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_flat_argmin_argmax_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy widens f16->f32 to scan for argmin/argmax; the native parallel uint16-view scan
     // returns the identical first-occurrence index, above the 1<<20 gate. NaN defers to numpy

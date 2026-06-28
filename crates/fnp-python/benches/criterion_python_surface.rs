@@ -5229,6 +5229,19 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
                 bch.iter(|| black_box(numpy_fn.call1((&hsq,)).expect("numpy f16 unary call")));
             });
         }
+        // f16 clip: numpy widens f16->f32 to clamp (~149ms@16M, biggest f16 elementwise gap).
+        {
+            let fnp_clip = module.getattr("clip").expect("fnp clip");
+            let numpy_clip = numpy.getattr("clip").expect("numpy clip");
+            group.bench_function("fnp_clip_f16_16m", |bch| {
+                bch.iter(|| black_box(fnp_clip.call1((&ha, -0.5f64, 0.5f64)).expect("fnp f16 clip")));
+            });
+            group.bench_function("numpy_clip_f16_16m", |bch| {
+                bch.iter(|| {
+                    black_box(numpy_clip.call1((&ha, -0.5f64, 0.5f64)).expect("numpy f16 clip"))
+                });
+            });
+        }
         // f16 flat min/max reduction: numpy widens f16->f32 to reduce (~80ms@16M); native
         // parallel f32-fold reduce wins (bit-exact, defers NaN / zero-extremum). hsq is all
         // non-negative with a non-zero max -> exercises the kernel.

@@ -12279,3 +12279,22 @@ numpy across scales incl ties / signed zeros / inf + the NaN DEFER path.
 WHY NOT ~0-GAIN: numpy f16 argextreme widens to f32 (~68ms); the native parallel scan aggregates cores.
 PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. **f16 FLAT reduction sub-vein COMPLETE:
 min/max/ptp/argmin/argmax. OPEN: AXIS (non-flat) f16 reductions; sum/mean ORDER-SENSITIVE (skip).** AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 clip (scalar bounds) - the biggest f16 elementwise gap
+`BlackThrush`. numpy has no native f16 ALU; clip widens f16->f32 to clamp (16M ~149ms = the biggest f16 elementwise
+gap measured). fnp explicitly DEFERRED f16 clip ("native f64 bridge ~2.7x slower"). Added try_zerocopy_f16_clip:
+view uint16, par_chunks_mut clamp per element, narrow, view back to float16. Hooked into the clip() pyfunction
+(replacing the f16 defer) for scalar finite bounds; NaN bounds / None bounds / out= / bool already defer above.
+BIT-EXACT: numpy clip = minimum(maximum(a, lo), hi) over f16-cast bounds; reproduced per element as
+`t = v>=lo ? v : lo; r = t<=hi ? t : hi` (the >=/<= picks the LHS on equal = numpy maximum/minimum's signed-zero rule),
+then narrow. A NaN element propagates its EXACT input bits (numpy clip(nan)=nan). Bounds cast f64->f16->f32 to match
+numpy's promotion of the python-float bound to the f16 result dtype. Verified byte-exact over the ENTIRE f16 domain
+(all 65536 patterns) for 6 bound pairs incl zero / reversed bounds.
+
+PERF (criterion, rch worker = truth; f16, 16M elements):
+  clip f16 16M: fnp 4.00 ms vs NumPy 156.64 ms = 0.026x / ~39.2x faster
+CORRECTNESS: new conformance test f16_clip_scalar_bounds_full_domain_bit_exact_matches_numpy -> byte-identical to numpy
+over the full f16 domain for 6 bound pairs (incl zero/reversed) + a 2-D case.
+WHY NOT ~0-GAIN: numpy f16 clip widens to f32 (~149ms); the native parallel clamp aggregates cores.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f16-no-ALU elementwise vein now also covers
+clip; array-bounds clip / None one-sided bounds still defer. AGENT_NAME=BlackThrush.
