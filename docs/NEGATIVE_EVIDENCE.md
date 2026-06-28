@@ -4,6 +4,32 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-28 - WIN (LANDED): np.where float32 typed selector parallelized - 8M f32 3.49 ms -> 1.21 ms, 0.348x vs ORIG
+
+`BlackThrush`. No unlanded measured bench-worktree win was found: the dirty bench worktrees were broad
+churn or already represented on `main`, and the only non-ancestor worktree head was a documented
+DLAQR3 no-ship. Dug the next non-BLAS boundary gap and found `np.where(cond, x, y)` already had a
+parallel f64 raw-slice path, while the equal-shape typed selector used one serial `Cell<T>` loop for
+ints, bool, float16, and float32. Added explicit f32/i64 Criterion rows to keep the lever measured
+and constrained.
+
+SAME-WORKER ORIG (hz2, `e91ff68d` source with the same bench rows and serial typed selector,
+`AGENT_NAME=BlackThrush RCH_WORKER=hz2 RCH_REQUIRE_REMOTE=1 RAYON_NUM_THREADS=8
+CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -j 1
+-p fnp-python --profile release --bench criterion_python_surface -- 'python_where_boundary/(...)'`):
+f32 3,487,025 ns, NumPy f32 5,096,836 ns; i64 7,912,227 ns, NumPy i64 8,759,019 ns. Broad first
+candidate parallelized all 4/8-byte typed arms and was REJECTED: i64 regressed to 29,969,885 ns
+(3.788x vs ORIG), despite f32 improving. That variant was narrowed away.
+
+KEPT: only the float32 byte-view arm (`where_typed::<u32>` behind float32 view) may enter the
+parallel raw-slice blend above the 16 MiB output-byte gate; integer/bool/float16 arms stay serial.
+Final same-worker candidate: f32 1,214,841 ns = **0.348x vs ORIG** and **0.253x vs NumPy**; i64
+serial guard 8,254,562 ns = 1.043x vs ORIG (noise band) and 0.679x vs NumPy. Conformance:
+`cargo test -j 1 -p fnp-python --profile release --test conformance_where -- --nocapture` passed
+23/23 on hz2. Also fixed the adjacent `where` no-keyword surface so the shard is green:
+`where(condition=..., x=..., y=...)` now matches NumPy's "takes no keyword arguments" TypeError.
+AGENT_NAME=BlackThrush.
+
 ## 2026-06-28 - NO-SHIP: lowering the 1536 matmul-shaped native GEMM window back to 1024 is worker-fragile and regresses badly on hz2
 
 `BlueStone`. LAND-OR-DIG found no measured `.scratch` / `.worktrees` keep still

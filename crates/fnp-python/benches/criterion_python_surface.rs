@@ -4352,6 +4352,45 @@ fn bench_where_boundary(c: &mut Criterion) {
         group.bench_function("numpy_where_f64_8m", |bn| {
             bn.iter(|| black_box(numpy_where.call1((&mask, &a, &b)).expect("numpy where")));
         });
+
+        let base_f32 = base.call_method1("astype", ("float32",)).expect("f32");
+        let a32 = base_f32.call_method1("__mul__", (2.0_f32,)).expect("a32");
+        let b32 = base_f32.call_method1("__add__", (1.0_f32,)).expect("b32");
+        group.bench_function("fnp_where_f32_8m", |bn| {
+            bn.iter(|| black_box(fnp_where.call1((&mask, &a32, &b32)).expect("fnp where f32")));
+        });
+        group.bench_function("numpy_where_f32_8m", |bn| {
+            bn.iter(|| {
+                black_box(
+                    numpy_where
+                        .call1((&mask, &a32, &b32))
+                        .expect("numpy where f32"),
+                )
+            });
+        });
+
+        let ibase = numpy
+            .call_method1("arange", (8_000_000_i64,))
+            .expect("8M ibase");
+        let ia = ibase.call_method1("__mul__", (2_i64,)).expect("ia");
+        let ib = ibase.call_method1("__add__", (1_i64,)).expect("ib");
+        let imask = ibase
+            .call_method1("__mod__", (2_i64,))
+            .expect("imod")
+            .call_method1("__eq__", (1_i64,))
+            .expect("imask bool");
+        group.bench_function("fnp_where_i64_8m", |bn| {
+            bn.iter(|| black_box(fnp_where.call1((&imask, &ia, &ib)).expect("fnp where i64")));
+        });
+        group.bench_function("numpy_where_i64_8m", |bn| {
+            bn.iter(|| {
+                black_box(
+                    numpy_where
+                        .call1((&imask, &ia, &ib))
+                        .expect("numpy where i64"),
+                )
+            });
+        });
     });
 
     group.finish();
