@@ -11825,3 +11825,23 @@ case, and the n=0/n=1 delegated paths.
 WHY NOT ~0-GAIN: numpy integer matrix_power has no BLAS (repeated naive int matmul); native binary-exp parallel GEMM is
 a large win. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. The integer-no-BLAS lever now
 covers 2-D matmul (7.7x), 2-D dot (27x), batched matmul (12x), and matrix_power. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel INTEGER np.tensordot (axes-int contraction) - (64,64,64) axes=1 ~Nx faster than NumPy
+`BlackThrush`. Another integer-no-BLAS-family primitive (distinct API: tensor contraction, common in ML/physics).
+fnp's tensordot native path was f64-ONLY, so integer tensordot delegated to numpy, which flattens to a no-BLAS matmul:
+measured axes=1 (64,64,64) int = 2494 ms vs float 115 ms (~22x slower). For an axes-INT contraction the GEMM operands
+are CONTIGUOUS reshapes (a's last k axes contract with b's first k — no permutation needed), so try_native_int_tensordot
+reshapes a->(m,contract), b->(contract,n), routes to the existing native parallel int GEMM (try_native_int_matmul), and
+reshapes the (m,n) result back to a_free + b_free. BIT-EXACT (reshape is free; the int GEMM is bit-exact). axes=0 (outer
+product), mixed/float/complex dtype, non-contiguous, and below-work-gate defer to numpy.
+
+PERF: NumPy tensordot axes=1 (64,64,64) int64 = 2494 ms DIRECTLY measured (python3, this turn) vs float 115 ms (~22x
+slower, no BLAS). The fnp criterion row was queue-blocked on saturated rch workers; tensordot reshapes to a
+(4096 x 64) @ (64 x 4096) GEMM routed to the SAME try_native_int_matmul kernel measured at 2-D int matmul 512^2 =
+0.130x/7.7x (and dot 27x), so int tensordot is many-x faster vs numpy's no-BLAS flattened matmul (win direction
+structurally guaranteed; conformance proves bit-exactness).
+CORRECTNESS: new conformance test int_tensordot_native_parallel_bit_exact_matches_numpy -> byte-identical to numpy for
+int64/int32/int16/int8/uint64/uint32 over axes=1 (3-D) AND axes=2 (multi-axis), plus a 2-D overflow-wrap case.
+WHY NOT ~0-GAIN: numpy integer tensordot has no BLAS (slow flattened naive matmul); native reshape+GEMM wins big.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. The integer-no-BLAS lever now covers 2-D
+matmul (7.7x), 2-D dot (27x), batched matmul (12x), matrix_power (7.1x), AND tensordot. AGENT_NAME=BlackThrush.

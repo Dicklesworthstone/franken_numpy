@@ -5376,6 +5376,29 @@ bbi = rng.integers(-100, 100, (64, 128, 128)).astype(np.int64)\n";
                 bch.iter(|| black_box(np_dot.call1((&a, &b)).expect("numpy int dot")));
             });
         }
+        // INTEGER tensordot(axes=1) (64,64,64): numpy no-BLAS slow; routes to native int GEMM.
+        let tdi_setup = "import numpy as np\n\
+rng = np.random.default_rng(10)\n\
+ati = rng.integers(-100, 100, (64, 64, 64)).astype(np.int64)\n\
+bti = rng.integers(-100, 100, (64, 64, 64)).astype(np.int64)\n";
+        py.run(
+            std::ffi::CString::new(tdi_setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("int tensordot setup");
+        {
+            let fnp_td = module.getattr("tensordot").expect("fnp tensordot");
+            let np_td = numpy.getattr("tensordot").expect("np tensordot");
+            let a = ns.get_item("ati").expect("ati");
+            let b = ns.get_item("bti").expect("bti");
+            group.bench_function("fnp_tensordot_i64_axes1_64x64x64", |bch| {
+                bch.iter(|| black_box(fnp_td.call1((&a, &b, 1_i64)).expect("fnp int tensordot")));
+            });
+            group.bench_function("numpy_tensordot_i64_axes1_64x64x64", |bch| {
+                bch.iter(|| black_box(np_td.call1((&a, &b, 1_i64)).expect("numpy int tensordot")));
+            });
+        }
         let fnp_tensordot = module.getattr("tensordot").expect("fnp tensordot");
         let np_tensordot = numpy.getattr("tensordot").expect("np tensordot");
         for sz in ["1024", "1536"] {

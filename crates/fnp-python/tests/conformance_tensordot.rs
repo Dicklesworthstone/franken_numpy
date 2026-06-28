@@ -301,3 +301,41 @@ else:
     );
     Ok(())
 }
+
+#[test]
+fn int_tensordot_native_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy integer tensordot flattens to a no-BLAS matmul (slow). The native route
+    // (reshape -> int GEMM -> reshape) must be byte-identical incl. overflow wrap and
+    // multi-axis contraction.
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(23)
+ok = True
+for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32]:
+    info = np.iinfo(dt)
+    # axes=1 over 3-D (the common contraction)
+    a = rng.integers(info.min // 4, info.max // 4, (40, 50, 24)).astype(dt)
+    b = rng.integers(info.min // 4, info.max // 4, (24, 18, 9)).astype(dt)
+    r = fnp.tensordot(a, b, 1); e = np.tensordot(a, b, 1)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+    # axes=2 (multi-axis contraction)
+    a2 = rng.integers(info.min // 8, info.max // 8, (20, 22, 30)).astype(dt)
+    b2 = rng.integers(info.min // 8, info.max // 8, (22, 30, 17)).astype(dt)
+    r2 = fnp.tensordot(a2, b2, 2); e2 = np.tensordot(a2, b2, 2)
+    ok = ok and r2.dtype == e2.dtype and r2.shape == e2.shape and r2.tobytes() == e2.tobytes()
+# 2-D axes=1 == matmul + overflow wrap
+a = np.full((130, 130), 5_000_000_000, dtype=np.int64)
+b = np.full((130, 130), 5_000_000_000, dtype=np.int64)
+ok = ok and fnp.tensordot(a, b, 1).tobytes() == np.tensordot(a, b, 1).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native integer tensordot must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
