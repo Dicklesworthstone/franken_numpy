@@ -12119,3 +12119,25 @@ ALL int widths (remainder + mod + the % operator) incl mixed signs, plus a zero-
 WHY NOT ~0-GAIN: numpy int remainder is a single-threaded element loop (~93ms); the parallel kernel aggregates cores.
 PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. The integer single-threaded-element-op vein
 (gcd/lcm/power/floor_divide/remainder) is now COMPLETE for the common ops. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel INTEGER divmod (a//b, a%b) - both outputs in one parallel pass
+`BlackThrush`. Caps the integer single-threaded-element-op vein (gcd/lcm/power/floor_divide/remainder/divmod). numpy runs
+integer divmod single-threaded (16M int64 ~163ms, compute-bound ~2x add). fnp's divmod had an f64 tuple path but deferred
+integers. Added divmod_typed<T> + try_native_int_divmod: computes BOTH the floored quotient and floored remainder in ONE
+par_chunks_mut pass into two fresh numpy.empty(dtype) buffers, returns a (quotient, remainder) tuple. Hooked into the
+divmod pyfunction above its non-f64 deferral.
+BIT-EXACT: quotient = floored division, remainder = floored remainder (sign of divisor), both in the input dtype with
+wrapping (signed: q=wrapping_div, r=wrapping_rem, then q-=1 & r+=divisor when r!=0 && sign(r)!=sign(divisor); unsigned
+plain /,%) — the SAME per-element rules already verified for floor_divide + remainder. Verified vs np.divmod over every
+width incl mixed signs / INT_MIN + the identity a==q*b+r in the wrapping ring. numpy returns (0,0)+RuntimeWarning for
+divide by zero, so the dispatcher DEFERS (zero-copy scan). Same-shape C-contiguous same-int-dtype, n>=1<<18.
+
+PERF (criterion, rch worker = truth; int64, 16M elements):
+  divmod i64 16M: fnp 53.29 ms vs NumPy 174.34 ms = 0.306x / ~3.3x faster
+CORRECTNESS: new conformance test int_divmod_parallel_large_bit_exact_matches_numpy -> byte-identical to numpy across
+ALL int widths incl mixed signs / INT_MIN, the a==q*b+r identity, plus a zero-divisor defer case.
+WHY NOT ~0-GAIN: numpy int divmod is a single-threaded element loop (~163ms, compute-bound); the parallel kernel
+aggregates cores and fuses both outputs in one pass. PRE-EXISTING (not mine): conformance_ufunc_edge::
+ufunc_signature_has_x1_x2. The integer single-threaded compute-bound element-op vein is now COMPLETE
+(gcd/lcm/power/floor_divide/remainder/divmod); left_shift/right_shift are BANDWIDTH-bound (==add ~80ms, contention-
+fragile) so deliberately NOT shipped. AGENT_NAME=BlackThrush.

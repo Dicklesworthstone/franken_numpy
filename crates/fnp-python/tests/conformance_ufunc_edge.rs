@@ -449,6 +449,49 @@ print(ok)
 }
 
 #[test]
+fn int_divmod_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy runs integer divmod single-threaded; the native parallel kernel produces both the
+    // floored quotient and floored remainder in one pass and must be byte-identical for every
+    // width incl mixed signs / INT_MIN, above the gate. Zero divisor must defer to numpy.
+    let script = fnp_script(
+        r#"
+import warnings
+n = (1 << 18) + 257
+rng = np.random.default_rng(19)
+ok = True
+for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint16, np.uint8]:
+    info = np.iinfo(dt)
+    a = rng.integers(info.min, info.max, n, dtype=dt)
+    b = rng.integers(info.min, info.max, n, dtype=dt)
+    b[b == 0] = dt(1)
+    a[0]=dt(7); b[0]=dt(-3) if info.min < 0 else dt(3)
+    a[1]=info.min; b[1]=dt(-1) if info.min < 0 else dt(1)
+    a[2]=info.min; b[2]=info.max
+    q, r = fnp.divmod(a, b); eq, er = np.divmod(a, b)
+    ok = ok and q.dtype == eq.dtype and q.tobytes() == eq.tobytes()
+    ok = ok and r.dtype == er.dtype and r.tobytes() == er.tobytes()
+    # identity a == q*b + r (in the wrapping ring)
+    ok = ok and ((q * b + r).astype(dt).tobytes() == a.tobytes())
+# zero divisor defers to numpy
+az = rng.integers(1, 1000, n, dtype=np.int64); bz = rng.integers(1, 7, n, dtype=np.int64); bz[5] = 0
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    q, r = fnp.divmod(az, bz); eq, er = np.divmod(az, bz)
+    ok = ok and q.tobytes() == eq.tobytes() and r.tobytes() == er.tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native int divmod must be bit-identical to numpy incl mixed signs / INT_MIN: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn int_remainder_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy runs integer a%b as a single-threaded element loop; the native parallel floored-
     // remainder kernel (sign of divisor) must be byte-identical for every width incl mixed
