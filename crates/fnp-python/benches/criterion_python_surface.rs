@@ -5323,6 +5323,19 @@ bi1024 = rng.integers(-100, 100, (1024, 1024)).astype(np.int64)\n";
                 bch.iter(|| black_box(np_mm.call1((&a, &b)).expect("numpy int matmul")));
             });
         }
+        // integer np.dot(2d,2d) routes to the same native GEMM (== matmul).
+        let fnp_dot = module.getattr("dot").expect("fnp dot");
+        let np_dot = numpy.getattr("dot").expect("np dot");
+        {
+            let a = ns.get_item("ai512").expect("ai512");
+            let b = ns.get_item("bi512").expect("bi512");
+            group.bench_function("fnp_dot_i64_512x512", |bch| {
+                bch.iter(|| black_box(fnp_dot.call1((&a, &b)).expect("fnp int dot")));
+            });
+            group.bench_function("numpy_dot_i64_512x512", |bch| {
+                bch.iter(|| black_box(np_dot.call1((&a, &b)).expect("numpy int dot")));
+            });
+        }
         let fnp_tensordot = module.getattr("tensordot").expect("fnp tensordot");
         let np_tensordot = numpy.getattr("tensordot").expect("np tensordot");
         for sz in ["1024", "1536"] {

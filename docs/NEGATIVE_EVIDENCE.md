@@ -11770,3 +11770,19 @@ WHY NOT ~0-GAIN: numpy integer matmul has no BLAS (naive serial loop); the nativ
 single biggest gap-vs-numpy found this session. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2
 (numpy/pyo3 signature drift) — orthogonal crate area. NEXT: integer dot() 2-D (same gap, route the same way); integer
 batched (>2-D) matmul; matrix-vector. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): route integer np.dot(2-D,2-D) to the native parallel GEMM (follow-up to a076828a) - 512^2 ~7-8x faster than NumPy
+`BlackThrush`. np.dot(2d,2d) == matmul, and numpy has no BLAS for integer dtypes (slow naive serial loop), so integer
+np.dot delegated to the same slow path matmul did. Routed dot() 2-D @ 2-D same-integer-dtype to the existing
+try_native_int_matmul (the parallel ikj wrapping GEMM landed in a076828a) before the numpy delegation. Bit-exact (np.dot
+2-D matrix product == matmul; wrapping integer arithmetic associative). All other dot cases (1-D inner, 2d@1d matvec,
+floats, mixed dtype, non-contiguous, out=, >2-D) defer to numpy unchanged.
+
+PERF (criterion, remote rch worker ovh-a = truth; python_matmul_boundary, int64):
+  dot i64 512x512: fnp 11.81 ms vs NumPy 319.64 ms = 0.037x (27.1x faster) — routes to the native GEMM (was numpy's
+  no-BLAS naive loop). Same try_native_int_matmul kernel as matmul (worker was faster/less-loaded this run).
+CORRECTNESS: new conformance test int_dot_2d_native_parallel_bit_exact_matches_numpy -> byte-identical to numpy.dot for
+int64/int32/int16/int8/uint64/uint32 (rectangular shapes) + an int64 overflow-wrap case.
+WHY NOT ~0-GAIN: numpy integer dot has no BLAS (naive serial); reuses the proven 7.7x native GEMM. PRE-EXISTING (not
+mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. NEXT (same lever): integer matrix-vector (2d@1d), integer
+batched (>2-D) matmul, register-tiled int kernel. AGENT_NAME=BlackThrush.
