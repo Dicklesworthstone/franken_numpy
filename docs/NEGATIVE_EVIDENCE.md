@@ -4,6 +4,30 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-28 - SURVEY (gate-sweep #3, RAYON=8): remaining low/axis gates well-tuned; nanargmax-LASTAXIS noisy non-lever — gate-crossover vein converging
+
+`BlackThrush`. After 3 gate wins, swept the remaining un-checked `*_PARALLEL_MIN` gates at
+just-above-gate sizes (RAYON=8, interleaved — the load-clean measurement). No new clean lever:
+
+- **WELL-TUNED (win, leave alone):** vander (1<<16) 0.05-0.18x, putmask (1<<19) 0.29-0.36x,
+  cumsum-axis (1<<18) 0.08-0.28x (axis0+axis1), nanmax-axis (1<<20) axis1 0.55-0.69x win /
+  axis0 parity. All bit-EXACT. These gates are correctly placed.
+- **NOISY NON-LEVER (no-ship):** nanargmax/nanargmin LAST-AXIS (`NANARG_LASTAXIS_PARALLEL_MIN`
+  1<<20) read 1.41-1.44x loss at EXACTLY 1M (the gate; 2048x512, 512x2048) but parity at 1.5-2M.
+  RAYON=1-vs-8 A/B does NOT cleanly classify it: RAYON=1 serial ALSO loses at 1M (1.68x, 1.45x)
+  yet is parity at 1.5M/2M (0.90-0.93x) — an inconsistent, shape-and-load-dependent 1M outlier,
+  same unmeasurable class as the reverted trapezoid. At 1M parallel (1.20x) is actually LESS bad
+  than serial (1.68x), so raising the gate (-> serial at 1M) would make it WORSE, not better;
+  it's a kernel/path floor at the 1M boundary, NOT a clean serial-parity mistuned gate. Left as a
+  documented lead for a quiet box. (Did NOT ship — fails the RAYON=1-robust-parity discriminator.)
+
+GATE-CROSSOVER LEVER STATUS: harvested. 3 wins this session (argextreme+nanextreme 1d056bda,
+nanargextreme-flat 063b1b38, sinc+angle+polyval ee8baca5); 2 no-ships (trapezoid, nanargmax-
+lastaxis — both load-noise-unmeasurable on this box); the rest (take/tile/ediff1d/digitize/
+searchsorted/cross/kron/gather/sort/argsort/frexp/modf/gradient/bincount/histogram + the above)
+are correctly tuned. Remaining gate work needs a QUIET box or the worker criterion bench (rch
+remote down) to resolve the 2 noisy leads. AGENT_NAME=BlackThrush.
+
 ## 2026-06-28 - WIN (LANDED): sinc/angle/polyval mistuned parallel gates raised — small-size losses 1.4-7x -> parity/win, large wins preserved, bit-exact (+ trapezoid REVERTED as unmeasurable)
 
 `BlackThrush`. Third gate-crossover sweep extended the lever beyond reductions to elementwise
