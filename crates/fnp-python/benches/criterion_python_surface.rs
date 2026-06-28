@@ -5266,6 +5266,38 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
                 bch.iter(|| black_box(numpy_fn.call1((&hsq,)).expect("numpy f16 reduce call")));
             });
         }
+        // f16 last-axis argmax/argmin: numpy widens f16->f32 per lane; native per-lane scan wins.
+        py.run(
+            std::ffi::CString::new("hsq2 = hsq.reshape(4000, 4000)").unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("f16 2-D reshape");
+        let hsq2 = ns.get_item("hsq2").expect("hsq2");
+        let kw_axis = PyDict::new(py);
+        kw_axis.set_item("axis", -1i64).expect("axis kwarg");
+        for op in ["argmax", "argmin"] {
+            let fnp_fn = module.getattr(op).expect("fnp arg op");
+            let numpy_fn = numpy.getattr(op).expect("numpy arg op");
+            group.bench_function(format!("fnp_{op}_lastaxis_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(
+                        fnp_fn
+                            .call((&hsq2,), Some(&kw_axis))
+                            .expect("fnp f16 lastaxis arg"),
+                    )
+                });
+            });
+            group.bench_function(format!("numpy_{op}_lastaxis_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(
+                        numpy_fn
+                            .call((&hsq2,), Some(&kw_axis))
+                            .expect("numpy f16 lastaxis arg"),
+                    )
+                });
+            });
+        }
         // f32 fmod/copysign: numpy runs f32 binary ufuncs single-threaded (fmod ~138ms @16M);
         // there was no f32 binary zero-copy path. Native parallel f32 kernel wins (bit-exact).
         let f32_setup = "import numpy as np\n\

@@ -12313,3 +12313,24 @@ CORRECTNESS: new conformance test f16_round_decimals0_full_domain_bit_exact_matc
 (round + around) over the full f16 domain + a 2-D case.
 WHY NOT ~0-GAIN: numpy f16 round widens to f32 (~120ms); the native parallel widen-rint aggregates cores.
 PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 LAST-AXIS argmin/argmax - opens the f16 AXIS reduction sub-vein
+`BlackThrush`. numpy widens f16->f32 per lane for argmin/argmax(axis=-1) (16M ~80ms). Added an f16 branch to
+try_zerocopy_lastaxis_argextreme (already called by both argmax/argmin before the f16 delegation): view the array as
+uint16, par_chunks_exact(lane) each lane runs lane_argextreme_f16 (widen each element to f32, first-occurrence argextreme,
+None if the lane holds a NaN), build the intp output reshaped to the input shape minus the last axis. Same 1<<20 gate as
+the f64 last-axis path.
+BIT-EXACT: argextreme is INDEX-based (first occurrence of the extreme value) so it is order-independent and has NO
+signed-zero VALUE ambiguity (unlike min/max VALUE reductions, which is why those stayed flat-only); the f16->f32 widen is
+exact and the strict comparison keeps the earliest index = numpy first-occurrence (verified vs numpy incl ties / signed
+zeros / inf). Any NaN lane DEFERS the whole call to numpy (return None) for numpy's first-NaN index semantics.
+
+PERF (criterion, rch worker = truth; f16, 4000x4000 = 16M, axis=-1, kernel path):
+  argmax axis=-1 f16: fnp 2.84 ms vs NumPy 36.10 ms = 0.079x / ~12.7x faster
+  argmin axis=-1 f16: fnp 1.95 ms vs NumPy 32.16 ms = 0.061x / ~16.5x faster
+CORRECTNESS: new conformance test f16_lastaxis_argmin_argmax_bit_exact_matches_numpy -> identical first-occurrence index
+array vs numpy (axis=-1 and axis=1) incl ties / signed zeros / inf + the NaN-lane DEFER path.
+WHY NOT ~0-GAIN: numpy f16 per-lane argextreme widens to f32 (~80ms); the per-lane native scan fans lanes across cores.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f16 reduction vein now: flat min/max/ptp/
+argmin/argmax + LAST-AXIS argmin/argmax. (Axis min/max/ptp VALUE reductions stay deferred — per-lane signed-zero tie is
+fold-order-dependent, can't defer per-lane.) AGENT_NAME=BlackThrush.

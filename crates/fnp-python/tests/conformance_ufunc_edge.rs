@@ -722,6 +722,42 @@ print(ok)
 }
 
 #[test]
+fn f16_lastaxis_argmin_argmax_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy widens f16->f32 per lane for argmin/argmax(axis=-1); the native per-lane uint16-view
+    // scan must return the identical first-occurrence index array, above the 1<<20 gate. A NaN
+    // lane defers the whole call to numpy (first-NaN index) and must still match.
+    let script = fnp_script(
+        r#"
+rows, cols = 4096, 300   # rows*cols > 1<<20
+rng = np.random.default_rng(43)
+a = (rng.standard_normal((rows, cols)) * 50.0).astype(np.float16)
+# ties + signed zeros within lanes
+a[:, 10] = a[:, 0]
+a[0, 5] = np.float16(0.0); a[0, 6] = np.float16(-0.0)
+a[1, :3] = np.float16(np.inf)
+ok = True
+for fnp_op, np_op in [(fnp.argmax, np.argmax), (fnp.argmin, np.argmin)]:
+    r = fnp_op(a, axis=-1); e = np_op(a, axis=-1)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+    r1 = fnp_op(a, axis=1); e1 = np_op(a, axis=1)   # axis=1 == last axis here
+    ok = ok and r1.tobytes() == e1.tobytes()
+# NaN lane defers to numpy and still matches (first-NaN index)
+an = a.copy(); an[2, 7] = np.float16(np.nan); an[2, 1] = np.float16(np.nan)
+ok = ok and fnp.argmax(an, axis=-1).tobytes() == np.argmax(an, axis=-1).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 last-axis argmin/argmax must match numpy first-occurrence index (incl NaN-lane defer): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_flat_argmin_argmax_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy widens f16->f32 to scan for argmin/argmax; the native parallel uint16-view scan
     // returns the identical first-occurrence index, above the 1<<20 gate. NaN defers to numpy
