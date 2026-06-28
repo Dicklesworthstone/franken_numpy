@@ -12370,3 +12370,23 @@ CORRECTNESS: new conformance test f16_nan_to_num_full_domain_bit_exact_matches_n
 full f16 domain (default + custom nan/posinf/neginf) + a 2-D case.
 WHY NOT ~0-GAIN: numpy f16 nan_to_num widens to f32 (~112ms); the native uint16 bit-replacement aggregates cores AND
 skips the widen. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 fmod/remainder - the two slowest f16 binary ops in numpy
+`BlackThrush`. numpy widens f16->f32 for fmod/remainder (16M: fmod ~214ms, remainder ~317ms = the slowest f16 binary
+ops measured). I'd shipped these for f32 but f16 delegated. Added op codes 5=fmod / 6=remainder to
+try_zerocopy_f16_binary_widen (widen each operand to f32, apply f32 fmod / floored-remainder, narrow). fmod hooked into
+the fmod pyfunction (f16 sibling beside f64/f32); remainder hooked into the binary ufunc __call__ Remainder block (beside
+f64/f32/int). A zero divisor (f16 +0.0=0x0000 / -0.0=0x8000) DEFERS to numpy in-helper so its RuntimeWarning + nan/0
+surface exactly.
+BIT-EXACT: numpy widens for these, so narrow(op_f32(widen(a),widen(b))) is byte-identical (verified incl inf/nan/-0.0/
+mixed-signs); fmod = f32 % (IEEE fmodf, sign of dividend), remainder = floored (sign of divisor). f32 arithmetic
+canonicalizes nan through the widen, matching numpy (no input-nan-bit preservation needed, unlike max/min).
+
+PERF (criterion, rch worker = truth; f16, 16M elements, non-zero divisors):
+  fmod      f16 16M: fnp 14.96 ms vs NumPy 223.20 ms = 0.067x / ~14.9x faster
+  remainder f16 16M: fnp 17.95 ms vs NumPy 321.10 ms = 0.056x / ~17.9x faster
+CORRECTNESS: new conformance test f16_fmod_remainder_parallel_bit_exact_matches_numpy -> byte-identical to numpy for
+fmod + remainder + the % operator incl inf/nan/-0.0/mixed-signs + a zero-divisor defer case.
+WHY NOT ~0-GAIN: numpy f16 fmod/remainder widen to f32 (~214-317ms, compute-bound); the native parallel widen-op-narrow
+aggregates cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. OPEN f16 binary: nextafter
+(bit-step, ~57ms), copysign (bit-trick, ~22ms), heaviside (~100ms); hypot (libm-divergence risk). AGENT_NAME=BlackThrush.

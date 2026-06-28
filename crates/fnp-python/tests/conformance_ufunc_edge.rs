@@ -693,6 +693,47 @@ print(ok)
 }
 
 #[test]
+fn f16_fmod_remainder_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy widens f16->f32 for fmod/remainder (the slowest f16 binary ops); the native parallel
+    // widen-op-narrow must be byte-identical incl inf/nan/-0.0/mixed-signs, above the 1<<20 gate.
+    // A zero divisor defers to numpy (warning + nan/0) and must still match.
+    let script = fnp_script(
+        r#"
+import warnings
+n = (1 << 20) + 257
+rng = np.random.default_rng(53)
+a = (rng.standard_normal(n) * 100.0).astype(np.float16)
+b = (rng.standard_normal(n) * 7.0).astype(np.float16)
+b[np.abs(b) < 0.05] = np.float16(1.5)   # non-zero divisors to exercise the kernel
+a[0]=np.float16(np.inf); a[1]=np.float16(-np.inf); a[2]=np.float16(np.nan); a[3]=np.float16(-0.0)
+b[2]=np.float16(3.0); b[3]=np.float16(-2.0)
+a[4]=np.float16(7.0);  b[4]=np.float16(-3.0)   # mixed-sign floored remainder
+ok = True
+r = fnp.fmod(a, b); e = np.fmod(a, b)
+ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+r = fnp.remainder(a, b); e = np.remainder(a, b)
+ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+ok = ok and (a % b).tobytes() == np.remainder(a, b).tobytes()   # operator form
+# zero divisor defers to numpy (warning suppressed) and still matches
+bz = b.copy(); bz[5] = np.float16(0.0)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    ok = ok and fnp.fmod(a, bz).tobytes() == np.fmod(a, bz).tobytes()
+    ok = ok and fnp.remainder(a, bz).tobytes() == np.remainder(a, bz).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 fmod/remainder must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_nan_to_num_full_domain_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy widens f16->f32 for nan_to_num; the native uint16 bit-replacement must be byte-
     // identical over the FULL f16 domain (every nan/inf/finite pattern), default args AND custom
