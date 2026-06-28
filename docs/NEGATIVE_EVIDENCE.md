@@ -4,6 +4,43 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-28 - NO-SHIP: cache-line density gate for flat `compress`/`extract` is noise or slower; current compact stays
+
+`BlackThrush`. LAND-OR-DIG found no measured `.scratch` / `.worktrees` keep still off `main`: the
+hub-einsum and digitize scratch diffs were already present on `origin/main`, the only non-ancestor
+worktree head was an explicit DLAQR3 no-ship, and the remaining dirty bench-worktree lever was an
+uncommitted `try_zerocopy_any_compact` density gate. Dug that lever as the live non-BLAS boundary gap:
+pre-count the bool mask, delegate dense masks to `numpy.extract`, and keep native sequential
+compaction only when kept elements are sparser than one cache line. This was the cache-locality
+hypothesis from the artifact graveyard; it failed the measured keep bar.
+
+Focused bench command shape (per-crate only): `AGENT_NAME=BlackThrush
+CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p
+fnp-python --profile release --bench criterion_python_surface -- python_compress_boundary`.
+`cargo bench --release` is not accepted by this Cargo; `--profile release` is the crate-scoped
+release-profile equivalent used here.
+
+| Probe | ORIG ns | Candidate ns | Candidate/ORIG | Candidate/NumPy | Verdict |
+|---|---:|---:|---:|---:|---|
+| local fallback `fnp_compress_f64_axis_none_100000` | prior Criterion baseline | 62,085 | 1.023x reported by Criterion (`p=0.46`) | 1.098x | reject/no-change |
+| local fallback `fnp_compress_f64_axis_none_1000000` | prior Criterion baseline | 602,570 | 0.825x reported by Criterion (`p=0.06`) | 0.984x | reject/no significant win |
+| remote `ovh-a` `fnp_compress_f64_axis_none_100000` | unavailable same-worker ORIG | 90,982 | n/a | 1.086x | reject/slower than NumPy |
+| remote `ovh-a` `fnp_compress_f64_axis_none_1000000` | unavailable same-worker ORIG | 947,110 | n/a | 1.082x | reject/slower than NumPy |
+
+Control ORIG on `hz2` showed current main is already the better shape for this bench family:
+`fnp_compress_f64_axis_none_100000` 60,571 ns vs NumPy 64,707 ns (0.936x), and
+`fnp_compress_f64_axis_none_1000000` 549,900 ns vs NumPy 660,470 ns (0.833x). The density-gate
+candidate could not beat current main with a same-worker proof, was slower than NumPy on `ovh-a`,
+and only read as no-change on the local fallback. Source reverted; do not retry the dense-mask
+`numpy.extract` delegate or unsafe byte-popcount pre-scan without a same-worker benchmark showing a
+statistically significant candidate/current-main win. AGENT_NAME=BlackThrush.
+
+Conformance on reverted source: `compress_` filter in `conformance_compress_choose_diagonal` passed
+13/13 on `hz2`; `extract_zerocopy_f64_bit_exact_matches_numpy` passed 1/1 on `hz2`. Broader
+container-surface shards remain red for pre-existing non-compress-kernel issues
+(`choose_python_container_surfaces_match_numpy`, `extract_python_container_surfaces_match_numpy` NaN
+equality case), so they are blockers for full-shard green but not caused by this reverted lever.
+
 ## 2026-06-28 - WIN (LANDED): np.where float32 typed selector parallelized - 8M f32 3.49 ms -> 1.21 ms, 0.348x vs ORIG
 
 `BlackThrush`. No unlanded measured bench-worktree win was found: the dirty bench worktrees were broad
