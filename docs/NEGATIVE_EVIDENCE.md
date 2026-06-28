@@ -4,6 +4,44 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-28 - WIN (LANDED): flat argmax/argmin/nanmax/nanmin mistuned parallel gate 1<<21 -> 1<<22 — 2M loss 1.3-2.2x -> parity, 4M+ wins preserved, bit-exact
+
+`BlackThrush`. The mistuned-parallel-gate SYSTEMATIC LEVER (cf bincount 104th / histogram
+105th / sort 106th) struck again on the memory's own TODO list ("flat argmax/ptp/nanextreme
+gates"). Interleaved fnp-vs-numpy sweep (local, non-BLAS reductions = load-valid) across the
+gate-crossover regime found a clean LOSS at exactly n=2M:
+
+| op | n=2M (before) | n=4M | n=8M |
+|---|---:|---:|---:|
+| argmax flat | 1.30-1.71x LOSS | 0.42x | 0.36x |
+| argmin flat | 1.44x LOSS | 0.38x | 0.38x |
+| nanmax flat | 1.85-1.94x LOSS | 0.62x | 0.36x |
+| nanmin flat | 1.60-2.20x LOSS | 0.63x | 0.38x |
+
+ROOT (confirmed by RAYON=1 vs default A/B): both gates `ARGEXTREME_PARALLEL_MIN` (lib.rs:50057)
+and `NANEXTREME_PARALLEL_MIN` (lib.rs:27894) were `1<<21` (2M). At n=2M the array (16MB) is
+L3-resident so RAYON=1 SERIAL is dead PARITY with numpy (0.97-1.01x), but the gate fired the
+64-thread parallel path whose fan-out floor (~0.6ms) LOSES to numpy's 0.42ms serial SIMD scan.
+Parallel only beats numpy from ~2.8M (DRAM-bound, multi-channel bandwidth wins): 3M 0.61-0.64x,
+4M+ 0.36-0.63x. The NANEXTREME comment literally said "WINS at >=3M" yet gated at 2M — an
+off-by-one-power bug. FIX: both gates 1<<21 -> 1<<22, so 2-3M stays serial (parity) and only the
+clear DRAM win regime (>=4M) fans out.
+
+MEASURED (rebuilt `-p fnp-python`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc`,
+interleaved best-of-15): n=2M argmax 1.71x->0.99x, argmin 1.44x->0.98x, nanmax 1.85x->0.95x,
+nanmin 2.20x->1.01x = ALL the loss erased to PARITY; n=4M/8M wins PRESERVED (0.65-0.77x). Outputs
+BIT-EXACT vs numpy at 2M/4M/8M (gate is arithmetic-preserving: argextreme/nanextreme combine per
+rayon chunk in index order = numpy first-index tie-break; serial is a strict subset of that
+combine). CONFORMANCE: `cargo test -p fnp-python --lib` = 532 passed, 1 failed — the 1 failure
+(`eigvals_supported_real_square_inputs_do_not_delegate_to_numpy`) is PRE-EXISTING on clean
+origin/main (CONFIRMED: stashed my edits, rebuilt clean baseline, the test fails 0/1 there too)
+and orthogonal (my diff is only the 2 reduction-gate constants at :27894/:50057; eigvals at
+:73089 is byte-identical). All argmax/argmin/nanmax/nanmin/nanargmax/nanargmin/argextreme/
+nanextreme tests PASS. ptp (2M 0.97x parity) and nanvar/nanstd (win everywhere) needed no change.
+REUSABLE: keep grepping `*_PARALLEL_MIN = 1 << 2N` reduction gates and A/B just-above-gate sizes;
+an L3-resident (~16MB = 2M f64) reduction that the gate parallelizes is a classic fan-out-floor
+loss — the gate belongs at the DRAM crossover (~4M f64 / 32MB), not L3. AGENT_NAME=BlackThrush.
+
 ## 2026-06-28 - DATA (load-insensitive, fnp-vs-fnp): native GEMM kernel ceiling ~115-125 GF; the "1536 collapse" is the native(<=1536)/numpy(>1536) cap BOUNDARY, NOT a blocking bug
 
 `BlackThrush`. Chased an apparent fnp-INTERNAL anomaly that needs neither numpy nor the
