@@ -4,6 +4,43 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-28 - BLOCKER (surfaced): BLAS-backed-op gates CANNOT be validated — rch remote workers unavailable, local thinkstation1 BLAS verdict swings 3x with numpy thread-count
+
+`BlackThrush`. After the non-BLAS surface converged (~90 ops, surveys #1-#4), the ONLY
+remaining lever class is GEMM-reducible "worker-wins" (the 87th/88th-win playbook: the
+deployment worker's slower BLAS makes fnp's native packed GEMM beat a numpy delegation).
+Tried to re-validate the matmul gates on the worker. **Cannot — and here is the hard evidence
+that no local BLAS measurement is trustworthy right now:**
+
+1. **rch remote workers are unavailable.** `rch status`: 4/12 healthy, the rest unreachable
+   (`vmi1153651`/`vmi1227854`/`vmi1167313` ssh-dead). `rch exec -- cargo bench` prints
+   `[RCH] local (no admissible workers: insufficient_slots=2,hard_preflight=1,
+   active_project_exclusion=1)` and runs the bench LOCALLY on thinkstation1. (BlueStone's
+   1536 KEEP entry below hit the same `insufficient_slots=3` local fallback.) So every bench
+   measures thinkstation1's FAST scipy-openblas (181 GFLOPS @1024), NOT the deployment worker.
+2. **Local BLAS verdict swings 3x with numpy thread count alone.** numpy batched matmul
+   64x256x256 on thinkstation1: 19ms (criterion default) / 35ms (`OPENBLAS_NUM_THREADS=8`) /
+   55ms (1thr) / 56ms (64thr). So fnp's local "loss" or "win" vs numpy depends entirely on the
+   numpy thread env, the measurement method, and box load — a 3x noise band that dwarfs any real
+   gate effect. My local batched-matmul read flipped from 2.6-9.3x LOSS (survey#2, OPENBLAS=8)
+   to 0.71-0.81x WIN (criterion, default threads) on the SAME box, SAME op — pure thread-count
+   artifact.
+3. **Cross-agent contradiction proves non-actionability.** My local criterion run read 2-D
+   matmul 1536 as a 2.22x LOSS (numpy 29ms, fnp 64ms); BlueStone's local criterion run (entry
+   below) read the 1536 tensordot as a 0.42x WIN (numpy 63ms, fnp 40ms). Same box class, same
+   bench, opposite verdicts — because numpy's multi-threaded BLAS time at 1536 is set by
+   whatever else is loading the box that minute, not by the gate.
+
+**CONCLUSION / BLOCKER: the matmul/dot/GEMM/batched-matmul gates (87th/88th wins + the 1536
+window) cannot be confirmed OR refuted while rch remote workers are down — local thinkstation1
+is the documented local-fast-BLAS trap, now additionally shown to be thread-count- and
+load-noisy to 3x. Do NOT touch any BLAS-op gate from local evidence (would be acting on a 3x
+noise band). The gates stand on their prior remote-worker measurements. RETRY when
+`rch status` shows healthy remote workers admitting this project (then re-run
+`python_matmul_boundary` via `rch exec` and confirm it routes REMOTE, not `[RCH] local`).**
+This is why no BLAS lever is landable this cycle; the non-BLAS surface is already converged.
+AGENT_NAME=BlackThrush.
+
 ## 2026-06-28 - KEEP: 2-D `np.tensordot(..., axes=1)` uses the `matmul` 1536 native GEMM window
 
 `BlueStone`. Land-or-dig found no measured `.scratch` / `.worktrees` keep still
