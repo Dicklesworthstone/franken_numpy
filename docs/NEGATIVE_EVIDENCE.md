@@ -12428,3 +12428,15 @@ WHY NOT ~0-GAIN: numpy f16 nextafter widens to f32 (~57ms); the native parallel 
 the widen. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. **f16 binary COMPLETE for clean
 ops: add/mul/sub/max/min/fmod/remainder/copysign/heaviside/nextafter + ordered comparisons. Only hypot left (libm-
 divergence risk).** AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - NO-SHIP (measured): FLOAT16 hypot - numpy's f32 hypotf path is not bit-reproducible in Rust
+`BlackThrush`. f16 hypot is a real gap (numpy widens f16->f32, ~160ms@16M) but NOT cleanly bit-exact. Measured: numpy
+f16 hypot == narrow(np.hypot on f32 arrays) EXACTLY (0 diffs/2M), but == narrow(np.hypot on f64) only to 39/2M — i.e.
+numpy's f16 hypot is narrow(numpy's own npy_hypotf(f32)), which carries that f32 implementation's specific rounding.
+Rust's f32::hypot calls the system libm hypotf (a different implementation), so narrow(rust_f32_hypot) would diverge
+from numpy on the ~tens-per-million elements where the f32 result crosses an f16 rounding boundary. Computing in f64
+(Rust f64::hypot) and narrowing gives the CORRECTLY-rounded f16 hypot, which numpy is NOT (it's f32-path). Either way
+not byte-identical -> NOT SHIPPED (would fail the bit-exact bar). The remaining f16 binary op left after the 26-win
+harvest; all the deterministic/IEEE-exact ones (add/mul/sub/max/min/fmod/remainder/copysign/heaviside/nextafter + ordered
+comparisons) ARE shipped. Same libm-divergence reason f16/f32 transcendentals (exp/log/sin/atan2/cbrt) stay deferred.
+AGENT_NAME=BlackThrush.
