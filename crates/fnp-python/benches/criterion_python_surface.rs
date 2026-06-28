@@ -2739,6 +2739,16 @@ x = rng.standard_normal(8_000_000)\n";
         group.bench_function("numpy_add_accumulate_i64_8m", |b| {
             b.iter(|| black_box(numpy_add.call_method1("accumulate", (&xa,)).expect("np add.accum i64")));
         });
+
+        // bitwise_or.accumulate(int) native two-pass prefix vs numpy serial.
+        let fnp_or = module.getattr("bitwise_or").expect("fnp bitwise_or");
+        let numpy_or = numpy.getattr("bitwise_or").expect("numpy bitwise_or");
+        group.bench_function("fnp_bitwise_or_accumulate_i64_8m", |b| {
+            b.iter(|| black_box(fnp_or.call_method1("accumulate", (&xi,)).expect("fnp or.accum i64")));
+        });
+        group.bench_function("numpy_bitwise_or_accumulate_i64_8m", |b| {
+            b.iter(|| black_box(numpy_or.call_method1("accumulate", (&xi,)).expect("np or.accum i64")));
+        });
     });
 
     group.finish();

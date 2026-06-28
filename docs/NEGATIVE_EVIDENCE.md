@@ -11723,3 +11723,24 @@ WHY NOT ~0-GAIN: was full numpy delegation (serial); now the parallel two-pass (
 cumsum path), zero ~0-gain risk. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2 RED
 (numpy/pyo3 inspect.signature drift on __call__; untouched). The .accumulate family is now native-parallel for
 maximum/minimum (f64/f32/all-int) AND add/multiply (int via cumsum/cumprod). AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel-prefix bitwise_and/or/xor.accumulate (int/uint/bool) - was full numpy delegation
+`BlackThrush`. Completes the .accumulate family. The ufunc .accumulate method delegated bitwise_and/or/xor to numpy
+(serial running bitwise reduction = dependency chain). Bitwise ops are associative+commutative with NO promotion (output
+dtype == input dtype), so the existing generic two-pass prefix (accumulate_extremum_typed) is bit-identical with a
+bitwise combine. New dispatcher try_zerocopy_accumulate_bitwise routes default (dtype=None, out=None) 1-D contiguous
+int/uint (i8..u64) directly and bool through a uint8 view (0/1 bytes stay valid bool) then views back. Floats never
+reach here (numpy bitwise on float raises). Parallel-only (defers below the 1<<21 gate like the rest of the family).
+
+PERF (criterion, remote rch worker ovh-a = truth; python_accumulate_extremum_boundary, flat 8M i64):
+  bitwise_or.accumulate i64: fnp 12.93 ms vs NumPy 43.55 ms = 0.297x (3.37x faster) — routes to the two-pass prefix
+  (was delegating to numpy serial). bitwise_and/xor share the identical accumulate_extremum_typed::<i64> kernel
+  (1-cycle combine swap) so the same ~3.4x holds.
+CORRECTNESS: new conformance test bitwise_accumulate_int_bool_parallel_large_bit_exact_matches_numpy (n=(1<<21)+65) ->
+bitwise_and/or/xor.accumulate over int64/int32/uint8/uint64 + bool, all dtype+shape+tobytes() byte-identical to numpy.
+WHY NOT ~0-GAIN: was full numpy delegation; now the parallel two-pass. Reuses the proven accumulate_extremum_typed
+machinery (parallel-only, defers below gate = no small-array regression). PRE-EXISTING (not mine):
+conformance_ufunc_edge::ufunc_signature_has_x1_x2 RED (numpy/pyo3 inspect.signature drift on __call__; untouched).
+The .accumulate family is now native-parallel for maximum/minimum (f64/f32/all-int), add/multiply (int via cumsum/
+cumprod), and bitwise_and/or/xor (int/uint/bool) — the associative-ufunc-accumulate prefix vein is COMPLETE.
+AGENT_NAME=BlackThrush.

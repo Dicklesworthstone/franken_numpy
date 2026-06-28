@@ -326,3 +326,38 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn bitwise_accumulate_int_bool_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    // bitwise_and/or/xor.accumulate (int/uint/bool) route to the two-pass parallel
+    // prefix (associative, no promotion). Must be byte-identical to numpy above the gate.
+    let script = fnp_script(
+        r#"
+n = (1 << 21) + 65
+rng = np.random.default_rng(3)
+ok = True
+for fnp_uf, np_uf in [
+    (fnp.bitwise_or, np.bitwise_or),
+    (fnp.bitwise_and, np.bitwise_and),
+    (fnp.bitwise_xor, np.bitwise_xor),
+]:
+    for dt in [np.int64, np.int32, np.uint8, np.uint64]:
+        x = rng.integers(0, 1 << 20, n).astype(dt)
+        a = fnp_uf.accumulate(x); e = np_uf.accumulate(x)
+        ok = ok and a.dtype == e.dtype and a.shape == e.shape and a.tobytes() == e.tobytes()
+    # bool inputs (running any/all/parity)
+    xb = (rng.integers(0, 2, n)).astype(np.bool_)
+    a = fnp_uf.accumulate(xb); e = np_uf.accumulate(xb)
+    ok = ok and a.dtype == e.dtype and a.tobytes() == e.tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large bitwise_*.accumulate must be bit-identical to numpy",
+    );
+    Ok(())
+}
