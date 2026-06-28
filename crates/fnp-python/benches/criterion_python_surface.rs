@@ -5424,6 +5424,31 @@ bbi = rng.integers(-100, 100, (64, 128, 128)).astype(np.int64)\n";
                 bch.iter(|| black_box(np_inner.call1((&a, &b)).expect("numpy int inner")));
             });
         }
+        // integer multi_dot chain (5 x 256x256): numpy no-BLAS chain vs native GEMM chain.
+        let mdi_setup = "import numpy as np\n\
+rng = np.random.default_rng(14)\n\
+mdi = [rng.integers(-50, 50, (256, 256)).astype(np.int64) for _ in range(5)]\n";
+        py.run(
+            std::ffi::CString::new(mdi_setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("int multi_dot setup");
+        {
+            let mdi = ns.get_item("mdi").expect("mdi");
+            let fnp_md = module.getattr("multi_dot").expect("fnp multi_dot");
+            let np_md = numpy
+                .getattr("linalg")
+                .expect("linalg")
+                .getattr("multi_dot")
+                .expect("np multi_dot");
+            group.bench_function("fnp_multi_dot_i64_5x256", |bch| {
+                bch.iter(|| black_box(fnp_md.call1((&mdi,)).expect("fnp int multi_dot")));
+            });
+            group.bench_function("numpy_multi_dot_i64_5x256", |bch| {
+                bch.iter(|| black_box(np_md.call1((&mdi,)).expect("numpy int multi_dot")));
+            });
+        }
         // INTEGER tensordot(axes=1) (64,64,64): numpy no-BLAS slow; routes to native int GEMM.
         let tdi_setup = "import numpy as np\n\
 rng = np.random.default_rng(10)\n\

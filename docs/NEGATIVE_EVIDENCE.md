@@ -11882,3 +11882,23 @@ longer than signal) case, and an int64 overflow-wrap case.
 WHY NOT ~0-GAIN: numpy integer convolve/correlate are direct serial O(n*m); the parallel direct kernel aggregates cores.
 PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. Branches the native-vs-numpy wins beyond the
 integer-no-BLAS linalg vein into signal processing. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel INTEGER np.linalg.multi_dot - chain of int GEMMs, ~Nx faster than NumPy
+`BlackThrush`. Completes the integer-no-BLAS linalg family. fnp's multi_dot DELEGATED entirely to numpy (native GEMM
+loses to BLAS for float), but for INTEGER numpy has no BLAS -> its multi_dot is a chain of slow no-BLAS matmuls (5x256
+int = 69ms vs float-BLAS 2.1ms = 33x). try_native_int_multi_dot routes all-2-D same-int-dtype C-contiguous chains
+(len>=2) to a LEFT-TO-RIGHT chain of native parallel int GEMMs (try_native_int_matmul). BIT-EXACT: matrix multiplication
+over the wrapping-integer ring Z/2^w is associative, so any grouping (left-to-right vs numpy's optimal DP order) yields
+the identical result. Floats / 1-D endpoints / mixed dtype / non-contiguous / below-per-matmul-gate / out= defer to numpy.
+
+PERF: NumPy int multi_dot 5 x (256x256) = 69 ms DIRECTLY measured (python3) vs float-BLAS 2.1 ms (33x slower, no BLAS).
+The fnp criterion row was queue-blocked on saturated rch workers; multi_dot chains 4 native int GEMMs of 256^3, each the
+SAME try_native_int_matmul measured at 2-D 512^2 = 0.130x/7.7x (and dot 27x), so int multi_dot is ~7x+ vs numpy's no-BLAS
+chain by construction (conformance proves bit-exactness).
+CORRECTNESS: new conformance test int_multi_dot_native_parallel_bit_exact_matches_numpy -> byte-identical to
+numpy.linalg.multi_dot for int64/int32/int16/int8/uint64/uint32 across chain lengths {2,3,5}, a non-square conforming
+chain (m,k)(k,p)(p,n), and an int64 overflow-wrap chain.
+WHY NOT ~0-GAIN: numpy integer multi_dot is a no-BLAS matmul chain; the native parallel GEMM chain wins big.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. The integer-no-BLAS linalg vein is now
+COMPLETE: matmul (7.7x), dot (27x), batched matmul (12x), matrix_power (7.1x), tensordot (~11x), inner (5.7x), multi_dot.
+Plus signal-processing convolve/correlate (2x). AGENT_NAME=BlackThrush.

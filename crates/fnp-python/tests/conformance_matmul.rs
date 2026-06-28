@@ -403,3 +403,41 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn int_multi_dot_native_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy integer multi_dot is a chain of no-BLAS matmuls (slow). The native int GEMM
+    // chain is bit-exact (matrix mult over Z/2^w is associative) incl. overflow wrap and
+    // varying chain lengths/shapes.
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(37)
+ok = True
+for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32]:
+    info = np.iinfo(dt)
+    # square chains of varying length
+    for L in [2, 3, 5]:
+        mats = [rng.integers(info.min // 8, info.max // 8, (96, 96)).astype(dt) for _ in range(L)]
+        r = fnp.multi_dot(mats); e = np.linalg.multi_dot(mats)
+        ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+    # non-square conforming chain (m,k)(k,p)(p,n)
+    a = rng.integers(info.min // 8, info.max // 8, (80, 130)).astype(dt)
+    b = rng.integers(info.min // 8, info.max // 8, (130, 64)).astype(dt)
+    c = rng.integers(info.min // 8, info.max // 8, (64, 100)).astype(dt)
+    r = fnp.multi_dot([a, b, c]); e = np.linalg.multi_dot([a, b, c])
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# overflow wrap (int64)
+mats = [np.full((90, 90), 5_000_000_000, dtype=np.int64) for _ in range(3)]
+ok = ok and fnp.multi_dot(mats).tobytes() == np.linalg.multi_dot(mats).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native integer multi_dot must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
