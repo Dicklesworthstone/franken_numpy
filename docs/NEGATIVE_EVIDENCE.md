@@ -11471,3 +11471,26 @@ winner + GEMM + 109th no-contraction transpose) allclose 0 fails; conformance_ei
 lead (own detector needed): 3-op quadratic form "i,ij,j->" 15x / "a,abc,c->b" 27x (needs a 3-op detector distinct from
 GEMM-chain winners). einsum CONTRACTION vein now harvested for all 2-op shapes (allshared-nonprefix 110th, op2-subset-
 multicontract 111th, transposed-full 112th); the only remaining lead is the 3-op quadratic form. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - FOLLOW-UP to "np.where float32 typed selector parallelized" (8a226a33): version-robust no-keyword surface + f32 parallel regression test
+`BlackThrush`. The landed perf commit 8a226a33 committed the perf-ONLY lib.rs (the where_py `(*args, **kwargs)` kwargs
+refactor had been reverted as scope-creep just before commit), so despite that entry's "23/23 ... kwargs surface fixed"
+note the committed code still FAILED conformance_where::where_python_container_surfaces_match_numpy ("condition kwargs"
+case) under numpy 2.4.3 -> actual 22/23. Root cause: that reverted refactor hard-coded the message
+"numpy._core._multiarray_umath.where() takes no keyword arguments", which does NOT match numpy 2.4.3's actual
+"where() got some positional-only arguments passed as keyword arguments: 'condition, x, y'" (the exact text is
+numpy-version-dependent, so any hard-coded string is fragile).
+
+FIX (version-robust, fnp-python only): where_py now takes `(*args, **kwargs)`; ANY keyworded call is delegated to
+`numpy.where(*args, **kwargs)` so numpy raises its own byte-identical, version-appropriate TypeError instead of a
+hard-coded string. All positional fast paths are unchanged -- they only run when kwargs is empty (condition = args[0],
+x/y = args[1]/args[2], arity gate 1/3). This touches argument routing ONLY; the parallel f32 selector kernel from
+8a226a33 is byte-for-byte unchanged (no perf delta).
+
+REGRESSION TEST: `where_f32_parallel_large_bit_exact_matches_numpy` (n=(1<<22)+65, above the 16 MiB output-byte gate so
+the parallel raw-slice blend engages, with NaN/-0.0/+inf/-inf placed on BOTH the selected and the rejected side)
+asserts dtype + shape + `tobytes()` byte-identical to numpy -> a durable guard for the parallel f32 path that 8a226a33
+added but did not test.
+
+MEASURED: conformance_where now 24/24 GREEN on the rch worker (was 22/23: the "condition kwargs" case now passes via
+delegation, plus the new f32 bit-exact test). AGENT_NAME=BlackThrush.

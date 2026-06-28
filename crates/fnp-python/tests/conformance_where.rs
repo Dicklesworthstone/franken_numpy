@@ -692,3 +692,37 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "where complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn where_f32_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    // Above the 1<<24-byte gate (n*4 bytes) the f32 arr/arr select runs the parallel
+    // raw-slice path through a uint32 view. The blend is a verbatim bit-pattern copy,
+    // so NaN/-0.0/+-inf must be selected byte-for-byte from whichever side wins.
+    let script = fnp_script(
+        r#"
+n = (1 << 22) + 65
+cond = (np.arange(n) % 2 == 0)
+x = np.linspace(-2000.5, 2000.5, n, dtype=np.float32) * np.float32(2.0)
+y = np.linspace(2000.5, -2000.5, n, dtype=np.float32) + np.float32(1.0)
+x[0] = np.float32(np.nan)    # cond True  -> NaN from x
+y[1] = np.float32(-0.0)      # cond False -> -0.0 from y
+x[2] = np.float32(np.inf)    # cond True  -> +inf from x
+y[3] = np.float32(-np.inf)   # cond False -> -inf from y
+actual = fnp.where(cond, x, y)
+expected = np.where(cond, x, y)
+print(
+    actual.dtype == expected.dtype
+    and actual.shape == expected.shape
+    and actual.tobytes() == expected.tobytes()
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large f32 where parallel path must be bit-identical to numpy"
+    );
+    Ok(())
+}
