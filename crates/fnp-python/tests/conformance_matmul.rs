@@ -366,3 +366,40 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn int_batched_matmul_native_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // Batched (>=3-D) integer matmul: numpy uses a naive per-slice serial loop. The
+    // native parallel batched GEMM must be byte-identical incl. 4-D batch + overflow wrap.
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(17)
+ok = True
+for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32]:
+    info = np.iinfo(dt)
+    # 3-D matching batch
+    a = rng.integers(info.min // 2, info.max // 2, (8, 40, 70)).astype(dt)
+    b = rng.integers(info.min // 2, info.max // 2, (8, 70, 33)).astype(dt)
+    r = fnp.matmul(a, b); e = np.matmul(a, b)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+    ok = ok and (a @ b).tobytes() == e.tobytes()
+# 4-D batch
+a = rng.integers(-1000, 1000, (3, 4, 32, 48)).astype(np.int64)
+b = rng.integers(-1000, 1000, (3, 4, 48, 24)).astype(np.int64)
+ok = ok and fnp.matmul(a, b).tobytes() == np.matmul(a, b).tobytes()
+# overflow wrap, batched
+a = np.full((6, 60, 60), 5_000_000_000, dtype=np.int64)
+b = np.full((6, 60, 60), 5_000_000_000, dtype=np.int64)
+ok = ok and fnp.matmul(a, b).tobytes() == np.matmul(a, b).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native batched integer matmul must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}

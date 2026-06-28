@@ -5323,6 +5323,27 @@ bi1024 = rng.integers(-100, 100, (1024, 1024)).astype(np.int64)\n";
                 bch.iter(|| black_box(np_mm.call1((&a, &b)).expect("numpy int matmul")));
             });
         }
+        // BATCHED integer matmul (3-D): numpy int has no BLAS (naive per-slice serial).
+        let bint_setup = "import numpy as np\n\
+rng = np.random.default_rng(8)\n\
+abi = rng.integers(-100, 100, (64, 128, 128)).astype(np.int64)\n\
+bbi = rng.integers(-100, 100, (64, 128, 128)).astype(np.int64)\n";
+        py.run(
+            std::ffi::CString::new(bint_setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("batched int setup");
+        {
+            let a = ns.get_item("abi").expect("abi");
+            let b = ns.get_item("bbi").expect("bbi");
+            group.bench_function("fnp_matmul_i64_batched_64x128x128", |bch| {
+                bch.iter(|| black_box(fnp_mm.call1((&a, &b)).expect("fnp int batched matmul")));
+            });
+            group.bench_function("numpy_matmul_i64_batched_64x128x128", |bch| {
+                bch.iter(|| black_box(np_mm.call1((&a, &b)).expect("numpy int batched matmul")));
+            });
+        }
         // integer np.dot(2d,2d) routes to the same native GEMM (== matmul).
         let fnp_dot = module.getattr("dot").expect("fnp dot");
         let np_dot = numpy.getattr("dot").expect("np dot");

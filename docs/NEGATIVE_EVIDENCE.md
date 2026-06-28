@@ -11786,3 +11786,22 @@ int64/int32/int16/int8/uint64/uint32 (rectangular shapes) + an int64 overflow-wr
 WHY NOT ~0-GAIN: numpy integer dot has no BLAS (naive serial); reuses the proven 7.7x native GEMM. PRE-EXISTING (not
 mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. NEXT (same lever): integer matrix-vector (2d@1d), integer
 batched (>2-D) matmul, register-tiled int kernel. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel BATCHED integer matmul (>=3-D) - (64,128,128) i64 12.0x faster than NumPy
+`BlackThrush`. Follow-up to a076828a/0d6915ca (2-D integer matmul/dot). numpy has no BLAS for integer dtypes, so a
+BATCHED a @ b (3-D+) is a naive per-slice serial loop: measured (64,128,128) i64 = 142.7 ms vs float-BLAS 2.7 ms (53x
+slower). Added batched_int_matmul_typed<T> (flatten leading batch dims to B independent GEMMs, parallelize across ALL
+B*m output rows, ikj inner) + try_native_int_batched_matmul (gates >=3-D, MATCHING non-broadcast batch dims, same int
+dtype, C-contiguous, work B*m*k*n >= 1<<18). Hooked into matmul() after the 2-D integer path. BIT-EXACT (wrapping int
+arithmetic associative). Broadcasting (mismatched batch dims), mixed dtype, floats, non-contiguous, <3-D defer to numpy.
+
+PERF (criterion, remote rch worker ovh-a = truth; python_matmul_boundary, int64):
+  matmul i64 batched (64,128,128): fnp 12.78 ms vs NumPy 153.61 ms = 0.083x (12.0x faster)
+CORRECTNESS: new conformance test int_batched_matmul_native_parallel_bit_exact_matches_numpy -> byte-identical to numpy
+for int64/int32/int16/int8/uint64/uint32 (3-D matching batch + the @ operator), a 4-D batch case, and a batched int64
+overflow-wrap case.
+WHY NOT ~0-GAIN: numpy integer batched matmul has no BLAS (naive per-slice serial); native parallel batched GEMM is 12x.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2 (numpy/pyo3 signature drift). The integer-no-
+BLAS lever now covers 2-D matmul (7.7x), 2-D dot (27x), and batched matmul (12x). REMAINING: integer matrix-vector is
+NOT a gap (numpy int matvec ~12ms is already fast, even beats float) - skip; register-tiled int kernel could push the
+2-D residual past 7.7x. AGENT_NAME=BlackThrush.
