@@ -2704,6 +2704,27 @@ x = rng.standard_normal(8_000_000)\n";
                 )
             });
         });
+
+        // f32 + i64 running max share the generic two-pass (bit-exact: max/min
+        // associative for float, no NaN/promotion for int).
+        let x32 = x.call_method1("astype", ("float32",)).expect("x32");
+        let xi = numpy
+            .call_method1("arange", (8_000_000_i64,))
+            .expect("8M i64 base")
+            .call_method1("__mod__", (1_000_003_i64,))
+            .expect("xi");
+        group.bench_function("fnp_maximum_accumulate_f32_8m", |b| {
+            b.iter(|| black_box(fnp_max.call_method1("accumulate", (&x32,)).expect("fnp max.accum f32")));
+        });
+        group.bench_function("numpy_maximum_accumulate_f32_8m", |b| {
+            b.iter(|| black_box(numpy_max.call_method1("accumulate", (&x32,)).expect("np max.accum f32")));
+        });
+        group.bench_function("fnp_maximum_accumulate_i64_8m", |b| {
+            b.iter(|| black_box(fnp_max.call_method1("accumulate", (&xi,)).expect("fnp max.accum i64")));
+        });
+        group.bench_function("numpy_maximum_accumulate_i64_8m", |b| {
+            b.iter(|| black_box(numpy_max.call_method1("accumulate", (&xi,)).expect("np max.accum i64")));
+        });
     });
 
     group.finish();

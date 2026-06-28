@@ -241,3 +241,42 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn accumulate_extremum_f32_int_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    // f32 + integer maximum/minimum.accumulate share the generic two-pass prefix.
+    // f32: same NaN/signed-zero rules as f64. Integer: no NaN/promotion, output dtype
+    // == input dtype. Must be byte-identical to numpy's serial accumulate above the gate.
+    let script = fnp_script(
+        r#"
+n = (1 << 21) + 65
+rng = np.random.default_rng(1)
+ok = True
+
+# float32 with signed zeros + propagating NaN
+xf = rng.standard_normal(n).astype(np.float32)
+xf[20] = np.float32(-0.0); xf[21] = np.float32(0.0); xf[22] = np.float32(-0.0)
+xf[9999] = np.float32(np.nan)
+for ufm, npf in [(fnp.maximum, np.maximum), (fnp.minimum, np.minimum)]:
+    a = ufm.accumulate(xf); e = npf.accumulate(xf)
+    ok = ok and a.dtype == e.dtype and a.shape == e.shape and a.tobytes() == e.tobytes()
+
+# integer running max/min across several widths (output dtype preserved)
+for dt in [np.int64, np.int32, np.int16, np.uint32, np.uint8]:
+    xi = (rng.integers(-50, 50, n)).astype(dt)
+    for ufm, npf in [(fnp.maximum, np.maximum), (fnp.minimum, np.minimum)]:
+        a = ufm.accumulate(xi); e = npf.accumulate(xi)
+        ok = ok and a.dtype == e.dtype and a.tobytes() == e.tobytes()
+
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large f32/int maximum/minimum.accumulate must be bit-identical to numpy"
+    );
+    Ok(())
+}

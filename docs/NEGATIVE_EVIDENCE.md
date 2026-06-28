@@ -11679,3 +11679,28 @@ flag flip. Same dependency-latency-chain lever as the integer cumsum prefix win 
 are exactly associative. minimum shares the identical mechanism (measured maximum, both covered bit-exactly by the test).
 REMAINING: f32 + integer maximum/minimum.accumulate still delegate (same lever, different buffer dtype) — a clean
 follow-up. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): generalize np.maximum/minimum.accumulate parallel-prefix to f32 + ALL integer widths - f32 8.1x / i64 3.1x faster than NumPy
+`BlackThrush`. Follow-up to 95fb6629 (f64-only). Generalized try_zerocopy_f64_accumulate_extremum into a generic
+accumulate_extremum_typed<T> + a dtype dispatcher (try_zerocopy_accumulate_extremum) covering f64/f32 (np_fmax/np_fmin
+per width) and i8..i64/u8..u64 (ord_max/ord_min — integer max/min has no NaN/signed-zero, equal values are bit-identical,
+so it matches numpy.maximum/minimum exactly; output dtype == input dtype, no promotion).
+
+PERF (criterion, remote rch worker ovh-a = truth; python_accumulate_extremum_boundary, flat 8M, SAME-WORKER serial
+isolation):
+  f32 maximum.accumulate: SERIAL (RAYON=1) 13.85 ms -> PARALLEL 2.99 ms = 4.6x over serial; vs NumPy 24.09 ms = 0.124x
+    (8.1x faster — numpy's f32 max.accumulate is especially slow)
+  i64 maximum.accumulate: SERIAL 49.72 ms -> PARALLEL 13.92 ms = 3.6x over serial; vs NumPy 43.68 ms = 0.319x (3.1x faster)
+
+REGRESSION GUARD (the reason the native path is PARALLEL-ONLY now): numpy's INTEGER max/min.accumulate is SIMD and BEATS
+a native serial loop (i64 serial 49.72 ms vs numpy 43.68 ms = 1.14x LOSS). So below the 1<<21 gate (or single-threaded)
+the helper now DEFERS to numpy (returns None) instead of running a native serial scan — no small-array regression for
+the integer arms; the native path engages ONLY above the gate where the two-pass parallel wins for every dtype. (The
+prior f64-only commit's below-gate native serial — which beat numpy 1.36x — is given up for this consistent, regression-
+free gating; below-gate arrays are tiny so the delta is negligible.)
+CORRECTNESS: new conformance test accumulate_extremum_f32_int_parallel_large_bit_exact_matches_numpy (n=(1<<21)+65) ->
+dtype+shape+tobytes() byte-identical to numpy for f32 (signed zeros + propagating NaN) and i64/i32/i16/uint32/uint8
+running max AND min.
+WHY NOT ~0-GAIN: 3.6-4.6x over the serial control; 3.1-8.1x vs numpy. PRE-EXISTING (not mine): conformance_ufunc_edge::
+ufunc_signature_has_x1_x2 RED (numpy/pyo3 inspect.signature drift on the ufunc __call__; untouched by this change).
+The prefix-scan family now spans cumsum/cumprod (int) + maximum/minimum.accumulate (f64/f32/all int). AGENT_NAME=BlackThrush.
