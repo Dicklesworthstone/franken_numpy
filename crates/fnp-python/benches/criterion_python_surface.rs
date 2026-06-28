@@ -2627,6 +2627,44 @@ fn bench_cumsum_lastaxis_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_cumsum_flat_boundary(c: &mut Criterion) {
+    // FLAT 1-D integer np.cumsum(8M) — a single-lane prefix sum. numpy's 1-D cumsum is
+    // a serial dependency chain; the native two-pass block scan breaks it across cores
+    // (bit-exact for wrapping integer add). Was serial (parity with numpy).
+    let mut group = c.benchmark_group("python_cumsum_flat_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_cumsum = module.getattr("cumsum").expect("fnp cumsum");
+        let numpy_cumsum = numpy.getattr("cumsum").expect("numpy cumsum");
+        let i64_in = numpy
+            .call_method1("arange", (8_000_000_i64,))
+            .expect("8M i64");
+        let i32_in = i64_in.call_method1("astype", ("int32",)).expect("i32");
+        group.bench_function("fnp_cumsum_i64_flat_8m", |b| {
+            b.iter(|| black_box(fnp_cumsum.call1((&i64_in,)).expect("fnp cumsum i64")));
+        });
+        group.bench_function("numpy_cumsum_i64_flat_8m", |b| {
+            b.iter(|| black_box(numpy_cumsum.call1((&i64_in,)).expect("numpy cumsum i64")));
+        });
+        group.bench_function("fnp_cumsum_i32_flat_8m", |b| {
+            b.iter(|| black_box(fnp_cumsum.call1((&i32_in,)).expect("fnp cumsum i32")));
+        });
+        group.bench_function("numpy_cumsum_i32_flat_8m", |b| {
+            b.iter(|| black_box(numpy_cumsum.call1((&i32_in,)).expect("numpy cumsum i32")));
+        });
+    });
+
+    group.finish();
+}
+
 // cumsum/cumprod along a MIDDLE axis (0 < ax < ndim-1) of a 3-D f64 stack. numpy runs a
 // non-last cumulative STRIDED + single-threaded; the native block-parallel slab-by-slab
 // scan (try_zerocopy_f64_cumulative_axis inner>1 path) fans independent contiguous outer
@@ -5411,6 +5449,7 @@ criterion_group!(
     bench_sum_lastaxis_boundary,
     bench_prod_lastaxis_boundary,
     bench_cumsum_lastaxis_boundary,
+    bench_cumsum_flat_boundary,
     bench_cum_midaxis_boundary,
     bench_int_cum_boundary,
     bench_vander_boundary,

@@ -11622,3 +11622,31 @@ LESSON: a 3x "win vs numpy" can be entirely the pre-existing serial zerocopy pat
 same-worker RAYON_NUM_THREADS=1 control before claiming a parallelization win (fnp-vs-numpy alone is not enough when a
 serial fast path already exists). Same memory-bound-already-saturated class as the serial-unary WALL and roll-memmove
 parity no-ships. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): FLAT 1-D integer np.cumsum/np.cumprod two-pass parallel prefix - 8M i64 cumsum 13.0 ms vs NumPy 42.9 ms = 0.303x (3.30x faster)
+`BlackThrush`. A NEW lever distinct from the 97th win (which parallelized cumulative scans ACROSS lanes/blocks of a
+non-last/middle axis): a FLAT 1-D array is a SINGLE lane, so it stayed on the serial prefix loop (`acc = add(acc, x[i])`)
+- a sequential DEPENDENCY chain that is latency-bound on one core, NOT a parallel-across-blocks case. numpy's 1-D cumsum
+is the same serial chain. The fix is a classic two-pass parallel prefix scan (block partials -> serial scan of block
+offsets -> re-scan each block from its offset), which BREAKS the dependency chain across cores. BIT-EXACT for INTEGER
+because wrapping add/mul are associative+commutative, so the block-reassociated result equals the serial fold byte-for-
+byte (incl. the int64/uint64 overflow-WRAP that numpy also performs). cumsum_typed gained a `parallel: bool` flag
+(CUMSUM_PARALLEL_MIN=1<<21); the 9 integer cumsum callers + 9 integer cumprod callers (mul via cumsum_typed) pass true,
+the f32 cumsum/cumprod callers pass FALSE (float reassociation would change rounding).
+
+PERF (criterion, remote rch worker ovh-a = truth; python_cumsum_flat_boundary, flat 8M; SAME-WORKER serial isolation):
+  i64 cumsum: SERIAL (RAYON=1) 41.63 ms -> PARALLEL 13.00 ms = 3.2x over serial; vs NumPy 42.91 ms = 0.303x (3.30x faster)
+  i32 cumsum: SERIAL 40.64 ms -> PARALLEL 11.52 ms = 3.5x over serial; vs NumPy 83.14 ms = 0.139x (7.2x faster; numpy's
+    i32->int64 cumsum is extra slow, so fnp's serial widening already won 2x and parallel makes it 7.2x)
+  -> the serial-isolation control PROVES the parallelism is the lever (NOT the pre-existing zerocopy): serial fnp i64
+     was at PARITY with numpy (41.6 vs 42.9), parallel is the 3.2x win. (Contrast the np.choose REJECT, where serial
+     already won and parallel was ~0-gain — a 1-D prefix is dependency-latency-bound so it HAS parallel headroom.)
+CORRECTNESS: new conformance test flat_int_cumsum_cumprod_parallel_large_bit_exact_matches_numpy (n=(1<<21)+65 above the
+gate) -> dtype+shape+tobytes() byte-identical to numpy for int64 cumsum WITH overflow-wrap, int32->int64 widening,
+uint64 wrap, AND int64 cumprod with sign/magnitude wrap. cumprod shares the identical two-pass mechanism (wrapping_mul
+associative), measured via cumsum + covered bit-exactly by the test.
+WHY NOT ~0-GAIN: 3.2-3.5x over the serial control on the same worker; 3.3-7.2x vs numpy. cumprod is the same proven
+mechanism (like the clip/where wins that measured one width and asserted bit-identical siblings).
+LESSON: a FLAT 1-D scan is a separate lever from the across-lanes axis-scan win — single-lane prefix is
+dependency-latency-bound and parallelizes via two-pass (bit-exact only for associative integer add/mul, NOT float).
+AGENT_NAME=BlackThrush.
