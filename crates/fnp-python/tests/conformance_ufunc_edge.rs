@@ -664,6 +664,46 @@ print(ok)
 }
 
 #[test]
+fn f16_ordered_comparison_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy widens f16 to f32 for ordered comparisons (compute-bound). The native parallel
+    // widen-compare must produce the identical bool array, incl NaN (all ordered comparisons
+    // with NaN are False), inf, and signed zeros, above the 1<<20 gate.
+    let script = fnp_script(
+        r#"
+n = (1 << 20) + 257
+rng = np.random.default_rng(29)
+a = rng.standard_normal(n).astype(np.float16)
+b = rng.standard_normal(n).astype(np.float16)
+# force some equal elements + specials
+b[: n // 4] = a[: n // 4]
+av = np.array([np.nan, np.inf, -np.inf, 0.0, -0.0, np.nan, 1.0], dtype=np.float16)
+bv = np.array([1.0, np.inf, -np.inf, -0.0, 0.0, np.nan, np.nan], dtype=np.float16)
+a[:7] = av; b[:7] = bv
+ok = True
+for fnp_op, np_op in [(fnp.greater, np.greater), (fnp.less, np.less),
+                      (fnp.greater_equal, np.greater_equal), (fnp.less_equal, np.less_equal)]:
+    r = fnp_op(a, b); e = np_op(a, b)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# operator forms route through the same ufuncs
+ok = ok and (a > b).tobytes() == np.greater(a, b).tobytes()
+ok = ok and (a <= b).tobytes() == np.less_equal(a, b).tobytes()
+# 2-D shape preserved
+a2 = a[:1 << 20].reshape(1024, 1024); b2 = b[:1 << 20].reshape(1024, 1024)
+ok = ok and fnp.greater(a2, b2).tobytes() == np.greater(a2, b2).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 ordered comparisons must be bit-identical to numpy incl NaN: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_binary_maximum_minimum_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy has no native f16 ALU; maximum/minimum widen->f32->op->narrow (compute-bound). The
     // native parallel kernel must be byte-identical incl NaN-bit propagation (LHS first), signed

@@ -5185,7 +5185,7 @@ hb = rng.standard_normal(16_000_000).astype(np.float16)\n";
         .expect("f16 binary setup");
         let ha = ns.get_item("ha").expect("ha");
         let hb = ns.get_item("hb").expect("hb");
-        for op in ["add", "multiply", "maximum", "minimum"] {
+        for op in ["add", "multiply", "maximum", "minimum", "greater", "less"] {
             let fnp_fn = module.getattr(op).expect("fnp op");
             let numpy_fn = numpy.getattr(op).expect("numpy op");
             group.bench_function(format!("fnp_{op}_f16_16m"), |bch| {

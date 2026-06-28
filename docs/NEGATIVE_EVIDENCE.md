@@ -12183,3 +12183,23 @@ WHY NOT ~0-GAIN: numpy f16 max/min are compute-bound widen/narrow (~122ms); para
 PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f16-no-ALU vein now: binary add/mul/sub/max/
 min + unary floor/ceil/trunc/rint/sqrt/square. NaN-BIT-PROPAGATION LESSON: numpy max/min keep the input nan's raw bits
 (not canonical) — widen->narrow canonicalizes, so handle nan on the u16 bits directly. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 ordered comparisons (greater/less/ge/le) -> bool
+`BlackThrush`. A different primitive in the f16-no-ALU class: comparison -> bool output (not arithmetic). numpy has no
+native f16 ALU, so it WIDENS each f16 operand to f32 to do an ORDERED comparison (16M ~80ms, ~15x f32's 5ms = compute-
+bound). equal/not_equal are EXCLUDED (numpy compares f16 bits directly for those, ~22ms = low headroom). Added
+try_zerocopy_f16_compare (views both operands as uint16 zero-copy, par_chunks_mut widen->compare->write a uint8 0/1,
+view result as bool) + an f16cmp block in the binary ufunc __call__ (UFuncKind::Greater/Less/GreaterEqual/LessEqual).
+BIT-EXACT: Rust f32 ordered comparisons (>,<,>=,<=) return false when either operand is NaN — EXACTLY numpy's ordered-
+comparison NaN semantics — and the f16->f32 widen is exact, so the bool array is byte-identical. Verified vs numpy incl
+NaN, inf, signed zeros, and equal elements; the > and <= operator forms route through the same ufuncs. Same-shape
+C-contiguous f16, n>=1<<20; everything else defers.
+
+PERF (criterion, rch worker = truth; f16, 16M elements):
+  greater f16 16M: fnp 3.71 ms vs NumPy 86.85 ms = 0.043x / ~23.4x faster
+  less    f16 16M: fnp 3.31 ms vs NumPy 94.36 ms = 0.035x / ~28.5x faster
+CORRECTNESS: new conformance test f16_ordered_comparison_parallel_bit_exact_matches_numpy -> byte-identical to numpy
+(greater/less/greater_equal/less_equal + operator forms + 2-D) incl NaN/inf/signed-zero/equal.
+WHY NOT ~0-GAIN: numpy f16 ordered comparison is compute-bound (widen to f32); parallel aggregates cores.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f16-no-ALU vein: binary add/mul/sub/max/min,
+unary floor/ceil/trunc/rint/sqrt/square, ordered comparisons. AGENT_NAME=BlackThrush.
