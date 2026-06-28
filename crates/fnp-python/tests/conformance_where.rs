@@ -726,3 +726,37 @@ print(
     );
     Ok(())
 }
+
+#[test]
+fn where_i32_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    // 4-byte int select takes the same parallel raw-slice path as f32 (above the
+    // 1<<24-byte gate). The blend is a verbatim copy, so extreme/min/max int values
+    // must be selected exactly from whichever side the bool condition picks.
+    let script = fnp_script(
+        r#"
+n = (1 << 22) + 65
+cond = (np.arange(n) % 2 == 0)
+x = (np.arange(n, dtype=np.int32) * np.int32(3)) - np.int32(7)
+y = np.int32(11) - (np.arange(n, dtype=np.int32) * np.int32(2))
+x[0] = np.iinfo(np.int32).max     # cond True  -> INT32_MAX from x
+y[1] = np.iinfo(np.int32).min     # cond False -> INT32_MIN from y
+x[2] = np.int32(0)
+y[3] = np.iinfo(np.int32).max
+actual = fnp.where(cond, x, y)
+expected = np.where(cond, x, y)
+print(
+    actual.dtype == expected.dtype
+    and actual.shape == expected.shape
+    and actual.tobytes() == expected.tobytes()
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large i32 where parallel path must be bit-identical to numpy"
+    );
+    Ok(())
+}

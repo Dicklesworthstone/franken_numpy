@@ -11494,3 +11494,29 @@ added but did not test.
 
 MEASURED: conformance_where now 24/24 GREEN on the rch worker (was 22/23: the "condition kwargs" case now passes via
 delegation, plus the new f32 bit-exact test). AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): np.where 4-byte INTEGER (int32/uint32) typed selector parallelized - 8M i32 2.59 ms vs NumPy 7.47 ms = 0.347x (2.88x faster)
+`BlackThrush`. Extends the float32 where win (8a226a33) to the 4-byte INTEGER arms. The equal-dtype typed selector
+`where_typed<T>` had only the float32 byte-view arm on the parallel raw-slice blend; the int32/uint32 arms were still
+serial `Cell<T>`. Their per-element traffic is identical to f32 (~13 B/elem: cond u8 + 4B x + 4B y + 4B out), so above
+the same 1<<24 output-byte gate the parallel blend aggregates bandwidth and beats numpy's single-threaded where.
+
+FIX (fnp-python only): flip the ("i",4) and ("u",4) arms of try_zerocopy_int_where to `parallel = true`
+(int32/uint32). 1/2-byte arms stay serial (too cheap to amortize fan-out) and 8-byte arms stay serial (the all-typed
+candidate REGRESSED i64 - 8B saturates memory bandwidth). The blend is a verbatim bit-pattern copy => BIT-EXACT
+(min/max/extreme int values selected byte-for-byte). uint32 mirrors int32 (same 4-byte path, same kernel) - kept
+parallel by analogy as the 48th-win integer clip did (measured i32, asserted u32 by identical byte width).
+
+PERF (criterion, remote rch worker = truth; python_where_boundary, 8M; worker under load this run so absolutes are
+inflated but ratios hold):
+  where i32 arr/arr: fnp 2.589 ms vs NumPy 7.469 ms = **0.347x (2.88x faster)** -- KEEP
+  where f32 arr/arr (control, already landed 8a226a33): fnp 3.087 ms vs NumPy 6.783 ms = 0.455x (2.20x faster) -- preserved
+  where i64 arr/arr (SERIAL 8-byte control): fnp 44.71 ms vs NumPy 44.92 ms = 0.995x parity -- NO regression (both hit a
+    load spike equally; serial i64 unaffected by this change)
+CORRECTNESS: new conformance test where_i32_parallel_large_bit_exact_matches_numpy (n=(1<<22)+65 above the gate, with
+INT32_MAX/INT32_MIN/0 on both selected and rejected sides) -> dtype+shape+tobytes() byte-identical to numpy. Full
+conformance_where GREEN on the rch worker.
+WHY NOT ~0-GAIN: i32 swings from a serial Cell loss to a 2.88x win; f32 control preserved; i64 serial control holds
+parity. Same itemsize-bandwidth boundary as the 48th-win clip (4-byte wins, 8-byte loses). The where 4-byte-typed
+parallel vein is now harvested for f32 + i32 + u32; remaining int arms (1/2/8-byte) stay serial by measurement.
+AGENT_NAME=BlackThrush.

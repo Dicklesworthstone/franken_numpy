@@ -4391,6 +4391,24 @@ fn bench_where_boundary(c: &mut Criterion) {
                 )
             });
         });
+
+        // 4-byte int select: like f32, ~13 B/elem traffic crosses the bandwidth floor,
+        // so the parallel raw-slice blend should beat numpy's single-threaded where
+        // (i64 above is the 8-byte serial control that stays at parity).
+        let ia32 = ia.call_method1("astype", ("int32",)).expect("ia32");
+        let ib32 = ib.call_method1("astype", ("int32",)).expect("ib32");
+        group.bench_function("fnp_where_i32_8m", |bn| {
+            bn.iter(|| black_box(fnp_where.call1((&imask, &ia32, &ib32)).expect("fnp where i32")));
+        });
+        group.bench_function("numpy_where_i32_8m", |bn| {
+            bn.iter(|| {
+                black_box(
+                    numpy_where
+                        .call1((&imask, &ia32, &ib32))
+                        .expect("numpy where i32"),
+                )
+            });
+        });
     });
 
     group.finish();
