@@ -425,6 +425,9 @@ ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobyt
 # copysign over the same arrays (every f32 input, incl -0.0/nan/inf signs)
 r = fnp.copysign(a, b); e = np.copysign(a, b)
 ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# nextafter (bit-step toward the other operand) — bit-identical in f32
+r = fnp.nextafter(a, b); e = np.nextafter(a, b)
+ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
 # 2-D shape preserved
 a2 = a[:1 << 21].reshape(2048, 1024); b2 = b[:1 << 21].reshape(2048, 1024)
 ok = ok and fnp.fmod(a2, b2).tobytes() == np.fmod(a2, b2).tobytes()

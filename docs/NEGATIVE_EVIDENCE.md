@@ -12003,3 +12003,22 @@ WHY NOT ~0-GAIN: numpy f32 remainder is single-threaded compute (~156ms, ~10x ab
 f32 kernel aggregates cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f32-binary
 class now covers fmod/copysign/remainder; remaining bit-exact-safe lead: nextafter (~83ms, needs a bit-step impl);
 maximum/minimum (~39ms, modest). arctan2/hypot/logaddexp/float_power = libm-divergence-risky (defer). AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT32 nextafter - extends the f32-binary-single-threaded class
+`BlackThrush`. Fourth op in the f32-binary-single-threaded class (after fmod/copysign/remainder). numpy runs f32
+nextafter single-threaded (~83ms @16M, compute-bound on the bit-step). Added BinaryOp::Nextafter to
+zerocopy_f32_binary_flat (the f32 mirror of BinaryOp::apply's f64 Nextafter bit-step arm: nan->nan, equal->rhs,
+lhs==0->smallest subnormal toward rhs sign, else step the u32 bits +/-1 by direction & sign) and an f32 fast path in
+the `nextafter` pyfunction (it is a pyfunction, line 21767 — hook there, NOT __call__), ABOVE the non-f64 numpy deferral.
+BIT-EXACT: the f32 bit-step is byte-identical to np.nextafter, VERIFIED over 3M f32 incl inf/-inf/nan/-0.0/subnormal/
+3.4e38 (0 diffs) — nextafter is uniquely defined, no libm. Same-shape C-contiguous f32; scalar/broadcast/non-f32/
+non-contiguous defer to numpy unchanged. Gated n>=1<<21, threads>=2.
+
+PERF (criterion, rch worker = truth; f32, 16M elements):
+  nextafter f32 16M: fnp 14.27 ms vs NumPy 144.68 ms = 0.099x / ~10.1x faster
+CORRECTNESS: conformance test f32_fmod_copysign_parallel_large_bit_exact_matches_numpy extended with nextafter ->
+byte-identical to numpy above the gate (incl specials).
+WHY NOT ~0-GAIN: numpy f32 nextafter is single-threaded compute (~83ms, ~5x above the bandwidth floor); the parallel
+f32 bit-step aggregates cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f32-binary
+class now covers fmod/copysign/remainder/nextafter; remaining bit-exact-safe lead: maximum/minimum (~39ms, bandwidth,
+modest, UFuncKinds->hook __call__). arctan2/hypot/logaddexp/float_power = libm-divergence-risky (defer). AGENT_NAME=BlackThrush.
