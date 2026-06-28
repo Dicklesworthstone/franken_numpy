@@ -4,6 +4,38 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-28 - WIN (LANDED): sinc/angle/polyval mistuned parallel gates raised — small-size losses 1.4-7x -> parity/win, large wins preserved, bit-exact (+ trapezoid REVERTED as unmeasurable)
+
+`BlackThrush`. Third gate-crossover sweep extended the lever beyond reductions to elementwise
+MAP ops. A broad just-above-gate sweep (interleaved) flagged four ops parallelizing too early.
+RAYON=1-vs-default A/B classified them (serial parity + parallel loss = mistuned gate). THREE
+landed, ONE reverted:
+
+- **sinc** `SINC_PARALLEL_MIN` 1<<15 -> 1<<16: gate was 32K; 32K (L3-resident) serial is parity
+  but fan-out lost (up to 2.6x loaded). RAYON=8: 32K parity, 64K-1M WIN 0.12-0.19x.
+- **angle** `ANGLE_PARALLEL_MIN` 1<<15 -> 1<<17: gate was 32K; 32-64K fan-out lost 1.5x (up to
+  7x on a loaded box). RAYON=8: 32-64K parity, 128K-512K WIN 0.18-0.19x.
+- **polyval** `POLYVAL_PARALLEL_MIN` 1<<16 -> 1<<18: gate was 64K; 64-128K fan-out lost
+  1.38-2.03x while the serial Horner WINS. RAYON=8: 64K-1M all WIN 0.11-0.31x (64K 1.38x loss
+  -> 0.31x win — below the gate it runs the serial single-pass Horner which beats numpy).
+
+All three are bit-EXACT (elementwise, per-element order independent of threading). Conformance
+532 pass / 1 fail = the SAME pre-existing `eigvals_..._do_not_delegate_to_numpy` (orthogonal,
+proven on clean baseline). sinc/angle/polyval tests PASS.
+
+**TRAPEZOID REVERTED (no-ship): unmeasurable on this loaded box.** trapezoid (gate 1<<16) showed
+a 64K-256K parallel loss too, but it is a SUM REDUCTION whose serial path A/B was load-noise-
+dominated: RAYON=1 serial read 0.965x (parity) in one run and 1.20-1.35x (loss) in another — so I
+could NOT distinguish "mistuned gate" (serial parity -> raise gate) from "kernel floor" (serial
+also loses -> no gate helps). Raising it to 1<<20 gave an inconsistent 256K result (1.41x default /
+1.35x RAYON=8). REVERTED to 1<<16; left as a documented lead (re-measure on a quiet box / via the
+worker criterion bench when rch remote returns). **KEY DISCRIMINATOR REAFFIRMED: only ship a gate
+raise when the SERIAL path (RAYON=1) is ROBUSTLY parity-or-win across runs; if RAYON=1 itself
+swings parity<->loss with load, the op is too small/noisy to gate-tune on a loaded box — measure
+at RAYON=8 AND require RAYON=1 stability.** Default-64-thread readings on this loaded box are
+oversubscription noise (polyval 64K read 2.15x at default but 0.31x WIN at RAYON=8 — same build);
+ALWAYS confirm gate fixes at RAYON=8. AGENT_NAME=BlackThrush.
+
 ## 2026-06-28 - WIN (LANDED): flat f64 nanargmax/nanargmin mistuned parallel gate 1<<18 -> 1<<19 — 256K loss 1.31-1.34x -> 0.68x WIN, larger wins preserved, bit-exact
 
 `BlackThrush`. Same systematic lever, immediately after the argextreme/nanextreme fix
