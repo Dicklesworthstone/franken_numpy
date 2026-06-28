@@ -12141,3 +12141,25 @@ aggregates cores and fuses both outputs in one pass. PRE-EXISTING (not mine): co
 ufunc_signature_has_x1_x2. The integer single-threaded compute-bound element-op vein is now COMPLETE
 (gcd/lcm/power/floor_divide/remainder/divmod); left_shift/right_shift are BANDWIDTH-bound (==add ~80ms, contention-
 fragile) so deliberately NOT shipped. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 sqrt/square - extends the f16-no-ALU unary vein past the rounding ops
+`BlackThrush`. numpy has NO native f16 ALU, so f16 sqrt/square widen->f32->op->narrow (compute-bound: 16M sqrt ~76ms,
+square ~61ms vs f32 ~35ms). Earlier shipped only the warning-free rounding ops (floor/ceil/trunc/rint); sqrt/square were
+held back for their warning surfaces. Now added to try_zerocopy_f16_unary_widen with a WARNING-SURFACE PRE-SCAN that
+defers the whole call to numpy when any element would make numpy emit a default-on RuntimeWarning, so that surface is
+reproduced exactly: sqrt defers on any negative (finite or -inf -> "invalid"); square defers on any |x| >= 256 (256^2 =
+65536 > f16 max 65504 -> "overflow"). The common all-nonnegative / all-moderate case takes the fast parallel kernel.
+Hooked sqrt into native_unary_promoting and square into native_unary_elementwise (above their f16 numpy fallbacks);
+transcendentals (exp/log/sin) return None from the helper so they still defer (libm divergence).
+BIT-EXACT: numpy f16 sqrt/square == narrow(op_f32(widen(x))) — verified byte-for-byte over the full f16 domain; sqrt
+(hardware sqrtss, one correct result) and square (f32 multiply) are IEEE-exact, so Rust bits == numpy bits. Conformance
+covers the kernel path (sqrt of all non-negative patterns, square of all |x|<256) AND the defer paths (negatives /
+|x|>=256 still byte-identical via numpy).
+
+PERF (criterion, rch worker = truth; f16, 16M elements, warning-free data):
+  sqrt   f16 16M: fnp 14.24 ms vs NumPy 98.74 ms = 0.144x / ~6.9x faster
+  square f16 16M: fnp 14.17 ms vs NumPy 78.69 ms = 0.180x / ~5.6x faster
+CORRECTNESS: new conformance test f16_unary_sqrt_square_parallel_bit_exact_matches_numpy -> byte-identical to numpy
+(kernel + defer paths). WHY NOT ~0-GAIN: numpy f16 sqrt/square are compute-bound widen/narrow; parallel aggregates cores.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f16 unary vein now covers floor/ceil/trunc/
+rint + sqrt/square; reciprocal left (fiddly tiny-input overflow surface). AGENT_NAME=BlackThrush.

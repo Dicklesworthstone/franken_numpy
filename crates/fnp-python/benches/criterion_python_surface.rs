@@ -5207,6 +5207,28 @@ hb = rng.standard_normal(16_000_000).astype(np.float16)\n";
                 bch.iter(|| black_box(numpy_fn.call1((&ha,)).expect("numpy f16 unary call")));
             });
         }
+        // f16 sqrt/square: numpy widens (compute-bound). Native parallel widen wins for the
+        // warning-free common case (sqrt of non-negatives, square of |x|<256).
+        let hsq_setup = "import numpy as np\n\
+rng = np.random.default_rng(8)\n\
+hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
+        py.run(
+            std::ffi::CString::new(hsq_setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("f16 sqrt/square setup");
+        let hsq = ns.get_item("hsq").expect("hsq");
+        for op in ["sqrt", "square"] {
+            let fnp_fn = module.getattr(op).expect("fnp f16 unary op");
+            let numpy_fn = numpy.getattr(op).expect("numpy f16 unary op");
+            group.bench_function(format!("fnp_{op}_f16_16m"), |bch| {
+                bch.iter(|| black_box(fnp_fn.call1((&hsq,)).expect("fnp f16 unary call")));
+            });
+            group.bench_function(format!("numpy_{op}_f16_16m"), |bch| {
+                bch.iter(|| black_box(numpy_fn.call1((&hsq,)).expect("numpy f16 unary call")));
+            });
+        }
         // f32 fmod/copysign: numpy runs f32 binary ufuncs single-threaded (fmod ~138ms @16M);
         // there was no f32 binary zero-copy path. Native parallel f32 kernel wins (bit-exact).
         let f32_setup = "import numpy as np\n\

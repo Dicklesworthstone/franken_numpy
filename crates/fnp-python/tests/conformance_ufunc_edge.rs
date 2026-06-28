@@ -664,6 +664,48 @@ print(ok)
 }
 
 #[test]
+fn f16_unary_sqrt_square_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy has no native f16 ALU; sqrt/square widen->f32->op->narrow (compute-bound). The native
+    // parallel widen path is bit-exact for the warning-free common case (sqrt of non-negatives,
+    // square of |x|<256) and DEFERS to numpy when a warning would fire (sqrt of a negative ->
+    // invalid; square overflow). Both kernel and defer paths must be byte-identical to numpy.
+    let script = fnp_script(
+        r#"
+import warnings
+# all non-negative f16 bit patterns for sqrt: positive finite + +inf (skip nan/negatives)
+allp = np.arange(65536, dtype=np.uint16).view(np.float16)
+pos = allp[(~np.isnan(allp)) & (allp >= np.float16(0))]
+reps = ((1 << 20) // pos.size) + 2
+xs = np.tile(pos, reps)
+ok = True
+r = fnp.sqrt(xs); e = np.sqrt(xs)
+ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# square: values with |x| < 256 (warning-free), tiled past the gate; include negatives and -0.0
+mod = allp[(~np.isnan(allp)) & (np.abs(allp) < np.float16(256))]
+xsq = np.tile(mod, ((1 << 20) // mod.size) + 2)
+r = fnp.square(xsq); e = np.square(xsq)
+ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# DEFER paths still match numpy exactly (suppress the expected warnings)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    neg = np.tile(allp[~np.isnan(allp)], 17)          # contains negatives -> sqrt defers
+    ok = ok and fnp.sqrt(neg).tobytes() == np.sqrt(neg).tobytes()
+    big = (np.tile(np.array([300.0, 1.0, -400.0, 2.0], dtype=np.float16), (1 << 19)))  # |x|>=256 -> square defers
+    ok = ok and fnp.square(big).tobytes() == np.square(big).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 sqrt/square must be bit-identical to numpy (kernel + defer paths): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_unary_floor_ceil_trunc_rint_parallel_full_domain_bit_exact_matches_numpy() -> Result<(), String>
 {
     // numpy has no native f16 ALU: floor/ceil/trunc/rint widen->f32->op->narrow (compute-bound).
