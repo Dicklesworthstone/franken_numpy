@@ -12883,3 +12883,19 @@ MODEST (like char.add: the large output write — 144MB@1M — is bandwidth-boun
 loop; parallel buys the extra memory bandwidth ~2x). GATE 1<<20 codepoints. **REMAINING char width ops (center/
 ljust/rjust/zfill/expandtabs ~130-193ms) are similar copy/pad = bandwidth-bound (~2x), lower priority; the BIG
 char wins (per-element-Python: upper 35.8x, translate 103.5x, replace 6.4x) are done.** AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel char/strings is{alpha,digit,alnum,space} (bool predicates) — 1.6-3.6x
+`BlackThrush`. np.char.isalpha/isdigit/isalnum/isspace(a) -> bool array: True iff content non-empty AND every
+codepoint is in the class. numpy runs str.isX per element single-threaded. Added try_zerocopy_unicode_ispredicate
+(single parallel pass, one bool per whole-string slot, FIXED output) + 8 pyfunctions (char/strings x 4) in both
+namespace overlays. BYTE-EXACT for all-ASCII (isalpha=[A-Za-z], isdigit=[0-9], isalnum=both, isspace=str.isspace
+ASCII set); DEFER non-ASCII (Python isX is Unicode-aware, 'é'.isalpha()==True). Conformance char_case_parallel_
+bit_exact_matches_numpy extended with the 4 predicates + strings.* + non-ASCII defer, PASSED.
+
+PERF (criterion, rch worker = truth; 1M x U20 all-ASCII):
+  char.isalpha: fnp 28.89 ms vs NumPy  47.48 ms = 0.608x / 1.64x faster
+  char.isalnum: fnp 28.65 ms vs NumPy 102.72 ms = 0.279x / 3.59x faster
+MODEST/READ-BOUND: the predicate is cheap so these are dominated by the input read (~80MB@1M U20); parallel buys
+extra bandwidth (isalpha 1.64x). isalnum is bigger (3.59x) because numpy's isalnum is costlier per element. GATE
+1<<20 codepoints. (isupper/islower/istitle deferred — need cased-char logic. STRING-OP class now: 11 transform
+ops + 4 predicates, all parallel bit-exact, np.char.* + np.strings.*.) AGENT_NAME=BlackThrush.

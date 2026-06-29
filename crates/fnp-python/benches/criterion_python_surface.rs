@@ -1259,6 +1259,17 @@ fn bench_char_ascii_boundary(c: &mut Criterion) {
         group.bench_function("numpy_char_multiply_u20_ascii_1m", |bench| {
             bench.iter(|| black_box(numpy_mul.call1((&input, three)).expect("numpy multiply")));
         });
+        // is* bool predicates (fixed bool output, single pass)
+        for op in ["isalpha", "isalnum"] {
+            let fnp_op = fnp_char.getattr(op).expect("fnp char is-op");
+            let numpy_op = numpy_char.getattr(op).expect("numpy char is-op");
+            group.bench_function(format!("fnp_char_{op}_u20_ascii_1m"), |bench| {
+                bench.iter(|| black_box(fnp_op.call1((&input,)).expect("fnp is-op")));
+            });
+            group.bench_function(format!("numpy_char_{op}_u20_ascii_1m"), |bench| {
+                bench.iter(|| black_box(numpy_op.call1((&input,)).expect("numpy is-op")));
+            });
+        }
     });
 
     group.finish();

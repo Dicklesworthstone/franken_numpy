@@ -1144,6 +1144,16 @@ for k in (1, 2, 3, 5):
     ok = ok and fnp.strings.multiply(ma, k).tobytes() == np.strings.multiply(ma, k).tobytes()
 # n<=0 must DELEGATE and still match
 ok = ok and fnp.char.multiply(ma, 0).tobytes() == np.char.multiply(ma, 0).tobytes()
+# is* bool predicates (fixed bool output): mixed alpha/digit/alnum/space/empty content
+pb = np.array(["abc", "ABC", "a1b", "123", "   ", "", "a b", "x9", "  ", "9z"], dtype="<U4")
+pa = np.tile(pb, ((1 << 20) // pb.size) + 2)
+for op in ("isalpha", "isdigit", "isalnum", "isspace"):
+    rp = getattr(fnp.char, op)(pa); ep = getattr(np.char, op)(pa)
+    ok = ok and rp.dtype == ep.dtype and rp.shape == ep.shape and rp.tobytes() == ep.tobytes()
+    ok = ok and getattr(fnp.strings, op)(pa).tobytes() == getattr(np.strings, op)(pa).tobytes()
+# non-ASCII (é is alpha) must DELEGATE and still match
+up = np.tile(np.array(["café", "123", "  "], dtype="<U5"), ((1 << 20) // 3) + 2)
+ok = ok and fnp.char.isalpha(up).tobytes() == np.char.isalpha(up).tobytes()
 # non-ASCII must delegate to numpy and still match (full-Unicode casing)
 u = np.tile(np.array(["café_StraßE", "ÀÉÎ_xyz"], dtype="<U16"), ((1 << 20) // 2) + 2)
 for op in ("upper", "lower"):
