@@ -12522,3 +12522,14 @@ incl inf/nan/-0.0 + 2-D x shape.
 WHY NOT ~0-GAIN: numpy polyval is single-threaded Horner (~570ms, compute-bound); each element is independent so the
 parallel per-element Horner aggregates cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2.
 Extends the "f64-only path delegates f32" lever (var/std, binary, searchsorted) to polyval. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - NO-SHIP (measured): float32 vander / sinc — f64-promotion and libm divergence
+`BlackThrush`. Two more "f64-only path delegates f32" candidates probed and rejected after searchsorted/polyval landed:
+- np.vander(float32, N) PROMOTES to a float64 output (verified: result dtype is float64; the ~130ms/2Mx8 measured was a
+  128MB f64 write + f64 cumprod). So there is no f32-specific vander op — matching numpy is just the existing f64 path
+  plus an input cast = ~0-gain. (numpy vander is itself a multiply.accumulate / cumulative product, which IS bit-exact,
+  but only in f64.) Not shipped.
+- np.sinc(float32) (~399ms/16M) = sin(pi*x)/(pi*x): libm sin. numpy uses its own f32 sinf path; Rust f32::sin (system
+  libm) won't match bit-for-bit -> not bit-reproducible. Not shipped (same reason as f16/f32 transcendentals).
+These close the compute-bound members of the "f64-only fast path, f32 delegates" sub-lever: the clean ones (searchsorted
+~36.6x, polyval ~41.6x) shipped; vander (f64-promoted) and sinc (libm) do not qualify. AGENT_NAME=BlackThrush.
