@@ -1074,6 +1074,22 @@ for dt in ("int32", "int64", "uint32", "uint64"):
     c2[:40, :] = c2[40:80, :]  # per-column duplicates
     ra = fnp.sort(c2, axis=0); ea = np.sort(c2, axis=0)
     ok = ok and ra.dtype == ea.dtype and ra.shape == ea.shape and ra.tobytes() == ea.tobytes()
+# COMPLEX128 VALUE sort (np.sort): flat distinct (perm real), flat with full dups, NaN/-0.0 delegate
+cv = (rng.permutation(n).astype(np.float64) + 1j * rng.standard_normal(n)).astype(np.complex128)
+rcv = fnp.sort(cv); ecv = np.sort(cv)
+ok = ok and rcv.dtype == ecv.dtype and rcv.shape == ecv.shape and rcv.tobytes() == ecv.tobytes()
+# full (re,im) duplicates: equal complex = identical bytes -> value sort still byte-exact (no tie-defer)
+cvd = (rng.integers(0, 20, n).astype(np.float64) + 1j * rng.integers(0, 20, n).astype(np.float64)).astype(np.complex128)
+ok = ok and fnp.sort(cvd).tobytes() == np.sort(cvd).tobytes()
+# complex with NaN -> DELEGATE, still match (NaN-at-end ordering)
+cvn = cv.copy(); cvn[9] = complex(np.nan, 2.0)
+ok = ok and bool(((fnp.sort(cvn).view(np.float64) == np.sort(cvn).view(np.float64)) | (np.isnan(fnp.sort(cvn).view(np.float64)) & np.isnan(np.sort(cvn).view(np.float64)))).all())
+# complex with -0.0 -> DELEGATE, still match
+cvz = cv.copy(); cvz[3] = complex(-0.0, 1.0)
+ok = ok and fnp.sort(cvz).tobytes() == np.sort(cvz).tobytes()
+# COMPLEX128 LAST-AXIS value sort, 2-D distinct-real per lane
+cvm = np.stack([rng.permutation(256).astype(np.float64) + 1j * rng.standard_normal(256) for _ in range(4096)]).astype(np.complex128)
+ok = ok and fnp.sort(cvm).tobytes() == np.sort(cvm).tobytes()
 print(bool(ok))
 "#
         .into(),

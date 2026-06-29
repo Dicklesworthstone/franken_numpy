@@ -2262,6 +2262,19 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
                 black_box(numpy_argsort.call((&am_c,), Some(&axis1_kwargs)).expect("numpy argsort am c128"))
             });
         });
+        // COMPLEX128 VALUE sort (np.sort): flat (permc, 16M distinct-real) + last-axis (la_c, distinct-per-lane)
+        group.bench_function("fnp_sort_c128_16m", |bch| {
+            bch.iter(|| black_box(fnp_sort.call1((&permc,)).expect("fnp sort c128")));
+        });
+        group.bench_function("numpy_sort_c128_16m", |bch| {
+            bch.iter(|| black_box(numpy_sort.call1((&permc,)).expect("numpy sort c128")));
+        });
+        group.bench_function("fnp_sort_c128_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_sort.call1((&la_c,)).expect("fnp sort la c128")));
+        });
+        group.bench_function("numpy_sort_c128_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(numpy_sort.call1((&la_c,)).expect("numpy sort la c128")));
+        });
     });
 
     group.finish();
