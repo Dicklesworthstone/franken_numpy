@@ -1934,6 +1934,31 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
         group.bench_function("numpy_sort_int64_lastaxis_16Mx", |bch| {
             bch.iter(|| black_box(numpy_sort.call1((&m2,)).expect("numpy lastaxis sort")));
         });
+        // int64 2-D AXIS-0 (column) sort: 1024 x 16384 (axis passed as kwarg so fnp's native
+        // single-positional-arg fast path engages).
+        let c2 = rng
+            .call_method1("integers", (i64::MIN, i64::MAX, (1024_usize, 16384_usize)))
+            .expect("int64 axis0 input");
+        let axis0_kw = PyDict::new(py);
+        axis0_kw.set_item("axis", 0_i64).expect("axis kw");
+        group.bench_function("fnp_sort_int64_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_sort
+                        .call((&c2,), Some(&axis0_kw))
+                        .expect("fnp axis0 sort"),
+                )
+            });
+        });
+        group.bench_function("numpy_sort_int64_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_sort
+                        .call((&c2,), Some(&axis0_kw))
+                        .expect("numpy axis0 sort"),
+                )
+            });
+        });
     });
 
     group.finish();

@@ -1069,6 +1069,11 @@ for dt in ("int32", "int64", "uint32", "uint64"):
     ok = ok and r2.tobytes() == e2.tobytes()
     rk = fnp.sort(m2, kind="stable"); ek = np.sort(m2, kind="stable")
     ok = ok and rk.tobytes() == ek.tobytes()
+    # AXIS-0 (column) sort, 2-D (rows x cols), incl per-column duplicates
+    c2 = rng.integers(info.min, info.max, (1024, 512), dtype=dt, endpoint=True)
+    c2[:40, :] = c2[40:80, :]  # per-column duplicates
+    ra = fnp.sort(c2, axis=0); ea = np.sort(c2, axis=0)
+    ok = ok and ra.dtype == ea.dtype and ra.shape == ea.shape and ra.tobytes() == ea.tobytes()
 print(bool(ok))
 "#
         .into(),

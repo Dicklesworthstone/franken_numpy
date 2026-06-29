@@ -12748,3 +12748,18 @@ GATES: SORT_AXIS_PARALLEL_MIN = 1<<20, SORT_LANE_PARALLEL_MIN = 256 (short lanes
 tight per-lane sort + the fan-out overhead lose there, same as the f64 last-axis path). 4-/8-byte ints only
 (1-/2-byte = numpy radix). f64 last-axis already done; f32 last-axis would be the same ~1.07x simd-sort wash as
 flat f32 (not shipped). AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel INTEGER AXIS-0 (column) sort (int32/int64/uint32/uint64)
+`BlackThrush`. Completes the integer sort family (flat + last-axis + axis0). np.sort(axis=0) sorts each STRIDED
+column single-threaded. The native path (int_sort_axis0_typed, mirrors try_zerocopy_f64_sort_axis0) gathers each
+column into a transposed column-major scratch, sorts each lane (sort_unstable), and scatters back — fully parallel
+across columns. BYTE-EXACT for ANY sort kind (integer ties equal-byte; conformance f32_int_flat_sort_parallel_
+bit_exact_matches_numpy extended with 2-D axis=0 int32/64/u32/u64 incl per-column duplicates, PASSED).
+
+PERF (criterion, rch worker = truth; int64 1024x16384 axis=0):
+  int64 axis-0: fnp 297.36 ms vs NumPy 656.13 ms = 0.453x / 2.2x faster
+GATE: SORT_AXIS0_PARALLEL_MIN = 1<<20 (rows>=2, cols>=2). 4-/8-byte ints only. (Higher variance than contiguous
+sorts — the strided gather/scatter is contention-sensitive on a loaded box — but a clear win vs numpy's serial
+strided column sort.) NOTE: axis must be passed as a KWARG (np.sort native fast path requires args.len()==1; a
+positional axis falls to numpy passthrough). INTEGER SORT FAMILY COMPLETE: flat + last-axis + axis0.
+AGENT_NAME=BlackThrush.
