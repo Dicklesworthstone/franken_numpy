@@ -1140,6 +1140,16 @@ for dt in ("int32", "int64", "uint32", "uint64"):
 # middle-axis with per-lane ties -> delegate, still match
 mtm = rng.integers(0, 30, (64, 256, 64), dtype=np.int64)
 ok = ok and fnp.argsort(mtm, axis=1).tobytes() == np.argsort(mtm, axis=1).tobytes()
+# FLOAT32 axis variants, distinct per-lane (perm < 2^24 = exact f32) -> native, byte-exact
+mf_last = np.stack([rng.permutation(256).astype(np.float32) for _ in range(4096)])  # last-axis
+ok = ok and fnp.argsort(mf_last).tobytes() == np.argsort(mf_last).tobytes()
+mf_ax0 = np.stack([rng.permutation(256).astype(np.float32) for _ in range(4096)], axis=1)  # (256,4096)
+ok = ok and fnp.argsort(mf_ax0, axis=0).tobytes() == np.argsort(mf_ax0, axis=0).tobytes()
+mf_mid = np.argsort(rng.standard_normal((64, 256, 64)), axis=1).astype(np.float32)  # middle axis
+ok = ok and fnp.argsort(mf_mid, axis=1).tobytes() == np.argsort(mf_mid, axis=1).tobytes()
+# f32 NaN per-lane -> delegate, still match (last-axis)
+mfn = rng.standard_normal((4096, 256)).astype(np.float32); mfn[0, 3] = np.nan
+ok = ok and fnp.argsort(mfn).tobytes() == np.argsort(mfn).tobytes()
 print(bool(ok))
 "#
         .into(),

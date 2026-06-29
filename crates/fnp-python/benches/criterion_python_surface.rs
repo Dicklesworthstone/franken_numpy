@@ -2137,6 +2137,52 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
                 )
             });
         });
+        // FLOAT32 axis argsort: reuse the distinct int arrays cast to f32 (values < 2^24 = exact, no ties)
+        let la_f32 = la.call_method1("astype", ("float32",)).expect("la f32");
+        group.bench_function("fnp_argsort_f32_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&la_f32,)).expect("fnp argsort la f32")));
+        });
+        group.bench_function("numpy_argsort_f32_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(numpy_argsort.call1((&la_f32,)).expect("numpy argsort la f32")));
+        });
+        let a0_f32 = a0.call_method1("astype", ("float32",)).expect("a0 f32");
+        group.bench_function("fnp_argsort_f32_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_argsort
+                        .call((&a0_f32,), Some(&axis0_kwargs))
+                        .expect("fnp argsort a0 f32"),
+                )
+            });
+        });
+        group.bench_function("numpy_argsort_f32_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call((&a0_f32,), Some(&axis0_kwargs))
+                        .expect("numpy argsort a0 f32"),
+                )
+            });
+        });
+        let am_f32 = am.call_method1("astype", ("float32",)).expect("am f32");
+        group.bench_function("fnp_argsort_f32_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_argsort
+                        .call((&am_f32,), Some(&axis1_kwargs))
+                        .expect("fnp argsort am f32"),
+                )
+            });
+        });
+        group.bench_function("numpy_argsort_f32_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call((&am_f32,), Some(&axis1_kwargs))
+                        .expect("numpy argsort am f32"),
+                )
+            });
+        });
     });
 
     group.finish();
