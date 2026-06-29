@@ -1911,6 +1911,48 @@ print(ok)
 }
 
 #[test]
+fn f16_nanmin_nanmax_flat_and_axis_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy has no f16 ALU, so np.nanmin/np.nanmax of float16 widens f16->f32 to reduce while
+    // skipping NaN (~32ms@16M, ~5x f64). The native uint16-view skip-NaN reduce narrowed to f16 must
+    // be byte-identical (FLAT + LAST axis + AXIS 0 + MIDDLE axis). All-NaN lanes (numpy NaN + warning)
+    // and zero-extremum lanes defer to numpy and must still match byte-for-byte.
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(43)
+ok = True
+n = (1 << 20) + 257
+# FLAT: shifted positive (extrema != 0), sparse NaN, not all-NaN
+a = (np.abs(rng.standard_normal(n)) * 50 + 300).astype(np.float16); a[::997] = np.float16(np.nan)
+for fnp_op, np_op in [(fnp.nanmin, np.nanmin), (fnp.nanmax, np.nanmax)]:
+    r = fnp_op(a); e = np_op(a)
+    ok = ok and r.dtype == e.dtype and r.view(np.uint16) == e.view(np.uint16)
+# AXIS: 2-D (last + axis0) + 3-D (middle), sparse NaN, no all-NaN lane
+m2 = (np.abs(rng.standard_normal((4096, 256))) * 50 + 300).astype(np.float16); m2[::7, ::13] = np.float16(np.nan)
+m3 = (np.abs(rng.standard_normal((64, 256, 64))) * 50 + 300).astype(np.float16); m3[::3, ::11, ::5] = np.float16(np.nan)
+for fnp_op, np_op in [(fnp.nanmin, np.nanmin), (fnp.nanmax, np.nanmax)]:
+    for arr, ax in [(m2, -1), (m2, 0), (m3, 1)]:
+        r = fnp_op(arr, axis=ax); e = np_op(arr, axis=ax)
+        ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.view(np.uint16).tobytes() == e.view(np.uint16).tobytes()
+# all-NaN lane -> defer to numpy (NaN + "All-NaN slice" warning), still byte-identical
+mall = m2.copy(); mall[5, :] = np.float16(np.nan)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    ok = ok and fnp.nanmin(mall, axis=-1).view(np.uint16).tobytes() == np.nanmin(mall, axis=-1).view(np.uint16).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 nanmin/nanmax (flat + last/axis0/middle + defer) must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_predicate_isnan_isinf_isfinite_signbit_full_domain_matches_numpy() -> Result<(), String> {
     // numpy widens f16 to f32 for isnan/isinf/isfinite/signbit; the native parallel uint16
     // bit-check must produce the identical bool array over the ENTIRE f16 domain (all 65536

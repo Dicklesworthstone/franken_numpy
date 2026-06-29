@@ -6096,6 +6096,55 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
                 black_box(numpy_ptp.call((&hsq2,), Some(&kw_axis0)).expect("numpy f16 axis0 ptp"))
             });
         });
+        // f16 nanmin/nanmax flat + last-axis + axis-0: numpy widens f16->f32 skip-NaN (~32ms@16M);
+        // native uint16-view skip-NaN reduce wins. Sparse NaN at stride 997 (coprime to 4000) so no
+        // lane is all-NaN and the kernel engages (all-NaN / zero-extremum lanes would defer).
+        py.run(
+            std::ffi::CString::new(
+                "hsqn = hsq.copy(); hsqn[::997] = np.float16(np.nan); hsqn2 = hsqn.reshape(4000, 4000)",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("f16 nan array");
+        let hsqn = ns.get_item("hsqn").expect("hsqn");
+        let hsqn2 = ns.get_item("hsqn2").expect("hsqn2");
+        for op in ["nanmin", "nanmax"] {
+            let fnp_fn = module.getattr(op).expect("fnp f16 nan op");
+            let numpy_fn = numpy.getattr(op).expect("numpy f16 nan op");
+            group.bench_function(format!("fnp_{op}_flat_f16_16m"), |bch| {
+                bch.iter(|| black_box(fnp_fn.call1((&hsqn,)).expect("fnp f16 flat nan")));
+            });
+            group.bench_function(format!("numpy_{op}_flat_f16_16m"), |bch| {
+                bch.iter(|| black_box(numpy_fn.call1((&hsqn,)).expect("numpy f16 flat nan")));
+            });
+            group.bench_function(format!("fnp_{op}_lastaxis_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(fnp_fn.call((&hsqn2,), Some(&kw_axis)).expect("fnp f16 lastaxis nan"))
+                });
+            });
+            group.bench_function(format!("numpy_{op}_lastaxis_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(
+                        numpy_fn.call((&hsqn2,), Some(&kw_axis)).expect("numpy f16 lastaxis nan"),
+                    )
+                });
+            });
+            group.bench_function(format!("fnp_{op}_axis0_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(fnp_fn.call((&hsqn2,), Some(&kw_axis0)).expect("fnp f16 axis0 nan"))
+                });
+            });
+            group.bench_function(format!("numpy_{op}_axis0_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(
+                        numpy_fn.call((&hsqn2,), Some(&kw_axis0)).expect("numpy f16 axis0 nan"),
+                    )
+                });
+            });
+        }
         for op in ["argmax", "argmin"] {
             let fnp_fn = module.getattr(op).expect("fnp arg op");
             let numpy_fn = numpy.getattr(op).expect("numpy arg op");

@@ -13042,3 +13042,19 @@ fnp 4.81ms vs NumPy 58.67ms=12.19x, axis-0 4.72ms vs 40.00ms=8.48x. fnp ~4.8ms <
 one-kernel decomposition. REMAINING f16 axis: sum/mean/prod (need numpy pairwise-tree match for bit-exact),
 nanmin/nanmax/nanmean (NaN-skip per lane).** See [[integer-matmul-no-blas-lever]] (f16 ALU-widen family).
 AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel FLOAT16 nanmin/nanmax (flat + axis) — ~5-8x (kernel-identity; bench in-flight)
+`BlackThrush`. numpy has NO f16 ALU -> np.nanmin/np.nanmax of float16 widens f16->f32 skip-NaN (measured
+~32ms@16M, ~5x f64 6.4ms). fnp had NO f16 nan-reduction path (flat+axis both delegated). DISPATCH TRAP:
+nanmin/nanmax fast-fail f16 via native_minmax_preserves_dtype BEFORE any native hook, so the f16 paths MUST
+go ABOVE that guard (else dead code -- the 100th-win nanvar lesson). Added try_zerocopy_f16_nanextreme_flat
+(par_chunks) + try_zerocopy_f16_nanextreme_axis (outer/axis_len/inner one-kernel decomposition: last=inner 1,
+axis0=outer 1, middle=both>1): uint16-view skip-NaN f32-fold reduce narrowed to f16. BIT-EXACT (extremum IS
+an input, f16->f32 exact). DEFER whole op (-> numpy's exact output incl "All-NaN slice" warning): any all-NaN
+input/lane + any zero extremum (+0/-0 ambiguity). Wired into nanmin(is_max=false)+nanmax(is_max=true) above
+the guard; keepdims handled. Conformance f16_nanmin_nanmax_flat_and_axis_bit_exact (flat + last 4096x256 +
+axis0 + middle 64x256x64 byte-exact sparse-NaN + all-NaN-lane defer), PASSED (build clean, exit=0). PERF by
+kernel identity with the f16 min/max axis win (ffec4fa2 4.7-8.2x) + ptp axis (a01d7135 8.5-12.2x) -- same
+uint16-view skip-NaN reduce, same gap class. **f16 AXIS-REDUCTION vein now: min/max + ptp + nanmin/nanmax.
+REMAINING: sum/mean/prod (need numpy pairwise-tree match), nanmean/nansum (numpy f16 not slower than f64 =
+no f16 penalty, skip).** See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
