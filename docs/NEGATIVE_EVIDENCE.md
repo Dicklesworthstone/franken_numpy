@@ -13119,7 +13119,16 @@ FIX: when outer==1, transpose (axis_len, inner) slab -> (inner, axis_len) scratc
 column in PARALLEL (par_chunks_mut = SAFE, columns disjoint), transpose back. BIT-IDENTICAL (int accumulator
 promotion, f64 skip_nan / -0.0 first-row preserved). Gated outer==1 && inner>=2 && total>=1<<18. Conformance
 cumsum_cumprod_axis0_large_2d_parallel_bit_exact (512x512 axis-0: f64/f32/int64/int32/uint64/uint32
-cumsum+cumprod + f64 nancum* sparse-NaN + -0.0), PASSED (build clean, exit=0). Ratio IN-FLIGHT (follow-up;
-the identical f16 change was 6.93x). **GENERAL: this completes the SCAN-axis0 lever across f16+f64+f32+int --
-the outer-block parallel scheme is SERIAL for axis 0 (outer always 1); the INNER columns are the independent
-dimension there.** See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
+cumsum+cumprod + f64 nancum* sparse-NaN + -0.0), PASSED (build clean, exit=0). MEASURED PERF (criterion, rch
+worker, 16M 4000x4000 axis-0) — path ENGAGES (fnp < numpy): cumsum f64 2.15x (215.6 vs 462.6ms), int64 2.02x
+(208.2 vs 420.7ms). Real range **~2.0-2.15x** — MUCH less than the f16 6.93x. **LESSON (8-byte transpose is
+bandwidth-bound, NOT compute-bound like f16): for f64/int the transpose gather+scatter moves 2x128MB strided
+and DOMINATES (fnp 215ms is bandwidth, not compute), so parallelism only buys ~2x; f16 won 6.93x because the
+serial baseline was COMPUTE-bound (151ms of f16->f32 widen) and the transpose's 2x32MB is cheap. The win
+SHRINKS as element size grows. OPEN optimization: an IN-PLACE unsafe column-block scan (each thread owns a
+disjoint contiguous column range, scans down rows) avoids the 2 transpose memcpy passes -> could lift f64/int
+toward ~3-4x; deferred (unsafe complexity vs a 2x->3x gain). Held the title to no numeric estimate and
+recorded the measured ratio post-bench (the discipline that the nanmin overclaim taught).** **GENERAL: this
+completes the SCAN-axis0 lever across f16+f64+f32+int -- the outer-block parallel scheme is SERIAL for axis 0
+(outer always 1); the INNER columns are the independent dimension there.** See [[integer-matmul-no-blas-lever]].
+AGENT_NAME=BlackThrush.
