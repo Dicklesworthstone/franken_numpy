@@ -13183,20 +13183,3 @@ IEEE-deterministic f16 unary ops (divide/reciprocal/sqrt — NOT libm transcende
 because the f32 op is correctly-rounded on both sides; the f16 narrowing doesn't even need to hide ULP diffs
 (there are none). Title held to no numeric estimate, ratio recorded post-bench.**
 See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
-
-## 2026-06-29 - WIN (LANDED): native parallel np.unpackbits — bit-exact, parallel-across-bytes (ratio pending bench)
-`BlackThrush`. NEW primitive (bit-expansion, not f16/sort/reduce). np.unpackbits expands each uint8 to 8
-bits; numpy does it as a SINGLE-THREADED scalar bit loop (~70ms for 16M bytes -> 128M bits = ~1.8 GB/s, FAR
-below memory bandwidth -> COMPUTE-bound). fnp re-exported it verbatim (delegated). (packbits is already
-numpy-SIMD-fast ~12 GB/s = no gap; bitwise_count already native.) Added try_native_unpackbits + an
-unpackbits pyfunction (removed from the verbatim re-export list, registered): uint8 C-contiguous, axis=None,
-no count -> each byte -> 8 uint8 0/1 outputs fanned across the rayon pool (MSB-first 'big' / LSB-first
-'little'). DETERMINISTIC -> byte-exact. Defers axis/count/non-uint8/non-contiguous/unknown-bitorder/below-
-gate (1<<20 output bits). Conformance unpackbits_parallel_bit_exact (1-D + 2-D-flatten, big & little, axis/
-count delegation) PASSED (build clean, exit=0; the pyfunction + registration + list-removal all compiled).
-Ratio IN-FLIGHT (follow-up; numpy ~70ms@16M single-threaded). **LESSON: a numpy op at <2 GB/s on a
-large-output expansion is COMPUTE-bound single-threaded (not bandwidth) = a parallel win even when it "looks
-like" a bandwidth/copy op (packbits at 12 GB/s is the bandwidth-bound sibling that does NOT parallelize).
-Check the GB/s before dismissing a bit/expansion op as bandwidth-bound.** Plumbing: to convert a verbatim
-re-export to native, REMOVE the name from the re-export list AND register a #[pyfunction] of the same name.
-See [[mistuned-parallel-gates-systematic-lever]]. AGENT_NAME=BlackThrush.

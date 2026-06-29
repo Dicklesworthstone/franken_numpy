@@ -6005,29 +6005,6 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
                 bch.iter(|| black_box(numpy_recip.call1((&hrecip,)).expect("numpy f16 reciprocal")));
             });
         }
-        // unpackbits: 16M uint8 -> 128M bits. numpy is a single-threaded scalar bit loop (~70ms,
-        // ~1.8 GB/s = compute-bound); the native parallel expansion wins (bit-exact, deterministic).
-        py.run(
-            std::ffi::CString::new(
-                "ub = rng.integers(0, 256, 16_000_000, dtype=np.uint8)",
-            )
-            .unwrap()
-            .as_c_str(),
-            Some(&ns),
-            Some(&ns),
-        )
-        .expect("unpackbits setup");
-        let ub = ns.get_item("ub").expect("ub");
-        {
-            let fnp_unpack = module.getattr("unpackbits").expect("fnp unpackbits");
-            let numpy_unpack = numpy.getattr("unpackbits").expect("numpy unpackbits");
-            group.bench_function("fnp_unpackbits_16m", |bch| {
-                bch.iter(|| black_box(fnp_unpack.call1((&ub,)).expect("fnp unpackbits")));
-            });
-            group.bench_function("numpy_unpackbits_16m", |bch| {
-                bch.iter(|| black_box(numpy_unpack.call1((&ub,)).expect("numpy unpackbits")));
-            });
-        }
         // f16 clip: numpy widens f16->f32 to clamp (~149ms@16M, biggest f16 elementwise gap).
         {
             let fnp_clip = module.getattr("clip").expect("fnp clip");

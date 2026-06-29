@@ -2076,42 +2076,6 @@ print(ok)
 }
 
 #[test]
-fn unpackbits_parallel_bit_exact_matches_numpy() -> Result<(), String> {
-    // np.unpackbits expands each uint8 to 8 bits (MSB-first 'big' / LSB-first 'little'). numpy's is a
-    // single-threaded scalar bit loop; the native parallel expansion (uint8 C-contiguous, axis=None,
-    // no count) must be byte-identical. axis/count/non-uint8 cases delegate to numpy and still match.
-    let script = fnp_script(
-        r#"
-rng = np.random.default_rng(48)
-ok = True
-data = rng.integers(0, 256, (1 << 18) + 7, dtype=np.uint8)  # > 1<<17 bytes -> out > 1<<20 -> native
-for bo in ("big", "little"):
-    r = fnp.unpackbits(data, bitorder=bo); e = np.unpackbits(data, bitorder=bo)
-    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
-# default bitorder (big)
-ok = ok and fnp.unpackbits(data).tobytes() == np.unpackbits(data).tobytes()
-# 2-D input flattens under axis=None (default) -> 1-D output
-data2 = rng.integers(0, 256, (512, 512), dtype=np.uint8)
-ok = ok and fnp.unpackbits(data2).tobytes() == np.unpackbits(data2).tobytes()
-ok = ok and fnp.unpackbits(data2).shape == np.unpackbits(data2).shape
-# axis given -> delegate to numpy, still byte-identical
-ok = ok and fnp.unpackbits(data2, axis=1).tobytes() == np.unpackbits(data2, axis=1).tobytes()
-# count given -> delegate, still byte-identical
-ok = ok and fnp.unpackbits(data, count=10).tobytes() == np.unpackbits(data, count=10).tobytes()
-print(ok)
-"#
-        .into(),
-    );
-    let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "native parallel unpackbits must be byte-identical to numpy (big/little + axis/count defer): {result}"
-    );
-    Ok(())
-}
-
-#[test]
 fn f16_reciprocal_full_domain_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy has no f16 ALU; np.reciprocal(f16) widens f16->f32, divides 1/x, narrows. f32 division is
     // IEEE correctly-rounded (no libm), so narrow(1/widen) is byte-identical to numpy over the ENTIRE
