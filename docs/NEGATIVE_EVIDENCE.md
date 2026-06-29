@@ -12732,3 +12732,19 @@ GATE: SORT_PARALLEL_MIN = 1<<20. REJECTED (not shipped): float32 flat sort = fnp
 scan eats the tiny margin). int8/int16/uint8/uint16 EXCLUDED: numpy uses an O(n) radix/counting sort for 1-/2-
 byte ints that a comparison par_sort cannot beat. Only the 4-/8-byte int widths (numpy comparison/simd-sort,
 single-threaded) are real parallel wins. AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native per-lane INTEGER LAST-AXIS sort (int32/int64/uint32/uint64)
+`BlackThrush`. Extends the integer-sort lever to >=2-D arrays sorted along the last (contiguous) axis. numpy
+sorts each lane single-threaded and walks lanes sequentially; the native path (int_sort_lastaxis_typed:
+par_chunks_mut over lanes, each lane sort_unstable) distributes the independent lane-sorts across the rayon pool.
+Code landed by a peer in e2259cfd (3 code files, no ledger); this records the measured ratio. BYTE-EXACT for ANY
+sort kind (integer ties are equal-byte, so stability is unobservable — no require_distinct deferral needed;
+conformance f32_int_flat_sort_parallel_bit_exact_matches_numpy extended with 2-D int32/64/u32/u64 incl per-lane
+duplicates, default + explicit axis=-1, and kind="stable", PASSED).
+
+PERF (criterion, rch worker = truth; int64 16384x1024 last-axis):
+  int64 last-axis: fnp 100.27 ms vs NumPy 200.36 ms = 0.50x / 2.0x faster
+GATES: SORT_AXIS_PARALLEL_MIN = 1<<20, SORT_LANE_PARALLEL_MIN = 256 (short lanes / few lanes defer — numpy's
+tight per-lane sort + the fan-out overhead lose there, same as the f64 last-axis path). 4-/8-byte ints only
+(1-/2-byte = numpy radix). f64 last-axis already done; f32 last-axis would be the same ~1.07x simd-sort wash as
+flat f32 (not shipped). AGENT_NAME=BlackThrush.
