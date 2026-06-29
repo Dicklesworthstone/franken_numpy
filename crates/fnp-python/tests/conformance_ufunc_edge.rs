@@ -974,6 +974,14 @@ for shp in ((8, 128, 128), (4, 3, 64, 64)):
     rb = fnp.matmul(a, b); eb = np.matmul(a, b)
     ok = ok and rb.dtype == eb.dtype and rb.shape == eb.shape
     ok = ok and bool(((rb.view(np.uint16) == eb.view(np.uint16)) | (np.isnan(rb) & np.isnan(eb))).all())
+# BROADCAST batched: (B,m,k)@(k,n) [b shared] and (m,k)@(B,k,n) [a shared]
+rng = np.random.default_rng(77)
+a = (rng.standard_normal((32, 128, 128)) * 0.3).astype(np.float16); b2d = (rng.standard_normal((128, 96)) * 0.3).astype(np.float16)
+rb = fnp.matmul(a, b2d); eb = np.matmul(a, b2d)
+ok = ok and rb.shape == eb.shape and bool(((rb.view(np.uint16) == eb.view(np.uint16)) | (np.isnan(rb) & np.isnan(eb))).all())
+a2d = (rng.standard_normal((96, 128)) * 0.3).astype(np.float16); b = (rng.standard_normal((32, 128, 64)) * 0.3).astype(np.float16)
+rb2 = fnp.matmul(a2d, b); eb2 = np.matmul(a2d, b)
+ok = ok and rb2.shape == eb2.shape and bool(((rb2.view(np.uint16) == eb2.view(np.uint16)) | (np.isnan(rb2) & np.isnan(eb2))).all())
 print(bool(ok))
 "#
         .into(),

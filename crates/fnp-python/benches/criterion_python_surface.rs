@@ -1848,6 +1848,15 @@ fn bench_f16_matmul_boundary(c: &mut Criterion) {
         group.bench_function("numpy_matmul_f16_batched_64x128", |bch| {
             bch.iter(|| black_box(numpy_matmul.call1((&a3, &b3)).expect("np f16 batched")));
         });
+        // broadcast batched: (B,m,k) @ (k,n) with b shared across the batch
+        let (ab, _) = make3(64, 128);
+        let (bb2d, _) = make(128);
+        group.bench_function("fnp_matmul_f16_bcast_64x128", |bch| {
+            bch.iter(|| black_box(fnp_matmul.call1((&ab, &bb2d)).expect("fnp f16 bcast")));
+        });
+        group.bench_function("numpy_matmul_f16_bcast_64x128", |bch| {
+            bch.iter(|| black_box(numpy_matmul.call1((&ab, &bb2d)).expect("np f16 bcast")));
+        });
         // f16 tensordot(axes=1) + inner at 512 (route to the f16 GEMM kernel)
         let (at, bt) = make(512);
         let fnp_td = module.getattr("tensordot").expect("fnp tensordot");

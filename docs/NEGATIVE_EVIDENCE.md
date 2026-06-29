@@ -12697,3 +12697,17 @@ PERF (criterion, rch worker = truth; f16, 512x512):
 (Same f16 GEMM kernel as matmul; this run was on an UNLOADED worker = 16 GFLOP/s, hence the 59x reflects the
 kernel's true speed vs the contended matmul-bench numbers.) f16 GEMM family COMPLETE: matmul(2-D+batched)/dot/
 tensordot/inner. AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel BROADCAST float16 matmul ((B,m,k)@(k,n) & (m,k)@(B,k,n))
+`BlackThrush`. The common batched-broadcast case (shared weights @ a batch, or a batch @ a shared matrix) was
+deferring: try_native_f16_batched_matmul requires matching ndim, and 2-D matmul requires both 2-D, so one-operand-
+2-D-other-3-D fell through to numpy's no-f16-BLAS naive loop. Added try_native_f16_broadcast_matmul (one operand
+>=3-D + the other 2-D; the shared operand reuses slice 0, the batched operand indexes by bb; parallelize across
+all batch*m output rows), hooked into the matmul pyfunction after the batched path.
+
+PERF (criterion, rch worker = truth; f16, (64,128,128)@(128,128)):
+  f16 broadcast matmul: fnp 15.57 ms vs NumPy 239.09 ms = 0.065x / 15.4x faster
+GATE: F16_MATMUL_MIN_WORK = 1<<18. BIT-EXACT (per-slice == the 2-D seq-k-f32 path; conformance
+f16_matmul_parallel_bit_exact_matches_numpy extended with both broadcast forms, PASSED). Fully-general batch
+broadcasting (both >=3-D with mismatched/1-broadcast dims) still defers to numpy. f16 GEMM family now covers
+2-D + batched + BROADCAST + dot + tensordot + inner. AGENT_NAME=BlackThrush.
