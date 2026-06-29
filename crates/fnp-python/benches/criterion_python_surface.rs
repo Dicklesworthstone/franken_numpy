@@ -2198,6 +2198,70 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
                 )
             });
         });
+        // COMPLEX128 axis argsort: distinct-real lane arrays (la/a0/am) + 1j*randn -> tie-free lexicographic
+        let onej = pyo3::types::PyComplex::from_doubles(py, 0.0, 1.0);
+        let la_c = la
+            .call_method1(
+                "__add__",
+                (rng
+                    .call_method1("standard_normal", (la.getattr("shape").expect("la shape"),))
+                    .expect("la imag")
+                    .call_method1("__mul__", (&onej,))
+                    .expect("1j*la_im"),),
+            )
+            .expect("la re+im")
+            .call_method1("astype", ("complex128",))
+            .expect("la c128");
+        group.bench_function("fnp_argsort_c128_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&la_c,)).expect("fnp argsort la c128")));
+        });
+        group.bench_function("numpy_argsort_c128_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(numpy_argsort.call1((&la_c,)).expect("numpy argsort la c128")));
+        });
+        let a0_c = a0
+            .call_method1(
+                "__add__",
+                (rng
+                    .call_method1("standard_normal", (a0.getattr("shape").expect("a0 shape"),))
+                    .expect("a0 imag")
+                    .call_method1("__mul__", (&onej,))
+                    .expect("1j*a0_im"),),
+            )
+            .expect("a0 re+im")
+            .call_method1("astype", ("complex128",))
+            .expect("a0 c128");
+        group.bench_function("fnp_argsort_c128_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(fnp_argsort.call((&a0_c,), Some(&axis0_kwargs)).expect("fnp argsort a0 c128"))
+            });
+        });
+        group.bench_function("numpy_argsort_c128_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(numpy_argsort.call((&a0_c,), Some(&axis0_kwargs)).expect("numpy argsort a0 c128"))
+            });
+        });
+        let am_c = am
+            .call_method1(
+                "__add__",
+                (rng
+                    .call_method1("standard_normal", (am.getattr("shape").expect("am shape"),))
+                    .expect("am imag")
+                    .call_method1("__mul__", (&onej,))
+                    .expect("1j*am_im"),),
+            )
+            .expect("am re+im")
+            .call_method1("astype", ("complex128",))
+            .expect("am c128");
+        group.bench_function("fnp_argsort_c128_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(fnp_argsort.call((&am_c,), Some(&axis1_kwargs)).expect("fnp argsort am c128"))
+            });
+        });
+        group.bench_function("numpy_argsort_c128_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(numpy_argsort.call((&am_c,), Some(&axis1_kwargs)).expect("numpy argsort am c128"))
+            });
+        });
     });
 
     group.finish();

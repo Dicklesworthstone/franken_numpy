@@ -1166,6 +1166,19 @@ ok = ok and fnp.argsort(ccd.astype(np.complex128)).tobytes() == np.argsort(ccd.a
 # complex with NaN -> DELEGATE, still match
 ccn = cc.copy(); ccn[7] = complex(np.nan, 1.0)
 ok = ok and fnp.argsort(ccn).tobytes() == np.argsort(ccn).tobytes()
+# COMPLEX128 axis variants: distinct real parts per lane (tie-free lexicographic) -> native, byte-exact
+cm_last = np.stack([rng.permutation(256).astype(np.float64) + 1j * rng.standard_normal(256) for _ in range(4096)])
+cm_last = cm_last.astype(np.complex128)  # last-axis: each row distinct real
+ok = ok and fnp.argsort(cm_last).tobytes() == np.argsort(cm_last).tobytes()
+cm_ax0 = np.stack([rng.permutation(256).astype(np.float64) + 1j * rng.standard_normal(256) for _ in range(4096)], axis=1)
+cm_ax0 = cm_ax0.astype(np.complex128)  # axis0: each column distinct real
+ok = ok and fnp.argsort(cm_ax0, axis=0).tobytes() == np.argsort(cm_ax0, axis=0).tobytes()
+cm_mid_re = np.argsort(rng.standard_normal((64, 256, 64)), axis=1).astype(np.float64)  # axis-1 lane = perm of real
+cm_mid = (cm_mid_re + 1j * rng.standard_normal((64, 256, 64))).astype(np.complex128)
+ok = ok and fnp.argsort(cm_mid, axis=1).tobytes() == np.argsort(cm_mid, axis=1).tobytes()
+# c128 axis with full dup (tie) -> delegate, still match (last-axis)
+cmd = (rng.integers(0, 16, (4096, 256)).astype(np.float64) + 1j * rng.integers(0, 16, (4096, 256)).astype(np.float64)).astype(np.complex128)
+ok = ok and fnp.argsort(cmd).tobytes() == np.argsort(cmd).tobytes()
 print(bool(ok))
 "#
         .into(),
