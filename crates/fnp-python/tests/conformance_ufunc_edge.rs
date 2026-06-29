@@ -1106,6 +1106,17 @@ for op in ("upper", "lower", "swapcase", "capitalize", "title"):
 tbl = str.maketrans("abcdXYZ9", "ABCDxyz0")
 rt = fnp.char.translate(a, tbl); et = np.char.translate(a, tbl)
 ok = ok and rt.dtype == et.dtype and rt.shape == et.shape and rt.tobytes() == et.tobytes()
+# char.add: element-wise concat (fixed output width wa+wb), same-shape large arrays
+b = np.tile(np.array(["_QR%d" % (i % 71) for i in range(1000)], dtype="<U8"), 1000 + 1)[: (1 << 20) + 257]
+rad = fnp.char.add(a, b); ead = np.char.add(a, b)
+ok = ok and rad.dtype == ead.dtype and rad.shape == ead.shape and rad.tobytes() == ead.tobytes()
+# char.add works for ANY unicode (pure concat, no casing) + embedded nulls
+ua = np.tile(np.array(["café", "x\x00y"], dtype="<U6"), ((1 << 20) // 2) + 2)
+ub = np.tile(np.array(["ü9", "Z"], dtype="<U4"), ((1 << 20) // 2) + 2)
+rau = fnp.char.add(ua, ub); eau = np.char.add(ua, ub)
+ok = ok and rau.dtype == eau.dtype and rau.tobytes() == eau.tobytes()
+# np.strings.add too
+ok = ok and fnp.strings.add(a, b).tobytes() == np.strings.add(a, b).tobytes()
 # non-ASCII must delegate to numpy and still match (full-Unicode casing)
 u = np.tile(np.array(["café_StraßE", "ÀÉÎ_xyz"], dtype="<U16"), ((1 << 20) // 2) + 2)
 for op in ("upper", "lower"):

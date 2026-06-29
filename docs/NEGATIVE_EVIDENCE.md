@@ -12810,5 +12810,23 @@ The biggest char win — translate is a trivial 1:1 lookup remap (no per-slot lo
 while numpy's str.translate is the most expensive per-element char op. BIT-EXACT (same ASCII lookup + non-ASCII
 defer; conformance char_case_parallel_bit_exact_matches_numpy extended with translate via str.maketrans, PASSED).
 SAME-WIDTH ASCII CHAR FAMILY COMPLETE (parallel): upper/lower/swapcase/capitalize/title/translate (both the
-np.char.* and np.strings.* namespaces share these helpers). OPEN: char.replace/add/strip (variable output width).
+np.char.* and np.strings.* namespaces share these helpers). OPEN: char.replace/strip (variable output width).
 AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel char.add / strings.add (element-wise string concat) — 2.9x
+`BlackThrush`. fnp had NO char.add native path (delegated to numpy). np.char.add(a,b) concatenates element-wise:
+result[i] = content(a[i]) + content(b[i]), content = codepoints up to the LAST non-null (trailing nulls = padding,
+embedded nulls kept), null-padded to the FIXED output width wa+wb. Added try_zerocopy_unicode_concat (view both 'U'
+arrays as uint32, per-element copy a_content++b_content++pad, parallel across elements) + char_add_native /
+strings_add_native pyfunctions registered in both namespace overlays.
+
+BIT-EXACT for ANY 'U' input — pure codepoint copy, NO Unicode casing, so non-ASCII works too (no defer needed);
+verified incl non-ASCII ('café'+'ü') + embedded nulls + np.strings.add (conformance char_case_parallel_bit_exact_
+matches_numpy extended, PASSED). Same-shape C-contiguous 'U' only; broadcast/scalar/'S' bytes defer.
+
+PERF (criterion, rch worker = truth; 1M, U20 + U12 -> U32):
+  char.add: fnp 6.01 ms vs NumPy 17.42 ms = 0.345x / 2.9x faster
+MODEST vs the per-element char ops (upper 35.8x / translate 103.5x): numpy char.add is already BANDWIDTH-bound (a
+copy, ~15 GB/s), not a pathological per-element Python loop, so parallel only buys the extra memory bandwidth
+(~43 GB/s) = 2.9x. Still a clean bit-exact win. GATE 1<<20 codepoints (parallel), 1<<16 (take native at all).
+OPEN: char.replace/strip (variable output width — numpy also bandwidth-ish, lower priority). AGENT_NAME=BlackThrush.

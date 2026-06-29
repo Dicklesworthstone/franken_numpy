@@ -1212,6 +1212,20 @@ fn bench_char_ascii_boundary(c: &mut Criterion) {
         group.bench_function("numpy_char_translate_u20_ascii_1m", |bench| {
             bench.iter(|| black_box(numpy_tr.call1((&input, &tbl)).expect("numpy translate")));
         });
+        // char.add: element-wise concat (fixed output width), same-shape arrays
+        let kw2 = PyDict::new(py);
+        kw2.set_item("dtype", "<U12").expect("dtype kw2");
+        let input_b = numpy
+            .call_method("full", ((1_000_000_usize,), "_suffix9"), Some(&kw2))
+            .expect("1M U12 second operand");
+        let fnp_add = fnp_char.getattr("add").expect("fnp char.add");
+        let numpy_add = numpy_char.getattr("add").expect("numpy char.add");
+        group.bench_function("fnp_char_add_u20u12_ascii_1m", |bench| {
+            bench.iter(|| black_box(fnp_add.call1((&input, &input_b)).expect("fnp add")));
+        });
+        group.bench_function("numpy_char_add_u20u12_ascii_1m", |bench| {
+            bench.iter(|| black_box(numpy_add.call1((&input, &input_b)).expect("numpy add")));
+        });
     });
 
     group.finish();
