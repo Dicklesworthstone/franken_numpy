@@ -5458,6 +5458,28 @@ epw = rng.integers(0, 12, 16_000_000).astype(np.int64)\n";
                 bch.iter(|| black_box(numpy_fn.call1((&atd, &ctd)).expect("numpy td op")));
             });
         }
+        // f32 searchsorted: numpy single-threaded cold-cache binary search per query (~1.6s for
+        // 8M queries into a 1M sorted f32). Native parallel per-query search wins big.
+        py.run(
+            std::ffi::CString::new(
+                "ssa = np.sort(np.random.default_rng(9).standard_normal(1_000_000).astype(np.float32)); ssv = np.random.default_rng(10).standard_normal(8_000_000).astype(np.float32)",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("searchsorted setup");
+        let ssa = ns.get_item("ssa").expect("ssa");
+        let ssv = ns.get_item("ssv").expect("ssv");
+        let fnp_ss = module.getattr("searchsorted").expect("fnp searchsorted");
+        let numpy_ss = numpy.getattr("searchsorted").expect("numpy searchsorted");
+        group.bench_function("fnp_searchsorted_f32_8m", |bch| {
+            bch.iter(|| black_box(fnp_ss.call1((&ssa, &ssv)).expect("fnp searchsorted")));
+        });
+        group.bench_function("numpy_searchsorted_f32_8m", |bch| {
+            bch.iter(|| black_box(numpy_ss.call1((&ssa, &ssv)).expect("numpy searchsorted")));
+        });
     });
 
     group.finish();

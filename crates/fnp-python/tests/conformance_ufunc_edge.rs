@@ -693,6 +693,43 @@ print(ok)
 }
 
 #[test]
+fn f32_searchsorted_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy searchsorted is a single-threaded cold-cache binary search per query; the parallel
+    // per-query lower/upper-bound search must return the identical intp index array for both
+    // sides, incl exact-match ties and -inf/inf, above the gate. NaN defers to numpy.
+    let script = fnp_script(
+        r#"
+n = (1 << 21) + 257
+rng = np.random.default_rng(71)
+a = np.sort(rng.standard_normal(500000).astype(np.float32))
+v = (rng.standard_normal(n) * 2.0).astype(np.float32)
+v[:1000] = a[rng.integers(0, a.size, 1000)]   # exact-match ties
+v[1] = np.float32(np.inf); v[2] = np.float32(-np.inf)
+ok = True
+for side in ("left", "right"):
+    r = fnp.searchsorted(a, v, side=side); e = np.searchsorted(a, v, side=side)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# 2-D query shape preserved
+v2 = v[:1 << 21].reshape(1024, 2048)
+ok = ok and fnp.searchsorted(a, v2).tobytes() == np.searchsorted(a, v2).tobytes()
+ok = ok and fnp.searchsorted(a, v2).shape == np.searchsorted(a, v2).shape
+# NaN in query defers to numpy and still matches
+vn = v.copy(); vn[5] = np.float32(np.nan)
+ok = ok and fnp.searchsorted(a, vn).tobytes() == np.searchsorted(a, vn).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f32 searchsorted must be bit-identical to numpy (both sides, ties, NaN defer): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn timedelta_remainder_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // td % td -> timedelta64 (same unit). For same-unit non-NaT non-zero operands it equals the
     // int64 floored remainder of the raw counts viewed back to timedelta. NaT / zero divisor defer

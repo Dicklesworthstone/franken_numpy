@@ -12485,3 +12485,23 @@ td%td + the % operator incl mixed signs + NaT-present and zero-divisor DEFER cas
 WHY NOT ~0-GAIN: numpy timedelta remainder is single-threaded with per-element NaT branches; the native parallel kernel
 defers NaT once (scan) and runs the int64 floored remainder. PRE-EXISTING (not mine): conformance_ufunc_edge::
 ufunc_signature_has_x1_x2. timedelta64 floor_divide + remainder pair complete. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT32 searchsorted - numpy's single-threaded cold-cache binary search
+`BlackThrush`. A DIFFERENT primitive (search -> index). numpy searchsorted runs a single-threaded cold-cache binary
+search per query — measured ~1.6s for 8M f32 queries into a 1M sorted f32 haystack (each key probes ~20 cache-missing
+levels). fnp had scalar/int/f64 searchsorted fast paths but f32 fell to the cold extract path. Added
+try_zerocopy_f32_searchsorted: NaN pre-scan (defer if any NaN, since numpy treats NaN as largest -> index=len, which a
+plain comparison binary search can't reproduce), else route to the existing generic searchsorted_typed::<f32> (parallel
+per-query lower/upper-bound search over the shared read-only haystack). Hooked into the searchsorted dispatcher after the
+f64 path; 1-D haystack, identical f32 dtype, array query, sorter=None.
+BIT-EXACT: for NaN-free inputs the lower/upper-bound search == numpy by construction (verified vs numpy both sides incl
+exact-match ties / +-inf / 2-D query shape); NaN-present defers and still matches.
+
+PERF (criterion, rch worker = truth; 8M f32 queries into 1M sorted f32):
+  searchsorted f32: fnp 47.73 ms vs NumPy 1744.9 ms = 0.027x / ~36.6x faster
+CORRECTNESS: new conformance test f32_searchsorted_parallel_bit_exact_matches_numpy -> byte-identical to numpy (left &
+right, ties, +-inf, 2-D query) + the NaN-query DEFER case.
+WHY NOT ~0-GAIN: numpy searchsorted is a single-threaded cold-cache binary search (~1.6s/8M); the per-query searches are
+independent + latency-bound, so the parallel map aggregates memory-level parallelism across cores. PRE-EXISTING (not
+mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. Extends the searchsorted parallel lever (was f64/int) to f32.
+AGENT_NAME=BlackThrush.
