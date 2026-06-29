@@ -1074,6 +1074,11 @@ for dt in ("int32", "int64", "uint32", "uint64"):
     c2[:40, :] = c2[40:80, :]  # per-column duplicates
     ra = fnp.sort(c2, axis=0); ea = np.sort(c2, axis=0)
     ok = ok and ra.dtype == ea.dtype and ra.shape == ea.shape and ra.tobytes() == ea.tobytes()
+    # MIDDLE-axis sort, 3-D (outer x alen x inner), incl per-lane duplicates along the sorted axis
+    m3 = rng.integers(info.min, info.max, (64, 256, 64), dtype=dt, endpoint=True)
+    m3[:, :40, :] = m3[:, 40:80, :]  # per-lane duplicates
+    rm = fnp.sort(m3, axis=1); em = np.sort(m3, axis=1)
+    ok = ok and rm.dtype == em.dtype and rm.shape == em.shape and rm.tobytes() == em.tobytes()
 # COMPLEX128 VALUE sort (np.sort): flat distinct (perm real), flat with full dups, NaN/-0.0 delegate
 cv = (rng.permutation(n).astype(np.float64) + 1j * rng.standard_normal(n)).astype(np.complex128)
 rcv = fnp.sort(cv); ecv = np.sort(cv)
@@ -1133,6 +1138,8 @@ dva0 = np.stack([rng.permutation(256) for _ in range(4096)], axis=1).astype("dat
 ok = ok and fnp.sort(dva0, axis=0).dtype == np.sort(dva0, axis=0).dtype and fnp.sort(dva0, axis=0).tobytes() == np.sort(dva0, axis=0).tobytes()
 dvln = dvl.copy(); dvln[3, 7] = np.datetime64("NaT")  # NaT in a lane -> whole-op delegate, still match
 ok = ok and fnp.sort(dvln).tobytes() == np.sort(dvln).tobytes()
+dvm = np.argsort(rng.standard_normal((64, 256, 64)), axis=1).astype("datetime64[s]")  # middle-axis distinct
+ok = ok and fnp.sort(dvm, axis=1).dtype == np.sort(dvm, axis=1).dtype and fnp.sort(dvm, axis=1).tobytes() == np.sort(dvm, axis=1).tobytes()
 print(bool(ok))
 "#
         .into(),

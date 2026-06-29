@@ -2397,6 +2397,30 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
         group.bench_function("numpy_sort_datetime64_lastaxis_16Mx", |bch| {
             bch.iter(|| black_box(numpy_sort.call1((&la_dt,)).expect("numpy sort la dt64")));
         });
+        // MIDDLE-axis sort: 3-D 64x4096x64 (=16M), int64 distinct-per-lane (argsort perm) + dt64 cast.
+        let m3_randn = rng
+            .call_method1("standard_normal", ((64_usize, 4096_usize, 64_usize),))
+            .expect("m3 randn");
+        let m3_kwargs = PyDict::new(py);
+        m3_kwargs.set_item("axis", 1_i64).expect("axis kw");
+        let m3 = numpy
+            .call_method("argsort", (m3_randn,), Some(&m3_kwargs))
+            .expect("m3 base")
+            .call_method1("astype", ("int64",))
+            .expect("m3 int64");
+        group.bench_function("fnp_sort_int64_midaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_sort.call((&m3,), Some(&m3_kwargs)).expect("fnp sort m3")));
+        });
+        group.bench_function("numpy_sort_int64_midaxis_16Mx", |bch| {
+            bch.iter(|| black_box(numpy_sort.call((&m3,), Some(&m3_kwargs)).expect("numpy sort m3")));
+        });
+        let m3_dt = m3.call_method1("astype", ("datetime64[s]",)).expect("m3 dt64");
+        group.bench_function("fnp_sort_datetime64_midaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_sort.call((&m3_dt,), Some(&m3_kwargs)).expect("fnp sort m3 dt")));
+        });
+        group.bench_function("numpy_sort_datetime64_midaxis_16Mx", |bch| {
+            bch.iter(|| black_box(numpy_sort.call((&m3_dt,), Some(&m3_kwargs)).expect("numpy sort m3 dt")));
+        });
     });
 
     group.finish();

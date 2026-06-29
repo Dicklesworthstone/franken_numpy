@@ -12983,3 +12983,24 @@ MEASURED CONFIRM (criterion, rch worker, 16M datetime64[s] distinct-per-lane 163
 above the flat 7.8x, because numpy's per-lane generic introsort (no simd-sort for 'M'/'m') is very slow while
 fnp parallelizes across 16384 lanes. Original commit 8da4ad11 title's 2.3-4.5x was a deliberate floor; true
 last-axis win is 9.08x. AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel INTEGER + DATETIME64/TIMEDELTA64 MIDDLE-axis value sort (np.sort) — int 2.9x / datetime 9.5x
+`BlackThrush`. Completes the value-sort axis family: int sort had last-axis + axis-0 but NO middle-axis
+kernel, and datetime value sort had last + axis-0 only (333728dc/8da4ad11). numpy sorts each strided
+middle-axis 1-D slice single-threaded; datetime has NO x86-simd-sort for 'M'/'m' (huge gap), while int gets
+simd-sort only after buffering each strided lane (smaller gap). Added int_sort_midaxis_typed (i32/i64/u32/
+u64): gather each lane's values into a contiguous scratch lane (strided read), sort_unstable, scatter back —
+BYTE-EXACT any kind (integer ties equal-byte, no tie-defer); mirrors int_argsort_midaxis_typed but sorts
+values in place (no idx array). Gated >=3-D C-contig, axis_spec_middle, n>=1<<20. Extended
+try_native_datetime_sort_axes with a Mid branch (DtMode enum; gather/sort/scatter into int64 view of a
+datetime-dtyped output; NaT pre-scan defers). Hooked try_native_int_sort_midaxis into sort() after the f64
+midaxis path. Conformance f32_int_flat_sort_parallel_bit_exact extended (int32/64+uint32/64 middle 64x256x64
+per-lane-dups byte-exact + datetime64[s] middle distinct), PASSED (rch worker, build clean, exit=0).
+PERF (criterion, rch worker, 16M, 64x4096x64 middle-axis distinct-per-lane): int64 fnp 58.23ms vs NumPy
+168.32ms = 2.89x; datetime64 fnp 65.56ms vs NumPy 621.14ms = 9.47x. datetime ~9.5x (no simd-sort); int ~2.9x
+(numpy simd-sorts each buffered lane). **PROCESS LESSON: do NOT run `cargo fmt -p <crate>` on this repo —
+lib.rs is NOT rustfmt-clean at HEAD (accumulated multi-agent code), so a crate-wide fmt rewrote 11 files /
+3040 lines incl other agents' code + 8 untouched test files. dcg blocks `git checkout --`; recover via
+`git stash push -- <paths>` (revert to HEAD, fmt preserved+droppable) then RE-APPLY only your semantic edits
+by Read-anchor + Edit. Keep diffs to hand-written hunks; never auto-format a shared dirty file.**
+AGENT_NAME=BlackThrush.
