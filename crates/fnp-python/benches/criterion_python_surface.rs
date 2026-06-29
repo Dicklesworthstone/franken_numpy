@@ -1226,6 +1226,20 @@ fn bench_char_ascii_boundary(c: &mut Criterion) {
         group.bench_function("numpy_char_add_u20u12_ascii_1m", |bench| {
             bench.iter(|| black_box(numpy_add.call1((&input, &input_b)).expect("numpy add")));
         });
+        // strip (whitespace, fixed width): input with leading/trailing spaces
+        let kw3 = PyDict::new(py);
+        kw3.set_item("dtype", "<U20").expect("dtype kw3");
+        let input_ws = numpy
+            .call_method("full", ((1_000_000_usize,), "   azByCxD0123   "), Some(&kw3))
+            .expect("1M U20 ws-padded input");
+        let fnp_strip = fnp_char.getattr("strip").expect("fnp char.strip");
+        let numpy_strip = numpy_char.getattr("strip").expect("numpy char.strip");
+        group.bench_function("fnp_char_strip_u20_ascii_1m", |bench| {
+            bench.iter(|| black_box(fnp_strip.call1((&input_ws,)).expect("fnp strip")));
+        });
+        group.bench_function("numpy_char_strip_u20_ascii_1m", |bench| {
+            bench.iter(|| black_box(numpy_strip.call1((&input_ws,)).expect("numpy strip")));
+        });
     });
 
     group.finish();

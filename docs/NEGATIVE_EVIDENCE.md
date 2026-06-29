@@ -12829,4 +12829,22 @@ PERF (criterion, rch worker = truth; 1M, U20 + U12 -> U32):
 MODEST vs the per-element char ops (upper 35.8x / translate 103.5x): numpy char.add is already BANDWIDTH-bound (a
 copy, ~15 GB/s), not a pathological per-element Python loop, so parallel only buys the extra memory bandwidth
 (~43 GB/s) = 2.9x. Still a clean bit-exact win. GATE 1<<20 codepoints (parallel), 1<<16 (take native at all).
-OPEN: char.replace/strip (variable output width — numpy also bandwidth-ish, lower priority). AGENT_NAME=BlackThrush.
+OPEN: char.replace (variable output width — numpy also bandwidth-ish, lower priority). AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel char/strings strip/lstrip/rstrip (whitespace) — 1.73x
+`BlackThrush`. fnp had no strip native path (delegated). np.char.strip/lstrip/rstrip(a) (no `chars` arg) remove
+leading/trailing ASCII whitespace, KEEP the input width (left-justify + null-pad). Added try_zerocopy_unicode_strip
+(mode 0/1/2; content = up to last non-null, strip whitespace within it, parallel across slots) + 6 pyfunctions
+(char/strings x strip/lstrip/rstrip) in both namespace overlays.
+
+BIT-EXACT: numpy char.strip whitespace set == Python str.isspace ASCII = {0x09-0x0d, 0x1c-0x1f, 0x20} (verified
+codepoint-by-codepoint). All-ASCII fast path; DEFER on any non-ASCII (Python strips Unicode ws too) and on a
+`chars` arg (conformance char_case_parallel_bit_exact_matches_numpy extended with strip/lstrip/rstrip incl tabs/
+0x1c-0x1f + strings.* + chars-arg defer, PASSED).
+
+PERF (criterion, rch worker = truth; 1M x U20 ws-padded):
+  char.strip: fnp 20.44 ms vs NumPy 35.45 ms = 0.577x / 1.73x faster
+MODEST (numpy char.strip is bandwidth-ish ~35ms@1M, not a pathological per-element loop like upper/translate; the
+per-slot content-len scan + strip adds work) but a clean bit-exact win across all 3 variants x 2 namespaces. GATE
+1<<20 codepoints. OPEN: char.replace (variable output width = two-pass, ~221ms numpy, biggest remaining char gap).
+AGENT_NAME=BlackThrush.

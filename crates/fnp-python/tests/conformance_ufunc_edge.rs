@@ -1117,6 +1117,15 @@ rau = fnp.char.add(ua, ub); eau = np.char.add(ua, ub)
 ok = ok and rau.dtype == eau.dtype and rau.tobytes() == eau.tobytes()
 # np.strings.add too
 ok = ok and fnp.strings.add(a, b).tobytes() == np.strings.add(a, b).tobytes()
+# char.strip/lstrip/rstrip (whitespace, fixed width), large array with leading/trailing ws + tabs
+sb = np.array(["  hi \t", "\nx\ty\r", "   ", "abc", "\x1cQ\x1f", "  e f  "], dtype="<U10")
+sa = np.tile(sb, ((1 << 20) // sb.size) + 2)
+for op in ("strip", "lstrip", "rstrip"):
+    rs = getattr(fnp.char, op)(sa); es = getattr(np.char, op)(sa)
+    ok = ok and rs.dtype == es.dtype and rs.shape == es.shape and rs.tobytes() == es.tobytes()
+    ok = ok and getattr(fnp.strings, op)(sa).tobytes() == getattr(np.strings, op)(sa).tobytes()
+# chars-arg strip must DELEGATE and still match
+ok = ok and fnp.char.strip(sa, "h").tobytes() == np.char.strip(sa, "h").tobytes()
 # non-ASCII must delegate to numpy and still match (full-Unicode casing)
 u = np.tile(np.array(["café_StraßE", "ÀÉÎ_xyz"], dtype="<U16"), ((1 << 20) // 2) + 2)
 for op in ("upper", "lower"):
