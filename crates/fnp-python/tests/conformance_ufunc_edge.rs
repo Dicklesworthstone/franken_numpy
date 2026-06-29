@@ -2076,6 +2076,47 @@ print(ok)
 }
 
 #[test]
+fn f16_modf_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy has no f16 ALU; np.modf(f16) widens, splits into (trunc(x), x-trunc(x) signed), narrows
+    // both. The native parallel uint16-view split must be byte-identical for finite inputs (native)
+    // and delegate inf/nan (numpy's special-value/warning surface) while still matching byte-for-byte.
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(49)
+ok = True
+n = (1 << 20) + 257
+a = (rng.standard_normal(n) * 100).astype(np.float16)  # finite, fractional -> native path
+fr, ip = fnp.modf(a); efr, eip = np.modf(a)
+ok = ok and fr.dtype == efr.dtype and ip.dtype == eip.dtype
+ok = ok and fr.view(np.uint16).tobytes() == efr.view(np.uint16).tobytes()
+ok = ok and ip.view(np.uint16).tobytes() == eip.view(np.uint16).tobytes()
+# negative + -0.0 / integer (-0.0 sign of frac) handling
+a2 = (-(rng.standard_normal(n) * 50)).astype(np.float16); a2[0] = np.float16(-0.0); a2[1] = np.float16(-2.0)
+fr2, ip2 = fnp.modf(a2); efr2, eip2 = np.modf(a2)
+ok = ok and fr2.view(np.uint16).tobytes() == efr2.view(np.uint16).tobytes()
+ok = ok and ip2.view(np.uint16).tobytes() == eip2.view(np.uint16).tobytes()
+# inf/nan present -> defer to numpy, still byte-identical (NaN-positional)
+an = a.copy(); an[3] = np.float16(np.inf); an[5] = np.float16(np.nan); an[7] = np.float16(-np.inf)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    frn, ipn = fnp.modf(an); efrn, eipn = np.modf(an)
+ok = ok and bool(((frn.view(np.uint16) == efrn.view(np.uint16)) | (np.isnan(frn) & np.isnan(efrn))).all())
+ok = ok and bool(((ipn.view(np.uint16) == eipn.view(np.uint16)) | (np.isnan(ipn) & np.isnan(eipn))).all())
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 modf must be byte-identical to numpy (finite native + inf/nan defer + signs): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_reciprocal_full_domain_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy has no f16 ALU; np.reciprocal(f16) widens f16->f32, divides 1/x, narrows. f32 division is
     // IEEE correctly-rounded (no libm), so narrow(1/widen) is byte-identical to numpy over the ENTIRE

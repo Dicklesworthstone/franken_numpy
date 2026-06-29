@@ -13199,3 +13199,18 @@ if a local probe makes it "look" slow. packbits (~12 GB/s) was correctly left al
 unpackbits looked slower ONLY because of the local-probe artifact. The discipline of committing with NO ratio
 claim (ratio pending) meant no overclaim landed — only a correct-but-slower kernel, cleanly reverted.**
 AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel FLOAT16 modf (fractional/integral split) — 5.54x
+`BlackThrush`. numpy has NO f16 ALU -> np.modf(f16) widens f16->f32, splits into (trunc(x), x-trunc(x)
+signed), narrows BOTH = single-threaded scalar loop ~124ms@16M WORKER (~0.6 GB/s = deeply COMPUTE-bound, NOT
+bandwidth — the key distinction from the unpackbits NO-SHIP which numpy SIMD-expands at 9.25 GB/s). Added
+try_zerocopy_f16_modf above the modf dispatcher's !f64 delegate guard: uint16-view parallel split, integral=
+trunc(x), fractional=(x-trunc(x)).copysign(x), both narrowed. IEEE-exact ops -> narrow(f32 split(widen)) ==
+numpy byte-for-byte (verified numpy_f16 modf == narrow(numpy_f32 modf)). DEFERS inf/nan (exp all ones) for
+numpy's special/warning surface; finite never warns. Conformance f16_modf_parallel_bit_exact (finite native
++ negatives/-0.0/integers + inf/nan delegation) PASSED. PERF (criterion rch WORKER, 16M f16): fnp 22.46ms vs
+NumPy 124.30ms = **5.54x**. **METHOD WIN (post-unpackbits): probed numpy's GB/s FIRST — 0.6 GB/s confirmed
+compute-bound (robust parallel win) vs unpackbits' 9.25 GB/s bandwidth-bound (loss). And measured on the
+WORKER before claiming. f16 modf was a remaining IEEE-deterministic f16 op (trunc+subtract, no libm) — the
+libm ones (hypot/transcendentals) stay deferred (hypot proven 13/2.6M divergent this session).** See
+[[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
