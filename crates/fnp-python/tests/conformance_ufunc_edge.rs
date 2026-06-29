@@ -1841,6 +1841,45 @@ print(ok)
 }
 
 #[test]
+fn f16_axis_min_max_reduction_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy widens f16->f32 per lane to reduce min/max along an axis (and strides for non-last
+    // axes). The native uint16-view per-lane parallel f32-fold reduce narrowed to f16 must be
+    // byte-identical for the no-NaN / non-zero-extremum case on the LAST axis, AXIS 0, and a MIDDLE
+    // axis. NaN-present and zero-extremum arrays defer to numpy and must still match byte-for-byte.
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(41)
+ok = True
+# kernel path: shifted positive so extrema != 0, no NaN. 2-D (last + axis0) and 3-D (middle), all 1<<20.
+m2 = (rng.standard_normal((4096, 256)) * 50 + 300).astype(np.float16)   # all positive
+m3 = (rng.standard_normal((64, 256, 64)) * 50 + 300).astype(np.float16)
+for fnp_op, np_op in [(fnp.min, np.min), (fnp.max, np.max), (fnp.amin, np.amin), (fnp.amax, np.amax)]:
+    for arr, ax in [(m2, -1), (m2, 0), (m3, 1)]:
+        r = fnp_op(arr, axis=ax); e = np_op(arr, axis=ax)
+        ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.view(np.uint16).tobytes() == e.view(np.uint16).tobytes()
+# negative array (min != 0) along the last axis
+mn = (-(rng.standard_normal((4096, 256)) * 50 + 300)).astype(np.float16)
+ok = ok and fnp.min(mn, axis=-1).view(np.uint16).tobytes() == np.min(mn, axis=-1).view(np.uint16).tobytes()
+# NaN present in a lane -> defer to numpy (NaN propagation), still byte-identical
+nan2 = m2.copy(); nan2[3, 7] = np.float16(np.nan)
+ok = ok and fnp.max(nan2, axis=-1).view(np.uint16).tobytes() == np.max(nan2, axis=-1).view(np.uint16).tobytes()
+# per-lane zero extremum -> defer (+0/-0 ambiguity), still byte-identical
+z2 = (-np.abs(rng.standard_normal((4096, 256))).astype(np.float16))  # all <= 0, per-lane max is 0
+ok = ok and fnp.max(z2, axis=-1).view(np.uint16).tobytes() == np.max(z2, axis=-1).view(np.uint16).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 axis min/max reduction must be bit-identical to numpy (last/axis0/middle + defer): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_predicate_isnan_isinf_isfinite_signbit_full_domain_matches_numpy() -> Result<(), String> {
     // numpy widens f16 to f32 for isnan/isinf/isfinite/signbit; the native parallel uint16
     // bit-check must produce the identical bool array over the ENTIRE f16 domain (all 65536

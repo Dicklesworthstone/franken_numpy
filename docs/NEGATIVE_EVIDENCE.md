@@ -13004,3 +13004,23 @@ lib.rs is NOT rustfmt-clean at HEAD (accumulated multi-agent code), so a crate-w
 `git stash push -- <paths>` (revert to HEAD, fmt preserved+droppable) then RE-APPLY only your semantic edits
 by Read-anchor + Edit. Keep diffs to hand-written hunks; never auto-format a shared dirty file.**
 AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel FLOAT16 min/max reduction ALONG AN AXIS (last/axis0/middle) — 4.7-8.2x
+`BlackThrush`. numpy has NO native f16 ALU -> np.min/np.max of float16 widens f16->f32 element-by-element to
+reduce (16M flat ~76ms, ~12x f64). fnp had the FLAT f16 min/max fast path but every AXIS reduction delegated
+to numpy's slow widen-scan (strides too for non-last axes). Added try_zerocopy_f16_minmax_axis: ONE
+uint16-view kernel reducing along ANY single axis via the outer/axis_len/inner decomposition (last=inner 1,
+axis0=outer 1, middle=both>1), par_iter over the whole output. BIT-EXACT: extremum IS one of the inputs and
+f16->f32 is exact -> narrowed f32 extremum == numpy. DEFER whole op (return None -> numpy's exact output) on
+(a) any NaN (numpy propagates a specific NaN's bits) and (b) any lane whose extremum is 0.0 (+0/-0 ambiguity).
+Wired into py_min/py_max after the flat path; gated single-int-axis + !keepdims + f16 + contiguous +
+total>=1<<20. Conformance f16_axis_min_max_reduction_bit_exact (min/max/amin/amax last-axis 4096x256 + axis-0
++ middle 64x256x64 byte-exact, negative-min lane, NaN-defer, zero-extremum-defer), PASSED (build clean).
+PERF (criterion, rch worker, 16M f16 4000x4000): max last-axis fnp 3.52ms vs NumPy 28.82ms=8.18x, axis-0
+5.50x; min last-axis 8.11x, axis-0 4.69x. fnp ~3.5ms << numpy ~20-30ms = path ENGAGES (not delegating).
+**GENERAL: the outer/axis_len/inner decomposition (from f16 argextreme_axis) reduces along ANY single axis in
+ONE kernel — last axis is just inner==1, axis0 is outer==1. Reuse it for any per-lane f16 reduction; the f16
+ALU-widen penalty (no native f16 hardware) makes EVERY f16 reduction a parallel win, even min/max which on
+f64/f32 are only bandwidth-bound. OPEN f16: sum/mean/prod along axes (numpy widens too; needs pairwise-order
+match for bit-exact sum), ptp along axes (max-min, same kernel), nanmin/nanmax along axes.** See
+[[integer-matmul-no-blas-lever]] (f16 ALU-widen family). AGENT_NAME=BlackThrush.

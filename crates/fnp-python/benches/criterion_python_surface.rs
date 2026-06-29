@@ -6040,6 +6040,38 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
         let hsq2 = ns.get_item("hsq2").expect("hsq2");
         let kw_axis = PyDict::new(py);
         kw_axis.set_item("axis", -1i64).expect("axis kwarg");
+        // f16 min/max along last-axis + axis-0 (4000x4000): numpy widens f16->f32 per lane
+        // (~76ms@16M); native per-lane parallel f32-fold reduce wins (bit-exact, NaN/zero defer).
+        let kw_axis0 = PyDict::new(py);
+        kw_axis0.set_item("axis", 0i64).expect("axis0 kwarg");
+        for op in ["max", "min"] {
+            let fnp_fn = module.getattr(op).expect("fnp f16 minmax op");
+            let numpy_fn = numpy.getattr(op).expect("numpy f16 minmax op");
+            group.bench_function(format!("fnp_{op}_lastaxis_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(fnp_fn.call((&hsq2,), Some(&kw_axis)).expect("fnp f16 lastaxis minmax"))
+                });
+            });
+            group.bench_function(format!("numpy_{op}_lastaxis_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(
+                        numpy_fn.call((&hsq2,), Some(&kw_axis)).expect("numpy f16 lastaxis minmax"),
+                    )
+                });
+            });
+            group.bench_function(format!("fnp_{op}_axis0_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(fnp_fn.call((&hsq2,), Some(&kw_axis0)).expect("fnp f16 axis0 minmax"))
+                });
+            });
+            group.bench_function(format!("numpy_{op}_axis0_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(
+                        numpy_fn.call((&hsq2,), Some(&kw_axis0)).expect("numpy f16 axis0 minmax"),
+                    )
+                });
+            });
+        }
         for op in ["argmax", "argmin"] {
             let fnp_fn = module.getattr(op).expect("fnp arg op");
             let numpy_fn = numpy.getattr(op).expect("numpy arg op");
