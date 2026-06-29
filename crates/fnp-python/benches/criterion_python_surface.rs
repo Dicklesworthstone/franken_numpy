@@ -6145,6 +6145,36 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
                 });
             });
         }
+        // f16 cumsum/cumprod along last-axis + axis-0: numpy widens f16->f32 per element + narrows
+        // each step, all lanes single-threaded (~138/106ms@16M); native per-lane parallel scan wins.
+        for op in ["cumsum", "cumprod"] {
+            let fnp_fn = module.getattr(op).expect("fnp f16 cum op");
+            let numpy_fn = numpy.getattr(op).expect("numpy f16 cum op");
+            group.bench_function(format!("fnp_{op}_lastaxis_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(fnp_fn.call((&hsq2,), Some(&kw_axis)).expect("fnp f16 lastaxis cum"))
+                });
+            });
+            group.bench_function(format!("numpy_{op}_lastaxis_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(
+                        numpy_fn.call((&hsq2,), Some(&kw_axis)).expect("numpy f16 lastaxis cum"),
+                    )
+                });
+            });
+            group.bench_function(format!("fnp_{op}_axis0_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(fnp_fn.call((&hsq2,), Some(&kw_axis0)).expect("fnp f16 axis0 cum"))
+                });
+            });
+            group.bench_function(format!("numpy_{op}_axis0_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(
+                        numpy_fn.call((&hsq2,), Some(&kw_axis0)).expect("numpy f16 axis0 cum"),
+                    )
+                });
+            });
+        }
         for op in ["argmax", "argmin"] {
             let fnp_fn = module.getattr(op).expect("fnp arg op");
             let numpy_fn = numpy.getattr(op).expect("numpy arg op");

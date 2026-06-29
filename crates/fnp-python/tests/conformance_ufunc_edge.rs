@@ -1953,6 +1953,50 @@ print(ok)
 }
 
 #[test]
+fn f16_axis_cumsum_cumprod_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy has no f16 ALU, so np.cumsum/np.cumprod of float16 widens f16->f32 per element then
+    // narrows back to f16 EACH STEP (the accumulator is f16). The native uint16-view per-lane scan
+    // carries the SAME f16-narrowed accumulator, parallel across independent lanes, so it is
+    // byte-identical on the LAST axis, AXIS 0, and a MIDDLE axis. NaN and inf propagate exactly.
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(44)
+ok = True
+# cumsum: small magnitudes so partial sums stay finite/meaningful
+s2 = (rng.standard_normal((4096, 256)) * 0.1).astype(np.float16)
+s3 = (rng.standard_normal((64, 256, 64)) * 0.1).astype(np.float16)
+for arr, ax in [(s2, -1), (s2, 0), (s3, 1)]:
+    r = fnp.cumsum(arr, axis=ax); e = np.cumsum(arr, axis=ax)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.view(np.uint16).tobytes() == e.view(np.uint16).tobytes()
+# cumprod: values near 1.0 so the running product stays O(1) (not all-underflow-to-0)
+p2 = (1.0 + rng.standard_normal((4096, 256)) * 0.03).astype(np.float16)
+p3 = (1.0 + rng.standard_normal((64, 256, 64)) * 0.03).astype(np.float16)
+for arr, ax in [(p2, -1), (p2, 0), (p3, 1)]:
+    r = fnp.cumprod(arr, axis=ax); e = np.cumprod(arr, axis=ax)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.view(np.uint16).tobytes() == e.view(np.uint16).tobytes()
+# NaN propagation: once a NaN appears the rest of the lane is NaN. Compare NaN-positionally + finite-exact.
+mn = s2.copy(); mn[3, 7] = np.float16(np.nan)
+rf = fnp.cumsum(mn, axis=-1); en = np.cumsum(mn, axis=-1)
+both_nan = np.isnan(rf) & np.isnan(en)
+fin_eq = (~np.isnan(rf)) & (~np.isnan(en)) & (rf.view(np.uint16) == en.view(np.uint16))
+ok = ok and bool((both_nan | fin_eq).all())
+# overflow to +inf (deterministic 0x7c00): 1000 per step overflows f16 max (65504) mid-lane
+mb = (np.ones((4096, 256)) * 1000).astype(np.float16)
+ok = ok and fnp.cumsum(mb, axis=-1).view(np.uint16).tobytes() == np.cumsum(mb, axis=-1).view(np.uint16).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 axis cumsum/cumprod must be bit-identical to numpy (last/axis0/middle + NaN/inf): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_predicate_isnan_isinf_isfinite_signbit_full_domain_matches_numpy() -> Result<(), String> {
     // numpy widens f16 to f32 for isnan/isinf/isfinite/signbit; the native parallel uint16
     // bit-check must produce the identical bool array over the ENTIRE f16 domain (all 65536

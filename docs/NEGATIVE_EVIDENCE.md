@@ -13067,3 +13067,22 @@ sibling's ratio. lastaxis (contiguous lanes) wins most (~4.5x); axis0/flat (stri
 (~1.6-2.3x).** **f16 AXIS-REDUCTION vein now: min/max + ptp + nanmin/nanmax. REMAINING: sum/mean/prod (need
 numpy pairwise-tree match), nanmean/nansum (numpy f16 not slower than f64 = no f16 penalty, skip).** See
 [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel FLOAT16 cumsum/cumprod ALONG AN AXIS (last/axis0/middle) — bit-exact, parallel-across-lanes (ratio pending bench)
+`BlackThrush`. numpy has NO f16 ALU -> np.cumsum/np.cumprod of float16 widens f16->f32 per element +
+NARROWS back to f16 EACH STEP (verified: accumulator is f16, not f32 -- 1.0+many-tiny stays ~1 in f16). Slow
+single-threaded widen-scan (measured ~138ms cumsum / ~106ms cumprod @16M, SLOWER than f64). fnp had NO f16
+scan path. DISPATCH TRAP: cumsum/cumprod fast-fail f16 via a delegate guard BEFORE any native hook -> f16
+axis path MUST go ABOVE it (else dead). Added try_zerocopy_f16_cumulative_axis: uint16-view scan (f16 not a
+PyBuffer Element) carrying the SAME f16-narrowed accumulator, mirroring cumsum_axis_typed last-axis
+(inner==1 per-lane register scan) + non-last slab (inner>1 per-outer-block); lanes are INDEPENDENT sequential
+chains fanned across the pool. BIT-EXACT (NaN/inf propagate naturally -> NO defers, cleaner than min/max/nan).
+Wired cumsum(is_prod=false)+cumprod(is_prod=true) above the guard; flat axis=None stays sequential.
+Conformance f16_axis_cumsum_cumprod_bit_exact (cumsum+cumprod last 4096x256 + axis0 + middle 64x256x64
+byte-exact + NaN-propagation + overflow-to-inf), PASSED (build clean, exit=0). PERF ratio IN-FLIGHT (numpy
+baseline 138/106ms@16M single-threaded vs ~4000-lane parallel); recorded in a follow-up -- NOT estimated
+(kernel-identity overclaimed nanmin/nanmax last time). **f16 vein now: min/max + ptp + nanmin/nanmax +
+cumsum/cumprod. cumsum/cumprod is a SCAN not a reduce (sequential within lane, parallel across lanes -- the
+96th-98th scan pattern); f16 scan is bit-exact because numpy's per-lane sequential f16-narrowed scan is
+deterministic (no pairwise ambiguity, unlike f16 sum/mean).** See [[integer-matmul-no-blas-lever]].
+AGENT_NAME=BlackThrush.
