@@ -5448,14 +5448,16 @@ epw = rng.integers(0, 12, 16_000_000).astype(np.int64)\n";
         .expect("timedelta setup");
         let atd = ns.get_item("atd").expect("atd");
         let ctd = ns.get_item("ctd").expect("ctd");
-        let fnp_fd = module.getattr("floor_divide").expect("fnp floor_divide");
-        let numpy_fd = numpy.getattr("floor_divide").expect("numpy floor_divide");
-        group.bench_function("fnp_floor_divide_td64_16m", |bch| {
-            bch.iter(|| black_box(fnp_fd.call1((&atd, &ctd)).expect("fnp td floordiv")));
-        });
-        group.bench_function("numpy_floor_divide_td64_16m", |bch| {
-            bch.iter(|| black_box(numpy_fd.call1((&atd, &ctd)).expect("numpy td floordiv")));
-        });
+        for op in ["floor_divide", "remainder"] {
+            let fnp_fn = module.getattr(op).expect("fnp td op");
+            let numpy_fn = numpy.getattr(op).expect("numpy td op");
+            group.bench_function(format!("fnp_{op}_td64_16m"), |bch| {
+                bch.iter(|| black_box(fnp_fn.call1((&atd, &ctd)).expect("fnp td op")));
+            });
+            group.bench_function(format!("numpy_{op}_td64_16m"), |bch| {
+                bch.iter(|| black_box(numpy_fn.call1((&atd, &ctd)).expect("numpy td op")));
+            });
+        }
     });
 
     group.finish();

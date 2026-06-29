@@ -12468,3 +12468,20 @@ WHY NOT ~0-GAIN: numpy timedelta floor_divide is single-threaded with per-elemen
 loop); the native parallel kernel defers NaT once (scan) and runs the plain int64 floored division. PRE-EXISTING (not
 mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. Extends the single-threaded-element-op lever to timedelta64.
 AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel TIMEDELTA64 remainder (td % td -> timedelta64)
+`BlackThrush`. Companion to the timedelta floor_divide win. numpy runs timedelta64 % timedelta64 single-threaded with
+per-element NaT handling. Added try_native_timedelta_remainder: same-unit timedelta64, view both as int64, scan for NaT
+(i64::MIN) / zero divisor and DEFER those to numpy (numpy returns NaT, not the floored remainder), else route to the
+int64 floored-remainder kernel (int_binary_map_typed) and VIEW the int64 result back to the input timedelta dtype.
+Hooked into the binary ufunc __call__ Remainder block (after int / f16 remainder).
+BIT-EXACT: for same-unit non-NaT non-zero operands, td % td == int64 floored remainder (sign of divisor) of the raw
+counts viewed back to timedelta (verified vs numpy incl mixed signs); NaT/zero cases defer and still match byte-for-byte.
+
+PERF (criterion, rch worker = truth; timedelta64[s], 16M elements, non-NaT/non-zero):
+  td64 % td64 16M: fnp 35.43 ms vs NumPy 101.37 ms = 0.349x / ~2.9x faster
+CORRECTNESS: new conformance test timedelta_remainder_parallel_bit_exact_matches_numpy -> byte-identical to numpy for
+td%td + the % operator incl mixed signs + NaT-present and zero-divisor DEFER cases.
+WHY NOT ~0-GAIN: numpy timedelta remainder is single-threaded with per-element NaT branches; the native parallel kernel
+defers NaT once (scan) and runs the int64 floored remainder. PRE-EXISTING (not mine): conformance_ufunc_edge::
+ufunc_signature_has_x1_x2. timedelta64 floor_divide + remainder pair complete. AGENT_NAME=BlackThrush.

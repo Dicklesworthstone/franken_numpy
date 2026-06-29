@@ -693,6 +693,44 @@ print(ok)
 }
 
 #[test]
+fn timedelta_remainder_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // td % td -> timedelta64 (same unit). For same-unit non-NaT non-zero operands it equals the
+    // int64 floored remainder of the raw counts viewed back to timedelta. NaT / zero divisor defer
+    // to numpy (which returns NaT). Must be byte-identical above the 1<<18 gate.
+    let script = fnp_script(
+        r#"
+import warnings
+n = (1 << 18) + 257
+rng = np.random.default_rng(67)
+a = rng.integers(-10**7, 10**7, n).astype('timedelta64[s]')
+b = rng.integers(-10**7, 10**7, n).astype('timedelta64[s]')
+b[b == np.timedelta64(0, 's')] = np.timedelta64(1, 's')
+a[0] = np.timedelta64(7, 's'); b[0] = np.timedelta64(-3, 's')   # mixed-sign floored remainder
+ok = True
+r = a % b; e = np.remainder(a, b)
+ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+ok = ok and np.remainder(a, b).tobytes() == e.tobytes()
+# NaT present + zero divisor -> defer to numpy (NaT), still match
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    an = a.copy(); an[5] = np.timedelta64('NaT')
+    ok = ok and (an % b).tobytes() == np.remainder(an, b).tobytes()
+    bz = b.copy(); bz[9] = np.timedelta64(0, 's')
+    ok = ok and (a % bz).tobytes() == np.remainder(a, bz).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native timedelta64 remainder must be bit-identical to numpy (incl NaT/zero defer): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn timedelta_floordiv_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // td // td -> int64. numpy runs it single-threaded with per-element NaT handling; for same-
     // unit non-NaT non-zero operands it equals int64 floor_divide of the raw counts. NaT and zero
