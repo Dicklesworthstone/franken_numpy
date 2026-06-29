@@ -12978,3 +12978,8 @@ trends toward flat 7.8x as lanes lengthen. **LESSON (extends 333728dc): for a VA
 view trick needs the OUTPUT allocated as the source dtype (np.empty(dtype=a.dtype) then .view(int64)) — the
 int kernels hard-code an int64 output, correct for argsort (intp) but wrong for sort. Value sort is even
 cleaner than argsort: equal ticks = equal bytes so NO tie-defer at all, only NaT-defer.** AGENT_NAME=BlackThrush.
+MEASURED CONFIRM (criterion, rch worker, 16M datetime64[s] distinct-per-lane 16384x1024 last-axis): sort fnp
+95.1ms vs NumPy 863.8ms = **9.08x faster** — well ABOVE the conservative int-kernel-identity floor and even
+above the flat 7.8x, because numpy's per-lane generic introsort (no simd-sort for 'M'/'m') is very slow while
+fnp parallelizes across 16384 lanes. Original commit 8da4ad11 title's 2.3-4.5x was a deliberate floor; true
+last-axis win is 9.08x. AGENT_NAME=BlackThrush.
