@@ -13243,3 +13243,17 @@ fnp 16.20ms vs NumPy 103.31ms = **6.38x** (vs the powi formulation's 64.80ms/1.6
 loop was 4x of the fnp time). Confirms the lesson: building 2^n from exponent bits instead of powi quadrupled
 the win (1.60x -> 6.38x). The main commit 498d5f6e claimed >=1.60x conservatively; true ratio is 6.38x.
 See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED, modest): FLOAT32 ldexp direct-2^n instead of per-element powi — 1.32x (fixes powi bottleneck)
+`BlackThrush`. Applied the f16 ldexp lesson (direct 2^n from exponent bits, NOT powi) to the EXISTING f32
+ldexp path (try_zerocopy_f32_i32_ldexp), which used `xv * 2.0_f64.powi(e)` per element. Replaced with
+`f64::from_bits(((e+1023)<<52))` for |e|<=1023 (bit-identical, one op vs the power loop; over/underflow keep
+the powi/inf path). Conformance conformance_ldexp PASSED (exit=0, bit-identical change). **TRAP REPEAT
+(unpackbits lesson): my LOCAL probe said numpy f32 ldexp ~86.7ms (compute-bound) but the WORKER shows
+numpy=7.62ms = ~12 GB/s = SIMD-fast scalbnf (bandwidth-bound, NOT compute-bound). So f32 ldexp is only a
+MARGINAL gap. Still landed: the optimization is strictly fewer ops + bit-exact and removes the per-element
+powi (which would make the parallel path a LOSS vs numpy's SIMD). MEASURED (rch WORKER, 16M f32): fnp 5.76ms
+vs NumPy 7.62ms = 1.32x.** LESSON tripled: ALWAYS bench numpy on the WORKER + compute GB/s; only f16 ops are
+deeply compute-bound (no f16 SIMD) — f32/f64 elementwise ops numpy SIMD-vectorizes (near-parity ceiling).
+The f16 ldexp/modf/frexp wins (5-6x) hold BECAUSE there is no f16 SIMD; their f32 siblings are ~parity.
+See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
