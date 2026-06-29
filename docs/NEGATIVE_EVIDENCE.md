@@ -12655,3 +12655,26 @@ REJECTED (measured, not shipped): f32 divide — NOT compute-bound. numpy f32 di
 = BANDWIDTH-bound SIMD (an earlier 167ms reading was an artifact: the timing lambda did an f16->f32 astype each
 call). Parallel would lose like c64 multiply. (The f64 Div path wins because f64's 2x bytes pressure DRAM more.)
 AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel FLOAT16 matmul / dot (2-D + batched) — numpy has NO f16 BLAS
+`BlackThrush`. numpy has no BLAS for float16: a @ b widens each element to f32 and runs a naive single-threaded
+loop whose cost blows up O(n^3). fnp's matmul/dot routed f64(BLAS)/integer/batched-integer paths but f16 fell
+through to numpy's slow loop. Added try_native_f16_matmul (2-D) + try_native_f16_batched_matmul (>=3-D matching
+batch dims), gated work>=1<<18, hooked into the matmul pyfunction (2-D also into dot) after the int matmul paths.
+
+PERF (criterion, rch worker = truth; f16 matmul):
+  256x256:   fnp  85.63 ms vs NumPy  127.53 ms = 0.671x / 1.49x faster
+  512x512:   fnp 164.09 ms vs NumPy 1082.8  ms = 0.152x / 6.60x faster
+  1024x1024: fnp 559.98 ms vs NumPy 8288.3  ms = 0.068x / 14.8x faster
+  batched (64,128,128): fnp 64.57 ms vs NumPy 882.99 ms = 0.073x / 13.7x faster
+GATE: F16_MATMUL_MIN_WORK = 1<<18 (~64^3). The win GROWS with size (numpy's naive loop is O(n^3) while the native
+parallel kernel amortizes fan-out) — modest 1.49x at 256, 14.8x at 1024.
+
+BIT-EXACT (verified vs numpy 2.4.3 across square/rectangular/matvec/large-K + batched shapes incl inf/nan;
+conformance f16_matmul_parallel_bit_exact_matches_numpy PASSED): numpy accumulates each output element in f32
+over k=0..K-1 IN ORDER, narrows to f16 ONCE (== einsum('ik,kj->ij', f32, f32, optimize=False) narrowed; NOT
+narrow(f32 BLAS) which reorders, NOT f16-per-step accumulation). The native ikj GEMM parallelized across output
+rows uses an f32 accumulator in the SAME k-order + a single narrow -> bit-for-bit identical. Batched = per-slice
+identical. Extends the "numpy has no BLAS for dtype X -> naive loop" lever (integer matmul) to float16.
+OPEN follow-up: f16 tensordot(axes>=1) is byte-exact == this matmul kernel and numpy is ~488ms@512 (route the
+reshape like int tensordot); f16 inner has a DIFFERENT reduction (not seq-k, deferred). AGENT_NAME=BlackThrush.
