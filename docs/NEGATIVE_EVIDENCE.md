@@ -12936,3 +12936,24 @@ BIT-EXACT for distinct values (conformance int_argsort_flat_parallel_bit_exact_m
 u32/u64 byte-exact + verified sorts correctly; DUPLICATES defer to numpy and still match, PASSED). Ties defer
 (unstable tie order), so categorical/low-cardinality int columns fall back to numpy; distinct keys (IDs, shuffled
 ranges, continuous-derived) win 4.1x. (int argsort last-axis/axis0 = next, mirror the f64 paths.) AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel DATETIME64/TIMEDELTA64 argsort along last/axis0/middle axes — 2.5-6.1x
+`BlackThrush`. Companion to the datetime64 flat argsort (ab8f49d6) and flat value sort (faded274). numpy
+has NO AVX-512 x86-simd-sort for 'M'/'m' dtypes, so np.argsort of datetime64/timedelta64 along an axis uses
+the SAME generic single-threaded per-lane comparison introsort as int64. argsort returns an intp permutation
+regardless of input dtype and datetime ordering IS int64 tick ordering, so viewing as int64 and delegating
+straight to the proven int64 per-lane argsort axis kernels (try_native_int_argsort_lastaxis/_axis0/_midaxis)
+is BYTE-EXACT. Added try_native_datetime_argsort_axes: gate 'M'/'m' itemsize-8 >=2-D C-contig, NaT pre-scan
+(== i64::MIN -> defer; numpy orders NaT specially), int64 view, route to the 3 int64 axis helpers (which
+defer on per-lane ties -> distinct ticks give the unique permutation numpy returns). Hooked into argsort()
+AFTER the int/f32/complex axis paths (they return None for 'M'/'m' kind so datetime falls through).
+Conformance int_argsort_flat_parallel_bit_exact extended (datetime64[s] last-axis 4096x256, axis-0 256x4096,
+middle 64x256x64 — all distinct-per-lane byte-exact), PASSED on rch worker (build clean).
+PERF: by kernel identity with the int64 axis argsort reused — last-axis 6.1x (847aa891), axis-0 4.8x
+(5aab15f1), middle 2.5x (ba2a2817) — numpy datetime64 argsort is the identical int64-backed generic
+introsort (no simd-sort for 'M'/'m'). Last-axis bench (16M datetime64[s], 16384x1024 distinct-per-lane)
+added to python_flat_sort_dtype_boundary. Thin int64-view adapter = zero extra kernel cost.
+**LESSON: a dtype numpy lacks a simd-sort for (datetime64/timedelta64) but whose ORDER equals an
+already-accelerated dtype's order (int64) is a free byte-exact win via a view+delegate adapter — no new
+kernel, just NaT/tie defer + route. argsort's intp output is dtype-agnostic so the int64 axis kernels apply
+verbatim.** AGENT_NAME=BlackThrush.

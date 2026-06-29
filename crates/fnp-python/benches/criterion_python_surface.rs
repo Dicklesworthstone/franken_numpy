@@ -2382,6 +2382,14 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
                 black_box(numpy_sort.call((&am_c64,), Some(&axis1_kwargs)).expect("numpy sort am c64"))
             });
         });
+        // datetime64 last-axis argsort: la (16384x1024 distinct-per-lane int64) cast to datetime64[s]
+        let la_dt = la.call_method1("astype", ("datetime64[s]",)).expect("la dt64");
+        group.bench_function("fnp_argsort_datetime64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&la_dt,)).expect("fnp argsort la dt64")));
+        });
+        group.bench_function("numpy_argsort_datetime64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(numpy_argsort.call1((&la_dt,)).expect("numpy argsort la dt64")));
+        });
     });
 
     group.finish();

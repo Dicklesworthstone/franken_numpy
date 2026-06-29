@@ -1255,6 +1255,13 @@ dtd = rng.integers(0, 1000, n).astype("datetime64[s]")  # heavy ties -> delegate
 ok = ok and fnp.argsort(dtd).tobytes() == np.argsort(dtd).tobytes()
 dtn = dts.copy(); dtn[5] = np.datetime64("NaT"); dtn[n // 2] = np.datetime64("NaT")  # NaT -> delegate
 ok = ok and fnp.argsort(dtn).tobytes() == np.argsort(dtn).tobytes()
+# DATETIME64 argsort AXES (last/axis0/mid), distinct-per-lane via int64 view
+dml = np.stack([rng.permutation(256) for _ in range(4096)]).astype("datetime64[s]")  # last-axis
+ok = ok and fnp.argsort(dml).tobytes() == np.argsort(dml).tobytes()
+dma0 = np.stack([rng.permutation(256) for _ in range(4096)], axis=1).astype("datetime64[s]")  # axis0
+ok = ok and fnp.argsort(dma0, axis=0).tobytes() == np.argsort(dma0, axis=0).tobytes()
+dmm = np.argsort(rng.standard_normal((64, 256, 64)), axis=1).astype("datetime64[s]")  # middle axis
+ok = ok and fnp.argsort(dmm, axis=1).tobytes() == np.argsort(dmm, axis=1).tobytes()
 print(bool(ok))
 "#
         .into(),
