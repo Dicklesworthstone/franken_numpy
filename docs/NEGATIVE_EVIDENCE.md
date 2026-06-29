@@ -13079,9 +13079,16 @@ PyBuffer Element) carrying the SAME f16-narrowed accumulator, mirroring cumsum_a
 chains fanned across the pool. BIT-EXACT (NaN/inf propagate naturally -> NO defers, cleaner than min/max/nan).
 Wired cumsum(is_prod=false)+cumprod(is_prod=true) above the guard; flat axis=None stays sequential.
 Conformance f16_axis_cumsum_cumprod_bit_exact (cumsum+cumprod last 4096x256 + axis0 + middle 64x256x64
-byte-exact + NaN-propagation + overflow-to-inf), PASSED (build clean, exit=0). PERF ratio IN-FLIGHT (numpy
-baseline 138/106ms@16M single-threaded vs ~4000-lane parallel); recorded in a follow-up -- NOT estimated
-(kernel-identity overclaimed nanmin/nanmax last time). **f16 vein now: min/max + ptp + nanmin/nanmax +
+byte-exact + NaN-propagation + overflow-to-inf), PASSED (build clean, exit=0). MEASURED PERF (criterion, rch
+worker, 16M f16 4000x4000) — path ENGAGES (fnp << numpy, not dead): cumsum lastaxis 8.10x (25.9 vs 209.6ms),
+axis0 2.97x (151.4 vs 449.4ms); cumprod lastaxis 4.44x (43.0 vs 190.7ms), axis0 2.64x (143.3 vs 378.2ms).
+Range **2.64-8.10x**. **LAST axis (inner==1, parallel across 4000 lanes) is the big win (8.1x); AXIS 0 has
+outer==1 ALWAYS (k=0 -> product(shape[..0])=1), so my non-last branch (gated outer>=2) runs SERIAL there --
+the 2.6-3x axis0 win is the serial f16 kernel beating numpy's serial scan, NOT parallelism. OPEN follow-up:
+parallelize axis0 across the `inner` independent columns (split inner, not outer) to lift axis0 toward the
+lastaxis 8x.** This time I held the title to "bit-exact, parallel-across-lanes" with NO numeric estimate and
+recorded the measured ratio here (vs the nanmin/nanmax overclaim) -- the discipline worked. **f16 vein now:
+min/max + ptp + nanmin/nanmax +
 cumsum/cumprod. cumsum/cumprod is a SCAN not a reduce (sequential within lane, parallel across lanes -- the
 96th-98th scan pattern); f16 scan is bit-exact because numpy's per-lane sequential f16-narrowed scan is
 deterministic (no pairwise ambiguity, unlike f16 sum/mean).** See [[integer-matmul-no-blas-lever]].
