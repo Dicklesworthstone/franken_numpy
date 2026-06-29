@@ -2044,6 +2044,18 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
                 )
             });
         });
+        // int64 flat argsort on DISTINCT data (shuffled permutation) -> native path
+        let perm = rng
+            .call_method1("permutation", (16_000_000_i64,))
+            .expect("perm 16M");
+        let fnp_argsort = module.getattr("argsort").expect("fnp argsort");
+        let numpy_argsort = numpy.getattr("argsort").expect("numpy argsort");
+        group.bench_function("fnp_argsort_int64_16m", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&perm,)).expect("fnp argsort")));
+        });
+        group.bench_function("numpy_argsort_int64_16m", |bch| {
+            bch.iter(|| black_box(numpy_argsort.call1((&perm,)).expect("numpy argsort")));
+        });
     });
 
     group.finish();

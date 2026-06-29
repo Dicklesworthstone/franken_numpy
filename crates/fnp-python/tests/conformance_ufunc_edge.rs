@@ -1088,6 +1088,40 @@ print(bool(ok))
 }
 
 #[test]
+fn int_argsort_flat_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy argsort is single-threaded introsort. The native parallel argsort (sort a [0..n] index
+    // permutation by value) is byte-identical to np.argsort for DISTINCT integer values (unique
+    // permutation); ties defer to numpy (unstable order is algorithm-specific). 4-/8-byte ints.
+    let script = fnp_script(
+        r#"
+n = (1 << 20) + 257
+rng = np.random.default_rng(131)
+ok = True
+# DISTINCT values (shuffled arange-like) -> native path, byte-exact
+for dt in ("int32", "int64", "uint32", "uint64"):
+    a = rng.permutation(n).astype(dt)  # distinct 0..n-1 permuted
+    r = fnp.argsort(a); e = np.argsort(a)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+    # verify it actually sorts
+    ok = ok and bool((a[r] == np.sort(a)).all())
+# DUPLICATES -> must DELEGATE to numpy and still match exactly
+ad = rng.integers(0, 1000, n, dtype=np.int64)  # heavy ties
+rd = fnp.argsort(ad); ed = np.argsort(ad)
+ok = ok and rd.tobytes() == ed.tobytes()
+print(bool(ok))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native int flat argsort must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn char_case_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy char.upper/lower/swapcase run single-threaded per element; the native ASCII path maps
     // codepoints in parallel above the gate. Must be BYTE-identical to numpy for all-ASCII input,

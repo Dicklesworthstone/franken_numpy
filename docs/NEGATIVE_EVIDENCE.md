@@ -12922,3 +12922,17 @@ all bandwidth-bound copy/pad = ~0-gain on a clean worker; the string-op frontier
 per-element-Python ops (upper/lower/swapcase/cap/title/translate/replace) and the bandwidth ops that happened to
 have numpy overhead (add/multiply/strip ~2x) were wins. LESSON (reinforced): ALWAYS get the clean-worker numpy
 baseline before building — a loaded-box standalone ms can overstate the gap 5-7x.** AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel INTEGER flat argsort (int32/int64/uint32/uint64) — 4.1x
+`BlackThrush`. fnp had f64 argsort (flat/lastaxis/axis0) but INTEGER argsort delegated to numpy's single-threaded
+introsort (COMPUTE-bound, ~4.36s@16M i64 on the clean worker). Added try_native_int_argsort_flat (mirrors the f64
+flat argsort): par_sort_unstable a [0..n] intp permutation by value, then DEFER on any tie (numpy's unstable order
+is algorithm-specific; DISTINCT values give the UNIQUE permutation numpy returns -> byte-exact). 4-/8-byte ints.
+
+PERF (criterion, rch worker = truth; 16M i64 DISTINCT permutation):
+  int64 flat argsort: fnp 1.063 s vs NumPy 4.359 s = 0.244x / 4.10x faster
+BIG (argsort is COMPUTE-bound — the right kind of lever, NOT the bandwidth trap). GATE ARGSORT_PARALLEL_MIN=1<<20.
+BIT-EXACT for distinct values (conformance int_argsort_flat_parallel_bit_exact_matches_numpy: distinct i32/i64/
+u32/u64 byte-exact + verified sorts correctly; DUPLICATES defer to numpy and still match, PASSED). Ties defer
+(unstable tie order), so categorical/low-cardinality int columns fall back to numpy; distinct keys (IDs, shuffled
+ranges, continuous-derived) win 4.1x. (int argsort last-axis/axis0 = next, mirror the f64 paths.) AGENT_NAME=BlackThrush.
