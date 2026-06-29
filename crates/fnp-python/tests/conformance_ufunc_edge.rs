@@ -1880,6 +1880,37 @@ print(ok)
 }
 
 #[test]
+fn f16_axis_ptp_reduction_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy widens f16->f32 for BOTH max and min passes then subtracts (the slowest f16 reduction),
+    // striding for non-last axes. The native uint16-view per-lane parallel max-min narrowed to f16
+    // must be byte-identical on the LAST axis, AXIS 0, and a MIDDLE axis. A NaN-present array defers
+    // to numpy and must still match byte-for-byte. ptp is non-negative so no signed-zero tie.
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(42)
+ok = True
+m2 = (rng.standard_normal((4096, 256)) * 50 + 300).astype(np.float16)
+m3 = (rng.standard_normal((64, 256, 64)) * 50 + 300).astype(np.float16)
+for arr, ax in [(m2, -1), (m2, 0), (m3, 1)]:
+    r = fnp.ptp(arr, axis=ax); e = np.ptp(arr, axis=ax)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.view(np.uint16).tobytes() == e.view(np.uint16).tobytes()
+# NaN present in a lane -> defer to numpy, still byte-identical
+nan2 = m2.copy(); nan2[3, 7] = np.float16(np.nan)
+ok = ok and fnp.ptp(nan2, axis=-1).view(np.uint16).tobytes() == np.ptp(nan2, axis=-1).view(np.uint16).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 axis ptp reduction must be bit-identical to numpy (last/axis0/middle + defer): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_predicate_isnan_isinf_isfinite_signbit_full_domain_matches_numpy() -> Result<(), String> {
     // numpy widens f16 to f32 for isnan/isinf/isfinite/signbit; the native parallel uint16
     // bit-check must produce the identical bool array over the ENTIRE f16 domain (all 65536

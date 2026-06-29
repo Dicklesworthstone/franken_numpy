@@ -13024,3 +13024,21 @@ ALU-widen penalty (no native f16 hardware) makes EVERY f16 reduction a parallel 
 f64/f32 are only bandwidth-bound. OPEN f16: sum/mean/prod along axes (numpy widens too; needs pairwise-order
 match for bit-exact sum), ptp along axes (max-min, same kernel), nanmin/nanmax along axes.** See
 [[integer-matmul-no-blas-lever]] (f16 ALU-widen family). AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel FLOAT16 ptp (max-min) reduction ALONG AN AXIS (last/axis0/middle) — 8.5-12.2x
+`BlackThrush`. Companion to the f16 axis min/max win (ffec4fa2). numpy has NO native f16 ALU -> np.ptp of
+float16 widens f16->f32 for BOTH max and min passes then subtracts = the SLOWEST f16 reduction (~167ms@16M
+flat). fnp had the FLAT f16 ptp fast path but every AXIS ptp delegated to numpy's slow widen-scan (strides
+too for non-last axes). Added try_zerocopy_f16_ptp_axis: ONE uint16-view kernel reducing along ANY single
+axis via outer/axis_len/inner (last=inner 1, axis0=outer 1, middle=both>1), par_iter over the output,
+narrow(max_f32 - min_f32) per lane. BIT-EXACT: numpy's f16 subtract ALSO widens to f32 then narrows, so
+narrow(max_f32-min_f32) == numpy's f16(max)-f16(min) exactly (flat f16 ptp kernel proves it incl signed
+zeros/inf). Any NaN DEFERS whole op. ptp non-negative -> NO zero-extremum defer (unlike min/max). Wired into
+ptp() after flat path; gated single-int-axis + f16 + contiguous + total>=1<<20 (out/keepdims/tuple already
+fall back). Conformance f16_axis_ptp_reduction_bit_exact (last 4096x256 + axis0 + middle 64x256x64 byte-exact
++ NaN-defer), PASSED (build clean, exit=0). PERF (criterion, rch worker, 16M f16 4000x4000): ptp last-axis
+fnp 4.81ms vs NumPy 58.67ms=12.19x, axis-0 4.72ms vs 40.00ms=8.48x. fnp ~4.8ms << numpy 40-59ms = ENGAGES.
+**f16 AXIS-REDUCTION vein now covers min/max (ffec4fa2) + ptp (this); all share the outer/axis_len/inner
+one-kernel decomposition. REMAINING f16 axis: sum/mean/prod (need numpy pairwise-tree match for bit-exact),
+nanmin/nanmax/nanmean (NaN-skip per lane).** See [[integer-matmul-no-blas-lever]] (f16 ALU-widen family).
+AGENT_NAME=BlackThrush.

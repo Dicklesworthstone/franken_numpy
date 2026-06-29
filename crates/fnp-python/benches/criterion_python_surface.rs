@@ -6072,6 +6072,30 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
                 });
             });
         }
+        // f16 ptp along last-axis + axis-0 (4000x4000): numpy widens f16->f32 for BOTH passes then
+        // subtracts (the slowest f16 reduction); native per-lane max-min wins (bit-exact, NaN defer).
+        let fnp_ptp = module.getattr("ptp").expect("fnp ptp");
+        let numpy_ptp = numpy.getattr("ptp").expect("numpy ptp");
+        group.bench_function("fnp_ptp_lastaxis_f16_16m", |bch| {
+            bch.iter(|| {
+                black_box(fnp_ptp.call((&hsq2,), Some(&kw_axis)).expect("fnp f16 lastaxis ptp"))
+            });
+        });
+        group.bench_function("numpy_ptp_lastaxis_f16_16m", |bch| {
+            bch.iter(|| {
+                black_box(numpy_ptp.call((&hsq2,), Some(&kw_axis)).expect("numpy f16 lastaxis ptp"))
+            });
+        });
+        group.bench_function("fnp_ptp_axis0_f16_16m", |bch| {
+            bch.iter(|| {
+                black_box(fnp_ptp.call((&hsq2,), Some(&kw_axis0)).expect("fnp f16 axis0 ptp"))
+            });
+        });
+        group.bench_function("numpy_ptp_axis0_f16_16m", |bch| {
+            bch.iter(|| {
+                black_box(numpy_ptp.call((&hsq2,), Some(&kw_axis0)).expect("numpy f16 axis0 ptp"))
+            });
+        });
         for op in ["argmax", "argmin"] {
             let fnp_fn = module.getattr(op).expect("fnp arg op");
             let numpy_fn = numpy.getattr(op).expect("numpy arg op");
