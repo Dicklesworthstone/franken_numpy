@@ -5435,6 +5435,27 @@ epw = rng.integers(0, 12, 16_000_000).astype(np.int64)\n";
                 bch.iter(|| black_box(numpy_fn.call1((&ag, &cg)).expect("numpy int call")));
             });
         }
+        // timedelta64 // timedelta64 -> int64: numpy single-threaded w/ per-element NaT (~212ms@16M).
+        py.run(
+            std::ffi::CString::new(
+                "atd = (np.abs(ag).astype('timedelta64[s]')); ctd = (np.where(cg==0,1,np.abs(cg)).astype('timedelta64[s]'))",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("timedelta setup");
+        let atd = ns.get_item("atd").expect("atd");
+        let ctd = ns.get_item("ctd").expect("ctd");
+        let fnp_fd = module.getattr("floor_divide").expect("fnp floor_divide");
+        let numpy_fd = numpy.getattr("floor_divide").expect("numpy floor_divide");
+        group.bench_function("fnp_floor_divide_td64_16m", |bch| {
+            bch.iter(|| black_box(fnp_fd.call1((&atd, &ctd)).expect("fnp td floordiv")));
+        });
+        group.bench_function("numpy_floor_divide_td64_16m", |bch| {
+            bch.iter(|| black_box(numpy_fd.call1((&atd, &ctd)).expect("numpy td floordiv")));
+        });
     });
 
     group.finish();

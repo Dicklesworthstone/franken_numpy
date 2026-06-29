@@ -12449,3 +12449,22 @@ zero block comes out scrambled (e.g. [-0,+0,+0,-0] for one input, [-0,+0,-0,+0] 
 reproduce that. Realistic f16 data rounds many small values to exactly +-0, so a "defer when both signed zeros present"
 gate would fire on most arrays -> not a useful win. NOT SHIPPED. (Same class of blocker as the f16 axis min/max VALUE
 reductions: an "equal-but-distinct-bits" tie whose order numpy doesn't fix deterministically.) AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel TIMEDELTA64 floor_divide (td // td -> int64)
+`BlackThrush`. A NEW dtype beyond f16/int/f32: numpy runs timedelta64 // timedelta64 single-threaded with per-element
+NaT handling (16M ~212ms — ~2x int64 floor_divide because of the NaT checks). Added try_native_timedelta_floordiv:
+require same-dtype (same unit) timedelta64 ('m' kind), view both as int64 (timedelta64 is int64 internally, NaT =
+i64::MIN), scan for NaT (either == INT_MIN) or zero divisor and DEFER those to numpy (numpy returns 0 there, not the
+floored quotient + a RuntimeWarning), else route to the existing int64 floored-division kernel (int_binary_map_typed)
+producing an int64 result. Hooked into the binary ufunc __call__ FloorDivide block (after the int floor_divide path).
+BIT-EXACT: for same-unit non-NaT non-zero operands, td // td == int64 floor_divide of the raw counts (verified vs numpy
+incl mixed signs); NaT/zero cases defer and still match numpy byte-for-byte. Mixed units / non-contiguous defer.
+
+PERF (criterion, rch worker = truth; timedelta64[s], 16M elements, non-NaT/non-zero):
+  td64 // td64 16M: fnp 36.73 ms vs NumPy 106.46 ms = 0.345x / ~2.9x faster
+CORRECTNESS: new conformance test timedelta_floordiv_parallel_bit_exact_matches_numpy -> byte-identical to numpy for
+td//td + the // operator incl mixed signs + NaT-present and zero-divisor DEFER cases.
+WHY NOT ~0-GAIN: numpy timedelta floor_divide is single-threaded with per-element NaT branches (~212ms, ~2x the int64
+loop); the native parallel kernel defers NaT once (scan) and runs the plain int64 floored division. PRE-EXISTING (not
+mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. Extends the single-threaded-element-op lever to timedelta64.
+AGENT_NAME=BlackThrush.

@@ -693,6 +693,45 @@ print(ok)
 }
 
 #[test]
+fn timedelta_floordiv_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // td // td -> int64. numpy runs it single-threaded with per-element NaT handling; for same-
+    // unit non-NaT non-zero operands it equals int64 floor_divide of the raw counts. NaT and zero
+    // divisor defer to numpy (which returns 0). Must be byte-identical above the 1<<18 gate.
+    let script = fnp_script(
+        r#"
+import warnings
+n = (1 << 18) + 257
+rng = np.random.default_rng(61)
+a = rng.integers(-10**7, 10**7, n).astype('timedelta64[s]')
+b = rng.integers(-10**7, 10**7, n).astype('timedelta64[s]')
+b[b == np.timedelta64(0, 's')] = np.timedelta64(1, 's')   # non-zero divisors -> exercise kernel
+a[0] = np.timedelta64(7, 's'); b[0] = np.timedelta64(-3, 's')   # mixed-sign floor
+ok = True
+r = a // b; e = np.floor_divide(a, b)
+ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+ok = ok and np.floor_divide(a, b).tobytes() == e.tobytes()
+# NaT present -> defers to numpy (numpy returns 0), still matches
+an = a.copy(); an[5] = np.timedelta64('NaT')
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    ok = ok and (an // b).tobytes() == np.floor_divide(an, b).tobytes()
+    # zero divisor -> defers to numpy
+    bz = b.copy(); bz[9] = np.timedelta64(0, 's')
+    ok = ok and (a // bz).tobytes() == np.floor_divide(a, bz).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native timedelta64 floor_divide must be bit-identical to numpy (incl NaT/zero defer): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_nextafter_full_domain_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy widens f16->f32 for nextafter; the native uint16 bit-step must be byte-identical over
     // the FULL f16 domain for several scalar targets b (incl 0/-0/inf/nan), tiled past the gate.
