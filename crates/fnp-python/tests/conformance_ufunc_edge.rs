@@ -693,6 +693,44 @@ print(ok)
 }
 
 #[test]
+fn f32_ldexp_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy f32 ldexp (scalbnf) is single-threaded; the native widen->exact-pow2-scale->narrow is
+    // a single rounding (== scalbnf), bit-identical across the exponent range incl 0/-0/inf/nan
+    // mantissas and subnormal/overflow exponents, above the gate.
+    let script = fnp_script(
+        r#"
+n = (1 << 20) + 257
+rng = np.random.default_rng(79)
+x = rng.standard_normal(n).astype(np.float32)
+e = rng.integers(-300, 300, n).astype(np.int32)
+x[0]=np.float32(0.0); x[1]=np.float32(-0.0); x[2]=np.float32(np.inf); x[3]=np.float32(-np.inf); x[4]=np.float32(np.nan)
+x[5]=np.float32(1e38); e[5]=np.int32(40)        # overflow -> inf
+x[6]=np.float32(1e-30); e[6]=np.int32(-40)      # underflow -> 0/subnormal
+e[0]=np.int32(100); e[2]=np.int32(7)
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    r = fnp.ldexp(x, e); ee = np.ldexp(x, e)
+ok = r.dtype == ee.dtype and r.shape == ee.shape
+ok = ok and ((r.view(np.uint32) == ee.view(np.uint32)) | (np.isnan(r) & np.isnan(ee))).all()
+# 2-D shape preserved
+x2 = x[:1 << 20].reshape(1024, 1024); e2 = e[:1 << 20].reshape(1024, 1024)
+r2 = fnp.ldexp(x2, e2); ee2 = np.ldexp(x2, e2)
+ok = ok and ((r2.view(np.uint32) == ee2.view(np.uint32)) | (np.isnan(r2) & np.isnan(ee2))).all()
+print(bool(ok))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f32 ldexp must be bit-identical to numpy across the exponent range: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f32_polyval_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy polyval (Horner) is single-threaded; for f32 coeffs + f32 x the result is f32 with an
     // in-f32 Horner. The native parallel per-element f32 Horner must be byte-identical, above the

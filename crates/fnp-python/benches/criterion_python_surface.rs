@@ -5501,6 +5501,27 @@ epw = rng.integers(0, 12, 16_000_000).astype(np.int64)\n";
         group.bench_function("numpy_polyval_f32_16m", |bch| {
             bch.iter(|| black_box(numpy_pv.call1((&pvp, &pvx)).expect("numpy polyval")));
         });
+        // f32 ldexp: numpy scalbnf single-threaded (~86ms@16M).
+        py.run(
+            std::ffi::CString::new(
+                "lxx = np.random.default_rng(13).standard_normal(16_000_000).astype(np.float32); lxe = np.random.default_rng(14).integers(-40,40,16_000_000).astype(np.int32)",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("ldexp setup");
+        let lxx = ns.get_item("lxx").expect("lxx");
+        let lxe = ns.get_item("lxe").expect("lxe");
+        let fnp_le = module.getattr("ldexp").expect("fnp ldexp");
+        let numpy_le = numpy.getattr("ldexp").expect("numpy ldexp");
+        group.bench_function("fnp_ldexp_f32_16m", |bch| {
+            bch.iter(|| black_box(fnp_le.call1((&lxx, &lxe)).expect("fnp ldexp")));
+        });
+        group.bench_function("numpy_ldexp_f32_16m", |bch| {
+            bch.iter(|| black_box(numpy_le.call1((&lxx, &lxe)).expect("numpy ldexp")));
+        });
     });
 
     group.finish();

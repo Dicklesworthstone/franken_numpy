@@ -12533,3 +12533,22 @@ Extends the "f64-only path delegates f32" lever (var/std, binary, searchsorted) 
   libm) won't match bit-for-bit -> not bit-reproducible. Not shipped (same reason as f16/f32 transcendentals).
 These close the compute-bound members of the "f64-only fast path, f32 delegates" sub-lever: the clean ones (searchsorted
 ~36.6x, polyval ~41.6x) shipped; vander (f64-promoted) and sinc (libm) do not qualify. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT32 ldexp - numpy scalbnf single-threaded
+`BlackThrush`. Another "f64-only path delegates f32" win. numpy runs f32 ldexp (scalbnf) single-threaded (~86ms@16M);
+fnp had only try_zerocopy_f64_i32_ldexp so f32 mantissa + i32 exponent delegated. Added try_zerocopy_f32_i32_ldexp:
+par_chunks_mut over (mantissa, exponent); per element widen mantissa to f64, scale by the EXACT power-of-two 2^n (f64),
+narrow to f32. Hooked into the ldexp pyfunction after the f64 path.
+BIT-EXACT: ldexp(x,n) = x*2^n; the f64 power-of-two scaling is EXACT whenever the f32 result is in the subnormal/normal
+range, so narrowing is a SINGLE rounding == numpy's scalbnf (verified byte-exact over 1M+ incl 0/-0/inf/nan mantissas
+and subnormal/overflow exponents). 0/-0/inf/nan mantissas pass through unchanged (ldexp identity). f32 mantissa + i32
+exponent, matching shapes, C-contiguous; other dtype combos defer.
+
+PERF (criterion, rch worker = truth; f32, 16M elements):
+  ldexp f32 16M: fnp 19.94 ms vs NumPy 98.09 ms = 0.203x / ~4.9x faster
+CORRECTNESS: new conformance test f32_ldexp_parallel_bit_exact_matches_numpy -> byte-identical to numpy across the
+exponent range incl 0/-0/inf/nan + overflow/underflow + 2-D.
+WHY NOT ~0-GAIN: numpy f32 ldexp is single-threaded scalbnf (~86ms); the native parallel widen-scale-narrow aggregates
+cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. Extends the "f64-only path delegates
+f32" lever (searchsorted/polyval) to ldexp. (f32 spacing NOT shipped: ULP scale is f32-specific, widen-narrow gives the
+f64 ULP — needs a direct f32 bit formula; deferred.) AGENT_NAME=BlackThrush.
