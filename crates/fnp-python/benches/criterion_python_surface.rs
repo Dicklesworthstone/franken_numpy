@@ -6029,6 +6029,29 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
                 bch.iter(|| black_box(numpy_frexp.call1((&hsq,)).expect("numpy f16 frexp")));
             });
         }
+        // f16 ldexp: numpy widens f16->f32, scalbnf, narrows — single-threaded (~108ms@16M = ~1.2
+        // GB/s, compute-bound). Native parallel exact-pow2-scale wins. (i32 exponent in [-5,5).)
+        py.run(
+            std::ffi::CString::new(
+                "lde = rng.integers(-5, 5, 16_000_000, dtype=np.int32)",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("f16 ldexp setup");
+        let lde = ns.get_item("lde").expect("lde");
+        {
+            let fnp_ldexp = module.getattr("ldexp").expect("fnp ldexp");
+            let numpy_ldexp = numpy.getattr("ldexp").expect("numpy ldexp");
+            group.bench_function("fnp_ldexp_f16_16m", |bch| {
+                bch.iter(|| black_box(fnp_ldexp.call1((&hsq, &lde)).expect("fnp f16 ldexp")));
+            });
+            group.bench_function("numpy_ldexp_f16_16m", |bch| {
+                bch.iter(|| black_box(numpy_ldexp.call1((&hsq, &lde)).expect("numpy f16 ldexp")));
+            });
+        }
         // f16 clip: numpy widens f16->f32 to clamp (~149ms@16M, biggest f16 elementwise gap).
         {
             let fnp_clip = module.getattr("clip").expect("fnp clip");

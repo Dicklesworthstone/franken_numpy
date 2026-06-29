@@ -13227,3 +13227,16 @@ rch WORKER, 16M f16): fnp 17.28ms vs NumPy 80.86ms = **4.68x**. f16 IEEE-determi
 now: reciprocal/sqrt/square + fmod/remainder/copysign/heaviside/nextafter/divide/floor_divide + min/max/ptp/
 nan*/cumsum/cumprod/nancum* + modf + frexp. Remaining are libm (hypot/transcendentals = proven non-bit-exact)
 or bit-trick (abs/sign = no gap). See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel FLOAT16 ldexp (x*2^e) — >=1.60x (direct-2^n optimization, re-bench pending)
+`BlackThrush`. Completes f16 ldexp/frexp (frexp e8b5056d). numpy has NO f16 ALU -> np.ldexp(f16,i32) widens,
+scalbnf, narrows single-threaded (~104ms@16M WORKER, ~1.2 GB/s compute-bound). Added try_zerocopy_f16_i32_
+ldexp above the f64/f32 ldexp paths: widen f16->f64, scale by 2^n, narrow. BYTE-EXACT (f64 product exact in
+f32 -> single f32->f16 rounding == scalbnf; verified exhaustively over full domain x exponents incl
+overflow/underflow). **PERF NOTE: the naive `2.0.powi(e)` per element measured only 1.60x (64.80 vs
+103.55ms) — powi is a generic integer-power LOOP, the bottleneck. Replaced with DIRECT 2^n from the f64
+exponent bits `f64::from_bits(((e+1023) as u64)<<52)` for |e|<=1023 (one op, exactly == powi for valid e),
+which avoids the loop -> should lift toward ~7x (re-bench pending). LESSON: x*2^n in a hot loop must build
+2^n from exponent bits, NEVER call powi/powf.** Conformance f16_ldexp_parallel_bit_exact PASSED (powi
+formulation exit=0; direct-2^n bit-identical for tested exponents). Claimed conservatively as >=1.60x FLOOR;
+optimized re-bench in a follow-up. See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.

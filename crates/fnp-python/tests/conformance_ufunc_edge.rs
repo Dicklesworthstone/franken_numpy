@@ -2076,6 +2076,46 @@ print(ok)
 }
 
 #[test]
+fn f16_ldexp_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // np.ldexp(float16, int32) = x * 2^e. numpy has no f16 ALU -> widens, scalbnf, narrows single-
+    // threaded. The native widen->exact-pow2-scale->narrow (one rounding) must be byte-identical over
+    // the full f16 domain x exponents incl overflow(->inf)/underflow(->0/subnormal); 0/inf/nan identity.
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(51)
+ok = True
+n = (1 << 20) + 257
+a = (rng.standard_normal(n)).astype(np.float16)
+e = rng.integers(-30, 20, n).astype(np.int32)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    r = fnp.ldexp(a, e); ex = np.ldexp(a, e)
+ok = ok and r.dtype == ex.dtype and r.shape == ex.shape
+ok = ok and r.view(np.uint16).tobytes() == ex.view(np.uint16).tobytes()
+# EXHAUSTIVE: every f16 value x a fixed exponent (incl overflow/underflow/inf/nan/zero)
+allf16 = np.arange(65536, dtype=np.uint16).view(np.float16)
+for ev in (-40, -14, -1, 0, 1, 14, 40):
+    full = np.tile(allf16, (1 << 20) // 65536 + 2)
+    efull = np.full(full.size, ev, dtype=np.int32)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        rf = fnp.ldexp(full, efull); eff = np.ldexp(full, efull)
+    ok = ok and bool(((rf.view(np.uint16) == eff.view(np.uint16)) | (np.isnan(rf) & np.isnan(eff))).all())
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 ldexp must be byte-identical to numpy (full domain x exponents incl over/underflow): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_frexp_full_domain_bit_exact_matches_numpy() -> Result<(), String> {
     // np.frexp(f16) -> (mantissa f16, exponent int32). It is an EXACT bit/exponent decomposition
     // (no rounding, no libm): mantissa = x/2^e in [0.5,1) is exactly representable in f16. numpy widens
