@@ -988,6 +988,41 @@ print(bool(ok))
 }
 
 #[test]
+fn f16_tensordot_inner_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy has no f16 BLAS, so tensordot(axes>=1) and inner run the slow naive widen matmul. Both
+    // flatten to the native f16 GEMM (tensordot via contiguous reshape; inner via a @ contiguous(b.T)),
+    // so the result must be BYTE-identical to np.tensordot / np.inner across axes specs and shapes.
+    let script = fnp_script(
+        r#"
+ok = True
+rng = np.random.default_rng(31)
+# tensordot axes=1 (2-D) and axes=2 (4-D contracting 2)
+a = (rng.standard_normal((256, 256)) * 0.3).astype(np.float16); b = (rng.standard_normal((256, 256)) * 0.3).astype(np.float16)
+rt = fnp.tensordot(a, b, axes=1); et = np.tensordot(a, b, axes=1)
+ok = ok and rt.dtype == et.dtype and rt.shape == et.shape
+ok = ok and ((rt.view(np.uint16) == et.view(np.uint16)) | (np.isnan(rt) & np.isnan(et))).all()
+a4 = (rng.standard_normal((20, 16, 8, 8)) * 0.3).astype(np.float16); b4 = (rng.standard_normal((8, 8, 12)) * 0.3).astype(np.float16)
+rt2 = fnp.tensordot(a4, b4, axes=2); et2 = np.tensordot(a4, b4, axes=2)
+ok = ok and rt2.shape == et2.shape and ((rt2.view(np.uint16) == et2.view(np.uint16)) | (np.isnan(rt2) & np.isnan(et2))).all()
+# inner: contracts shared last axis
+ai = (rng.standard_normal((300, 64)) * 0.3).astype(np.float16); bi = (rng.standard_normal((200, 64)) * 0.3).astype(np.float16)
+ri = fnp.inner(ai, bi); ei = np.inner(ai, bi)
+ok = ok and ri.dtype == ei.dtype and ri.shape == ei.shape
+ok = ok and ((ri.view(np.uint16) == ei.view(np.uint16)) | (np.isnan(ri) & np.isnan(ei))).all()
+print(bool(ok))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 tensordot/inner must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f32_searchsorted_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy searchsorted is a single-threaded cold-cache binary search per query; the parallel
     // per-query lower/upper-bound search must return the identical intp index array for both

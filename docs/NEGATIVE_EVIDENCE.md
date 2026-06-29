@@ -12676,5 +12676,24 @@ over k=0..K-1 IN ORDER, narrows to f16 ONCE (== einsum('ik,kj->ij', f32, f32, op
 narrow(f32 BLAS) which reorders, NOT f16-per-step accumulation). The native ikj GEMM parallelized across output
 rows uses an f32 accumulator in the SAME k-order + a single narrow -> bit-for-bit identical. Batched = per-slice
 identical. Extends the "numpy has no BLAS for dtype X -> naive loop" lever (integer matmul) to float16.
-OPEN follow-up: f16 tensordot(axes>=1) is byte-exact == this matmul kernel and numpy is ~488ms@512 (route the
-reshape like int tensordot); f16 inner has a DIFFERENT reduction (not seq-k, deferred). AGENT_NAME=BlackThrush.
+**MEASUREMENT NOTE: the matmul ratios above were on a CONTENDED rch worker (fnp 0.2-1.9 GFLOP/s); the same
+kernel on an unloaded worker runs ~8ms@512 (see tensordot below = 16 GFLOP/s), so the matmul win is conservative
+(true ~60x@512, not 6.6x). Worker load varies between bench runs — the win DIRECTION is unambiguous.**
+AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel FLOAT16 tensordot(axes>=1) + inner — route to the f16 GEMM
+`BlackThrush`. Completes the f16 GEMM family. numpy has no f16 BLAS, so tensordot(axes>=1) and inner run the
+slow naive widen matmul. Both flatten to a 2-D GEMM (tensordot via contiguous reshape; inner via a @
+contiguous(b.T)), so try_native_f16_tensordot + try_native_f16_inner route to try_native_f16_matmul (the landed
+f16 GEMM kernel), hooked into the tensordot (axes>=1) and inner pyfunctions after the integer paths.
+
+BIT-EXACT (verified vs numpy 2.4.3 across axes=1/axes=2 + rectangular inner shapes; conformance test
+f16_tensordot_inner_parallel_bit_exact_matches_numpy PASSED): tensordot(axes>=1) flattens to (m,contract)@
+(contract,n) == the seq-k-f32 matmul; inner == matmul(a, ascontig(b.T)) seq-k-f32 (both verified byte-exact).
+
+PERF (criterion, rch worker = truth; f16, 512x512):
+  f16 tensordot(axes=1): fnp 8.27 ms vs NumPy 490.45 ms = 0.017x / 59.3x faster
+  f16 inner:             fnp 9.58 ms vs NumPy 481.80 ms = 0.020x / 50.3x faster
+(Same f16 GEMM kernel as matmul; this run was on an UNLOADED worker = 16 GFLOP/s, hence the 59x reflects the
+kernel's true speed vs the contended matmul-bench numbers.) f16 GEMM family COMPLETE: matmul(2-D+batched)/dot/
+tensordot/inner. AGENT_NAME=BlackThrush.

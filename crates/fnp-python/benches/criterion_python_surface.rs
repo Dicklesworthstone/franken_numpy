@@ -1848,6 +1848,25 @@ fn bench_f16_matmul_boundary(c: &mut Criterion) {
         group.bench_function("numpy_matmul_f16_batched_64x128", |bch| {
             bch.iter(|| black_box(numpy_matmul.call1((&a3, &b3)).expect("np f16 batched")));
         });
+        // f16 tensordot(axes=1) + inner at 512 (route to the f16 GEMM kernel)
+        let (at, bt) = make(512);
+        let fnp_td = module.getattr("tensordot").expect("fnp tensordot");
+        let numpy_td = numpy.getattr("tensordot").expect("numpy tensordot");
+        let fnp_inner = module.getattr("inner").expect("fnp inner");
+        let numpy_inner = numpy.getattr("inner").expect("numpy inner");
+        let one = 1_i64;
+        group.bench_function("fnp_tensordot_f16_512", |bch| {
+            bch.iter(|| black_box(fnp_td.call1((&at, &bt, one)).expect("fnp f16 tensordot")));
+        });
+        group.bench_function("numpy_tensordot_f16_512", |bch| {
+            bch.iter(|| black_box(numpy_td.call1((&at, &bt, one)).expect("np f16 tensordot")));
+        });
+        group.bench_function("fnp_inner_f16_512", |bch| {
+            bch.iter(|| black_box(fnp_inner.call1((&at, &bt)).expect("fnp f16 inner")));
+        });
+        group.bench_function("numpy_inner_f16_512", |bch| {
+            bch.iter(|| black_box(numpy_inner.call1((&at, &bt)).expect("np f16 inner")));
+        });
     });
 
     group.finish();
