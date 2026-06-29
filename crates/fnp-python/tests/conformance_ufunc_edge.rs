@@ -1207,6 +1207,17 @@ ok = ok and fnp.argsort(cm_mid, axis=1).tobytes() == np.argsort(cm_mid, axis=1).
 # c128 axis with full dup (tie) -> delegate, still match (last-axis)
 cmd = (rng.integers(0, 16, (4096, 256)).astype(np.float64) + 1j * rng.integers(0, 16, (4096, 256)).astype(np.float64)).astype(np.complex128)
 ok = ok and fnp.argsort(cmd).tobytes() == np.argsort(cmd).tobytes()
+# COMPLEX64 argsort: flat distinct-real (perm), full-dup defer, NaN defer, last-axis distinct-per-lane
+c6a = (rng.permutation(n).astype(np.float32) + 1j * rng.standard_normal(n).astype(np.float32)).astype(np.complex64)
+r6a = fnp.argsort(c6a); e6a = np.argsort(c6a)
+ok = ok and r6a.dtype == e6a.dtype and r6a.shape == e6a.shape and r6a.tobytes() == e6a.tobytes()
+ok = ok and bool((c6a[r6a] == np.sort(c6a)).all())
+c6ad = (rng.integers(0, 40, n).astype(np.float32) + 1j * rng.integers(0, 40, n).astype(np.float32)).astype(np.complex64)
+ok = ok and fnp.argsort(c6ad).tobytes() == np.argsort(c6ad).tobytes()  # full dup tie -> delegate
+c6an = c6a.copy(); c6an[7] = np.complex64(complex(np.nan, 1.0))
+ok = ok and fnp.argsort(c6an).tobytes() == np.argsort(c6an).tobytes()  # NaN -> delegate
+c6al = np.stack([rng.permutation(256).astype(np.float32) + 1j * rng.standard_normal(256).astype(np.float32) for _ in range(4096)]).astype(np.complex64)
+ok = ok and fnp.argsort(c6al).tobytes() == np.argsort(c6al).tobytes()  # last-axis distinct-per-lane
 print(bool(ok))
 "#
         .into(),

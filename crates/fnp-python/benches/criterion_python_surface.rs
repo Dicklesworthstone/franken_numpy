@@ -2290,6 +2290,19 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
         group.bench_function("numpy_sort_c64_lastaxis_16Mx", |bch| {
             bch.iter(|| black_box(numpy_sort.call1((&la_c64,)).expect("numpy sort la c64")));
         });
+        // COMPLEX64 argsort: reuse permc64 (flat distinct-real) + la_c64 (last-axis distinct-per-lane)
+        group.bench_function("fnp_argsort_c64_16m", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&permc64,)).expect("fnp argsort c64")));
+        });
+        group.bench_function("numpy_argsort_c64_16m", |bch| {
+            bch.iter(|| black_box(numpy_argsort.call1((&permc64,)).expect("numpy argsort c64")));
+        });
+        group.bench_function("fnp_argsort_c64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&la_c64,)).expect("fnp argsort la c64")));
+        });
+        group.bench_function("numpy_argsort_c64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(numpy_argsort.call1((&la_c64,)).expect("numpy argsort la c64")));
+        });
     });
 
     group.finish();
