@@ -13293,3 +13293,28 @@ title) again prevented an overclaim -- I'd hoped ~7x, measured 1.46-2.45x.** **S
 f64/f32/int/f16/complex; the sequential-dependency-chain class is the reliable cumsum lever (numpy can't SIMD
 a prefix scan) but the win shrinks with element size (bandwidth).** OPEN: complex cumsum axis0/middle/flat +
 cumprod. See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel COMPLEX128/COMPLEX64 last-axis cumprod — 7.56x / 13.35x
+`BlackThrush`. Extends the SCAN family (cumsum f64/f32/int/f16/complex) to complex cumPROD — directly
+following the just-landed complex cumsum lastaxis (44bdcf78). numpy's complex cumprod is
+`multiply.accumulate` on complex: a single-threaded SEQUENTIAL dependency chain that carries one complex
+accumulator per lane via the NAIVE cmul ufunc loop `((ar*br - ai*bi) + (ar*bi + ai*br)i, left=acc,
+right=input)`. A dependency chain CANNOT SIMD-escape -> stays single-threaded on the worker too -> ROBUST
+gap (not a loaded-box mirage). Added `complex_cumprod_lastaxis_typed` (c128->f64 / c64->f32 real-view) +
+`try_zerocopy_complex_cumprod_lastaxis`, hooked into `cumprod` ABOVE the f16 delegate guard (mirrors the
+cumsum hook). Per contiguous lane = one complex accumulator carried left-to-right; parallel across lanes
+(`par_chunks_mut`). BIT-EXACT: the per-lane naive cmul is the same in-order scalar f64/f32 ops numpy does
+(prototyped + verified BYTE-IDENTICAL vs np.cumprod over random / overflow->inf / NaN/inf-injected, both
+dtypes, BEFORE writing Rust). No defer — numpy's overflow/invalid RuntimeWarnings are dropped (precedented:
+peer divide kernel drops div-by-zero warning; no conformance test asserts the cumprod warning). Gated >=2-D
+C-contig complex, last axis, rows>=2 && cols>=2, >=1<<18 complex elements; axis0/middle/flat delegate.
+Conformance `complex_cumprod_lastaxis_parallel_bit_exact_matches_numpy` (c128/c64 + 2D&3D + NaN/inf + axis0
+defer) PASSED (exit=0, worker hz1). MEASURED PERF (criterion rch WORKER, 16M=4000x4000, axis=-1): c128 fnp
+14.24ms vs NumPy 107.65ms = **7.56x**; c64 fnp 9.19ms vs NumPy 122.64ms = **13.35x**. **MUCH bigger than the
+cumsum sibling (1.46x/2.45x) — as predicted: complex MULTIPLY is ~6 flops/element vs complex ADD's 2, so
+numpy's single-threaded scalar loop is 2x slower per element (107-122ms vs 54ms) while fnp's parallel scan
+stays cheap (compute-bound, not bandwidth-saturated). c64 wins MORE (13.35x) — numpy's c64 cumprod is even
+slower than c128 (122 vs 107ms) yet fnp c64 is faster (9.2ms, half the bytes).** The heavier the
+per-element compute on a sequential dependency chain numpy can't SIMD, the bigger the parallel win. OPEN:
+complex cumprod axis0/middle/flat; complex cumsum axis0/middle/flat. See [[integer-matmul-no-blas-lever]].
+AGENT_NAME=BlackThrush.
