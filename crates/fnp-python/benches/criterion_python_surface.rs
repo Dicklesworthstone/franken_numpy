@@ -2064,6 +2064,21 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
         group.bench_function("numpy_argsort_f32_16m", |bch| {
             bch.iter(|| black_box(numpy_argsort.call1((&permf32,)).expect("numpy argsort f32")));
         });
+        // complex128 flat argsort on DISTINCT real parts (permutation) -> tie-free lexicographic
+        let cim = rng
+            .call_method1("standard_normal", (16_000_000_usize,))
+            .expect("c imag");
+        let permc = perm
+            .call_method1("__add__", (cim.call_method1("__mul__", (pyo3::types::PyComplex::from_doubles(py, 0.0, 1.0),)).expect("1j*im"),))
+            .expect("re+1j*im")
+            .call_method1("astype", ("complex128",))
+            .expect("perm c128");
+        group.bench_function("fnp_argsort_c128_16m", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&permc,)).expect("fnp argsort c128")));
+        });
+        group.bench_function("numpy_argsort_c128_16m", |bch| {
+            bch.iter(|| black_box(numpy_argsort.call1((&permc,)).expect("numpy argsort c128")));
+        });
         // int64 last-axis argsort, 2-D distinct-per-lane: 16384 x 1024 (each lane a shuffled range)
         let la_randn = rng
             .call_method1("standard_normal", ((16384_usize, 1024_usize),))

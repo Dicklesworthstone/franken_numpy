@@ -1150,6 +1150,22 @@ ok = ok and fnp.argsort(mf_mid, axis=1).tobytes() == np.argsort(mf_mid, axis=1).
 # f32 NaN per-lane -> delegate, still match (last-axis)
 mfn = rng.standard_normal((4096, 256)).astype(np.float32); mfn[0, 3] = np.nan
 ok = ok and fnp.argsort(mfn).tobytes() == np.argsort(mfn).tobytes()
+# COMPLEX128 flat argsort: distinct real parts (permutation) so lexicographic (re,im) is tie-free
+cre = rng.permutation(n).astype(np.float64); cim = rng.standard_normal(n)
+cc = (cre + 1j * cim).astype(np.complex128)
+rc = fnp.argsort(cc); ec = np.argsort(cc)
+ok = ok and rc.dtype == ec.dtype and rc.shape == ec.shape and rc.tobytes() == ec.tobytes()
+ok = ok and bool((cc[rc] == np.sort(cc)).all())
+# complex with ties on real, broken by imag (still all distinct (re,im)) -> native, byte-exact
+cre2 = rng.integers(0, 8, n).astype(np.float64); cim2 = rng.permutation(n).astype(np.float64)
+cc2 = (cre2 + 1j * cim2).astype(np.complex128)  # re repeats, im distinct -> (re,im) distinct
+ok = ok and fnp.argsort(cc2).tobytes() == np.argsort(cc2).tobytes()
+# complex with full (re,im) duplicates -> DELEGATE (tie), still match
+ccd = rng.integers(0, 50, n).astype(np.float64) + 1j * rng.integers(0, 50, n).astype(np.float64)
+ok = ok and fnp.argsort(ccd.astype(np.complex128)).tobytes() == np.argsort(ccd.astype(np.complex128)).tobytes()
+# complex with NaN -> DELEGATE, still match
+ccn = cc.copy(); ccn[7] = complex(np.nan, 1.0)
+ok = ok and fnp.argsort(ccn).tobytes() == np.argsort(ccn).tobytes()
 print(bool(ok))
 "#
         .into(),
