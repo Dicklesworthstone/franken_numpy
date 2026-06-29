@@ -13318,3 +13318,29 @@ slower than c128 (122 vs 107ms) yet fnp c64 is faster (9.2ms, half the bytes).**
 per-element compute on a sequential dependency chain numpy can't SIMD, the bigger the parallel win. OPEN:
 complex cumprod axis0/middle/flat; complex cumsum axis0/middle/flat. See [[integer-matmul-no-blas-lever]].
 AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel COMPLEX128/COMPLEX64 MIDDLE-axis cumprod — 18.09x / 21.82x (+ cumsum same kernel)
+`BlackThrush`. Extends the just-landed complex cumprod last-axis (4e5e3cc4) to the NON-last (MIDDLE) axis,
+and folds complex cumSUM middle-axis into the same generic kernel. numpy's non-last complex cumulative is
+STRIDED **and** single-threaded (the worst case — strides by `inner` each step on a serial dependency chain
+it can't SIMD), so it is far slower than the contiguous last-axis case. Added one generic
+`complex_cumulative_nonlast_typed<T>(is_prod)` + `try_zerocopy_complex_cumulative_nonlast(axis, is_prod)`,
+hooked into BOTH cumsum (is_prod=false) and cumprod (is_prod=true) right after their complex last-axis hooks.
+Each independent OUTER block (axis_len, inner) is scanned slab-by-slab (carry the running complex value
+forward one slab, cache-friendly contiguous), and the >=2 blocks fan across the rayon pool
+(`par_chunks_mut(lane)`). cumprod uses numpy's naive cmul `(pr*xr-pim*xi, pr*xi+pim*xr)`, cumsum uses
+`(pr+xr, pim+xi)`. Gated to MIDDLE axes only (0 < axis < ndim-1 ⟹ outer>=2 ⟹ guaranteed parallelism; ndim>=3,
+C-contig, >=1<<18 complex); axis-0 (outer==1, serial) and the last axis (dedicated paths) defer. BIT-EXACT:
+re/im accumulate via the SAME in-order scalar ops numpy does (prototyped byte-identical vs np.cumsum/np.cumprod
+over 2-D/3-D/4-D + NaN/inf + axis0-defer, both dtypes, BEFORE writing Rust). Conformance
+`complex_cumulative_midaxis_parallel_bit_exact_matches_numpy` (c128/c64 + 3-D/4-D + NaN/inf + axis0 defer)
+PASSED (exit=0, worker hz1; all 3 complex-cumulative conformance tests green). MEASURED PERF (criterion rch
+worker hz1, 16M=256x256x256, axis=1=MIDDLE): c128 cumprod fnp 16.33ms vs NumPy 295.36ms = **18.09x**; c64
+cumprod fnp 10.54ms vs NumPy 230.03ms = **21.82x**. **BIGGER than the last-axis cumprod (7.56x/13.35x) because
+numpy's non-last path adds a STRIDE penalty on top of the serial dependency chain (295ms vs the contiguous
+last-axis 107ms) — fnp dodges both (contiguous slab + parallel-across-blocks). Confirms the f64 96th-win
+lesson (non-last scan 13-20x) carries to complex.** cumsum MIDDLE-axis ships on the SAME bit-exact kernel
+(is_prod=false, conformance-verified); its ratio is not separately benched (lighter add op → smaller than
+cumprod, but still positive given numpy's strided-serial worst case). OPEN: complex cumsum/cumprod AXIS0
+(outer==1 — serial cache-friendly, needs inner-column parallelism for a parallel win) + FLAT. See
+[[integer-matmul-no-blas-lever]] [[complex-binary-ops-lever]]. AGENT_NAME=BlackThrush.

@@ -2158,6 +2158,49 @@ print(ok)
 }
 
 #[test]
+fn complex_cumulative_midaxis_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy runs a non-last complex cumsum/cumprod strided + single-threaded; each independent outer
+    // block is a slab-by-slab scan (cumsum: re/im add; cumprod: naive cmul). The native per-block
+    // parallel scan along a MIDDLE axis must be byte-identical for c128/c64, incl NaN/inf; axis-0 and
+    // the last axis delegate (last axis handled by the dedicated last-axis paths).
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(54)
+ok = True
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    for dt, rname in [(np.complex128, np.float64), (np.complex64, np.float32)]:
+        m3 = (rng.standard_normal((64, 96, 96)) + 1j * rng.standard_normal((64, 96, 96))).astype(dt)
+        for fn_fnp, fn_np in [(fnp.cumsum, np.cumsum), (fnp.cumprod, np.cumprod)]:
+            r = fn_fnp(m3, axis=1); e = fn_np(m3, axis=1)
+            ok = ok and r.dtype == e.dtype and r.shape == e.shape and bool(((r.view(rname) == e.view(rname)) | (np.isnan(r.view(rname)) & np.isnan(e.view(rname)))).all())
+        # NaN/inf along a middle lane
+        mn = m3.copy(); mn[3, 7, 5] = complex(np.nan, 1.0); mn[5, 0, 9] = complex(np.inf, np.nan)
+        rn = fnp.cumprod(mn, axis=1); en = np.cumprod(mn, axis=1)
+        ok = ok and bool(((rn.view(rname) == en.view(rname)) | (np.isnan(rn.view(rname)) & np.isnan(en.view(rname)))).all())
+        # 4-D middle axis (axis=2, still a middle axis -> outer>=2)
+        m4 = (rng.standard_normal((8, 8, 24, 32)) + 1j * rng.standard_normal((8, 8, 24, 32))).astype(dt)
+        r4 = fnp.cumsum(m4, axis=2); e4 = np.cumsum(m4, axis=2)
+        ok = ok and bool(((r4.view(rname) == e4.view(rname)) | (np.isnan(r4.view(rname)) & np.isnan(e4.view(rname)))).all())
+    # axis-0 (outer==1) delegates, still byte-identical
+    a0 = (rng.standard_normal((64, 64, 64)) + 1j * rng.standard_normal((64, 64, 64))).astype(np.complex128)
+    r0 = fnp.cumprod(a0, axis=0); e0 = np.cumprod(a0, axis=0)
+    ok = ok and bool(((r0.view(np.float64) == e0.view(np.float64)) | (np.isnan(r0.view(np.float64)) & np.isnan(e0.view(np.float64)))).all())
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native complex middle-axis cumsum/cumprod must be byte-identical to numpy (c128/c64 + 3-D/4-D + NaN/inf + axis0 defer): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_ldexp_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // np.ldexp(float16, int32) = x * 2^e. numpy has no f16 ALU -> widens, scalbnf, narrows single-
     // threaded. The native widen->exact-pow2-scale->narrow (one rounding) must be byte-identical over
