@@ -13183,3 +13183,19 @@ IEEE-deterministic f16 unary ops (divide/reciprocal/sqrt — NOT libm transcende
 because the f32 op is correctly-rounded on both sides; the f16 narrowing doesn't even need to hide ULP diffs
 (there are none). Title held to no numeric estimate, ratio recorded post-bench.**
 See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - NO-SHIP / REVERTED (measured LOSS): native parallel np.unpackbits — 0.44x (fnp SLOWER than numpy)
+`BlackThrush`. Built + landed (32e882d3) a native parallel unpackbits, then REVERTED (a3716b91) on the
+worker bench: fnp 31.74ms vs NumPy 13.83ms = **0.44x (fnp 2.3x SLOWER)**. ROOT: my LOCAL probe showed numpy
+unpackbits ~70ms (~1.8 GB/s, "compute-bound") but that was a slow/contended local box; on the clean rch
+WORKER numpy unpackbits is 13.83ms for 128MB output = **9.25 GB/s = near memory bandwidth** -> numpy's
+unpackbits is a fast SIMD/LUT bit-expansion that is BANDWIDTH-bound, NOT compute-bound. fnp's scalar
+par_chunks_mut(8) loop (8 byte-writes per input byte) runs at ~4 GB/s and CANNOT beat numpy's vectorized
+single-threaded expansion. Conformance was byte-exact (the kernel is correct), but it's a perf regression ->
+reverted. **LESSON (reinforced, the loaded-box trap): ALWAYS get the numpy baseline on the CLEAN rch WORKER
+(not a local probe) before building — the local probe overstated numpy's time ~5x here (70 vs 13.83ms). And
+compute GB/s: a numpy op near memory bandwidth (>8 GB/s) is bandwidth-bound SIMD = NOT a parallel win, even
+if a local probe makes it "look" slow. packbits (~12 GB/s) was correctly left alone for the same reason;
+unpackbits looked slower ONLY because of the local-probe artifact. The discipline of committing with NO ratio
+claim (ratio pending) meant no overclaim landed — only a correct-but-slower kernel, cleanly reverted.**
+AGENT_NAME=BlackThrush.
