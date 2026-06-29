@@ -1924,6 +1924,16 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
                 bch.iter(|| black_box(numpy_sort.call1((arr,)).expect("numpy sort call")));
             });
         }
+        // int64 2-D last-axis sort (many wide lanes): 16384 x 1024
+        let m2 = rng
+            .call_method1("integers", (i64::MIN, i64::MAX, (16384_usize, 1024_usize)))
+            .expect("int64 2-D input");
+        group.bench_function("fnp_sort_int64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_sort.call1((&m2,)).expect("fnp lastaxis sort")));
+        });
+        group.bench_function("numpy_sort_int64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(numpy_sort.call1((&m2,)).expect("numpy lastaxis sort")));
+        });
     });
 
     group.finish();

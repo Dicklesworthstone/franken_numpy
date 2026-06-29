@@ -1058,6 +1058,17 @@ ok = ok and r.dtype == e.dtype and r.tobytes() == e.tobytes()
 fn_ = f.copy(); fn_[5] = np.float32(np.nan); fn_[6] = np.float32(-0.0)
 rn = fnp.sort(fn_); en = np.sort(fn_)
 ok = ok and bool(((rn.view(np.uint32) == en.view(np.uint32)) | (np.isnan(rn) & np.isnan(en))).all())
+# integer LAST-AXIS sort (2-D, many wide lanes) incl duplicates, default + explicit axis=-1, and a stable kind
+for dt in ("int32", "int64", "uint32", "uint64"):
+    info = np.iinfo(dt)
+    m2 = rng.integers(info.min, info.max, (4096, 256), dtype=dt, endpoint=True)
+    m2[:, :40] = m2[:, 40:80]  # per-lane duplicates
+    r = fnp.sort(m2); e = np.sort(m2)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+    r2 = fnp.sort(m2, axis=-1); e2 = np.sort(m2, axis=-1)
+    ok = ok and r2.tobytes() == e2.tobytes()
+    rk = fnp.sort(m2, kind="stable"); ek = np.sort(m2, kind="stable")
+    ok = ok and rk.tobytes() == ek.tobytes()
 print(bool(ok))
 "#
         .into(),
