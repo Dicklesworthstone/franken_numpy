@@ -6175,6 +6175,37 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
                 });
             });
         }
+        // f64/int64 cumsum AXIS-0 (4000x4000=16M): numpy runs cumsum single-threaded for every dtype
+        // (~166/163ms); the transpose column-parallel axis-0 path parallelizes the previously-serial
+        // axis-0 scan (last-axis was already parallel).
+        py.run(
+            std::ffi::CString::new(
+                "c64 = rng.standard_normal((4000, 4000)); ci64 = rng.integers(-1000, 1000, (4000, 4000)).astype(np.int64)",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("cumsum axis0 arrays");
+        let c64 = ns.get_item("c64").expect("c64");
+        let ci64 = ns.get_item("ci64").expect("ci64");
+        let fnp_cumsum = module.getattr("cumsum").expect("fnp cumsum");
+        let numpy_cumsum = numpy.getattr("cumsum").expect("numpy cumsum");
+        for (arr, tag) in [(&c64, "f64"), (&ci64, "i64")] {
+            group.bench_function(format!("fnp_cumsum_axis0_{tag}_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(fnp_cumsum.call((arr,), Some(&kw_axis0)).expect("fnp cumsum axis0"))
+                });
+            });
+            group.bench_function(format!("numpy_cumsum_axis0_{tag}_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(
+                        numpy_cumsum.call((arr,), Some(&kw_axis0)).expect("numpy cumsum axis0"),
+                    )
+                });
+            });
+        }
         for op in ["argmax", "argmin"] {
             let fnp_fn = module.getattr(op).expect("fnp arg op");
             let numpy_fn = numpy.getattr(op).expect("numpy arg op");

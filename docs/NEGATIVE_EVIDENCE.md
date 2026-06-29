@@ -13109,3 +13109,17 @@ across OUTER blocks is SERIAL for axis 0 (outer always ==1) -- the independent d
 exists in the GENERIC cumsum_axis_typed (int/f32) and try_zerocopy_f64_cumulative_axis -> f64/f32/int cumsum
 axis-0 of a 2-D array are ALSO serial = an open follow-up lever (bigger: all dtypes).** See
 [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): parallelize FLOAT64/FLOAT32/INTEGER cumsum/cumprod AXIS-0 across inner columns — bit-exact (ratio pending bench)
+`BlackThrush`. Generalizes the f16 axis-0 fix (9d675f45, measured 2.97x->6.93x) to ALL dtypes via the GENERIC
+kernels. numpy runs cumsum/cumprod single-threaded for EVERY dtype (measured @16M 4000x4000: f64 axis0 166ms,
+f32 99ms, int64 163ms, int32 228ms). cumsum_axis_typed (int/f32) + try_zerocopy_f64_cumulative_axis
+(f64/nancum*) parallelize across OUTER blocks, but AXIS 0 has outer==1 always -> SERIAL (parity w/ numpy).
+FIX: when outer==1, transpose (axis_len, inner) slab -> (inner, axis_len) scratch, scan each contiguous
+column in PARALLEL (par_chunks_mut = SAFE, columns disjoint), transpose back. BIT-IDENTICAL (int accumulator
+promotion, f64 skip_nan / -0.0 first-row preserved). Gated outer==1 && inner>=2 && total>=1<<18. Conformance
+cumsum_cumprod_axis0_large_2d_parallel_bit_exact (512x512 axis-0: f64/f32/int64/int32/uint64/uint32
+cumsum+cumprod + f64 nancum* sparse-NaN + -0.0), PASSED (build clean, exit=0). Ratio IN-FLIGHT (follow-up;
+the identical f16 change was 6.93x). **GENERAL: this completes the SCAN-axis0 lever across f16+f64+f32+int --
+the outer-block parallel scheme is SERIAL for axis 0 (outer always 1); the INNER columns are the independent
+dimension there.** See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.

@@ -1997,6 +1997,48 @@ print(ok)
 }
 
 #[test]
+fn cumsum_cumprod_axis0_large_2d_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy runs cumsum/cumprod single-threaded for every dtype. fnp's per-axis scan kernels
+    // parallelize across OUTER blocks, but AXIS 0 has outer==1, so it ran SERIAL. The new transpose
+    // column-parallel path (outer==1, inner>=2, total>=1<<18) must be byte-identical to numpy for
+    // f64/f32/int cumsum+cumprod AND f64 nancumsum/nancumprod (skip_nan / -0.0 semantics preserved).
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(45)
+ok = True
+shp = (512, 512)  # 262144 == 1<<18, engages the transpose path; axis-0 -> outer==1, inner==512
+for dt in (np.float64, np.float32):
+    a = (rng.standard_normal(shp) * 0.5).astype(dt)
+    ok = ok and fnp.cumsum(a, axis=0).dtype == np.cumsum(a, axis=0).dtype and fnp.cumsum(a, axis=0).tobytes() == np.cumsum(a, axis=0).tobytes()
+    p = (1.0 + rng.standard_normal(shp) * 0.01).astype(dt)
+    ok = ok and fnp.cumprod(p, axis=0).tobytes() == np.cumprod(p, axis=0).tobytes()
+for dt in (np.int64, np.int32, np.uint64, np.uint32):
+    ai = rng.integers(-1000, 1000, shp).astype(dt)
+    ok = ok and fnp.cumsum(ai, axis=0).dtype == np.cumsum(ai, axis=0).dtype and fnp.cumsum(ai, axis=0).tobytes() == np.cumsum(ai, axis=0).tobytes()
+    pi = rng.integers(0, 4, shp).astype(dt)
+    ok = ok and fnp.cumprod(pi, axis=0).tobytes() == np.cumprod(pi, axis=0).tobytes()
+# f64 nancumsum/nancumprod axis-0 (skip_nan path) with sparse NaN, not all-NaN columns
+an = (rng.standard_normal(shp) * 0.5); an[::97, ::13] = np.nan
+ok = ok and fnp.nancumsum(an, axis=0).tobytes() == np.nancumsum(an, axis=0).tobytes()
+ap = (1.0 + an * 0.01)
+ok = ok and fnp.nancumprod(ap, axis=0).tobytes() == np.nancumprod(ap, axis=0).tobytes()
+# -0.0 first-row preservation (plain cumsum, no skip): a column starting with -0.0
+z = np.zeros(shp); z[0, :] = -0.0; z[1:, :] = rng.standard_normal((shp[0]-1, shp[1])) * 0.5
+ok = ok and fnp.cumsum(z, axis=0).tobytes() == np.cumsum(z, axis=0).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native axis-0 transpose-parallel cumsum/cumprod must be bit-identical to numpy (f64/f32/int + nan + -0.0): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_predicate_isnan_isinf_isfinite_signbit_full_domain_matches_numpy() -> Result<(), String> {
     // numpy widens f16 to f32 for isnan/isinf/isfinite/signbit; the native parallel uint16
     // bit-check must produce the identical bool array over the ENTIRE f16 domain (all 65536
