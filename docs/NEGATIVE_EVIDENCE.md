@@ -13257,3 +13257,18 @@ vs NumPy 7.62ms = 1.32x.** LESSON tripled: ALWAYS bench numpy on the WORKER + co
 deeply compute-bound (no f16 SIMD) — f32/f64 elementwise ops numpy SIMD-vectorizes (near-parity ceiling).
 The f16 ldexp/modf/frexp wins (5-6x) hold BECAUSE there is no f16 SIMD; their f32 siblings are ~parity.
 See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - NO-SHIP (measured PARITY): native parallel FLOAT16 spacing — 1.03x (numpy fast on worker)
+`BlackThrush`. Built a native parallel f16 spacing (correctly using numpy's f16 nextafter(x,+inf)-x
+convention — verified BYTE-EXACT over the full domain, distinct from the f32/f64 abs-ulp convention which is
+31743/65536 wrong for f16). But the WORKER bench is PARITY: fnp 20.51ms vs NumPy 21.19ms = 1.03x. NOT
+shipped (stashed/reverted before landing). ROOT (THIRD instance of the loaded-box trap this session): my
+LOCAL probe said numpy f16 spacing ~69.7ms (~0.9 GB/s, "compute-bound") but the clean WORKER shows
+numpy=21.19ms (~3 GB/s) — numpy's f16 spacing loop is fast enough that fnp's parallel version only ties.
+Unlike f16 modf (124ms, 5.5x) / frexp (81ms, 4.7x) / ldexp (104ms, 6.4x) where numpy is genuinely slow, f16
+spacing is CHEAP per element (a single bit-step + subtract) so numpy isn't the bottleneck. **DISCIPLINE WIN:
+HELD the commit until the worker bench (didn't commit on the local-probe gap); saw parity; reverted before
+landing — no parity shipped.** LESSON FINAL: NEVER trust the local numpy probe for gap SIZE; bench numpy on
+the clean WORKER + compute GB/s FIRST. A cheap-per-element f16 op can be fast in numpy even without SIMD; the
+f16 wins need numpy EXPENSIVE per element (widen-heavy: modf/frexp/ldexp/reciprocal/sqrt). f16 IEEE-
+deterministic family COMPLETE (cheap ones like spacing = parity). AGENT_NAME=BlackThrush.
