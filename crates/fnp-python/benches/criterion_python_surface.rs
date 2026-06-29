@@ -2072,6 +2072,12 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
         group.bench_function("numpy_argsort_datetime64_16m", |bch| {
             bch.iter(|| black_box(numpy_argsort.call1((&permdt,)).expect("numpy argsort dt64")));
         });
+        group.bench_function("fnp_sort_datetime64_16m", |bch| {
+            bch.iter(|| black_box(fnp_sort.call1((&permdt,)).expect("fnp sort dt64")));
+        });
+        group.bench_function("numpy_sort_datetime64_16m", |bch| {
+            bch.iter(|| black_box(numpy_sort.call1((&permdt,)).expect("numpy sort dt64")));
+        });
         // complex128 flat argsort on DISTINCT real parts (permutation) -> tie-free lexicographic
         let cim = rng
             .call_method1("standard_normal", (16_000_000_usize,))

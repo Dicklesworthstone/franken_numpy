@@ -1117,6 +1117,13 @@ ok = ok and fnp.sort(c6va0, axis=0).tobytes() == np.sort(c6va0, axis=0).tobytes(
 c6vmid_re = np.argsort(rng.standard_normal((64, 256, 64)), axis=1).astype(np.float32)
 c6vmid = (c6vmid_re + 1j * rng.standard_normal((64, 256, 64)).astype(np.float32)).astype(np.complex64)
 ok = ok and fnp.sort(c6vmid, axis=1).tobytes() == np.sort(c6vmid, axis=1).tobytes()
+# DATETIME64 / TIMEDELTA64 flat VALUE sort (int64-backed): distinct + dups byte-exact; NaT delegate
+dvs = rng.permutation(n).astype("datetime64[s]")
+ok = ok and fnp.sort(dvs).dtype == np.sort(dvs).dtype and fnp.sort(dvs).tobytes() == np.sort(dvs).tobytes()
+tvs = rng.integers(0, 1000, n).astype("timedelta64[s]")  # heavy dups (value sort, no tie-defer)
+ok = ok and fnp.sort(tvs).tobytes() == np.sort(tvs).tobytes()
+dvn = dvs.copy(); dvn[5] = np.datetime64("NaT")  # NaT -> delegate
+ok = ok and fnp.sort(dvn).tobytes() == np.sort(dvn).tobytes()
 print(bool(ok))
 "#
         .into(),
