@@ -2303,6 +2303,29 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
         group.bench_function("numpy_argsort_c64_lastaxis_16Mx", |bch| {
             bch.iter(|| black_box(numpy_argsort.call1((&la_c64,)).expect("numpy argsort la c64")));
         });
+        // COMPLEX64 argsort AXIS0 + MIDAXIS: reuse a0_c/am_c (distinct-real) cast to complex64
+        let a0_c64 = a0_c.call_method1("astype", ("complex64",)).expect("a0_c64");
+        group.bench_function("fnp_argsort_c64_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(fnp_argsort.call((&a0_c64,), Some(&axis0_kwargs)).expect("fnp argsort a0 c64"))
+            });
+        });
+        group.bench_function("numpy_argsort_c64_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(numpy_argsort.call((&a0_c64,), Some(&axis0_kwargs)).expect("numpy argsort a0 c64"))
+            });
+        });
+        let am_c64 = am_c.call_method1("astype", ("complex64",)).expect("am_c64");
+        group.bench_function("fnp_argsort_c64_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(fnp_argsort.call((&am_c64,), Some(&axis1_kwargs)).expect("fnp argsort am c64"))
+            });
+        });
+        group.bench_function("numpy_argsort_c64_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(numpy_argsort.call((&am_c64,), Some(&axis1_kwargs)).expect("numpy argsort am c64"))
+            });
+        });
     });
 
     group.finish();

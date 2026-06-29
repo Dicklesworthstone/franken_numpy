@@ -1218,6 +1218,12 @@ c6an = c6a.copy(); c6an[7] = np.complex64(complex(np.nan, 1.0))
 ok = ok and fnp.argsort(c6an).tobytes() == np.argsort(c6an).tobytes()  # NaN -> delegate
 c6al = np.stack([rng.permutation(256).astype(np.float32) + 1j * rng.standard_normal(256).astype(np.float32) for _ in range(4096)]).astype(np.complex64)
 ok = ok and fnp.argsort(c6al).tobytes() == np.argsort(c6al).tobytes()  # last-axis distinct-per-lane
+# COMPLEX64 argsort AXIS0 + MIDAXIS, distinct-real per lane
+c6a0 = np.stack([rng.permutation(256).astype(np.float32) + 1j * rng.standard_normal(256).astype(np.float32) for _ in range(4096)], axis=1).astype(np.complex64)
+ok = ok and fnp.argsort(c6a0, axis=0).tobytes() == np.argsort(c6a0, axis=0).tobytes()
+c6mid_re = np.argsort(rng.standard_normal((64, 256, 64)), axis=1).astype(np.float32)
+c6mid = (c6mid_re + 1j * rng.standard_normal((64, 256, 64)).astype(np.float32)).astype(np.complex64)
+ok = ok and fnp.argsort(c6mid, axis=1).tobytes() == np.argsort(c6mid, axis=1).tobytes()
 print(bool(ok))
 "#
         .into(),
