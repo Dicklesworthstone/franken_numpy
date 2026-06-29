@@ -2275,6 +2275,27 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
         group.bench_function("numpy_sort_c128_lastaxis_16Mx", |bch| {
             bch.iter(|| black_box(numpy_sort.call1((&la_c,)).expect("numpy sort la c128")));
         });
+        // COMPLEX128 VALUE sort AXIS0 + MIDAXIS: reuse a0_c (distinct-per-column) + am_c (distinct-per-lane)
+        group.bench_function("fnp_sort_c128_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(fnp_sort.call((&a0_c,), Some(&axis0_kwargs)).expect("fnp sort a0 c128"))
+            });
+        });
+        group.bench_function("numpy_sort_c128_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(numpy_sort.call((&a0_c,), Some(&axis0_kwargs)).expect("numpy sort a0 c128"))
+            });
+        });
+        group.bench_function("fnp_sort_c128_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(fnp_sort.call((&am_c,), Some(&axis1_kwargs)).expect("fnp sort am c128"))
+            });
+        });
+        group.bench_function("numpy_sort_c128_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(numpy_sort.call((&am_c,), Some(&axis1_kwargs)).expect("numpy sort am c128"))
+            });
+        });
         // COMPLEX64 VALUE sort (np.sort): permc/la_c cast to complex64 (distinct-real -> tie-free)
         let permc64 = permc.call_method1("astype", ("complex64",)).expect("permc64");
         group.bench_function("fnp_sort_c64_16m", |bch| {

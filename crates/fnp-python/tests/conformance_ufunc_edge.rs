@@ -1102,6 +1102,15 @@ c6z = c6.copy(); c6z[3] = np.complex64(complex(-0.0, 1.0))
 ok = ok and fnp.sort(c6z).tobytes() == np.sort(c6z).tobytes()  # -0.0 delegate, still match
 c6m = np.stack([rng.permutation(256).astype(np.float32) + 1j * rng.standard_normal(256).astype(np.float32) for _ in range(4096)]).astype(np.complex64)
 ok = ok and fnp.sort(c6m).tobytes() == np.sort(c6m).tobytes()  # last-axis
+# COMPLEX128 VALUE sort AXIS0 + MIDAXIS (gather/scatter), distinct-real per lane + full-dup byte-exact
+cva0 = np.stack([rng.permutation(256).astype(np.float64) + 1j * rng.standard_normal(256) for _ in range(4096)], axis=1).astype(np.complex128)
+ok = ok and fnp.sort(cva0, axis=0).tobytes() == np.sort(cva0, axis=0).tobytes()
+cvmid_re = np.argsort(rng.standard_normal((64, 256, 64)), axis=1).astype(np.float64)
+cvmid = (cvmid_re + 1j * rng.standard_normal((64, 256, 64))).astype(np.complex128)
+ok = ok and fnp.sort(cvmid, axis=1).tobytes() == np.sort(cvmid, axis=1).tobytes()
+# axis0 full (re,im) dups -> still byte-exact (value sort, no tie-defer)
+cvad = (rng.integers(0, 20, (256, 4096)).astype(np.float64) + 1j * rng.integers(0, 20, (256, 4096)).astype(np.float64)).astype(np.complex128)
+ok = ok and fnp.sort(cvad, axis=0).tobytes() == np.sort(cvad, axis=0).tobytes()
 print(bool(ok))
 "#
         .into(),
