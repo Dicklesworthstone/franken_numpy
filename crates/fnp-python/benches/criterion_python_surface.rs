@@ -1249,6 +1249,16 @@ fn bench_char_ascii_boundary(c: &mut Criterion) {
         group.bench_function("numpy_char_replace_u20_ascii_1m", |bench| {
             bench.iter(|| black_box(numpy_rep.call1((&input, "C", "QR")).expect("numpy replace")));
         });
+        // multiply (repeat n times, two-pass variable width)
+        let fnp_mul = fnp_char.getattr("multiply").expect("fnp char.multiply");
+        let numpy_mul = numpy_char.getattr("multiply").expect("numpy char.multiply");
+        let three = 3_i64;
+        group.bench_function("fnp_char_multiply_u20_ascii_1m", |bench| {
+            bench.iter(|| black_box(fnp_mul.call1((&input, three)).expect("fnp multiply")));
+        });
+        group.bench_function("numpy_char_multiply_u20_ascii_1m", |bench| {
+            bench.iter(|| black_box(numpy_mul.call1((&input, three)).expect("numpy multiply")));
+        });
     });
 
     group.finish();

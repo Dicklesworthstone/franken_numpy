@@ -12868,3 +12868,18 @@ PERF (criterion, rch worker = truth; 1M x U20, "C"->"QR" expansion):
 GATE 1<<20 codepoints (parallel), 1<<16 (native at all). **STRING/CHAR OPS FAMILY COMPLETE: upper/lower/swapcase/
 capitalize/title/translate/add/strip/lstrip/rstrip/replace — all parallel, bit-exact, both np.char.* + np.strings.*.**
 AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel char/strings.multiply (string repeat, two-pass) — 1.95x
+`BlackThrush`. np.char.multiply(a, n) repeats each string's content n times, output sized to MAX(content_len*n)
+(null-padded). numpy runs str.__mul__ per element single-threaded. try_zerocopy_unicode_multiply: two parallel
+passes (par max-reduce content_len -> maxlen=max_content*n -> par build copy content n times, pad). PURE codepoint
+copy (no casing) -> BYTE-EXACT for ANY 'U' input incl non-ASCII (verified n=1/2/3/5 + non-ASCII + strings.* +
+n<=0 defer; conformance char_case_parallel_bit_exact_matches_numpy extended, PASSED). Scalar n>=1; array n / n<=0
+(numpy U1-empty edge) / 'S' defer.
+
+PERF (criterion, rch worker = truth; 1M x U20, n=3 -> U36):
+  char.multiply: fnp 31.95 ms vs NumPy 62.30 ms = 0.513x / 1.95x faster
+MODEST (like char.add: the large output write — 144MB@1M — is bandwidth-bound, not a pathological per-element
+loop; parallel buys the extra memory bandwidth ~2x). GATE 1<<20 codepoints. **REMAINING char width ops (center/
+ljust/rjust/zfill/expandtabs ~130-193ms) are similar copy/pad = bandwidth-bound (~2x), lower priority; the BIG
+char wins (per-element-Python: upper 35.8x, translate 103.5x, replace 6.4x) are done.** AGENT_NAME=BlackThrush.

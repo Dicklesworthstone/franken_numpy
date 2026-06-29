@@ -1135,6 +1135,15 @@ for old, new in (("X", "YZ"), ("XX", "Y"), ("X", "Q"), ("Z", "W"), ("o", "")):
     ok = ok and fnp.strings.replace(ra2, old, new).tobytes() == np.strings.replace(ra2, old, new).tobytes()
 # count arg + non-ASCII old must DELEGATE and still match
 ok = ok and fnp.char.replace(ra2, "X", "YZ", 1).tobytes() == np.char.replace(ra2, "X", "YZ", 1).tobytes()
+# char.multiply: repeat content n times, output width = max_content*n; works for any unicode
+mb = np.array(["ab", "cde", "f", "", "café"], dtype="<U6")
+ma = np.tile(mb, ((1 << 20) // mb.size) + 2)
+for k in (1, 2, 3, 5):
+    rm2 = fnp.char.multiply(ma, k); em2 = np.char.multiply(ma, k)
+    ok = ok and rm2.dtype == em2.dtype and rm2.shape == em2.shape and rm2.tobytes() == em2.tobytes()
+    ok = ok and fnp.strings.multiply(ma, k).tobytes() == np.strings.multiply(ma, k).tobytes()
+# n<=0 must DELEGATE and still match
+ok = ok and fnp.char.multiply(ma, 0).tobytes() == np.char.multiply(ma, 0).tobytes()
 # non-ASCII must delegate to numpy and still match (full-Unicode casing)
 u = np.tile(np.array(["café_StraßE", "ÀÉÎ_xyz"], dtype="<U16"), ((1 << 20) // 2) + 2)
 for op in ("upper", "lower"):
