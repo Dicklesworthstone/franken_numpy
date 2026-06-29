@@ -12628,7 +12628,30 @@ costlier per element), so even with identical widen/narrow the speedup is far sm
 kernel-identity proxy is only valid when the per-element OP cost is comparable; for an expensive op (divide >>
 add) it over-projects — always measure the actual head-to-head.** Still a clean 4.88x WIN, bit-exact, landed.
 
-OPEN (NOT shipped): f16 floor_divide — numpy 375ms@16M (even bigger!), byte-exact via narrow(numpy f32
-floor_divide(widen)), BUT numpy's float floor_divide is npy_divmod (fmod-corrected, NOT floor(a/b)) and a
-straight npy_divmod transcription still mismatched ~6% (signed-zero + the div-floordiv>0.5 rounding correction).
-Needs an exact npy_divmod replication before it can ship. AGENT_NAME=BlackThrush.
+FOLLOW-UP: f16 floor_divide SHIPPED next (npy_divmod replication solved — see entry below). AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 floor_divide — numpy widens f16->f32->npy_divmod->narrow
+`BlackThrush`. Completes the f16-binary-widen arithmetic family. numpy has no f16 ALU: f16 a//b widens both
+operands to f32, runs the float floor_divide (npy_divmod — fmod-CORRECTED, NOT floor(a/b)), narrows. Single-
+threaded compute-bound. Added op 11 to try_zerocopy_f16_binary_widen + wired UFuncKind::FloorDivide => Some(11)
+into the f16op dispatch + extended the zero-divisor defer (op 5|6|10|11).
+
+PERF (criterion, rch worker = truth; f16, 16M):
+  f16 floor_divide 16M: fnp 16.89 ms vs NumPy 436.16 ms = 0.039x / 25.8x faster
+GATE: F16_BINARY_PARALLEL_MIN = 1<<20. (Much bigger than f16 divide's 4.88x: numpy's npy_divmod is far more
+expensive than a plain f32 divide — fmod + divide + floor + corrections — so it leaves much more on the table.)
+
+BIT-EXACT (verified vs numpy 2.4.3: 0 mismatches over the FULL f16 domain x an f16 divisor set incl inf/nan
+numerators + 2M random pairs; conformance f16_floor_divide_widen_parallel_bit_exact_matches_numpy PASSED):
+numpy's float floor_divide is the npy_divmod result, NOT floor(a/b) (e.g. 0.5//0.1 -> 4, not floor(5.0)=5).
+Replicated in f32: mod=fmod(a,b); div=(a-mod)/b; if mod!=0 && sign(b)!=sign(mod){div-=1}; fl=floor(div); if
+div-fl>0.5{fl+=1}; if fl==0{fl=copysign(0,a/b)}. **The signed-zero fix (copysign from a/b) was ESSENTIAL — a
+straight npy_divmod transcription flipped every zero-quotient sign (~the only mismatch class); the divmod
+correction (vs naive floor(a/b)) handles the 0.5//0.1 class.** A zero divisor (0x0000/0x8000) defers to numpy.
+f16-binary-widen ARITHMETIC family now COMPLETE: add/mul/sub/max/min/fmod/remainder/copysign/heaviside/
+nextafter/divide/floor_divide.
+
+REJECTED (measured, not shipped): f32 divide — NOT compute-bound. numpy f32 divide 16M ~40.6ms ≈ f32 add 41.8ms
+= BANDWIDTH-bound SIMD (an earlier 167ms reading was an artifact: the timing lambda did an f16->f32 astype each
+call). Parallel would lose like c64 multiply. (The f64 Div path wins because f64's 2x bytes pressure DRAM more.)
+AGENT_NAME=BlackThrush.
