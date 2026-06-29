@@ -2071,6 +2071,35 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
         group.bench_function("numpy_argsort_int64_lastaxis_16Mx", |bch| {
             bch.iter(|| black_box(numpy_argsort.call1((&la,)).expect("numpy argsort la")));
         });
+        // int64 AXIS-0 argsort, 2-D distinct-per-column: 1024 x 16384 (each column a shuffled range)
+        let a0_randn = rng
+            .call_method1("standard_normal", ((1024_usize, 16384_usize),))
+            .expect("a0 randn");
+        let axis0_kwargs = PyDict::new(py);
+        axis0_kwargs.set_item("axis", 0_i64).expect("axis kw");
+        let a0 = numpy
+            .call_method("argsort", (a0_randn,), Some(&axis0_kwargs))
+            .expect("a0 base")
+            .call_method1("astype", ("int64",))
+            .expect("a0 int64");
+        group.bench_function("fnp_argsort_int64_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_argsort
+                        .call((&a0,), Some(&axis0_kwargs))
+                        .expect("fnp argsort a0"),
+                )
+            });
+        });
+        group.bench_function("numpy_argsort_int64_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call((&a0,), Some(&axis0_kwargs))
+                        .expect("numpy argsort a0"),
+                )
+            });
+        });
     });
 
     group.finish();

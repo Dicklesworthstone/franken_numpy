@@ -1116,6 +1116,14 @@ for dt in ("int32", "int64", "uint32", "uint64"):
 # 2-D with per-lane ties -> delegate, still match
 mt = rng.integers(0, 50, (4096, 256), dtype=np.int64)
 ok = ok and fnp.argsort(mt).tobytes() == np.argsort(mt).tobytes()
+# AXIS-0 argsort, 2-D, distinct per-COLUMN values (each column a permutation of 0..rows-1)
+for dt in ("int32", "int64", "uint32", "uint64"):
+    m0 = np.stack([rng.permutation(256).astype(dt) for _ in range(4096)], axis=1)  # (256,4096)
+    r3 = fnp.argsort(m0, axis=0); e3 = np.argsort(m0, axis=0)
+    ok = ok and r3.dtype == e3.dtype and r3.shape == e3.shape and r3.tobytes() == e3.tobytes()
+# axis-0 with per-column ties -> delegate, still match
+mt0 = rng.integers(0, 50, (256, 4096), dtype=np.int64)
+ok = ok and fnp.argsort(mt0, axis=0).tobytes() == np.argsort(mt0, axis=0).tobytes()
 print(bool(ok))
 "#
         .into(),
