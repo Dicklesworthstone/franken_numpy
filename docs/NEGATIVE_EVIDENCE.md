@@ -12910,3 +12910,15 @@ real measurement was a loss, so REVERTED (stashed) rather than chase a marginal 
 PREDICATES that must scan the WHOLE content with NO short-circuit (count, and likely find/index) are READ-BOUND —
 unlike isalpha/isalnum which short-circuit on the first failing char (1.6-3.6x win). The big char wins were the
 per-element-PYTHON ops (upper 35x, translate 103x); read-bound char scans don't beat numpy's C.** AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - NO-SHIP (measured): char.ljust/rjust — ~0-gain, numpy is already bandwidth-fast (clean worker)
+`BlackThrush`. Built try_zerocopy_unicode_justify (two-pass pad-to-width). Measured (1M x U20, width 30, clean rch
+worker): ljust fnp 20.03 ms vs NumPy 19.81 ms = 1.01x (PARITY); rjust fnp 19.95 ms vs NumPy 19.33 ms = 1.03x
+(tiny LOSS). REVERTED. **ROOT: numpy's char.ljust/rjust are BANDWIDTH-bound (a content copy + fill, ~6 GB/s) and
+already fast on a clean worker — the earlier ~130ms reading that motivated this was CONTENTION-inflated on the
+loaded box (same trap as the f32-divide astype artifact). The two-pass max-reduce + build can't beat a
+bandwidth-saturated copy. CONCLUSION: the remaining char WIDTH-PAD ops (ljust/rjust/center/zfill/expandtabs) are
+all bandwidth-bound copy/pad = ~0-gain on a clean worker; the string-op frontier is EXHAUSTED — only the
+per-element-Python ops (upper/lower/swapcase/cap/title/translate/replace) and the bandwidth ops that happened to
+have numpy overhead (add/multiply/strip ~2x) were wins. LESSON (reinforced): ALWAYS get the clean-worker numpy
+baseline before building — a loaded-box standalone ms can overstate the gap 5-7x.** AGENT_NAME=BlackThrush.
