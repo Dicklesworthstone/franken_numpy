@@ -13282,7 +13282,14 @@ interleaved sequential real prefix sums. Added complex_cumsum_lastaxis_typed (c1
 complex as its real type, carry (re,im) register accumulators per contiguous lane, par across lanes.
 BIT-EXACT (same sequential real adds; NaN/inf propagate; NO defer). Gated >=2-D C-contig complex, last axis,
 rows>=2&&cols>=2, >=1<<18. Conformance complex_cumsum_lastaxis_parallel_bit_exact (c128/c64 + 2D&3D + NaN/inf
-+ axis0 defer) PASSED (exit=0). Ratio IN-FLIGHT (follow-up; numpy 177ms single-threaded vs ~4000-lane
-parallel; same class as f16 cumsum lastaxis 8.10x). **SCAN family now covers f64/f32/int/f16/complex; the
-sequential-dependency-chain class is the reliable cumsum lever (numpy can't SIMD a prefix scan).** OPEN:
-complex cumsum axis0/middle/flat + cumprod. See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
++ axis0 defer) PASSED (exit=0). MEASURED PERF (criterion rch WORKER, 16M=4000x4000): c128 fnp 37.12ms vs
+NumPy 54.08ms = 1.46x; c64 fnp 19.25ms vs NumPy 47.11ms = 2.45x. WIN (engages, bit-exact) but MODEST: the
+local probe again overstated numpy (177 vs 54ms, ~3.3x -- 4th loaded-box instance), AND complex128 is large
+(256MB read + 256MB write); fnp c128 runs at ~14 GB/s = near memory BANDWIDTH, numpy at ~9.5 GB/s, so the
+gap is bandwidth-throttled. c64 (half the bytes) wins more (2.45x). **Still a REAL win (unlike spacing's
+parity) because a prefix scan IS a dependency chain numpy can't SIMD -> genuinely single-threaded; the win
+size is just capped by bandwidth for the big 16-byte dtype. The discipline (ratio pending, no overclaim in
+title) again prevented an overclaim -- I'd hoped ~7x, measured 1.46-2.45x.** **SCAN family now covers
+f64/f32/int/f16/complex; the sequential-dependency-chain class is the reliable cumsum lever (numpy can't SIMD
+a prefix scan) but the win shrinks with element size (bandwidth).** OPEN: complex cumsum axis0/middle/flat +
+cumprod. See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
