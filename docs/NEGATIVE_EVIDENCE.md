@@ -13214,3 +13214,16 @@ compute-bound (robust parallel win) vs unpackbits' 9.25 GB/s bandwidth-bound (lo
 WORKER before claiming. f16 modf was a remaining IEEE-deterministic f16 op (trunc+subtract, no libm) — the
 libm ones (hypot/transcendentals) stay deferred (hypot proven 13/2.6M divergent this session).** See
 [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel FLOAT16 frexp (mantissa/exponent split) — 4.68x
+`BlackThrush`. Sibling of f16 modf (969911ee). numpy has NO f16 ALU -> np.frexp(f16) widens, decomposes into
+(mantissa f16, exponent int32), narrows mantissa = single-threaded scalar loop ~81ms@16M WORKER (~1 GB/s =
+compute-bound). Added try_zerocopy_f16_frexp above the frexp dispatcher's !f64 delegate guard: widen f16->f64,
+frexp_one (the tested f64 helper) decomposes, mantissa narrows to f16, exponent int32, parallel. frexp is an
+EXACT bit/exponent split (no rounding, no libm) and mantissa x/2^e in [0.5,1) is exactly representable in f16,
+so narrow(frexp(widen)) == numpy byte-for-byte over the FULL f16 domain (verified exhaustively, incl
+zero/inf/nan via frexp_one -> NO defer). Conformance f16_frexp_full_domain_bit_exact PASSED. PERF (criterion
+rch WORKER, 16M f16): fnp 17.28ms vs NumPy 80.86ms = **4.68x**. f16 IEEE-deterministic compute-bound family
+now: reciprocal/sqrt/square + fmod/remainder/copysign/heaviside/nextafter/divide/floor_divide + min/max/ptp/
+nan*/cumsum/cumprod/nancum* + modf + frexp. Remaining are libm (hypot/transcendentals = proven non-bit-exact)
+or bit-trick (abs/sign = no gap). See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.

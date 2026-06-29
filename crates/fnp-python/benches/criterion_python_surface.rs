@@ -6017,6 +6017,18 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
                 bch.iter(|| black_box(numpy_modf.call1((&hsq,)).expect("numpy f16 modf")));
             });
         }
+        // f16 frexp: numpy widens f16->f32, decomposes (mantissa, exponent), narrows — single-threaded
+        // scalar loop (~123ms@16M = ~0.8 GB/s, compute-bound). Native parallel bit-split wins.
+        {
+            let fnp_frexp = module.getattr("frexp").expect("fnp frexp");
+            let numpy_frexp = numpy.getattr("frexp").expect("numpy frexp");
+            group.bench_function("fnp_frexp_f16_16m", |bch| {
+                bch.iter(|| black_box(fnp_frexp.call1((&hsq,)).expect("fnp f16 frexp")));
+            });
+            group.bench_function("numpy_frexp_f16_16m", |bch| {
+                bch.iter(|| black_box(numpy_frexp.call1((&hsq,)).expect("numpy f16 frexp")));
+            });
+        }
         // f16 clip: numpy widens f16->f32 to clamp (~149ms@16M, biggest f16 elementwise gap).
         {
             let fnp_clip = module.getattr("clip").expect("fnp clip");

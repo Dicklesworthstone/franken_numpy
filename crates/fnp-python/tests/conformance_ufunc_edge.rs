@@ -2076,6 +2076,46 @@ print(ok)
 }
 
 #[test]
+fn f16_frexp_full_domain_bit_exact_matches_numpy() -> Result<(), String> {
+    // np.frexp(f16) -> (mantissa f16, exponent int32). It is an EXACT bit/exponent decomposition
+    // (no rounding, no libm): mantissa = x/2^e in [0.5,1) is exactly representable in f16. numpy widens
+    // f16->f32 single-threaded; the native parallel split must be byte-identical over the ENTIRE f16
+    // domain (finite native + zero/inf/nan handled by frexp_one, no defer).
+    let script = fnp_script(
+        r#"
+ok = True
+allf16 = np.arange(65536, dtype=np.uint16).view(np.float16)
+# EXHAUSTIVE over all finite f16 tiled past the parallel gate (1<<19)
+finite = allf16[np.isfinite(allf16)]
+eng = np.tile(finite, (1 << 20) // finite.size + 2)
+m, e = fnp.frexp(eng); em, ee = np.frexp(eng)
+ok = ok and m.dtype == em.dtype and e.dtype == ee.dtype
+ok = ok and m.view(np.uint16).tobytes() == em.view(np.uint16).tobytes()
+ok = ok and e.tobytes() == ee.tobytes()
+# FULL domain incl zero/inf/nan (frexp_one handles them inline -> no defer)
+full = np.tile(allf16, (1 << 19) // 65536 + 2)
+mf, ef = fnp.frexp(full); emf, eef = np.frexp(full)
+ok = ok and bool(((mf.view(np.uint16) == emf.view(np.uint16)) | (np.isnan(mf) & np.isnan(emf))).all())
+ok = ok and ef.tobytes() == eef.tobytes()
+# 2-D shape preserved (both outputs)
+d2 = (np.random.default_rng(7).standard_normal((724, 724)) * 50).astype(np.float16)
+m2, e2 = fnp.frexp(d2); em2, ee2 = np.frexp(d2)
+ok = ok and m2.shape == em2.shape and e2.shape == ee2.shape
+ok = ok and m2.view(np.uint16).tobytes() == em2.view(np.uint16).tobytes() and e2.tobytes() == ee2.tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 frexp must be byte-identical to numpy over the full domain (mantissa + int32 exponent): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_modf_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy has no f16 ALU; np.modf(f16) widens, splits into (trunc(x), x-trunc(x) signed), narrows
     // both. The native parallel uint16-view split must be byte-identical for finite inputs (native)
