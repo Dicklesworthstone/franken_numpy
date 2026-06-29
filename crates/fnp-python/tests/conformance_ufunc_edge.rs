@@ -1239,6 +1239,15 @@ ok = ok and fnp.argsort(c6a0, axis=0).tobytes() == np.argsort(c6a0, axis=0).toby
 c6mid_re = np.argsort(rng.standard_normal((64, 256, 64)), axis=1).astype(np.float32)
 c6mid = (c6mid_re + 1j * rng.standard_normal((64, 256, 64)).astype(np.float32)).astype(np.complex64)
 ok = ok and fnp.argsort(c6mid, axis=1).tobytes() == np.argsort(c6mid, axis=1).tobytes()
+# DATETIME64 / TIMEDELTA64 flat argsort (int64-backed): distinct -> native byte-exact; NaT/dup -> delegate
+dts = rng.permutation(n).astype("datetime64[s]")  # distinct ticks
+ok = ok and fnp.argsort(dts).tobytes() == np.argsort(dts).tobytes()
+tds = rng.permutation(n).astype("timedelta64[s]")
+ok = ok and fnp.argsort(tds).tobytes() == np.argsort(tds).tobytes()
+dtd = rng.integers(0, 1000, n).astype("datetime64[s]")  # heavy ties -> delegate
+ok = ok and fnp.argsort(dtd).tobytes() == np.argsort(dtd).tobytes()
+dtn = dts.copy(); dtn[5] = np.datetime64("NaT"); dtn[n // 2] = np.datetime64("NaT")  # NaT -> delegate
+ok = ok and fnp.argsort(dtn).tobytes() == np.argsort(dtn).tobytes()
 print(bool(ok))
 "#
         .into(),
