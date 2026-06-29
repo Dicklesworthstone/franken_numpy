@@ -12796,3 +12796,19 @@ PERF (criterion, rch worker = truth; 1M x U20 all-ASCII):
 codepoint — but still ~14x.) BIT-EXACT (same ASCII map + non-ASCII defer; conformance char_case_parallel_bit_
 exact_matches_numpy extended with capitalize/title, PASSED). ASCII char-case family now parallel: upper/lower/
 swapcase/capitalize/title. OPEN: char.replace/add/strip (variable output width). AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): parallelize native ASCII char.translate ('U' arrays) — 103.5x
+`BlackThrush`. Completes the same-width ASCII char family. np.char.translate runs str.translate single-threaded
+per element — the SLOWEST char op (~446ms@1M x U20). fnp's try_zerocopy_unicode_ascii_translate builds a 128-entry
+ASCII lookup (defers dict with null-key / non-ASCII / None|str values / deletechars) but the scan + remap were
+SERIAL. Parallelized both (par_iter().any scan + par_chunks_mut lookup remap over the raw uint32 codepoints),
+gate 1<<20.
+
+PERF (criterion, rch worker = truth; 1M x U20 all-ASCII):
+  char.translate: fnp 4.31 ms vs NumPy 446.30 ms = 0.010x / 103.5x faster
+The biggest char win — translate is a trivial 1:1 lookup remap (no per-slot logic) so it parallelizes ideally,
+while numpy's str.translate is the most expensive per-element char op. BIT-EXACT (same ASCII lookup + non-ASCII
+defer; conformance char_case_parallel_bit_exact_matches_numpy extended with translate via str.maketrans, PASSED).
+SAME-WIDTH ASCII CHAR FAMILY COMPLETE (parallel): upper/lower/swapcase/capitalize/title/translate (both the
+np.char.* and np.strings.* namespaces share these helpers). OPEN: char.replace/add/strip (variable output width).
+AGENT_NAME=BlackThrush.

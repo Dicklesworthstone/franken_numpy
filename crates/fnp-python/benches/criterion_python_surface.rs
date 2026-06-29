@@ -1197,6 +1197,21 @@ fn bench_char_ascii_boundary(c: &mut Criterion) {
                 bench.iter(|| black_box(numpy_op.call1((&input,)).expect("numpy char call")));
             });
         }
+        // translate (1:1 ASCII codepoint lookup remap, parallelized)
+        let builtins = py.import("builtins").expect("builtins");
+        let tbl = builtins
+            .getattr("str")
+            .expect("str")
+            .call_method1("maketrans", ("abcdXYZ9", "ABCDxyz0"))
+            .expect("maketrans");
+        let fnp_tr = fnp_char.getattr("translate").expect("fnp char.translate");
+        let numpy_tr = numpy_char.getattr("translate").expect("numpy char.translate");
+        group.bench_function("fnp_char_translate_u20_ascii_1m", |bench| {
+            bench.iter(|| black_box(fnp_tr.call1((&input, &tbl)).expect("fnp translate")));
+        });
+        group.bench_function("numpy_char_translate_u20_ascii_1m", |bench| {
+            bench.iter(|| black_box(numpy_tr.call1((&input, &tbl)).expect("numpy translate")));
+        });
     });
 
     group.finish();

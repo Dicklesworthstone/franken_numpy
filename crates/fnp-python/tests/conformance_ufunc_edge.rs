@@ -1102,6 +1102,10 @@ a = np.tile(base, 1000 + 1)[: (1 << 20) + 257]
 for op in ("upper", "lower", "swapcase", "capitalize", "title"):
     r = getattr(fnp.char, op)(a); e = getattr(np.char, op)(a)
     ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# char.translate: 1:1 ASCII codepoint remap (parallel lookup), large array
+tbl = str.maketrans("abcdXYZ9", "ABCDxyz0")
+rt = fnp.char.translate(a, tbl); et = np.char.translate(a, tbl)
+ok = ok and rt.dtype == et.dtype and rt.shape == et.shape and rt.tobytes() == et.tobytes()
 # non-ASCII must delegate to numpy and still match (full-Unicode casing)
 u = np.tile(np.array(["café_StraßE", "ÀÉÎ_xyz"], dtype="<U16"), ((1 << 20) // 2) + 2)
 for op in ("upper", "lower"):
