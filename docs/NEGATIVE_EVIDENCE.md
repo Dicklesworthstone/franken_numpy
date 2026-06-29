@@ -13238,5 +13238,8 @@ overflow/underflow). **PERF NOTE: the naive `2.0.powi(e)` per element measured o
 exponent bits `f64::from_bits(((e+1023) as u64)<<52)` for |e|<=1023 (one op, exactly == powi for valid e),
 which avoids the loop -> should lift toward ~7x (re-bench pending). LESSON: x*2^n in a hot loop must build
 2^n from exponent bits, NEVER call powi/powf.** Conformance f16_ldexp_parallel_bit_exact PASSED (powi
-formulation exit=0; direct-2^n bit-identical for tested exponents). Claimed conservatively as >=1.60x FLOOR;
-optimized re-bench in a follow-up. See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
+formulation exit=0; direct-2^n confirmed exit=0). MEASURED PERF (criterion rch WORKER, 16M f16): direct-2^n
+fnp 16.20ms vs NumPy 103.31ms = **6.38x** (vs the powi formulation's 64.80ms/1.60x — the per-element power
+loop was 4x of the fnp time). Confirms the lesson: building 2^n from exponent bits instead of powi quadrupled
+the win (1.60x -> 6.38x). The main commit 498d5f6e claimed >=1.60x conservatively; true ratio is 6.38x.
+See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
