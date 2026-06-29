@@ -12848,3 +12848,23 @@ MODEST (numpy char.strip is bandwidth-ish ~35ms@1M, not a pathological per-eleme
 per-slot content-len scan + strip adds work) but a clean bit-exact win across all 3 variants x 2 namespaces. GATE
 1<<20 codepoints. OPEN: char.replace (variable output width = two-pass, ~221ms numpy, biggest remaining char gap).
 AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel char/strings.replace (variable-width two-pass) — 6.4x
+`BlackThrush`. The biggest remaining char gap and the first VARIABLE-output-width string op. np.char.replace(a,
+old, new) replaces all non-overlapping leftmost occurrences per element and sizes the output to the MAX result
+length over elements (null-padded). numpy runs str.replace per element single-threaded. Added
+try_zerocopy_unicode_replace: TWO parallel passes — (1) par max-reduce of each slot's result length
+(content_len + count*(len(new)-len(old)), non-overlapping leftmost count); (2) allocate U(maxlen) and par build
+each result (copy with replacement, null-pad). + char_replace_native/strings_replace_native (count=None|-1 native,
+other count -> numpy).
+
+BIT-EXACT for all-ASCII input + ASCII scalar old/new (str.replace deterministic; non-overlapping leftmost ==
+'XXX'.replace('XX','Y')=='YX'); DEFERS non-ASCII / empty old / array old|new / non-default count / 'S'. Conformance
+char_case_parallel_bit_exact_matches_numpy extended with expansion(X->YZ)/contraction(XX->Y)/same-len/no-match/
+delete(o->'')/overlapping + strings.* + count-arg defer, PASSED.
+
+PERF (criterion, rch worker = truth; 1M x U20, "C"->"QR" expansion):
+  char.replace: fnp 9.05 ms vs NumPy 57.84 ms = 0.156x / 6.4x faster
+GATE 1<<20 codepoints (parallel), 1<<16 (native at all). **STRING/CHAR OPS FAMILY COMPLETE: upper/lower/swapcase/
+capitalize/title/translate/add/strip/lstrip/rstrip/replace — all parallel, bit-exact, both np.char.* + np.strings.*.**
+AGENT_NAME=BlackThrush.

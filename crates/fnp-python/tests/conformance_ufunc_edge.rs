@@ -1126,6 +1126,15 @@ for op in ("strip", "lstrip", "rstrip"):
     ok = ok and getattr(fnp.strings, op)(sa).tobytes() == getattr(np.strings, op)(sa).tobytes()
 # chars-arg strip must DELEGATE and still match
 ok = ok and fnp.char.strip(sa, "h").tobytes() == np.char.strip(sa, "h").tobytes()
+# char.replace: expansion / contraction / same-len / no-match / overlapping pattern; output width = max result
+rb = np.array(["aXbXc", "XXXX", "nomatch", "XXX", "", "oXo"], dtype="<U10")
+ra2 = np.tile(rb, ((1 << 20) // rb.size) + 2)
+for old, new in (("X", "YZ"), ("XX", "Y"), ("X", "Q"), ("Z", "W"), ("o", "")):
+    rr = fnp.char.replace(ra2, old, new); er = np.char.replace(ra2, old, new)
+    ok = ok and rr.dtype == er.dtype and rr.shape == er.shape and rr.tobytes() == er.tobytes()
+    ok = ok and fnp.strings.replace(ra2, old, new).tobytes() == np.strings.replace(ra2, old, new).tobytes()
+# count arg + non-ASCII old must DELEGATE and still match
+ok = ok and fnp.char.replace(ra2, "X", "YZ", 1).tobytes() == np.char.replace(ra2, "X", "YZ", 1).tobytes()
 # non-ASCII must delegate to numpy and still match (full-Unicode casing)
 u = np.tile(np.array(["café_StraßE", "ÀÉÎ_xyz"], dtype="<U16"), ((1 << 20) // 2) + 2)
 for op in ("upper", "lower"):

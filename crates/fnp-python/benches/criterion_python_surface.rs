@@ -1240,6 +1240,15 @@ fn bench_char_ascii_boundary(c: &mut Criterion) {
         group.bench_function("numpy_char_strip_u20_ascii_1m", |bench| {
             bench.iter(|| black_box(numpy_strip.call1((&input_ws,)).expect("numpy strip")));
         });
+        // replace (per-element non-overlapping, two-pass variable width)
+        let fnp_rep = fnp_char.getattr("replace").expect("fnp char.replace");
+        let numpy_rep = numpy_char.getattr("replace").expect("numpy char.replace");
+        group.bench_function("fnp_char_replace_u20_ascii_1m", |bench| {
+            bench.iter(|| black_box(fnp_rep.call1((&input, "C", "QR")).expect("fnp replace")));
+        });
+        group.bench_function("numpy_char_replace_u20_ascii_1m", |bench| {
+            bench.iter(|| black_box(numpy_rep.call1((&input, "C", "QR")).expect("numpy replace")));
+        });
     });
 
     group.finish();
