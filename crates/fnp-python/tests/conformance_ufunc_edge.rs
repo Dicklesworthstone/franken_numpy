@@ -693,6 +693,40 @@ print(ok)
 }
 
 #[test]
+fn f32_polyval_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy polyval (Horner) is single-threaded; for f32 coeffs + f32 x the result is f32 with an
+    // in-f32 Horner. The native parallel per-element f32 Horner must be byte-identical, above the
+    // gate, for several degrees + incl inf/nan/-0.0 x values.
+    let script = fnp_script(
+        r#"
+n = (1 << 18) + 257
+rng = np.random.default_rng(73)
+ok = True
+for deg in (1, 4, 11):
+    p = rng.standard_normal(deg).astype(np.float32)
+    x = (rng.standard_normal(n) * 3.0).astype(np.float32)
+    x[0] = np.float32(np.inf); x[1] = np.float32(-np.inf); x[2] = np.float32(np.nan); x[3] = np.float32(-0.0)
+    r = fnp.polyval(p, x); e = np.polyval(p, x)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# 2-D x shape preserved
+x2 = (rng.standard_normal((512, 512)) * 2.0).astype(np.float32)
+p = rng.standard_normal(6).astype(np.float32)
+ok = ok and fnp.polyval(p, x2).tobytes() == np.polyval(p, x2).tobytes()
+ok = ok and fnp.polyval(p, x2).shape == np.polyval(p, x2).shape
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f32 polyval must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f32_searchsorted_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy searchsorted is a single-threaded cold-cache binary search per query; the parallel
     // per-query lower/upper-bound search must return the identical intp index array for both

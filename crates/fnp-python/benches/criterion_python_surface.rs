@@ -5480,6 +5480,27 @@ epw = rng.integers(0, 12, 16_000_000).astype(np.int64)\n";
         group.bench_function("numpy_searchsorted_f32_8m", |bch| {
             bch.iter(|| black_box(numpy_ss.call1((&ssa, &ssv)).expect("numpy searchsorted")));
         });
+        // f32 polyval (deg-11 Horner): numpy single-threaded (~570ms@16M).
+        py.run(
+            std::ffi::CString::new(
+                "pvp = np.random.default_rng(11).standard_normal(12).astype(np.float32); pvx = np.random.default_rng(12).standard_normal(16_000_000).astype(np.float32)",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("polyval setup");
+        let pvp = ns.get_item("pvp").expect("pvp");
+        let pvx = ns.get_item("pvx").expect("pvx");
+        let fnp_pv = module.getattr("polyval").expect("fnp polyval");
+        let numpy_pv = numpy.getattr("polyval").expect("numpy polyval");
+        group.bench_function("fnp_polyval_f32_16m", |bch| {
+            bch.iter(|| black_box(fnp_pv.call1((&pvp, &pvx)).expect("fnp polyval")));
+        });
+        group.bench_function("numpy_polyval_f32_16m", |bch| {
+            bch.iter(|| black_box(numpy_pv.call1((&pvp, &pvx)).expect("numpy polyval")));
+        });
     });
 
     group.finish();

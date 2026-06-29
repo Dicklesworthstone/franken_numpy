@@ -12505,3 +12505,20 @@ WHY NOT ~0-GAIN: numpy searchsorted is a single-threaded cold-cache binary searc
 independent + latency-bound, so the parallel map aggregates memory-level parallelism across cores. PRE-EXISTING (not
 mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. Extends the searchsorted parallel lever (was f64/int) to f32.
 AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT32 polyval - numpy single-threaded Horner
+`BlackThrush`. Another "f64-only fast path, f32 delegates" case (same systematic lever as the f32 var/binary families
+and f32 searchsorted). numpy polyval (Horner) is single-threaded: 16M f32, degree-11 = ~570ms. fnp had try_zerocopy_f64_
+polyval but f32 fell through to numpy. Added try_zerocopy_f32_polyval: f32 coeffs + f32 C-contiguous x -> per-element
+parallel f32 Horner (y = y*x + c per step), output f32. Hooked into the polyval pyfunction after the f64 path.
+BIT-EXACT: for f32 coeffs + f32 x, numpy's result is f32 with an in-f32 Horner (separate multiply+add, no FMA, fixed
+per-element order) — reproduced exactly (verified vs numpy across degrees 1/4/11 incl inf/nan/-0.0 + 2-D). int/f64
+coeffs (numpy promotes) or non-f32 x defer.
+
+PERF (criterion, rch worker = truth; f32, 16M elements, degree-11):
+  polyval f32 16M: fnp 14.44 ms vs NumPy 600.46 ms = 0.024x / ~41.6x faster
+CORRECTNESS: new conformance test f32_polyval_parallel_bit_exact_matches_numpy -> byte-identical to numpy across degrees
+incl inf/nan/-0.0 + 2-D x shape.
+WHY NOT ~0-GAIN: numpy polyval is single-threaded Horner (~570ms, compute-bound); each element is independent so the
+parallel per-element Horner aggregates cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2.
+Extends the "f64-only path delegates f32" lever (var/std, binary, searchsorted) to polyval. AGENT_NAME=BlackThrush.
