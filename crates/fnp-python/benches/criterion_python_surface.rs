@@ -1706,6 +1706,75 @@ fn bench_sort_complex_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_complex_binary_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_complex_binary_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+
+        // Deterministic non-zero complex operands (divisor never (0,0), so divide takes the
+        // native Smith path instead of the zero-divisor defer).
+        let make = |n: usize, dt: &str, lo: f64, hi: f64| {
+            let re = numpy
+                .call_method1("linspace", (lo, hi, n))
+                .expect("re linspace");
+            let im = numpy
+                .call_method1("linspace", (hi, lo + 5.0, n))
+                .expect("im linspace");
+            let kw = PyDict::new(py);
+            kw.set_item("dtype", dt).expect("dtype kw");
+            let z = numpy.call_method("empty", (n,), Some(&kw)).expect("empty");
+            z.setattr("real", &re).expect("set real");
+            z.setattr("imag", &im).expect("set imag");
+            z
+        };
+
+        let cases: [(&str, &[usize]); 2] = [
+            ("complex128", &[262_144, 1_048_576, 16_000_000]),
+            ("complex64", &[1_048_576, 16_000_000]),
+        ];
+        for (dt, sizes) in cases {
+            for &n in sizes {
+                let a = make(n, dt, -2.0, 3.0);
+                let b = make(n, dt, 1.0, 4.0);
+                let fmul = module.getattr("multiply").expect("fnp multiply");
+                let nmul = numpy.getattr("multiply").expect("numpy multiply");
+                let fdiv = module.getattr("divide").expect("fnp divide");
+                let ndiv = numpy.getattr("divide").expect("numpy divide");
+                let fsq = module.getattr("square").expect("fnp square");
+                let nsq = numpy.getattr("square").expect("numpy square");
+                group.bench_function(format!("fnp_mul_{dt}_{n}"), |bch| {
+                    bch.iter(|| black_box(fmul.call1((&a, &b)).expect("fnp mul")));
+                });
+                group.bench_function(format!("numpy_mul_{dt}_{n}"), |bch| {
+                    bch.iter(|| black_box(nmul.call1((&a, &b)).expect("np mul")));
+                });
+                group.bench_function(format!("fnp_div_{dt}_{n}"), |bch| {
+                    bch.iter(|| black_box(fdiv.call1((&a, &b)).expect("fnp div")));
+                });
+                group.bench_function(format!("numpy_div_{dt}_{n}"), |bch| {
+                    bch.iter(|| black_box(ndiv.call1((&a, &b)).expect("np div")));
+                });
+                group.bench_function(format!("fnp_sq_{dt}_{n}"), |bch| {
+                    bch.iter(|| black_box(fsq.call1((&a,)).expect("fnp sq")));
+                });
+                group.bench_function(format!("numpy_sq_{dt}_{n}"), |bch| {
+                    bch.iter(|| black_box(nsq.call1((&a,)).expect("np sq")));
+                });
+            }
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_statistics_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_statistics_boundary");
     group.sample_size(10);
@@ -6062,6 +6131,7 @@ criterion_group!(
     bench_setops_boundary,
     bench_unique_medium_boundary,
     bench_sort_complex_boundary,
+    bench_complex_binary_boundary,
     bench_statistics_boundary,
     bench_std_var_axis_boundary,
     bench_var_multiaxis_boundary,

@@ -800,6 +800,53 @@ print(ok)
 }
 
 #[test]
+fn complex_multiply_divide_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy runs complex multiply / divide single-threaded. The native parallel kernels (FMA
+    // multiply for complex128, Smith divide for both dtypes) must be BYTE-identical to numpy above
+    // the gate, incl the full inf/nan/-0.0 specials grid for multiply. Divide defers to numpy on a
+    // zero complex divisor (numpy's div-by-zero recovery differs), so the random divisor is kept
+    // non-zero. (complex64 multiply + complex square delegate to numpy — byte-identical trivially.)
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+ok = True
+for cdt, fdt in (("complex128", "float64"), ("complex64", "float32")):
+    n = (1 << 20) + 257
+    rng = np.random.default_rng(91)
+    a = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(cdt)
+    # divisor magnitude bounded away from zero so divide takes the native Smith path
+    b = ((rng.standard_normal(n) + 2.5) + 1j * (rng.standard_normal(n) + 2.5)).astype(cdt)
+    for r, e in ((fnp.multiply(a, b), np.multiply(a, b)),
+                 (fnp.divide(a, b), np.divide(a, b)),
+                 (fnp.square(a), np.square(a))):
+        ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+    # 2-D shape preserved (native multiply for c128, delegated for c64; native divide both)
+    a2 = a[:1 << 20].reshape(1024, 1024); b2 = b[:1 << 20].reshape(1024, 1024)
+    ok = ok and fnp.multiply(a2, b2).tobytes() == np.multiply(a2, b2).tobytes()
+    ok = ok and fnp.multiply(a2, b2).shape == np.multiply(a2, b2).shape
+    ok = ok and fnp.divide(a2, b2).tobytes() == np.divide(a2, b2).tobytes()
+    # full inf/nan/-0.0 specials grid for multiply, tiled past the 1<<20 multiply gate
+    sp = np.array([0.0, -0.0, 1.0, -2.5, np.inf, -np.inf, np.nan], dtype=fdt)
+    gr = np.array([complex(x, y) for x in sp for y in sp], dtype=cdt)
+    A = np.tile(gr, ((1 << 20) // gr.size) + 64)
+    B = np.tile(gr[::-1], ((1 << 20) // gr.size) + 64)
+    rm = fnp.multiply(A, B); em = np.multiply(A, B)
+    ok = ok and ((rm.view(fdt) == em.view(fdt)) | (np.isnan(rm.view(fdt)) & np.isnan(em.view(fdt)))).all()
+print(bool(ok))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native complex multiply/divide must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f32_searchsorted_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy searchsorted is a single-threaded cold-cache binary search per query; the parallel
     // per-query lower/upper-bound search must return the identical intp index array for both

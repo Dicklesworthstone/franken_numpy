@@ -12570,3 +12570,39 @@ PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f32-
 polyval/ldexp/spacing + pre-existing frexp/modf/var/binary/clip/nan_to_num/around. **KEY: precision-specific ops (spacing
 = ULP) need the DIRECT f32 bit formula, NOT widen-f64-narrow (which gives the f64 ULP) — unlike ldexp where widen-narrow
 IS exact.** AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel COMPLEX multiply (complex128) + divide (complex128 & complex64)
+`BlackThrush`. New lever class: fnp's binary UFunc __call__ fast-path covered only f64/f32, so EVERY complex
+binary op delegated to single-threaded numpy. numpy runs complex multiply/divide single-threaded; added
+`try_zerocopy_complex_binary` (complex128 via f64 view, complex64 via f32 view; same dtype, same shape,
+C-contiguous; par_chunks_mut over the interleaved [re,im,...] buffer) hooked into the Multiply|Divide UFunc
+__call__ path.
+
+MEASURED (criterion, rch worker = truth) — SHIPPED ONLY the subset that wins; the rest delegate:
+  complex128 multiply 16M: fnp 16.18 ms vs NumPy 28.60 ms = 0.566x / 1.77x faster
+  complex128 multiply  1M: fnp  1.009ms vs NumPy  1.108ms = 0.910x / 1.10x faster
+  complex128 divide   16M: fnp 68.91 ms vs NumPy 188.76 ms = 0.365x / 2.74x faster
+  complex128 divide    1M: fnp  2.339ms vs NumPy  2.863ms = 0.817x / 1.22x faster
+  complex64  divide   16M: fnp 24.61 ms vs NumPy 46.45 ms = 0.530x / 1.89x faster
+  complex64  divide    1M: fnp  2.241ms vs NumPy  3.020ms = 0.742x / 1.35x faster
+GATES: COMPLEX_MUL_PARALLEL_MIN=1<<20 (c128 only), COMPLEX_DIV_PARALLEL_MIN=1<<19. Below -> numpy.
+
+BIT-EXACT (verified vs numpy 2.4.3 over the full inf/nan/-0.0 specials grid + millions of random values, both
+dtypes; conformance test complex_multiply_divide_parallel_bit_exact_matches_numpy):
+  multiply: re=fma(ar,br,-(ai*bi)), im=fma(ar,bi,ai*br) — numpy's complex multiply loop uses hardware FMA
+            (Rust mul_add == vfmadd). Naive (non-FMA) == numpy on every inf/nan case, so NO specials defer.
+  divide  : Smith branch (|br|>=|bi| ? {r=bi/br;s=1/(br+bi*r);(ar+ai*r)*s,(ai-ar*r)*s} : symmetric). Byte-exact
+            for every non-zero divisor incl infinities; numpy's div-by-zero recovery differs (z/0 -> nan+infj
+            vs Smith nan+nanj), so a zero complex divisor (br==0 && bi==0 anywhere) defers the whole call.
+
+REJECTED (measured LOSSES, delegate to numpy — documented so they are not re-chased):
+  complex64 multiply: numpy vectorizes it well (~29 GB/s bandwidth-bound). 1M fnp 926µs vs NumPy 369µs = 2.5x
+    LOSS; 16M ~par/noisy. Itemsize-8 multiply returns None.
+  complex square (z*z): z*z reads the input TWICE (la & rb both view z) vs numpy's single read, so it is
+    bandwidth-disadvantaged. c128 16M fnp 39.68ms vs NumPy 20.80ms = 1.91x LOSS; c64 1M 4x LOSS. Square delegates.
+WHY: numpy's complex MULTIPLY/SQUARE are bandwidth-bound SIMD (~27-65 GB/s); parallel only wins where numpy
+leaves bandwidth on the table — c128 multiply (interleaved-f64 loop tops ~27 GB/s, parallel reaches ~47 GB/s)
+and the compute-bound Smith DIVIDE. c64 multiply + square are already near peak single-thread bandwidth -> REJECT.
+PRE-EXISTING (not mine): fnp-python lib UNIT tests fail to compile (where_py 3-arg calls at lines
+72949/72974/73000 on committed HEAD use the old signature after a peer's where_py kwargs refactor). Orthogonal;
+the integration conformance test + benches build/run fine. AGENT_NAME=BlackThrush.
