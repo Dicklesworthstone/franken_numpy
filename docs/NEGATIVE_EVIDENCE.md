@@ -13164,8 +13164,14 @@ sqrt/square parallel widen path): kernel arm 1.0/v + a warning-surface pre-scan 
 element's f16 reciprocal overflows (|x| < 1/65504 -> "overflow") or x==0 (-> "divide by zero"); inf->0,
 nan->nan inline. Conformance f16_reciprocal_full_domain_bit_exact (EXHAUSTIVE non-overflow f16 tiled ->
 native byte-exact; full domain incl zero/tiny/inf/nan -> defer byte-exact) PASSED (build clean, exit=0).
-Ratio IN-FLIGHT (follow-up; numpy baseline ~62ms@16M single-threaded). **CORRECTS the prior "reciprocal
-excluded as fiddly" note (the overflow defer is the same shape as square's). LESSON: IEEE-deterministic f16
-unary ops (divide/reciprocal/sqrt — NOT libm transcendentals) are bit-exact-safe because the f32 op is
-correctly-rounded on both sides; the f16 narrowing doesn't even need to hide ULP diffs (there are none).**
+MEASURED PERF (criterion, rch worker, 16M f16 values>=0.5): reciprocal fnp 15.78ms vs numpy 34.47ms = 2.18x
+— ENGAGES, bit-exact, but MODEST (vs f16 sqrt ~7x / floor ~37x). ROOT: the warning-defer pre-scan computes
+1/v for EVERY element to detect overflow BEFORE the kernel computes 1/v again = TWO divide passes (~2x fnp
+work). **OPEN optimization: replace the divide-based pre-scan with a cheap COMPARISON (defer if v==0 ||
+(v.is_finite() && |v| <= 1/65504)) -> one divide pass -> ~4x; the threshold tuning is the "fiddly" part the
+memory warned about (must defer ALL overflow cases to keep numpy's warning surface), so deferred. **CORRECTS
+the prior "reciprocal excluded as fiddly" note (the overflow defer is the same shape as square's). LESSON:
+IEEE-deterministic f16 unary ops (divide/reciprocal/sqrt — NOT libm transcendentals) are bit-exact-safe
+because the f32 op is correctly-rounded on both sides; the f16 narrowing doesn't even need to hide ULP diffs
+(there are none). Title held to no numeric estimate, ratio recorded post-bench.**
 See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
