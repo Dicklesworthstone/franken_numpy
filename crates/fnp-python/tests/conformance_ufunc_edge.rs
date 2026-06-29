@@ -1111,6 +1111,12 @@ ok = ok and fnp.sort(cvmid, axis=1).tobytes() == np.sort(cvmid, axis=1).tobytes(
 # axis0 full (re,im) dups -> still byte-exact (value sort, no tie-defer)
 cvad = (rng.integers(0, 20, (256, 4096)).astype(np.float64) + 1j * rng.integers(0, 20, (256, 4096)).astype(np.float64)).astype(np.complex128)
 ok = ok and fnp.sort(cvad, axis=0).tobytes() == np.sort(cvad, axis=0).tobytes()
+# COMPLEX64 VALUE sort AXIS0 + MIDAXIS (f32 gather/scatter), distinct-real per lane
+c6va0 = np.stack([rng.permutation(256).astype(np.float32) + 1j * rng.standard_normal(256).astype(np.float32) for _ in range(4096)], axis=1).astype(np.complex64)
+ok = ok and fnp.sort(c6va0, axis=0).tobytes() == np.sort(c6va0, axis=0).tobytes()
+c6vmid_re = np.argsort(rng.standard_normal((64, 256, 64)), axis=1).astype(np.float32)
+c6vmid = (c6vmid_re + 1j * rng.standard_normal((64, 256, 64)).astype(np.float32)).astype(np.complex64)
+ok = ok and fnp.sort(c6vmid, axis=1).tobytes() == np.sort(c6vmid, axis=1).tobytes()
 print(bool(ok))
 "#
         .into(),

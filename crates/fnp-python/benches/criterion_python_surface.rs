@@ -2347,6 +2347,27 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
                 black_box(numpy_argsort.call((&am_c64,), Some(&axis1_kwargs)).expect("numpy argsort am c64"))
             });
         });
+        // COMPLEX64 VALUE sort AXIS0 + MIDAXIS: reuse a0_c64 (distinct-per-column) + am_c64 (distinct-per-lane)
+        group.bench_function("fnp_sort_c64_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(fnp_sort.call((&a0_c64,), Some(&axis0_kwargs)).expect("fnp sort a0 c64"))
+            });
+        });
+        group.bench_function("numpy_sort_c64_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(numpy_sort.call((&a0_c64,), Some(&axis0_kwargs)).expect("numpy sort a0 c64"))
+            });
+        });
+        group.bench_function("fnp_sort_c64_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(fnp_sort.call((&am_c64,), Some(&axis1_kwargs)).expect("fnp sort am c64"))
+            });
+        });
+        group.bench_function("numpy_sort_c64_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(numpy_sort.call((&am_c64,), Some(&axis1_kwargs)).expect("numpy sort am c64"))
+            });
+        });
     });
 
     group.finish();
