@@ -2076,6 +2076,47 @@ print(ok)
 }
 
 #[test]
+fn f16_reciprocal_full_domain_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy has no f16 ALU; np.reciprocal(f16) widens f16->f32, divides 1/x, narrows. f32 division is
+    // IEEE correctly-rounded (no libm), so narrow(1/widen) is byte-identical to numpy over the ENTIRE
+    // f16 domain. The native path defers any element whose f16 reciprocal overflows (|x| < 1/65504 ->
+    // "overflow") or x==0 (-> "divide by zero") so numpy's warning surface is reproduced.
+    let script = fnp_script(
+        r#"
+import warnings
+ok = True
+allf16 = np.arange(65536, dtype=np.uint16).view(np.float16)
+af = allf16.astype(np.float32)
+# NATIVE path, EXHAUSTIVE: every f16 whose reciprocal does NOT overflow (finite, |x| safely above
+# 1/65504) tiled past the 1<<20 gate -> the kernel runs (no defer) and must be byte-identical.
+safe = allf16[np.isfinite(allf16) & (np.abs(af) >= (1.0 / 65504.0) * 1.01)]
+engx = np.tile(safe, (1 << 20) // safe.size + 2)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    rx = fnp.reciprocal(engx); ex = np.reciprocal(engx)
+ok = ok and rx.dtype == ex.dtype and rx.view(np.uint16).tobytes() == ex.view(np.uint16).tobytes()
+# DEFER path: the full f16 domain contains zeros/tiny (overflow) -> whole call delegates to numpy;
+# inf->0, nan->nan. Must stay byte-identical (NaN-positional).
+full = np.tile(allf16, (1 << 20) // 65536 + 2)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    rf = fnp.reciprocal(full); ef = np.reciprocal(full)
+both_nan = np.isnan(rf) & np.isnan(ef)
+ok = ok and bool((both_nan | (rf.view(np.uint16) == ef.view(np.uint16))).all())
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 reciprocal must be bit-identical to numpy over the full domain (native + defer): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_predicate_isnan_isinf_isfinite_signbit_full_domain_matches_numpy() -> Result<(), String> {
     // numpy widens f16 to f32 for isnan/isinf/isfinite/signbit; the native parallel uint16
     // bit-check must produce the identical bool array over the ENTIRE f16 domain (all 65536

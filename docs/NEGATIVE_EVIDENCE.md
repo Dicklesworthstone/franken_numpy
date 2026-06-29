@@ -13153,3 +13153,19 @@ lanes); axis0 ~7x (transpose bandwidth, like plain cumsum f16). **f16
 AXIS-REDUCTION+SCAN vein: min/max + ptp + nanmin/nanmax + cumsum/cumprod + nancumsum/nancumprod -- all share
 the no-f16-ALU widen gap. f16 scan family COMPLETE (cum + nancum).** See [[integer-matmul-no-blas-lever]].
 AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel FLOAT16 reciprocal (1/x) — bit-exact via IEEE divide (ratio pending bench)
+`BlackThrush`. numpy has NO f16 ALU -> np.reciprocal(f16) widens f16->f32, 1/x, narrows = single-threaded
+(~62ms@16M). KEY: unlike transcendentals (which the codebase defers because Rust libm diverges from numpy
+in the last ULP), 1/x is a PURE IEEE f32 divide (no libm), correctly-rounded identically on Rust+numpy, so
+narrow(1.0f32/widen) is BYTE-IDENTICAL to numpy over the ENTIRE f16 domain (verified EXHAUSTIVELY, all 65536
+patterns, in conformance). Added UnaryOp::Reciprocal to try_zerocopy_f16_unary_widen (the existing
+sqrt/square parallel widen path): kernel arm 1.0/v + a warning-surface pre-scan that defers when any finite
+element's f16 reciprocal overflows (|x| < 1/65504 -> "overflow") or x==0 (-> "divide by zero"); inf->0,
+nan->nan inline. Conformance f16_reciprocal_full_domain_bit_exact (EXHAUSTIVE non-overflow f16 tiled ->
+native byte-exact; full domain incl zero/tiny/inf/nan -> defer byte-exact) PASSED (build clean, exit=0).
+Ratio IN-FLIGHT (follow-up; numpy baseline ~62ms@16M single-threaded). **CORRECTS the prior "reciprocal
+excluded as fiddly" note (the overflow defer is the same shape as square's). LESSON: IEEE-deterministic f16
+unary ops (divide/reciprocal/sqrt — NOT libm transcendentals) are bit-exact-safe because the f32 op is
+correctly-rounded on both sides; the f16 narrowing doesn't even need to hide ULP diffs (there are none).**
+See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.

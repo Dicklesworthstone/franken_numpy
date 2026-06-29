@@ -5982,6 +5982,29 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
                 bch.iter(|| black_box(numpy_fn.call1((&hsq,)).expect("numpy f16 unary call")));
             });
         }
+        // f16 reciprocal: numpy widens f16->f32, 1/x (IEEE divide -> bit-exact), narrows (~62ms@16M).
+        // Native parallel widen wins; values >= 0.5 so no 1/x overflow (overflow inputs would defer).
+        py.run(
+            std::ffi::CString::new(
+                "hrecip = (np.abs(rng.standard_normal(16_000_000)) * 5.0 + 0.5).astype(np.float16)",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("f16 reciprocal setup");
+        let hrecip = ns.get_item("hrecip").expect("hrecip");
+        {
+            let fnp_recip = module.getattr("reciprocal").expect("fnp reciprocal");
+            let numpy_recip = numpy.getattr("reciprocal").expect("numpy reciprocal");
+            group.bench_function("fnp_reciprocal_f16_16m", |bch| {
+                bch.iter(|| black_box(fnp_recip.call1((&hrecip,)).expect("fnp f16 reciprocal")));
+            });
+            group.bench_function("numpy_reciprocal_f16_16m", |bch| {
+                bch.iter(|| black_box(numpy_recip.call1((&hrecip,)).expect("numpy f16 reciprocal")));
+            });
+        }
         // f16 clip: numpy widens f16->f32 to clamp (~149ms@16M, biggest f16 elementwise gap).
         {
             let fnp_clip = module.getattr("clip").expect("fnp clip");
