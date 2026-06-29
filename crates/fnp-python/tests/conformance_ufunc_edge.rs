@@ -2076,6 +2076,44 @@ print(ok)
 }
 
 #[test]
+fn complex_cumsum_lastaxis_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy's complex cumsum is a single-threaded sequential dependency chain; the real & imaginary
+    // parts accumulate independently, so per contiguous lane it is two interleaved sequential real
+    // prefix sums. The native parallel-across-lanes scan must be byte-identical for complex128 and
+    // complex64 on the last axis (2-D + 3-D), incl NaN/inf propagation; axis-0 delegates to numpy.
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(52)
+ok = True
+for dt, rname in [(np.complex128, np.float64), (np.complex64, np.float32)]:
+    m = (rng.standard_normal((4096, 256)) + 1j * rng.standard_normal((4096, 256))).astype(dt)
+    for ax in (1, -1):
+        r = fnp.cumsum(m, axis=ax); e = np.cumsum(m, axis=ax)
+        ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.view(rname).tobytes() == e.view(rname).tobytes()
+    m3 = (rng.standard_normal((64, 64, 256)) + 1j * rng.standard_normal((64, 64, 256))).astype(dt)
+    r3 = fnp.cumsum(m3, axis=2); e3 = np.cumsum(m3, axis=2)
+    ok = ok and r3.shape == e3.shape and r3.view(rname).tobytes() == e3.view(rname).tobytes()
+    # NaN/inf propagation along a lane
+    mn = m.copy(); mn[3, 7] = complex(np.nan, 1.0); mn[5, 0] = complex(np.inf, np.nan)
+    rn = fnp.cumsum(mn, axis=1); en = np.cumsum(mn, axis=1)
+    ok = ok and bool(((rn.view(rname) == en.view(rname)) | (np.isnan(rn.view(rname)) & np.isnan(en.view(rname)))).all())
+# axis-0 (non-last) -> delegate, still byte-identical
+ma0 = (rng.standard_normal((256, 4096)) + 1j * rng.standard_normal((256, 4096))).astype(np.complex128)
+ok = ok and fnp.cumsum(ma0, axis=0).view(np.float64).tobytes() == np.cumsum(ma0, axis=0).view(np.float64).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native complex last-axis cumsum must be byte-identical to numpy (c128/c64 + 3-D + NaN/inf + axis0 defer): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_ldexp_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // np.ldexp(float16, int32) = x * 2^e. numpy has no f16 ALU -> widens, scalbnf, narrows single-
     // threaded. The native widen->exact-pow2-scale->narrow (one rounding) must be byte-identical over

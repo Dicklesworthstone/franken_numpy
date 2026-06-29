@@ -13272,3 +13272,17 @@ landing — no parity shipped.** LESSON FINAL: NEVER trust the local numpy probe
 the clean WORKER + compute GB/s FIRST. A cheap-per-element f16 op can be fast in numpy even without SIMD; the
 f16 wins need numpy EXPENSIVE per element (widen-heavy: modf/frexp/ldexp/reciprocal/sqrt). f16 IEEE-
 deterministic family COMPLETE (cheap ones like spacing = parity). AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel COMPLEX128/COMPLEX64 last-axis cumsum — bit-exact (ratio pending bench)
+`BlackThrush`. Extends the cumsum SCAN family (f64/f32/int/f16) to complex -- the last dtype. numpy complex
+cumsum is a single-threaded SEQUENTIAL dependency chain (~177ms@16M c128 axis1, ~110ms c64); KEY: a
+dependency chain CANNOT SIMD-escape, so it stays single-threaded on the WORKER too -> ROBUST gap (unlike the
+spacing/unpackbits cheap-elementwise traps numpy SIMDs). re/im accumulate INDEPENDENTLY -> per lane = two
+interleaved sequential real prefix sums. Added complex_cumsum_lastaxis_typed (c128->f64/c64->f32): view
+complex as its real type, carry (re,im) register accumulators per contiguous lane, par across lanes.
+BIT-EXACT (same sequential real adds; NaN/inf propagate; NO defer). Gated >=2-D C-contig complex, last axis,
+rows>=2&&cols>=2, >=1<<18. Conformance complex_cumsum_lastaxis_parallel_bit_exact (c128/c64 + 2D&3D + NaN/inf
++ axis0 defer) PASSED (exit=0). Ratio IN-FLIGHT (follow-up; numpy 177ms single-threaded vs ~4000-lane
+parallel; same class as f16 cumsum lastaxis 8.10x). **SCAN family now covers f64/f32/int/f16/complex; the
+sequential-dependency-chain class is the reliable cumsum lever (numpy can't SIMD a prefix scan).** OPEN:
+complex cumsum axis0/middle/flat + cumprod. See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.

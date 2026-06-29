@@ -6052,6 +6052,36 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
                 bch.iter(|| black_box(numpy_ldexp.call1((&hsq, &lde)).expect("numpy f16 ldexp")));
             });
         }
+        // complex128/complex64 last-axis cumsum (4000x4000=16M): numpy's complex cumsum is a single-
+        // threaded sequential dependency chain (~177ms@16M c128); native per-lane parallel scan wins.
+        py.run(
+            std::ffi::CString::new(
+                "cc128 = (rng.standard_normal((4000,4000))+1j*rng.standard_normal((4000,4000))).astype(np.complex128); cc64 = cc128.astype(np.complex64)",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("complex cumsum setup");
+        let cc128 = ns.get_item("cc128").expect("cc128");
+        let cc64 = ns.get_item("cc64").expect("cc64");
+        let kw_ax1 = PyDict::new(py);
+        kw_ax1.set_item("axis", 1i64).expect("axis kw");
+        let fnp_cumsum = module.getattr("cumsum").expect("fnp cumsum");
+        let numpy_cumsum = numpy.getattr("cumsum").expect("numpy cumsum");
+        for (arr, tag) in [(&cc128, "c128"), (&cc64, "c64")] {
+            group.bench_function(format!("fnp_cumsum_lastaxis_{tag}_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(fnp_cumsum.call((arr,), Some(&kw_ax1)).expect("fnp complex cumsum"))
+                });
+            });
+            group.bench_function(format!("numpy_cumsum_lastaxis_{tag}_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(numpy_cumsum.call((arr,), Some(&kw_ax1)).expect("numpy complex cumsum"))
+                });
+            });
+        }
         // f16 clip: numpy widens f16->f32 to clamp (~149ms@16M, biggest f16 elementwise gap).
         {
             let fnp_clip = module.getattr("clip").expect("fnp clip");
