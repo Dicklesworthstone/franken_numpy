@@ -12619,11 +12619,14 @@ inf/nan/-0.0 numerators; conformance test f16_divide_widen_parallel_bit_exact_ma
 widen->f32 div->narrow is a single rounding == numpy. A zero divisor (0x0000/0x8000) defers the whole call so
 numpy's RuntimeWarning + inf/nan surface exactly.
 
-PERF: numpy f16 divide ~90 ms@16M single-threaded (widen->f32->divide->narrow, measured). The native parallel
-path uses the SAME try_zerocopy_f16_binary_widen kernel as the landed f16 add (numpy 91ms -> fnp 4.62ms = 19.8x),
-fmod (~15x) and remainder (~18x) against the same ~90ms numpy baseline -> kernel-identity proxy (memory-endorsed)
-puts f16 divide solidly in the ~15-20x range. GATE: F16_BINARY_PARALLEL_MIN = 1<<20 (shared with the family).
-(Criterion fnp-vs-numpy bench for divide_f16 added to python_parallel_binary_boundary; in flight at land time.)
+PERF (criterion, rch worker = truth; f16, 16M): f16 divide: fnp 45.55 ms vs NumPy 222.13 ms = 0.205x / 4.88x
+faster. GATE: F16_BINARY_PARALLEL_MIN = 1<<20 (shared with the family).
+**CORRECTION (kernel-identity proxy OVERESTIMATED):** the initial commit 0e5af955 claimed ~15-20x by analogy to
+the landed f16 add (19.8x) since it reuses the same try_zerocopy_f16_binary_widen widen/narrow. WRONG: the
+head-to-head is 4.88x. f32 DIVISION dominates the kernel cost (fnp f16 divide 45.5ms vs fnp f16 add 4.6ms — ~10x
+costlier per element), so even with identical widen/narrow the speedup is far smaller. **LESSON: the
+kernel-identity proxy is only valid when the per-element OP cost is comparable; for an expensive op (divide >>
+add) it over-projects — always measure the actual head-to-head.** Still a clean 4.88x WIN, bit-exact, landed.
 
 OPEN (NOT shipped): f16 floor_divide — numpy 375ms@16M (even bigger!), byte-exact via narrow(numpy f32
 floor_divide(widen)), BUT numpy's float floor_divide is npy_divmod (fmod-corrected, NOT floor(a/b)) and a
