@@ -5522,6 +5522,15 @@ epw = rng.integers(0, 12, 16_000_000).astype(np.int64)\n";
         group.bench_function("numpy_ldexp_f32_16m", |bch| {
             bch.iter(|| black_box(numpy_le.call1((&lxx, &lxe)).expect("numpy ldexp")));
         });
+        // f32 spacing: numpy single-threaded ULP (~64ms@16M).
+        let fnp_sp = module.getattr("spacing").expect("fnp spacing");
+        let numpy_sp = numpy.getattr("spacing").expect("numpy spacing");
+        group.bench_function("fnp_spacing_f32_16m", |bch| {
+            bch.iter(|| black_box(fnp_sp.call1((&lxx,)).expect("fnp spacing")));
+        });
+        group.bench_function("numpy_spacing_f32_16m", |bch| {
+            bch.iter(|| black_box(numpy_sp.call1((&lxx,)).expect("numpy spacing")));
+        });
     });
 
     group.finish();

@@ -12552,3 +12552,21 @@ WHY NOT ~0-GAIN: numpy f32 ldexp is single-threaded scalbnf (~86ms); the native 
 cores. PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. Extends the "f64-only path delegates
 f32" lever (searchsorted/polyval) to ldexp. (f32 spacing NOT shipped: ULP scale is f32-specific, widen-narrow gives the
 f64 ULP — needs a direct f32 bit formula; deferred.) AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT32 spacing - direct f32 ULP bit formula
+`BlackThrush`. Completes the f32-delegation lever for spacing. numpy runs f32 spacing single-threaded (~64ms@16M); fnp
+had only an f64 path so f32 delegated. IMPORTANT: f32 spacing CANNOT be done via widen-to-f64 (that gives the f64 ULP,
+not the f32 ULP — verified 1M+ diffs). Added try_zerocopy_f32_spacing with the DIRECT f32 bit formula (the precision-
+specific ULP): nan/inf -> nan, +-0 -> smallest f32 subnormal (from_bits(1)), else from_bits(|x|_bits + 1) - |x| with
+x's sign. par_chunks_mut over the f32 buffer. Hooked into the spacing pyfunction before its non-f64 deferral.
+BIT-EXACT: verified byte-exact vs numpy over the FULL f32 domain (sampled ~2M patterns incl 0/-0/inf/nan/subnormal).
+
+PERF (criterion, rch worker = truth; f32, 16M elements):
+  spacing f32 16M: fnp 13.72 ms vs NumPy 98.25 ms = 0.140x / ~7.2x faster
+CORRECTNESS: new conformance test f32_spacing_full_domain_bit_exact_matches_numpy -> byte-identical to numpy over the
+full f32 domain + explicit specials + 2-D.
+WHY NOT ~0-GAIN: numpy f32 spacing is single-threaded (~64ms); the native parallel bit formula aggregates cores.
+PRE-EXISTING (not mine): conformance_ufunc_edge::ufunc_signature_has_x1_x2. f32-delegation lever members now: searchsorted/
+polyval/ldexp/spacing + pre-existing frexp/modf/var/binary/clip/nan_to_num/around. **KEY: precision-specific ops (spacing
+= ULP) need the DIRECT f32 bit formula, NOT widen-f64-narrow (which gives the f64 ULP) — unlike ldexp where widen-narrow
+IS exact.** AGENT_NAME=BlackThrush.

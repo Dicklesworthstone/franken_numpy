@@ -693,6 +693,41 @@ print(ok)
 }
 
 #[test]
+fn f32_spacing_full_domain_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy f32 spacing is single-threaded; the native direct f32 bit formula (ULP at f32
+    // precision) must be byte-identical over the FULL f32 domain (sampled), incl 0/-0/inf/nan/
+    // subnormal, tiled past the gate.
+    let script = fnp_script(
+        r#"
+patterns = np.arange(0, 2**32, 1 << 11, dtype=np.uint32).view(np.float32)   # ~2M f32 samples
+ok = True
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    r = fnp.spacing(patterns); e = np.spacing(patterns)
+ok = ok and r.dtype == e.dtype and r.shape == e.shape
+ok = ok and ((r.view(np.uint32) == e.view(np.uint32)) | (np.isnan(r) & np.isnan(e))).all()
+# explicit specials + 2-D
+sp = np.array([0.0, -0.0, np.inf, -np.inf, np.nan, 1.0, -1.0, 1e38, 1e-40], dtype=np.float32)
+sp = np.tile(sp, ((1 << 18) // sp.size) + 2)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    r2 = fnp.spacing(sp); e2 = np.spacing(sp)
+ok = ok and bool(((r2.view(np.uint32) == e2.view(np.uint32)) | (np.isnan(r2) & np.isnan(e2))).all())
+print(bool(ok))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f32 spacing must be bit-identical to numpy over the full domain: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f32_ldexp_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy f32 ldexp (scalbnf) is single-threaded; the native widen->exact-pow2-scale->narrow is
     // a single rounding (== scalbnf), bit-identical across the exponent range incl 0/-0/inf/nan
