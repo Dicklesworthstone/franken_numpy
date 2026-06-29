@@ -1090,6 +1090,18 @@ ok = ok and fnp.sort(cvz).tobytes() == np.sort(cvz).tobytes()
 # COMPLEX128 LAST-AXIS value sort, 2-D distinct-real per lane
 cvm = np.stack([rng.permutation(256).astype(np.float64) + 1j * rng.standard_normal(256) for _ in range(4096)]).astype(np.complex128)
 ok = ok and fnp.sort(cvm).tobytes() == np.sort(cvm).tobytes()
+# COMPLEX64 VALUE sort (np.sort): flat distinct (perm real < 2^24 = exact f32), full dups, NaN/-0.0 delegate, last-axis
+c6 = (rng.permutation(n).astype(np.float32) + 1j * rng.standard_normal(n).astype(np.float32)).astype(np.complex64)
+r6 = fnp.sort(c6); e6 = np.sort(c6)
+ok = ok and r6.dtype == e6.dtype and r6.shape == e6.shape and r6.tobytes() == e6.tobytes()
+c6d = (rng.integers(0, 20, n).astype(np.float32) + 1j * rng.integers(0, 20, n).astype(np.float32)).astype(np.complex64)
+ok = ok and fnp.sort(c6d).tobytes() == np.sort(c6d).tobytes()  # full dups byte-exact
+c6n = c6.copy(); c6n[9] = np.complex64(complex(np.nan, 2.0))
+ok = ok and bool(((fnp.sort(c6n).view(np.float32) == np.sort(c6n).view(np.float32)) | (np.isnan(fnp.sort(c6n).view(np.float32)) & np.isnan(np.sort(c6n).view(np.float32)))).all())
+c6z = c6.copy(); c6z[3] = np.complex64(complex(-0.0, 1.0))
+ok = ok and fnp.sort(c6z).tobytes() == np.sort(c6z).tobytes()  # -0.0 delegate, still match
+c6m = np.stack([rng.permutation(256).astype(np.float32) + 1j * rng.standard_normal(256).astype(np.float32) for _ in range(4096)]).astype(np.complex64)
+ok = ok and fnp.sort(c6m).tobytes() == np.sort(c6m).tobytes()  # last-axis
 print(bool(ok))
 "#
         .into(),

@@ -2275,6 +2275,21 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
         group.bench_function("numpy_sort_c128_lastaxis_16Mx", |bch| {
             bch.iter(|| black_box(numpy_sort.call1((&la_c,)).expect("numpy sort la c128")));
         });
+        // COMPLEX64 VALUE sort (np.sort): permc/la_c cast to complex64 (distinct-real -> tie-free)
+        let permc64 = permc.call_method1("astype", ("complex64",)).expect("permc64");
+        group.bench_function("fnp_sort_c64_16m", |bch| {
+            bch.iter(|| black_box(fnp_sort.call1((&permc64,)).expect("fnp sort c64")));
+        });
+        group.bench_function("numpy_sort_c64_16m", |bch| {
+            bch.iter(|| black_box(numpy_sort.call1((&permc64,)).expect("numpy sort c64")));
+        });
+        let la_c64 = la_c.call_method1("astype", ("complex64",)).expect("la_c64");
+        group.bench_function("fnp_sort_c64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_sort.call1((&la_c64,)).expect("fnp sort la c64")));
+        });
+        group.bench_function("numpy_sort_c64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(numpy_sort.call1((&la_c64,)).expect("numpy sort la c64")));
+        });
     });
 
     group.finish();
