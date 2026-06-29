@@ -13093,3 +13093,19 @@ cumsum/cumprod. cumsum/cumprod is a SCAN not a reduce (sequential within lane, p
 96th-98th scan pattern); f16 scan is bit-exact because numpy's per-lane sequential f16-narrowed scan is
 deterministic (no pairwise ambiguity, unlike f16 sum/mean).** See [[integer-matmul-no-blas-lever]].
 AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): parallelize FLOAT16 cumsum/cumprod AXIS-0 across inner columns — 2.97x -> 6.93x
+`BlackThrush`. Follow-up to 3acdd21b/c5d5eb45 (which logged this as open). The f16 cumulative-axis kernel's
+non-last branch parallelizes across OUTER blocks, but AXIS 0 always has outer==1 (k=0 -> product(shape[..0])
+=1) so it ran SERIAL (2.97x cumsum / 2.64x cumprod). FIX: the `inner` columns are independent prefix scans;
+when outer==1, transpose the (axis_len, inner) slab into (inner, axis_len) scratch, scan each contiguous
+column in PARALLEL (par_chunks_mut over scratch = SAFE, columns disjoint), transpose back. Per-column scan
+carries the same f16-narrowed accumulator -> BIT-IDENTICAL (existing conformance covers axis-0 4096x256,
+stays GREEN). Gated outer==1 && inner>=2 && total>=1<<18; outer>=2 (middle axis) keeps the cache-friendly
+slab-parallel path. PERF (criterion, rch worker, 16M f16 4000x4000 axis-0): cumsum fnp 151ms->18.57ms vs
+NumPy 128.65ms = 6.93x; cumprod 143ms->18.41ms = 6.02x. **GENERAL LESSON: a SCAN kernel that parallelizes
+across OUTER blocks is SERIAL for axis 0 (outer always ==1) -- the independent dimension there is INNER
+(the columns), so transpose+column-parallel+transpose-back recovers the parallelism. The SAME limitation
+exists in the GENERIC cumsum_axis_typed (int/f32) and try_zerocopy_f64_cumulative_axis -> f64/f32/int cumsum
+axis-0 of a 2-D array are ALSO serial = an open follow-up lever (bigger: all dtypes).** See
+[[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
