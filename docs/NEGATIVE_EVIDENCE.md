@@ -13053,8 +13053,17 @@ axis0=outer 1, middle=both>1): uint16-view skip-NaN f32-fold reduce narrowed to 
 an input, f16->f32 exact). DEFER whole op (-> numpy's exact output incl "All-NaN slice" warning): any all-NaN
 input/lane + any zero extremum (+0/-0 ambiguity). Wired into nanmin(is_max=false)+nanmax(is_max=true) above
 the guard; keepdims handled. Conformance f16_nanmin_nanmax_flat_and_axis_bit_exact (flat + last 4096x256 +
-axis0 + middle 64x256x64 byte-exact sparse-NaN + all-NaN-lane defer), PASSED (build clean, exit=0). PERF by
-kernel identity with the f16 min/max axis win (ffec4fa2 4.7-8.2x) + ptp axis (a01d7135 8.5-12.2x) -- same
-uint16-view skip-NaN reduce, same gap class. **f16 AXIS-REDUCTION vein now: min/max + ptp + nanmin/nanmax.
-REMAINING: sum/mean/prod (need numpy pairwise-tree match), nanmean/nansum (numpy f16 not slower than f64 =
-no f16 penalty, skip).** See [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
+axis0 + middle 64x256x64 byte-exact sparse-NaN + all-NaN-lane defer), PASSED (build clean, exit=0).
+MEASURED PERF (criterion, rch worker, 16M f16 4000x4000 sparse-NaN) — path ENGAGES (fnp < numpy everywhere,
+NOT dead code): nanmin flat 1.91x (34.6 vs 66.2ms), lastaxis 4.57x (14.1 vs 64.6ms), axis0 1.57x (39.2 vs
+61.6ms); nanmax flat 2.29x, lastaxis 4.39x, axis0 2.17x. Real range **1.57-4.57x**, NOT the ~5-8x
+kernel-identity estimate in commit 3de0ce33's title (OVERCLAIM — corrected here).
+**LESSON (kernel-identity caveat, reinforced): the proxy is valid ONLY for the SAME op. nanmin/nanmax are
+NOT branchless like min/max — the per-element NaN-skip branch (if (b&0x7c00)==0x7c00 && (b&0x03ff)!=0
+continue) DEFEATS auto-vectorization, so fnp nanmin flat is 34.6ms vs fnp min flat ~3.5ms = ~10x slower
+KERNEL. numpy's nanmin is also branch-slow (~62-66ms isnan-mask+reduce) so fnp still wins, but only
+1.6-4.6x, not min/max's 8x. ALWAYS measure a NaN-skip variant DIRECTLY; never inherit the branchless
+sibling's ratio. lastaxis (contiguous lanes) wins most (~4.5x); axis0/flat (strided + branch) win least
+(~1.6-2.3x).** **f16 AXIS-REDUCTION vein now: min/max + ptp + nanmin/nanmax. REMAINING: sum/mean/prod (need
+numpy pairwise-tree match), nanmean/nansum (numpy f16 not slower than f64 = no f16 penalty, skip).** See
+[[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
