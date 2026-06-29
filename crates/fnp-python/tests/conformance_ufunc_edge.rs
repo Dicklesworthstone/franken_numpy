@@ -1124,6 +1124,14 @@ for dt in ("int32", "int64", "uint32", "uint64"):
 # axis-0 with per-column ties -> delegate, still match
 mt0 = rng.integers(0, 50, (256, 4096), dtype=np.int64)
 ok = ok and fnp.argsort(mt0, axis=0).tobytes() == np.argsort(mt0, axis=0).tobytes()
+# MIDDLE-AXIS argsort, 3-D (64,256,64), distinct per-lane along axis=1
+for dt in ("int32", "int64", "uint32", "uint64"):
+    mm = np.argsort(rng.standard_normal((64, 256, 64)), axis=1).astype(dt)  # each axis-1 lane a perm
+    r4 = fnp.argsort(mm, axis=1); e4 = np.argsort(mm, axis=1)
+    ok = ok and r4.dtype == e4.dtype and r4.shape == e4.shape and r4.tobytes() == e4.tobytes()
+# middle-axis with per-lane ties -> delegate, still match
+mtm = rng.integers(0, 30, (64, 256, 64), dtype=np.int64)
+ok = ok and fnp.argsort(mtm, axis=1).tobytes() == np.argsort(mtm, axis=1).tobytes()
 print(bool(ok))
 "#
         .into(),

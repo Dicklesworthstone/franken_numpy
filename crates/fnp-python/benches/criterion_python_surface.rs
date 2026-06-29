@@ -2100,6 +2100,35 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
                 )
             });
         });
+        // int64 MIDDLE-axis argsort, 3-D distinct-per-lane: (256, 256, 256) along axis=1
+        let am_randn = rng
+            .call_method1("standard_normal", ((256_usize, 256_usize, 256_usize),))
+            .expect("am randn");
+        let axis1_kwargs = PyDict::new(py);
+        axis1_kwargs.set_item("axis", 1_i64).expect("axis1 kw");
+        let am = numpy
+            .call_method("argsort", (am_randn,), Some(&axis1_kwargs))
+            .expect("am base")
+            .call_method1("astype", ("int64",))
+            .expect("am int64");
+        group.bench_function("fnp_argsort_int64_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_argsort
+                        .call((&am,), Some(&axis1_kwargs))
+                        .expect("fnp argsort am"),
+                )
+            });
+        });
+        group.bench_function("numpy_argsort_int64_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call((&am,), Some(&axis1_kwargs))
+                        .expect("numpy argsort am"),
+                )
+            });
+        });
     });
 
     group.finish();
