@@ -1108,6 +1108,14 @@ for dt in ("int32", "int64", "uint32", "uint64"):
 ad = rng.integers(0, 1000, n, dtype=np.int64)  # heavy ties
 rd = fnp.argsort(ad); ed = np.argsort(ad)
 ok = ok and rd.tobytes() == ed.tobytes()
+# LAST-AXIS argsort, 2-D, distinct per-lane values
+for dt in ("int32", "int64", "uint32", "uint64"):
+    m = np.stack([rng.permutation(256).astype(dt) for _ in range(4096)])  # each lane distinct
+    r2 = fnp.argsort(m); e2 = np.argsort(m)
+    ok = ok and r2.dtype == e2.dtype and r2.shape == e2.shape and r2.tobytes() == e2.tobytes()
+# 2-D with per-lane ties -> delegate, still match
+mt = rng.integers(0, 50, (4096, 256), dtype=np.int64)
+ok = ok and fnp.argsort(mt).tobytes() == np.argsort(mt).tobytes()
 print(bool(ok))
 "#
         .into(),

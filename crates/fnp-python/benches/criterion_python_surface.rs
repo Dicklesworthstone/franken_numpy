@@ -2056,6 +2056,21 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
         group.bench_function("numpy_argsort_int64_16m", |bch| {
             bch.iter(|| black_box(numpy_argsort.call1((&perm,)).expect("numpy argsort")));
         });
+        // int64 last-axis argsort, 2-D distinct-per-lane: 16384 x 1024 (each lane a shuffled range)
+        let la_randn = rng
+            .call_method1("standard_normal", ((16384_usize, 1024_usize),))
+            .expect("la randn");
+        let la = numpy
+            .call_method1("argsort", (la_randn,))
+            .expect("la base")
+            .call_method1("astype", ("int64",))
+            .expect("la int64");
+        group.bench_function("fnp_argsort_int64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&la,)).expect("fnp argsort la")));
+        });
+        group.bench_function("numpy_argsort_int64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(numpy_argsort.call1((&la,)).expect("numpy argsort la")));
+        });
     });
 
     group.finish();
