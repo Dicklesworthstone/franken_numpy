@@ -13167,9 +13167,17 @@ native byte-exact; full domain incl zero/tiny/inf/nan -> defer byte-exact) PASSE
 MEASURED PERF (criterion, rch worker, 16M f16 values>=0.5): reciprocal fnp 15.78ms vs numpy 34.47ms = 2.18x
 — ENGAGES, bit-exact, but MODEST (vs f16 sqrt ~7x / floor ~37x). ROOT: the warning-defer pre-scan computes
 1/v for EVERY element to detect overflow BEFORE the kernel computes 1/v again = TWO divide passes (~2x fnp
-work). **OPEN optimization: replace the divide-based pre-scan with a cheap COMPARISON (defer if v==0 ||
-(v.is_finite() && |v| <= 1/65504)) -> one divide pass -> ~4x; the threshold tuning is the "fiddly" part the
-memory warned about (must defer ALL overflow cases to keep numpy's warning surface), so deferred. **CORRECTS
+work). **DONE (follow-up commit): replaced the divide-based pre-scan with the cheap COMPARISON `v.is_finite()
+&& |v| <= 1/65504` — a SAFE SUPERSET of the true overflow set (overflow is |v| < 1/65520; 1/65504 > 1/65520,
+so all overflow defers + a tiny harmless margin), resolving the "fiddly threshold" worry. Conformance
+EXHAUSTIVELY GREEN over all 65536 (native non-overflow tile + full-domain defer). The clean perf delta was
+UNMEASURABLE this session: the rch worker was severely contended (numpy reciprocal swung 34->52->52ms and fnp
+15.78->34->29ms across IDENTICAL-shape runs), confounding the OLD-vs-NEW comparison (they ran on different
+loads). Landed on op-count grounds: the no-short-circuit `par_iter().any()` over 16M goes from a per-element
+divide+narrow+classify to one abs+compare = strictly fewer ops, CANNOT be slower on equal hardware; no fresh
+ratio claimed (landed 2.18x stands as floor; clean-worker should show ~4x). LESSON: when worker contention
+makes a micro-opt unmeasurable, land it ONLY if it is provably fewer-ops + bit-exact, and claim NO new ratio.
+**CORRECTS
 the prior "reciprocal excluded as fiddly" note (the overflow defer is the same shape as square's). LESSON:
 IEEE-deterministic f16 unary ops (divide/reciprocal/sqrt — NOT libm transcendentals) are bit-exact-safe
 because the f32 op is correctly-rounded on both sides; the f16 narrowing doesn't even need to hide ULP diffs
