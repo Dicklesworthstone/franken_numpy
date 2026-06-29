@@ -13132,3 +13132,19 @@ recorded the measured ratio post-bench (the discipline that the nanmin overclaim
 completes the SCAN-axis0 lever across f16+f64+f32+int -- the outer-block parallel scheme is SERIAL for axis 0
 (outer always 1); the INNER columns are the independent dimension there.** See [[integer-matmul-no-blas-lever]].
 AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel FLOAT16 nancumsum/nancumprod along an axis (last/axis0/middle) — bit-exact (ratio pending bench)
+`BlackThrush`. Extends the f16 cumulative-axis kernel (3acdd21b/9d675f45) with skip_nan. numpy has NO f16 ALU
+-> np.nancumsum/np.nancumprod of float16 widens f16->f32, replaces NaN with identity (0 sum / 1 prod),
+accumulates, narrows back to f16 each step = slow single-threaded widen-scan (measured ~202ms nancumsum /
+~171ms nancumprod @16M). fnp had NO f16 nan-scan path. Added skip_nan to try_zerocopy_f16_cumulative_axis:
+NaN contributes the identity so the running f16 accumulator carries through (NaN first-element -> identity),
+bit-identical to numpy's "NaN as 0/1 then scan", in all 3 branches (last-axis register, axis-0 transpose
+column-parallel, non-last slab). Deterministic -> NO defers; all-NaN lane -> all-zeros (nancumsum) like numpy.
+Wired nancumsum(false,true)+nancumprod(true,true) after f64/f32 nan paths; plain cumsum/cumprod pass
+skip_nan=false. Conformance f16_axis_nancumsum_nancumprod_bit_exact (last 4096x256 + axis0 + middle 64x256x64
+sparse-NaN + all-NaN lane) PASSED + f16 cumsum/cumprod stays GREEN (skip_nan=false regression), exit=0.
+Ratio IN-FLIGHT (follow-up; identical f16 cumsum kernel was 8.10x lastaxis / 2.64-6.93x axis0). **f16
+AXIS-REDUCTION+SCAN vein: min/max + ptp + nanmin/nanmax + cumsum/cumprod + nancumsum/nancumprod -- all share
+the no-f16-ALU widen gap. f16 scan family COMPLETE (cum + nancum).** See [[integer-matmul-no-blas-lever]].
+AGENT_NAME=BlackThrush.

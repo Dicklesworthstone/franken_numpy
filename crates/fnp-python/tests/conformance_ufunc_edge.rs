@@ -1997,6 +1997,43 @@ print(ok)
 }
 
 #[test]
+fn f16_axis_nancumsum_nancumprod_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy has no f16 ALU; np.nancumsum/np.nancumprod of float16 widens f16->f32, replaces NaN with
+    // the identity (0 for sum, 1 for prod), accumulates, and narrows back to f16 each step. The native
+    // uint16-view per-lane scan with the same skip-NaN/identity rule, parallel across independent
+    // lanes, must be byte-identical on the LAST axis, AXIS 0, and a MIDDLE axis (incl an all-NaN lane,
+    // which nancumsum turns into all-zeros). Deterministic -> no defers.
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(46)
+ok = True
+s2 = (rng.standard_normal((4096, 256)) * 0.1).astype(np.float16); s2[::7, ::13] = np.float16(np.nan)
+s3 = (rng.standard_normal((64, 256, 64)) * 0.1).astype(np.float16); s3[::3, ::11, ::5] = np.float16(np.nan)
+for arr, ax in [(s2, -1), (s2, 0), (s3, 1)]:
+    r = fnp.nancumsum(arr, axis=ax); e = np.nancumsum(arr, axis=ax)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.view(np.uint16).tobytes() == e.view(np.uint16).tobytes()
+p2 = (1.0 + rng.standard_normal((4096, 256)) * 0.03).astype(np.float16); p2[::7, ::13] = np.float16(np.nan)
+p3 = (1.0 + rng.standard_normal((64, 256, 64)) * 0.03).astype(np.float16); p3[::3, ::11, ::5] = np.float16(np.nan)
+for arr, ax in [(p2, -1), (p2, 0), (p3, 1)]:
+    r = fnp.nancumprod(arr, axis=ax); e = np.nancumprod(arr, axis=ax)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.view(np.uint16).tobytes() == e.view(np.uint16).tobytes()
+# all-NaN lane -> nancumsum is all-zeros (identity carries); must match
+mall = s2.copy(); mall[5, :] = np.float16(np.nan)
+ok = ok and fnp.nancumsum(mall, axis=-1).view(np.uint16).tobytes() == np.nancumsum(mall, axis=-1).view(np.uint16).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 axis nancumsum/nancumprod must be bit-identical to numpy (last/axis0/middle + all-NaN): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn cumsum_cumprod_axis0_large_2d_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy runs cumsum/cumprod single-threaded for every dtype. fnp's per-axis scan kernels
     // parallelize across OUTER blocks, but AXIS 0 has outer==1, so it ran SERIAL. The new transpose

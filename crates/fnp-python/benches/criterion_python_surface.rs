@@ -6175,6 +6175,40 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
                 });
             });
         }
+        // f16 nancumsum/nancumprod last-axis + axis-0 (4000x4000, sparse NaN -> identity): numpy
+        // widens f16->f32 + nan-mask + narrows each step (~202/171ms); native per-lane scan wins.
+        for op in ["nancumsum", "nancumprod"] {
+            let fnp_fn = module.getattr(op).expect("fnp f16 nancum op");
+            let numpy_fn = numpy.getattr(op).expect("numpy f16 nancum op");
+            group.bench_function(format!("fnp_{op}_lastaxis_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(
+                        fnp_fn.call((&hsqn2,), Some(&kw_axis)).expect("fnp f16 lastaxis nancum"),
+                    )
+                });
+            });
+            group.bench_function(format!("numpy_{op}_lastaxis_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(
+                        numpy_fn.call((&hsqn2,), Some(&kw_axis)).expect("numpy f16 lastaxis nancum"),
+                    )
+                });
+            });
+            group.bench_function(format!("fnp_{op}_axis0_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(
+                        fnp_fn.call((&hsqn2,), Some(&kw_axis0)).expect("fnp f16 axis0 nancum"),
+                    )
+                });
+            });
+            group.bench_function(format!("numpy_{op}_axis0_f16_16m"), |bch| {
+                bch.iter(|| {
+                    black_box(
+                        numpy_fn.call((&hsqn2,), Some(&kw_axis0)).expect("numpy f16 axis0 nancum"),
+                    )
+                });
+            });
+        }
         // f64/int64 cumsum AXIS-0 (4000x4000=16M): numpy runs cumsum single-threaded for every dtype
         // (~166/163ms); the transpose column-parallel axis-0 path parallelizes the previously-serial
         // axis-0 scan (last-axis was already parallel).
