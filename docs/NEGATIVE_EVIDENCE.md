@@ -13144,7 +13144,12 @@ column-parallel, non-last slab). Deterministic -> NO defers; all-NaN lane -> all
 Wired nancumsum(false,true)+nancumprod(true,true) after f64/f32 nan paths; plain cumsum/cumprod pass
 skip_nan=false. Conformance f16_axis_nancumsum_nancumprod_bit_exact (last 4096x256 + axis0 + middle 64x256x64
 sparse-NaN + all-NaN lane) PASSED + f16 cumsum/cumprod stays GREEN (skip_nan=false regression), exit=0.
-Ratio IN-FLIGHT (follow-up; identical f16 cumsum kernel was 8.10x lastaxis / 2.64-6.93x axis0). **f16
+MEASURED PERF (criterion, rch worker, 16M f16 4000x4000) — path ENGAGES (fnp << numpy): nancumsum lastaxis
+19.48x (7.45 vs 145.05ms), axis0 7.91x (18.69 vs 147.80ms); nancumprod lastaxis 16.79x (7.48 vs 125.57ms),
+axis0 6.87x (19.08 vs 131.05ms). Range **6.87-19.48x** — BIGGER than plain f16 cumsum (8.10x lastaxis)
+because numpy's nancum adds an isnan-mask + replace pass ON TOP of the widen-scan (~145ms vs cumsum ~125ms),
+while fnp's NaN->identity is a cheap per-element branch in the same scan. lastaxis ~17-19x (par across many
+lanes); axis0 ~7x (transpose bandwidth, like plain cumsum f16). **f16
 AXIS-REDUCTION+SCAN vein: min/max + ptp + nanmin/nanmax + cumsum/cumprod + nancumsum/nancumprod -- all share
 the no-f16-ALU widen gap. f16 scan family COMPLETE (cum + nancum).** See [[integer-matmul-no-blas-lever]].
 AGENT_NAME=BlackThrush.
