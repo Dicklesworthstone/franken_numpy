@@ -1088,6 +1088,39 @@ print(bool(ok))
 }
 
 #[test]
+fn char_case_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy char.upper/lower/swapcase run single-threaded per element; the native ASCII path maps
+    // codepoints in parallel above the gate. Must be BYTE-identical to numpy for all-ASCII input,
+    // and DELEGATE (still match) on any non-ASCII codepoint (numpy uses full-Unicode casing that
+    // can change width, e.g. 'ß'.upper()=='SS').
+    let script = fnp_script(
+        r#"
+ok = True
+# large all-ASCII U16 array (1M strings x 16 codepoints = 16M >> gate)
+base = np.array(["aZ_bY9-cX_%d" % (i % 89) for i in range(1000)], dtype="<U16")
+a = np.tile(base, 1000 + 1)[: (1 << 20) + 257]
+for op in ("upper", "lower", "swapcase"):
+    r = getattr(fnp.char, op)(a); e = getattr(np.char, op)(a)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# non-ASCII must delegate to numpy and still match (full-Unicode casing)
+u = np.tile(np.array(["café_StraßE", "ÀÉÎ_xyz"], dtype="<U16"), ((1 << 20) // 2) + 2)
+for op in ("upper", "lower"):
+    r = getattr(fnp.char, op)(u); e = getattr(np.char, op)(u)
+    ok = ok and r.tobytes() == e.tobytes()
+print(bool(ok))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native parallel char upper/lower/swapcase must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f32_searchsorted_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy searchsorted is a single-threaded cold-cache binary search per query; the parallel
     // per-query lower/upper-bound search must return the identical intp index array for both

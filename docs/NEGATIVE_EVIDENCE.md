@@ -12763,3 +12763,21 @@ sorts — the strided gather/scatter is contention-sensitive on a loaded box —
 strided column sort.) NOTE: axis must be passed as a KWARG (np.sort native fast path requires args.len()==1; a
 positional axis falls to numpy passthrough). INTEGER SORT FAMILY COMPLETE: flat + last-axis + axis0.
 AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): parallelize native ASCII char.upper/lower/swapcase ('U' arrays) — 32-36x
+`BlackThrush`. np.char.upper/lower/swapcase run a slow single-threaded per-element Python-string loop (~205-212ms
+@1M x U20). fnp already had a native ASCII path (unicode_ascii_case_or_numpy: view 'U' as uint32 codepoints, defer
+on any non-ASCII so numpy's full-Unicode casing — e.g. 'ß'.upper()=='SS' width change — is preserved) but it was
+SERIAL (one codepoint loop + a serial all-ASCII scan). Parallelized BOTH the all-ASCII pre-scan (par_iter().any)
+and the case-map (par_chunks_mut over the raw uint32 codepoint slices), gated at 1<<20 codepoints.
+
+PERF (criterion, rch worker = truth; 1M x U20 all-ASCII):
+  char.upper: fnp 5.94 ms vs NumPy 212.46 ms = 0.028x / 35.8x faster
+  char.lower: fnp 6.45 ms vs NumPy 205.75 ms = 0.031x / 31.9x faster
+MY CONTRIBUTION = the parallelization: serial (RAYON=1) char.upper was 109 ms (only ~1.9x vs numpy); the parallel
+codepoint map takes it to 5.94 ms = 18.3x over serial / 35.8x over numpy. BIT-EXACT (same ASCII map + non-ASCII
+defer as the serial path; conformance char_case_parallel_bit_exact_matches_numpy: all-ASCII >gate byte-identical +
+non-ASCII ('café'/'straße'/accented) delegates and still matches, PASSED). GATE CHAR_CASE_PARALLEL_MIN = 1<<20
+codepoints. NEW primitive class: parallel string/char ops. OPEN: char.replace (~221ms)/add (~147ms)/strip (~78ms)
+are slow in numpy too but need variable-output-width handling (capitalize/title already have a serial native path
+that could be parallelized the same way). AGENT_NAME=BlackThrush.
