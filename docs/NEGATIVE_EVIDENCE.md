@@ -12606,3 +12606,26 @@ and the compute-bound Smith DIVIDE. c64 multiply + square are already near peak 
 PRE-EXISTING (not mine): fnp-python lib UNIT tests fail to compile (where_py 3-arg calls at lines
 72949/72974/73000 on committed HEAD use the old signature after a peer's where_py kwargs refactor). Orthogonal;
 the integration conformance test + benches build/run fine. AGENT_NAME=BlackThrush.
+
+## 2026-06-28 - WIN (LANDED): native parallel FLOAT16 divide — numpy widens f16->f32->divide->narrow
+`BlackThrush`. The f16-binary-widen family (try_zerocopy_f16_binary_widen: add/mul/sub/max/min/fmod/remainder/
+copysign/heaviside/nextafter) had NO divide — numpy has no f16 ALU so f16 a/b widens each operand to f32,
+divides, narrows (round-to-nearest-even), single-threaded compute-bound. Added op 10 = divide
+(f16::from_f32(av/bv)) + extended the zero-divisor defer (op 5|6|10) + wired UFuncKind::Divide => Some(10) into
+the f16op dispatch in the binary UFunc __call__.
+
+BIT-EXACT (verified vs numpy 2.4.3: random + the FULL f16 domain divided by a fixed divisor set, incl
+inf/nan/-0.0 numerators; conformance test f16_divide_widen_parallel_bit_exact_matches_numpy PASSED, exit 0):
+widen->f32 div->narrow is a single rounding == numpy. A zero divisor (0x0000/0x8000) defers the whole call so
+numpy's RuntimeWarning + inf/nan surface exactly.
+
+PERF: numpy f16 divide ~90 ms@16M single-threaded (widen->f32->divide->narrow, measured). The native parallel
+path uses the SAME try_zerocopy_f16_binary_widen kernel as the landed f16 add (numpy 91ms -> fnp 4.62ms = 19.8x),
+fmod (~15x) and remainder (~18x) against the same ~90ms numpy baseline -> kernel-identity proxy (memory-endorsed)
+puts f16 divide solidly in the ~15-20x range. GATE: F16_BINARY_PARALLEL_MIN = 1<<20 (shared with the family).
+(Criterion fnp-vs-numpy bench for divide_f16 added to python_parallel_binary_boundary; in flight at land time.)
+
+OPEN (NOT shipped): f16 floor_divide — numpy 375ms@16M (even bigger!), byte-exact via narrow(numpy f32
+floor_divide(widen)), BUT numpy's float floor_divide is npy_divmod (fmod-corrected, NOT floor(a/b)) and a
+straight npy_divmod transcription still mismatched ~6% (signed-zero + the div-floordiv>0.5 rounding correction).
+Needs an exact npy_divmod replication before it can ship. AGENT_NAME=BlackThrush.

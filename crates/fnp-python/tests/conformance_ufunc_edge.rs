@@ -847,6 +847,52 @@ print(bool(ok))
 }
 
 #[test]
+fn f16_divide_widen_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy has no f16 ALU: it widens f16->f32, divides, narrows (round-to-nearest-even). The native
+    // parallel widen-divide-narrow must be BYTE-identical above the gate, incl inf/nan/-0.0 numerators
+    // and the full f16 domain divided by a fixed divisor set. A zero divisor defers to numpy.
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+n = (1 << 20) + 257
+rng = np.random.default_rng(97)
+a = (rng.standard_normal(n) * 4).astype(np.float16)
+b = (rng.standard_normal(n) * 4).astype(np.float16)
+b[b == 0] = np.float16(1.0)                 # non-zero divisor -> native path
+a[0]=np.float16(np.inf); a[1]=np.float16(-np.inf); a[2]=np.float16(np.nan); a[3]=np.float16(-0.0)
+r = fnp.divide(a, b); e = np.divide(a, b)
+ok = r.dtype == e.dtype and r.shape == e.shape
+ok = ok and ((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all()
+# 2-D shape preserved
+a2 = a[:1 << 20].reshape(1024, 1024); b2 = b[:1 << 20].reshape(1024, 1024)
+r2 = fnp.divide(a2, b2); e2 = np.divide(a2, b2)
+ok = ok and ((r2.view(np.uint16) == e2.view(np.uint16)) | (np.isnan(r2) & np.isnan(e2))).all()
+# full f16 domain (tiled past the gate) divided by a fixed divisor set
+allf = np.arange(0, 65536, dtype=np.uint16).view(np.float16)
+A = np.tile(allf, ((1 << 20) // allf.size) + 2)
+for d in (np.float16(1.0), np.float16(-3.5), np.float16(7.0), np.float16(0.5)):
+    B = np.full(A.size, d, dtype=np.float16)
+    rr = fnp.divide(A, B); ee = np.divide(A, B)
+    ok = ok and bool(((rr.view(np.uint16) == ee.view(np.uint16)) | (np.isnan(rr) & np.isnan(ee))).all())
+# zero divisor defers to numpy and still matches (inf/nan + RuntimeWarning suppressed)
+bz = b.copy(); bz[5] = np.float16(0.0); bz[6] = np.float16(-0.0)
+rz = fnp.divide(a, bz); ez = np.divide(a, bz)
+ok = ok and bool(((rz.view(np.uint16) == ez.view(np.uint16)) | (np.isnan(rz) & np.isnan(ez))).all())
+print(bool(ok))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 divide must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f32_searchsorted_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy searchsorted is a single-threaded cold-cache binary search per query; the parallel
     // per-query lower/upper-bound search must return the identical intp index array for both

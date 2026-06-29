@@ -5275,7 +5275,8 @@ hb = rng.standard_normal(16_000_000).astype(np.float16)\n";
         )
         .expect("f16 nonzero divisor setup");
         let hbnz = ns.get_item("hbnz").expect("hbnz");
-        for op in ["fmod", "remainder"] {
+        // f16 divide added: numpy widens f16->f32->divide->narrow single-threaded (~90ms@16M).
+        for op in ["fmod", "remainder", "divide"] {
             let fnp_fn = module.getattr(op).expect("fnp op");
             let numpy_fn = numpy.getattr(op).expect("numpy op");
             group.bench_function(format!("fnp_{op}_f16_16m"), |bch| {
