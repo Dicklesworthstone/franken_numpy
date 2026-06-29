@@ -1881,6 +1881,54 @@ fn bench_f16_matmul_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_flat_sort_dtype_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_sort = module.getattr("sort").expect("fnp sort");
+        let numpy_sort = numpy.getattr("sort").expect("numpy sort");
+        let default_rng = numpy
+            .getattr("random")
+            .expect("numpy.random")
+            .getattr("default_rng")
+            .expect("default_rng");
+        let rng = default_rng.call1((7_i64,)).expect("rng");
+        let n = 16_000_000_usize;
+        // int64, int32, float32 flat-sort inputs
+        let i64a = rng
+            .call_method1("integers", (i64::MIN, i64::MAX, n))
+            .expect("int64 input");
+        let i32a = rng
+            .call_method1("integers", (-2_000_000_000_i64, 2_000_000_000_i64, n))
+            .expect("int32 raw")
+            .call_method1("astype", ("int32",))
+            .expect("int32 input");
+        let f32a = rng
+            .call_method1("standard_normal", (n,))
+            .expect("f32 raw")
+            .call_method1("astype", ("float32",))
+            .expect("f32 input");
+        for (label, arr) in [("int64", &i64a), ("int32", &i32a), ("float32", &f32a)] {
+            group.bench_function(format!("fnp_sort_{label}_16m"), |bch| {
+                bch.iter(|| black_box(fnp_sort.call1((arr,)).expect("fnp sort call")));
+            });
+            group.bench_function(format!("numpy_sort_{label}_16m"), |bch| {
+                bch.iter(|| black_box(numpy_sort.call1((arr,)).expect("numpy sort call")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_statistics_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_statistics_boundary");
     group.sample_size(10);
@@ -6240,6 +6288,7 @@ criterion_group!(
     bench_sort_complex_boundary,
     bench_complex_binary_boundary,
     bench_f16_matmul_boundary,
+    bench_flat_sort_dtype_boundary,
     bench_statistics_boundary,
     bench_std_var_axis_boundary,
     bench_var_multiaxis_boundary,

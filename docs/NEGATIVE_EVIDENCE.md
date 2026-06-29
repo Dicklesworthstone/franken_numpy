@@ -12711,3 +12711,24 @@ GATE: F16_MATMUL_MIN_WORK = 1<<18. BIT-EXACT (per-slice == the 2-D seq-k-f32 pat
 f16_matmul_parallel_bit_exact_matches_numpy extended with both broadcast forms, PASSED). Fully-general batch
 broadcasting (both >=3-D with mismatched/1-broadcast dims) still defers to numpy. f16 GEMM family now covers
 2-D + batched + BROADCAST + dot + tensordot + inner. AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel INTEGER flat 1-D sort (int32/int64/uint32/uint64)
+`BlackThrush`. DIFFERENT primitive (sorting, not elementwise/GEMM). np.sort is single-threaded for every dtype;
+fnp had a parallel flat f64 sort (try_zerocopy_f64_sort_flat) but f32/integer 1-D arrays delegated to numpy.
+Added try_native_int_sort_flat (generic int_sort_flat_typed over a fresh numpy.empty copy + rayon
+par_sort_unstable), hooked into the sort pyfunction's 1-D branch after the f64 path.
+
+BIT-EXACT unconditionally for integers: no -0.0/NaN, so equal value == equal bytes and Rust's Ord total order ==
+numpy's ascending value order (incl signed two's-complement, duplicates). No scan/defer needed. (conformance
+f32_int_flat_sort_parallel_bit_exact_matches_numpy PASSED across all int widths + f32 incl inf/dups + the
+delegated NaN/-0.0 f32 cases.)
+
+PERF (criterion, rch worker = truth; 16M flat sort):
+  int64:  fnp 80.42 ms vs NumPy 189.23 ms = 0.425x / 2.35x faster
+  int32:  fnp 64.24 ms vs NumPy  92.53 ms = 0.694x / 1.44x faster
+  (uint32/uint64 ship by symmetry — same kernel/cost as the signed widths.)
+GATE: SORT_PARALLEL_MIN = 1<<20. REJECTED (not shipped): float32 flat sort = fnp 89.18ms vs NumPy 95.19ms =
+1.07x ~0-gain (numpy 2.x uses AVX-512 x86-simd-sort for 4-byte floats — already saturated; the NaN/-0.0 defer
+scan eats the tiny margin). int8/int16/uint8/uint16 EXCLUDED: numpy uses an O(n) radix/counting sort for 1-/2-
+byte ints that a comparison par_sort cannot beat. Only the 4-/8-byte int widths (numpy comparison/simd-sort,
+single-threaded) are real parallel wins. AGENT_NAME=BlackThrush.

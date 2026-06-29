@@ -1031,6 +1031,47 @@ print(bool(ok))
 }
 
 #[test]
+fn f32_int_flat_sort_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy sorts every dtype single-threaded; the native parallel flat sort (rayon
+    // par_sort_unstable over a fresh copy) must be BYTE-identical to np.sort above the gate.
+    // Integers are byte-exact unconditionally (Ord == numpy ascending value order, incl signed
+    // two's-complement, with ties/duplicates). f32 is byte-exact for no-NaN/no--0.0 input.
+    let script = fnp_script(
+        r#"
+n = (1 << 20) + 257
+rng = np.random.default_rng(123)
+ok = True
+# integer dtypes incl negatives, duplicates, full range
+for dt in ("int8","int16","int32","int64","uint8","uint16","uint32","uint64"):
+    info = np.iinfo(dt)
+    a = rng.integers(info.min, info.max, n, dtype=dt, endpoint=True)
+    a[:500] = a[500:1000]  # duplicates
+    r = fnp.sort(a); e = np.sort(a)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# float32 (no NaN, no -0.0): includes +inf/-inf, +0.0, duplicates
+f = (rng.standard_normal(n) * 10).astype(np.float32)
+f[0] = np.float32(np.inf); f[1] = np.float32(-np.inf); f[2] = np.float32(0.0)
+f[:300] = f[300:600]
+r = fnp.sort(f); e = np.sort(f)
+ok = ok and r.dtype == e.dtype and r.tobytes() == e.tobytes()
+# f32 with NaN/-0.0 must DELEGATE and still match numpy
+fn_ = f.copy(); fn_[5] = np.float32(np.nan); fn_[6] = np.float32(-0.0)
+rn = fnp.sort(fn_); en = np.sort(fn_)
+ok = ok and bool(((rn.view(np.uint32) == en.view(np.uint32)) | (np.isnan(rn) & np.isnan(en))).all())
+print(bool(ok))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f32/int flat sort must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f32_searchsorted_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy searchsorted is a single-threaded cold-cache binary search per query; the parallel
     // per-query lower/upper-bound search must return the identical intp index array for both
