@@ -942,6 +942,52 @@ print(bool(ok))
 }
 
 #[test]
+fn f16_matmul_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy has no f16 BLAS: a @ b widens to f32, accumulates each output element over k=0..K-1 in
+    // order, narrows to f16 once. The native parallel GEMM (per-output f32 accumulation in the same
+    // k-order, single narrow) must be BYTE-identical to np.matmul / np.dot across square, rectangular,
+    // matvec and large-K shapes, above the gate.
+    let script = fnp_script(
+        r#"
+ok = True
+for (M, K, N, seed) in ((512,512,512,1),(300,700,200,2),(128,2000,64,3),(2000,3,2000,4),(64,4096,1,5)):
+    rng = np.random.default_rng(seed)
+    a = (rng.standard_normal((M, K)) * 0.3).astype(np.float16)
+    b = (rng.standard_normal((K, N)) * 0.3).astype(np.float16)
+    rm = fnp.matmul(a, b); em = np.matmul(a, b)
+    ok = ok and rm.dtype == em.dtype and rm.shape == em.shape
+    ok = ok and ((rm.view(np.uint16) == em.view(np.uint16)) | (np.isnan(rm) & np.isnan(em))).all()
+    rd = fnp.dot(a, b); ed = np.dot(a, b)
+    ok = ok and ((rd.view(np.uint16) == ed.view(np.uint16)) | (np.isnan(rd) & np.isnan(ed))).all()
+# inf/nan elements propagate identically
+rng = np.random.default_rng(6)
+a = (rng.standard_normal((256, 256)) * 0.3).astype(np.float16); b = (rng.standard_normal((256, 256)) * 0.3).astype(np.float16)
+a[0, 0] = np.float16(np.inf); b[0, 1] = np.float16(np.nan)
+rm = fnp.matmul(a, b); em = np.matmul(a, b)
+ok = ok and bool(((rm.view(np.uint16) == em.view(np.uint16)) | (np.isnan(rm) & np.isnan(em))).all())
+# BATCHED (>=3-D) f16 matmul, matching batch dims
+for shp in ((8, 128, 128), (4, 3, 64, 64)):
+    rng = np.random.default_rng(sum(shp))
+    *bd, M, K = shp
+    a = (rng.standard_normal(shp) * 0.3).astype(np.float16)
+    b = (rng.standard_normal((*bd, K, M)) * 0.3).astype(np.float16)
+    rb = fnp.matmul(a, b); eb = np.matmul(a, b)
+    ok = ok and rb.dtype == eb.dtype and rb.shape == eb.shape
+    ok = ok and bool(((rb.view(np.uint16) == eb.view(np.uint16)) | (np.isnan(rb) & np.isnan(eb))).all())
+print(bool(ok))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native f16 matmul must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f32_searchsorted_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy searchsorted is a single-threaded cold-cache binary search per query; the parallel
     // per-query lower/upper-bound search must return the identical intp index array for both
