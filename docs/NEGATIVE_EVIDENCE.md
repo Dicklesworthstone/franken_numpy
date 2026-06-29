@@ -12899,3 +12899,14 @@ MODEST/READ-BOUND: the predicate is cheap so these are dominated by the input re
 extra bandwidth (isalpha 1.64x). isalnum is bigger (3.59x) because numpy's isalnum is costlier per element. GATE
 1<<20 codepoints. (isupper/islower/istitle deferred — need cased-char logic. STRING-OP class now: 11 transform
 ops + 4 predicates, all parallel bit-exact, np.char.* + np.strings.*.) AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - NO-SHIP (measured): char.count — READ-BOUND, loses to numpy's single-pass C scan
+`BlackThrush`. Built try_zerocopy_unicode_count (per-slot non-overlapping substring count -> int64). FIRST bench
+(1M x U20, sub="C") = fnp 64.3 ms vs NumPy 42.1 ms = 1.53x LOSS. Root cause: count is READ-BOUND (numpy ~42ms just
+reads the ~80MB input once in optimized C); my version did a non-ASCII PRE-SCAN (a full extra read) + the count
+scan = 2 passes. Removed the pre-scan (counting an ASCII sub is correct for any content — non-ASCII never matches),
+making it 1 pass, but a 1-pass parallel read of 80MB is at best marginal vs numpy's 1-pass C scan and the first
+real measurement was a loss, so REVERTED (stashed) rather than chase a marginal read-bound op. **LESSON: char
+PREDICATES that must scan the WHOLE content with NO short-circuit (count, and likely find/index) are READ-BOUND —
+unlike isalpha/isalnum which short-circuit on the first failing char (1.6-3.6x win). The big char wins were the
+per-element-PYTHON ops (upper 35x, translate 103x); read-bound char scans don't beat numpy's C.** AGENT_NAME=BlackThrush.
