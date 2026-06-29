@@ -1099,7 +1099,7 @@ ok = True
 # large all-ASCII U16 array (1M strings x 16 codepoints = 16M >> gate)
 base = np.array(["aZ_bY9-cX_%d" % (i % 89) for i in range(1000)], dtype="<U16")
 a = np.tile(base, 1000 + 1)[: (1 << 20) + 257]
-for op in ("upper", "lower", "swapcase"):
+for op in ("upper", "lower", "swapcase", "capitalize", "title"):
     r = getattr(fnp.char, op)(a); e = getattr(np.char, op)(a)
     ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
 # non-ASCII must delegate to numpy and still match (full-Unicode casing)

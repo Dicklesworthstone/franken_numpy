@@ -12781,3 +12781,18 @@ non-ASCII ('café'/'straße'/accented) delegates and still matches, PASSED). GAT
 codepoints. NEW primitive class: parallel string/char ops. OPEN: char.replace (~221ms)/add (~147ms)/strip (~78ms)
 are slow in numpy too but need variable-output-width handling (capitalize/title already have a serial native path
 that could be parallelized the same way). AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): parallelize native ASCII char.capitalize/title ('U' arrays) — 14-15x
+`BlackThrush`. Follow-on to the char.upper/lower parallelization. np.char.capitalize/title run a slow single-
+threaded per-element loop (~228-236ms@1M x U20). fnp's try_zerocopy_unicode_ascii_cap_title had a SERIAL per-slot
+loop (each fixed-width string slot: capitalize = first cp upper + rest lower; title = upper a cased char after an
+uncased one). Parallelized the all-ASCII pre-scan + the per-slot map (par_chunks_mut over WHOLE-STRING slots —
+each slot is independent; title's prev_cased state is per-slot so slot-level parallelism is correct). Gate 1<<20.
+
+PERF (criterion, rch worker = truth; 1M x U20 all-ASCII):
+  char.capitalize: fnp 16.27 ms vs NumPy 228.00 ms = 0.071x / 14.0x faster
+  char.title:      fnp 15.99 ms vs NumPy 236.24 ms = 0.068x / 14.8x faster
+(Smaller than upper/lower's 35.8x — cap/title do per-slot first-letter/word-boundary logic, more work per
+codepoint — but still ~14x.) BIT-EXACT (same ASCII map + non-ASCII defer; conformance char_case_parallel_bit_
+exact_matches_numpy extended with capitalize/title, PASSED). ASCII char-case family now parallel: upper/lower/
+swapcase/capitalize/title. OPEN: char.replace/add/strip (variable output width). AGENT_NAME=BlackThrush.

@@ -1185,6 +1185,18 @@ fn bench_char_ascii_boundary(c: &mut Criterion) {
                 black_box(result);
             });
         });
+
+        // capitalize / title (per-slot ASCII map, parallelized across whole-string slots)
+        for op in ["capitalize", "title"] {
+            let fnp_op = fnp_char.getattr(op).expect("fnp char op");
+            let numpy_op = numpy_char.getattr(op).expect("numpy char op");
+            group.bench_function(format!("fnp_char_{op}_u20_ascii_1m"), |bench| {
+                bench.iter(|| black_box(fnp_op.call1((&input,)).expect("fnp char call")));
+            });
+            group.bench_function(format!("numpy_char_{op}_u20_ascii_1m"), |bench| {
+                bench.iter(|| black_box(numpy_op.call1((&input,)).expect("numpy char call")));
+            });
+        }
     });
 
     group.finish();
