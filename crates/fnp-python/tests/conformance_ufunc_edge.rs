@@ -1108,6 +1108,14 @@ for dt in ("int32", "int64", "uint32", "uint64"):
 ad = rng.integers(0, 1000, n, dtype=np.int64)  # heavy ties
 rd = fnp.argsort(ad); ed = np.argsort(ad)
 ok = ok and rd.tobytes() == ed.tobytes()
+# FLOAT32 flat argsort, DISTINCT (perm 0..n-1 < 2^24 = exact f32) -> native path, byte-exact
+af = rng.permutation(n).astype(np.float32)
+rf = fnp.argsort(af); ef = np.argsort(af)
+ok = ok and rf.dtype == ef.dtype and rf.shape == ef.shape and rf.tobytes() == ef.tobytes()
+ok = ok and bool((af[rf] == np.sort(af)).all())
+# FLOAT32 with NaN -> must DELEGATE (numpy NaN-at-end ordering) and still match
+anf = rng.standard_normal(n).astype(np.float32); anf[5] = np.nan; anf[n // 2] = np.nan
+ok = ok and fnp.argsort(anf).tobytes() == np.argsort(anf).tobytes()
 # LAST-AXIS argsort, 2-D, distinct per-lane values
 for dt in ("int32", "int64", "uint32", "uint64"):
     m = np.stack([rng.permutation(256).astype(dt) for _ in range(4096)])  # each lane distinct

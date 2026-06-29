@@ -2056,6 +2056,14 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
         group.bench_function("numpy_argsort_int64_16m", |bch| {
             bch.iter(|| black_box(numpy_argsort.call1((&perm,)).expect("numpy argsort")));
         });
+        // f32 flat argsort on DISTINCT data (permutation 0..16M-1 < 2^24 = exact f32, no ties)
+        let permf32 = perm.call_method1("astype", ("float32",)).expect("perm f32");
+        group.bench_function("fnp_argsort_f32_16m", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&permf32,)).expect("fnp argsort f32")));
+        });
+        group.bench_function("numpy_argsort_f32_16m", |bch| {
+            bch.iter(|| black_box(numpy_argsort.call1((&permf32,)).expect("numpy argsort f32")));
+        });
         // int64 last-axis argsort, 2-D distinct-per-lane: 16384 x 1024 (each lane a shuffled range)
         let la_randn = rng
             .call_method1("standard_normal", ((16384_usize, 1024_usize),))
