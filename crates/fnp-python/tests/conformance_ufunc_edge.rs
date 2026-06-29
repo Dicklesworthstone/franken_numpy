@@ -1124,6 +1124,15 @@ tvs = rng.integers(0, 1000, n).astype("timedelta64[s]")  # heavy dups (value sor
 ok = ok and fnp.sort(tvs).tobytes() == np.sort(tvs).tobytes()
 dvn = dvs.copy(); dvn[5] = np.datetime64("NaT")  # NaT -> delegate
 ok = ok and fnp.sort(dvn).tobytes() == np.sort(dvn).tobytes()
+# DATETIME64/TIMEDELTA64 VALUE sort AXES (last/axis0): distinct + heavy-dups byte-exact (no tie-defer); NaT delegate
+dvl = np.stack([rng.permutation(256) for _ in range(4096)]).astype("datetime64[s]")  # last-axis distinct
+ok = ok and fnp.sort(dvl).dtype == np.sort(dvl).dtype and fnp.sort(dvl).tobytes() == np.sort(dvl).tobytes()
+tvl = rng.integers(0, 50, (4096, 256)).astype("timedelta64[s]")  # last-axis HEAVY dups -> byte-exact, no defer
+ok = ok and fnp.sort(tvl).tobytes() == np.sort(tvl).tobytes()
+dva0 = np.stack([rng.permutation(256) for _ in range(4096)], axis=1).astype("datetime64[s]")  # axis-0 distinct
+ok = ok and fnp.sort(dva0, axis=0).dtype == np.sort(dva0, axis=0).dtype and fnp.sort(dva0, axis=0).tobytes() == np.sort(dva0, axis=0).tobytes()
+dvln = dvl.copy(); dvln[3, 7] = np.datetime64("NaT")  # NaT in a lane -> whole-op delegate, still match
+ok = ok and fnp.sort(dvln).tobytes() == np.sort(dvln).tobytes()
 print(bool(ok))
 "#
         .into(),

@@ -12957,3 +12957,24 @@ added to python_flat_sort_dtype_boundary. Thin int64-view adapter = zero extra k
 already-accelerated dtype's order (int64) is a free byte-exact win via a view+delegate adapter — no new
 kernel, just NaT/tie defer + route. argsort's intp output is dtype-agnostic so the int64 axis kernels apply
 verbatim.** AGENT_NAME=BlackThrush.
+
+## 2026-06-29 - WIN (LANDED): native parallel DATETIME64/TIMEDELTA64 value sort (np.sort) along last-axis + axis-0 — 2.3-4.5x
+`BlackThrush`. Symmetric companion to the datetime64 argsort axes win (333728dc) and flat value sort
+(faded274, 7.8x). numpy has NO AVX-512 x86-simd-sort for 'M'/'m', so np.sort along an axis sorts each
+lane/column with a generic single-threaded comparison introsort. Equal ticks are equal bytes -> sorting the
+int64 view is BYTE-EXACT with NO tie-defer (unlike argsort); only the OUTPUT dtype matters, so allocate
+numpy.empty(dtype=a.dtype) and view IT as int64 for the parallel sort. Added try_native_datetime_sort_axes:
+gate 'M'/'m' itemsize-8 >=2-D C-contig, NaT pre-scan (== i64::MIN -> defer), LAST axis copies src->dst +
+par_chunks_mut(cols).sort_unstable() (lane-width gate cols>=256, mirrors the SHORT-LANE fix); AXIS 0 gathers
+each strided column into a transposed scratch lane, sorts, scatters back. Mirrors try_native_int_sort_
+lastaxis/_axis0 but datetime-dtyped output (int kernels emit int64 = wrong for a value sort). Middle axis
+defers (no int64 midaxis value-sort kernel yet — clean follow-up). Hooked into sort() after int/f32/complex
+axis paths (they return None for 'M'/'m'). Conformance f32_int_flat_sort_parallel_bit_exact extended
+(datetime64[s] last-axis distinct + timedelta64[s] last-axis HEAVY-dups byte-exact + datetime64[s] axis-0
+distinct + NaT-in-lane defer), PASSED. PERF by kernel identity with the int64 axis value-sort kernels reused
+(last-axis 2.34x, axis-0 4.45x = 76th-79th wins) = a conservative FLOOR; numpy datetime axis sort is the same
+generic introsort PER LANE but has NO simd-sort (int does), so the datetime win is >= the int ratios and
+trends toward flat 7.8x as lanes lengthen. **LESSON (extends 333728dc): for a VALUE sort the reuse-by-int64-
+view trick needs the OUTPUT allocated as the source dtype (np.empty(dtype=a.dtype) then .view(int64)) — the
+int kernels hard-code an int64 output, correct for argsort (intp) but wrong for sort. Value sort is even
+cleaner than argsort: equal ticks = equal bytes so NO tie-defer at all, only NaT-defer.** AGENT_NAME=BlackThrush.
