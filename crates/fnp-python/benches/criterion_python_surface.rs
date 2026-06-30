@@ -3499,6 +3499,8 @@ fn bench_complex_cumulative_midaxis_boundary(c: &mut Criterion) {
         let numpy = py.import("numpy").expect("numpy oracle");
         let fnp_cumprod = module.getattr("cumprod").expect("fnp_python.cumprod");
         let numpy_cumprod = numpy.getattr("cumprod").expect("numpy.cumprod");
+        let fnp_nancumprod = module.getattr("nancumprod").expect("fnp_python.nancumprod");
+        let numpy_nancumprod = numpy.getattr("nancumprod").expect("numpy.nancumprod");
 
         // 256x256x256 = 16M complex, axis=1 (middle -> outer=256 blocks). Unit-magnitude complex so
         // the product stays finite.
@@ -3540,6 +3542,22 @@ fn bench_complex_cumulative_midaxis_boundary(c: &mut Criterion) {
                     let result = numpy_cumprod
                         .call((&input,), Some(&numpy_kwargs))
                         .expect("numpy cumprod mid call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("fnp_nancumprod_{label}_axis_mid_16M"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_nancumprod
+                        .call((&input,), Some(&fnp_kwargs))
+                        .expect("fnp nancumprod mid call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_nancumprod_{label}_axis_mid_16M"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_nancumprod
+                        .call((&input,), Some(&numpy_kwargs))
+                        .expect("numpy nancumprod mid call");
                     black_box(result);
                 });
             });

@@ -13392,3 +13392,24 @@ direct kernel proto over first-element-NaN / (nan,nan) / (inf,nan), both dtypes,
 Gated >=2-D C-contig complex, last axis, rows>=2 && cols>=2, >=1<<18; non-last delegates. OPEN (high-conf
 mirrors): complex nancum* MIDDLE axis (mirror the cum* middle slab w/ nan-replace -> ~18-22x like cum*) +
 axis0. See [[complex-binary-ops-lever]] [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
+
+## 2026-06-30 - WIN (LANDED): native parallel COMPLEX128/COMPLEX64 MIDDLE-axis nancumsum/nancumprod — 14.49x (c128)
+`BlackThrush`. Extends the complex nancum* family (last-axis ece0ea89) to the MIDDLE axis. numpy's non-last
+complex nancum* is STRIDED + single-threaded + per-element isnan check = the slowest case yet (~357ms@16M
+c128 axis=1, vs last-axis nancum 157ms vs middle cum* 295ms). Added a SEPARATE per-outer-block slab nan-scan
+kernel `complex_nancumulative_nonlast_typed<T>(is_prod, ident, is_nan: fn(T)->bool)` +
+`try_zerocopy_complex_nancumulative_nonlast` (gated to MIDDLE axes 0<axis<ndim-1 so outer>=2 guaranteed
+parallelism; ndim>=3, >=1<<18), hooked into BOTH nancumsum (ident=0) and nancumprod (ident=1) after their
+last-axis nan hooks. Each independent outer block: replace NaN-complex (re OR im NaN) inputs with (ident, 0),
+slab-by-slab scan (cumsum re/im add; cumprod naive cmul), fanned across the pool. NO touching the landed
+cum*/nancum-lastaxis paths = zero regression risk. BIT-EXACT (nancum* == cum*(nan-complex -> identity);
+proto byte-identical, conformance covers it). Conformance `complex_nancumulative_lastaxis_parallel_bit_exact_
+matches_numpy` extended with MIDDLE-axis cases (axis=1, c128/c64, sum+prod, NaN+inf) PASSED (exit=0, worker
+hz2). MEASURED PERF (criterion rch worker, 16M=256x256x256, axis=1): c128 nancumprod fnp 24.65ms vs NumPy
+357.17ms = **14.49x**; c64 fnp 22.17ms vs NumPy 256.53ms = **11.57x** (re-run captured after the first run's
+`head -20` truncated it). NOTE: numpy c64 mid (256ms) < c128 mid (357ms) — c64's half-bytes ease the strided
+bandwidth even though the isnan check dominates — so c64 is 11.57x, NOT the ~16x I'd estimated from last-axis
+parity (measured, not assumed). **COMPLEX NANCUM* now native on last (7.3-7.9x) + middle (14.5x/11.6x) axes;
+the per-element isnan check makes numpy's nancum* even slower than plain cum* (mid c128 357ms vs cum* 295ms),
+so the parallel wins are comparable-to-larger.** OPEN: complex nancum* AXIS-0 (modest, like cum* axis0 1.4x).
+See [[complex-binary-ops-lever]]. AGENT_NAME=BlackThrush.

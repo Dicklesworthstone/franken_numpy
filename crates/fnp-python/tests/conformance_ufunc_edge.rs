@@ -2182,6 +2182,12 @@ with warnings.catch_warnings():
         m3[1, 2, 0] = complex(np.nan, 0.0)
         r3 = fnp.nancumprod(m3, axis=2); e3 = np.nancumprod(m3, axis=2)
         ok = ok and bool(((r3.view(rname) == e3.view(rname)) | (np.isnan(r3.view(rname)) & np.isnan(e3.view(rname)))).all())
+        # MIDDLE axis (axis=1, outer>=2): native per-block nan-scan, both ops
+        mm = (rng.standard_normal((64, 96, 96)) + 1j * rng.standard_normal((64, 96, 96))).astype(dt)
+        mm[3, 0, 5] = complex(np.nan, 1.0); mm[5, 7, 0] = complex(np.inf, np.nan)
+        for fn_fnp, fn_np in [(fnp.nancumsum, np.nancumsum), (fnp.nancumprod, np.nancumprod)]:
+            rm = fn_fnp(mm, axis=1); em = fn_np(mm, axis=1)
+            ok = ok and bool(((rm.view(rname) == em.view(rname)) | (np.isnan(rm.view(rname)) & np.isnan(em.view(rname)))).all())
     # axis-0 (non-last) -> delegate, still byte-identical
     a0 = (rng.standard_normal((256, 4096)) + 1j * rng.standard_normal((256, 4096))).astype(np.complex128)
     a0[7, 3] = complex(np.nan, 1.0)
