@@ -2183,10 +2183,18 @@ with warnings.catch_warnings():
         m4 = (rng.standard_normal((8, 8, 24, 32)) + 1j * rng.standard_normal((8, 8, 24, 32))).astype(dt)
         r4 = fnp.cumsum(m4, axis=2); e4 = np.cumsum(m4, axis=2)
         ok = ok and bool(((r4.view(rname) == e4.view(rname)) | (np.isnan(r4.view(rname)) & np.isnan(e4.view(rname)))).all())
-    # axis-0 (outer==1) delegates, still byte-identical
-    a0 = (rng.standard_normal((64, 64, 64)) + 1j * rng.standard_normal((64, 64, 64))).astype(np.complex128)
-    r0 = fnp.cumprod(a0, axis=0); e0 = np.cumprod(a0, axis=0)
-    ok = ok and bool(((r0.view(np.float64) == e0.view(np.float64)) | (np.isnan(r0.view(np.float64)) & np.isnan(e0.view(np.float64)))).all())
+    # axis-0 (outer==1) -> native gather/scan/scatter column scan, byte-identical (2-D + 3-D, c128/c64, sum+prod)
+    for dt, rname in [(np.complex128, np.float64), (np.complex64, np.float32)]:
+        a2 = (rng.standard_normal((4096, 256)) + 1j * rng.standard_normal((4096, 256))).astype(dt)
+        a3 = (rng.standard_normal((256, 128, 64)) + 1j * rng.standard_normal((256, 128, 64))).astype(dt)
+        for arr in (a2, a3):
+            for fn_fnp, fn_np in [(fnp.cumsum, np.cumsum), (fnp.cumprod, np.cumprod)]:
+                r0 = fn_fnp(arr, axis=0); e0 = fn_np(arr, axis=0)
+                ok = ok and r0.dtype == e0.dtype and r0.shape == e0.shape and bool(((r0.view(rname) == e0.view(rname)) | (np.isnan(r0.view(rname)) & np.isnan(e0.view(rname)))).all())
+        # NaN/inf down an axis-0 column
+        an = a2.copy(); an[7, 3] = complex(np.inf, np.nan); an[0, 9] = complex(np.nan, 1.0)
+        rn = fnp.cumprod(an, axis=0); en = np.cumprod(an, axis=0)
+        ok = ok and bool(((rn.view(rname) == en.view(rname)) | (np.isnan(rn.view(rname)) & np.isnan(en.view(rname)))).all())
 print(ok)
 "#
         .into(),

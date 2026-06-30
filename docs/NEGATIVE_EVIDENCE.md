@@ -13344,3 +13344,29 @@ lesson (non-last scan 13-20x) carries to complex.** cumsum MIDDLE-axis ships on 
 cumprod, but still positive given numpy's strided-serial worst case). OPEN: complex cumsum/cumprod AXIS0
 (outer==1 — serial cache-friendly, needs inner-column parallelism for a parallel win) + FLAT. See
 [[integer-matmul-no-blas-lever]] [[complex-binary-ops-lever]]. AGENT_NAME=BlackThrush.
+
+## 2026-06-30 - WIN (LANDED, gated >=1M): native parallel COMPLEX128/COMPLEX64 AXIS-0 cumprod+cumsum — 1.4-4.3x
+`BlackThrush`. Completes the complex cumulative non-last family (after last-axis 4e5e3cc4 + middle-axis
+ef24b67a). For AXIS-0 the outer dim collapses to 1, so the per-block slab scan can't parallelize across
+blocks; instead `complex_cumulative_axis0_typed` GATHERS each of the `inner` independent columns into a
+contiguous lane (mirrors the proven c128 sort-axis0 gather), SCANS each lane in place (per-column register
+accumulator: cumsum re/im add; cumprod naive cmul) parallel across lanes, then SCATTERS back to row-major
+output. Routed via the same `try_zerocopy_complex_cumulative_nonlast` dispatcher (ax==0 branch); hooked into
+BOTH cumsum and cumprod. BIT-EXACT: gather/scatter only reorder memory, not arithmetic — each column's scan
+is the SAME in-order scalar ops numpy does (prototyped byte-identical vs np.cum* over 2-D/3-D + NaN/inf, both
+dtypes, BEFORE Rust). Conformance `complex_cumulative_midaxis_parallel_bit_exact_matches_numpy` extended with
+axis-0-engaging cases (1M 2-D + 2M 3-D, c128/c64, sum+prod, NaN/inf) PASSED (all 3 complex-cumulative tests
+green). MEASURED PERF (criterion rch worker hz1, axis=0, cumprod): **1M c128 fnp 5.21ms vs NumPy 22.20ms =
+4.26x, c64 3.44/16.11 = 4.68x; 16M c128 fnp 95.7ms vs NumPy 132.9ms = 1.39x, c64 60.7/127.5 = 2.10x.**
+**MODEST vs middle-axis (18-22x) and INVERTED size-scaling (small wins MORE): numpy's axis-0 scan is
+CONTIGUOUS row-by-row (each row a vectorizable complex op, only the 4000-step row dependency is serial) — NOT
+the strided worst case the middle axis is — so it's much faster (132ms vs middle's 295ms), and fnp's
+gather/scatter (~2x memory traffic) caps the win; at small sizes the array is cache-resident so fnp's
+parallel column scan dominates numpy's serial row chain (4.26x), at 16M the strided gather/scatter thrashes
+DRAM and narrows it (1.39x) — but fnp WINS AT EVERY MEASURED SIZE (no small-size loss, unlike the typical
+gather-overhead pattern).** Gated >=1<<20 (1M, the measured-win floor; sub-1M unmeasured -> defer; a separate
+higher gate than the middle/last 1<<18). CONTENTION CAVEAT: the 4M numpy sample read 211ms (> numpy 16M
+132ms = physically impossible same-op) = a worker-load spike, so the 4M ratio is unreliable; the 1M and 16M
+readings (consistent fnp times, fast iters) anchor the honest range. **COMPLEX CUMULATIVE SCAN FAMILY NOW
+COMPLETE on every axis: last (7-13x) + middle (18-22x) + axis0 (1.4-4.3x); cumsum + cumprod; c128 + c64.**
+See [[complex-binary-ops-lever]] [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.

@@ -3483,6 +3483,73 @@ fn bench_complex_cumulative_midaxis_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_complex_cumulative_axis0_boundary(c: &mut Criterion) {
+    // complex128/complex64 AXIS-0 cumprod (2-D). numpy scans DOWN columns = strided + single-threaded
+    // (cache-hostile worst case); the native path gathers each column into a contiguous lane, scans in
+    // parallel across lanes, and scatters back. Bit-exact.
+    let mut group = c.benchmark_group("python_complex_cumulative_axis0_boundary");
+    group.sample_size(15);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_cumprod = module.getattr("cumprod").expect("fnp_python.cumprod");
+        let numpy_cumprod = numpy.getattr("cumprod").expect("numpy.cumprod");
+
+        // Sweep sizes to find the axis-0 crossover (gather/scan/scatter has ~2x numpy's traffic, so the
+        // win shrinks at small sizes). Unit-magnitude complex (cos + i*sin) per square shape.
+        let j = numpy
+            .getattr("complex128")
+            .expect("complex128")
+            .call1((0.0_f64, 1.0_f64))
+            .expect("1j");
+        for (label, n) in [("1M", 1024_i64), ("4M", 2048_i64), ("16M", 4000_i64)] {
+            let size = n * n;
+            let theta = numpy
+                .call_method1("linspace", (0.0_f64, 6.0_f64, size))
+                .expect("theta");
+            let cosv = numpy.call_method1("cos", (&theta,)).expect("cos");
+            let sinv = numpy.call_method1("sin", (&theta,)).expect("sin");
+            let base = cosv
+                .call_method1("__add__", (sinv.call_method1("__mul__", (&j,)).expect("i*sin"),))
+                .expect("complex base")
+                .call_method1("reshape", ((n, n),))
+                .expect("complex 2-D shape");
+            for (dlabel, cname) in [("complex128", "complex128"), ("complex64", "complex64")] {
+                let input = base.call_method1("astype", (cname,)).expect("astype complex");
+                let fnp_kwargs = PyDict::new(py);
+                fnp_kwargs.set_item("axis", 0_i64).expect("fnp axis kwarg");
+                let numpy_kwargs = PyDict::new(py);
+                numpy_kwargs.set_item("axis", 0_i64).expect("numpy axis kwarg");
+
+                group.bench_function(format!("fnp_cumprod_{dlabel}_axis0_{label}"), |bench| {
+                    bench.iter(|| {
+                        let result = fnp_cumprod
+                            .call((&input,), Some(&fnp_kwargs))
+                            .expect("fnp cumprod axis0 call");
+                        black_box(result);
+                    });
+                });
+                group.bench_function(format!("numpy_cumprod_{dlabel}_axis0_{label}"), |bench| {
+                    bench.iter(|| {
+                        let result = numpy_cumprod
+                            .call((&input,), Some(&numpy_kwargs))
+                            .expect("numpy cumprod axis0 call");
+                        black_box(result);
+                    });
+                });
+            }
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_cumsum_flat_boundary(c: &mut Criterion) {
     // FLAT 1-D integer np.cumsum(8M) — a single-lane prefix sum. numpy's 1-D cumsum is
     // a serial dependency chain; the native two-pass block scan breaks it across cores
@@ -7236,6 +7303,7 @@ criterion_group!(
     bench_cumsum_lastaxis_boundary,
     bench_complex_cumprod_lastaxis_boundary,
     bench_complex_cumulative_midaxis_boundary,
+    bench_complex_cumulative_axis0_boundary,
     bench_cumsum_flat_boundary,
     bench_accumulate_extremum_boundary,
     bench_cum_midaxis_boundary,
