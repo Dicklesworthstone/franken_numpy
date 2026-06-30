@@ -13370,3 +13370,25 @@ higher gate than the middle/last 1<<18). CONTENTION CAVEAT: the 4M numpy sample 
 readings (consistent fnp times, fast iters) anchor the honest range. **COMPLEX CUMULATIVE SCAN FAMILY NOW
 COMPLETE on every axis: last (7-13x) + middle (18-22x) + axis0 (1.4-4.3x); cumsum + cumprod; c128 + c64.**
 See [[complex-binary-ops-lever]] [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.
+
+## 2026-06-30 - WIN (LANDED): native parallel COMPLEX128/COMPLEX64 last-axis nancumsum/nancumprod — 7.32x / 7.87x
+`BlackThrush`. Sibling of the complex cum* family (4e5e3cc4/ef24b67a/302bb5b1): fnp's nancumsum/nancumprod
+had native f64/f32/f16/int paths but COMPLEX fell through to single-threaded numpy (core_numpy_passthrough).
+numpy's complex nancum* = cum* with every NaN-complex (re OR im is NaN) replaced by the identity (0+0j sum /
+1+0j prod) on a serial dependency chain — EVEN SLOWER than plain cumprod (156ms vs 107ms @16M c128) because
+of the per-element isnan check ON TOP of the chain it can't SIMD. Added a SEPARATE kernel
+`complex_nancumulative_lastaxis_typed<T>(is_prod, ident, is_nan: fn(T)->bool)` +
+`try_zerocopy_complex_nancumulative_lastaxis` (no skip_nan plumbing into the 3 landed cum* paths = zero
+regression risk; no num_traits dep so is_nan is a plain fn-pointer f64::is_nan/f32::is_nan, ident a literal),
+hooked into BOTH nancumsum (is_prod=false, ident=0) and nancumprod (is_prod=true, ident=1) after their int
+paths. Per contiguous lane: replace NaN-complex inputs with (ident, 0), carry one complex accumulator
+(cumsum re/im add; cumprod naive cmul), parallel across lanes. BIT-EXACT: numpy's complex nancum* ==
+cum*(nan-complex -> identity) — verified byte-identical (proto: nancum* == cum* with mask-replaced input AND
+direct kernel proto over first-element-NaN / (nan,nan) / (inf,nan), both dtypes, BEFORE Rust). Conformance
+`complex_nancumulative_lastaxis_parallel_bit_exact_matches_numpy` (c128/c64 + 2D&3D + first-elem-NaN +
+(nan,nan) + (inf,nan) + axis0 defer) PASSED (exit=0, worker hz1). MEASURED PERF (criterion rch worker hz1,
+16M=4000x4000, axis=-1): c128 fnp 21.43ms vs NumPy 156.77ms = **7.32x**; c64 fnp 19.55ms vs NumPy 153.73ms =
+**7.87x**. (c64 ~= c128 because numpy nancum* is dominated by the isnan check + serial chain, not bandwidth.)
+Gated >=2-D C-contig complex, last axis, rows>=2 && cols>=2, >=1<<18; non-last delegates. OPEN (high-conf
+mirrors): complex nancum* MIDDLE axis (mirror the cum* middle slab w/ nan-replace -> ~18-22x like cum*) +
+axis0. See [[complex-binary-ops-lever]] [[integer-matmul-no-blas-lever]]. AGENT_NAME=BlackThrush.

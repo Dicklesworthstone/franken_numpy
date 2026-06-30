@@ -3416,6 +3416,72 @@ fn bench_complex_cumprod_lastaxis_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_complex_nancumprod_lastaxis_boundary(c: &mut Criterion) {
+    // complex128/complex64 last-axis nancumprod. numpy replaces NaN-complex with 1+0j then runs the
+    // single-threaded multiply.accumulate chain (per-element isnan check + serial scan); the native
+    // per-lane parallel nan-scan fans across cores. Bit-exact.
+    let mut group = c.benchmark_group("python_complex_nancumprod_lastaxis_boundary");
+    group.sample_size(15);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_nancumprod = module.getattr("nancumprod").expect("fnp_python.nancumprod");
+        let numpy_nancumprod = numpy.getattr("nancumprod").expect("numpy.nancumprod");
+
+        let rows = 4000_i64;
+        let cols = 4000_i64;
+        let size = rows * cols;
+        let theta = numpy
+            .call_method1("linspace", (0.0_f64, 6.0_f64, size))
+            .expect("theta");
+        let cosv = numpy.call_method1("cos", (&theta,)).expect("cos");
+        let sinv = numpy.call_method1("sin", (&theta,)).expect("sin");
+        let j = numpy
+            .getattr("complex128")
+            .expect("complex128")
+            .call1((0.0_f64, 1.0_f64))
+            .expect("1j");
+        let base = cosv
+            .call_method1("__add__", (sinv.call_method1("__mul__", (&j,)).expect("i*sin"),))
+            .expect("complex base")
+            .call_method1("reshape", ((rows, cols),))
+            .expect("complex 2-D shape");
+
+        for (label, cname) in [("complex128", "complex128"), ("complex64", "complex64")] {
+            let input = base.call_method1("astype", (cname,)).expect("astype complex");
+            let fnp_kwargs = PyDict::new(py);
+            fnp_kwargs.set_item("axis", -1_i64).expect("fnp axis kwarg");
+            let numpy_kwargs = PyDict::new(py);
+            numpy_kwargs.set_item("axis", -1_i64).expect("numpy axis kwarg");
+
+            group.bench_function(format!("fnp_nancumprod_{label}_axis_last_16M"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_nancumprod
+                        .call((&input,), Some(&fnp_kwargs))
+                        .expect("fnp nancumprod call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_nancumprod_{label}_axis_last_16M"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_nancumprod
+                        .call((&input,), Some(&numpy_kwargs))
+                        .expect("numpy nancumprod call");
+                    black_box(result);
+                });
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_complex_cumulative_midaxis_boundary(c: &mut Criterion) {
     // complex128/complex64 MIDDLE-axis cumprod (3-D, axis=1). numpy runs a non-last complex
     // multiply.accumulate strided + single-threaded; the native per-outer-block parallel slab scan
@@ -7302,6 +7368,7 @@ criterion_group!(
     bench_prod_lastaxis_boundary,
     bench_cumsum_lastaxis_boundary,
     bench_complex_cumprod_lastaxis_boundary,
+    bench_complex_nancumprod_lastaxis_boundary,
     bench_complex_cumulative_midaxis_boundary,
     bench_complex_cumulative_axis0_boundary,
     bench_cumsum_flat_boundary,

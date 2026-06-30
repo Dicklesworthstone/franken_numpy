@@ -2158,6 +2158,49 @@ print(ok)
 }
 
 #[test]
+fn complex_nancumulative_lastaxis_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy's complex nancumsum/nancumprod = cum* with every NaN-complex (re OR im NaN) replaced by the
+    // identity (0+0j sum / 1+0j prod) on a single-threaded chain. The native per-lane parallel nan-scan
+    // must be byte-identical for c128/c64 on the last axis (2-D + 3-D), incl first-element-NaN, (nan,nan),
+    // (inf,nan); axis-0 (non-last) delegates to numpy.
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(55)
+ok = True
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    for dt, rname in [(np.complex128, np.float64), (np.complex64, np.float32)]:
+        m = (rng.standard_normal((4096, 256)) + 1j * rng.standard_normal((4096, 256))).astype(dt)
+        # inject NaN-complex incl first-element of some lanes
+        m[0, 0] = complex(np.nan, 1.0); m[3, 0] = complex(2.0, np.nan); m[5, 7] = complex(np.nan, np.nan); m[9, 1] = complex(np.inf, np.nan)
+        for fn_fnp, fn_np in [(fnp.nancumsum, np.nancumsum), (fnp.nancumprod, np.nancumprod)]:
+            for ax in (1, -1):
+                r = fn_fnp(m, axis=ax); e = fn_np(m, axis=ax)
+                ok = ok and r.dtype == e.dtype and r.shape == e.shape and bool(((r.view(rname) == e.view(rname)) | (np.isnan(r.view(rname)) & np.isnan(e.view(rname)))).all())
+        m3 = (rng.standard_normal((64, 64, 256)) + 1j * rng.standard_normal((64, 64, 256))).astype(dt)
+        m3[1, 2, 0] = complex(np.nan, 0.0)
+        r3 = fnp.nancumprod(m3, axis=2); e3 = np.nancumprod(m3, axis=2)
+        ok = ok and bool(((r3.view(rname) == e3.view(rname)) | (np.isnan(r3.view(rname)) & np.isnan(e3.view(rname)))).all())
+    # axis-0 (non-last) -> delegate, still byte-identical
+    a0 = (rng.standard_normal((256, 4096)) + 1j * rng.standard_normal((256, 4096))).astype(np.complex128)
+    a0[7, 3] = complex(np.nan, 1.0)
+    r0 = fnp.nancumsum(a0, axis=0); e0 = np.nancumsum(a0, axis=0)
+    ok = ok and bool(((r0.view(np.float64) == e0.view(np.float64)) | (np.isnan(r0.view(np.float64)) & np.isnan(e0.view(np.float64)))).all())
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native complex last-axis nancumsum/nancumprod must be byte-identical to numpy (c128/c64 + 3-D + NaN + axis0 defer): {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn complex_cumulative_midaxis_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy runs a non-last complex cumsum/cumprod strided + single-threaded; each independent outer
     // block is a slab-by-slab scan (cumsum: re/im add; cumprod: naive cmul). The native per-block
