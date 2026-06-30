@@ -13413,3 +13413,21 @@ parity (measured, not assumed). **COMPLEX NANCUM* now native on last (7.3-7.9x) 
 the per-element isnan check makes numpy's nancum* even slower than plain cum* (mid c128 357ms vs cum* 295ms),
 so the parallel wins are comparable-to-larger.** OPEN: complex nancum* AXIS-0 (modest, like cum* axis0 1.4x).
 See [[complex-binary-ops-lever]]. AGENT_NAME=BlackThrush.
+
+## 2026-06-30 - NO-SHIP (bandwidth-bound + contention-fragile): complex last-axis maximum/minimum.accumulate
+`BlackThrush`. Built a native per-lane parallel LEXICOGRAPHIC complex maximum/minimum.accumulate (last axis,
+c128/c64; defer on NaN/-0.0 so the real-then-imag total order is unambiguous -> selection bit-exact, verified
+byte-identical vs np.{maximum,minimum}.accumulate incl real-ties imag-tiebreak). Conformance PASSED. But
+MEASURED on the clean rch worker it is bandwidth-bound + CONTENTION-FRAGILE, so NO-SHIP (reverted before
+landing). c128: fnp 15.39ms vs NumPy 29.50ms = 1.92x (single run). c64: fnp **13.45ms run-1 vs 32.30ms run-2**
+(2.4x variance from worker load) vs NumPy 28.78ms -> **0.89x LOSS under contention**. ROOT: unlike cumprod
+(naive cmul = ~6 flops/element, COMPUTE-bound -> 7-14x robust), complex MAX is a CHEAP comparison (2 float
+compares + branch), so numpy's serial maximum.accumulate is already BANDWIDTH-bound (~29ms = the 512MB
+read+write floor, not compute-starved). fnp's parallel scan only wins by capturing the bandwidth numpy's
+single thread leaves on the table — a fragile margin that INVERTS to a loss when the box is loaded (64-thread
+fan-out oversubscribes contended memory). **LESSON (Nth loaded-box instance + the bandwidth-REJECT rule
+again): the local probe said numpy 147.9ms (compute-bound, "~10x gap") but the clean worker shows 29.5ms
+(~5x overstate); ALWAYS bench numpy on the worker FIRST + classify compute-vs-bandwidth before building. A
+prefix scan wins BIG only when the per-element op is EXPENSIVE (cmul/isnan-guarded chain); a CHEAP-compare
+scan (max/min, and likely cumsum's small margin) is bandwidth-bound and contention-fragile = REJECT, same as
+the c64-multiply/complex-square bandwidth rejections.** [[complex-binary-ops-lever]]. AGENT_NAME=BlackThrush.
