@@ -13564,3 +13564,35 @@ axisc, (2,N)). Conformance `cross_axis0_3n_parallel_bit_exact_matches_numpy` add
 
 OPEN (smaller): strided (N,3) axis=-1 still 0.7x loss (fnp extract path slower than numpy) — a follow-up
 could ascontiguousarray + route to the (N,3) kernel. AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED): parallelize native np.outer for LARGE outputs (page-fault wall) — 3.6-3.9x
+
+`BlackThrush`. fnp's native outer (try_zerocopy_f64_outer + generic outer_typed<T> for f32/all-int) was a
+SERIAL scalar-times-vector store. It won small (cache-resident) outer 2-4x, but at >=~32MB output it
+collapsed to PARITY with numpy: BOTH stalled at a hard ~2.1 GB/s (f64 4096x4096 66ms, 6000x6000 140ms) —
+far below DRAM bandwidth. ROOT: FIRST-TOUCH PAGE FAULTS on the fresh n*m numpy.empty output. A single
+thread walking 128-288MB of virgin pages is page-fault-bound, not bandwidth-bound; numpy's C loop hits the
+identical wall. Distributing the ROWS across the rayon pool faults + fills the pages CONCURRENTLY, breaking
+the wall.
+
+Added a gated parallel branch (par_chunks_mut over row blocks, rows_per_chunk = n.div_ceil(threads)) to
+both try_zerocopy_f64_outer and outer_typed<T> (added T: Send+Sync, F: Sync bounds; byte gate
+total*sizeof(T) >= 32MB so the crossover is dtype-consistent). Small sizes stay serial (the tight
+autovectorized loop already wins and dodges fan-out). BIT-EXACT: each output element is one independent
+ai*bj (float) / wrapping_mul (int) store — no accumulation, row order irrelevant. Verified byte-identical
+vs numpy over f64/f32/i64/i32/i16/u8 at 3x3..4096x4096, inf/nan/-0.0, non-square, 2-D-ravel inputs.
+Conformance outer_zerocopy_parallel_bit_exact_matches_numpy added (sha256, large sizes tripping the gate),
+11/11 conformance_outer green.
+
+| Probe (min-of-many, 64 threads) | numpy | fnp (parallel) | fnp/numpy |
+|---|---:|---:|---:|
+| outer f64 4096x4096 (134MB) | 66.2ms | 18.3ms | 0.28x (~3.6x) |
+| outer f64 6000x6000 (288MB) | 140.5ms | 35.7ms | 0.25x (~3.9x) |
+| outer i64 4096x4096 (134MB) | 65.1ms | 17.6ms | 0.27x (~3.7x) |
+| outer f32 6000x6000 (144MB) | 67.3ms | 18.0ms | 0.27x (~3.7x) |
+
+(small sizes still win 3-4x via the serial autovectorized path; no size regresses.) **REUSABLE LESSON: a
+serial op that writes a LARGE fresh buffer and reads at a suspiciously low ~2 GB/s is FIRST-TOUCH PAGE-FAULT
+bound, not compute/bandwidth bound — parallel row/block chunking faults pages concurrently for a ~4x win
+even when the per-element work is trivial (one multiply). Grep serial `numpy.empty(...)` + fill loops that
+materialize >L3 output.** AGENT_NAME=BlackThrush.
