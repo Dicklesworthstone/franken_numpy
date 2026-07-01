@@ -13532,3 +13532,35 @@ CONCLUSION: the bit-exact-safe complex REDUCTION vein = prod + nanprod, LAST axi
 multiply.reduce lacks a pairwise tree AND reduces the contiguous axis in plain sequential order = the unique
 byte-reproducible complex reduction. All add-based (sum/mean/nansum/nanmean) and all strided-axis reductions
 are off-limits for byte-exact. AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED): native parallel cross(a,b,axis=0) on (3,N) f64/f32 — 12-27x
+
+`BlackThrush`. fnp already had a fast native path for the CONTIGUOUS (N,3) last-axis cross (14-22x), but
+`np.cross(a, b, axis=0)` on two (3, N) arrays — the canonical "vector components stored column-wise"
+(x=data[0], y=data[1], z=data[2]) pattern — was FULLY DELEGATED (cross() bailed to numpy on any axis!=-1)
+and is numpy's slow case: numpy moveaxis's the vector axis to the end (strided views) then allocates
+whole-array temporaries. Measured a genuine gap AND a related loss: `np.cross(a,b,axis=0)` numpy 208.7ms
+@ 4M (fnp delegating parity), and the strided (N,3) axis=-1 case fnp 332ms vs numpy 237ms = 0.7x LOSS.
+
+Added `cross_axis0_3n_typed<T>` (each of the 3 components is a CONTIGUOUS length-N row; compute the 3
+output rows with numpy's exact per-component formula `a1*b2 - a2*b1, ...` over disjoint column chunks via
+split_at_mut + a 3-way par_chunks_mut zip) + `try_zerocopy_cross_axis0_3n`, hooked into `cross` BEFORE the
+axis!=-1 fallback. Engages when the effective vector axis is the FIRST 2-D axis (axis=0, axis=-2, or
+axisa=axisb=axisc=0) on two (3,N) C-contiguous f64/f32 arrays; everything else (3-D, F-contig, mixed
+axisc, (2,N) 2-component, (N,3) last-axis) defers unchanged. Gate n*3 >= 1<<21.
+
+BIT-EXACT: same per-component expressions, same per-element order, no reassembly (numpy cross uses plain
+multiply/subtract, no accumulation) — verified byte-identical vs np.cross(axis=0) for f64+f32 across N in
+{1,7,1000,700003,4M}, inf/nan/-inf propagation, and all defer paths (existing (N,3), 3-D, F-contig, mixed
+axisc, (2,N)). Conformance `cross_axis0_3n_parallel_bit_exact_matches_numpy` added, 13/13
+`conformance_cross` green.
+
+| Probe (min-of-many, 64 threads) | numpy | fnp | fnp/numpy |
+|---|---:|---:|---:|
+| cross axis=0 f64 N=1M | 15.2ms | 1.3ms | 0.09x (~12x) |
+| cross axis=0 f32 N=1M | 6.7ms | 0.2ms | 0.03x (~27x) |
+| cross axis=0 f64 N=4M | 208.7ms | 13.2ms | 0.06x (~16x) |
+| cross axis=0 f32 N=4M | 104.1ms | 6.7ms | 0.06x (~16x) |
+
+OPEN (smaller): strided (N,3) axis=-1 still 0.7x loss (fnp extract path slower than numpy) — a follow-up
+could ascontiguousarray + route to the (N,3) kernel. AGENT_NAME=BlackThrush.
