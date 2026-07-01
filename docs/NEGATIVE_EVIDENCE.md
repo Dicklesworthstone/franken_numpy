@@ -13706,3 +13706,31 @@ every defer path; overflow errors match byte-for-byte (int8 300, uint8 -1, int64
 
 Page-fault vein now: outer + repeat + tile + concatenate + full parallel. Remaining candidates (~2 GB/s):
 meshgrid (228ms), broadcast_to+copy (123ms), ones/full_like (route the same const-fill). AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED): native parallel np.ones / ones_like / zeros_like / full_like — 3.4-3.9x (page-fault wall)
+
+`BlackThrush`. Sixth page-fault-wall application — extends the np.full const-fill (048a6a9a) to the whole
+constant-creation family, all of which FULLY DELEGATED at numpy's ~2 GB/s serial memset wall (measured
+6000x6000 f64: ones 137ms, ones_like 137ms, zeros_like 136ms [NOT calloc — a real memset], full_like 139ms).
+Added `try_native_full_like_parallel` (resolve target shape = shape-override|source.shape and dtype =
+override|source.dtype, then route to try_native_full_parallel); `ones` routes directly with fill=1 and its
+default float64 dtype. Wired into ones/ones_like/zeros_like/full_like before their numpy delegates.
+
+Engages: plain (exact) C-contiguous ndarray source (so order K == C output), order C/K, 1/2/4/8-byte
+numeric/bool/complex64, output >= 8MB, no device. Defers (numpy handles, incl exact result flags): subclass
+source, F-contiguous source (order K -> F), order='F', 16-byte complex128, small, shape/dtype combos numpy
+rejects. BIT-EXACT + FLAG-EXACT — verified byte-identical AND C/F-contiguity-identical vs numpy over
+f64/f32/f16/i8/i16/i32/i64/u8/complex64/complex128/bool incl dtype overrides, shape override, 1-D/3-D, and
+every defer path. Conformance `ones_like_family_parallel_bit_exact_matches_numpy` added; array_creation_base
+14/14, array_like 18/18 green.
+
+| Probe (min-of-many, 64 threads) | numpy | fnp | fnp/numpy |
+|---|---:|---:|---:|
+| ones 6000x6000 f64 | 136.9ms | 39.9ms | 0.29x (~3.4x) |
+| ones_like 6000x6000 f64 | 137.1ms | 35.6ms | 0.26x (~3.9x) |
+| zeros_like 6000x6000 f64 | 136.6ms | 39.2ms | 0.29x (~3.5x) |
+| full_like 6000x6000 f64 | 139.3ms | 39.4ms | 0.28x (~3.5x) |
+| ones_like 6000x6000 i32 | 69.3ms | 19.3ms | 0.28x (~3.6x) |
+
+Page-fault vein now: outer + repeat + tile + concatenate + full + ones/like family (6 wins). Remaining:
+meshgrid (228ms), broadcast_to+copy (123ms). AGENT_NAME=BlackThrush.

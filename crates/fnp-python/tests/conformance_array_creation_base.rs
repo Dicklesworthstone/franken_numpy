@@ -317,3 +317,50 @@ print(ok)
     );
     Ok(())
 }
+
+// The parallel const-fill routing for ones / ones_like / zeros_like / full_like (large output) must be
+// byte-identical to numpy AND preserve the exact result flags (C/F contiguity) across dtypes, dtype
+// overrides, and shape overrides; F-contiguous sources, order='F', small sizes, and 16-byte complex defer.
+#[test]
+fn ones_like_family_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import numpy as np
+ok = True
+rng = np.random.default_rng(20260701)
+def same(a, b):
+    a = np.asarray(a); b = np.asarray(b)
+    return (a.shape == b.shape and a.dtype == b.dtype
+            and a.flags["C_CONTIGUOUS"] == b.flags["C_CONTIGUOUS"]
+            and a.flags["F_CONTIGUOUS"] == b.flags["F_CONTIGUOUS"]
+            and np.ascontiguousarray(a).tobytes() == np.ascontiguousarray(b).tobytes())
+S = (3000, 3000)
+for dt in [None, np.float64, np.float32, np.int32, np.int8, np.uint8, np.int64, np.complex64, np.float16, bool]:
+    if not same(fnp.ones(S, dtype=dt), np.ones(S, dtype=dt)):
+        ok = False
+for dt in [np.float64, np.float32, np.int32, np.int8, np.complex128, bool]:
+    a = (rng.standard_normal(S) if np.dtype(dt).kind in "fc" else rng.integers(0, 9, S)).astype(dt)
+    if not same(fnp.ones_like(a), np.ones_like(a)): ok = False
+    if not same(fnp.zeros_like(a), np.zeros_like(a)): ok = False
+    if not same(fnp.full_like(a, 3), np.full_like(a, 3)): ok = False
+    if not same(fnp.ones_like(a, dtype=np.int16), np.ones_like(a, dtype=np.int16)): ok = False
+a = rng.standard_normal((100, 100))
+if not same(fnp.full_like(a, 2.0, shape=(3000, 3000)), np.full_like(a, 2.0, shape=(3000, 3000))): ok = False
+# defer paths must match (incl flags)
+if not same(fnp.ones(S, order="F"), np.ones(S, order="F")): ok = False
+aF = np.asfortranarray(rng.standard_normal(S))
+if not same(fnp.ones_like(aF), np.ones_like(aF)): ok = False
+if not same(fnp.ones((8, 8)), np.ones((8, 8))): ok = False
+if not same(fnp.ones(S, dtype=np.complex128), np.ones(S, dtype=np.complex128)): ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native parallel ones/like family must be byte-identical to numpy: {result}"
+    );
+    Ok(())
+}
