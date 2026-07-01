@@ -272,3 +272,48 @@ print(ok)
     );
     Ok(())
 }
+
+// The native parallel np.full (large output, >= gate) must be byte-identical to numpy across dtypes and
+// fill values: it resolves the exact cast value via a 1-element numpy.full then fills a fresh buffer in
+// parallel (order-free constant fill). Small / order='F' / 16-byte complex / string fills defer to numpy.
+#[test]
+fn full_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+ok = True
+S = (3000, 3000)
+cases = [
+    (3.14, None), (7, None), (-1, None), (0.0, None), (-0.0, None),
+    (float("inf"), None), (float("nan"), None),
+    (2.5, np.float32), (255, np.uint8), (-5, np.int8), (1000, np.int16),
+    (2**40, np.int64), (True, None), (1.5, np.float16), (3 + 4j, None),
+    (1.0, np.complex64), (7, np.uint64),
+]
+for v, dt in cases:
+    fa = np.ascontiguousarray(fnp.full(S, v, dtype=dt))
+    na = np.ascontiguousarray(np.full(S, v, dtype=dt))
+    if fa.dtype != na.dtype or fa.shape != na.shape or fa.tobytes() != na.tobytes():
+        ok = False
+# 1-D and 3-D shapes
+for shp in [9_000_000, (300, 300, 120)]:
+    if np.ascontiguousarray(fnp.full(shp, 2.0)).tobytes() != np.ascontiguousarray(np.full(shp, 2.0)).tobytes():
+        ok = False
+# defer paths must still equal numpy
+for v, dt, kw in [(3.14, None, {}), (3.14, None, {"order": "F"}), (3 + 4j, None, {})]:
+    fa = np.ascontiguousarray(fnp.full((3000, 3000), v, dtype=dt, **kw))
+    na = np.ascontiguousarray(np.full((3000, 3000), v, dtype=dt, **kw))
+    if fa.dtype != na.dtype or fa.tobytes() != na.tobytes():
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native parallel full must be byte-identical to numpy: {result}"
+    );
+    Ok(())
+}

@@ -13679,3 +13679,30 @@ hstack; defer paths (mixed dtype, F-contig, small, axis=None, out=, dtype=) all 
 
 Page-fault vein now: outer + repeat + tile + concatenate/vstack/hstack parallel. Remaining candidates
 (~2 GB/s): np.full (132ms), meshgrid (228ms), broadcast_to+copy (123ms). AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED): native parallel np.full (const-fill) — 3.1-4.0x (page-fault wall)
+
+`BlackThrush`. Fifth page-fault-wall application (after outer/repeat/tile/concatenate). np.full FULLY
+DELEGATED (an in-source comment claimed "numpy's C memset cannot be beaten in safe Rust" — WRONG for the
+page-fault wall: numpy's serial fill IS the ~2 GB/s first-touch wall, full(6000x6000) 140ms). Resolve the
+exact output dtype + fill bytes via a 1-element numpy.full (replicates numpy's inference / scalar cast /
+OverflowError surface), then numpy.empty the full shape and fill it in PARALLEL (par_chunks_mut + slice::fill
+= memset per chunk) so the fresh pages fault concurrently.
+
+Added `try_native_full_parallel` + `full_fill_typed<T>` (uint8/16/32/64 mover by itemsize), hooked into
+`full` before the numpy fallback. Engages: 1/2/4/8-byte numeric/bool/complex64 dtype, output >= 8MB, order
+C/K. Defers: order='F', 16-byte complex128, object/string, small, OverflowError (re-raised identically by
+numpy). BIT-EXACT + ORDER-FREE (a constant buffer is byte-identical in C or F order) — verified byte-
+identical vs numpy over f64/f32/f16/i8/i16/i64/u8/u64/bool/complex64 incl inf/nan/-0.0, 1-D/3-D shapes, and
+every defer path; overflow errors match byte-for-byte (int8 300, uint8 -1, int64 overflow). Conformance
+`full_parallel_bit_exact_matches_numpy` added, 13/13 `conformance_array_creation_base` green.
+
+| Probe (min-of-many, 64 threads) | numpy | fnp | fnp/numpy |
+|---|---:|---:|---:|
+| full 6000x6000 f64 (288MB) | 139.7ms | 38.4ms | 0.27x (~3.6x) |
+| full 6000x6000 int64 | 139.3ms | 39.9ms | 0.29x (~3.5x) |
+| full 6000x6000 f32 (144MB) | 70.5ms | 17.5ms | 0.25x (~4.0x) |
+| full 6000x6000 int8 (36MB) | 16.3ms | 5.3ms | 0.33x (~3.1x) |
+
+Page-fault vein now: outer + repeat + tile + concatenate + full parallel. Remaining candidates (~2 GB/s):
+meshgrid (228ms), broadcast_to+copy (123ms), ones/full_like (route the same const-fill). AGENT_NAME=BlackThrush.
