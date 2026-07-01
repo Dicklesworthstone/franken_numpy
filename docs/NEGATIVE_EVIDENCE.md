@@ -13431,3 +13431,42 @@ again): the local probe said numpy 147.9ms (compute-bound, "~10x gap") but the c
 prefix scan wins BIG only when the per-element op is EXPENSIVE (cmul/isnan-guarded chain); a CHEAP-compare
 scan (max/min, and likely cumsum's small margin) is bandwidth-bound and contention-fragile = REJECT, same as
 the c64-multiply/complex-square bandwidth rejections.** [[complex-binary-ops-lever]]. AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED): native parallel COMPLEX128/COMPLEX64 last-axis prod (np.multiply.reduce) — 13-78x
+
+`BlackThrush`. First complex REDUCTION win (all prior complex work was SCANS: cumsum/cumprod/nancum*).
+A broad loss-finder sweep (min-of-many interleaved, full threads) surfaced that complex `prod` along the
+CONTIGUOUS last axis is a stable ~4-5x-slower-than-strided outlier in numpy: numpy reduces complex with
+the `multiply` ufunc loop, which — unlike `add.reduce` — gets NO pairwise tree, so it is a strict
+single-threaded left-to-right per-lane dependency chain carrying one complex accumulator via the naive
+cmul. That latency-bound chain is the tell (measured c128 2000x2000: **16.9ms last-axis vs 3.3ms axis0**;
+c64 **21.0ms vs 1.3ms**). fnp previously merely tied it via a cold extract→`reduce_prod` fold (parity,
+plus a wasteful 64MB copy). The strided outer axes are already SIMD-fast in numpy — DELEGATE those.
+
+Added `complex_prod_lastaxis_typed<T>` (c128->f64 / c64->f32 real-view, `dst.par_chunks_mut(2).zip(
+src.par_chunks(2*cols))`, keep only the final per-lane product) + `try_zerocopy_complex_prod_lastaxis`,
+hooked into `prod` ABOVE the f64/int/extract paths. Gate `rows>=2 && cols>=2 && rows*cols>=1<<18 &&
+threads>=2`; last-axis only (`axis_spec_is_last(Some(axis),ndim)` — Some-wraps so axis=None flatten maps
+to Some(None)=defer, NOT the "missing axis -> last" branch: caught by the verifier, flatten was wrongly
+returning shape (rows,) instead of a scalar until fixed). keepdims -> trailing-1 out shape.
+
+BIT-EXACT: the per-lane in-order scalar f64/f32 cmul is identical to the landed complex cumprod kernel
+(byte-verified vs np.cumprod incl overflow->inf and NaN/inf), and `np.prod(a,axis=-1) ==
+np.cumprod(a,axis=-1)[...,-1]` byte-for-byte (reduce & accumulate share the ufunc loop), so this ==
+np.prod byte-exact. Verified byte-identical vs numpy over c128+c64 x {2000x2000, 512x2049, 2x131072,
+262144x2, 100x50x80} x keepdims, plus inf/nan/1e30-overflow/(0+0j)/(nan,0) lanes, plus every defer path
+(below-gate 3x3, axis=0, flatten, F-contiguous, strided). Conformance
+`prod_reduction_zerocopy_complex_lastaxis_bit_exact_matches_numpy` (sha256 of raw bytes) added, 17/17
+`conformance_prod` green; `conformance_reductions` green; standard perf_gap_sweep no new losses.
+
+| Probe (min-of-many, 64 threads) | numpy | fnp | fnp/numpy |
+|---|---:|---:|---:|
+| prod c128 2000x2000 axis=-1 | 17.01ms | 0.59ms | 0.03x (~29x) |
+| prod c64  2000x2000 axis=-1 | 21.03ms | 0.27ms | 0.01x (~78x) |
+| prod c128 64x200000 axis=-1 | 54.27ms | 4.02ms | 0.07x (~13.5x) |
+| prod c64  64x200000 axis=-1 | 67.36ms | 2.26ms | 0.03x (~30x) |
+
+OPEN complex-reduction siblings (same latency-bound-chain shape, not yet dug): complex `nanprod`
+last-axis; complex prod MIDDLE/axis0 (numpy SIMD-fast there — likely REJECT/parity like sum). Complex
+`sum`/`mean` last-axis stay at ~parity (numpy's add.reduce DOES get the pairwise tree = already
+vectorized ~4ms, not the slow chain) = not a gap. AGENT_NAME=BlackThrush.

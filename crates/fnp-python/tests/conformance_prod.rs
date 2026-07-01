@@ -623,3 +623,53 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+// The native parallel-across-lanes complex prod (np.multiply.reduce) along the LAST contiguous axis
+// must be byte-identical to numpy: numpy reduces complex with a strict per-lane scalar dependency chain
+// (no pairwise tree), and this kernel replays the identical in-order naive cmul per lane. Exercises the
+// engaged path (large arrays past the 1<<18 gate, c128 + c64, keepdims), the inf/nan/overflow/(0+0j)
+// lanes, and the defer paths (below gate, axis=0, flatten, non-contiguous) — all of which must equal
+// numpy bit-for-bit.
+#[test]
+fn prod_reduction_zerocopy_complex_lastaxis_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260701)
+chunks = []
+for cdt, rdt in [(np.complex128, np.float64), (np.complex64, np.float32)]:
+    # Engaged last-axis path (rows*cols >= 1<<18) across a few lane shapes + keepdims.
+    for shp in [(2000, 2000), (512, 2049), (2, 131072), (262144, 2), (100, 50, 80)]:
+        x = (rng.standard_normal(shp) + 1j * rng.standard_normal(shp)).astype(cdt)
+        chunks.append(np.ascontiguousarray(mod.prod(x, axis=-1)).tobytes())
+        chunks.append(np.ascontiguousarray(mod.prod(x, axis=-1, keepdims=True)).tobytes())
+    # inf / nan / overflow / (0+0j) lanes must propagate exactly.
+    xe = (rng.standard_normal((2000, 2000)) + 1j * rng.standard_normal((2000, 2000))).astype(cdt)
+    xe[0, 5] = complex(np.inf, np.nan)
+    xe[1, :] = complex(1e30, 1e30) if cdt == np.complex128 else complex(1e18, 1e18)
+    xe[2, 10] = complex(0.0, 0.0)
+    xe[3, :] = complex(np.nan, 0.0)
+    chunks.append(np.ascontiguousarray(mod.prod(xe, axis=1)).tobytes())
+    # Defer paths (must still equal numpy): below-gate small, axis=0, flatten, F-contiguous, strided.
+    sm = (rng.standard_normal((3, 3)) + 1j * rng.standard_normal((3, 3))).astype(cdt)
+    chunks.append(np.ascontiguousarray(mod.prod(sm, axis=1)).tobytes())
+    big = (rng.standard_normal((2000, 2000)) + 1j * rng.standard_normal((2000, 2000))).astype(cdt)
+    chunks.append(np.ascontiguousarray(mod.prod(big, axis=0)).tobytes())
+    chunks.append(np.asarray(mod.prod(big)).tobytes())
+    chunks.append(np.ascontiguousarray(mod.prod(np.asfortranarray(big), axis=1)).tobytes())
+    chunks.append(np.ascontiguousarray(mod.prod(big[:, ::2], axis=1)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_prod_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "native complex last-axis prod reduction must be bit-identical to numpy (sha256 of raw bytes)"
+    );
+    Ok(())
+}
