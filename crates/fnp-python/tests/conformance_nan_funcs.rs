@@ -1039,3 +1039,63 @@ print(ok)
     );
     Ok(())
 }
+
+// The native parallel-across-lanes complex nanprod (np.nanprod) along the LAST contiguous axis must be
+// byte-identical to numpy: numpy replaces NaN-complex with 1+0j and runs the slow multiply.reduce chain;
+// this kernel replaces NaN inline during the identical per-lane sequential product. Exercises the engaged
+// path (large arrays past the 1<<18 gate, c128 + c64, keepdims) with sprinkled NaNs, the NaN-edge lanes
+// (all-NaN -> 1+0j, (nan,x), (x,nan), (inf,nan), overflow, zero), and every defer path (below gate,
+// axis=0, flatten, non-contiguous) — all of which must equal numpy bit-for-bit.
+#[test]
+fn nanprod_complex_lastaxis_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib, warnings
+rng = np.random.default_rng(20260701)
+ok = True
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    for cdt in (np.complex128, np.complex64):
+        chunks_f, chunks_n = [], []
+        def add(arr, **kw):
+            chunks_f.append(np.ascontiguousarray(fnp.nanprod(arr, **kw)).tobytes())
+            chunks_n.append(np.ascontiguousarray(np.nanprod(arr, **kw)).tobytes())
+        # engaged last-axis path (rows*cols >= 1<<18) with sprinkled NaNs
+        for shp in [(2000, 2000), (512, 2049), (2, 131072), (262144, 2), (100, 50, 80)]:
+            x = (rng.standard_normal(shp) + 1j * rng.standard_normal(shp)).astype(cdt)
+            x.ravel()[::11] = np.nan
+            add(x, axis=-1)
+            add(x, axis=-1, keepdims=True)
+        # NaN-edge lanes
+        xe = (rng.standard_normal((2000, 2000)) + 1j * rng.standard_normal((2000, 2000))).astype(cdt)
+        xe[0, :] = np.nan
+        xe[1, 5] = complex(np.nan, 1.0)
+        xe[2, 7] = complex(1.0, np.nan)
+        xe[3, 9] = complex(np.inf, np.nan)
+        xe[4, :] = complex(1e30, 1e30) if cdt == np.complex128 else complex(1e18, 1e18)
+        xe[5, 11] = complex(0.0, 0.0)
+        add(xe, axis=1)
+        # defer paths (must still equal numpy)
+        sm = (rng.standard_normal((3, 3)) + 1j * rng.standard_normal((3, 3))).astype(cdt)
+        add(sm, axis=1)
+        big = (rng.standard_normal((2000, 2000)) + 1j * rng.standard_normal((2000, 2000))).astype(cdt)
+        big.ravel()[::13] = np.nan
+        add(big, axis=0)
+        chunks_f.append(np.asarray(fnp.nanprod(big)).tobytes())
+        chunks_n.append(np.asarray(np.nanprod(big)).tobytes())
+        add(np.asfortranarray(big), axis=1)
+        add(big[:, ::2], axis=1)
+        if hashlib.sha256(b"".join(chunks_f)).hexdigest() != hashlib.sha256(b"".join(chunks_n)).hexdigest():
+            ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native complex last-axis nanprod must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}

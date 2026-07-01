@@ -13470,3 +13470,40 @@ OPEN complex-reduction siblings (same latency-bound-chain shape, not yet dug): c
 last-axis; complex prod MIDDLE/axis0 (numpy SIMD-fast there — likely REJECT/parity like sum). Complex
 `sum`/`mean` last-axis stay at ~parity (numpy's add.reduce DOES get the pairwise tree = already
 vectorized ~4ms, not the slow chain) = not a gap. AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED): native parallel COMPLEX128/COMPLEX64 last-axis nanprod — 38-90x
+
+`BlackThrush`. Direct sibling of the complex prod last-axis win (5c7d0c71): the first-documented OPEN
+complex-reduction lead. np.nanprod is `prod` with every NaN-complex (re OR im NaN) treated as identity
+1+0j — numpy implements it as a materialize-NaN->1 copy of the whole array (a wasteful 64MB temp for
+c128 2000x2000) followed by the same slow single-threaded multiply.reduce chain, so it is slow on EVERY
+axis and the isnan tax is on top (measured c128 2000x2000: nanprod last-axis 58.8ms vs plain prod 17ms;
+c128 64x200000 nanprod 193ms). fnp delegated all complex nanprod (dispatcher fast-fails non-f64 floats
+via `native_f64_reduction_preserves_dtype` -> fallback BEFORE any native hook — the new complex path had
+to go ABOVE that guard, same lesson as the f32 nanvar dispatch).
+
+Added `complex_nanprod_lastaxis_typed<T>` (real-view; per lane replace NaN-complex with (1,0) inline
+during a sequential naive-cmul product, `dst.par_chunks_mut(2).zip(src.par_chunks(2*cols))`, keep final)
++ `try_zerocopy_complex_nanprod_lastaxis`, hooked into `nanprod` above the f64-dtype guard. Only an
+explicit integer LAST axis engages (axis=None/tuple/non-last defer). Gate rows>=2 && cols>=2 &&
+rows*cols>=1<<18 && threads>=2. keepdims -> trailing-1 out shape.
+
+BIT-EXACT: identical per-lane replace+cmul to the landed complex nancumprod kernel (byte-verified vs
+np.nancumprod), and `np.nanprod(a,-1) == np.nancumprod(a,-1)[...,-1]` byte-for-byte; an ALL-NaN lane
+yields 1+0j exactly (acc starts at identity and stays). Verified byte-identical vs numpy over c128+c64 x
+many shapes x keepdims + sprinkled-NaN + NaN-edge lanes {all-NaN, (nan,x), (x,nan), (inf,nan), 1e30
+overflow, (0+0j)} + every defer path (below-gate, axis=0, flatten, F-contig, strided, 3d axis=-2).
+Conformance `nanprod_complex_lastaxis_parallel_bit_exact_matches_numpy` added (sha256), 38/38
+`conformance_nan_funcs` green.
+
+| Probe (min-of-many, 64 threads, ~9% NaN) | numpy | fnp | fnp/numpy |
+|---|---:|---:|---:|
+| nanprod c128 2000x2000 axis=-1 | 58.76ms | 0.65ms | 0.011x (~90x) |
+| nanprod c64  2000x2000 axis=-1 | 27.17ms | 0.47ms | 0.017x (~58x) |
+| nanprod c128 64x200000 axis=-1 | 193.13ms | 5.07ms | 0.026x (~38x) |
+| nanprod c64  64x200000 axis=-1 | 141.44ms | 2.27ms | 0.016x (~62x) |
+
+BIGGER than plain prod (29-78x) because numpy nanprod's whole-array NaN->1 materialize copy is an extra
+64MB of traffic fnp dodges (replace inline). OPEN complex-reduction siblings still: prod/nanprod
+MIDDLE/axis0 (numpy vectorizes across inner on strided axes — likely parity/REJECT; measure last-vs-axis0
+first). AGENT_NAME=BlackThrush.
