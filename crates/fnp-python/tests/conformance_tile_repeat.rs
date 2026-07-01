@@ -633,3 +633,45 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+// The native multidim tile path parallelizes over output super-rows for large outputs; the direct-unravel
+// super-index mapping must reproduce the serial odometer exactly. Byte-identical to numpy across dtypes and
+// reps shapes (2-D/3-D, scalar reps, reps-longer-than-ndim) at sizes that trip the ~4MB gate.
+#[test]
+fn tile_multidim_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260701)
+chunks = []
+for dtn in ["float64", "float32", "int64", "int16", "int8", "uint32", "bool"]:
+    dt = np.dtype(dtn)
+    if dt.kind == "f":
+        base = (rng.standard_normal(1500 * 1500) * 1.5).astype(dt).reshape(1500, 1500)
+        base3 = (rng.standard_normal(200 * 150 * 40)).astype(dt).reshape(200, 150, 40)
+    elif dt.kind == "b":
+        base = rng.integers(0, 2, 1500 * 1500).astype(dt).reshape(1500, 1500)
+        base3 = rng.integers(0, 2, 200 * 150 * 40).astype(dt).reshape(200, 150, 40)
+    else:
+        info = np.iinfo(dt)
+        base = rng.integers(info.min // 2, info.max // 2, 1500 * 1500).astype(dt).reshape(1500, 1500)
+        base3 = rng.integers(info.min // 2, info.max // 2, 200 * 150 * 40).astype(dt).reshape(200, 150, 40)
+    for reps in [(4, 1), (2, 3), (1, 4), 3, (2, 2, 2)]:
+        chunks.append(np.ascontiguousarray(mod.tile(base, reps)).tobytes())
+    for reps in [(2, 1, 3), (1, 2, 1), (3, 1, 1)]:
+        chunks.append(np.ascontiguousarray(mod.tile(base3, reps)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "native parallel multidim tile must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}

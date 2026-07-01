@@ -13626,3 +13626,28 @@ bool at 1-D axis=None, 2-D axis=0/axis=None/axis=-2, 3-D axis=0, k in {1,4,9,18}
 OPEN (same page-fault vein, still delegating at ~2 GB/s): tile 2-D (315ms), np.full (132ms), meshgrid
 (228ms), broadcast_to+copy (123ms) — each a byte-copy/constant-fill parallelizable the same way.
 AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED): parallelize native multidim np.tile (2-D/3-D) — 4.2-6.2x (page-fault wall)
+
+`BlackThrush`. Third page-fault-wall application (after np.outer aea8023a + np.repeat 613684f3). The
+existing `try_zerocopy_any_tile_multidim` (correct, bit-exact byte-copy kernel; tile 1-D was already
+parallel) walked output super-rows with a SERIAL odometer, so large 2-D/3-D tiles stalled at numpy's ~2
+GB/s page-fault wall (np.tile(m,(4,1)) 308ms, (2,2) 416ms). Replaced the incremental odometer with a
+DIRECT super-index unravel (out_super_stride) so each output super-row is independent, then
+par_chunks_mut(out_row_bytes) over super-rows — faulting the fresh output pages concurrently.
+
+BIT-EXACT: identical source-row mapping (digit = (s / out_super_stride[k]) % out_shape[k], reproduces the
+odometer) + byte copy, row order irrelevant. Verified byte-identical vs np.tile over f64/f32/i64/i16/i8/
+u32/bool at 2-D reps {(4,1),(2,3),(1,4),scalar 3,(2,2,2)-longer-than-ndim}, 3-D reps {(2,1,3),(1,2,1),
+(3,1,1)}, and small (serial-path) sizes. Gate output >= 4MB (small stays serial). Conformance
+`tile_multidim_parallel_bit_exact_matches_numpy` added, 25/25 `conformance_tile_repeat` green.
+
+| Probe (min-of-many, 64 threads) | numpy | fnp | fnp/numpy |
+|---|---:|---:|---:|
+| tile f64 2D (4,1) 4000x4000 | 307.7ms | 73.6ms | 0.24x (~4.2x) |
+| tile f64 2D (2,2) 4000x4000 | 416.3ms | 67.2ms | 0.16x (~6.2x) |
+| tile i64 2D (4,1) 4000x4000 | 304.0ms | 71.6ms | 0.24x (~4.2x) |
+
+Page-fault-wall vein now: outer + repeat + tile all parallel. Remaining candidates (still ~2 GB/s
+delegating): np.full (132ms, no native path — parallel const-fill), meshgrid (228ms), broadcast_to+copy
+(123ms). AGENT_NAME=BlackThrush.
