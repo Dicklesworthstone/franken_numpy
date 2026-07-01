@@ -13734,3 +13734,29 @@ every defer path. Conformance `ones_like_family_parallel_bit_exact_matches_numpy
 
 Page-fault vein now: outer + repeat + tile + concatenate + full + ones/like family (6 wins). Remaining:
 meshgrid (228ms), broadcast_to+copy (123ms). AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED): parallelize native np.meshgrid (2-D) + tile-1D / repeat-each halves — 2.5-3.1x (page-fault wall)
+
+`BlackThrush`. Seventh page-fault-wall application. fnp's 2-input meshgrid (try_zerocopy_meshgrid_2d) was
+already correct — it builds X/Y from `try_zerocopy_any_tile` (1-D broadcast-across-rows) + `try_zerocopy_
+repeat_each` (each row = constant input[i]) — but BOTH helper fills were SERIAL, so large meshgrids stalled
+at numpy's ~2 GB/s first-touch page-fault wall (meshgrid(6000,7000) both arrays 338ms). Parallelized both:
+tile-1D fans the r disjoint input-copies across the pool (par_chunks_mut(n_bytes)); repeat_each fans the m
+disjoint per-row constant-fills (par_chunks_mut(times) + slice::fill). Both are also used standalone (tile of
+a 1-D array), so tile-1D large also speeds up.
+
+BIT-EXACT (byte copy / constant fill) — meshgrid verified byte-identical vs numpy over 5 dtype PAIRS
+(float64/float64, float32/int32, int8/int64, uint16/float64, bool/float32 — each output keeps its OWN
+input's dtype, no cross-promotion) x {xy, ij} indexing; tile-1D over f64/i32/i8 flat + (3,3) reps; defer
+paths (sparse, copy=False, >2 inputs, small) all match. Gate output >= 8MB. Conformance
+`meshgrid_2d_parallel_bit_exact_matches_numpy` added; conformance_meshgrid 13/13, tile_repeat 25/25 green.
+
+| Probe (min-of-many, 64 threads) | numpy | fnp | fnp/numpy |
+|---|---:|---:|---:|
+| meshgrid xy (both arrays) 6000x7000 | 337.7ms | 109.2ms | 0.32x (~3.1x) |
+| meshgrid ij (both arrays) | 327.4ms | 109.9ms | 0.34x (~3.0x) |
+| tile 1-D x18 (8M->144M) | 734.9ms | 290.2ms | 0.39x (~2.5x) |
+
+Page-fault vein now: outer + repeat + tile(nd+1d) + concatenate + full + ones/like family + meshgrid
+(7 wins). Remaining: broadcast_to+ascontiguousarray (123ms), np.copy/flip (read+write bound ~2x, weaker).
+AGENT_NAME=BlackThrush.
