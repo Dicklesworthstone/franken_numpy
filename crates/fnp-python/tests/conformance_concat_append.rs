@@ -809,3 +809,49 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+// The native parallel concatenate block copy (large output, >= gate) must be byte-identical to numpy
+// across dtypes, axes, input counts, and call forms (positional axis, axis kwarg, no axis). concatenate
+// moves whole elements verbatim, so the parallel disjoint-block byte copy is exact.
+#[test]
+fn concatenate_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260701)
+chunks = []
+for dtn in ["float64", "float32", "int64", "int32", "int16", "int8", "uint32", "complex128", "complex64", "bool"]:
+    dt = np.dtype(dtn)
+    def mk(shp):
+        if dt.kind == "f":
+            return (rng.standard_normal(shp) * 1.5).astype(dt)
+        if dt.kind == "c":
+            return (rng.standard_normal(shp) + 1j * rng.standard_normal(shp)).astype(dt)
+        if dt.kind == "b":
+            return rng.integers(0, 2, shp).astype(dt)
+        info = np.iinfo(dt)
+        return rng.integers(info.min // 2, info.max // 2, shp).astype(dt)
+    a = mk((1200, 1200)); b = mk((1200, 1200)); c = mk((600, 1200))
+    chunks.append(np.ascontiguousarray(mod.concatenate([a, b])).tobytes())           # no axis (0)
+    chunks.append(np.ascontiguousarray(mod.concatenate([a, b, c], 0)).tobytes())      # positional axis
+    chunks.append(np.ascontiguousarray(mod.concatenate([a, b], axis=1)).tobytes())    # axis kwarg
+    chunks.append(np.ascontiguousarray(mod.concatenate([a, b], axis=-1)).tobytes())
+    chunks.append(np.ascontiguousarray(mod.vstack([a, b])).tobytes())
+    chunks.append(np.ascontiguousarray(mod.hstack([a, b])).tobytes())
+    t = mk((60, 400, 60)); u = mk((60, 250, 60))
+    chunks.append(np.ascontiguousarray(mod.concatenate([t, u], axis=1)).tobytes())    # 3-D non-trivial outer
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "native parallel concatenate must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}

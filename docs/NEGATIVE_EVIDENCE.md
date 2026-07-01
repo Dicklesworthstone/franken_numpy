@@ -13651,3 +13651,31 @@ u32/bool at 2-D reps {(4,1),(2,3),(1,4),scalar 3,(2,2,2)-longer-than-ndim}, 3-D 
 Page-fault-wall vein now: outer + repeat + tile all parallel. Remaining candidates (still ~2 GB/s
 delegating): np.full (132ms, no native path — parallel const-fill), meshgrid (228ms), broadcast_to+copy
 (123ms). AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED): parallelize native np.concatenate / vstack / hstack — 2.8-4.1x (page-fault wall)
+
+`BlackThrush`. Fourth page-fault-wall application (after outer/repeat/tile). fnp's concatenate had native
+kernels (try_zerocopy_f64_concatenate + try_zerocopy_bytes_concatenate/concatenate_mover) but their block
+copy was SERIAL, so large concatenations stalled at numpy's ~2 GB/s first-touch page-fault wall (concat
+4000x4000 axis0 149ms, vstack 157ms). Added `concat_copy_blocks_parallel<T>`: decompose every (outer,input)
+contiguous block into fixed 64K-element GRAIN sub-copies and run them across the rayon pool (raw
+copy_nonoverlapping), faulting output pages concurrently even for the common 2-input axis=0 case (few huge
+blocks). Wired into BOTH the f64 and mover paths (gate output >= 8MB). ALSO fixed the dispatcher: concatenate
+delegated on ANY kwarg, so the common `np.concatenate([...], axis=k)` KEYWORD form missed the native path —
+now an `axis`-only kwarg routes to it (other kwargs out/dtype/casting + axis=None flatten still defer).
+
+BIT-EXACT (element-verbatim byte copy) — verified byte-identical vs numpy over f64/f32/i64/i32/i16/i8/u32/
+c128/c64/bool at axis 0/1/-1, 2-D + 3-D, 2 & 3 inputs, positional-axis + axis-kwarg + no-axis + vstack +
+hstack; defer paths (mixed dtype, F-contig, small, axis=None, out=, dtype=) all match. Conformance
+`concatenate_parallel_bit_exact_matches_numpy` added; concat_append 30/30, stack 27/27, shape_manip 23/23.
+
+| Probe (min-of-many, 64 threads) | numpy | fnp | fnp/numpy |
+|---|---:|---:|---:|
+| concatenate axis=0 f64 4000x4000 | 150.7ms | 37.2ms | 0.25x (~4.1x) |
+| concatenate axis=1 f64 | 146.8ms | 46.0ms | 0.31x (~3.2x) |
+| concatenate axis=0 i32 | 78.2ms | 20.9ms | 0.27x (~3.7x) |
+| vstack f64 | 158.0ms | 47.1ms | 0.30x (~3.4x) |
+| hstack f64 | 141.5ms | 55.3ms | 0.39x (~2.6x) |
+
+Page-fault vein now: outer + repeat + tile + concatenate/vstack/hstack parallel. Remaining candidates
+(~2 GB/s): np.full (132ms), meshgrid (228ms), broadcast_to+copy (123ms). AGENT_NAME=BlackThrush.
