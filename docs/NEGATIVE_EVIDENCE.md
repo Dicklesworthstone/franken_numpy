@@ -13596,3 +13596,33 @@ serial op that writes a LARGE fresh buffer and reads at a suspiciously low ~2 GB
 bound, not compute/bandwidth bound — parallel row/block chunking faults pages concurrently for a ~4x win
 even when the per-element work is trivial (one multiply). Grep serial `numpy.empty(...)` + fill loops that
 materialize >L3 output.** AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED): native parallel np.repeat (scalar count, axis None/0) — 3.5-3.7x (page-fault wall)
+
+`BlackThrush`. Second application of the page-fault-wall lever (after np.outer aea8023a). np.repeat was
+FULLY DELEGATED (fnp `repeat` was a bare numpy passthrough). numpy.repeat materializes a large fresh output
+with a serial C copy that stalls at the first-touch page-fault wall (~2 GB/s): np.repeat(x,18) 587ms,
+np.repeat(m,4,axis=0) 255ms. Both the axis=None (flat) and axis=0 cases reduce to "repeat each contiguous
+UNIT k times" (axis=None: unit = one raveled element; axis=0: unit = one leading slice), which is a pure
+byte copy for EVERY fixed-width dtype (repeat moves whole elements verbatim).
+
+Added `try_native_repeat_scalar` (uint8-view of input; output numpy.empty in the input dtype;
+`par_chunks_mut(k*unit_bytes)` so each output block = k copies of one input unit, faulting pages across the
+rayon pool), hooked into `repeat` before the numpy delegate. Engages: scalar int k>=1, axis=None or 0
+(incl negative), C-contiguous numeric/bool/complex, output >= 4MB. Defers: per-element repeats arrays,
+axis!=0 (e.g. axis=1 interleaves within rows), k<1, non-contiguous, small, non-numeric.
+
+BIT-EXACT (uint8 byte copy) — verified byte-identical vs np.repeat over f64/f32/i64/i32/i16/i8/u16/c128/
+bool at 1-D axis=None, 2-D axis=0/axis=None/axis=-2, 3-D axis=0, k in {1,4,9,18}, plus every defer path
+(per-element array, axis=1/2, list-count, np.int64 scalar, k=0, below-gate, F-contig). Conformance
+`repeat_scalar_parallel_bit_exact_matches_numpy` added, 24/24 `conformance_tile_repeat` green.
+
+| Probe (min-of-many, 64 threads) | numpy | fnp | fnp/numpy |
+|---|---:|---:|---:|
+| repeat 1D x18 f64 (8M->144M) | 587.3ms | 159.4ms | 0.27x (~3.7x) |
+| repeat 2D axis0 x4 f64 (4000^2) | 254.7ms | 72.0ms | 0.28x (~3.5x) |
+| repeat 1D x18 i32 | 292.3ms | 83.1ms | 0.28x (~3.5x) |
+
+OPEN (same page-fault vein, still delegating at ~2 GB/s): tile 2-D (315ms), np.full (132ms), meshgrid
+(228ms), broadcast_to+copy (123ms) — each a byte-copy/constant-fill parallelizable the same way.
+AGENT_NAME=BlackThrush.

@@ -586,3 +586,50 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+// The native parallel scalar-repeat path (large output, axis=None / axis=0) must be byte-identical to
+// numpy for every fixed-width dtype (repeat moves whole elements verbatim, so a uint8-view byte copy over
+// row blocks is exact). Sizes are chosen to trip the ~4MB output gate; per-element repeats / axis=1 / small
+// sizes all defer to numpy and are covered by the pre-existing tests.
+#[test]
+fn repeat_scalar_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260701)
+chunks = []
+for dtn in ["float64", "float32", "int64", "int32", "int16", "int8", "uint16", "complex128", "bool"]:
+    dt = np.dtype(dtn)
+    if dt.kind in "fc":
+        base = (rng.standard_normal(600000) * 1.5).astype(dt)
+        base2 = (rng.standard_normal(2000 * 300) * 1.5).astype(dt).reshape(2000, 300)
+    elif dt.kind == "b":
+        base = rng.integers(0, 2, 600000).astype(dt)
+        base2 = rng.integers(0, 2, 2000 * 300).astype(dt).reshape(2000, 300)
+    else:
+        info = np.iinfo(dt)
+        base = rng.integers(info.min // 2, info.max // 2, 600000).astype(dt)
+        base2 = rng.integers(info.min // 2, info.max // 2, 2000 * 300).astype(dt).reshape(2000, 300)
+    for k in (1, 4, 9):
+        chunks.append(np.ascontiguousarray(mod.repeat(base, k)).tobytes())            # 1-D axis=None
+        chunks.append(np.ascontiguousarray(mod.repeat(base2, k, axis=0)).tobytes())    # 2-D axis=0
+        chunks.append(np.ascontiguousarray(mod.repeat(base2, k)).tobytes())            # 2-D axis=None (ravel)
+        chunks.append(np.ascontiguousarray(mod.repeat(base2, k, axis=-2)).tobytes())   # negative axis == 0
+# 3-D axis=0 leading-slice unit
+t = (rng.standard_normal(300 * 400 * 20)).reshape(300, 400, 20)
+chunks.append(np.ascontiguousarray(mod.repeat(t, 3, axis=0)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "native parallel scalar repeat must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
