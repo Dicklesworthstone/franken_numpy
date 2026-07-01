@@ -13760,3 +13760,30 @@ paths (sparse, copy=False, >2 inputs, small) all match. Gate output >= 8MB. Conf
 Page-fault vein now: outer + repeat + tile(nd+1d) + concatenate + full + ones/like family + meshgrid
 (7 wins). Remaining: broadcast_to+ascontiguousarray (123ms), np.copy/flip (read+write bound ~2x, weaker).
 AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED, loss fix): percentile/quantile array-q WITH axis — 0.64x LOSS -> parity (skip wasted extract)
+
+`BlackThrush`. A vs-numpy sweep found np.percentile with a LIST of q values along an axis was a stable
+1.6x LOSS (measured percentile([25,50,75], axis=1) on 2000x2000: numpy 70ms, fnp 109ms = 0.64x; axis=0
+0.67x). ROOT: the native paths only cover scalar-q (any axis) and array-q with axis=None; array-q WITH an
+axis correctly delegates to numpy — BUT only AFTER `extract_numeric_array` copies the whole 32MB array to a
+Rust Vec, a ~39ms waste numpy never pays. FIX: hoist an early guard (`axis_is_set && q.extract::<f64>()
+.is_err() -> fallback()`) ABOVE the extract in BOTH percentile and quantile, so array-q-with-axis delegates
+immediately.
+
+Result: percentile [25,50,75] axis=1 0.64x -> 0.99x, axis=0 0.67x -> 1.00x, 3-D axis=1 -> 0.97x; quantile
+multi-q-axis 0.98x -> 1.00x. Byte-exact (numpy's own result). PRESERVED all native wins: scalar-q axis
+6.2x, array-q flat 2.6x, scalar-q flat 1.9x (unchanged paths). Conformance
+`percentile_quantile_array_q_with_axis_matches_numpy` added (array-q x axes {0,1,-1} x q-forms byte-exact),
+percentile_median 25/25 green.
+
+| Probe (min-of-many, 2000x2000) | numpy | fnp before | fnp after |
+|---|---:|---:|---:|
+| percentile [25,50,75] axis=1 | 70ms | 109ms (0.64x LOSS) | 68ms (0.99x) |
+| percentile [25,50,75] axis=0 | 76ms | 117ms (0.67x LOSS) | 76ms (1.00x) |
+| quantile [.25,.5,.75] axis=1 | 69ms | ~72ms (0.98x) | 68ms (1.00x) |
+
+**LESSON: a native dispatcher that EXTRACTS the whole array up front, then delegates a sub-case to numpy,
+pays a full-array-copy tax on that sub-case — hoist the sub-case's delegate guard ABOVE the extract. Grep
+`extract_numeric_array`/`extract_precise_numeric_array` followed by a later `fallback()` for a param combo
+the native path can't handle.** AGENT_NAME=BlackThrush.
