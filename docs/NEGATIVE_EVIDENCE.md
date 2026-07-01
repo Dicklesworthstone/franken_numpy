@@ -13507,3 +13507,28 @@ BIGGER than plain prod (29-78x) because numpy nanprod's whole-array NaN->1 mater
 64MB of traffic fnp dodges (replace inline). OPEN complex-reduction siblings still: prod/nanprod
 MIDDLE/axis0 (numpy vectorizes across inner on strided axes — likely parity/REJECT; measure last-vs-axis0
 first). AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - NO-SHIP (bit-exactness not tractable): complex prod/nanprod AX0+MIDDLE, and complex sum/nansum/nanmean ANY axis
+
+`BlackThrush`. After landing complex prod (5c7d0c71) + nanprod (65e808f7) LAST-axis, probed the rest of the
+complex-reduction family for the same NaN-materialize-copy / no-pairwise tax. All measured as delegating
+(~parity) with a real numpy gap, BUT NONE is bit-exactly matchable, so all NO-SHIP:
+
+- **prod / nanprod AX0 + MIDDLE axis (numpy ~44ms nanprod, ~3-46ms prod): REJECT.** numpy's `multiply.reduce`
+  along a NON-contiguous (strided) axis does NOT multiply in naive top-to-bottom row order:
+  `np.nanprod(a,axis=0) != np.nancumprod(a,axis=0)[-1]` byte-wise (and same for the 3-D middle axis), so a
+  column-block/outer-block sequential kernel can't reproduce numpy's byte output. Only the CONTIGUOUS last
+  axis reduces in simple sequential order (that's why prod/nanprod last-axis ARE bit-exact and landed).
+- **sum / nansum / nanmean ANY axis (numpy complex nansum/nanmean ~44ms all axes = the NaN-materialize-copy
+  tax; sum ~4ms last / 2.7ms axis0): NO-SHIP (bit-exactness intractable).** numpy's complex `add.reduce` is
+  NOT sequential (`np.sum(a,-1) != np.cumsum(a,-1)[...,-1]`) AND not reproduced by numpy's documented
+  `pairwise_sum` (8-acc/128-block) replicated in Python — EVEN a 7-element complex sum matches neither strict
+  sequential NOR the pairwise guess byte-for-byte (numpy uses a SIMD-lane accumulation order not reproducible
+  from a scalar/pairwise kernel). Without a byte-exact match a native kernel would only be allclose, which
+  this project's bit-exact bar rejects. (nansum/nanmean have the biggest surface — ~44ms, common ops — but
+  the pairwise-order match is the blocker, same class as why complex sum lastaxis was only 1.46x bandwidth.)
+
+CONCLUSION: the bit-exact-safe complex REDUCTION vein = prod + nanprod, LAST axis ONLY, both LANDED (13-90x).
+multiply.reduce lacks a pairwise tree AND reduces the contiguous axis in plain sequential order = the unique
+byte-reproducible complex reduction. All add-based (sum/mean/nansum/nanmean) and all strided-axis reductions
+are off-limits for byte-exact. AGENT_NAME=BlackThrush.
