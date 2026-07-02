@@ -14430,3 +14430,30 @@ nan-reduction pair (nansum 8b062fdf + nanmean here) mirrors the flat pair — bo
 lane nan-path is temp-heavy at every size. Remaining f16 vein: non-last-axis nansum/nanmean (numpy strided
 nan-reduce also slow, but the reduction order differs — verify per-lane vs numpy's strided pass first);
 plain sum/mean axis stay delegated (numpy SIMD-fast). AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): f16 NANSUM non-last axis (0/middle) 15-51x + the strided-order semantics
+
+`BlackThrush`. SEMANTICS DIG (the "verify order first" flagged last commit): a STRIDED (non-last) f16 axis
+reduction is NEITHER f32-pairwise NOR f32-sequential — numpy's generic strided loop accumulates in the OUTPUT
+dtype f16, NARROWING EACH STEP: per lane `s = float16(f32(s) + f32(v))` left-to-right (NaN->0 for nansum).
+Verified byte-exact: `np.nansum(f16, axis=k<last) == per-lane sequential-f16-narrow over the moved axis`
+(also plain `np.sum(f16, axis0) == seq_f16`). CONTRAST: the CONTIGUOUS last axis uses f32-pairwise (different
+algorithm) — the reduction order depends on whether the reduced axis is contiguous.
+
+FIX: `try_zerocopy_f16_nansum_nonlast_axis` (norm < ndim-1) — per-lane sequential f16-narrow nan-skip
+accumulate over the strided axis (stride=inner), parallel across the outer*inner lanes. numpy's strided f16
+nansum is slow (mask/where + narrow-each-step): measured
+
+| f16 nansum non-last (30% NaN) | numpy | fnp | ratio |
+|---|---:|---:|---:|
+| axis0 (8000,8000) | 959ms | 18.7ms | **0.020x (51x)** |
+| axis0 (4000,4000) | 208ms | 5.8ms | **0.028x (36x)** |
+| middle (500,500,64) | 217ms | 14.7ms | **0.068x (15x)** |
+
+Bit-exact ALL PASS (axis0/middle x shapes x densities x keepdims; last-axis pairwise path untouched). Gate
+1<<20; hooked above the f64 guard, after the last-axis hook. **LESSON: a strided-axis reduction's ORDER
+differs from the contiguous-axis one — numpy accumulates strided reductions in the OUTPUT dtype narrowing
+each step (observable f16 overflow), while the contiguous fast axis uses the wide f32-pairwise tree. Always
+reverse-engineer the order PER axis-kind (contiguous vs strided), not once.** Next: f16 nanmean non-last
+(same strided seq + per-lane count), f16 plain sum non-last (seq_f16 also matches, numpy strided-slow = win).
+AGENT_NAME=BlackThrush.
