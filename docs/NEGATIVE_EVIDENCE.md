@@ -13856,3 +13856,21 @@ byte-exact (delegating). Single-q native WIN preserved (nanpct 50 flat 1.34x). C
 q-forms {[25,50,75],[0,100],array} x axes {None,0,1}. conformance_percentile_median 25/25, nan_funcs 38/38.
 **EXTRACT-TAX LEVER now swept across the whole quantile family: percentile + quantile + nanpercentile +
 nanquantile (hoist the delegate guard above extract_numeric_array).** AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED, loss fix): np.average with full-shape weights along a NON-LAST axis — 0.09-0.15x -> parity
+
+`BlackThrush`. A vs-numpy sweep found np.average(a, axis=k, weights=W) with W.shape==a.shape (element-wise
+weights) along a NON-LAST axis was a catastrophic 0.09-0.15x LOSS (fnp 7-11x SLOWER than numpy): 2000x2000
+axis=0 fnp 67ms vs numpy 6ms; 3-D axis=0/1 ~0.14x. ROOT: try_zerocopy_f64_average_axis's full-shape-weights
+fast branch only handles the CONTIGUOUS last axis (gated `inner == 1`); a non-last axis falls through to the
+cold extract + strided native average (~10x slower). The last-axis full-shape case WINS (ax1 2-D 4.0x, 3-D
+last 3.6x), 1-D weights WIN (ax0 3.7x), axis=None WINS (2.7x) — all preserved.
+
+FIX: before the cold extract in average(), delegate full-shape-weights (w.shape==a.shape, ndim>=2) along a
+non-last integer axis to numpy (fast, ~6ms). Result: axis=0 2-D 0.09x->0.93x, returned 0.10x->1.10x, 3-D
+axis=0 0.14x->1.01x, 3-D axis=1 0.15x->0.87x — all byte-exact (delegating). All native wins preserved (ax1/
+last/flat/1-D 2.7-4.0x). Correctness 0 fails across shapes {2000x2000, 3-D, 1000x50} x all axes x returned.
+
+conformance_mean 14/14; conformance_statistics all 8 average_* tests PASS. (The 3 cov_* failures in
+conformance_statistics are PRE-EXISTING worker-BLAS-FMA flakiness — documented, fail on baseline; this diff
+touches ONLY average() [21 lines, zero cov lines] and cov does not call average.) AGENT_NAME=BlackThrush.
