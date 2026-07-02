@@ -14852,3 +14852,20 @@ now 10-14x native, ALL byte-exact.** LESSON: when native arithmetic can wrap i64
 handles internally, a cheap any()-overflow pre-scan that defers the whole array is safer + simpler than per-
 element i128 (realistic data never trips it; extremes stay byte-exact via numpy). Remaining datetime:
 timedelta64 (different format — signed integer + unit suffix). AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): native np.strings.mod('%d', ints) — 34-55x (biggest win this run)
+
+`BlackThrush`. np.strings.mod (printf % elementwise) formats each element single-threaded (~430ns/elem =>
+1.7-2.1s@4M — the biggest delegating op found). Implemented the plain %d/%i integer case: parse the format to
+(prefix,suffix) codepoints (reject width/flags/precision/other-conversions/%%/array-format), read the int
+array per dtype (i8..u64, widened to i128 uniformly), two-pass (max content len -> U{out_w}, then build
+prefix+decimal+suffix) parallel. Reuses the datetime digit-writer machinery. Measured 4M: %d i64 **55x**
+(1768->32ms), 'item %d' (literals) 53x, %d u64 34x. BYTE-IDENTICAL (dtype+tobytes) over all int dtypes x
+{%d,%i,literal prefix/suffix} x 2-D; char.mod mirrored. Delegates %5d/%x/%o/%.2f/%%/%s, float/bool values,
+array format, below-gate.
+
+**LESSON: printf-formatting ops (strings.mod, and by extension int->str astype) are numpy's SLOWEST per-element
+ops (~430ns, dwarfs even datetime's 240ns) because they go through Python-ish format machinery — the plain
+integer %d case is a trivial decimal write that parallelizes to 34-55x. The digit-writer + two-pass-max-width
+framework from datetime/expandtabs transfers directly.** Remaining: %.Nf float formatting (2.1s, harder —
+needs correct decimal rounding), %x/%o (radix), %e/%g. AGENT_NAME=BlackThrush.
