@@ -13818,3 +13818,26 @@ win mechanism). conformance_matmul 14/14, conformance_dot 12/12, conformance_ten
 LOSS under the DEFAULT multi-threaded BLAS real users run — gate BLAS-competing native paths on
 blas_is_single_threaded(). Check any native GEMM / BLAS-competing op at FULL THREADS, not just the OMP=1
 sweep.** AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED, loss fix): extend serial-BLAS gate to batched matmul / tensordot / inner / matrix_power — removes 0.32-0.63x default-regime losses
+
+`BlackThrush`. Follow-up to the 2-D matmul/dot gate (90733ca6): audited ALL f64 BLAS-competing native paths
+at FULL THREADS and found the same OMP=1-calibration loss family. Measured (same-host, default multi-thread
+BLAS): batched matmul (256,64,64) 0.54x / (64,128,128) 0.32x, tensordot axes=1 1200 0.61x, matrix_power^3
+1000 0.63x — all LOSSES; the SAME ops WIN 1.8-3.2x under OMP=1 (serial BLAS). matrix_power's own in-source
+comment even acknowledged it bets on "the deployment host [having SLOW BLAS]".
+
+FIX: gate each on `blas_is_single_threaded()` — engage the native GEMM only when numpy's BLAS is serial,
+else delegate. Sites: try_zerocopy_f64_batched_matmul (EQUAL-batch case only — a_batched && b_batched),
+tensordot `in_native_window`, inner `in_native_window`, matrix_power native-window guard. The matrix-
+BROADCAST batched case (one 2-D operand reused across the batch) is NOT gated — it wins at FULL THREADS via
+shared-operand cache reuse (measured 2.10x), verified preserved.
+
+Result (FULL THREADS): batched (256,64,64) 0.54x->1.00x, (64,128,128) 0.32x->1.00x, tensordot 0.61x->0.96x,
+matrix_power 0.63x->0.93x, broadcast batched 2.10x WIN kept; all byte-exact (delegating). (OMP=1): batched
+1.79-1.93x, tensordot 2.35x, matrix_power 3.18x, matmul 3.68x — ALL wins preserved. matrix_power allclose
+True (300/700/1000). conformance matmul 14/14, tensordot 11/11, dot 12/12, linalg_basic 61/61 green.
+
+**The OMP=1-calibration hidden-loss family is now fully swept: 2-D matmul/dot + batched + tensordot + inner +
+matrix_power all gated on blas_is_single_threaded().** Remaining (lower value): multi_dot 0.82x, matmul f32
+0.79x (f32 GEMM path) — same fix if pursued. AGENT_NAME=BlackThrush.
