@@ -14998,3 +14998,21 @@ consistent with the existing interp standard, not a NEW tolerance relaxation. Ve
 the correct bar for this op.** LESSON: before demanding byte-exact on an EXTENSION, check the BASE op's actual
 standard — interp/linalg/fft that wrap a non-bit-exact numeric kernel are allclose ops; a periodic/masked variant
 of an allclose op is held to allclose, not tobytes. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): percentile/quantile method=lower/higher/nearest — 2.9-3.6x (wired existing kernel)
+
+`BlackThrush`. np.percentile/quantile with an explicit method= was a FULL DELEGATION (~350-420ms@4000² axis=1)
+even though fnp-ufunc ALREADY had percentile_method/quantile_method + a QuantileInterp enum — the pyfunction
+gate just bailed on `method.is_some()` and never called them. Wired it: parse method -> QuantileInterp, and for
+the NON-INTERPOLATING methods (lower/higher/nearest — pure order-statistic selection) route scalar-q through
+percentile_method/quantile_method (the same parallel radix-select as the default). Measured 4000² axis=1: lower
+2.9x, higher 2.7x, nearest 2.9x (350-420->140-150ms). BYTE-IDENTICAL (dtype+tobytes) — verified over shapes x
+q{0,25,37,50,99.9,100} x axes{None,0,1} x percentile+quantile.
+
+**KEY: 'linear' (default) stays on the ORIGINAL a.percentile(q,axis) path — percentile_method's axis
+interpolation is only ALLCLOSE (~1e-18, like interp), and the default linear is itself already allclose (28/2000
+values 1-ULP off on even-length medians, pre-existing). So route Linear->original, lower/higher/nearest->method
+(byte-exact, no interpolation), and DELEGATE midpoint + the statistical H&F methods (hazen/weibull/...) + array-q
+with a non-linear method. LESSON: when a kernel already exposes a feature the pyfunction gates off, wiring it is
+near-free — but split by which sub-cases are BYTE-exact (order-stat selection) vs merely allclose (interpolation)
+and only claim the byte-exact ones.** 43 wins. AGENT_NAME=BlackThrush.
