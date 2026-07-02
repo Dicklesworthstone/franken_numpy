@@ -14078,3 +14078,33 @@ pay-twice tie-defer (follow-up).
 PRE-sort predicate can PROVE the defer condition (here pigeonhole: range<n => guaranteed tie), check it
 first so the defer costs only the predicate, not predicate+work+fallback. Integer value-range is a free
 tie oracle for the dense/categorical case.** AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED): integer argsort pigeonhole tie pre-check — AXIS paths (last/axis0/mid)
+
+`BlackThrush`. Follow-up extending the flat-path fix (eb1a43f9) to the three per-lane int argsort paths
+(`int_argsort_{lastaxis,axis0,midaxis}_typed`), which had the SAME pay-twice tie-defer. Factored a shared
+`int_argsort_all_lanes_have_tie(data, lane_len)` oracle: one cheap chunked global min/max; if the whole
+array's value range spans fewer than `lane_len` distinct values, EVERY lane (length = the sorted-axis
+length: cols/rows/alen) must contain a tie (pigeonhole) -> defer for the scan alone. Measured 16M-element
+2-D/3-D int64 (20th-pctile interleaved):
+
+| axis argsort | numpy | fnp BEFORE | fnp AFTER |
+|---|---:|---:|---:|
+| lastaxis dense ties (4000x4000, range 1000) | 314ms | 361ms **1.10x LOSS** | 316ms **1.007x par** |
+| axis0 dense ties     (4000x4000, range 1000) | 405ms | 490ms **1.13x LOSS** | 411ms **1.014x par** |
+| midaxis dense ties   (400x400x100, r<alen)   | 297ms | 361ms **1.18x LOSS** | 302ms **1.016x par** |
+| lastaxis DISTINCT (preserved)                | 320ms | 33ms 0.10x WIN | 33ms **0.104x WIN** |
+| axis0/mid DISTINCT (preserved)               | 419/304ms | — | **0.173x / 0.228x WIN** |
+
+**OUTPUT BYTE-IDENTICAL for every input** (the tie case already deferred to numpy; this only defers EARLIER;
+distinct/wide-range lanes fall through unchanged) -> correctness cannot regress; verified exact vs numpy
+across dense/distinct x {i32,i64,u32,u64} x {lastaxis,axis0,midaxis}. Added `Into<i128>` bound to the three
+typed fns (all int widths widen losslessly). RESIDUAL (honest, unchanged): a lane length shorter than the
+global range (e.g. midaxis alen=400 with range 1000) with only SPARSE ties still falls to the tail
+sort-then-defer; and the pigeonhole uses the GLOBAL range so a mostly-distinct array with a few dense lanes
+isn't caught — both rare. The whole int-argsort family (flat + all axes) now converts the common
+categorical/dense-tie case from ~1.1-1.4x LOSS to parity while keeping the 5-10x distinct-value win.
+
+**LESSON: when a per-LANE fast path defers-on-tie, the same pigeonhole oracle generalizes — the guaranteed-
+tie predicate is `global_range < lane_length` (every lane of that length must collide). One global min/max
+pass gates ALL lanes; no need for per-lane range computation.** AGENT_NAME=BlackThrush.
