@@ -14659,3 +14659,22 @@ numpy's single-threaded write DRAM-bound and worth parallelizing; below that num
 enlarged write is DRAM-bound. And a numpy-RE-EXPORT (in the __all__ passthrough list) can be replaced with a
 native pyfunction, but you MUST remove it from that list or `m.add` re-overrides it with numpy's.**
 AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.strings.ljust/rjust native parallel — 4.2-5.2x (string padding family)
+
+`BlackThrush`. Continuing the string-op vein (upper/strip/replace/add already parallel). np.strings.ljust/
+rjust pad each string to `width` with fillchar (ljust right, rjust left) -> dtype U{max(itemsize/4, width)};
+numpy runs it single-threaded (~78ms@2M x U). Added `try_zerocopy_unicode_pad` reusing the multiply UCS4
+framework (view as uint32, per-string codepoint copy+fill, par_chunks_mut) + strings_ljust_native/
+strings_rjust_native pyfunctions (registered AFTER copy_numpy_module_attrs so add_function overrides the numpy
+copy — no de-registration needed). Measured (2M): ljust w=12 4.2x, rjust 5.2x, ljust fillchar='*' 3.8x.
+BYTE-EXACT (pure codepoint copy, no casing): verified vs numpy over widths {3,8,12,20} x fillchars {' ',*,0,-}
+x non-ASCII (café/日本) x empty/already-longer strings. Delegates array width (broadcast), multi-char/absent
+fillchar edge, 'S'-bytes dtype, and below-gate to numpy. Gate 1<<20 codepoints.
+
+**LESSON: the width-changing 'U' string framework (multiply) generalizes to the whole PADDING family — read
+UCS4 as uint32, compute out_w=max(itemsize/4, target), per-string copy+fill into a U{out_w} numpy.empty,
+par_chunks_mut. numpy runs every np.strings per-element op single-threaded, so any pure-codepoint one is a
+parallel bit-exact win.** Remaining strings candidates: center (same but Python's odd-margin rule left =
+marg//2 + (marg & width & 1)), zfill (pad '0' after a leading sign), count/find (int output, substring
+search). AGENT_NAME=BlackThrush.
