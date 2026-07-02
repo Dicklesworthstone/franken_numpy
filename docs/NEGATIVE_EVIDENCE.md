@@ -14571,3 +14571,20 @@ sub-ULP f32 differences, and the 65536-value domain is small enough to PROVE bit
 verification turns a risky tolerance win into a certain one.** Remaining f16 transcendentals to clear the
 same way: sinh/cosh/arcsin/arccos/tan (warning/inf surfaces), exp/expm1/log/log1p (overflow/negative
 surfaces) — each needs its exhaustive 65536 pass + warning pre-scan. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): f16 tan/arcsin/arccos/arcsinh/arccosh/arctanh 9.8-19x (native path exhaustively proven)
+
+`BlackThrush`. Second batch of f16 transcendentals (recipe from 9ca5a3c6). Added to try_zerocopy_f16_unary_
+widen (kernel v.tan()/.asin()/.acos()/.asinh()/.acosh()/.atanh()) with domain-defer pre-scans: tan defers inf
+(numpy "invalid"->nan); arcsin/arccos defer |x|>1; arctanh defers |x|>=1; arccosh defers x<1; arcsinh is
+warning-free. Measured (in-domain 16M): arcsinh 19x, arccosh 14x, arctanh 12.6x, arcsin 12.8x, arccos 11.6x,
+tan 9.8x. All EXHAUSTIVELY proven bit-exact over their in-domain f16 values (0 mismatch each).
+
+**METHODOLOGY CATCH (important): a domain-defer op's exhaustive test MUST cover only IN-DOMAIN inputs. Tiling
+the FULL 65536 domain includes out-of-domain values, which trip the pre-scan and DEFER the whole array to
+numpy -> the exhaustive test then passes TRIVIALLY (delegation == numpy) WITHOUT ever engaging the native
+kernel. Re-verified each op over `allf[in_domain(allf)]` tiled >= the gate so the NATIVE path actually runs:
+tan (all finite, n=63488), arcsin/arccos (|x|<=1, n=30722), arccosh (x>=1, n=16385), arctanh (|x|<1, n=30720),
+arcsinh (all finite) — all 0 mismatch. Always confirm the fast path ENGAGES before trusting a bit-exact pass
+on a warning/domain-guarded op.** f16 inverse-trig + inverse-hyperbolic COMPLETE. Remaining: sinh/cosh
+(overflow pre-scan), exp/expm1/log/log1p (overflow/negative). AGENT_NAME=BlackThrush.
