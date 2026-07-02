@@ -14836,3 +14836,19 @@ core INSIDE uses truncating `/` per Hinnant; the OUTER unit split uses div_eucli
 semantics in the same function — match each to what the algorithm assumes.)** datetime_as_string vein: all
 common units (D + s/h/m/ms/us/ns) now native 10-13x. Remaining: Y/M/W (year/month arithmetic, no civil),
 timedelta64 (different format). AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): native np.datetime_as_string[Y/M/W] — 11.6-14.3x (datetime_as_string COMPLETE)
+
+`BlackThrush`. Completes datetime_as_string: added the calendar units. [Y] 'YYYY' = %04d(1970+v) out_w22;
+[M] 'YYYY-MM' via year=1970+v.div_euclid(12), month=v.rem_euclid(12)+1, out_w25; [W] 'YYYY-MM-DD' via
+days=v*7 -> civil, out_w28. Added kind field to DtUnit + branch in dt_format. Measured 4M: Y 13.7x (730->54ms),
+M 14.3x (787->55ms), W 11.6x (1092->94ms). BYTE-IDENTICAL (dtype+tobytes) over 2M+/unit incl negatives/NaT/
+year-0. OVERFLOW GUARD: W (v*7) and Y (1970+v) can wrap i64 at pathological extremes -> cheap parallel pre-scan
+defers the whole array to numpy if any element exceeds the safe range (M uses div_euclid, can't overflow, no
+guard). Verified extremes defer correctly.
+
+**np.datetime_as_string COMPLETE for ALL units (D/h/m/s/ms/us/ns/Y/M/W) — a ~700-1100ms/4M single-threaded op
+now 10-14x native, ALL byte-exact.** LESSON: when native arithmetic can wrap i64 at input extremes numpy
+handles internally, a cheap any()-overflow pre-scan that defers the whole array is safer + simpler than per-
+element i128 (realistic data never trips it; extremes stay byte-exact via numpy). Remaining datetime:
+timedelta64 (different format — signed integer + unit suffix). AGENT_NAME=BlackThrush.
