@@ -14678,3 +14678,19 @@ par_chunks_mut. numpy runs every np.strings per-element op single-threaded, so a
 parallel bit-exact win.** Remaining strings candidates: center (same but Python's odd-margin rule left =
 marg//2 + (marg & width & 1)), zfill (pad '0' after a leading sign), count/find (int output, substring
 search). AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.strings.center/zfill native parallel — 4.6-4.9x (padding family COMPLETE)
+
+`BlackThrush`. Completes the string-padding family (ljust/rjust landed 74008dc6). Extended try_zerocopy_
+unicode_pad's build closure with mode 2 (center) and mode 3 (zfill) + strings_center_native/strings_zfill_
+native pyfunctions. center replicates CPython's odd-margin rule EXACTLY (left = marg//2 + (marg & width & 1),
+extra pad on the RIGHT when odd — verified over widths 1..20 covering both parities). zfill '0'-pads on the
+LEFT but AFTER a leading sign (+/-): '-5'.zfill(5)=='-0005', hardcoded fill '0', no fillchar param. Measured
+(2M): center w=15 4.8x, center fillchar='.' 4.9x, zfill 4.6x. BYTE-EXACT vs numpy over widths {1..20} x
+fillchars x signs {+5,-42,+,-,12.5} x empty x non-ASCII x already-longer strings.
+
+**LESSON: the fiddly per-op string rules (center's odd-margin bias, zfill's sign-then-zeros) are the ONLY
+real correctness risk — reproduce CPython's exact formula and verify over BOTH margin parities + all sign
+variants; the parallel framework itself is shared. np.strings padding family (ljust/rjust/center/zfill) now
+COMPLETE.** Remaining strings candidates: count/find (int-output substring search 17-21ms), expandtabs (133ms),
+rfind/index/partition. AGENT_NAME=BlackThrush.
