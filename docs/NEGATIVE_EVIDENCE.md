@@ -14329,3 +14329,29 @@ so the reduction's ALGORITHM (tree vs sequential) decides parallelizability, and
 path that widens is worse than delegating. Check numpy's reduction order before assuming a compute-bound f16
 reduction is a parallel win.** Remaining f16 reduction vein: nansum/nanmean (50/89ms, numpy pairwise-nansum
 = parallelizable via a nan-skip widen-pairwise), std/var (needs two-pass). AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): f16 flat NANSUM 6.6-72x (numpy f16 nansum is catastrophically slow)
+
+`BlackThrush`. Biggest f16-vein win. numpy's f16 nansum is ~6x slower per element than its already-slow f16
+sum (~9ms/M vs ~1.6ms/M) — it builds an isnan MASK + a where'd COPY + sums, all with the f16->f32 widen on
+top. BIT-EXACT semantics verified over sizes x NaN-densities(0..1) x scales: `np.nansum(f16) ==
+float16(np.add.reduce(where(isnan, 0, f16.astype(f32))))`. FIX: `par_pairwise_nansum_f16` = the same rayon::
+join numpy-pairwise tree as the sum, but the <=128 leaf zeroes NaN before base_sum_simd_f32 (no NaN defer —
+nansum defines NaN as 0). Hooked ABOVE nansum's `native_f64_reduction_preserves_dtype` guard (which delegates
+all non-f64 floats — a path beside/below it is DEAD CODE, per the f32-nanvar dispatch lesson).
+
+| f16 flat nansum (30% NaN) | numpy | fnp | ratio |
+|---|---:|---:|---:|
+| 16M | 144ms | 2.0ms | **0.014x (72x)** |
+| 4M  | 35.9ms | 1.2ms | **0.033x (30x)** |
+| 1M  | 9.4ms | 0.52ms | **0.056x (18x)** |
+| 262K | 2.3ms | 0.23ms | **0.100x (10x)** |
+| 131K | 1.2ms | 0.18ms | **0.151x (6.6x)** |
+
+Bit-exact ALL PASS (densities 0/0.01/0.3/0.9/1.0, all-NaN, no-NaN, n>2^24, small-delegate). **GATE 1<<17
+(NOT the sum's 1<<22): numpy nansum is slow even at small N (temps, not cache-resident SIMD), and the nansum
+fast path skips the sum's NaN pre-scan (nansum can't defer on NaN), so it wins from ~130K up — always
+re-derive the gate per op from ITS numpy cost + ITS fixed floor, don't copy a sibling's.** nanmean SKIPPED:
+`np.nanmean(f16)` does NOT match float16(f32_nansum/count) — it overflows to inf where an f32-accumulate
+wouldn't and shows ULP drift, so its internal accumulation differs (fiddly/risky; left for a semantics dig).
+AGENT_NAME=BlackThrush.
