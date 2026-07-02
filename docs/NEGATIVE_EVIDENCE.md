@@ -15048,3 +15048,18 @@ a STALE .so (previous build) and the bench read PARITY -> I nearly concluded 'st
 source edits were correct; the .so just lacked them. ALWAYS confirm the build printed 'Finished' before trusting
 a bench; when a just-added native path reads exactly PARITY, suspect a stale/incomplete build BEFORE suspecting
 a dispatch gate (rebuild in a SEPARATE command first).** 45 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.take mode=clip/wrap native — 1.11x LOSS -> 5-7.6x WIN
+
+`BlackThrush`. np.take with mode='clip'/'wrap' was DELEGATED (`if mode != "raise" -> fallback`), a 1.11x LOSS
+(asarray+dtype-introspection overhead on top of numpy's single-threaded gather). But clip (clamp idx to
+[0,n-1], no negatives-from-end) and wrap (rem_euclid(n)) are DETERMINISTIC index transforms — same parallel
+gather as the default mode, just a different per-index resolve. Added resolve_take_index(idx,n,mode_code) and
+threaded mode_code through the flat f64 + int (i64/u64/bool) gather paths. Measured (4M idx): f64 clip 7.6x
+(27->3.6ms), wrap 5x, i64 clip 7.5x. BYTE-IDENTICAL over f64/i64/u64/bool x clip/wrap x 1-D/2-D indices x
+out-of-range both signs; empty source (n==0) + axis + narrow dtypes delegate (rem_euclid(0) guarded).
+
+**GATED-KWARG-LOSS pattern: a pyfunction that `mode != "raise" -> fallback` pays the sniff overhead THEN
+delegates to numpy's serial gather = a LOSS, when the alternate modes are just a different pure index math
+the native parallel gather already does. Grep for `!= "default" -> fallback` gates where the non-default branch
+is a cheap deterministic transform of the SAME kernel.** 46 wins. AGENT_NAME=BlackThrush.
