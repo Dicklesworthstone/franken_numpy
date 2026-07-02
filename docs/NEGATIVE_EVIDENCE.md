@@ -14964,3 +14964,20 @@ imaginary/real) exposed the last-ULP failures. LESSON: algebraic-but-libm ops (s
 NOT reliably byte-exact across Rust/numpy the way pure {:.N} formatting is — verify over EXTREMES and structural
 edges (re=0, im=0, subnormal results), not just a random normal sample, before trusting bit-exactness.** Contrast
 [[the float %.Nf/%e wins]] which ARE byte-exact (correctly-rounded decimal = unique answer). AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.strings.partition/rpartition — 4.1-4.4x
+
+`BlackThrush`. Split each string at the FIRST/LAST occurrence of sep -> a 3-TUPLE (before, sep_out, after) of
+U arrays (not found: partition->(whole,'',''), rpartition->('','',whole)). numpy single-threaded ~185ms@2M.
+try_native_strings_partition: pass 1 finds the sep position + (before,after) piece lengths per element (Vec of
+positions), computes 3 tight widths, pass 2 builds the 3 U{width} arrays in parallel. Measured 2M: partition
+4.4x (189->43ms), rpartition 4.1x. BYTE-IDENTICAL (dtype+tobytes on all 3 parts) over found/not-found/multichar
+sep/mixed x 2-D x char mirror. Delegates: array sep, EMPTY sep (numpy ValueError), 'S', below gate 4096.
+
+**EDGE that cost 3 iterations (all caught by dtype+tobytes, never array_equal): numpy emits a U0 array for a
+whole-empty part (all-not-found after, all-leading-sep before, all-empty input), but numpy.empty('U0') PROMOTES
+to U1 (can't construct U0). So when a part's max width is 0, DEFER the whole op to numpy (`if bw==0||aw==0 ->
+None`). Also: the sep-part dtype is ALWAYS U{len(sep)} even when NO element contains sep (not U0). LESSON: a
+dtype-changing op with a variable-width output has TWO numpy width quirks to match — the U0-vs-U1 minimum AND
+per-part fixed-vs-tight rules; verify with tobytes and probe the all-empty/all-not-found corners explicitly.**
+np.strings per-element surface now essentially COMPLETE. AGENT_NAME=BlackThrush.
