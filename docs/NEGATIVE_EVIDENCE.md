@@ -14045,3 +14045,36 @@ cases use tiny kernels k<=128 that never reach the guard).
 serial->parallel PAR_MIN) also fires — measure the WHOLE size range, not just the large end. ce24abcb benched
 only 4M (all >=PAR_MIN) and shipped a 1.5-1.76x regression for every 300K-signal large kernel. Gate the fast
 path at the SAME crossover its parallelization uses.** AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED): integer argsort pigeonhole tie pre-check — dense-tie 1.4x LOSS -> parity
+
+`BlackThrush`. `np.argsort` default kind='quicksort' is UNSTABLE, so a tied value's index order is
+algorithm-specific and unreproducible. fnp's native flat int argsort (`int_argsort_flat_typed`) is byte-exact
+ONLY for DISTINCT values, so it sorted an index buffer by value, scanned for adjacent ties, and on ANY tie
+DEFERRED to numpy. That paid the FULL native indirect sort AND numpy's re-sort = pay-twice. Measured 8M
+(20th-pctile interleaved): DISTINCT i64 0.19x WIN (~5x), but ANY tie -> LOSS:
+
+| 8M argsort | numpy | fnp BEFORE (pay-twice) | fnp AFTER (pigeonhole) |
+|---|---:|---:|---:|
+| i64 dense ties (range 1000) | 349ms | 492ms **1.41x LOSS** | 368ms **1.026x par** |
+| i32 dense ties (range 100)  | 211ms | ~1.4x LOSS | 249ms **1.025x par** |
+| u64 dense ties (range 500)  | 342ms | ~1.4x LOSS | 365ms 1.067x (near-par) |
+| i64 DISTINCT (perm)         | 600ms | 125ms 0.21x WIN | 125ms **0.21x WIN (preserved)** |
+
+FIX: before the expensive indirect sort, one cheap chunked min/max pass; if the integer VALUE RANGE spans
+fewer than n distinct values (`(max-min) < n-1`), a tie is GUARANTEED (pigeonhole) -> defer immediately for
+the price of the scan alone (parity) instead of pay-twice. Catches the common categorical/label/small-ID
+tie case. **OUTPUT IS BYTE-IDENTICAL to before for every input** (the tie case already deferred to numpy —
+this only defers EARLIER; distinct arrays fall through unchanged), so correctness cannot regress; verified
+exact vs numpy across dense/distinct/sparse x {i32,i64,u32,u64}. Added `T: Into<i128>` bound for overflow-safe
+range (all of i32/i64/u32/u64 widen losslessly). RESIDUALS (honest): (1) wide-range arrays with only SPARSE
+ties (e.g. range 2^40, ~24 collisions in 8M) fall through to the tail sort-then-defer = still ~1.22x LOSS
+(pigeonhole can't rule out sparse ties without sorting; rare in practice). (2) u32/u64 dense ~1.07-1.09x
+(defer overhead a larger fraction of numpy's faster small-type sort; partly loaded-box noise). Both are
+far smaller than the original ~1.4x. Only the FLAT path fixed; last-axis/axis0/midaxis int argsort keep the
+pay-twice tie-defer (follow-up).
+
+**LESSON: a "sort then check-then-defer-on-tie" fast path pays TWICE whenever it defers. If a cheap
+PRE-sort predicate can PROVE the defer condition (here pigeonhole: range<n => guaranteed tie), check it
+first so the defer costs only the predicate, not predicate+work+fallback. Integer value-range is a free
+tie oracle for the dense/categorical case.** AGENT_NAME=BlackThrush.
