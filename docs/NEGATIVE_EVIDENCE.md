@@ -15466,3 +15466,25 @@ here) with serial-within-lane order preserved; and a parallel READ(val)+WRITE(ar
 guard with a buffer pointer-range OVERLAP check and fall back to serial (values===arr is legal in numpy). This
 mirrors take_along's gather (already parallel) — the scatter twin just needed the disjoint-region decomposition
 + alias guard.** 69 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.sort(structured, order=) via lexsort+gather — 2.9-5.7x
+
+`BlackThrush`. First NON-copy-family lever in a while. np.sort on a STRUCTURED array (with or without `order`)
+sorts records through a generic per-record comparator = pathologically slow (~1.7s@2M 2-field, ~5.1s 3-field).
+It is EXACTLY a lexsort by the field PRECEDENCE (`order` fields first, then the remaining fields in dtype
+order) followed by a gather — and BYTE-IDENTICAL because two records equal on EVERY field are byte-identical,
+so tie order never changes output bytes (verified via tobytes()). Added try_native_struct_sort: build the
+precedence, np.lexsort(keys reversed so primary is last), gather a[idx]. Hooked into sort() by capturing the
+`order` kwarg (was treated as an unknown -> passthrough) and running before the f64/int fast paths. Measured
+2M: 2-field order='a' 2.92x (1669->571ms), 3-field order=['x','y'] 5.68x (5116->901ms — bigger with more
+fields, numpy's comparator degrades). BYTE-IDENTICAL over 1/2/3+ order fields (str/list) + no-order (all fields
+in dtype order) + kind=stable + axis {-1,0,default} + string fields + heavy primary ties (broken by later
+fields) + exact-duplicate records; unknown `order` field / order-on-non-struct / n-D struct defer to numpy;
+plain f64 sort unaffected.
+
+**LEVER: np.sort/argsort with a structured dtype or `order=` delegates to numpy's SLOW record comparator; it
+always reduces to a lexsort (typed per-key) + gather = big win + provably byte-exact (all-field-equal records
+are byte-identical). SIBLING LEADS: np.argsort(struct, order=) (same, return the lexsort indices directly),
+n-D structured sort (per-axis lexsort). BUILD GOTCHA (2nd time): a helper inserted between a #[pyfunction]'s
+attribute lines and `fn` steals the #[pyo3(signature)] -> 'expected argument numpy but got args'; put helpers
+ABOVE the attributes.** 70 wins. AGENT_NAME=BlackThrush.
