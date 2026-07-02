@@ -14475,3 +14475,25 @@ Bit-exact ALL PASS (sum w/wo NaN, nanmean, keepdims, axis0/middle x shapes). **f
 is now BROAD: sum flat, mean flat, nansum(flat/last/non-last), nanmean(flat/last/non-last), sum non-last.
 9 commits. Remaining: mean non-last (numpy strided mean = seq/n, likely win), the OTHER dtypes' strided
 reductions are numpy-fast (f32/f64 SIMD).** AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): f16 nanvar/nanstd NON-LAST axis 53-73x; f16 MEAN axis REJECTED
+
+`BlackThrush`.
+**LANDED — f16 nanvar/nanstd(axis=k<last) 53-73x.** numpy's strided f16 nanvar/nanstd is a slow scalar
+narrow-each-step two-pass (nanstd axis0 4000x4000 669ms; 8000x8000 2586ms!). CRUCIAL: unlike the FLAT var
+(REJECTED earlier as degenerate — its sqr-dev sum narrows via np.sum and overflows to inf for n>~65K), an
+AXIS reduction has SHORT lanes (e.g. 4000 < 65504) so the f16 sqr-dev sum stays FINITE. Verified byte-exact
+per lane == np.nanvar/np.nanstd(f16, axis0/mid): pass1 seq-f16 nansum + non-NaN count -> f16 mean; pass2 per
+element d=f16(x-mean), sq=f16(d*d), seq-f16 accumulate; var=float16(f32(ss)/(cnt-ddof)); nanstd=float16(sqrt(
+f32(var_f16))). cnt<=ddof (incl all-NaN lane) defers for numpy's warning. `try_zerocopy_f16_nanvar_nonlast_
+axis` (take_sqrt flag serves both), hooked above the f32/f64 guards, ddof/keepdims handled. Measured (30%
+NaN): nanvar axis0 4kx4k 53x, nanstd axis0 4kx4k 58x, nanstd axis0 8kx8k **73x** (2586ms->35ms). Bit-exact
+ALL PASS (nanvar+nanstd x axis0/middle x keepdims x ddof{0,1} x all-NaN-lane-defer).
+
+**REJECTED — f16 mean(axis) (last AND non-last).** np.mean(f16) upcasts to an f32 ACCUMULATOR (unlike np.sum
+which stays f16), so numpy's f16 mean-axis is already f32-SIMD-fast (~24ms 4000x4000, par at both axes) — a
+native path can't beat it; and the f32 strided-reduction order didn't match a simple seq/pairwise hypothesis.
+Delegate. (Contrast: f16 SUM axis0 IS slow=win because sum stays f16 scalar; MEAN axis0 is fast because mean
+upcasts.) **LESSON: the SAME logical op (sum vs mean) can use DIFFERENT numpy intermediate dtypes — mean/std
+upcast f16->f32 (fast, or degenerate-if-narrowed like flat var), sum/nansum stay f16 (slow scalar = win).
+Check the accumulator dtype per op, and note AXIS var is finite where FLAT var overflows.** AGENT_NAME=BlackThrush.
