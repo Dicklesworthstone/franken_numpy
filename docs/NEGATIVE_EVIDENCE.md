@@ -13894,3 +13894,25 @@ conformance_percentile_median 25/25, nan_funcs 38/38 green.
 **EXTRACT-TAX LEVER now covers array-q + non-last-weights + TUPLE-axis across the whole order-statistic /
 average family. General pattern: extract_axis_spec's `Ok(Some(_)) => fallback` (tuple axis) sitting AFTER
 extract_numeric_array is a wasted-copy tax — hoist a tuple-axis guard before the extract.** AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - NO-SHIP + convergence surface: unique_values not byte-reproducible; perf surface converged after 13-win session
+
+`BlackThrush`. After landing 13 measured wins this session (7 page-fault-wall parallelizations: outer/repeat/
+tile/concatenate/full/ones-like-family/meshgrid; 2 BLAS-regime GEMM gates: 2-D matmul-dot + batched/tensordot/
+inner/matrix_power; 4 extract-tax fixes: quantile-array-q / nanquantile / average-non-last-weights / order-
+statistic-tuple-axis), a broad re-sweep found the accessible bit-exact perf surface CONVERGED — every scanned
+op is WIN or ~parity. correctness_sweep_vs_numpy.py: 0 FAILs.
+
+NO-SHIP RECORDED (so it is not re-chased): **np.unique_values looks like a big win (numpy 497ms @ 4M vs
+fnp.unique's fast native kernel 6ms = would-be ~80x) but is NOT byte-reproducible.** numpy.unique_values is
+UNSORTED (array-API "order unspecified"; numpy returns an internal hash/processing order — verified
+unique_values([3,1,2,1,3]) -> [2,1,3] NOT [1,2,3]) AND uses equal_nan=False (multiple NaNs kept separate:
+[1,2,nan,nan]). fnp's fast unique kernel returns SORTED + equal_nan=True, so routing unique_values to it would
+give a different byte layout; replicating numpy's unsorted hash-order byte-for-byte is an internal artifact,
+not tractable. fnp correctly DELEGATES unique_values (~parity, not a loss). (np.unique itself already wins
+42-50x native; unique/unique_all/unique_counts route to the fast kernel; only the unsorted unique_values can't.)
+
+OTHER measured-parity (not losses, do not chase): linalg pinv/qr/svd/matrix_rank/cond delegate to LAPACK
+(~1.0x); norm/trace ~parity; nan-reduction TUPLE-axis (nanmean/nanstd/nansum/nanmax) ~parity (numpy nan-
+baseline slow enough that the extract fraction is within noise — unlike median/percentile which were fixed);
+f32/multi_dot GEMM = contention-noise ~parity (no stable regime loss). AGENT_NAME=BlackThrush.
