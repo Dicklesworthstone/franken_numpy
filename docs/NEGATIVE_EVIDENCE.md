@@ -14494,6 +14494,20 @@ ALL PASS (nanvar+nanstd x axis0/middle x keepdims x ddof{0,1} x all-NaN-lane-def
 which stays f16), so numpy's f16 mean-axis is already f32-SIMD-fast (~24ms 4000x4000, par at both axes) — a
 native path can't beat it; and the f32 strided-reduction order didn't match a simple seq/pairwise hypothesis.
 Delegate. (Contrast: f16 SUM axis0 IS slow=win because sum stays f16 scalar; MEAN axis0 is fast because mean
-upcasts.) **LESSON: the SAME logical op (sum vs mean) can use DIFFERENT numpy intermediate dtypes — mean/std
-upcast f16->f32 (fast, or degenerate-if-narrowed like flat var), sum/nansum stay f16 (slow scalar = win).
-Check the accumulator dtype per op, and note AXIS var is finite where FLAT var overflows.** AGENT_NAME=BlackThrush.
+upcasts.) **LESSON: the SAME logical op can use DIFFERENT numpy intermediate dtypes — only MEAN upcasts
+f16->f32 (mean-AXIS is f32-SIMD-fast = reject; mean-FLAT still single-threaded = won); sum/nansum/var/std/
+nanvar/nanstd STAY f16 (slow scalar narrow-each-step = win). Check the accumulator dtype per op; AXIS var is
+finite where FLAT var overflows.** AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): f16 var/std NON-LAST axis 26-36x (generalized the nanvar helper)
+
+`BlackThrush`. Sibling of the nanvar/nanstd non-last win (4e116ddb): plain var/std along a strided f16 axis
+use the SAME slow numpy scalar narrow-each-step two-pass (they do NOT upcast to f32 like mean — verified:
+var axis0 4000x4000 = 326ms, std 8000x8000 = 1367ms, both delegate). Generalized `try_zerocopy_f16_nanvar_
+nonlast_axis` with a `nan_skip` flag: nan_skip=false (plain var/std) counts every element (cnt=axis_len) and
+lets NaN flow through the accumulator so the lane result propagates NaN (verified byte-exact == np.var/np.std
+incl 5% NaN). Hooked into the var/std dispatchers after the f32 non-last hooks. Measured (no NaN): var axis0
+4kx4k 26x, std 4kx4k 26x, std 8kx8k **36x** (1367ms->38ms). Bit-exact ALL PASS (var+std x axis0/middle x
+keepdims x ddof{0,1} x NaN-propagate; nanvar/nanstd unaffected by the generalization). **f16 var-family AXIS
+(var/std/nanvar/nanstd, non-last) COMPLETE; remaining: last-axis (contiguous => numpy uses f32-PAIRWISE
+sqr-dev per lane, different order — needs the pairwise-sqr-dev port + finite-lane check).** AGENT_NAME=BlackThrush.
