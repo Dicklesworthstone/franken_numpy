@@ -14534,3 +14534,21 @@ unaffected). Gate 1<<20. **f16 var-family COMPLETE across all axes: FLAT rejecte
 = per-lane SEQ-f16 (26-73x); last-axis = per-lane f32-PAIRWISE (23-101x). LESSON: the contiguous vs strided
 axis-kind picks not just SUM order but the WHOLE two-pass's order (pairwise for both passes on the fast
 axis).** f16 reduction vein spans sum/mean/nansum/nanmean/var/std/nanvar/nanstd across flat+all axes. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): f16 fmax/fmin 20-22x (NaN-aware binary, pivot off reductions)
+
+`BlackThrush`. Pivoting off the (now-mined-out) f16 reduction vein to f16 IEEE-deterministic BINARY ops:
+`maximum`/`minimum`/`fmod`/`remainder`/`copysign`/`nextafter`/`heaviside` already won, but `fmax`/`fmin`
+were pure passthroughs (delegating; numpy widens f16->f32 single-threaded ~122ms@16M). Added op codes 12
+(fmax)/13 (fmin) to `try_zerocopy_f16_binary_widen` and hooked the fmax/fmin pyfunctions before their
+core_numpy_passthrough. Measured (16M): fmax 0.044x (22.5x), fmin 0.051x (19.6x).
+
+**BIT-EXACT SEMANTICS (reverse-engineered + verified over the FULL 65536 f16 domain x 79 b-values incl every
+NaN variant):** fmax/fmin are NaN-AWARE (unlike maximum/minimum which propagate NaN) — both-NaN returns the
+LHS bits; exactly one NaN returns the OTHER (non-NaN) operand's bits; else larger/smaller via widen (equal/
+signed-zero take the LHS). My first hypothesis (canonical-NaN on both-NaN) FAILED — numpy returns the LHS's
+EXACT nan bits (e.g. fmax(0xfe00, 0x7e00)=0xfe00), so full-domain verification was essential. Bit-exact ALL
+PASS (full domain x specials x swapped-order x 16M-random-with-NaN x small-delegate). **LESSON: for a NaN-
+aware binary op, verify the exact NaN-BIT propagation over the full f16 domain — the "obvious" canonical-NaN
+guess is wrong; numpy propagates the operand's original bits.** f16 IEEE-deterministic binary ops COMPLETE.
+AGENT_NAME=BlackThrush.
