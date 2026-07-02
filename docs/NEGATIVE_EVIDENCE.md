@@ -14552,3 +14552,22 @@ PASS (full domain x specials x swapped-order x 16M-random-with-NaN x small-deleg
 aware binary op, verify the exact NaN-BIT propagation over the full f16 domain — the "obvious" canonical-NaN
 guess is wrong; numpy propagates the operand's original bits.** f16 IEEE-deterministic binary ops COMPLETE.
 AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): f16 transcendentals sin/cos/tanh/cbrt/arctan 15-20x (EXHAUSTIVELY proven bit-exact)
+
+`BlackThrush`. numpy has no f16 ALU so it widens f16->f32, applies its SIMD libm, narrows — single-threaded
+compute-bound (108-167ms@16M). These were long EXCLUDED from fnp's f16 unary widen path as "libm-divergence
+risk" (Rust's f32 libm differs from numpy's in the last f32 ULP). KEY INSIGHT: narrowing f32->f16 discards 13
+mantissa bits, so a sub-ULP f32 divergence is ABSORBED unless it lands exactly on an f16-rounding boundary.
+And since the f16 domain is only 65536 values, that can be checked EXHAUSTIVELY: computed all 65536 f16
+inputs through the actual Rust build vs numpy -> **0 mismatch for sin, cos, tanh, cbrt, arctan** (the WHOLE
+domain -> a proof, not a tolerance bet). Enabled them in try_zerocopy_f16_unary_widen (kernel: v.sin()/.cos()
+/.tanh()/.cbrt()/.atan()); sin/cos defer any inf (numpy's "invalid"->nan warning), tanh/cbrt/arctan are
+warning-free. Measured (finite 16M): sin 15x (154->10ms), cos 17x, tanh 18x, cbrt 19x, arctan 20x.
+
+**LESSON: "libm divergence" is NOT a blanket disqualifier for f16 transcendentals — the f16 narrow absorbs
+sub-ULP f32 differences, and the 65536-value domain is small enough to PROVE bit-exactness exhaustively
+(unlike f32/f64 where it stays a tolerance bet, so those correctly still delegate). Exhaustive-domain
+verification turns a risky tolerance win into a certain one.** Remaining f16 transcendentals to clear the
+same way: sinh/cosh/arcsin/arccos/tan (warning/inf surfaces), exp/expm1/log/log1p (overflow/negative
+surfaces) — each needs its exhaustive 65536 pass + warning pre-scan. AGENT_NAME=BlackThrush.
