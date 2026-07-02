@@ -15131,3 +15131,22 @@ Measured 4M: %d 37.9-95.8x, %+06d 45.5-140x, 0x%08X 56.9-105x across i8/i32/i64/
 KIND is chosen by the format's dtype exactly as numpy does. Remaining 'S' mirrors: strip/replace/count/find/
 ljust/rjust/center/zfill/expandtabs/predicates/partition + mod-FLOAT (%f/%e already 'U'-native; the same
 generic-writer trick would mirror them to 'S').** 50 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): 'S' (bytes) string mod %.Nf/%e/%E (float) — 14.65-31.3x
+
+`BlackThrush`. Direct continuation of the 'S' mod-int win (1605f278). np.strings.mod(b'%.2f', float_arr)
+with a BYTES format delegated fully to numpy (~0.7-1.4s/2M single-threaded). numpy's bytes float output is
+byte-for-byte the ASCII re-encoding of the str output (float digits/sign/./e/inf/nan are all ASCII), so the
+'S' path emits the SAME bytes the 'U' float kernel already produces, viewed as uint8. Taught
+try_native_strings_mod_float the same bytes-format acceptance (ASCII-only; non-ASCII byte -> defer) + an
+as_bytes branch choosing 'S{w}' at uint8 width vs 'U{w}' at uint32; the float writer (fmt_float -> StackW
+[u8]) is already byte-based so 'S' writes those bytes directly. Measured 2M: %.2f 14.65x (f64) / 28.3x (f32),
+%e 31.3x / 29.6x. BYTE-IDENTICAL over 13 formats x {f64,f32} with inf/-inf/nan/+-0.0/1e300/1e-30 specials +
+%+.3f/%8.2f/%-10.4f/%012.3f/%.0f/%+.6e + 2-D + below-gate (<4096) parity; 'U' path unaffected; non-ASCII byte
+format delegates. %g/%G still delegate (parse_mod_float_format returns None for %g) = unchanged parity, no
+regression.
+
+**Both mod conversions (int + float) now emit 'S' for a bytes format via the same output-encoding switch. The
+KIND is picked from the format's dtype exactly as numpy does; the digit/float writer is encoding-agnostic
+(int: generic E: From<u8>; float: already-[u8] StackW). Remaining 'S' mod: %g/%G (needs a native %g writer,
+which 'U' also lacks).** 51 wins. AGENT_NAME=BlackThrush.
