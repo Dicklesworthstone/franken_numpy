@@ -15255,3 +15255,22 @@ width + 2-D + below-gate (<1<<16) parity; mixed U+S defers (numpy raises, matche
 numpy runs in per-element Python (translate/replace/mod). 'S' string family COMPLETE for the width/content-map
 ops: pad(ljust/rjust/center/zfill) + multiply + expandtabs + translate + replace + add. Remaining 'S':
 partition/rpartition (3-tuple output).** 57 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): 'S' (bytes) np.strings.partition/rpartition — 3.4x (load-depressed)
+
+`BlackThrush`. Completing the 'S' vein. np.strings.partition/rpartition(bytes_arr, sep) delegated fully to
+numpy while the 'U' equivalent already won ~3.6-3.9x. Refactored try_native_strings_partition into a generic
+run_partition<E: Copy + PartialEq + From<u8>> (per-element analyze sep position + piece lengths, then build a
+3-tuple of {U|S}{width} arrays) dispatching input kind: 'U' -> uint32 view / str sep, 'S' -> uint8 view / bytes
+sep. Pure content copy, no ASCII assumptions -> byte-exact both. Measured 2M UNDER HEAVY LOAD (avg 61/64
+cores): partition 3.45x (114->33ms), rpartition 3.43x (86->25ms) — a clean box would be larger (parallel
+kernels are load-sensitive; numpy single-thread per-element is not). BYTE-IDENTICAL (3 arrays: dtype+shape+
+bytes) over single/multi/repeated-char seps x sep-at-start/end/middle/not-found/non-ASCII/empty content + 2-D
++ below-gate (<4096) parity; empty-sep raises (matched), all-not-found (S0 edge) + bw/aw==0 defer to numpy;
+'U' path unaffected.
+
+**'S' STRING FAMILY COMPLETE: mod(int/float) + case(upper/lower/swapcase/cap/title) + pad(ljust/rjust/center/
+zfill) + multiply + expandtabs + translate + replace + add + partition/rpartition. Every 'U' string kernel now
+mirrors to 'S' via the same generic-E dispatch (uint32/uint8 view, kind from input dtype). The per-element-
+Python ops (translate 183x, replace 17x, mod 40-140x) gave the biggest wins; bandwidth-bound ops (add 2.4x,
+partition 3.4x) the smallest.** 58 wins. AGENT_NAME=BlackThrush.
