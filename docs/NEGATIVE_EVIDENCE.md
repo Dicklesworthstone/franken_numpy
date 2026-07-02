@@ -15330,3 +15330,22 @@ don't split it into a separate pre-scan pass — that adds d passes and caps the
 into the single compute pass with an atomic flag and defer AFTER the join. The scan's earlier 152ms/1.06x read
 for ravel was ALSO inflated by an in-lambda `fi%100` — real numpy is ~65ms.** Remaining serial-kernel leads:
 copyto where= (67ms), flatnonzero (58ms, prefix-sum). 61 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.copyto(dst, src, where=mask) f64 parallel — 5.6-6.5x
+
+`BlackThrush`. Serial-kernel vein, 4th hit — but this one was a PURE DELEGATE (np.copyto always called numpy).
+numpy's masked copyto is single-threaded C (~28-33ms@8M). Added try_zerocopy_copyto: for a writable
+C-contiguous f64 dst + bool mask of identical shape + f64 SCALAR or same-shape f64 array src, does the in-place
+masked write dst[i]=src[i] where mask[i] in one rayon pass over dst's own buffer. Measured 8M: scalar src
+6.45x (28.3->4.9ms), array src 5.59x (33.5->4.9ms). BIT-EXACT (pure copy; NaN/inf/-0.0 verbatim; self-src
+aliasing = safe i==i no-op) over scalar/py-int/array/all-false/all-true masks + 2-D; casting is a no-op for
+f64->f64 so it's not threaded through. DEFERS (numpy, still correct): non-f64 dst/src, broadcast src (shape
+(1,)), where=None/True/scalar, read-only dst (numpy's ValueError preserved), partially-overlapping array src
+(data-race guard via buffer pointer-range check). Also verified read-only dst raises ValueError in both.
+
+**Serial-kernel/delegate vein now 4/4 (select, unravel_index, ravel_multi_index, copyto). BUILD GOTCHA: I
+inserted try_zerocopy_copyto BETWEEN copyto's #[pyfunction]/#[pyo3(signature=...)] attributes and `fn copyto`,
+so pyo3 bound the signature to the helper -> "expected argument where_obj but got casting". When inserting a
+helper before a #[pyfunction], put it ABOVE the attribute lines. ALWAYS check the build exit, not just the
+stale-.so test (the stale ravel .so ran green at 1.01x = the OLD delegate, masking the compile failure).**
+Remaining lead: flatnonzero (58ms, needs prefix-sum). 62 wins. AGENT_NAME=BlackThrush.
