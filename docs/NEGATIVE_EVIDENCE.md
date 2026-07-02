@@ -14883,3 +14883,20 @@ delegate.
 (signed hex/octal), not C printf — verify the SIGN/UNSIGNED convention by probing before assuming C.** Remaining
 printf: %.Nf FLOAT (numpy == C printf %.Nf byte-exact incl half-even, verified — feasible IF Rust's {:.N}
 matches C printf, needs a Rust-side bit-exact check first), width/flag variants (%5d/%05d/%+d). AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.strings.mod %.Nf float — 33-37x (printf-format vein largely complete)
+
+`BlackThrush`. The biggest single delegating op (2.3-2.9s@4M). VERIFIED FIRST with a standalone Rust program
+that Rust's `{:.N}` == numpy/C-printf `%.Nf` byte-for-byte over 3.6M values x 6 precisions (0/1/2/3/6/10), 0
+mismatch — incl half-even edges (2.675->2.67), subnormals, 1e300, -0.0, pi. Then implemented %[.N]f (default
+prec 6) via a no-alloc StackW (write! {:.N} into a stack buffer, copy codepoints), two-pass max-width, parallel.
+nan/inf SPECIAL-CASED (Rust prints 'NaN'/'inf', numpy/C 'nan'/'-inf'). f32 formats via widen-to-f64 (matches
+C varargs promotion). Measured 4M: %.3f f64 33x (2308->68ms), %.6f 37x, %.2f f32 34x. BYTE-IDENTICAL (dtype+
+tobytes) f64+f32 x {.0,.2,.3,.6,%f,literals} x nan/inf/edges; %.3e/%8.3f/%g/%+.2f/int still delegate.
+
+**★KEY METHODOLOGY WIN: for a bit-exact-RISKY op (Rust libc-divergence unknown), VERIFY the primitive in a
+standalone Rust program vs numpy over millions of values BEFORE the expensive pyext build — turned a 'risky
+maybe' into a confirmed 33-37x. Rust std {:.N} IS byte-exact with C printf %.Nf for finite f64 (correctly-
+rounded, round-half-even); only nan/inf strings differ.★** printf mod family now: ints %d/%i/%x/%X/%o +
+floats %.Nf all 33-59x. Remaining: %e/%g (scientific — verify Rust {:e} vs C first), width/flags. 37 wins.
+AGENT_NAME=BlackThrush.
