@@ -14167,3 +14167,32 @@ tail — rare. Only the FLAT float paths done; float axis (last/axis0/mid) argso
 fallback verify, a cheap PROBABILISTIC pre-check (here: a duplicate in a K-strided sample => certain tie)
 is safe — it can only skip wasted work, never change output. Sampling gives a pigeonhole where the value
 domain is too large for an exact one.** AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): FLOAT AXIS argsort per-lane sampled tie oracle — tie-data 1.06-1.19x loss -> parity
+
+`BlackThrush`. Follow-up extending the flat float argsort sampled-tie fix (ccc3fcf8) to the six per-lane
+float argsort paths (f64+f32 x last/axis0/mid). Same pay-twice: sort every lane, scan ties, defer on any
+lane-tie. Per-lane mirror `argsort_axis_sample_has_tie(num_lanes, lane_len, get)` — a strided subset of
+lanes, each sampled strided within-lane; a within-lane dup PROVES that lane ties => the whole per-lane op
+must defer, so defer early. One-sided/safe (the caller's own per-lane post-sort tie-scan is the net; only
+defers on an ACTUAL observed dup, a missed sparse lane still defers there => output never changes; caller
+supplies the layout accessor: contiguous / column-strided / (o,t)-strided). Measured 16M-element:
+
+| float axis argsort dense ties | numpy | BEFORE | AFTER |
+|---|---:|---:|---:|
+| f64 lastaxis (4000x4000 rnd2dp) | 304ms | 402ms 1.11x LOSS | 318ms **1.05x par** |
+| f32 lastaxis                    | 312ms | 418ms 1.06x LOSS | 321ms **1.03x par** |
+| f64 axis0                       | 391ms | 538ms 1.12x LOSS | 386ms **0.99x par** |
+| f64 midaxis (400x400x100)       | 269ms | 329ms 1.19x LOSS | 287ms **1.07x** (near-par, strided sample) |
+| f64/f32 distinct (all axes)     | 300-401ms | WIN | **0.12-0.26x WIN preserved** |
+
+exact=True across dense-tie/distinct for every axis (the layout accessors verified: output byte-identical to
+numpy). RESIDUAL: midaxis stays ~1.07x (the (o,t)-strided sample gather is costlier + load noise), down from
+1.19x; genuinely SPARSE-tie lanes (few tied lanes among many distinct) slip the sample and hit the pay-twice
+tail. Whole float argsort family (flat + all axes) now dense-tie parity + distinct win; complex argsort
+(c64/c128) still defers post-sort (follow-up).
+
+**LESSON: the sampled-tie oracle generalizes to per-LANE deferring paths by supplying a layout accessor
+`get(lane, idx)` — one helper covers contiguous (last axis), column-strided (axis 0), and (outer,inner)-
+strided (middle axis) lanes; finding a tie in ANY sampled lane is sufficient to defer (the op defers on
+any-lane-tie anyway).** AGENT_NAME=BlackThrush.
