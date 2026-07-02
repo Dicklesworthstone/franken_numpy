@@ -15274,3 +15274,22 @@ zfill) + multiply + expandtabs + translate + replace + add + partition/rpartitio
 mirrors to 'S' via the same generic-E dispatch (uint32/uint8 view, kind from input dtype). The per-element-
 Python ops (translate 183x, replace 17x, mod 40-140x) gave the biggest wins; bandwidth-bound ops (add 2.4x,
 partition 3.4x) the smallest.** 58 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.select f64 parallel + Python-scalar-default gate — 3-4.8x
+
+`BlackThrush`. First NON-string lever after the 'S' family. np.select had a native f64 path
+(try_zerocopy_f64_select) but (1) its kernel was a SERIAL for-loop (only ~parity with numpy's C copyto) and
+(2) the outer choices_all_f64 gate rejected Python-scalar defaults, so the UBIQUITOUS call
+`np.select(conds, f64_choices, 0)` (Python int/float default) delegated entirely. Fix: (1) fused the per-element
+selection over rayon (first-true-condition-wins, raw &[u8]/&[f64] slices, gate n>=1<<16); (2) relaxed the gate
+to accept a Python real scalar default (extract::<f64>; it promotes to f64 vs f64 choices and the kernel already
+casts via extract) while still deferring complex/other. numpy does k+1 sequential passes (full(default) + one
+masked copyto per condition) single-threaded; the fused parallel pass is bit-identical but multi-core, so the
+win GROWS with condition count. Measured 8M (load ~20-30): 2 conds 2.99x (83->27.8ms), 3 conds 4.76x
+(100->21ms). BIT-IDENTICAL (incl NaN/inf/-0.0 copied verbatim) over 2/3 conds x default {py-int-0, py-float,
+np.float64, None, f64-array} + all-false + 2-D + below-gate parity; non-f64 choices + complex default defer.
+
+**LESSON: a native path can exist AND be correct yet still read as ~parity because its KERNEL is serial — grep
+existing try_zerocopy_* for a plain `for (i, slot) in output.iter()` and parallelize (numpy's per-op C loop is
+1 core). Also: an over-strict pre-gate (numpy_dtype_is_f64 on the default) silently delegates the COMMON call
+shape; align the gate with what the kernel can actually cast (extract::<f64>).** 59 wins. AGENT_NAME=BlackThrush.
