@@ -13874,3 +13874,23 @@ last/flat/1-D 2.7-4.0x). Correctness 0 fails across shapes {2000x2000, 3-D, 1000
 conformance_mean 14/14; conformance_statistics all 8 average_* tests PASS. (The 3 cov_* failures in
 conformance_statistics are PRE-EXISTING worker-BLAS-FMA flakiness — documented, fail on baseline; this diff
 touches ONLY average() [21 lines, zero cov lines] and cov does not call average.) AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED, loss fix): tuple-axis extract-tax in median/nanmedian/percentile/quantile — 0.66-0.84x -> parity
+
+`BlackThrush`. Third extract-tax sweep. A tuple/list AXIS (len != 1) has no native path in the order-statistic
+functions — extract_axis_spec returns `Ok(Some(_)) => fallback()` — but only AFTER extract_numeric_array
+copies the whole array, so a multi-axis reduction wastes a ~32MB copy + the extract's UFuncArray build (~40ms
+for 4M). Measured 200x200x100: median axis=(0,1) 0.66x (fnp 119ms/numpy 79ms), nanmedian axis=(1,2) 0.84x,
+percentile 50 axis=(0,1) 0.81x. (The nan-REDUCTIONS nanmean/nanstd/nansum/nanmax tuple-axis were already
+~parity — their numpy baseline is slow enough that the extract fraction is negligible.)
+
+FIX: hoist a tuple/list-axis (len != 1) delegate BEFORE the extract in median, nanmedian, percentile, and
+quantile (a 1-element tuple axis stays on the native single-axis WIN path). Result: median axis=(0,1)
+0.66x->1.00x, nanmedian 0.84x->1.00x, percentile/quantile tuple-axis ->1.00x — all byte-exact (delegating).
+PRESERVED: median axis=1 8.8x, flat 1.8x, percentile axis=1 8.1x, median axis=(1,) [1-elem tuple] 6.4x.
+Correctness 0 fails across {(0,1),(1,2),(0,2),(0,1,2),(1,)} x {median,nanmedian,percentile,quantile}.
+conformance_percentile_median 25/25, nan_funcs 38/38 green.
+
+**EXTRACT-TAX LEVER now covers array-q + non-last-weights + TUPLE-axis across the whole order-statistic /
+average family. General pattern: extract_axis_spec's `Ok(Some(_)) => fallback` (tuple axis) sitting AFTER
+extract_numeric_array is a wasted-copy tax — hoist a tuple-axis guard before the extract.** AGENT_NAME=BlackThrush.
