@@ -15170,3 +15170,19 @@ n>=1<<20, so never hit in conformance). run_pad now computes max_content in a pa
 like numpy for BOTH kinds. Cost: the extra pass trims 'U' from ~4x to ~3.2-3.9x (still a clear win) — correct
 > fast.** Remaining 'S' width ops: multiply/add/expandtabs (each a 'U' kernel mirrored to uint8). 52 wins.
 AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): 'S' (bytes) np.strings.multiply — 4.3-4.9x
+
+`BlackThrush`. Continuing the 'S' vein. np.strings.multiply(bytes_arr, reps) delegated fully to numpy
+(~50-94ms/2M single-threaded) while the 'U' equivalent already won ~3.4x. Refactored
+try_zerocopy_unicode_multiply's per-slot repeat closure into a generic mul_build<E: Copy + PartialEq +
+From<u8>> plus a generic run_multiply<E>, then dispatched dtype kind: 'U' -> uint32 view / 'U{maxlen}', 'S' ->
+uint8 view / 'S{maxlen}' (maxlen = max_content_len * reps). The repeat kernel is byte-for-byte identical (pure
+content copy, non-ASCII bytes repeated verbatim). Measured 2M: x2 4.87x, x3 4.32x, x5 4.91x. BYTE-IDENTICAL
+(dtype+shape+bytes) over reps {1,2,3,5,8} x signs/non-ASCII/empty/full-width content + 2-D + below-gate
+(<1<<16) parity + n<=0 defer; 'U' path unaffected.
+
+**Same generic-E mirror as the 'S' pad family (f7eb7ee5): one kernel, dtype kind chosen from the input,
+uint32/uint8 views. Remaining 'S' width ops: add (numpy sizes out to itemsize_a+itemsize_b, NOT maxcontent —
+different rule, verify separately) + expandtabs (buffersize reserves 1 byte/char not 4).** 53 wins.
+AGENT_NAME=BlackThrush.
