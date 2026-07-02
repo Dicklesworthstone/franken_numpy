@@ -15063,3 +15063,21 @@ out-of-range both signs; empty source (n==0) + axis + narrow dtypes delegate (re
 delegates to numpy's serial gather = a LOSS, when the alternate modes are just a different pure index math
 the native parallel gather already does. Grep for `!= "default" -> fallback` gates where the non-default branch
 is a cheap deterministic transform of the SAME kernel.** 46 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - REJECT/RESIDUAL: f32 flat argsort on TIE data — irreducible ~1.05-1.2x loss (numpy SIMD too fast)
+
+`BlackThrush`. Loss-hunt found np.argsort(f32) 1-D on tie-heavy data is a 1.1-1.2x LOSS (2M continuous 1.11x,
+2M rounded-2dp 1.18x; 8M continuous ~1.045x par), while f32 DISTINCT WINS 3.4x and f64 continuous WINS 3.5x.
+ROOT: numpy's f32 argsort uses a fast SIMD/radix path whose TIE ORDER is unreproducible (verified quicksort !=
+stable for f32), so the native path MUST defer on ties (byte-exactness). The defer pre-checks — an O(n) NaN scan
++ a strided sampled-tie oracle (65536-element sort) — cost ~1-2ms, which EXCEEDS what numpy's fast f32 sort
+leaves on the table, so deferring is a net loss vs pure delegation. Reordering oracle-before-NaN-scan trims it
+(1.11x -> ~1.07x) but does NOT reach parity; the oracle cost is irreducible if the distinct-f32 3.4x win is kept.
+
+**NOT CLEANLY FIXABLE: no free tie oracle exists for f32 (bit-pattern range >> n, so no int-style pigeonhole),
+and numpy's tie order can't be reproduced. The tradeoff is fixed: keep the distinct-f32 3.4x win + accept the
+common tie-case ~1.05-1.1x residual, OR delegate f32 flat argsort always (parity on ties, lose the distinct
+win). Left as-is (win preserved). LESSON: a pay-twice/defer pre-check is only worth it when the delegated kernel
+is SLOW; against numpy's SIMD f32 sort the pre-check overhead itself is the loss — the int-pigeonhole free-oracle
+trick has no f32 analog.** (Box was loaded during measurement — abs times 3x inflated; ratios stable.) Also seen:
+np.delete 1.07x (tiny, dispatch overhead — not worth). AGENT_NAME=BlackThrush.
