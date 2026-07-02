@@ -14640,3 +14640,22 @@ native fast path OFF for small n, check WHERE `Ok(None)` lands — if the caller
 extract (not numpy), returning None is a REGRESSION; delegate to numpy explicitly. Also: a serial collect()+
 copy loses to numpy SIMD; write results DIRECTLY into the output buffer in parallel (no intermediate Vec).**
 AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): native parallel np.unpackbits — 3.6-3.7x (was a pure numpy re-export)
+
+`BlackThrush`. np.unpackbits (uint8 -> 8x 0/1 bytes, MSB-first) was a PURE NUMPY RE-EXPORT in fnp (in the
+numpy.__all__ passthrough list, no engine). numpy runs it single-threaded + compute-bound (per-byte 8x
+bit-extract + an 8x-larger write). Added a native `unpackbits` pyfunction that fans the independent bytes
+across cores writing STRAIGHT into the output (out[i*8+j] = (in[i]>>(7-j))&1); registered it via
+m.add_function AND removed "unpackbits" from the re-export list (m.add overwrites, so leaving it there would
+let numpy's version shadow the native one). Delegates any axis/count/bitorder kwarg, non-1-D / non-uint8 /
+non-contiguous, or below-gate to numpy. Measured: 8M bytes 35.8->10.0ms **3.6x WIN**, 16M 3.7x. Bit-exact
+(deterministic bit extraction; verified vs numpy over sizes + kwargs-delegate + 2-D-axis-delegate).
+
+GATE 1<<22 (~4M bytes): the 8x-larger OUTPUT is the cost — only once it exceeds L3 (~32MB => ~4M input) is
+numpy's single-threaded write DRAM-bound and worth parallelizing; below that numpy is cache-resident/fast
+(measured 500K parallel 3.8x LOSS, 2M/4M parity, 8M+ win) so small delegates. **LESSON: for an EXPANDING op
+(output N x input) gate on when the OUTPUT (not input) exceeds cache — the parallel win only appears once the
+enlarged write is DRAM-bound. And a numpy-RE-EXPORT (in the __all__ passthrough list) can be replaced with a
+native pyfunction, but you MUST remove it from that list or `m.add` re-overrides it with numpy's.**
+AGENT_NAME=BlackThrush.
