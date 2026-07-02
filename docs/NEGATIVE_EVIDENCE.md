@@ -15150,3 +15150,23 @@ regression.
 KIND is picked from the format's dtype exactly as numpy does; the digit/float writer is encoding-agnostic
 (int: generic E: From<u8>; float: already-[u8] StackW). Remaining 'S' mod: %g/%G (needs a native %g writer,
 which 'U' also lacks).** 51 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): 'S' (bytes) ljust/rjust/center/zfill — 2.2-3.2x (+ 'U' width<itemsize dtype fix)
+
+`BlackThrush`. Continuing the 'S' vein. np.strings.{ljust,rjust,center,zfill}(bytes_arr, width) delegated fully
+to numpy (~52-67ms/2M single-threaded) while the 'U' equivalents already won ~4x. All four route through
+try_zerocopy_unicode_pad; refactored its per-slot build closure into a generic `pad_build<E: Copy + PartialEq
++ From<u8>>` and a generic `run_pad<E>` plumbing fn, then dispatched dtype kind: 'U' -> uint32 view / 'U{w}'
+output, 'S' -> uint8 view / 'S{w}' output. The build logic is byte-for-byte identical (zfill sign on byte
+43/45, center margin rule, non-ASCII bytes copied verbatim, any fillchar byte). Measured 2M: zfill 3.19x,
+center 2.77-2.90x, ljust 2.42-2.95x, rjust 2.19x. BYTE-IDENTICAL (dtype+shape+bytes) over signs/non-ASCII/
+empty/full-width content + custom fillchars (b'*'/b'.'/b'0') + width<content + 2-D + below-gate (<1<<20)
+parity; 'U' path correctness unaffected.
+
+**Also fixed a LATENT 'U' bug the refactor exposed: numpy sizes pad output to max(width, max_content_len) over
+the array, NEVER floored at the input itemsize (S12/maxcontent8 center w=8 -> S8). The old 'U' code used
+`itemsize.max(width)` which over-sized the dtype for width<itemsize with slack content (only reachable at
+n>=1<<20, so never hit in conformance). run_pad now computes max_content in a parallel pass and sizes exactly
+like numpy for BOTH kinds. Cost: the extra pass trims 'U' from ~4x to ~3.2-3.9x (still a clear win) — correct
+> fast.** Remaining 'S' width ops: multiply/add/expandtabs (each a 'U' kernel mirrored to uint8). 52 wins.
+AGENT_NAME=BlackThrush.
