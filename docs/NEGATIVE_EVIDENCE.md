@@ -14108,3 +14108,31 @@ categorical/dense-tie case from ~1.1-1.4x LOSS to parity while keeping the 5-10x
 **LESSON: when a per-LANE fast path defers-on-tie, the same pigeonhole oracle generalizes — the guaranteed-
 tie predicate is `global_range < lane_length` (every lane of that length must collide). One global min/max
 pass gates ALL lanes; no need for per-lane range computation.** AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): lexsort delegation dtype-sniff via result_type not asarray — 1.05-1.09x loss -> parity/win
+
+`BlackThrush`. `np.lexsort` on INTEGER/bool keys delegates to numpy (numpy radix-sorts int keys ~20x faster
+than fnp's comparison-based native lexsort); float keys keep the native path (which WINS multi-key float).
+The delegation DECISION sniffed the promoted key dtype by calling `np.asarray(keys)` — but on a tuple of key
+arrays that MATERIALISES a full (nkeys x n) copy of every key just to read `.dtype.kind`, then throws it
+away. Measured cost of that copy: 3-key 2M int64 = **25.8ms** (== the whole delegation overhead, a 1.052x
+loss); 2-key = ~2.5ms. `np.result_type(*keys)` returns the SAME promoted dtype from dtypes ALONE (~0.2us, no
+data touched).
+
+FIX: compute the promoted kind from `keys.dtype` (ndarray input) or `np.result_type(*elements)` (tuple/list
+input) instead of `np.asarray(keys).dtype`. Measured (20th-pctile interleaved):
+
+| lexsort int keys | numpy | fnp BEFORE | fnp AFTER |
+|---|---:|---:|---:|
+| 2-key 2M | 357ms | 371ms 1.09x LOSS | 358ms **1.004x par** |
+| 3-key 2M | 633ms | 644ms 1.05x LOSS | 598ms **0.945x WIN** (copy elided flips it) |
+| 2-key 8M | 2156ms | 2236ms 1.04x | 2214ms **1.027x par** |
+
+Correctness/behaviour preserved (bit-exact vs numpy): 2-D int-array keys (par), mixed int/float -> float ->
+native (0.57x WIN, same routing as before since result_type promotes to float), pure float native (0.70x
+WIN), Python-list keys. The old asarray was cheap for a 2-D ndarray input (no copy) but expensive for the
+common tuple-of-arrays input.
+
+**LESSON: never `np.asarray(container)` just to read a dtype/kind/shape — that copies the payload. Use
+`np.result_type`/`.dtype`/`.shape` (metadata-only) for routing decisions. A "sniff" that materialises the
+data it's sniffing turns a free dispatch check into an O(n) tax that grows with the operand.** AGENT_NAME=BlackThrush.
