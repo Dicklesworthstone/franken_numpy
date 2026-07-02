@@ -13787,3 +13787,34 @@ percentile_median 25/25 green.
 pays a full-array-copy tax on that sub-case — hoist the sub-case's delegate guard ABOVE the extract. Grep
 `extract_numeric_array`/`extract_precise_numeric_array` followed by a later `fallback()` for a param combo
 the native path can't handle.** AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED, loss fix): gate native f64 2-D GEMM to single-threaded-BLAS regime — removes 0.32-0.58x default-regime matmul/dot loss
+
+`BlackThrush`. A vs-numpy sweep flagged np.matmul (f64 2-D) as a LOSS. ROOT: `python_native_gemm_f64_2d` (the
+native packed GEMM matmul/dot try FIRST) was calibrated against SINGLE-THREADED numpy BLAS (the rch worker /
+OMP=1 regime the crossover consts PY_NATIVE_GEMM_MAX_DIM=1024 / PY_NATIVE_MATMUL_MAX_DIM=1536 were measured
+in — the in-source comment cites "the local numpy BLAS"). It genuinely beats serial BLAS, but under numpy's
+DEFAULT multi-threaded OpenBLAS (what real users run) it LOSES 2-3x, and is non-bit-exact (different
+accumulation order than BLAS). Measured same-host: full-threads matmul n=900 0.36x, n=1200 0.32x, n=1500
+0.58x (fnp SLOWER); OMP=1 n=900 2.66x, n=1200 1.78x, n=1500 2.17x (fnp WINS).
+
+FIX: added `blas_is_single_threaded()` (env OPENBLAS/OMP/MKL/BLIS_NUM_THREADS pinned to 1) and gate at the
+top of python_native_gemm_f64_2d — engage the native GEMM ONLY when numpy's BLAS is serial (where it wins),
+else return None immediately so matmul/dot delegate to numpy's (faster in the real regime AND BIT-IDENTICAL)
+BLAS. Applies the methodology rule "judge numpy-BLAS ops at FULL THREADS": a native path that only wins vs an
+artificially serialized BLAS is a false win for real users.
+
+Result: DEFAULT regime f64 2-D matmul/dot 0.32-0.58x LOSS -> delegates to BLAS (byte-exact, ~parity — exact=True
+now vs exact=False before, confirming the delegation). OMP=1 / CI-sweep regime native win PRESERVED (2.2-2.7x).
+Batched f64 (parallel-across-slices), integer, and f16 GEMMs are UNAFFECTED (no BLAS competition / different
+win mechanism). conformance_matmul 14/14, conformance_dot 12/12, conformance_tensordot 11/11 green.
+
+| Probe (same-host) | regime | numpy | fnp before | fnp after |
+|---|---|---:|---:|---:|
+| matmul n=1200 | default (multi-thread BLAS) | ~10ms | ~34ms (0.32x LOSS) | ~delegate/parity (exact) |
+| matmul n=1200 | OMP=1 (serial BLAS) | ~60ms | ~34ms (1.78x) | ~34ms (1.78x, preserved) |
+
+**REUSABLE LESSON: a native kernel calibrated against numpy under OMP=1 (serial BLAS) can be a hidden 2-3x
+LOSS under the DEFAULT multi-threaded BLAS real users run — gate BLAS-competing native paths on
+blas_is_single_threaded(). Check any native GEMM / BLAS-competing op at FULL THREADS, not just the OMP=1
+sweep.** AGENT_NAME=BlackThrush.
