@@ -13916,3 +13916,28 @@ OTHER measured-parity (not losses, do not chase): linalg pinv/qr/svd/matrix_rank
 (~1.0x); norm/trace ~parity; nan-reduction TUPLE-axis (nanmean/nanstd/nansum/nanmax) ~parity (numpy nan-
 baseline slow enough that the extract fraction is within noise — unlike median/percentile which were fixed);
 f32/multi_dot GEMM = contention-noise ~parity (no stable regime loss). AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED): parallelize native np.indices 2-D grid — 1.8-3.8x (page-fault wall)
+
+`BlackThrush`. Fresh page-fault-wall find. fnp's native indices (try_zerocopy_indices + fill_indices_typed)
+built the (d, *dims) coordinate grid with SERIAL per-axis block fills, so the large fresh output stalled at
+numpy's ~2 GB/s first-touch page-fault wall (np.indices((5000,4000)) = 320MB int64, 158ms; (6000,6000) 576MB
+307ms). For the common 2-D grid the two slabs are independent per row — slab0[i,:]=i (per-row constant fill),
+slab1[i,:]=0..M-1 (per-row arange) — so fan the rows across the rayon pool (added T:Send+Sync, F:Sync bounds).
+Gate total >= 1<<22 elements/slab; d!=2 / small / narrow-dtype-wrap / sparse defer to the serial/numpy path.
+
+BIT-EXACT (integer indices, deterministic) — verified byte-identical vs numpy over default + int64/int32/
+int16/uint32/uint8/int8 dtypes across shapes {2100^2, 5000x4000, 6000^2, 4x3, 1x5, 5x1, 3000x700, 2x131072,
+131072x2} (0 fails). conformance_indices 19/19, conformance_array_creation 5/5 green.
+
+| Probe (min-of-many, 64 threads) | numpy | fnp | fnp/numpy |
+|---|---:|---:|---:|
+| indices (5000,4000) 320MB | 158.0ms | 89.9ms | 0.57x (~1.8x) |
+| indices (6000,6000) 576MB | 306.9ms | 81.0ms | 0.26x (~3.8x) |
+| indices (2100,2100) 71MB | 34.3ms | 9.7ms | 0.28x (~3.5x) |
+| indices int32 (6000,6000) | 139.9ms | 47.4ms | 0.34x (~3.0x) |
+
+Page-fault vein now: outer + repeat + tile + concatenate + full + ones/like + meshgrid + indices (8 wins).
+(PRE-EXISTING, out of scope: np.indices(dtype=None) -> float64 in numpy [np.dtype(None)==float64] but fnp
+defaults int64 — the pyfunction signature can't distinguish no-dtype from explicit None; unchanged by this
+diff, not covered by conformance. Also fnp.indices lacks the sparse= kwarg.) AGENT_NAME=BlackThrush.
