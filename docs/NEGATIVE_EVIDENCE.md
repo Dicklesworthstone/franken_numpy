@@ -14748,3 +14748,18 @@ machine: isupper/islower/istitle) — the stateful ones need a custom per-string
 over-in_class; both share the read-UCS4 + defer-non-ASCII + bool-output-par_iter_mut skeleton. Remaining
 strings: index/rindex (find-that-raises: run search, if any -1 delegate for the exact ValueError), slice
 (width-change), char-module mirror. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.strings.index/rindex native parallel — 4.6-5.3x (search family complete)
+
+`BlackThrush`. index/rindex == find/rfind but RAISE ValueError on a miss. Reused try_zerocopy_unicode_search
+with a `require_found` flag: the parallel fill sets an AtomicBool if ANY element yields -1; if set, the whole
+op returns None -> caller delegates to numpy for the EXACT ValueError (rare error path, pays twice only on the
+error). All-found (the normal index/rindex usage — you call it when the substring IS present) wins. Measured
+(2M all-found): index 4.6x, rindex 5.1x. Bit-exact vs numpy over subs x index/rindex AND raise-parity (a miss
+raises numpy's identical ValueError message). Delegates start/end, array sub, empty sub, 'S', below-gate.
+
+**np.strings SEARCH family COMPLETE (count/find/rfind/index/rindex).** LESSON: a find-that-RAISES is just
+find + an all-found gate — flag any sentinel (-1) during the parallel fill with an AtomicBool and defer to
+numpy on the error path, so the native never has to reproduce numpy's exact exception message. Remaining
+np.strings: slice (width-change, fiddly Python slice.indices semantics), partition/rpartition, char-module
+mirror. AGENT_NAME=BlackThrush.
