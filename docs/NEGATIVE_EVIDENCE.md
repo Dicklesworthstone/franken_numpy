@@ -15293,3 +15293,21 @@ np.float64, None, f64-array} + all-false + 2-D + below-gate parity; non-f64 choi
 existing try_zerocopy_* for a plain `for (i, slot) in output.iter()` and parallelize (numpy's per-op C loop is
 1 core). Also: an over-strict pre-gate (numpy_dtype_is_f64 on the default) silently delegates the COMMON call
 shape; align the gate with what the kernel can actually cast (extract::<f64>).** 59 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.unravel_index parallel (serial-kernel lever) — 3.2-3.8x
+
+`BlackThrush`. Second hit of the serial-native-kernel vein (after np.select 6058234f). try_zerocopy_unravel_c
+had a native C-order path but BOTH its OOB-validation scan and its coordinate div/mod sweep were SERIAL
+for-loops -> ~parity with numpy's single-threaded C (0.97x). Fix: (1) parallel OOB check via par_iter().any;
+(2) replaced the chained-remainder sweep with per-dimension INDEPENDENT parallel passes — precompute
+inner[dd]=prod(dims[dd+1..]), then coord[dd][i]=(x[i]/inner[dd])%dims[dd], each output array a standalone
+par_iter_mut over x (bit-identical to the sweep; integer arithmetic exact). Gate n>=1<<16. Measured 8M: 3-D
+3.23x (135->42ms), 5-D 3.82x (231->60ms) — win GROWS with ndim (more independent output arrays to
+parallelize). BIT-IDENTICAL over shapes {(100,100,100),(4,5,5),(1e6,),(2,3,4,5,6),(7,11,13),(2,)x20} +
+boundary idx {0,total-1} + 2-D-indices-shape-preserved; OOB (ValueError) / F order / scalar / int32 indices /
+non-contiguous defer to numpy.
+
+**Serial-kernel vein now 2/2 (select, unravel_index). The div/mod sweep decouples into per-dimension passes —
+a chained-accumulator loop that LOOKS sequential is often independent per output lane once you precompute the
+strides. Sibling lead: ravel_multi_index (152ms, benched 1.06x — its UFuncArray path may be serial too);
+copyto where= (67ms, delegates); flatnonzero (58ms, needs prefix-sum).** 60 wins. AGENT_NAME=BlackThrush.
