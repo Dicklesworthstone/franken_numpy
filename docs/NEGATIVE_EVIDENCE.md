@@ -15081,3 +15081,19 @@ win). Left as-is (win preserved). LESSON: a pay-twice/defer pre-check is only wo
 is SLOW; against numpy's SIMD f32 sort the pre-check overhead itself is the loss — the int-pigeonhole free-oracle
 trick has no f32 analog.** (Box was loaded during measurement — abs times 3x inflated; ratios stable.) Also seen:
 np.delete 1.07x (tiny, dispatch overhead — not worth). AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): 'S' (bytes) string upper/lower/swapcase — 45-59x (fresh S-dtype vein)
+
+`BlackThrush`. New vein: fnp's string natives were 'U' (UCS4) ONLY — every op deferred 'S' (bytes) arrays, and
+numpy's 'S' string ops are ALSO single-threaded (case ops ~115-130ms@2M x S7). 'S' case is SIMPLER than 'U':
+bytes.upper() is ASCII-only (bytes >= 128 pass through UNCHANGED, NO width change like 'U's 'ß'->'SS'), so a
+single-pass per-byte map with NO non-ASCII defer, same output width. Added try_zerocopy_bytes_ascii_case (view
+S as uint8, parallel byte map into empty_like) hooked into unicode_ascii_case_or_numpy after the 'U' path.
+Measured 2M: upper 59x (131->2.3ms), swapcase 53x, lower 45x. BYTE-IDENTICAL over ASCII + non-ASCII bytes
+(\xe9\xff\x80 pass through) + null-padding + empty + 2-D + char mirror; 'U' path unaffected.
+
+**NEW VEIN: the ENTIRE 'S' string surface delegates (numpy single-threaded) and is often SIMPLER than 'U' (1
+byte/char, ASCII-only casing = no width-change defer). All the 'U' wins have an 'S' mirror: case (done) + cap/
+title (~115ms) + strip/replace/count/find/ljust/pad/predicates/partition/mod. LESSON: after mining a dtype
+family ('U'), check the SIBLING encoding ('S') — same numpy-single-threaded slowness, and byte-encoding casing
+rules are often SIMPLER (no multi-byte/width-change edge) so the win is bigger + cleaner.** 47 wins. AGENT_NAME=BlackThrush.
