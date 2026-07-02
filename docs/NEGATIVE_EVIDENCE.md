@@ -14625,3 +14625,18 @@ bit-exact over the 65536-value f16 domain.** Remaining f16 (low value / not-para
 (bit-step, deterministic but ~68ms parity — could add), modf/frexp (2-output), binary hypot/logaddexp (2D
 domain -> not exhaustively verifiable + libm -> RISK, delegate). numpy's total lack of an f16 ALU has yielded
 19 wins this run across the whole f16 surface. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): bitwise_count (popcount) parallel write-direct — 1.2x loss -> 3.4-3.8x win (pivot off f16)
+
+`BlackThrush`. Pivoting off the exhausted f16 megavein to a non-f16 loss. np.bitwise_count is a ~1-cycle SIMD
+POPCNT per element but SINGLE-THREADED; fnp's native try_zerocopy_bitwise_count was a 1.2x LOSS at 16M because
+it `.collect()`ed a Vec<u8> of counts then COPIED it into the output — a serial two-pass. Rewrote to write
+count_ones() STRAIGHT into the numpy.empty(uint8) output, parallel across cores via par_chunks_mut (no Vec, no
+copy). uint64/int64 16M: 12ms->3.5ms **3.4-3.8x WIN**; bit-exact over u8..u64 + signed (unsigned_abs magnitude,
+numpy's documented rule) + bool + 2-D. Gate 1<<20: below it numpy's single-threaded SIMD beats the fan-out, so
+DELEGATE DIRECTLY to numpy (an earlier gate that `return Ok(None)`d regressed 22x — it dropped to the slow
+f64+sidecar EXTRACT fallback, not numpy; the direct-delegate fixes it to parity). **LESSON: when gating a
+native fast path OFF for small n, check WHERE `Ok(None)` lands — if the caller's fallback is a slow native
+extract (not numpy), returning None is a REGRESSION; delegate to numpy explicitly. Also: a serial collect()+
+copy loses to numpy SIMD; write results DIRECTLY into the output buffer in parallel (no intermediate Vec).**
+AGENT_NAME=BlackThrush.
