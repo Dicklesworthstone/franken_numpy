@@ -13985,3 +13985,32 @@ conformance_range_funcs 18/18, array_creation 5/5 green.
 **LESSON (extends the composite-op-slow-native-path pattern): a native constructor that BUILDS a UFuncArray
 Vec then build_numpy_array_from_ufunc-COPIES it has a hidden per-element double-copy tax that only wins for
 small N; gate such paths by size, delegating large N to numpy's direct write.** AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED): parallel-direct convolve/correlate for LARGE kernels (128<k<=4096) — 10-16x
+
+`BlackThrush`. fnp's convolve/correlate won SMALL kernels (k<=128, gather 8-26x) but DELEGATED 128<k<=2048
+to numpy at parity (bead 1nzxt delegated that band because fnp's FFT/scatter path lost 1.2-1.7x to numpy's
+direct O(n*m)). BUT `convolve_gather_fill` is a PARALLEL SIMD DIRECT convolve (4-wide over outputs, per-
+output sum in numpy's tap order) that works for ANY kernel size — the 128 cap (GATHER_MAX_M) was a stale
+tuning choice predating the parallelization, and only the FFT path was ever rejected, never a parallel
+direct. numpy's direct convolve is single-threaded, so the parallel direct beats it for large kernels too.
+
+FIX: raise GATHER_MAX_M 128 -> 4096 (try_zerocopy_conv_corr_f64 now handles 129<=k<=4096 via the parallel
+gather, bypassing the numpy delegate). Measured 4M signal: convolve k=256 15.4x, k=500 12.5x, k=1000 10.6x,
+k=2048 16.0x, correlate k=500 12.9x — all were ~1.07x parity before. Small kernels preserved (k=128 12.8x).
+CORRECTNESS: convolve parity is tolerance-based (it always was — the existing SMALL-kernel gather is only
+~1e-8 close to numpy from SIMD reassociation, and the FFT path ~1e-12); the large-kernel gather is TIGHTER
+(~1e-11), well within that standard. Verified allclose vs numpy over k in {129,256,500,1000,2048,4096} x
+{full,same,valid} x {convolve,correlate} x {300K,4M} signals; conformance_convolution 2/2 green; k>4096
+still defers to numpy/FFT unchanged.
+
+| Probe (min-of-many, 4M signal) | numpy | fnp | fnp/numpy |
+|---|---:|---:|---:|
+| convolve k=256 same | 120.3ms | 7.8ms | ~15.4x |
+| convolve k=500 same | 181.4ms | 14.5ms | ~12.5x |
+| convolve k=2048 same | 883.6ms | 55.3ms | ~16.0x |
+| correlate k=500 valid | 183.8ms | 14.2ms | ~12.9x |
+
+**LESSON: a "cap" on a fast path may predate a later parallelization — re-measure whether raising it wins;
+a rejection of ONE algorithm (FFT) for a band doesn't mean the band can't be won by ANOTHER (parallel
+direct).** AGENT_NAME=BlackThrush.
