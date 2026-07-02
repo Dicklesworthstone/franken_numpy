@@ -15349,3 +15349,20 @@ so pyo3 bound the signature to the helper -> "expected argument where_obj but go
 helper before a #[pyfunction], put it ABOVE the attribute lines. ALWAYS check the build exit, not just the
 stale-.so test (the stale ravel .so ran green at 1.01x = the OLD delegate, masking the compile failure).**
 Remaining lead: flatnonzero (58ms, needs prefix-sum). 62 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.insert (1-D f64 scalar) parallel copy — 5.1-6.4x
+
+`BlackThrush`. try_zerocopy_f64_insert_scalar already had a native 1-D f64 scalar-index+value path, but its two
+`copy_from_slice` calls were SERIAL single-threaded memcpy (~40-66ms@8M — numpy.insert IS just concatenate,
+same cost). Replaced with a chunked rayon parallel copy (par_chunks_mut(1<<16).zip(...).copy_from_slice) around
+the insertion point, saturating more memory channels (fnp.concatenate already proved ~6x this way). Gate
+n>=1<<16. Measured 8M: idx=5 6.44x (64.3->10.0ms), idx=mid 5.12x (50.6->9.9ms). BIT-IDENTICAL over idx
+{0,1,5,mid,n-1,n(append),-1,-2,-n} incl NaN/inf/-0.0 verbatim + below-gate parity; array obj / array values /
+f32 / int / 2-D-no-axis(flatten) / OOB(IndexError) defer to numpy.
+
+**DIAGNOSTIC LESSON: np.insert == np.concatenate == 66ms, but `ff[1::2].copy()` = 4.5ms and `ff.copy()` = 40ms
+(this box's single-thread memcpy is only ~1.6GB/s) — the win is pure memory-channel parallelism on the copy,
+NOT algorithm. When numpy time ~= a plain copy of the same bytes, a chunked par_chunks_mut copy is a free
+multi-x.** BIG SIBLING STILL OPEN: np.delete(arr, slice) = 62ms but `arr[complement].copy()` ~4.5ms = ~14x
+(numpy builds a full bool mask); the complement of a strided slice is piecewise so it needs a gather, not a
+2-memcpy. flatnonzero stays REJECTED (prior note: kernel-bound, never wins). 63 wins. AGENT_NAME=BlackThrush.
