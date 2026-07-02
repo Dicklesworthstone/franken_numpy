@@ -13966,3 +13966,22 @@ defer. conformance_eye_diag 24/24, array_creation 5/5, grid_objects 7/7 green.
 
 Page-fault vein now: outer + repeat + tile + concatenate + full + ones/like + meshgrid + indices + tri
 (9 wins). AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED, loss fix): logspace/geomspace large-N delegate — 0.84-0.85x -> parity (composite-op slow-native-path)
+
+`BlackThrush`. np.logspace/geomspace (base=10 / positive endpoints, the native-eligible case) used
+UFuncArray::{logspace,geomspace}_endpoint, which builds a UFuncArray Vec then build_numpy_array_from_ufunc
+COPIES it into a numpy array — a double-handling that beats numpy's per-call overhead for SMALL outputs but
+loses for large ones where the extra ~num*8-byte copy dominates. Measured: logspace 1000 1.37x / geomspace
+2.37x WIN, ~parity to ~1M, but 5M 0.85x / 20M 0.84x LOSS (numpy's direct 10**linspace is faster). Same
+"composite-op routes to slow native path" class as matrix_power/ix_/einsum-diagonal.
+
+FIX: gate the native path to num <= 1<<21 (~2M); larger num delegates to numpy (faster AND byte-identical
+— numpy IS the reference). Result: logspace/geomspace 5M/20M 0.84-0.85x -> 1.00x parity, small native WIN
+preserved (logspace 1000 1.36x, geomspace 1000 2.37x), 500K parity. Correctness 0 fails across
+{(0,3,50),(0,3,5M),(-2,5,10),(1,1,7)} logspace + geomspace + base!=10/endpoint=False defer paths.
+conformance_range_funcs 18/18, array_creation 5/5 green.
+
+**LESSON (extends the composite-op-slow-native-path pattern): a native constructor that BUILDS a UFuncArray
+Vec then build_numpy_array_from_ufunc-COPIES it has a hidden per-element double-copy tax that only wins for
+small N; gate such paths by size, delegating large N to numpy's direct write.** AGENT_NAME=BlackThrush.
