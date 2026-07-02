@@ -14947,3 +14947,20 @@ null padding) make it bandwidth-bound and it never beats numpy's per-element str
 on the side that READS the compact representation; reading the wide side (U) in multiple passes is bandwidth-
 bound. Ship the winning direction, delegate the other.** encode left as the numpy re-export (parity). 40 wins.
 AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - REJECT: complex128 sqrt native — NOT byte-exact (last-ULP hypot/division divergence)
+
+`BlackThrush`. Evaluated np.sqrt(complex128) (~115ms@4M single-threaded, ~5x parallel headroom). VERIFIED FIRST
+with a standalone Rust program (csqrt via t=sqrt((|a|+hypot(a,b))/2), im=b/(2t)) vs numpy over 1M NORMAL-range
+values: 0 bit mismatches (looked shippable!). But a BROAD sweep (exponents -300..300 + pure-imaginary) revealed
+~50k/2M last-ULP mismatches: (1) extreme-magnitude cases where Rust f64::hypot != numpy's C hypot in the last
+ULP (amplified into subnormal result components), (2) PURE-IMAGINARY (re=0) where numpy gets re==im exactly but
+Rust's b/(2t) division rounds 1 ULP off. allclose=True but NOT byte-identical -> fails the repo's bit-exact bar.
+Replicating numpy's exact csqrt (its scaling + C hypot's exact rounding) is too fragile; REJECTED.
+
+**★METHODOLOGY WIN (this is the point): the cheap standalone-Rust-verify caught the divergence BEFORE any pyext
+build — a normal-range spot check (0 mm) was MISLEADING; only the broad+edge sweep (extreme exponents + pure-
+imaginary/real) exposed the last-ULP failures. LESSON: algebraic-but-libm ops (sqrt/hypot/division chains) are
+NOT reliably byte-exact across Rust/numpy the way pure {:.N} formatting is — verify over EXTREMES and structural
+edges (re=0, im=0, subnormal results), not just a random normal sample, before trusting bit-exactness.** Contrast
+[[the float %.Nf/%e wins]] which ARE byte-exact (correctly-rounded decimal = unique answer). AGENT_NAME=BlackThrush.
