@@ -14869,3 +14869,17 @@ ops (~430ns, dwarfs even datetime's 240ns) because they go through Python-ish fo
 integer %d case is a trivial decimal write that parallelizes to 34-55x. The digit-writer + two-pass-max-width
 framework from datetime/expandtabs transfers directly.** Remaining: %.Nf float formatting (2.1s, harder —
 needs correct decimal rounding), %x/%o (radix), %e/%g. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.strings.mod %x/%X/%o (radix) — 38-59x
+
+`BlackThrush`. Extended the strings.mod integer path (57cb928a) to hex/octal conversions. numpy uses PYTHON
+(signed) semantics for these — '%x' % -1 == '-1' (sign + hex of |v|), NOT C unsigned two's-complement — so it's
+the same digit-writer as %d with base 16/8 + an a-f/A-F digit map. Generalized parse_mod_int_format ->
+(prefix,suffix,base,upper) and write_i128_base(v,base,upper). Measured 4M i64: %x 59x (2032->35ms), %X 38x,
+%o 48x. BYTE-IDENTICAL over all int dtypes x {%x,%X,%o,literals} x negatives; %d unchanged; %5x/%.2f/%% still
+delegate.
+
+**printf-int mod family COMPLETE (%d/%i/%x/%X/%o), all 34-59x. KEY: numpy strings.mod uses PYTHON % semantics
+(signed hex/octal), not C printf — verify the SIGN/UNSIGNED convention by probing before assuming C.** Remaining
+printf: %.Nf FLOAT (numpy == C printf %.Nf byte-exact incl half-even, verified — feasible IF Rust's {:.N}
+matches C printf, needs a Rust-side bit-exact check first), width/flag variants (%5d/%05d/%+d). AGENT_NAME=BlackThrush.
