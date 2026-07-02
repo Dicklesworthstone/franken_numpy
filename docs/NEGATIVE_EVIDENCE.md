@@ -14783,3 +14783,22 @@ probe the real numpy arg convention (positional-only? 1-arg meaning? default-wid
 **np.strings PER-ELEMENT VEIN EXHAUSTED: case/translate/add/strip/replace/multiply/predicates(7)/padding(4)/
 expandtabs/search(5)/slice all PARALLEL.** Only par/fast small ops (startswith/endswith/comparison/str_len/
 isdecimal/isnumeric) + the char-module legacy alias remain. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - FIX+WIN (LANDED): expandtabs dtype-width bugfix + np.char mirror (13 ops) — 1.2-3.9x
+
+`BlackThrush`. TWO things: (1) BUGFIX to shipped expandtabs (779b8d67): its output DTYPE width was wrong
+(value-correct but U10->U10 where numpy emits U40) because that commit's test used np.array_equal (VALUE-only,
+width-blind). numpy's _expandtabs_length reserves 4 per non-tab char (sizeof ucs4) + true expansion per tab
+('\n'/'\r' reserve 4 + reset col), max over elements — NOT the true expanded length. Reproduced the exact
+formula (verified vs numpy over tabsize {0..16} x tabs/newlines/non-ASCII), fixed the width-reservation pass
+(content build was already correct). Now byte-identical (dtype+tobytes). (2) np.char is a compatibility shim
+over np.strings in modern numpy — BYTE-IDENTICAL outputs (verified incl trailing-whitespace edges), so pointed
+fnp.char's still-delegating ops (ljust/rjust/center/zfill/expandtabs/count/find/rfind/index/rindex/isupper/
+islower/istitle) at the SAME fnp.strings native pyfunctions via setattr (zero new kernels). char wins 1.2-3.9x.
+
+**CRITICAL LESSON (cost me a shipped bug): np.array_equal is VALUE-only and IGNORES dtype/width — a width-
+changing op (expandtabs/pad/slice/multiply) can pass array_equal while emitting a WRONG-itemsize array.
+ALWAYS verify string/dtype-changing ops with `x.dtype==y.dtype and x.tobytes()==y.tobytes()`, never
+np.array_equal. Re-audited ALL width-changing ops (ljust/rjust/center/zfill/slice/multiply) with tobytes ->
+all byte-identical; only expandtabs was wrong. The np.char mirror bx-test is what surfaced it.**
+AGENT_NAME=BlackThrush.
