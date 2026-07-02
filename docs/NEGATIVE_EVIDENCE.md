@@ -14900,3 +14900,18 @@ maybe' into a confirmed 33-37x. Rust std {:.N} IS byte-exact with C printf %.Nf 
 rounded, round-half-even); only nan/inf strings differ.★** printf mod family now: ints %d/%i/%x/%X/%o +
 floats %.Nf all 33-59x. Remaining: %e/%g (scientific — verify Rust {:e} vs C first), width/flags. 37 wins.
 AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.strings.mod integer width/flags (%05d/%+d/%-8x/...) — 58-71x
+
+`BlackThrush`. Extended the strings.mod integer path with C-printf width + flags: '-' left-justify, '+' force
+sign, ' ' space-before-positive, '0' zero-pad, numeric min-width, for d/i/x/X/o. I write the padding MYSELF
+(no Rust-format dependency) replicating Python %/C printf exactly: sign precedence +>space, zero-pad goes
+BETWEEN sign and digits, '-' overrides '0', out_w = max(sign+digits, width). Parsed via an IntFmt struct.
+Measured 4M i64: %8d 71x (1721->24ms), %05d 59x, %+d 58x. BYTE-IDENTICAL over all int dtypes x negatives x
+{%5d,%05d,%-5d,%+d,%+5d,% d,%+08d,%-8d,%08x,%8X,%-6o,%-05d,literals}. '#' (alt form 0x prefix) + precision
+(%.3d) still delegate.
+
+**printf-mod family now covers the common surface: ints %d/%i/%x/%X/%o + width/flags, floats %.Nf — all
+33-71x. Integer padding is deterministic (I emit the bytes) so NO libc-divergence risk, unlike float where I
+lean on Rust's verified {:.N}.** Remaining: %e/%g scientific (Rust {:e} format differs from C -> manual build
+needed), float width/flags (%8.3f/%+.2f -> Rust {:8.3}/{:+.2} mapping, VERIFY first). 38 wins. AGENT_NAME=BlackThrush.
