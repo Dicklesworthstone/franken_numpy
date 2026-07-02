@@ -14355,3 +14355,27 @@ re-derive the gate per op from ITS numpy cost + ITS fixed floor, don't copy a si
 `np.nanmean(f16)` does NOT match float16(f32_nansum/count) — it overflows to inf where an f32-accumulate
 wouldn't and shows ULP drift, so its internal accumulation differs (fiddly/risky; left for a semantics dig).
 AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): f16 flat NANMEAN 2.2-17x (semantics dig resolved: narrow-sum-to-f16-FIRST)
+
+`BlackThrush`. The nanmean "semantics dig" flagged last commit resolved. The failing hypothesis (float16(
+f32_nansum/count)) was wrong because numpy computes nanmean as `tot = np.nansum(a); avg = tot/cnt` where
+**tot is NARROWED to f16 by np.sum FIRST** (that's why it overflows to inf when the f16 sum overflows). CORRECT
++ verified byte-exact over sizes x densities(0..0.9) x scales incl the inf cases:
+`np.nanmean(f16) == float16( float32(float16(f32_nansum)) / float32(count) )`. FIX: reuse
+par_pairwise_nansum_f16, narrow to f16 (matching np.sum), re-widen, divide by the parallel non-NaN count,
+narrow. count==0 (all-NaN) defers for numpy's "Mean of empty slice" warning. Hooked ABOVE the f64-dtype guard.
+
+| f16 flat nanmean (30% NaN) | numpy | fnp | ratio |
+|---|---:|---:|---:|
+| 16M | 188ms | 11.0ms | **0.058x (17x)** |
+| 4M  | 39.0ms | 7.3ms | **0.187x (5.3x)** |
+| 1M  | 10.0ms | 4.5ms | **0.449x (2.2x)** |
+| <=524K | — | — | parity (delegates) |
+
+Bit-exact ALL PASS (densities/scales/all-NaN-defer/small-delegate/n up to 16M). GATE 1<<19 (higher than
+nansum's 1<<17): nanmean adds a full non-NaN COUNT pass + narrow/re-widen, so its fixed floor is larger
+(262K 1.00x, 1M 0.45x). **LESSON: for a composite f16 reduction, reverse-engineer numpy's EXACT intermediate
+dtype at each step — np.nanmean chains np.nansum (which narrows to f16) then divides, so the sum's f16
+narrowing (and its overflow-to-inf) is OBSERVABLE and must be replicated; guessing 'f32 throughout' is wrong.**
+f16 flat nan-reduction pair (nansum+nanmean) COMPLETE. Next: std/var (two-pass), then AXIS variants. AGENT_NAME=BlackThrush.
