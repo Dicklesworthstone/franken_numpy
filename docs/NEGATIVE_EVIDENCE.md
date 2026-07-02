@@ -14915,3 +14915,19 @@ Measured 4M i64: %8d 71x (1721->24ms), %05d 59x, %+d 58x. BYTE-IDENTICAL over al
 33-71x. Integer padding is deterministic (I emit the bytes) so NO libc-divergence risk, unlike float where I
 lean on Rust's verified {:.N}.** Remaining: %e/%g scientific (Rust {:e} format differs from C -> manual build
 needed), float width/flags (%8.3f/%+.2f -> Rust {:8.3}/{:+.2} mapping, VERIFY first). 38 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.strings.mod %e/%E scientific — 40-52x (printf float vein complete)
+
+`BlackThrush`. Scientific float formatting (~2.5-2.9s@4M). VERIFIED FIRST (standalone Rust vs numpy, 2.4M
+values x 4 precisions, 0 mm): Rust's {:.Ne} MANTISSA is byte-exact with C printf %.Ne, but Rust's exponent is
+unsigned/unpadded ('1e3') while C wants 'e±dd' (explicit sign, >=2 digits) — so I format with Rust into a
+scratch StackW then REFORMAT just the exponent (parse it, emit sign + zero-pad-to-2). Generalized the float
+path to a FloatFmt{prec,sci,upper}. Measured 4M: %.3e 52x, %.6E 48x, %e 40x (2573->65ms). BYTE-IDENTICAL f64+
+f32 x {%e,%E,%.Ne,literals} x nan/inf/edges. **GOTCHA caught by test: %E uppercases the SPECIAL values too
+(numpy nan->'NAN', inf->'INF'), %f/%e stay lowercase — case the nan/inf strings by ff.upper.** %g/%8.3e/%+e
+delegate.
+
+**printf-mod FLOAT vein COMPLETE (%.Nf fixed + %e/%E scientific), ints %d/%i/%x/%X/%o + width/flags — the whole
+common printf surface is native 33-71x.** Method held again: standalone-Rust-verify the primitive, then reformat
+the parts where Rust's spec differs from C (exponent sign/pad, nan/inf case). Remaining printf (niche): %g
+(picks %e/%f + strips zeros — complex), float width/flags. 39 wins. AGENT_NAME=BlackThrush.
