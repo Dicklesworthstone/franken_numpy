@@ -15016,3 +15016,20 @@ values 1-ULP off on even-length medians, pre-existing). So route Linear->origina
 with a non-linear method. LESSON: when a kernel already exposes a feature the pyfunction gates off, wiring it is
 near-free — but split by which sub-cases are BYTE-exact (order-stat selection) vs merely allclose (interpolation)
 and only claim the byte-exact ones.** 43 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.gradient edge_order=2 native (1-D + last axis) — 8-8.7x
+
+`BlackThrush`. gradient edge_order=2 was a FULL DELEGATION (~103-157ms) — the zero-copy path bailed `if
+edge_order != 1`. The interior (central diff) is IDENTICAL to edge_order=1; only the 2 one-sided boundary
+points differ. Extended try_zerocopy_f64_gradient_1d to edge_order=2 with numpy's EXACT byte-for-byte boundary
+formula. Measured: 1-D 8M 8.7x (103->12ms), 4000² last-axis 8x (157->20ms). BYTE-IDENTICAL over n{3..8M} x
+dx{1,0.5,2.5,0.01,3.7,100,0.333,7.25} x 1-D + N-D last-axis. Non-last axis / coordinate-array spacing delegate.
+
+**TWO FORMULA GOTCHAS (each caught by dtype+tobytes over MANY dx, not one): (1) numpy uses the COEFFICIENT form
+a*f0+b*f1+c*f2, NOT the simplified -(3f0-4f1+f2)/(2dx) — the latter diverges when 3/(2dx) isn't representable
+(dx=0.01). (2) for UNIFORM spacing numpy's coefficients are the SIMPLE -1.5/dx, 2/dx, -0.5/dx (first) / 0.5/dx,
+-2/dx, 1.5/dx (last), NOT the non-uniform h0/h1 coefficient form — those round differently at dx=3.7. LESSON:
+a finite-difference boundary stencil has a UNIQUE byte-exact spelling; reverse-engineer numpy's exact op-order
++ coefficient source by probing MULTIPLE dx (esp. non-power-of-2 like 3.7, 0.01) — a single dx=1 test passes
+for 3 different wrong formulas.** 44 wins. The ufunc gradient_advanced's own edge2 (-3f0+4f1-f2)/2 form is only
+allclose — this zero-copy path is stricter (byte-exact) AND faster. AGENT_NAME=BlackThrush.
