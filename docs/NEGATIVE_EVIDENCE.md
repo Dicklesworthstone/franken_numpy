@@ -15203,3 +15203,22 @@ non-ASCII/empty/no-tab content + 2-D + below-gate (<1<<20) parity; 'U' path unaf
 dispatched on the input dtype kind (uint32/uint8 view, '{U|S}{w}' output). Remaining 'S': add (numpy sizes out
 to itemsize_a+itemsize_b, two-operand — different plumbing) + translate (byte table). Content ops (count/find/
 strip/replace/predicates) already probed at PARITY.** 54 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): 'S' (bytes) np.strings.translate — 183x
+
+`BlackThrush`. Continuing the 'S' vein — the BIGGEST 'S' win yet. np.strings.translate(bytes_arr, table)
+delegated fully to numpy, which runs per-element Python bytes.translate (~245ms/2M x S12). Added
+try_zerocopy_bytes_translate: the table is a 256-byte bytes (from bytes.maketrans), so byte b -> table[b] over
+the WHOLE flat uint8 buffer, parallel across cores (a 256-entry LUT gather = memory-bandwidth-bound). Output
+same itemsize. Hooked into unicode_ascii_translate_or_numpy after the 'U' attempt (both under !deletechars).
+Measured 2M: 244.66ms -> 1.33ms = 183.27x. BYTE-IDENTICAL over 5 tables (abc->ABC, permutation, byte->NUL,
+full 1..255 permutation, identity) x embedded-null/non-ASCII/empty/full-width content + 2-D + below-gate
+(<1<<16) parity; 'U' path unaffected.
+
+**KEY correctness insight: numpy 'S' translate maps EMBEDDED nulls but leaves TRAILING padding NUL (verified
+b'a\x00b'-> table applied at the embedded \x00, padding stays \x00). Whole-buffer uniform translate is only
+safe when table[0]==0 (padding maps to itself); gate table[0]!=0 -> numpy. Unlike 'U' (dict table, ASCII-
+gated, defers non-ASCII), the byte table covers 0-255 so NO non-ASCII defer — 'S' is both simpler AND a far
+bigger win (numpy's per-element Python bytes.translate is pathologically slow).** deletechars form (length-
+changing) + non-256 table + table[0]!=0 defer. 'S' width/content-map family: pad/multiply/expandtabs/translate.
+Remaining 'S': add (two-operand, itemsize_a+itemsize_b). 55 wins. AGENT_NAME=BlackThrush.
