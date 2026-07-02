@@ -14981,3 +14981,20 @@ None`). Also: the sep-part dtype is ALWAYS U{len(sep)} even when NO element cont
 dtype-changing op with a variable-width output has TWO numpy width quirks to match — the U0-vs-U1 minimum AND
 per-part fixed-vs-tight rules; verify with tobytes and probe the all-empty/all-not-found corners explicitly.**
 np.strings per-element surface now essentially COMPLETE. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.interp period= native — 3.2x (extends the existing allclose interp path)
+
+`BlackThrush`. np.interp(x, xp, fp, period=P) (angular/periodic interp) was a FULL DELEGATION (678ms@8M). numpy's
+period path is pure preprocessing (x%P, xp%P, argsort, wrap-augment with [xp[-1]-P]..[xp[0]+P]) then the SAME
+compiled_interp. Replicated the preprocessing with numpy's OWN ops (byte-identical to numpy's) then routed the
+8M-point main loop through the existing zero-copy interp kernel (try_zerocopy_f64_interp). Measured 8M: 678->212ms
+**3.2x WIN**. Verified vs numpy over periods {100,360,2pi,1,0.5}, unsorted xp, dup xp, negative x, neg-period(abs).
+Delegates: period=0 (numpy ValueError), complex fp, scalar x.
+
+**IMPORTANT HONESTY: interp in this repo is ALLCLOSE (~1e-15), NOT byte-exact — the SHIPPED plain interp kernel
+already differs from numpy in the last ULP (~950k/2M values, maxdiff 1.3e-15; the native linear-blend op-order
+!= numpy's compiled_interp). This period path INHERITS that exact 1e-15 (it IS the same kernel), so it's
+consistent with the existing interp standard, not a NEW tolerance relaxation. Verified with allclose(rtol=1e-12),
+the correct bar for this op.** LESSON: before demanding byte-exact on an EXTENSION, check the BASE op's actual
+standard — interp/linalg/fft that wrap a non-bit-exact numeric kernel are allclose ops; a periodic/masked variant
+of an allclose op is held to allclose, not tobytes. AGENT_NAME=BlackThrush.
