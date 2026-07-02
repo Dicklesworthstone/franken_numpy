@@ -15113,3 +15113,21 @@ only + passthrough) so 'S' is strictly simpler + a bigger win than 'U'.** Remain
 count/find/ljust/rjust/center/zfill/expandtabs/predicates/partition/mod (each = a 'U' kernel with uint8; the
 CONTENT ops like count/find/slice are byte-identical, the width-changing ones need the same 2-pass). 49 wins.
 AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): 'S' (bytes) string mod %d/%i/%x/%X/%o (int) — 37.9-140x
+
+`BlackThrush`. Continuing the 'S' vein (case-conversion family landed 259c64f9). `np.strings.mod(b'%d', arr)`
+with a BYTES format + int array delegated fully to numpy — which formats each element single-threaded ~1.1-1.35s
+for 4M. numpy picks the output KIND from the format's dtype ('S' bytes -> 'S' output, 'U' str -> 'U' output),
+so a bytes format needs 'S' output at uint8 width. Made `write_int_fmt` GENERIC over `E: From<u8> + Copy`
+(writes into uint8 OR uint32) and taught `try_native_strings_mod_int` to accept a bytes format (ASCII-only;
+non-ASCII byte in the format -> defer to numpy) and emit an 'S{w}' array viewed as uint8. The int-format kernel
+(prefix + write_int_fmt + suffix + null-pad, parallel over fixed-width slots) is otherwise identical to 'U'.
+Measured 4M: %d 37.9-95.8x, %+06d 45.5-140x, 0x%08X 56.9-105x across i8/i32/i64/u32/u64. BYTE-IDENTICAL (dtype
++ shape + bytes) over 10 formats x 5 int dtypes + 2-D + %i alias + INT_MIN/MAX + alt-form %#010X + negatives
++ wrapping int8; below-gate (<4096) parity; non-ASCII-byte format delegates; 'U' path unaffected.
+
+**'S' mod-int mirrors the 'U' kernel with ONE generalization (the digit-writer over `E: From<u8>`) — the output
+KIND is chosen by the format's dtype exactly as numpy does. Remaining 'S' mirrors: strip/replace/count/find/
+ljust/rjust/center/zfill/expandtabs/predicates/partition + mod-FLOAT (%f/%e already 'U'-native; the same
+generic-writer trick would mirror them to 'S').** 50 wins. AGENT_NAME=BlackThrush.
