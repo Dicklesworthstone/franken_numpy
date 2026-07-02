@@ -14277,3 +14277,32 @@ Before chasing a ratio, check: does fnp even have a native path (grep the pyfunc
 `core_numpy_passthrough`)? is default==RAYON=1 (=> not parallel, likely dispatch)? does the ratio->1.0 with n
 (=> fixed overhead, not kernel)? is the absolute time <1ms (=> not worth it)? All three killed every candidate
 this sweep.** AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): native parallel FLOAT16 flat sum — 2.1-4.4x (numpy widen-pairwise is serial+compute-bound)
+
+`BlackThrush`. The convergence-map "untried levers" panned out on ONE: **f16 flat sum was a real gap the
+triage missed** because default==RAYON=1 (fnp had NO native f16 sum — it DELEGATED, so serial==parallel==numpy
+by construction, not because it's unparallelizable). numpy sums float16 by widening each value to f32, running
+its f32 pairwise tree, and narrowing once — SINGLE-THREADED and COMPUTE-bound: ~10x slower per byte than the
+bandwidth-bound f64 sum (16M f16 = 26ms vs f64 128MB = 10ms). BIT-EXACT semantics VERIFIED over 127..16M x
+scales x kinds: `np.sum(f16) == float16(np.add.reduce(f16.astype(f32)))` (widen->f32-pairwise->narrow-once).
+
+FIX: `try_zerocopy_f16_sum_flat` + `par_pairwise_sum_f16` — reproduce numpy's EXACT pairwise tree over the raw
+u16 bits (leaf<=128 widens into an f32 buf and calls the shared bit-exact `base_sum_simd_f32`; split n2=n/2
+rounded DOWN to mult of 8), parallelized via rayon::join at the top levels (identical tree => identical
+arithmetic => byte-exact), narrow once. NaN input defers (keep the fast path finite). Measured (20th-pctile):
+
+| f16 flat sum | numpy | fnp | ratio |
+|---|---:|---:|---:|
+| 16M | 26.7ms | 6.1ms | **0.228x (4.4x)** |
+| 8M  | 13.3ms | 3.1ms | **0.233x (4.3x)** |
+| 4.5M | 7.7ms | 3.7ms | **0.477x (2.1x)** |
+| <=3.5M | — | — | parity (delegates, gate 1<<22) |
+
+Bit-exact ALL PASS (sizes/scales/ones/NaN-defer/small-delegate). Gate 1<<22 = the measured DRAM crossover
+(below it numpy's cache-resident sum beats the ~5ms fixed floor of view+NaN-scan+fan-out). conformance sum
+tests use small arrays (< gate) => delegate => unaffected. **KEY: "default==RAYON=1 => not a lever" is WRONG
+when fnp has NO native path at all — serial==parallel because it's DELEGATING, not because the op resists
+parallelism. Always also ask: does numpy do this SINGLE-THREADED and COMPUTE-bound? (grep whether fnp even
+has a native hook before concluding no-lever.)** f16 mean (= float16(f32_sum/n), same helper) is the obvious
+next follow-up. AGENT_NAME=BlackThrush.
