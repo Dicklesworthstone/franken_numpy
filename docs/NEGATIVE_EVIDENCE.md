@@ -14608,3 +14608,20 @@ All EXHAUSTIVELY bit-exact: native path over in-domain f16 values (exp x<11 n=50
 |x|<11 n=37632, ...) AND the full-domain-defer path both 0 mismatch. f16 transcendental family COMPLETE
 (trig/inverse-trig/hyperbolic/inverse-hyperbolic/exp/log). numpy's f16 exp/log/sinh here are 89-270ms single-
 threaded widen; parallel widen wins 10-26x. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): f16 exp2/deg2rad/rad2deg 3.8-18.4x (f16 unary family effectively complete)
+
+`BlackThrush`. Cleanup batch of the last delegating f16 unary transcendental/scale ops. Added to
+try_zerocopy_f16_unary_widen (v.exp2()/.to_radians()/.to_degrees()) + pre-scans: exp2 defers x>=16 (2^x
+overflow at ~15.9997), rad2deg (Degrees, x*180/pi) defers |x|>=1143 (overflow at 65504/57.3), deg2rad
+(Radians, x*pi/180) needs no pre-scan (never overflows). Wired the standalone exp2 passthrough + the
+degrees_native/radians_native pyfunctions with an f16-only hook before their existing dispatch. Measured
+(16M): deg2rad 18.4x (80->4.3ms), rad2deg 5.3x, exp2 3.8x (Rust f32 exp2 libm is ~3x costlier than exp).
+Exhaustively bit-exact (native over in-domain + full-domain-defer both 0 mismatch); f32/f64 unaffected.
+
+**The f16 unary family (rounding + sqrt/square/reciprocal + all trig/inverse-trig/hyperbolic/inverse-hyp +
+exp/exp2/expm1 + log/log2/log10/log1p + cbrt + deg2rad/rad2deg) is now COMPLETE, every op EXHAUSTIVELY proven
+bit-exact over the 65536-value f16 domain.** Remaining f16 (low value / not-parallelizable): spacing/nextafter
+(bit-step, deterministic but ~68ms parity — could add), modf/frexp (2-output), binary hypot/logaddexp (2D
+domain -> not exhaustively verifiable + libm -> RISK, delegate). numpy's total lack of an f16 ALU has yielded
+19 wins this run across the whole f16 surface. AGENT_NAME=BlackThrush.
