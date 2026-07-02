@@ -15097,3 +15097,19 @@ byte/char, ASCII-only casing = no width-change defer). All the 'U' wins have an 
 title (~115ms) + strip/replace/count/find/ljust/pad/predicates/partition/mod. LESSON: after mining a dtype
 family ('U'), check the SIBLING encoding ('S') — same numpy-single-threaded slowness, and byte-encoding casing
 rules are often SIMPLER (no multi-byte/width-change edge) so the win is bigger + cleaner.** 47 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): 'S' (bytes) string capitalize/title — 19.6-44x
+
+`BlackThrush`. Continuing the 'S' vein (upper/lower/swapcase landed 3cc0b123). bytes.capitalize()/title() are
+ASCII-only — non-ASCII bytes act as NON-LETTERS (unchanged + reset title word-state), so the 'U' per-slot logic
+mirrors directly onto uint8 with NO non-ASCII defer, same output width. Added try_zerocopy_bytes_ascii_cap_title
+(view S as uint8, per-slot process across fixed-width byte slots, parallel) hooked into unicode_ascii_cap_title_
+or_numpy. Measured 2M: title 44x (136->3.1ms), capitalize 19.6x (118->6ms). BYTE-IDENTICAL over ASCII + non-
+ASCII (\xe9/\xff word-boundaries) + spaces + empty + null-padding + 2-D + char mirror; 'U' path unaffected.
+
+**'S' case-conversion family COMPLETE (upper/lower/swapcase/capitalize/title). The 'S' vein keeps giving — each
+'U' kernel mirrors to uint8, and for PURE-BYTE ops (casing) there's NO non-ASCII defer (byte semantics = ASCII-
+only + passthrough) so 'S' is strictly simpler + a bigger win than 'U'.** Remaining 'S' mirrors: strip/replace/
+count/find/ljust/rjust/center/zfill/expandtabs/predicates/partition/mod (each = a 'U' kernel with uint8; the
+CONTENT ops like count/find/slice are byte-identical, the width-changing ones need the same 2-pass). 49 wins.
+AGENT_NAME=BlackThrush.
