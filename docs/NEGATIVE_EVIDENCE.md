@@ -14457,3 +14457,21 @@ each step (observable f16 overflow), while the contiguous fast axis uses the wid
 reverse-engineer the order PER axis-kind (contiguous vs strided), not once.** Next: f16 nanmean non-last
 (same strided seq + per-lane count), f16 plain sum non-last (seq_f16 also matches, numpy strided-slow = win).
 AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): f16 nanmean non-last 43-59x + f16 plain SUM non-last 20-21x
+
+`BlackThrush`. Both flagged next-steps landed, reusing the strided-order semantics (per-lane seq f16-narrow
+accumulate):
+- **f16 nanmean(axis=k<last) 43-59x** — per lane = float16(float32(seq_f16_nansum)/count) (NaN skipped ==
+  adding 0 since f16(f32(s)+0)==s; verified == np.nanmean(f16, axis0/mid)). all-NaN lane defers for the
+  warning. axis0 4kx4k 43x (207ms->4.8ms), 8kx8k 59x (982ms->16.5ms).
+- **f16 plain SUM(axis=k<last) 20-21x** — generalized try_zerocopy_f16_sum_nonlast_axis with nan_skip: plain
+  sum keeps the NaN value so it PROPAGATES (numpy's f16 NaN result is canonical 0x7e00, verified with 5%
+  NaN). axis0 4kx4k 20x (82ms->4.1ms), 8kx8k 21x (322ms->15.4ms). CONTRAST: plain sum LAST-axis LOSES (numpy
+  SIMD-fast contiguous) but NON-LAST WINS (numpy strided serial-f16-narrow is slow) — the SAME op flips
+  win/loss by axis-kind because numpy's contiguous kernel is SIMD but its strided kernel is a scalar loop.
+
+Bit-exact ALL PASS (sum w/wo NaN, nanmean, keepdims, axis0/middle x shapes). **f16 flat+axis reduction vein
+is now BROAD: sum flat, mean flat, nansum(flat/last/non-last), nanmean(flat/last/non-last), sum non-last.
+9 commits. Remaining: mean non-last (numpy strided mean = seq/n, likely win), the OTHER dtypes' strided
+reductions are numpy-fast (f32/f64 SIMD).** AGENT_NAME=BlackThrush.
