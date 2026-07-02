@@ -14819,3 +14819,20 @@ Python `//` FLOORS: negative-day off-by-one. Prototype the algorithm in the TARG
 semantics, or emulate C-truncation in Python before trusting it.)** Next datetime units: [s]/[h]/[m] (add
 'THH:MM:SS' from seconds-of-day), [ms]/[us]/[ns] (+ fractional). Same civil core, per-unit format+width.
 AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): native np.datetime_as_string[s/h/m/ms/us/ns] — 10-13x (datetime time units)
+
+`BlackThrush`. Extended the [D] datetime formatter (c23bb70c) to all TIME units, sharing the Hinnant civil
+core + a unit-parameterized ISO writer (DtUnit{per_day,subper,level,fdig,out_w}). Decompose value -> days
+(v.div_euclid(per_day)) + rem (v.rem_euclid, FLOORED so pre-1970 negatives are correct) -> second-of-day +
+fraction; write 'YYYY-MM-DDTHH:MM:SS.<frac>' truncated to the unit's level. Measured 4M: s 13.1x (1104->84ms),
+h 12.5x, m 11x, ms 10.4x, us 10.2x, ns 10x. BYTE-IDENTICAL (dtype+tobytes) vs numpy over 2M+ values/unit incl
+huge negatives, NaT, day-boundary edges. Fixed out_w per unit (h32/m35/s38/ms42/us45/ns48). Delegates Y/M/W
+(different format), multiple-of-unit (5m), timezone/unit/casting kwargs, n<4096, non-contiguous.
+
+**KEY: the day-boundary split MUST use FLOORED division (Rust div_euclid/rem_euclid) not truncating `/` — a
+pre-1970 timestamp like -100s is day -1 + second-of-day 86300, which truncation would get wrong. (The civil
+core INSIDE uses truncating `/` per Hinnant; the OUTER unit split uses div_euclid. Two different division
+semantics in the same function — match each to what the algorithm assumes.)** datetime_as_string vein: all
+common units (D + s/h/m/ms/us/ns) now native 10-13x. Remaining: Y/M/W (year/month arithmetic, no civil),
+timedelta64 (different format). AGENT_NAME=BlackThrush.
