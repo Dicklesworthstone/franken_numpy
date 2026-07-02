@@ -14221,3 +14221,30 @@ genuinely SPARSE ties slip the sample; complex AXIS argsort (rarer) could take t
 **LESSON: the sampled-tie oracle extends to composite keys — a tuple `(re,im)` whose lexicographic
 `partial_cmp==Equal` matches the op's tie definition lets one sampling idiom cover scalar AND lexicographic
 sorts.** AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): COMPLEX AXIS argsort per-lane sampled tie oracle — ARGSORT FAMILY 100% COMPLETE
+
+`BlackThrush`. Final piece: the six complex axis argsort paths (c128+c64 x last/axis0/mid) had the same
+pay-twice. Combined the two prior idioms — the per-lane oracle `argsort_axis_sample_has_tie(num_lanes,
+lane_len, get)` (207daf33) fed a COMPOSITE `(re,im)` accessor (8b73dcea): `get(lane, j)` reads the lane's
+j-th complex element from the f64/f32 pair-view and returns a `(f64,f64)`/`(f32,f32)` whose lexicographic
+`partial_cmp==Equal` is exactly the downstream re&&im tie test. One helper, three layout accessors
+(contiguous last / column-strided axis0 / (o,t)-strided mid). Measured (4000² / 400³ complex):
+
+| complex axis argsort dense ties | numpy | BEFORE | AFTER |
+|---|---:|---:|---:|
+| c128 lastaxis | 1370ms | 1294ms 1.06x LOSS | 1382ms **1.01x par** |
+| c128 axis0    | 1520ms | 1432ms 1.08x LOSS | 1572ms **1.03x par** |
+| c128 midaxis  | 854ms  | 897ms 1.09x LOSS  | 881ms **1.03x par** |
+| c64 lastaxis  | 647ms  | ~1.06x LOSS | 672ms **1.04x par** |
+| c128/c64 distinct (all axes) | — | WIN | **0.08-0.16x WIN preserved (10-12x)** |
+
+exact=True across ties/distinct for every axis+dtype (accessors byte-verified). RESIDUAL: c64 axis0/midaxis
+~1.05-1.07x (strided-sample gather cost + load noise, down from ~1.06-1.09x). **THE ENTIRE np.argsort SURFACE
+— {int8..u64, f32, f64, c64, c128} x {flat, last-axis, axis-0, mid-axis} — is now dense-tie PARITY + distinct
+5-17x WIN.** Was ~1.06-1.49x LOSS on any tied data (common: categorical/rounded/quantized/f32-precision).
+
+**LESSON: two orthogonal generalizations compose — (per-lane via accessor) x (composite key via tuple) —
+so one ~20-line sampled-tie helper closed a 20-function family (5 dtypes x 4 axes) of the same pay-twice
+defer bug. When a bug recurs structurally, factor the fix to the axis of recurrence, not the instance.**
+AGENT_NAME=BlackThrush.
