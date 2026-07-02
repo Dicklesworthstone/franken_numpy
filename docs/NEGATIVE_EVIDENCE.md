@@ -15239,3 +15239,19 @@ non-ASCII-input defer) unaffected.
 bytes.replace (pathologically slow) and 'S' needs no non-ASCII defer (byte substrings are exact for any
 0-255). 'S' string family now: pad/multiply/expandtabs/translate/replace. Remaining 'S': add (two-operand) +
 partition/rpartition (3-tuple output).** 56 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): 'S' (bytes) np.strings.add — 2.45x
+
+`BlackThrush`. Continuing the 'S' vein. np.strings.add(bytes_a, bytes_b) (element-wise concat) delegated
+fully to numpy (~56ms/2M x S12+S10) while the 'U' equivalent already won ~3.4x. Refactored
+try_zerocopy_unicode_concat into a generic run_concat<E: Copy + PartialEq + From<u8>> (per-slot content(a) +
+content(b) null-padded to wa+wb) dispatching input kind: 'U'+'U' -> uint32 view / 'U{wa+wb}', 'S'+'S' -> uint8
+view / 'S{isa+isb}'. Pure content copy, no ASCII assumptions -> byte-exact both. Measured 2M: 2.45x (56 ->
+22.8ms). BYTE-IDENTICAL (dtype+shape+bytes) over equal+unequal widths x non-ASCII/embedded-null/empty/full-
+width + 2-D + below-gate (<1<<16) parity; mixed U+S defers (numpy raises, matched); 'U' path unaffected.
+
+**SMALLER win than other 'S' ops (2.45x vs 17-183x) because numpy's 'S' add is a bandwidth-bound C concat
+(~56ms, 1/4 the data of 'U'), NOT a per-element Python loop — so less headroom. The big 'S' wins came from ops
+numpy runs in per-element Python (translate/replace/mod). 'S' string family COMPLETE for the width/content-map
+ops: pad(ljust/rjust/center/zfill) + multiply + expandtabs + translate + replace + add. Remaining 'S':
+partition/rpartition (3-tuple output).** 57 wins. AGENT_NAME=BlackThrush.
