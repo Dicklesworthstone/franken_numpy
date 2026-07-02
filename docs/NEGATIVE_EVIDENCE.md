@@ -14306,3 +14306,26 @@ when fnp has NO native path at all — serial==parallel because it's DELEGATING,
 parallelism. Always also ask: does numpy do this SINGLE-THREADED and COMPUTE-bound? (grep whether fnp even
 has a native hook before concluding no-lever.)** f16 mean (= float16(f32_sum/n), same helper) is the obvious
 next follow-up. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): f16 flat MEAN 3.4-6x + f16 PROD 2.31x-loss -> parity
+
+`BlackThrush`. Two f16-vein follow-ups to the f16 sum win (3b4c14f5):
+
+(1) **f16 flat MEAN — 3.4-6x WIN.** numpy computes it float16(f32_pairwise_sum / float32(n)), single-threaded
+compute-bound like the sum (verified byte-exact incl n>2^24 where `n as f32` rounds == np.float32(n)). Reuse
+`par_pairwise_sum_f16`, divide by n in f32, narrow once. 16M 26.1ms->4.4ms **0.166x (6.0x)**, 8M **0.290x
+(3.4x)**; <=3M delegates at parity (gate 1<<22, same DRAM crossover). Bit-exact ALL PASS (sizes/scales/NaN-
+defer/small-delegate); NaN input defers.
+
+(2) **f16 PROD — 2.31x LOSS -> parity.** np.multiply.reduce is SEQUENTIAL (fp multiply is non-associative, so
+NO bit-exact parallel tree exists — unlike sum). f16 prod had no guard so it fell into the generic cold
+extract->f64 fold (128MB widen + build) = 2.31x SLOWER than numpy's serial f16 product (16M: 105ms vs 45ms).
+Added `if numpy_dtype_is_f16 { return fallback() }` right after the existing f32-prod delegate guard -> parity
+(45ms == 45ms), bit-exact (numpy computes it).
+
+**LESSON: SUM parallelizes bit-exactly because numpy uses a FIXED pairwise TREE (associativity of the tree
+structure, replicable); PROD does NOT because numpy multiplies SEQUENTIALLY and fp-mul is non-associative —
+so the reduction's ALGORITHM (tree vs sequential) decides parallelizability, and a non-parallelizable native
+path that widens is worse than delegating. Check numpy's reduction order before assuming a compute-bound f16
+reduction is a parallel win.** Remaining f16 reduction vein: nansum/nanmean (50/89ms, numpy pairwise-nansum
+= parallelizable via a nan-skip widen-pairwise), std/var (needs two-pass). AGENT_NAME=BlackThrush.
