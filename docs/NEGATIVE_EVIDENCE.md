@@ -14711,3 +14711,21 @@ find (INT-output substring search 17-21ms — needs an int64-output framework, n
 comparison ops. LESSON: two-pass (parallel max-width scan, then parallel build) is the template for ANY
 content-dependent-width string op (multiply, expandtabs); fixed/target-width ops (padding) skip the scan.**
 AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.strings.count/find/rfind native parallel — 4.5-9.1x (int-output string vein)
+
+`BlackThrush`. Different framework than the U-string ops: count/find/rfind return an INTP array (count = non-
+overlapping occurrences of sub per string; find/rfind = lowest/highest start index or -1). numpy runs the per-
+string search single-threaded (~18-30ms@2M x U). `try_zerocopy_unicode_search` reads UCS4 as uint32, does the
+per-string naive substring search, and writes an intp numpy.empty in parallel (par_iter_mut) — output is a
+plain count/index so BIT-EXACT regardless of order. Measured (2M): count 9.1x, find 6x, rfind 4.5x. Byte-exact
+vs numpy over subs {o,a,ab,abc,aa,xyz,café,日,.} x count/find/rfind x non-ASCII x empty strings. Delegates:
+start/end kwargs (windowed search), EMPTY sub (count=len+1/find=0 edge), ARRAY sub (broadcast), 'S'-bytes,
+below-gate. Output dtype = intp (matches numpy).
+
+**np.strings vein: case + translate/add + strip + replace/multiply + predicates + padding(4) + expandtabs +
+search(count/find/rfind) all PARALLEL now.** LESSON: string ops split into TWO output frameworks — (1) U-string
+output (case/pad/expandtabs: build a U{out_w} codepoint buffer) and (2) INT/BOOL output (count/find/predicates:
+build an intp/bool buffer, par_iter_mut one-per-element). Both read the input as uint32 UCS4; pick the output
+framework by return type. Remaining: index/rindex (find that RAISES on miss), startswith/endswith (already
+par), comparison ops. AGENT_NAME=BlackThrush.
