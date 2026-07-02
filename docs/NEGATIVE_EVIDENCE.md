@@ -13841,3 +13841,18 @@ True (300/700/1000). conformance matmul 14/14, tensordot 11/11, dot 12/12, linal
 **The OMP=1-calibration hidden-loss family is now fully swept: 2-D matmul/dot + batched + tensordot + inner +
 matrix_power all gated on blas_is_single_threaded().** Remaining (lower value): multi_dot 0.82x, matmul f32
 0.79x (f32 GEMM path) — same fix if pursued. AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED, loss fix): nanpercentile/nanquantile multi-q extract-tax — 0.88-0.95x -> parity
+
+`BlackThrush`. Extends the percentile/quantile extract-tax fix to the nan-variants. nanpercentile/nanquantile
+have NO native array-q path (only scalar q); a q-LIST tries `q.extract::<f64>()` and delegates — but only
+AFTER `extract_numeric_array` copies the whole array, so every multi-q call wastes a ~32MB copy. Measured
+2000x2000 (10% NaN): nanpercentile [25,75] flat 0.88x, [25,50,75] axis=1 0.95x (numpy's slow nan-baseline
+made the tax a smaller fraction than percentile's 0.64x, but the wasted extract is identical). FIX: hoist the
+scalar-q guard ABOVE the extract in both nanpercentile and nanquantile.
+
+Result: nanpct [25,75] flat 0.88x->1.00x, [25,50,75] ax1 0.95x->1.00x, nanquant flat/ax0 ->1.00-1.01x; all
+byte-exact (delegating). Single-q native WIN preserved (nanpct 50 flat 1.34x). Correctness 0 fails across
+q-forms {[25,50,75],[0,100],array} x axes {None,0,1}. conformance_percentile_median 25/25, nan_funcs 38/38.
+**EXTRACT-TAX LEVER now swept across the whole quantile family: percentile + quantile + nanpercentile +
+nanquantile (hoist the delegate guard above extract_numeric_array).** AGENT_NAME=BlackThrush.
