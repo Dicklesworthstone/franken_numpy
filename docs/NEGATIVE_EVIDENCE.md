@@ -15398,3 +15398,21 @@ serial `for..in output.iter() { slot.set() }` / `copy_from_slice` pattern is a f
 whenever numpy time ~= a plain memcpy of the same bytes (this box's single-thread memcpy is ~1.6GB/s). STILL
 DELEGATING at ~40ms/parity (same lever, likely serial or pure-delegate): column_stack, dstack, stack, pad
 (constant/edge), roll (1-D/2-D). Grep those next.** 65 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.roll (1-D flatten, all dtypes) parallel copy + shared par_copy_slice — 3.6-4.1x
+
+`BlackThrush`. Both 1-D roll paths — try_zerocopy_f64_roll (f64) and try_zerocopy_any_roll (byte view, all
+dtypes) — wrote their two rotated runs with SERIAL copy_from_slice (the parity; np.roll of a large array is a
+single-threaded ~64-128MB copy). Extracted a shared `par_copy_slice<T: Copy+Send+Sync>(dst,src)` (chunked
+par_chunks_mut(1<<16), gates dst.len()>=1<<16 else plain memcpy) and applied it to both roll copy sites.
+Measured 8M: f64 4.08x (37.5->10.1ms), complex128 3.59x (82.9->20.7ms). i32 only 1.50x (2.3->1.4ms) — a 32MB
+i32 array is L3-cache-resident so numpy's memcpy is already fast; the win is on MEMORY-BOUND wide dtypes
+(f64 64MB / c128 128MB spill to RAM at ~1.6GB/s single-thread). BIT-IDENTICAL over {f64,f32,i64,i32,u8,
+complex128,bool} x shifts {+,-,0,>n,-(>n),n/2} incl NaN/inf/-0.0 + 2-D-flatten + below-gate parity.
+
+**par_copy_slice is now the reusable primitive for the parallel-copy family (roll here; insert/delete/append
+have equivalent inline copies — a mechanical follow-up could route them through it too). NUANCE: the copy win
+only materializes when the array is MEMORY-bound (spills L3); cache-resident copies (<~L3, or narrow dtypes at
+moderate n) are already at numpy speed — report per-dtype, don't assume one ratio.** Remaining copy-family
+delegators: column_stack/dstack/stack, pad(constant/edge), roll per-axis/2-D(.set() loops). 66 wins.
+AGENT_NAME=BlackThrush.
