@@ -14511,3 +14511,26 @@ incl 5% NaN). Hooked into the var/std dispatchers after the f32 non-last hooks. 
 keepdims x ddof{0,1} x NaN-propagate; nanvar/nanstd unaffected by the generalization). **f16 var-family AXIS
 (var/std/nanvar/nanstd, non-last) COMPLETE; remaining: last-axis (contiguous => numpy uses f32-PAIRWISE
 sqr-dev per lane, different order — needs the pairwise-sqr-dev port + finite-lane check).** AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): f16 var/std/nanvar/nanstd LAST axis 23-101x (f16 var-family COMPLETE)
+
+`BlackThrush`. Completes the f16 var-family: the CONTIGUOUS last axis uses a DIFFERENT reduction order than
+the strided non-last one — numpy reduces each contiguous lane with the f32-PAIRWISE tree for BOTH the mean's
+nansum and the squared-deviation sum, narrowing to f16 at each stage (verified byte-exact == np.var/std/
+nanvar/nanstd(f16, axis=-1)). New `pairwise_sqr_dev_f16_widen` (leaf computes d=f16(x-avg), sq=f16(d*d),
+widens to f32, base_sum_simd_f32; split n/2 like numpy) + `try_zerocopy_f16_nanvar_lastaxis` (per lane: mean
+= float16(f32(float16(pairwise_nansum))/cnt); ss = float16(pairwise_sqr_dev(mean)); var = float16(f32(ss)/
+(cnt-ddof)); std = float16(sqrt(f32(var))); nan_skip serves nanvar, plain var counts all + propagates NaN),
+parallel across lanes. Short lanes keep the f16 sums finite (unlike the degenerate FLAT var). Measured:
+
+| f16 last-axis | numpy | fnp | ratio |
+|---|---:|---:|---:|
+| nanstd axis1 (8000,8000) | 2069ms | 20.4ms | **0.010x (101x)** |
+| nanvar axis1 (4000,4000) | 526ms | 7.2ms | **0.014x (73x)** |
+| var axis1 (4000,4000) | 216ms | 9.4ms | **0.044x (23x)** |
+
+Bit-exact ALL PASS (var/std/nanvar/nanstd x last-axis x keepdims x ddof{0,1} x NaN-propagate; non-last
+unaffected). Gate 1<<20. **f16 var-family COMPLETE across all axes: FLAT rejected as degenerate-inf; non-last
+= per-lane SEQ-f16 (26-73x); last-axis = per-lane f32-PAIRWISE (23-101x). LESSON: the contiguous vs strided
+axis-kind picks not just SUM order but the WHOLE two-pass's order (pairwise for both passes on the fast
+axis).** f16 reduction vein spans sum/mean/nansum/nanmean/var/std/nanvar/nanstd across flat+all axes. AGENT_NAME=BlackThrush.
