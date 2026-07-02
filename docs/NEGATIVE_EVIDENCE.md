@@ -14014,3 +14014,34 @@ still defers to numpy/FFT unchanged.
 **LESSON: a "cap" on a fast path may predate a later parallelization — re-measure whether raising it wins;
 a rejection of ONE algorithm (FFT) for a band doesn't mean the band can't be won by ANOTHER (parallel
 direct).** AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED): bound the large-kernel gather to out_len>=PAR_MIN — fixes ce24abcb SMALL-output regression
+
+`BlackThrush`. Follow-up to ce24abcb (raise GATHER_MAX_M 128->4096). That commit measured its wins ONLY at
+4M signals (out_len>=PAR_MIN=1<<19, where the gather PARALLELIZES) but the raised cap also engaged the gather
+for SMALL outputs, where it runs SERIAL — O(out_len*mk) with a wide sliding window that thrashes cache and
+LOSES to numpy's tight C loop. Clean-box A/B (300K signal, 20th-pctile interleaved, rebuilt no-guard vs
+with-guard .so):
+
+| 300K signal | numpy | fnp NO-GUARD (ce24abcb) | ratio | fnp WITH-GUARD | ratio |
+|---|---:|---:|---:|---:|---:|
+| convolve k=256  | 10.09ms |  15.29ms | 1.52x LOSS | 9.03ms  | 1.00 par (numpy delegate) |
+| convolve k=512  | 18.07ms |  28.91ms | 1.60x LOSS | 16.75ms | 1.00 par |
+| convolve k=1024 | 36.91ms |  64.51ms | 1.75x LOSS | 32.59ms | 1.00 par |
+| convolve k=2048 | 73.79ms | 129.68ms | 1.76x LOSS | 65.91ms | 1.00 par |
+| convolve k=4096 | 150.94ms | 268.83ms | 1.64x LOSS | **12.66ms** | **0.084x = 11.9x WIN** (FFT) |
+
+FIX: in `try_zerocopy_conv_corr_f64`, `if mk > 128 && out_len < (1<<19) { return Ok(None) }` — defer small-
+output large kernels to their PRE-EXISTING routes: 129<=k<=2048 -> `conv_corr_should_delegate_midkernel`
+(numpy, parity), k>2048 -> the native FFT/scatter path (which at these small outputs is 11.9-13.5x FASTER
+than numpy's O(n*m); 300K k=4096 full 0.084x, valid/same 0.074x). The 1<<19 threshold == PAR_MIN, the exact
+serial->parallel crossover: below it the gather is serial (loses), at/above it parallelizes (wins). Crossover
+verified with-guard: out=522047 (below gate) 0.998 par, out=532047 (above gate) **0.157x = 6.4x WIN**. ALL
+ce24abcb large-signal wins PRESERVED: 4M k=256 0.066x, k=2048 0.051x. Shared helper so covers convolve AND
+correlate; small kernels (mk<=128) unchanged (gather at all sizes). conformance_convolution unaffected (its
+cases use tiny kernels k<=128 that never reach the guard).
+
+**LESSON: when raising a fast-path cap, the new upper band may only win where a LATER-stage gate (here the
+serial->parallel PAR_MIN) also fires — measure the WHOLE size range, not just the large end. ce24abcb benched
+only 4M (all >=PAR_MIN) and shipped a 1.5-1.76x regression for every 300K-signal large kernel. Gate the fast
+path at the SAME crossover its parallelization uses.** AGENT_NAME=BlackThrush.
