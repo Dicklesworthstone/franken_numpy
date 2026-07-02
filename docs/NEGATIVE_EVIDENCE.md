@@ -14763,3 +14763,23 @@ find + an all-found gate — flag any sentinel (-1) during the parallel fill wit
 numpy on the error path, so the native never has to reproduce numpy's exact exception message. Remaining
 np.strings: slice (width-change, fiddly Python slice.indices semantics), partition/rpartition, char-module
 mirror. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.strings.slice native parallel — 3.8-4x (last sizable np.strings op)
+
+`BlackThrush`. Python-slice-per-string. numpy single-threaded ~58ms@2M x U. try_zerocopy_unicode_slice reads
+UCS4, replicates CPython PySlice_GetIndicesEx clamping per string (negatives, step, None bounds, reverse),
+copies the sliced codepoints into a U{w} output in parallel. Measured (2M): all forms ~4x. BYTE-IDENTICAL
+(dtype+shape+tobytes, not just values) over 16 cases: 1-arg/2-arg/3-arg, negatives, step>1, step<0 (reverse),
+None bounds, out-of-range, empty x 3 sizes.
+
+**TWO SEMANTIC GOTCHAS caught by probing numpy FIRST (not assuming): (1) OUTPUT DTYPE = INPUT width (numpy does
+NOT shrink U9->U3 for a 3-char slice) — got this only because I checked .dtype/.tobytes, since np.array_equal
+IGNORES dtype/width (a values-only test would have shipped a wrong-itemsize array). (2) numpy.strings.slice is
+POSITIONAL-ONLY (a,start,stop,step,/) AND uses the Python slice() 1-arg rule: slice(a,x) means stop=x/start=
+None, NOT start=x. Delegate any kwarg (numpy raises TypeError) + replicate the 1-arg->stop remap.** LESSON:
+for byte-exactness ALWAYS compare dtype+tobytes not np.array_equal (which is values-only, width-blind); and
+probe the real numpy arg convention (positional-only? 1-arg meaning? default-width?) before coding.
+
+**np.strings PER-ELEMENT VEIN EXHAUSTED: case/translate/add/strip/replace/multiply/predicates(7)/padding(4)/
+expandtabs/search(5)/slice all PARALLEL.** Only par/fast small ops (startswith/endswith/comparison/str_len/
+isdecimal/isnumeric) + the char-module legacy alias remain. AGENT_NAME=BlackThrush.
