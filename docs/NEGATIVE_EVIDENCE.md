@@ -14729,3 +14729,22 @@ output (case/pad/expandtabs: build a U{out_w} codepoint buffer) and (2) INT/BOOL
 build an intp/bool buffer, par_iter_mut one-per-element). Both read the input as uint32 UCS4; pick the output
 framework by return type. Remaining: index/rindex (find that RAISES on miss), startswith/endswith (already
 par), comparison ops. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.strings.isupper/islower/istitle native parallel — 3.9-8.4x (ASCII)
+
+`BlackThrush`. Completes the predicate family (isalpha/isdigit/isalnum/isspace already native). Extended
+try_zerocopy_unicode_ispredicate with modes 4/5/6 — these need per-string CASE-STATE logic (not the "all
+chars in class" pattern): isupper = >=1 cased char AND no lowercase; islower = >=1 cased AND no uppercase;
+istitle = CPython rule (a cased char follows an uncased one only if UPPER, a lowercase follows a cased one;
+>=1 cased). ASCII-only (the framework already defers any codepoint >0x7f to numpy, since A-Z/a-z is the full
+ASCII cased set). Measured ASCII-only 2M: isupper 6.0x (33->5.6ms), islower 3.9x, istitle 8.4x (55->6.5ms).
+Bit-exact vs numpy over title/upper/lower/mixed/digit/punct/empty/single strings; non-ASCII arrays defer
+(byte-exact, same ~1ms pre-scan cost as the existing isalpha natives -> a ~1.07x non-ASCII-array microloss,
+consistent with the family).
+
+**np.strings PREDICATE family COMPLETE (isalpha/isdigit/isalnum/isspace/isupper/islower/istitle).** LESSON:
+predicates split into STATELESS ("all chars in class": isalpha/isdigit) and STATEFUL (per-string case-state
+machine: isupper/islower/istitle) — the stateful ones need a custom per-string loop, not the shared all()-
+over-in_class; both share the read-UCS4 + defer-non-ASCII + bool-output-par_iter_mut skeleton. Remaining
+strings: index/rindex (find-that-raises: run search, if any -1 delegate for the exact ValueError), slice
+(width-change), char-module mirror. AGENT_NAME=BlackThrush.
