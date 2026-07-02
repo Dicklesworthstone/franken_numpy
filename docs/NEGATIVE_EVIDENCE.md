@@ -14248,3 +14248,32 @@ exact=True across ties/distinct for every axis+dtype (accessors byte-verified). 
 so one ~20-line sampled-tie helper closed a 20-function family (5 dtypes x 4 axes) of the same pay-twice
 defer bug. When a bug recurs structurally, factor the fix to the axis of recurrence, not the instance.**
 AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - CONVERGENCE MAP (post-argsort-family): 13-domain sweep found NO new clean lever
+
+`BlackThrush`. After closing the argsort family, swept 13 domains at scale (8-16M / 4000² / 2000³) to find
+the next real loss. Result: the surface is CONVERGED — every substantive (>1ms) op is WIN or parity. Logging
+what was checked so future agents don't re-tread (all clean HEAD 6e6447e8, 20th-pctile interleaved):
+
+- **Set ops** isin/intersect1d/union1d/setdiff1d/setxor1d: 2.8-43x WIN. **einsum** ij,jk->ik 41x WIN; batchdot/
+  diag/rowsum par. **unique** return_inverse 20x WIN; unique(axis=0/1) par (delegated).
+- **Stencil/scan** gradient 6.6x, ediff1d 3.5x, histogramdd 3.5x, histogram2d 9.6x, digitize 20x, median-axis
+  3-4x, vander 2.7x, count_nonzero 1.7x, repeat-axis 4.3x, triu 1.8x, tril_indices 1.1x WIN.
+- **PARITY (bandwidth/SIMD/delegated, no lever):** pad (all 6 modes), packbits/unpackbits, add.at scatter,
+  add.reduceat, is_busday, sum/prod/mean/std/max with where=/dtype=, boolean all/any, average+weights, insert/
+  delete, fill_diagonal, block, diff(n=2/prepend), piecewise, select, take/compress/extract, gradient(coords),
+  argpartition/partition (incl. ties — delegated, no native pay-twice), non-contiguous sum/std/argmax/cumsum on
+  m.T and a[::2], FFT fft/fft2 (rfft 1.06x WIN), maximum/minimum/fmax/fmin f32.
+- **NON-LEVERS (pure passthrough — fnp already 100% delegates, apparent 'loss' = loaded-box variance on multi-
+  second LAPACK):** np.roots (deg500 1.22x), linalg.inv/det/cholesky/qr/lstsq/pinv 2-D (all `return fallback()`
+  to numpy per the STALE-CLIFF delegation; native inv measured LOSES at every size).
+- **MICROSECOND DISPATCH NOISE (not real):** argmax/ptp flat at n<=131K read 1.08-1.27x but default==RAYON=1
+  and the ratio->1.0 as n grows => ~3us FIXED wrapper overhead on a 0.01-0.12ms op; fliplr/rot90 (return VIEWS,
+  0.003ms) and all/any (early-exit, 0.002ms) read 1.1-2.7x on sub-microsecond ops. All negligible-absolute.
+
+**LESSON: the fnp perf surface is at convergence — the remaining apparent losses are (a) pure passthroughs
+with no code to optimize, or (b) fixed ~us dispatch overhead on ops whose absolute time is already <0.15ms.
+Before chasing a ratio, check: does fnp even have a native path (grep the pyfunction for `return fallback()`/
+`core_numpy_passthrough`)? is default==RAYON=1 (=> not parallel, likely dispatch)? does the ratio->1.0 with n
+(=> fixed overhead, not kernel)? is the absolute time <1ms (=> not worth it)? All three killed every candidate
+this sweep.** AGENT_NAME=BlackThrush.
