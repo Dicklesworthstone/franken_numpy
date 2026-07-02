@@ -14694,3 +14694,20 @@ real correctness risk — reproduce CPython's exact formula and verify over BOTH
 variants; the parallel framework itself is shared. np.strings padding family (ljust/rjust/center/zfill) now
 COMPLETE.** Remaining strings candidates: count/find (int-output substring search 17-21ms), expandtabs (133ms),
 rfind/index/partition. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.strings.expandtabs native parallel — 7.5-8.6x (biggest string op)
+
+`BlackThrush`. The biggest single delegating np.strings op (275ms@2M x U). expandtabs replaces each '\t' with
+spaces up to the next multiple of tabsize (default 8); '\n'/'\r' reset the column. Width-changing (output len
+depends on tab count), so two-pass like multiply: `try_zerocopy_unicode_expandtabs` computes max expanded
+width in a parallel pass then builds the U{out_w} output per-string in parallel (par_chunks_mut). Measured
+(2M): default 7.5x (275->37ms), tabsize=4 8.6x. BYTE-EXACT (pure codepoint transform) vs numpy over tabsize
+{0,1,2,3,4,8,default} x tabs/newlines(\n,\r)/mixed-column strings x non-ASCII x empty x no-tab arrays;
+'S'-bytes / array-tabsize defer to numpy.
+
+**np.strings vein now: case (upper/lower/swapcase/cap/title) + translate/add + strip family + replace/multiply
++ predicates (isalpha/...) + padding (ljust/rjust/center/zfill) + expandtabs all PARALLEL. Remaining: count/
+find (INT-output substring search 17-21ms — needs an int64-output framework, not the U-string one) + the
+comparison ops. LESSON: two-pass (parallel max-width scan, then parallel build) is the template for ANY
+content-dependent-width string op (multiply, expandtabs); fixed/target-width ops (padding) skip the scan.**
+AGENT_NAME=BlackThrush.
