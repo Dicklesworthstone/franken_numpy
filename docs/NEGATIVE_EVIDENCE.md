@@ -15382,3 +15382,19 @@ gate n>=1<<16. Measured 8M: idx=5 3.64x (39.0->10.7ms), idx=mid 3.53x (39.7->11.
 of a strided slice is piecewise so it needs a parallel gather/compaction (still OPEN, harder). insert+delete
 scalar memcpy family now parallel (f64 only; int/f32 still delegate = a widen-generic follow-up).** 64 wins.
 AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.append (axis=None, all fixed-width dtypes) parallel copy — 2.8-3.6x
+
+`BlackThrush`. try_zerocopy_append_flat (append's axis=None byte-concat path) had a SERIAL per-element
+`slot.set(src.get())` Cell copy loop over the uint8 view = the parity (~40ms@8M, numpy.append is a
+single-threaded ~64MB copy). Replaced with chunked rayon par_chunks_mut(1<<16) byte copy of the two runs
+(split_at_mut(na)); gate na+nv>=1<<16. Because it operates on the uint8 VIEW it covers EVERY fixed-width dtype
+in one path. Measured 8M (2x4M): f64 3.63x (41.2->12.9ms), i64 2.80x (39.2->14.0ms). BIT-IDENTICAL over
+{f64,f32,i64,i32,u8,complex128,bool} incl NaN/inf/-0.0 verbatim + 2-D-input-flatten + scalar values +
+below-gate parity; axis!=None (per-axis) / dtype-promoting values (int arr + float) defer to numpy.
+
+**PARALLEL-COPY FAMILY now: concatenate/hstack/vstack/tile (pre-existing) + insert + delete + append. The
+serial `for..in output.iter() { slot.set() }` / `copy_from_slice` pattern is a free ~3-6x via par_chunks_mut
+whenever numpy time ~= a plain memcpy of the same bytes (this box's single-thread memcpy is ~1.6GB/s). STILL
+DELEGATING at ~40ms/parity (same lever, likely serial or pure-delegate): column_stack, dstack, stack, pad
+(constant/edge), roll (1-D/2-D). Grep those next.** 65 wins. AGENT_NAME=BlackThrush.
