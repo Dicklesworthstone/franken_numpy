@@ -15416,3 +15416,19 @@ only materializes when the array is MEMORY-bound (spills L3); cache-resident cop
 moderate n) are already at numpy speed — report per-dtype, don't assume one ratio.** Remaining copy-family
 delegators: column_stack/dstack/stack, pad(constant/edge), roll per-axis/2-D(.set() loops). 66 wins.
 AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.pad (1-D constant mode, all numeric dtypes) parallel interior copy — 3.7-4.1x
+
+`BlackThrush`. Both pad constant-mode native paths (try_zerocopy_f64_pad_1d_constant + the byte-view
+try_zerocopy_pad_bytes_1d_constant covering f32/int*/complex/bool) zeroed the two small edge runs then wrote
+the INTERIOR with a serial copy_from_slice — the bulk, and the parity (~39-76ms@8M). Routed the interior copy
+through the shared par_copy_slice; edges stay a plain .fill(0). Measured 8M pw=1000: f64 4.08x (38.7->9.8ms),
+complex128 3.73x (76.4->20.4ms). BIT-IDENTICAL over {f64,f32,i64,i32,u8,complex128,bool} x pad_width
+{scalar,(before,after),[(b,a)],0} incl NaN/inf/-0.0 + below-gate parity; non-constant mode (edge/reflect/...) /
+constant_values!=0 / 2-D (multi-axis) pad defer to numpy.
+
+**par_copy_slice reuse #2 (roll, now pad). Parallel-copy family this session: insert/delete/append/roll/pad
+(+ pre-existing concatenate/hstack/vstack/tile). Remaining copy delegators: column_stack/dstack/stack (stacking
+wrappers), roll per-axis/2-D (.set() loops, strided). The general lesson holds: a native path can be correct
+yet sit at parity because its dominant COPY is a serial copy_from_slice/Cell.set — route the big run through
+par_chunks_mut.** 67 wins. AGENT_NAME=BlackThrush.
