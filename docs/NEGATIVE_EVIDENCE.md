@@ -14802,3 +14802,20 @@ ALWAYS verify string/dtype-changing ops with `x.dtype==y.dtype and x.tobytes()==
 np.array_equal. Re-audited ALL width-changing ops (ljust/rjust/center/zfill/slice/multiply) with tobytes ->
 all byte-identical; only expandtabs was wrong. The np.char mirror bx-test is what surfaced it.**
 AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): native np.datetime_as_string[D] — 13.3x (pivot off strings to datetime)
+
+`BlackThrush`. np.datetime_as_string formats each datetime64 element SINGLE-THREADED (~240ns/elem => ~900ms@4M
+across ALL units — the biggest single delegating op found). Implemented the datetime64[D] common case natively:
+Howard Hinnant civil_from_days (days-since-1970 -> Y/M/D) + manual digit formatting into a U28 codepoint buffer,
+parallel. Measured 4M: 894->67ms **13.3x WIN**. BYTE-IDENTICAL (dtype+tobytes) vs numpy over 3M values incl huge
+negatives, NaT (i64::MIN -> 'NaT'), year-0/BCE ('%04d' = sign counts toward width, -1 -> '-001'), 5-digit years,
+2-D. Fixed out_w=28 (numpy over-allocates a constant per unit). Delegates: non-[D] units, unit/timezone/casting
+kwargs, extra positionals, n<4096, non-contiguous, timedelta64.
+
+**KEY: Rust `/` truncates toward zero == C, which is exactly what Hinnant's `z>=0?z:z-146096` era adjustment
+assumes — so the Rust civil algorithm is byte-exact with numpy. (My Python PROTOTYPE was wrong at first because
+Python `//` FLOORS: negative-day off-by-one. Prototype the algorithm in the TARGET language's division
+semantics, or emulate C-truncation in Python before trusting it.)** Next datetime units: [s]/[h]/[m] (add
+'THH:MM:SS' from seconds-of-day), [ms]/[us]/[ns] (+ fractional). Same civil core, per-unit format+width.
+AGENT_NAME=BlackThrush.
