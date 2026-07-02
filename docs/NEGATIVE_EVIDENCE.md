@@ -15222,3 +15222,20 @@ gated, defers non-ASCII), the byte table covers 0-255 so NO non-ASCII defer — 
 bigger win (numpy's per-element Python bytes.translate is pathologically slow).** deletechars form (length-
 changing) + non-256 table + table[0]!=0 defer. 'S' width/content-map family: pad/multiply/expandtabs/translate.
 Remaining 'S': add (two-operand, itemsize_a+itemsize_b). 55 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): 'S' (bytes) np.strings.replace — 16.8-19.6x
+
+`BlackThrush`. Continuing the 'S' vein. np.strings.replace(bytes_arr, old, new) delegated fully to numpy
+(per-element Python bytes.replace, ~82-94ms/2M x S12) while the 'U' equivalent already won ~6.5x. Refactored
+try_zerocopy_unicode_replace into a generic run_replace<E: Copy + PartialEq + PartialOrd + From<u8>> (two-pass:
+max result length via non-overlapping leftmost match count, then build null-padded) dispatching dtype kind: 'U'
+-> uint32 view / 'U{maxlen}' (str old/new, gates non-ASCII), 'S' -> uint8 view / 'S{maxlen}' (bytes old/new,
+NO ASCII gate). Measured 2M: a->XY 17.11x, ab->Z 16.76x, a->'' 19.57x (fnp 4-5.5ms). BYTE-IDENTICAL over grow/
+shrink/equal/delete/non-ASCII-old(b'\xff')/multichar-old/no-match/expand x embedded-null/non-ASCII/empty/full-
+width content + 2-D + below-gate (<1<<16) parity; empty-old + count!=default defer to numpy; 'U' path (incl its
+non-ASCII-input defer) unaffected.
+
+**'S' replace wins BIGGER than 'U' (17-19x vs 6.5x) because numpy's 'S' path is per-element Python
+bytes.replace (pathologically slow) and 'S' needs no non-ASCII defer (byte substrings are exact for any
+0-255). 'S' string family now: pad/multiply/expandtabs/translate/replace. Remaining 'S': add (two-operand) +
+partition/rpartition (3-tuple output).** 56 wins. AGENT_NAME=BlackThrush.
