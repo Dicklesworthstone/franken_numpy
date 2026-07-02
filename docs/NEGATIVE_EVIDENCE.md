@@ -13941,3 +13941,28 @@ Page-fault vein now: outer + repeat + tile + concatenate + full + ones/like + me
 (PRE-EXISTING, out of scope: np.indices(dtype=None) -> float64 in numpy [np.dtype(None)==float64] but fnp
 defaults int64 — the pyfunction signature can't distinguish no-dtype from explicit None; unchanged by this
 diff, not covered by conformance. Also fnp.indices lacks the sparse= kwarg.) AGENT_NAME=BlackThrush.
+
+## 2026-07-01 - WIN (LANDED): parallelize native np.tri — 2.5-5.8x (page-fault wall)
+
+`BlackThrush`. Ninth page-fault-wall win. np.tri delegated to numpy (an old native UFuncArray build-then-
+convert path was 18-178x slower and abandoned); numpy's serial fill of the large (n,m) grid is first-touch
+page-fault bound (~2 GB/s; np.tri(6000,6000) 162ms f64). Added `try_zerocopy_tri` + `tri_fill_typed<T>`: each
+row i has ones_count=clamp(i+k+1,0,m) copies of the dtype's 1-bit-pattern then zeros, fanned per-row across
+the rayon pool. BIT-EXACT: 0 = all-zero bytes for every numeric/bool dtype; `one_bits` read from
+numpy.ones((1,),dtype).view(uintN) so the 1-value byte pattern matches numpy exactly. Gate n*m >= 1<<22;
+1/2/4/8-byte b/i/u/f dtypes; small / 16-byte / complex defer to the numpy path (its serial build is correct).
+
+Verified byte-identical vs numpy over shapes {2100^2,6000^2,4000x8000,8000x4000,4x5,1x1,5x3} x k in
+{0,±1,±3,±100,±M} x {default,f64,f32,f16,i64,i32,i8,u16,bool} (0 fails), plus m=None / small / complex128
+defer. conformance_eye_diag 24/24, array_creation 5/5, grid_objects 7/7 green.
+
+| Probe (min-of-many, 64 threads) | numpy | fnp | fnp/numpy |
+|---|---:|---:|---:|
+| tri 6000x6000 f64 | 162.4ms | 36.5ms | 0.22x (~4.5x) |
+| tri 6000x6000 k=100 | 159.3ms | 39.6ms | 0.25x (~4.0x) |
+| tri 6000x6000 int8 | 39.2ms | 6.7ms | 0.17x (~5.8x) |
+| tri 6000x6000 bool | 18.1ms | 7.4ms | 0.41x (~2.5x) |
+| tri 4000x8000 f32 | 68.8ms | 17.7ms | 0.26x (~3.9x) |
+
+Page-fault vein now: outer + repeat + tile + concatenate + full + ones/like + meshgrid + indices + tri
+(9 wins). AGENT_NAME=BlackThrush.
