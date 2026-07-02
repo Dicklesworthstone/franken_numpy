@@ -14931,3 +14931,19 @@ delegate.
 common printf surface is native 33-71x.** Method held again: standalone-Rust-verify the primitive, then reformat
 the parts where Rust's spec differs from C (exponent sign/pad, nan/inf case). Remaining printf (niche): %g
 (picks %e/%f + strips zeros — complex), float width/flags. 39 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.strings.decode (ASCII) — 22.7x; encode REJECTED (bandwidth loss)
+
+`BlackThrush`. np.strings.decode (S bytes -> U str) runs str.decode per element single-threaded (~350-490ms@2M).
+For PURE-ASCII bytes (all < 128) each codepoint == the byte -> identity copy into a U{max content} output,
+parallel. Measured 2M: decode 22.7x (386->17ms); even wide-S input (S40) wins 1.8x. BYTE-IDENTICAL (dtype+
+tobytes) over encodings {None/utf-8/ascii/latin-1} x 2-D x char.decode mirror; any byte >= 128 (multi-byte utf-8)
+defers. Symmetric out_w = tight max content length (verified S8-content-2 -> U2, not capacity).
+
+**encode (U -> S) REJECTED: measured 1.05x LOSS. Root: decode reads a COMPACT S input (1 byte/char) but encode
+reads the WIDE U input (4 bytes/codepoint) — the max-content + build passes over the 4x-larger U buffer (incl
+null padding) make it bandwidth-bound and it never beats numpy's per-element str.encode. So decode wins big
+(compact source) while its inverse doesn't (wide source). LESSON: for a dtype-narrowing conversion, the WIN is
+on the side that READS the compact representation; reading the wide side (U) in multiple passes is bandwidth-
+bound. Ship the winning direction, delegate the other.** encode left as the numpy re-export (parity). 40 wins.
+AGENT_NAME=BlackThrush.
