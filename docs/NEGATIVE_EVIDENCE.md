@@ -15186,3 +15186,20 @@ content copy, non-ASCII bytes repeated verbatim). Measured 2M: x2 4.87x, x3 4.32
 uint32/uint8 views. Remaining 'S' width ops: add (numpy sizes out to itemsize_a+itemsize_b, NOT maxcontent —
 different rule, verify separately) + expandtabs (buffersize reserves 1 byte/char not 4).** 53 wins.
 AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): 'S' (bytes) np.strings.expandtabs — ~4.1x
+
+`BlackThrush`. Continuing the 'S' vein. np.strings.expandtabs(bytes_arr, tabsize) delegated fully to numpy
+(~46-61ms/2M single-threaded) while the 'U' equivalent already won ~3.6x. Refactored
+try_zerocopy_unicode_expandtabs into a generic run_expandtabs<E: Copy + PartialEq + From<u8>> dispatching dtype
+kind: 'U' -> uint32 view / 'U{out_w}', 'S' -> uint8 view / 'S{out_w}'. THE ONE ENCODING DIFFERENCE: numpy's
+_expandtabs_length buffer reservation is sizeof(cell) per non-tab char (4 for 'U'/ucs4, 1 for 'S'/byte) + the
+tab's true expansion; handled generically via cell_bytes = size_of::<E>(). The BUILD (tab -> spaces, others
+copied verbatim, null-pad) is identical. Measured 2M: ts=8 4.11x, ts=4 4.04x. BYTE-IDENTICAL (dtype+shape+
+bytes; verified S10 ts=8 -> S17 vs U10 ts=8 -> U20) over tabsize {8,4,2,1,0,default} x tabs/\n/\r-column-reset/
+non-ASCII/empty/no-tab content + 2-D + below-gate (<1<<20) parity; 'U' path unaffected.
+
+**'S' width-op family now: pad(ljust/rjust/center/zfill) + multiply + expandtabs — all one generic-E kernel
+dispatched on the input dtype kind (uint32/uint8 view, '{U|S}{w}' output). Remaining 'S': add (numpy sizes out
+to itemsize_a+itemsize_b, two-operand — different plumbing) + translate (byte table). Content ops (count/find/
+strip/replace/predicates) already probed at PARITY.** 54 wins. AGENT_NAME=BlackThrush.
