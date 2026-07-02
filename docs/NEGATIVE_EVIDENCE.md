@@ -14136,3 +14136,34 @@ common tuple-of-arrays input.
 **LESSON: never `np.asarray(container)` just to read a dtype/kind/shape — that copies the payload. Use
 `np.result_type`/`.dtype`/`.shape` (metadata-only) for routing decisions. A "sniff" that materialises the
 data it's sniffing turns a free dispatch check into an O(n) tax that grows with the operand.** AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): FLOAT argsort sampled tie oracle — tie-data 1.19-1.49x loss -> parity
+
+`BlackThrush`. The f64/f32 flat argsort fast paths are byte-exact vs numpy's UNSTABLE argsort ONLY for
+tie-free data, so they sort a permutation then DEFER on any tie = pay the full native sort AND numpy's
+re-sort (pay-twice). Float ties are COMMON (rounded/quantized/discrete/many-zeros; f32 precision makes ~5%
+ties on ANY continuous input — 418k dups in 8M). Truly-distinct floats WIN ~5x, so the loss is purely the
+tie-defer. Floats have NO pigeonhole (a range holds astronomically many values), so the int fix doesn't port.
+
+FIX: a SAMPLED tie oracle before the sort — sort K=65536 strided values; a duplicate in the sample PROVES
+the array has ties, so defer cheaply (~1ms) instead of pay-twice. **Zero correctness risk: the caller's own
+post-sort tie-scan is the net — we only defer on an ACTUAL observed duplicate (never a false defer), and a
+missed SPARSE tie still defers at the scan (never wrong output).** Measured 8M (20th-pctile interleaved):
+
+| 8M f64/f32 argsort | numpy | fnp BEFORE | fnp AFTER |
+|---|---:|---:|---:|
+| f64 rounded 2dp     | ~450ms | 455ms 1.42x LOSS | ~parity (1.05x, load-noisy) |
+| f64 int-valued      | 394ms  | 496ms 1.26x LOSS | **0.99x par** |
+| f32 continuous ties | 467ms  | 602ms 1.29x LOSS | **1.02x par** |
+| f64 distinct (WIN)  | 559ms  | 139ms 0.25x WIN  | **0.21x WIN preserved** |
+| f32 distinct (WIN)  | 780ms  | 144ms 0.19x WIN  | **0.20x WIN preserved** |
+
+Distinct arrays find no sample dup and keep the win (strided gather+sort of 64K = negligible vs the full
+sort). exact=True + valid=True across dense-tie / distinct / NaN(defer) cases. RESIDUAL (honest): only
+genuinely SPARSE ties (a handful in millions, so the 64K strided sample misses them) still hit the pay-twice
+tail — rare. Only the FLAT float paths done; float axis (last/axis0/mid) argsort keep pay-twice (follow-up).
+
+**LESSON: when a fast path DEFERS on a rare-but-uncheaply-detectable condition and has its own correct
+fallback verify, a cheap PROBABILISTIC pre-check (here: a duplicate in a K-strided sample => certain tie)
+is safe — it can only skip wasted work, never change output. Sampling gives a pigeonhole where the value
+domain is too large for an exact one.** AGENT_NAME=BlackThrush.
