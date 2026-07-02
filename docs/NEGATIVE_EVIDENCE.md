@@ -15033,3 +15033,18 @@ a finite-difference boundary stencil has a UNIQUE byte-exact spelling; reverse-e
 + coefficient source by probing MULTIPLE dx (esp. non-power-of-2 like 3.7, 0.01) — a single dx=1 test passes
 for 3 different wrong formulas.** 44 wins. The ufunc gradient_advanced's own edge2 (-3f0+4f1-f2)/2 form is only
 allclose — this zero-copy path is stricter (byte-exact) AND faster. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.gradient edge_order=2 NON-LAST (strided) axis — 7.8-7.9x
+
+`BlackThrush`. Completes gradient edge_order=2: extended try_zerocopy_f64_gradient_strided_axis (non-last axis
+row-combine kernel) the same way as the 1-d/last-axis path (2167f539) — interior central-diff shared, only the
+2 boundary rows use numpy's uniform edge2 coefficients (-1.5/dx,2/dx,-0.5/dx first; 0.5/dx,-2/dx,1.5/dx last;
+per-row over `inner`). Measured: 4000² axis=0 7.8x (156->20ms), 256³ axis=1 7.9x. BYTE-IDENTICAL over shapes x
+dx{1,3.7,0.01} x all non-last axes. gradient edge_order=2 now native on EVERY single-axis case (1-d/last +
+strided); axis=None-full-tuple + coordinate-array spacing still delegate.
+
+**PROCESS LESSON (cost a misdiagnosis): a build+bench in ONE bash command TIMED OUT mid-build -> the cp copied
+a STALE .so (previous build) and the bench read PARITY -> I nearly concluded 'strided edge2 doesn't win'. The
+source edits were correct; the .so just lacked them. ALWAYS confirm the build printed 'Finished' before trusting
+a bench; when a just-added native path reads exactly PARITY, suspect a stale/incomplete build BEFORE suspecting
+a dispatch gate (rebuild in a SEPARATE command first).** 45 wins. AGENT_NAME=BlackThrush.
