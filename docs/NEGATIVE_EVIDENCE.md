@@ -14588,3 +14588,23 @@ tan (all finite, n=63488), arcsin/arccos (|x|<=1, n=30722), arccosh (x>=1, n=163
 arcsinh (all finite) — all 0 mismatch. Always confirm the fast path ENGAGES before trusting a bit-exact pass
 on a warning/domain-guarded op.** f16 inverse-trig + inverse-hyperbolic COMPLETE. Remaining: sinh/cosh
 (overflow pre-scan), exp/expm1/log/log1p (overflow/negative). AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): f16 exp/expm1/log/log1p/log2/log10/sinh/cosh 10.7-26x (exhaustively proven)
+
+`BlackThrush`. Third f16-transcendental batch. Kernel arms in try_zerocopy_f16_unary_widen (v.exp()/.exp_m1()
+/.ln()/.ln_1p()/.log2()/.log10()/.sinh()/.cosh()) + overflow/negative defer pre-scans: sinh/cosh defer |x|>=11
+(overflow ~11.77), exp/expm1 defer x>=11 (overflow ~11.09; large-negative underflows to 0, warning-free, stays
+native), log/log2/log10 defer x<=0, log1p defers x<=-1. Measured (in-domain 16M): expm1 26x, sinh 20x, cosh
+18.5x, log10 12.5x, log2/log/log1p 11x, exp 10.7x.
+
+**DISPATCH CATCH: sinh/cosh/expm1/log1p route through native_unary_promoting_or_passthrough -> the widen path,
+so they engaged immediately. But exp/log/log2/log10 are STANDALONE core_numpy_passthrough pyfunctions (they
+were deliberately kept as passthroughs for f32/f64 SIMD) — my kernel arms for them were DEAD CODE reading
+parity until I added an f16-only hook inside each pyfunction before its passthrough. This is the same
+'confirm the fast path ENGAGES' lesson (b19f477b): parity + a passing exhaustive test = the op is DELEGATING,
+not running the kernel. The f16-only hook keeps the f32/f64 SIMD passthrough intact (verified f32 unaffected).**
+
+All EXHAUSTIVELY bit-exact: native path over in-domain f16 values (exp x<11 n=50561, log x>0 n=31744, sinh
+|x|<11 n=37632, ...) AND the full-domain-defer path both 0 mismatch. f16 transcendental family COMPLETE
+(trig/inverse-trig/hyperbolic/inverse-hyperbolic/exp/log). numpy's f16 exp/log/sinh here are 89-270ms single-
+threaded widen; parallel widen wins 10-26x. AGENT_NAME=BlackThrush.
