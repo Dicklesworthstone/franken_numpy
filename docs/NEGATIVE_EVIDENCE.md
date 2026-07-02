@@ -15366,3 +15366,19 @@ NOT algorithm. When numpy time ~= a plain copy of the same bytes, a chunked par_
 multi-x.** BIG SIBLING STILL OPEN: np.delete(arr, slice) = 62ms but `arr[complement].copy()` ~4.5ms = ~14x
 (numpy builds a full bool mask); the complement of a strided slice is piecewise so it needs a gather, not a
 2-memcpy. flatnonzero stays REJECTED (prior note: kernel-bound, never wins). 63 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.delete (1-D f64 scalar-int) parallel copy — 3.5-3.6x
+
+`BlackThrush`. Sibling of the insert win. try_zerocopy_f64_delete_scalar had a native 1-D f64 single-int-index
+path but its two `copy_from_slice` (o[..idx]=data[..idx], o[idx..]=data[idx+1..]) were SERIAL memcpy (~39-48ms
+@8M single-threaded). Replaced with the same chunked rayon par_chunks_mut(1<<16) copy of the two kept runs;
+gate n>=1<<16. Measured 8M: idx=5 3.64x (39.0->10.7ms), idx=mid 3.53x (39.7->11.3ms). BIT-IDENTICAL over idx
+{0,1,5,mid,n-1,-1,-2,-n} incl NaN/inf/-0.0 verbatim + below-gate parity; slice obj / array obj / f32 / int /
+2-D-no-axis / OOB(IndexError) defer to numpy.
+
+**SCOPE NOTE (measured, not guessed): only the SCALAR-INT delete is the memcpy lever. A STEP=1 slice range
+(np.delete(a, slice(x,y))) is ALREADY ~4.5ms in numpy (it recognises the contiguous range) — no gap. The
+62ms/14x case is a STEP>1 / boolean / index-array delete, where numpy builds a full bool mask; the complement
+of a strided slice is piecewise so it needs a parallel gather/compaction (still OPEN, harder). insert+delete
+scalar memcpy family now parallel (f64 only; int/f32 still delegate = a widen-generic follow-up).** 64 wins.
+AGENT_NAME=BlackThrush.
