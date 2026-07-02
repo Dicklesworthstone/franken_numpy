@@ -14196,3 +14196,28 @@ tail. Whole float argsort family (flat + all axes) now dense-tie parity + distin
 `get(lane, idx)` — one helper covers contiguous (last axis), column-strided (axis 0), and (outer,inner)-
 strided (middle axis) lanes; finding a tie in ANY sampled lane is sufficient to defer (the op defers on
 any-lane-tie anyway).** AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): COMPLEX flat argsort sampled tie oracle — tie-data 1.42x loss -> parity (argsort family COMPLETE)
+
+`BlackThrush`. Closes the argsort tie family: c128/c64 flat argsort had the same pay-twice (sort a
+permutation by lexicographic (re,im), scan ties, defer on any tie). Complex ties are common (rounded/
+quantized/discrete real+imag). Sampled tie oracle over `(re,im)` pairs: `(f64,f64)`/`(f32,f32)` compare
+LEXICOGRAPHICALLY, so `partial_cmp == Equal` means re AND im equal — exactly the downstream tie test. A dup
+in a K=65536 strided sample proves ties -> defer cheaply. SAFE (only defers on an ACTUAL observed dup; a
+missed sparse tie still defers at the post-sort scan => output never changes). Measured 8M (20th-pctile):
+
+| complex flat argsort | numpy | BEFORE | AFTER |
+|---|---:|---:|---:|
+| c128 ties (rnd 2dp)  | 1545ms | 2240ms 1.42x LOSS | 1570ms **1.02x par** |
+| c64 ties             | 1409ms | ~1.4x LOSS | 1396ms **0.99x par** |
+| c128 distinct (WIN)  | 1478ms | 266ms 0.18x WIN | 266ms **0.18x WIN preserved** |
+| c64 distinct (WIN)   | 1356ms | 223ms 0.16x WIN | 223ms **0.16x WIN preserved** |
+
+exact=True + valid=True across ties/distinct. **The whole argsort family — {int, f64, f32, c128, c64} x
+{flat, last-axis, axis-0, mid-axis} — is now dense-tie parity + distinct win** (int flat/axes via pigeonhole
+eb1a43f9/0a6c0f07; float flat/axes via sampled oracle ccc3fcf8/207daf33; complex flat here). RESIDUAL: only
+genuinely SPARSE ties slip the sample; complex AXIS argsort (rarer) could take the per-lane oracle later.
+
+**LESSON: the sampled-tie oracle extends to composite keys — a tuple `(re,im)` whose lexicographic
+`partial_cmp==Equal` matches the op's tie definition lets one sampling idiom cover scalar AND lexicographic
+sorts.** AGENT_NAME=BlackThrush.
