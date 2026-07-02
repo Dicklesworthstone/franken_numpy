@@ -15432,3 +15432,20 @@ constant_values!=0 / 2-D (multi-axis) pad defer to numpy.
 wrappers), roll per-axis/2-D (.set() loops, strided). The general lesson holds: a native path can be correct
 yet sit at parity because its dominant COPY is a serial copy_from_slice/Cell.set — route the big run through
 par_chunks_mut.** 67 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.roll per-axis + 2-D multi-axis (f64/int) parallel — 3.1-4.4x
+
+`BlackThrush`. The per-axis (try_zerocopy_f64_roll_axis + byte try_zerocopy_any_roll_axis) and 2-D multi-axis
+(try_zerocopy_f64_roll_2d_multi) roll kernels wrote their two rotated runs with a SERIAL per-element/per-byte
+Cell.set loop over lanes/rows = the parity. Parallelized: 2-D multi -> par over output rows (each reads one
+row-shifted input row, memcpys the two column runs); per-axis -> par ACROSS lanes when outer>=2, else (outer==1,
+i.e. axis=0 = one giant lane) par WITHIN the lane via par_copy_slice. Measured 8M f64: axis=0 4.39x
+(44->11.3ms), axis=1 3.29x (37->10.6ms), both-axes 3.15x (35.5->11.2ms). BIT-IDENTICAL over f64/int32/
+complex128 x shifts{+,-,0,>len} x axes{0,1,-1,(0,1),(1,0)} + 3-D per-axis(all 4 axes) + below-gate.
+
+**TWO-ATTEMPT LESSON: parallelizing OVER lanes only fixed axis>0 (many lanes); axis=0 has outer==1 (the whole
+array is ONE lane) so lane-parallel = serial and stayed 0.98x. The single-big-lane case needs par WITHIN the
+lane's run copies (par_copy_slice). A lane/block-parallel kernel must ALSO handle the degenerate outer==1 (one
+big block) or the most-common axis (0) silently stays serial. Complex axis-roll stays delegated (pre-existing
+exclusion from the byte path — not a regression, verified correct via fallback).** Copy-family this session:
+insert/delete/append/roll(1-D+2-D+axis)/pad. 68 wins. AGENT_NAME=BlackThrush.
