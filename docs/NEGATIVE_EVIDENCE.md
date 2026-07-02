@@ -15311,3 +15311,22 @@ non-contiguous defer to numpy.
 a chained-accumulator loop that LOOKS sequential is often independent per output lane once you precompute the
 strides. Sibling lead: ravel_multi_index (152ms, benched 1.06x — its UFuncArray path may be serial too);
 copyto where= (67ms, delegates); flatnonzero (58ms, needs prefix-sum).** 60 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.ravel_multi_index parallel single-pass — 3.9-4.3x
+
+`BlackThrush`. Third hit of the serial-native-kernel vein (select, unravel_index, now ravel). try_zerocopy_ravel_c
+had a native C-order multiply-add path but its kernel was a SERIAL `for i in 0..n` with an in-loop `return None`
+on raise-mode OOB. Parallelized: flat[i] = Σ_dd transform(coord[dd][i])·stride[dd], one fused rayon pass.
+**KEY: a first attempt that PRE-VALIDATED raise-mode OOB in d separate parallel scans then computed only got
+1.28x (3-D) — the d+1 passes ate the win. Fusing the OOB check INTO the compute via an AtomicBool (a bad coord
+sets it relaxed; the par-join barriers it; discard+defer if set afterwards; wrapping_add/mul make the discarded
+garbage harmless) collapsed it to ONE pass -> 3.89x (3-D) / 4.28x (5-D).** Measured 8M: 64.67->16.63ms (3-D),
+74->17ms (5-D). BIT-IDENTICAL over shapes {(100,100,100),(4,5,5),(2,3,4,5,6),(7,11,13),(2,)x20,(1e6,)} +
+boundary coords + unravel round-trip + clip/wrap modes (OOB coords); raise-mode OOB (ValueError) / F order /
+scalar / ragged / non-int64 / 2-D-coords-shape-preserved defer or handled.
+
+**LESSON (serial-kernel vein, 3/3): when a serial loop has an early-exit VALIDATION (return None on OOB),
+don't split it into a separate pre-scan pass — that adds d passes and caps the win at ~1.3x. Fuse the check
+into the single compute pass with an atomic flag and defer AFTER the join. The scan's earlier 152ms/1.06x read
+for ravel was ALSO inflated by an in-lambda `fi%100` — real numpy is ~65ms.** Remaining serial-kernel leads:
+copyto where= (67ms), flatnonzero (58ms, prefix-sum). 61 wins. AGENT_NAME=BlackThrush.
