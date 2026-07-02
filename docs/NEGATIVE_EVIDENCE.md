@@ -14408,3 +14408,25 @@ f64-dtype guard; keepdims handled (trailing 1).
 axis (flat) OR temp-heavy (nansum). Where numpy's per-lane kernel is already SIMD-fast (contiguous sum/mean
 axis), a native per-lane path LOSES; measure numpy's per-lane cost before porting a flat win to the axis.**
 Next: f16 nanmean(axis=-1) (numpy per-lane nanmean also temp-heavy = likely win), non-last nansum. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): f16 NANMEAN last-axis 33-90x
+
+`BlackThrush`. As predicted by the last commit's lesson (numpy per-lane nanmean is temp-heavy), f16
+nanmean(axis=-1) is a big win. numpy's per-lane f16 nanmean = mask + where + sum + count + divide per lane:
+4000x4000 171ms, 8000x8000 692ms. `try_zerocopy_f16_nanmean_lastaxis`: per contiguous lane, nan-skip
+pairwise sum -> narrow to f16 -> re-widen -> divide by the per-lane non-NaN count -> narrow (same narrow-
+first semantics as flat nanmean; verified per-lane == np.nanmean(axis=-1)), parallel across lanes. If ANY
+lane is all-NaN (count 0) the whole op DEFERS so numpy emits its single "Mean of empty slice" warning.
+
+| f16 nanmean(axis=-1), 30% NaN | numpy | fnp | ratio |
+|---|---:|---:|---:|
+| (8000,8000) | 692ms | 7.7ms | **0.011x (90x)** |
+| (4000,4000) | 171ms | 2.0ms | **0.012x (84x)** |
+| (500000,64) | 369ms | 6.1ms | **0.016x (61x)** |
+| (2000,2000) | 36ms | 1.1ms | **0.030x (33x)** |
+
+Bit-exact ALL PASS (shapes x densities x keepdims x all-NaN-lane-defer). Gate 1<<20. The f16 last-axis
+nan-reduction pair (nansum 8b062fdf + nanmean here) mirrors the flat pair — both huge because numpy's per-
+lane nan-path is temp-heavy at every size. Remaining f16 vein: non-last-axis nansum/nanmean (numpy strided
+nan-reduce also slow, but the reduction order differs — verify per-lane vs numpy's strided pass first);
+plain sum/mean axis stay delegated (numpy SIMD-fast). AGENT_NAME=BlackThrush.
