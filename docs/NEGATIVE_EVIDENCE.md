@@ -15449,3 +15449,20 @@ lane's run copies (par_copy_slice). A lane/block-parallel kernel must ALSO handl
 big block) or the most-common axis (0) silently stays serial. Complex axis-roll stays delegated (pre-existing
 exclusion from the byte path — not a regression, verified correct via fallback).** Copy-family this session:
 insert/delete/append/roll(1-D+2-D+axis)/pad. 68 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): np.put_along_axis parallel scatter — 5.74x
+
+`BlackThrush`. scatter_along_typed (put_along_axis's in-place scatter, inverse of the already-parallel
+gather/take_along) had TWO serial passes: an OOB-validation scan and a per-element Cell.set scatter = the parity
+(~63ms@8M). Parallelized: (1) OOB validate via par_iter().any (indices only, always safe); (2) scatter over
+DISJOINT per-outer-lane arr regions via par_chunks_mut(la*inner) — each output lane writes arr[o*la*inner..),
+disjoint across o, so no cross-thread write conflict; within a lane the l-loop stays serial so repeated indices
+keep numpy's last-write-wins order (BIT-EXACT). Added T:Send+Sync. Measured 8M axis=1: 5.74x (62.7->10.9ms,
+under load 41 so a clean box is higher). BIT-IDENTICAL over {f64,f32,i64,i32,u8} permutation + repeated-idx
+(last-write-wins) + negative idx + axis=0 (outer==1 -> serial) + 3-D; OOB (IndexError) defers unmutated.
+
+**SCATTER-SAFETY LESSON: parallel in-place scatter is sound ONLY across disjoint output regions (per-outer-lane
+here) with serial-within-lane order preserved; and a parallel READ(val)+WRITE(arr) races if val aliases arr —
+guard with a buffer pointer-range OVERLAP check and fall back to serial (values===arr is legal in numpy). This
+mirrors take_along's gather (already parallel) — the scatter twin just needed the disjoint-region decomposition
++ alias guard.** 69 wins. AGENT_NAME=BlackThrush.
