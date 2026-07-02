@@ -14379,3 +14379,32 @@ nansum's 1<<17): nanmean adds a full non-NaN COUNT pass + narrow/re-widen, so it
 dtype at each step — np.nanmean chains np.nansum (which narrows to f16) then divides, so the sum's f16
 narrowing (and its overflow-to-inf) is OBSERVABLE and must be replicated; guessing 'f32 throughout' is wrong.**
 f16 flat nan-reduction pair (nansum+nanmean) COMPLETE. Next: std/var (two-pass), then AXIS variants. AGENT_NAME=BlackThrush.
+
+## 2026-07-02 - WIN (LANDED): f16 NANSUM last-axis 11-59x; f16 sum last-axis + std/var REJECTED (measured)
+
+`BlackThrush`. Extended the f16 vein to the last (contiguous) axis and measured which per-lane reductions
+actually win:
+
+**LANDED — f16 nansum(axis=-1) 11-59x.** numpy's per-lane f16 nansum builds an isnan-mask + where-copy per
+lane = catastrophically slow (4000x4000: 135ms; 8000x8000: 647ms). `try_zerocopy_f16_sum_lastaxis` (nan_skip
+=true) runs `pairwise_nansum_f16_widen` per contiguous lane, parallel ACROSS lanes, narrow. Bit-exact (per-
+lane == np.nansum(axis=-1), verified over shapes x densities x keepdims x all-NaN-lane). Measured (30% NaN):
+(4000,4000) 43x, (8000,8000) 59x, (500000,64) 42x, (2000,2000) 11x. Gate 1<<20; hooked ABOVE the nansum
+f64-dtype guard; keepdims handled (trailing 1).
+
+**REJECTED (measured, kept as negative evidence):**
+- **f16 sum(axis=-1) — LOSS 2.5x.** numpy's contiguous f16 sum(axis=-1) is already SIMD-fast (per-lane
+  f32-pairwise, 4000x4000 = 59ms), so a per-lane native path can't beat it (150ms). Hook removed; delegates
+  at parity. **Contrast with FLAT sum (won 4.4x): flat is ONE serial pairwise we PARALLELIZE; axis is already
+  N independent SIMD-fast lanes numpy loops — no serial bottleneck to exploit. A reduction wins parallel-
+  ization only where numpy is SERIAL on the hot dimension.** (nansum axis wins anyway because numpy's per-
+  lane nansum is slow REGARDLESS of SIMD — the temps dominate.)
+- **f16 var/std flat — REJECTED as degenerate.** `np.var(f16)` accumulates the sum-of-squared-deviations
+  through `np.sum` which NARROWS to f16, overflowing at 65504 — so f16 var == inf for any n>~65K at unit
+  variance (verified ref=inf at sc=1.0, n=131072). Matching a fast-inf is valueless and the multi-narrow
+  semantics are fiddly. Skip.
+
+**LESSON: parallelizing a per-lane reduction only wins if numpy is SLOW per lane — either serial-on-the-hot-
+axis (flat) OR temp-heavy (nansum). Where numpy's per-lane kernel is already SIMD-fast (contiguous sum/mean
+axis), a native per-lane path LOSES; measure numpy's per-lane cost before porting a flat win to the axis.**
+Next: f16 nanmean(axis=-1) (numpy per-lane nanmean also temp-heavy = likely win), non-last nansum. AGENT_NAME=BlackThrush.
