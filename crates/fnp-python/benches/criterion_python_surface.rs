@@ -490,6 +490,53 @@ fn bench_max_min_reduction_boundary(c: &mut Criterion) {
 // inner-wide plane per fold segment (~2.6x slower than numpy at large inner); the
 // column-block parallel rewrite makes it a single pass. axis=1 (middle) is the
 // already-fast block-parallel non-last path, kept here as a regression guard.
+// np.ptp(f32, axis): f32 had no ptp-axis kernel (int uses Ord-based, f64 its own), so f32
+// delegated to numpy's two-pass amax/amin (~parity non-last, a LOSS on axis=0). The f32 twin
+// (fused NaN-propagating max/min, parallel) wins ~4x (mid) and turns the axis=0 loss into a win.
+fn bench_ptp_f32_axis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_ptp_f32_axis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+mid = rng.standard_normal((512, 512, 32)).astype(np.float32)\n\
+tall = rng.standard_normal((524288, 32)).astype(np.float32)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("ptp f32 setup");
+        let fnp_ptp = module.getattr("ptp").expect("fnp ptp");
+        let numpy_ptp = numpy.getattr("ptp").expect("numpy ptp");
+        for (label, var, ax) in [("mid", "mid", 1_i64), ("axis0", "tall", 0_i64)] {
+            let arr = ns.get_item(var).expect("arr");
+            let kw = PyDict::new(py);
+            kw.set_item("axis", ax).unwrap();
+            let kw2 = kw.clone();
+            group.bench_function(format!("fnp_ptp_f32_{label}"), |b| {
+                b.iter(|| black_box(fnp_ptp.call((&arr,), Some(&kw)).expect("fnp ptp")));
+            });
+            group.bench_function(format!("numpy_ptp_f32_{label}"), |b| {
+                b.iter(|| black_box(numpy_ptp.call((&arr,), Some(&kw2)).expect("np ptp")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_ptp_axis0_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_ptp_axis0_boundary");
     group.sample_size(10);
@@ -8142,6 +8189,7 @@ criterion_group!(
     bench_temporal_astype_boundary,
     bench_max_min_reduction_boundary,
     bench_ptp_axis0_boundary,
+    bench_ptp_f32_axis_boundary,
     bench_bool_minmax_reduction_boundary,
     bench_prod_reduction_boundary,
     bench_ediff1d_boundary,

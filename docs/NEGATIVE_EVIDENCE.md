@@ -4,6 +4,22 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.ptp(f32, axis) native kernel — 4.2x (mid) + fixes a 0.77x axis=0 LOSS
+
+`BlackThrush`. Missing-float-width twin that was ALSO a loss: ptp had an int kernel (Ord-based
+ptp_axis_typed) and a dedicated f64 kernel, but NO f32 path -> f32 delegated to numpy's two-pass
+amax/amin (~parity on a non-last axis, a 0.77x LOSS on axis=0). Added `try_zerocopy_f32_ptp_axis`
+(scoped f32 twin of the f64 kernel — f64 left untouched): fused NaN-propagating branchless
+f32::max/min in one pass, parallel over outer groups (last-axis lanes / mid-axis groups / axis=0
+column-blocks). max/min are exact input values and the single f32 subtract == numpy's amax-amin =>
+bit-identical.
+
+Bit-exact ALL PASS: f32 ptp x {(512,512,32),(524288,32),(2048,300),(64,128,256),(1000,500),(8,256K)}
+x EVERY axis + NaN-propagation(all axes) + inf/signed + keepdims + f64 regression + int regression.
+Local same-worker: ptp f32 mid 9.14 vs numpy 37.99 ms = 4.2x; axis=0 61.86 vs 93.18 = 1.5x (was a
+0.77x loss -> now a win). (Also noted, NOT changed: sum/max f64 non-last PARALLEL paths read ~0.75-
+0.8x under load — bandwidth-bound reduces where parallel contention hurts; ~parity serial/unloaded.)
+
 ## 2026-07-03 - SHIP: parallelize np.argmin/argmax(f64 + int, non-last axis) SERIAL kernels — 8.9x -> 22x
 
 `BlackThrush`. Serial-sibling cleanup: after shipping the parallel f32 argextreme_axis (which was
