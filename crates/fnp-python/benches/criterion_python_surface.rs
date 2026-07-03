@@ -719,6 +719,37 @@ fn bench_diff_1d_boundary(c: &mut Criterion) {
                 b.iter(|| black_box(numpy_diff.call((&big,), Some(&kw2)).expect("np diff")));
             });
         }
+        // int64 1-D (diff_typed) and 2-D last-axis f64 (diff_axis) — both parallelized.
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+xi = rng.integers(-1000, 1000, 8_000_000).astype(np.int64)\n\
+a2 = rng.standard_normal((4096, 2048))\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("diff setup");
+        let xi = ns.get_item("xi").expect("xi");
+        let a2 = ns.get_item("a2").expect("a2");
+        group.bench_function("fnp_diff_int64_1d_8m", |b| {
+            b.iter(|| black_box(fnp_diff.call1((&xi,)).expect("fnp diff int")));
+        });
+        group.bench_function("numpy_diff_int64_1d_8m", |b| {
+            b.iter(|| black_box(numpy_diff.call1((&xi,)).expect("np diff int")));
+        });
+        let axkw = PyDict::new(py);
+        axkw.set_item("axis", 1_i64).unwrap();
+        let axkw2 = axkw.clone();
+        group.bench_function("fnp_diff_f64_2d_axis1", |b| {
+            b.iter(|| black_box(fnp_diff.call((&a2,), Some(&axkw)).expect("fnp diff ax1")));
+        });
+        group.bench_function("numpy_diff_f64_2d_axis1", |b| {
+            b.iter(|| black_box(numpy_diff.call((&a2,), Some(&axkw2)).expect("np diff ax1")));
+        });
     });
 
     group.finish();

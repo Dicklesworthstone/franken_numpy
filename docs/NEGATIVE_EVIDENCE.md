@@ -4,6 +4,22 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.diff int/f32 + f64 N-D axis — parallelized the remaining serial diff kernels — 3.1-3.4x
+
+`BlackThrush`. Follow-up to the f64-1-D diff parallelization: the generic `diff_typed` (int8..
+uint64 + f32, both 1-D and per-axis) and `try_zerocopy_f64_diff_axis` (f64 2-D/N-D) still did
+their subtract in SERIAL loops = parity vs numpy's SIMD (a native path that only ties = red flag).
+Parallelized both with the same structure: inner==1 (last-axis/1-D) -> par over lanes (outer>=2)
+or chunk the single lane (outer==1); inner>1 (strided) -> par over output rows (chunk = inner,
+row index c -> (o, a_out) = (c/out_axis_len, c%out_axis_len)). Added `T: Send+Sync, F: Sync` to
+diff_typed. Same subtraction => bit-identical regardless of chunking.
+
+Engagement proof (RAYON=1): fnp ~42 == numpy ~38 ms serial, 3.1-3.4x at full threads = pure
+parallelism. Bit-exact ALL PASS: 9 dtypes (int8..uint64/f32) x N x n{1,2,3} + every axis of
+2-D/3-D f64/f32/int + nan/inf/signed-zero + int8 overflow-wrap. Local same-worker 8M: diff int64
+1-D 11.56 vs 38.76 = 3.4x; f32 1-D 5.99 vs 19.56 = 3.3x; f64 2-D axis=1 12.69 vs 40.73 = 3.2x;
+axis=0 12.18 vs 38.16 = 3.1x. **np.diff family now fully parallel (f64/int/f32, 1-D + every axis).**
+
 ## 2026-07-03 - SHIP: np.diff(1-D f64, any n) — parallelized the serial first-difference kernel — 3.2x (was 0.9x LOSS)
 
 `BlackThrush`. fnp's `diff` iterates a native first-difference kernel n times (numpy defines
