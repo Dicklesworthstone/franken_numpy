@@ -4,6 +4,19 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.stack(axis=0) generalized to N-D (was 1-D only) — 3.7x for 2-D+ inputs
+
+`BlackThrush`. The stack(axis=0) fast path was gated to 1-D inputs; 2-D+ delegated (parity ~80ms).
+But `stack(equal-shape arrays, axis=0) == concatenate(axis=0).reshape((K, *shape))` for ANY ndim
+(each input becomes a leading slice, so the flat bytes are the inputs end-to-end). Relaxed the gate
+from ndim==1 to any-ndim equal-shape and reshape to (K, *shape) — routes to the already-fast
+concatenate. Same-shape required (numpy stack raises on mismatch -> defer for its exact error);
+axis!=0 (interleave) and 0-d inputs still defer.
+
+Bit-exact ALL PASS: shapes {1-D, 2-D, 3-D} x K in {2,3} x 4 dtypes + explicit-axis0 + mismatched-
+shape raise + axis=1/2 defer + 1-D regression. Local same-worker stack(2-D 1Mx8, axis=0): fnp 21.50
+vs numpy 80.27 ms = 3.7x. (Shares the rch-confirmed concatenate kernel — no separate bench.)
+
 ## 2026-07-03 - SHIP: np.column_stack / stack(axis=1) / dstack of 1-D arrays native parallel interleave — 3.6-4.4x
 
 `BlackThrush`. The INTERLEAVE stack ops (column_stack, stack(axis=1), dstack) on 1-D arrays all
