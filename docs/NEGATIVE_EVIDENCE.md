@@ -4,6 +4,40 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-02 - SHIP: f16 `arctan2` (18x) + `hypot` (6.6x) native parallel widen — numpy has no f16 ALU
+
+`BlackThrush`. The f16-widen vein (numpy emulates every f16 op via f16->f32->op->
+narrow single-threaded, compute-bound) had covered f16 unary transcendentals +
+add/mul/sub/div/floordiv/fmod/remainder/min/max, but the f16 BINARY transcendentals
+`arctan2`/`hypot`/`power`/`logaddexp` still delegated (parity). Added `arctan2`+`hypot`
+via the existing `try_zerocopy_f16_binary_widen` helper (new op codes 15/16): parallel
+widen->`atan2f`/`hypotf`->narrow.
+
+Bit-exact (verified over **161M f16 pairs** = every 5th finite value crossed, plus
+NaN/±inf/±0/65504/60000 special rows): system libm (which Rust's `f32::atan2`/`hypot`
+call) narrowed to f16 matches numpy for every pair — the f16 10-bit mantissa washes
+out f32 last-ULP libm diffs (the same reason the unary f16 transcendentals are exact).
+Proxy-confirmed pre-build: ctypes `atan2f`/`hypotf`/`powf` vs numpy f16 = 0 mismatches
+over 300k pairs each. arctan2 never warns; hypot can overflow f16 -> a cheap integer
+pre-scan (`(v & 0x7C00) >= 0x7800`, biased-exp >= 30 i.e. |v| >= 32768 or NaN/inf)
+defers possible-overflow operands so numpy's overflow RuntimeWarning surfaces.
+
+Engagement PROVEN (local same-worker, 16M f16, DEFAULT << RAYON=1):
+
+| Probe (16M f16) | fnp full | numpy | speedup | fnp RAYON=1 | Verdict |
+|---|---:|---:|---:|---:|---|
+| arctan2 | 15.99 ms | 291.6 ms | 18.2x | 280.7 ms (≈numpy) | SHIP |
+| hypot | 26.30 ms | 172.7 ms | 6.6x | 172.3 ms (≈numpy) | SHIP |
+
+RAYON=1 ≈ numpy confirms the whole gap is parallelism (numpy runs the widen serially).
+hypot < arctan2 because of the extra serial overflow pre-scan (a bit-mask memory scan;
+a first attempt using an f32-widen scan gave only 2.8x — the integer bit test lifted it
+to 6.6x). NOT added: `power` (numpy emits divide/overflow/invalid warnings needing a
+multi-case pre-scan) and `logaddexp` (composite exp+log1p, would need an exact npy
+formula replication) — future work, values proxy-verified bit-exact but warning/formula
+handling deferred. Correctness via the 161M-pair python sweep (cargo test is blocked by
+the pre-existing where_py test break — see the isin entry below).
+
 ## 2026-07-02 - NO-SHIP: FLOAT `np.unique(return_index/inverse/counts)` hashed dedup — numpy float unique is a FAST introsort, not the pathological isin-sort
 
 `BlackThrush`. After shipping float `isin` (530x), tried the same "numpy sorts

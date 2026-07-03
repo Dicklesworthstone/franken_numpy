@@ -4399,6 +4399,50 @@ fn bench_norm_frobenius_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+// f16 arctan2/hypot: numpy has no f16 ALU, so it widens f16->f32, applies the f32
+// transcendental single-threaded, and narrows (~290ms/~170ms @16M). The native
+// parallel widen-op-narrow is bit-exact (verified over 161M f16 pairs) and wins big.
+// RAYON_NUM_THREADS=1 vs default isolates the parallel gain.
+fn bench_f16_binary_transcendental_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_f16_binary_transcendental_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+x = rng.standard_normal(16_000_000).astype(np.float16)\n\
+y = rng.standard_normal(16_000_000).astype(np.float16)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("f16 binary setup");
+        let x = ns.get_item("x").expect("x");
+        let y = ns.get_item("y").expect("y");
+        for name in ["arctan2", "hypot"] {
+            let fnp_fn = module.getattr(name).expect("fnp fn");
+            let numpy_fn = numpy.getattr(name).expect("numpy fn");
+            group.bench_function(format!("fnp_{name}_f16_16m"), |b| {
+                b.iter(|| black_box(fnp_fn.call1((&x, &y)).expect("fnp f16 binary")));
+            });
+            group.bench_function(format!("numpy_{name}_f16_16m"), |b| {
+                b.iter(|| black_box(numpy_fn.call1((&x, &y)).expect("np f16 binary")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 // np.isin over matched real-float dtypes (f64/f32). numpy can't use its fast
 // integer 'table' method for floats, so it falls back to a serial sort of
 // |element|+|test| (~3 s for 16M f64). The native zero-copy parallel hashed-set
@@ -7451,6 +7495,7 @@ criterion_group!(
     bench_histogram_boundary,
     bench_setops_boundary,
     bench_float_isin_boundary,
+    bench_f16_binary_transcendental_boundary,
     bench_unique_medium_boundary,
     bench_sort_complex_boundary,
     bench_complex_binary_boundary,
