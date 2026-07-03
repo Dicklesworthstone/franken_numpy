@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.take generalized to ALL 1/2/4/8-byte dtypes — flat f32 12.4x, take-axis 1.5-4.3x
+
+`BlackThrush`. np.take's native gather was gated (dtype_kind=='b' || itemsize==8) — bool + int64/
+uint64/float64 only; f32/f16/int32/int16/int8/uint(32/16/8)/complex64 all DELEGATED (the old extract
+residual WIDENED narrow widths to i64/u64/f64, a dtype-parity bug, so the gate blocked them). But the
+per-axis helper try_zerocopy_take_axis was ALREADY value-agnostic (view as the matching-width uint,
+gather, view back) — only the outer gate blocked it. Fix: (1) generalized the FLAT helper
+try_zerocopy_int_take to the SAME itemsize-view byte gather; (2) relaxed the gate to {b,i,u,f,c} x
+itemsize{1,2,4,8}; (3) guarded the widening extract residual to bool/8-byte so a relaxed dtype that
+slips past the fast paths (e.g. non-int64 indices) delegates instead of widening. 16-byte complex128
+(no primitive mover) still delegates.
+
+Bit-exact + dtype-preserving ALL PASS: 14 dtypes x 3 shapes x flat + every axis + negative indices +
+clip/wrap modes + OOB-raise (IndexError parity) + scalar index + int32-index-array. Local same-worker
+UNDER LOAD (gauge matmul 0.80x, so true wins are even bigger): take flat float32 2.36 vs numpy 29.26
+ms = 12.4x (numpy's flat f32 fancy-take is very slow); take-axis float32 3.1x / int32 2.5x / complex64
+4.3x / int16 1.5x. **LESSON (4th structural generalization this session): when the PER-AXIS twin is
+already dtype-agnostic (uint-view) but the FLAT twin + the outer gate are not, generalize the flat
+twin to match and relax the gate — and GUARD any remaining widening extract residual to the old
+dtype set so a fast-path miss delegates rather than corrupts the dtype.**
+
 ## 2026-07-03 - SHIP: np.roll(2-D, tuple shifts, tuple axes) generalized to ALL dtypes — 2.6-3.1x
 
 `BlackThrush`. The fused 2-D multi-axis roll (try_zerocopy_f64_roll_2d_multi) was f64-only; the

@@ -6981,6 +6981,49 @@ counts = rng.integers(1, 8, 4_000_000).astype(np.int64)\n";
     group.finish();
 }
 
+// np.take(float32, ...): the native gather was gated to bool/8-byte, so f32/int32/f16/complex64 etc.
+// delegated. Generalized to a value-agnostic uint8/16/32/64-view byte gather -> all 1/2/4/8-byte
+// dtypes win (flat f32 ~12x, take-axis f32/int32/complex64 ~2.5-4.3x).
+fn bench_take_dtype_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_take_dtype_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+xf = rng.standard_normal(1 << 22).astype(np.float32)\n\
+idxf = rng.integers(0, 1 << 22, 1 << 22)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("take dtype setup");
+        let xf = ns.get_item("xf").expect("xf");
+        let idxf = ns.get_item("idxf").expect("idxf");
+        let fnp_take = module.getattr("take").expect("fnp take");
+        let numpy_take = numpy.getattr("take").expect("numpy take");
+        group.bench_function("fnp_take_flat_f32", |b| {
+            b.iter(|| black_box(fnp_take.call1((&xf, &idxf)).expect("fnp take")));
+        });
+        group.bench_function("numpy_take_flat_f32", |b| {
+            b.iter(|| black_box(numpy_take.call1((&xf, &idxf)).expect("np take")));
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_take_boundary(c: &mut Criterion) {
     // np.take(16M f64 source, 8M random indices) — serial gather vs parallel raw-slice gather.
     let mut group = c.benchmark_group("python_take_boundary");
@@ -8638,6 +8681,7 @@ criterion_group!(
     bench_parallel_binary_boundary,
     bench_take_axis_boundary,
     bench_take_along_axis_boundary,
+    bench_take_dtype_boundary,
     bench_take_boundary,
     bench_repeat_array_boundary,
     bench_repeat_axis_boundary,
