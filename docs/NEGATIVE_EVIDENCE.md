@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.diff(1-D f64, any n) — parallelized the serial first-difference kernel — 3.2x (was 0.9x LOSS)
+
+`BlackThrush`. fnp's `diff` iterates a native first-difference kernel n times (numpy defines
+diff(n) = first-diff applied n times), BUT the 1-D f64 kernel `try_zerocopy_f64_diff1d` did the
+subtract in a SERIAL `for` loop (out[i]=in[i+1]-in[i]) — measured 0.9x (a slight LOSS: fnp 41ms
+vs numpy 38ms, numpy's SIMD subtract beats a serial Rust loop). Meanwhile the mathematically
+IDENTICAL `ediff1d` kernel was already parallel (won 3.4x). Ported ediff1d's par_chunks_mut
+(raw f64 slices, gate n_out>=1<<21, threads>=2) into diff1d — same in[i+1]-in[i] expression, so
+bit-identical regardless of chunking; n>1 iterates the now-fast diff.
+
+Engagement proof (RAYON=1 control): fnp 40.17 == numpy 40.07 ms serial (1.0x), 12.27 ms at full
+threads = PURE parallelism. Bit-exact ALL PASS: N in {3,100,1M,8M} x n in {1,2,3,5} + nan/inf/
+signed-zero propagation + 2-D axis=0/1 (untouched) + int64/f32 (untouched) + prepend defer. Local
+same-worker 8M: diff(n=1) 12.27 vs 38.79 = 3.2x; n=2 22.35 vs 78.68 = 3.5x; n=3 35.41 vs 114.64 =
+3.2x. (int/f32 1-D + the f64 axis kernel are still serial — same `diff_typed`/`diff_axis` pattern,
+a follow-up; f64 1-D is the common case.)
+
 ## 2026-07-03 - SHIP: np.stack(axis=0) generalized to N-D (was 1-D only) — 3.7x for 2-D+ inputs
 
 `BlackThrush`. The stack(axis=0) fast path was gated to 1-D inputs; 2-D+ delegated (parity ~80ms).

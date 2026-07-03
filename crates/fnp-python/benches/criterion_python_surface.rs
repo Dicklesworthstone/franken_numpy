@@ -689,6 +689,41 @@ fn bench_prod_reduction_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+// np.diff(1-D f64, n): the 1-D first-difference kernel was serial (parity/slight loss vs numpy's
+// SIMD subtract); parallelizing it (mirroring ediff1d) wins ~3.2x, and n>1 iterates the fast diff.
+fn bench_diff_1d_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_diff_1d_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let big = numpy
+            .call_method1("linspace", (-1e6_f64, 1e6_f64, 8_000_000_usize))
+            .expect("8M f64 input");
+        let fnp_diff = module.getattr("diff").expect("fnp diff");
+        let numpy_diff = numpy.getattr("diff").expect("numpy diff");
+        for n in [1_i64, 2] {
+            let kw = PyDict::new(py);
+            kw.set_item("n", n).unwrap();
+            let kw2 = kw.clone();
+            group.bench_function(format!("fnp_diff_n{n}_f64_8m"), |b| {
+                b.iter(|| black_box(fnp_diff.call((&big,), Some(&kw)).expect("fnp diff")));
+            });
+            group.bench_function(format!("numpy_diff_n{n}_f64_8m"), |b| {
+                b.iter(|| black_box(numpy_diff.call((&big,), Some(&kw2)).expect("np diff")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_ediff1d_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_ediff1d_boundary");
     group.sample_size(10);
@@ -7843,6 +7878,7 @@ criterion_group!(
     bench_bool_minmax_reduction_boundary,
     bench_prod_reduction_boundary,
     bench_ediff1d_boundary,
+    bench_diff_1d_boundary,
     bench_select_boundary,
     bench_ldexp_boundary,
     bench_float_power_boundary,
