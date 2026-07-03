@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.cumsum(timedelta64, axis) routed to int64 cumsum — 2.3x
+
+`BlackThrush`. timedelta64 cumsum delegated (~1.0x) while int64 cumsum wins ~3.8x. Unlike the
+order-DEPENDENT float sum (defer), INTEGER prefix sum is order-preserving so bit-exact: view as
+int64, run the native int cumsum (accumulator-promotion int64->int64, no-op), view the int64 result
+back as timedelta64[unit]. Only kind 'm' (datetime64 cumsum is invalid -> numpy raises, verified
+both raise). NaT propagates in numpy's running sum (i64::MIN just wraps in int64) -> pre-scan
+np.isnat + defer.
+
+Bit-exact ALL PASS: timedelta64 x units {D,s,ns} x axis {None,0,1,2} (result dtype timedelta64[unit])
++ NaT-defer(all axes) + int64/f64 regression + datetime-cumsum-both-raise. Local same-worker (i64
+cumsum reference read a clean 3.8x, so load was normal): td cumsum mid 41.69 vs numpy 96.90 ms =
+2.3x (int64 cumsum ~27ms; the isnat pre-scan is the rest). **KEY: timedelta reductions where the
+underlying int op is ORDER-PRESERVING (cumsum, min/max, ptp, argmin/argmax) route to int64 bit-
+exactly; the ORDER-DEPENDENT ones (sum/mean over a strided axis) do NOT (float-sum-order blocker) —
+though timedelta SUM is integer-exact, int64 sum is bandwidth-parity so no win anyway.**
+
 ## 2026-07-03 - SHIP: np.max/min(datetime64/timedelta64, axis) routed to int64 min/max — 2.6x
 
 `BlackThrush`. Completes the temporal-reduction routing: max/min(datetime64/timedelta64) delegated

@@ -8154,6 +8154,49 @@ i32 = rng.integers(0, 1000, 4_000_000).astype(np.int32)\n";
     group.finish();
 }
 
+// np.cumsum(timedelta64, axis): int64-backed; integer prefix sum is order-preserving (bit-exact),
+// so the int64-view routes to the native int cumsum (~2.3x, result viewed back as timedelta64[unit]).
+fn bench_timedelta_cumsum_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_timedelta_cumsum_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+td = rng.integers(-50000, 50000, (4096, 512, 8)).astype('timedelta64[D]')\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("timedelta cumsum setup");
+        let td = ns.get_item("td").expect("td");
+        let fnp_cumsum = module.getattr("cumsum").expect("fnp cumsum");
+        let numpy_cumsum = numpy.getattr("cumsum").expect("numpy cumsum");
+        let kw = PyDict::new(py);
+        kw.set_item("axis", 1_i64).unwrap();
+        let kw2 = kw.clone();
+        group.bench_function("fnp_cumsum_td_mid", |b| {
+            b.iter(|| black_box(fnp_cumsum.call((&td,), Some(&kw)).expect("fnp cumsum")));
+        });
+        group.bench_function("numpy_cumsum_td_mid", |b| {
+            b.iter(|| black_box(numpy_cumsum.call((&td,), Some(&kw2)).expect("np cumsum")));
+        });
+    });
+
+    group.finish();
+}
+
 // np.max/min(datetime64/timedelta64, axis): int64-backed; the int64-view routes to the native int
 // min/max (~5-8x, result viewed back as the SAME temporal dtype). NaT pre-scan + defer.
 fn bench_datetime_minmax_boundary(c: &mut Criterion) {
@@ -8443,6 +8486,7 @@ criterion_group!(
     bench_datetime_argextreme_boundary,
     bench_datetime_ptp_boundary,
     bench_datetime_minmax_boundary,
+    bench_timedelta_cumsum_boundary,
     bench_asarray_dtype_boundary,
     bench_char_add_boundary,
     bench_matmul_boundary,
