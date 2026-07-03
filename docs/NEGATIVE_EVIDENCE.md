@@ -4,6 +4,37 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-02 - SHIP: complex64 exp/sin/cos/sinh/cosh/sign native parallel — 3.0-13.7x (generalized the complex-unary helper to f32)
+
+`BlackThrush`. numpy computes complex64 transcendentals per-element single-threaded too
+(~330-470ms@8M) AND computes them in f32 DIRECTLY (NOT via an f64 widen — proxy: f32-direct
+composition = 0/200k vs numpy, f64-widen = 54.81% WRONG). So the same real-libm composition
+in f32 (f32::exp/sin/cos/sinh/cosh/hypot = system expf/sinf/... = numpy's npy_cexpf) is
+bit-identical. Generalized `try_zerocopy_complex_unary` with a `run!($ty,...)` macro over
+{f64/complex128/ovf=709, f32/complex64/ovf=88} and dispatch on itemsize (16/8). All existing
+dispatch sites (exp pyfunction, native_unary_promoting for sin/cos/sinh/cosh, sign pyfunction)
+now handle BOTH dtypes with no wiring change.
+
+Bit-exact proven pre-build by ctypes proxy (all six c64 ops = 0/200k vs numpy) and post-build
+over c64 AND c128 at normal/wide/near-overflow scales + specials/overflow DEFER parity + 2-D +
+sign(0)=0 — ALL PASS (c128 did NOT regress).
+
+Engagement (local same-worker, 8M complex64):
+
+| Probe (8M c64) | fnp | numpy | speedup |
+|---|---:|---:|---:|
+| exp | 26.31 ms | 338.3 ms | 12.9x |
+| sin | 33.05 ms | 422.1 ms | 12.8x |
+| cos | 34.44 ms | 470.1 ms | 13.7x |
+| sinh | 33.47 ms | 427.8 ms | 12.8x |
+| cosh | 32.55 ms | 436.9 ms | 13.4x |
+| sign | 26.88 ms | 79.3 ms | 3.0x |
+
+c64 wins are LARGER than c128's (smaller data = better parallel scaling). f32 overflow
+threshold is ~88.7 (expf/coshf f-max) vs f64's ~709.8 — the macro parameterizes it.
+**complex exp/sin/cos/sinh/cosh/sign now native for BOTH complex64 and complex128.** Remaining:
+log/sqrt (numpy careful algo, skip), tan/tanh (quotient — proxy TBD).
+
 ## 2026-07-02 - SHIP: complex128 `sin`/`cos`/`sinh`/`cosh`/`sign` native parallel — 4.3-9.6x (extends the complex-compute vein)
 
 `BlackThrush`. Followed complex exp with the rest of the bit-exact-composable complex128

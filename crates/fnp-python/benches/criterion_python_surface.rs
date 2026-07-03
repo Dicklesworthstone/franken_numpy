@@ -1809,7 +1809,8 @@ fn bench_complex_exp_boundary(c: &mut Criterion) {
         let numpy = py.import("numpy").expect("numpy oracle");
         let setup = "import numpy as np\n\
 rng = np.random.default_rng(0)\n\
-z = (rng.standard_normal(8_000_000) + 1j*rng.standard_normal(8_000_000)).astype(np.complex128)\n";
+z = (rng.standard_normal(8_000_000) + 1j*rng.standard_normal(8_000_000)).astype(np.complex128)\n\
+z64 = z.astype(np.complex64)\n";
         let ns = PyDict::new(py);
         py.run(
             std::ffi::CString::new(setup).unwrap().as_c_str(),
@@ -1818,6 +1819,7 @@ z = (rng.standard_normal(8_000_000) + 1j*rng.standard_normal(8_000_000)).astype(
         )
         .expect("cexp setup");
         let z = ns.get_item("z").expect("z");
+        let z64 = ns.get_item("z64").expect("z64");
         for name in ["exp", "sin", "cos", "sinh", "cosh", "sign"] {
             let fnp_fn = module.getattr(name).expect("fnp fn");
             let numpy_fn = numpy.getattr(name).expect("numpy fn");
@@ -1826,6 +1828,12 @@ z = (rng.standard_normal(8_000_000) + 1j*rng.standard_normal(8_000_000)).astype(
             });
             group.bench_function(format!("numpy_{name}_complex128_8m"), |b| {
                 b.iter(|| black_box(numpy_fn.call1((&z,)).expect("np c128 unary")));
+            });
+            group.bench_function(format!("fnp_{name}_complex64_8m"), |b| {
+                b.iter(|| black_box(fnp_fn.call1((&z64,)).expect("fnp c64 unary")));
+            });
+            group.bench_function(format!("numpy_{name}_complex64_8m"), |b| {
+                b.iter(|| black_box(numpy_fn.call1((&z64,)).expect("np c64 unary")));
             });
         }
     });
