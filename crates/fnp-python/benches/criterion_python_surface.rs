@@ -8039,18 +8039,23 @@ a = rng.standard_normal((512, 512, 32)).astype(np.float32)\n",
         )
         .expect("argextreme f32 setup");
         let a = ns.get_item("a").expect("a");
+        // f64 + int64 of the same shape: their non-last kernels were parallelized (were serial).
+        let a64 = a.call_method1("astype", ("float64",)).expect("a64");
+        let ai = a.call_method1("astype", ("int64",)).expect("ai");
         for name in ["argmin", "argmax"] {
             let fnp_fn = module.getattr(name).expect("fnp fn");
             let numpy_fn = numpy.getattr(name).expect("numpy fn");
             let kw = PyDict::new(py);
             kw.set_item("axis", 1_i64).unwrap();
-            let kw2 = kw.clone();
-            group.bench_function(format!("fnp_{name}_f32_mid"), |b| {
-                b.iter(|| black_box(fnp_fn.call((&a,), Some(&kw)).expect("fnp arg")));
-            });
-            group.bench_function(format!("numpy_{name}_f32_mid"), |b| {
-                b.iter(|| black_box(numpy_fn.call((&a,), Some(&kw2)).expect("np arg")));
-            });
+            for (tag, arr) in [("f32", &a), ("f64", &a64), ("i64", &ai)] {
+                let kwc = kw.clone();
+                group.bench_function(format!("fnp_{name}_{tag}_mid"), |b| {
+                    b.iter(|| black_box(fnp_fn.call((arr,), Some(&kw)).expect("fnp arg")));
+                });
+                group.bench_function(format!("numpy_{name}_{tag}_mid"), |b| {
+                    b.iter(|| black_box(numpy_fn.call((arr,), Some(&kwc)).expect("np arg")));
+                });
+            }
         }
     });
 

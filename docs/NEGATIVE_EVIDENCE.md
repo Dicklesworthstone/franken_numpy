@@ -4,6 +4,22 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: parallelize np.argmin/argmax(f64 + int, non-last axis) SERIAL kernels — 8.9x -> 22x
+
+`BlackThrush`. Serial-sibling cleanup: after shipping the parallel f32 argextreme_axis (which was
+FASTER than the serial f64 twin), parallelized the two remaining serial kernels —
+`try_zerocopy_f64_argextreme_axis` and the generic `argextreme_axis_int_typed<T>` (all int widths +
+bool). Both did `for o in 0..outer` with a SHARED best_val vec; gave each outer block its OWN
+best_val and fanned the independent blocks across the pool (par_chunks_mut over the index output;
+added T: Send+Sync to the int generic). Strict-better update => byte-identical to the prior serial
+(FIRST extremum index) + bit-exact; f64 defers on any NaN as before.
+
+Engagement (RAYON=1): fnp 9.02 vs numpy 46.83 ms = 5.2x serial, DEFAULT 2.15 vs 47.50 = 22.1x =
+~4x from the new parallelism. Bit-exact ALL PASS: argmin+argmax x {f64,i64,i32,i16,u8} x 4 shapes
+x every non-last axis + int/f32 ties(first-index) + f64 NaN-defer + bool + f32 regression +
+small-serial. Local same-worker: argmin f64 mid 22.1x; i64 mid 22.2x. **argmin/argmax non-last now
+FULLY parallel across f64/f32/f16/int/bool.**
+
 ## 2026-07-03 - SHIP: np.argmin/argmax(f32, non-last axis) native parallel kernel — 8.4x (f32 had no path)
 
 `BlackThrush`. Missing-float-width twin: argmin/argmax had f64 + f16 non-last-axis kernels but NOT
