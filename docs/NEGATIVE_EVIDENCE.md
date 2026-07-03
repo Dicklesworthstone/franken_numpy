@@ -4,6 +4,41 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-02 - NO-SHIP: FLOAT `np.unique(return_index/inverse/counts)` hashed dedup — numpy float unique is a FAST introsort, not the pathological isin-sort
+
+`BlackThrush`. After shipping float `isin` (530x), tried the same "numpy sorts
+floats serially" hypothesis on `np.unique(return_index/inverse/counts)`: numpy
+always argsorts the whole array (O(n log n)) even at low cardinality, so a hashed
+O(n+u log u) dedup should win like the INT path does (int unique already wins
+6-71x via a counting array). Implemented `unique_hash_full_float<T: FloatUniq>`
+(f64/f32) with a `FastIntBuildHasher` map keyed by normalized bits, NaN/-0.0 defer,
+cardinality cap. Bit-exact ALL PASS (low-card, inf, +0.0, 2-D inverse reshape,
+NaN/-0.0/high-card defer). **But it FAILED the measured keep bar** — REVERTED
+(only a 5-line signpost comment in `unique()` kept):
+
+| Probe (8M f64, ~500 distinct, no -0.0/NaN) | fnp | numpy | verdict |
+|---|---:|---:|---|
+| unique return_index | 370 ms | 1048 ms | 3x win (numpy uses slow STABLE mergesort) |
+| unique return_inverse | 738 ms | 720 ms | ~parity |
+| unique return_counts | 357 ms | 80 ms | **4.5x LOSS** (numpy uses FAST quicksort) |
+
+ROOT: numpy's float `unique` sorts at ~100M elem/s (a tuned introsort) — nothing
+like the pathological O(n log n) concat-sort that made float `isin` 2.7 s. A
+`std::HashMap` at ~40 ns/op (8M lookups ≈ 320 ms) can't beat that fast sort; it
+only edges out the SLOWER stable-mergesort variant (return_index). return_counts
+alone is a LOSS because numpy takes its fast quicksort path there. The INT win
+came from a COUNTING ARRAY (~2 ns/op direct index), which does NOT translate to
+sparse float keys. **RETRY PREDICATE: do not retry a hashed float-unique unless
+you first have a <15 ns/op float-bits set (SoA / open-addressing / radix) proven
+to beat numpy's ~100M/s sort on return_counts — a slow std::HashMap will not.**
+Also: `round()` produces -0.0 for small negatives, so any -0.0-defer gate silently
+misses common rounded data (would need signed-zero KEY normalization like isin,
+which still doesn't fix the hashmap-too-slow root). **LESSON: "numpy sorts serially"
+is only a lever when its sort is PATHOLOGICAL (bad constants / huge concat / stable
+forced); a plain fast introsort at ~100M/s is already near memory-bandwidth for the
+dedup and is not beatable by a general hash.** See the float `isin` win below for
+the contrasting case where the numpy sort WAS pathological.
+
 ## 2026-07-02 - SHIP: FLOAT `np.isin` zero-copy parallel hashed-set — 530x vs NumPy (16M f64), 70x vs prior fnp path
 
 `BlackThrush`. Biggest measured serial gap in the set-ops surface: numpy's float
