@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.argmin/argmax(f32, non-last axis) native parallel kernel — 8.4x (f32 had no path)
+
+`BlackThrush`. Missing-float-width twin: argmin/argmax had f64 + f16 non-last-axis kernels but NOT
+f32, so f32 delegated to numpy's slow strided reduce (~parity 1.0x while f64 won 8.9x). Added
+`try_zerocopy_f32_argextreme_axis`: per-outer-block running best index/value comparing IN f32
+(order-preserving strict compare -> FIRST extremum index bit-identical to numpy), parallel across
+the independent outer blocks (the f64 twin is serial, so this f32 is actually FASTER: 3.10 vs
+5.40ms). Any NaN in a block defers the whole call (numpy's argmin/argmax NaN semantics differ from
+a skip-NaN scan), mirroring the f64/f16 twins.
+
+Bit-exact ALL PASS: argmin+argmax f32 x {(512,512,32),(2048,300),(64,128,256),(1000,500),(8,256K)}
+x every non-last axis + ties(first-index) + NaN-defer + inf + f32-last-axis + f64 regression +
+small-serial. Local same-worker: argmin f32 (512,512,32) axis=1 3.10 vs 26.10 ms = 8.4x (f64
+reference simultaneously 8.9x, box clean).
+
 ## 2026-07-03 - SHIP: np.nansum(f64, LAST axis) — fix bit-exactness (sequential -> pairwise) + parallelize
 
 `BlackThrush`. Correctness fix for the gap I surfaced last commit: the last-axis (inner==1) branch

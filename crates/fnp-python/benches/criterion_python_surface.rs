@@ -8012,6 +8012,51 @@ i32 = rng.integers(0, 1000, 4_000_000).astype(np.int32)\n";
     group.finish();
 }
 
+// np.argmin/argmax(f32, non-last axis): f32 had no arg-axis kernel (only f64+f16), so it delegated
+// to numpy's slow strided reduce (~parity). The parallel per-block f32 scan wins ~8x.
+fn bench_argextreme_f32_axis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_argextreme_f32_axis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+a = rng.standard_normal((512, 512, 32)).astype(np.float32)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("argextreme f32 setup");
+        let a = ns.get_item("a").expect("a");
+        for name in ["argmin", "argmax"] {
+            let fnp_fn = module.getattr(name).expect("fnp fn");
+            let numpy_fn = numpy.getattr(name).expect("numpy fn");
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 1_i64).unwrap();
+            let kw2 = kw.clone();
+            group.bench_function(format!("fnp_{name}_f32_mid"), |b| {
+                b.iter(|| black_box(fnp_fn.call((&a,), Some(&kw)).expect("fnp arg")));
+            });
+            group.bench_function(format!("numpy_{name}_f32_mid"), |b| {
+                b.iter(|| black_box(numpy_fn.call((&a,), Some(&kw2)).expect("np arg")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 // np.nanargmin/nanargmax(f64, axis=-1): numpy copies the array replacing NaN with +-inf then
 // argmins (~107-144ms@16M); the native fused single-pass per-lane nan-skip scan wins 10-46x.
 // f64 previously had no last-axis path (only f32); this closes the gap.
@@ -8061,6 +8106,7 @@ w = rng.standard_normal((8, 2_000_000))\nw[w > 2.0] = np.nan\n",
 criterion_group!(
     benches,
     bench_nanarg_lastaxis_boundary,
+    bench_argextreme_f32_axis_boundary,
     bench_asarray_dtype_boundary,
     bench_char_add_boundary,
     bench_matmul_boundary,
