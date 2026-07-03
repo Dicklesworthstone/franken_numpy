@@ -4,6 +4,30 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.delete(1-D, bool mask / int index array) routed to fnp's parallel compress — 1.9x / 1.3x
+
+`BlackThrush`. fnp's delete had a native single-int-scalar path but delegated a bool mask /
+int index ARRAY to numpy, which builds a keep-mask then runs its SLOW serial compress (~50ms@8M).
+np.delete(arr, obj) for 1-D IS `compress(keep, arr)` where keep[i] = i-not-deleted. Route the
+keep-mask through fnp's already-fast parallel compress (`try_zerocopy_any_compact`, wins 4.3x on
+its own): bool mask -> keep = ~mask; int index -> keep = ones(bool); keep[obj]=False (numpy
+fancy-assign handles negatives/duplicates; an out-of-bounds index defers so numpy raises its exact
+IndexError). Bit-exact (delete is a pure value+order-preserving filter).
+
+Correctness ALL PASS: 9 dtypes (f64/f32/f16/int widths/complex) x {int-index incl dup+neg, bool
+mask} + list obj + OOB-both-raise + scalar-delete-unchanged + empty-idx + all-True->empty + slice
+obj defer + 2-D-axis defer. Local same-worker 8M:
+
+| Probe (8M) | fnp | numpy | speedup |
+|---|---:|---:|---:|
+| delete(bool mask) | 26.23 ms | 49.79 ms | 1.9x |
+| delete(int index array) | 39.72 ms | 50.50 ms | 1.3x |
+
+bool-mask wins clean (just negate + fast compress); int-index is dragged by numpy's serial
+fancy-assign keep-mask build (~15ms for 2M indices), but always >= numpy (same mask build, faster
+compress). NOT optimized further: a native parallel keep[idx]=False scatter would race on duplicate
+indices (idempotent value but UB) — kept the safe numpy fancy-assign.
+
 ## 2026-07-03 - NO-SHIP: np.strings startswith/endswith are bandwidth-bound (numpy already fast) — parity, reverted
 
 `BlackThrush`. Most np.char/strings ops win natively (find 5.5x, count 7.2x, zfill/center/
