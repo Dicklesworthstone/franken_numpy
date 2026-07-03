@@ -983,6 +983,45 @@ fn bench_float_power_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+// np.heaviside(f64 array, f64 SCALAR): the array/scalar case delegated to numpy's slow multi-pass
+// scalar-broadcast (~7x below bandwidth); a fused single-pass parallel map wins ~4.5-7x.
+fn bench_heaviside_scalar_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_heaviside_scalar_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\nx = rng.standard_normal(1 << 22)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("heaviside setup");
+        let x = ns.get_item("x").expect("x");
+        let fnp_hv = module.getattr("heaviside").expect("fnp heaviside");
+        let numpy_hv = numpy.getattr("heaviside").expect("numpy heaviside");
+        group.bench_function("fnp_heaviside_scalar", |b| {
+            b.iter(|| black_box(fnp_hv.call1((&x, 0.5_f64)).expect("fnp heaviside")));
+        });
+        group.bench_function("numpy_heaviside_scalar", |b| {
+            b.iter(|| black_box(numpy_hv.call1((&x, 0.5_f64)).expect("np heaviside")));
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_frexp_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_frexp_boundary");
     group.sample_size(10);
@@ -8787,6 +8826,7 @@ criterion_group!(
     bench_select_boundary,
     bench_ldexp_boundary,
     bench_float_power_boundary,
+    bench_heaviside_scalar_boundary,
     bench_frexp_boundary,
     bench_modf_boundary,
     bench_putmask_boundary,

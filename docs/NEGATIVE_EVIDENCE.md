@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.heaviside(f64 array, f64 SCALAR) fused single-pass — 4.5x
+
+`BlackThrush`. heaviside's native binary kernel (BinaryOp::Heaviside) required BOTH operands to be
+f64 ndarrays, so the common `heaviside(x, 0.5)` (scalar step-value) failed `numpy_dtype_is_f64(&b)`
+and fell to core_numpy_passthrough -> numpy's scalar-broadcast heaviside runs ~7x BELOW bandwidth
+(~0.7 GB/s @ 4M f64; it materializes the broadcast + multi-branch pass). Added
+try_zerocopy_f64_heaviside_scalar: a fused single-pass parallel map (x<0->0, x>0->1, x==0->h,
+NaN->NaN) with the scalar h captured in the closure. Wired into the heaviside pyfunction after the
+array/array path (a multi-element array b won't `extract::<f64>()` so it stays with the array kernel;
+a python/numpy scalar or 0-d array coerces to the fast path).
+
+Bit-exact ALL PASS (per-element branch; else-branch returns xv so NaN propagates, +/-0 both -> h):
+h in {0, 0.5, 1, -2, NaN} x 3 shapes x sign-regions/nan/inf/-0 + h-as-{int, np.float64, 0-d array} +
+array/array regression + f32-scalar-still-delegates. Local same-worker UNDER LOAD (gauge matmul 0.83x):
+heaviside(x,0.5) 4M 8.02 vs numpy 36.51 ms = 4.5x (true win bigger unloaded). **LESSON: a binary
+ufunc with a native array/array kernel but NO array/SCALAR path delegates the (common) scalar-operand
+case to numpy's slow scalar-broadcast — add a scalar-parameterized fused map. Grep other native binary
+ufuncs (copysign/nextafter/hypot/logaddexp...) for a missing array+scalar fast path. Also f32 heaviside
+scalar still delegates (missing f32 sibling).**
+
 ## 2026-07-03 - SHIP: np.bincount(weighted) max-scan vectorized — parity -> 1.13-1.22x (bincount family complete)
 
 `BlackThrush`. Third and last bincount path: try_zerocopy_bincount_weighted had the SAME scalar
