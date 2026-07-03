@@ -1791,10 +1791,10 @@ fn bench_sort_complex_boundary(c: &mut Criterion) {
     group.finish();
 }
 
-// complex128 exp: numpy computes cexp per-element single-threaded (~256ms@8M). The
-// native parallel exp(re)*(cos(im)+i*sin(im)) is bit-exact (system libm == npy_cexp)
-// and wins on core count. RAYON_NUM_THREADS=1 vs default isolates the parallel gain
-// (the serial kernel is ~parity/slightly slower — the win is entirely parallelism).
+// complex128 exp/sin/cos/sinh/cosh/sign: numpy computes these per-element single-threaded
+// (~180-420ms@8M). The native parallel real-libm composition is bit-exact (system libm ==
+// numpy's npy_c*) and wins on core count. RAYON_NUM_THREADS=1 vs default isolates the
+// parallel gain (the serial kernels are ~parity — the win is entirely parallelism).
 fn bench_complex_exp_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_complex_exp_boundary");
     group.sample_size(10);
@@ -1818,14 +1818,16 @@ z = (rng.standard_normal(8_000_000) + 1j*rng.standard_normal(8_000_000)).astype(
         )
         .expect("cexp setup");
         let z = ns.get_item("z").expect("z");
-        let fnp_exp = module.getattr("exp").expect("fnp exp");
-        let numpy_exp = numpy.getattr("exp").expect("numpy exp");
-        group.bench_function("fnp_exp_complex128_8m", |b| {
-            b.iter(|| black_box(fnp_exp.call1((&z,)).expect("fnp c128 exp")));
-        });
-        group.bench_function("numpy_exp_complex128_8m", |b| {
-            b.iter(|| black_box(numpy_exp.call1((&z,)).expect("np c128 exp")));
-        });
+        for name in ["exp", "sin", "cos", "sinh", "cosh", "sign"] {
+            let fnp_fn = module.getattr(name).expect("fnp fn");
+            let numpy_fn = numpy.getattr(name).expect("numpy fn");
+            group.bench_function(format!("fnp_{name}_complex128_8m"), |b| {
+                b.iter(|| black_box(fnp_fn.call1((&z,)).expect("fnp c128 unary")));
+            });
+            group.bench_function(format!("numpy_{name}_complex128_8m"), |b| {
+                b.iter(|| black_box(numpy_fn.call1((&z,)).expect("np c128 unary")));
+            });
+        }
     });
 
     group.finish();

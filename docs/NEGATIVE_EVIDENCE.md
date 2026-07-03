@@ -4,6 +4,37 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-02 - SHIP: complex128 `sin`/`cos`/`sinh`/`cosh`/`sign` native parallel — 4.3-9.6x (extends the complex-compute vein)
+
+`BlackThrush`. Followed complex exp with the rest of the bit-exact-composable complex128
+transcendentals. Generalized `try_zerocopy_complex_exp` -> `try_zerocopy_complex_unary(op)`
+(enum ComplexUnaryOp) with the per-op real-libm composition + per-op overflow guard:
+- sin = (sin(re)*cosh(im), cos(re)*sinh(im)); cos = (cos(re)*cosh(im), -sin(re)*sinh(im))
+- sinh = (sinh(re)*cos(im), cosh(re)*sin(im)); cosh = (cosh(re)*cos(im), sinh(re)*sin(im))
+- sign = z/hypot(re,im) (z==0 -> 0)
+All use the SAME system libm as numpy's npy_c* -> bit-identical. Overflow defer: sin/cos on
+|im|>=709 (cosh term), sinh/cosh on |re|>=709, sign none (|result|<=1). Non-finite always defers.
+
+Bit-exact PROVEN pre-build by ctypes proxy (all five = 0/200k vs numpy). Post-build bit-exact
+over wide sample (|re|,|im| to 708 incl extreme) + specials/overflow DEFER parity + sign(0)=0 +
+c64 delegate + 2-D — ALL PASS. Wired: sin/cos/sinh/cosh via native_unary_promoting
+(complex_unary_op_for map); sign in its pyfunction before the complex delegation.
+
+Engagement (local same-worker, 8M complex128, win is pure parallelism):
+
+| Probe (8M c128) | fnp | numpy | speedup |
+|---|---:|---:|---:|
+| sin | 42.83 ms | 405.7 ms | 9.5x |
+| cos | 43.37 ms | 415.9 ms | 9.6x |
+| sinh | 44.84 ms | 411.2 ms | 9.2x |
+| cosh | 46.34 ms | 416.7 ms | 9.0x |
+| sign | 41.54 ms | 178.8 ms | 4.3x |
+
+exp still 6.1x through the generalized helper. Remaining complex128 delegates: log/sqrt
+(numpy's careful npy_clog/npy_csqrt != naive formula — clog proxy failed 10%, NOT bit-exact);
+tan/tanh (quotients csinh/ccosh — proxy not yet run, could be a follow-up). abs/absolute/
+conjugate/square/reciprocal = numpy-fast (skip). complex64 versions untried (need an f32 path).
+
 ## 2026-07-02 - SHIP: complex128 `exp` (7.1x) native parallel — numpy cexp is single-threaded
 
 `BlackThrush`. New vein (complex compute): numpy computes `np.exp` on complex128
