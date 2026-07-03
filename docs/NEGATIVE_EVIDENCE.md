@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.gradient(2-D field, cy, cx, edge_order=1) fused per-axis stencils — 13.0x
+
+`BlackThrush`. Extending yesterday's 1-D coord gradient to the common science idiom `gy,gx =
+np.gradient(field, y, x)` (axis=None -> a list of per-axis gradients). numpy runs each axis through
+its slow multi-pass Python stencil (~215 ms @4M). Added try_zerocopy_f64_gradient_2d_coords: g1 is
+the per-row 1-D coord stencil with cx (last axis, contiguous); g0[i,:] = a_i*f[i-1,:] + b_i*f[i,:] +
+c_i*f[i+1,:] with axis-0 coord weights from cy (same LEFT-TO-RIGHT grouping as 1-D), edges = fwd/bwd
+first differences. Both axes PROTOTYPED bit-exact in Python before building (byte-for-byte). Parallel
+over rows for each axis; returns a PyList [g0, g1].
+
+Bit-exact ALL PASS: 6 shapes (2x2 .. 2000x2000, incl 4x3000 / 3000x4) x both axes + returns-list +
+1-D-coords regression + uniform-2-D regression + edge_order=2-delegates. Local same-worker (gauge
+matmul 1.04x, clean): gradient2d(2000x2000, cy, cx) 16.54 vs numpy 215.47 ms = 13.0x. Remaining
+gradient gap: 3-D+ coord arrays + edge_order=2 non-uniform (both defer to numpy). **The Python-level-
+multi-pass-stencil vein keeps paying: gradient (1-D + 2-D coords) done; next candidates = other numpy
+funcs that loop axes / broadcast weight arrays in pure Python.**
+
 ## 2026-07-03 - SHIP: np.gradient(f64 1-D, COORDINATE array, edge_order=1) fused stencil — 30.6x
 
 `BlackThrush`. np.gradient's native paths only handled UNIFORM spacing (scalar dx); a coordinate-

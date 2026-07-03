@@ -4550,6 +4550,48 @@ fn bench_polyval_boundary(c: &mut Criterion) {
 
 // np.gradient(f32, last axis / 1-D): f32 previously delegated (only f64 had a kernel); the f32
 // twin (edge_order=1, bit-identical) wins ~6-8x over numpy's slow pure-Python slice gradient.
+// np.gradient(2-D field, cy, cx, edge_order=1): numpy runs each axis through its slow multi-pass
+// Python stencil (~215ms @4M); the fused per-axis parallel stencils win ~13x, returning [g0, g1].
+fn bench_gradient_2d_coords_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_gradient_2d_coords_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+D = rng.standard_normal((2000, 2000))\ncy = np.sort(rng.standard_normal(2000))\ncx = np.sort(rng.standard_normal(2000))\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("gradient 2d coords setup");
+        let d = ns.get_item("D").expect("D");
+        let cy = ns.get_item("cy").expect("cy");
+        let cx = ns.get_item("cx").expect("cx");
+        let fnp_g = module.getattr("gradient").expect("fnp gradient");
+        let numpy_g = numpy.getattr("gradient").expect("numpy gradient");
+        group.bench_function("fnp_gradient_2d_coords", |b| {
+            b.iter(|| black_box(fnp_g.call1((&d, &cy, &cx)).expect("fnp gradient")));
+        });
+        group.bench_function("numpy_gradient_2d_coords", |b| {
+            b.iter(|| black_box(numpy_g.call1((&d, &cy, &cx)).expect("np gradient")));
+        });
+    });
+
+    group.finish();
+}
+
 // np.gradient(f64 1-D, COORDINATE array, edge_order=1): numpy's non-uniform gradient is a multi-pass
 // Python-level stencil (~245ms @4M, ~30x below bandwidth); a fused single-pass parallel stencil wins.
 fn bench_gradient_coords_boundary(c: &mut Criterion) {
@@ -8954,6 +8996,7 @@ criterion_group!(
     bench_vander_boundary,
     bench_polyval_boundary,
     bench_gradient_axis_boundary,
+    bench_gradient_2d_coords_boundary,
     bench_gradient_coords_boundary,
     bench_gradient_f32_boundary,
     bench_norm_axis_boundary,
