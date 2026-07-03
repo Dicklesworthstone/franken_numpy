@@ -4,6 +4,33 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-02 - SHIP: f16 `power` (6.5x) native parallel widen — COMPLETES the f16 binary transcendental vein
+
+`BlackThrush`. Last f16 binary transcendental (op 14). numpy widens f16->f32->powf->
+narrow single-threaded (~190-240ms@16M). The warning handling that had deferred this op:
+numpy emits divide (0^neg), invalid (neg^non-int), and overflow (finite base -> f16 inf)
+RuntimeWarnings. Approach: defer non-finite operands up front (bit test), then during the
+parallel compute set a shared AtomicBool if ANY finite element hits a warning case
+(`av==0 && bv<0` | `av<0 && bv.fract()!=0` | `av!=0 && (r.inf || |r|>65504)`); if set, the
+whole call defers to numpy post-loop (numpy recomputes + emits the exact warning). Pay-twice
+only on the rare warning-bearing array; the common no-warning case computes natively.
+
+Bit-exact over **161M finite f16 pairs** (all finite pairs — warning cases defer to numpy so
+their VALUE still matches) + NaN/±inf/±0 specials. WARNING PARITY verified: for div/invalid/
+overflow arrays fnp raises numpy's exact warning set (via the defer); clean (2^3) and neg^int
+(-3^2) raise none. Proxy-confirmed pre-build (ctypes powf vs numpy f16 = 0/300k).
+
+Engagement PROVEN (local same-worker, 16M f16 positive-base no-warning, DEFAULT << RAYON=1):
+
+| Probe (16M f16) | fnp full | numpy | speedup | fnp RAYON=1 | Verdict |
+|---|---:|---:|---:|---:|---|
+| power (positive base) | 29.14 ms | 188.1 ms | 6.5x | 180.5 ms (≈numpy) | SHIP |
+
+RAYON=1 ≈ numpy confirms the gap is pure parallelism. Negative-base / overflow / 0^neg inputs
+defer to numpy by design (correct value + warning). **f16 BINARY TRANSCENDENTAL VEIN COMPLETE:
+arctan2 + hypot + logaddexp + power all native; combined with the earlier unary transcendentals
++ arithmetic, the f16-widen surface is now fully harvested for common ops.**
+
 ## 2026-07-02 - SHIP: f16 `logaddexp` (10.5x) native parallel widen — extends the f16 binary transcendental vein
 
 `BlackThrush`. Followed the f16 arctan2/hypot win (below) with `logaddexp` (op 17 in

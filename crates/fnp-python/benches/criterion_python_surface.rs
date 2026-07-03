@@ -4418,7 +4418,9 @@ fn bench_f16_binary_transcendental_boundary(c: &mut Criterion) {
         let setup = "import numpy as np\n\
 rng = np.random.default_rng(0)\n\
 x = rng.standard_normal(16_000_000).astype(np.float16)\n\
-y = rng.standard_normal(16_000_000).astype(np.float16)\n";
+y = rng.standard_normal(16_000_000).astype(np.float16)\n\
+pbase = (np.abs(rng.standard_normal(16_000_000)) + 0.5).astype(np.float16)\n\
+pexp = (rng.standard_normal(16_000_000) * 0.5).astype(np.float16)\n";
         let ns = PyDict::new(py);
         py.run(
             std::ffi::CString::new(setup).unwrap().as_c_str(),
@@ -4438,6 +4440,18 @@ y = rng.standard_normal(16_000_000).astype(np.float16)\n";
                 b.iter(|| black_box(numpy_fn.call1((&x, &y)).expect("np f16 binary")));
             });
         }
+        // power uses positive bases + bounded exponents so it engages the native path
+        // (negative base / overflow cases defer to numpy by design).
+        let pbase = ns.get_item("pbase").expect("pbase");
+        let pexp = ns.get_item("pexp").expect("pexp");
+        let fnp_pow = module.getattr("power").expect("fnp power");
+        let numpy_pow = numpy.getattr("power").expect("numpy power");
+        group.bench_function("fnp_power_f16_16m", |b| {
+            b.iter(|| black_box(fnp_pow.call1((&pbase, &pexp)).expect("fnp f16 power")));
+        });
+        group.bench_function("numpy_power_f16_16m", |b| {
+            b.iter(|| black_box(numpy_pow.call1((&pbase, &pexp)).expect("np f16 power")));
+        });
     });
 
     group.finish();
