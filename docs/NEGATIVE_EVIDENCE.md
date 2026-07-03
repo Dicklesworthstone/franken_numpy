@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.gradient(f32, last axis / 1-D) native kernel — 10.4x / 7.3x (f32 had no path)
+
+`BlackThrush`. Another missing-float-width twin: np.gradient had f64 kernels (gradient_1d +
+gradient_strided_axis) but f32 delegated to numpy's slow pure-Python slice gradient (~parity).
+numpy keeps f32 gradient in f32 (interior (f[i+1]-f[i-1])/(2*dx), edges (f[1]-f[0])/dx, python-
+float spacing casts to f32 value-based), so the f32 twin `try_zerocopy_f32_gradient_1d` (fused
+single-pass, parallel over rows / interior) is bit-identical for the default edge_order=1.
+edge_order=2 DEFERS for f32 (its 3-point boundary rounds subtly in f32 — kept f64-only).
+
+Bit-exact ALL PASS: 1-D + N-D last-axis f32 x {(4M,),(1000,4096),(256,256,128) 3-D} + explicit
+axis=-1/1 + scalar spacings {0.5,1.0,2.0} + nan/inf + edge_order=2 defer + f64 regression + 2-D
+no-axis list (defers the strided axis, still matches). **rch hz1 (clean): gradient f32 1-D 1.09 vs
+11.37 ms = 10.4x; 2-D axis=1 2.39 vs 17.34 ms = 7.3x.** (Local same-worker read 2.1x/5.2x but the
+box was ~10x loaded — the KNOWN-8.7x f64 gradient reference simultaneously read only 2.4x, so the
+rch numbers are the true ratio.) Only gradient_1d twinned; f32 strided-axis (non-last) + N-D
+no-axis list still defer — follow-up.
+
 ## 2026-07-03 - SHIP: np.nanargmin/nanargmax(f64, axis=-1) native last-axis kernel — 26-46x (f64 had no path)
 
 `BlackThrush`. nanargmin/nanargmax had a fast f32 last-axis kernel (`try_zerocopy_f32_nanarg_
