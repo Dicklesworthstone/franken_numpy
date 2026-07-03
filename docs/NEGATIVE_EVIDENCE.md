@@ -4,6 +4,31 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-02 - SHIP: f16 `radians`/`degrees` alias wiring gap — parity -> 10.9x/9.6x (route to the existing rad2deg/deg2rad fast path)
+
+`BlackThrush`. `np.radians` IS the `deg2rad` ufunc and `np.degrees` IS `rad2deg`;
+fnp's `deg2rad`/`rad2deg` already ship a bit-exact f16-widen fast path (win ~7-12x),
+but the plain `radians`/`degrees` pyfunctions never called `try_zerocopy_f16_unary_widen`
+— they went straight to `radians_native`/`degrees_native`, which delegate f16 to numpy
+(parity). One-line-each fix: try the f16 widen helper (UnaryOp::Radians/Degrees) before
+the native path, mirroring deg2rad/rad2deg.
+
+Bit-exact EXHAUSTIVELY (all 65536 f16 inputs, both ops, incl NaN/inf) and byte-identical
+to fnp's own deg2rad/rad2deg; f32/f64/int inputs still delegate. Local same-worker 16M f16:
+
+| Probe (16M f16) | fnp | numpy | speedup |
+|---|---:|---:|---:|
+| radians | 9.19 ms | 100.1 ms | 10.9x |
+| degrees | 10.46 ms | 100.8 ms | 9.6x |
+
+LESSON: alias functions can silently miss a fast path their canonical name already has —
+when an op has a native win, grep its numpy ALIASES (radians/deg2rad, degrees/rad2deg,
+in1d/isin, abs/absolute, conj/conjugate, ...) and confirm each alias routes to the same
+helper. (Also: f16 arcsin/arccos/arccosh/arctanh read "parity" ONLY on domain-edge test
+data — the helper's domain pre-scan defers |x|>1 / f16-rounds-to-1.0 inputs; in strict
+domain they WIN 6-9x and are already covered. Re-measure a delegating f16 op with
+strictly in-domain inputs before assuming a real gap.)
+
 ## 2026-07-02 - SHIP: f16 `power` (6.5x) native parallel widen — COMPLETES the f16 binary transcendental vein
 
 `BlackThrush`. Last f16 binary transcendental (op 14). numpy widens f16->f32->powf->
