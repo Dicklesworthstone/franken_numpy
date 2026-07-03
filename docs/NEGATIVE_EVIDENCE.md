@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - FIX: np.logaddexp2(f64 array, f64 SCALAR) 0.37x LOSS -> 2.9x (broadcast into fast kernel)
+
+`BlackThrush`. Pursuing the heaviside standing dig (native binary ufuncs missing an array+scalar path):
+copysign/nextafter/hypot/logaddexp/float_power/fmax/fmin/fmod/arctan2 are all PARITY for array+scalar
+(numpy's scalar-broadcast is bandwidth-fast for those). But logaddexp2(x, scalar) was a 0.37x LOSS
+(fnp 196 vs numpy 72 ms) — the array/array kernel skipped the scalar (shape mismatch) and it fell to
+the single-threaded generic ufunc_logaddexp2 (logaddexp2 is a slow per-element log2/exp2, so even
+numpy's scalar path is beatable). Fix: broadcast the scalar with np.full and re-run the fast PARALLEL
+array/array kernel (try_zerocopy_f64_binary Logaddexp2) — handles scalar on either side; a
+multi-element array won't extract::<f64> so it stays with the direct kernel.
+
+Correctness = ALLCLOSE(equal_nan): fnp's logaddexp2 kernel is itself ~1 ULP off numpy (a PRE-EXISTING
+property of the shipped array/array path — the FINITE uint8 bit-compare fails for array/array too,
+not something this change introduced), and the scalar path is BIT-IDENTICAL to fnp's own array/array
+kernel (self-consistency check passed). allclose ALL PASS: h in {0,2,-3.5,+/-inf,nan} x scalar-lhs
+and scalar-rhs x 3 shapes (incl inf/-inf/nan in x) + int/np.float64 scalar + both-scalar +
+f32-still-delegates. Local UNDER LOAD (gauge 0.85x): logaddexp2(x,2.0) 4M 24.94 vs numpy 72.71 ms =
+2.9x (np.full ~broadcast overhead keeps it below the 11.5x array/array win, but decisively off the
+loss). **The array+scalar vein is NARROW: only logaddexp2 (and heaviside last commit) — the rest are
+numpy-fast for scalars. Vein closed.**
+
 ## 2026-07-03 - SHIP: np.heaviside(f64 array, f64 SCALAR) fused single-pass — 4.5x
 
 `BlackThrush`. heaviside's native binary kernel (BinaryOp::Heaviside) required BOTH operands to be
