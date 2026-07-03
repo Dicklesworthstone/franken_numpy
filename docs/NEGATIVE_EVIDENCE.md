@@ -4,6 +4,51 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-02 - SHIP: FLOAT `np.isin` zero-copy parallel hashed-set — 530x vs NumPy (16M f64), 70x vs prior fnp path
+
+`BlackThrush`. Biggest measured serial gap in the set-ops surface: numpy's float
+`isin` can't use its fast integer 'table' method, so it falls back to a serial
+SORT of the |element|+|test| concatenation (~3.0 s for 16M f64 vs 65k test). The
+prior fnp float path routed through `extract_precise_numeric_array` → `ar1.isin`
+(a full O(n) copy of BOTH operands + `build_numpy_array_from_ufunc`), so it only
+reached ~392 ms (7x vs numpy) — a win, but leaving ~50x on the table.
+
+New `try_zerocopy_float_isin` + `isin_float_typed<T: FloatKey>` (f64/f32): read
+both operands' buffers zero-copy, build a fast-hashed set of the test values'
+NORMALIZED bit-keys (O(m)), then a PARALLEL per-element membership lookup (O(n))
+over a shared read-only set. Runs BEFORE the extract path; gated to both ndarrays,
+identical float dtype (else numpy promotes — defer), C-contiguous, default
+assume_unique/kind. Non-float / mismatched-dtype / non-contiguous defer unchanged.
+
+BIT-EXACT float-equality key (verified — reproduces numpy's `isin` exactly): NaN
+is DROPPED from the set (numpy: NaN never a member — NaN != NaN, so any NaN element
+also misses with no lookup special-case), ±0.0 collapse to one key (numpy: -0.0 ==
+0.0), all other values keyed by raw bits (two non-NaN non-zero floats are `==` iff
+their bits are `==`). ±inf exact. invert honored. Python sweep ALL PASS: f64+f32 ×
+{NaN,-0.0,inf,dups,empty,invert} × shapes {1-D,2-D,17,1<<20} + mismatched-dtype
+defer + non-contiguous defer. Rust guard `float_isin_matches_numpy` added.
+
+Engagement PROVEN (local same-worker, |B|=65536):
+
+| Probe | fnp full-threads | numpy | fnp/numpy | fnp RAYON=1 | Verdict |
+|---|---:|---:|---:|---:|---|
+| isin f64 4M | 4.20 ms | 575.4 ms | 0.0073 (137x) | 17.0 ms | SHIP |
+| isin f64 16M | 5.63 ms | 2986.0 ms | 0.0019 (530x) | 60.4 ms (45x vs np) | SHIP |
+| isin f32 4M | 2.95 ms | 472.2 ms | 0.0062 (160x) | 12.9 ms | SHIP |
+| isin f32 16M | 5.18 ms | 2427.1 ms | 0.0021 (469x) | 50.7 ms (46x vs np) | SHIP |
+
+Two independent gains stack: (1) ALGORITHM — the serial hash O(n+m) already beats
+numpy's O(n log n) sort ~45x (RAYON=1: 60 ms vs 2712 ms); (2) PARALLELISM — full
+threads add another ~10x (60 → 5.6 ms). Both proven via the RAYON=1 control.
+
+BLOCKER surfaced (NOT caused by this change, pre-existing on origin/main): the
+lib-test binary fails to compile — 3 stale `where_py(py, condition, &args)` test
+calls (HEAD lines ~85805/85830/85856) don't match the refactored `where_py(args,
+kwargs)` signature, so `cargo test -p fnp-python` is RED independent of this work.
+The cdylib itself builds/imports/runs clean; the new bench + `float_isin_matches_numpy`
+test compile with ZERO errors (only the 3 pre-existing where_py errors remain).
+Correctness therefore proven via the python sweep, not `cargo test`.
+
 ## 2026-07-02 - SHIP: `logical_and/or/xor.accumulate` on BOOL input routes to native two-pass prefix — 3.1x (remote) / 7.3-8.8x (local same-worker)
 
 `BlackThrush`. Closed the last remaining lead in the associative-ufunc-accumulate
