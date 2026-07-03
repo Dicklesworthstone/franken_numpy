@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.ptp(datetime64/timedelta64, axis) routed to int64 ptp — 6.4x
+
+`BlackThrush`. Follow-up to the datetime arg routing: ptp(datetime64/timedelta64) delegated (~1.0x)
+while the int64 ptp wins ~15x. Temporal is int64-backed and ptp = max-min under int64 ordering ==
+temporal ordering, so view as int64, run the native int ptp, then view the int64 result back as
+timedelta64[unit] (ptp of a datetime is a DURATION; unit from np.datetime_data). NaT (i64::MIN)
+makes numpy return NaT, so pre-scan np.isnat and defer if any present.
+
+Bit-exact ALL PASS: datetime64 + timedelta64 x units {D,s,ns} x axis {None,0,1,2} (result dtype
+timedelta64[unit] matches numpy) + NaT-defer(all axes) + int64/f64 regression. Local same-worker
+(clean; the just-after-build read was a load spike): dt ptp mid 18.28 vs numpy 117.24 ms = 6.4x
+(int64 ptp alone ~12ms; the isnat pre-scan adds ~6ms). VALUE-returning temporal reduce -> the
+result is viewed back as m8[unit] (vs argmin/argmax which return dtype-agnostic indices).
+Follow-up: min/max(datetime axis) same routing (result viewed back as the SAME m8/M8[unit]).
+
 ## 2026-07-03 - SHIP: np.argmin/argmax(datetime64/timedelta64, axis) routed to int64 kernels — 5.8x
 
 `BlackThrush`. datetime64/timedelta64 argmin/argmax delegated to numpy's slow temporal reduce

@@ -8154,6 +8154,49 @@ i32 = rng.integers(0, 1000, 4_000_000).astype(np.int32)\n";
     group.finish();
 }
 
+// np.ptp(datetime64/timedelta64, axis): int64-backed; numpy's temporal ptp is slow while the
+// int64-view routes to the native int ptp (~6x, result viewed back as timedelta64[unit]).
+fn bench_datetime_ptp_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_datetime_ptp_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+dt = rng.integers(0, 100000, (4096, 512, 8)).astype('datetime64[D]')\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("datetime ptp setup");
+        let dt = ns.get_item("dt").expect("dt");
+        let fnp_ptp = module.getattr("ptp").expect("fnp ptp");
+        let numpy_ptp = numpy.getattr("ptp").expect("numpy ptp");
+        let kw = PyDict::new(py);
+        kw.set_item("axis", 1_i64).unwrap();
+        let kw2 = kw.clone();
+        group.bench_function("fnp_ptp_dt_mid", |b| {
+            b.iter(|| black_box(fnp_ptp.call((&dt,), Some(&kw)).expect("fnp ptp")));
+        });
+        group.bench_function("numpy_ptp_dt_mid", |b| {
+            b.iter(|| black_box(numpy_ptp.call((&dt,), Some(&kw2)).expect("np ptp")));
+        });
+    });
+
+    group.finish();
+}
+
 // np.argmin/argmax(datetime64/timedelta64, axis): temporal reductions are int64-backed; numpy runs
 // a slow temporal reduce while the int64-view routes to the fast native int argextreme (~6x after
 // the NaT pre-scan). Bit-exact indices (int64 ordering == temporal ordering); NaT defers.
@@ -8353,6 +8396,7 @@ criterion_group!(
     bench_nanarg_nonlast_boundary,
     bench_argextreme_f32_axis_boundary,
     bench_datetime_argextreme_boundary,
+    bench_datetime_ptp_boundary,
     bench_asarray_dtype_boundary,
     bench_char_add_boundary,
     bench_matmul_boundary,
