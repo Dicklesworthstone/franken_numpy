@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.repeat(a, per-element count array) native parallel scatter — 2.4x
+
+`BlackThrush`. fnp's repeat had a native SCALAR-count path (wins ~3.7x) but delegated a
+per-element (variable) count ARRAY to numpy, which expands it single-threaded (~104ms@4M in
+-> ~18M out, ~1.3 GB/s). `try_native_repeat_array`: exclusive prefix-sum of the counts gives
+each input unit a DISJOINT output range, so the value-agnostic byte scatter parallelizes across
+input index with no coordination (usize-pointer pattern -> copy_nonoverlapping). uint8-view
+covers every fixed-width dtype (bool/int/float/complex, all widths). axis=None (flat) or 0;
+int64/uint64 counts only (narrower defer); negative count / length-mismatch defer so numpy raises.
+
+Bit-exact ALL PASS: 11 dtypes (incl bool/f16/complex) x axis=None/0 x zero-count segments +
+multi-D-axis=None + negative-count-raises + length-mismatch-raises + int32-counts-defer +
+all-zero->empty + small-n-defer. Local same-worker 4M-in: fnp 46.08 ms vs numpy 109.74 ms = 2.4x.
+
+The scatter is memory-bound (writes ~144MB); the win is numpy's slow serial expand (~1.3 GB/s,
+page-fault-bound) vs the parallel scatter (~3 GB/s). RAYON=1 my serial is ~0.7x (prefix-sum +
+scatter setup > numpy's tight loop), so an EARLY `current_num_threads() < 2` gate defers
+single-core cleanly. Gate: output >= 4MB bytes.
+
 ## 2026-07-03 - NO-SHIP: f32/f16 `sinc` (f64 sinc already wins 15-18x); DISCOVERY: numpy f64 sin/cos/exp/log == system libm bit-for-bit
 
 `BlackThrush`. Probed sinc for the narrow floats. **f64 sinc ALREADY WINS 15-18x**

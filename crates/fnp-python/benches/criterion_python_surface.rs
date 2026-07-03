@@ -6284,6 +6284,46 @@ v = rng.standard_normal(4_000_000)\n";
     group.finish();
 }
 
+// np.repeat(a, counts_array) with a per-element int64 count array: numpy expands it
+// single-threaded (~104ms@4M in). The native prefix-sum + disjoint parallel scatter wins.
+fn bench_repeat_array_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_repeat_array_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+x = rng.standard_normal(4_000_000)\n\
+counts = rng.integers(1, 8, 4_000_000).astype(np.int64)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("repeat setup");
+        let x = ns.get_item("x").expect("x");
+        let counts = ns.get_item("counts").expect("counts");
+        let fnp_repeat = module.getattr("repeat").expect("fnp repeat");
+        let numpy_repeat = numpy.getattr("repeat").expect("numpy repeat");
+        group.bench_function("fnp_repeat_array_f64_4m", |b| {
+            b.iter(|| black_box(fnp_repeat.call1((&x, &counts)).expect("fnp repeat")));
+        });
+        group.bench_function("numpy_repeat_array_f64_4m", |b| {
+            b.iter(|| black_box(numpy_repeat.call1((&x, &counts)).expect("np repeat")));
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_take_boundary(c: &mut Criterion) {
     // np.take(16M f64 source, 8M random indices) — serial gather vs parallel raw-slice gather.
     let mut group = c.benchmark_group("python_take_boundary");
@@ -7611,6 +7651,7 @@ criterion_group!(
     bench_take_axis_boundary,
     bench_take_along_axis_boundary,
     bench_take_boundary,
+    bench_repeat_array_boundary,
     bench_searchsorted_boundary,
     bench_digitize_boundary,
     bench_bincount_boundary,
