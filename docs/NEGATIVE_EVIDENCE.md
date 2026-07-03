@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.max/min(datetime64/timedelta64, axis) routed to int64 min/max — 2.6x
+
+`BlackThrush`. Completes the temporal-reduction routing: max/min(datetime64/timedelta64) delegated
+(~1.0x). Temporal is int64-backed and max/min under int64 ordering == temporal ordering, so view as
+int64, run the native int min/max (try_zerocopy_int_minmax), then view the int64 result back as the
+SAME temporal dtype (min/max of a datetime is a datetime, of a timedelta is a timedelta — unlike ptp
+whose result is a duration). NaT (i64::MIN) makes numpy propagate NaT, so pre-scan np.isnat + defer.
+Added to both py_max/py_min above the f64/int paths.
+
+Bit-exact ALL PASS: datetime64 + timedelta64 x units {D,s,ns} x max/min x axis {None,0,1,2} (result
+dtype == input dtype) + keepdims + NaT-defer(all axes) + int64/f64 regression. **rch hz1 (clean):
+max dt mid 18.72 vs 49.11 ms = 2.6x; min 17.54 vs 44.96 = 2.6x.** (Local read 0.86x was pure load
+compression — the i64 min/max reference simultaneously read 2.75x vs its true 7-8x, i.e. ~10x box
+load; the isnat pre-scan also eats into the raw int64 win. rch is the true ratio.) **Temporal
+value-reductions now native: ptp/max/min; argmin/argmax done last cycle. Reduction routing to int64
+via .view complete for the common temporal ops.**
+
 ## 2026-07-03 - SHIP: np.ptp(datetime64/timedelta64, axis) routed to int64 ptp — 6.4x
 
 `BlackThrush`. Follow-up to the datetime arg routing: ptp(datetime64/timedelta64) delegated (~1.0x)

@@ -8154,6 +8154,51 @@ i32 = rng.integers(0, 1000, 4_000_000).astype(np.int32)\n";
     group.finish();
 }
 
+// np.max/min(datetime64/timedelta64, axis): int64-backed; the int64-view routes to the native int
+// min/max (~5-8x, result viewed back as the SAME temporal dtype). NaT pre-scan + defer.
+fn bench_datetime_minmax_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_datetime_minmax_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+dt = rng.integers(0, 100000, (4096, 512, 8)).astype('datetime64[D]')\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("datetime minmax setup");
+        let dt = ns.get_item("dt").expect("dt");
+        for name in ["max", "min"] {
+            let fnp_fn = module.getattr(name).expect("fnp fn");
+            let numpy_fn = numpy.getattr(name).expect("numpy fn");
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 1_i64).unwrap();
+            let kw2 = kw.clone();
+            group.bench_function(format!("fnp_{name}_dt_mid"), |b| {
+                b.iter(|| black_box(fnp_fn.call((&dt,), Some(&kw)).expect("fnp mm")));
+            });
+            group.bench_function(format!("numpy_{name}_dt_mid"), |b| {
+                b.iter(|| black_box(numpy_fn.call((&dt,), Some(&kw2)).expect("np mm")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 // np.ptp(datetime64/timedelta64, axis): int64-backed; numpy's temporal ptp is slow while the
 // int64-view routes to the native int ptp (~6x, result viewed back as timedelta64[unit]).
 fn bench_datetime_ptp_boundary(c: &mut Criterion) {
@@ -8397,6 +8442,7 @@ criterion_group!(
     bench_argextreme_f32_axis_boundary,
     bench_datetime_argextreme_boundary,
     bench_datetime_ptp_boundary,
+    bench_datetime_minmax_boundary,
     bench_asarray_dtype_boundary,
     bench_char_add_boundary,
     bench_matmul_boundary,
