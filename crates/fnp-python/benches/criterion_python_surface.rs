@@ -8156,6 +8156,57 @@ a = rng.standard_normal((512, 512, 32)).astype(np.float32)\n",
     group.finish();
 }
 
+// np.nanargmin/nanargmax(f32/f64, NON-last axis): no native non-last nanarg kernel existed, so it
+// fell to the extract path (f64 ~2.3x, f32 a 0.77x LOSS from the f32->f64 widen). numpy's nanarg
+// copies NaN->-+inf then argmins (whole-array temp). The native per-column nan-skip arg wins ~40-53x.
+fn bench_nanarg_nonlast_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_nanarg_nonlast_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+a = rng.standard_normal((4096, 512, 8)).astype(np.float32)\n\
+a[a > 2.0] = np.nan\na[:, 0, :] = 0.5\n\
+a64 = a.astype(np.float64)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("nanarg nonlast setup");
+        let a = ns.get_item("a").expect("a");
+        let a64 = ns.get_item("a64").expect("a64");
+        for name in ["nanargmin", "nanargmax"] {
+            let fnp_fn = module.getattr(name).expect("fnp fn");
+            let numpy_fn = numpy.getattr(name).expect("numpy fn");
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 1_i64).unwrap();
+            for (tag, arr) in [("f32", &a), ("f64", &a64)] {
+                let kwc = kw.clone();
+                group.bench_function(format!("fnp_{name}_{tag}_mid"), |b| {
+                    b.iter(|| black_box(fnp_fn.call((arr,), Some(&kw)).expect("fnp nanarg")));
+                });
+                group.bench_function(format!("numpy_{name}_{tag}_mid"), |b| {
+                    b.iter(|| black_box(numpy_fn.call((arr,), Some(&kwc)).expect("np nanarg")));
+                });
+            }
+        }
+    });
+
+    group.finish();
+}
+
 // np.nanargmin/nanargmax(f64, axis=-1): numpy copies the array replacing NaN with +-inf then
 // argmins (~107-144ms@16M); the native fused single-pass per-lane nan-skip scan wins 10-46x.
 // f64 previously had no last-axis path (only f32); this closes the gap.
@@ -8205,6 +8256,7 @@ w = rng.standard_normal((8, 2_000_000))\nw[w > 2.0] = np.nan\n",
 criterion_group!(
     benches,
     bench_nanarg_lastaxis_boundary,
+    bench_nanarg_nonlast_boundary,
     bench_argextreme_f32_axis_boundary,
     bench_asarray_dtype_boundary,
     bench_char_add_boundary,

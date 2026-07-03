@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.nanargmin/nanargmax(f32 + f64, NON-last axis) native kernel — 42x / 53x + fixes an f32 LOSS
+
+`BlackThrush`. No native non-last nanarg kernel existed for EITHER float width — the non-last axis
+fell to the extract path (f64 ~2.3x via numpy-slow, f32 a 0.77x LOSS from the f32->f64 widen).
+numpy's nanarg copies the array replacing NaN with -+inf then argmins (whole-array temp + strided
+reduce). Added the generic `try_zerocopy_float_nanarg_nonlast_axis<T: NanArgFloat>` (impl for
+f32+f64): per-outer-block running best index/value with a -1 sentinel for "no non-NaN seen yet"
+(skip NaN, order-preserving strict compare -> FIRST extremum index, bit-identical to numpy),
+parallel across the independent outer blocks; wrong-dtype T -> None (format mismatch). Any all-NaN
+column defers the whole call (numpy raises ValueError). Wired for both nanargmin/nanargmax, above
+the extract fallback (beside the existing flat/last-axis f32 paths, so guard-safe).
+
+Bit-exact ALL PASS: nanargmin+nanargmax x {f32,f64} x 5 shapes x every non-last axis + ties(first-
+index) + nan+tie + all-NaN-col both-raise + last-axis-unchanged + axis=None + int regression. Local
+same-worker: nanargmin f32 mid 3.07 vs numpy 130.14 ms = 42.4x (was a 0.77x loss); f64 mid 4.40 vs
+233.61 = 53.1x (was 2.3x via the extract path).
+
 ## 2026-07-03 - SHIP: np.nanmax/nanmin(f32, axis) native kernel — 18.7x (f32 had no path)
 
 `BlackThrush`. Missing-float-width twin, big win: nanmax/nanmin had f64 + f16 nanextreme-axis
