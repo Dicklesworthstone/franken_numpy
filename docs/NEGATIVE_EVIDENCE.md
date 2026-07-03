@@ -4,6 +4,20 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - NO-SHIP: np.strings startswith/endswith are bandwidth-bound (numpy already fast) — parity, reverted
+
+`BlackThrush`. Most np.char/strings ops win natively (find 5.5x, count 7.2x, zfill/center/
+rjust/ljust 3-3.6x, replace 4.2x); only startswith/endswith read as parity, so implemented a
+native parallel codepoint-compare-against-null-stripped-content path (`try_zerocopy_unicode_
+startswith`, bool output, verified BIT-EXACT ALL PASS incl empty/too-long affix, unicode, 2-D,
+array-affix defer, start/end-window defer, 'S'-bytes defer). **But it measured 1.0x (28.8 vs
+29.9 ms @2M x U) — REVERTED.** ROOT: startswith/endswith only compare a FIXED short prefix/
+suffix per string (O(affix)), so numpy is BANDWIDTH-bound (~6.4 GB/s over the U buffer), not
+compute-bound like find/count's substring SEARCH (O(len x affix) scan per string). No parallel
+headroom on a bandwidth-saturated op. **LESSON: a string op wins natively only when numpy's
+per-string work is COMPUTE-heavy (substring search, case-fold, pad-realloc); a cheap fixed-
+affix compare is bandwidth-bound = numpy already saturates = parity, don't ship.**
+
 ## 2026-07-03 - SHIP: np.repeat(a, per-element count array) native parallel scatter — 2.4x
 
 `BlackThrush`. fnp's repeat had a native SCALAR-count path (wins ~3.7x) but delegated a
