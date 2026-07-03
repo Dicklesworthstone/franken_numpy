@@ -5269,6 +5269,61 @@ fn bench_compress_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+// np.roll(2-D, tuple shifts, tuple axes) for NON-f64 dtypes: numpy does successive full-copy
+// concatenations; the f64 fused-parallel path won 3.6x but non-f64 delegated. Generalized to a
+// uint8-view byte roll -> int64 3.0x / float32 2.6x / complex128 3.1x.
+fn bench_roll_2d_multi_dtype_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_roll_2d_multi_dtype_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+x = rng.integers(-1000, 1000, (4096, 4096)).astype(np.int64)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("roll 2d multi setup");
+        let x = ns.get_item("x").expect("x");
+        let fnp_roll = module.getattr("roll").expect("fnp roll");
+        let numpy_roll = numpy.getattr("roll").expect("numpy roll");
+        let shifts = (3_i64, 5_i64);
+        let axes = (0_i64, 1_i64);
+        group.bench_function("fnp_roll_2d_multi_int64", |b| {
+            b.iter(|| {
+                black_box(
+                    fnp_roll
+                        .call1((&x, shifts, axes))
+                        .expect("fnp roll"),
+                )
+            });
+        });
+        group.bench_function("numpy_roll_2d_multi_int64", |b| {
+            b.iter(|| {
+                black_box(
+                    numpy_roll
+                        .call1((&x, shifts, axes))
+                        .expect("np roll"),
+                )
+            });
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_roll_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_roll_boundary");
     group.sample_size(10);
@@ -8668,6 +8723,7 @@ criterion_group!(
     bench_compress_lastaxis_boundary,
     bench_delete_mask_boundary,
     bench_insert_block_boundary,
+    bench_roll_2d_multi_dtype_boundary,
     bench_roll_boundary,
     bench_einsum_boundary,
     bench_linalg_boundary

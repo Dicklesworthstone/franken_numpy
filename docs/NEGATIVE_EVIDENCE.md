@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.roll(2-D, tuple shifts, tuple axes) generalized to ALL dtypes — 2.6-3.1x
+
+`BlackThrush`. The fused 2-D multi-axis roll (try_zerocopy_f64_roll_2d_multi) was f64-only; the
+dispatch's residual delegated every other dtype's tuple-axis roll to numpy, which rolls a 2-D
+tuple-axis array as SUCCESSIVE full-copy concatenations (~2 copies/call) — so f64 won 3.6x while
+int/f32/f16/complex/bool ran at numpy's slower speed. roll is a pure element relocation (value-
+agnostic), so added try_zerocopy_any_roll_2d_multi: the identical fused single-pass net-shift roll
+on the uint8 view with itemsize-scaled column offsets (each output row memcpys the two byte runs of
+one row-shifted input row, parallel over rows). Bit-identical for every fixed-width dtype.
+
+Bit-exact ALL PASS: 12 dtypes (int all widths / f32 / f16 / complex64+128 / bool / f64) x 5 shapes x
+7 (shifts,axes) combos incl negative/wrapping/single-axis-tuple + f64 regression + OOB-axis-both-
+raise. Local same-worker (load gauge matmul 1.04x fnp-favorable => clean/trustworthy): roll(4096^2,
+(3,5),axis=(0,1)) int64 24.65 vs 74.98 = 3.0x; float32 13.94 vs 36.89 = 2.6x; complex128 49.98 vs
+152.73 = 3.1x. **LESSON (3rd time this session, after repeat-any-axis + stack ndim-generalize): a
+VALUE-AGNOSTIC structural kernel gated to f64 generalizes to ALL fixed-width dtypes for free via the
+uint8 view + itemsize-scaled offsets — grep other try_zerocopy_f64_* STRUCTURAL (copy/rotate/gather,
+non-arithmetic) kernels with no any_* twin.**
+
 ## 2026-07-03 - FIX: np.compress(2-D, axis=1 last axis) 0.46x LOSS -> parity (delegate the per-element gather)
 
 `BlackThrush`. The native f64 `try_zerocopy_f64_compress_axis` engaged for the LAST axis (inner==1)
