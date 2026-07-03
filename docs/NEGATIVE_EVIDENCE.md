@@ -4,6 +4,22 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.nanmax/nanmin(f32, axis) native kernel — 18.7x (f32 had no path)
+
+`BlackThrush`. Missing-float-width twin, big win: nanmax/nanmin had f64 + f16 nanextreme-axis
+kernels but NO f32, so f32 delegated to numpy — which, when NaN is present, MATERIALIZES a temp
+(copy + isnan mask + reduce, ~77-92ms@16M), so f64 won 13-20x while f32 stayed ~1.0x. Added
+`try_zerocopy_f32_nanextreme_axis` (placed ABOVE the native_minmax_preserves_dtype guard beside the
+f16 twin, else dead code): scalar `f32::max`/`min` skip NaN (IEEE maxNum returns the non-NaN
+operand) exactly like the f64 SIMD helpers, parallel over lanes/outer-groups. max/min are exact
+input values => bit-identical. Mirrors every f64 edge: inner>128 (wide down-axis) defers, +-0
+extreme defers (sign-tie), all-NaN lane -> NaN + numpy's single "All-NaN slice" warning.
+
+Bit-exact ALL PASS: f32 nanmax+nanmin x {(4096,512,8),(512,512,32),(2048,300),(64,128,16),
+(1000,500),(8,256K)} x EVERY axis + all-NaN-lane + some-NaN + inf + +-0-defer + keepdims +
+inner>128-defer + f64 regression. Local same-worker: nanmax f32 mid 4.26 vs numpy 79.78 ms =
+18.7x (f64 reference simultaneously 21.3x, box clean).
+
 ## 2026-07-03 - SHIP: np.ptp(f32, axis) native kernel — 4.2x (mid) + fixes a 0.77x axis=0 LOSS
 
 `BlackThrush`. Missing-float-width twin that was ALSO a loss: ptp had an int kernel (Ord-based
