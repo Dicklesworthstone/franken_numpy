@@ -4,6 +4,31 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-02 - SHIP: timedelta64 add/subtract (td +/- td) native parallel — 4.1x/3.9x
+
+`BlackThrush`. New dtype vein (datetime/timedelta). numpy runs `td +/- td` as an int64
+add/sub with per-element NaT checks single-threaded (~90ms@16M — NOT bandwidth-saturated,
+so parallel headroom). `try_native_timedelta_addsub`: view both as int64, parallel WRAPPING
+add/sub with NaT (i64::MIN) propagation folded INLINE (single pass — a separate NaT pre-scan
+would double-read this cheap-compute input), view result back to the timedelta dtype.
+
+BIT-EXACT verified: NaT in either operand -> NaT; overflow WRAPS to NaT exactly like numpy
+(MAX+1 == i64::MIN == NaT); NO overflow warning (confirmed). Same-dtype (same unit) only —
+mixed units / dt+td / dt-dt DEFER to numpy (verified they still match). Correctness ALL PASS
+(random+NaT+overflow-wrap + mixed-unit defer + dt+td delegate + small-n).
+
+Engagement (local same-worker, 16M timedelta64[ns], DEFAULT << RAYON=1):
+
+| Probe (16M td) | fnp full | numpy | speedup | fnp RAYON=1 | Verdict |
+|---|---:|---:|---:|---:|---|
+| td + td | 23.56 ms | 96.10 ms | 4.1x | 86.94 ms (≈numpy) | SHIP |
+| td - td | 23.84 ms | 92.63 ms | 3.9x | 92.80 ms (≈numpy) | SHIP |
+
+RAYON=1 ≈ numpy confirms pure parallelism (inline NaT adds no serial penalty vs numpy).
+Follow-ups (not yet done): td*int, dt-dt (-> td), dt+/-td (-> dt) — same infra, different
+result dtype. **Complex tan/tanh REJECTED same day: naive sin/cos quotient = 95.6% mismatch
+vs numpy's careful ctan/ctanh (Kahan) — like clog/csqrt, NOT bit-exact via composition.**
+
 ## 2026-07-02 - SHIP: complex64 exp/sin/cos/sinh/cosh/sign native parallel — 3.0-13.7x (generalized the complex-unary helper to f32)
 
 `BlackThrush`. numpy computes complex64 transcendentals per-element single-threaded too

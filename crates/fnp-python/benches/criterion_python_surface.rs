@@ -182,6 +182,49 @@ fn bench_narrow_int_unary_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+// timedelta64 add/subtract (td +/- td -> td): numpy runs int64 add/sub with per-element NaT
+// checks single-threaded (~90ms@16M). The native parallel wrapping op with inline NaT is
+// bit-exact and wins ~4x. RAYON_NUM_THREADS=1 vs default isolates the parallel gain.
+fn bench_timedelta_addsub_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_timedelta_addsub_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+a = rng.integers(0, 10**9, 16_000_000).astype(np.int64).view('timedelta64[ns]')\n\
+b = rng.integers(1, 10**6, 16_000_000).astype(np.int64).view('timedelta64[ns]')\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("td setup");
+        let a = ns.get_item("a").expect("a");
+        let b = ns.get_item("b").expect("b");
+        for name in ["add", "subtract"] {
+            let fnp_fn = module.getattr(name).expect("fnp fn");
+            let numpy_fn = numpy.getattr(name).expect("numpy fn");
+            group.bench_function(format!("fnp_{name}_timedelta_16m"), |bch| {
+                bch.iter(|| black_box(fnp_fn.call1((&a, &b)).expect("fnp td addsub")));
+            });
+            group.bench_function(format!("numpy_{name}_timedelta_16m"), |bch| {
+                bch.iter(|| black_box(numpy_fn.call1((&a, &b)).expect("np td addsub")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_remainder_mod_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_remainder_mod_boundary");
     group.sample_size(10);
@@ -7540,6 +7583,7 @@ criterion_group!(
     bench_int32_unary_boundary,
     bench_narrow_int_unary_boundary,
     bench_remainder_mod_boundary,
+    bench_timedelta_addsub_boundary,
     bench_max_min_reduction_boundary,
     bench_ptp_axis0_boundary,
     bench_bool_minmax_reduction_boundary,
