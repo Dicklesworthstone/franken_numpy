@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.column_stack / stack(axis=1) / dstack of 1-D arrays native parallel interleave — 3.6-4.4x
+
+`BlackThrush`. The INTERLEAVE stack ops (column_stack, stack(axis=1), dstack) on 1-D arrays all
+delegated to numpy's serial page-fault-bound strided copy (~87ms@2x8M; the earlier "column_stack
+2.9x" reading was small-array noise — clean/large it's parity). All three produce the same
+interleaved data: `out[i, j] = arrays[j][i]` -> (N, K) for column_stack/stack(axis=1), (1, N, K)
+for dstack. `try_native_column_interleave`: parallel over row blocks, each row writes K contiguous
+units gathered from the K sources (contiguous row writes, strided source reads), value-agnostic
+via uint8-view. Routed column_stack + stack(axis=1) + dstack.
+
+Bit-exact ALL PASS: column_stack 9 dtypes x K in {2,3,5}; stack(axis=1)/dstack 6 dtypes x K in
+{2,3}; + mixed-length raise-parity + 2-D defer + mixed-1-D/2-D defer + mixed-dtype defer +
+stack(axis=-1) defer + small-n. Local same-worker: column_stack 2x8M 3.7x / 3x8M 4.4x;
+stack(axis=1) 2x8M 4.3x; dstack 2x8M 3.6x.
+
+Gate: all-1-D same-dtype same-length ndarrays, output >= 4MB. **STRUCTURAL-JOIN family now COMPLETE
+for 1-D: concatenate/append/hstack/column_stack/vstack/stack(axis0/1)/dstack — the concat-reshape
+ones route to fast concatenate, the interleave ones use the native row-block interleave.**
+
 ## 2026-07-03 - SHIP: np.vstack / np.stack of 1-D arrays routed to fast concatenate — 4.0x / 3.7x
 
 `BlackThrush`. vstack had an all-2-D fast path (concatenate axis=0) but 1-D inputs fell through
