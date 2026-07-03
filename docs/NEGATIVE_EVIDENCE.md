@@ -4,6 +4,22 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: datetime64/timedelta64 add/subtract extended to dt-dt / dt+/-td / td+dt — 3.4-3.5x
+
+`BlackThrush`. Extended the timedelta add/sub helper (`try_native_timedelta_addsub`) to the
+full temporal add/sub surface. The int64 wrapping-with-inline-NaT kernel is identical; only
+the GATE and RESULT DTYPE differ by kind combination:
+- `dt - dt` -> timedelta of the shared unit (built via `np.datetime_data` -> `timedelta64[unit]`)
+- `dt +/- td` -> datetime; `td + dt` -> datetime; `td +/- td` -> timedelta
+- `dt + dt` and `td - dt` are INVALID -> defer so numpy raises the same UFuncTypeError
+Same unit required (mixed units -> numpy promotes -> defer); count>1 multiples (e.g. [5m]) handled.
+
+BIT-EXACT verified: valid combos byte-identical incl NaT propagation + overflow-wrap-to-NaT;
+INVALID combos (dt+dt, td-dt) both raise; mixed-unit defer + count>1 + small-n all match numpy —
+ALL PASS (td+/-td did NOT regress). Local same-worker 16M[ns]: dt-dt 26.19 vs 90.44 ms = 3.5x,
+dt+td 3.4x, dt-td 3.4x. Follow-up remaining: td*int (asymmetric NaT — only the td operand's
+i64::MIN is NaT; the int operand's MIN is a normal value that wraps).
+
 ## 2026-07-02 - SHIP: timedelta64 add/subtract (td +/- td) native parallel — 4.1x/3.9x
 
 `BlackThrush`. New dtype vein (datetime/timedelta). numpy runs `td +/- td` as an int64
