@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - FIX: np.compress(2-D, axis=1 last axis) 0.46x LOSS -> parity (delegate the per-element gather)
+
+`BlackThrush`. The native f64 `try_zerocopy_f64_compress_axis` engaged for the LAST axis (inner==1)
+and did a SCALAR per-element strided column gather in a SERIAL `for o in 0..outer` loop — 0.36-0.84x
+vs numpy's one-pass SIMD strided gather (a native path that only LOSES = worse than a missing win).
+The kernel's own comment already noted a branchless last-axis store-advance "regressed". Gated
+`inner == 1 -> return Ok(None)` so the last-axis compress delegates to numpy (fast); kept the native
+path only for inner>1 (large contiguous `inner`-slabs, non-last axis, at parity).
+
+Load gauge was UNfavorable (matmul ref 0.83x) so most timings were load-suspect, but the fix is
+LOAD-IMMUNE: compress axis=1 now DELEGATES, so fnp==numpy regardless of load -> the 1.02x reading
+(was 0.46x native loss) is reliable. Bit-exact ALL PASS: compress x 4 shapes (2-D+3-D) x every axis
++ short condition + all-True/all-False + axis=None flat + 1-D axis0. **LESSON: a native per-axis
+kernel that does a scalar per-element gather for the LAST axis (inner==1, strided columns) usually
+LOSES to numpy's SIMD strided gather — gate inner==1 to delegate; the native win is only for the
+large-contiguous-slab (inner>1) case. (compress mid/ax0 native path unchanged, ~parity.)**
+
 ## 2026-07-03 - SHIP: np.repeat(N-D, scalar count, ANY axis) generalized — 2.4x (was axis 0/None only)
 
 `BlackThrush`. The native scalar-repeat path (try_native_repeat_scalar) gated to axis None/0; every

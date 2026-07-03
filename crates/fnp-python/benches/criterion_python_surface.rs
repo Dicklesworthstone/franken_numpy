@@ -5155,6 +5155,51 @@ idx = np.sort(rng.choice(8_000_000, size=2_000_000, replace=False))\n";
     group.finish();
 }
 
+// np.compress(cond, 2-D, axis=1): the native f64 compress-axis path did a scalar per-element column
+// gather for the last axis (inner==1) and LOST 0.4-0.8x to numpy's SIMD strided gather. Now delegates
+// the inner==1 case -> parity (regression guard: this should track numpy, not the old native loss).
+fn bench_compress_lastaxis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_compress_lastaxis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+x = rng.standard_normal((2048, 2048))\ncond = rng.random(2048) < 0.5\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("compress lastaxis setup");
+        let x = ns.get_item("x").expect("x");
+        let cond = ns.get_item("cond").expect("cond");
+        let fnp_compress = module.getattr("compress").expect("fnp compress");
+        let numpy_compress = numpy.getattr("compress").expect("numpy compress");
+        let kw = PyDict::new(py);
+        kw.set_item("axis", 1_i64).unwrap();
+        let kw2 = kw.clone();
+        group.bench_function("fnp_compress_2d_axis1", |b| {
+            b.iter(|| black_box(fnp_compress.call((&cond, &x), Some(&kw)).expect("fnp compress")));
+        });
+        group.bench_function("numpy_compress_2d_axis1", |b| {
+            b.iter(|| black_box(numpy_compress.call((&cond, &x), Some(&kw2)).expect("np compress")));
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_compress_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_compress_boundary");
     group.sample_size(10);
@@ -8620,6 +8665,7 @@ criterion_group!(
     bench_norm_nonlast_axis_boundary,
     bench_norm_frobenius_boundary,
     bench_compress_boundary,
+    bench_compress_lastaxis_boundary,
     bench_delete_mask_boundary,
     bench_insert_block_boundary,
     bench_roll_boundary,
