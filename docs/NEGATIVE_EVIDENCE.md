@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.nansum(f64, LAST axis) — fix bit-exactness (sequential -> pairwise) + parallelize
+
+`BlackThrush`. Correctness fix for the gap I surfaced last commit: the last-axis (inner==1) branch
+of `try_zerocopy_f64_nansum_axis` summed each lane SEQUENTIALLY, diverging from numpy's contiguous
+pairwise reduce by up to ~131072 ULP (allclose but NOT bit-exact) — while it "won" ~11x. Routed
+each lane through `pairwise_simd_f64` (nan_to_zero=true) — the SAME bit-exact pairwise SIMD tree
+the flat nansum uses — and parallelized over the independent lanes (raw &[f64] for Sync + cast each
+lane back to ReadOnlyCell, repr(transparent)). Now BIT-EXACT and faster.
+
+Bit-exact ALL PASS (was 131072 ULP -> now 0): last-axis f64 nansum x {(512,512,32),(4,4,1M),
+(1000,5000),(100,100,100),(2000,500)} + keepdims + all-NaN-lane(->0) + inf/signed + non-last
+regression + axis=None flat + small-serial. axis_len>1M still defers at the COMPENSATED_SUM_MIN_LEN
+gate (a separate downstream path, ~1 ULp, pre-existing — untouched). Local same-worker (loaded, f64
+nansum last (512,512,32)): fnp 17.54 vs numpy 118.40 ms = 6.7x (~11-15x unloaded), now bit-exact.
+**np.nansum(f64) now bit-exact on flat + last-axis + non-last (axis_len<=1M) — the >1M edge is the
+only remaining allclose case.**
+
 ## 2026-07-03 - SHIP: np.nansum(f64, non-last axis) — parallelized the SERIAL branch — 12x -> 40x
 
 `BlackThrush`. Serial-sibling red-flag: `try_zerocopy_f64_nansum_axis`'s non-last (inner>1) branch

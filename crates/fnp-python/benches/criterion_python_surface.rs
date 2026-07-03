@@ -3160,6 +3160,16 @@ a[a > 2.0] = np.nan\n",
         group.bench_function("numpy_nansum_f64_mid", |b| {
             b.iter(|| black_box(numpy_nansum.call((&a64,), Some(&kw2)).expect("np nansum f64")));
         });
+        // f64 nansum LAST axis: per-lane pairwise (now bit-exact, was sequential) + parallel.
+        let lax = PyDict::new(py);
+        lax.set_item("axis", 2_i64).unwrap();
+        let lax2 = lax.clone();
+        group.bench_function("fnp_nansum_f64_last", |b| {
+            b.iter(|| black_box(fnp_nansum.call((&a64,), Some(&lax)).expect("fnp nansum f64 last")));
+        });
+        group.bench_function("numpy_nansum_f64_last", |b| {
+            b.iter(|| black_box(numpy_nansum.call((&a64,), Some(&lax2)).expect("np nansum f64 last")));
+        });
     });
 
     group.finish();
