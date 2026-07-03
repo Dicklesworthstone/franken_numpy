@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.gradient(f64 1-D, COORDINATE array, edge_order=1) fused stencil — 30.6x
+
+`BlackThrush`. np.gradient's native paths only handled UNIFORM spacing (scalar dx); a coordinate-
+ARRAY spacing arg set uniform_dx=None and skipped them all -> numpy's non-uniform gradient, a
+multi-pass pure-Python stencil (materializes hd, hs, the 3 weights, then the weighted sums), runs
+~245 ms @4M (~30x below bandwidth). Added try_zerocopy_f64_gradient_1d_coords: a fused single-pass
+parallel stencil. BIT-IDENTICAL (prototyped in Python BEFORE building, byte-for-byte over a random
+probe): interior out[i] = a*f[i-1] + b*f[i] + c*f[i+1] evaluated LEFT-TO-RIGHT (the (a*fm+b*f0)+c*fp
+grouping — b*f0+c*fp-first is NOT bit-exact) with numpy's weights a=-hs/(hd(hd+hs)), b=(hs-hd)/(hd
+hs), c=hd/(hs(hd+hs)), hd=x[i]-x[i-1], hs=x[i+1]-x[i]; edges = forward/backward first differences.
+
+Bit-exact ALL PASS: n in {2,3,17,1K,1M,4M} + axis {None,0,-1} + edge_order=2-delegates + uniform-
+scalar/default-regression + 2-D-delegates(list) + f32-coord-delegates. Local UNDER LOAD (gauge 0.84x):
+gradient(f,coord) 4M 8.01 vs numpy 245.21 ms = 30.6x. **METHOD (reusable): for a numeric stencil/
+reduction that must be bit-exact, PROTOTYPE the exact op-order in Python/numpy first (cheap, no build)
+and confirm byte-identical — here it pinned the LEFT-TO-RIGHT 3-term grouping numpy uses. Remaining
+gradient gap: N-D with coord arrays (returns a per-axis list) + edge_order=2 non-uniform.**
+
 ## 2026-07-03 - FIX: np.logaddexp2(f64 array, f64 SCALAR) 0.37x LOSS -> 2.9x (broadcast into fast kernel)
 
 `BlackThrush`. Pursuing the heaviside standing dig (native binary ufuncs missing an array+scalar path):

@@ -4550,6 +4550,47 @@ fn bench_polyval_boundary(c: &mut Criterion) {
 
 // np.gradient(f32, last axis / 1-D): f32 previously delegated (only f64 had a kernel); the f32
 // twin (edge_order=1, bit-identical) wins ~6-8x over numpy's slow pure-Python slice gradient.
+// np.gradient(f64 1-D, COORDINATE array, edge_order=1): numpy's non-uniform gradient is a multi-pass
+// Python-level stencil (~245ms @4M, ~30x below bandwidth); a fused single-pass parallel stencil wins.
+fn bench_gradient_coords_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_gradient_coords_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+fd = rng.standard_normal(1 << 22)\nxd = np.sort(rng.standard_normal(1 << 22))\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("gradient coords setup");
+        let fd = ns.get_item("fd").expect("fd");
+        let xd = ns.get_item("xd").expect("xd");
+        let fnp_g = module.getattr("gradient").expect("fnp gradient");
+        let numpy_g = numpy.getattr("gradient").expect("numpy gradient");
+        group.bench_function("fnp_gradient_coords", |b| {
+            b.iter(|| black_box(fnp_g.call1((&fd, &xd)).expect("fnp gradient")));
+        });
+        group.bench_function("numpy_gradient_coords", |b| {
+            b.iter(|| black_box(numpy_g.call1((&fd, &xd)).expect("np gradient")));
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_gradient_f32_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_gradient_f32_boundary");
     group.sample_size(10);
@@ -8913,6 +8954,7 @@ criterion_group!(
     bench_vander_boundary,
     bench_polyval_boundary,
     bench_gradient_axis_boundary,
+    bench_gradient_coords_boundary,
     bench_gradient_f32_boundary,
     bench_norm_axis_boundary,
     bench_norm_f32_orderfree_boundary,
