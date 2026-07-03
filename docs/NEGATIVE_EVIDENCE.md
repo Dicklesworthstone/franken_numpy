@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.insert(1-D, scalar idx, values block) native parallel three-run copy — 3.25x
+
+`BlackThrush`. fnp's insert had a native scalar-idx + scalar-VALUE path but delegated a scalar-idx
++ values ARRAY (block insertion) to numpy, which runs a serial page-fault-bound copy (~44ms@8M).
+`np.insert(arr, idx, block)` == `concatenate(arr[:idx], block, arr[idx:])`; the native parallel
+three-run byte copy (uint8-view, `split_at_mut` into 3 disjoint runs, `rayon::join` on the two
+arr runs) wins. Value-agnostic so every fixed-width dtype works. Same-dtype values only (numpy
+casts/promotes differing dtypes -> defer); SCALAR idx only (an array idx is the stable-argsort
+merge case -> defer); negatives wrap; OOB defers so numpy raises its IndexError; 1-D arr, axis
+None/0.
+
+Bit-exact ALL PASS: 10 dtypes (f64/f32/f16/int widths/bool/complex) x idx in {0, N, N/2, 1, N-1,
+-1, -N} + OOB-both-raise + array-idx-merge-defer + scalar-value-unchanged + differing-dtype-defer
++ small-n + empty-block. Local same-worker 8M: fnp 13.68 ms vs numpy 44.50 ms = 3.25x.
+
 ## 2026-07-03 - SHIP: np.delete(1-D, bool mask / int index array) routed to fnp's parallel compress — 1.9x / 1.3x
 
 `BlackThrush`. fnp's delete had a native single-int-scalar path but delegated a bool mask /
