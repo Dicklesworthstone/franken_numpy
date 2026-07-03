@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.linalg.norm(f32, ord=+-inf/0, axis) order-free kernel — 51x (f32 had no path)
+
+`BlackThrush`. Missing-float-width twin: linalg.norm had an f64 vector-norm-axis kernel but no f32,
+so f32 delegated to numpy which materializes abs(x) then a per-axis max/min/count reduce (f64 won
+29-48x, f32 stayed ~1.0x). Added `try_zerocopy_f32_vector_norm_axis` for the ORDER-FREE ords only
+(ord=+inf MaxAbs, -inf MinAbs, 0 Count) — max/min of |x| and count-of-nonzero are
+associative+commutative, so bit-identical under any traversal order (max/min return exact input
+|values|). L2/L1 (order-dependent sums, and already parity for f32) defer. Same last-axis / non-last
+/ axis=0-band-privatize structure as the f64 twin, scalar f32 fold.
+
+Bit-exact ALL PASS: f32 norm ord in {+inf,-inf,0} x {(4096,512,8),(512K,32),(512,512,32),(2048,300),
+(1000,500)} x EVERY axis + NaN/inf/-0 + keepdims + L2/L1-parity-preserved + f64 regression. Local
+same-worker: norm inf f32 mid 1.76 vs numpy 90.49 ms = 51.4x (f64 reference simultaneously 48x).
+(L2/L1 f32 norm stays ~parity — the order-dependent strided-sum blocker, unchanged.)
+
 ## 2026-07-03 - SHIP: np.nanargmin/nanargmax(f32 + f64, NON-last axis) native kernel — 42x / 53x + fixes an f32 LOSS
 
 `BlackThrush`. No native non-last nanarg kernel existed for EITHER float width — the non-last axis

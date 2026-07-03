@@ -4730,6 +4730,54 @@ fn bench_norm_axis_boundary(c: &mut Criterion) {
 // band-privatized column reduction (try_zerocopy_f64_vector_norm_axis non-last branch)
 // is bit-exact for these order-free reductions. L2/L1 are NOT here (they delegate -
 // numpy's strided summation order is not reproducible bit-for-bit in parallel).
+// np.linalg.norm(f32, ord=+-inf/0, non-last axis): f32 had no norm-axis kernel, so numpy
+// materialized abs(x) then a per-axis max/min/count reduce (~90ms@16M). The f32 order-free twin
+// (fused max/min|x| fold, parallel) wins ~50x.
+fn bench_norm_f32_orderfree_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_norm_f32_orderfree_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+a = rng.standard_normal((4096, 512, 8)).astype(np.float32)\ninf = np.inf\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("norm f32 setup");
+        let a = ns.get_item("a").expect("a");
+        let inf = ns.get_item("inf").expect("inf");
+        let fnp_norm = module.getattr("linalg").unwrap().getattr("norm").expect("fnp norm");
+        let numpy_norm = numpy.getattr("linalg").unwrap().getattr("norm").expect("np norm");
+        for (label, ordv) in [("maxabs", inf.clone())] {
+            let kw = PyDict::new(py);
+            kw.set_item("ord", &ordv).unwrap();
+            kw.set_item("axis", 1_i64).unwrap();
+            let kw2 = kw.clone();
+            group.bench_function(format!("fnp_norm_f32_{label}_mid"), |b| {
+                b.iter(|| black_box(fnp_norm.call((&a,), Some(&kw)).expect("fnp norm")));
+            });
+            group.bench_function(format!("numpy_norm_f32_{label}_mid"), |b| {
+                b.iter(|| black_box(numpy_norm.call((&a,), Some(&kw2)).expect("np norm")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_norm_nonlast_axis_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_norm_nonlast_axis_boundary");
     group.sample_size(10);
@@ -8343,6 +8391,7 @@ criterion_group!(
     bench_gradient_axis_boundary,
     bench_gradient_f32_boundary,
     bench_norm_axis_boundary,
+    bench_norm_f32_orderfree_boundary,
     bench_norm_nonlast_axis_boundary,
     bench_norm_frobenius_boundary,
     bench_compress_boundary,
