@@ -4,6 +4,20 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-02 - SHIP: f16 `fabs` (11.8x) native parallel widen — numpy fabs WIDENS f16 (unlike abs's bit-trick)
+
+`BlackThrush`. `np.fabs` on f16 is ~95ms@16M — numpy widens f16->f32->fabsf->narrow
+single-threaded, UNLIKE `np.abs`/`np.absolute` which clear the sign bit directly (~18ms).
+So fabs was the odd f16 op still compute-bound and delegating (parity). Added
+`UnaryOp::Fabs` to the `try_zerocopy_f16_unary_widen` whitelist + a `v.abs()` compute arm
+(the fabs pyfunction already routes through native_unary_promoting -> that helper). fabs
+never warns (|x| always defined, |x| <= max input so no overflow, NaN->NaN), so it needs
+no domain pre-scan (hits the `_ => {}` default).
+
+Bit-exact EXHAUSTIVELY (all 65536 f16 inputs, incl every NaN/inf/-0.0 — numpy fabs just
+clears the sign, no canonicalization; widen-fabsf-narrow == numpy 0/65536). f32/f64 delegate.
+Local same-worker 16M f16: **fabs 8.22 ms vs numpy 97.33 ms = 11.8x**.
+
 ## 2026-07-02 - SHIP: f16 `radians`/`degrees` alias wiring gap — parity -> 10.9x/9.6x (route to the existing rad2deg/deg2rad fast path)
 
 `BlackThrush`. `np.radians` IS the `deg2rad` ufunc and `np.degrees` IS `rad2deg`;
