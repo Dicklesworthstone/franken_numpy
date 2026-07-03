@@ -3104,6 +3104,53 @@ fn bench_var_f32_axis_boundary(c: &mut Criterion) {
 // sequential strided reduces (~70-77ms@8M middle); try_zerocopy_f32_nanvar_nonlast_axis
 // runs a per-block sequential f32 NaN-skip two-pass (block-parallel middle / serial axis0)
 // with no temp -> bit-identical and 5-35x faster. f32 sibling of the f64 nanvar paths.
+// np.nansum/nanprod(f32, non-last axis): f32 delegated to numpy's temp-materializing nansum
+// (copy + isnan + reduce, ~34ms@8M) while f64 had a kernel. The f32 twin (sequential per-block,
+// parallel over outer blocks) avoids the temp AND parallelizes -> ~53x.
+fn bench_nansum_f32_axis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_nansum_f32_axis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+a = rng.standard_normal((512, 512, 32)).astype(np.float32)\n\
+a[a > 2.0] = np.nan\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("nansum f32 setup");
+        let a = ns.get_item("a").expect("a");
+        for name in ["nansum", "nanprod"] {
+            let fnp_fn = module.getattr(name).expect("fnp fn");
+            let numpy_fn = numpy.getattr(name).expect("numpy fn");
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 1_i64).unwrap();
+            let kw2 = kw.clone();
+            group.bench_function(format!("fnp_{name}_f32_mid"), |b| {
+                b.iter(|| black_box(fnp_fn.call((&a,), Some(&kw)).expect("fnp nan")));
+            });
+            group.bench_function(format!("numpy_{name}_f32_mid"), |b| {
+                b.iter(|| black_box(numpy_fn.call((&a,), Some(&kw2)).expect("np nan")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_nanvar_f32_axis_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_nanvar_f32_axis_boundary");
     group.sample_size(10);
@@ -8053,6 +8100,7 @@ criterion_group!(
     bench_var_midaxis_boundary,
     bench_var_f32_axis_boundary,
     bench_nanvar_f32_axis_boundary,
+    bench_nansum_f32_axis_boundary,
     bench_nanvar_f32_last_axis_boundary,
     bench_nanvar_midaxis_boundary,
     bench_var_axis0_boundary,

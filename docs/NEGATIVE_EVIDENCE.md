@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.nansum/nanprod(f32, non-last axis) native per-block kernel — 53x / 68x
+
+`BlackThrush`. Missing-float-width twin: nansum/nanprod had f64 non-last kernels but f32 delegated
+to numpy's temp-materializing nansum/nanprod (copy + isnan mask + reduce = 3 passes + whole-array
+temp, ~34ms@8M). numpy reduces the non-last f32 axis SEQUENTIALLY (not pairwise), so a per-outer-
+block sequential f32 pass (init 0.0 sum / 1.0 prod, skip NaN) is BIT-IDENTICAL (prototyped 0
+mismatches) and — parallelized across the independent outer blocks — beats even the SERIAL f64
+kernel. `try_zerocopy_f32_nansum_nanprod_nonlast_axis` (is_prod flag; keepdims inside).
+
+**DEAD-CODE TRAP (caught + fixed): first placement was BELOW nansum's `native_f64_reduction_
+preserves_dtype -> return fallback()` guard (which delegates every non-f64 float) => the path was
+never reached, measured 1.0x==numpy while the f64 REFERENCE simultaneously won 10x. Moved BOTH
+branches ABOVE the guard (beside the f16 paths). Symptom was exactly DEFAULT==numpy despite a
+"correct" ALL-PASS (the delegate is also correct).**
+
+Engagement proof: RAYON=1 fnp 3.37 vs numpy 30.66 ms = 9.1x (temp-avoidance), full threads 0.64 vs
+34.10 = 53x (nansum) / 0.46 vs 31.33 = 68x (nanprod) — two stacking gains. Bit-exact ALL PASS:
+nansum+nanprod x 5 shapes x every non-last axis + keepdims + all-NaN-lane (->0 / ->1) + inf/signed
++ last-axis-unchanged + f64 regression + axis=None.
+
 ## 2026-07-03 - SHIP: np.gradient(f32, strided non-last axis + N-D no-axis tuple) — 7.7x / 12.4x
 
 `BlackThrush`. Follow-up completing f32 gradient: last cycle added the f32 last-axis/1-D twin;
