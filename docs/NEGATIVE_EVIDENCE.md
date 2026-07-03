@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.vstack / np.stack of 1-D arrays routed to fast concatenate — 4.0x / 3.7x
+
+`BlackThrush`. vstack had an all-2-D fast path (concatenate axis=0) but 1-D inputs fell through
+to the slow default (delegate); stack fully delegated. `vstack([1-D arrays])` and
+`stack([1-D arrays], axis=0)` promote each input to a row, so the result is EXACTLY
+`concatenate(axis=0).reshape(K, N)` — routed both to fnp's fast zero-copy concatenate + reshape
+(the same trick column_stack/hstack already use). Requires all inputs 1-D ndarrays of EQUAL
+length (numpy raises on mismatch -> defer so its exact error surfaces); stack only for axis=0
+(default/explicit) — axis=1 (interleave) and 2-D inputs defer.
+
+Bit-exact ALL PASS: vstack 8 dtypes + K in {1,2,3,4} + mixed-length-both-raise + 2-D-unchanged +
+mixed-1-D/2-D defer + tuple input; stack 6 dtypes + explicit-axis0 + axis=1/axis=-2/2-D defer +
+mixed-length raise. Local same-worker 4x4M: vstack fnp 21.94 vs numpy 87.14 ms = 4.0x; stack fnp
+22.82 vs 85.13 ms = 3.7x. (dstack + stack(axis!=0) are interleaves, not concat-reshape -> left.)
+
 ## 2026-07-03 - SHIP: np.insert(1-D, scalar idx, values block) native parallel three-run copy — 3.25x
 
 `BlackThrush`. fnp's insert had a native scalar-idx + scalar-VALUE path but delegated a scalar-idx

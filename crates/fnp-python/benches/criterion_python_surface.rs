@@ -1124,6 +1124,46 @@ fn bench_shift_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+// np.vstack / np.stack of 1-D equal-length arrays == concatenate(axis=0).reshape(K,N): numpy
+// runs a serial page-fault-bound copy (~85ms@4x4M). Routing to fnp's fast concatenate wins ~4x.
+fn bench_vstack_1d_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_vstack_1d_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+arrs = [rng.standard_normal(4_000_000) for _ in range(4)]\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("vstack setup");
+        let arrs = ns.get_item("arrs").expect("arrs");
+        for name in ["vstack", "stack"] {
+            let fnp_fn = module.getattr(name).expect("fnp fn");
+            let numpy_fn = numpy.getattr(name).expect("numpy fn");
+            group.bench_function(format!("fnp_{name}_1d_4x4m"), |b| {
+                b.iter(|| black_box(fnp_fn.call1((&arrs,)).expect("fnp stack")));
+            });
+            group.bench_function(format!("numpy_{name}_1d_4x4m"), |b| {
+                b.iter(|| black_box(numpy_fn.call1((&arrs,)).expect("np stack")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_concat_hstack_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_concat_hstack_boundary");
     group.sample_size(10);
@@ -7770,6 +7810,7 @@ criterion_group!(
     bench_putmask_boundary,
     bench_shift_boundary,
     bench_concat_hstack_boundary,
+    bench_vstack_1d_boundary,
     bench_indices_construction_boundary,
     bench_char_ascii_boundary,
     bench_average_nansum_axis_boundary,
