@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SURFACE: fresh probe (tensordot / batched-matmul / structural) — no clean lever; box too load-noisy for timing digs
+
+`BlackThrush`. After the temporal→int64 routing vein completed, probed a fresh batch. Findings:
+- **np.tensordot(f64, axes>=2) "loss" is NOT a slow kernel — it DELEGATES (bit-exact) and the ~0.77x
+  is just ~2ms of pre-delegation dispatch overhead** (the int/f16-tensordot attempts + shape gate
+  before `return fallback()`). The `contract <= PY_NATIVE_GEMM_MAX_DIM(1024)` gate correctly routes
+  the big-contract case to numpy (which uses the fast np.dot, ~7ms). Earlier 0.2x/0.49x reads were
+  load. Not worth chasing (minor structural overhead, not a kernel).
+- **Batched matmul (stacks of small matrices) is BLAS-competitive and UNRELIABLE under load**: the
+  same (1024, 32, 32) f64 read 1.5x WIN then 0.43x LOSS across runs (3.5x swing); the 2048x2048
+  matmul reference read 0.86x (vs its true ~parity/win), i.e. heavy variable box load. Any real
+  small-matrix-batch loss needs an rch-clean confirm before a gate change — deferred (delicate:
+  batched-matmul gate tuning affects many shapes).
+- Covered/parity (re-confirmed): tril 1.9x / triu 1.5x / roll-2axis 3.6x / triu_indices 4.0x /
+  repeat-ax0 1.8x WIN; repeat-ax1 (~1.0x bandwidth column-expand), gradient edge_order=2 f32/f64
+  (~1.1x), correlate-full (~1.0x), batched-matvec (~0.9x) = parity, no headroom.
+
+**State: the f32-twin and temporal→int64 veins are exhausted (52 wins). Remaining candidates are
+bandwidth-bound (repeat-ax1, sum/max non-last), BLAS-competitive (batched matmul — needs rch-clean),
+or bit-exact-hostile (float sum/mean, sort/argsort, median, complex careful algos). Next dig should
+be on an UNLOADED box or via rch, since local timing is currently unreliable (±3x swings).**
+
 ## 2026-07-03 - SHIP: np.cumsum(timedelta64, axis) routed to int64 cumsum — 2.3x
 
 `BlackThrush`. timedelta64 cumsum delegated (~1.0x) while int64 cumsum wins ~3.8x. Unlike the
