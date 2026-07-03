@@ -7874,8 +7874,55 @@ i32 = rng.integers(0, 1000, 4_000_000).astype(np.int32)\n";
     group.finish();
 }
 
+// np.nanargmin/nanargmax(f64, axis=-1): numpy copies the array replacing NaN with +-inf then
+// argmins (~107-144ms@16M); the native fused single-pass per-lane nan-skip scan wins 10-46x.
+// f64 previously had no last-axis path (only f32); this closes the gap.
+fn bench_nanarg_lastaxis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_nanarg_lastaxis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+w = rng.standard_normal((8, 2_000_000))\nw[w > 2.0] = np.nan\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("nanarg setup");
+        let w = ns.get_item("w").expect("w");
+        for name in ["nanargmin", "nanargmax"] {
+            let fnp_fn = module.getattr(name).expect("fnp fn");
+            let numpy_fn = numpy.getattr(name).expect("numpy fn");
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 1_i64).unwrap();
+            let kw2 = kw.clone();
+            group.bench_function(format!("fnp_{name}_f64_8x2m"), |b| {
+                b.iter(|| black_box(fnp_fn.call((&w,), Some(&kw)).expect("fnp nanarg")));
+            });
+            group.bench_function(format!("numpy_{name}_f64_8x2m"), |b| {
+                b.iter(|| black_box(numpy_fn.call((&w,), Some(&kw2)).expect("np nanarg")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_nanarg_lastaxis_boundary,
     bench_asarray_dtype_boundary,
     bench_char_add_boundary,
     bench_matmul_boundary,

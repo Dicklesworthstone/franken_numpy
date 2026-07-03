@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.nanargmin/nanargmax(f64, axis=-1) native last-axis kernel — 26-46x (f64 had no path)
+
+`BlackThrush`. nanargmin/nanargmax had a fast f32 last-axis kernel (`try_zerocopy_f32_nanarg_
+lastaxis`, per-lane fused nan-skip arg-scan, wins 18-34x) but NO f64 equivalent — f64 along an
+axis delegated to the slow extract+ndarray path (~parity 1.1x). numpy's nanarg copies the array
+replacing NaN with +-inf then argmins (2 passes + alloc, ~107-144ms@16M). Added the f64 twin
+`try_zerocopy_f64_nanarg_lastaxis` (identical structure: per-lane first-non-NaN strict-compare
+scan, parallel over lanes) and wired it above the f32 path in both nanargmin/nanargmax.
+
+Order-preserving strict compare => the FIRST extremum index is bit-identical to numpy (verified
+incl. ties + nan+tie). All-NaN lane defers (numpy raises ValueError, parity). Bit-exact ALL PASS:
+f64+f32 x {(8,1M),(64,256K),(1000,5000),(256,256,64) 3-D} x nanargmin/nanargmax + ties + nan-ties
++ all-NaN-both-raise + axis=None flat + axis=0 delegate + int delegate. Local same-worker 16M:
+nanargmin f64 (8, 2M) axis=1 3.98 vs 106.68 ms = 26.8x; (64, 256K) 3.13 vs 144.38 = 46.1x.
+
+**LEVER: when a fast native kernel exists for ONE float width (f32) but not the other (f64), the
+missing-width op silently delegates = parity — grep for `try_zerocopy_f32_*` helpers with no f64
+twin (or vice-versa) and mirror. Here f64 is the COMMON dtype, so the missing twin was the bigger
+gap.**
+
 ## 2026-07-03 - SHIP: np.diff int/f32 + f64 N-D axis — parallelized the remaining serial diff kernels — 3.1-3.4x
 
 `BlackThrush`. Follow-up to the f64-1-D diff parallelization: the generic `diff_typed` (int8..
