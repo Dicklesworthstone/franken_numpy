@@ -15,10 +15,13 @@ to SIMD max/min; correct for both signed and unsigned T). numpy's narrow-int bin
 further.
 
 Bit-exact CORRECT: uint8/int16/int32/uint16 x several (hi,n) + negative-int-raises parity + minlength.
-Local same-worker (gauge matmul 1.08x fnp-favorable, clean): bincount uint8 hi=256 n=4M 1.38 vs numpy
-21.42 ms = 15.5x; uint8 n=16M 15.6x; int16 13.9x; int32 11.4x; uint16 15.7x. **Confirms the lesson
+**rch hz1 (CLEAN, authoritative): bincount uint8 4M fnp 1.51 vs numpy 5.33 ms = 3.5x.** The local
+read showed 15.5x but that was NUMPY load-inflation (numpy uint8 bincount 21.42ms local vs 5.33ms
+rch) — unusual direction: here NUMPY was the load-slow side while fnp's cheap fast-path stayed ~1.5ms
+both places, so the local RATIO was inflated. True win ~3.5x (still solid). **Confirms the lesson
 generalizes: the early-`break` pre-scan anti-pattern was in BOTH bincount widths; a repo-wide grep for
-`break;` inside max/min/negative pre-scans is the standing follow-up.**
+`break;` inside max/min/negative pre-scans is the standing follow-up. Also a load-caveat twin: a ratio
+can be inflated by the SLOW side (numpy) being load-hit, not just fnp — rch-confirm either way.**
 
 ## 2026-07-03 - FIX: np.bincount(int64) high-K 0.5x LOSS -> 1.1-1.6x (vectorize the max-scan)
 
