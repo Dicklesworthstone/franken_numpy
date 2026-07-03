@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SURFACE: broad Python-level-multi-pass probe — no new lever; pad refines the heuristic
+
+`BlackThrush`. Continued the "numpy Python-level multi-pass = fused-kernel lever" vein with a wide
+probe (load-gauge clean). ALL covered or bandwidth-parity — no new clean lever:
+- **np.pad NON-constant modes (edge/reflect/wrap/symmetric/linear_ramp/maximum/mean, 1-D + 2-D):
+  ALL PARITY.** REFINES THE HEURISTIC: pad's Python-level mode logic only touches the SMALL pad
+  region; the large INTERIOR copy dominates and is bandwidth-bound for both. So "numpy does Python-
+  level work" is a lever ONLY when the WHOLE (large) array is computed slowly (gradient-coords,
+  unwrap, interp), NOT when just the edges/small-region are (pad).
+- busday_count / is_busday / busday_offset: PARITY (numpy's business-day logic is C-optimized, not
+  slow Python — delegates cleanly).
+- Re-confirmed WINS (already native, not gaps): datetime_as_string 7.3x, select 4.8x, nan_to_num 2x,
+  diff-datetime 2.3x, nanstd-axis 51x, std-ddof 23x, nanvar 2.6x, cumprod 1.5x, nancumsum/prod 1.8x,
+  gradient-3d-UNIFORM 2.5x, convolve/correlate ACROSS ALL kernel sizes 50..5000 = 5.7-13.6x (the
+  earlier "correlate large = parity" was a SMALLER-INPUT artifact; at 1<<20 input every size wins).
+- Parity/bandwidth (not levers): sliding_window_view, extract, trapezoid-with-coords (sum-based).
+
+Remaining KNOWN gradient gap: 3-D+ coord arrays + edge_order=2 non-uniform (niche; deferred — not
+worth an N-D strided-coord kernel for the rare 3-D case). **The accessible surface is exhaustively
+harvested at 65 wins; the reliable fresh levers now come from NEW op families, not re-probing the
+covered ones.**
+
 ## 2026-07-03 - SHIP: np.gradient(2-D field, cy, cx, edge_order=1) fused per-axis stencils — 13.0x
 
 `BlackThrush`. Extending yesterday's 1-D coord gradient to the common science idiom `gy,gx =
