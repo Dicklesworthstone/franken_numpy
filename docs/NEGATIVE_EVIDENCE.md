@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - NO-SHIP: f32/f16 `sinc` (f64 sinc already wins 15-18x); DISCOVERY: numpy f64 sin/cos/exp/log == system libm bit-for-bit
+
+`BlackThrush`. Probed sinc for the narrow floats. **f64 sinc ALREADY WINS 15-18x**
+(`try_zerocopy_f64_sinc` — a fused single-pass sin(pi*x)/(pi*x) that avoids numpy's 4-5
+temp-array Python-level passes; the earlier "417ms sinc" reading was the f16 case). **f32 sinc
+REJECTED**: the fused system-`sinf` formula is 13.7% bit-mismatch vs numpy — numpy's f32 `sin`
+diverges from scalar system `sinf` in the last ULP (its own vectorized f32 kernel; matches the
+prior f32-transcendental-divergence note). f16 sinc has a `where(x==0, 1e-20, x)` underflow
+subtlety (1e-20 -> 0 in f16 yet numpy sinc(f16)(0)=1.0, so numpy doesn't compute purely in f16).
+Neither narrow sinc is naive-formula bit-exact.
+
+**REUSABLE DISCOVERY (proxy, 0/300k each): numpy's f64 sin/cos/exp/log ARE system libm
+bit-for-bit** — so a FUSED single-pass f64 function that numpy implements as a Python-level
+multi-array-pass (materializing temps) CAN be bit-exact AND win by avoiding the temps + going
+parallel, even though the individual f64 transcendental is SIMD-fast (parallelizing it ALONE
+loses). sinc(f64) is the proven instance. Other candidates are niche/hard: np.i0 (Bessel,
+piecewise Chebyshev poly — ~50 coeffs, bit-exact-tedious), window fns (kaiser/hamming — computed
+ONCE per small size, not a large-array op). **RULE: numpy f64 transcendentals match system libm
+(unlike f32/f16 which use divergent narrow kernels) — a fused-f64 lever needs numpy to compute
+the whole function in f64 (not narrow); f32/f16 fused transcendentals are NOT bit-exact.**
+
 ## 2026-07-03 - SHIP: datetime64/timedelta64 UNIT conversion (astype) native parallel — 4.3x downcast / 1.7x upcast
 
 `BlackThrush`. `f.astype` was a pure passthrough. numpy converts datetime/timedelta between
