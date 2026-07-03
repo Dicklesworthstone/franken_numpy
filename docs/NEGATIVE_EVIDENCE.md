@@ -4,6 +4,35 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-02 - SHIP: complex128 `exp` (7.1x) native parallel — numpy cexp is single-threaded
+
+`BlackThrush`. New vein (complex compute): numpy computes `np.exp` on complex128
+per-element single-threaded (~256ms@8M). cexp(re+i*im) = exp(re)*(cos(im) + i*sin(im)),
+and Rust's f64 exp/cos/sin call the SAME system libm numpy's npy_cexp uses, so it's
+bit-identical. `try_zerocopy_complex_exp` reads the complex128 buffer as interleaved f64
+(re,im), parallel-computes the formula, writes a fresh complex128. Defers any non-finite
+operand (numpy's cexp special-value handling) and any re >= 709 (exp overflows f64 ->
+numpy's "overflow" warning) via a cheap input pre-scan.
+
+Bit-exact PROVEN pre-build by ctypes proxy (system exp/cos/sin composed = 0/200k vs numpy;
+NOTE clog FAILED the same proxy 10% — numpy's npy_clog uses a more careful algorithm than
+log(hypot)+i*atan2, so complex log/sqrt were NOT attempted). Post-build bit-exact over a
+wide sample (re in [-700,700], im to 1e6, incl 2-D) + non-finite/overflow DEFER parity +
+c64 delegate + sub-gate correctness — ALL PASS.
+
+Engagement (local same-worker, 8M complex128):
+
+| Probe (8M c128) | fnp full | numpy | speedup | fnp RAYON=1 | Verdict |
+|---|---:|---:|---:|---:|---|
+| exp | 35.94 ms | 256.1 ms | 7.1x | 332.1 ms (0.8x) | SHIP |
+
+The win is ENTIRELY parallelism: numpy's per-element cexp kernel is slightly FASTER serial
+(RAYON=1 0.8x — it likely uses a fused sincos vs my separate cos+sin), but it is
+single-threaded, so full threads win 7.1x here (robust: ~1.5x even on 2 cores). Other
+complex128 ops surveyed: `angle` already wins 9.8x; abs/absolute/conjugate/square/reciprocal
+are numpy-fast (parity, skip); sqrt/log/sign delegate but sqrt/log need numpy's exact
+non-naive algorithm (clog proxy failed) — not bit-exact-safe, left for later.
+
 ## 2026-07-02 - SHIP: f16 `fabs` (11.8x) native parallel widen — numpy fabs WIDENS f16 (unlike abs's bit-trick)
 
 `BlackThrush`. `np.fabs` on f16 is ~95ms@16M — numpy widens f16->f32->fabsf->narrow

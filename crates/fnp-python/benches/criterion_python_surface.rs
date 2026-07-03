@@ -1791,6 +1791,46 @@ fn bench_sort_complex_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+// complex128 exp: numpy computes cexp per-element single-threaded (~256ms@8M). The
+// native parallel exp(re)*(cos(im)+i*sin(im)) is bit-exact (system libm == npy_cexp)
+// and wins on core count. RAYON_NUM_THREADS=1 vs default isolates the parallel gain
+// (the serial kernel is ~parity/slightly slower — the win is entirely parallelism).
+fn bench_complex_exp_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_complex_exp_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+z = (rng.standard_normal(8_000_000) + 1j*rng.standard_normal(8_000_000)).astype(np.complex128)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("cexp setup");
+        let z = ns.get_item("z").expect("z");
+        let fnp_exp = module.getattr("exp").expect("fnp exp");
+        let numpy_exp = numpy.getattr("exp").expect("numpy exp");
+        group.bench_function("fnp_exp_complex128_8m", |b| {
+            b.iter(|| black_box(fnp_exp.call1((&z,)).expect("fnp c128 exp")));
+        });
+        group.bench_function("numpy_exp_complex128_8m", |b| {
+            b.iter(|| black_box(numpy_exp.call1((&z,)).expect("np c128 exp")));
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_complex_binary_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_complex_binary_boundary");
     group.sample_size(10);
@@ -7513,6 +7553,7 @@ criterion_group!(
     bench_unique_medium_boundary,
     bench_sort_complex_boundary,
     bench_complex_binary_boundary,
+    bench_complex_exp_boundary,
     bench_f16_matmul_boundary,
     bench_flat_sort_dtype_boundary,
     bench_statistics_boundary,
