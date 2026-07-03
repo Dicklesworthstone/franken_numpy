@@ -6865,6 +6865,26 @@ x_big = rng.integers(0, 512, 64_000_000)\n";
                 b.iter(|| black_box(numpy_bc.call1((x,)).expect("numpy bincount")));
             });
         }
+        // Weighted bincount (float64 accumulate): the vectorized max-scan moved it from parity to
+        // ~1.13-1.22x (the sequential float tally still dominates, so the win is modest).
+        py.run(
+            std::ffi::CString::new("w_k1000 = rng.standard_normal(4_000_000)")
+                .unwrap()
+                .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("weighted setup");
+        let w_k1000 = ns.get_item("w_k1000").expect("w_k1000");
+        let kw = PyDict::new(py);
+        kw.set_item("weights", &w_k1000).unwrap();
+        let kw2 = kw.clone();
+        group.bench_function("fnp_bincount_weighted_4m_k1000", |b| {
+            b.iter(|| black_box(fnp_bc.call((&x_k1000,), Some(&kw)).expect("fnp wbincount")));
+        });
+        group.bench_function("numpy_bincount_weighted_4m_k1000", |b| {
+            b.iter(|| black_box(numpy_bc.call((&x_k1000,), Some(&kw2)).expect("np wbincount")));
+        });
     });
 
     group.finish();

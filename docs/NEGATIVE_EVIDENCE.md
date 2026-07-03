@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.bincount(weighted) max-scan vectorized — parity -> 1.13-1.22x (bincount family complete)
+
+`BlackThrush`. Third and last bincount path: try_zerocopy_bincount_weighted had the SAME scalar
+max-scan (early `return None` on negative + branchy max, iterated over ReadOnlyCell so it did not
+vectorize). Cast x_in to a raw &[i64] and applied the same branchless max + min fold (min<0 detects
+a negative after the full pass) -> SIMD. The sequential float64 tally (bit-exact forward accumulation)
+still dominates and can't be parallelized bit-exactly, so this is a modest win (not the big unweighted
+gains), but it moves weighted bincount off parity.
+
+Bit-exact CORRECT (float tally order unchanged): weighted x {K256, K1000, K5000, K50000} x {4M, 8M}
++ negative-raises parity. Local same-worker (gauge matmul 1.08x, clean): weighted K1000 4M 4.45 vs
+numpy 5.36 ms = 1.21x; K256 1.22x; K5000 8M 1.15x; K50000 8M 1.13x (all were ~1.0x parity before).
+**bincount max-scan family now COMPLETE: i64 (0.5x->1.1-1.6x) + narrow (rch 3.5x) + weighted
+(->1.13-1.22x). The early-`break`/early-`return` pre-scan anti-pattern was in all three.**
+
 ## 2026-07-03 - SHIP: np.bincount(narrow int) max-scan vectorized too — 11-15.7x
 
 `BlackThrush`. Follow-up to the i64 bincount fix (same session): try_zerocopy_bincount_narrow<T>
