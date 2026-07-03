@@ -3756,6 +3756,41 @@ x = rng.standard_normal(8_000_000)\n";
         group.bench_function("numpy_bitwise_or_accumulate_i64_8m", |b| {
             b.iter(|| black_box(numpy_or.call_method1("accumulate", (&xi,)).expect("np or.accum i64")));
         });
+
+        // logical_and/or/xor.accumulate(bool): numpy runs a serial dependency-chain scan
+        // (~40ms/16M). Bool logical == bitwise (0/1 values), routed to the proven two-pass
+        // bitwise prefix. Mask is ~86% True (realistic, avoids AND collapsing to all-False).
+        let xb = numpy
+            .call_method1("arange", (8_000_000_i64,))
+            .expect("8M i64 arange for bool")
+            .call_method1("__mod__", (7_i64,))
+            .expect("mod 7")
+            .call_method1("__ne__", (0_i64,))
+            .expect("bool mask");
+        let fnp_land = module.getattr("logical_and").expect("fnp logical_and");
+        let numpy_land = numpy.getattr("logical_and").expect("numpy logical_and");
+        group.bench_function("fnp_logical_and_accumulate_bool_8m", |b| {
+            b.iter(|| black_box(fnp_land.call_method1("accumulate", (&xb,)).expect("fnp land.accum bool")));
+        });
+        group.bench_function("numpy_logical_and_accumulate_bool_8m", |b| {
+            b.iter(|| black_box(numpy_land.call_method1("accumulate", (&xb,)).expect("np land.accum bool")));
+        });
+        let fnp_lor = module.getattr("logical_or").expect("fnp logical_or");
+        let numpy_lor = numpy.getattr("logical_or").expect("numpy logical_or");
+        group.bench_function("fnp_logical_or_accumulate_bool_8m", |b| {
+            b.iter(|| black_box(fnp_lor.call_method1("accumulate", (&xb,)).expect("fnp lor.accum bool")));
+        });
+        group.bench_function("numpy_logical_or_accumulate_bool_8m", |b| {
+            b.iter(|| black_box(numpy_lor.call_method1("accumulate", (&xb,)).expect("np lor.accum bool")));
+        });
+        let fnp_lxor = module.getattr("logical_xor").expect("fnp logical_xor");
+        let numpy_lxor = numpy.getattr("logical_xor").expect("numpy logical_xor");
+        group.bench_function("fnp_logical_xor_accumulate_bool_8m", |b| {
+            b.iter(|| black_box(fnp_lxor.call_method1("accumulate", (&xb,)).expect("fnp lxor.accum bool")));
+        });
+        group.bench_function("numpy_logical_xor_accumulate_bool_8m", |b| {
+            b.iter(|| black_box(numpy_lxor.call_method1("accumulate", (&xb,)).expect("np lxor.accum bool")));
+        });
     });
 
     group.finish();

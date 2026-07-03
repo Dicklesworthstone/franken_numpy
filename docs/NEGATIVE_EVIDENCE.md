@@ -4,6 +4,43 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-02 - SHIP: `logical_and/or/xor.accumulate` on BOOL input routes to native two-pass prefix — 3.1x (remote) / 7.3-8.8x (local same-worker)
+
+`BlackThrush`. Closed the last remaining lead in the associative-ufunc-accumulate
+prefix vein (max/min + add/mul→cumsum + bitwise and/or/xor were already native;
+logical was the only kind still fully delegating). Key equivalence: for BOOL input
+(values 0/1), `logical_{and,or,xor}` is byte-identical to `bitwise_{and,or,xor}`
+(and both yield a bool output), so bool-input logical accumulate routes to the
+already-proven `try_zerocopy_accumulate_bitwise` two-pass parallel prefix. numpy
+runs logical accumulate as a serial dependency-chain scan (~40ms/16M, ~410 M/s).
+Non-bool input is NOT routed — numpy coerces int/float to bool first
+(`logical_and(2,4)=True` vs `bitwise_and(2,4)=0`), so int/float defer to numpy.
+Gated bool-dtype, default form (dtype=None, out=None), 1-D contiguous.
+
+Bit-exact verified (python sweep, ALL PASS): bool byte-exact over sizes
+{0,1,2,3,17,1000,65537,1<<20} × densities {0,.1,.5,.9,1.0}, axis=-1, plus non-bool
+(int32/int64/f64) and 2-D (axis 0/1) all matching numpy's coerce-to-bool semantics
+(defer path). Rust conformance guard `logical_accumulate_bool_matches_numpy` added.
+
+Engagement PROVEN via DEFAULT << RAYON=1 (not dead-code parity), local same-worker,
+N=8M (`(arange%7)!=0`, ~86% True):
+
+| Probe (8M) | fnp full-threads | numpy | fnp/numpy | fnp RAYON=1 | Verdict |
+|---|---:|---:|---:|---:|---|
+| logical_and.accumulate bool | 2.12 ms | 18.59 ms | 0.114 (8.77x) | 18.71 ms (≈numpy) | SHIP |
+| logical_or.accumulate bool | 2.22 ms | 16.25 ms | 0.137 (7.31x) | 15.11 ms (≈numpy) | SHIP |
+| logical_xor.accumulate bool | 2.46 ms | 19.36 ms | 0.127 (7.88x) | 20.81 ms (≈numpy) | SHIP |
+
+RAYON=1 fnp ≈ numpy (0.99-1.11x) confirms the native path engages and the whole
+gap is parallelism. Independent rch criterion confirmation (remote worker `hz1`,
+more contended → smaller but same-direction speedup): logical_and 7.78 vs 24.48 ms
+= **3.15x**, logical_or 9.66 vs 19.70 ms = **2.04x**, logical_xor 7.74 vs 24.13 ms
+= **3.12x**.
+
+`ASSOCIATIVE-UFUNC-ACCUMULATE PREFIX VEIN NOW FULLY CLOSED`: max/min(f64/f32/all-int)
++ add/multiply(int→cumsum/cumprod) + bitwise and/or/xor(int/bool) + logical
+and/or/xor(bool). No accumulate kind left delegating for the common flat-1-D case.
+
 ## 2026-06-28 - NO-SHIP: cache-line density gate for flat `compress`/`extract` is noise or slower; current compact stays
 
 `BlackThrush`. LAND-OR-DIG found no measured `.scratch` / `.worktrees` keep still off `main`: the
