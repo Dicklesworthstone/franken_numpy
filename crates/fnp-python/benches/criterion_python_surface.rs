@@ -8154,6 +8154,52 @@ i32 = rng.integers(0, 1000, 4_000_000).astype(np.int32)\n";
     group.finish();
 }
 
+// np.argmin/argmax(datetime64/timedelta64, axis): temporal reductions are int64-backed; numpy runs
+// a slow temporal reduce while the int64-view routes to the fast native int argextreme (~6x after
+// the NaT pre-scan). Bit-exact indices (int64 ordering == temporal ordering); NaT defers.
+fn bench_datetime_argextreme_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_datetime_argextreme_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+dt = rng.integers(0, 100000, (4096, 512, 8)).astype('datetime64[D]')\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("datetime arg setup");
+        let dt = ns.get_item("dt").expect("dt");
+        for name in ["argmin", "argmax"] {
+            let fnp_fn = module.getattr(name).expect("fnp fn");
+            let numpy_fn = numpy.getattr(name).expect("numpy fn");
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 1_i64).unwrap();
+            let kw2 = kw.clone();
+            group.bench_function(format!("fnp_{name}_dt_mid"), |b| {
+                b.iter(|| black_box(fnp_fn.call((&dt,), Some(&kw)).expect("fnp arg")));
+            });
+            group.bench_function(format!("numpy_{name}_dt_mid"), |b| {
+                b.iter(|| black_box(numpy_fn.call((&dt,), Some(&kw2)).expect("np arg")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 // np.argmin/argmax(f32, non-last axis): f32 had no arg-axis kernel (only f64+f16), so it delegated
 // to numpy's slow strided reduce (~parity). The parallel per-block f32 scan wins ~8x.
 fn bench_argextreme_f32_axis_boundary(c: &mut Criterion) {
@@ -8306,6 +8352,7 @@ criterion_group!(
     bench_nanarg_lastaxis_boundary,
     bench_nanarg_nonlast_boundary,
     bench_argextreme_f32_axis_boundary,
+    bench_datetime_argextreme_boundary,
     bench_asarray_dtype_boundary,
     bench_char_add_boundary,
     bench_matmul_boundary,

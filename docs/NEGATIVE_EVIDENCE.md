@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.argmin/argmax(datetime64/timedelta64, axis) routed to int64 kernels — 5.8x
+
+`BlackThrush`. datetime64/timedelta64 argmin/argmax delegated to numpy's slow temporal reduce
+(~1.0x) while the equivalent int64 wins ~17x. Temporal dtypes are int64-backed and their argmin/
+argmax by int64 ordering == temporal ordering, so viewing as int64 and routing through the native
+int argextreme (now parallel) gives bit-identical INDICES (dtype-agnostic output). NaT (i64::MIN)
+has subtle numpy arg semantics (argmax with NaT returns the NaT index, != int64 max), so pre-scan
+`np.isnat(a).any()` and DEFER the whole call if any NaT is present (the common no-NaT case wins).
+Placed right after axis parsing in both argmin/argmax; the original array is kept for the fallback.
+
+Bit-exact ALL PASS: datetime64 + timedelta64 x units {D,s,ns} x argmin/argmax x axis {None,0,1,2}
++ ties(first-index) + NaT-defer(all axes, matches numpy) + int64/f64 regression. Local same-worker:
+dt argmin mid 16.23 vs numpy 94.27 ms = 5.8x; argmax 17.01 vs 97.19 = 5.7x (the isnat pre-scan is
+~half the cost — the NaT-safety tax; raw int64 arg is ~17x). **REUSABLE: temporal (M8/m8)
+reductions route to the int64 kernels via .view('int64') — argmin/argmax return dtype-agnostic
+indices (always safe modulo NaT); a value-returning reduce (ptp/min/max) needs the result viewed
+back as m8[unit]. Pre-scan isnat + defer for the ops where NaT semantics differ.**
+
 ## 2026-07-03 - SHIP: np.linalg.norm(f32, ord=+-inf/0, axis) order-free kernel — 51x (f32 had no path)
 
 `BlackThrush`. Missing-float-width twin: linalg.norm had an f64 vector-norm-axis kernel but no f32,
