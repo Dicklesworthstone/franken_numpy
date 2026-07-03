@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.repeat(N-D, scalar count, ANY axis) generalized — 2.4x (was axis 0/None only)
+
+`BlackThrush`. The native scalar-repeat path (try_native_repeat_scalar) gated to axis None/0; every
+other axis delegated to numpy's serial page-fault-bound expand (~1.0x). But repeat along ANY axis is
+the SAME "flat units, each copied k times consecutively" copy: unit = the `inner` trailing elements
+(product(shape[ax+1..])), n_units = product(shape[..=ax]); the flat [unit0 xk, unit1 xk, ...] result
+reshapes exactly to the axis-expanded shape (verified: repeat(M,k,axis=1) row = [M[r,0]xk, M[r,1]xk,
+...]). So the copy loop was already correct — only the axis resolution was over-gated. Relaxed it to
+compute (n_units, unit_bytes, out_shape) for any axis; value-agnostic uint8-view byte copy => bit-
+identical for every dtype. OOB axis defers (numpy AxisError); k<1 defers.
+
+Bit-exact ALL PASS: 8 dtypes (f64/f32/f16/ints/bool/complex) x 5 shapes (2-D + 3-D) x EVERY axis x
+k in {1,2,3,5} + axis=None + negative axis + OOB-both-raise + k=0 + array-count-still-works + 1-D.
+Local same-worker (load had dropped — the 2048^2 matmul reference read 1.35x fnp-favorable, so
+trustworthy): repeat(512x4096, 3, axis=1) 11.27 vs numpy 27.50 ms = 2.4x. (Followed my own load
+rule: only trusted the ratio once the matmul reference confirmed the box was clean.)
+
 ## 2026-07-03 - SURFACE: fresh probe (tensordot / batched-matmul / structural) — no clean lever; box too load-noisy for timing digs
 
 `BlackThrush`. After the temporal→int64 routing vein completed, probed a fresh batch. Findings:

@@ -6798,6 +6798,49 @@ v = rng.standard_normal(4_000_000)\n";
     group.finish();
 }
 
+// np.repeat(2-D, scalar count, axis=1): the scalar-repeat native path used to gate to axis 0/None;
+// generalized to ANY axis (leading units of `inner` trailing elems, each copied k times). ~2.4x.
+fn bench_repeat_axis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_repeat_axis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+m = rng.standard_normal((512, 4096))\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("repeat axis setup");
+        let m = ns.get_item("m").expect("m");
+        let fnp_repeat = module.getattr("repeat").expect("fnp repeat");
+        let numpy_repeat = numpy.getattr("repeat").expect("numpy repeat");
+        let kw = PyDict::new(py);
+        kw.set_item("axis", 1_i64).unwrap();
+        let kw2 = kw.clone();
+        group.bench_function("fnp_repeat_2d_axis1_c3", |b| {
+            b.iter(|| black_box(fnp_repeat.call((&m, 3_i64), Some(&kw)).expect("fnp repeat")));
+        });
+        group.bench_function("numpy_repeat_2d_axis1_c3", |b| {
+            b.iter(|| black_box(numpy_repeat.call((&m, 3_i64), Some(&kw2)).expect("np repeat")));
+        });
+    });
+
+    group.finish();
+}
+
 // np.repeat(a, counts_array) with a per-element int64 count array: numpy expands it
 // single-threaded (~104ms@4M in). The native prefix-sum + disjoint parallel scatter wins.
 fn bench_repeat_array_boundary(c: &mut Criterion) {
@@ -8497,6 +8540,7 @@ criterion_group!(
     bench_take_along_axis_boundary,
     bench_take_boundary,
     bench_repeat_array_boundary,
+    bench_repeat_axis_boundary,
     bench_searchsorted_boundary,
     bench_digitize_boundary,
     bench_bincount_boundary,
