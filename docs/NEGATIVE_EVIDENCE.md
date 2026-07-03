@@ -4,6 +4,31 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-02 - SHIP: f16 `logaddexp` (10.5x) native parallel widen — extends the f16 binary transcendental vein
+
+`BlackThrush`. Followed the f16 arctan2/hypot win (below) with `logaddexp` (op 17 in
+`try_zerocopy_f16_binary_widen`): parallel widen f16->f32, apply the stable
+`max + log1p(exp(-|x-y|))` form (npy_logaddexpf replica via `logaddexp_f32`, using the
+system `expf`/`log1pf` that Rust's `f32::exp`/`ln_1p` call), narrow.
+
+Bit-exact over **161M finite f16 pairs** (every 5th finite value crossed) + NaN/±inf/±0
+special rows. Proxy-verified pre-build (ctypes `expf`/`log1pf` formula narrowed vs numpy
+f16 = 0/400k). Warning handling: logaddexp's only default-`warn` case is "invalid" from a
+NaN/inf operand, so a cheap bit-mask pre-scan (`(v & 0x7C00) == 0x7C00` = exp all-set =
+NaN/inf) defers non-finite operands to numpy; finite inputs only underflow, which is
+default-`ignore`, so they never warn (verified: fnp introduces no divide/over/invalid
+warning on a finite array).
+
+Engagement PROVEN (local same-worker, 16M f16, DEFAULT << RAYON=1):
+
+| Probe (16M f16) | fnp full | numpy | speedup | fnp RAYON=1 | Verdict |
+|---|---:|---:|---:|---:|---|
+| logaddexp | 33.24 ms | 347.9 ms | 10.5x | 348.6 ms (≈numpy) | SHIP |
+
+RAYON=1 ≈ numpy confirms the gap is pure parallelism. f16 binary transcendental vein now
+covers arctan2/hypot/logaddexp; only `power` remains (numpy divide/overflow/invalid
+warnings need a multi-case pre-scan — future work, values already proxy-bit-exact).
+
 ## 2026-07-02 - SHIP: f16 `arctan2` (18x) + `hypot` (6.6x) native parallel widen — numpy has no f16 ALU
 
 `BlackThrush`. The f16-widen vein (numpy emulates every f16 op via f16->f32->op->
