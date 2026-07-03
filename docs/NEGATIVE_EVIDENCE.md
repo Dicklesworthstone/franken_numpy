@@ -4,6 +4,22 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.bincount(narrow int) max-scan vectorized too — 11-15.7x
+
+`BlackThrush`. Follow-up to the i64 bincount fix (same session): try_zerocopy_bincount_narrow<T>
+(uint8/int16/int32/uint16...) had the IDENTICAL early-`break`-on-negative serial max-scan. Grepped
+for the anti-pattern (per the lesson from the i64 commit), found it at the narrow path, applied the
+same branchless max + min fold (min<0 detects a negative after the full pass -> LLVM autovectorizes
+to SIMD max/min; correct for both signed and unsigned T). numpy's narrow-int bincount is very slow
+(it widens narrow -> int64), so this path was already winning; the vectorized max-scan pushes it
+further.
+
+Bit-exact CORRECT: uint8/int16/int32/uint16 x several (hi,n) + negative-int-raises parity + minlength.
+Local same-worker (gauge matmul 1.08x fnp-favorable, clean): bincount uint8 hi=256 n=4M 1.38 vs numpy
+21.42 ms = 15.5x; uint8 n=16M 15.6x; int16 13.9x; int32 11.4x; uint16 15.7x. **Confirms the lesson
+generalizes: the early-`break` pre-scan anti-pattern was in BOTH bincount widths; a repo-wide grep for
+`break;` inside max/min/negative pre-scans is the standing follow-up.**
+
 ## 2026-07-03 - FIX: np.bincount(int64) high-K 0.5x LOSS -> 1.1-1.6x (vectorize the max-scan)
 
 `BlackThrush`. bincount's serial pre-scan for max-value + non-negativity used a scalar loop with an

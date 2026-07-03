@@ -6835,6 +6835,7 @@ fn bench_bincount_boundary(c: &mut Criterion) {
 rng = np.random.default_rng(0)\n\
 x_mid = rng.integers(0, 256, 2_000_000)\n\
 x_k1000 = rng.integers(0, 1000, 4_000_000)\n\
+x_u8 = rng.integers(0, 256, 4_000_000).astype(np.uint8)\n\
 x_big = rng.integers(0, 512, 64_000_000)\n";
         let ns = PyDict::new(py);
         py.run(
@@ -6845,13 +6846,16 @@ x_big = rng.integers(0, 512, 64_000_000)\n";
         .expect("bincount setup");
         let x_mid = ns.get_item("x_mid").expect("x_mid");
         let x_k1000 = ns.get_item("x_k1000").expect("x_k1000");
+        let x_u8 = ns.get_item("x_u8").expect("x_u8");
         let x_big = ns.get_item("x_big").expect("x_big");
         let fnp_bc = module.getattr("bincount").expect("fnp bincount");
         let numpy_bc = numpy.getattr("bincount").expect("numpy bincount");
-        // k1000 is the case the vectorized max-scan fixed (was ~0.5x vs numpy, now ~1.1-1.6x).
+        // k1000 = the i64-path case the vectorized max-scan fixed (0.5x -> ~1.1-1.6x); u8_4m = the
+        // narrow-int path (numpy's narrow bincount is very slow, ~15x after the same max-scan fix).
         for (label, x) in [
             ("mid_2m_k256", &x_mid),
             ("mid_4m_k1000", &x_k1000),
+            ("narrow_u8_4m", &x_u8),
             ("big_64m_k512", &x_big),
         ] {
             group.bench_function(format!("fnp_bincount_i64_{label}"), |b| {
