@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.gradient(f32, strided non-last axis + N-D no-axis tuple) — 7.7x / 12.4x
+
+`BlackThrush`. Follow-up completing f32 gradient: last cycle added the f32 last-axis/1-D twin;
+this adds `try_zerocopy_f32_gradient_strided_axis` (non-last single axis) and wires BOTH f32 twins
+into the N-D no-axis loop (each per-axis step tries f64 then f32). Same f32 stencil as the 1-D twin
+(interior (hi-lo)/(2*dx), edges /dx, all f32) combining two strided input rows of length `inner` —
+bit-identical since numpy keeps f32 gradient in f32. edge_order=1 only (edge_order=2 defers).
+
+Bit-exact ALL PASS: f32 every non-last axis of {(4096,2048),(2048,4096),(512,512,32),(64,128,256)}
++ no-axis per-axis tuple (each element byte-equal) + scalar spacings {0.5,1,2} + edge_order=2 defer
++ f64 no-axis + 1-D regressions. Local same-worker (box lighter this run — f64 axis0 reference read
+its normal 6.8x): gradient f32 axis0 7.01 vs 54.03 ms = 7.7x; 2-D no-axis 12.52 vs 154.86 ms = 12.4x.
+**np.gradient f32 now fully native (1-D, last axis, non-last axis, N-D no-axis tuple); edge_order=2
+f32 is the only remaining defer.**
+
 ## 2026-07-03 - SHIP: np.gradient(f32, last axis / 1-D) native kernel — 10.4x / 7.3x (f32 had no path)
 
 `BlackThrush`. Another missing-float-width twin: np.gradient had f64 kernels (gradient_1d +

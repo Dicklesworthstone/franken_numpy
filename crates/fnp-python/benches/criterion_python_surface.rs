@@ -4350,6 +4350,22 @@ a2 = rng.standard_normal((4096, 2048)).astype(np.float32)\n",
         group.bench_function("numpy_gradient_f32_2d_axis1", |b| {
             b.iter(|| black_box(numpy_grad.call((&a2,), Some(&kw2)).expect("np grad ax1")));
         });
+        // axis=0 is the strided (non-last) f32 twin; no-axis returns the per-axis tuple.
+        let ax0 = PyDict::new(py);
+        ax0.set_item("axis", 0_i64).unwrap();
+        let ax0b = ax0.clone();
+        group.bench_function("fnp_gradient_f32_2d_axis0", |b| {
+            b.iter(|| black_box(fnp_grad.call((&a2,), Some(&ax0)).expect("fnp grad ax0")));
+        });
+        group.bench_function("numpy_gradient_f32_2d_axis0", |b| {
+            b.iter(|| black_box(numpy_grad.call((&a2,), Some(&ax0b)).expect("np grad ax0")));
+        });
+        group.bench_function("fnp_gradient_f32_2d_noaxis", |b| {
+            b.iter(|| black_box(fnp_grad.call1((&a2,)).expect("fnp grad noaxis")));
+        });
+        group.bench_function("numpy_gradient_f32_2d_noaxis", |b| {
+            b.iter(|| black_box(numpy_grad.call1((&a2,)).expect("np grad noaxis")));
+        });
     });
 
     group.finish();
