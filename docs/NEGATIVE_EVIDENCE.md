@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - FIX: np.bincount(int64) high-K 0.5x LOSS -> 1.1-1.6x (vectorize the max-scan)
+
+`BlackThrush`. bincount's serial pre-scan for max-value + non-negativity used a scalar loop with an
+early `break` on the first negative — that data-dependent branch/early-exit BLOCKED autovectorization,
+so the max-scan ran ~2x numpy's SIMD max and bincount LOST 0.47-0.53x to numpy for K~1000 bins (the
+tally itself was already an optimized unchecked scatter matching numpy). Replaced it with a branchless
+max + min fold (min < 0 detects a negative after the full pass; deferring is the rare error case so
+scanning to the end is free on the common non-negative input) -> LLVM autovectorizes it to SIMD
+max/min.
+
+Bit-exact CORRECT (integer counts, order-independent): K1000 x {1M,4M,16M} + K100/K256 + minlength +
+negative-raises parity. Local same-worker (gauge matmul 0.93x, near-clean): bincount K=1000 n=1M
+1.19 vs numpy 1.93 ms = 1.61x (was 0.53x); n=4M 6.68 vs 7.56 = 1.13x (was 0.47x). K<=256 stays at
+its prior parity/win. **LESSON: a serial pre-scan with an early-`break` (or any data-dependent branch)
+does NOT autovectorize — for a max/min/any-negative scan, use a branchless max+min fold and test the
+condition AFTER the full pass; the wasted tail on the error path is free vs the SIMD win on the hot path.**
+
 ## 2026-07-03 - SHIP: np.take_along_axis / put_along_axis complex64 — 4.9x (was deferred to slow residual)
 
 `BlackThrush`. Completing the gather/scatter family for complex64 (take already did c64 last commit).
