@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.take_along_axis / put_along_axis complex64 — 4.9x (was deferred to slow residual)
+
+`BlackThrush`. Completing the gather/scatter family for complex64 (take already did c64 last commit).
+take_along_axis & put_along_axis deferred ALL complex (`kind=="c" -> fallback`), but complex64 is
+8-byte and their helpers (try_zerocopy_take_along_axis / try_zerocopy_put_along_axis) already gather/
+scatter via a uintN bit-view with an orig-dtype (`arr.dtype.name`) view-back — so c64 works verbatim
+through the uint64 mover. Relaxed both the outer gate and the helper gate to defer only complex128
+(16-byte, no primitive mover, still excluded by the `!matches!(itemsize,1|2|4|8)` guard). The prior
+c64 take_along_axis was NOT even a clean delegate — it hit the cold extract residual (2.5-5.3x slower),
+so this is also a loss-fix.
+
+Bit-exact + dtype-preserving ALL PASS: take_along_axis + put_along_axis x {complex64, complex128} x
+3 shapes x every axis + f64/int32 regression. Local same-worker (load had dropped, gauge matmul 1.03x
+clean): take_along_axis c64 8.19 vs numpy 40.30 ms = 4.9x. **np.put(flat, c64) was ATTEMPTED and
+REVERTED: np.put routes through try_zerocopy_any_put which requires a BOOL mask (it backs putmask),
+so put's index path always falls to the extract residual that rejects complex — a separate helper is
+needed; left deferring complex. NB: take/take_along/put_along are the value-agnostic-helper ops; np.put
+flat is not (yet).**
+
 ## 2026-07-03 - SHIP: np.take generalized to ALL 1/2/4/8-byte dtypes — flat f32 12.4x, take-axis 1.5-4.3x
 
 `BlackThrush`. np.take's native gather was gated (dtype_kind=='b' || itemsize==8) — bool + int64/

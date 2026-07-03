@@ -7063,6 +7063,48 @@ idx = rng.integers(0, 16_000_000, 8_000_000).astype(np.int64)\n";
     group.finish();
 }
 
+// np.take_along_axis(complex64, ...): take_along_axis / put_along_axis deferred ALL complex; complex64
+// (8-byte) now gathers via the same uint64 bit-view as every 8-byte dtype (complex128 still delegates).
+fn bench_take_along_axis_c64_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_take_along_axis_c64_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+x = (rng.standard_normal((2048, 2048)) + 1j*rng.standard_normal((2048, 2048))).astype(np.complex64)\n\
+idx = rng.integers(0, 2048, (2048, 2048))\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("take_along c64 setup");
+        let x = ns.get_item("x").expect("x");
+        let idx = ns.get_item("idx").expect("idx");
+        let fnp_ta = module.getattr("take_along_axis").expect("fnp take_along_axis");
+        let numpy_ta = numpy.getattr("take_along_axis").expect("numpy take_along_axis");
+        group.bench_function("fnp_take_along_c64", |b| {
+            b.iter(|| black_box(fnp_ta.call1((&x, &idx, 1_i64)).expect("fnp ta")));
+        });
+        group.bench_function("numpy_take_along_c64", |b| {
+            b.iter(|| black_box(numpy_ta.call1((&x, &idx, 1_i64)).expect("np ta")));
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_take_along_axis_boundary(c: &mut Criterion) {
     // np.take_along_axis(4096x4096 f64, 4096x2048 idx, axis=1) — serial gather vs parallel.
     let mut group = c.benchmark_group("python_take_along_axis_boundary");
@@ -8680,6 +8722,7 @@ criterion_group!(
     bench_sort_axis_boundary,
     bench_parallel_binary_boundary,
     bench_take_axis_boundary,
+    bench_take_along_axis_c64_boundary,
     bench_take_along_axis_boundary,
     bench_take_dtype_boundary,
     bench_take_boundary,
