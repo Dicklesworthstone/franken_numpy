@@ -182,6 +182,50 @@ fn bench_narrow_int_unary_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+// datetime64 unit conversion (ns->us downcast = floor-div; s->ns upcast = mul): numpy runs it
+// single-threaded per-element with NaT checks (~98ms@16M downcast). The native parallel path
+// is bit-exact and wins. RAYON_NUM_THREADS=1 vs default isolates the parallel gain.
+fn bench_temporal_astype_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_temporal_astype_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+dt = rng.integers(0, 10**18, 16_000_000).astype(np.int64).view('datetime64[ns]')\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("astype setup");
+        let dt = ns.get_item("dt").expect("dt");
+        let fnp_astype = module.getattr("astype").expect("fnp astype");
+        group.bench_function("fnp_datetime_ns_to_us_16m", |b| {
+            b.iter(|| {
+                black_box(
+                    fnp_astype
+                        .call1((&dt, "datetime64[us]"))
+                        .expect("fnp astype"),
+                )
+            });
+        });
+        group.bench_function("numpy_datetime_ns_to_us_16m", |b| {
+            b.iter(|| black_box(dt.call_method1("astype", ("datetime64[us]",)).expect("np astype")));
+        });
+    });
+
+    group.finish();
+}
+
 // timedelta64 add/subtract (td +/- td -> td): numpy runs int64 add/sub with per-element NaT
 // checks single-threaded (~90ms@16M). The native parallel wrapping op with inline NaT is
 // bit-exact and wins ~4x. RAYON_NUM_THREADS=1 vs default isolates the parallel gain.
@@ -7584,6 +7628,7 @@ criterion_group!(
     bench_narrow_int_unary_boundary,
     bench_remainder_mod_boundary,
     bench_timedelta_addsub_boundary,
+    bench_temporal_astype_boundary,
     bench_max_min_reduction_boundary,
     bench_ptp_axis0_boundary,
     bench_bool_minmax_reduction_boundary,

@@ -4,6 +4,32 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: datetime64/timedelta64 UNIT conversion (astype) native parallel — 4.3x downcast / 1.7x upcast
+
+`BlackThrush`. `f.astype` was a pure passthrough. numpy converts datetime/timedelta between
+units single-threaded per-element (~98ms@16M downcast). `try_native_temporal_astype`: DOWNCAST
+(finer->coarser, e.g. ns->us) FLOOR-divides the raw i64 count by the unit ratio (`i64::div_euclid`
+== numpy's toward -inf floor, verified incl negatives: -1999 ns -> -2 us); UPCAST multiplies
+(wrapping). NaT (i64::MIN) preserved. The ratio is READ FROM NUMPY (a 1-element probe array, no
+hardcoded table) so it tracks numpy exactly. Restricted to CONSTANT-ratio units
+(W/D/h/m/s/ms/us/ns/ps/fs/as); Y and M are calendar-variable -> DEFER; count>1 / cross-kind /
+same-unit also defer.
+
+Bit-exact verified EXHAUSTIVELY: every ordered unit pair over {W,D,h,m,s,ms,us,ns,ps,fs,as} for
+BOTH datetime64 and timedelta64 (up- and down-cast) byte-identical incl NaT/negatives/overflow;
+Y/M defer + same-unit identity + small-n + non-temporal astype unaffected — ALL PASS.
+
+Engagement (local same-worker, 16M):
+
+| Probe (16M) | fnp | numpy | speedup |
+|---|---:|---:|---:|
+| dt[ns] -> dt[us] (downcast, floor-div) | 22.70 ms | 98.25 ms | 4.3x |
+| dt[s] -> dt[ns] (upcast, mul) | 126.46 ms | 212.96 ms | 1.7x |
+
+Downcast (div) has more headroom than upcast (numpy's multiply is better-vectorized). Datetime/
+timedelta vein now covers add/subtract + unit-conversion. **KEY: read the exact conversion ratio
+from numpy via a tiny probe array instead of hardcoding a unit table — robust + tracks numpy.**
+
 ## 2026-07-03 - SHIP: datetime64/timedelta64 add/subtract extended to dt-dt / dt+/-td / td+dt — 3.4-3.5x
 
 `BlackThrush`. Extended the timedelta add/sub helper (`try_native_timedelta_addsub`) to the
