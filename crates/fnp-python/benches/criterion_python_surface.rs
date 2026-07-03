@@ -3133,6 +3133,7 @@ a[a > 2.0] = np.nan\n",
         )
         .expect("nansum f32 setup");
         let a = ns.get_item("a").expect("a");
+        let a64 = a.call_method1("astype", ("float64",)).expect("a64");
         for name in ["nansum", "nanprod"] {
             let fnp_fn = module.getattr(name).expect("fnp fn");
             let numpy_fn = numpy.getattr(name).expect("numpy fn");
@@ -3146,6 +3147,19 @@ a[a > 2.0] = np.nan\n",
                 b.iter(|| black_box(numpy_fn.call((&a,), Some(&kw2)).expect("np nan")));
             });
         }
+        // f64 nansum non-last: the SERIAL branch was parallelized (its sibling nanprod was already
+        // parallel) -> ~12x (temp-avoidance) becomes ~40x.
+        let fnp_nansum = module.getattr("nansum").expect("fnp nansum");
+        let numpy_nansum = numpy.getattr("nansum").expect("numpy nansum");
+        let kw = PyDict::new(py);
+        kw.set_item("axis", 1_i64).unwrap();
+        let kw2 = kw.clone();
+        group.bench_function("fnp_nansum_f64_mid", |b| {
+            b.iter(|| black_box(fnp_nansum.call((&a64,), Some(&kw)).expect("fnp nansum f64")));
+        });
+        group.bench_function("numpy_nansum_f64_mid", |b| {
+            b.iter(|| black_box(numpy_nansum.call((&a64,), Some(&kw2)).expect("np nansum f64")));
+        });
     });
 
     group.finish();

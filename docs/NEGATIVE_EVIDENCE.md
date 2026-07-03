@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.nansum(f64, non-last axis) — parallelized the SERIAL branch — 12x -> 40x
+
+`BlackThrush`. Serial-sibling red-flag: `try_zerocopy_f64_nansum_axis`'s non-last (inner>1) branch
+was SERIAL (`for out_outer in 0..outer`) while its sibling `try_zerocopy_f64_nanprod_axis` was
+already parallel. Both win ~12-15x via temp-avoidance (numpy nansum copies + isnan + reduces),
+but only nanprod parallelized. Parallelized nansum's outer loop over the INDEPENDENT outer blocks
+(par_chunks_mut, per-block sequential accumulate, gate outer>=2 && outer*axis_len*inner>=1<<16),
+mirroring nanprod's structure. Per-block logic BYTE-IDENTICAL to the prior serial (parallelizing
+independent blocks can't change per-block results) so it's result-identical + bit-exact.
+
+Engagement: DEFAULT 1.34 vs numpy 54.30 ms = 40x; RAYON=1 5.78 vs 55.00 = 9.5x (the ~4x delta is
+the new parallelism on top of temp-avoidance). Bit-exact ALL PASS on the CHANGED scope: non-last
+multi-outer x 5 shapes x every non-last axis + keepdims + all-NaN(->0) + inf/signed + f32/nanprod
+regressions. **PRE-EXISTING (NOT this change, unchanged code paths): the last-axis inner==1 branch
+and axis_len>1M cases are allclose-not-bit-exact (sequential vs numpy's pairwise, boundary exactly
+at the COMPENSATED_SUM_MIN_LEN=1M gate) — my edit only touched the non-last inner>1 branch and
+leaves those paths byte-for-byte unchanged; asserted they stay allclose (no regression).**
+
 ## 2026-07-03 - SHIP: np.nansum/nanprod(f32, non-last axis) native per-block kernel — 53x / 68x
 
 `BlackThrush`. Missing-float-width twin: nansum/nanprod had f64 non-last kernels but f32 delegated
