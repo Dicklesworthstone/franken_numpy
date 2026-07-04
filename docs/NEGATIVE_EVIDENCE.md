@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.unique(1-D MIXED-field structured) via memcmp byte-transform value-lex sort — 13.9x
+
+`BlackThrush`. NEW LEVER. All-int64 structured unique used the int64-view (13986a4d); mixed-width / float-field
+records can't use that. numpy sorts records by field VALUE-lex with its slow void comparator (~1.56s @1M
+i8+f8+i4). `try_native_unique_struct_valuelex`: transform each record into a same-width MEMCMP-comparable key —
+per field, a sortable big-endian transform (signed int flips the sign bit; uint/bool unchanged; IEEE float flips
+all bits if negative else just the sign bit) so `[u8]::cmp` of transformed keys == numpy's record order — then
+PARALLEL sort the row indices by key memcmp, gather the ORIGINAL records contiguous, dedup, gather distinct.
+Float fields DEFER on any NaN/-0.0 (their transform diverges from numpy's +0.0==-0.0). Gate: 1-D C-contig,
+native/little-endian fields width 1/2/4/8, no padding, itemsize<=256, n>=1<<16. Wired into unique() after the
+int64-view struct path. BYTE-EXACT (verified vs numpy: i8+f8, i4+f4, incl negatives).
+
+MEASURED (per-crate `rch exec -- cargo bench` on remote, criterion bencher median, 1M records, i8+f8+i4):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(1M struct i8+f8+i4)` | 111.9 ms | 1559.5 ms | **13.9x** |
+
+CORRECTNESS: bench asserts `np.array_equal` — PASSED. **REUSABLE: the "sortable byte-transform" (int sign-flip,
+float bit-flip, big-endian) makes ANY packed record MEMCMP-comparable in value order — a general value-lex
+record sort that generalizes the int64-view to mixed-width / float-field records. Foundation for mixed-struct
+sort / factorize / setops / searchsorted (all currently all-int64-only).** Float fields defer NaN/-0.0.
+
 ## 2026-07-04 - WIN (SHIP): np.unique(2-D complex64, axis=0) + factorize via f32-view — 8.83x
 
 `BlackThrush`. c64 twin of the c128 rows path (e730c4e0). numpy sorts complex64 rows by (re, im) lex per column

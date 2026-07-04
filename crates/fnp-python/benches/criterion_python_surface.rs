@@ -8054,6 +8054,43 @@ a['c'] = rng.integers(-50, 50, n)\n";
     group.finish();
 }
 
+fn bench_unique_struct_mixed_boundary(c: &mut Criterion) {
+    // np.unique on a 1-D MIXED int+float structured (record) array. numpy sorts records via its slow void
+    // comparator (~778ms @1M i8+f8); fnp value-lex sorts a memcmp-comparable byte-transform of the records.
+    let mut group = c.benchmark_group("python_unique_struct_mixed_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+dt = [('id','<i8'),('val','<f8'),('flag','<i4')]\n\
+n = 1_000_000\n\
+a = np.zeros(n, dtype=dt)\n\
+a['id'] = rng.integers(-100000, 100000, n)\n\
+a['val'] = rng.integers(-100000, 100000, n).astype(np.float64)\n\
+a['flag'] = rng.integers(0, 100, n)\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let a = ns.get_item("a").expect("a");
+        let fnp_u = module.getattr("unique").expect("fnp unique");
+        let numpy_u = numpy.getattr("unique").expect("numpy unique");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        let f = fnp_u.call1((&a,)).expect("fnp unique");
+        let n = numpy_u.call1((&a,)).expect("numpy unique");
+        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "unique struct mixed mismatch");
+        group.bench_function("fnp_unique_struct_i8f8i4_1m", |bn| bn.iter(|| black_box(fnp_u.call1((&a,)).unwrap())));
+        group.bench_function("numpy_unique_struct_i8f8i4_1m", |bn| bn.iter(|| black_box(numpy_u.call1((&a,)).unwrap())));
+    });
+    group.finish();
+}
+
 fn bench_unique_rows_datetime_boundary(c: &mut Criterion) {
     // np.unique(2-D datetime64, axis=0) plain + factorize. numpy sorts records via its slow void comparator;
     // fnp views int64 and routes to the int row-unique, viewing the result back as datetime64[unit].
@@ -11508,6 +11545,7 @@ criterion_group!(
     bench_complex64_ops_boundary,
     bench_datetime_unique_boundary,
     bench_unique_struct_int_boundary,
+    bench_unique_struct_mixed_boundary,
     bench_unique_rows_datetime_boundary,
     bench_unique_rows_f16_boundary,
     bench_unique_struct_int_factorize_boundary,
