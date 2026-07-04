@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - NO-SHIP (REVERTED, PARITY): np.sort(2-D 'U'/'S', axis=1) per-lane string sort — 1.00x
+
+`BlackThrush`. Hypothesis: the 1-D string memcmp sort win (5x, 1fb2bc11) extends to per-lane last-axis 2-D
+string sort — numpy sorts each row with its per-record codepoint/byte comparator; a parallel per-lane memcmp
+index-sort should win. Implemented `try_native_string_sort_lastaxis` (byte-exact-verified: per-row memcmp
+sort == numpy for U4 Latin-1 AND S3; wide-codepoint defer), wired after the int last-axis sort.
+
+MEASURED (per-crate `rch exec -- cargo bench` on ovh-a, criterion bencher median, 2000x2000 U4 Latin-1, axis=1):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `sort(2000x2000 U4, axis=1)` | 216.8 ms | 217.3 ms | **1.00x (PARITY)** |
+
+REVERTED (git-stashed, not committed to lib.rs). ROOT CAUSE + RULE: the 1-D win came from ONE big parallel
+sort of 2M records crushing numpy's single-threaded sort. Per-lane is 2000 SMALL independent sorts (2000
+records each) — numpy amortizes its per-lane comparator efficiently, and fnp's per-lane overhead (a Vec<u32>
+allocation + index-sort + gather PER lane) offsets the cross-lane parallelism → exact parity. **RULE: the
+big-single-sort memcmp win does NOT extend to many-small-lane per-axis sorts; numpy's per-lane string sort
+is not pathologically slow, and per-lane index-sort/gather overhead eats the parallelism. Also: the local
+482ms numpy scan was ~2.2x LOAD-INFLATED (clean ovh-a = 217ms) — confirm the clean baseline first.** Do NOT
+re-dig per-lane string/complex sort. (1-D flat string sort/unique + 2-D-axis0 value-lex unique remain the wins.)
+
 ## 2026-07-04 - WIN (SHIP): np.unique(2-D float32, axis=0) parallel value-lex row sort+dedup — 22.4x
 
 `BlackThrush`. f32 mirror of the f64 row-unique (eb5db24b); f32 is a common ML dtype and numpy's void
