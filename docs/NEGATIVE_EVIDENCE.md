@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.unique(flat complex128) parallel lexicographic sort+dedup — 3.43x
+
+`BlackThrush`. New (non-string) op: complex128 unique. numpy sorts complex lexicographically (real, then
+imag) with a generic single-threaded introsort then dedups. fnp already had `try_zerocopy_c128_sort_flat`;
+this adds the dedup twin `try_zerocopy_c128_unique_flat`: view as [re,im] f64 pairs, defer on NaN/-0.0
+(numpy's ordering there is subtle), parallel lexicographic `par_sort_unstable_by`, dedup adjacent-equal pairs
+(equal complex == equal bytes), write distinct pairs to a fresh complex128 output. Wired into unique()'s
+single-arg path after the string path. Proved byte-exact with a pure-numpy prototype
+(`lexsort((im,re))`-sorted + adjacent-dedup == np.unique) and a bench-embedded assert. 1-D C-contig, gate n>=1<<18.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz1, criterion bencher median, 2M complex128, ~1M distinct):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(2M complex128, heavy-dedup)` | 84.6 ms | 290.6 ms | **3.43x** |
+
+CORRECTNESS: bench embeds `np.array_equal(fnp.unique, np.unique)` — PASSED on hz1. NOTE: numpy complex-unique
+is worker-variable (290ms hz1 vs ~2804ms local loaded — the local number was ~10x load-inflated; honest ratio
+is the hz1 3.43x). NEXT: c64 (complex64) unique twin (same f32-pair mirror of the c64 sort); complex
+searchsorted/isin; unique(str,return_inverse) factorize (~587ms, still open).
+
 ## 2026-07-04 - WIN (SHIP): 'S' (bytes) twin of searchsorted/isin/intersect/setdiff/setxor — 7.88x / 35.2x / (byte-exact) / (byte-exact) / 5.42x (string vein 'S' COMPLETE)
 
 `BlackThrush`. Completes the 'S' (bytes) twin across the whole string-op family (sort/unique/union1d landed
