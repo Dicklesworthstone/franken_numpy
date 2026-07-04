@@ -9083,8 +9083,63 @@ w = rng.standard_normal((8, 2_000_000))\nw[w > 2.0] = np.nan\n",
     group.finish();
 }
 
+// np.lexsort(3 small-range int keys, 2M): numpy runs K sequential radix sorts; the packed-composite
+// path does one parallel sort. Correctness gate (byte-identical to numpy) + timing.
+fn bench_lexsort_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_lexsort_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+k0 = rng.integers(0, 100, 2_000_000).astype(np.int64)\n\
+k1 = rng.integers(0, 100, 2_000_000).astype(np.int32)\n\
+k2 = rng.integers(0, 100, 2_000_000).astype(np.int16)\n\
+keys = (k0, k1, k2)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("lexsort setup");
+        let keys = ns.get_item("keys").expect("keys");
+        let fnp_lexsort = module.getattr("lexsort").expect("fnp lexsort");
+        let numpy_lexsort = numpy.getattr("lexsort").expect("numpy lexsort");
+        {
+            let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+            let got = fnp_lexsort.call1((&keys,)).expect("fnp lexsort");
+            let exp = numpy_lexsort.call1((&keys,)).expect("np lexsort");
+            let eq: bool = np_array_equal
+                .call1((&got, &exp))
+                .expect("array_equal")
+                .extract()
+                .expect("bool");
+            assert!(eq, "lexsort composite correctness mismatch");
+        }
+        group.bench_function("fnp_lexsort_3int_2m", |b| {
+            b.iter(|| black_box(fnp_lexsort.call1((&keys,)).expect("fnp lexsort")));
+        });
+        group.bench_function("numpy_lexsort_3int_2m", |b| {
+            b.iter(|| black_box(numpy_lexsort.call1((&keys,)).expect("numpy lexsort")));
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_lexsort_boundary,
     bench_nanarg_lastaxis_boundary,
     bench_nanarg_nonlast_boundary,
     bench_argextreme_f32_axis_boundary,

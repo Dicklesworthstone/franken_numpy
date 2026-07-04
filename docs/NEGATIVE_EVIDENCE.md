@@ -4,6 +4,32 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.lexsort(small-range int keys) packed composite — 3.37x
+
+`BlackThrush`. lexsort's int keys DELEGATED to numpy (which does K sequential radix sorts, one per key).
+RADICAL lever (alien-graveyard "sort by a packed composite key"): pack all keys into a SINGLE integer
+that preserves lexicographic precedence (keys[0] least-significant .. keys[-1] primary, each key's value
+shifted to [0,span) and scaled by the product of prior spans), then ONE parallel sort does the whole
+lexsort. try_native_lexsort_composite: cast each key to i64, parallel per-key min + span, accumulate the
+pack multiplier in u128 and defer if the packed range would exceed u64, build the u64 composite, then
+par_sort_unstable of (composite, original-index) pairs. BIT-EXACT: ties (rows equal on ALL keys) break
+by original index == numpy's stable lexsort order (pure-numpy prototype byte-exact over 200 trials,
+K=1..4; bench-embedded fnp-vs-numpy assertion PASSED on hz2).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion median):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `lexsort(3 int keys {i64,i32,i16}, 2M)` | 64.2 ms | 216.5 ms | **3.37x** |
+
+(Local read was 478 ms numpy / 0.98x — LOAD-INFLATED; the clean hz2 worker settles it at 216 ms / 3.37x,
+another case where a parallelism win is only trustworthy on the remote worker.) GATES (else defer to
+numpy's radix): tuple/list of 1-D int keys (i8..i64 / u8..u32 / bool), packed range fits u64, n >= 1<<18,
+axis=-1. Defers: uint64, 2-D keys ndarray, float keys (existing native path), range overflow, small n.
+**FOLLOW-UP: a COUNTING sort of the composite (O(n + range) when the packed range is small, e.g. <=1<<24)
+would beat the O(n log n) par_sort for categorical keys — potential 10-20x vs the current 3.4x.**
+
+## 2026-07-04 - WIN (SHIP): np.searchsorted f32 twin — sort-merge — 13.8x
+
 ## 2026-07-04 - WIN (SHIP): np.searchsorted f32 twin — sort-merge — 13.8x
 
 `BlackThrush`. The f32 twin of the f64 searchsorted sort-merge landed earlier today (7a20d60f). Same
