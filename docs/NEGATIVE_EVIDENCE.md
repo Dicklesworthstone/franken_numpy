@@ -4,6 +4,34 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - NO-SHIP (DROPPED): packed-composite lexsort counting scatter — 6.51x vs NumPy but no gain over shipped sort
+
+`BlackThrush`. Land-or-dig worktree scan found no measured win absent from `main`: the only non-ancestor
+FrankenNumPy worktree head was still `franken_numpy_snowspire_ixs5y173`, a beads-only DLAQR3 no-ship.
+Dug the existing packed-composite `np.lexsort` follow-up: replace the shipped `(composite, original_index)`
+parallel comparison sort with a stable counting scatter when the packed key range is small (`<= 1<<24`).
+The idea follows the graveyard radix/counting-sort guidance for bounded integer domains: count each packed
+key, prefix-sum bucket starts, then scan original indices in order so ties retain NumPy's stable order.
+
+MEASURED (per-crate RCH on `vmi1227854`, candidate source, release profile, 3 int keys x 2M):
+| Probe | candidate fnp | legacy NumPy original | numpy/fnp |
+|---|---:|---:|---:|
+| `lexsort(3 int keys {i64,i32,i16}, 2M)` | 66.8 ms | 435.0 ms | **6.51x** |
+
+KEEP/REJECT: DROPPED. The candidate still beats legacy NumPy, but it is not a new measured win over the
+already-shipped packed-composite path (`64.2 ms` ledger row on hz2). The stable counting scatter adds a
+full zeroed offsets array plus serial count/prefix/scatter passes; for the 100^3 benchmark domain, those
+passes erase the theoretical `O(n + range)` advantage over Rayon sorting `(u64,u32)` pairs. Source and the
+focused conformance test were reverted; no code change remains. Retry only with a parallel histogram or a
+smaller-range adaptive gate that proves a same-worker speedup over the shipped path.
+
+Command note: the literal requested `cargo bench --release` form is rejected by this Cargo, so the repo-working
+equivalent was used:
+`AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface -- 'python_lexsort_boundary/(fnp_lexsort_3int_2m|numpy_lexsort_3int_2m)' --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher --noplot`.
+The benchmark embedded its existing `np.array_equal` correctness assertion before timing; a focused
+`cargo check -p fnp-python --lib --bench criterion_python_surface --test conformance_lexsort` passed remotely
+on `hz2` before the timing run.
+
 ## 2026-07-04 - NO-SHIP (DROPPED): packed u64 keys for narrow fixed-width string sort/unique — 1.70x vs NumPy but 4.3x slower than shipped memcmp path
 
 `cod`. Land-or-dig worktree scan found no measured win absent from `main`: the only non-ancestor
