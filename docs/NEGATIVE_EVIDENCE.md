@@ -4,6 +4,29 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.setxor1d(two same-width 'U', Latin-1) source-tagged sort — 6.55x (string set-op family COMPLETE)
+
+`BlackThrush`. Eighth string-vein op; COMPLETES the string set-op family (union/intersect/setdiff/setxor).
+setxor1d = sorted-unique symmetric difference (values in exactly one SET). RADICAL TRICK to avoid building two
+big hash sets (which would be a ~2M-insert sequential bottleneck): TAG each record by its source array —
+concatenate a then b so combined index < |a| means "from a" — memcmp-sort the combined, then for each
+equal-record RUN keep it iff the run is present in EXACTLY ONE array (pure-a or pure-b; a run spanning both is
+the intersection -> dropped). The run-composition scan is a cache-local sequential pass over the sorted
+contiguous buffer, NO hashing. `try_native_string_setxor`. numpy's string setxor does 2-3 per-record sorts
+(~3.8 s local, worker-variable).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 2M + 2M, ~50% overlap):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `setxor1d(2M 'U8', 2M 'U8')` | 223.5 ms | 1464.4 ms | **6.55x** |
+
+CORRECTNESS: bench embeds `np.array_equal(fnp.setxor1d, np.setxor1d)` — PASSED on hz2. **REUSABLE LESSON: a
+symmetric set-op over two arrays can be done by SOURCE-TAGGING (concat + index-partition) + one sort + a
+run-composition scan — cheaper than building per-array hash sets when both arrays are large.** String vein
+COMPLETE for the common ops: sort 5.9x / unique >=1.74x / searchsorted 12.4x / isin 18.3x / union1d 3.86x /
+intersect 4.90x / setdiff 2.67x / setxor 6.55x. Remaining niche: unique(str,return_index/inverse/counts)
+factorize; 'S' (bytes) dtype twin (same byte lever, no codepoint subtlety); u128 pack for narrow widths.
+
 ## 2026-07-04 - WIN (SHIP): np.intersect1d / np.setdiff1d (two same-width 'U', Latin-1) = unique(a) + parallel membership filter — 4.90x / 2.67x
 
 `BlackThrush`. Sixth/seventh string-vein ops. Both reduce to sorted-unique(a) filtered by membership in a

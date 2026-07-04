@@ -7555,6 +7555,56 @@ b = np.concatenate([a[:1_000_000], brand])\n";
     group.finish();
 }
 
+fn bench_string_setxor_boundary(c: &mut Criterion) {
+    // np.setxor1d of two unicode ('U') arrays = sorted-unique symmetric difference. numpy does 2-3
+    // slow per-record sorts (~3.8s @2M+2M); fnp source-tags + memcmp-sorts the concat, then keeps
+    // runs present in exactly one array (no hashing) — bit-exact.
+    let mut group = c.benchmark_group("python_string_setxor_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+a = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n\
+brand = rng.integers(97, 123, (1_000_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n\
+b = np.concatenate([a[:1_000_000], brand])\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("string setxor setup");
+        let a = ns.get_item("a").expect("a");
+        let b = ns.get_item("b").expect("b");
+        let fnp_x = module.getattr("setxor1d").expect("fnp setxor1d");
+        let numpy_x = numpy.getattr("setxor1d").expect("numpy setxor1d");
+        let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+        let f = fnp_x.call1((&a, &b)).expect("fnp setxor1d");
+        let n = numpy_x.call1((&a, &b)).expect("numpy setxor1d");
+        let eq: bool = np_array_equal
+            .call1((&f, &n))
+            .expect("array_equal")
+            .extract()
+            .expect("bool");
+        assert!(eq, "string setxor1d correctness mismatch");
+        group.bench_function("fnp_setxor1d_U8_2m", |bn| {
+            bn.iter(|| black_box(fnp_x.call1((&a, &b)).expect("fnp setxor1d")));
+        });
+        group.bench_function("numpy_setxor1d_U8_2m", |bn| {
+            bn.iter(|| black_box(numpy_x.call1((&a, &b)).expect("numpy setxor1d")));
+        });
+    });
+    group.finish();
+}
+
 fn bench_tile_boundary(c: &mut Criterion) {
     // np.tile of a 1-D array (scalar reps) -> ~4M output. numpy.tile is a single-threaded
     // python helper (reshape + C repeat); fnp does a parallel block memcpy. Bit-exact.
@@ -9915,6 +9965,7 @@ criterion_group!(
     bench_string_isin_boundary,
     bench_string_union1d_boundary,
     bench_string_setops_boundary,
+    bench_string_setxor_boundary,
     bench_sort_axis_boundary,
     bench_parallel_binary_boundary,
     bench_take_axis_boundary,
