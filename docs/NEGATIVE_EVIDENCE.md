@@ -29,6 +29,36 @@ failed because the mailbox DB corruption circuit breaker is open.
 Action: keep this as current positive evidence for the histogram family. If a future no-gaps sweep sees a
 histogram regression, rerun this exact group before reopening the tally implementation.
 
+## 2026-07-04 - SURFACE: broad multi-family read-only sweep — no fresh lever; every apparent LOSS was LOAD NOISE
+
+`BlackThrush`. Five read-only profiling passes across op families NOT recently probed, hunting a
+load-immune (order-of-magnitude, Python-level-multi-pass) gap. Result: the accessible surface is
+exhaustively harvested — everything already wins or is parity, and **all four apparent losses reversed
+to wins/parity on re-measurement** (box heavily loaded: matmul gauge swung 0.81-1.16x all session, so
+any sub-2x single read is untrustworthy — always re-measure ≥3x before believing a loss).
+
+- **np.char.* string family ALREADY WINS BIG (native paths):** upper 14x, capitalize 16x, lower 5.4x,
+  zfill 3.7x, replace 3.3x, add/multiply 2.4x, count 2.2x, strip 1.9x. Parity/bandwidth (not levers):
+  find 1.1x, startswith 1.0x, str_len 1.0x, equal 1.0x, encode ~1.0x (both ~510ms — a genuine per-
+  element codec cost, but fnp already matches; an ASCII-fast native encode is the only conceivable
+  char lever left and it's fiddly + niche). char family = DONE.
+- **string sort/unique/searchsorted: PARITY (delegate).** sort(str) 1.0x, argsort(str) 0.94x,
+  unique(str) 0.97x (numpy's generic string comparator is NOT the slow-comparator win the STRUCTURED
+  sort was — plain 1-D string sort is already fast/bandwidth). unique(str,return_counts) 1.28x (fnp
+  edges it). searchsorted(str) FALSE-LOSS: a 0.69x single read re-measured to 1.2-1.4x WIN (match=True).
+- **Confirmed FALSE losses (all load noise):** histogram(256) read 0.85x → re-measured 1.25-2.69x WIN;
+  quantile(method='lower') read 0.80x → swung 0.48-1.13x (pure noise); searchsorted(str) 0.69x → 1.2x;
+  packbits 0.85x / unpackbits 0.91x (0.3ms absolute — noise). None are real.
+- **Reconfirmed WINS (not gaps):** unique(int64) 29.5x, kron 2.1x, digitize 19x, unwrap 46x, interp
+  11x, sinc 6x, diff-n2 3.3x, percentile 2x, histogram2d 2x, average-weighted 2.6x, i0 1.5x.
+- **Parity/BLAS (not levers):** cov/corrcoef (mean-center+matmul, BLAS-bound), unique(f64),
+  piecewise (numpy ~parity, not slow enough).
+
+Net: NO fresh clean lever this pass. The one real open lever remains the previously-surfaced FLOAT
+set-ops parallelism play (see the 2026-07-03 set-ops entry) — un-benchable under today's load. **META:
+the reliable NEW-lever signal is an ORDER-OF-MAGNITUDE numpy slowness (Python-level multi-pass); sub-2x
+"losses" on this box are noise, not levers — don't chase them without a clean-box re-measure.**
+
 ## 2026-07-04 - SURFACE: `deadlock-audit-1nzxt` convolve/correlate k=256 target is stale — current main is ~30x faster than NumPy
 
 `BlackThrush`. Rechecked the open bead `deadlock-audit-1nzxt` ("convolve/correlate k=128-256
