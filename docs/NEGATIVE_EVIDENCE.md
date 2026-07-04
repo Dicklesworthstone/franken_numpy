@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.unique(2-D complex128, axis=0, return_index/inverse/counts) via f64-view reuse — 17.9x
+
+`BlackThrush`. c128 factorize twin of the plain c128 row-unique (e730c4e0), same f64-view trick. The row-level
+index/inverse/counts are IDENTICAL for the complex array and its (n, 2*ncols) f64 view (one complex row == one
+f64 row), so route `.view('float64')` through the f64 _full (2466aee9) and only re-view tuple[0] (the unique
+array) back to complex128; index/inverse/counts pass through unchanged. `try_native_unique_rows_complex128_full`
+(~40-line wrapper, zero new sort/scatter code). Wired into unique(axis=0) after the f64 _full. BYTE-EXACT (all
+four outputs verified vs numpy). 2-D complex128 C-contig.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 500k x 3 complex128, all 3 flags):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(500kx3 c128, axis=0, index+inverse+counts)` | 30.2 ms | 540.0 ms | **17.9x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on each of the 4 tuple elements — PASSED. The value-lex 2-D axis=0
+unique vein is now COMPLETE across the three headline dtypes × plain/factorize: int64/uint64 (10.5x/15.2x) +
+f64 (16.2x/21.4x) + complex128 (17.6x/17.9x). Remaining leads are mechanical/niche: narrow-int/f32 rows,
+axis=1 (strided columns), int-only structured 1-D.
+
 ## 2026-07-04 - WIN (SHIP): np.unique(2-D complex128, axis=0) via f64-view reuse — 17.6x (≈15 lines)
 
 `BlackThrush`. numpy sorts complex rows by (re, im) lexicographic per column — which is EXACTLY value-lex over
