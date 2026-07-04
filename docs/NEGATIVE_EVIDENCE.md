@@ -4,6 +4,31 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - LOSS (DROPPED): np.pad(2-D, mode="constant") parallel bordered row-copy — f64 0.87x, i32 1.42x — numpy 2-D is NOT the slow path
+
+`BlackThrush`. Tried to extend the 1-D pad copy-family win to 2-D constant (bordered image padding).
+Implemented `try_zerocopy_pad_bytes_2d_constant` (byte view, `numpy.empty((R+t+b,C+l+r),dtype)`, zero the
+top/bottom row blocks, PARALLEL over the R interior rows: zero left/right column border + memcpy the input
+row). Byte-exact (bench assert PASSED). But it does NOT win — DROPPED per "drop ~0-gain".
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2 worker vmi1227854, criterion bencher median, 2048x2048 +64 border):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `pad(2048² f64, 64, "constant")` | 5.52 ms (±23%) | 4.79 ms | **0.87x (LOSS)** |
+| `pad(2048² i32, 64, "constant")` | 1.12 ms | 1.59 ms | 1.42x (marginal) |
+
+ROOT CAUSE (the reusable lesson): the 1-D pad lever worked because numpy's **1-D** pad is a slow single-threaded
+PYTHON path (~0.8-9 GB/s). numpy's **2-D constant** pad is NOT — it does `np.zeros(out)` (fast memset) + ONE
+vectorized strided slice-assign `out[t:t+R, l:l+C] = a` (near-bandwidth C, ~15 GB/s @ f64). fnp's parallel
+per-row copy does the SAME memory traffic with rayon overhead + per-row border fills, so it ties/loses for f64
+(the smaller i32 has a little headroom -> weak 1.42x, not worth a dtype-gated path + f64 regression risk).
+**RULE: before porting a 1-D-pad-style copy lever to N-D, check whether numpy's N-D path is a Python loop
+(beatable) or a single strided slice-assign after memset (already optimal — no lever).** The 1-D pad family
+(constant/edge/wrap/reflect/symmetric) wins BECAUSE numpy's 1-D pad concatenates via Python; the 2-D+ family
+does not. NOT SHIPPED (code reverted). Remaining pad leads that MIGHT still win: multi-reflection 1-D (numpy
+Python bounce), edge/wrap/reflect 2-D (numpy builds those via slower per-axis python, unlike constant) — but
+verify the numpy-is-slow precondition FIRST.
+
 ## 2026-07-04 - WIN (SHIP): np.pad(1-D, mode in {reflect,symmetric}, single-reflection) parallel mirror — 2.73x (f64 reflect) / 2.53x (i32 symmetric)
 
 `BlackThrush`. Third+fourth modes in the pad copy-family vein (constant/edge/wrap already landed). reflect and
