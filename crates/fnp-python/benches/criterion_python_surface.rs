@@ -10772,6 +10772,17 @@ keys = (k0, k1, k2)\n",
         )
         .expect("lexsort setup");
         let keys = ns.get_item("keys").expect("keys");
+        py.run(
+            std::ffi::CString::new(
+                "keys_f64 = (k0.astype(np.float64), k1.astype(np.float64), k2.astype(np.float64))",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("lexsort float setup");
+        let keys_f64 = ns.get_item("keys_f64").expect("keys_f64");
         let fnp_lexsort = module.getattr("lexsort").expect("fnp lexsort");
         let numpy_lexsort = numpy.getattr("lexsort").expect("numpy lexsort");
         {
@@ -10784,12 +10795,35 @@ keys = (k0, k1, k2)\n",
                 .extract()
                 .expect("bool");
             assert!(eq, "lexsort composite correctness mismatch");
+            let got_f64 = fnp_lexsort.call1((&keys_f64,)).expect("fnp lexsort f64");
+            let exp_f64 = numpy_lexsort.call1((&keys_f64,)).expect("np lexsort f64");
+            let eq_f64: bool = np_array_equal
+                .call1((&got_f64, &exp_f64))
+                .expect("array_equal f64")
+                .extract()
+                .expect("bool");
+            assert!(
+                eq_f64,
+                "lexsort integral-f64 composite correctness mismatch"
+            );
         }
         group.bench_function("fnp_lexsort_3int_2m", |b| {
             b.iter(|| black_box(fnp_lexsort.call1((&keys,)).expect("fnp lexsort")));
         });
         group.bench_function("numpy_lexsort_3int_2m", |b| {
             b.iter(|| black_box(numpy_lexsort.call1((&keys,)).expect("numpy lexsort")));
+        });
+        group.bench_function("fnp_lexsort_3f64_intvalued_2m", |b| {
+            b.iter(|| black_box(fnp_lexsort.call1((&keys_f64,)).expect("fnp lexsort f64")));
+        });
+        group.bench_function("numpy_lexsort_3f64_intvalued_2m", |b| {
+            b.iter(|| {
+                black_box(
+                    numpy_lexsort
+                        .call1((&keys_f64,))
+                        .expect("numpy lexsort f64"),
+                )
+            });
         });
     });
 

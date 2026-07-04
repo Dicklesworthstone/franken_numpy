@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.lexsort(integral-valued f64 keys) packed composite — 15.31x vs legacy NumPy
+
+`cod`. Worktree scan found no measured `.scratch` win absent from `main` (the visible non-main FrankenNumPy
+worktree head was a DLAQR no-ship). Dug the open float-lexsort niche with the existing packed-composite
+integer lexsort primitive. Floats normally keep the general lexsort path because NaN, signed zero, and
+non-integral ordering corners are easy to get wrong. This branch gates only 1-D finite f32/f64 keys whose
+values are exactly integral and within the exact integer range, rejects `-0.0`, casts those keys to int64,
+then reuses the proven packed composite `(key, original_index)` sort. Arbitrary float keys still fall through
+to the existing path.
+
+MEASURED (per-crate local fallback after `rch exec` repeatedly selected `ovh-b` and failed in dependency
+build with `zerocopy` SIGILL; `CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod`, release profile,
+criterion bencher, 3 f64 keys x 2M rows, all values integral):
+| Probe | fnp | legacy NumPy original | numpy/fnp |
+|---|---:|---:|---:|
+| `lexsort(3 integral-valued f64 keys, 2M)` | 103.87 ms | 1590.29 ms | **15.31x** |
+
+CORRECTNESS: benchmark embeds `np.array_equal(fnp.lexsort(keys_f64), np.lexsort(keys_f64))` before timing;
+the focused public conformance shard passed `cargo test -p fnp-python --test conformance_lexsort -- --nocapture`
+(16/16). Compile gate passed: `cargo check -p fnp-python --lib --bench criterion_python_surface`. Both used the
+project target dir above. The filtered bench process was interrupted only after both target timing rows emitted.
+
 ## 2026-07-04 - WIN (SHIP): complex128 set-ops union1d/intersect1d/setdiff1d — 1.94-3.17x (setxor reverted ~parity)
 
 `BlackThrush`. numpy's complex128 set-ops DELEGATE (the dispatch falls back on complex) to a serial sort of
