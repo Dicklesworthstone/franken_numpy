@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): float16 set-ops union/intersect/setdiff/setxor via exact f32 widening — 8.9-11.6x
+
+`BlackThrush`. Extends the f16-via-f32-widening family (cf2d26da) to the 4 set-ops. numpy has no f16 SIMD so
+its f16 set-ops run ~250-270ms @2M+2M. `try_native_f16_setop`: widen both operands exact -> f32, route to the
+f32 set-op (recursive), narrow the sorted-unique result back to f16. Wired into each set-op fn BEFORE the
+`setop_inputs_are_float` fallback (f16 is float-kind). BYTE-EXACT incl NaN/-0.0/inf (verified vs numpy — the
+sorted-UNIQUE output has no ±0.0 tie-order ambiguity, unlike f16 SORT). Gate n>=1<<14.
+
+MEASURED (per-crate `rch exec -- cargo bench` on vmi1152480, criterion bencher median, 2M + 2M float16):
+| Op | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `union1d` | 27.9 ms | 247.6 ms | **8.9x** |
+| `intersect1d` | 23.5 ms | 247.8 ms | **10.5x** |
+| `setdiff1d` | 23.3 ms | 271.0 ms | **11.6x** |
+| `setxor1d` | 25.4 ms | 273.0 ms | **10.8x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on all four ops — PASSED. f16 family now: unique/isin/searchsorted
+(cf2d26da) + 4 set-ops. OPEN (noted, not shipped): f16 SORT (~6x) — byte-exact only for finite non-(-0.0)
+(numpy f16/f32 sort disagree on ±0.0 tie order and NaN narrow-back bit pattern), needs a NaN/-0.0 pre-scan
+defer + narrow-back; more hook surface in sort()'s multi-axis dispatch.
+
 ## 2026-07-04 - WIN (SHIP): float16 unique/isin/searchsorted via exact f32 widening — 10.5-18.8x
 
 `BlackThrush`. numpy has NO f16 SIMD — its f16 sort-based ops convert per-element and run ~10-30x slower than
