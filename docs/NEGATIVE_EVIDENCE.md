@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.unique(2-D complex64, axis=0) + factorize via f32-view — 8.83x
+
+`BlackThrush`. c64 twin of the c128 rows path (e730c4e0). numpy sorts complex64 rows by (re, im) lex per column
+== value-lex over the interleaved f32 components, so `try_native_unique_rows_complex64` views the (n, ncols)
+complex64 array as f32 (n, 2*ncols), routes to the f32 row-unique (plain or _full, which DEFERS NaN/-0.0), and
+views the (nu, 2*ncols) f32 unique rows back to complex64 (nu, ncols); index/inverse/counts are row-level,
+unchanged. Wired into unique(axis=0) after the c128 rows path (plain + _full) AND the axis=1 transpose wrapper.
+ZERO new sort code. BYTE-EXACT (plain + factorize verified vs numpy). 2-D complex64 C-contig.
+
+MEASURED (per-crate `rch exec -- cargo bench` on remote, criterion bencher median, 500k x 3 complex64):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(500kx3 c64, axis=0)` | 63.1 ms | 557.6 ms | **8.83x** |
+
+CORRECTNESS: bench asserts `np.array_equal` for BOTH plain and the 4-tuple factorize — PASSED. Completes the
+COMPLEX rows family (c128 e730c4e0/3c0ab8a2 + c64). The value-lex 2-D axis=0 unique vein now covers every
+headline numeric/temporal dtype: i64/u64, f64, f32, f16, c128, c64, datetime/timedelta (+ narrow-int, sibling).
+
 ## 2026-07-04 - WIN (SHIP): np.unique(2-D float16, axis=0) + factorize via exact f32 widening — 17.8x
 
 `BlackThrush`. f16 rows unique was uncovered (the axis=0 dispatch handles int/f64/f32/c128/datetime rows, not
