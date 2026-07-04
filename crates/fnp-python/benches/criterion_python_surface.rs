@@ -9194,8 +9194,70 @@ A = rng.integers(0, 20, (500_000, 4)).astype(np.int64)\n",
     group.finish();
 }
 
+// np.unique(500k x 4 int, axis=0, return_index/inverse/counts): the group-by/factorize primitive; numpy
+// does the slow void-row sort plus the extra outputs. Correctness gate (all outputs byte-identical) + timing.
+fn bench_unique_rows_full_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_unique_rows_full_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+A = rng.integers(0, 20, (500_000, 4)).astype(np.int64)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("unique rows full setup");
+        let a = ns.get_item("A").expect("A");
+        let fnp_unique = module.getattr("unique").expect("fnp unique");
+        let numpy_unique = numpy.getattr("unique").expect("numpy unique");
+        let kw = PyDict::new(py);
+        kw.set_item("axis", 0).expect("axis");
+        kw.set_item("return_index", true).expect("ri");
+        kw.set_item("return_inverse", true).expect("rinv");
+        kw.set_item("return_counts", true).expect("rc");
+        {
+            let got = fnp_unique.call((&a,), Some(&kw)).expect("fnp unique full");
+            let exp = numpy_unique.call((&a,), Some(&kw)).expect("np unique full");
+            let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+            // Compare each element of the returned tuple (unique, index, inverse, counts).
+            for t in 0..4usize {
+                let g = got.get_item(t).expect("got item");
+                let e = exp.get_item(t).expect("exp item");
+                let eq: bool = np_array_equal
+                    .call1((&g, &e))
+                    .expect("array_equal")
+                    .extract()
+                    .expect("bool");
+                assert!(eq, "unique(axis=0) return_* correctness mismatch at tuple index {t}");
+            }
+        }
+        group.bench_function("fnp_unique_rows_full_500k4", |b| {
+            b.iter(|| black_box(fnp_unique.call((&a,), Some(&kw)).expect("fnp unique full")));
+        });
+        group.bench_function("numpy_unique_rows_full_500k4", |b| {
+            b.iter(|| black_box(numpy_unique.call((&a,), Some(&kw)).expect("numpy unique full")));
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_unique_rows_full_boundary,
     bench_unique_rows_boundary,
     bench_lexsort_boundary,
     bench_nanarg_lastaxis_boundary,

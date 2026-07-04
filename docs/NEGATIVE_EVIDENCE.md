@@ -4,6 +4,29 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.unique(2-D int, axis=0, return_index/inverse/counts) — 49x
+
+`BlackThrush`. Extends yesterday's unique-rows composite (228c7092) to the GROUP-BY / FACTORIZE primitive:
+unique(axis=0, return_index/return_inverse/return_counts). numpy does the same slow void-row sort PLUS
+builds the extra outputs (~658 ms @500k x 4). The packed composite carries everything through ONE u64
+sort: sort (composite, original-index) pairs (ties by index = stable, so the first pair of each group is
+the first occurrence), then group boundaries give — return_index = first index per group; return_inverse
+= scatter group-id back to original position (the factorize map); return_counts = group sizes; unique
+rows = decode the group composites. try_native_unique_rows_composite_full. BIT-EXACT incl tuple
+order/shapes (pure-numpy prototype byte-exact over 150 trials across ALL return_* subsets; bench-embedded
+per-tuple-element fnp-vs-numpy assertion PASSED on hz2).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion median):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(500k x 4 int, axis=0, index+inverse+counts)` | 13.4 ms | 658 ms | **49x** |
+
+GATES: 2-D int ndarray (i8..i64/u8..u32/bool), {axis:0} + any subset of return_index/inverse/counts,
+n in [1<<17, u32::MAX], packed range fits u64. return_inverse is the numpy `np.unique(..., return_inverse)`
+group-by — this makes fnp's factorize-on-int-records ~50x. **Packed-composite vein now: lexsort 3.37x,
+unique-rows 65x, unique-rows+return_* 49x. Remaining: unique(axis=1), float/large-range rows via hashed
+dedup (composite doesn't fit), and 1-D-record structured-array group-by.**
+
 ## 2026-07-04 - WIN (SHIP): np.unique(2-D small-range int, axis=0) packed composite — 65x
 
 `BlackThrush`. unique(axis=0) (unique ROWS of a 2-D array) DELEGATED to numpy, which views each row as a
