@@ -4,7 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
-## 2026-07-04 - WIN (SHIP): np.unique(2-D large-range int64/uint64, axis=0, return_index/inverse/counts) — row factorize/group-by — 15.2x
+## 2026-07-04 - WIN (SHIP): np.unique(2-D float64, axis=0) parallel value-lex row sort+dedup — 16.2x
+
+`BlackThrush`. Float mirror of the int row-lexsort (f2e75261). numpy sorts f64 rows VALUE-lexicographically
+(col0 primary) with its slow void comparator (~490-771ms @500kx4). `try_native_unique_rows_lexsort_f64`:
+parallel value-lex sort of row indices (compare columns left-to-right by f64 `partial_cmp`), gather sorted
+rows contiguous, dedup adjacent-equal, gather distinct to a fresh (n_unique, ncols) f64 output. DEFER on any
+NaN or -0.0 (numpy collapses +0.0/-0.0 ROWS as equal — byte order would keep them distinct — and NaN ordering
+is subtle); for FINITE rows with no -0.0, value-lex via partial_cmp == numpy (verified over random + int-valued
+f64). Wired into unique(axis=0) after the int lexsort path. 2-D f64 C-contig, no return_*, rows>=1<<16.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 500k x 4 finite f64 ~250k distinct):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(500kx4 finite f64, axis=0)` | 30.2 ms | 490.4 ms | **16.2x** |
+
+CORRECTNESS: bench asserts `np.array_equal(fnp.unique(axis=0), np.unique(axis=0))` — PASSED. The value-lex
+row-unique vein now covers int64/uint64 (plain 10.5x + factorize 15.2x) AND f64 (16.2x). Same lever as the
+complex unique (defer NaN/-0.0, value comparator). NEXT: f64 axis=0 return_*; narrow-int/f32 rows; axis=1.
 
 `BlackThrush`. The return_* (factorize/group-by) twin of the just-landed large-range unique-rows value-lex sort
 (f2e75261). Extends it to the group outputs numpy builds via its slow void comparator + inverse construction.
