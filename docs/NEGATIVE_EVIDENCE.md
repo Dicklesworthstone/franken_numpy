@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.unique(1-D MIXED-field structured, return_index/inverse/counts) factorize — 18.8x
+
+`BlackThrush`. Final piece of the mixed-struct family: record factorize/group-by via the byte-transform value-lex
+sort (9c56396d). numpy sorts records by field value-lex with its slow void comparator + builds the inverse
+(~867ms-1.24s @1M i8+f8). `try_native_unique_struct_valuelex_full`: STABLE sort of (transformed-key, original-
+index) so the group-first record carries the MIN original index (= numpy return_index first-occurrence);
+group_starts -> [unique records (re-materialized in the struct dtype), index?, inverse? (scatter group-id to
+orig index), counts?] tuple (extras intp). Float fields DEFER on NaN/-0.0. Wired into unique()'s kwargs branch
+(axis-missing + return_*) after the int64 struct factorize. BYTE-EXACT (all four outputs verified vs numpy).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 1M records i8+f8, all 3 flags):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(1M mixed struct, index+inverse+counts)` | 46.1 ms | 867.4 ms | **18.8x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on each of the 4 tuple elements — PASSED. **STRUCTURED / RECORD-ARRAY
+FAMILY COMPLETE** for both all-int64 AND mixed int/float: unique + factorize + isin + searchsorted + 4 set-ops,
+all powered by two levers — the sortable byte-transform (value-lex ordering) and the record-byte hash (equality).
+
 ## 2026-07-04 - WIN (SHIP): np.searchsorted(sorted MIXED-field structured) byte-transform binary search — 32.6x
 
 `BlackThrush`. Extends struct searchsorted (998c57f8, was all-int64 int64-view) to mixed int/float records via
