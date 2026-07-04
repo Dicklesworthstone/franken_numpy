@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.isin(1-D structured, structured) record membership via byte-hash — 50.9x
+
+`BlackThrush`. numpy's structured isin has NO fast table path -> it falls back to a serial sort of
+|element|+|test| (~1537ms @1M+500k). isin is EQUALITY not ordering, so two records are equal iff their BYTES
+are equal — provided every field is integer-kind (i/u/b, so bytes uniquely encode value; no float -0.0/NaN)
+and there is NO padding (contiguous offsets, itemsize == sum of field sizes). `try_native_struct_isin` (clone
+of the string/complex isin record-hash lever): FNV-hashed HashSet of the test record bytes, PARALLEL lookup
+over the element records -> contains ^ invert. Wired into isin() after the complex isin, before the extract
+fallback. BYTE-EXACT (verified vs numpy). Same-dtype, all-integer-field, no-padding, 1-D C-contig, gate n>=1<<16.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 1M element x 500k test, 2xi8 fields):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `isin(1M struct, 500k struct)` | 30.2 ms | 1537.3 ms | **50.9x** |
+
+CORRECTNESS: bench asserts `np.array_equal` — PASSED. Biggest win since the complex isin (35x). **REUSABLE:
+the record-byte hash-set isin lever (float 530x, string 35x, complex 35x) extends to STRUCTURED records for
+FREE — hash the itemsize-byte record; gate all-integer-field + no-padding for byte-equality == value-equality.
+Structural EQUALITY ops (isin, and by extension setops) hash raw records; structural ORDERING ops (unique/sort)
+route via the int64-view.** numpy's struct isin fallback (serial concat-sort) is the pathology.
+
 ## 2026-07-04 - WIN (SHIP): np.unique(1-D structured all-int64, return_index/inverse/counts) record factorize — 21.4x
 
 `BlackThrush`. Record factorize/group-by twin of the plain struct unique (13986a4d). Same int64-view trick:
