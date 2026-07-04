@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.searchsorted(sorted MIXED-field structured) byte-transform binary search — 32.6x
+
+`BlackThrush`. Extends struct searchsorted (998c57f8, was all-int64 int64-view) to mixed int/float records via
+the byte-transform lever (9c56396d). numpy binary-searches each record with its slow void comparator (~2.1-10s
+@2M+2M i8+f8). `try_native_searchsorted_struct_valuelex`: transform the (already value-lex-sorted) haystack
+records and the query records into MEMCMP-comparable keys (per-field sortable big-endian), then PARALLEL memcmp
+binary search each query key -> insertion index (side left/right via the compare). Float fields DEFER on NaN/
+-0.0 (via struct_all_floats_finite on both operands). Wired into searchsorted() for a_kind 'V' after the int64
+struct path. BYTE-EXACT both sides (verified vs numpy). 1-D C-contig, native/LE fields w1/2/4/8, no padding, m>=1<<16.
+
+MEASURED (per-crate `rch exec -- cargo bench` on ovh-a, criterion bencher median, 2M haystack + 2M queries, i8+f8):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `searchsorted(2M mixed struct, 2M q)` | 64.5 ms | 2104.7 ms | **32.6x** |
+
+CORRECTNESS: bench asserts `np.array_equal` for side=left AND side=right — PASSED. The byte-transform lever
+(9c56396d) now powers mixed-struct unique + set-ops + **searchsorted**. STRUCTURED FAMILY COMPLETE for both
+all-int64 AND mixed int/float: unique / isin / searchsorted / 4 set-ops (+ all-int64 factorize). Remaining niche:
+mixed-struct factorize (byte-transform + stable group scatter).
+
 ## 2026-07-04 - WIN (SHIP): MIXED-field structured set-ops union/intersect/setdiff/setxor — 16.4-36.8x
 
 `BlackThrush`. Extends the structured set-ops (ca436092, was all-int64) to mixed int/float record arrays, built
