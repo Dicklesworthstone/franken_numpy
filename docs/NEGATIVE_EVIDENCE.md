@@ -4,6 +4,42 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - BLOCKER (TOOLING): rustup override → broken local .so (ufuncs SIGSEGV, fast paths raise "an integer is required")
+
+`BlackThrush`. Local python-probe validation is currently UNRELIABLE on this box. Root cause: a **rustup
+directory override** shadows the repo-pinned toolchain.
+
+- `rustup override list` → `/data/projects/franken_numpy  nightly-2026-04-30-x86_64-unknown-linux-gnu`,
+  which SHADOWS `rust-toolchain.toml` (`channel = "nightly-2026-02-20"`). So a plain
+  `cargo build -p fnp-python --release --features python-extension` (even with `force_local=true`) links
+  the .so with nightly-2026-04-30, NOT the pinned nightly-2026-02-20 that CI / the remote rch workers use.
+
+- The resulting `.so` LOADS and imports fine (736 fns, glibc <=2.35 so locally loadable) but is broken at
+  runtime for two op families:
+  * **Generic ufuncs / reductions SEGFAULT** — `fnp.add`, `fnp.multiply`, `fnp.sum`, `fnp.sqrt` crash
+    (SIGSEGV = exit 139) even on trivial 5-element / scalar inputs. faulthandler C-stack: fnp.so ufunc
+    buffer path -> `libc memcpy` (bad pointer/length). `sqrt` raises `TypeError: an integer is required`.
+  * **Several native fast paths raise `TypeError: an integer is required`** whenever the fast path engages:
+    `searchsorted` and `cross` (always, incl. tiny inputs); `lexsort(f64 keys)`, `unique(return_inverse=)`,
+    `repeat(array counts)`, `tri`, `kron`, `argsort(axis=)` at fast-path-engaging size. Small inputs that
+    delegate to numpy work (they never reach the fast path).
+  * WORKING despite the same numpy arrays: `sort`, `median`, `unique(1-D)`, `bincount`, `histogram`,
+    `cumsum`, `partition`, `nanpercentile`, `cov`, `trim_zeros` — so it is NOT a blanket ABI break.
+
+- NOT a code regression: every broken op above is a SHIPPED, remotely-benched win — they pass on hz2. NOT
+  numpy-version-specific either: reproduced identically under numpy 2.4.3 AND a throwaway numpy 2.1.3 venv
+  (py3.14). The pre-existing `.probe/fnp_python.so` (a prior local build) crashed the same way, so this is
+  not my build alone — it is any local build made under the override.
+
+- REMEDY (recommended, build-confirmed / runtime re-confirmation was interrupted): build with the pinned
+  toolchain explicitly — `cargo +nightly-2026-02-20 build -p fnp-python --release --features
+  python-extension` (completed clean in 6m47s), OR `rustup override unset` in the repo root so
+  `rust-toolchain.toml` takes effect. Until a local .so is proven clean, do byte-exact validation via
+  numpy-only prototypes + RCH criterion benches on hz2 (pinned toolchain), NOT via local
+  `PYTHONPATH=.probe python scripts/correctness_sweep_vs_numpy.py` (that sweep SIGSEGVs early under the
+  broken .so). This is a NEW gotcha distinct from the glibc-2.43 remote-build gotcha: that one makes a
+  remote .so fail to LOAD; this one makes a local .so LOAD but mis-execute.
+
 ## 2026-07-04 - WIN (SHIP): np.unique(2-D int, axis=0, return_index/inverse/counts) — 49x
 
 `BlackThrush`. Extends yesterday's unique-rows composite (228c7092) to the GROUP-BY / FACTORIZE primitive:
