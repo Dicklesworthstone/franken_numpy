@@ -7494,6 +7494,67 @@ b = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8'
     group.finish();
 }
 
+fn bench_string_setops_boundary(c: &mut Criterion) {
+    // np.intersect1d / np.setdiff1d of two unicode ('U') arrays. numpy does 2-3 slow per-record
+    // sorts (~3.1-3.7s @2M+2M); fnp = memcmp-sort unique(a) + hashed-set membership filter over b.
+    let mut group = c.benchmark_group("python_string_setops_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        // b shares 1M values with a and adds 1M fresh, so intersect and setdiff are both non-trivial.
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+a = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n\
+brand = rng.integers(97, 123, (1_000_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n\
+b = np.concatenate([a[:1_000_000], brand])\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("string setops setup");
+        let a = ns.get_item("a").expect("a");
+        let b = ns.get_item("b").expect("b");
+        let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+        // Correctness gate for both ops.
+        for op in ["intersect1d", "setdiff1d"] {
+            let f = module.getattr(op).unwrap().call1((&a, &b)).expect("fnp setop");
+            let n = numpy.getattr(op).unwrap().call1((&a, &b)).expect("numpy setop");
+            let eq: bool = np_array_equal
+                .call1((&f, &n))
+                .expect("array_equal")
+                .extract()
+                .expect("bool");
+            assert!(eq, "string {op} correctness mismatch");
+        }
+        let fnp_i = module.getattr("intersect1d").unwrap();
+        let numpy_i = numpy.getattr("intersect1d").unwrap();
+        let fnp_d = module.getattr("setdiff1d").unwrap();
+        let numpy_d = numpy.getattr("setdiff1d").unwrap();
+        group.bench_function("fnp_intersect1d_U8_2m", |bn| {
+            bn.iter(|| black_box(fnp_i.call1((&a, &b)).expect("fnp intersect")));
+        });
+        group.bench_function("numpy_intersect1d_U8_2m", |bn| {
+            bn.iter(|| black_box(numpy_i.call1((&a, &b)).expect("numpy intersect")));
+        });
+        group.bench_function("fnp_setdiff1d_U8_2m", |bn| {
+            bn.iter(|| black_box(fnp_d.call1((&a, &b)).expect("fnp setdiff")));
+        });
+        group.bench_function("numpy_setdiff1d_U8_2m", |bn| {
+            bn.iter(|| black_box(numpy_d.call1((&a, &b)).expect("numpy setdiff")));
+        });
+    });
+    group.finish();
+}
+
 fn bench_tile_boundary(c: &mut Criterion) {
     // np.tile of a 1-D array (scalar reps) -> ~4M output. numpy.tile is a single-threaded
     // python helper (reshape + C repeat); fnp does a parallel block memcpy. Bit-exact.
@@ -9853,6 +9914,7 @@ criterion_group!(
     bench_string_searchsorted_boundary,
     bench_string_isin_boundary,
     bench_string_union1d_boundary,
+    bench_string_setops_boundary,
     bench_sort_axis_boundary,
     bench_parallel_binary_boundary,
     bench_take_axis_boundary,

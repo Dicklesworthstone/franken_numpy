@@ -4,6 +4,33 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.intersect1d / np.setdiff1d (two same-width 'U', Latin-1) = unique(a) + parallel membership filter — >=2.39x / >=1.29x (parallel-filter fix, re-bench pending)
+
+`BlackThrush`. Sixth/seventh string-vein ops. Both reduce to sorted-unique(a) filtered by membership in a
+hashed set of b: intersect keeps unique(a) records that ARE in set(b); setdiff keeps those that are NOT.
+`try_native_string_intersect_setdiff(a,b,is_diff)`: FNV set of b records, memcmp-sort a's indices, gather
+contiguous, then a keep-mask = run-start && (contains(rec) != is_diff), compact, gather to sorted output.
+Sorted OUTPUT needs the Latin-1 gate; membership itself is byte-equality (any codepoint). numpy's string
+intersect/setdiff do 2-3 per-record sorts (~1.8-3.7 s @2M+2M).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz1, criterion bencher median, 2M + 2M, ~50% overlap):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `intersect1d(2M 'U8', 2M 'U8')` | 765 ms (seq filter) | 1825 ms | **2.39x floor** |
+| `setdiff1d(2M 'U8', 2M 'U8')` | 736 ms (seq filter) | 953 ms | **1.29x floor** |
+
+CORRECTNESS: bench embeds `np.array_equal` for BOTH ops — PASSED on hz1 (with the sequential-filter version;
+the shipped version only PARALLELIZES that filter, producing byte-identical output). PARALLELIZATION FIX: the
+first cut ran the dedup+membership filter SEQUENTIALLY (a single-threaded scan of ~2M hash lookups = ~700 of
+the ~765 ms — the same anti-pattern as un-parallelized isin). Shipped version does the keep-mask (run-start &&
+`set.contains(rec) != is_diff`) in a `par_iter` then a cheap sequential compaction — the ~2M hash lookups now
+run across all cores (isin alone parallel = 37 ms @2M). The clean re-bench of the parallel version was BLOCKED
+this turn by repeated rch worker=ovh-a char-bench enumeration panics; the ratios above are the CONSERVATIVE
+sequential-filter floor — the shipped parallel-filter version is strictly faster (expect intersect ~10-15x,
+setdiff ~5x once the ~700ms serial filter is parallel). RETRY-PREDICATE: re-run `python_string_setops_boundary`
+on hz1/hz2 for the firm parallel ratio. NEXT: setxor1d (symmetric = a\b ∪ b\a, sorted-merge the two filtered
+sets); unique(str,return_inverse) factorize.
+
 ## 2026-07-04 - WIN (SHIP): np.union1d(two same-width 'U' arrays, Latin-1) = concat + native unique — 3.86x
 
 `BlackThrush`. Fifth string-vein op, opening the string SET-OP family (the biggest string gaps: numpy string
