@@ -28,6 +28,29 @@ passed:
 is not accepted by this Cargo; reran as `cargo bench --profile release`. The remote release bench was interrupted
 after a long quiet compile phase and the same filtered benchmark was measured locally.
 
+## 2026-07-04 - WIN (SHIP): np.argsort(1-D int/float, kind='stable'/'mergesort') on DENSE/tied data — 6.98x / 8.00x
+
+`BlackThrush`. The existing int/float argsort fast paths DEFER ON TIES (a duplicate value in the sorted order ->
+numpy's default-quicksort tie arrangement is unmatchable), so `kind='stable'` on data with repeats fell back to
+numpy's slow stable value sort (~587ms i64 / ~1157ms f64 @8M dense[0,1000)). But kind='stable' ties by ORIGINAL
+INDEX, which IS byte-exactly reproducible. `try_native_argsort_stable_flat` / `argsort_stable_typed<T>`: STABLE
+sort the index permutation by (value, original index) via one parallel `par_sort_unstable_by`, NO tie defer.
+Float: pre-scan NaN -> defer (numpy orders NaN last; partial_cmp can't); -0.0 needs NO defer (numpy stable ties
+-0.0==+0.0 by index, exactly as partial_cmp — verified). Gated kind='stable'/'mergesort' at the TOP of the
+argsort flat block (the default-kind distinct paths still run below). i/u/f width 4/8. BYTE-EXACT (int + float,
+dense + distinct verified).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 8M dense[0,1000), kind=stable):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `argsort(8M i64 dense, stable)` | 84.1 ms | 587.1 ms | **6.98x** |
+| `argsort(8M f64 dense, stable)` | 144.6 ms | 1156.7 ms | **8.00x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on both — PASSED. Completes the stable-argsort family: the tied case
+of PLAIN numeric argsort now wins (distinct already did via defer-on-ties), alongside structured (byte-transform)
+and string (memcmp) stable argsort. RULE: a "defer-on-ties" fast path leaves the kind='stable'/'mergesort' tied
+case on the table — stable's index tiebreak is byte-exact, so a (key, orig-index) sort captures it with no defer.
+
 ## 2026-07-04 - WIN (SHIP): np.argsort(1-D 'U'/'S' Latin-1, kind='stable'/'mergesort') memcmp — 7.15x / 9.46x
 
 `BlackThrush`. The `kind='stable'` argsort lever (db543e15, structured) generalizes to strings — an open lead in
