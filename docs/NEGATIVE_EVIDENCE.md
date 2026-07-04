@@ -4,41 +4,38 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
-## 2026-07-04 - BLOCKER (TOOLING): rustup override → broken local .so (ufuncs SIGSEGV, fast paths raise "an integer is required")
+## 2026-07-04 - BLOCKER (TOOLING): local py3.14 .probe .so mis-executes (ufuncs SIGSEGV in PyUFunc::__call__, fast paths raise "an integer is required") — validate via RCH/hz2
 
-`BlackThrush`. Local python-probe validation is currently UNRELIABLE on this box. Root cause: a **rustup
-directory override** shadows the repo-pinned toolchain.
+`BlackThrush`. Local python-probe validation via `.venv-numpy314` (Python 3.14.3) is UNRELIABLE on this box.
+**CORRECTION of my earlier same-day claim: the rustup override is NOT the cause.** I rebuilt with the pinned
+`nightly-2026-02-20` (the CI / remote-rch toolchain) and `fnp.add(np.arange(5.0), np.arange(5.0))` STILL
+SIGSEGVs. Both the override toolchain (nightly-2026-04-30) AND the pinned one crash identically, so toolchain
+is ruled out. (An override does exist: `rustup override list` → `/data/projects/franken_numpy →
+nightly-2026-04-30`; benign here but worth unsetting for CI-parity.)
 
-- `rustup override list` → `/data/projects/franken_numpy  nightly-2026-04-30-x86_64-unknown-linux-gnu`,
-  which SHADOWS `rust-toolchain.toml` (`channel = "nightly-2026-02-20"`). So a plain
-  `cargo build -p fnp-python --release --features python-extension` (even with `force_local=true`) links
-  the .so with nightly-2026-04-30, NOT the pinned nightly-2026-02-20 that CI / the remote rch workers use.
-
-- The resulting `.so` LOADS and imports fine (736 fns, glibc <=2.35 so locally loadable) but is broken at
-  runtime for two op families:
-  * **Generic ufuncs / reductions SEGFAULT** — `fnp.add`, `fnp.multiply`, `fnp.sum`, `fnp.sqrt` crash
-    (SIGSEGV = exit 139) even on trivial 5-element / scalar inputs. faulthandler C-stack: fnp.so ufunc
-    buffer path -> `libc memcpy` (bad pointer/length). `sqrt` raises `TypeError: an integer is required`.
-  * **Several native fast paths raise `TypeError: an integer is required`** whenever the fast path engages:
-    `searchsorted` and `cross` (always, incl. tiny inputs); `lexsort(f64 keys)`, `unique(return_inverse=)`,
-    `repeat(array counts)`, `tri`, `kron`, `argsort(axis=)` at fast-path-engaging size. Small inputs that
-    delegate to numpy work (they never reach the fast path).
-  * WORKING despite the same numpy arrays: `sort`, `median`, `unique(1-D)`, `bincount`, `histogram`,
-    `cumsum`, `partition`, `nanpercentile`, `cov`, `trim_zeros` — so it is NOT a blanket ABI break.
-
-- NOT a code regression: every broken op above is a SHIPPED, remotely-benched win — they pass on hz2. NOT
-  numpy-version-specific either: reproduced identically under numpy 2.4.3 AND a throwaway numpy 2.1.3 venv
-  (py3.14). The pre-existing `.probe/fnp_python.so` (a prior local build) crashed the same way, so this is
-  not my build alone — it is any local build made under the override.
-
-- REMEDY (recommended, build-confirmed / runtime re-confirmation was interrupted): build with the pinned
-  toolchain explicitly — `cargo +nightly-2026-02-20 build -p fnp-python --release --features
-  python-extension` (completed clean in 6m47s), OR `rustup override unset` in the repo root so
-  `rust-toolchain.toml` takes effect. Until a local .so is proven clean, do byte-exact validation via
-  numpy-only prototypes + RCH criterion benches on hz2 (pinned toolchain), NOT via local
-  `PYTHONPATH=.probe python scripts/correctness_sweep_vs_numpy.py` (that sweep SIGSEGVs early under the
-  broken .so). This is a NEW gotcha distinct from the glibc-2.43 remote-build gotcha: that one makes a
-  remote .so fail to LOAD; this one makes a local .so LOAD but mis-execute.
+- gdb backtrace of the crash: `SIGSEGV in <fnp_python::PyUFunc>::__pymethod___call____` → pyo3 ternaryfunc
+  trampoline → CPython eval. i.e. the crash is inside the `PyUFunc.__call__` pyclass method, NOT random
+  memory. faulthandler earlier showed the leaf in `libc memcpy` (bad ptr/len).
+- Symptom families (py3.14, numpy 2.1.3 AND 2.4.3 — NOT numpy-version-specific):
+  * ufuncs/reductions `add`/`multiply`/`sum`/`sqrt` SIGSEGV (exit 139) on trivial/scalar input; `sqrt`
+    variant raises `TypeError: an integer is required`.
+  * native fast paths raise `TypeError: an integer is required` when they engage: `searchsorted`/`cross`
+    (always), `lexsort(f64)`/`unique(return_inverse=)`/`repeat(array counts)`/`tri`/`kron`/`argsort(axis=)`
+    at fast-path size. Small inputs that delegate to numpy work.
+  * WORKING (usable for local gap-probing): `sort`, `median`, `unique(1-D)`, `bincount`, `histogram`,
+    `cumsum`, `partition`, `nanpercentile`, `cov`, `trim_zeros`.
+- Leading hypothesis (UNCONFIRMED): a **Python 3.14 × pyo3(nightly-2026-02-20) pyclass-trampoline
+  incompatibility** — py3.14.3 is bleeding-edge and predates this pyo3's stable py3.14 support. CI uses
+  **Python 3.12** (`.github/workflows/ci.yml` `python-version: "3.12"`), the tested config. Could not build
+  a py3.12 control .so: `cargo build -p fnp-python` under `PYO3_PYTHON=.venv-numpy126` (py3.12) produced no
+  cdylib (compile error, unread) — the .probe .so also requires py3.13+ symbols (`PyType_GetModuleName`), so
+  the code currently only builds/loads for py3.13+ locally.
+- NOT a code regression: every broken op is a SHIPPED, remotely-benched win that passes on hz2.
+- REMEDY: do byte-exact validation via numpy-only prototypes + PER-CRATE RCH criterion benches on hz2 (embed
+  the fnp-vs-numpy assert IN the bench); DO NOT trust local ufunc/fast-path probes or
+  `scripts/correctness_sweep_vs_numpy.py` under py3.14 (it SIGSEGVs early = false alarm, not a real bug).
+  Structural/sort ops above CAN be probed locally for gap-finding. Distinct from the glibc-2.43 gotcha (that
+  = remote .so won't LOAD; this = local py3.14 .so LOADS but mis-executes).
 
 ## 2026-07-04 - WIN (SHIP): np.unique(2-D int, axis=0, return_index/inverse/counts) — 49x
 
