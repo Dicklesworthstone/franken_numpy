@@ -4,6 +4,37 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.searchsorted i64 twin — sort-merge — 10.73x vs NumPy original
+
+`BlackThrush`. No unlanded measured win was available in the scratch/worktree scan: the only ahead
+bench worktree was a DLAQR3/AED no-ship, while main already carried the f64/f32 searchsorted and
+packed-composite wins. New lever shipped here: extend the proven searchsorted sort-merge kernel to
+same-dtype integer arrays (`i8..i64`, `u8..u64`). The original/legacy NumPy path does one random-access
+binary search through the large sorted haystack per query; the fnp path sorts `(query, original_index)`
+pairs once, then performs one sequential monotonic merge through the haystack and scatters the insertion
+positions back to the query shape. Integer ordering is total, so this avoids float NaN/signed-zero
+special cases and defers small, mixed-dtype, unsorted, non-contiguous, scalar, and `sorter != None`
+inputs to the existing exact paths.
+
+MEASURED (per-crate RCH bench, `AGENT_NAME=BlackThrush`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-blackthrush-searchsorted-i64`,
+worker `hz2`, criterion median):
+
+| Probe | fnp | legacy NumPy original | fnp/original | original/fnp |
+|---|---:|---:|---:|---:|
+| `searchsorted(i64 4M haystack, i64 4M queries)` | 102,267,380 ns | 1,097,792,032 ns | 0.0932x | **10.73x** |
+
+GATES: exact numpy ndarrays; identical signed/unsigned integer dtype; 1-D haystack; array query;
+sorter=None; side in `{left,right}`; C-contiguous buffers; haystack and query length both >= 1<<19;
+query length <= `u32::MAX`; rayon threads >= 2; haystack verified non-decreasing in parallel. Bench
+embedded `np.array_equal(fnp.searchsorted(...), np.searchsorted(...))` for both `left` and `right`
+before timing. Focused conformance GREEN via
+`cargo test -p fnp-python --profile release --test conformance_sort_search searchsorted_large_i64_array_matches_numpy`
+on `ovh-a` (1 passed). Targeted compile GREEN via
+`cargo check -p fnp-python --lib --bench criterion_python_surface --test conformance_sort_search`
+on `hz1`, final diff rerun GREEN on `vmi1227854`; broad `--tests` remains blocked by the
+already-documented pre-existing `where_py` lib-test signature errors on main.
+
 ## 2026-07-04 - BLOCKER (TOOLING): local py3.14 .probe .so mis-executes (ufuncs SIGSEGV in PyUFunc::__call__, fast paths raise "an integer is required") — validate via RCH/hz2
 
 `BlackThrush`. Local python-probe validation via `.venv-numpy314` (Python 3.14.3) is UNRELIABLE on this box.

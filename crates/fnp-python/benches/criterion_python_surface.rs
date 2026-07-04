@@ -7270,6 +7270,43 @@ v_f32 = rng3.standard_normal(4_000_000).astype(np.float32)\n";
         group.bench_function("numpy_searchsorted_f32_4m_haystack4m", |b| {
             b.iter(|| black_box(numpy_ss.call1((&a_f32, &v_f32)).expect("numpy searchsorted f32")));
         });
+
+        // i64 twin: integer ordering is total, so the same query-sort + monotonic merge should
+        // be byte-identical while avoiding one random binary-search walk per query.
+        let i64_setup = "import numpy as np\n\
+rng4 = np.random.default_rng(3)\n\
+a_i64 = np.sort(rng4.integers(-2_000_000_000, 2_000_000_000, 4_000_000, dtype=np.int64))\n\
+v_i64 = rng4.integers(-2_500_000_000, 2_500_000_000, 4_000_000, dtype=np.int64)\n";
+        let ns4 = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(i64_setup).unwrap().as_c_str(),
+            Some(&ns4),
+            Some(&ns4),
+        )
+        .expect("searchsorted i64 setup");
+        let a_i64 = ns4.get_item("a_i64").expect("a_i64");
+        let v_i64 = ns4.get_item("v_i64").expect("v_i64");
+        {
+            let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+            for side in ["left", "right"] {
+                let kw = PyDict::new(py);
+                kw.set_item("side", side).expect("side");
+                let got = fnp_ss.call((&a_i64, &v_i64), Some(&kw)).expect("fnp ss i64");
+                let exp = numpy_ss.call((&a_i64, &v_i64), Some(&kw)).expect("np ss i64");
+                let eq: bool = np_array_equal
+                    .call1((&got, &exp))
+                    .expect("array_equal")
+                    .extract()
+                    .expect("bool");
+                assert!(eq, "searchsorted i64 merge correctness mismatch: side={side}");
+            }
+        }
+        group.bench_function("fnp_searchsorted_i64_4m_haystack4m", |b| {
+            b.iter(|| black_box(fnp_ss.call1((&a_i64, &v_i64)).expect("fnp searchsorted i64")));
+        });
+        group.bench_function("numpy_searchsorted_i64_4m_haystack4m", |b| {
+            b.iter(|| black_box(numpy_ss.call1((&a_i64, &v_i64)).expect("numpy searchsorted i64")));
+        });
     });
 
     group.finish();

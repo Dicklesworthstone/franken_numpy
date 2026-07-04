@@ -520,6 +520,45 @@ print(ok)
 }
 
 #[test]
+fn searchsorted_large_i64_array_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(124)
+a = np.sort(rng.integers(-1_000_000, 1_000_000, (1 << 19) + 4099, dtype=np.int64))
+v = rng.integers(-1_250_000, 1_250_000, 1025 * 513, dtype=np.int64).reshape(1025, 513)
+flat = v.ravel()
+flat[:2048] = a[rng.integers(0, a.size, 2048)]  # exact-match ties
+flat[1] = np.iinfo(np.int64).min
+flat[2] = np.iinfo(np.int64).max
+
+ok = True
+for side in ("left", "right"):
+    result = fnp.searchsorted(a, v, side=side)
+    expected = np.searchsorted(a, v, side=side)
+    if result.dtype != expected.dtype:
+        print(("dtype", side, str(result.dtype), str(expected.dtype)))
+        ok = False
+    if result.shape != expected.shape:
+        print(("shape", side, result.shape, expected.shape))
+        ok = False
+    if not np.array_equal(result, expected):
+        mismatch = np.flatnonzero(result.ravel() != expected.ravel())[:10].tolist()
+        print(("values", side, mismatch, result.ravel()[mismatch].tolist(), expected.ravel()[mismatch].tolist()))
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large i64 searchsorted merge path should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn searchsorted_scalar() -> Result<(), String> {
     let script = fnp_script(
         r#"
