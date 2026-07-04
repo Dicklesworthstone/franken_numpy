@@ -4,7 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
-## 2026-07-04 - NO-SHIP (DROPPED): packed-composite lexsort counting scatter — 6.51x vs NumPy but no gain over shipped sort
+## 2026-07-04 - WIN (SHIP): np.unique(2-D large-range int64/uint64, axis=0, return_index/inverse/counts) — row factorize/group-by — 15.2x
+
+`BlackThrush`. The return_* (factorize/group-by) twin of the just-landed large-range unique-rows value-lex sort
+(f2e75261). Extends it to the group outputs numpy builds via its slow void comparator + inverse construction.
+`try_native_unique_rows_lexsort_int_full`: STABLE value-lex sort of row indices (value-lex THEN original-index
+tiebreak, so the first row of each group carries the MIN original index = numpy's first-occurrence
+return_index), gather sorted rows contiguous, group_starts on row change; then unique rows = rows at
+group_starts, return_index = perm[group_start], return_inverse = scatter group-id to each original row index,
+return_counts = group sizes; returns the numpy-ordered [unique, index?, inverse?, counts?] tuple (extras dtype
+intp). Wired into unique(axis=0) after the composite-full path (composite handles small-range). BYTE-EXACT for
+int (verified ALL FOUR outputs vs numpy over large-range i64 incl dups). 2-D int64/uint64 C-contig, rows>=1<<16.
+
+MEASURED (per-crate `rch exec -- cargo bench` on ovh-a, criterion bencher median, 500k x 3 int64 ~250k distinct,
+all three flags):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(500kx3 large-range i64, axis=0, index+inverse+counts)` | 18.3 ms | 278.4 ms | **15.2x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on EACH of the 4 tuple elements (unique/index/inverse/counts) —
+PASSED. Row factorize/group-by is a core data-science primitive. The large-range unique-rows vein is now
+complete for axis=0 (plain 10.5x + return_* 15.2x), int64/uint64. NEXT: narrow-int (i8/i16/i32) many-column
+axis=0 (generalize the itemsize gate); axis=1 large-range (column value-lex).
 
 `BlackThrush`. Land-or-dig worktree scan found no measured win absent from `main`: the only non-ancestor
 FrankenNumPy worktree head was still `franken_numpy_snowspire_ixs5y173`, a beads-only DLAQR3 no-ship.

@@ -8060,6 +8060,62 @@ a = np.concatenate([base, base])\n";
     group.finish();
 }
 
+fn bench_unique_rows_factorize_boundary(c: &mut Criterion) {
+    // np.unique(2-D large-range int64, axis=0, return_index+inverse+counts) — the row factorize/group-by.
+    // numpy sorts rows via its slow void comparator AND builds the inverse; fnp value-lex sorts + scatters.
+    let mut group = c.benchmark_group("python_unique_rows_factorize_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+base = rng.integers(-10**15, 10**15, (250_000, 3)).astype(np.int64)\n\
+a = np.concatenate([base, base])\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let a = ns.get_item("a").expect("a");
+        let fnp_u = module.getattr("unique").expect("fnp unique");
+        let numpy_u = numpy.getattr("unique").expect("numpy unique");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        let kwfull = PyDict::new(py);
+        kwfull.set_item("axis", 0_i64).unwrap();
+        kwfull.set_item("return_index", true).unwrap();
+        kwfull.set_item("return_inverse", true).unwrap();
+        kwfull.set_item("return_counts", true).unwrap();
+        // Correctness: compare each of the 4 tuple elements.
+        let ft = fnp_u.call((&a,), Some(&kwfull)).expect("fnp unique full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+        let nt = numpy_u.call((&a,), Some(&kwfull)).expect("numpy unique full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+        for i in 0..4 {
+            let eq: bool = eqf.call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap())).unwrap().extract().unwrap();
+            assert!(eq, "unique rows factorize element {i} mismatch");
+        }
+        group.bench_function("fnp_unique_rows_factorize_500kx3", |bn| {
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
+            kw.set_item("return_index", true).unwrap();
+            kw.set_item("return_inverse", true).unwrap();
+            kw.set_item("return_counts", true).unwrap();
+            bn.iter(|| black_box(fnp_u.call((&a,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("numpy_unique_rows_factorize_500kx3", |bn| {
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
+            kw.set_item("return_index", true).unwrap();
+            kw.set_item("return_inverse", true).unwrap();
+            kw.set_item("return_counts", true).unwrap();
+            bn.iter(|| black_box(numpy_u.call((&a,), Some(&kw)).unwrap()));
+        });
+    });
+    group.finish();
+}
+
 fn bench_tile_boundary(c: &mut Criterion) {
     // np.tile of a 1-D array (scalar reps) -> ~4M output. numpy.tile is a single-threaded
     // python helper (reshape + C repeat); fnp does a parallel block memcpy. Bit-exact.
@@ -10429,6 +10485,7 @@ criterion_group!(
     bench_complex64_ops_boundary,
     bench_datetime_unique_boundary,
     bench_unique_rows_lexsort_boundary,
+    bench_unique_rows_factorize_boundary,
     bench_sort_axis_boundary,
     bench_parallel_binary_boundary,
     bench_take_axis_boundary,
