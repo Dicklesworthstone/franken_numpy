@@ -7187,11 +7187,51 @@ v = rng.standard_normal(4_000_000)\n";
         let v = ns.get_item("v").expect("v");
         let fnp_ss = module.getattr("searchsorted").expect("fnp searchsorted");
         let numpy_ss = numpy.getattr("searchsorted").expect("numpy searchsorted");
+
+        // Larger sorted haystack (4M, well past cache) so the sort-merge path is squarely in its
+        // cache-miss win regime, plus a correctness gate: the merge output must be byte-identical to
+        // numpy for both sides. Panics abort the bench, so a remote `cargo bench` doubles as the
+        // conformance check on a glibc-matched worker.
+        let big_setup = "import numpy as np\n\
+rng2 = np.random.default_rng(1)\n\
+a_big = np.sort(rng2.standard_normal(4_000_000))\n\
+v_big = rng2.standard_normal(4_000_000)\n";
+        let ns2 = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(big_setup).unwrap().as_c_str(),
+            Some(&ns2),
+            Some(&ns2),
+        )
+        .expect("searchsorted big setup");
+        let a_big = ns2.get_item("a_big").expect("a_big");
+        let v_big = ns2.get_item("v_big").expect("v_big");
+        {
+            let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+            for side in ["left", "right"] {
+                let kw = PyDict::new(py);
+                kw.set_item("side", side).expect("side");
+                let got = fnp_ss.call((&a_big, &v_big), Some(&kw)).expect("fnp ss");
+                let exp = numpy_ss.call((&a_big, &v_big), Some(&kw)).expect("np ss");
+                let eq: bool = np_array_equal
+                    .call1((&got, &exp))
+                    .expect("array_equal")
+                    .extract()
+                    .expect("bool");
+                assert!(eq, "searchsorted merge correctness mismatch: side={side}");
+            }
+        }
+
         group.bench_function("fnp_searchsorted_f64_4m", |b| {
             b.iter(|| black_box(fnp_ss.call1((&a, &v)).expect("fnp searchsorted")));
         });
         group.bench_function("numpy_searchsorted_f64_4m", |b| {
             b.iter(|| black_box(numpy_ss.call1((&a, &v)).expect("numpy searchsorted")));
+        });
+        group.bench_function("fnp_searchsorted_f64_4m_haystack4m", |b| {
+            b.iter(|| black_box(fnp_ss.call1((&a_big, &v_big)).expect("fnp searchsorted big")));
+        });
+        group.bench_function("numpy_searchsorted_f64_4m_haystack4m", |b| {
+            b.iter(|| black_box(numpy_ss.call1((&a_big, &v_big)).expect("numpy searchsorted big")));
         });
     });
 

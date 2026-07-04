@@ -4,6 +4,34 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.searchsorted(large sorted f64, large f64 queries) sort-merge — 15.6-20.8x
+
+`BlackThrush`. RADICAL algorithmic lever (alien-graveyard "batch queries by sorting" / sort-merge join
+applied to searchsorted). numpy's searchsorted (and fnp's prior parallel per-query binary search) is
+CACHE-MISS-BOUND for a large haystack: each query does ~log2(n) RANDOM probes into a haystack too big
+for cache, so even parallel it saturates memory latency. try_zerocopy_f64_searchsorted_merge replaces
+the random probes with ONE SEQUENTIAL pass: sort the queries once (cache-friendly (value,index) pair
+sort), then a single monotonic pointer walks the sorted haystack — O(m log m + n) with sequential
+haystack access, ~1 haystack touch per query instead of ~log2(n). Scatter results back to input order.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion median, load-immune remote worker):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `searchsorted(1M sorted f64, 4M queries)` | 58.8 ms | 918 ms | **15.6x** |
+| `searchsorted(4M sorted f64, 4M queries)` | 84.2 ms | 1751 ms | **20.8x** |
+
+CORRECTNESS: a bench-embedded assertion (fnp vs numpy array_equal, side left+right, 4M haystack) PASSED
+on hz2, and a pure-numpy prototype of the exact merge was byte-exact over 300 random trials (both sides,
+duplicates, out-of-range, exact matches, ±inf) BEFORE building. GATES (else fall through to the existing
+parallel binary search, so behavior only changes for the proven case): sorter=None, 1-D f64 ndarrays,
+haystack >= 1<<19 AND queries >= 1<<19 (cache-miss regime that amortizes the sort), haystack strictly
+non-decreasing (a parallel scan; also rejects NaN in the haystack — numpy-undefined on unsorted/NaN
+input, left to the binary-search path), and no NaN query (numpy puts NaN at the end; the finite merge
+can't place it). **REUSABLE: any many-queries-into-a-large-sorted-table op (searchsorted/digitize/
+interp/bucketize) that does independent RANDOM binary-search probes is cache-miss-bound — sort the
+queries + monotonic merge (sequential access) is the order-of-magnitude fix. Same pattern would lift
+digitize and the f32 searchsorted twin.** f32/int haystacks + the sorter path still defer (follow-ups).
+
 ## 2026-07-04 - LOSS (dropped): PARALLEL sort-dedup-merge float set-ops — byte-exact but 0.70x at 1M
 
 `BlackThrush`. Built the parallel reformulation I'd surfaced 2026-07-03 (try_zerocopy_float_setop: all
