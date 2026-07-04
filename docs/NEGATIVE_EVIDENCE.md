@@ -4,6 +4,36 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - LOSS (dropped): PARALLEL sort-dedup-merge float set-ops — byte-exact but 0.70x at 1M
+
+`BlackThrush`. Built the parallel reformulation I'd surfaced 2026-07-03 (try_zerocopy_float_setop: all
+4 float set-ops, f32/f64 — zero-copy buffers, NaN/-0.0 pre-scan gate, rayon par_sort_unstable_by(
+total_cmp) + dedup each operand, linear merge per op) and benched it PER-CRATE on hz2 via `rch exec --
+cargo bench` (clean remote worker, load-immune vs the local box).
+
+CORRECTNESS PROVED: a bench-embedded assertion (fnp vs numpy np.array_equal for all 8 op×dtype cases on
+the finite inputs) PASSED on hz2, and a pure-numpy prototype of the exact merge arms was byte-exact over
+800 random trials (f64+f32, 4 ops). The gate correctly defers NaN/-0.0 (numpy's NaN placement + signed-
+zero survivor depend on its own unstable concat-sort). So the kernel is right.
+
+TIMING = LOSS (rch bench, hz2, 1M, `python_setops_boundary`, bencher ns/iter):
+| Probe | fnp | numpy | numpy/fnp | Verdict |
+|---|---:|---:|---:|---|
+| `intersect1d(f64, 1M, ~65k distinct)` | 115.6M | 81.5M | 0.70x | LOSS (fnp ±100M ns = unstable) |
+| `setxor1d(f32, 1M)` | 15.8M | 15.1M | 0.96x | parity |
+
+The parallel path does NOT beat numpy at 1M: two `to_vec` copies (16 MB) + the NaN/-0.0 prescan + par_sort
+thread setup exceed the savings when numpy's serial per-operand sort is only ~40 ms, and the parallel
+sort is unstable under worker contention (±100 M ns). This EXTENDS a6c7122e's "a sort can at best tie" —
+it holds for the PARALLEL case too at practical sizes; the crossover (if any) is only at very large n,
+not worth a high-gated ship that regresses the common 1M case. **DROPPED (code not shipped).**
+
+Meanwhile a native f64 intersect1d fast path landed concurrently on main (036b77a8, different approach) —
+the float set-op family is being addressed there. **Float set-ops parallel-sort lever = CLOSED (measured
+loss), not just surfaced.** Reusable meta: `rch exec -- cargo bench` on a worker is the load-immune way
+to settle a parallelism win/loss the local (loaded) box can't; a bench-embedded fnp-vs-numpy assert makes
+that one remote run double as the conformance gate.
+
 ## 2026-07-04 - SHIP: `intersect1d(float64)` finite parallel set path - 1.67x faster than NumPy
 
 `SilverBridge`. The 2026-07-03 float set-ops crack was still unrealized on `main`.
