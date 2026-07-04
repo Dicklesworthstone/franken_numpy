@@ -7233,6 +7233,43 @@ v_big = rng2.standard_normal(4_000_000)\n";
         group.bench_function("numpy_searchsorted_f64_4m_haystack4m", |b| {
             b.iter(|| black_box(numpy_ss.call1((&a_big, &v_big)).expect("numpy searchsorted big")));
         });
+
+        // f32 twin: 4M sorted f32 haystack + 4M f32 queries. Correctness gate (both sides byte-identical
+        // to numpy) + timing; the merge path engages for these large sizes.
+        let f32_setup = "import numpy as np\n\
+rng3 = np.random.default_rng(2)\n\
+a_f32 = np.sort(rng3.standard_normal(4_000_000).astype(np.float32))\n\
+v_f32 = rng3.standard_normal(4_000_000).astype(np.float32)\n";
+        let ns3 = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(f32_setup).unwrap().as_c_str(),
+            Some(&ns3),
+            Some(&ns3),
+        )
+        .expect("searchsorted f32 setup");
+        let a_f32 = ns3.get_item("a_f32").expect("a_f32");
+        let v_f32 = ns3.get_item("v_f32").expect("v_f32");
+        {
+            let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+            for side in ["left", "right"] {
+                let kw = PyDict::new(py);
+                kw.set_item("side", side).expect("side");
+                let got = fnp_ss.call((&a_f32, &v_f32), Some(&kw)).expect("fnp ss f32");
+                let exp = numpy_ss.call((&a_f32, &v_f32), Some(&kw)).expect("np ss f32");
+                let eq: bool = np_array_equal
+                    .call1((&got, &exp))
+                    .expect("array_equal")
+                    .extract()
+                    .expect("bool");
+                assert!(eq, "searchsorted f32 merge correctness mismatch: side={side}");
+            }
+        }
+        group.bench_function("fnp_searchsorted_f32_4m_haystack4m", |b| {
+            b.iter(|| black_box(fnp_ss.call1((&a_f32, &v_f32)).expect("fnp searchsorted f32")));
+        });
+        group.bench_function("numpy_searchsorted_f32_4m_haystack4m", |b| {
+            b.iter(|| black_box(numpy_ss.call1((&a_f32, &v_f32)).expect("numpy searchsorted f32")));
+        });
     });
 
     group.finish();

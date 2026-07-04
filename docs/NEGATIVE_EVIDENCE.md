@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.searchsorted f32 twin — sort-merge — 13.8x
+
+`BlackThrush`. The f32 twin of the f64 searchsorted sort-merge landed earlier today (7a20d60f). Same
+cache-miss lever: numpy's f32 searchsorted does ~log2(n) RANDOM probes per query into a haystack too big
+for cache; try_zerocopy_f32_searchsorted_merge sorts the queries once ((value,index) pair sort) then a
+single monotonic pointer walks the sorted haystack sequentially. Mechanical transcription of the f64
+kernel (f32 total_cmp, PyBuffer::<f32>); identical gates (sorter=None, 1-D f32, haystack>=1<<19 AND
+queries>=1<<19, non-decreasing/NaN-free haystack, no NaN query).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion median):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `searchsorted(4M sorted f32, 4M queries)` | 87.5 ms | 1210 ms | **13.8x** |
+
+CORRECTNESS: bench-embedded fnp-vs-numpy array_equal assertion (side left+right, 4M f32 haystack) PASSED
+on hz2; a pure-numpy prototype of the merge was byte-exact over 200 f32 trials (both sides) before
+building. (Same run re-confirmed the f64 path: 1M/4M 15.6x, 4M/4M 20.4x.) **searchsorted sort-merge now
+covers f64 + f32; the remaining twin of this vein is np.digitize (searchsorted-equivalent per-element
+probes over a large bins array — same sort-queries+merge fix) and int-haystack searchsorted.**
+
 ## 2026-07-04 - WIN (SHIP): np.searchsorted(large sorted f64, large f64 queries) sort-merge — 15.6-20.8x
 
 `BlackThrush`. RADICAL algorithmic lever (alien-graveyard "batch queries by sorting" / sort-merge join
