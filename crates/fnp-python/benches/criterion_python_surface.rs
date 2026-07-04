@@ -8230,6 +8230,30 @@ q = np.zeros(2_000_000, dtype=dt); q['a'] = rng.integers(0, 100000, 2_000_000); 
         }
         group.bench_function("fnp_searchsorted_struct_2xi8_2m_2m", |bn| bn.iter(|| black_box(fnp_ss.call1((&hay, &q)).unwrap())));
         group.bench_function("numpy_searchsorted_struct_2xi8_2m_2m", |bn| bn.iter(|| black_box(numpy_ss.call1((&hay, &q)).unwrap())));
+
+        let setup_u64 = "import numpy as np\n\
+rng = np.random.default_rng(1)\n\
+dt = [('a','<u8'),('b','<u8')]\n\
+n = 1_000_000\n\
+base = np.arange(n, dtype=np.uint64)\n\
+hay_u = np.zeros(n, dtype=dt)\n\
+hay_u['a'] = base // np.uint64(1000)\n\
+hay_u['b'] = base % np.uint64(1000)\n\
+q_u = np.zeros(n, dtype=dt)\n\
+qa = rng.integers(0, n, n, dtype=np.uint64)\n\
+q_u['a'] = qa // np.uint64(1000)\n\
+q_u['b'] = qa % np.uint64(1000)\n";
+        py.run(std::ffi::CString::new(setup_u64).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("u64 setup");
+        let hay_u = ns.get_item("hay_u").expect("hay_u");
+        let q_u = ns.get_item("q_u").expect("q_u");
+        for side in ["left", "right"] {
+            let kw = PyDict::new(py); kw.set_item("side", side).unwrap();
+            let f = fnp_ss.call((&hay_u, &q_u), Some(&kw)).expect("fnp u64 searchsorted");
+            let n = numpy_ss.call((&hay_u, &q_u), Some(&kw)).expect("numpy u64 searchsorted");
+            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "u64 searchsorted struct side={side} mismatch");
+        }
+        group.bench_function("fnp_searchsorted_struct_2xu8_1m_1m", |bn| bn.iter(|| black_box(fnp_ss.call1((&hay_u, &q_u)).unwrap())));
+        group.bench_function("numpy_searchsorted_struct_2xu8_1m_1m", |bn| bn.iter(|| black_box(numpy_ss.call1((&hay_u, &q_u)).unwrap())));
     });
     group.finish();
 }

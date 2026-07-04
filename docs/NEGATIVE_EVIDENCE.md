@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.searchsorted(sorted structured uint64 records) via uint64-view record binary search — 54.47x
+
+`BlackThrush`. While rebasing, `main` already landed the signed-int64 structured searchsorted fast path, so the
+duplicate signed variant was dropped. New lever: extend the same record-ordering primitive to homogeneous
+unsigned 64-bit structured dtypes. NumPy still uses the slow per-record void comparator for `<u8` structured
+queries; a no-padding all-uint64 record is exactly an nfield `uint64` row in dtype field order, so the native
+path views haystack and query arrays as `uint64` and runs parallel lower/upper-bound row searches. Mixed
+signed/unsigned records, padding, non-64-bit fields, endian swaps, scalars/lists, and sorter still defer.
+
+MEASURED (per-crate `rch exec -- cargo bench` on `ovh-a`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod`,
+release profile, criterion bencher, 1M haystack x 1M query, 2 uint64 fields):
+| Probe | fnp | legacy NumPy original | numpy/fnp |
+|---|---:|---:|---:|
+| `searchsorted(1M struct 2xu8, 1M struct queries)` | 15.55 ms | 846.73 ms | **54.47x** |
+
+CORRECTNESS: benchmark asserts `np.array_equal` for side=`left` and side=`right` before timing. Focused
+conformance passed remotely on `ovh-a`: `cargo test -p fnp-python --test conformance_sort_search
+searchsorted_structured_uint64_records_match_numpy -- --nocapture` (1/1). Compile gate passed locally with the
+same target dir after `rch` repeatedly selected `ovh-b` and hit the known `zerocopy` SIGILL:
+`cargo check -p fnp-python --lib --bench criterion_python_surface`.
+
 ## 2026-07-04 - WIN (SHIP): np.unique(2-D int32, axis=0) via exact int64 row-widening - 9.63x vs legacy NumPy
 
 `cod`. No measured `.scratch` worktree head was absent from `main`; all visible FrankenNumPy `.scratch`

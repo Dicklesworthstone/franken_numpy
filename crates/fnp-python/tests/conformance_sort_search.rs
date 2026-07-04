@@ -552,6 +552,32 @@ print(np.array_equal(result, expected))
 }
 
 #[test]
+fn searchsorted_structured_uint64_records_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+n = 70000
+dt = [('a','<u8'),('b','<u8')]
+base = np.arange(n, dtype=np.uint64)
+h = np.zeros(n, dtype=dt)
+h['a'] = base // np.uint64(100)
+h['b'] = base % np.uint64(100)
+q = h[(np.arange(n, dtype=np.int64) * 37) % n]
+left = np.array_equal(fnp.searchsorted(h, q, side='left'), np.searchsorted(h, q, side='left'))
+right = np.array_equal(fnp.searchsorted(h, q, side='right'), np.searchsorted(h, q, side='right'))
+print(left and right)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "structured uint64 searchsorted should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
 fn searchsorted_left() -> Result<(), String> {
     let script = fnp_script(
         r#"
