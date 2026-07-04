@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.unique(2-D float32, axis=0, return_index/inverse/counts) f32 row factorize — 15.7x
+
+`BlackThrush`. f32 factorize twin of the plain f32 row-unique (566ab34c) and the f32 mirror of the f64 _full.
+`try_native_unique_rows_lexsort_f32_full`: STABLE value-lex sort (f32 partial_cmp then original-index tiebreak),
+DEFER NaN/-0.0 (f32 -0.0 bits = 0x8000_0000), group_starts -> [unique, index?, inverse?, counts?] tuple (extras
+intp) exactly as the f64 _full. Wired into unique(axis=0) after the f64 _full. BYTE-EXACT for finite f32 (all
+four outputs verified). 2-D f32 C-contig, rows>=1<<16.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 500k x 4 finite f32, all 3 flags):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(500kx4 finite f32, axis=0, index+inverse+counts)` | 29.4 ms | 461.3 ms | **15.7x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on each of the 4 tuple elements — PASSED. Confirms the numeric
+value-lex vein still delivers (contrast the two string reverts above — numpy's numeric comparator is the slow
+one). The 2-D axis=0 unique vein is now COMPLETE for numeric dtypes × plain/factorize: int64/uint64
+(10.5x/15.2x) + f64 (16.2x/21.4x) + f32 (22.4x/15.7x) + c128 (17.6x/17.9x), plus axis=1 columns.
+
 ## 2026-07-04 - NO-SHIP (REVERTED, ~PARITY): np.unique(2-D 'U'/'S', axis=0) string ROWS memcmp sort — 1.06x
 
 `BlackThrush`. Hypothesis: string rows axis=0 unique is a big single sort (like the 1-D string unique 5x win),
