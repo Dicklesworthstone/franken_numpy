@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.unique(2-D float16, axis=0) + factorize via exact f32 widening — 17.8x
+
+`BlackThrush`. f16 rows unique was uncovered (the axis=0 dispatch handles int/f64/f32/c128/datetime rows, not
+f16). numpy has no f16 SIMD so its f16 row-unique (void comparator + per-element convert) is ~451ms @500kx4.
+`try_native_unique_rows_f16`: widen the (n, ncols) f16 array exact -> f32, route to the f32 row-unique (plain
+or _full — which DEFERS NaN/-0.0), narrow the (nu, ncols) f32 unique rows back to f16 (index/inverse/counts are
+row-level, unchanged). Wired into unique(axis=0) after the datetime rows path (plain + _full) AND the axis=1
+transpose wrapper. BYTE-EXACT for finite (plain + factorize verified vs numpy).
+
+MEASURED (per-crate `rch exec -- cargo bench` on ovh-a, criterion bencher median, 500k x 4 float16):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(500kx4 f16, axis=0)` | 25.3 ms | 451.2 ms | **17.8x** |
+
+CORRECTNESS: bench asserts `np.array_equal` for BOTH plain and the 4-tuple factorize — PASSED. Note: unlike f16
+SORT (LOSS — no kernel win), f16 row-unique HAS a big fnp kernel win (the parallel value-lex f32 row sort+dedup,
+16.2x) that dwarfs the astype cost. Completes the axis=0 unique vein for f16. f16 family now: unique/isin/
+searchsorted/setops (flat) + rows (2-D).
+
 ## 2026-07-04 - WIN (SHIP): np.isin(MIXED int+float structured) record byte-hash — 33.6x
 
 `BlackThrush`. Extends the structured isin record-hash lever (7a1076e6, was all-integer-field only) to records
