@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.unique(1-D structured all-int64, return_index/inverse/counts) record factorize — 21.4x
+
+`BlackThrush`. Record factorize/group-by twin of the plain struct unique (13986a4d). Same int64-view trick:
+the record-level index/inverse/counts are IDENTICAL for the (n,) structured array and its (n, nfields) int64
+view (one record == one row), so `try_native_unique_struct_int64_full` routes the view through the int row
+_full (3762131b) and only re-views tuple[0] (the unique records) flat and back to the struct dtype. Hooked in
+unique()'s kwargs branch under `axis missing + return_*`. BYTE-EXACT (all four outputs verified vs numpy incl
+negative fields). All-int64-field, contiguous-offset, 1-D C-contig.
+
+MEASURED (per-crate `rch exec -- cargo bench` on ovh-a, criterion bencher median, 1M x 3 int64 fields, all 3 flags):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(1M struct 3xi8, index+inverse+counts)` | 39.8 ms | 851.2 ms | **21.4x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on each of the 4 tuple elements — PASSED. Structured-array vein now
+= plain 26.6x + factorize 21.4x, both via the int64-view routing. Remaining structured leads need NEW row
+kernels (searchsorted/isin over records) — deferred.
+
 ## 2026-07-04 - WIN (SHIP): np.unique(1-D structured all-int64) via int64-view row-unique — 26.6x
 
 `BlackThrush`. Fresh op family (structured/record arrays). numpy sorts records by field VALUE-lexicographically
