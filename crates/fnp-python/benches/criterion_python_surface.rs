@@ -7921,6 +7921,42 @@ test = np.concatenate([a[:100_000], trand])\n";
     group.finish();
 }
 
+fn bench_datetime_unique_boundary(c: &mut Criterion) {
+    // np.unique on datetime64/timedelta64. numpy sorts via a generic comparison introsort (~665ms @2M);
+    // fnp routes to an int64 sort+dedup of the ticks viewed back as the same M8/m8[unit] — bit-exact.
+    let mut group = c.benchmark_group("python_datetime_unique_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+dt = rng.integers(0, 100000, 2_000_000).astype('datetime64[s]')\n\
+td = rng.integers(0, 100000, 2_000_000).astype('timedelta64[s]')\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let dt = ns.get_item("dt").expect("dt");
+        let td = ns.get_item("td").expect("td");
+        let fnp_u = module.getattr("unique").expect("fnp unique");
+        let numpy_u = numpy.getattr("unique").expect("numpy unique");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        for (arr, label) in [(&dt, "datetime64"), (&td, "timedelta64")] {
+            let f = fnp_u.call1((arr,)).expect("fnp unique");
+            let n = numpy_u.call1((arr,)).expect("numpy unique");
+            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "{label} unique mismatch");
+        }
+        group.bench_function("fnp_unique_datetime64_2m", |bn| bn.iter(|| black_box(fnp_u.call1((&dt,)).unwrap())));
+        group.bench_function("numpy_unique_datetime64_2m", |bn| bn.iter(|| black_box(numpy_u.call1((&dt,)).unwrap())));
+    });
+    group.finish();
+}
+
 fn bench_tile_boundary(c: &mut Criterion) {
     // np.tile of a 1-D array (scalar reps) -> ~4M output. numpy.tile is a single-threaded
     // python helper (reshape + C repeat); fnp does a parallel block memcpy. Bit-exact.
@@ -10289,6 +10325,7 @@ criterion_group!(
     bench_complex_searchsorted_boundary,
     bench_complex_isin_boundary,
     bench_complex64_ops_boundary,
+    bench_datetime_unique_boundary,
     bench_sort_axis_boundary,
     bench_parallel_binary_boundary,
     bench_take_axis_boundary,
