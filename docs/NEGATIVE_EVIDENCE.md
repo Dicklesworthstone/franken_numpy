@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): complex64 searchsorted + isin (f32 twins) — 20.9x / 27.7x (complex vein COMPLETE)
+
+`BlackThrush`. f32 twins of the c128 searchsorted (9.46x) and c128 isin (35.2x): itemsize 8, float32
+components, -0.0 == 0x8000_0000, else identical (lex (re,im) binary search / hashed 8-byte-pattern set,
+NaN/-0.0 defer). `try_zerocopy_c64_searchsorted` + `try_zerocopy_c64_isin`, wired after the c128 paths in the
+searchsorted (a_kind=="c") and isin dispatches.
+
+MEASURED (per-crate `rch exec -- cargo bench` on vmi1227854, criterion bencher median, 2M complex64):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `searchsorted(2M c64 sorted, 2M c64 q)` | 64.4 ms | 1346.6 ms | **20.9x** |
+| `isin(2M c64, 200k c64 test)` | 18.7 ms | 517.0 ms | **27.7x** |
+
+CORRECTNESS: bench embeds `np.array_equal` for searchsorted (left+right) and isin (default+invert) — PASSED.
+Complex vein now COMPLETE across c128+c64: unique / searchsorted / isin (sort was already done). The
+fixed-width-record lever family (string 'U'/'S' + complex c128/c64) spans sort/unique/searchsorted/isin/set-ops.
+Remaining niche: unique(str,return_inverse) factorize; lexsort(float keys) ~628ms (byte-exact-fiddly: stable
+tie order + NaN).
+
 ## 2026-07-04 - WIN (SHIP): np.isin(complex128 element, complex128 test) hashed 16-byte-pattern set — 35.2x
 
 `BlackThrush`. Mirror of the string isin (hashed record-byte set) for complex128. For FINITE values with no
