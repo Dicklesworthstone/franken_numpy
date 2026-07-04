@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - SURFACE: `deadlock-audit-1nzxt` convolve/correlate k=256 target is stale — current main is ~30x faster than NumPy
+
+`BlackThrush`. Rechecked the open bead `deadlock-audit-1nzxt` ("convolve/correlate k=128-256
+kernel-quality loss 1.3-1.7x") after the already-landed June 28 integer direct kernel and July 1
+float64 parallel-direct gather work. The target is now stale: current `main` beats legacy NumPy
+decisively in the exact k=256 band. No convolve implementation change was made in this pass; added a
+focused Criterion group so the stale class stays measurable.
+
+Per-crate RCH bench command: `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-blackthrush rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface -- python_f64_convolve_boundary --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher --noplot`.
+Worker: `hz2`.
+
+| Probe | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `convolve(f64 1M, k=256, same)` | 6,535,865 | 198,544,611 | 0.0329x (30.4x faster) | stale bead, current win |
+| `correlate(f64 1M, k=256, valid)` | 6,654,724 | 200,298,598 | 0.0332x (30.1x faster) | stale bead, current win |
+
+Validation: `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-blackthrush rch exec -- cargo check -p fnp-python --bench criterion_python_surface` passed on `hz2`; `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-blackthrush rch exec -- cargo test -p fnp-python --test conformance_convolution` passed on `ovh-a` (`2 passed`). `rustfmt --edition 2024 --check crates/fnp-python/benches/criterion_python_surface.rs` still reports broad pre-existing bench-file drift outside this hunk; `git diff --check` on the touched bench file is clean. Agent Mail registration/reservation attempts failed because the mailbox DB corruption circuit breaker is open; existing pane identity is `BlackThrush`.
+
+Action: close `deadlock-audit-1nzxt` as superseded/stale rather than reopening the old FFT/direct-loop investigation. Retry only if a future same-worker `python_f64_convolve_boundary` row regresses above parity.
+
 ## 2026-07-03 - SURFACE: FLOAT set-ops (intersect1d/union1d/setdiff1d/setxor1d) — a real crack, but parallelism-gated + fiddly; can't validate on loaded box
 
 `BlackThrush`. Profiled the set-op family as the value-returning sibling of the 530x float-isin hash
