@@ -4,7 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
-## 2026-07-04 - WIN (SHIP): np.unique(2-D float64, axis=0) parallel value-lex row sort+dedup — 16.2x
+## 2026-07-04 - WIN (SHIP): np.unique(2-D float64, axis=0, return_index/inverse/counts) f64 row factorize — 21.4x
+
+`BlackThrush`. f64 return_* twin (factorize/group-by) of the plain f64 row-unique (eb5db24b) and the mirror of
+the int _full. `try_native_unique_rows_lexsort_f64_full`: STABLE value-lex sort (f64 partial_cmp then
+original-index tiebreak -> group-first row = min index = numpy first-occurrence), DEFER NaN/-0.0, group_starts,
+build [unique, index?, inverse?, counts?] tuple (extras intp) exactly as the int _full. Wired into unique(axis=0)
+after the int _full. BYTE-EXACT for finite f64 (all four outputs verified vs numpy). 2-D f64 C-contig, rows>=1<<16.
+
+MEASURED (per-crate `rch exec -- cargo bench` on vmi1227854, criterion bencher median, 500k x 4 finite f64,
+all three flags):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(500kx4 finite f64, axis=0, index+inverse+counts)` | 42.0 ms | 898.1 ms | **21.4x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on each of the 4 tuple elements — PASSED. The value-lex 2-D-axis=0
+unique vein is now COMPLETE for the two headline dtypes × plain/factorize: int64/uint64 (10.5x / 15.2x) + f64
+(16.2x / 21.4x). NEXT (mechanical, lower value): narrow-int (i8/i16/i32) & f32 rows; axis=1 (strided columns).
 
 `BlackThrush`. Float mirror of the int row-lexsort (f2e75261). numpy sorts f64 rows VALUE-lexicographically
 (col0 primary) with its slow void comparator (~490-771ms @500kx4). `try_native_unique_rows_lexsort_f64`:
