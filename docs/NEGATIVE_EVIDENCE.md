@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.unique(2-D float32, axis=0) parallel value-lex row sort+dedup — 22.4x
+
+`BlackThrush`. f32 mirror of the f64 row-unique (eb5db24b); f32 is a common ML dtype and numpy's void
+comparator is even slower relative to the smaller data (~390-729ms @500kx4). `try_native_unique_rows_lexsort_f32`:
+identical to the f64 helper but f32 buffers + `f32::partial_cmp` + DEFER on NaN / -0.0 (f32 -0.0 bits =
+0x8000_0000; numpy collapses +0.0/-0.0 rows). Finite no-(-0.0): value-lex == numpy (verified). Wired into
+unique(axis=0) after the f64 plain path AND into the axis=1 transpose wrapper (so f32 gets axis=1 for free).
+2-D f32 C-contig, no return_*, rows>=1<<16.
+
+MEASURED (per-crate `rch exec -- cargo bench` on ovh-a, criterion bencher median, 500k x 4 finite f32 ~250k distinct):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(500kx4 finite f32, axis=0)` | 17.4 ms | 389.7 ms | **22.4x** |
+
+CORRECTNESS: bench asserts `np.array_equal` — PASSED. Highest multiple in the vein (f32's half-footprint sorts
++ gathers faster than f64 while numpy's per-record comparator gets no simd benefit). Value-lex axis=0 unique
+now: i64/u64 + f64 + f32 + c128. Remaining: f32 factorize (mirror f64 _full); int-only structured 1-D.
+
 ## 2026-07-04 - WIN (SHIP): np.unique(2-D wide array, axis=1) unique COLUMNS via transpose→row-unique — 7.6x
 
 `BlackThrush`. axis=1 (unique columns) reduces to the row path. numpy sorts columns value-lex via its slow

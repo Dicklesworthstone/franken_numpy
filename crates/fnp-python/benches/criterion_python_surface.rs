@@ -8157,6 +8157,45 @@ a = np.concatenate([base, base])\n";
     group.finish();
 }
 
+fn bench_unique_rows_f32_boundary(c: &mut Criterion) {
+    // np.unique(2-D float32, axis=0). numpy value-lex void comparator (~729ms @500kx4); fnp f32 row-unique.
+    let mut group = c.benchmark_group("python_unique_rows_f32_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+base = rng.integers(-100, 100, (250_000, 4)).astype(np.float32)\n\
+a = np.concatenate([base, base])\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let a = ns.get_item("a").expect("a");
+        let fnp_u = module.getattr("unique").expect("fnp unique");
+        let numpy_u = numpy.getattr("unique").expect("numpy unique");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+        let f = fnp_u.call((&a,), Some(&kw)).expect("fnp unique");
+        let n = numpy_u.call((&a,), Some(&kw)).expect("numpy unique");
+        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "unique rows f32 mismatch");
+        group.bench_function("fnp_unique_rows_f32_500kx4", |bn| {
+            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            bn.iter(|| black_box(fnp_u.call((&a,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("numpy_unique_rows_f32_500kx4", |bn| {
+            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            bn.iter(|| black_box(numpy_u.call((&a,), Some(&kw)).unwrap()));
+        });
+    });
+    group.finish();
+}
+
 fn bench_unique_rows_f64_factorize_boundary(c: &mut Criterion) {
     // np.unique(2-D f64, axis=0, return_index+inverse+counts) — f64 row factorize. numpy ~1393ms @500kx4.
     let mut group = c.benchmark_group("python_unique_rows_f64_factorize_boundary");
@@ -10715,6 +10754,7 @@ criterion_group!(
     bench_unique_rows_lexsort_boundary,
     bench_unique_rows_factorize_boundary,
     bench_unique_rows_f64_boundary,
+    bench_unique_rows_f32_boundary,
     bench_unique_rows_f64_factorize_boundary,
     bench_unique_rows_c128_boundary,
     bench_unique_rows_c128_factorize_boundary,
