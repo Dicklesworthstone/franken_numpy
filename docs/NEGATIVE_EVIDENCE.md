@@ -26,6 +26,34 @@ confirm the numpy baseline on a clean worker before estimating a datetime/int ga
 (numpy int64-backed ops don't have the pathological slowness that its string/complex/void comparators do).**
 KEPT (1.50x > ~0-gain, byte-exact, safe/mode-gated) but it is the weakest win of the run; NOT a big lever.
 
+## 2026-07-04 - WIN (SHIP): np.unique(fixed-width bytes/string, return_index/inverse/counts) record-sort factorize — 2.07x
+
+`BlackThrush`. No unlanded measured `.scratch` / `.worktrees` bench-worktree win remained off `main`: the visible
+dirty bench worktrees were stale or already represented on `main` (hub-einsum delegate, digitize rebench,
+compact density no-ship). Dug the top current ledger niche, `unique(str, return_*)` factorization. Lever:
+carry original indices through the existing byte-record sort as `(record, original_index)`, gather sorted
+records contiguously, then derive group starts, first occurrence, inverse group id, and counts from equal-record
+runs. Equal records tie-break by original index, so `return_index` is NumPy's first occurrence; `return_inverse`
+scatters group ids back to original order. 'S' bytes need no ordering pre-scan; 'U' keeps the existing Latin-1
+gate.
+
+MEASURED (per-crate RCH `cargo bench` on `vmi1149989`, release profile, 2M `S8`, all return flags):
+| Probe | fnp | legacy NumPy original | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(2M 'S8', return_index=True, return_inverse=True, return_counts=True)` | 424.7 ms | 878.1 ms | **2.07x** |
+
+Command note: the literal requested `cargo bench --release` form is rejected by this Cargo (`unexpected
+argument '--release'`), so the equivalent repo-working release-profile form was used:
+`AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod rch --no-self-healing exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface -- 'python_string_unique_full_boundary/(fnp_unique_S8_full_2m|numpy_unique_S8_full_2m)' --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher --noplot`.
+Rows emitted from a detached scratch bench worktree; the RCH client was killed after both target rows were
+captured when it crossed the 10 minute cap while wrapping up.
+
+Correctness: bench embeds tuple element `np.array_equal` checks for all four outputs. Focused conformance:
+`unique_string_return_flags_large_match_numpy` covers both `U4` and `S8` large arrays, dtype/shape/value parity
+for unique/index/inverse/counts. Alien lever note: this follows the graveyard "data plane + golden invariant"
+contract, using deterministic record ordering and a conservative NumPy fallback outside the proven byte-order
+domain.
+
 ## 2026-07-04 - WIN (SHIP): complex64 searchsorted + isin (f32 twins) — 20.9x / 27.7x (complex vein COMPLETE)
 
 `BlackThrush`. f32 twins of the c128 searchsorted (9.46x) and c128 isin (35.2x): itemsize 8, float32

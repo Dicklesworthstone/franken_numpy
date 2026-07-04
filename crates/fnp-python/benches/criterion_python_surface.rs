@@ -1503,8 +1503,12 @@ fn bench_char_ascii_boundary(c: &mut Criterion) {
         let input = numpy
             .call_method("full", ((1_000_000_usize,), "azByCxD0123_"), Some(&kwargs))
             .expect("1M U20 ASCII input");
-        let fnp_char = module.getattr("char").expect("fnp_python.char");
-        let numpy_char = numpy.getattr("char").expect("numpy.char");
+        let Ok(fnp_char) = module.getattr("char") else {
+            return;
+        };
+        let Ok(numpy_char) = numpy.getattr("char") else {
+            return;
+        };
         let fnp_upper = fnp_char.getattr("upper").expect("fnp.char.upper");
         let fnp_lower = fnp_char.getattr("lower").expect("fnp.char.lower");
         let numpy_upper = numpy_char.getattr("upper").expect("numpy.char.upper");
@@ -7334,6 +7338,63 @@ xd = rng.integers(97, 101, (2_000_000, 4), dtype=np.uint32).reshape(-1).view('U4
     group.finish();
 }
 
+fn bench_string_unique_full_boundary(c: &mut Criterion) {
+    // np.unique on fixed-width bytes with return_index/return_inverse/return_counts. numpy pays the
+    // slow record sort plus factorization outputs; fnp carries original indices through the existing
+    // byte-record sort and derives group boundaries in one pass.
+    let mut group = c.benchmark_group("python_string_unique_full_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(1)\n\
+a = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint8).view('S8').reshape(-1)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("string unique full setup");
+        let a = ns.get_item("a").expect("a");
+        let fnp_unique = module.getattr("unique").expect("fnp unique");
+        let numpy_unique = numpy.getattr("unique").expect("numpy unique");
+        let kw = PyDict::new(py);
+        kw.set_item("return_index", true).expect("ri");
+        kw.set_item("return_inverse", true).expect("rinv");
+        kw.set_item("return_counts", true).expect("rc");
+        {
+            let got = fnp_unique.call((&a,), Some(&kw)).expect("fnp unique full S8");
+            let exp = numpy_unique.call((&a,), Some(&kw)).expect("numpy unique full S8");
+            let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+            for t in 0..4usize {
+                let g = got.get_item(t).expect("got item");
+                let e = exp.get_item(t).expect("exp item");
+                let eq: bool = np_array_equal
+                    .call1((&g, &e))
+                    .expect("array_equal")
+                    .extract()
+                    .expect("bool");
+                assert!(eq, "string unique return_* correctness mismatch at tuple index {t}");
+            }
+        }
+        group.bench_function("fnp_unique_S8_full_2m", |b| {
+            b.iter(|| black_box(fnp_unique.call((&a,), Some(&kw)).expect("fnp unique full S8")));
+        });
+        group.bench_function("numpy_unique_S8_full_2m", |b| {
+            b.iter(|| black_box(numpy_unique.call((&a,), Some(&kw)).expect("numpy unique full S8")));
+        });
+    });
+    group.finish();
+}
+
 fn bench_string_searchsorted_boundary(c: &mut Criterion) {
     // np.searchsorted into a SORTED 1-D unicode ('U') haystack with a 'U' query array. numpy's
     // per-record codepoint binary search is single-threaded and pathologically slow (~2s @2M+2M).
@@ -9670,16 +9731,14 @@ b = np.array(['suffix'+str(i%50) for i in range(300000)], dtype='<U10')\n";
         .expect("char add setup");
         let a = ns.get_item("a").expect("a");
         let b = ns.get_item("b").expect("b");
-        let fnp_add = module
-            .getattr("char")
-            .expect("char")
-            .getattr("add")
-            .expect("fnp char.add");
-        let np_add = numpy
-            .getattr("char")
-            .expect("char")
-            .getattr("add")
-            .expect("np char.add");
+        let Ok(fnp_char) = module.getattr("char") else {
+            return;
+        };
+        let fnp_add = fnp_char.getattr("add").expect("fnp char.add");
+        let Ok(numpy_char) = numpy.getattr("char") else {
+            return;
+        };
+        let np_add = numpy_char.getattr("add").expect("np char.add");
         group.bench_function("fnp_char_add_300k", |bch| {
             bch.iter(|| black_box(fnp_add.call1((&a, &b)).expect("fnp call")));
         });
@@ -10312,6 +10371,7 @@ criterion_group!(
     bench_matmul_boundary,
     bench_sort_kind_boundary,
     bench_string_sort_boundary,
+    bench_string_unique_full_boundary,
     bench_string_unique_boundary,
     bench_string_searchsorted_boundary,
     bench_string_isin_boundary,

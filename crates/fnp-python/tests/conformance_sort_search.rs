@@ -400,6 +400,47 @@ print(ok)
     Ok(())
 }
 
+#[test]
+fn unique_string_return_flags_large_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(725)
+n = (1 << 17) + 333
+u = rng.integers(97, 103, (n, 4), dtype=np.uint32).reshape(-1).view("U4")
+s = rng.integers(97, 103, (n, 8), dtype=np.uint8).view("S8").reshape(-1)
+
+ok = True
+for label, arr in [("U4", u), ("S8", s)]:
+    got = fnp.unique(arr, return_index=True, return_inverse=True, return_counts=True)
+    exp = np.unique(arr, return_index=True, return_inverse=True, return_counts=True)
+    if not isinstance(got, tuple) or len(got) != 4:
+        print(("surface", label, type(got).__name__, len(got) if isinstance(got, tuple) else None))
+        ok = False
+        continue
+    for i, (g, e) in enumerate(zip(got, exp)):
+        if np.asarray(g).dtype != np.asarray(e).dtype:
+            print(("dtype", label, i, str(np.asarray(g).dtype), str(np.asarray(e).dtype)))
+            ok = False
+        if np.asarray(g).shape != np.asarray(e).shape:
+            print(("shape", label, i, np.asarray(g).shape, np.asarray(e).shape))
+            ok = False
+        if not np.array_equal(g, e):
+            mismatch = np.flatnonzero(np.asarray(g).ravel() != np.asarray(e).ravel())[:10].tolist()
+            print(("values", label, i, mismatch))
+            ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large string unique return flags should match numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // searchsorted
 // ─────────────────────────────────────────────────────────────────────────────
