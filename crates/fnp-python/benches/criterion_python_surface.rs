@@ -8376,6 +8376,57 @@ a = np.zeros(1_000_000, dtype=dt); a['id'] = rng.integers(0, 10000, 1_000_000); 
     group.finish();
 }
 
+fn bench_argsort_string_stable_boundary(c: &mut Criterion) {
+    // np.argsort(1-D 'U'/'S', kind='stable'). numpy stable-sorts strings via its per-record codepoint
+    // comparator (~1.3s @2M U6); fnp memcmp stable index-sort returns the permutation directly — bit-exact.
+    let mut group = c.benchmark_group("python_argsort_string_stable_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+u = rng.integers(97, 123, (2_000_000, 6), dtype=np.uint32).reshape(-1).view('U6')\n\
+s = rng.integers(97, 123, (2_000_000, 6), dtype=np.uint8).reshape(-1).view('S6')\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let u = ns.get_item("u").expect("u");
+        let s = ns.get_item("s").expect("s");
+        let fnp_as = module.getattr("argsort").expect("fnp argsort");
+        let numpy_as = numpy.getattr("argsort").expect("numpy argsort");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        for (arr, label) in [(&u, "U6"), (&s, "S6")] {
+            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let f = fnp_as.call((arr,), Some(&kw)).expect("fnp argsort");
+            let n = numpy_as.call((arr,), Some(&kw)).expect("numpy argsort");
+            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "argsort {label} stable mismatch");
+        }
+        group.bench_function("fnp_argsort_U6_stable_2m", |bn| {
+            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            bn.iter(|| black_box(fnp_as.call((&u,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("numpy_argsort_U6_stable_2m", |bn| {
+            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            bn.iter(|| black_box(numpy_as.call((&u,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("fnp_argsort_S6_stable_2m", |bn| {
+            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            bn.iter(|| black_box(fnp_as.call((&s,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("numpy_argsort_S6_stable_2m", |bn| {
+            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            bn.iter(|| black_box(numpy_as.call((&s,), Some(&kw)).unwrap()));
+        });
+    });
+    group.finish();
+}
+
 fn bench_argsort_struct_stable_boundary(c: &mut Criterion) {
     // np.argsort(1-D structured, kind='stable'). numpy stable-sorts records by field value-lex via its void
     // comparator (~3.4s @2M i8+f8); fnp byte-transforms records + stable index sort — bit-exact.
@@ -11888,6 +11939,7 @@ criterion_group!(
     bench_lexsort_float_boundary,
     bench_sort_struct_mixed_boundary,
     bench_argsort_struct_stable_boundary,
+    bench_argsort_string_stable_boundary,
     bench_unique_arrayapi_boundary,
     bench_isin_struct_boundary,
     bench_isin_struct_float_boundary,

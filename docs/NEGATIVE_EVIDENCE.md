@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.argsort(1-D 'U'/'S' Latin-1, kind='stable'/'mergesort') memcmp — 7.15x / 9.46x
+
+`BlackThrush`. The `kind='stable'` argsort lever (db543e15, structured) generalizes to strings — an open lead in
+the string-memcmp vein. numpy stable-sorts 'U'/'S' records with its slow per-record codepoint comparator (~345ms-
+1.3s @2M U6, worker-variable). `try_native_string_argsort_stable`: STABLE sort the record indices by (memcmp of
+the itemsize-byte record, original index) == numpy's stable argsort permutation, return the permutation directly
+(NO gather — cheaper than sort, which the string vein flagged). Only kind='stable'/'mergesort' is byte-exact (the
+default quicksort tie order is unmatchable). 'U' defers on any codepoint >= 0x100 (byte order then diverges from
+codepoint order); 'S' bytes are always in numpy order. Wired into argsort()'s flat block after the struct path.
+BYTE-EXACT (both 'U' and 'S' verified). 1-D C-contig, itemsize<=4096 ('U' %4==0), n>=1<<18.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 2M strings, kind=stable):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `argsort(2M U6, stable)` | 60.5 ms | 432.7 ms | **7.15x** |
+| `argsort(2M S6, stable)` | 36.4 ms | 344.5 ms | **9.46x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on both — PASSED. 'S' is faster (6-byte records vs UCS4's 24 -> less
+memcmp + cache traffic). The stable-argsort-of-records pattern now spans structured (byte-transform) AND strings
+(memcmp), both returning the permutation directly with (record, orig-index) tie-break == numpy stable.
+
 ## 2026-07-04 - WIN (SHIP): np.argsort(1-D structured, kind='stable'/'mergesort') byte-transform — 20.9x
 
 `BlackThrush`. numpy stable-sorts structured records by field value-lex via its slow void comparator (~1.5-3.4s
