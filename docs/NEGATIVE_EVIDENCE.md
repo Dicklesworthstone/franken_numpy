@@ -4,6 +4,37 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.unique(1-D fixed-width unicode 'U', Latin-1) parallel memcmp sort + contiguous dedup — >=1.74x floor (see caveat)
+
+`BlackThrush`. Extends the string-sort vein (1fb2bc11) to `np.unique('U')` — the biggest string gap. Same
+Latin-1 byte-exactness lever (codepoints < 0x100 -> UCS4 little-endian memcmp == numpy codepoint order).
+`try_native_string_unique_flat` (wired into unique()'s single-arg no-kwargs path after f64_unique_flat):
+pre-scan+defer any codepoint >= 0x100, memcmp-sort record indices, GATHER the sorted records into a
+CONTIGUOUS temp buffer, dedup adjacent-equal there, gather the distinct records to a fresh same-dtype output.
+Bit-exact (bench-embedded `np.array_equal` assert over a mostly-unique U8 case + a heavy-dedup U4 case, PASSED
+on hz1 AND a second worker).
+
+CONTIGUOUS-DEDUP LESSON (measured): the first cut deduped THROUGH `perm` (compared rec(perm[k]) vs
+rec(perm[k-1]) — two RANDOM 32-byte gathers per compare = the sort-to-sequentialize anti-pattern) and ran
+221 ms @2M U8. Gathering the sorted records into a contiguous buffer ONCE and deduping there (adjacent memcmps
+cache-local) dropped fnp to 113 ms — a 2x fnp speedup for the SAME output. RULE: after an index-sort, if you
+must scan adjacent sorted elements (dedup/diff/group), materialize them contiguously first — never re-probe
+through the permutation.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2-fleet, criterion bencher median, 2M):
+| Probe | fnp | numpy | numpy/fnp | note |
+|---|---:|---:|---:|---|
+| `unique(2M 'U8', mostly-unique)` | 113 ms (improved) / 221 ms (1st cut) | 385 ms (hz1) .. 2251 ms (other) | **>=1.74x, ~3.4x typical** | numpy 6x worker-variable |
+| `unique(2M 'U4', heavy-dedup 256 distinct)` | 81 ms / 104 ms | 217 ms (hz1) .. 76 ms (other) | **>=2.07x, ~2.7x typical** | numpy worker-variable |
+
+CAVEAT (honest): numpy's single-threaded string-unique time is HIGHLY worker-variable (U8 385ms on hz1 vs
+2251ms on another fleet node, each ±3% so per-worker-stable — a slow-single-core / load effect, NOT my data).
+The RELIABLE same-worker floor is run-1 hz1 with the FIRST code (U8 1.74x, U4 2.07x); the shipped
+contiguous-dedup code is strictly faster on fnp (U8 221->113ms) so real ratios are higher (~3.4x / ~2.7x vs the
+hz1 numpy baseline). SHIPPED as a conservative >=1.74x win — byte-exact, monotonic improvement over delegating.
+RETRY-PREDICATE: re-measure fnp+numpy on ONE clean worker for a firm ratio. NEXT: record-packing key (U1-U4 ->
+u128 big-endian, sort keys directly, no 32-byte gather) for a bigger multiple; argsort(str); searchsorted(str).
+
 ## 2026-07-04 - WIN (SHIP): np.sort(1-D fixed-width unicode 'U', Latin-1) parallel memcmp index-sort — 5.35x (U8) / 5.88x (U4)
 
 `BlackThrush`. New vein (NOT the sibling int/composite sort work): STRING sort. numpy sorts a 'U' array with a

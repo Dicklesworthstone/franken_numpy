@@ -7275,6 +7275,65 @@ x4 = rng.integers(97, 123, (2_000_000, 4), dtype=np.uint32).reshape(-1).view('U4
     group.finish();
 }
 
+fn bench_string_unique_boundary(c: &mut Criterion) {
+    // np.unique on a 1-D fixed-width unicode ('U') array. numpy sorts with the slow per-record
+    // codepoint comparator then dedups. For Latin-1 strings fnp memcmp-sorts record indices,
+    // dedups adjacent-equal, and gathers the distinct records — bit-exact. Two cases: mostly-unique
+    // (U8, big output) and heavy-dedup (U4 over a 4-letter alphabet).
+    let mut group = c.benchmark_group("python_string_unique_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+x8 = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n\
+xd = rng.integers(97, 101, (2_000_000, 4), dtype=np.uint32).reshape(-1).view('U4')\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("string unique setup");
+        let x8 = ns.get_item("x8").expect("x8");
+        let xd = ns.get_item("xd").expect("xd");
+        let fnp_unique = module.getattr("unique").expect("fnp unique");
+        let numpy_unique = numpy.getattr("unique").expect("numpy unique");
+        let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+        // Correctness gate: fnp.unique == numpy.unique for both cases; panics on mismatch.
+        for (arr, label) in [(&x8, "U8-mostly-unique"), (&xd, "U4-heavy-dedup")] {
+            let f = fnp_unique.call1((arr,)).expect("fnp unique");
+            let n = numpy_unique.call1((arr,)).expect("numpy unique");
+            let eq: bool = np_array_equal
+                .call1((&f, &n))
+                .expect("array_equal")
+                .extract()
+                .expect("bool");
+            assert!(eq, "string unique correctness mismatch: case={label}");
+        }
+        group.bench_function("fnp_unique_U8_2m", |b| {
+            b.iter(|| black_box(fnp_unique.call1((&x8,)).expect("fnp unique U8")));
+        });
+        group.bench_function("numpy_unique_U8_2m", |b| {
+            b.iter(|| black_box(numpy_unique.call1((&x8,)).expect("numpy unique U8")));
+        });
+        group.bench_function("fnp_unique_U4_dedup_2m", |b| {
+            b.iter(|| black_box(fnp_unique.call1((&xd,)).expect("fnp unique U4")));
+        });
+        group.bench_function("numpy_unique_U4_dedup_2m", |b| {
+            b.iter(|| black_box(numpy_unique.call1((&xd,)).expect("numpy unique U4")));
+        });
+    });
+    group.finish();
+}
+
 fn bench_tile_boundary(c: &mut Criterion) {
     // np.tile of a 1-D array (scalar reps) -> ~4M output. numpy.tile is a single-threaded
     // python helper (reshape + C repeat); fnp does a parallel block memcpy. Bit-exact.
@@ -9630,6 +9689,7 @@ criterion_group!(
     bench_matmul_boundary,
     bench_sort_kind_boundary,
     bench_string_sort_boundary,
+    bench_string_unique_boundary,
     bench_sort_axis_boundary,
     bench_parallel_binary_boundary,
     bench_take_axis_boundary,
