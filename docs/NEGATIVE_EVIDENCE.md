@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.searchsorted(sorted 'U' haystack, 'U' queries, Latin-1) parallel memcmp binary search — 12.42x
+
+`BlackThrush`. Third op in the string vein (after sort 1fb2bc11 / unique 231756b9), and the BIGGEST string gap:
+numpy's per-record codepoint binary search into a sorted 'U' haystack is single-threaded and pathological
+(~2034 ms @2M haystack + 2M queries). Same Latin-1 lever (codepoints < 0x100 -> UCS4 little-endian memcmp ==
+numpy codepoint order). `try_native_string_searchsorted` (wired into searchsorted() at the a_kind=="U" branch
+before the non-numeric numpy defer): view both as uint8, PARALLEL pre-scan+defer any codepoint >= 0x100 in
+haystack OR queries, then `par_iter` over queries doing a `[u8]::cmp` binary search (side left = first a[i]>=q,
+right = first a[i]>q), writing int64 insertion indices. No tie ambiguity (insertion position is deterministic).
+Same-width 'U' haystack+query, 1-D C-contig, sorter=None, gate m>=1<<16.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz1, criterion bencher median, 2M haystack + 2M queries):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `searchsorted(2M 'U8' sorted, 2M 'U8' q, side=left)` | 163.8 ms | 2034.5 ms | **12.42x** |
+
+CORRECTNESS: bench embeds `np.array_equal(fnp.searchsorted(...), np.searchsorted(...))` for side left AND
+right — PASSED on hz1 (no panic). Win = pure parallelism over queries + fast memcmp vs numpy's single-threaded
+per-record comparator (each query is an independent binary search -> embarrassingly parallel). String vein now:
+sort 5.9x / unique >=1.74x / searchsorted 12.4x. NEXT: isin(str) (~710ms numpy — hashed set of Latin-1 record
+bytes), unique(str, return_inverse) string factorize, u128 record-packing key for narrow widths.
+
 ## 2026-07-04 - WIN (SHIP): np.unique(1-D fixed-width unicode 'U', Latin-1) parallel memcmp sort + contiguous dedup — >=1.74x floor (see caveat)
 
 `BlackThrush`. Extends the string-sort vein (1fb2bc11) to `np.unique('U')` — the biggest string gap. Same

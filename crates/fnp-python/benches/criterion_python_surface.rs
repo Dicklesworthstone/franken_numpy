@@ -7334,6 +7334,60 @@ xd = rng.integers(97, 101, (2_000_000, 4), dtype=np.uint32).reshape(-1).view('U4
     group.finish();
 }
 
+fn bench_string_searchsorted_boundary(c: &mut Criterion) {
+    // np.searchsorted into a SORTED 1-D unicode ('U') haystack with a 'U' query array. numpy's
+    // per-record codepoint binary search is single-threaded and pathologically slow (~2s @2M+2M).
+    // For Latin-1 fnp does a parallel memcmp binary search — bit-exact insertion indices.
+    let mut group = c.benchmark_group("python_string_searchsorted_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+h8 = np.sort(rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8'))\n\
+q8 = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("string searchsorted setup");
+        let h8 = ns.get_item("h8").expect("h8");
+        let q8 = ns.get_item("q8").expect("q8");
+        let fnp_ss = module.getattr("searchsorted").expect("fnp searchsorted");
+        let numpy_ss = numpy.getattr("searchsorted").expect("numpy searchsorted");
+        let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+        // Correctness gate: fnp.searchsorted == numpy.searchsorted for left and right sides.
+        for side in ["left", "right"] {
+            let kw = PyDict::new(py);
+            kw.set_item("side", side).unwrap();
+            let f = fnp_ss.call((&h8, &q8), Some(&kw)).expect("fnp searchsorted");
+            let n = numpy_ss.call((&h8, &q8), Some(&kw)).expect("numpy searchsorted");
+            let eq: bool = np_array_equal
+                .call1((&f, &n))
+                .expect("array_equal")
+                .extract()
+                .expect("bool");
+            assert!(eq, "string searchsorted correctness mismatch: side={side}");
+        }
+        group.bench_function("fnp_searchsorted_U8_left_2m", |b| {
+            b.iter(|| black_box(fnp_ss.call1((&h8, &q8)).expect("fnp ss left")));
+        });
+        group.bench_function("numpy_searchsorted_U8_left_2m", |b| {
+            b.iter(|| black_box(numpy_ss.call1((&h8, &q8)).expect("numpy ss left")));
+        });
+    });
+    group.finish();
+}
+
 fn bench_tile_boundary(c: &mut Criterion) {
     // np.tile of a 1-D array (scalar reps) -> ~4M output. numpy.tile is a single-threaded
     // python helper (reshape + C repeat); fnp does a parallel block memcpy. Bit-exact.
@@ -9690,6 +9744,7 @@ criterion_group!(
     bench_sort_kind_boundary,
     bench_string_sort_boundary,
     bench_string_unique_boundary,
+    bench_string_searchsorted_boundary,
     bench_sort_axis_boundary,
     bench_parallel_binary_boundary,
     bench_take_axis_boundary,
