@@ -4633,6 +4633,51 @@ fd = rng.standard_normal(1 << 22)\nxd = np.sort(rng.standard_normal(1 << 22))\n"
     group.finish();
 }
 
+// np.gradient(f64 N-D, COORDINATE array, axis=k): a single coord array along one explicit axis of an
+// N-D array returns a single array; numpy runs it through the same slow multi-pass Python stencil.
+// The fused strided per-plane kernel (outer*la planes, each an inner slab combine) wins. axis=0 of a
+// 3-D field exercises the strided (non-contiguous) axis path.
+fn bench_gradient_nd_coords_axis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_gradient_nd_coords_axis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+D = rng.standard_normal((256, 256, 64))\ncz = np.sort(rng.standard_normal(256))\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("gradient nd coords setup");
+        let d = ns.get_item("D").expect("D");
+        let cz = ns.get_item("cz").expect("cz");
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("axis", 0).expect("axis kwarg");
+        let fnp_g = module.getattr("gradient").expect("fnp gradient");
+        let numpy_g = numpy.getattr("gradient").expect("numpy gradient");
+        group.bench_function("fnp_gradient_nd_coords_axis0", |b| {
+            b.iter(|| black_box(fnp_g.call((&d, &cz), Some(&kwargs)).expect("fnp gradient")));
+        });
+        group.bench_function("numpy_gradient_nd_coords_axis0", |b| {
+            b.iter(|| black_box(numpy_g.call((&d, &cz), Some(&kwargs)).expect("np gradient")));
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_gradient_f32_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_gradient_f32_boundary");
     group.sample_size(10);
@@ -8998,6 +9043,7 @@ criterion_group!(
     bench_gradient_axis_boundary,
     bench_gradient_2d_coords_boundary,
     bench_gradient_coords_boundary,
+    bench_gradient_nd_coords_axis_boundary,
     bench_gradient_f32_boundary,
     bench_norm_axis_boundary,
     bench_norm_f32_orderfree_boundary,

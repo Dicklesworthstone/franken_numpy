@@ -4,6 +4,35 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SHIP: np.gradient(f64 N-D, COORDINATE array, axis=k) fused stencil — 8-14x
+
+`BlackThrush`. Closes the remaining coord-gradient gap: `np.gradient(field_ND, x, axis=k)` — a single
+COORDINATE array along one EXPLICIT axis of an N-D array. This returns a SINGLE array (numpy returns
+one array only when axis is given), distinct from the axis=None-single-coord form (which is a numpy
+ERROR — one spacing is invalid for N>1 axes — and correctly DEFERS/mirrors the TypeError) and from the
+axis=None-multi-coord form (returns a list, the deemed-niche 2-D/3-D case). The single-axis form is the
+common "gradient along the fast/slow axis of a field" idiom and still fell through every fast path to
+numpy's slow multi-pass Python stencil (~53-73 ms @4M). Added try_zerocopy_f64_gradient_axis_coords:
+decompose the axis into outer*la*inner; each interior position i applies numpy's non-uniform weights
+from coord[i-1..=i+1], edges = fwd/bwd first differences — the SAME left-to-right per-element grouping
+the 1-D/2-D coord paths were proven byte-for-byte on (re-proved here with a pure-numpy prototype of the
+exact kernel BEFORE building). Two layouts: inner>1 (non-last axis) = strided per-plane fill over large
+contiguous inner slabs; inner==1 (LAST axis / trailing dims all 1 = contiguous rows) = per-row 1-D
+stencil (chunk by la) so it vectorizes along the row. Parallel over planes/rows.
+
+Bit-exact ALL PASS: 12 shapes (2x3x4 .. 64³ / 2x1e6 / 1e6x2) x every axis + NEGATIVE axis + axis=None-
+single-coord raises TypeError == numpy + uniform-scalar+axis regression + edge_order=2-delegates.
+Local (gauge fnp/np matmul 1.17x — mildly loaded, so these ratios are CONSERVATIVE): (2000,2000)
+ax0 10.7x / ax1 13.8x; (1000,64,64) ax0 10.1x; (256,256,64) ax1 8.3x; (64,64,1000) ax2 8.7x.
+
+**LAST-AXIS (inner==1) LESSON REPRISED: the first cut used the strided per-plane fill for ALL axes ->
+the last axis (inner==1) chunked by 1 element, couldn't vectorize along the contiguous row, and read
+1.05x (parity). Unlike the compress inner==1 case (where numpy's SIMD strided gather wins so you
+DELEGATE), here numpy is ALSO slow (its Python stencil), so the fix is a CONTIGUOUS per-row branch, not
+a delegate — 1.05x -> 8.7x. RULE: inner==1 (contiguous last axis) needs a row-wise kernel; whether you
+delegate or write the contiguous path depends on whether numpy is fast for that op.** Coord-gradient
+vein now: 1-D + 2-D(list) + N-D single-axis all done. Remaining: edge_order=2 non-uniform (defers).
+
 ## 2026-07-03 - SURFACE: broad Python-level-multi-pass probe — no new lever; pad refines the heuristic
 
 `BlackThrush`. Continued the "numpy Python-level multi-pass = fused-kernel lever" vein with a wide
