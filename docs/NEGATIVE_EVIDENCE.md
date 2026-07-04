@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): datetime64/timedelta64 searchsorted 11.8x + isin 44.7x via int64-view
+
+`BlackThrush`. numpy DELEGATES both datetime searchsorted (~317ms @2M+2M) and datetime isin (~190ms @2M+1M) —
+no fast int path, despite datetime being int64-backed. Both route through fnp's fast int kernels with NO
+view-back (searchsorted indices and the isin bool mask are dtype-agnostic): `try_native_datetime_searchsorted`
+views sorted haystack + queries as int64 and recursively calls fnp's int searchsorted (sort-to-sequentialize
+merge); `try_native_datetime_isin` views element + test as int64 and recursively calls fnp's int isin (hashed
+table). DEFER on any NaT (== i64::MIN): numpy orders NaT last (searchsorted) / NaT != NaT (isin), but int64
+orders/matches MIN. Same-dtype (same unit). BYTE-EXACT for finite (searchsorted both sides + isin verified).
+
+MEASURED (per-crate `rch exec -- cargo bench` on ovh-a, criterion bencher median):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `searchsorted(2M datetime, 2M q)` | 26.96 ms | 317.0 ms | **11.76x** |
+| `isin(2M datetime, 1M test)` | 4.26 ms | 190.5 ms | **44.7x** |
+
+CORRECTNESS: bench asserts `np.array_equal` (searchsorted side=left/right + isin) — PASSED. Completes the
+temporal int64-view routing family: unique/sort/rows/argmin/ptp/min/max/cumsum + set-ops + **searchsorted +
+isin**. **RULE (reinforced): int64-backed temporal ops numpy DELEGATES (no fast int path) route to fnp's fast
+int kernels via `.view('int64')` + recursive-call; index/bool outputs need NO view-back, value outputs view
+back to M8/m8[unit].** isin biggest temporal win (numpy delegates to serial sort; fnp hashes = 44.7x).
+
 ## 2026-07-04 - WIN (SHIP): np.searchsorted(sorted structured uint64 records) via uint64-view record binary search — 54.47x
 
 `BlackThrush`. While rebasing, `main` already landed the signed-int64 structured searchsorted fast path, so the

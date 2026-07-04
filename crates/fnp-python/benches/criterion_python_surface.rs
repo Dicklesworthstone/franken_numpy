@@ -8368,6 +8368,51 @@ b = rng.integers(0, 3000, 2_000_000).astype('datetime64[s]')\n";
     group.finish();
 }
 
+fn bench_datetime_searchsorted_isin_boundary(c: &mut Criterion) {
+    // np.searchsorted(sorted datetime, datetime q) + np.isin(datetime, datetime). numpy delegates both
+    // (~867ms / ~341ms); fnp routes the int64 view to the fast int searchsorted / int isin — bit-exact.
+    let mut group = c.benchmark_group("python_datetime_searchsorted_isin_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+hay = np.sort(rng.integers(0, 10**9, 2_000_000).astype('datetime64[s]'))\n\
+q = rng.integers(0, 10**9, 2_000_000).astype('datetime64[s]')\n\
+ia = rng.integers(0, 100000, 2_000_000).astype('datetime64[s]')\n\
+ib = rng.integers(0, 100000, 1_000_000).astype('datetime64[s]')\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let (hay, q, ia, ib) = (ns.get_item("hay").unwrap(), ns.get_item("q").unwrap(), ns.get_item("ia").unwrap(), ns.get_item("ib").unwrap());
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        let fnp_ss = module.getattr("searchsorted").unwrap();
+        let numpy_ss = numpy.getattr("searchsorted").unwrap();
+        let fnp_isin = module.getattr("isin").unwrap();
+        let numpy_isin = numpy.getattr("isin").unwrap();
+        for side in ["left", "right"] {
+            let kw = PyDict::new(py); kw.set_item("side", side).unwrap();
+            let f = fnp_ss.call((&hay, &q), Some(&kw)).unwrap();
+            let n = numpy_ss.call((&hay, &q), Some(&kw)).unwrap();
+            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "datetime searchsorted {side} mismatch");
+        }
+        let fi = fnp_isin.call1((&ia, &ib)).unwrap();
+        let ni = numpy_isin.call1((&ia, &ib)).unwrap();
+        assert!(eqf.call1((&fi, &ni)).unwrap().extract::<bool>().unwrap(), "datetime isin mismatch");
+        group.bench_function("fnp_searchsorted_datetime_2m_2m", |bn| bn.iter(|| black_box(fnp_ss.call1((&hay, &q)).unwrap())));
+        group.bench_function("numpy_searchsorted_datetime_2m_2m", |bn| bn.iter(|| black_box(numpy_ss.call1((&hay, &q)).unwrap())));
+        group.bench_function("fnp_isin_datetime_2m_1m", |bn| bn.iter(|| black_box(fnp_isin.call1((&ia, &ib)).unwrap())));
+        group.bench_function("numpy_isin_datetime_2m_1m", |bn| bn.iter(|| black_box(numpy_isin.call1((&ia, &ib)).unwrap())));
+    });
+    group.finish();
+}
+
 fn bench_unique_rows_lexsort_boundary(c: &mut Criterion) {
     // np.unique(2-D large-range int64, axis=0). numpy sorts rows with its slow void comparator
     // (~570ms @500kx3); the packed-composite path can't pack this range, so fnp does a parallel
@@ -11256,6 +11301,7 @@ criterion_group!(
     bench_struct_setops_boundary,
     bench_c128_setops_boundary,
     bench_datetime_setops_boundary,
+    bench_datetime_searchsorted_isin_boundary,
     bench_unique_rows_lexsort_boundary,
     bench_unique_rows_factorize_boundary,
     bench_unique_rows_f64_boundary,
