@@ -7217,6 +7217,64 @@ xi = rng.integers(-1000, 1000, 8_000_000).astype(np.int32)\n";
     group.finish();
 }
 
+fn bench_string_sort_boundary(c: &mut Criterion) {
+    // np.sort on a 1-D fixed-width unicode ('U') array. numpy sorts with a slow single-threaded
+    // per-record codepoint comparator (~280ms @2M U8). For Latin-1 strings (all codepoints <0x100)
+    // fnp sorts record indices by memcmp (== codepoint order) in parallel and gathers — bit-exact.
+    let mut group = c.benchmark_group("python_string_sort_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+x8 = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n\
+x4 = rng.integers(97, 123, (2_000_000, 4), dtype=np.uint32).reshape(-1).view('U4')\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("string sort setup");
+        let x8 = ns.get_item("x8").expect("x8");
+        let x4 = ns.get_item("x4").expect("x4");
+        let fnp_sort = module.getattr("sort").expect("fnp sort");
+        let numpy_sort = numpy.getattr("sort").expect("numpy sort");
+        let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+        // Correctness gate: fnp.sort == numpy.sort for U8 and U4; panics on mismatch.
+        for (arr, label) in [(&x8, "U8"), (&x4, "U4")] {
+            let f = fnp_sort.call1((arr,)).expect("fnp sort");
+            let n = numpy_sort.call1((arr,)).expect("numpy sort");
+            let eq: bool = np_array_equal
+                .call1((&f, &n))
+                .expect("array_equal")
+                .extract()
+                .expect("bool");
+            assert!(eq, "string sort correctness mismatch: dtype={label}");
+        }
+        group.bench_function("fnp_sort_U8_2m", |b| {
+            b.iter(|| black_box(fnp_sort.call1((&x8,)).expect("fnp sort U8")));
+        });
+        group.bench_function("numpy_sort_U8_2m", |b| {
+            b.iter(|| black_box(numpy_sort.call1((&x8,)).expect("numpy sort U8")));
+        });
+        group.bench_function("fnp_sort_U4_2m", |b| {
+            b.iter(|| black_box(fnp_sort.call1((&x4,)).expect("fnp sort U4")));
+        });
+        group.bench_function("numpy_sort_U4_2m", |b| {
+            b.iter(|| black_box(numpy_sort.call1((&x4,)).expect("numpy sort U4")));
+        });
+    });
+    group.finish();
+}
+
 fn bench_tile_boundary(c: &mut Criterion) {
     // np.tile of a 1-D array (scalar reps) -> ~4M output. numpy.tile is a single-threaded
     // python helper (reshape + C repeat); fnp does a parallel block memcpy. Bit-exact.
@@ -9571,6 +9629,7 @@ criterion_group!(
     bench_char_add_boundary,
     bench_matmul_boundary,
     bench_sort_kind_boundary,
+    bench_string_sort_boundary,
     bench_sort_axis_boundary,
     bench_parallel_binary_boundary,
     bench_take_axis_boundary,

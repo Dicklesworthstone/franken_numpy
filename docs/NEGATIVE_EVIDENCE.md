@@ -4,6 +4,34 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.sort(1-D fixed-width unicode 'U', Latin-1) parallel memcmp index-sort — 5.35x (U8) / 5.88x (U4)
+
+`BlackThrush`. New vein (NOT the sibling int/composite sort work): STRING sort. numpy sorts a 'U' array with a
+generic single-threaded per-record CODEPOINT comparator — pathologically slow (~299 ms @2M U8, ~259 ms U4).
+KEY byte-exactness insight (proved with a pure-numpy prototype over ASCII + full Latin-1 corpora): for strings
+whose every codepoint is < 0x100, the UCS4 LITTLE-ENDIAN byte order of each fixed-width record EQUALS numpy's
+codepoint order — each char = `[lowbyte,0,0,0]`, so memcmp hits the discriminating low byte first and the zero
+high bytes never reorder; null padding also makes shorter strings sort before longer same-prefix ones, matching
+numpy. `try_native_string_sort_flat`: view uint8, PARALLEL pre-scan for any codepoint >= 0x100 (any UCS4 high
+byte nonzero) -> DEFER to numpy (byte order would then diverge); else `par_sort_unstable_by` a `Vec<u32>` of
+record indices via `[u8]::cmp` (== memcmp), then parallel-gather the sorted records into a fresh same-dtype
+output. Equal strings are byte-identical so unstable sort is byte-exact. Wired into `sort()`'s 1-D flat path
+after the c64 path (kind 'U', 1-D C-contig, itemsize multiple-of-4 <= 4096, gate n>=1<<18).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 2M, CLEAN tight-variance):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `sort(2M 'U8' Latin-1 strings)` | 55.9 ms | 299.0 ms | **5.35x** |
+| `sort(2M 'U4' Latin-1 strings)` | 44.1 ms | 258.9 ms | **5.88x** |
+
+CORRECTNESS: bench embeds `np.array_equal(fnp.sort(x), np.sort(x))` for U8 and U4 — PASSED on hz2 (no panic).
+The index-sort comparator gathers 32-byte records (a cache-miss random probe — the SORT-TO-SEQUENTIALIZE
+anti-pattern) yet still wins 5-6x because numpy's per-record comparator is so much slower; a record-packing key
+(U1-U4 records fit u128 big-endian -> sort keys directly, cache-local, no gather) is the OBVIOUS next lever for
+an even bigger multiple. NEXT in this vein: np.unique(str) (add adjacent dedup + resized output, biggest gap at
+~1.7s@2M), np.argsort(str) (return the perm directly), np.searchsorted(str). GATE REMINDER: DEFER any codepoint
+>= 0x100 (verified break: mixed 'A'/U+0100 sorts differ byte-order vs codepoint-order).
+
 ## 2026-07-04 - LOSS (DROPPED): np.pad(2-D, mode="constant") parallel bordered row-copy — f64 0.87x, i32 1.42x — numpy 2-D is NOT the slow path
 
 `BlackThrush`. Tried to extend the 1-D pad copy-family win to 2-D constant (bordered image padding).
