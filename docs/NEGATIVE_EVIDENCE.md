@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.isin(MIXED int+float structured) record byte-hash — 33.6x
+
+`BlackThrush`. Extends the structured isin record-hash lever (7a1076e6, was all-integer-field only) to records
+with FLOAT fields — the common record-array case (e.g. [('id','i8'),('val','f8')]). isin is EQUALITY, so two
+records are equal iff their bytes are equal, which for a float field holds only for FINITE, non-(-0.0) values
+(numpy's field == treats +0.0/-0.0 equal, NaN!=NaN). The gate now accepts 'f' fields and PRE-SCANS each float
+field of both operands (numpy isnan + signbit&==0) -> DEFER on any NaN/-0.0; else the existing FNV record-byte
+hash + parallel lookup is byte-exact. numpy's structured isin (with a float field) delegates to a serial sort
+(~2.7 s @1M+500k). Still gated no-padding (itemsize == sum of field sizes), 1-D C-contig, n>=1<<16.
+
+MEASURED (per-crate `rch exec -- cargo bench` on remote, criterion bencher median, 1M element + 500k test, i8+f8):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `isin(1M struct i8+f8, 500k)` | 81.8 ms | 2747.3 ms | **33.6x** |
+
+CORRECTNESS: bench asserts `np.array_equal` — PASSED. The float-field pre-scan adds ~50ms (isnan+signbit over
+1.5M floats) but the win is huge. **REUSABLE: the record-byte-hash EQUALITY lever extends to any packed record
+with int OR finite-non-(-0.0) float fields — pre-scan float fields for NaN/-0.0 and defer. Same gate could
+extend struct setops (equality-filter half) to float-field records.**
+
 ## 2026-07-04 - NO-SHIP (REVERTED, LOSS): np.sort(float16) via f32 widening — 0.75x
 
 `BlackThrush`. Hypothesis: extend the f16-via-f32-widening family (cf2d26da) to sort. Implemented

@@ -8196,6 +8196,41 @@ b = np.zeros(500_000, dtype=dt); b['a'] = rng.integers(0, 1000, 500_000); b['b']
     group.finish();
 }
 
+fn bench_isin_struct_float_boundary(c: &mut Criterion) {
+    // np.isin on a MIXED int+float structured (record) array. numpy delegates to a serial sort (~1.3s
+    // @1M+500k); fnp hashes the record bytes (finite float fields, -0.0/NaN defer) — bit-exact.
+    let mut group = c.benchmark_group("python_isin_struct_float_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+dt = [('id','<i8'),('val','<f8')]\n\
+a = np.zeros(1_000_000, dtype=dt); a['id'] = rng.integers(0, 1000, 1_000_000); a['val'] = rng.integers(0, 1000, 1_000_000).astype(np.float64)\n\
+b = np.zeros(500_000, dtype=dt); b['id'] = rng.integers(0, 1000, 500_000); b['val'] = rng.integers(0, 1000, 500_000).astype(np.float64)\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let a = ns.get_item("a").expect("a");
+        let b = ns.get_item("b").expect("b");
+        let fnp_isin = module.getattr("isin").expect("fnp isin");
+        let numpy_isin = numpy.getattr("isin").expect("numpy isin");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        let f = fnp_isin.call1((&a, &b)).expect("fnp isin");
+        let n = numpy_isin.call1((&a, &b)).expect("numpy isin");
+        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "isin struct int+f8 mismatch");
+        group.bench_function("fnp_isin_struct_i8f8_1m_500k", |bn| bn.iter(|| black_box(fnp_isin.call1((&a, &b)).unwrap())));
+        group.bench_function("numpy_isin_struct_i8f8_1m_500k", |bn| bn.iter(|| black_box(numpy_isin.call1((&a, &b)).unwrap())));
+    });
+    group.finish();
+}
+
 fn bench_searchsorted_struct_boundary(c: &mut Criterion) {
     // np.searchsorted(sorted structured, structured queries) — record binary search. numpy uses its slow
     // per-record void comparator (~5.5s @2M+2M); fnp value-lex binary search via the int64 view — bit-exact.
@@ -11374,6 +11409,7 @@ criterion_group!(
     bench_unique_rows_datetime_boundary,
     bench_unique_struct_int_factorize_boundary,
     bench_isin_struct_boundary,
+    bench_isin_struct_float_boundary,
     bench_searchsorted_struct_boundary,
     bench_struct_setops_boundary,
     bench_c128_setops_boundary,
