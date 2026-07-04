@@ -7663,6 +7663,66 @@ b = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint8).view('S8').reshape(-1)
     group.finish();
 }
 
+fn bench_string_bytes_ops2_boundary(c: &mut Criterion) {
+    // 'S' (bytes) twins of searchsorted/isin/intersect1d/setdiff1d/setxor1d. Same byte helpers,
+    // bit-exact for 'S' (no codepoint layer). numpy is slow on all (searchsorted ~766ms, isin ~440ms,
+    // set-ops ~1-4s @2M).
+    let mut group = c.benchmark_group("python_string_bytes_ops2_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+a = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint8).view('S8').reshape(-1)\n\
+h = np.sort(a)\n\
+q = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint8).view('S8').reshape(-1)\n\
+brand = rng.integers(97, 123, (1_000_000, 8), dtype=np.uint8).view('S8').reshape(-1)\n\
+b = np.concatenate([a[:1_000_000], brand])\n\
+trand = rng.integers(97, 123, (100_000, 8), dtype=np.uint8).view('S8').reshape(-1)\n\
+test = np.concatenate([a[:100_000], trand])\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let a = ns.get_item("a").unwrap();
+        let h = ns.get_item("h").unwrap();
+        let q = ns.get_item("q").unwrap();
+        let b = ns.get_item("b").unwrap();
+        let test = ns.get_item("test").unwrap();
+        let eqf = numpy.getattr("array_equal").unwrap();
+        // Correctness for all 5 ops.
+        let ss_f = module.getattr("searchsorted").unwrap().call1((&h, &q)).unwrap();
+        let ss_n = numpy.getattr("searchsorted").unwrap().call1((&h, &q)).unwrap();
+        assert!(eqf.call1((&ss_f, &ss_n)).unwrap().extract::<bool>().unwrap(), "S searchsorted mismatch");
+        let is_f = module.getattr("isin").unwrap().call1((&a, &test)).unwrap();
+        let is_n = numpy.getattr("isin").unwrap().call1((&a, &test)).unwrap();
+        assert!(eqf.call1((&is_f, &is_n)).unwrap().extract::<bool>().unwrap(), "S isin mismatch");
+        for op in ["intersect1d", "setdiff1d", "setxor1d"] {
+            let f = module.getattr(op).unwrap().call1((&a, &b)).unwrap();
+            let n = numpy.getattr(op).unwrap().call1((&a, &b)).unwrap();
+            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "S {op} mismatch");
+        }
+        let ss_ff = module.getattr("searchsorted").unwrap();
+        let ss_nn = numpy.getattr("searchsorted").unwrap();
+        let is_ff = module.getattr("isin").unwrap();
+        let is_nn = numpy.getattr("isin").unwrap();
+        let xr_ff = module.getattr("setxor1d").unwrap();
+        let xr_nn = numpy.getattr("setxor1d").unwrap();
+        group.bench_function("fnp_searchsorted_S8_2m", |bn| bn.iter(|| black_box(ss_ff.call1((&h, &q)).unwrap())));
+        group.bench_function("numpy_searchsorted_S8_2m", |bn| bn.iter(|| black_box(ss_nn.call1((&h, &q)).unwrap())));
+        group.bench_function("fnp_isin_S8_2m", |bn| bn.iter(|| black_box(is_ff.call1((&a, &test)).unwrap())));
+        group.bench_function("numpy_isin_S8_2m", |bn| bn.iter(|| black_box(is_nn.call1((&a, &test)).unwrap())));
+        group.bench_function("fnp_setxor1d_S8_2m", |bn| bn.iter(|| black_box(xr_ff.call1((&a, &b)).unwrap())));
+        group.bench_function("numpy_setxor1d_S8_2m", |bn| bn.iter(|| black_box(xr_nn.call1((&a, &b)).unwrap())));
+    });
+    group.finish();
+}
+
 fn bench_tile_boundary(c: &mut Criterion) {
     // np.tile of a 1-D array (scalar reps) -> ~4M output. numpy.tile is a single-threaded
     // python helper (reshape + C repeat); fnp does a parallel block memcpy. Bit-exact.
@@ -10025,6 +10085,7 @@ criterion_group!(
     bench_string_setops_boundary,
     bench_string_setxor_boundary,
     bench_string_bytes_boundary,
+    bench_string_bytes_ops2_boundary,
     bench_sort_axis_boundary,
     bench_parallel_binary_boundary,
     bench_take_axis_boundary,

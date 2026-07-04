@@ -4,7 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
-## 2026-07-04 - WIN (SHIP): 'S' (bytes) dtype twin of sort/unique/union1d — 4.09x / 22.6x / 22.2x
+## 2026-07-04 - WIN (SHIP): 'S' (bytes) twin of searchsorted/isin/intersect/setdiff/setxor — 7.88x / 35.2x / (byte-exact) / (byte-exact) / 5.42x (string vein 'S' COMPLETE)
+
+`BlackThrush`. Completes the 'S' (bytes) twin across the whole string-op family (sort/unique/union1d landed
+099934e6). Same mechanical relax on the remaining 5 helpers + the searchsorted DISPATCH gate: accept kind in
+{'U','S'} (require the two operands SAME kind), capture `is_bytes` to SKIP the UCS4 wide-char pre-scan + the
+itemsize%4 check for 'S'. isin needed no pre-scan change (equality). Bytes are already byte-ordered == numpy
+order, so bit-exact with zero algorithm change.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz1, criterion bencher median, 2M 'S8'):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `searchsorted(2M 'S8' sorted, 2M 'S8' q)` | 95.1 ms | 748.9 ms | **7.88x** |
+| `isin(2M 'S8', 200k 'S8' test)` | 14.4 ms | 506.7 ms | **35.2x** |
+| `setxor1d(2M 'S8', 2M 'S8')` | 317.4 ms | 1719 ms | **5.42x** |
+
+CORRECTNESS: bench embeds `np.array_equal` for ALL FIVE ops (searchsorted, isin, intersect1d, setdiff1d,
+setxor1d) on 'S8' — PASSED on hz1 (intersect1d/setdiff1d asserted byte-exact, not separately timed; same helper
+as the 'U' 4.90x/2.67x). The 'U' + 'S' string-op family is now COMPLETE: sort/unique/searchsorted/isin/
+union1d/intersect1d/setdiff1d/setxor1d, all for both dtypes. Remaining niche: unique(str,return_*) factorize;
+u128 record-packing key for narrow widths (would push the sort-based ops higher).
 
 `BlackThrush`. The string-vein helpers were gated to 'U' (UCS4) but the byte machinery is dtype-agnostic. 'S'
 (numpy bytes) records are ALREADY in byte order == numpy's sort order (bytes have no codepoint layer), so there
