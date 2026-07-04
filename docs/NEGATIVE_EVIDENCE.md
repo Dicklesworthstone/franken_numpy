@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.isin(1-D 'U' element, 'U' test) hashed record-byte set — 18.27x (NO Latin-1 gate)
+
+`BlackThrush`. Fourth op in the string vein. KEY difference from sort/searchsorted: isin is EQUALITY, not
+ordering — two fixed-width 'U' strings are equal iff their UCS4 byte records are equal, for ANY codepoint. So
+this path needs NO Latin-1 gate (works for wide chars too; verified vs numpy on a U+0100 corpus). numpy's
+string isin sorts |element|+|test| (~674 ms @2M element + 200k test, up to 2.4 s for 2M test).
+`try_native_string_isin` (wired into isin() after the float-isin path): build a FNV-hashed
+`HashSet<&[u8], FastIntBuildHasher>` of the test record bytes (exact — membership verified on lookup, no
+false positives from the hash), then `par_iter` over element records emitting `set.contains(rec) ^ invert`
+into a bool output. O(n+m) vs numpy's O((n+m) log(n+m)) sort.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz1, criterion bencher median, 2M element + 200k test):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `isin(2M 'U8', 200k 'U8' test)` | 36.9 ms | 674.0 ms | **18.27x** |
+
+CORRECTNESS: bench embeds `np.array_equal(fnp.isin, np.isin)` for default AND invert=True (test set = 100k
+real members drawn from element + 100k non-members, so both bool branches fire) — PASSED on hz1. Same-width
+'U' element+test, 1-D C-contig, assume_unique/kind defer to the caller's numpy fallback, gate n>=1<<16. String
+vein now: sort 5.9x / unique >=1.74x / searchsorted 12.4x / isin 18.3x. Mirrors the float-isin 530x lever
+(hashed set beats numpy's sort). NEXT: unique(str, return_inverse) factorize, u128 pack for narrow widths.
+
 ## 2026-07-04 - WIN (SHIP): np.searchsorted(sorted 'U' haystack, 'U' queries, Latin-1) parallel memcmp binary search — 12.42x
 
 `BlackThrush`. Third op in the string vein (after sort 1fb2bc11 / unique 231756b9), and the BIGGEST string gap:

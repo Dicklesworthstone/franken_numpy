@@ -7388,6 +7388,62 @@ q8 = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8
     group.finish();
 }
 
+fn bench_string_isin_boundary(c: &mut Criterion) {
+    // np.isin on a 1-D unicode ('U') element array against a 'U' test array. numpy sorts
+    // |element|+|test| (~730ms .. 2.4s @2M); fnp builds a hashed record-byte set and does a
+    // parallel membership scan — bit-exact for ALL codepoints (equality = byte equality).
+    let mut group = c.benchmark_group("python_string_isin_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        // test = 100k members drawn from `a` + 100k random non-members, so both bool branches fire.
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+a = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n\
+trand = rng.integers(97, 123, (100_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n\
+test = np.concatenate([a[:100_000], trand])\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("string isin setup");
+        let a = ns.get_item("a").expect("a");
+        let test = ns.get_item("test").expect("test");
+        let fnp_isin = module.getattr("isin").expect("fnp isin");
+        let numpy_isin = numpy.getattr("isin").expect("numpy isin");
+        let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+        // Correctness gate: fnp.isin == numpy.isin for default and invert=True.
+        for inv in [false, true] {
+            let kw = PyDict::new(py);
+            kw.set_item("invert", inv).unwrap();
+            let f = fnp_isin.call((&a, &test), Some(&kw)).expect("fnp isin");
+            let n = numpy_isin.call((&a, &test), Some(&kw)).expect("numpy isin");
+            let eq: bool = np_array_equal
+                .call1((&f, &n))
+                .expect("array_equal")
+                .extract()
+                .expect("bool");
+            assert!(eq, "string isin correctness mismatch: invert={inv}");
+        }
+        group.bench_function("fnp_isin_U8_2m", |b| {
+            b.iter(|| black_box(fnp_isin.call1((&a, &test)).expect("fnp isin")));
+        });
+        group.bench_function("numpy_isin_U8_2m", |b| {
+            b.iter(|| black_box(numpy_isin.call1((&a, &test)).expect("numpy isin")));
+        });
+    });
+    group.finish();
+}
+
 fn bench_tile_boundary(c: &mut Criterion) {
     // np.tile of a 1-D array (scalar reps) -> ~4M output. numpy.tile is a single-threaded
     // python helper (reshape + C repeat); fnp does a parallel block memcpy. Bit-exact.
@@ -9745,6 +9801,7 @@ criterion_group!(
     bench_string_sort_boundary,
     bench_string_unique_boundary,
     bench_string_searchsorted_boundary,
+    bench_string_isin_boundary,
     bench_sort_axis_boundary,
     bench_parallel_binary_boundary,
     bench_take_axis_boundary,
