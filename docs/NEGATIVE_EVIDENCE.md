@@ -4,6 +4,30 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.argsort(1-D distinct float-field structured) via sortable byte-transform - 20.04x vs legacy NumPy
+
+`cod`; AGENT_NAME=cod. No measured `.scratch`/worktree win was absent from `origin/main` after fetch; dug the
+structured-sort sibling called out by the byte-transform row. `np.sort(struct)` can ignore equal-record order
+because equal records are byte-identical, but `np.argsort(struct)` exposes numpy's unstable tie permutation. The
+native helper therefore transforms packed native/LE bool/int/uint/float fields into memcmp-comparable keys,
+parallel-sorts row indices for distinct records, and DEFERs to numpy when adjacent transformed keys tie. Float
+fields also defer on NaN/-0.0. All-integer structured records stay on numpy's faster radix/void path.
+
+MEASURED (per-crate local fallback after `rch exec` release bench stalled before Criterion rows;
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod`, release profile, short Criterion subset, 1M distinct
+records i8+f8):
+| Probe | fnp | legacy NumPy original | numpy/fnp |
+| --- | ---: | ---: | ---: |
+| `argsort(1M distinct mixed struct)` | 72.53 ms | 1453.58 ms | **20.04x** |
+
+CORRECTNESS: bench asserts `np.array_equal(fnp.argsort(a), np.argsort(a))` before timing. Focused conformance
+passed:
+`cargo test -p fnp-python --test conformance_sort_search argsort_struct_mixed_float_matches_numpy_distinct_and_tied -- --nocapture`
+(1/1; checks the native distinct case and tied fallback). Compile gate passed:
+`rch exec -- cargo check -p fnp-python --lib --bench criterion_python_surface`. NOTE: `cargo bench --release`
+is not accepted by this Cargo; reran as `cargo bench --profile release`. The remote release bench was interrupted
+after a long quiet compile phase and the same filtered benchmark was measured locally.
+
 ## 2026-07-04 - WIN (SHIP): np.argsort(1-D 'U'/'S' Latin-1, kind='stable'/'mergesort') memcmp — 7.15x / 9.46x
 
 `BlackThrush`. The `kind='stable'` argsort lever (db543e15, structured) generalizes to strings — an open lead in
