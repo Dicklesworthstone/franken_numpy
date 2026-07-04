@@ -8143,6 +8143,44 @@ b = np.zeros(500_000, dtype=dt); b['a'] = rng.integers(0, 1000, 500_000); b['b']
     group.finish();
 }
 
+fn bench_searchsorted_struct_boundary(c: &mut Criterion) {
+    // np.searchsorted(sorted structured, structured queries) — record binary search. numpy uses its slow
+    // per-record void comparator (~5.5s @2M+2M); fnp value-lex binary search via the int64 view — bit-exact.
+    let mut group = c.benchmark_group("python_searchsorted_struct_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+dt = [('a','<i8'),('b','<i8')]\n\
+hay = np.zeros(2_000_000, dtype=dt); hay['a'] = rng.integers(0, 100000, 2_000_000); hay['b'] = rng.integers(0, 100000, 2_000_000); hay = np.sort(hay)\n\
+q = np.zeros(2_000_000, dtype=dt); q['a'] = rng.integers(0, 100000, 2_000_000); q['b'] = rng.integers(0, 100000, 2_000_000)\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let hay = ns.get_item("hay").expect("hay");
+        let q = ns.get_item("q").expect("q");
+        let fnp_ss = module.getattr("searchsorted").expect("fnp searchsorted");
+        let numpy_ss = numpy.getattr("searchsorted").expect("numpy searchsorted");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        for side in ["left", "right"] {
+            let kw = PyDict::new(py); kw.set_item("side", side).unwrap();
+            let f = fnp_ss.call((&hay, &q), Some(&kw)).expect("fnp searchsorted");
+            let n = numpy_ss.call((&hay, &q), Some(&kw)).expect("numpy searchsorted");
+            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "searchsorted struct side={side} mismatch");
+        }
+        group.bench_function("fnp_searchsorted_struct_2xi8_2m_2m", |bn| bn.iter(|| black_box(fnp_ss.call1((&hay, &q)).unwrap())));
+        group.bench_function("numpy_searchsorted_struct_2xi8_2m_2m", |bn| bn.iter(|| black_box(numpy_ss.call1((&hay, &q)).unwrap())));
+    });
+    group.finish();
+}
+
 fn bench_struct_setops_boundary(c: &mut Criterion) {
     // np.union1d / intersect1d / setdiff1d / setxor1d on 1-D structured records. numpy does 2-3 serial
     // per-record void sorts (~2.5-8s @1M+1M); fnp reuses struct-unique + a hashed record-set filter.
@@ -11041,6 +11079,7 @@ criterion_group!(
     bench_unique_struct_int_boundary,
     bench_unique_struct_int_factorize_boundary,
     bench_isin_struct_boundary,
+    bench_searchsorted_struct_boundary,
     bench_struct_setops_boundary,
     bench_c128_setops_boundary,
     bench_unique_rows_lexsort_boundary,

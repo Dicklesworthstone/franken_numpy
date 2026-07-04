@@ -25,6 +25,26 @@ CORRECTNESS: benchmark embeds `np.array_equal(fnp.lexsort(keys_f64), np.lexsort(
 the focused public conformance shard passed `cargo test -p fnp-python --test conformance_lexsort -- --nocapture`
 (16/16). Compile gate passed: `cargo check -p fnp-python --lib --bench criterion_python_surface`. Both used the
 project target dir above. The filtered bench process was interrupted only after both target timing rows emitted.
+## 2026-07-04 - WIN (SHIP): np.searchsorted(sorted structured, structured queries) via int64-view record binary search — 12.6x
+
+`BlackThrush`. Directed by the rule "the lever wins BIG where numpy's fallback is the slow VOID path": numpy
+binary-searches each structured query record with its per-record void comparator (~5.5-10.5s @2M haystack +
+2M queries — pathological). An all-int64-field record IS nfields contiguous int64 in field order, so
+`try_native_searchsorted_struct` views both haystack and queries as int64 and runs a PARALLEL value-lex binary
+search (compare fields left-to-right by i64 value) — numpy's exact record order. side left/right via the
+compare. BYTE-EXACT (verified vs numpy BOTH sides). Wired into searchsorted() for a_kind 'V' after the complex
+path. All-int64-field, contiguous-offset, 1-D C-contig haystack + same-dtype array query, sorter=None, m>=1<<16.
+
+MEASURED (per-crate `rch exec -- cargo bench` on vmi1152480, criterion bencher median, 2M haystack + 2M queries, 2xi8):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `searchsorted(2M struct, 2M q)` | 831.8 ms | 10457.3 ms | **12.6x** |
+
+CORRECTNESS: bench asserts `np.array_equal` for side=left AND side=right — PASSED. Confirms the void-pathology
+rule: struct searchsorted (void comparator) wins 12.6x, unlike the complex set-ops (fast native sort, 2-3x).
+Structured family now: unique / factorize / isin / 4 setops / **searchsorted** — the int64-view (ordering) +
+record-hash (equality) levers cover the whole record-array surface. (numpy struct searchsorted was 10.5s on
+this slow worker; the 12.6x same-worker ratio is what matters.)
 
 ## 2026-07-04 - WIN (SHIP): complex128 set-ops union1d/intersect1d/setdiff1d — 1.94-3.17x (setxor reverted ~parity)
 
