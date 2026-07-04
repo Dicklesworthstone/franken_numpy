@@ -4,6 +4,43 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - SURFACE: dense `eigvalsh` n800 remains a measured NumPy loss; radical route needs two-stage SBR contract
+
+`BlackThrush`. Land-or-dig pass first checked the dirty/ahead bench worktrees for
+an unlanded measured win. The visible candidates were stale or already on `main`:
+`SilverBridge`'s f16 `logaddexp2` win is commit `bfc985af`, the old digitize
+scratch row is already represented by the 12.5x ledger entry and conformance test
+on current `main`, and the only ahead worktree was a metadata/no-ship closeout.
+
+Per-crate RCH bench command: `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-blackthrush-landordig RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface -- 'python_linalg_boundary/(fnp_eigvalsh_delegate_f64_2d_n800|numpy_eigvalsh_delegate_f64_2d_n800|fnp_eigh_delegate_f64_2d_n800|numpy_eigh_delegate_f64_2d_n800)' --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher --noplot`.
+Worker: `vmi1152480`. Note: the literal `cargo bench --release` spelling was tried first and failed before compile because this cargo bench frontend rejects `--release`; `--profile release` is the accepted equivalent used elsewhere in this repo.
+
+| Probe | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `np.linalg.eigvalsh(f64 800x800 SPD)` | 102,675,813 | 73,900,744 | 1.389x (NumPy 1.39x faster) | loss/blocker |
+| `np.linalg.eigh(f64 800x800 SPD)` | 119,639,141 | 200,664,869 | 0.596x (FNP 1.68x faster) | noisy current win |
+
+Negative result: no small keepable lever was landed. The biggest fresh loss is
+still eigenvalues-only dense symmetric reduction, not eigenvectors. The relevant
+radical idea from the alien-graveyard pass is communication-avoiding dense linear
+algebra: make the Householder symmetric reduction into a two-stage dense-to-band
+then band-to-tridiagonal SBR so the trailing work becomes cache-sized BLAS-3 style
+updates instead of the current memory-bound panel matvec path. That is the right
+next primitive, but it is not a safe opportunistic patch: prior SBR probes in this
+ledger already showed shallow stage-1 work is not a shippable improvement, and the
+contract needs an explicit golden/allclose policy before changing the reduction
+order for eigenvalues-only output. Drop additional tile-width, row-parallel, or
+other near-loop variants unless they include a complete two-stage SBR proof.
+
+Validation: the RCH bench completed with exit 0 on `vmi1152480`. The compile
+emitted only known pre-existing warnings (`fnp-ufunc::nan_filtered`,
+`fnp-python` unused/dead-code warnings, and the bench unused `numpy` binding).
+Criterion warned that 3s was too short for 10 samples on the slow linalg rows, so
+the ratio is routing/blocker evidence rather than a keep/reject proof for a code
+patch. Focused conformance is green:
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-blackthrush-landordig RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo test -p fnp-python --profile release --test conformance_linalg_decomp -- --nocapture`
+passed on `vmi1152480` (`39 passed`).
+
 ## 2026-07-04 - SHIP: `np.logaddexp2(f16, f16)` native finite widen path - 7.23x faster than NumPy
 
 `SilverBridge`. `np.logaddexp2` was the missing sibling in the existing f16 binary
