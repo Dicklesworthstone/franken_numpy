@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.unique(1-D structured all-int64) via int64-view row-unique — 26.6x
+
+`BlackThrush`. Fresh op family (structured/record arrays). numpy sorts records by field VALUE-lexicographically
+(field 0 primary) with its slow single-threaded comparator (~1054ms @1M x 3 int64 fields — the numeric
+value-lex slowness, NOT the fast string kind). Since an all-int64-field record's packed bytes == nfields
+contiguous int64 in field order, `try_native_unique_struct_int64` views the (n,) structured array as (n,
+nfields) int64, routes to the int row-unique (f2e75261), and views the (nu, nfields) result flat and back to
+the structured dtype. ZERO new sort code (reuses the int row helper). BYTE-EXACT (verified vs numpy incl
+negative fields). GATE: all fields int64, native/little-endian, contiguous offsets (itemsize == 8*nfields ->
+no padding); 1-D C-contig. Wired into unique() single-arg after the datetime path.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 1M x 3 int64 fields ~mostly distinct):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(1M structured 3xi8 fields)` | 39.6 ms | 1053.6 ms | **26.6x** |
+
+CORRECTNESS: bench asserts `np.array_equal` — PASSED. **REUSABLE: the int64-view trick — an all-int64-field
+structured array (no padding) IS an (n, nfields) int64 matrix in field order; route structural ops (unique,
+and by extension sort/searchsorted) through the numeric row helpers and view back. Same family as complex-via-
+f64 and datetime-via-int64.** Biggest single win since the complex isin. Mixed-width/float-field structured
+defers (padding / -0.0/NaN hostile). Confirms numpy's beatable slowness is the NUMERIC value comparator.
+
 ## 2026-07-04 - WIN (SHIP): np.unique(2-D float32, axis=0, return_index/inverse/counts) f32 row factorize — 15.7x
 
 `BlackThrush`. f32 factorize twin of the plain f32 row-unique (566ab34c) and the f32 mirror of the f64 _full.

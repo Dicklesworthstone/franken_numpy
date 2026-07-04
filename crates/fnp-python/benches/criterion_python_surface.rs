@@ -8018,6 +8018,42 @@ td = rng.integers(0, 100000, 2_000_000).astype('timedelta64[s]')\n";
     group.finish();
 }
 
+fn bench_unique_struct_int_boundary(c: &mut Criterion) {
+    // np.unique(1-D structured all-int64) — record dedup. numpy sorts records via its slow field value-lex
+    // comparator (~776ms @1M x 2 fields); fnp views as (n,nfields) int64 and routes to the int row-unique.
+    let mut group = c.benchmark_group("python_unique_struct_int_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+n = 1_000_000\n\
+a = np.zeros(n, dtype=[('a','<i8'),('b','<i8'),('c','<i8')])\n\
+a['a'] = rng.integers(-50, 50, n)\n\
+a['b'] = rng.integers(-50, 50, n)\n\
+a['c'] = rng.integers(-50, 50, n)\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let a = ns.get_item("a").expect("a");
+        let fnp_u = module.getattr("unique").expect("fnp unique");
+        let numpy_u = numpy.getattr("unique").expect("numpy unique");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        let f = fnp_u.call1((&a,)).expect("fnp unique");
+        let n = numpy_u.call1((&a,)).expect("numpy unique");
+        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "unique struct mismatch");
+        group.bench_function("fnp_unique_struct_3xi8_1m", |bn| bn.iter(|| black_box(fnp_u.call1((&a,)).unwrap())));
+        group.bench_function("numpy_unique_struct_3xi8_1m", |bn| bn.iter(|| black_box(numpy_u.call1((&a,)).unwrap())));
+    });
+    group.finish();
+}
+
 fn bench_unique_rows_lexsort_boundary(c: &mut Criterion) {
     // np.unique(2-D large-range int64, axis=0). numpy sorts rows with its slow void comparator
     // (~570ms @500kx3); the packed-composite path can't pack this range, so fnp does a parallel
@@ -10805,6 +10841,7 @@ criterion_group!(
     bench_complex_isin_boundary,
     bench_complex64_ops_boundary,
     bench_datetime_unique_boundary,
+    bench_unique_struct_int_boundary,
     bench_unique_rows_lexsort_boundary,
     bench_unique_rows_factorize_boundary,
     bench_unique_rows_f64_boundary,
