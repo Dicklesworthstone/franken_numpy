@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.unique(flat complex64) parallel lexicographic sort+dedup — 3.62x
+
+`BlackThrush`. f32-pair twin of the c128 unique (8c899483). `try_zerocopy_c64_unique_flat`: view complex64 as
+[re,im] f32 pairs, defer NaN / -0.0 (0x8000_0000), parallel lexicographic sort, dedup adjacent-equal, write
+distinct to a fresh complex64 output. Byte-exact (bench-embedded `np.array_equal` assert PASSED hz2). Wired
+into unique() right after the c128 path. 1-D C-contig, itemsize 8, gate n>=1<<18.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 2M complex64, ~1M distinct):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(2M complex64, heavy-dedup)` | 65.5 ms | 236.9 ms | **3.62x** |
+
+Complex unique now covered for both c128 (3.43x) and c64 (3.62x). NEXT: complex searchsorted/isin (mirror the
+string byte lever but with the (re,im) comparator / bit-equality); unique(str,return_inverse) factorize.
+
 ## 2026-07-04 - WIN (SHIP): np.unique(flat complex128) parallel lexicographic sort+dedup — 3.43x
 
 `BlackThrush`. New (non-string) op: complex128 unique. numpy sorts complex lexicographically (real, then

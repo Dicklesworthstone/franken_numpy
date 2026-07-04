@@ -7758,6 +7758,40 @@ c = re + 1j * im\n";
     group.finish();
 }
 
+fn bench_complex64_unique_boundary(c: &mut Criterion) {
+    // np.unique on a flat complex64 array (f32-pair twin of the c128 path). numpy lexicographic
+    // introsort + dedup single-threaded; fnp parallel-sorts f32 pairs + dedups — bit-exact.
+    let mut group = c.benchmark_group("python_complex64_unique_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+re = rng.integers(0, 1000, 2_000_000).astype(np.float32)\n\
+im = rng.integers(0, 1000, 2_000_000).astype(np.float32)\n\
+c = (re + 1j * im).astype(np.complex64)\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let cc = ns.get_item("c").expect("c");
+        let fnp_u = module.getattr("unique").expect("fnp unique");
+        let numpy_u = numpy.getattr("unique").expect("numpy unique");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        let f = fnp_u.call1((&cc,)).expect("fnp unique");
+        let n = numpy_u.call1((&cc,)).expect("numpy unique");
+        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "complex64 unique mismatch");
+        group.bench_function("fnp_unique_c64_2m", |bn| bn.iter(|| black_box(fnp_u.call1((&cc,)).unwrap())));
+        group.bench_function("numpy_unique_c64_2m", |bn| bn.iter(|| black_box(numpy_u.call1((&cc,)).unwrap())));
+    });
+    group.finish();
+}
+
 fn bench_tile_boundary(c: &mut Criterion) {
     // np.tile of a 1-D array (scalar reps) -> ~4M output. numpy.tile is a single-threaded
     // python helper (reshape + C repeat); fnp does a parallel block memcpy. Bit-exact.
@@ -10122,6 +10156,7 @@ criterion_group!(
     bench_string_bytes_boundary,
     bench_string_bytes_ops2_boundary,
     bench_complex_unique_boundary,
+    bench_complex64_unique_boundary,
     bench_sort_axis_boundary,
     bench_parallel_binary_boundary,
     bench_take_axis_boundary,
