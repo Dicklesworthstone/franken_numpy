@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.searchsorted(sorted complex128 haystack, complex128 queries) parallel lexicographic binary search — 9.46x
+
+`BlackThrush`. numpy's complex searchsorted is a per-element lexicographic (real, imag) binary search,
+single-threaded (~844 ms @2M+2M on hz1, ~1.07 s local). `try_zerocopy_c128_searchsorted` (mirror of the string
+searchsorted but with the (re,im) pair comparator instead of memcmp): view haystack+queries as f64 pairs,
+defer NaN/-0.0, then `par_iter` over queries doing a lexicographic binary search (left = first h>=q, right =
+first h>q), writing int64 insertion indices. Insertion index is deterministic (no tie ambiguity). Proved
+byte-exact with a pure-numpy prototype (hand lex binary search == np.searchsorted for both sides) + bench
+assert. Wired into searchsorted() at the a_kind=="c" branch. Same-dtype complex128, 1-D C-contig, sorter=None,
+gate m>=1<<16.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz1, criterion bencher median, 2M haystack + 2M queries):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `searchsorted(2M c128 sorted, 2M c128 q, left)` | 89.2 ms | 844.0 ms | **9.46x** |
+
+CORRECTNESS: bench embeds `np.array_equal(fnp.searchsorted, np.searchsorted)` for left AND right — PASSED hz1.
+Win = embarrassingly-parallel independent binary searches. NEXT: complex isin (~529ms, hashed set of the 16
+bit-pattern bytes — equality so no NaN/-0.0 subtlety except -0.0==+0.0 which numpy's `in` also treats equal,
+verify); c64 searchsorted twin; unique(str,return_inverse) factorize.
+
 ## 2026-07-04 - WIN (SHIP): np.unique(flat complex64) parallel lexicographic sort+dedup — 3.62x
 
 `BlackThrush`. f32-pair twin of the c128 unique (8c899483). `try_zerocopy_c64_unique_flat`: view complex64 as
