@@ -7444,6 +7444,56 @@ test = np.concatenate([a[:100_000], trand])\n";
     group.finish();
 }
 
+fn bench_string_union1d_boundary(c: &mut Criterion) {
+    // np.union1d of two unicode ('U') arrays = sorted-unique of the concatenation. numpy does 2-3
+    // slow per-record sorts (~3.2s @2M+2M); fnp concatenates + routes through the native 'U' unique
+    // (memcmp sort + dedup) — bit-exact.
+    let mut group = c.benchmark_group("python_string_union1d_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+a = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n\
+b = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("string union1d setup");
+        let a = ns.get_item("a").expect("a");
+        let b = ns.get_item("b").expect("b");
+        let fnp_u = module.getattr("union1d").expect("fnp union1d");
+        let numpy_u = numpy.getattr("union1d").expect("numpy union1d");
+        let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+        // Correctness gate.
+        let f = fnp_u.call1((&a, &b)).expect("fnp union1d");
+        let n = numpy_u.call1((&a, &b)).expect("numpy union1d");
+        let eq: bool = np_array_equal
+            .call1((&f, &n))
+            .expect("array_equal")
+            .extract()
+            .expect("bool");
+        assert!(eq, "string union1d correctness mismatch");
+        group.bench_function("fnp_union1d_U8_2m", |bn| {
+            bn.iter(|| black_box(fnp_u.call1((&a, &b)).expect("fnp union1d")));
+        });
+        group.bench_function("numpy_union1d_U8_2m", |bn| {
+            bn.iter(|| black_box(numpy_u.call1((&a, &b)).expect("numpy union1d")));
+        });
+    });
+    group.finish();
+}
+
 fn bench_tile_boundary(c: &mut Criterion) {
     // np.tile of a 1-D array (scalar reps) -> ~4M output. numpy.tile is a single-threaded
     // python helper (reshape + C repeat); fnp does a parallel block memcpy. Bit-exact.
@@ -9802,6 +9852,7 @@ criterion_group!(
     bench_string_unique_boundary,
     bench_string_searchsorted_boundary,
     bench_string_isin_boundary,
+    bench_string_union1d_boundary,
     bench_sort_axis_boundary,
     bench_parallel_binary_boundary,
     bench_take_axis_boundary,

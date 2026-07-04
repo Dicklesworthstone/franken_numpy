@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.union1d(two same-width 'U' arrays, Latin-1) = concat + native unique — 3.86x
+
+`BlackThrush`. Fifth string-vein op, opening the string SET-OP family (the biggest string gaps: numpy string
+intersect1d/union1d/setdiff1d/setxor1d are 3.1-3.8 s @2M+2M locally — each does 2-3 slow per-record sorts).
+union1d is the cleanest: `union1d(a,b) == unique(concatenate(a,b))`, so `try_native_string_union1d` ravels
+both, numpy.concatenate's them (fast C copy), and routes straight through the already-landed native 'U' unique
+path (Latin-1 pre-scan + memcmp sort + contiguous dedup) — zero new sort code, BYTE-EXACT by construction.
+Same-width 'U', wide codepoints defer (via the unique helper's own gate).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 2M + 2M):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `union1d(2M 'U8', 2M 'U8')` | 178.1 ms | 688.2 ms | **3.86x** |
+
+CORRECTNESS: bench embeds `np.array_equal(fnp.union1d, np.union1d)` — PASSED on hz2. NOTE: numpy string
+union1d is worker-variable (688 ms hz2 vs ~3258 ms local loaded), so the ratio is the honest clean-worker
+number (a loaded-numpy comparison would read ~18x — don't). String vein: sort 5.9x / unique >=1.74x /
+searchsorted 12.4x / isin 18.3x / union1d 3.86x. NEXT (same lever, bigger numpy gaps): intersect1d /
+setdiff1d / setxor1d — each = a hashed-set membership FILTER over unique(a) then sorted-unique output
+(intersect = unique(a) ∩ set(b); setdiff = unique(a) \ set(b); setxor = symmetric); unique(str,return_inverse)
+string factorize (~587ms).
+
 ## 2026-07-04 - WIN (SHIP): np.isin(1-D 'U' element, 'U' test) hashed record-byte set — 18.27x (NO Latin-1 gate)
 
 `BlackThrush`. Fourth op in the string vein. KEY difference from sort/searchsorted: isin is EQUALITY, not
