@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.lexsort(multi-key float/mixed) via sortable byte-transform — 7.8x / 13.3x
+
+`BlackThrush`. The byte-transform lever (9c56396d) generalizes BEYOND structured records to lexsort. numpy's
+lexsort on FLOAT keys is a K-PASS comparison sort (~611ms 2 keys / ~1s 3 keys @2M); the packed-composite path
+only handles small-range int / integral float (else it delegated to the slow K-pass native comparison path).
+`try_native_lexsort_valuelex`: transform each key column into sortable big-endian bytes and concatenate them
+PRIMARY-FIRST (numpy's LAST key is primary) into one per-row record, then a SINGLE stable memcmp sort of the
+row indices ((record, orig index)) == numpy's lexsort permutation. Float keys DEFER on NaN/-0.0. Wired into
+lexsort() after the composite for float-promoted keys. BYTE-EXACT (multi-key float + mixed int/float verified).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 2M rows, non-integral f64 keys):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `lexsort(2 f64 keys)` | 78.5 ms | 611.7 ms | **7.8x** |
+| `lexsort(3 f64 keys)` | 75.2 ms | 1001.0 ms | **13.3x** |
+
+CORRECTNESS: bench asserts `np.array_equal` (2-key + 3-key) — PASSED. fnp time is ~CONSTANT in key count (the
+record just widens: one sort of wider keys) while numpy scales linearly (K passes) — so the multiple grows with
+more keys. **The sortable byte-transform is now a general value-lex primitive: it powers mixed-struct
+unique/factorize/setops/searchsorted AND multi-key lexsort — anything reducible to "sort rows by a tuple of
+typed keys" becomes one parallel memcmp sort of transformed records.**
+
 ## 2026-07-04 - WIN (SHIP): np.unique(1-D MIXED-field structured, return_index/inverse/counts) factorize — 18.8x
 
 `BlackThrush`. Final piece of the mixed-struct family: record factorize/group-by via the byte-transform value-lex
