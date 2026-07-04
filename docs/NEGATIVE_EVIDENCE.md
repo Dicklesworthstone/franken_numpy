@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): numpy 2.x array-API unique_counts/unique_all/unique_inverse/unique_values routing — 2.16x / 3.03x
+
+`BlackThrush`. The numpy 2.x array-API `unique_*` functions were fnp `core_numpy_passthrough` stubs -> they
+DELEGATED to numpy's slow generic unique, missing all of fnp's fast unique paths (string/complex/datetime/
+structured/etc.). `array_api_unique_route` routes the single-array/no-kwargs case through fnp's fast `unique(x,
+return_*=True)` and re-wraps the (values, ...extras) tuple in numpy's exact result namedtuple (imported from
+numpy.lib._arraysetops_impl; any failure -> passthrough, correctness preserved). unique_values returns the bare
+values array. BYTE-EXACT (each namedtuple field verified vs numpy).
+
+MEASURED (per-crate `rch exec -- cargo bench` on ovh-a, criterion bencher median, 2M U8 strings):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique_counts(2M U8)` | 116.6 ms | 251.4 ms | **2.16x** |
+| `unique_all(2M U8)` | 139.5 ms | 422.5 ms | **3.03x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on EACH namedtuple field of both ops — PASSED. Modest (the multiple
+= whatever fnp's underlying unique wins for that dtype; here string unique ~2-3x) but a clean whole-family fix
+(all four array-API unique fns now inherit fnp's fast unique for every dtype instead of delegating). REUSABLE:
+thin numpy-2.x array-API wrappers (unique_*, and likely others) that just call a classic op + repackage should
+route to the fnp classic op + repackage, not passthrough.
+
 ## 2026-07-04 - WIN (SHIP): np.sort(1-D float-field structured) via sortable byte-transform — 8.97x
 
 `BlackThrush`. The existing struct-sort path routes through numpy.lexsort, which is a slow K-PASS comparison

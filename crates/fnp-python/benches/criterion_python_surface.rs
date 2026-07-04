@@ -8376,6 +8376,51 @@ a = np.zeros(1_000_000, dtype=dt); a['id'] = rng.integers(0, 10000, 1_000_000); 
     group.finish();
 }
 
+fn bench_unique_arrayapi_boundary(c: &mut Criterion) {
+    // np.unique_counts / unique_all (numpy 2.x array-API). numpy delegates to its generic unique (~411ms
+    // unique_counts / ~742ms unique_all @2M U8); fnp routes through its fast string unique — bit-exact.
+    let mut group = c.benchmark_group("python_unique_arrayapi_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+s = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let s = ns.get_item("s").expect("s");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        // correctness: compare each namedtuple field of unique_counts and unique_all
+        for op in ["unique_counts", "unique_all"] {
+            let fnp_fn = module.getattr(op).expect("fnp op");
+            let np_fn = numpy.getattr(op).expect("numpy op");
+            let f = fnp_fn.call1((&s,)).expect("fnp").downcast_into::<pyo3::types::PyTuple>().unwrap();
+            let n = np_fn.call1((&s,)).expect("numpy").downcast_into::<pyo3::types::PyTuple>().unwrap();
+            let nfields = if op == "unique_counts" { 2 } else { 4 };
+            for i in 0..nfields {
+                let eq: bool = eqf.call1((f.get_item(i).unwrap(), n.get_item(i).unwrap())).unwrap().extract().unwrap();
+                assert!(eq, "{op} field {i} mismatch");
+            }
+        }
+        let fnp_uc = module.getattr("unique_counts").unwrap();
+        let np_uc = numpy.getattr("unique_counts").unwrap();
+        let fnp_ua = module.getattr("unique_all").unwrap();
+        let np_ua = numpy.getattr("unique_all").unwrap();
+        group.bench_function("fnp_unique_counts_U8_2m", |bn| bn.iter(|| black_box(fnp_uc.call1((&s,)).unwrap())));
+        group.bench_function("numpy_unique_counts_U8_2m", |bn| bn.iter(|| black_box(np_uc.call1((&s,)).unwrap())));
+        group.bench_function("fnp_unique_all_U8_2m", |bn| bn.iter(|| black_box(fnp_ua.call1((&s,)).unwrap())));
+        group.bench_function("numpy_unique_all_U8_2m", |bn| bn.iter(|| black_box(np_ua.call1((&s,)).unwrap())));
+    });
+    group.finish();
+}
+
 fn bench_isin_struct_boundary(c: &mut Criterion) {
     // np.isin(1-D structured, structured) record membership. numpy falls back to a serial sort of
     // |element|+|test| (~4s @1M+500k); fnp hashes the test record bytes + parallel lookup — bit-exact.
@@ -11802,6 +11847,7 @@ criterion_group!(
     bench_unique_struct_mixed_factorize_boundary,
     bench_lexsort_float_boundary,
     bench_sort_struct_mixed_boundary,
+    bench_unique_arrayapi_boundary,
     bench_isin_struct_boundary,
     bench_isin_struct_float_boundary,
     bench_searchsorted_struct_boundary,
