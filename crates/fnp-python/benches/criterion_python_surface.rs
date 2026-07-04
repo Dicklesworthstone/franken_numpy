@@ -8304,6 +8304,46 @@ a = np.concatenate([base, base])\n";
     group.finish();
 }
 
+fn bench_unique_cols_axis1_boundary(c: &mut Criterion) {
+    // np.unique(2-D wide i64, axis=1) — unique columns. numpy sorts columns via its slow void comparator
+    // (~515ms @3x500k); fnp transposes to C-contig, reuses the row-unique, transposes back — bit-exact.
+    let mut group = c.benchmark_group("python_unique_cols_axis1_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+base = rng.integers(-10**15, 10**15, (3, 250_000)).astype(np.int64)\n\
+a = np.concatenate([base, base], axis=1)\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let a = ns.get_item("a").expect("a");
+        let fnp_u = module.getattr("unique").expect("fnp unique");
+        let numpy_u = numpy.getattr("unique").expect("numpy unique");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        let kw = PyDict::new(py); kw.set_item("axis", 1_i64).unwrap();
+        let f = fnp_u.call((&a,), Some(&kw)).expect("fnp unique");
+        let n = numpy_u.call((&a,), Some(&kw)).expect("numpy unique");
+        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "unique cols axis=1 mismatch");
+        group.bench_function("fnp_unique_cols_i64_3x500k", |bn| {
+            let kw = PyDict::new(py); kw.set_item("axis", 1_i64).unwrap();
+            bn.iter(|| black_box(fnp_u.call((&a,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("numpy_unique_cols_i64_3x500k", |bn| {
+            let kw = PyDict::new(py); kw.set_item("axis", 1_i64).unwrap();
+            bn.iter(|| black_box(numpy_u.call((&a,), Some(&kw)).unwrap()));
+        });
+    });
+    group.finish();
+}
+
 fn bench_tile_boundary(c: &mut Criterion) {
     // np.tile of a 1-D array (scalar reps) -> ~4M output. numpy.tile is a single-threaded
     // python helper (reshape + C repeat); fnp does a parallel block memcpy. Bit-exact.
@@ -10678,6 +10718,7 @@ criterion_group!(
     bench_unique_rows_f64_factorize_boundary,
     bench_unique_rows_c128_boundary,
     bench_unique_rows_c128_factorize_boundary,
+    bench_unique_cols_axis1_boundary,
     bench_sort_axis_boundary,
     bench_parallel_binary_boundary,
     bench_take_axis_boundary,

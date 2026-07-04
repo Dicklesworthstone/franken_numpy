@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.unique(2-D wide array, axis=1) unique COLUMNS via transpose→row-unique — 7.6x
+
+`BlackThrush`. axis=1 (unique columns) reduces to the row path. numpy sorts columns value-lex via its slow
+void comparator (~333-515ms @3x500k). `try_native_unique_cols_via_transpose`: `ascontiguousarray(a.T)` makes a
+fresh (ncols, nrows) C-contig array (each original column is now a row), routes through the row-unique helpers
+(int/f64/complex128 — whichever gates), then `ascontiguousarray(result.T)` gives numpy's (nrows, n_unique_cols)
+layout. The row helpers' rows>=1<<16 gate means this engages only for WIDE arrays (many columns) — exactly
+where axis=1 is a real gap; narrow arrays return None → delegate. BYTE-EXACT (verified vs numpy i64/f64). ZERO
+new sort code (reuses all three axis=0 helpers). Wired into unique(axis=1) after the cols-composite path.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 3 x 500k int64 ~250k distinct cols):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(3x500k i64, axis=1)` | 43.7 ms | 333.4 ms | **7.6x** |
+
+CORRECTNESS: bench asserts `np.array_equal` — PASSED. Lower multiple than axis=0 (10.5x) because of the two
+transpose copies (strided→contiguous read/write), but still solid; and it inherits all three dtypes (i64/u64/
+f64/c128) for FREE via the row helpers. The value-lex unique vein now covers axis=0 (i64/u64/f64/c128, plain +
+factorize) AND axis=1 (wide arrays, all dtypes). Remaining: narrow-int/f32 rows; int-only structured 1-D.
+
 ## 2026-07-04 - WIN (SHIP): np.unique(2-D complex128, axis=0, return_index/inverse/counts) via f64-view reuse — 17.9x
 
 `BlackThrush`. c128 factorize twin of the plain c128 row-unique (e730c4e0), same f64-view trick. The row-level
