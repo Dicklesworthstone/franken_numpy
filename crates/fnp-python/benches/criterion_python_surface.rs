@@ -8180,6 +8180,43 @@ b = np.zeros(1_000_000, dtype=dt); b['a'] = rng.integers(0, 3000, 1_000_000); b[
     group.finish();
 }
 
+fn bench_c128_setops_boundary(c: &mut Criterion) {
+    // np.union1d / intersect1d / setdiff1d / setxor1d on complex128. numpy delegates to a serial sort of
+    // |a|+|b| (~2.7-3.1s @2M+2M); fnp reuses c128-unique + a hashed 16-byte-record filter (finite only).
+    let mut group = c.benchmark_group("python_c128_setops_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+a = (rng.integers(0, 3000, 2_000_000) + 1j * rng.integers(0, 3000, 2_000_000)).astype(np.complex128)\n\
+b = (rng.integers(0, 3000, 2_000_000) + 1j * rng.integers(0, 3000, 2_000_000)).astype(np.complex128)\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let a = ns.get_item("a").expect("a");
+        let b = ns.get_item("b").expect("b");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        // setxor1d intentionally excluded: measured only 1.22x (~parity) and reverted.
+        for op in ["union1d", "intersect1d", "setdiff1d"] {
+            let fnp_fn = module.getattr(op).expect("fnp op");
+            let np_fn = numpy.getattr(op).expect("numpy op");
+            let f = fnp_fn.call1((&a, &b)).expect("fnp setop");
+            let n = np_fn.call1((&a, &b)).expect("numpy setop");
+            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "{op} c128 mismatch");
+            group.bench_function(format!("fnp_{op}_c128_2m_2m"), |bn| bn.iter(|| black_box(fnp_fn.call1((&a, &b)).unwrap())));
+            group.bench_function(format!("numpy_{op}_c128_2m_2m"), |bn| bn.iter(|| black_box(np_fn.call1((&a, &b)).unwrap())));
+        }
+    });
+    group.finish();
+}
+
 fn bench_unique_rows_lexsort_boundary(c: &mut Criterion) {
     // np.unique(2-D large-range int64, axis=0). numpy sorts rows with its slow void comparator
     // (~570ms @500kx3); the packed-composite path can't pack this range, so fnp does a parallel
@@ -10971,6 +11008,7 @@ criterion_group!(
     bench_unique_struct_int_factorize_boundary,
     bench_isin_struct_boundary,
     bench_struct_setops_boundary,
+    bench_c128_setops_boundary,
     bench_unique_rows_lexsort_boundary,
     bench_unique_rows_factorize_boundary,
     bench_unique_rows_f64_boundary,

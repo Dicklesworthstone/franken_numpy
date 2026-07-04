@@ -4,6 +4,32 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): complex128 set-ops union1d/intersect1d/setdiff1d — 1.94-3.17x (setxor reverted ~parity)
+
+`BlackThrush`. numpy's complex128 set-ops DELEGATE (the dispatch falls back on complex) to a serial sort of
+|a|+|b|. Same two levers as the structured/string set-ops: sorted-unique base = `try_zerocopy_c128_unique_flat`
+(parallel lexicographic (re,im) sort+dedup) + a hashed 16-byte-record membership filter, then `base[mask]`.
+union1d = c128-unique(concat); intersect/setdiff = c128-unique(a) + mask(in/not-in set(b)). FINITE, non-(-0.0)
+only: byte-equality == value-equality; NaN/-0.0 (numpy collapses ±0.0, NaN∉set) -> DEFER (c128-unique defers a,
+explicit pre-scan defers b). Helpers `try_native_c128_union1d` / `_intersect_setdiff`; wired after the struct
+paths. BYTE-EXACT for finite (verified vs numpy).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz1, criterion bencher median, 2M + 2M finite complex128):
+| Op | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `union1d` | 224.8 ms | 587.7 ms | **2.61x** |
+| `intersect1d` | 315.4 ms | 1001.2 ms | **3.17x** |
+| `setdiff1d` | 326.6 ms | 632.2 ms | **1.94x** |
+| ~~`setxor1d`~~ | 810.6 ms | 986.0 ms | 1.22x (REVERTED) |
+
+CORRECTNESS: bench asserts `np.array_equal` on the 3 shipped ops — PASSED. Much weaker than the STRUCTURED
+set-ops (15-38x) because numpy's complex sort is a reasonably-fast lexicographic sort (NOT the pathological
+per-field VOID comparator numpy uses for structured), so there is less slowness to beat; and the local 2.7-3.1s
+scan was ~3-5x LOAD-INFLATED (clean hz1 numpy = 0.6-1.0s). setxor REVERTED at 1.22x: it must unique the full 4M
+concat + build 2 hash sets, so its overhead is inherent and ~parity. RULE: the record-hash/unique set-op lever
+wins BIG only where numpy's fallback is the slow void/serial-sort path (structured/string); for complex (fast
+native sort) it is a modest 2-3x. Don't extend to float set-ops expecting more than ~2-3x.
+
 ## 2026-07-04 - WIN (SHIP): structured set-ops union1d/intersect1d/setdiff1d/setxor1d — 15.6-37.8x (4 ops)
 
 `BlackThrush`. numpy's structured set-ops do 2-3 serial per-record void-comparator sorts (~1.8-4.6s @1M+1M).
