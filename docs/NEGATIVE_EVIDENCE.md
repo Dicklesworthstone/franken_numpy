@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - SHIP: `np.logaddexp2(f16, f16)` native finite widen path - 7.23x faster than NumPy
+
+`SilverBridge`. `np.logaddexp2` was the missing sibling in the existing f16 binary
+transcendental fast path: NumPy widens f16 operands to f32, runs `npy_logaddexp2f`
+single-threaded, and narrows back to f16. Added the same finite-only parallel
+widen/op/narrow route used by `arctan2`, `hypot`, and `logaddexp`, with non-finite
+operands still delegated so NumPy owns warning and special-value behavior.
+
+Per-crate RCH bench command: `AGENT_NAME=SilverBridge CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-silverbridge RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface -- logaddexp2_f16_16m --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher --noplot`.
+Worker: `hz2`.
+
+| Probe | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `logaddexp2(f16 16M, f16 16M)` | 38,113,743 | 275,713,782 | 0.138x (7.23x faster) | ship |
+
+Validation: `AGENT_NAME=SilverBridge CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-silverbridge RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo check -p fnp-python --lib --bench criterion_python_surface` passed on `ovh-a`; `AGENT_NAME=SilverBridge CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-silverbridge RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo test -p fnp-python --test conformance_logaddexp -- --nocapture` passed on `vmi1149989` (`11 passed`); deterministic NumPy formula proxy matched `938,848` finite f16 pairs with `0` bit mismatches. The focused lib-test target is currently blocked before this new test by pre-existing `where_py` signature errors at `crates/fnp-python/src/lib.rs:89375`, `:89400`, and `:89426`.
+
 ## 2026-07-04 - SURFACE: f64 `histogram` 256-bin rows are still 6.4-7.1x faster than NumPy on current main
 
 `BlackThrush`. Fresh per-crate RCH recheck of the existing `fnp-python` Criterion

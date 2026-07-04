@@ -5170,10 +5170,10 @@ fn bench_norm_frobenius_boundary(c: &mut Criterion) {
     group.finish();
 }
 
-// f16 arctan2/hypot/logaddexp: numpy has no f16 ALU, so it widens f16->f32, applies
-// the f32 transcendental single-threaded, and narrows (~290/~170/~350ms @16M). The
-// native parallel widen-op-narrow is bit-exact (verified over 161M f16 pairs) and wins
-// big. RAYON_NUM_THREADS=1 vs default isolates the parallel gain.
+// f16 arctan2/hypot/logaddexp/logaddexp2: numpy has no f16 ALU, so it widens f16->f32, applies
+// the f32 transcendental single-threaded, and narrows (~290/~170/~350/~276ms @16M). The
+// native parallel widen-op-narrow is bit-exact for the finite fast-path domains and wins big.
+// RAYON_NUM_THREADS=1 vs default isolates the parallel gain.
 fn bench_f16_binary_transcendental_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_f16_binary_transcendental_boundary");
     group.sample_size(10);
@@ -5201,7 +5201,7 @@ pexp = (rng.standard_normal(16_000_000) * 0.5).astype(np.float16)\n";
         .expect("f16 binary setup");
         let x = ns.get_item("x").expect("x");
         let y = ns.get_item("y").expect("y");
-        for name in ["arctan2", "hypot", "logaddexp"] {
+        for name in ["arctan2", "hypot", "logaddexp", "logaddexp2"] {
             let fnp_fn = module.getattr(name).expect("fnp fn");
             let numpy_fn = numpy.getattr(name).expect("numpy fn");
             group.bench_function(format!("fnp_{name}_f16_16m"), |b| {
