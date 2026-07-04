@@ -8054,6 +8054,59 @@ a['c'] = rng.integers(-50, 50, n)\n";
     group.finish();
 }
 
+fn bench_unique_rows_datetime_boundary(c: &mut Criterion) {
+    // np.unique(2-D datetime64, axis=0) plain + factorize. numpy sorts records via its slow void comparator;
+    // fnp views int64 and routes to the int row-unique, viewing the result back as datetime64[unit].
+    let mut group = c.benchmark_group("python_unique_rows_datetime_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+base = rng.integers(0, 100000, (250_000, 3)).astype('datetime64[s]')\n\
+a = np.concatenate([base, base])\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let a = ns.get_item("a").expect("a");
+        let fnp_u = module.getattr("unique").expect("fnp unique");
+        let numpy_u = numpy.getattr("unique").expect("numpy unique");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        // plain
+        let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+        let f = fnp_u.call((&a,), Some(&kw)).expect("fnp unique");
+        let n = numpy_u.call((&a,), Some(&kw)).expect("numpy unique");
+        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "datetime rows plain mismatch");
+        // factorize
+        let kwf = PyDict::new(py);
+        kwf.set_item("axis", 0_i64).unwrap();
+        kwf.set_item("return_index", true).unwrap();
+        kwf.set_item("return_inverse", true).unwrap();
+        kwf.set_item("return_counts", true).unwrap();
+        let ft = fnp_u.call((&a,), Some(&kwf)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+        let nt = numpy_u.call((&a,), Some(&kwf)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+        for i in 0..4 {
+            let eq: bool = eqf.call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap())).unwrap().extract().unwrap();
+            assert!(eq, "datetime rows factorize element {i} mismatch");
+        }
+        group.bench_function("fnp_unique_rows_datetime_500kx3", |bn| {
+            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            bn.iter(|| black_box(fnp_u.call((&a,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("numpy_unique_rows_datetime_500kx3", |bn| {
+            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            bn.iter(|| black_box(numpy_u.call((&a,), Some(&kw)).unwrap()));
+        });
+    });
+    group.finish();
+}
+
 fn bench_unique_struct_int_factorize_boundary(c: &mut Criterion) {
     // np.unique(1-D structured all-int64, return_index+inverse+counts) — record factorize.
     let mut group = c.benchmark_group("python_unique_struct_int_factorize_boundary");
@@ -11136,6 +11189,7 @@ criterion_group!(
     bench_complex64_ops_boundary,
     bench_datetime_unique_boundary,
     bench_unique_struct_int_boundary,
+    bench_unique_rows_datetime_boundary,
     bench_unique_struct_int_factorize_boundary,
     bench_isin_struct_boundary,
     bench_searchsorted_struct_boundary,

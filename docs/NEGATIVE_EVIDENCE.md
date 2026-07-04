@@ -27,6 +27,25 @@ np.unique(a, axis=0))` before timing. Focused conformance passed remotely:
 (1/1 on `ovh-a`). Compile gate passed remotely on `hz2`:
 `cargo check -p fnp-python --lib --bench criterion_python_surface`. Both used `AGENT_NAME=cod` and the project
 target dir above. The filtered local bench process was interrupted only after both target timing rows emitted.
+## 2026-07-04 - WIN (SHIP): np.unique(2-D datetime64/timedelta64, axis=0) + factorize via int64-view — 6.97x
+
+`BlackThrush`. datetime/timedelta rows axis=0 unique was uncovered (the axis=0 dispatch handles int/f64/f32/c128
+rows but not 'M'/'m'). datetime is int64-backed and its value order == int64 tick order, so
+`try_native_unique_rows_datetime` views the (n, ncols) M8/m8 array as int64, routes to the int row-unique
+(plain or _full), and views the (nu, ncols) int64 unique back to the SAME M8/m8[unit] (index/inverse/counts
+are record-level, unchanged). DEFER on any NaT (== i64::MIN): numpy orders NaT-containing records differently
+from int64 MIN-first. Wired into unique(axis=0) after the c128 rows path (both plain and _full) AND into the
+axis=1 transpose wrapper (datetime cols for free). BYTE-EXACT for finite (plain + factorize verified vs numpy).
+
+MEASURED (per-crate `rch exec -- cargo bench` on remote, criterion bencher median, 500k x 3 datetime64[s]):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(500kx3 datetime64, axis=0)` | 71.8 ms | 500.7 ms | **6.97x** |
+
+CORRECTNESS: bench asserts `np.array_equal` for BOTH plain and the 4-tuple factorize — PASSED. Completes the
+axis=0 unique vein for temporal dtypes (int64-view routing family: complex→f64, datetime→int64,
+structured→int64). Modest gap vs the numeric rows (numpy's void comparator on int64-backed datetime records is
+a bit faster) but a clean ~7x reusing the proven int row helper + a ~40-line view wrapper.
 
 ## 2026-07-04 - WIN (SHIP): np.lexsort(integral-valued f64 keys) packed composite — 15.31x vs legacy NumPy
 
