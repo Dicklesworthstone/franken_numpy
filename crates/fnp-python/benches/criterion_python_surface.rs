@@ -7605,6 +7605,64 @@ b = np.concatenate([a[:1_000_000], brand])\n";
     group.finish();
 }
 
+fn bench_string_bytes_boundary(c: &mut Criterion) {
+    // 'S' (bytes) dtype twins of sort/unique/union1d. Bytes are already in byte order == numpy order
+    // (no codepoint subtlety, no Latin-1 gate), so the same byte helpers are bit-exact. numpy is
+    // equally slow on 'S' (sort ~238ms, unique ~1245ms, union1d ~3162ms @2M).
+    let mut group = c.benchmark_group("python_string_bytes_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+a = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint8).view('S8').reshape(-1)\n\
+b = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint8).view('S8').reshape(-1)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("string bytes setup");
+        let a = ns.get_item("a").expect("a");
+        let b = ns.get_item("b").expect("b");
+        let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+        // Correctness gates for sort / unique / union1d on 'S8'.
+        for op in ["sort", "unique"] {
+            let f = module.getattr(op).unwrap().call1((&a,)).expect("fnp op");
+            let n = numpy.getattr(op).unwrap().call1((&a,)).expect("numpy op");
+            let eq: bool = np_array_equal.call1((&f, &n)).unwrap().extract().unwrap();
+            assert!(eq, "bytes {op} correctness mismatch");
+        }
+        {
+            let f = module.getattr("union1d").unwrap().call1((&a, &b)).expect("fnp union1d");
+            let n = numpy.getattr("union1d").unwrap().call1((&a, &b)).expect("numpy union1d");
+            let eq: bool = np_array_equal.call1((&f, &n)).unwrap().extract().unwrap();
+            assert!(eq, "bytes union1d correctness mismatch");
+        }
+        let fnp_sort = module.getattr("sort").unwrap();
+        let numpy_sort = numpy.getattr("sort").unwrap();
+        let fnp_uniq = module.getattr("unique").unwrap();
+        let numpy_uniq = numpy.getattr("unique").unwrap();
+        let fnp_uni = module.getattr("union1d").unwrap();
+        let numpy_uni = numpy.getattr("union1d").unwrap();
+        group.bench_function("fnp_sort_S8_2m", |bn| bn.iter(|| black_box(fnp_sort.call1((&a,)).unwrap())));
+        group.bench_function("numpy_sort_S8_2m", |bn| bn.iter(|| black_box(numpy_sort.call1((&a,)).unwrap())));
+        group.bench_function("fnp_unique_S8_2m", |bn| bn.iter(|| black_box(fnp_uniq.call1((&a,)).unwrap())));
+        group.bench_function("numpy_unique_S8_2m", |bn| bn.iter(|| black_box(numpy_uniq.call1((&a,)).unwrap())));
+        group.bench_function("fnp_union1d_S8_2m", |bn| bn.iter(|| black_box(fnp_uni.call1((&a, &b)).unwrap())));
+        group.bench_function("numpy_union1d_S8_2m", |bn| bn.iter(|| black_box(numpy_uni.call1((&a, &b)).unwrap())));
+    });
+    group.finish();
+}
+
 fn bench_tile_boundary(c: &mut Criterion) {
     // np.tile of a 1-D array (scalar reps) -> ~4M output. numpy.tile is a single-threaded
     // python helper (reshape + C repeat); fnp does a parallel block memcpy. Bit-exact.
@@ -9966,6 +10024,7 @@ criterion_group!(
     bench_string_union1d_boundary,
     bench_string_setops_boundary,
     bench_string_setxor_boundary,
+    bench_string_bytes_boundary,
     bench_sort_axis_boundary,
     bench_parallel_binary_boundary,
     bench_take_axis_boundary,

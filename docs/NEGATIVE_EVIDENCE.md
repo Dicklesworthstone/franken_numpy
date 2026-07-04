@@ -4,6 +4,29 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): 'S' (bytes) dtype twin of sort/unique/union1d — 4.09x / 22.6x / 22.2x
+
+`BlackThrush`. The string-vein helpers were gated to 'U' (UCS4) but the byte machinery is dtype-agnostic. 'S'
+(numpy bytes) records are ALREADY in byte order == numpy's sort order (bytes have no codepoint layer), so there
+is NO Latin-1 / wide-char subtlety AT ALL — the exact same memcmp sort / dedup / concat helpers are bit-exact
+for 'S'. Generalized 3 helpers (`try_native_string_sort_flat`, `_unique_flat`, `_union1d`): accept kind in
+{'U','S'}, capture `is_bytes` to SKIP the UCS4-only wide-char pre-scan and the itemsize%4 check for 'S'. Output
+dtype = input dtype ('S' stays 'S'). numpy is even SLOWER on 'S' than 'U' for the group ops.
+
+MEASURED (per-crate `rch exec -- cargo bench` on vmi1227854, criterion bencher median, 2M 'S8'):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `sort(2M 'S8')` | 70.5 ms | 288.5 ms | **4.09x** |
+| `unique(2M 'S8')` | 88.5 ms | 1998 ms | **22.6x** |
+| `union1d(2M 'S8', 2M 'S8')` | 193.8 ms | 4306 ms | **22.2x** |
+
+CORRECTNESS: bench embeds `np.array_equal` for sort/unique/union1d on 'S8' — PASSED. **REUSABLE: a byte-record
+helper written for 'U' generalizes to 'S' for FREE by dropping the wide-char pre-scan + %4 check (bytes need
+neither) — the sort/dedup/gather/concat logic is identical.** Remaining 'S' twins (mechanical, same relax):
+searchsorted (relax the a_kind=="U" DISPATCH check + the v_dtype gate + %4), isin, intersect/setdiff/setxor
+(relax the a_dt/b_dt "U" gate + %4 + guard the wide pre-scan). Note isin has NO pre-scan already (equality),
+so it's just the kind+%4 gate.
+
 ## 2026-07-04 - WIN (SHIP): np.setxor1d(two same-width 'U', Latin-1) source-tagged sort — 6.55x (string set-op family COMPLETE)
 
 `BlackThrush`. Eighth string-vein op; COMPLETES the string set-op family (union/intersect/setdiff/setxor).
