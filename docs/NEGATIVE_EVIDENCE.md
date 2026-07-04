@@ -24,6 +24,27 @@ conformance passed remotely on `ovh-a`: `cargo test -p fnp-python --test conform
 searchsorted_structured_uint64_records_match_numpy -- --nocapture` (1/1). Compile gate passed locally with the
 same target dir after `rch` repeatedly selected `ovh-b` and hit the known `zerocopy` SIGILL:
 `cargo check -p fnp-python --lib --bench criterion_python_surface`.
+## 2026-07-04 - WIN (SHIP): datetime64/timedelta64 set-ops union/intersect/setdiff/setxor via int64-view — 6.8-7.6x
+
+`BlackThrush`. numpy's TEMPORAL set-ops DELEGATE to a serial sort (~105-113ms clean @2M+2M) — they do NOT use
+the fast int64 path, even though datetime is int64-backed. `try_native_datetime_setop` views both operands as
+int64, routes to fnp's FAST int64 set-op (recursively — int64 args skip the datetime path), and views the
+sorted-unique result back to the SAME M8/m8[unit]. DEFER on any NaT (== i64::MIN): numpy orders NaT last but
+the int64 op orders MIN first. Same-dtype (same unit) required; intersect skips when assume_unique/
+return_indices set; setdiff/setxor already fall back on assume_unique. BYTE-EXACT for finite (all four verified).
+
+MEASURED (per-crate `rch exec -- cargo bench` on vmi1152480, criterion bencher median, 2M + 2M datetime64[s]):
+| Op | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `union1d` | 15.5 ms | 112.8 ms | **7.3x** |
+| `intersect1d` | 14.7 ms | 105.8 ms | **7.2x** |
+| `setdiff1d` | 16.3 ms | 110.3 ms | **6.8x** |
+| `setxor1d` | 14.3 ms | 108.1 ms | **7.6x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on all four ops — PASSED. The local 1.2-2.0s scan was ~12x
+LOAD-INFLATED (clean numpy = ~110ms). REUSABLE: int64-backed temporal ops route to the fast int64 kernels via
+`.view('int64')` + view-back — the same routing that covers datetime unique/argmin/sort/rows; here it flips
+numpy's temporal set-op DELEGATION (no fast path) into fnp's fast int64 set-op. NaT defer.
 
 ## 2026-07-04 - WIN (SHIP): np.unique(2-D int32, axis=0) via exact int64 row-widening - 9.63x vs legacy NumPy
 
