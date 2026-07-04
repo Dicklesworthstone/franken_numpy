@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - NO-SHIP (REVERTED, LOSS): np.sort(float16) via f32 widening — 0.75x
+
+`BlackThrush`. Hypothesis: extend the f16-via-f32-widening family (cf2d26da) to sort. Implemented
+`try_native_f16_sort` (pre-scan NaT... NaN/-0.0 defer via uint16 bits, widen f32, numpy AVX sort, narrow f16;
+byte-exact verified for finite non-(-0.0)).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 4M float16):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `sort(4M f16)` | 132.0 ms | 99.1 ms | **0.75x (LOSS)** |
+
+REVERTED (git-stashed). ROOT CAUSE + RULE: **unlike f16 unique/isin/searchsorted/set-ops (numpy does a slow
+sort-based op with no f16 fast path -> the fnp f32 KERNEL win of 10-40x dwarfs the two astype copies), numpy's
+f16 SORT itself is only ~99ms (NOT pathological — the local 164ms scan was ~1.65x load-inflated). There is no
+kernel win for a plain sort, so the widen(astype 8MB)+f32-sort+narrow(astype 16MB) overhead makes it SLOWER
+than numpy's native f16 sort.** RULE: the lossless-upcast route wins only when the target op has a big fnp
+KERNEL advantage (hash/merge/dedup); for a plain SORT (numpy f16 sort ~= f16->f32 convert cost internally) the
+explicit astype round-trip is pure overhead. A sortable-uint16-bits in-place transform (no widening) might win
+but numpy uint16 sort likely lacks SIMD; deemed not worth it. Do NOT re-dig f16 sort.
+
 ## 2026-07-04 - WIN (SHIP): float16 set-ops union/intersect/setdiff/setxor via exact f32 widening — 8.9-11.6x
 
 `BlackThrush`. Extends the f16-via-f32-widening family (cf2d26da) to the 4 set-ops. numpy has no f16 SIMD so
