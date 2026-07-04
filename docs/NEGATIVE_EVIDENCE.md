@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - NO-SHIP (REVERTED, ~PARITY): np.unique(2-D 'U'/'S', axis=0) string ROWS memcmp sort — 1.06x
+
+`BlackThrush`. Hypothesis: string rows axis=0 unique is a big single sort (like the 1-D string unique 5x win),
+so a parallel whole-row memcmp sort+dedup should beat numpy's void comparator. Implemented
+`try_native_unique_rows_string` (byte-exact-verified: row-memcmp sort == numpy for U4 Latin-1 AND S3; wide defer).
+
+MEASURED (per-crate `rch exec -- cargo bench` on ovh-a, criterion bencher median, 500kx3 U4 Latin-1, axis=0):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(500kx3 U4, axis=0)` | 368.9 ms | 392.8 ms | **1.06x (~parity)** |
+
+REVERTED (git-stashed). ROOT CAUSE + RULE: **the value-lex int/f64 row-unique wins (10-22x) because numpy's
+axis=0 VALUE comparator for numeric rows is genuinely slow (per-element typed dispatch). For STRING rows numpy
+already compares rows by fast memcmp-class ordering, so there is no slow comparator to beat — AND fnp's own
+memcmp comparator does cache-miss 48-byte-record gathers per compare (sort-to-sequentialize anti-pattern),
+which offsets the parallelism → ~parity.** The string memcmp lever wins for BIG-SINGLE 1-D sort/unique (one
+contiguous pass) but NOT for row-records (perm-gathered wide records). To ever win here would need packing
+narrow rows (row_bytes<=16 -> u128 key, cache-local sort) — niche, deferred. Local 519ms scan was ~1.3x
+load-inflated (clean 393ms). Do NOT re-dig string/complex ROW unique. (Numeric row unique remains the win.)
+
 ## 2026-07-04 - NO-SHIP (REVERTED, PARITY): np.sort(2-D 'U'/'S', axis=1) per-lane string sort — 1.00x
 
 `BlackThrush`. Hypothesis: the 1-D string memcmp sort win (5x, 1fb2bc11) extends to per-lane last-axis 2-D
