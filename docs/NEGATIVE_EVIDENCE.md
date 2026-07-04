@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.unique(2-D complex128, axis=0) via f64-view reuse — 17.6x (≈15 lines)
+
+`BlackThrush`. numpy sorts complex rows by (re, im) lexicographic per column — which is EXACTLY value-lex over
+the interleaved f64 components. So `unique(complex128 (n,ncols), axis=0)` == route the `.view('float64')`
+(n, 2*ncols) through the f64 row-unique (eb5db24b) and `.view('complex128')` the (nu, 2*ncols) result back.
+`try_native_unique_rows_complex128` is a ~15-line wrapper — ZERO new sort/dedup code, NaN/-0.0 defer inherited
+from the f64 path. Wired into unique(axis=0) after the f64 plain path. BYTE-EXACT (verified vs numpy:
+`unique(complex,axis=0) == unique(complex.view(f64),axis=0).view(complex)`). 2-D complex128 C-contig, no return_*.
+
+MEASURED (per-crate `rch exec -- cargo bench` on ovh-a, criterion bencher median, 500k x 3 complex128 ~250k distinct):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(500kx3 complex128, axis=0)` | 24.0 ms | 424.0 ms | **17.6x** |
+
+CORRECTNESS: bench asserts `np.array_equal` — PASSED. **REUSABLE: complex-row structural ops reduce to their
+f64 twin by viewing (n,k) complex as (n,2k) f64 — the (re,im)-lex order IS f64-component value-lex; view the
+result back. No complex-specific comparator needed.** Value-lex 2-D axis=0 unique vein now: i64/u64 (10.5x/15.2x)
++ f64 (16.2x/21.4x) + c128 (17.6x). NEXT (mechanical): narrow-int/f32 rows; c128 factorize (same view trick).
+
 ## 2026-07-04 - WIN (SHIP): np.unique(2-D float64, axis=0, return_index/inverse/counts) f64 row factorize — 21.4x
 
 `BlackThrush`. f64 return_* twin (factorize/group-by) of the plain f64 row-unique (eb5db24b) and the mirror of
