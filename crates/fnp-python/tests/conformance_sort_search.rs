@@ -231,6 +231,39 @@ print(np.array_equal(sorted_via_indices, sorted_direct))
     Ok(())
 }
 
+#[test]
+fn argsort_struct_mixed_float_matches_numpy_distinct_and_tied() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(0)
+n = 70_000
+dt = [('id', '<i8'), ('val', '<f8')]
+
+distinct = np.zeros(n, dtype=dt)
+distinct['id'] = rng.permutation(n)
+distinct['val'] = rng.standard_normal(n)
+distinct_actual = fnp.argsort(distinct)
+distinct_expected = np.argsort(distinct)
+
+tied = np.zeros(n, dtype=dt)
+tied['id'] = np.repeat(np.arange(n // 4), 4)
+tied['val'] = 1.0
+tied_actual = fnp.argsort(tied)
+tied_expected = np.argsort(tied)
+
+print(np.array_equal(distinct_actual, distinct_expected) and np.array_equal(tied_actual, tied_expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "structured mixed float argsort should match numpy for distinct records and tie fallback"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // unique
 // ─────────────────────────────────────────────────────────────────────────────

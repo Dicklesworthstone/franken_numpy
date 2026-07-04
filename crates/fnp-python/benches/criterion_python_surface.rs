@@ -8345,7 +8345,8 @@ keys3 = (k0, k1, k2)\n";
 fn bench_sort_struct_mixed_boundary(c: &mut Criterion) {
     // np.sort on a 1-D MIXED int+float structured (record) array. numpy sorts records by field value-lex; the
     // existing fnp struct-sort path routes through numpy.lexsort (slow K-pass for float ~627ms @1M); fnp
-    // byte-transforms the records and sorts once (no dedup) — bit-exact.
+    // byte-transforms the records and sorts once (no dedup) — bit-exact. The argsort sibling returns the same
+    // transformed-key permutation when records are distinct, and defers on ties to preserve numpy's unstable order.
     let mut group = c.benchmark_group("python_sort_struct_mixed_boundary");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(4));
@@ -8360,18 +8361,34 @@ fn bench_sort_struct_mixed_boundary(c: &mut Criterion) {
         let setup = "import numpy as np\n\
 rng = np.random.default_rng(0)\n\
 dt = [('id','<i8'),('val','<f8')]\n\
-a = np.zeros(1_000_000, dtype=dt); a['id'] = rng.integers(0, 10000, 1_000_000); a['val'] = rng.integers(0, 10000, 1_000_000).astype(np.float64)\n";
+a = np.zeros(1_000_000, dtype=dt); a['id'] = rng.integers(0, 10000, 1_000_000); a['val'] = rng.integers(0, 10000, 1_000_000).astype(np.float64)\n\
+a_argsort = np.zeros(1_000_000, dtype=dt); a_argsort['id'] = rng.permutation(1_000_000); a_argsort['val'] = rng.standard_normal(1_000_000)\n";
         let ns = PyDict::new(py);
         py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
         let a = ns.get_item("a").expect("a");
+        let a_argsort = ns.get_item("a_argsort").expect("a_argsort");
         let fnp_s = module.getattr("sort").expect("fnp sort");
         let numpy_s = numpy.getattr("sort").expect("numpy sort");
+        let fnp_as = module.getattr("argsort").expect("fnp argsort");
+        let numpy_as = numpy.getattr("argsort").expect("numpy argsort");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         let f = fnp_s.call1((&a,)).expect("fnp sort");
         let n = numpy_s.call1((&a,)).expect("numpy sort");
         assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "sort mixed struct mismatch");
+        let f_idx = fnp_as.call1((&a_argsort,)).expect("fnp argsort");
+        let n_idx = numpy_as.call1((&a_argsort,)).expect("numpy argsort");
+        assert!(
+            eqf.call1((&f_idx, &n_idx)).unwrap().extract::<bool>().unwrap(),
+            "argsort mixed struct mismatch"
+        );
         group.bench_function("fnp_sort_struct_i8f8_1m", |bn| bn.iter(|| black_box(fnp_s.call1((&a,)).unwrap())));
         group.bench_function("numpy_sort_struct_i8f8_1m", |bn| bn.iter(|| black_box(numpy_s.call1((&a,)).unwrap())));
+        group.bench_function("fnp_argsort_struct_i8f8_distinct_1m", |bn| {
+            bn.iter(|| black_box(fnp_as.call1((&a_argsort,)).unwrap()))
+        });
+        group.bench_function("numpy_argsort_struct_i8f8_distinct_1m", |bn| {
+            bn.iter(|| black_box(numpy_as.call1((&a_argsort,)).unwrap()))
+        });
     });
     group.finish();
 }

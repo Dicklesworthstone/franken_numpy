@@ -45,6 +45,28 @@ ratio holds — fnp side tight ±2%.) The sortable byte-transform now also power
 value-lex "sort/group/rank rows by a tuple of typed keys" op reduces to one parallel memcmp sort of transformed
 records.
 
+## 2026-07-04 - WIN (SHIP): np.argsort(1-D distinct float-field structured) via sortable byte-transform - 11.39x
+
+`BlackThrush`; `AGENT_NAME=BlackThrush`. Scratch candidate
+`/data/projects/.scratch/franken_numpy-cod-struct-argsort-20260704` had no ledger entry, so it was measured
+before landing. Lever: reuse the structured-record sortable byte transform from the `np.sort` keep, build
+memcmp-comparable keys for packed native/LE structured records with at least one float field, parallel-sort row
+indices by key, and emit the `intp` permutation directly. Because `argsort` exposes tie order and numpy's default
+quicksort/heapsort ordering is not stable, this native path defers on adjacent-equal transformed keys; tied
+records, NaN, -0.0, padded/big-endian records, all-integer records, unsupported field widths, non-1-D, and
+keyword-rich calls fall back to legacy NumPy. Distinct records are byte-exact.
+
+MEASURED (per-crate `CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod AGENT_NAME=BlackThrush rch exec --
+cargo bench -p fnp-python --bench criterion_python_surface -- argsort_struct_i8f8_distinct_1m` on `hz2`,
+Criterion bencher median, 1M distinct `[(id, <i8), (val, <f8)]` records):
+| Probe | fnp | legacy NumPy original | numpy/fnp |
+|---|---:|---:|---:|
+| `argsort(1M distinct mixed struct)` | 82.360 ms | 938.04 ms | **11.39x** |
+
+CORRECTNESS: benchmark asserts `np.array_equal(fnp.argsort(a), np.argsort(a))` before timing. Focused conformance
+adds distinct fast-path plus tied fallback coverage:
+`argsort_struct_mixed_float_matches_numpy_distinct_and_tied`.
+
 ## 2026-07-04 - WIN (SHIP): numpy 2.x array-API unique_counts/unique_all/unique_inverse/unique_values routing — 2.16x / 3.03x
 
 `BlackThrush`. The numpy 2.x array-API `unique_*` functions were fnp `core_numpy_passthrough` stubs -> they
