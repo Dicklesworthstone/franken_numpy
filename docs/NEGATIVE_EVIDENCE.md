@@ -4,28 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
-## 2026-07-04 - SHIP (byte-exact-proven, MEASUREMENT RCH-BLOCKED): np.unique(datetime64/timedelta64) via int64 sort+dedup
+## 2026-07-04 - WIN (SHIP, WEAK): np.unique(datetime64/timedelta64) via int64 sort+dedup — 1.50x (numpy is already int64-fast here)
 
-`BlackThrush`. datetime64/timedelta64 unique had NO fnp path (delegated to numpy's generic datetime
-introsort, ~665ms @2M local). datetime/timedelta is int64-backed and value order == int64 tick order, so
-unique == the int64 sort+dedup of `.view('int64')` written back into a fresh same-dtype output.
-`try_native_datetime_unique_flat`: view int64, PARALLEL pre-scan NaT (== i64::MIN) -> DEFER (numpy places the
-single NaT at the END of datetime-unique, but an int64 unique would place i64::MIN FIRST -> the routing
-diverges there; verified), else `par_sort_unstable` + `dedup`, write back via int64 view. Wired into unique()
-after the c128/c64 paths. 1-D C-contig, itemsize 8, gate n>=1<<18. Mirrors the temporal->int64 routing vein
-(argmin/argmax/ptp/min/max/cumsum/sort already route this way).
+`BlackThrush`. datetime64/timedelta64 unique had NO fnp path (delegated). datetime/timedelta is int64-backed
+and value order == int64 tick order, so unique == the int64 sort+dedup of `.view('int64')` written back into
+a fresh same-dtype output. `try_native_datetime_unique_flat`: view int64, PARALLEL pre-scan NaT (== i64::MIN)
+-> DEFER (numpy places the single NaT at the END of datetime-unique, but an int64 unique would place i64::MIN
+FIRST -> the routing diverges there; verified), else `par_sort_unstable` + `dedup`, write back via int64 view.
+Wired into unique() after the c128/c64 paths. 1-D C-contig, itemsize 8, gate n>=1<<18.
 
-BYTE-EXACTNESS: PROVED with a pure-numpy prototype — finite `np.unique(datetime64)` == `unique(int64-view)`
-viewed back; NaT case shown to diverge -> deferred. Code COMPILES clean (cargo check --bench).
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 2M datetime64[s] ~100k distinct):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(2M datetime64[s])` | 15.2 ms | 22.8 ms | **1.50x** |
 
-MEASUREMENT: **RCH-BLOCKED this turn** — the remote fleet was saturated (`RCH_REQUIRE_REMOTE=1` refused local
-fallback: "no worker assigned" on 5+ attempts; local py3.14 probe can't validate either, per the tooling
-blocker). No fnp timing obtained. numpy datetime-unique local ~665ms (load-inflated; clean ~200-300ms).
-Expected ~4x by analogy to the complex128/64 unique (3.43x/3.62x, same single-value parallel sort+dedup) and
-the temporal->int64 vein. SHIPPED because byte-exact-proven + safe (mode-gated, NaT/small-n defer -> cannot
-regress non-datetime; int64 sort+dedup strictly beats numpy's datetime introsort). RETRY-PREDICATE: re-run
-`rch exec -- cargo bench -p fnp-python ... python_datetime_unique_boundary` on hz1/hz2 for the firm ratio when
-the fleet frees.
+CORRECTNESS: bench asserts `np.array_equal` for datetime64 AND timedelta64 — PASSED hz2. **LOAD-INFLATION
+LESSON (bit me): my local numpy datetime-unique scan read ~665ms and I estimated ~4x — that local number was
+~29x LOAD-INFLATED. On a clean hz2 worker numpy's datetime unique is already int64-fast (22.8ms, tight ±2%),
+so routing to int64 only buys the sort's parallelism -> a MODEST 1.50x, not the analogy-based ~4x. ALWAYS
+confirm the numpy baseline on a clean worker before estimating a datetime/int gap from a loaded-local scan
+(numpy int64-backed ops don't have the pathological slowness that its string/complex/void comparators do).**
+KEPT (1.50x > ~0-gain, byte-exact, safe/mode-gated) but it is the weakest win of the run; NOT a big lever.
 
 ## 2026-07-04 - WIN (SHIP): complex64 searchsorted + isin (f32 twins) — 20.9x / 27.7x (complex vein COMPLETE)
 
