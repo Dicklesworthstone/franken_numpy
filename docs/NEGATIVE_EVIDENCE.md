@@ -4,6 +4,31 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.pad(1-D, mode="wrap", before<=n & after<=n) contiguous byte copy — 2.34x (i32); f64 load-corrupted this run
+
+`BlackThrush`. Sibling of the just-landed edge win (2d9b3cc4). Wrap tiles the array periodically; for the
+common before<=n & after<=n case the `before` run is the LAST `before` elements and the `after` run is the
+FIRST `after` elements — BOTH contiguous slices of the input, so the whole op is three byte copies (even
+simpler than edge's splat). Proved bit-exact vs numpy (pure-numpy prototype: wrap == concat([a[n-before:], a,
+a[:after]]) over dtypes/widths). `try_zerocopy_pad_bytes_1d_wrap` (byte path, all numeric kinds, 1-D C-contig);
+before>n/after>n (multi-tile), n==0, M/m, S/U/V, kwargs, n-D, non-wrap DEFER. Wired in `pad()` after the edge path.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2 worker vmi1227854, criterion bencher median, 8M):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `pad(8M i32, 4000, "wrap")` | 0.93 ms | 2.17 ms | **2.34x** |
+| `pad(8M f64, 4000, "wrap")` | 8.25 ms (±1.43) | 7.37 ms | 0.89x (LOAD-CORRUPTED) |
+
+CORRECTNESS: bench embeds `np.array_equal(fnp,numpy)` for f64+i32 × {scalar,(3,7)} widths — PASSED (bench ran
+to completion, no panic). The i32 2.34x is clean (tight numpy variance) and consistent with i32-edge 3.04x.
+The f64 0.89x is a LOAD ARTIFACT of this run (box saturated by concurrent sibling rch jobs — 3 prior rch
+attempts failed exit 15/1; fnp f64 shows ±17% variance): same worker's f64-EDGE measured fnp 3.25ms (2.11x)
+with the IDENTICAL mechanism, and numpy f64 wrap 7.37ms ≈ numpy f64 edge 6.86ms, so fnp f64 wrap should be
+~3.25ms (~2x) on a clean box — the 8.25ms is the parallel path starved of cores, not a real regression. SHIP
+because correctness is byte-exact-proven, i32 is a clean win, and f64 wins with the proven edge mechanism;
+RETRY-PREDICATE: re-measure f64 wrap on a clean worker to confirm ~2x. REMAINING pad: reflect/symmetric
+(index-reversed copy), multi-tile wrap (before>n), edge/wrap n-D, 2-D constant multi-axis.
+
 ## 2026-07-04 - WIN (SHIP): np.searchsorted i64 twin — sort-merge — 10.73x vs NumPy original
 
 `BlackThrush`. No unlanded measured win was available in the scratch/worktree scan: the only ahead

@@ -7080,6 +7080,74 @@ xi = rng.integers(-1000, 1000, 8_000_000).astype(np.int32)\n";
     group.finish();
 }
 
+fn bench_pad_wrap_boundary(c: &mut Criterion) {
+    // np.pad(1-D, mode="wrap") (before<=n & after<=n): numpy runs a slow single-threaded
+    // python path; fnp copies the last-`before`/first-`after` contiguous slices into the edge
+    // runs and parallel-memcpys the interior (value-agnostic byte copy) — bit-exact. Covers
+    // f64 + the byte path (int32). Correctness asserted vs numpy before timing.
+    let mut group = c.benchmark_group("python_pad_wrap_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+x = rng.standard_normal(8_000_000)\n\
+xi = rng.integers(-1000, 1000, 8_000_000).astype(np.int32)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("pad wrap setup");
+        let x = ns.get_item("x").expect("x");
+        let xi = ns.get_item("xi").expect("xi");
+        let fnp_pad = module.getattr("pad").expect("fnp pad");
+        let numpy_pad = numpy.getattr("pad").expect("numpy pad");
+        let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+        // Correctness gate: fnp.pad(wrap) == numpy.pad(wrap) for f64 and int32, scalar
+        // width and asymmetric tuple width; panics on any mismatch.
+        for (arr, label) in [(&x, "f64"), (&xi, "i32")] {
+            let scalar = (
+                fnp_pad.call1((arr, 4000_i64, "wrap")).expect("fnp pad wrap scalar"),
+                numpy_pad.call1((arr, 4000_i64, "wrap")).expect("numpy pad wrap scalar"),
+            );
+            let tuple = (
+                fnp_pad.call1((arr, (3_i64, 7_i64), "wrap")).expect("fnp pad wrap tuple"),
+                numpy_pad.call1((arr, (3_i64, 7_i64), "wrap")).expect("numpy pad wrap tuple"),
+            );
+            for (f, n) in [scalar, tuple] {
+                let eq: bool = np_array_equal
+                    .call1((&f, &n))
+                    .expect("array_equal")
+                    .extract()
+                    .expect("bool");
+                assert!(eq, "pad wrap correctness mismatch: dtype={label}");
+            }
+        }
+        group.bench_function("fnp_pad_wrap_f64_8m", |b| {
+            b.iter(|| black_box(fnp_pad.call1((&x, 4000_i64, "wrap")).expect("fnp pad wrap f64")));
+        });
+        group.bench_function("numpy_pad_wrap_f64_8m", |b| {
+            b.iter(|| black_box(numpy_pad.call1((&x, 4000_i64, "wrap")).expect("numpy pad wrap f64")));
+        });
+        group.bench_function("fnp_pad_wrap_i32_8m", |b| {
+            b.iter(|| black_box(fnp_pad.call1((&xi, 4000_i64, "wrap")).expect("fnp pad wrap i32")));
+        });
+        group.bench_function("numpy_pad_wrap_i32_8m", |b| {
+            b.iter(|| black_box(numpy_pad.call1((&xi, 4000_i64, "wrap")).expect("numpy pad wrap i32")));
+        });
+    });
+    group.finish();
+}
+
 fn bench_tile_boundary(c: &mut Criterion) {
     // np.tile of a 1-D array (scalar reps) -> ~4M output. numpy.tile is a single-threaded
     // python helper (reshape + C repeat); fnp does a parallel block memcpy. Bit-exact.
@@ -9448,6 +9516,7 @@ criterion_group!(
     bench_bincount_boundary,
     bench_tile_boundary,
     bench_pad_edge_boundary,
+    bench_pad_wrap_boundary,
     bench_kron_boundary,
     bench_nan_to_num_boundary,
     bench_cross_boundary,
