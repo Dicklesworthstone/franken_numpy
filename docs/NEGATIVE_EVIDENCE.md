@@ -4,6 +4,44 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-03 - SURFACE: FLOAT set-ops (intersect1d/union1d/setdiff1d/setxor1d) — a real crack, but parallelism-gated + fiddly; can't validate on loaded box
+
+`BlackThrush`. Profiled the set-op family as the value-returning sibling of the 530x float-isin hash
+win. Findings + a concrete build-ready lead (deferred: pure-parallelism win, un-benchable under today's
+load — gauge swung 0.84-1.16x):
+
+- **int64/uint64 set-ops ALREADY WIN 30-140x** (native UFuncArray path: serial sort_unstable + dedup +
+  linear merge). numpy's int64 intersect1d is anomalously slow here (~9 s @8M vs its own float
+  intersect1d ~0.5 s @8M — numpy int set-ops hit a pathological path), so even fnp's SERIAL native
+  path crushes it. NOT a lever — already covered.
+- **FLOAT set-ops DELEGATE to numpy (parity ~1.0x)** — deliberate, per commit a6c7122e: the old native
+  float path was extract-widen(f16/f32->f64) + UFuncArray sort + cast-back = pure overhead over numpy's
+  own fast native float sort, so it LOST 1.7-3.2x. Their conclusion: "a sort can at best tie."
+
+- **THE CRACK: "a sort can at best tie" assumed a SERIAL sort.** numpy float intersect1d does THREE
+  serial sorts (unique(ar1) + unique(ar2) + concat-sort, ~526 ms @8M f64). A zero-copy path doing TWO
+  PARALLEL sort-dedups (par_sort_unstable_by(total_cmp) on each operand, no extract) + a linear merge
+  does strictly LESS work AND parallelizes -> est ~3-5x (2 par-sorts of 8M beat numpy's 3 serial sorts).
+  This is the isin lesson (parallel beats numpy's serial) applied to the value-returning siblings.
+- **THE CAP: unlike isin (returns a MASK -> no output sort -> 530x), set-ops must return SORTED-UNIQUE
+  VALUES**, so the result sort is unavoidable and the ceiling is ~3-5x, not order-of-magnitude.
+
+- **THE CORRECTNESS GATE (empirically pinned vs numpy — the genuinely hard part a6c7122e flagged):**
+  np.unique collapses NaN to ONE, placed at END. union1d keeps -0.0 (SIGN preserved) + one NaN;
+  intersect1d EXCLUDES NaN (NaN!=NaN) and keeps +0.0; setdiff1d KEEPS NaN in ar1 (nan not "in" ar2 via
+  nan!=nan); setxor1d keeps TWO NaNs (each counts as "in exactly one"). WHICH signed-zero survives
+  depends on numpy's UNSTABLE concat-sort tie-break: intersect1d([-0.0],[0.0])->-0.0 but the -0.0/+0.0
+  ordering flips inside a larger mix -> NOT reproducible without numpy's exact sort. So a fast path MUST
+  parallel-pre-scan both operands and DELEGATE on any NaN OR any -0.0. The finite / no-negative-zero
+  common case sorts unambiguously (total_cmp == value order, +0.0 unambiguous) -> BIT-EXACT.
+
+- **RECOMMENDATION (clean-box build):** try_zerocopy_float_setop<T: f32/f64> inserted BEFORE the
+  setop_inputs_are_float delegate (lib.rs ~41269 in intersect1d and the 3 siblings): zero-copy buffers,
+  parallel any(is_nan||is_neg_zero) pre-scan gate (else delegate), par_sort_unstable_by(total_cmp) +
+  dedup(==) each operand, linear merge per op. Gate n>=~1<<20 (par_sort setup). Bit-exact for the gated
+  common case; ~3-5x expected. **NOT shipped now: the win is PURE parallelism and today's box gauge is
+  0.84-1.16x (loaded) — a parallel-sort ratio read here would be noise. Retry on a clean box.**
+
 ## 2026-07-03 - SHIP: np.gradient(f64 N-D, COORDINATE array, axis=k) fused stencil — 8-14x
 
 `BlackThrush`. Closes the remaining coord-gradient gap: `np.gradient(field_ND, x, axis=k)` — a single
