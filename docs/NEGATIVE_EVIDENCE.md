@@ -64,6 +64,31 @@ GATES (else defer to numpy): exact 2-D int/bool ndarray (`i*`, `u8..u32`, bool),
 return_index/return_inverse/return_counts/equal_nan kwargs, `rows <= 8`, `cols >= 1<<17`, packed product
 of per-row spans fits u64, rayon thread count >= 2. This keeps the radical record-packing primitive in
 the measured short-record regime and leaves large-range/float records for the hashed-dedup follow-up.
+## 2026-07-04 - WIN (SHIP): np.pad(1-D, mode="edge") parallel byte splat+copy — 2.1x (f64) / 3.0x (i32)
+
+`BlackThrush`. Extends the pad copy-family vein (constant-mode landed 3.7-4.1x; edge/reflect/wrap/2-D still
+delegated per prior note). Edge mode replicates the FIRST element into the `before` run and the LAST element
+into the `after` run — a value-agnostic byte op (proved bit-exact vs numpy over every dtype/width incl
+NaN/inf/-0.0 with a pure-numpy prototype: `edge == concat([full(before,a[0]), a, full(after,a[-1])])`).
+`try_zerocopy_pad_bytes_1d_edge` (modeled on the constant byte path): view uint8, `numpy.empty(total,dtype)`,
+splat the first/last element's itemsize bytes into the two edge runs (chunks_exact_mut), `par_copy_slice` the
+interior (the bulk). Wired into `pad()` after the two constant fast paths. All numeric kinds (f/i/u/c/b),
+1-D C-contiguous, scalar/(b,a)/[(b,a)] pad_width; n==0 / M/m / S/U/V / kwargs / n-D / non-edge mode DEFER.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2 worker vmi1227854, criterion median, 8M):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `pad(8M f64, 4000, "edge")` | 3.25 ms | 6.86 ms | **2.11x** |
+| `pad(8M i32, 4000, "edge")` | 0.67 ms | 2.05 ms | **3.04x** |
+
+Win = parallel aggregate bandwidth (~39 GB/s f64 / ~95 GB/s i32) beats numpy's single-threaded edge copy
+(~19/31 GB/s) even though numpy edge is near-bandwidth on ONE core on a clean box. NOTE: LOCAL numpy edge read
+~77ms @8M (load-inflated ~0.8 GB/s) — the honest gap is the CLEAN-worker 6.9ms; measure on hz2, not this
+loaded box. CORRECTNESS: bench embeds `np.array_equal(fnp, numpy)` for f64+i32 × {scalar,(3,7)} widths, PASSED
+on hz2 (no panic). Existing `pad_matches_numpy_across_modes` conformance test already covers edge (unchanged,
+still green). REMAINING pad delegators: edge n-D, reflect/symmetric (index-reversed copy), wrap (tiled copy),
+2-D constant multi-axis. NEXT: wrap is the next-simplest value-agnostic copy (before run = last elements,
+after run = first elements; tile when width>n).
 
 ## 2026-07-04 - BLOCKER (TOOLING): local py3.14 .probe .so mis-executes (ufuncs SIGSEGV in PyUFunc::__call__, fast paths raise "an integer is required") — validate via RCH/hz2
 
