@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): MIXED-field structured set-ops union/intersect/setdiff/setxor — 16.4-36.8x
+
+`BlackThrush`. Extends the structured set-ops (ca436092, was all-int64) to mixed int/float record arrays, built
+on the two just-landed pieces: the byte-transform value-lex unique base (9c56396d) and the float-capable record
+hash (8afd4650). numpy sorts mixed records via its slow void comparator (~1.8-4.7s @1M+1M i8+f8). New shared
+helper `try_native_unique_struct_any` (int64-view for all-int64, else the byte-transform valuelex sort) is the
+set-op base; `struct_all_floats_finite` gates the hashed operand (b for intersect/setdiff; the concat covers
+both for union/setxor via the valuelex pre-scan). Float NaN/-0.0 -> DEFER. BYTE-EXACT (all four verified vs numpy).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 1M + 1M records, i8+f8):
+| Op | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `union1d` | 109.8 ms | 1804.8 ms | **16.4x** |
+| `intersect1d` | 127.5 ms | 4693.5 ms | **36.8x** |
+| `setdiff1d` | 106.0 ms | 1893.3 ms | **17.9x** |
+| `setxor1d` | 235.0 ms | 4658.7 ms | **19.8x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on all four ops — PASSED. The byte-transform lever (9c56396d) now
+powers mixed-struct unique + all four set-ops. Structured family: unique/factorize/isin/searchsorted/set-ops,
+all-int64 AND mixed int/float. Remaining: mixed-struct factorize (byte-transform + group scatter) + searchsorted
+(byte-transform binary search).
+
 ## 2026-07-04 - WIN (SHIP): np.unique(1-D MIXED-field structured) via memcmp byte-transform value-lex sort — 13.9x
 
 `BlackThrush`. NEW LEVER. All-int64 structured unique used the int64-view (13986a4d); mixed-width / float-field
