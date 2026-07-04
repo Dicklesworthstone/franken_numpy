@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.sort(1-D float-field structured) via sortable byte-transform — 8.97x
+
+`BlackThrush`. The existing struct-sort path routes through numpy.lexsort, which is a slow K-PASS comparison
+sort for FLOAT keys (~627ms-1.06s @1M i8+f8). `try_native_struct_sort_valuelex`: transform each record into a
+memcmp-comparable key (byte-transform lever 9c56396d), UNSTABLE sort the row indices by key memcmp (equal
+records are byte-identical so the sorted output is identical regardless of tie order — no stability needed for
+SORT), gather the ORIGINAL records into a fresh same-dtype output. GATED to HAS-FLOAT records (all-integer
+records stay on the fast numpy.lexsort radix path). Float fields DEFER on NaN/-0.0. Wired into sort() before the
+existing struct-sort path. BYTE-EXACT (verified vs numpy). 1-D C-contig, native/LE fields w1/2/4/8, no padding,
+order=None, n>=1<<16.
+
+MEASURED (per-crate `rch exec -- cargo bench` on vmi1152480, criterion bencher median, 1M records i8+f8):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `sort(1M mixed struct)` | 118.1 ms | 1059.4 ms | **8.97x** |
+
+CORRECTNESS: bench asserts `np.array_equal` — PASSED. The sortable byte-transform now powers the FULL structured
+surface (unique/factorize/isin/searchsorted/setops/**sort**) AND multi-key lexsort — every "sort/group rows by
+a tuple of typed keys" op reduces to one parallel memcmp sort of transformed records.
+
 ## 2026-07-04 - WIN (SHIP): np.lexsort(multi-key float/mixed) via sortable byte-transform — 7.8x / 13.3x
 
 `BlackThrush`. The byte-transform lever (9c56396d) generalizes BEYOND structured records to lexsort. numpy's
