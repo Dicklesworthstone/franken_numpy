@@ -4,6 +4,30 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.unique(2-D int32, axis=0) via exact int64 row-widening - 9.63x vs legacy NumPy
+
+`cod`. No measured `.scratch` worktree head was absent from `main`; all visible FrankenNumPy `.scratch`
+heads were ancestors of `origin/main`. Dug the remaining narrow-int row-unique niche from the value-lex
+unique vein. The packed-composite row path already handles small ranges; this branch targets large-range
+2-D narrow integer rows (`bool`, `i/u` widths < 8 bytes) by casting the C-contiguous input to int64,
+reusing the proven int64 value-lex row-unique, then casting only the unique rows back to the original dtype.
+For these widths, int64 widening preserves numeric order exactly, so row ordering, duplicate grouping, and
+the returned dtype match NumPy.
+
+MEASURED (per-crate local fallback after `rch exec` on `vmi1264463` stayed in a cold release build with no
+timing rows; `CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod`, release profile, criterion bencher,
+500k x 4 int32 rows made from a duplicated 250k-row base, large value range so composite packing defers):
+| Probe | fnp | legacy NumPy original | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(500kx4 int32, axis=0)` | 48.45 ms | 466.50 ms | **9.63x** |
+
+CORRECTNESS: the benchmark asserts both `dtype` equality and `np.array_equal(fnp.unique(a, axis=0),
+np.unique(a, axis=0))` before timing. Focused conformance passed remotely:
+`cargo test -p fnp-python --test conformance_sort_search unique_axis0_narrow_int_rows_preserves_dtype_and_values -- --nocapture`
+(1/1 on `ovh-a`). Compile gate passed remotely on `hz2`:
+`cargo check -p fnp-python --lib --bench criterion_python_surface`. Both used `AGENT_NAME=cod` and the project
+target dir above. The filtered local bench process was interrupted only after both target timing rows emitted.
+
 ## 2026-07-04 - WIN (SHIP): np.lexsort(integral-valued f64 keys) packed composite — 15.31x vs legacy NumPy
 
 `cod`. Worktree scan found no measured `.scratch` win absent from `main` (the visible non-main FrankenNumPy

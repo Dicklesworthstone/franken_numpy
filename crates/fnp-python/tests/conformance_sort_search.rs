@@ -305,6 +305,41 @@ print(ok)
 }
 
 #[test]
+fn unique_axis0_narrow_int_rows_preserves_dtype_and_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(91)
+ok = True
+for dtype in (np.int32, np.uint16):
+    base = rng.integers(0, 60000, ((1 << 16) + 9, 4), dtype=dtype)
+    if np.issubdtype(dtype, np.signedinteger):
+        base = (base.astype(np.int64) - 30000).astype(dtype)
+    a = np.concatenate([base, base[:2048], base[1024:3072]])
+    result = fnp.unique(a, axis=0)
+    expected = np.unique(a, axis=0)
+    if result.dtype != expected.dtype:
+        print(("dtype", str(dtype), str(result.dtype), str(expected.dtype)))
+        ok = False
+    if result.shape != expected.shape:
+        print(("shape", str(dtype), result.shape, expected.shape))
+        ok = False
+    if not np.array_equal(result, expected):
+        print(("values", str(dtype)))
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unique axis=0 narrow-int rows should preserve dtype and match numpy"
+    );
+    Ok(())
+}
+
+#[test]
 fn unique_float() -> Result<(), String> {
     let script = fnp_script(
         r#"

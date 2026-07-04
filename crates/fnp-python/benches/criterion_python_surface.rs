@@ -8297,6 +8297,64 @@ a = np.concatenate([base, base])\n";
     group.finish();
 }
 
+fn bench_unique_rows_narrow_int_boundary(c: &mut Criterion) {
+    // np.unique(2-D int32, axis=0). The packed-composite path cannot pack this large range, but
+    // exact int64 widening lets fnp reuse the value-lex row-unique and cast back to int32.
+    let mut group = c.benchmark_group("python_unique_rows_narrow_int_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+base = rng.integers(-(1 << 30), 1 << 30, (250_000, 4), dtype=np.int32)\n\
+a = np.concatenate([base, base])\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
+        let a = ns.get_item("a").expect("a");
+        let fnp_u = module.getattr("unique").expect("fnp unique");
+        let numpy_u = numpy.getattr("unique").expect("numpy unique");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        let kw = PyDict::new(py);
+        kw.set_item("axis", 0_i64).unwrap();
+        let f = fnp_u.call((&a,), Some(&kw)).expect("fnp unique");
+        let n = numpy_u.call((&a,), Some(&kw)).expect("numpy unique");
+        assert!(
+            f.getattr("dtype")
+                .unwrap()
+                .eq(n.getattr("dtype").unwrap())
+                .unwrap(),
+            "unique rows narrow-int dtype mismatch"
+        );
+        assert!(
+            eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+            "unique rows narrow-int value mismatch"
+        );
+        group.bench_function("fnp_unique_rows_i32_500kx4", |bn| {
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
+            bn.iter(|| black_box(fnp_u.call((&a,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("numpy_unique_rows_i32_500kx4", |bn| {
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
+            bn.iter(|| black_box(numpy_u.call((&a,), Some(&kw)).unwrap()));
+        });
+    });
+    group.finish();
+}
+
 fn bench_unique_rows_factorize_boundary(c: &mut Criterion) {
     // np.unique(2-D large-range int64, axis=0, return_index+inverse+counts) — the row factorize/group-by.
     // numpy sorts rows via its slow void comparator AND builds the inverse; fnp value-lex sorts + scatters.
@@ -11049,6 +11107,7 @@ criterion_group!(
     bench_unique_cols_boundary,
     bench_unique_rows_boundary,
     bench_lexsort_boundary,
+    bench_unique_rows_narrow_int_boundary,
     bench_nanarg_lastaxis_boundary,
     bench_nanarg_nonlast_boundary,
     bench_argextreme_f32_axis_boundary,
