@@ -340,6 +340,44 @@ print(ok)
 }
 
 #[test]
+fn unique_axis0_narrow_int_rows_return_flags_preserve_dtype_and_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(92)
+ok = True
+cases = []
+base_i32 = rng.integers(-(1 << 30), 1 << 30, ((1 << 16) + 17, 4), dtype=np.int32)
+cases.append(base_i32)
+base_u32 = rng.integers(0, 1 << 31, ((1 << 16) + 17, 4), dtype=np.uint32)
+cases.append(base_u32)
+for base in cases:
+    a = np.concatenate([base, base[:4096], base[2048:6144]])
+    result = fnp.unique(a, axis=0, return_index=True, return_inverse=True, return_counts=True)
+    expected = np.unique(a, axis=0, return_index=True, return_inverse=True, return_counts=True)
+    if result[0].dtype != expected[0].dtype:
+        print(("dtype", str(a.dtype), str(result[0].dtype), str(expected[0].dtype)))
+        ok = False
+    if result[0].shape != expected[0].shape:
+        print(("shape", str(a.dtype), result[0].shape, expected[0].shape))
+        ok = False
+    for i, (got, exp) in enumerate(zip(result, expected)):
+        if not np.array_equal(got, exp):
+            print(("values", str(a.dtype), i))
+            ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unique axis=0 narrow-int rows return flags should preserve dtype and match numpy"
+    );
+    Ok(())
+}
+
+#[test]
 fn unique_float() -> Result<(), String> {
     let script = fnp_script(
         r#"

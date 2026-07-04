@@ -8901,6 +8901,38 @@ a = np.concatenate([base, base])\n";
             eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
             "unique rows narrow-int value mismatch"
         );
+        let kwfull = PyDict::new(py);
+        kwfull.set_item("axis", 0_i64).unwrap();
+        kwfull.set_item("return_index", true).unwrap();
+        kwfull.set_item("return_inverse", true).unwrap();
+        kwfull.set_item("return_counts", true).unwrap();
+        let ft = fnp_u
+            .call((&a,), Some(&kwfull))
+            .expect("fnp unique narrow full")
+            .cast_into::<pyo3::types::PyTuple>()
+            .unwrap();
+        let nt = numpy_u
+            .call((&a,), Some(&kwfull))
+            .expect("numpy unique narrow full")
+            .cast_into::<pyo3::types::PyTuple>()
+            .unwrap();
+        assert!(
+            ft.get_item(0)
+                .unwrap()
+                .getattr("dtype")
+                .unwrap()
+                .eq(nt.get_item(0).unwrap().getattr("dtype").unwrap())
+                .unwrap(),
+            "unique rows narrow-int factorize dtype mismatch"
+        );
+        for i in 0..4 {
+            let eq: bool = eqf
+                .call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap()))
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert!(eq, "unique rows narrow-int factorize element {i} mismatch");
+        }
         group.bench_function("fnp_unique_rows_i32_500kx4", |bn| {
             let kw = PyDict::new(py);
             kw.set_item("axis", 0_i64).unwrap();
@@ -8909,6 +8941,22 @@ a = np.concatenate([base, base])\n";
         group.bench_function("numpy_unique_rows_i32_500kx4", |bn| {
             let kw = PyDict::new(py);
             kw.set_item("axis", 0_i64).unwrap();
+            bn.iter(|| black_box(numpy_u.call((&a,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("fnp_unique_rows_i32_factorize_500kx4", |bn| {
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
+            kw.set_item("return_index", true).unwrap();
+            kw.set_item("return_inverse", true).unwrap();
+            kw.set_item("return_counts", true).unwrap();
+            bn.iter(|| black_box(fnp_u.call((&a,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("numpy_unique_rows_i32_factorize_500kx4", |bn| {
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
+            kw.set_item("return_index", true).unwrap();
+            kw.set_item("return_inverse", true).unwrap();
+            kw.set_item("return_counts", true).unwrap();
             bn.iter(|| black_box(numpy_u.call((&a,), Some(&kw)).unwrap()));
         });
     });

@@ -24,6 +24,35 @@ CORRECTNESS: bench asserts `np.array_equal` — PASSED. The sortable byte-transf
 surface (unique/factorize/isin/searchsorted/setops/**sort**) AND multi-key lexsort — every "sort/group rows by
 a tuple of typed keys" op reduces to one parallel memcmp sort of transformed records.
 
+## 2026-07-04 - WIN (SHIP): np.unique(2-D int32, axis=0, return_index/inverse/counts) via exact int64 row-widening - 8.65x vs legacy NumPy
+
+`cod`; AGENT_NAME=cod. No measured `.scratch`/worktree win was absent from `origin/main` (all visible
+FrankenNumPy scratch heads were ancestors; the only non-main head was an explicit DLAQR no-ship). Dug the
+narrow-int row factorize twin of the existing large-range int32 row-unique widening path. The packed-composite
+row path already handles small integer ranges; this branch targets large-range bool/i/u widths <8 where the
+composite product cannot fit in one u64 and NumPy falls back to its slow void-row sort plus inverse/count
+bookkeeping.
+
+Lever: `try_native_unique_rows_narrow_int_via_i64_full` widens narrow integer rows to int64 with
+`np.ascontiguousarray(..., dtype=int64)`, reuses the proven `try_native_unique_rows_lexsort_int_full`
+factorize/group-by helper, then casts only tuple[0] (unique rows) back to the original dtype. The row-level
+`return_index`, `return_inverse`, and `return_counts` arrays pass through unchanged because each original row maps
+one-to-one to its widened int64 row.
+
+MEASURED (per-crate `rch exec -- cargo bench` on `vmi1293453`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod`, release profile, short Criterion subset; process was
+interrupted after both timing rows printed):
+
+| Probe | fnp | legacy NumPy original | numpy/fnp |
+| --- | ---: | ---: | ---: |
+| `unique(500kx4 int32, axis=0, return_index=True, return_inverse=True, return_counts=True)` | 69.88 ms | 604.25 ms | **8.65x** |
+
+CORRECTNESS: benchmark asserts dtype equality for tuple[0] and `np.array_equal` for all four tuple elements
+before timing. Focused conformance passed:
+`cargo test -p fnp-python --test conformance_sort_search unique_axis0_narrow_int_rows_return_flags_preserve_dtype_and_values -- --nocapture`
+(1/1). Compile gate passed with local fallback after `ovh-b` hit the known `zerocopy` SIGILL:
+`cargo check -p fnp-python --lib --bench criterion_python_surface`.
+
 ## 2026-07-04 - WIN (SHIP): np.lexsort(multi-key float/mixed) via sortable byte-transform — 7.8x / 13.3x
 
 `BlackThrush`. The byte-transform lever (9c56396d) generalizes BEYOND structured records to lexsort. numpy's
