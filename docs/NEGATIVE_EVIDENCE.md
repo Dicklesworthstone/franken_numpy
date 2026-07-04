@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.isin(complex128 element, complex128 test) hashed 16-byte-pattern set — 35.2x
+
+`BlackThrush`. Mirror of the string isin (hashed record-byte set) for complex128. For FINITE values with no
+-0.0, byte-equality of the 16-byte record == complex value-equality, so a byte set is exact. DEFER on NaN or
+-0.0 in element OR test (verified numpy edge semantics: +0.0==-0.0 True but bits differ -> byte set would MISS;
+nan not-in [nan] but bits equal -> byte set would FALSELY match). `try_zerocopy_c128_isin`: parallel NaN/-0.0
+pre-scan on the f64 components -> defer; else build a FNV `HashSet<&[u8;16], FastIntBuildHasher>` of the test
+records, `par_iter` over element records emitting `contains ^ invert` into a bool output. numpy's complex isin
+sorts |elem|+|test| (~404-529ms @2M). Same-dtype c128, 1-D C-contig, gate n>=1<<16.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 2M element + 200k test):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `isin(2M c128, 200k c128 test)` | 11.5 ms | 404.4 ms | **35.2x** |
+
+CORRECTNESS: bench embeds `np.array_equal(fnp.isin, np.isin)` for default AND invert=True — PASSED hz2. Same
+lever as float-isin 530x / string-isin 18.3x (hashed set beats numpy's sort). NEXT: c64 isin/searchsorted
+twins (f32); unique(str,return_inverse) factorize.
+
 ## 2026-07-04 - WIN (SHIP): np.searchsorted(sorted complex128 haystack, complex128 queries) parallel lexicographic binary search — 9.46x
 
 `BlackThrush`. numpy's complex searchsorted is a per-element lexicographic (real, imag) binary search,

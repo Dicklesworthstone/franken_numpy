@@ -7830,6 +7830,45 @@ q = rng.integers(0, 1000, 2_000_000).astype(np.float64) + 1j * rng.integers(0, 1
     group.finish();
 }
 
+fn bench_complex_isin_boundary(c: &mut Criterion) {
+    // np.isin on complex128 arrays via a hashed 16-byte-pattern set. numpy sorts |elem|+|test|
+    // (~529ms @2M); fnp does a parallel membership scan — bit-exact for finite non-(-0.0) values.
+    let mut group = c.benchmark_group("python_complex_isin_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+a = rng.integers(0, 1000, 2_000_000).astype(np.float64) + 1j * rng.integers(0, 1000, 2_000_000).astype(np.float64)\n\
+trand = rng.integers(0, 1000, 100_000).astype(np.float64) + 1j * rng.integers(0, 1000, 100_000).astype(np.float64)\n\
+test = np.concatenate([a[:100_000], trand])\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let a = ns.get_item("a").expect("a");
+        let test = ns.get_item("test").expect("test");
+        let fnp_isin = module.getattr("isin").expect("fnp isin");
+        let numpy_isin = numpy.getattr("isin").expect("numpy isin");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        for inv in [false, true] {
+            let kw = PyDict::new(py);
+            kw.set_item("invert", inv).unwrap();
+            let f = fnp_isin.call((&a, &test), Some(&kw)).expect("fnp isin");
+            let n = numpy_isin.call((&a, &test), Some(&kw)).expect("numpy isin");
+            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "complex isin mismatch invert={inv}");
+        }
+        group.bench_function("fnp_isin_c128_2m", |bn| bn.iter(|| black_box(fnp_isin.call1((&a, &test)).unwrap())));
+        group.bench_function("numpy_isin_c128_2m", |bn| bn.iter(|| black_box(numpy_isin.call1((&a, &test)).unwrap())));
+    });
+    group.finish();
+}
+
 fn bench_tile_boundary(c: &mut Criterion) {
     // np.tile of a 1-D array (scalar reps) -> ~4M output. numpy.tile is a single-threaded
     // python helper (reshape + C repeat); fnp does a parallel block memcpy. Bit-exact.
@@ -10196,6 +10235,7 @@ criterion_group!(
     bench_complex_unique_boundary,
     bench_complex64_unique_boundary,
     bench_complex_searchsorted_boundary,
+    bench_complex_isin_boundary,
     bench_sort_axis_boundary,
     bench_parallel_binary_boundary,
     bench_take_axis_boundary,
