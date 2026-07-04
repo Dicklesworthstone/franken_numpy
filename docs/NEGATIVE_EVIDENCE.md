@@ -63,6 +63,31 @@ The RCH client was stopped after both target rows printed so filtered Criterion 
 setup work.
 
 ## 2026-07-04 - WIN (SHIP, WEAK): np.unique(datetime64/timedelta64) via int64 sort+dedup — 1.50x (numpy is already int64-fast here)
+## 2026-07-04 - WIN (SHIP): np.unique(2-D large-range int64/uint64, axis=0) parallel value-lex row sort+dedup — 10.5x
+
+`BlackThrush`. Extends the sibling's packed-composite unique-rows (small-range int, axis=0) to the LARGE-RANGE
+case it can't pack (row range exceeds u64). numpy sorts rows by VALUE-lexicographic order (col0 primary,
+ascending) with its slow single-threaded VOID comparator (genuinely slow — NOT int64-fast, unlike flat
+datetime unique). `try_native_unique_rows_lexsort_int`: PARALLEL value-lex sort of row indices (compare
+i64/u64 columns left-to-right), gather sorted rows CONTIGUOUS, dedup adjacent-equal, gather distinct rows to a
+fresh (n_unique, ncols) same-dtype output. BYTE-EXACT for integers (no -0.0/NaN edge cases; verified value-lex
+== numpy over large-range i64 incl dedup). Wired into unique(axis=0) after the composite path (composite runs
+first for small-range; this handles the overflow). 2-D int64/uint64 C-contig, no return_*, rows >= 1<<16.
+
+MEASURED (per-crate `rch exec -- cargo bench` on vmi1293453, criterion bencher median, 500k x 3 int64 ~250k
+distinct, range 1e15/col so the composite overflows u64):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(500kx3 large-range i64, axis=0)` | 37.2 ms | 390.7 ms | **10.5x** |
+
+CORRECTNESS: bench embeds `np.array_equal(fnp.unique(axis=0), np.unique(axis=0))` — PASSED. Contrast with the
+datetime unique (1.50x): there numpy uses a FAST int64 sort (weak win); here numpy uses the SLOW per-row VOID
+comparator (strong 10.5x) — confirms the heuristic that numpy's beatable slowness is in its COMPARATOR-heavy
+paths (void/string/complex), not int64-backed ops. **RCH-FLEET NOTE: this measurement took 4 attempts over a
+critically-degraded fleet (one cold compile alone ran 8m43s > the 590s timeout; another attempt hit the
+pre-existing char-bench panic worker) — use `timeout 1100` + retry when the fleet is slow.** NEXT: value-lex
+for structured-array unique (843ms, but float fields = -0.0/NaN byte-exact-hostile); unique(axis=0)
+return_index/inverse/counts for large-range (add the group-id scatter).
 
 `BlackThrush`. datetime64/timedelta64 unique had NO fnp path (delegated). datetime/timedelta is int64-backed
 and value order == int64 tick order, so unique == the int64 sort+dedup of `.view('int64')` written back into
