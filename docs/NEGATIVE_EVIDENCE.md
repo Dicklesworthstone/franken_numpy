@@ -35,6 +35,36 @@ on `ovh-a` (1 passed). Targeted compile GREEN via
 on `hz1`, final diff rerun GREEN on `vmi1227854`; broad `--tests` remains blocked by the
 already-documented pre-existing `where_py` lib-test signature errors on main.
 
+## 2026-07-04 - WIN (SHIP): np.unique(2-D small-range int, axis=1) packed column composite — 42.8x
+
+`SilverBridge`. This is the column-record sibling of the packed unique-rows lever. numpy's
+`unique(axis=1)` moves columns into record slots and sorts them with the same slow void-record
+comparator; for a short-row / many-column matrix we can pack each column record into one u64 with row0
+most significant, run one parallel u64 sort+dedup, then decode the sorted unique composites back into a
+`(rows, unique_cols)` output. Implemented as `try_native_unique_cols_composite`; axis=0 row path remains
+the existing shipped helper, while axis=-1/-2 now route to the matching 2-D record path.
+
+MEASURED (per-crate RCH criterion on `vmi1149989`, median; command completed the target group then hit
+an existing unrelated `bench_char_add_boundary` setup panic because `fnp_python_bench.char` is absent):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(4 x 500k int, axis=1)` | 18.391 ms | 787.29 ms | **42.8x** |
+
+COMMAND:
+`AGENT_NAME=SilverBridge CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-silverbridge RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=1200 rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface -- python_unique_cols_boundary`
+
+CONFORMANCE: `rch exec -- cargo test -p fnp-python --test conformance_sort_search
+unique_axis1_large_small_range_int_matches_numpy -- --exact` PASS on `hz1`; `cargo check -p fnp-python
+--bench criterion_python_surface --test conformance_sort_search` PASS on `hz1`. The broader
+`--benches --tests` gate is already blocked on unrelated lib-test-only `where_py` callsite signature
+errors around `crates/fnp-python/src/lib.rs:90268`, so this commit keeps validation to the touched bench
+and conformance shard.
+
+GATES (else defer to numpy): exact 2-D int/bool ndarray (`i*`, `u8..u32`, bool), `axis=1`/`axis=-1`, no
+return_index/return_inverse/return_counts/equal_nan kwargs, `rows <= 8`, `cols >= 1<<17`, packed product
+of per-row spans fits u64, rayon thread count >= 2. This keeps the radical record-packing primitive in
+the measured short-record regime and leaves large-range/float records for the hashed-dedup follow-up.
+
 ## 2026-07-04 - BLOCKER (TOOLING): local py3.14 .probe .so mis-executes (ufuncs SIGSEGV in PyUFunc::__call__, fast paths raise "an integer is required") — validate via RCH/hz2
 
 `BlackThrush`. Local python-probe validation via `.venv-numpy314` (Python 3.14.3) is UNRELIABLE on this box.

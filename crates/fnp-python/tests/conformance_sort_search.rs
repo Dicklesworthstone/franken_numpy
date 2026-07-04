@@ -268,6 +268,43 @@ print(np.array_equal(result, expected))
 }
 
 #[test]
+fn unique_axis1_large_small_range_int_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(73)
+a = rng.integers(-8, 12, (4, (1 << 17) + 17), dtype=np.int64)
+a[:, :1024] = a[:, 1024:2048]
+a[0, 0] = -8
+a[1, 1] = -8
+a[2, 2] = 11
+a[3, 3] = 0
+ok = True
+for axis in (1, -1):
+    result = fnp.unique(a, axis=axis)
+    expected = np.unique(a, axis=axis)
+    if result.dtype != expected.dtype:
+        print(("dtype", axis, str(result.dtype), str(expected.dtype)))
+        ok = False
+    if result.shape != expected.shape:
+        print(("shape", axis, result.shape, expected.shape))
+        ok = False
+    if not np.array_equal(result, expected):
+        print(("values", axis))
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unique axis=1 small-range int should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
 fn unique_float() -> Result<(), String> {
     let script = fnp_script(
         r#"
