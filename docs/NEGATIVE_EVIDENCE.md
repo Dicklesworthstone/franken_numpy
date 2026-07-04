@@ -4,6 +4,29 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): float16 unique/isin/searchsorted via exact f32 widening — 10.5-18.8x
+
+`BlackThrush`. numpy has NO f16 SIMD — its f16 sort-based ops convert per-element and run ~10-30x slower than
+f32 (f16 sort 164ms vs f32 11ms @4M). f16 -> f32 is LOSSLESS (every f16 value has an exact f32 rep), so routing
+the widened f32 through fnp's fast f32 kernels and narrowing the RESULT back to f16 is byte-exact. Helpers
+`try_native_f16_{unique,isin,searchsorted}`: unique widens -> f32 unique -> narrows result to f16; isin/
+searchsorted widen both operands -> f32 isin / f32 searchsorted (bool/index outputs are dtype-agnostic, no
+narrow). Wired into unique()/isin()/searchsorted() after the datetime paths. BYTE-EXACT incl NaN/-0.0/inf
+(verified vs numpy: unique/isin/searchsorted all match; SORT diverges on NaN narrow-back so NOT routed).
+Gate n>=1<<14. NEW dtype family (f16).
+
+MEASURED (per-crate `rch exec -- cargo bench` on ovh-a, criterion bencher median):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(4M f16)` | 14.9 ms | 156.3 ms | **10.5x** |
+| `searchsorted(2M f16, 2M q)` | 16.9 ms | 316.8 ms | **18.8x** |
+| `isin(2M f16, 1M test)` | 24.0 ms | 259.4 ms | **10.8x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on all three ops — PASSED. **REUSABLE: numpy's f16 has no SIMD ->
+its sort-based ops are ~10-30x slower than f32; widen f16->f32 EXACT (lossless), route to the fast f32 kernel,
+narrow the value RESULT back (index/bool outputs need no narrow). Same delegation-routing idea as temporal
+int64-view, but via lossless UPCAST instead of a same-width view.** SORT excluded (NaN narrow-back divergence).
+
 ## 2026-07-04 - WIN (SHIP): datetime64/timedelta64 searchsorted 11.8x + isin 44.7x via int64-view
 
 `BlackThrush`. numpy DELEGATES both datetime searchsorted (~317ms @2M+2M) and datetime isin (~190ms @2M+1M) —

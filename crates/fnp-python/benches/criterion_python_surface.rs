@@ -8413,6 +8413,47 @@ ib = rng.integers(0, 100000, 1_000_000).astype('datetime64[s]')\n";
     group.finish();
 }
 
+fn bench_f16_ops_boundary(c: &mut Criterion) {
+    // np.unique / isin / searchsorted on float16. numpy has no f16 SIMD (converts per-element -> ~170-330ms);
+    // fnp widens exact to f32 and routes to the fast f32 kernels — bit-exact.
+    let mut group = c.benchmark_group("python_f16_ops_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+u = (rng.integers(0, 2000, 4_000_000) / 7).astype(np.float16)\n\
+hs = np.sort((rng.integers(0, 2000, 2_000_000) / 7).astype(np.float16))\n\
+hq = (rng.integers(0, 2000, 2_000_000) / 7).astype(np.float16)\n\
+ia = (rng.integers(0, 2000, 2_000_000) / 7).astype(np.float16)\n\
+ib = (rng.integers(0, 2000, 1_000_000) / 7).astype(np.float16)\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let (u, hs, hq, ia, ib) = (ns.get_item("u").unwrap(), ns.get_item("hs").unwrap(), ns.get_item("hq").unwrap(), ns.get_item("ia").unwrap(), ns.get_item("ib").unwrap());
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        let (fu, nu_) = (module.getattr("unique").unwrap(), numpy.getattr("unique").unwrap());
+        let (fss, nss) = (module.getattr("searchsorted").unwrap(), numpy.getattr("searchsorted").unwrap());
+        let (fi, ni) = (module.getattr("isin").unwrap(), numpy.getattr("isin").unwrap());
+        assert!(eqf.call1((fu.call1((&u,)).unwrap(), nu_.call1((&u,)).unwrap())).unwrap().extract::<bool>().unwrap(), "f16 unique mismatch");
+        assert!(eqf.call1((fss.call1((&hs, &hq)).unwrap(), nss.call1((&hs, &hq)).unwrap())).unwrap().extract::<bool>().unwrap(), "f16 searchsorted mismatch");
+        assert!(eqf.call1((fi.call1((&ia, &ib)).unwrap(), ni.call1((&ia, &ib)).unwrap())).unwrap().extract::<bool>().unwrap(), "f16 isin mismatch");
+        group.bench_function("fnp_unique_f16_4m", |bn| bn.iter(|| black_box(fu.call1((&u,)).unwrap())));
+        group.bench_function("numpy_unique_f16_4m", |bn| bn.iter(|| black_box(nu_.call1((&u,)).unwrap())));
+        group.bench_function("fnp_searchsorted_f16_2m_2m", |bn| bn.iter(|| black_box(fss.call1((&hs, &hq)).unwrap())));
+        group.bench_function("numpy_searchsorted_f16_2m_2m", |bn| bn.iter(|| black_box(nss.call1((&hs, &hq)).unwrap())));
+        group.bench_function("fnp_isin_f16_2m_1m", |bn| bn.iter(|| black_box(fi.call1((&ia, &ib)).unwrap())));
+        group.bench_function("numpy_isin_f16_2m_1m", |bn| bn.iter(|| black_box(ni.call1((&ia, &ib)).unwrap())));
+    });
+    group.finish();
+}
+
 fn bench_unique_rows_lexsort_boundary(c: &mut Criterion) {
     // np.unique(2-D large-range int64, axis=0). numpy sorts rows with its slow void comparator
     // (~570ms @500kx3); the packed-composite path can't pack this range, so fnp does a parallel
@@ -11302,6 +11343,7 @@ criterion_group!(
     bench_c128_setops_boundary,
     bench_datetime_setops_boundary,
     bench_datetime_searchsorted_isin_boundary,
+    bench_f16_ops_boundary,
     bench_unique_rows_lexsort_boundary,
     bench_unique_rows_factorize_boundary,
     bench_unique_rows_f64_boundary,
