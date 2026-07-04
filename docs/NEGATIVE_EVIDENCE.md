@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): structured set-ops union1d/intersect1d/setdiff1d/setxor1d — 15.6-37.8x (4 ops)
+
+`BlackThrush`. numpy's structured set-ops do 2-3 serial per-record void-comparator sorts (~1.8-4.6s @1M+1M).
+They reduce to the two proven structured levers — the sorted-unique base is `try_native_unique_struct_int64`
+(int64-view value-lex) and the membership filter is a hashed record-byte set — then a numpy boolean index
+`base[mask]` (fast C) keeps the sorted output. union1d = struct-unique(concat); intersect1d/setdiff1d =
+struct-unique(a) with mask (in/not-in set(b)); setxor1d = struct-unique(concat) with mask (in EXACTLY ONE of
+set(a)/set(b)). Helpers `try_native_struct_union1d` / `_intersect_setdiff(is_diff)` / `_setxor1d` +
+`struct_filter_by_set`; wired into each set-op fn after the string path. BYTE-EXACT (all four verified vs numpy).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 1M + 1M records, 2xi8 fields):
+| Op | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `union1d` | 98.3 ms | 1812.0 ms | **18.4x** |
+| `intersect1d` | 120.6 ms | 4561.2 ms | **37.8x** |
+| `setdiff1d` | 119.5 ms | 1859.0 ms | **15.6x** |
+| `setxor1d` | 231.6 ms | 4621.9 ms | **20.0x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on all four ops — PASSED. **STRUCTURED-ARRAY FAMILY COMPLETE this
+session: unique (26.6x) + factorize (21.4x) + isin (50.9x) + union/intersect/setdiff/setxor (15.6-37.8x), all
+from two levers — int64-view for ORDERING, record-byte-hash for EQUALITY.** All-int64-field, no-padding gate.
+
 ## 2026-07-04 - WIN (SHIP): np.isin(1-D structured, structured) record membership via byte-hash — 50.9x
 
 `BlackThrush`. numpy's structured isin has NO fast table path -> it falls back to a serial sort of
