@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.argsort(1-D structured, kind='stable'/'mergesort') byte-transform — 20.9x
+
+`BlackThrush`. numpy stable-sorts structured records by field value-lex via its slow void comparator (~1.5-3.4s
+@2M i8+f8). `try_native_argsort_struct_stable`: transform each record into a memcmp-comparable key (byte-transform
+lever 9c56396d) and STABLE sort the row indices by (key, original index) -> exactly numpy's stable argsort
+permutation (ties by original index). GATED to kind='stable'/'mergesort' ONLY — the default quicksort's tie order
+is unmatchable (the existing float/int/datetime argsort paths already defer-on-ties for the same reason; this is
+the structured analog but stable is byte-exact WITHOUT tie detection since stable == index tiebreak). Float
+fields DEFER on NaN/-0.0. Wired into argsort()'s flat block after the complex64 path. BYTE-EXACT (verified).
+
+MEASURED (per-crate `rch exec -- cargo bench` on ovh-a, criterion bencher median, 2M records i8+f8, kind=stable):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `argsort(2M struct, stable)` | 70.6 ms | 1479.9 ms | **20.9x** |
+
+CORRECTNESS: bench asserts `np.array_equal` — PASSED. (numpy side ran ±21% under worker load; the same-worker
+ratio holds — fnp side tight ±2%.) The sortable byte-transform now also powers stable record argsort; every
+value-lex "sort/group/rank rows by a tuple of typed keys" op reduces to one parallel memcmp sort of transformed
+records.
+
 ## 2026-07-04 - WIN (SHIP): numpy 2.x array-API unique_counts/unique_all/unique_inverse/unique_values routing — 2.16x / 3.03x
 
 `BlackThrush`. The numpy 2.x array-API `unique_*` functions were fnp `core_numpy_passthrough` stubs -> they

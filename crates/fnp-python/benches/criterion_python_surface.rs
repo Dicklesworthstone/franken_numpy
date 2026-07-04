@@ -8376,6 +8376,46 @@ a = np.zeros(1_000_000, dtype=dt); a['id'] = rng.integers(0, 10000, 1_000_000); 
     group.finish();
 }
 
+fn bench_argsort_struct_stable_boundary(c: &mut Criterion) {
+    // np.argsort(1-D structured, kind='stable'). numpy stable-sorts records by field value-lex via its void
+    // comparator (~3.4s @2M i8+f8); fnp byte-transforms records + stable index sort — bit-exact.
+    let mut group = c.benchmark_group("python_argsort_struct_stable_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+dt = [('id','<i8'),('val','<f8')]\n\
+a = np.zeros(2_000_000, dtype=dt); a['id'] = rng.integers(0, 100000, 2_000_000); a['val'] = rng.integers(0, 100000, 2_000_000).astype(np.float64)\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let a = ns.get_item("a").expect("a");
+        let fnp_as = module.getattr("argsort").expect("fnp argsort");
+        let numpy_as = numpy.getattr("argsort").expect("numpy argsort");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+        let f = fnp_as.call((&a,), Some(&kw)).expect("fnp argsort");
+        let n = numpy_as.call((&a,), Some(&kw)).expect("numpy argsort");
+        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "argsort struct stable mismatch");
+        group.bench_function("fnp_argsort_struct_i8f8_2m", |bn| {
+            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            bn.iter(|| black_box(fnp_as.call((&a,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("numpy_argsort_struct_i8f8_2m", |bn| {
+            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            bn.iter(|| black_box(numpy_as.call((&a,), Some(&kw)).unwrap()));
+        });
+    });
+    group.finish();
+}
+
 fn bench_unique_arrayapi_boundary(c: &mut Criterion) {
     // np.unique_counts / unique_all (numpy 2.x array-API). numpy delegates to its generic unique (~411ms
     // unique_counts / ~742ms unique_all @2M U8); fnp routes through its fast string unique — bit-exact.
@@ -11847,6 +11887,7 @@ criterion_group!(
     bench_unique_struct_mixed_factorize_boundary,
     bench_lexsort_float_boundary,
     bench_sort_struct_mixed_boundary,
+    bench_argsort_struct_stable_boundary,
     bench_unique_arrayapi_boundary,
     bench_isin_struct_boundary,
     bench_isin_struct_float_boundary,
