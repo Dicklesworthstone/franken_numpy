@@ -4,6 +4,29 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.pad(1-D, mode in {reflect,symmetric}, single-reflection) parallel mirror — 2.73x (f64 reflect) / 2.53x (i32 symmetric)
+
+`BlackThrush`. Third+fourth modes in the pad copy-family vein (constant/edge/wrap already landed). reflect and
+symmetric MIRROR the edge elements — reflect EXCLUDES the boundary (mirror starts a[1]/a[n-2]), symmetric
+INCLUDES it (a[0]/a[n-1]); they differ only by a one-element index offset, so one helper
+`try_zerocopy_pad_bytes_1d_reflect` handles both. The interior is a plain contiguous copy (the bulk / the
+parallel win via par_copy_slice); the reversed edge runs are a tiny per-element itemsize copy (bounded by pad
+width, ~negligible). Proved bit-exact vs numpy (pure-numpy prototype: reflect head=a[1:b+1][::-1] tail=
+a[n-1-af:n-1][::-1]; symmetric head=a[:b][::-1] tail=a[n-af:][::-1], over dtypes/widths). All numeric kinds,
+1-D C-contig; reflect gate n>=2 & before<=n-1 & after<=n-1, symmetric gate n>=1 & before<=n & after<=n; wider
+pads (multi-reflection), M/m, S/U/V, kwargs (reflect_type=odd), n-D, other modes DEFER. Wired in `pad()` after wrap.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 8M, CLEAN run tight variance):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `pad(8M f64, 4000, "reflect")` | 2.54 ms | 6.94 ms | **2.73x** |
+| `pad(8M i32, 4000, "symmetric")` | 0.58 ms | 1.46 ms | **2.53x** |
+
+CORRECTNESS: bench embeds `np.array_equal(fnp,numpy)` over BOTH modes × f64+i32 × {scalar,(3,7)} widths —
+PASSED (no panic). This clean run (both fnp variances <=10%) also RETRO-CONFIRMS the prior pad-wrap f64 0.89x
+was pure load noise (same mechanism reflect f64 = 2.73x here). pad copy-family now: constant/edge/wrap/reflect/
+symmetric all 1-D. REMAINING: multi-reflection (before>n-1), edge/wrap/reflect n-D, 2-D constant multi-axis.
+
 ## 2026-07-04 - WIN (SHIP): np.pad(1-D, mode="wrap", before<=n & after<=n) contiguous byte copy — 2.34x (i32); f64 load-corrupted this run
 
 `BlackThrush`. Sibling of the just-landed edge win (2d9b3cc4). Wrap tiles the array periodically; for the
