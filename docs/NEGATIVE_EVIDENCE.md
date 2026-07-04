@@ -4,6 +4,36 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - NO-SHIP (DROPPED): packed u64 keys for narrow fixed-width string sort/unique — 1.70x vs NumPy but 4.3x slower than shipped memcmp path
+
+`cod`. Land-or-dig worktree scan found no measured win absent from `main`: the only non-ancestor
+FrankenNumPy worktree head was `franken_numpy_snowspire_ixs5y173` with a beads-only DLAQR3 no-ship commit,
+and its dirty `fnp-linalg` AED diff had no landed measured win to transplant. Dug the open string-sort note
+from the existing ledger (`record-packing key` for narrow fixed-width strings). Lever tried: materialize each
+Latin-1 `U<=8` or `S<=8` record into a big-endian `u64`, sort `Vec<u32>` indices by that key, and use key
+equality for default `unique` run detection. This was intended to replace repeated `[u8]::cmp` record
+comparisons with register-width comparisons.
+
+MEASURED (per-crate RCH on `vmi1152480`, candidate source, release profile, 2M `U4` Latin-1):
+| Probe | candidate fnp | legacy NumPy original | numpy/fnp |
+|---|---:|---:|---:|
+| `sort(2M 'U4' Latin-1 strings)` | 191.0 ms | 324.6 ms | **1.70x** |
+
+KEEP/REJECT: DROPPED. The shipped memcmp-index path is already ledgered on `hz2` at 44.1 ms for the same
+`U4` row, so the packed-key materialization variant is roughly **4.3x slower than current main** despite
+still beating NumPy. Root cause: a full parallel key-materialization pass plus key-vector memory traffic
+overwhelms any comparator savings; Rayon/slice memcmp is already excellent for the short low-entropy records.
+This is the graveyard §7.1/§7.7 "constants kill you" case: word packing was plausible, but the extra SoA
+artifact is the wrong layout for this hot path. Code and focused conformance test were reverted; no source
+change remains. Retry only with an in-place `(key,index)` pair sort that eliminates the separate perm+key
+indirection and proves faster than 44 ms on the same row.
+
+Command note: the literal requested `cargo bench --release` form was attempted and Cargo rejected it
+(`unexpected argument '--release'`), so the repo-working equivalent was used:
+`AGENT_NAME=cod RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface -- 'python_string_sort_boundary/(fnp_sort_U4_2m|numpy_sort_U4_2m)' --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher --noplot`.
+The RCH client was stopped after both target rows printed so filtered Criterion would not continue unrelated
+setup work.
+
 ## 2026-07-04 - WIN (SHIP, WEAK): np.unique(datetime64/timedelta64) via int64 sort+dedup — 1.50x (numpy is already int64-fast here)
 
 `BlackThrush`. datetime64/timedelta64 unique had NO fnp path (delegated). datetime/timedelta is int64-backed
