@@ -4,6 +4,31 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - SURFACE: f64 `histogram` 256-bin rows are still 6.4-7.1x faster than NumPy on current main
+
+`BlackThrush`. Fresh per-crate RCH recheck of the existing `fnp-python` Criterion
+histogram boundary. No source change was made: this pass surfaces a current
+measured win on `main` and leaves the native privatized `par_chunks` tally as-is.
+
+Per-crate RCH bench command: `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-blackthrush-02 rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface -- 'python_histogram_boundary/(fnp_histogram_f64_4m_256|numpy_histogram_f64_4m_256|fnp_histogram_f64_8m_256|numpy_histogram_f64_8m_256)' --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher --noplot`.
+Worker: `hz2`.
+
+| Probe | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `histogram(f64 4M, bins=256)` | 4,204,678 | 27,066,113 | 0.1553x (6.4x faster) | current win |
+| `histogram(f64 8M, bins=256)` | 7,656,334 | 53,988,752 | 0.1418x (7.1x faster) | current win |
+
+Validation: benchmark completed remotely on `hz2` with exit 0. The compile emitted the known pre-existing
+`fnp-ufunc::nan_filtered`, `fnp-python` unused/dead-code, and bench unused-`numpy` warnings. Criterion
+also warned that the slow NumPy 8M row could not complete 10 samples within the 3s measurement window,
+which is consistent with the measured NumPy latency rather than a failure. `git pull --rebase origin main`
+passed in a clean scratch worktree; the same command was blocked in the shared checkout by unrelated
+unstaged peer edits. Agent Mail session identity resolved to `BlackThrush`; file reservation writes still
+failed because the mailbox DB corruption circuit breaker is open.
+
+Action: keep this as current positive evidence for the histogram family. If a future no-gaps sweep sees a
+histogram regression, rerun this exact group before reopening the tally implementation.
+
 ## 2026-07-04 - SURFACE: `deadlock-audit-1nzxt` convolve/correlate k=256 target is stale — current main is ~30x faster than NumPy
 
 `BlackThrush`. Rechecked the open bead `deadlock-audit-1nzxt` ("convolve/correlate k=128-256
