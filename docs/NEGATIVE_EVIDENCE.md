@@ -4,6 +4,30 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - WIN (SHIP): np.unique(2-D small-range int, axis=0) packed composite — 65x
+
+`BlackThrush`. unique(axis=0) (unique ROWS of a 2-D array) DELEGATED to numpy, which views each row as a
+void scalar and sorts them with a slow per-row byte comparator (~620 ms for 500k x 4). Empirically pinned
+that numpy returns rows in VALUE-LEXICOGRAPHIC order (col0 primary) -> it IS a lexsort-by-columns + dedup,
+so the packed-composite key from the lexsort win applies: pack each row into ONE u64 with col0 MOST
+significant (= value-lex), a fast u64 par_sort + dedup gives the sorted-unique row keys, then DECODE each
+unique composite back to a row (col = (comp / mult_j) % span_j + min_j) instead of gathering.
+try_native_unique_rows_composite. BIT-EXACT (pure-numpy prototype byte-exact over 200 trials, int32/64,
+K=1..4; bench-embedded fnp-vs-numpy assertion PASSED on hz2).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion median):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `unique(500k x 4 int, axis=0)` | 9.5 ms | 620 ms | **65x** |
+
+GATES (else defer to numpy): 2-D int ndarray (i8..i64 / u8..u32 / bool), sole {axis: 0} kwarg (no
+return_* / equal_nan), n >= 1<<17, packed range (product of per-column spans) fits u64. The DECODE step
+(reconstruct rows from composites) avoids a gather and preserves the input dtype exactly via a lossless
+astype. **This is the 3rd win from the packed-composite key (lexsort, searchsorted-family sibling): any
+op that sorts/dedups small-range integer RECORDS (unique-rows, lexsort, group-by, join-key) collapses to
+one u64 sort. Follow-ups: unique(axis=0) with return_index/inverse/counts (carry the index through the
+sort), unique(axis=1), and float/large-range rows via a hashed dedup instead of composite packing.**
+
 ## 2026-07-04 - WIN (SHIP): np.lexsort(small-range int keys) packed composite — 3.37x
 
 `BlackThrush`. lexsort's int keys DELEGATED to numpy (which does K sequential radix sorts, one per key).

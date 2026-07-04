@@ -9137,8 +9137,66 @@ keys = (k0, k1, k2)\n",
     group.finish();
 }
 
+// np.unique(500k x 4 small-range int, axis=0): numpy sorts rows via a slow void comparator; the
+// composite-pack path does one u64 sort+dedup+decode. Correctness gate (byte-identical) + timing.
+fn bench_unique_rows_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_unique_rows_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+A = rng.integers(0, 20, (500_000, 4)).astype(np.int64)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("unique rows setup");
+        let a = ns.get_item("A").expect("A");
+        let fnp_unique = module.getattr("unique").expect("fnp unique");
+        let numpy_unique = numpy.getattr("unique").expect("numpy unique");
+        {
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0).expect("axis");
+            let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+            let got = fnp_unique.call((&a,), Some(&kw)).expect("fnp unique");
+            let exp = numpy_unique.call((&a,), Some(&kw)).expect("np unique");
+            let eq: bool = np_array_equal
+                .call1((&got, &exp))
+                .expect("array_equal")
+                .extract()
+                .expect("bool");
+            assert!(eq, "unique(axis=0) composite correctness mismatch");
+        }
+        group.bench_function("fnp_unique_rows_500k4_axis0", |b| {
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0).expect("axis");
+            b.iter(|| black_box(fnp_unique.call((&a,), Some(&kw)).expect("fnp unique")));
+        });
+        group.bench_function("numpy_unique_rows_500k4_axis0", |b| {
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0).expect("axis");
+            b.iter(|| black_box(numpy_unique.call((&a,), Some(&kw)).expect("numpy unique")));
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_unique_rows_boundary,
     bench_lexsort_boundary,
     bench_nanarg_lastaxis_boundary,
     bench_nanarg_nonlast_boundary,
