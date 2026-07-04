@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-04 - SHIP: `intersect1d(float64)` finite parallel set path - 1.67x faster than NumPy
+
+`SilverBridge`. The 2026-07-03 float set-ops crack was still unrealized on `main`.
+Landed the smallest measured piece: a same-dtype, exact-ndarray, C-contiguous
+`float64` `intersect1d` path that reads borrowed buffers, rejects NaN and negative
+zero to preserve NumPy's special-value semantics, parallel-sorts and dedups each
+side, then emits the sorted intersection into `numpy.empty(dtype=float64)`.
+
+Per-crate RCH bench command: `AGENT_NAME=SilverBridge CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-silverbridge RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900 rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface -- 'python_setops_boundary/(fnp_intersect1d_f64_repeated_1m|numpy_intersect1d_f64_repeated_1m)' --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher --noplot`.
+Worker: `vmi1293453`.
+
+| Probe | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `intersect1d(float64 repeated 1M)` | 11,639,282 | 19,466,670 | 0.598x (1.67x faster) | ship |
+
+Validation: `AGENT_NAME=SilverBridge CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-silverbridge RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo check -p fnp-python --lib --bench criterion_python_surface` passed remotely on `hz2`. `AGENT_NAME=SilverBridge CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-silverbridge RCH_QUEUE_WHEN_BUSY=1 rch exec -- cargo test -p fnp-python --test conformance_setops -- --nocapture` fell open locally because all workers were inadmissible at dispatch, and passed `MUST 9/9`, `SHOULD 14/14`, `MAY 2/2`, including the new `setops-intersect1d-f64-large-repeated` case. `cargo fmt --check -p fnp-python` remains blocked by pre-existing package-wide formatting drift in `criterion_python_surface.rs`; direct rustfmt check on touched files also reports broad pre-existing `lib.rs` drift, so no unrelated rustfmt rewrite was applied. `ubs crates/fnp-python/src/lib.rs crates/fnp-python/tests/conformance_setops.rs` completed with the known broad inventory findings, while its internal fmt/clippy/check/test sections were clean.
+
 ## 2026-07-04 - SURFACE: dense `eigvalsh` n800 remains a measured NumPy loss; radical route needs two-stage SBR contract
 
 `BlackThrush`. Land-or-dig pass first checked the dirty/ahead bench worktrees for

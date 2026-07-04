@@ -35,6 +35,19 @@ fn np_array_1d_f<'py>(
     py.import("numpy")?.getattr("array")?.call1((values,))
 }
 
+fn np_repeated_f64_grid<'py>(
+    py: Python<'py>,
+    n: i64,
+    mul: i64,
+    modulus: i64,
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    let raw = py.import("numpy")?.call_method1("arange", (n,))?;
+    raw.call_method1("__mul__", (mul,))?
+        .call_method1("__mod__", (modulus,))?
+        .call_method1("__truediv__", (16.0_f64,))?
+        .call_method1("astype", ("float64",))
+}
+
 fn np_array_1d_complex<'py>(
     py: Python<'py>,
     values: Vec<(f64, f64)>,
@@ -119,6 +132,26 @@ fn conformance_setops_matrix() {
                 kw.set_item("assume_unique", true)?;
                 Ok(Some(kw))
             },
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "setops-intersect1d-f64-large-repeated",
+            "intersect1d",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_repeated_f64_grid(py, 1_100_000, 1, 65_536)?,
+                        np_repeated_f64_grid(py, 1_100_000, 7, 65_536)?,
+                    ],
+                )
+            },
+            no_kwargs,
         );
         run_case(
             py,
