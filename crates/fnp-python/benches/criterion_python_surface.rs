@@ -7101,9 +7101,10 @@ fn bench_pad_wrap_boundary(c: &mut Criterion) {
         fnp_python(&module).expect("initialize fnp_python bench module");
         let numpy = py.import("numpy").expect("numpy oracle");
         let setup = "import numpy as np\n\
-rng = np.random.default_rng(0)\n\
-x = rng.standard_normal(8_000_000)\n\
-xi = rng.integers(-1000, 1000, 8_000_000).astype(np.int32)\n";
+	rng = np.random.default_rng(0)\n\
+	x = rng.standard_normal(8_000_000)\n\
+	xi = rng.integers(-1000, 1000, 8_000_000).astype(np.int32)\n\
+	xm = rng.integers(-1000, 1000, 4096).astype(np.int32)\n";
         let ns = PyDict::new(py);
         py.run(
             std::ffi::CString::new(setup).unwrap().as_c_str(),
@@ -7113,6 +7114,7 @@ xi = rng.integers(-1000, 1000, 8_000_000).astype(np.int32)\n";
         .expect("pad wrap setup");
         let x = ns.get_item("x").expect("x");
         let xi = ns.get_item("xi").expect("xi");
+        let xm = ns.get_item("xm").expect("xm");
         let fnp_pad = module.getattr("pad").expect("fnp pad");
         let numpy_pad = numpy.getattr("pad").expect("numpy pad");
         let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
@@ -7136,6 +7138,19 @@ xi = rng.integers(-1000, 1000, 8_000_000).astype(np.int32)\n";
                 assert!(eq, "pad wrap correctness mismatch: dtype={label}");
             }
         }
+        let multi_width = (4_000_000_i64, 4_003_000_i64);
+        let f_multi = fnp_pad
+            .call1((&xm, multi_width, "wrap"))
+            .expect("fnp pad wrap multi-tile");
+        let n_multi = numpy_pad
+            .call1((&xm, multi_width, "wrap"))
+            .expect("numpy pad wrap multi-tile");
+        let eq: bool = np_array_equal
+            .call1((&f_multi, &n_multi))
+            .expect("array_equal")
+            .extract()
+            .expect("bool");
+        assert!(eq, "pad wrap multi-tile correctness mismatch");
         group.bench_function("fnp_pad_wrap_f64_8m", |b| {
             b.iter(|| black_box(fnp_pad.call1((&x, 4000_i64, "wrap")).expect("fnp pad wrap f64")));
         });
@@ -7147,6 +7162,24 @@ xi = rng.integers(-1000, 1000, 8_000_000).astype(np.int32)\n";
         });
         group.bench_function("numpy_pad_wrap_i32_8m", |b| {
             b.iter(|| black_box(numpy_pad.call1((&xi, 4000_i64, "wrap")).expect("numpy pad wrap i32")));
+        });
+        group.bench_function("fnp_pad_wrap_i32_multitile_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    fnp_pad
+                        .call1((&xm, multi_width, "wrap"))
+                        .expect("fnp pad wrap multi-tile i32"),
+                )
+            });
+        });
+        group.bench_function("numpy_pad_wrap_i32_multitile_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    numpy_pad
+                        .call1((&xm, multi_width, "wrap"))
+                        .expect("numpy pad wrap multi-tile i32"),
+                )
+            });
         });
     });
     group.finish();

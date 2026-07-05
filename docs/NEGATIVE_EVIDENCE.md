@@ -4,6 +4,30 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-05 - WIN (SHIP): np.pad(1-D, mode="wrap") multi-tile periodic byte copy - 3.57x vs legacy NumPy
+
+`cod`; AGENT_NAME=cod. No measured `.scratch`/worktree win was absent from `origin/main` after fetch; the only
+non-main worktree head was an existing no-ship. Dug the remaining pad-copy family gap from the ledger:
+`mode="wrap"` with `before > len(a)` or `after > len(a)`. The shipped wrap fast path handled only one tile
+(`before<=n && after<=n`) and deferred wider pads to NumPy's Python pad machinery.
+
+Lever: keep the existing numeric 1-D C-contiguous byte-copy gates, but replace the multi-tile defer with
+`copy_periodic_items`: a chunked periodic copy over whole input records. The single-tile case stays the prior
+contiguous three-copy path; multi-tile head starts at `(-before mod n)`, tail starts at `0`, and the interior is
+still a direct parallel copy of the input. Dtypes remain numeric only (`f/i/u/c/b`); `M/m`, `S/U/V`, kwargs,
+empty inputs, and n-D still defer.
+
+MEASURED (per-crate RCH Criterion on `vmi1293453`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod`,
+release profile, short filtered subset, 4096-element `int32` input padded by `(4_000_000, 4_003_000)`):
+| Probe | fnp | legacy NumPy original | numpy/fnp |
+|---|---:|---:|---:|
+| `pad(4096 i32, (4_000_000, 4_003_000), "wrap")` | 212,798 ns | 759,332 ns | **3.57x** |
+
+CORRECTNESS: bench embeds `np.array_equal(fnp.pad(...), np.pad(...))` for the measured row. Focused conformance
+passed: `rch exec -- cargo test -p fnp-python --test conformance_moveaxis_pad pad_wrap_multitile_numeric --
+--nocapture` (1/1, int32/f64/complex64). Compile gate passed:
+`rch exec -- cargo check -p fnp-python --lib --bench criterion_python_surface --test conformance_moveaxis_pad`.
+
 ## 2026-07-04 - WIN (SHIP): np.argsort(1-D distinct float-field structured) via sortable byte-transform - 20.04x vs legacy NumPy
 
 `cod`; AGENT_NAME=cod. No measured `.scratch`/worktree win was absent from `origin/main` after fetch; dug the
