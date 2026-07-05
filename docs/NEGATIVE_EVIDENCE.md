@@ -4,6 +4,32 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-05 - WIN (SHIP): np.argsort(1-D datetime/timedelta + complex, kind='stable'/'mergesort') on dense ties - 10.90x / 8.60x vs legacy NumPy
+
+`BlackThrush`; AGENT_NAME=BlackThrush. Landed the uncommitted scratch candidate from
+`.scratch/franken_numpy-blackthrush-pad-20260704T025641` after re-measuring it on `main`; the existing ledger
+covered distinct datetime/complex argsort and stable int/float/string/structured argsort, but not stable temporal
+or complex tied data. The lever is the same stable-order escape hatch: default-kind argsort must defer on ties
+because NumPy's unstable tie permutation is exposed, but `kind='stable'/'mergesort'` breaks ties by original
+index. Datetime/timedelta route through an int64 view after a NaT pre-scan. Complex routes through a float view and
+sorts the permutation by `(real, imag, original_index)`, deferring on NaN components.
+
+MEASURED (per-crate `rch exec` on `hz2`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod`,
+release profile via `cargo bench -p fnp-python --bench criterion_python_surface --profile release --
+argsort_temporal_complex_stable --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher`;
+the requested `cargo bench --release` form is rejected by this Cargo):
+| Probe | fnp | legacy NumPy original | numpy/fnp |
+| --- | ---: | ---: | ---: |
+| `argsort(8M datetime64[s] dense, stable)` | 96.72 ms | 1054.11 ms | **10.90x** |
+| `argsort(8M complex128 dense, stable)` | 172.63 ms | 1485.33 ms | **8.60x** |
+
+CORRECTNESS: the bench asserts `np.array_equal(fnp.argsort(a, kind='stable'), np.argsort(a, kind='stable'))`
+for both benchmark arrays before timing. Focused conformance passed:
+`rch exec -- cargo test -p fnp-python --test conformance_sort_search argsort_temporal_complex_stable_dense_matches_numpy -- --nocapture`
+(1/1; datetime64, timedelta64, complex128, complex64 dense ties plus NaT/NaN fallback surfaces). Compile gate
+passed:
+`rch exec -- cargo check -p fnp-python --lib --bench criterion_python_surface`.
+
 ## 2026-07-05 - WIN (SHIP): np.pad(1-D, mode="wrap") multi-tile periodic byte copy - 3.57x vs legacy NumPy
 
 `cod`; AGENT_NAME=cod. No measured `.scratch`/worktree win was absent from `origin/main` after fetch; the only

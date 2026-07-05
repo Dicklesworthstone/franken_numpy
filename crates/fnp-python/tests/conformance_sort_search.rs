@@ -264,6 +264,54 @@ print(np.array_equal(distinct_actual, distinct_expected) and np.array_equal(tied
     Ok(())
 }
 
+#[test]
+fn argsort_temporal_complex_stable_dense_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(43)
+n = (1 << 20) + 129
+ticks = rng.integers(-1000, 1000, n, dtype=np.int64)
+c_re = rng.integers(-100, 100, n)
+c_im = rng.integers(-100, 100, n)
+cases = [
+    ("datetime64", ticks.astype("datetime64[s]")),
+    ("timedelta64", ticks.astype("timedelta64[ns]")),
+    ("complex128", (c_re + 1j * c_im).astype(np.complex128)),
+    ("complex64", (c_re + 1j * c_im).astype(np.complex64)),
+]
+ok = True
+for label, arr in cases:
+    for kind in ("stable", "mergesort"):
+        got = fnp.argsort(arr, kind=kind)
+        exp = np.argsort(arr, kind=kind)
+        if not np.array_equal(got, exp):
+            print(("dense", label, kind))
+            ok = False
+
+special_cases = [
+    ("datetime64_NaT", np.array(["1970-01-03", "NaT", "1970-01-01", "NaT"], dtype="datetime64[D]")),
+    ("timedelta64_NaT", np.array([3, "NaT", 1, "NaT"], dtype="timedelta64[D]")),
+    ("complex128_NaN", np.array([1 + 2j, np.nan + 0j, 1 + 1j, np.nan + 3j], dtype=np.complex128)),
+]
+for label, arr in special_cases:
+    got = fnp.argsort(arr, kind="stable")
+    exp = np.argsort(arr, kind="stable")
+    if not np.array_equal(got, exp):
+        print(("special", label))
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "stable temporal/complex argsort should match numpy on dense ties: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // unique
 // ─────────────────────────────────────────────────────────────────────────────
