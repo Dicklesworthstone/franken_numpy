@@ -4,6 +4,31 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-06 - WIN (SHIP): WIDE-range int stable argsort via PARALLEL LSD RADIX SORT (radical primitive) — 14.8x / 13.9x
+
+`BlackThrush`, dig-deeper round. Multi-pass generalization of last round's counting sort (b9951f33) to UNBOUNDED
+range — the case counting sort defers on (range > 1<<20), where `argsort_stable_typed` falls back to the
+gather-bound comparison sort (data[x].cmp(data[y]) = 2 random gathers/compare, ~2 s @16M i64). `argsort_stable_
+radix<T>`: carry each element's KEY alongside its INDEX (keys = value-min as u64 offset, idx = 0..n) and sort on
+the key BYTES directly — GATHER-FREE. Ping-pong LSD, one pass per significant byte (1..8, from the value span),
+each pass a fully-PARALLEL counting sort (per-chunk 256-bucket histogram -> disjoint per-chunk offsets -> per-
+chunk scatter of BOTH key+index arrays). Every pass stable + input in original-index order -> equal values keep
+ascending index == numpy stable argsort. Gate n <= u32::MAX (index width). i32/i64/u32/u64. Wired into
+int_argsort_stable after counting (small range), before the comparison fallback. BYTE-EXACT (verified).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 16M wide-range, kind=stable):
+| Probe | fnp radix | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `argsort(16M i64 [0,2^30), stable)` (4 passes) | 134.2 ms | 1986.3 ms | **14.8x** |
+| `argsort(16M u64 [0,2^52), stable)` (7 passes) | 146.8 ms | 2041.8 ms | **13.9x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on both — PASSED. u64's 7 passes cost only ~10% more than i64's 4
+(per-pass cost low; scales in significant bytes, not range). The stable numeric argsort now spans the FULL int
+range: small dense -> counting sort O(n+range) (32.2x), wide -> LSD radix O(n·bytes) (14.8x), both gather-free
+and beating the comparison sort's per-compare gathers. Does NOT touch the default-kind introsort-tie path (ledger
+~line 11496 rejection stands for kind=default). RULE: when a stable/dense sort baseline sorts KEYS-BY-INDEX with
+gathers, carry the key with the index and radix on the key bytes — gather-free multi-pass beats gather-bound compare.
+
 ## 2026-07-06 - WIN (SHIP): small-range int stable argsort via PARALLEL COUNTING SORT (radical primitive) — 32.2x (4.6x over own path)
 
 `BlackThrush`, dig-deeper round. RADICAL PRIMITIVE swap on the hottest path (stable numeric argsort, 07c4955e).
