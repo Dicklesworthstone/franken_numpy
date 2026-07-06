@@ -4,6 +4,30 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-06 - WIN (SHIP): small-range int stable argsort via PARALLEL COUNTING SORT (radical primitive) — 32.2x (4.6x over own path)
+
+`BlackThrush`, dig-deeper round. RADICAL PRIMITIVE swap on the hottest path (stable numeric argsort, 07c4955e).
+The comparison path sorts the index permutation by `data[x].cmp(data[y])` — TWO random gathers into the value
+array per compare (~n·log n gathers = the sort-to-sequentialize anti-pattern, 84.1 ms @8M i64 dense last turn).
+`argsort_stable_counting<T>` replaces it for SMALL-RANGE ints with a fully-PARALLEL counting sort: (1) per-chunk
+histogram (parallel, sequential value reads), (2) compute each chunk's DISJOINT output sub-range per bucket, (3)
+per-chunk scatter (parallel) writing each original index into its bucket cursor. Stable — chunks run in original
+order and each emits ascending indices, so within every value bucket indices ascend == numpy stable argsort.
+Gated range <= 1<<20 (else histogram/offset arrays dominate -> comparison-sort fallback). i32/i64/u32/u64. Float
++ wide-range int keep the comparison path. BYTE-EXACT (bench assert + numpy-prototype verified).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 8M dense[0,1000), kind=stable):
+| Probe | fnp counting | fnp compare (07c4955e) | numpy | numpy/fnp |
+|---|---:|---:|---:|---:|
+| `argsort(8M i64 dense, stable)` | 18.4 ms | 84.1 ms | 593.5 ms | **32.2x** (4.6x over own path) |
+
+CORRECTNESS: bench asserts `np.array_equal` — PASSED. This is the LEDGER RETRY-PREDICATE satisfied: a SERIAL
+counting scatter for lexsort was DROPPED earlier (line ~912: "serial count/prefix/scatter erased the O(n+range)
+edge; retry only with a PARALLEL histogram") — this is that parallel histogram+scatter, AND its baseline (an
+argsort that GATHERS per compare) is far more gather-bound than lexsort's gather-free `(u64,u32)` pair sort, so
+the counting sort has huge room. RULE: when a stable/dense argsort baseline sorts INDICES with value gathers,
+a parallel counting sort (bounded range) sidesteps the gathers entirely — O(n) beats O(n·log n)+cache-miss.
+
 ## 2026-07-06 - WIN (SHIP): np.argsort(2-D int/float, axis=-1, kind='stable'/'mergesort') per-lane dense — 15.5x / 12.8x
 
 `BlackThrush`. The LAST-AXIS analog of the flat numeric stable argsort (07c4955e): the existing per-lane last-axis
