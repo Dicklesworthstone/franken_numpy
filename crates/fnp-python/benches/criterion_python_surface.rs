@@ -8477,6 +8477,58 @@ df = rng.integers(0, 1000, 8_000_000).astype(np.float64)\n";
     group.finish();
 }
 
+fn bench_argsort_lastaxis_stable_boundary(c: &mut Criterion) {
+    // np.argsort(2-D int/float, axis=-1, kind='stable') on DENSE rows (heavy repeats — the per-lane tied case
+    // the default-kind last-axis path defers on). numpy per-lane stable sort (~0.3-0.4s @8M); fnp per-lane
+    // (value, in-lane index) parallel sort across lanes — bit-exact.
+    let mut group = c.benchmark_group("python_argsort_lastaxis_stable_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+mi = np.ascontiguousarray(rng.integers(0, 100, (4000, 2000)).astype(np.int64))\n\
+mf = np.ascontiguousarray(rng.integers(0, 100, (4000, 2000)).astype(np.float64))\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let mi = ns.get_item("mi").expect("mi");
+        let mf = ns.get_item("mf").expect("mf");
+        let fnp_as = module.getattr("argsort").expect("fnp argsort");
+        let numpy_as = numpy.getattr("argsort").expect("numpy argsort");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        for (arr, label) in [(&mi, "i64"), (&mf, "f64")] {
+            let kw = PyDict::new(py); kw.set_item("axis", -1).unwrap(); kw.set_item("kind", "stable").unwrap();
+            let f = fnp_as.call((arr,), Some(&kw)).expect("fnp argsort");
+            let n = numpy_as.call((arr,), Some(&kw)).expect("numpy argsort");
+            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "argsort 2D {label} axis=-1 stable mismatch");
+        }
+        group.bench_function("fnp_argsort_i64_2d_lastaxis_stable_8m", |bn| {
+            let kw = PyDict::new(py); kw.set_item("axis", -1).unwrap(); kw.set_item("kind", "stable").unwrap();
+            bn.iter(|| black_box(fnp_as.call((&mi,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("numpy_argsort_i64_2d_lastaxis_stable_8m", |bn| {
+            let kw = PyDict::new(py); kw.set_item("axis", -1).unwrap(); kw.set_item("kind", "stable").unwrap();
+            bn.iter(|| black_box(numpy_as.call((&mi,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("fnp_argsort_f64_2d_lastaxis_stable_8m", |bn| {
+            let kw = PyDict::new(py); kw.set_item("axis", -1).unwrap(); kw.set_item("kind", "stable").unwrap();
+            bn.iter(|| black_box(fnp_as.call((&mf,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("numpy_argsort_f64_2d_lastaxis_stable_8m", |bn| {
+            let kw = PyDict::new(py); kw.set_item("axis", -1).unwrap(); kw.set_item("kind", "stable").unwrap();
+            bn.iter(|| black_box(numpy_as.call((&mf,), Some(&kw)).unwrap()));
+        });
+    });
+    group.finish();
+}
+
 fn bench_argsort_temporal_complex_stable_boundary(c: &mut Criterion) {
     // np.argsort(1-D datetime/complex, kind='stable') on DENSE data. The tie-stable order is
     // reproducible as (value, original-index), unlike default-kind argsort.
@@ -12103,6 +12155,7 @@ criterion_group!(
     bench_argsort_string_stable_boundary,
     bench_argsort_temporal_complex_stable_boundary,
     bench_argsort_numeric_stable_boundary,
+    bench_argsort_lastaxis_stable_boundary,
     bench_unique_arrayapi_boundary,
     bench_isin_struct_boundary,
     bench_isin_struct_float_boundary,

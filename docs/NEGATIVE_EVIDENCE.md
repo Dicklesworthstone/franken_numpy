@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-06 - WIN (SHIP): np.argsort(2-D int/float, axis=-1, kind='stable'/'mergesort') per-lane dense — 15.5x / 12.8x
+
+`BlackThrush`. The LAST-AXIS analog of the flat numeric stable argsort (07c4955e): the existing per-lane last-axis
+argsort paths DEFER ON TIES, so `kind='stable'` on rows with repeats fell back to numpy's slow per-lane stable
+sort (~263ms i64 / ~359ms f64 @8M dense[0,100)). `try_native_argsort_stable_lastaxis` / `argsort_stable_lastaxis_
+typed<T>`: per-lane STABLE sort of the in-lane index perm by (value, in-lane index) == numpy stable, parallel
+across lanes, NO tie defer. Float pre-scan NaN -> defer; -0.0 needs no defer (numpy stable ties ±0.0 by index).
+Gated kind='stable'/'mergesort' at the top of the last-axis block. i/u/f width 4/8. BYTE-EXACT (int + float).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 4000x2000 dense[0,100), axis=-1):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `argsort(4000x2000 i64, axis=-1, stable)` | 17.0 ms | 263.2 ms | **15.5x** |
+| `argsort(4000x2000 f64, axis=-1, stable)` | 28.0 ms | 358.5 ms | **12.8x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on both — PASSED. BIGGER multiple than the flat case (6.98-8.0x)
+because each lane's sort (cols=2000) is CACHE-RESIDENT and 4000 lanes parallelize perfectly. NOTE: this turn's
+first attempt (flat datetime/complex stable argsort) COLLIDED with a sibling that landed the identical helpers
+(02d8881b) minutes earlier — discarded my redundant duplicate, pivoted to the still-open 2-D last-axis. The
+stable-argsort family is now COMPLETE across dtype AND shape: numeric/datetime/complex/string/struct flat +
+numeric last-axis.
+
 ## 2026-07-05 - WIN (SHIP): np.argsort(1-D datetime/timedelta + complex, kind='stable'/'mergesort') on dense ties - 10.90x / 8.60x vs legacy NumPy
 
 `BlackThrush`; AGENT_NAME=BlackThrush. Landed the uncommitted scratch candidate from
