@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-07 - WIN (SHIP): DATETIME64 argsort (default + stable) routed to the gather-free int radix/counting — 13.9x / 65.7x
+
+`BlackThrush`, dig-deeper round. The temporal-routing lever (.view('int64') -> int kernels) applied to argsort:
+datetime64/timedelta64 are int64-backed and int64 value order == temporal order, so datetime argsort is an int64
+argsort of the view (indices are dtype-agnostic). Both datetime argsort paths were routing to the GATHER-BOUND
+comparison sort (`argsort_stable_typed::<i64>` for stable; `int_argsort_flat_typed::<i64>` for default) — swapped
+them to the gather-free `int_argsort_stable` (counting sort / LSD radix) and `try_native_int_argsort_default_radix`.
+NaT (i64::MIN, which numpy orders specially) pre-scanned + deferred; tied default data defers to the existing
+comparison path. Two-LINE routing change, reusing all the int-radix machinery. BYTE-EXACT (distinct + tied + NaT).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 16M datetime64[s]):
+| Probe | fnp | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `argsort(16M distinct datetime, default)` | 136.3 ms | 1891.6 ms | **13.9x** (LSD radix) |
+| `argsort(16M tied[0,1000) datetime, stable)` | 24.2 ms | 1588.0 ms | **65.7x** (counting sort!) |
+
+CORRECTNESS: bench asserts `np.array_equal` on distinct-default, tied-default (defers), and tied-stable — all
+PASSED. The tied-stable case hits the O(n+range) counting sort (dense small-range datetime via the int64 view)
+for a 65.7x win. The whole argsort surface is now gather-free: {int, float, datetime/timedelta} x {stable,
+default}, via counting sort (small dense) / LSD radix (wide or float-linearized) / int64-view routing (temporal).
+RULE: any int64-backed dtype (datetime/timedelta) inherits ALL the int argsort speedups for free via .view.
+
 ## 2026-07-07 - WIN (SHIP): DEFAULT-kind FLOAT argsort via gather-free IEEE-radix for distinct data — 12.7x / 13.8x
 
 `BlackThrush`, dig-deeper round. Float analog of the default-kind int argsort (b72f273b): `np.argsort(float)` with

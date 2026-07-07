@@ -8717,6 +8717,56 @@ tied = np.round(rng.standard_normal(16_000_000), 2)\n";  // f32d: ints < 2**24 e
     group.finish();
 }
 
+fn bench_argsort_datetime_radix_boundary(c: &mut Criterion) {
+    // np.argsort(1-D datetime64) default + stable — int64-backed, so route the .view('int64') to the gather-free
+    // int radix/counting instead of the gather-bound comparison sort (numpy ~2s @16M). NaT defers. Bit-exact.
+    let mut group = c.benchmark_group("python_argsort_datetime_radix_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+dt = rng.permutation(16_000_000).astype('datetime64[s]')\n\
+dt_tied = rng.integers(0, 1000, 16_000_000).astype('datetime64[s]')\n";  // distinct + dense-tied
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let dt = ns.get_item("dt").expect("dt");
+        let dt_tied = ns.get_item("dt_tied").expect("dt_tied");
+        let fnp_as = module.getattr("argsort").expect("fnp argsort");
+        let numpy_as = numpy.getattr("argsort").expect("numpy argsort");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        // default kind: distinct + tied (tied defers -> comparison path, still bit-exact)
+        for (arr, label) in [(&dt, "distinct_default"), (&dt_tied, "tied_default")] {
+            let f = fnp_as.call1((arr,)).expect("fnp argsort");
+            let n = numpy_as.call1((arr,)).expect("numpy argsort");
+            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "datetime argsort {label} mismatch");
+        }
+        // stable kind on tied datetime (dense) -> counting/radix, bit-exact
+        let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+        let fs = fnp_as.call((&dt_tied,), Some(&kw)).expect("fnp stable");
+        let ns_ = numpy_as.call((&dt_tied,), Some(&kw)).expect("numpy stable");
+        assert!(eqf.call1((&fs, &ns_)).unwrap().extract::<bool>().unwrap(), "datetime argsort stable tied mismatch");
+        group.bench_function("fnp_argsort_datetime_distinct_default_16m", |bn| bn.iter(|| black_box(fnp_as.call1((&dt,)).unwrap())));
+        group.bench_function("numpy_argsort_datetime_distinct_default_16m", |bn| bn.iter(|| black_box(numpy_as.call1((&dt,)).unwrap())));
+        group.bench_function("fnp_argsort_datetime_tied_stable_16m", |bn| {
+            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            bn.iter(|| black_box(fnp_as.call((&dt_tied,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("numpy_argsort_datetime_tied_stable_16m", |bn| {
+            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            bn.iter(|| black_box(numpy_as.call((&dt_tied,), Some(&kw)).unwrap()));
+        });
+    });
+    group.finish();
+}
+
 fn bench_median_int_histogram_boundary(c: &mut Criterion) {
     // np.median of a bounded-range INTEGER array. numpy partitions (introselect + int->f64 copy); fnp's own int
     // path delegates (widen-to-f64 "never beats numpy"). fnp histogram order-statistics = parallel histogram +
@@ -12388,6 +12438,7 @@ criterion_group!(
     bench_argsort_radix_float_boundary,
     bench_argsort_default_int_radix_boundary,
     bench_argsort_default_float_radix_boundary,
+    bench_argsort_datetime_radix_boundary,
     bench_median_int_histogram_boundary,
     bench_argsort_lastaxis_stable_boundary,
     bench_unique_arrayapi_boundary,
