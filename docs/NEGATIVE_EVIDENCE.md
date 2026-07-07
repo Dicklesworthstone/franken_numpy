@@ -4,6 +4,31 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-06 - WIN (SHIP): integer np.median via HISTOGRAM ORDER-STATISTICS (radical primitive, no sort/partition) — 31.3x / 21.5x
+
+`BlackThrush`, dig-deeper round. A genuinely DIFFERENT primitive from the sort work: order statistics from a
+HISTOGRAM, no sort and no partition. numpy median partitions (introselect O(n) + data movement + int->f64 copy);
+fnp's own int-median path widens int->f64 and "never beats numpy" so it DELEGATES (explicit comment at the
+integer gate). The key unlock: median returns a VALUE, not a partitioned array, so byte-exactness needs only the
+correct value — sidestepping the introselect tie-order problem that blocks argpartition. `median_hist_typed<T>`:
+PARALLEL per-chunk histogram of the values (bounded range) -> merge + prefix-sum -> binary-search the cumulative
+counts for the value at rank n/2 (odd) or the two straddling ranks (even, averaged) == numpy's sorted-middle.
+Gated axis=None + no out/overwrite/keepdims, integer any width, range <= 1<<22, n >= 1<<20. BYTE-EXACT (odd,
+even, signed, unsigned, i16 all verified vs numpy).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 16M bounded-range int):
+| Probe | fnp histogram | numpy partition | numpy/fnp |
+|---|---:|---:|---:|
+| `median(16M i64 dense[0,1000))` | 2.98 ms | 93.3 ms | **31.3x** |
+| `median(16M i16 dense[0,30000))` | 5.25 ms | 113.0 ms | **21.5x** |
+
+CORRECTNESS: bench asserts `np.equal(fnp, numpy)` on even-n i64, odd-n i64, and i16 — PASSED. numpy must move
+16M elements to partition; fnp does one parallel counting pass + a tiny prefix-sum + binary search (i16 is
+slower than i64 only because its 30k-bucket range costs more in the merge). RULE: any op that returns an ORDER
+STATISTIC (median/percentile/quantile) of bounded-range ints needs only the VALUE — a histogram + cumsum + rank
+lookup is byte-exact and skips the partition entirely, dodging the introselect tie-order blocker. OPEN: percentile/
+quantile (same histogram, interpolate between the two rank-straddling values), axis-wise median.
+
 ## 2026-07-06 - WIN (SHIP): WIDE-range int stable argsort via PARALLEL LSD RADIX SORT (radical primitive) — 14.8x / 13.9x
 
 `BlackThrush`, dig-deeper round. Multi-pass generalization of last round's counting sort (b9951f33) to UNBOUNDED

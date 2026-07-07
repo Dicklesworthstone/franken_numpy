@@ -8581,6 +8581,47 @@ wu = rng.integers(0, 2**52, 16_000_000).astype(np.uint64)\n";
     group.finish();
 }
 
+fn bench_median_int_histogram_boundary(c: &mut Criterion) {
+    // np.median of a bounded-range INTEGER array. numpy partitions (introselect + int->f64 copy); fnp's own int
+    // path delegates (widen-to-f64 "never beats numpy"). fnp histogram order-statistics = parallel histogram +
+    // prefix-sum + rank binary-search — returns the same value with NO sort/partition. Bit-exact (odd + even n).
+    let mut group = c.benchmark_group("python_median_int_histogram_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+even_i64 = rng.integers(0, 1000, 16_000_000).astype(np.int64)\n\
+odd_i64  = rng.integers(-500, 500, 16_000_001).astype(np.int64)\n\
+i16 = rng.integers(0, 30000, 16_000_000).astype(np.int16)\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let fnp_m = module.getattr("median").expect("fnp median");
+        let numpy_m = numpy.getattr("median").expect("numpy median");
+        for name in ["even_i64", "odd_i64", "i16"] {
+            let arr = ns.get_item(name).expect("arr");
+            let f = fnp_m.call1((&arr,)).expect("fnp median");
+            let n = numpy_m.call1((&arr,)).expect("numpy median");
+            let eq: bool = numpy.getattr("equal").unwrap().call1((&f, &n)).unwrap().extract().unwrap();
+            assert!(eq, "median {name} mismatch: fnp {:?} numpy {:?}", f, n);
+        }
+        let ev = ns.get_item("even_i64").expect("ev");
+        let i16a = ns.get_item("i16").expect("i16a");
+        group.bench_function("fnp_median_i64_dense_16m", |bn| bn.iter(|| black_box(fnp_m.call1((&ev,)).unwrap())));
+        group.bench_function("numpy_median_i64_dense_16m", |bn| bn.iter(|| black_box(numpy_m.call1((&ev,)).unwrap())));
+        group.bench_function("fnp_median_i16_dense_16m", |bn| bn.iter(|| black_box(fnp_m.call1((&i16a,)).unwrap())));
+        group.bench_function("numpy_median_i16_dense_16m", |bn| bn.iter(|| black_box(numpy_m.call1((&i16a,)).unwrap())));
+    });
+    group.finish();
+}
+
 fn bench_argsort_temporal_complex_stable_boundary(c: &mut Criterion) {
     // np.argsort(1-D datetime/complex, kind='stable') on DENSE data. The tie-stable order is
     // reproducible as (value, original-index), unlike default-kind argsort.
@@ -12208,6 +12249,7 @@ criterion_group!(
     bench_argsort_temporal_complex_stable_boundary,
     bench_argsort_numeric_stable_boundary,
     bench_argsort_radix_stable_boundary,
+    bench_median_int_histogram_boundary,
     bench_argsort_lastaxis_stable_boundary,
     bench_unique_arrayapi_boundary,
     bench_isin_struct_boundary,
