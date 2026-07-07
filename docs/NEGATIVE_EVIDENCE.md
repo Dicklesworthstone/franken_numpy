@@ -4,6 +4,31 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-07 - WIN (SHIP): DEFAULT-kind int argsort (the common call) via gather-free RADIX for distinct data — 14.4x / 13.8x
+
+`BlackThrush`, dig-deeper round. The MOST COMMON argsort call — `np.argsort(int_array)` with the default
+(unstable introsort) kind — was served by the gather-bound comparison sort (par_sort of the index perm, 2 random
+gathers/compare). numpy's default tie order is unmatchable, BUT for DISTINCT data the permutation is UNIQUE, so
+any correct sort reproduces numpy's order. Route distinct data through the gather-free parallel LSD radix
+(206030a4): added a `distinct_only` gate to the shared `radix_perm_from_keys` — pigeonhole pre-check (fewer
+distinct values than elements => tie => defer) + a post-radix adjacent-equal scan on the sorted keys; tied data
+returns None and falls through to the existing defer-on-ties comparison path (which numpy also handles). Wired
+`try_native_int_argsort_default_radix` (i32/i64/u32/u64) into the argsort flat block before the comparison path.
+The `distinct_only=false` stable callers are behaviorally identical (the new code is behind `if distinct_only`).
+BYTE-EXACT for distinct + verified the TIED array still matches (defers).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 16M distinct, DEFAULT kind):
+| Probe | fnp radix | numpy introsort | numpy/fnp |
+|---|---:|---:|---:|
+| `argsort(16M i64 distinct)` | 130.6 ms | 1886.7 ms | **14.4x** |
+| `argsort(16M u64 distinct)` | 140.4 ms | 1931.2 ms | **13.8x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on i64-distinct, u64-distinct, AND an i64-TIED array (which defers) —
+all PASSED. The int argsort is now gather-free across BOTH kinds: stable (counting/radix, any ties) and default
+(radix for distinct). RULE: a default/unstable sort whose tie order is unmatchable is STILL a radix win on
+DISTINCT data — the unique perm is kind-agnostic; gate distinctness (pigeonhole + post-sort adjacent-equal scan)
+and defer ties.
+
 ## 2026-07-07 - REJECTED (REVERTED): FLOAT np.median via RADIX-SELECT — 0.68x LOSS on the common case
 
 `BlackThrush`, dig-deeper round. Extended the integer histogram-median (ec2255d9) to FLOAT via radix-SELECT:
