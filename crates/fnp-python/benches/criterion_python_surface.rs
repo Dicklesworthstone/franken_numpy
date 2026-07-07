@@ -8676,6 +8676,47 @@ tied = rng.integers(0, 1000, 16_000_000).astype(np.int64)\n";
     group.finish();
 }
 
+fn bench_argsort_default_float_radix_boundary(c: &mut Criterion) {
+    // np.argsort(1-D float) with the DEFAULT kind (unstable introsort) — the common float argsort call. For
+    // DISTINCT data the perm is unique so the gather-free radix on IEEE-linearized keys reproduces numpy's order
+    // (~1.3s @16M); the fnp comparison path it replaces is gather-bound. Also asserts a TIED array still matches.
+    let mut group = c.benchmark_group("python_argsort_default_float_radix_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+f64d = rng.standard_normal(16_000_000)\n\
+f32d = rng.permutation(16_000_000).astype(np.float32)\n\
+tied = np.round(rng.standard_normal(16_000_000), 2)\n";  // f32d: ints < 2**24 exact -> distinct; tied: dense dups -> defers
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let f64d = ns.get_item("f64d").expect("f64d");
+        let f32d = ns.get_item("f32d").expect("f32d");
+        let tied = ns.get_item("tied").expect("tied");
+        let fnp_as = module.getattr("argsort").expect("fnp argsort");
+        let numpy_as = numpy.getattr("argsort").expect("numpy argsort");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        for (arr, label) in [(&f64d, "f64_distinct"), (&f32d, "f32_distinct"), (&tied, "f64_tied")] {
+            let f = fnp_as.call1((arr,)).expect("fnp argsort");
+            let n = numpy_as.call1((arr,)).expect("numpy argsort");
+            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "default float argsort {label} mismatch");
+        }
+        group.bench_function("fnp_argsort_f64_distinct_default_16m", |bn| bn.iter(|| black_box(fnp_as.call1((&f64d,)).unwrap())));
+        group.bench_function("numpy_argsort_f64_distinct_default_16m", |bn| bn.iter(|| black_box(numpy_as.call1((&f64d,)).unwrap())));
+        group.bench_function("fnp_argsort_f32_distinct_default_16m", |bn| bn.iter(|| black_box(fnp_as.call1((&f32d,)).unwrap())));
+        group.bench_function("numpy_argsort_f32_distinct_default_16m", |bn| bn.iter(|| black_box(numpy_as.call1((&f32d,)).unwrap())));
+    });
+    group.finish();
+}
+
 fn bench_median_int_histogram_boundary(c: &mut Criterion) {
     // np.median of a bounded-range INTEGER array. numpy partitions (introselect + int->f64 copy); fnp's own int
     // path delegates (widen-to-f64 "never beats numpy"). fnp histogram order-statistics = parallel histogram +
@@ -12346,6 +12387,7 @@ criterion_group!(
     bench_argsort_radix_stable_boundary,
     bench_argsort_radix_float_boundary,
     bench_argsort_default_int_radix_boundary,
+    bench_argsort_default_float_radix_boundary,
     bench_median_int_histogram_boundary,
     bench_argsort_lastaxis_stable_boundary,
     bench_unique_arrayapi_boundary,

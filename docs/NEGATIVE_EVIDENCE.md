@@ -4,6 +4,33 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-07 - WIN (SHIP): DEFAULT-kind FLOAT argsort via gather-free IEEE-radix for distinct data — 12.7x / 13.8x
+
+`BlackThrush`, dig-deeper round. Float analog of the default-kind int argsort (b72f273b): `np.argsort(float)` with
+the default (unstable introsort) kind, previously the gather-bound comparison sort (~2.0 s @16M). numpy's default
+tie order is unmatchable, but DISTINCT float data has a unique perm -> the gather-free radix on IEEE-LINEARIZED
+keys (0f8f0a0b transform, distinct_only=true) reproduces it. Threaded `distinct_only` through the f64/f32 radix
+helpers to `radix_perm_from_keys`; wired `try_native_float_argsort_default_radix` into the argsort flat block
+before the comparison paths. NaN defers. BYTE-EXACT for distinct + tied verified.
+
+KEY GOTCHA (first bench caught it): float has NO pigeonhole (value range is huge), so tied data was running the
+FULL O(n) radix before the post-sort tie scan defers it — f32 standard_normal (dense f32 dups) measured 0.92x
+LOSS (radix waste stacked on the fallback). FIX: a CHEAP sampled tie pre-check (`argsort_sample_has_tie`, the
+same 65536-strided sample the comparison paths use) BEFORE the key build -> dense-dup data defers instantly with
+zero radix waste; only the genuinely-distinct case pays for the radix. With the pre-check, f32 (truly-distinct,
+ints < 2^24) wins 13.2x and the tied array defers at parity.
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 16M distinct, DEFAULT kind):
+| Probe | fnp radix | numpy introsort | numpy/fnp |
+|---|---:|---:|---:|
+| `argsort(16M f64 distinct)` | 158.3 ms | 2007.3 ms | **12.7x** |
+| `argsort(16M f32 distinct)` | 144.4 ms | 1901.0 ms | **13.2x** (was 0.92x LOSS before the sample pre-check) |
+
+CORRECTNESS: bench asserts `np.array_equal` on f64-distinct, f32-distinct, AND an f64-TIED array (defers via the
+sample pre-check) — all PASSED. The argsort is now gather-free across the FULL matrix of {int, float} x {stable,
+default}. RULE: when a default-kind radix has no cheap pigeonhole to reject ties (floats), a SAMPLED tie pre-check
+before the O(n) key build is mandatory — else tied inputs pay full radix + full fallback = net LOSS.
+
 ## 2026-07-07 - WIN (SHIP): DEFAULT-kind int argsort (the common call) via gather-free RADIX for distinct data — 14.4x / 13.8x
 
 `BlackThrush`, dig-deeper round. The MOST COMMON argsort call — `np.argsort(int_array)` with the default
