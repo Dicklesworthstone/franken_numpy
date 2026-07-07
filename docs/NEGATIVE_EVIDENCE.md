@@ -4,6 +4,32 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-07 - REJECTED (REVERTED): FLOAT np.median via RADIX-SELECT — 0.68x LOSS on the common case
+
+`BlackThrush`, dig-deeper round. Extended the integer histogram-median (ec2255d9) to FLOAT via radix-SELECT:
+linearize floats -> monotonic u64 keys (0f8f0a0b transform), then MSD-narrow to the bucket containing rank n/2
+(`radix_select_key`: histogram one byte, find the rank's bucket, filter to it, recurse on the next byte; level 0
+parallel, deeper serial). BYTE-EXACT (odd/even/negatives verified, bench asserts PASSED). But it LOSES:
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 16M f64):
+| Probe | fnp radix-select | numpy introselect | numpy/fnp |
+|---|---:|---:|---:|
+| `median(16M f64 standard_normal)` | 233.8 ms | 160.0 ms | **0.68x (LOSS)** |
+| `median(16M f64 clustered/round2)` | 128.3 ms | 156.9 ms | 1.22x (marginal) |
+
+ROOT CAUSE: numpy's introselect is O(n) IN-PLACE and cache-friendly (one partition of the array). Radix-select
+pays (a) a full O(n) key-materialization copy, (b) MULTIPLE O(n) narrowing passes — for standard_normal the
+median sits near 0 where floats have many distinct exponents, so the candidate set shrinks SLOWLY over the top
+bytes (several near-n passes before it collapses), and (c) 2x everything for even-n (two independent selects +
+a keys clone). The constant factors + allocations exceed introselect's single in-place pass. The clustered case
+(many exact ties near the median) narrows in one byte -> marginal win, but the COMMON case regresses. REVERTED
+all code (lib.rs + bench back to HEAD, verified empty diff); ledger-only commit. RULE: the histogram/counting
+lever wins for SORTING (numpy=comparison, gather-bound) and for BOUNDED-INT selection (exact single-pass
+histogram), but NOT for FLOAT selection vs numpy's introselect — introselect is already O(n) in-place, and
+radix-select's multi-pass narrowing + key copy + even-n doubling lose on spread (non-clustered) data. Retry
+predicate: only a SINGLE-pass in-place parallel partition (parallel introselect / Floyd-Rivest) could beat it,
+not a multi-pass radix narrow. Do not re-attempt radix-select for float order statistics.
+
 ## 2026-07-07 - WIN (SHIP): FLOAT stable argsort via LSD RADIX on IEEE-LINEARIZED keys — 17.4x / 13.7x
 
 `BlackThrush`, dig-deeper round. The bold/unorthodox move: floats are NOT naturally radix-sortable, but a
