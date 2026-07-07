@@ -8581,6 +8581,59 @@ wu = rng.integers(0, 2**52, 16_000_000).astype(np.uint64)\n";
     group.finish();
 }
 
+fn bench_argsort_radix_float_boundary(c: &mut Criterion) {
+    // np.argsort(1-D FLOAT, kind='stable') — currently the gather-bound comparison sort (~2.7s @16M f64). fnp
+    // LINEARIZES IEEE floats into radix-sortable u64 keys (monotonic bit-transform) + parallel LSD radix.
+    // standard_normal has many exact-tie duplicates in float32 -> exercises stability. Bit-exact vs numpy stable.
+    let mut group = c.benchmark_group("python_argsort_radix_float_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+f64 = rng.standard_normal(16_000_000)\n\
+f64[rng.integers(0, 16_000_000, 1000)] *= -1.0\n\
+f32 = rng.integers(-100000, 100000, 16_000_000).astype(np.float32) / 7.0\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let f64a = ns.get_item("f64").expect("f64");
+        let f32a = ns.get_item("f32").expect("f32");
+        let fnp_as = module.getattr("argsort").expect("fnp argsort");
+        let numpy_as = numpy.getattr("argsort").expect("numpy argsort");
+        let eqf = numpy.getattr("array_equal").expect("np.array_equal");
+        for (arr, label) in [(&f64a, "f64"), (&f32a, "f32")] {
+            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let f = fnp_as.call((arr,), Some(&kw)).expect("fnp argsort");
+            let n = numpy_as.call((arr,), Some(&kw)).expect("numpy argsort");
+            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "argsort float {label} stable mismatch");
+        }
+        group.bench_function("fnp_argsort_f64_stable_16m", |bn| {
+            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            bn.iter(|| black_box(fnp_as.call((&f64a,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("numpy_argsort_f64_stable_16m", |bn| {
+            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            bn.iter(|| black_box(numpy_as.call((&f64a,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("fnp_argsort_f32_stable_16m", |bn| {
+            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            bn.iter(|| black_box(fnp_as.call((&f32a,), Some(&kw)).unwrap()));
+        });
+        group.bench_function("numpy_argsort_f32_stable_16m", |bn| {
+            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            bn.iter(|| black_box(numpy_as.call((&f32a,), Some(&kw)).unwrap()));
+        });
+    });
+    group.finish();
+}
+
 fn bench_median_int_histogram_boundary(c: &mut Criterion) {
     // np.median of a bounded-range INTEGER array. numpy partitions (introselect + int->f64 copy); fnp's own int
     // path delegates (widen-to-f64 "never beats numpy"). fnp histogram order-statistics = parallel histogram +
@@ -12249,6 +12302,7 @@ criterion_group!(
     bench_argsort_temporal_complex_stable_boundary,
     bench_argsort_numeric_stable_boundary,
     bench_argsort_radix_stable_boundary,
+    bench_argsort_radix_float_boundary,
     bench_median_int_histogram_boundary,
     bench_argsort_lastaxis_stable_boundary,
     bench_unique_arrayapi_boundary,

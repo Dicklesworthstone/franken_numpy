@@ -4,6 +4,31 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-07 - WIN (SHIP): FLOAT stable argsort via LSD RADIX on IEEE-LINEARIZED keys — 17.4x / 13.7x
+
+`BlackThrush`, dig-deeper round. The bold/unorthodox move: floats are NOT naturally radix-sortable, but a
+MONOTONIC IEEE BIT-TRANSFORM linearizes them into radix-sortable u64 keys, so the gather-free radix (206030a4,
+int) extends to float — the case float stable argsort still fell back to the gather-bound comparison sort (2
+gathers/compare, numpy comparison ~2.4-2.8 s @16M). Transform: normalize -0.0 -> +0.0 bits (numpy stable ties
++-0.0 by index), then flip ALL bits if negative else set the sign bit -> u64 strictly monotonic in float value
+(verified over -inf..+inf incl +-0.0). Refactored the radix into a shared `radix_perm_from_keys(keys: Vec<u64>)`
+core; int builds value-min offset keys, f64/f32 build sortable keys via `f64_sortable_key`/`f32_sortable_key`.
+NaN -> defer (numpy orders NaN last). Wired into the float stable dispatch before the comparison fallback. BYTE-
+EXACT (verified with negatives, +-0.0, +-inf, exact-tie duplicates).
+
+MEASURED (per-crate `rch exec -- cargo bench` on hz2, criterion bencher median, 16M, kind=stable):
+| Probe | fnp radix | numpy | numpy/fnp |
+|---|---:|---:|---:|
+| `argsort(16M f64 standard_normal, stable)` | 160.9 ms | 2801.2 ms | **17.4x** |
+| `argsort(16M f32, stable)` | 175.0 ms | 2399.1 ms | **13.7x** |
+
+CORRECTNESS: bench asserts `np.array_equal` on f64 + f32 — PASSED. The int radix refactor is confirmed non-
+regressed (same run: i64 14.7x / u64 12.4x, asserts pass — identical results to the pre-refactor 206030a4). The
+stable argsort now spans the FULL numeric domain gather-free: int small-range -> counting sort (32x), int wide ->
+radix (15x), FLOAT -> radix on linearized keys (17x). RULE: any comparison/gather-bound sort of a totally-ordered
+type can go radix if you can LINEARIZE the type into monotonic integer keys (IEEE floats: normalize +-0.0, flip-
+all-if-neg-else-sign-bit). OPEN: datetime already int64 (route to int radix), complex (lex -> two-level radix).
+
 ## 2026-07-06 - WIN (SHIP): integer np.median via HISTOGRAM ORDER-STATISTICS (radical primitive, no sort/partition) — 31.3x / 21.5x
 
 `BlackThrush`, dig-deeper round. A genuinely DIFFERENT primitive from the sort work: order statistics from a
