@@ -176,6 +176,42 @@ print(np.allclose(result, expected))
 }
 
 #[test]
+fn percentile_quantile_large_bounded_integer_scalar_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20260708)
+n = (1 << 20) + 33
+cases = [
+    ("i64", rng.integers(-500, 500, n, dtype=np.int64), 12.5, 0.125),
+    ("u16", rng.integers(0, 30000, n, dtype=np.uint16), 75.0, 0.75),
+]
+ok = True
+for label, a, p, q in cases:
+    got_p = fnp.percentile(a, p)
+    exp_p = np.percentile(a, p)
+    got_q = fnp.quantile(a, q)
+    exp_q = np.quantile(a, q)
+    for op, got, exp in [("percentile", got_p, exp_p), ("quantile", got_q, exp_q)]:
+        if str(np.asarray(got).dtype) != str(np.asarray(exp).dtype):
+            print(("dtype", label, op, str(np.asarray(got).dtype), str(np.asarray(exp).dtype)))
+            ok = False
+        if not np.array_equal(np.asarray(got), np.asarray(exp)):
+            print(("value", label, op, repr(got), repr(exp)))
+            ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large bounded integer percentile/quantile scalar paths should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn percentile_multiple() -> Result<(), String> {
     let script = fnp_script(
         r#"

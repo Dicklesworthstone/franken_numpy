@@ -4,6 +4,30 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-08 - WIN (SHIP): bounded integer scalar percentile/quantile via HISTOGRAM ORDER-STATISTICS — 20.2x / 6.9x vs ORIG
+
+`Codex`, land-or-dig round. The existing integer `percentile`/`quantile` scalar path delegated to NumPy, so the
+ORIG comparator is the NumPy delegate. Generalized the shipped bounded-integer histogram median primitive from
+rank n/2 to arbitrary linear quantile ranks: parallel per-chunk histograms over the bounded integer span, merge,
+prefix counts to resolve `floor(h)` and `ceil(h)` order-statistic values, then interpolate exactly as NumPy's
+default `method="linear"` scalar result. The route is deliberately narrow: flat/axis=None only, scalar finite q,
+default/linear method only, no out/keepdims/weights/overwrite_input, integer buffers only, and bounded span
+(`<= 1 << 22`) plus large n gate before taking the native path; everything else falls through to the existing
+delegate.
+
+MEASURED (per-crate `rch exec -- cargo bench --profile release` with `CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod`;
+rch local fallback because workers were saturated; criterion bencher, 16M bounded ints):
+| Probe | fnp histogram | ORIG numpy delegate | ORIG/fnp |
+|---|---:|---:|---:|
+| `percentile(i64[16M], q=12.5)` | 9.577 ms | 193.727 ms | **20.2x** |
+| `quantile(u16[16M], q=0.75)` | 14.613 ms | 100.891 ms | **6.9x** |
+
+CORRECTNESS: focused conformance test `percentile_quantile_large_bounded_integer_scalar_match_numpy` verifies
+large bounded `i64` and `u16` scalar outputs/dtypes against live NumPy for both `percentile` and `quantile`.
+Bench setup asserts `np.array_equal` before timing both probes. RULE: bounded integer order-statistics that only
+need VALUE results should use the histogram rank primitive, not sort/partition/delegate. Do not extend this to
+float order-statistics; the 2026-07-07 float radix-select rejection still stands.
+
 ## 2026-07-07 - WIN (SHIP): DATETIME64 argsort (default + stable) routed to the gather-free int radix/counting — 13.9x / 65.7x
 
 `BlackThrush`, dig-deeper round. The temporal-routing lever (.view('int64') -> int kernels) applied to argsort:

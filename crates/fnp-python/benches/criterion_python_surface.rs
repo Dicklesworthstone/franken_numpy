@@ -8808,6 +8808,59 @@ i16 = rng.integers(0, 30000, 16_000_000).astype(np.int16)\n";
     group.finish();
 }
 
+fn bench_int_percentile_quantile_histogram_boundary(c: &mut Criterion) {
+    // np.percentile/quantile of bounded-range INTEGER arrays, scalar default-linear q. Same primitive as the
+    // histogram median win: one parallel histogram, rank lookup for the two straddling order statistics, then
+    // f64 interpolation. The benchmark asserts byte-exact scalar outputs against numpy before timing.
+    let mut group = c.benchmark_group("python_int_percentile_quantile_histogram_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(8)\n\
+i64 = rng.integers(-500, 500, 16_000_000).astype(np.int64)\n\
+u16 = rng.integers(0, 30000, 16_000_000).astype(np.uint16)\n";
+        let ns = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        let fnp_percentile = module.getattr("percentile").expect("fnp percentile");
+        let numpy_percentile = numpy.getattr("percentile").expect("numpy percentile");
+        let fnp_quantile = module.getattr("quantile").expect("fnp quantile");
+        let numpy_quantile = numpy.getattr("quantile").expect("numpy quantile");
+        let i64_arr = ns.get_item("i64").expect("i64");
+        let u16_arr = ns.get_item("u16").expect("u16");
+        for (name, arr, p, q) in [("i64", &i64_arr, 12.5_f64, 0.125_f64), ("u16", &u16_arr, 75.0, 0.75)] {
+            let fp = fnp_percentile.call1((arr, p)).expect("fnp percentile");
+            let np = numpy_percentile.call1((arr, p)).expect("numpy percentile");
+            let fq = fnp_quantile.call1((arr, q)).expect("fnp quantile");
+            let nq = numpy_quantile.call1((arr, q)).expect("numpy quantile");
+            let eq_p: bool = numpy.getattr("array_equal").unwrap().call1((&fp, &np)).unwrap().extract().unwrap();
+            let eq_q: bool = numpy.getattr("array_equal").unwrap().call1((&fq, &nq)).unwrap().extract().unwrap();
+            assert!(eq_p, "percentile {name} mismatch: fnp {:?} numpy {:?}", fp, np);
+            assert!(eq_q, "quantile {name} mismatch: fnp {:?} numpy {:?}", fq, nq);
+        }
+        group.bench_function("fnp_percentile_i64_dense_16m_p12_5", |bn| {
+            bn.iter(|| black_box(fnp_percentile.call1((&i64_arr, 12.5_f64)).unwrap()));
+        });
+        group.bench_function("numpy_percentile_i64_dense_16m_p12_5", |bn| {
+            bn.iter(|| black_box(numpy_percentile.call1((&i64_arr, 12.5_f64)).unwrap()));
+        });
+        group.bench_function("fnp_quantile_u16_dense_16m_q75", |bn| {
+            bn.iter(|| black_box(fnp_quantile.call1((&u16_arr, 0.75_f64)).unwrap()));
+        });
+        group.bench_function("numpy_quantile_u16_dense_16m_q75", |bn| {
+            bn.iter(|| black_box(numpy_quantile.call1((&u16_arr, 0.75_f64)).unwrap()));
+        });
+    });
+    group.finish();
+}
+
 fn bench_argsort_temporal_complex_stable_boundary(c: &mut Criterion) {
     // np.argsort(1-D datetime/complex, kind='stable') on DENSE data. The tie-stable order is
     // reproducible as (value, original-index), unlike default-kind argsort.
@@ -12440,6 +12493,7 @@ criterion_group!(
     bench_argsort_default_float_radix_boundary,
     bench_argsort_datetime_radix_boundary,
     bench_median_int_histogram_boundary,
+    bench_int_percentile_quantile_histogram_boundary,
     bench_argsort_lastaxis_stable_boundary,
     bench_unique_arrayapi_boundary,
     bench_isin_struct_boundary,
