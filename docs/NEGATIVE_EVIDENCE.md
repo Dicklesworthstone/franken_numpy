@@ -4,6 +4,34 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-09 - WIN (SHIP): string unique_full return_index/inverse/counts (Latin-1) via packed-u64 pair sort - 6.1x / 6.3x vs ORIG
+
+`BlackThrush`, dig-deeper round (fifth win this session; completes the string packed-key family). Final follow-up
+flagged by the sort+unique entry below: `try_native_string_unique_full` (np.unique with return_index /
+return_inverse / return_counts, i.e. numpy-2.x `unique_all` / `unique_counts`) was the #1 hottest remaining
+string row (`fnp_unique_all_U8_2m` 351 ms, `fnp_unique_counts_U8_2m` 336 ms), still memcmp-sorting a
+`(record, original-index)` pair for first-occurrence semantics.
+
+Primitive: the same word-RAM packed-u64 key. `(u64_key, u32_index)` pair sort == `(record, orig-index)` order
+exactly, so the min-original-index-per-run (numpy first-occurrence) tie-break that return_index/inverse/counts
+require is preserved. Only the sort is swapped; the downstream run-grouping that emits the unique values, first
+indices, inverse map, and counts is unchanged. Wider records / wide codepoints keep the memcmp comparator.
+
+MEASURED (per-crate `rch exec -- cargo bench --profile release`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cc`, worker `hz2`, criterion bencher, 2M U8 Latin-1):
+| Probe | fnp packed | ORIG NumPy | ORIG/fnp |
+|---|---:|---:|---:|
+| `unique(U8[2M], return_index+inverse+counts)` (unique_all) | 89.34 ms | 541.10 ms | **6.06x** |
+| `unique(U8[2M], return_counts)` (unique_counts) | 50.59 ms | 319.77 ms | **6.32x** |
+Also ~3.9-6.6x faster than the pre-change memcmp path (unique_all 351->89, unique_counts 336->51 ms).
+
+CORRECTNESS: `cargo test -p fnp-python --test conformance_setops` GREEN (8/8) with new
+`unique_full_string_packed_latin1_large_matches_numpy` (U8 + S6, all four return fields - values, first-index,
+inverse, counts - vs live `np.array_equal`); the criterion benches also assert byte-exactness before timing.
+STRING PACKED-u64 KEY FAMILY NOW COMPLETE: sort + argsort + unique(flat) + unique(full) all pack narrow Latin-1
+records into a big-endian u64 and do a gather-free (key,index) sort. (searchsorted(str) remains on the older
+prefix-index path; not re-dug.)
+
 ## 2026-07-09 - WIN (SHIP): string sort + unique (Latin-1 U1-8/S1-8) via packed-u64 pair sort - 6.4x / 4.3x vs ORIG
 
 `BlackThrush`, dig-deeper round (fourth win this session). Direct follow-up to the packed-u64 string ARGSORT win

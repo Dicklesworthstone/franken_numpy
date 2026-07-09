@@ -803,3 +803,43 @@ fn unique_and_sort_string_packed_latin1_large_matches_numpy() {
         Ok(())
     });
 }
+
+#[test]
+fn unique_full_string_packed_latin1_large_matches_numpy() {
+    // unique(..., return_index/inverse/counts) on large Latin-1 U8/S6 takes the packed-u64
+    // (key, index) path; first-occurrence index, inverse map, and counts must all be byte-exact.
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(23)\n\
+                 n = 300_000\n\
+                 u8 = rng.integers(97, 101, (n, 8), dtype=np.uint32).reshape(-1).view('U8')\n\
+                 s6 = np.array([bytes(r) for r in rng.integers(97, 101, (40_000, 6), dtype=np.uint8)], dtype='S6')\n\
+                 s6 = np.tile(s6, 8)[:n]\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let array_equal = numpy.getattr("array_equal")?;
+        let kw = PyDict::new(py);
+        kw.set_item("return_index", true)?;
+        kw.set_item("return_inverse", true)?;
+        kw.set_item("return_counts", true)?;
+        for name in ["u8", "s6"] {
+            let arr = ns
+                .get_item(name)?
+                .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing arr"))?;
+            let ours = module.getattr("unique")?.call((&arr,), Some(&kw))?;
+            let theirs = numpy.getattr("unique")?.call((&arr,), Some(&kw))?;
+            for k in 0..4 {
+                let o = ours.get_item(k)?;
+                let t = theirs.get_item(k)?;
+                let equal: bool = array_equal.call1((&o, &t))?.extract()?;
+                assert!(equal, "packed Latin-1 {name} unique_full field {k} diverged from numpy");
+            }
+        }
+        Ok(())
+    });
+}
