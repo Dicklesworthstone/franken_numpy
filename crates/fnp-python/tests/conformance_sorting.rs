@@ -438,3 +438,39 @@ fn lexsort_bounded_integer_valued_counting_sort_matches_numpy() {
         Ok(())
     });
 }
+
+#[test]
+fn argsort_string_stable_packed_latin1_matches_numpy() {
+    // Fixed-width Latin-1 U6/U8/S6 records (n >= 1<<18) take the gather-free packed-u64
+    // (key, index) pair-sort path. Stable argsort ties break by original index; the packed
+    // key must reproduce numpy's codepoint order and stable tie-break byte-exactly.
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(11)\n\
+                 n = 300_000\n\
+                 u6 = rng.integers(97, 100, (n, 6), dtype=np.uint32).reshape(-1).view('U6')\n\
+                 u8 = rng.integers(97, 123, (n, 8), dtype=np.uint32).reshape(-1).view('U8')\n\
+                 s6 = np.array([bytes(r) for r in rng.integers(97, 100, (50_000, 6), dtype=np.uint8)], dtype='S6')\n\
+                 s6 = np.tile(s6, 6)[:n]\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let array_equal = numpy.getattr("array_equal")?;
+        let kw = PyDict::new(py);
+        kw.set_item("kind", "stable")?;
+        for name in ["u6", "u8", "s6"] {
+            let arr = ns
+                .get_item(name)?
+                .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing arr"))?;
+            let ours = module.getattr("argsort")?.call((&arr,), Some(&kw))?;
+            let theirs = numpy.getattr("argsort")?.call((&arr,), Some(&kw))?;
+            let equal: bool = array_equal.call1((&ours, &theirs))?.extract()?;
+            assert!(equal, "packed Latin-1 {name} stable argsort diverged from numpy");
+        }
+        Ok(())
+    });
+}

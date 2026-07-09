@@ -4,6 +4,42 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-09 - WIN (SHIP): string stable argsort (Latin-1 U1-8/S1-8) via gather-free packed-u64 pair sort - 7.5x / 7.2x vs ORIG
+
+`BlackThrush`, dig-deeper round (third win this session, after the c128 dense-domain grid 9a075fb1 and the
+lexsort counting sort 181f6bc2). Consulted this ledger first: it explicitly notes (2026-07-05 stable-argsort
+family entry) that the string memcmp argsort "GATHERS per compare" and is "far more gather-bound than lexsort's
+gather-free `(u64,u32)` pair sort" - a standing observation nobody had acted on. Profiling put
+`python_argsort_string_stable_boundary/fnp_argsort_U6_stable_2m` at 324 ms and `fnp_argsort_S6_stable_2m` at
+284 ms (both still on the memcmp record sort).
+
+Primitive: a word-RAM packed-key transform. `try_native_string_argsort_stable` sorted a `Vec<u32>` of indices
+with `par_sort_unstable_by(|i,j| in_data[rec_i].cmp(in_data[rec_j]))` - every comparison chases TWO cache-cold
+fixed-width records (24-32 bytes). For narrow Latin-1 records (S1..8 / U1..8) the existing
+`pack_fixed_width_string_keys` helper (already used by the string setops) packs each record ORDER-PRESERVINGLY
+into a big-endian `u64` (leading codepoints in the top bytes, left-aligned). The key captures every codepoint of
+the record, so key equality == record equality; sorting `(u64_key, u32_index)` pairs (`par_sort_unstable`,
+ascending key then index) is GATHER-FREE and reproduces numpy's stable argsort tie-break byte-exactly. Wired
+ahead of the memcmp path; wide records (U9+/S9+) and wide (>0xFF) codepoints fall through unchanged.
+
+MEASURED (per-crate `rch exec -- cargo bench --profile release`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cc`, worker `hz2` (clean, tight variance), criterion
+bencher, 2M fixed-width Latin-1 records, kind='stable'):
+| Probe | fnp packed | ORIG NumPy | ORIG/fnp |
+|---|---:|---:|---:|
+| `argsort(U6[2M], stable)` | 55.16 ms | 414.29 ms | **7.51x** |
+| `argsort(S6[2M], stable)` | 48.39 ms | 346.54 ms | **7.16x** |
+Also ~5.9x faster than the pre-change memcmp path (U6 324->55 ms, S6 284->48 ms) - the win is the gather-free
+key sort, not just the numpy delta.
+
+CORRECTNESS: `cargo test -p fnp-python --test conformance_sorting` GREEN (4/4) with new
+`argsort_string_stable_packed_latin1_matches_numpy` (U6 heavy-tie 3-letter alphabet, U8 26-letter, and S6 bytes,
+all vs live `np.array_equal` on kind='stable'); the criterion bench also asserts `np.array_equal` before timing.
+RULE: fixed-width Latin-1 string SORT/ARGSORT/UNIQUE with itemsize packable into u64 -> pack to a big-endian key
+and do a gather-free (key,index) sort instead of memcmp record chasing. FOLLOW-UP: the same packing lever still
+applies to `try_native_string_unique_flat` / `_full` (unique U8 ~345 ms) and `try_native_string_sort_flat`
+(sort U8 ~264 ms), which still memcmp-sort indices + gather records.
+
 ## 2026-07-09 - WIN (SHIP): lexsort bounded integer-valued keys via STABLE COUNTING SORT - 5.2x / 2.2x vs ORIG
 
 `BlackThrush`, dig-deeper round. Consulted this ledger first (avoided the rejected float order-stat radix and the
