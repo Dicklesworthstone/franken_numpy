@@ -9324,8 +9324,8 @@ b = (rng.integers(0, 3000, 2_000_000) + 1j * rng.integers(0, 3000, 2_000_000)).a
         let a = ns.get_item("a").expect("a");
         let b = ns.get_item("b").expect("b");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
-        // setxor1d intentionally excluded: measured only 1.22x (~parity) and reverted.
-        for op in ["union1d", "intersect1d", "setdiff1d"] {
+        // setxor1d re-included: the old hash route was ~parity (1.22x); the dense-domain grid wins.
+        for op in ["union1d", "intersect1d", "setdiff1d", "setxor1d"] {
             let fnp_fn = module.getattr(op).expect("fnp op");
             let np_fn = numpy.getattr(op).expect("numpy op");
             let f = fnp_fn.call1((&a, &b)).expect("fnp setop");

@@ -843,3 +843,38 @@ fn unique_full_string_packed_latin1_large_matches_numpy() {
         Ok(())
     });
 }
+
+#[test]
+fn setxor1d_complex128_dense_integral_grid_matches_numpy() {
+    // c128 setxor1d over a dense integer grid. `b` spans values both inside and OUTSIDE a's range,
+    // since setxor keeps b-only cells too (union-range grid). Byte-exact vs numpy for finite integral.
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 x = np.arange(300_000, dtype=np.int64)\n\
+                 y = np.arange(300_000, dtype=np.int64)\n\
+                 a = (((x * 17) % 600) + 1j * ((x * 31) % 600)).astype(np.complex128)\n\
+                 b_lo = ((((y * 29) + 7) % 600) + 1j * (((y * 43) + 11) % 600)).astype(np.complex128)\n\
+                 b_hi = ((700 + (y % 400)) + 1j * (700 + ((y * 7) % 400))).astype(np.complex128)\n\
+                 b = np.concatenate([b_lo[:200_000], b_hi[:100_000]])\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let a = ns
+            .get_item("a")?
+            .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing a"))?;
+        let b = ns
+            .get_item("b")?
+            .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing b"))?;
+        let ours = module.getattr("setxor1d")?.call1((&a, &b))?;
+        let theirs = numpy.getattr("setxor1d")?.call1((&a, &b))?;
+        let equal: bool = numpy.getattr("array_equal")?.call1((&ours, &theirs))?.extract()?;
+        assert!(equal, "dense integral complex128 setxor1d diverged from numpy");
+        let dtype = ours.getattr("dtype")?.str()?.to_string();
+        assert_eq!(dtype, "complex128");
+        Ok(())
+    });
+}

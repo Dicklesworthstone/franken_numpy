@@ -4,6 +4,34 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-09 - WIN (SHIP): complex128 setxor1d via dense direct-domain presence grid - 11.2x vs ORIG (un-reverts old 1.22x hash)
+
+`BlackThrush`, dig-deeper round (sixth win this session; completes the c128 dense-domain setop family). The
+c128 setxor follow-up flagged by the intersect/setdiff grid entry below: numpy delegates c128 setxor to a serial
+sort (~820 ms @2M+2M) and fnp had NO native c128 setxor path (it fell through to numpy) - the old record-hash
+setxor route had been reverted at ~parity (1.22x). Note this bench row was intentionally EXCLUDED from
+`python_c128_setops_boundary` after that revert; I re-added it (the grid changes the calculus).
+
+Primitive: the same 2-bit occupancy grid as intersect/setdiff, but setxor is the symmetric difference and spans
+BOTH operands, so it uses the COMBINED (union) range like union1d. Mark bit0=a, bit1=b over the union grid; emit
+cells whose state is 0b01 or 0b10 (present in exactly one side) in NumPy complex lexicographic order.
+`try_native_c128_setxor_dense_integral`, wired into `setxor1d` after the f16 path (gated by `c128_setop_gate` +
+the usual finite / integral / non-`-0.0` / domain<=2^24 checks). O(na+nb+domain), no sort/hash/unique.
+
+MEASURED (per-crate `rch exec -- cargo bench --profile release`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cc`, worker `hz2`, criterion bencher, two 2M-element
+complex128 arrays, integer real/imag in [0,3000)):
+| Probe | fnp grid | ORIG NumPy | ORIG/fnp |
+|---|---:|---:|---:|
+| `setxor1d(complex128[2M], complex128[2M])` | 73.26 ms | 819.13 ms | **11.2x** |
+
+CORRECTNESS: `cargo test -p fnp-python --test conformance_setops` GREEN (9/9) with new
+`setxor1d_complex128_dense_integral_grid_matches_numpy` (dense grid where `b` mixes in-grid values with a
+[700,1100) block OUTSIDE a's range - exercises the union-range b-only cells that setxor must keep, unlike
+intersect/setdiff); the criterion bench also asserts `np.array_equal` for setxor before timing. C128 DENSE-DOMAIN
+SETOP FAMILY NOW COMPLETE: union1d / intersect1d / setdiff1d / setxor1d all on the presence grid. This does NOT
+reopen the reverted record-hash setxor (the grid is a different primitive).
+
 ## 2026-07-09 - WIN (SHIP): string unique_full return_index/inverse/counts (Latin-1) via packed-u64 pair sort - 6.1x / 6.3x vs ORIG
 
 `BlackThrush`, dig-deeper round (fifth win this session; completes the string packed-key family). Final follow-up
