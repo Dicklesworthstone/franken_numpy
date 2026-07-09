@@ -4,6 +4,36 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-09 - WIN (SHIP): bounded-grid complex stable argsort via 2-D histogram buckets — 27.9x vs ORIG
+
+`Codex`, dig-deeper round. Profiled the current residual boundary rows first; the hottest actionable FNP row was
+`python_argsort_temporal_complex_stable_boundary/fnp_argsort_c128_dense_stable_8m` at 605.4 ms, with ORIG NumPy
+at 2093.9 ms on the same worker. The existing FNP path was still comparison sorting the permutation by
+lexicographic `(real, imag, original_index)`. Replaced that narrow bounded-grid case with a radically different
+primitive: a radix-hash-join-shaped 2-D histogram over finite integer-valued complex components. Build local
+histograms over `(real-min_real, imag-min_imag)`, prefix buckets in NumPy's complex lexicographic order, then
+stable-scatter original indices. This preserves stable tie order by construction and avoids `O(n log n)`
+comparison/gather work.
+
+MEASURED (per-crate `rch exec -- cargo bench --profile release` with `CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod`;
+worker `ovh-a`, criterion bencher, 8M `complex128` dense bounded grid, `kind="stable"`):
+| Probe | fnp 2-D histogram | ORIG NumPy stable argsort | ORIG/fnp |
+|---|---:|---:|---:|
+| `argsort(complex128[8M], stable, re/im in [0,100))` | 58.867 ms | 1640.191 ms | **27.9x** |
+
+PROFILE ROUTING: same-pass pre-change profile ranked FNP residuals as complex stable argsort 605.4 ms,
+structured searchsorted 477.8 ms, string stable argsort 179.7 ms, c128 union1d 153.3 ms, datetime searchsorted
+45.7 ms. The selected row also improved about 10.3x versus that prior FNP comparator profile (cross-worker, used
+only as routing evidence).
+
+CORRECTNESS: focused conformance `argsort_temporal_complex_stable_dense_matches_numpy` passed on remote worker
+`vmi1152480`; it exercises large dense `complex128` and `complex64` stable/mergesort arrays plus special fallback
+cases. The native route is deliberately narrow: 1-D C-contiguous complex64/complex128, stable/mergesort,
+large n, finite integral components, bounded `(real_bins * imag_bins) <= 1 << 18`; anything else falls through to
+the existing comparison path / NumPy passthrough. RULE: for stable ordering of dense bounded key grids, bucket
+the value domain directly and stable-scatter indices; do not comparison-sort a permutation when the lexicographic
+domain is small enough to prefix.
+
 ## 2026-07-08 - WIN (SHIP): bounded integer scalar percentile/quantile via HISTOGRAM ORDER-STATISTICS — 20.2x / 6.9x vs ORIG
 
 `Codex`, land-or-dig round. The existing integer `percentile`/`quantile` scalar path delegated to NumPy, so the
