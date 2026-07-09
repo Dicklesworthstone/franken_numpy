@@ -728,3 +728,43 @@ fn conformance_setops_matrix() {
         );
     }
 }
+
+#[test]
+fn intersect_setdiff_complex128_dense_integral_grid_matches_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        // `a` lives on a [0,600)x[0,600) integral grid (the direct-domain presence-grid
+        // route). `b` mixes values inside that grid (genuine intersect/setdiff overlap)
+        // with a block shifted into [1000,1600) that lies OUTSIDE a's grid, so both ops
+        // exercise the b-out-of-range cells (present in b, never emitted).
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 x = np.arange(300_000, dtype=np.int64)\n\
+                 y = np.arange(300_000, dtype=np.int64)\n\
+                 a = (((x * 17) % 600) + 1j * ((x * 31) % 600)).astype(np.complex128)\n\
+                 b_lo = ((((y * 29) + 7) % 600) + 1j * (((y * 43) + 11) % 600)).astype(np.complex128)\n\
+                 b_hi = ((1000 + (y % 600)) + 1j * (1000 + ((y * 7) % 600))).astype(np.complex128)\n\
+                 b = np.concatenate([b_lo[:200_000], b_hi[:100_000]])\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let a = ns
+            .get_item("a")?
+            .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing a"))?;
+        let b = ns
+            .get_item("b")?
+            .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing b"))?;
+        let array_equal = numpy.getattr("array_equal")?;
+        for op in ["intersect1d", "setdiff1d"] {
+            let ours = module.getattr(op)?.call1((&a, &b))?;
+            let theirs = numpy.getattr(op)?.call1((&a, &b))?;
+            let equal: bool = array_equal.call1((&ours, &theirs))?.extract()?;
+            assert!(equal, "dense integral complex128 {op} diverged from numpy");
+            let dtype = ours.getattr("dtype")?.str()?.to_string();
+            assert_eq!(dtype, "complex128");
+        }
+        Ok(())
+    });
+}

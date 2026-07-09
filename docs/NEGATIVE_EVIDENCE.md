@@ -43,6 +43,52 @@ the mixed structured parity test covering `setxor1d`, `intersect1d`, and `setdif
 `setdiff1d`, use word-packed `a`/`b` bitplanes; do not route through record-hash membership unless the bitplane
 gates fail. This does not reopen row-unique occupancy/rank tables or c128 dense-domain setops.
 
+## 2026-07-09 - WIN (SHIP): complex128 intersect1d/setdiff1d via dense direct-domain presence grid - 15.8x / 7.8x vs ORIG
+
+`BlackThrush`, dig-deeper round. Consulted this ledger first: avoided the rejected c128 setxor parity retry, and
+recognized that the sibling sorted-unique merge streams entry directly below (commit 37a28f6e) - though it
+SHIPPED and passes conformance - is only ~parity with the prior hash filter on this bench (its 25.6x/23.7x row
+was a load-inflated `RCH local fallback` measurement; a clean same-command re-bench puts that merge route at
+~311 ms intersect / ~326 ms setdiff, i.e. NO real speedup over the old 16-byte-record hash). The real, unclaimed
+win was to finish the dense-domain complex set-op FAMILY: `union1d` already had a presence grid
+(`try_native_c128_union1d_dense_integral`, ~100 ms) while intersect1d/setdiff1d were still on the sort-based
+routes. Profiling (`rch exec -- cargo bench --profile release`, worker `vmi1152480`) had the two hottest eligible
+current-FNP rows at `python_c128_setops_boundary/fnp_setdiff1d_c128_2m_2m` and `fnp_intersect1d_c128_2m_2m`.
+
+Primitive: a counting / direct-address occupancy set-algebra route (2-D histogram over the value domain, NOT a
+comparison sort or a hash join). New `try_native_c128_intersect_setdiff_dense_integral`, wired as the FIRST
+fast-path inside `try_native_c128_intersect_setdiff` (ahead of the merge/hash routes). For finite integer-valued
+(real, imag) components on a bounded product domain (<= 2^24 cells), keep a 2-bit occupancy byte per cell:
+bit0 = present in `a`, bit1 = present in `b`. Sweep the grid in NumPy complex lexicographic order (real outer,
+imag inner) emitting cells whose state == 0b11 (intersect1d) or == 0b01 (setdiff1d). O(na + nb + domain)
+sequential marks + one linear sweep: no sort, no hash, no unique(). GATE (mirrors the union grid): both operands
+fully dense-integral, finite, non-`-0.0` (so NumPy's `-0.0 == +0.0` cannot let a stray `-0.0` skip a genuine
+common/kept element); total >= 2^18; domain <= 2^24. Anything else falls through to the existing merge -> hash ->
+delegate chain unchanged (verified: the sibling `intersect_setdiff_complex128_sorted_merge_matches_numpy` test
+still passes, exercising that fallback on a non-dense grid).
+
+MEASURED (per-crate `rch exec -- cargo bench --profile release`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cc`, worker `hz1`, criterion bencher, two 2M-element
+`complex128` arrays with integer-valued real/imag components in `[0,3000)`, domain 9,000,000):
+| Probe | fnp grid | ORIG NumPy | ORIG/fnp |
+|---|---:|---:|---:|
+| `intersect1d(complex128[2M], complex128[2M])` | 62.91 ms | 993.88 ms | **15.8x** |
+| `setdiff1d(complex128[2M], complex128[2M])`   | 79.10 ms | 616.77 ms | **7.8x** |
+(same run: `union1d` 100.06 ms vs 681.10 ms = 6.8x, unchanged reference; the grid intersect emits nu=357584 and
+setdiff nu=1434605 - fewer than union's ~3.2M, so both beat the union grid too.) This is ALSO ~5x / ~4x faster
+than the sibling merge route it front-runs (~311/326 ms).
+
+CORRECTNESS: `cargo test -p fnp-python --test conformance_setops` GREEN (6/6, incl. `conformance_setops_matrix`
+MUST 9/9 SHOULD 14/14 MAY 2/2) with new `intersect_setdiff_complex128_dense_integral_grid_matches_numpy`: dense
+[0,600)x[0,600) grid where `b` mixes in-grid values with a [1000,1600) block OUTSIDE a's grid (exercises the
+b-out-of-range cells: present in b, never emitted), both ops vs live `np.array_equal`; the criterion bench itself
+also asserts `np.array_equal` per op before timing. Path confirmed via a temporary `FNP_DD_TRACE` probe on the
+bench-exact 2M data (`DD RUN` for both ops), then stripped. RULE: dense integer-valued complex128 set-ops all
+reduce to the presence-grid family (union/intersect/setdiff now covered); carry per-operand occupancy bits and
+sweep in lex order. FOLLOW-UP (not done): setxor1d = symmetric difference spans BOTH operand ranges - emit
+state == 0b01 OR 0b10 over the union-range grid; the old hash setxor was ~parity (1.22x) and stays reverted, but
+the grid could revisit it.
+
 ## 2026-07-09 - WIN (SHIP): complex128 intersect/setdiff via sorted-unique merge streams - 25.6x / 23.7x vs ORIG
 
 `BlackThrush`, dig-deeper round. Consulted this ledger first and avoided the rejected c128 setxor parity retry,
