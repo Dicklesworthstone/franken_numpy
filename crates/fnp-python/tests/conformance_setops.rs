@@ -131,6 +131,47 @@ fn union_and_setxor_u8_packed_latin1_strings_match_numpy() {
 }
 
 #[test]
+fn setxor1d_mixed_struct_dense_integral_float_matches_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(321)\n\
+                 dt = [('id','<i8'),('val','<f8')]\n\
+                 a = np.zeros(100_000, dtype=dt)\n\
+                 a['id'] = rng.integers(-200, 700, 100_000)\n\
+                 a['val'] = rng.integers(-150, 850, 100_000).astype(np.float64)\n\
+                 b = np.zeros(100_000, dtype=dt)\n\
+                 b['id'][:30_000] = a['id'][:30_000]\n\
+                 b['val'][:30_000] = a['val'][:30_000]\n\
+                 b['id'][30_000:] = rng.integers(-200, 700, 70_000)\n\
+                 b['val'][30_000:] = rng.integers(-150, 850, 70_000).astype(np.float64)\n\
+                 edge_a = np.array([(1, -0.0), (2, 1.5), (3, 3.0)], dtype=dt)\n\
+                 edge_b = np.array([(1, 0.0), (4, 4.0)], dtype=dt)\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let setxor = module.getattr("setxor1d")?;
+        let numpy_setxor = numpy.getattr("setxor1d")?;
+        let array_equal = numpy.getattr("array_equal")?;
+        for (left_name, right_name) in [("a", "b"), ("edge_a", "edge_b")] {
+            let left = ns.get_item(left_name)?.expect("left");
+            let right = ns.get_item(right_name)?.expect("right");
+            let ours = setxor.call1((&left, &right))?;
+            let theirs = numpy_setxor.call1((&left, &right))?;
+            let equal: bool = array_equal.call1((&ours, &theirs))?.extract()?;
+            assert!(
+                equal,
+                "mixed structured setxor1d diverged from numpy for {left_name}/{right_name}"
+            );
+        }
+        Ok(())
+    });
+}
+
+#[test]
 fn conformance_setops_matrix() {
     static TOTALS: Totals = Totals::new();
 

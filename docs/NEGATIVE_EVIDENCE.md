@@ -4,6 +4,44 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-09 - WIN (SHIP): mixed structured setxor via dense source-bit grid - 58.2x vs ORIG
+
+`BlackThrush`, dig-deeper round. Consulted this ledger first and avoided the rejected dense row-unique
+occupancy/rank table, c128 setxor parity retry, threshold/packed-panel families, and already-shipped sortable
+byte-transform structured setops. Fresh residual profiling with per-crate
+`rch exec -- cargo bench --profile release` selected the hottest eligible current-FNP row:
+`python_struct_mixed_setops_boundary/fnp_setxor1d_struct_i8f8_1m_1m` at 369.826 ms, ahead of c128 setops around
+335-343 ms and mixed structured searchsorted around 187 ms.
+
+Primitive: a radix-hash-join / bitmap-index shaped direct-domain symmetric-difference table for the narrow
+mixed structured record shape `(int64, float64)`. When the dtype is two contiguous native/LE fields, the float
+field is finite, non-`-0.0`, exactly integral, and the combined `(id, value)` domain is bounded, mark one byte of
+source bits per domain cell (`a` bit, `b` bit), then scan cells in structured value-lexicographic order and emit
+records whose source mask is exactly one side. This bypasses the existing byte-transform sort + two record
+hash-sets path. Non-integral floats, NaN, `-0.0`, padded/big-endian layouts, different field shapes, small inputs,
+or sparse/wide domains fall back to the prior byte-transform/hash path.
+
+MEASURED (per-crate `rch exec -- cargo bench --profile release` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod`; worker `vmi1227854`, criterion bencher, two 1M-record
+structured arrays with fields `[('id','<i8'),('val','<f8')]`, both values drawn from `[0,3000)`):
+| Probe | fnp dense source-bit grid | ORIG NumPy | ORIG/fnp |
+|---|---:|---:|---:|
+| `setxor1d(struct i8+f8[1M], struct i8+f8[1M])` | 96.950 ms | 5641.349 ms | **58.2x** |
+
+PROFILE ROUTING: the same-session pre-change sweep had the old FNP byte-transform/hash row at 369.826 ms, so
+the final-source candidate is about 3.8x faster than that current-FNP routing sample. That current-FNP delta is
+cross-worker routing evidence only; the formal landed ratio is the same-command ORIG/FNP comparison above.
+
+CORRECTNESS: `cargo check -p fnp-python --profile release --lib --test conformance_setops --bench
+criterion_python_surface` passed on worker `hz1`. `cargo test -p fnp-python --profile release --test
+conformance_setops -- --nocapture` passed on worker `vmi1227854`: `MUST 9/9`, `SHOULD 14/14`, `MAY 2/2`, plus
+`setxor1d_mixed_struct_dense_integral_float_matches_numpy`, which compares the dense route and float-edge
+fallbacks to live NumPy with `np.array_equal`. RULE: for two-field contiguous `(int64, float64)` structured
+`setxor1d` over a bounded exact-integral float domain, use a source-bit domain grid; do not route through the
+byte-transform sort plus record-hash membership path unless the dense-grid gates fail. This does not reopen the
+rejected row-unique occupancy/rank table: no inverse/count rank materialization is built, and this route is only
+for symmetric difference over two record columns.
+
 ## 2026-07-09 - WIN (SHIP): fixed-width Latin-1 string setops via packed word keys - 63.7x / 96.3x vs ORIG
 
 `Codex`, dig-deeper round. Consulted this ledger first and avoided the already-shipped complex dense grids,
