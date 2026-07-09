@@ -768,3 +768,38 @@ fn intersect_setdiff_complex128_dense_integral_grid_matches_numpy() {
         Ok(())
     });
 }
+
+#[test]
+fn unique_and_sort_string_packed_latin1_large_matches_numpy() {
+    // Large-n fixed-width Latin-1 U8/S6 arrays (n >= 1<<17) take the packed-u64 (key, index)
+    // sort path in both unique and sort. Packed key order == codepoint order; unique first-of-run
+    // and sorted record sequence must be byte-exact vs numpy.
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(19)\n\
+                 n = 300_000\n\
+                 u8 = rng.integers(97, 123, (n, 8), dtype=np.uint32).reshape(-1).view('U8')\n\
+                 s6 = np.array([bytes(r) for r in rng.integers(97, 105, (60_000, 6), dtype=np.uint8)], dtype='S6')\n\
+                 s6 = np.tile(s6, 5)[:n]\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let array_equal = numpy.getattr("array_equal")?;
+        for name in ["u8", "s6"] {
+            let arr = ns
+                .get_item(name)?
+                .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing arr"))?;
+            for op in ["unique", "sort"] {
+                let ours = module.getattr(op)?.call1((&arr,))?;
+                let theirs = numpy.getattr(op)?.call1((&arr,))?;
+                let equal: bool = array_equal.call1((&ours, &theirs))?.extract()?;
+                assert!(equal, "packed Latin-1 {name} {op} diverged from numpy");
+            }
+        }
+        Ok(())
+    });
+}

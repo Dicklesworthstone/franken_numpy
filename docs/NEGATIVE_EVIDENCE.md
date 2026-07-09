@@ -4,6 +4,38 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-09 - WIN (SHIP): string sort + unique (Latin-1 U1-8/S1-8) via packed-u64 pair sort - 6.4x / 4.3x vs ORIG
+
+`BlackThrush`, dig-deeper round (fourth win this session). Direct follow-up to the packed-u64 string ARGSORT win
+(commit f7d6cb7d) - the same lever was flagged there as still open for `try_native_string_sort_flat` (np.sort)
+and `try_native_string_unique_flat` (np.unique), both of which still `par_sort_unstable_by` a `Vec<u32>` of
+indices with a memcmp record comparator (two cache-cold 24-32 byte record chases per compare). Profiling had
+`fnp_sort_U8_2m` at 264 ms, `fnp_unique_U8_2m` at 345 ms.
+
+Primitive: same word-RAM packed-key transform. For narrow Latin-1 records (S1..8 / U1..8), pack each record into
+an order-preserving big-endian u64 via the existing `pack_fixed_width_string_keys`, sort `(u64_key, u32_index)`
+pairs gather-free, and take the resulting index permutation for the UNCHANGED downstream gather/dedup. For np.sort
+the sorted record sequence is identical (equal records are byte-identical, so tie order is irrelevant); for
+np.unique the (key asc, index asc) order groups equal records adjacently exactly as the memcmp sort did, so the
+first-of-run choice stays byte-exact. Wider records / wide codepoints keep the memcmp path.
+
+MEASURED (per-crate `rch exec -- cargo bench --profile release`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cc`, worker `hz1`, criterion bencher, 2M fixed-width Latin-1):
+| Probe | fnp packed | ORIG NumPy | ORIG/fnp |
+|---|---:|---:|---:|
+| `sort(U8[2M])`   | 55.49 ms | 355.85 ms | **6.41x** |
+| `sort(U4[2M])`   | 47.06 ms | 307.35 ms | **6.53x** |
+| `unique(U8[2M])` | 84.44 ms | 364.95 ms | **4.32x** |
+| `unique(U4[2M] dedup)` | 54.06 ms | 220.26 ms | **4.08x** |
+Also ~4.1-4.8x faster than the pre-change memcmp path (sort U8 264->55, unique U8 345->84 ms).
+
+CORRECTNESS: `cargo test -p fnp-python --test conformance_setops` GREEN with new
+`unique_and_sort_string_packed_latin1_large_matches_numpy` (U8 26-letter + S6 bytes, both np.unique and np.sort
+vs live `np.array_equal`); the criterion benches also assert byte-exactness before timing. RULE: the packed-u64
+key lever now covers string SORT + ARGSORT + UNIQUE (flat). FOLLOW-UP: `try_native_string_unique_full`
+(return_index/inverse/counts; `unique_all/counts U8` ~336-351 ms) still memcmp-sorts a (record, index) pair - the
+same pack applies but must keep the (key, orig-index) tie-break for first-occurrence index semantics.
+
 ## 2026-07-09 - WIN (SHIP): string stable argsort (Latin-1 U1-8/S1-8) via gather-free packed-u64 pair sort - 7.5x / 7.2x vs ORIG
 
 `BlackThrush`, dig-deeper round (third win this session, after the c128 dense-domain grid 9a075fb1 and the

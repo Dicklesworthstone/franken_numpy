@@ -1,0 +1,16 @@
+python_string_sort_boundary/fnp_sort_U8_2m
+                        time:   [54.765 ms 55.489 ms 56.291 ms]
+python_string_sort_boundary/numpy_sort_U8_2m
+                        time:   [346.06 ms 355.85 ms 365.84 ms]
+python_string_sort_boundary/fnp_sort_U4_2m
+                        time:   [46.506 ms 47.064 ms 48.108 ms]
+python_string_sort_boundary/numpy_sort_U4_2m
+                        time:   [302.64 ms 307.35 ms 312.29 ms]
+python_string_unique_boundary/fnp_unique_U8_2m
+                        time:   [82.388 ms 84.444 ms 86.597 ms]
+python_string_unique_boundary/numpy_unique_U8_2m
+                        time:   [362.24 ms 364.95 ms 368.38 ms]
+python_string_unique_boundary/fnp_unique_U4_dedup_2m
+                        time:   [53.365 ms 54.057 ms 55.307 ms]
+python_string_unique_boundary/numpy_unique_U4_dedup_2m
+                        time:   [218.25 ms 220.26 ms 222.78 ms]
