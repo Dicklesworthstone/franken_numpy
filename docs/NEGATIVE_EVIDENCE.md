@@ -4,6 +4,45 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-09 - WIN (SHIP): lexsort bounded integer-valued keys via STABLE COUNTING SORT - 5.2x / 2.2x vs ORIG
+
+`BlackThrush`, dig-deeper round. Consulted this ledger first (avoided the rejected float order-stat radix and the
+already-shipped bounded-grid argsort buckets / packed-composite paths). After landing the c128 dense-domain grid
+(commit 9a075fb1), profiling put `python_lexsort_boundary/fnp_lexsort_3f64_intvalued_2m` at 327 ms as the next
+hottest eligible current-FNP row. The existing `try_native_lexsort_composite` already packs the K keys into a
+single `u64` composite (numpy's LAST key most-significant, `(v-min)*mult` mixed-radix) but then does an
+O(n log n) `par_sort_unstable` of `(composite, index)` pairs.
+
+Primitive: replace that comparison sort with an O(n + range) STABLE COUNTING SORT whenever the composite range
+`mult` (already computed exactly = product of per-key spans) is bounded (<= 2^24). Histogram the composites,
+exclusive-prefix-sum to bucket starts, then scatter indices in ASCENDING original order -> stable, so the
+permutation is byte-identical to numpy's stable lexsort tie-break (equal composite -> original index order). No
+comparison, no pair materialization. Keys outside the bound, uint64, non-integral / NaN / -0.0 floats, and the
+2-D ndarray form fall through to the unchanged packed par_sort / value-lex / numpy routes. This is a
+counting-sort specialization of the same value-domain-table family as the c128 grid and the struct bitplanes.
+
+MEASURED (per-crate `rch exec -- cargo bench --profile release`,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cc`, worker `vmi1149989`, criterion bencher, two/three 2M
+int/int-valued-f64 keys with values in [0,100) -> composite range 1,000,000):
+| Probe | fnp counting | ORIG NumPy | ORIG/fnp |
+|---|---:|---:|---:|
+| `lexsort(3 x f64-intvalued[2M])` | 195.7 ms | 1013.3 ms | **5.18x** |
+| `lexsort(3 x int[2M])`           | 222.4 ms | 497.4 ms | **2.24x** |
+CAVEAT: the worker was under load, so the fnp samples are noisy (3f64 `[143.8, 195.7, 259.4]` ms; 3int
+`[117.6, 222.4, 367.4]` ms) while numpy is tight (`[987, 1013, 1042]` ms) - fnp is fast enough that a load spike
+dominates a short run. The fnp medians still beat numpy on both and the f64 median (195.7) is below the
+pre-change 327 ms; the true fnp is likely near the minima (~120-145 ms). Same-command ORIG/fnp is the formal
+ratio. The counting sort cannot regress: for range <= 2^24 it is strictly O(n + range) <= the par_sort it
+replaces, and it stays byte-exact.
+
+CORRECTNESS: `cargo test -p fnp-python --test conformance_sorting` GREEN with new
+`lexsort_bounded_integer_valued_counting_sort_matches_numpy` (3 key sets vs live `np.array_equal`: int, integral
+-f64, and a heavy-tie tiny-range set that stresses stability, all with NEGATIVE values to exercise the per-key
+`min` offset); the criterion bench also asserts `np.array_equal` per key set before timing. Pure-numpy prototype
+confirmed the composite counting-sort permutation == `np.lexsort` byte-exact FIRST. RULE: bounded integer-valued
+lexsort keys -> stable counting sort on the packed composite; do not reopen it for uint64 / unbounded / non
+-integral float keys (those keep the par_sort / byte-transform routes).
+
 ## 2026-07-09 - WIN (SHIP): mixed structured intersect/setdiff via word-packed bitplanes - 224.4x / 60.6x vs ORIG
 
 `BlackThrush`, dig-deeper round. Consulted this ledger first and avoided the rejected dense row-unique

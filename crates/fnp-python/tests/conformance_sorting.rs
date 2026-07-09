@@ -397,3 +397,44 @@ fn conformance_sorting_matrix() {
         Ok(())
     });
 }
+
+#[test]
+fn lexsort_bounded_integer_valued_counting_sort_matches_numpy() {
+    // Large-n, bounded-range integer-valued keys (both int and integral-float, incl. negatives)
+    // exercise the stable counting-sort fast path. numpy's lexsort is stable; the counting scatter
+    // in ascending original-index order must reproduce that tie-break byte-exactly.
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(7)\n\
+                 n = 300_000\n\
+                 k0 = rng.integers(0, 100, n).astype(np.int64)\n\
+                 k1 = rng.integers(-50, 50, n).astype(np.int32)\n\
+                 k2 = rng.integers(0, 100, n).astype(np.int16)\n\
+                 keys_int = (k0, k1, k2)\n\
+                 keys_f64 = (k0.astype(np.float64), k1.astype(np.float64), k2.astype(np.float64))\n\
+                 # heavy-tie case: tiny ranges so many equal composites test stability\n\
+                 t0 = rng.integers(0, 3, n).astype(np.int64)\n\
+                 t1 = rng.integers(-2, 2, n).astype(np.int64)\n\
+                 keys_tie = (t0, t1)\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let array_equal = numpy.getattr("array_equal")?;
+        for name in ["keys_int", "keys_f64", "keys_tie"] {
+            let keys = ns
+                .get_item(name)?
+                .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing keys"))?;
+            let ours = module.getattr("lexsort")?.call1((&keys,))?;
+            let theirs = numpy.getattr("lexsort")?.call1((&keys,))?;
+            let equal: bool = array_equal.call1((&ours, &theirs))?.extract()?;
+            assert!(equal, "lexsort counting-sort {name} diverged from numpy");
+            let dtype = ours.getattr("dtype")?.str()?.to_string();
+            assert_eq!(dtype, "int64");
+        }
+        Ok(())
+    });
+}
