@@ -192,19 +192,21 @@ fn setxor1d_mixed_struct_dense_integral_float_matches_numpy() {
             Some(&ns),
             Some(&ns),
         )?;
-        let setxor = module.getattr("setxor1d")?;
-        let numpy_setxor = numpy.getattr("setxor1d")?;
         let array_equal = numpy.getattr("array_equal")?;
-        for (left_name, right_name) in [("a", "b"), ("edge_a", "edge_b")] {
-            let left = ns.get_item(left_name)?.expect("left");
-            let right = ns.get_item(right_name)?.expect("right");
-            let ours = setxor.call1((&left, &right))?;
-            let theirs = numpy_setxor.call1((&left, &right))?;
-            let equal: bool = array_equal.call1((&ours, &theirs))?.extract()?;
-            assert!(
-                equal,
-                "mixed structured setxor1d diverged from numpy for {left_name}/{right_name}"
-            );
+        for op in ["setxor1d", "intersect1d", "setdiff1d"] {
+            let ours_fn = module.getattr(op)?;
+            let numpy_fn = numpy.getattr(op)?;
+            for (left_name, right_name) in [("a", "b"), ("edge_a", "edge_b")] {
+                let left = ns.get_item(left_name)?.expect("left");
+                let right = ns.get_item(right_name)?.expect("right");
+                let ours = ours_fn.call1((&left, &right))?;
+                let theirs = numpy_fn.call1((&left, &right))?;
+                let equal: bool = array_equal.call1((&ours, &theirs))?.extract()?;
+                assert!(
+                    equal,
+                    "mixed structured {op} diverged from numpy for {left_name}/{right_name}"
+                );
+            }
         }
         Ok(())
     });

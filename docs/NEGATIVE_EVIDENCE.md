@@ -4,6 +4,45 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-09 - WIN (SHIP): mixed structured intersect/setdiff via word-packed bitplanes - 224.4x / 60.6x vs ORIG
+
+`BlackThrush`, dig-deeper round. Consulted this ledger first and avoided the rejected dense row-unique
+occupancy/rank table, c128 setxor parity retry, threshold/packed-panel families, and already-shipped mixed
+structured `setxor1d` source-bit grid. Fresh residual profiling with per-crate
+`rch exec -- cargo bench --profile release` selected the hottest eligible current-FNP rows:
+`python_struct_mixed_setops_boundary/fnp_setdiff1d_struct_i8f8_1m_1m` at 425.660 ms and
+`python_struct_mixed_setops_boundary/fnp_intersect1d_struct_i8f8_1m_1m` at 358.915 ms.
+
+Primitive: a bitmap-index / bit-parallel set algebra route for dense two-field `(int64, float64)` structured
+records. When the dtype is two contiguous native/LE fields, the float field is finite, non-`-0.0`, exactly
+integral, and the `a`-side `(id, value)` domain is bounded, mark `a` and in-domain `b` records into packed
+`u64` bitplanes. `intersect1d` emits `a_bits & b_bits`; `setdiff1d` emits `a_bits & !b_bits`, scanning set bits
+in structured value-lexicographic order. Non-integral floats, NaN, `-0.0`, padded/big-endian layouts, empty or
+small inputs, and sparse/wide domains fall back to the prior unique-plus-membership-hash route. This is not the
+shipped `setxor1d` byte-grid primitive: it uses packed bitplanes, derives the domain only from `a`, and ignores
+out-of-domain `b` records as the exact set algebra requires.
+
+MEASURED (per-crate `rch exec -- cargo bench --profile release` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod`; worker `vmi1149989`, criterion bencher, two 1M-record
+structured arrays with fields `[('id','<i8'),('val','<f8')]`, both values drawn from `[0,3000)`):
+| Probe | fnp word-packed bitplanes | ORIG NumPy | ORIG/fnp |
+|---|---:|---:|---:|
+| `intersect1d(struct i8+f8[1M], struct i8+f8[1M])` | 26.218 ms | 5882.759 ms | **224.4x** |
+| `setdiff1d(struct i8+f8[1M], struct i8+f8[1M])` | 38.222 ms | 2315.984 ms | **60.6x** |
+
+PROFILE ROUTING: the same-session pre-change residual sweep had FNP at 358.915 ms for intersect and 425.660 ms
+for setdiff. The final-source candidate is about 13.7x / 11.1x faster than those current-FNP routing samples.
+That current-FNP delta is routing evidence only; the formal landed ratio is the same-command ORIG/FNP comparison
+above.
+
+CORRECTNESS: `cargo check -p fnp-python --profile release --lib --test conformance_setops --bench
+criterion_python_surface` passed on worker `hz1`. `cargo test -p fnp-python --profile release --test
+conformance_setops -- --nocapture` passed via RCH local fallback: `MUST 9/9`, `SHOULD 14/14`, `MAY 2/2`, with
+the mixed structured parity test covering `setxor1d`, `intersect1d`, and `setdiff1d` against live NumPy via
+`np.array_equal`. RULE: for bounded exact-integral two-field `(int64, float64)` structured `intersect1d` and
+`setdiff1d`, use word-packed `a`/`b` bitplanes; do not route through record-hash membership unless the bitplane
+gates fail. This does not reopen row-unique occupancy/rank tables or c128 dense-domain setops.
+
 ## 2026-07-09 - WIN (SHIP): complex128 intersect/setdiff via sorted-unique merge streams - 25.6x / 23.7x vs ORIG
 
 `BlackThrush`, dig-deeper round. Consulted this ledger first and avoided the rejected c128 setxor parity retry,
