@@ -4,6 +4,44 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-09 - WIN (SHIP): fixed-width Latin-1 string setops via packed word keys - 63.7x / 96.3x vs ORIG
+
+`Codex`, dig-deeper round. Consulted this ledger first and avoided the already-shipped complex dense grids,
+homogeneous structured searchsorted prefix index, bounded-grid argsort buckets, integer histogram order stats,
+and the rejected dense row-unique occupancy/rank table. Fresh residual profiling with
+`rch exec -- cargo bench --profile release` selected the remaining unclaimed hot path:
+`python_string_setxor_boundary/fnp_setxor1d_U8_2m` at 398.048 ms, just ahead of
+`python_string_union1d_boundary/fnp_union1d_U8_2m` at 378.869 ms and complex setops around 364-369 ms.
+
+Primitive: a word-RAM/trie-inspired packed lexicographic key route for fixed-width string records, drawing on
+the graveyard's fusion-tree / x-fast trie "word key" idea and Masstree/FST fixed byte-slice string indexing.
+For `S<=8` and Latin-1 `U<=8`, pack each fixed-width record into one big-endian `u64`, where integer order is
+identical to NumPy lexicographic string order. `union1d` sorts and dedups the packed keys directly; `setxor1d`
+sorts `(key, source)` tags and keeps runs present in exactly one input. The output is reconstructed into fresh
+same-dtype NumPy storage. Non-Latin-1 `U`, wider strings, small inputs, mixed kinds/widths, or unsupported layouts
+fall through to the existing raw-record memcmp path or NumPy delegate.
+
+MEASURED (per-crate `rch exec -- cargo bench --profile release` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod`; worker `vmi1227854`, criterion bencher, two
+2M-element `U8` arrays with lowercase Latin-1 codepoints):
+| Probe | fnp packed word keys | ORIG NumPy | ORIG/fnp |
+|---|---:|---:|---:|
+| `union1d(U8[2M], U8[2M])` | 53.661 ms | 5165.852 ms | **96.3x** |
+| `setxor1d(U8[2M], U8[2M])` | 85.769 ms | 5463.708 ms | **63.7x** |
+
+PROFILE ROUTING: the pre-change same-command residual sweep ranked `setxor1d_U8_2m` at 398.048 ms and
+`union1d_U8_2m` at 378.869 ms. The packed-key candidate measured about 4.6x faster on setxor and 7.1x faster
+on union versus those routing samples; that current-FNP delta is cross-worker and used as routing evidence only.
+The landed proof is the same-command ORIG/FNP ratio above.
+
+CORRECTNESS: `cargo check -p fnp-python --profile release --lib --test conformance_setops --bench
+criterion_python_surface` passed on worker `ovh-a`. `cargo test -p fnp-python --profile release --test
+conformance_setops -- --nocapture` passed on worker `vmi1152480`: `MUST 9/9`, `SHOULD 14/14`, `MAY 2/2`, plus
+`union_and_setxor_u8_packed_latin1_strings_match_numpy`, which compares packed-route `U8` `union1d` and
+`setxor1d` to live NumPy with `np.array_equal`. RULE: for fixed-width `S<=8` or Latin-1 `U<=8` setops, pack
+records into big-endian word keys and operate on sorted keys; do not route this narrow family through raw
+record-permutation memcmp sort unless the packed-key gates fail.
+
 ## 2026-07-09 - WIN (SHIP): dense-domain complex128 union1d via direct 2-D presence table - 30.9x vs ORIG
 
 `Codex`, dig-deeper round. Consulted the existing ledger first and avoided the rejected threshold/packed-panel/

@@ -95,6 +95,34 @@ fn union1d_complex128_dense_integral_grid_matches_numpy() {
 }
 
 #[test]
+fn union_and_setxor_u8_packed_latin1_strings_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(123)\n\
+                 a = rng.integers(97, 123, (90_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n\
+                 fresh = rng.integers(97, 123, (70_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n\
+                 b = np.concatenate([a[:30_000], fresh])\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let a = ns.get_item("a")?.expect("a");
+        let b = ns.get_item("b")?.expect("b");
+        let array_equal = numpy.getattr("array_equal")?;
+        for op in ["union1d", "setxor1d"] {
+            let ours = module.getattr(op)?.call1((&a, &b))?;
+            let theirs = numpy.getattr(op)?.call1((&a, &b))?;
+            let equal: bool = array_equal.call1((&ours, &theirs))?.extract()?;
+            assert!(equal, "packed Latin-1 U8 {op} diverged from numpy");
+        }
+        Ok(())
+    });
+}
+
+#[test]
 fn conformance_setops_matrix() {
     static TOTALS: Totals = Totals::new();
 
