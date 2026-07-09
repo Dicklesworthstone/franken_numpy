@@ -697,6 +697,35 @@ print(left and right)
 }
 
 #[test]
+fn searchsorted_structured_int64_prefix_records_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+n = 70000
+dt = [('a','<i8'),('b','<i8')]
+base = np.arange(n, dtype=np.int64)
+h = np.zeros(n, dtype=dt)
+h['a'] = (base // 5) * 3 - 50000
+h['b'] = (base % 5) - 2
+probe = (base * 37) % (n + 2000)
+q = np.zeros(n, dtype=dt)
+q['a'] = (probe // 5) * 3 - 50003
+q['b'] = (probe % 11) - 5
+left = np.array_equal(fnp.searchsorted(h, q, side='left'), np.searchsorted(h, q, side='left'))
+right = np.array_equal(fnp.searchsorted(h, q, side='right'), np.searchsorted(h, q, side='right'))
+print(left and right)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "structured int64 prefix searchsorted should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
 fn searchsorted_left() -> Result<(), String> {
     let script = fnp_script(
         r#"

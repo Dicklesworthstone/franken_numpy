@@ -36,6 +36,35 @@ with `np.array_equal`. RULE: for finite integer-valued complex128 `union1d` over
 mark the direct value grid and emit buckets; do not concatenate and comparison-sort complex records unless the
 domain gate fails.
 
+## 2026-07-09 - WIN (SHIP): structured `searchsorted` two-field integer prefix index — 72.7x vs ORIG
+
+`BlackThrush`, dig-deeper round. Consulted this ledger first and avoided the rejected dense row-unique table,
+float order-stat radix, packed-GEMM/SVD retunes, and already-shipped bounded-grid argsort buckets. Profiled the
+remaining Python-surface candidates with per-crate `rch exec -- cargo bench --profile release` and found the
+hottest actionable FNP row was `python_searchsorted_struct_boundary/fnp_searchsorted_struct_2xi8_2m_2m` at
+1272.134 ms, ahead of string `union1d_U8_2m` at 939.567 ms and complex setops around 626-633 ms. The old
+structured path still performed a full lexicographic binary search over the 2M-record haystack for every query.
+
+Primitive: a cache-oblivious/search-index-inspired prefix table for homogeneous two-field integer structured
+records. Verify the haystack is lexicographically sorted, build a dense lower-bound table over the first field
+only when its span is bounded (`<= 1 << 20`), then answer each query by indexing the first-field bucket and
+binary-searching only the second-field subrange. This is deliberately not the rejected dense row-unique lever:
+it does not scan or materialize the full composite domain, and it falls back to the existing comparator search
+when the first-field span is too wide, the data is not two-field homogeneous i64/u64, or sortedness is not proven.
+
+MEASURED candidate (per-crate `rch exec -- cargo bench --profile release` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod`; worker `vmi1227854`, criterion bencher, 2M haystack +
+2M query structured `<i8,<i8>` records):
+| Probe | fnp prefix index | ORIG NumPy | ORIG/fnp |
+|---|---:|---:|---:|
+| `searchsorted(struct[2xi8], 2M into 2M)` | 87.814 ms | 6385.023 ms | **72.7x** |
+
+CORRECTNESS: focused `searchsorted_structured_{int64_prefix,uint64}_records_match_numpy` passed on remote worker
+`vmi1227854`; broader `conformance_sort_search searchsorted` passed on worker `hz1` with 10/10 searchsorted tests
+green. RULE: for sorted two-field homogeneous integer structured searchsorted with a bounded first-field span,
+build a first-field prefix index and search only the matching bucket; do not full-record binary-search every
+query unless the prefix-index gates fail.
+
 ## 2026-07-09 - REJECT (NO-SHIP): dense-domain row-unique occupancy/rank table loses to packed-composite sort
 
 `BlackThrush`, dig-deeper round. Profiled the residual Python-surface boundary rows after consulting the existing
