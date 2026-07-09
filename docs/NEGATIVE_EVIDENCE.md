@@ -4,6 +4,33 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-09 - REJECT (NO-SHIP): dense-domain row-unique occupancy/rank table loses to packed-composite sort
+
+`BlackThrush`, dig-deeper round. Profiled the residual Python-surface boundary rows after consulting the existing
+ledger. The hottest unharvested-looking row in that pass was `unique(axis=0)` / `unique(axis=0, return_*)` on
+500k x 4 small-domain integer rows: current FNP was already far ahead of ORIG NumPy, but still spending
+~10-14 ms in the packed-composite sort path. Tried a radically different primitive from the segmented/rank-select
+and radix-hash-join family: compute the mixed-radix row code, use a dense occupancy/count/rank table over the
+bounded code domain (`20^4 = 160k`), scan codes in value-lexicographic order, and decode rows directly. This
+removes comparison sorting, but the extra table scans / rank materialization did not beat the existing u64
+sort+dedup/group-by implementation.
+
+MEASURED candidate (per-crate `rch exec -- cargo bench --profile release` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod`; worker `hz1`, criterion bencher, 500k x 4 int64 rows):
+| Probe | dense occupancy/rank candidate | ORIG NumPy | ORIG/candidate |
+|---|---:|---:|---:|
+| `unique(axis=0, return_index/inverse/counts)` | 21.891 ms | 1319.755 ms | **60.3x** |
+| `unique(axis=0)` | 10.954 ms | 1363.510 ms | **124.5x** |
+
+REVERT CHECK: after removing the dense branch, the current packed-composite path measured 14.803 ms for the
+return_* row and 10.428 ms for the plain row on a follow-up RCH worker. The earlier profile sweep also had the
+current path at 13.886 ms / 10.133 ms. Because the dense primitive showed no current-FNP win and was especially
+bad for return_*, it was reverted completely; no source or conformance-test change is shipped from this attempt.
+RULE: do not replace FrankenNumPy's packed-composite small-domain row unique with a dense occupancy/rank table
+for the 500k x 4 / 160k-domain family. A future retry needs a materially different primitive, e.g. vectorized
+code generation plus avoiding full-domain scans, or a row path that can prove same-worker improvement over the
+packed u64 sort baseline.
+
 ## 2026-07-09 - WIN (SHIP): bounded-grid complex stable argsort via 2-D histogram buckets — 27.9x vs ORIG
 
 `Codex`, dig-deeper round. Profiled the current residual boundary rows first; the hottest actionable FNP row was
