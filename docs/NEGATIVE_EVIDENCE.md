@@ -4,6 +4,38 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-09 - WIN (SHIP): dense-domain complex128 union1d via direct 2-D presence table - 30.9x vs ORIG
+
+`Codex`, dig-deeper round. Consulted the existing ledger first and avoided the rejected threshold/packed-panel/
+row-unique dense-rank families. Profiled current Python-surface residuals with
+`rch exec -- cargo bench --profile release` and selected the hottest actionable FNP row in that pass:
+`python_c128_setops_boundary/fnp_union1d_c128_2m_2m` at 222.020 ms (routing profile on worker `hz2`). The
+existing path flattened `a` and `b`, concatenated them, then comparison-sorted `[real, imag]` pairs in the
+complex128 unique path. Replaced the narrow dense-integral case with a radix-hash-join-shaped direct-domain
+primitive: validate finite non-negative-zero integer-valued real/imag components, compute the bounded
+`real_bins * imag_bins` grid, mark presence from both inputs, then scan buckets in NumPy complex lexicographic
+order to materialize the sorted unique union directly. Non-integral, NaN, `-0.0`, small, or too-wide domains
+fall through to the existing concat/sort path.
+
+MEASURED (per-crate `rch exec -- cargo bench --profile release` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod`; worker `vmi1264463`, criterion bencher, two
+2M-element `complex128` arrays with integer re/im components in `[0,3000)`):
+| Probe | fnp direct-domain union | ORIG NumPy union1d | ORIG/fnp |
+|---|---:|---:|---:|
+| `union1d(complex128[2M], complex128[2M])` | 189.638 ms | 5869.978 ms | **30.9x** |
+
+PROFILE ROUTING: the pre-change sweep ranked FNP residuals as c128 union1d 222.020 ms, complex stable argsort
+68.577 ms, structured searchsorted 59.603 ms, string stable argsort 57.264 ms, datetime searchsorted 35.454 ms.
+The post-change row is about 1.17x faster than that routed FNP sample, but the current-FNP delta is cross-worker
+and used only as routing evidence; the formal landed ratio is same-command ORIG/FNP.
+
+CORRECTNESS: `cargo check -p fnp-python --lib --test conformance_setops --bench criterion_python_surface` passed
+on `hz2`. Full setops conformance passed on `ovh-a`: `MUST 9/9`, `SHOULD 14/14`, `MAY 2/2`, plus
+`union1d_complex128_dense_integral_grid_matches_numpy` comparing dense integral complex128 output to live NumPy
+with `np.array_equal`. RULE: for finite integer-valued complex128 `union1d` over a bounded 2-D value domain,
+mark the direct value grid and emit buckets; do not concatenate and comparison-sort complex records unless the
+domain gate fails.
+
 ## 2026-07-09 - REJECT (NO-SHIP): dense-domain row-unique occupancy/rank table loses to packed-composite sort
 
 `BlackThrush`, dig-deeper round. Profiled the residual Python-surface boundary rows after consulting the existing

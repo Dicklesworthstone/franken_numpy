@@ -62,6 +62,39 @@ fn np_array_1d_complex<'py>(
 }
 
 #[test]
+fn union1d_complex128_dense_integral_grid_matches_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 x = np.arange(300_000, dtype=np.int64)\n\
+                 y = np.arange(300_000, dtype=np.int64)\n\
+                 a = (((x * 17) % 600) + 1j * ((x * 31) % 600)).astype(np.complex128)\n\
+                 b = ((((y * 29) + 7) % 600) + 1j * (((y * 43) + 11) % 600)).astype(np.complex128)\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let a = ns.get_item("a")?.expect("a");
+        let b = ns.get_item("b")?.expect("b");
+        let ours = module.getattr("union1d")?.call1((&a, &b))?;
+        let theirs = numpy.getattr("union1d")?.call1((&a, &b))?;
+        let equal: bool = numpy
+            .getattr("array_equal")?
+            .call1((&ours, &theirs))?
+            .extract()?;
+        assert!(
+            equal,
+            "dense integral complex128 union1d diverged from numpy"
+        );
+        let dtype = ours.getattr("dtype")?.str()?.to_string();
+        assert_eq!(dtype, "complex128");
+        Ok(())
+    });
+}
+
+#[test]
 fn conformance_setops_matrix() {
     static TOTALS: Totals = Totals::new();
 
