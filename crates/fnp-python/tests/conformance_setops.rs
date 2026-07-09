@@ -76,8 +76,12 @@ fn union1d_complex128_dense_integral_grid_matches_numpy() {
             Some(&ns),
             Some(&ns),
         )?;
-        let a = ns.get_item("a")?.expect("a");
-        let b = ns.get_item("b")?.expect("b");
+        let a = ns
+            .get_item("a")?
+            .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing a"))?;
+        let b = ns
+            .get_item("b")?
+            .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing b"))?;
         let ours = module.getattr("union1d")?.call1((&a, &b))?;
         let theirs = numpy.getattr("union1d")?.call1((&a, &b))?;
         let equal: bool = numpy
@@ -109,8 +113,12 @@ fn union_and_setxor_u8_packed_latin1_strings_match_numpy() {
             Some(&ns),
             Some(&ns),
         )?;
-        let a = ns.get_item("a")?.expect("a");
-        let b = ns.get_item("b")?.expect("b");
+        let a = ns
+            .get_item("a")?
+            .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing a"))?;
+        let b = ns
+            .get_item("b")?
+            .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing b"))?;
         let array_equal = numpy.getattr("array_equal")?;
         for op in ["union1d", "setxor1d"] {
             let ours = module.getattr(op)?.call1((&a, &b))?;

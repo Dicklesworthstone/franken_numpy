@@ -42,6 +42,20 @@ conformance_setops -- --nocapture` passed on worker `vmi1152480`: `MUST 9/9`, `S
 records into big-endian word keys and operate on sorted keys; do not route this narrow family through raw
 record-permutation memcmp sort unless the packed-key gates fail.
 
+## 2026-07-09 - REJECT (NO-SHIP): narrow ASCII `U8` union-only packed helper superseded by packed word keys
+
+`BlackThrush`, rebase resolution. Independently profiled the same residual family and tried a narrower
+`U8`-only monotone `u64` recode for `union1d`. The candidate was a real local fallback win
+(`union1d(U8[2M], U8[2M])` at 70.966 ms vs ORIG NumPy 4156.764 ms, 58.6x), but during `git pull --rebase`
+`origin/main` already contained the broader fixed-width Latin-1 packed word-key primitive above. That upstream
+path covers `S<=8` and Latin-1 `U<=8`, handles both `union1d` and `setxor1d`, and measured stronger on the same
+union row (53.661 ms, 96.3x vs ORIG). The duplicate source helper and union-only test were dropped during rebase;
+only the upstream general primitive should remain.
+
+RULE: do not add a separate `U8`-only `union1d` packed-key helper on top of `try_packed_string_union1d`.
+Future string setop work must either extend the shared packed word-key route to a materially different family
+or prove a same-command win over that upstream implementation.
+
 ## 2026-07-09 - WIN (SHIP): dense-domain complex128 union1d via direct 2-D presence table - 30.9x vs ORIG
 
 `Codex`, dig-deeper round. Consulted the existing ledger first and avoided the rejected threshold/packed-panel/
