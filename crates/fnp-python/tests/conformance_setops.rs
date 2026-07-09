@@ -99,6 +99,45 @@ fn union1d_complex128_dense_integral_grid_matches_numpy() {
 }
 
 #[test]
+fn intersect_setdiff_complex128_sorted_merge_matches_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 x = np.arange(330_000, dtype=np.int64)\n\
+                 y = np.arange(330_000, dtype=np.int64)\n\
+                 a = (((x * 1_000_003) % 2_000_003) + 1j * ((x * 1_000_033) % 2_000_033)).astype(np.complex128)\n\
+                 shared = a[::3]\n\
+                 fresh = ((((y * 1_000_087) + 17) % 2_000_089) + 1j * (((y * 1_000_093) + 31) % 2_000_099)).astype(np.complex128)\n\
+                 b = np.concatenate([shared, fresh[:220_000]])\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let a = ns
+            .get_item("a")?
+            .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing a"))?;
+        let b = ns
+            .get_item("b")?
+            .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing b"))?;
+        let array_equal = numpy.getattr("array_equal")?;
+        for op in ["intersect1d", "setdiff1d"] {
+            let ours = module.getattr(op)?.call1((&a, &b))?;
+            let theirs = numpy.getattr(op)?.call1((&a, &b))?;
+            let equal: bool = array_equal.call1((&ours, &theirs))?.extract()?;
+            assert!(
+                equal,
+                "complex128 sorted-merge {op} diverged from numpy"
+            );
+            let dtype = ours.getattr("dtype")?.str()?.to_string();
+            assert_eq!(dtype, "complex128");
+        }
+        Ok(())
+    });
+}
+
+#[test]
 fn union_and_setxor_u8_packed_latin1_strings_match_numpy() {
     with_fnp_and_numpy(|py, module, numpy| {
         let ns = PyDict::new(py);

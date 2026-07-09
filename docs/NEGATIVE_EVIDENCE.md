@@ -4,6 +4,44 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-09 - WIN (SHIP): complex128 intersect/setdiff via sorted-unique merge streams - 25.6x / 23.7x vs ORIG
+
+`BlackThrush`, dig-deeper round. Consulted this ledger first and avoided the rejected c128 setxor parity retry,
+the already-shipped c128 dense-domain `union1d` presence grid, the dense row-unique occupancy/rank table, and
+threshold/packed-panel linalg retunes. Fresh residual profiling with per-crate
+`rch exec -- cargo bench --profile release` selected the hottest eligible current-FNP rows:
+`python_c128_setops_boundary/fnp_setdiff1d_c128_2m_2m` at 609.839 ms and
+`python_c128_setops_boundary/fnp_intersect1d_c128_2m_2m` at 572.714 ms on worker `vmi1152480`.
+
+Primitive: a worst-case-optimal-join / Roaring-array-container shaped sorted-stream set algebra route. The old
+complex128 intersect/setdiff path already computed `unique(a)` and then built a cache-cold 16-byte record
+hash set for `b`. The new route computes sorted unique streams for both operands when both pass the existing
+finite/non-`-0.0` complex128 gates, then performs a two-pointer lexicographic merge to materialize
+`intersect1d` or `setdiff1d` directly. If `unique(b)` cannot take the native path, or if NaN / `-0.0` appears,
+the implementation falls back to the prior exact hash/delegate behavior. This is deliberately not the shipped
+dense-domain union grid: it does not allocate a value-domain table and works on arbitrary finite complex values.
+
+MEASURED (per-crate `rch exec -- cargo bench --profile release` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/numpy-cod`; RCH local fallback because all workers were occupied,
+criterion bencher, two 2M-element `complex128` arrays with integer-valued real/imag components in `[0,3000)`):
+| Probe | fnp sorted-merge | ORIG NumPy | ORIG/fnp |
+|---|---:|---:|---:|
+| `intersect1d(complex128[2M], complex128[2M])` | 132.995 ms | 3404.941 ms | **25.6x** |
+| `setdiff1d(complex128[2M], complex128[2M])` | 130.263 ms | 3087.189 ms | **23.7x** |
+
+PROFILE ROUTING: the same-session pre-change sweep on `vmi1152480` had FNP at 572.714 ms for intersect and
+609.839 ms for setdiff. The final-source candidate is about 4.3x / 4.7x faster than those current-FNP routing
+samples; that current-FNP delta is cross-mode routing evidence only. The formal landed ratio is the same-command
+ORIG/FNP comparison above.
+
+CORRECTNESS: `cargo check -p fnp-python --profile release --lib --test conformance_setops --bench
+criterion_python_surface` passed on worker `hz2`. `cargo test -p fnp-python --profile release --test
+conformance_setops -- --nocapture` passed via RCH local fallback: `MUST 9/9`, `SHOULD 14/14`, `MAY 2/2`, plus
+`intersect_setdiff_complex128_sorted_merge_matches_numpy`, which compares the sorted-merge route to live NumPy
+with `np.array_equal`. RULE: for finite, non-`-0.0` complex128 `intersect1d` and `setdiff1d`, compute sorted
+unique streams for both sides and merge them; do not build a 16-byte-record membership hash when both unique
+streams are available. This does not reopen c128 setxor or dense-domain union work.
+
 ## 2026-07-09 - WIN (SHIP): mixed structured setxor via dense source-bit grid - 58.2x vs ORIG
 
 `BlackThrush`, dig-deeper round. Consulted this ledger first and avoided the rejected dense row-unique
