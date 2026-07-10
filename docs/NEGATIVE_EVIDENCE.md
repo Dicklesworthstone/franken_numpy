@@ -4,6 +4,37 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - RE-DECISION (median gate, no new measurement): the 2026-07-04 "np.sort(float16) via f32 widening - 0.75x, do NOT re-dig" REJECT is REFUTED IN DIRECTION; production lever unblocked
+
+`cc_fnp`, applying the corrected decision method (gate on MEDIAN separation vs the per-function
+null floor, not cv) to cod_fnp's same-day reconstruction data - the frankenlibc route: rows are
+re-decided from evidence already in the ledger, no new run taken.
+
+DATA (cod_fnp's reopen entry below; ONE binary / ONE process / ONE rch invocation on
+vmi1149989, alternating AB/BA, black_box on results; profile proved the reconstructed route
+executed - f16 uint16 pre-scan 62 self samples): f32-widen/sort/narrow candidate median
+37.764 ms vs ORIG numpy f16 sort 260.331 ms at 4M = **6.89x separation**, candidate CV 19.1%,
+ORIG CV 5.1%. That run had no null-control row (the rule postdates it), but the DECISION is
+still valid under the median gate: even a null floor as wide as +-40% per arm cannot close a
+6.9x median separation (worst-case bounds 37.8*1.4 = 52.9 ms vs 260.3*0.6 = 156.2 ms - still
+3x apart). The old row's 0.75x verdict (fnp 132.0 vs numpy 99.1 ms) is REFUTED in direction on
+today's fleet numpy: numpy's f16 sort reads 260.3 ms, not 99.1 ms, so the old row's premise
+("numpy f16 sort is NOT pathological") no longer holds - whether from numpy-version drift or a
+mismeasured 2026-07-04 baseline, the wall it claimed does not exist now.
+
+UNBLOCKED PRODUCTION LEVER (next dig, not claimed here): restore the reverted
+`try_native_f16_sort` design - uint16-bits pre-scan defers NaN / -0.0, astype f32 -> sort ->
+astype f16 for the rest - wired into the sort() flat dispatch, with the byte-parity battery
+(NaN / -0.0 / inf / subnormal / dense-tie) and a same-binary interleaved A/B WITH a null-control
+row and full provenance (sha256, self-time, worker, cv, null median). Expected order: ~5-7x at
+4M f16 per the reconstruction. The old row's "lossless-upcast wins only where an fnp KERNEL
+advantage exists" rule stays useful but its application to sort was premised on the stale
+99.1 ms baseline.
+
+RE-DECISION of the tie-heavy f32 argsort row is already in flight as a production lever (the
+dispatch dedupe named in the amendment below); its measured WIN/REJECT with the null-control
+row lands separately.
+
 ## 2026-07-10 - AMENDMENT (scope-void, no new measurement): the 2026-07-07 "FLOAT median via RADIX-SELECT" REJECT's family-ceiling claim is FALSIFIED BY IN-TREE SHIPPED CODE + two pre-existing container-test failures classified
 
 `cc_fnp`, ledger-integrity route (the frankenlibc pattern: re-decide rows from existing
