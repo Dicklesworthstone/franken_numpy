@@ -270,6 +270,65 @@ fn setxor1d_mixed_struct_dense_integral_float_matches_numpy() {
 }
 
 #[test]
+fn mixed_struct_dense_bitplanes_all_supported_field_widths_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 cases = {}\n\
+                 for case_id, int_code in enumerate(('i1', 'i2', 'i4', 'i8', 'u1', 'u2', 'u4', 'u8')):\n\
+                 \x20\x20\x20\x20low, high = ((0, 41) if int_code[0] == 'u' else (-20, 21))\n\
+                 \x20\x20\x20\x20for float_code in ('f4', 'f8'):\n\
+                 \x20\x20\x20\x20\x20\x20\x20\x20rng = np.random.default_rng(10_000 + 10 * case_id + int(float_code[1]))\n\
+                 \x20\x20\x20\x20\x20\x20\x20\x20dt = np.dtype([('id', int_code), ('val', float_code)], align=False)\n\
+                 \x20\x20\x20\x20\x20\x20\x20\x20a = np.zeros(40_000, dtype=dt)\n\
+                 \x20\x20\x20\x20\x20\x20\x20\x20a['id'] = rng.integers(low, high, 40_000, dtype=np.dtype(int_code))\n\
+                 \x20\x20\x20\x20\x20\x20\x20\x20a['val'] = rng.integers(-15, 26, 40_000).astype(np.dtype(float_code))\n\
+                 \x20\x20\x20\x20\x20\x20\x20\x20b = np.zeros(40_000, dtype=dt)\n\
+                 \x20\x20\x20\x20\x20\x20\x20\x20b[:10_000] = a[:10_000]\n\
+                 \x20\x20\x20\x20\x20\x20\x20\x20b['id'][10_000:] = rng.integers(low, high, 30_000, dtype=np.dtype(int_code))\n\
+                 \x20\x20\x20\x20\x20\x20\x20\x20b['val'][10_000:] = rng.integers(-15, 26, 30_000).astype(np.dtype(float_code))\n\
+                 \x20\x20\x20\x20\x20\x20\x20\x20cases[f'{int_code}_{float_code}'] = (a, b)\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let cases = ns.get_item("cases")?.ok_or_else(|| {
+            pyo3::exceptions::PyKeyError::new_err("structured cases were not generated")
+        })?;
+        let array_equal = numpy.getattr("array_equal")?;
+        for int_code in ["i1", "i2", "i4", "i8", "u1", "u2", "u4", "u8"] {
+            for float_code in ["f4", "f8"] {
+                let label = format!("{int_code}_{float_code}");
+                let pair = cases.get_item(&label)?;
+                let left = pair.get_item(0)?;
+                let right = pair.get_item(1)?;
+                for op in ["intersect1d", "setdiff1d", "setxor1d"] {
+                    let ours = module.getattr(op)?.call1((&left, &right))?;
+                    let theirs = numpy.getattr(op)?.call1((&left, &right))?;
+                    assert!(
+                        array_equal.call1((&ours, &theirs))?.extract::<bool>()?,
+                        "mixed structured {op} diverged for {label}"
+                    );
+                    assert!(
+                        ours.getattr("dtype")?.eq(theirs.getattr("dtype")?)?,
+                        "mixed structured {op} changed dtype for {label}"
+                    );
+                    let ours_bytes: Vec<u8> = ours.call_method0("tobytes")?.extract()?;
+                    let theirs_bytes: Vec<u8> = theirs.call_method0("tobytes")?.extract()?;
+                    assert_eq!(
+                        ours_bytes, theirs_bytes,
+                        "mixed structured {op} changed output bytes for {label}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    });
+}
+
+#[test]
 fn conformance_setops_matrix() {
     static TOTALS: Totals = Totals::new();
 
