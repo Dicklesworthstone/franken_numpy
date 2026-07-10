@@ -14379,6 +14379,121 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
                 });
             });
             report_ledger_pair("narrow_int_i16_argsort_stable_null_AA", &na2, &nb2);
+
+            // LAST-AXIS siblings on a 4000x2000 view of the same 8M i16 input: per-lane sort
+            // + per-lane stable argsort, paired with A/A null controls.
+            let input2d = input
+                .call_method1("reshape", ((4000, 2000),))
+                .expect("reshape 4000x2000");
+            let axkw = pyo3::types::PyDict::new(py);
+            axkw.set_item("axis", -1).expect("axis kwarg");
+            let stax_kw = pyo3::types::PyDict::new(py);
+            stax_kw.set_item("axis", -1).expect("axis kwarg");
+            stax_kw.set_item("kind", "stable").expect("kind kwarg");
+            let sf = fnp_sort.call((&input2d,), Some(&axkw)).expect("fnp lastaxis parity");
+            let sn = numpy_sort
+                .call((&input2d,), Some(&axkw))
+                .expect("numpy lastaxis parity");
+            let sfb: Vec<u8> = sf.call_method0("tobytes").expect("b").extract().expect("e");
+            let snb: Vec<u8> = sn.call_method0("tobytes").expect("b").extract().expect("e");
+            assert_eq!(sfb, snb, "narrow-int i16 lastaxis sort parity");
+            let gf = fnp_argsort_n
+                .call((&input2d,), Some(&stax_kw))
+                .expect("fnp lastaxis argsort parity");
+            let gn = numpy_argsort_n
+                .call((&input2d,), Some(&stax_kw))
+                .expect("numpy lastaxis argsort parity");
+            assert!(
+                equal
+                    .call1((&gf, &gn))
+                    .expect("array_equal")
+                    .extract::<bool>()
+                    .expect("bool"),
+                "narrow-int i16 lastaxis stable argsort parity",
+            );
+            for (label, ffn, nfn, kw) in [
+                (
+                    "narrow_int_i16_sort_lastaxis_4000x2000",
+                    &fnp_sort,
+                    &numpy_sort,
+                    &axkw,
+                ),
+                (
+                    "narrow_int_i16_argsort_stable_lastaxis_4000x2000",
+                    &fnp_argsort_n,
+                    &numpy_argsort_n,
+                    &stax_kw,
+                ),
+            ] {
+                let cand = RefCell::new(Vec::new());
+                let orig = RefCell::new(Vec::new());
+                let ord = Cell::new(0u64);
+                group.bench_function(format!("{label}_paired"), |bench| {
+                    bench.iter_custom(|iterations| {
+                        let mut ct = Duration::ZERO;
+                        let mut ot = Duration::ZERO;
+                        for _ in 0..iterations {
+                            let of = ord.get() & 1 == 1;
+                            ord.set(ord.get().wrapping_add(1));
+                            if of {
+                                let s = Instant::now();
+                                black_box(nfn.call((&input2d,), Some(kw)).expect("orig"));
+                                ot += s.elapsed();
+                                let s = Instant::now();
+                                black_box(ffn.call((&input2d,), Some(kw)).expect("cand"));
+                                ct += s.elapsed();
+                            } else {
+                                let s = Instant::now();
+                                black_box(ffn.call((&input2d,), Some(kw)).expect("cand"));
+                                ct += s.elapsed();
+                                let s = Instant::now();
+                                black_box(nfn.call((&input2d,), Some(kw)).expect("orig"));
+                                ot += s.elapsed();
+                            }
+                        }
+                        cand.borrow_mut()
+                            .push(ct.as_secs_f64() * 1e9 / iterations as f64);
+                        orig.borrow_mut()
+                            .push(ot.as_secs_f64() * 1e9 / iterations as f64);
+                        ct + ot
+                    });
+                });
+                report_ledger_pair(label, &cand, &orig);
+                let na = RefCell::new(Vec::new());
+                let nb = RefCell::new(Vec::new());
+                let nord = Cell::new(0u64);
+                group.bench_function(format!("{label}_null_control"), |bench| {
+                    bench.iter_custom(|iterations| {
+                        let mut at = Duration::ZERO;
+                        let mut bt = Duration::ZERO;
+                        for _ in 0..iterations {
+                            let bf = nord.get() & 1 == 1;
+                            nord.set(nord.get().wrapping_add(1));
+                            if bf {
+                                let s = Instant::now();
+                                black_box(ffn.call((&input2d,), Some(kw)).expect("nb"));
+                                bt += s.elapsed();
+                                let s = Instant::now();
+                                black_box(ffn.call((&input2d,), Some(kw)).expect("na"));
+                                at += s.elapsed();
+                            } else {
+                                let s = Instant::now();
+                                black_box(ffn.call((&input2d,), Some(kw)).expect("na"));
+                                at += s.elapsed();
+                                let s = Instant::now();
+                                black_box(ffn.call((&input2d,), Some(kw)).expect("nb"));
+                                bt += s.elapsed();
+                            }
+                        }
+                        na.borrow_mut()
+                            .push(at.as_secs_f64() * 1e9 / iterations as f64);
+                        nb.borrow_mut()
+                            .push(bt.as_secs_f64() * 1e9 / iterations as f64);
+                        at + bt
+                    });
+                });
+                report_ledger_pair(&format!("{label}_null_AA"), &na, &nb);
+            }
         }
 
         {

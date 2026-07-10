@@ -4,6 +4,43 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - WIN (SHIP): narrow-int LAST-AXIS sort 15.9x + stable argsort 1.43x - two same-worker replications, nulls 0.992-1.002; completes the narrow-int ordering family
+
+`cc_fnp`, last-axis siblings of the flat counting levers below. PROFILE BASIS: the same
+delegation gap - both last-axis dispatches gated ("i"|"u", 4|8); numpy's per-lane narrow-int
+path is the same serial code the flat lever measured at 325.9 ms @8M.
+
+ONE LEVER (dispatch-widening into existing typed per-lane machinery): 1-/2-byte arms in
+try_native_int_sort_lastaxis (per-lane parallel value sort - byte-exact any kind, a lane's
+sorted multiset is unique) and try_native_argsort_stable_lastaxis (per-lane (value,
+in-lane-index) stable perm == numpy kind='stable' exactly; in-lane ties dense by
+construction).
+
+MEASURED (ONE binary / ONE process / ONE rch invocation each, worker ovh-a BOTH runs,
+alternating AB/BA in one iter_custom routine, black_box, per-row A/A null controls; i16
+full-range 8M viewed 4000x2000):
+
+| row | run2 | run3 | nulls |
+|---|---|---|---|
+| narrow_int_i16_sort_lastaxis_4000x2000 | 12.030 vs 191.136 ms = **15.89x** (3.2%/0.3%) | 12.090 vs 191.623 ms = **15.85x** (6.2%/0.3%) | 0.9970 / 1.0001 |
+| narrow_int_i16_argsort_stable_lastaxis_4000x2000 | 18.562 vs 26.684 ms = **1.44x** (1.1%/1.1%) | 18.684 vs 26.541 ms = **1.42x** (2.3%/0.8%) | 0.9923 / 1.0017 |
+
+Median gate: both decidable (44% effect vs ~1% null on the argsort row; 15.9x vs ~0.3% null
+on the sort row, replicated to three significant figures). HONEST SCOPING: numpy's per-lane
+STABLE ARGSORT is far faster than its flat variant (26.7 ms vs 109 ms at the same element
+count - per-lane merges on 2000-element lanes are cache-resident), so the argsort multiple is
+structurally smaller; 1.43x with pinned nulls is still a keep.
+
+CORRECTNESS: conformance_sorting::narrow_int_lastaxis_sort_and_stable_argsort_match_numpy
+GREEN (remote hz1): i16 + u8, axis=-1 + explicit axis=1 + 3-D, tobytes for sort + exact index
+equality for argsort, plus the short-lane defer case. cargo check green. NARROW-INT ORDERING
+FAMILY COMPLETE: flat sort (66.3x) + flat stable argsort (3.9x/2.5x) + lastaxis sort (15.9x)
++ lastaxis stable argsort (1.43x); default-kind argsort stays correctly delegated (tie-dense
+=> numpy's unstable order unmatchable), bool needs its semantics check first (still OPEN).
+PROVENANCE: worker ovh-a x2 (bench), hz1 (conformance); binary sha256 unobtainable (rch
+retrieval exclusion, documented 420cf1a3); artifacts
+tests/artifacts/perf/2026-07-10_narrow_int_counting_sort_cc_fnp/lastaxis_bench_run*.txt.
+
 ## 2026-07-10 - WIN (SHIP): narrow-int STABLE ARGSORT via the existing counting-prefix machinery - 3.94x / 2.47x on two same-worker runs, nulls 0.9954 / 0.9964; four dispatch arms was the whole lever
 
 `cc_fnp`, sibling of the 66.3x narrow-int counting sort below. PROFILE BASIS: the same

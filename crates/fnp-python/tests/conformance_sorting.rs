@@ -777,3 +777,59 @@ fn narrow_int_stable_argsort_counting_matches_numpy() {
         Ok(())
     });
 }
+
+#[test]
+fn narrow_int_lastaxis_sort_and_stable_argsort_match_numpy() {
+    // >=2-D last-axis siblings of the narrow-int flat levers: per-lane value sort (tobytes)
+    // and per-lane stable argsort (exact indices; in-lane ties dense by construction).
+    // Covers i16 and u8 on 2-D axis=-1 and explicit axis=1, a 3-D case, and the short-lane
+    // defer (cols below the lane minimum must fall back numpy-identically).
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(290)\n\
+                 m16 = rng.integers(-32768, 32768, (2600, 500), dtype=np.int16)\n\
+                 mu8 = rng.integers(0, 256, (2600, 500), dtype=np.uint8)\n\
+                 m3 = rng.integers(-32768, 32768, (26, 100, 512), dtype=np.int16)\n\
+                 short_lanes = rng.integers(-32768, 32768, (26000, 50), dtype=np.int16)\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let array_equal = numpy.getattr("array_equal")?;
+        for (name, axis) in [
+            ("m16", -1_i64),
+            ("m16", 1_i64),
+            ("mu8", -1_i64),
+            ("m3", -1_i64),
+            ("short_lanes", -1_i64),
+        ] {
+            let arr = ns
+                .get_item(name)?
+                .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing arr"))?;
+            let kw = PyDict::new(py);
+            kw.set_item("axis", axis)?;
+            let ours = module.getattr("sort")?.call((&arr,), Some(&kw))?;
+            let theirs = numpy.getattr("sort")?.call((&arr,), Some(&kw))?;
+            let ours_bytes: Vec<u8> = ours.call_method0("tobytes")?.extract()?;
+            let theirs_bytes: Vec<u8> = theirs.call_method0("tobytes")?.extract()?;
+            assert_eq!(
+                ours_bytes, theirs_bytes,
+                "{name} axis={axis}: narrow-int lastaxis sort bytes diverged"
+            );
+            let akw = PyDict::new(py);
+            akw.set_item("axis", axis)?;
+            akw.set_item("kind", "stable")?;
+            let ours_a = module.getattr("argsort")?.call((&arr,), Some(&akw))?;
+            let theirs_a = numpy.getattr("argsort")?.call((&arr,), Some(&akw))?;
+            let equal: bool = array_equal.call1((&ours_a, &theirs_a))?.extract()?;
+            assert!(
+                equal,
+                "{name} axis={axis}: narrow-int lastaxis stable argsort diverged"
+            );
+        }
+        Ok(())
+    });
+}
