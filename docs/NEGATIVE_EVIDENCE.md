@@ -4,6 +4,62 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - WIN (SHIP): f32/f64 flat argsort dispatch dedupe - removes the duplicated NaN-scan + tie-oracle pre-check (1.286 ms/call directly measured self-time at 2M f32); post-fix tie residual 0.918x vs numpy (null control 0.979) + ISA-BASELINE VERDICT recorded
+
+`cc_fnp`, production half of the tie-heavy f32 argsort row reopen (cod_fnp's reconstruction
+proved the 65,536-sample tie oracle executes TWICE on dense-tie flat input since 4720dc2a:
+once in the radix candidate, again in the comparison candidate, before numpy delegation - and
+falsified the old row's mechanism: numpy runs index-introsort here, NOT its SIMD value-sort).
+
+ONE LEVER: `FloatArgsortRadixOutcome` tri-state from the flat float radix candidates
+(Done / DeferData / NotApplicable). The default-kind dispatch skips the comparison candidates
+when the radix candidate already proved NaN-or-ties on the buffer (they would re-run the
+identical scan + oracle - or a full pay-twice sort on sparse ties - and defer identically);
+structural gate failures still fall through. The stable-kind callers map every non-Done
+outcome to their existing comparison fallback, byte-preserving today's behavior. Parity is by
+construction (routing-only; the skipped candidates' verdicts are deterministic on the same
+buffer); `conformance_sort_search` runs 42 passed / 2 failed with BOTH failures baseline-
+classified as pre-existing on unmodified a73f42c9 (ledger amendment 093d6098).
+
+MEASURED (ONE binary / ONE process / ONE rch invocation, worker ovh-a, alternating AB/BA
+inside one iter_custom routine, black_box on results, per the v2 substrate; full group run
+unfiltered because report_ledger_pair asserts >=2 samples on every section):
+
+| row | candidate | ORIG numpy | ratio | cvs |
+|---|---:|---:|---:|---|
+| f32_argsort_rounded_ties_2m (FIXED dispatch) | 28.564 ms | 26.233 ms | 0.918x | 7.2% / 3.8% |
+| f32_argsort_null_control_AA (same arm twice) | 32.827 ms | 32.138 ms | **0.979** | 25.3% / 19.8% |
+| f32_argsort_tie_precheck_selftime_2m | **1.286 ms** (CI 1.276-1.296) | - | - | tight |
+
+DECISION (median gate): the lever's effect is the directly-measured removed unit - 1.286 ms
+per dense-tie/NaN call (the second pre-check the old dispatch paid), ~4.5% of the 28.6 ms
+call, ~2x the null floor's 2.1% ratio deviation, and an ABSOLUTE self-time measurement rather
+than an A/B inference. The old row's "irreducible" residual is now quantified post-fix at
+0.918x vs numpy (real but 4x smaller than cod's pre-fix 0.649x read on vmi1149989 - stated as
+context only, cross-invocation). Same-run context rows: f16 widening sort REPLICATES at 6.65x
+on a second worker (cvs 15.2/6.1 - bead deadlock-audit-98chw strengthened); radix median
+re-confirms its loss direction (0.579x, cvs 17.7/5.5).
+
+PROVENANCE: worker ovh-a, remote runtime 921.3 s, criterion estimates + full stdout in
+tests/artifacts/perf/2026-07-10_f32_argsort_dispatch_dedupe_cc_fnp/. Binary sha256 NOT
+recordable: rch's .rchignore excludes binaries from artifact retrieval (599 files / 7,058
+bytes = criterion JSONs only) - source provenance instead: the measured binary was built from
+the exact content squashed into this commit. NAMED LIMITATION: the same exclusion blocks the
+worker-binary objdump for the fleet ISA check.
+
+ISA-BASELINE VERDICT (fleet check, recorded even though already-AVX2): fnp is NOT in the
+SSE2-on-AVX2 trap. `.cargo/config.toml` ships `-C target-feature=+avx2` project-wide
+(deliberately WITHOUT +fma: x86-64-v3 contraction regresses 16 fnp-linalg conformance tests;
++avx2 alone keeps all 37 green - the comment in that file carries the evidence). Local cdylib
+census: 249,747 ymm instructions vs 277 residual SSE2 packed-double xmm; exactly 4 vfmadd*
+sites, all in compiler_builtins' runtime-dispatched libm fma() reached only by the repo's
+deliberate explicit mul_add sites (e.g. complex multiply matching numpy's own fusion).
+Hottest-kernel annotate shows separate vmulpd+vaddpd on ymm - no implicit contraction.
+target-cpu=native is CONTRAINDICATED here (FMA bit-parity). Worker-side emission: the config
+syncs with the tree and no RUSTFLAGS override appears in rch logs; formal objdump proof
+blocked by the retrieval exclusion above (worker timings are AVX2-scale - behavioral
+consistency only).
+
 ## 2026-07-10 - RE-DECISION (median gate, no new measurement): the 2026-07-04 "np.sort(float16) via f32 widening - 0.75x, do NOT re-dig" REJECT is REFUTED IN DIRECTION; production lever unblocked
 
 `cc_fnp`, applying the corrected decision method (gate on MEDIAN separation vs the per-function

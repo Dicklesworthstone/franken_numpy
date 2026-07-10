@@ -1,0 +1,557 @@
+  [2m2026-07-10T15:54:44.698387Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ovh-a at ubuntu@51.222.245.56 (0 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:867 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:45.012339Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for franken_numpy-ccfnp-covbal-20260710-035639 (hash: 369b16aaac66cde1)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:241 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:45.012412Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 11 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:263 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:46.864018Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker ovh-a...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:323 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:46.864127Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 1 pattern(s) from .rchignore (total: 40)[0m
+    [2;3mat[0m rch/src/transfer.rs:968 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:46.864136Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639 -> /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639 on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1610 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:47.633234Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 769ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1674 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:47.633385Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-conformance -> /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-conformance on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1610 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:48.212746Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 579ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1674 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:48.212877Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-dtype -> /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-dtype on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1610 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:48.786218Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 573ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1674 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:48.786375Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-io -> /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-io on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1610 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:49.374002Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 587ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1674 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:49.374165Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-iter -> /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-iter on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1610 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:49.941246Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 567ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1674 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:49.941374Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-linalg -> /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-linalg on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1610 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:50.531234Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 589ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1674 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:50.531519Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-ndarray -> /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-ndarray on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1610 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:51.091662Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 560ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1674 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:51.091819Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-python -> /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-python on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1610 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:51.665665Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 573ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1674 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:51.665797Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-random -> /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-random on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1610 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:52.235957Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 570ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1674 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:52.236111Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-runtime -> /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-runtime on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1610 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:52.813560Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 577ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1674 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:52.813718Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-ufunc -> /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-ufunc on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1610 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:53.404831Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 591ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1674 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:53.404880Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 4883 files, 171316 bytes in 6535ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:486 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:58.552342Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: cargo bench -p fnp-python --profile release-perf --bench criterion_python_surface -- python_ledger_integrity_rejects[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:529 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T15:54:58.552398Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/target -> /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/.rch-target-ovh-a-pool-de51a2be66e609d4bc6cb5c7065f1942[0m
+    [2;3mat[0m rch/src/transfer.rs:856 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded adler2 v2.0.1
+  Downloaded anstyle v1.0.14
+  Downloaded ciborium-ll v0.2.2
+  Downloaded ciborium-io v0.2.2
+  Downloaded bytemuck v1.25.0
+  Downloaded plotters-backend v0.3.7
+  Downloaded heck v0.5.0
+  Downloaded pyo3-macros v0.28.3
+  Downloaded same-file v1.0.6
+  Downloaded cast v0.3.0
+  Downloaded autocfg v1.5.0
+  Downloaded walkdir v2.5.0
+  Downloaded zmij v1.0.21
+  Downloaded tinytemplate v1.2.1
+  Downloaded once_cell v1.21.4
+  Downloaded pyo3-build-config v0.28.3
+  Downloaded ciborium v0.2.2
+  Downloaded target-lexicon v0.13.5
+  Downloaded unicode-ident v1.0.24
+  Downloaded serde_core v1.0.228
+  Downloaded serde_derive v1.0.228
+  Downloaded rayon-core v1.13.0
+  Downloaded memchr v2.8.0
+  Downloaded zerocopy-derive v0.8.48
+  Downloaded itertools v0.10.5
+  Downloaded flate2 v1.1.9
+  Downloaded criterion v0.6.0
+  Downloaded plotters v0.3.7
+  Downloaded serde_json v1.0.149
+  Downloaded rayon v1.12.0
+  Downloaded regex v1.12.3
+  Downloaded itertools v0.13.0
+  Downloaded clap_builder v4.6.0
+  Downloaded aho-corasick v1.1.4
+  Downloaded serde v1.0.228
+  Downloaded zerocopy v0.8.48
+  Downloaded syn v2.0.117
+  Downloaded pyo3-macros-backend v0.28.3
+  Downloaded pyo3-ffi v0.28.3
+  Downloaded regex-syntax v0.8.10
+  Downloaded miniz_oxide v0.8.9
+  Downloaded proc-macro2 v1.0.106
+  Downloaded crc32fast v1.5.0
+  Downloaded num-traits v0.2.19
+  Downloaded clap v4.6.1
+  Downloaded half v2.7.1
+  Downloaded getrandom v0.3.4
+  Downloaded crossbeam-utils v0.8.21
+  Downloaded crossbeam-epoch v0.9.18
+  Downloaded simd-adler32 v0.3.9
+  Downloaded quote v1.0.45
+  Downloaded regex-automata v0.4.14
+  Downloaded oorandom v11.1.5
+  Downloaded either v1.15.0
+  Downloaded crossbeam-deque v0.8.6
+  Downloaded criterion-plot v0.5.0
+  Downloaded plotters-svg v0.3.7
+  Downloaded itoa v1.0.18
+  Downloaded clap_lex v1.1.0
+  Downloaded cfg-if v1.0.4
+  Downloaded anes v0.1.6
+  Downloaded libc v0.2.185
+  Downloaded pyo3 v0.28.3
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling target-lexicon v0.13.5
+   Compiling cfg-if v1.0.4
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde_core v1.0.228
+   Compiling either v1.15.0
+   Compiling zerocopy v0.8.48
+   Compiling serde v1.0.228
+   Compiling zmij v1.0.21
+   Compiling rayon-core v1.13.0
+   Compiling serde_json v1.0.149
+   Compiling libc v0.2.185
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.0
+   Compiling crc32fast v1.5.0
+   Compiling autocfg v1.5.0
+   Compiling getrandom v0.3.4
+   Compiling simd-adler32 v0.3.9
+   Compiling heck v0.5.0
+   Compiling adler2 v2.0.1
+   Compiling regex-syntax v0.8.10
+   Compiling clap_lex v1.1.0
+   Compiling ciborium-io v0.2.2
+   Compiling anstyle v1.0.14
+   Compiling plotters-backend v0.3.7
+   Compiling miniz_oxide v0.8.9
+   Compiling num-traits v0.2.19
+   Compiling itertools v0.10.5
+   Compiling clap_builder v4.6.0
+   Compiling cast v0.3.0
+   Compiling same-file v1.0.6
+   Compiling plotters-svg v0.3.7
+   Compiling bytemuck v1.25.0
+   Compiling once_cell v1.21.4
+   Compiling walkdir v2.5.0
+   Compiling pyo3-build-config v0.28.3
+   Compiling itertools v0.13.0
+   Compiling crossbeam-epoch v0.9.18
+   Compiling flate2 v1.1.9
+   Compiling oorandom v11.1.5
+   Compiling syn v2.0.117
+   Compiling anes v0.1.6
+   Compiling crossbeam-deque v0.8.6
+   Compiling fnp-io v0.1.0 (/data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-io)
+   Compiling plotters v0.3.7
+   Compiling regex-automata v0.4.14
+   Compiling rayon v1.12.0
+   Compiling criterion-plot v0.5.0
+   Compiling pyo3-macros-backend v0.28.3
+   Compiling pyo3-ffi v0.28.3
+   Compiling pyo3 v0.28.3
+   Compiling clap v4.6.1
+   Compiling regex v1.12.3
+   Compiling zerocopy-derive v0.8.48
+   Compiling serde_derive v1.0.228
+   Compiling fnp-linalg v0.1.0 (/data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-linalg)
+   Compiling fnp-random v0.1.0 (/data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-random)
+   Compiling tinytemplate v1.2.1
+   Compiling fnp-iter v0.1.0 (/data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-iter)
+   Compiling pyo3-macros v0.28.3
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling fnp-dtype v0.1.0 (/data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-dtype)
+   Compiling ciborium v0.2.2
+   Compiling fnp-ufunc v0.1.0 (/data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-ufunc)
+   Compiling criterion v0.6.0
+warning: method `nan_filtered` is never used
+     --> crates/fnp-ufunc/src/lib.rs:25364:8
+      |
+ 4913 | impl UFuncArray {
+      | --------------- method in this implementation
+...
+25364 |     fn nan_filtered(&self) -> Self {
+      |        ^^^^^^^^^^^^
+      |
+      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `fnp-ufunc` (lib) generated 1 warning
+   Compiling fnp-python v0.1.0 (/data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/crates/fnp-python)
+warning: unnecessary parentheses around closure body
+     --> crates/fnp-python/src/lib.rs:60999:29
+      |
+60999 |         .reduce_with(|a, b| (a.min(b)))
+      |                             ^        ^
+      |
+      = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+      |
+60999 -         .reduce_with(|a, b| (a.min(b)))
+60999 +         .reduce_with(|a, b| a.min(b))
+      |
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast`: use `Bound::cast` instead
+     --> crates/fnp-python/src/lib.rs:77406:34
+      |
+77406 |             let tup = t.bind(py).downcast::<PyTuple>()?;
+      |                                  ^^^^^^^^
+      |
+      = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast`: use `Bound::cast` instead
+     --> crates/fnp-python/src/lib.rs:78128:38
+      |
+78128 |             let tup = f_out.bind(py).downcast::<PyTuple>()?;
+      |                                      ^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast`: use `Bound::cast` instead
+     --> crates/fnp-python/src/lib.rs:78175:38
+      |
+78175 |                 let tup = t.bind(py).downcast::<PyTuple>()?;
+      |                                      ^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast`: use `Bound::cast` instead
+     --> crates/fnp-python/src/lib.rs:78240:38
+      |
+78240 |                 let tup = t.bind(py).downcast::<PyTuple>()?;
+      |                                      ^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast`: use `Bound::cast` instead
+     --> crates/fnp-python/src/lib.rs:78288:38
+      |
+78288 |                 let tup = t.bind(py).downcast::<PyTuple>()?;
+      |                                      ^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast`: use `Bound::cast` instead
+     --> crates/fnp-python/src/lib.rs:86350:33
+      |
+86350 |             let Ok(tup) = res_b.downcast::<PyTuple>() else {
+      |                                 ^^^^^^^^
+
+warning: unused variable: `py`
+     --> crates/fnp-python/src/lib.rs:43211:29
+      |
+43211 | fn struct_all_floats_finite(py: Python<'_>, numpy: &Bound<'_, PyModule>, arr: &Bound<'_, PyAny>) -> PyResult<bool> {
+      |                             ^^ help: if this is intentional, prefix it with an underscore: `_py`
+      |
+      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `py`
+     --> crates/fnp-python/src/lib.rs:60222:5
+      |
+60222 |     py: Python<'py>,
+      |     ^^ help: if this is intentional, prefix it with an underscore: `_py`
+
+warning: unused variable: `py`
+     --> crates/fnp-python/src/lib.rs:60542:5
+      |
+60542 |     py: Python<'py>,
+      |     ^^ help: if this is intentional, prefix it with an underscore: `_py`
+
+warning: unused variable: `kind`
+     --> crates/fnp-python/src/lib.rs:68105:9
+      |
+68105 |     let kind = arr_dtype.getattr("kind")?.extract::<String>()?;
+      |         ^^^^ help: if this is intentional, prefix it with an underscore: `_kind`
+
+warning: variable does not need to be mutable
+     --> crates/fnp-python/src/lib.rs:82458:9
+      |
+82458 |     let mut push = |b: u8, out: &mut [E], pos: &mut usize| {
+      |         ----^^^^
+      |         |
+      |         help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variants `Depth` and `Column` are never constructed
+    --> crates/fnp-python/src/lib.rs:2895:5
+     |
+2892 | enum StackHelperKind {
+     |      --------------- variants in this enum
+...
+2895 |     Depth,
+     |     ^^^^^
+2896 |     Column,
+     |     ^^^^^^
+     |
+     = note: `StackHelperKind` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `extract_mask_operand` is never used
+    --> crates/fnp-python/src/lib.rs:5527:4
+     |
+5527 | fn extract_mask_operand(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `count_valid_elements` is never used
+    --> crates/fnp-python/src/lib.rs:5549:4
+     |
+5549 | fn count_valid_elements(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: `fnp-python` (lib) generated 15 warnings (run `cargo fix --lib -p fnp-python` to apply 6 suggestions)
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:8375:67
+     |
+8375 |         let ft = fnp_u.call((&a,), Some(&kwf)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                   ^^^^^^^^^^^^^
+     |
+     = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:8376:71
+     |
+8376 |         let nt = numpy_u.call((&a,), Some(&kwf)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                       ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:8426:67
+     |
+8426 |         let ft = fnp_u.call((&a,), Some(&kwf)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                   ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:8427:71
+     |
+8427 |         let nt = numpy_u.call((&a,), Some(&kwf)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                       ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:8474:70
+     |
+8474 |         let ft = fnp_u.call((&a,), Some(&kwfull)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                      ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:8475:74
+     |
+8475 |         let nt = numpy_u.call((&a,), Some(&kwfull)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                          ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:8526:67
+     |
+8526 |         let ft = fnp_u.call((&a,), Some(&kwf)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                   ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:8527:71
+     |
+8527 |         let nt = numpy_u.call((&a,), Some(&kwf)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                       ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:9253:55
+     |
+9253 |             let f = fnp_fn.call1((&s,)).expect("fnp").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                       ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:9254:56
+     |
+9254 |             let n = np_fn.call1((&s,)).expect("numpy").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                        ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:9907:77
+     |
+9907 |         let ft = fnp_u.call((&a,), Some(&kwfull)).expect("fnp unique full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                             ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:9908:81
+     |
+9908 |         let nt = numpy_u.call((&a,), Some(&kwfull)).expect("numpy unique full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                                 ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+     --> crates/fnp-python/benches/criterion_python_surface.rs:10041:70
+      |
+10041 |         let ft = fnp_u.call((&a,), Some(&kwfull)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+      |                                                                      ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+     --> crates/fnp-python/benches/criterion_python_surface.rs:10042:74
+      |
+10042 |         let nt = numpy_u.call((&a,), Some(&kwfull)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+      |                                                                          ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+     --> crates/fnp-python/benches/criterion_python_surface.rs:10095:70
+      |
+10095 |         let ft = fnp_u.call((&a,), Some(&kwfull)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+      |                                                                      ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+     --> crates/fnp-python/benches/criterion_python_surface.rs:10096:74
+      |
+10096 |         let nt = numpy_u.call((&a,), Some(&kwfull)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+      |                                                                          ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+     --> crates/fnp-python/benches/criterion_python_surface.rs:10193:67
+      |
+10193 |         let ft = fnp_u.call((&a,), Some(&kwf)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+      |                                                                   ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+     --> crates/fnp-python/benches/criterion_python_surface.rs:10194:71
+      |
+10194 |         let nt = numpy_u.call((&a,), Some(&kwf)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+      |                                                                       ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+     --> crates/fnp-python/benches/criterion_python_surface.rs:10239:70
+      |
+10239 |         let ft = fnp_u.call((&a,), Some(&kwfull)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+      |                                                                      ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+     --> crates/fnp-python/benches/criterion_python_surface.rs:10240:74
+      |
+10240 |         let nt = numpy_u.call((&a,), Some(&kwfull)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+      |                                                                          ^^^^^^^^^^^^^
+
+warning: unused variable: `numpy`
+   --> crates/fnp-python/benches/criterion_python_surface.rs:202:13
+    |
+202 |         let numpy = py.import("numpy").expect("numpy oracle");
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_numpy`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `fnp-python` (bench "criterion_python_surface") generated 21 warnings (run `cargo fix --bench "criterion_python_surface" -p fnp-python` to apply 1 suggestion)
+    Finished `release-perf` profile [optimized + debuginfo] target(s) in 10m 01s
+     Running benches/criterion_python_surface.rs (.rch-target-ovh-a-pool-de51a2be66e609d4bc6cb5c7065f1942/release-perf/deps/criterion_python_surface-492facd9daa49863)
+Gnuplot not found, using plotters backend
+Benchmarking python_ledger_integrity_rejects/radix_median_f64_normal_16m_paired
+Benchmarking python_ledger_integrity_rejects/radix_median_f64_normal_16m_paired: Warming up for 2.0000 s
+Benchmarking python_ledger_integrity_rejects/radix_median_f64_normal_16m_paired: Collecting 10 samples in estimated 8.0968 s (20 iterations)
+Benchmarking python_ledger_integrity_rejects/radix_median_f64_normal_16m_paired: Analyzing
+python_ledger_integrity_rejects/radix_median_f64_normal_16m_paired
+                        time:   [417.92 ms 444.08 ms 476.94 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+LEDGER_AUDIT row=radix_median_f64_normal_16m samples=10 candidate_mean_ms=281.226545 candidate_cv_pct=17.706 orig_mean_ms=162.854439 orig_cv_pct=5.547 orig_over_candidate=0.5791
+Benchmarking python_ledger_integrity_rejects/f16_sort_via_f32_widening_4m_paired
+Benchmarking python_ledger_integrity_rejects/f16_sort_via_f32_widening_4m_paired: Warming up for 2.0000 s
+
+Warning: Unable to complete 10 samples in 6.0s. You may wish to increase target time to 10.4s or enable flat sampling.
+Benchmarking python_ledger_integrity_rejects/f16_sort_via_f32_widening_4m_paired: Collecting 10 samples in estimated 10.384 s (55 iterations)
+Benchmarking python_ledger_integrity_rejects/f16_sort_via_f32_widening_4m_paired: Analyzing
+python_ledger_integrity_rejects/f16_sort_via_f32_widening_4m_paired
+                        time:   [198.81 ms 209.59 ms 214.55 ms]
+LEDGER_AUDIT row=f16_sort_via_f32_widening_4m samples=10 candidate_mean_ms=26.025900 candidate_cv_pct=15.171 orig_mean_ms=172.970339 orig_cv_pct=6.068 orig_over_candidate=6.6461
+Benchmarking python_ledger_integrity_rejects/f32_argsort_rounded_ties_2m_paired
+Benchmarking python_ledger_integrity_rejects/f32_argsort_rounded_ties_2m_paired: Warming up for 2.0000 s
+Benchmarking python_ledger_integrity_rejects/f32_argsort_rounded_ties_2m_paired: Collecting 10 samples in estimated 6.0349 s (110 iterations)
+Benchmarking python_ledger_integrity_rejects/f32_argsort_rounded_ties_2m_paired: Analyzing
+python_ledger_integrity_rejects/f32_argsort_rounded_ties_2m_paired
+                        time:   [52.336 ms 53.206 ms 54.814 ms]
+LEDGER_AUDIT row=f32_argsort_rounded_ties_2m samples=10 candidate_mean_ms=28.564110 candidate_cv_pct=7.180 orig_mean_ms=26.232643 orig_cv_pct=3.783 orig_over_candidate=0.9184
+Benchmarking python_ledger_integrity_rejects/f32_argsort_rounded_ties_2m_null_control
+Benchmarking python_ledger_integrity_rejects/f32_argsort_rounded_ties_2m_null_control: Warming up for 2.0000 s
+Benchmarking python_ledger_integrity_rejects/f32_argsort_rounded_ties_2m_null_control: Collecting 10 samples in estimated 6.1485 s (110 iterations)
+Benchmarking python_ledger_integrity_rejects/f32_argsort_rounded_ties_2m_null_control: Analyzing
+python_ledger_integrity_rejects/f32_argsort_rounded_ties_2m_null_control
+                        time:   [55.516 ms 57.234 ms 60.124 ms]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high mild
+LEDGER_AUDIT row=f32_argsort_null_control_AA samples=10 candidate_mean_ms=32.827374 candidate_cv_pct=25.253 orig_mean_ms=32.138097 orig_cv_pct=19.788 orig_over_candidate=0.9790
+Benchmarking python_ledger_integrity_rejects/f32_argsort_tie_precheck_selftime_2m
+Benchmarking python_ledger_integrity_rejects/f32_argsort_tie_precheck_selftime_2m: Warming up for 2.0000 s
+Benchmarking python_ledger_integrity_rejects/f32_argsort_tie_precheck_selftime_2m: Collecting 10 samples in estimated 6.0383 s (4675 iterations)
+Benchmarking python_ledger_integrity_rejects/f32_argsort_tie_precheck_selftime_2m: Analyzing
+python_ledger_integrity_rejects/f32_argsort_tie_precheck_selftime_2m
+                        time:   [1.2759 ms 1.2859 ms 1.2957 ms]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low mild
+  1 (10.00%) high mild
+
+  [2m2026-07-10T16:10:04.649732Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 906097ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:653 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T16:10:04.650115Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:702 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T16:10:04.650135Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639 on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:2328 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T16:10:04.650177Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 1 retrieval exclude pattern(s) from .rchignore (total: 6)[0m
+    [2;3mat[0m rch/src/transfer.rs:1078 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T16:10:05.367449Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 717ms (1 files, 1313 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2383 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T16:10:05.367483Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mArtifacts retrieved: 1 files, 1313 bytes in 717ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:735 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T16:10:05.367591Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/.rch-target-ovh-a-pool-de51a2be66e609d4bc6cb5c7065f1942 on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:2328 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T16:10:06.012914Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 645ms (599 files, 7058 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2383 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-10T16:10:06.012952Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 599 files, 7058 bytes in 645ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:859 [2;3mon[0m ThreadId(1)
+
+[RCH] remote ovh-a (921.3s)
+RCH-DONE exit=0

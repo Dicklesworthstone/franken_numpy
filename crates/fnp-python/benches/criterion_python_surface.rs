@@ -13414,6 +13414,90 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
                 &candidate_samples,
                 &orig_samples,
             );
+
+            // NULL CONTROL (A/A): the candidate arm registered twice in the same interleaved
+            // routine. Its ratio and cv are the harness noise floor - any lever effect below
+            // this floor is undecidable on this harness (franken_whisper null-control rule).
+            let null_a = RefCell::new(Vec::new());
+            let null_b = RefCell::new(Vec::new());
+            let null_order = Cell::new(0u64);
+            group.bench_function("f32_argsort_rounded_ties_2m_null_control", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut a_total = Duration::ZERO;
+                    let mut b_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let b_first = null_order.get() & 1 == 1;
+                        null_order.set(null_order.get().wrapping_add(1));
+                        if b_first {
+                            let start = Instant::now();
+                            black_box(
+                                ledger_f32_tie_argsort_candidate(&fnp_argsort, &input)
+                                    .expect("null-control arm b"),
+                            );
+                            b_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                ledger_f32_tie_argsort_candidate(&fnp_argsort, &input)
+                                    .expect("null-control arm a"),
+                            );
+                            a_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(
+                                ledger_f32_tie_argsort_candidate(&fnp_argsort, &input)
+                                    .expect("null-control arm a"),
+                            );
+                            a_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                ledger_f32_tie_argsort_candidate(&fnp_argsort, &input)
+                                    .expect("null-control arm b"),
+                            );
+                            b_total += start.elapsed();
+                        }
+                    }
+                    null_a
+                        .borrow_mut()
+                        .push(a_total.as_secs_f64() * 1e9 / iterations as f64);
+                    null_b
+                        .borrow_mut()
+                        .push(b_total.as_secs_f64() * 1e9 / iterations as f64);
+                    a_total + b_total
+                });
+            });
+            report_ledger_pair("f32_argsort_null_control_AA", &null_a, &null_b);
+
+            // Self-time of the pre-check unit the dispatch dedupe removes: ONE full parallel
+            // NaN scan + ONE 65,536-sample strided tie oracle over the same 2M f32 buffer
+            // (bench-local reconstruction of the dispatch's NaN scan + argsort_sample_has_tie;
+            // before the fix, dense-tie input paid this unit TWICE - radix candidate then
+            // comparison candidate - before delegation).
+            let raw: Vec<u8> = input
+                .call_method0("tobytes")
+                .expect("f32 tie bytes")
+                .extract()
+                .expect("extract f32 tie bytes");
+            let data: Vec<f32> = raw
+                .chunks_exact(4)
+                .map(|chunk| f32::from_ne_bytes(chunk.try_into().expect("one native f32")))
+                .collect();
+            group.bench_function("f32_argsort_tie_precheck_selftime_2m", |bench| {
+                bench.iter(|| {
+                    use rayon::prelude::*;
+                    let d = black_box(&data);
+                    let nan = d.par_iter().any(|v| v.is_nan());
+                    const TIE_SAMPLE: usize = 1 << 16;
+                    let n = d.len();
+                    let k = n.min(TIE_SAMPLE);
+                    let stride = (n / k).max(1);
+                    let mut sample: Vec<f32> = (0..k).map(|i| d[i * stride]).collect();
+                    sample.sort_unstable_by(|a, b| {
+                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    let tie = (1..sample.len()).any(|i| sample[i] == sample[i - 1]);
+                    black_box((nan, tie))
+                });
+            });
         }
     });
 
