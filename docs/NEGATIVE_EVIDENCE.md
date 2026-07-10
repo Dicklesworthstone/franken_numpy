@@ -4,6 +4,59 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - WIN (SHIP): packed complex GEMM uses one row band per Rayon worker - bit-identical, 0.5-2.3% lower same-binary median self-time
+
+`GoldSummit`. PROFILE-FIRST TARGET: a remote Criterion sweep of the direct linalg
+surfaces ranked `complex_matmul/512` at 16.792 ms, ahead of `multi_dot/512` at
+5.687 ms; `matrix_power_nxn/512` was slower overall (20.581 ms) but is a composite
+of repeated real GEMMs. The direct packed complex GEMM was therefore the selected
+primitive. The already-rejected shared-B-pack, A-panel-pack, packed-tile-width, and
+FMA families were not retried.
+
+ONE LEVER: change the packed parallel driver's row-band target from two bands per
+Rayon worker to one. Every band repacks all B panels, while the square packed lane
+has uniform row work; fewer bands remove duplicate panel packing without changing
+the microkernel, loop nesting, K accumulation order, or output layout.
+
+DECISIVE MEDIAN SELF-TIME GATE (one release binary and process per worker, local
+four-thread Rayon pool, 512x512 deterministic complex inputs, 11 alternating AB/BA
+observations per arm, output consumed by `black_box`):
+
+| remote worker | old: two bands/worker | new: one band/worker | new / old |
+|---|---:|---:|---:|
+| hz1 | 11.737 ms | 11.470 ms | **0.9772x** |
+| vmi1264463 | 25.341 ms | 25.210 ms | **0.9948x** |
+
+Both independent workers pass the median self-time gate. Supporting pinned
+four-thread Criterion on vmi1264463 measured `complex_matmul/512` at 25.788 ms
+before and 23.076 / 23.036 ms in two candidate reads (0.895 / 0.893x). The
+cross-invocation effect is larger than the same-binary AB/BA result and is supporting
+evidence only. Unpinned default-thread reads ranged from 16.792 to 28.583 ms for the
+unchanged baseline and were discarded as shared-worker/load noise.
+
+BIT-IDENTICAL PROOF: each same-binary timing gate compares every output element via
+`f64::to_bits()` before timing. Remote release tests also pass the existing complex
+identity test plus the row-parallel and packed-path serial-reference SHA locks (3/3).
+The lever changes only ownership of complete row bands, so each output element keeps
+the exact prior arithmetic and accumulation order.
+
+VALIDATION: remote `cargo check -p fnp-linalg --all-targets` and remote
+`cargo clippy -p fnp-linalg --all-targets -- -D warnings` passed on hz1. Earlier
+clippy attempts surfaced remote-only infrastructure failures (ovh-b `zerocopy`
+build-script SIGILL; vmi1264463 missing the pinned clippy component) and never fell
+back locally. The workspace check reached an unrelated pre-existing `fnp-python`
+test mismatch (three E0308 errors); no `fnp-python`, ufunc, reduction, or sort file
+was modified. RCH correctly refused non-compilation `cargo fmt --check`; no local
+fallback was used. A static-only changed-file UBS run (Rust build categories disabled
+to preserve remote-only compilation) exited nonzero on the existing 18k-line file's
+whole-file heuristic inventory, including test panic macros and false-positive
+"secret comparisons" on row/column dimensions; it did not identify a new production
+issue in this lever. `git diff --check` passed.
+
+DECISION: SHIP. The exact-binary median is lower on both workers, the pinned
+Criterion confirmation agrees, and the output proof is bit-exact. Impact 3 x
+confidence 4 / effort 1 = 12.
+
 ## 2026-07-10 - WIN (SHIP): np.sort(float16) via exact f32 widening - 7.72x vs numpy, null control 1.0005, closes bead deadlock-audit-98chw + UPSTREAM FINDING: numpy 2.3.5 direct f16 sort emits MIS-SORTED output on AVX-512 workers
 
 `cc_fnp`. The production lever unblocked by today's median-gate re-decision (f98ac675): the

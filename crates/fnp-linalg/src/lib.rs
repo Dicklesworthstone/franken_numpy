@@ -9447,6 +9447,28 @@ fn complex_matmul_band(a: &[f64], b: &[f64], k: usize, n: usize, row_start: usiz
     }
 }
 
+fn complex_matmul_packed_parallel(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    bands_per_thread: usize,
+    c: &mut [f64],
+) {
+    let threads = rayon::current_num_threads();
+    let band_rows = (m
+        .div_ceil(threads * bands_per_thread.max(1))
+        .div_ceil(MATMUL_ROW_BLOCK)
+        .max(2))
+        * MATMUL_ROW_BLOCK;
+    c.par_chunks_mut(band_rows * 2 * n)
+        .enumerate()
+        .for_each(|(block, c_block)| {
+            complex_matmul_band(a, b, k, n, block * band_rows, c_block);
+        });
+}
+
 pub fn complex_matmul(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
     let mut c = vec![0.0; 2 * m * n];
     if c.is_empty() {
@@ -9464,14 +9486,10 @@ pub fn complex_matmul(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec
         && flops >= COMPLEX_MATMUL_PARALLEL_MIN_FLOPS
         && m >= 8
     {
-        let threads = rayon::current_num_threads();
-        let band_rows =
-            (m.div_ceil(threads * 2).div_ceil(MATMUL_ROW_BLOCK).max(2)) * MATMUL_ROW_BLOCK;
-        c.par_chunks_mut(band_rows * 2 * n)
-            .enumerate()
-            .for_each(|(block, c_block)| {
-                complex_matmul_band(a, b, k, n, block * band_rows, c_block);
-            });
+        // Each band repacks every B panel. The square packed lane has uniform
+        // row work, so one band per worker avoids duplicate packing without
+        // sacrificing useful parallelism.
+        complex_matmul_packed_parallel(a, b, m, k, n, 1, &mut c);
     } else if use_packed {
         complex_matmul_band(a, b, k, n, 0, &mut c);
     } else if rayon::current_num_threads() >= 2
@@ -10191,6 +10209,84 @@ mod tests {
         assert_eq!(
             digest, "71af9c98bd94b4c56cf5375e77c1d081316283aa448cfd47f615ec8f5c13d3f8",
             "complex_matmul packed-path golden digest drifted: {digest}"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf timing; run with --profile release -- --ignored --nocapture"]
+    fn complex_matmul_single_band_per_thread_median_self_time() {
+        use std::time::Instant;
+
+        let n = 512usize;
+        let mut state: u64 = 0xBADC_0FFE_EE11_2233;
+        let mut fill = |len: usize| -> Vec<f64> {
+            (0..len)
+                .map(|_| {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+                })
+                .collect()
+        };
+        let a = fill(2 * n * n);
+        let b = fill(2 * n * n);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("build local rayon pool");
+
+        let measure = |bands_per_thread| {
+            let start = Instant::now();
+            let out = pool.install(|| {
+                let mut out = vec![0.0; 2 * n * n];
+                super::complex_matmul_packed_parallel(
+                    &a,
+                    &b,
+                    n,
+                    n,
+                    n,
+                    bands_per_thread,
+                    &mut out,
+                );
+                out
+            });
+            std::hint::black_box(&out);
+            (start.elapsed().as_nanos(), out)
+        };
+
+        let (_, baseline_out) = measure(2);
+        let (_, candidate_out) = measure(1);
+        for (baseline, candidate) in baseline_out.iter().zip(&candidate_out) {
+            assert_eq!(
+                baseline.to_bits(),
+                candidate.to_bits(),
+                "packed complex band policy changed output bits"
+            );
+        }
+
+        let mut baseline_ns = Vec::with_capacity(11);
+        let mut candidate_ns = Vec::with_capacity(11);
+        for round in 0..11 {
+            if round % 2 == 0 {
+                baseline_ns.push(measure(2).0);
+                candidate_ns.push(measure(1).0);
+            } else {
+                candidate_ns.push(measure(1).0);
+                baseline_ns.push(measure(2).0);
+            }
+        }
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median = baseline_ns[baseline_ns.len() / 2];
+        let candidate_median = candidate_ns[candidate_ns.len() / 2];
+        println!(
+            "complex_matmul/512 four-thread median self-time: two_bands={:.3} ms one_band={:.3} ms ratio={:.4}",
+            baseline_median as f64 / 1e6,
+            candidate_median as f64 / 1e6,
+            candidate_median as f64 / baseline_median as f64,
+        );
+        assert!(
+            candidate_median < baseline_median,
+            "one packed complex band per thread failed the median self-time gate"
         );
     }
 
