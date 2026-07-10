@@ -4,6 +4,45 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - ADDENDUM (ISA scoping, from existing ledgered measurements): which fnp surfaces are vector-width-bound vs memory-bound - the honest-scoping companion to the AVX2 verdict below
+
+`cc_fnp`, completing the fleet ISA check per the frankenpandas pattern (scope where wider
+vectors CAN pay before attributing any gap to ISA). fnp already ships +avx2 (verdict in the
+WIN entry below: 249,747 ymm ops, no implicit FMA, target-cpu=native contraindicated by the
+16-test conformance regression). A before/after SSE2-vs-AVX2 measurement is NOT applicable -
+there is no SSE2 'before' arm in this repo and building one would measure a regression we
+could never ship. What matters is the scoping, and the ledger already contains the
+measurements:
+
+MEMORY-BOUND - wider vectors CANNOT move these (already at bandwidth; every row measured):
+- Elementwise binary f64 add/sub/mul/div at large n: the 2026-06 "elementwise surface
+  memory-bound" entry; cross-engine baseline shows 0.89-0.91x vs numpy = both at DRAM
+  bandwidth. AVX2->AVX-512 would change nothing.
+- Large-copy family (pad/roll/tile/repeat/delete/insert, np.full, meshgrid): the page-fault
+  vein entries (~2 GB/s wall) - allocation/paging-bound, not ALU-bound.
+- Single-pass reductions at large n (sum/mean/nansum): one load per element, AI ~0.125 -
+  bandwidth-bound; the shipped wins there came from parallelism + gate tuning, not width.
+- Sort/searchsorted/unique record chases: cache-miss-bound (the sort-to-sequentialize vein);
+  the shipped wins came from packing/layout, not vector width.
+- String/memcmp surface: byte-compare and gather bound.
+
+VECTOR-WIDTH/COMPUTE-BOUND - width (and the forbidden FMA) DOES bind these:
+- Gram/GEMM-shaped kernels (cov/corrcoef, matmul, LU/cholesky panels): the cov Gram dot8 at
+  AI=0.125 flop/B is measured "balanced against Zen3's 64 B/cycle L1" WITH +avx2 and no FMA -
+  i.e. AT its no-FMA ISA cap; post-checkfree annotate shows cycles on vmulpd/vaddpd ymm. The
+  remaining gap class here is the deliberate no-FMA/no-BLAS parity policy (capstone f6a33cc7),
+  not vector width.
+- Transcendentals (exp/log/sin/pow families): numpy uses SIMD libm-class kernels; fnp calls
+  scalar libm per element - compute-bound, and the shipped wins (complex exp 7.1x) came from
+  PARALLELISM over numpy's single thread. A safe vectorized-poly libm (std::simd, no unsafe)
+  is the real ISA-adjacent lever on this sub-surface - OPEN, distinct from build flags.
+- FFT butterflies / polynomial evaluation: compute-bound, width-sensitive, already ymm.
+
+CONSEQUENCE: no fnp gap is attributable to a missing build flag. The compute-bound residuals
+are capped by policy (no FMA / no BLAS), and the memory-bound majority is at bandwidth where
+ISA is irrelevant. The one open ISA-adjacent lever this scoping surfaces is std::simd
+polynomial transcendentals (safe, portable, parity to be proven per-op against the oracle).
+
 ## 2026-07-10 - WIN (SHIP): f32/f64 flat argsort dispatch dedupe - removes the duplicated NaN-scan + tie-oracle pre-check (1.286 ms/call directly measured self-time at 2M f32); post-fix tie residual 0.918x vs numpy (null control 0.979) + ISA-BASELINE VERDICT recorded
 
 `cc_fnp`, production half of the tie-heavy f32 argsort row reopen (cod_fnp's reconstruction
