@@ -43,6 +43,15 @@ are capped by policy (no FMA / no BLAS), and the memory-bound majority is at ban
 ISA is irrelevant. The one open ISA-adjacent lever this scoping surfaces is std::simd
 polynomial transcendentals (safe, portable, parity to be proven per-op against the oracle).
 
+WORKER-SIDE RUNTIME PROOF (closes the last residual - the env-override risk): new permanent
+diagnostic test `fnp-runtime/tests/worker_isa_probe.rs`, run remotely on worker vmi1152480:
+`compiled_target_features: sse2=true sse4.2=true avx=true avx2=true fma=false avx512f=false`
+(the project rustflags ARE applied on workers) vs
+`runtime_cpu_features: ... avx2=true fma=true avx512f=false` (AVX2 fleet hardware, FMA
+present but deliberately unused, no AVX-512). The test asserts avx2-baked-in AND
+fma-not-baked-in, so any future build environment that drops the project flags or adds FMA
+fails CI loudly instead of silently shipping half-width or parity-breaking kernels.
+
 ## 2026-07-10 - WIN (SHIP): f32/f64 flat argsort dispatch dedupe - removes the duplicated NaN-scan + tie-oracle pre-check (1.286 ms/call directly measured self-time at 2M f32); post-fix tie residual 0.918x vs numpy (null control 0.979) + ISA-BASELINE VERDICT recorded
 
 `cc_fnp`, production half of the tie-heavy f32 argsort row reopen (cod_fnp's reconstruction
