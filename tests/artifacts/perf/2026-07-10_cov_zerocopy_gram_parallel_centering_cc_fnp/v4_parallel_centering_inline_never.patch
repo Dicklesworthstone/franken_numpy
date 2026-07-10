@@ -1,0 +1,162 @@
+diff --git a/crates/fnp-python/src/lib.rs b/crates/fnp-python/src/lib.rs
+index 0baeb982..6e5ff3da 100644
+--- a/crates/fnp-python/src/lib.rs
++++ b/crates/fnp-python/src/lib.rs
+@@ -33242,7 +33242,11 @@ fn cov_gram_from_centered(centered: &[f64], n_vars: usize, n_obs: usize, ddof: u
+     // itself ~1.3x faster but is a NET LOSS: the 32 MiB result ends up dirty in 64 threads'
+     // private caches across 8 CCDs, and the serial copy in `build_square_f64_matrix` then
+     // snoops it all back cross-CCD (measured 47.1 ms vs 31.2 ms end-to-end at 2000x500).
+-    // Revisit only alongside a parallel / zero-copy output stage.
++    // ALSO re-tested 2026-07-09 on a lighter box together with a zero-copy output stage
++    // (Gram written straight into the numpy buffer, mirror fused OR as a separate
++    // parallel pass): still a consistent loss at n_vars >= 1000 -- the warm serial copy
++    // is cheaper than parallel-faulting the fresh numpy pages from the kernel. Do not
++    // revisit without new evidence; see docs/NEGATIVE_EVIDENCE.md.
+     let block = |i0: usize, rows: &mut [f64]| {
+         let mr = rows.len() / n_vars;
+         // Full-width strip: every j <= i0 is below-diagonal for all mr rows of this block.
+@@ -33303,6 +33307,34 @@ fn cov_gram_from_centered(centered: &[f64], n_vars: usize, n_obs: usize, ddof: u
+     result
+ }
+ 
++// Center each variable row by its own mean: `src(r)` hands back row r's raw source
++// slice. The per-row mean stays a sequential in-order sum and the subtraction stays
++// elementwise, so each row is bit-identical to the historical serial loop; rows are
++// independent, so fan out across them once the matrix is big enough to amortize the
++// rayon dispatch (the serial pass was ~0.5-1 ms of the cov 2000x500 hotspot).
++//
++// inline(never) is LOAD-BEARING: letting this generic inline into the cov gram
++// callers perturbed LLVM's whole-caller register allocation under
++// lto=true/codegen-units=1 and spilled the MR=4 Gram tile's ymm accumulators --
++// measured 5x slower cov at n_vars >= ~1600 (49.5 ms vs 13 ms at 1900x500) with
++// zero source change to the kernel itself. See docs/NEGATIVE_EVIDENCE.md 2026-07-09.
++#[inline(never)]
++fn center_rows<'a>(centered: &mut [f64], n_obs: usize, src: impl Fn(usize) -> &'a [f64] + Sync) {
++    use rayon::prelude::*;
++    let center_one = |(r, dst): (usize, &mut [f64])| {
++        let s = src(r);
++        let mean = s.iter().sum::<f64>() / n_obs as f64;
++        for (o, &v) in dst.iter_mut().zip(s) {
++            *o = v - mean;
++        }
++    };
++    if centered.len() >= (1 << 20) && rayon::current_num_threads() >= 2 {
++        centered.par_chunks_mut(n_obs).enumerate().for_each(center_one);
++    } else {
++        centered.chunks_mut(n_obs).enumerate().for_each(center_one);
++    }
++}
++
+ // True only when `obj` is an ndarray (or array-like exposing `.ndim`) of rank 1.
+ // Any error (e.g. a Python list with no `.ndim`) yields false, so callers defer.
+ fn ndim_is_1(obj: &Bound<'_, PyAny>) -> bool {
+@@ -33376,24 +33408,23 @@ fn cov_gram_two_rowvar_f64(
+     let (Some(m_slice), Some(y_slice)) = (m_buf.as_slice(py), y_buf.as_slice(py)) else {
+         return Ok(None);
+     };
++    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64 and we hold the GIL;
++    // same read-only reinterpretation the zero-copy unary/binary input paths use.
++    // Plain &[f64] views are Sync, which the parallel centering fan-out needs.
++    let m_data: &[f64] =
++        unsafe { std::slice::from_raw_parts(m_slice.as_ptr().cast::<f64>(), m_slice.len()) };
++    let y_data: &[f64] =
++        unsafe { std::slice::from_raw_parts(y_slice.as_ptr().cast::<f64>(), y_slice.len()) };
+     // Center every variable row (from whichever source buffer) by its own mean,
+     // matching cov_gram_rowvar_f64's per-row centering exactly.
+     let mut centered = vec![0.0f64; n_vars * n_obs];
+-    let center_into = |src: &[pyo3::buffer::ReadOnlyCell<f64>], dst: &mut [f64]| {
+-        let mean = src.iter().map(|c| c.get()).sum::<f64>() / n_obs as f64;
+-        for (o, c) in dst.iter_mut().zip(src) {
+-            *o = c.get() - mean;
++    center_rows(&mut centered, n_obs, |r| {
++        if r < m_rows {
++            &m_data[r * n_obs..(r + 1) * n_obs]
++        } else {
++            &y_data[(r - m_rows) * n_obs..(r - m_rows + 1) * n_obs]
+         }
+-    };
+-    for r in 0..m_rows {
+-        let src = &m_slice[r * n_obs..(r + 1) * n_obs];
+-        center_into(src, &mut centered[r * n_obs..(r + 1) * n_obs]);
+-    }
+-    for r in 0..y_rows {
+-        let src = &y_slice[r * n_obs..(r + 1) * n_obs];
+-        let dst_row = m_rows + r;
+-        center_into(src, &mut centered[dst_row * n_obs..(dst_row + 1) * n_obs]);
+-    }
++    });
+     let result = cov_gram_from_centered(&centered, n_vars, n_obs, ddof);
+     Ok(Some((result, n_vars)))
+ }
+@@ -33442,24 +33473,24 @@ fn cov_gram_rowvar_f64(
+     let Some(input) = in_buffer.as_slice(py) else {
+         return Ok(None); // non-contiguous
+     };
++    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64 and we hold the GIL;
++    // same read-only reinterpretation the zero-copy unary/binary input paths use.
++    let data: &[f64] =
++        unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+ 
+     // Center each variable (row) by its mean.
+     let mut centered = vec![0.0f64; n_vars * n_obs];
+-    for i in 0..n_vars {
+-        let src = &input[i * n_obs..(i + 1) * n_obs];
+-        let mean = src.iter().map(|c| c.get()).sum::<f64>() / n_obs as f64;
+-        let dst = &mut centered[i * n_obs..(i + 1) * n_obs];
+-        for (o, c) in dst.iter_mut().zip(src) {
+-            *o = c.get() - mean;
+-        }
+-    }
+-
++    center_rows(&mut centered, n_obs, |r| &data[r * n_obs..(r + 1) * n_obs]);
+     let result = cov_gram_from_centered(&centered, n_vars, n_obs, ddof);
+     Ok(Some((result, n_vars)))
+ }
+ 
+ // Build an (n_vars x n_vars) float64 numpy array from a flat row-major Vec; numpy squeezes
+-// a single-variable covariance/correlation to a 0-d scalar.
++// a single-variable covariance/correlation to a 0-d scalar. (Writing the Gram directly
++// into this numpy buffer instead -- zero intermediate Vec, zero copy, mirror fused or
++// as a parallel pass -- was measured 2026-07-09 and is a consistent small LOSS at
++// n_vars >= 1000: the warm serial copy beats parallel-faulting the fresh numpy pages
++// from inside the kernel. See docs/NEGATIVE_EVIDENCE.md before retrying.)
+ fn build_square_f64_matrix(
+     py: Python<'_>,
+     numpy: &Bound<'_, PyModule>,
+@@ -33568,6 +33599,7 @@ fn try_zerocopy_cov_rowvar_f64(
+ // exact two-divide ULP order). Returns None to defer when any variance is
+ // non-finite/negative or zero (numpy yields NaN/inf warnings there).
+ fn corrcoef_normalize_in_place(cov: &mut [f64], n_vars: usize) -> Option<()> {
++    use rayon::prelude::*;
+     let mut stddev = Vec::with_capacity(n_vars);
+     for i in 0..n_vars {
+         let var = cov[i * n_vars + i];
+@@ -33580,14 +33612,22 @@ fn corrcoef_normalize_in_place(cov: &mut [f64], n_vars: usize) -> Option<()> {
+         }
+         stddev.push(sd);
+     }
+-    for row in 0..n_vars {
++    // Rows are independent (each cell sees only its own row/col stddev, and keeps
++    // the same divide-divide-clamp order as the historical serial loop, so values
++    // are bit-identical); fan out across them for large matrices where the serial
++    // pass was a measurable slice of corrcoef (~1 ms at 2000^2 on top of cov).
++    let normalize_row = |(row, cells): (usize, &mut [f64])| {
+         let row_scale = stddev[row];
+-        for (col, &col_scale) in stddev.iter().enumerate().take(n_vars) {
+-            let idx = row * n_vars + col;
+-            cov[idx] /= row_scale;
+-            cov[idx] /= col_scale;
+-            cov[idx] = cov[idx].clamp(-1.0, 1.0);
++        for (c, &col_scale) in cells.iter_mut().zip(&stddev) {
++            *c /= row_scale;
++            *c /= col_scale;
++            *c = c.clamp(-1.0, 1.0);
+         }
++    };
++    if n_vars * n_vars >= (1 << 20) && rayon::current_num_threads() >= 2 {
++        cov.par_chunks_mut(n_vars).enumerate().for_each(normalize_row);
++    } else {
++        cov.chunks_mut(n_vars).enumerate().for_each(normalize_row);
+     }
+     Some(())
+ }

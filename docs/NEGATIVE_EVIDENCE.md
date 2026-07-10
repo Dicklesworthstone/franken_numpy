@@ -4,6 +4,71 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - REJECT (measured, reverted) + TWO LANE-CRITICAL MEASUREMENT FINDINGS: cov/corrcoef zero-copy Gram into the numpy buffer + fused mirror + parallel centering (bead deadlock-audit-zj3m3)
+
+`cc_fnp`. Executed the bead's plan exactly (it honors the fused-mirror retry-condition from the
+2026-07-09 REJECT below): V1 = Gram written directly into the numpy `empty` buffer via a
+`build_square_f64_matrix_with(fill)` + ptr-as-usize scatter, mirror FUSED into the kernel,
+per-row centering and corrcoef normalize parallelized; V2 = same but mirror as a separate
+PARALLEL pass; V3/V4 = ONLY parallel centering + parallel normalize (kernel and output stages
+byte-identical to HEAD). Every variant BIT-IDENTICAL to the HEAD baseline .so over a 50-case
+battery (13 shapes x {cov, cov ddof=0, corrcoef} + 1-D + two-operand cov(m,y)/corrcoef(m,y) +
+const-row defer + NaN + fortran defer) and allclose green vs numpy 1.26.4. All evidence in
+tests/artifacts/perf/2026-07-10_cov_zerocopy_gram_parallel_centering_cc_fnp/ (incl. the full V4
+patch and every probe script); worktree franken_numpy-ccfnp-covzc-20260709 holds the code as a
+detached wip commit 3317f17f.
+
+FINDING 0 - CORRECTION OF THE BEAD PREMISE (and of the "HONEST LIMIT" note in the MR=4 WIN
+below): cov 2000x500 is NOT a loss vs ORIG. Interleaved same-load processes tonight: ORIG numpy
+1.26.4 = 19.8-20.2 ms min-of-7 vs HEAD fnp = 7.9-8.3 ms => fnp 2.4-2.5x FASTER; 1000x1000: 20.3
+vs 5.3 (3.8x); 500x5000: 27.2 vs 9.2 (3.0x). The recorded "0.49x, fnp 39.9 ms" was measured
+under heavy load AND (in hindsight, see FINDING A) very likely on a fault-storm-mode binary.
+The cov/corrcoef + batched-LU lane has NO remaining big-shape losses vs ORIG 1.26.
+
+FINDING 1 - REJECT V1 (fused mirror + zero-copy output) and V2 (parallel mirror + zero-copy
+output) on tonight's box: min over 7 interleaved rounds vs the HEAD baseline .so (both sides
+fast-mode binaries, so the A/B is fair): cov 2000x500 old 7.93 / v1 8.46 / v2 9.54; corrcoef
+1000x1000 old 5.92 / v1 6.83 / v2 7.06; but cov 500x5000 old 10.91 / v1 9.44 / v2 9.49 and
+corrcoef 500x5000 old 10.60 / v1 9.56 (the 500x5000 win is the parallel-centering component:
+n_obs-heavy shapes, 20 MB input, output only 2 MB). Net: loss at n_vars >= 1000, win only where
+centering dominates => reverted per one-lever discipline. The warm serial `slot.set` copy is
+simply not the ~18 ms the loaded-box session measured -- it is ~1-2 ms warm, so there was never
+13-15 ms to reclaim. RETRY-CONDITION: reconsider zero-copy output NOT as a latency lever but as
+ALLOCATION-LOTTERY HARDENING (see FINDING A): it removes the 30.5 MiB Vec entirely, and V1/V2
+binaries were immune to the fault-storm mode across tonight's builds.
+
+FINDING 2 - V3 (parallel centering + normalize alone, the conservative subset) is plausibly a
+~10% win on n_obs-heavy shapes but is UNMEASURABLE locally right now: its binary (and EVERY
+local rebuild of Vec-gram-shaped source tonight, see FINDING A) came out fault-storm-mode, 4-5x
+slow at n_vars >= ~1600, so any A/B against the (lucky) HEAD baseline binary is invalid.
+Deferred, not rejected on merit. Do not re-attempt without the FINDING A protocol below.
+
+FINDING A (MEASUREMENT-CRITICAL) - the fault-storm lottery: local release builds of the SAME
+SOURCE flip between two deterministic performance modes for big-n_vars cov/corrcoef. Fast mode:
+~2.9k minor faults per cov((2000,50)) call, 2.4 ms. Storm mode: ~15.8k minor faults = the
+30.5 MiB result Vec + 30.5 MiB numpy buffer REFAULTED EVERY CALL, +27 ms constant offset
+independent of n_obs (probes C-F in the artifacts). Tonight: 3 fast binaries (cod_fnp's
+2026-07-09 22:51 build of HEAD-equivalent source; my V1; my V2) vs 5 storm binaries (V3, V4,
+pristine-HEAD rebuild warm dir, pristine-HEAD rebuild COLD FRESH dir). Same pinned toolchain
+(nightly-2026-02-20), same +avx2-only rustflags, same box, cargo = plain rustup shim, RUSTFLAGS
+empty. Mode is a property of the BINARY (stable across processes/rounds), flips across builds of
+identical source. MECHANISM CONFIRMED via glibc knobs: MALLOC_MMAP_THRESHOLD_=128M
+MALLOC_TRIM_THRESHOLD_=128M collapses the storm binary to 2 faults/call (31.4 -> 11.35 ms).
+It is glibc mmap/trim-threshold page-recycling behavior around the ~30.5 MiB allocations, NOT
+(primarily) codegen. RULES going forward: (1) any local perf read on an allocation-heavy path
+MUST record ru_minflt per call alongside time (fault_probe.py in the artifacts does this) --
+a storm-mode binary on either side invalidates the A/B; (2) never conclude a big-alloc-path
+lever from a single build on each side; rebuild at least one side and confirm the mode is
+stable; (3) the criterion python-surface bench has NO big-n_vars cov shape, so CI cannot see
+any of this -- registering fnp_cov 2000x500 there is the cheap guard.
+
+FINDING B (OPEN) - residual binary-to-binary gap: with the malloc knobs equalizing fault
+behavior (2-3 faults/call both sides), the storm-built binary still ran cov((2000,50)) at
+11.35 ms vs 2.93 ms for the fast binary -- a real ~4x difference in the n_vars^2 output stages
+(mirror + copy) net of paging. Unexplained (codegen/regalloc variance under lto=true +
+codegen-units=1 suspected, not proven; symbols are stripped). Root-causing this is the blocker
+for ANY further local cov output-stage work.
+
 ## 2026-07-09 - WIN (SHIP): cov/corrcoef Gram MR=4 register tile - 1.10-1.38x self, BIT-IDENTICAL (corrects the "4x4 tile was DRAM-flat / C-BLAS-only" verdict)
 
 `cc_fnp`. Lane: large-n linalg pure-Rust (no C BLAS/LAPACK/XLA, per standing directive).
