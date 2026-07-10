@@ -107,7 +107,74 @@ target-cpu=native is CONTRAINDICATED here (FMA bit-parity). Worker-side emission
 syncs with the tree and no RUSTFLAGS override appears in rch logs; formal objdump proof
 blocked by the retrieval exclusion above (worker timings are AVX2-scale - behavioral
 consistency only).
+## 2026-07-10 - MEDIAN-GATED WIN (SHIP U16 union/setxor proof) + f16 NO-SHIP / PROFILE BLOCKER: union 2.44x and setxor 3.43x clear their own null floors; f16 widening is 0.736x
 
+`cod_fnp`, beads `deadlock-audit-611nq` and `deadlock-audit-98chw`. This closes the
+wide-key U9..U16 union/setxor evidence gap left by the CV-gated row below and re-decides the
+reopened f16 widening-sort lever under the corrected median rule. It writes **no REJECT**:
+the f16 loss has no self-time profile from the exact measured binary, so the ledger rule
+requires it to remain a surfaced profile blocker.
+
+METHOD: one `release-perf` Criterion binary, process, strict-remote RCH invocation, and worker.
+Each exact function first runs its own NumPy/NumPy A/A null, then NumPy/FNP effect pairs, all
+inside the same `iter_custom` routine. Each logical iteration records ABBA and BAAB observations;
+functions, inputs, and owned results pass through `black_box`. Criterion reported 10 samples in
+10 iterations for every row, yielding 20 retained paired ratios per function. Decisions use the
+median of per-observation `NumPy/FNP` ratios against that function's null `[p10,p90]`; CV is
+informational only. Pre-timing parity checks compare values, bytes, dtype string, and dtype
+metadata. The exact command was:
+
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench -p fnp-python --profile release-perf --bench criterion_python_surface --config 'target.x86_64-unknown-linux-gnu.runner=["sh","-c","printf RUNNER_HOST=; hostname; printf BINARY_SHA256=; sha256sum \"$1\"; echo RAYON_NUM_THREADS=4; RAYON_NUM_THREADS=4 exec \"$@\"","fnp-runner"]' -- python_completion_median_gate`
+
+PROVENANCE: RCH worker id `hz2`, runner host `hetzner2`, `RAYON_NUM_THREADS=4`, binary SHA-256
+`5a8c2232ca4f564eeffd4ceba95c8c1a355afbb85fbeb59ff7e5249998eaef97`. Rust compile-time
+features reported `avx2=true`, `sse2=true`. NumPy `2.3.5` reported build baseline
+`SSE/SSE2/SSE3`, dispatched `AVX2` and AVX-512 families, and runtime `AVX2=true` /
+`AVX512F=true`. Thus this result is not an SSE2-ceiling artifact.
+
+| Function / shape | FNP median | NumPy median | effect median (p10,p90) | FNP CV | NumPy CV | null median `[p10,p90]` | null CV | Decision |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| U16 `union1d`, disjoint 1M+1M | 332.719 ms | 880.489 ms | **2.4386x** `[1.1763,3.0533]` | 4.962% | 40.257% | 1.0050 `[0.9458,1.1103]` | 6.710% | **WIN / KEEP** (null-corrected 2.4265x; 20/20 above 1) |
+| U16 `setxor1d`, exact 50% overlap 1M+1M | 265.657 ms | 908.998 ms | **3.4325x** `[3.2097,3.9169]` | 4.340% | 6.730% | 0.9845 `[0.9462,1.0643]` | 11.831% | **WIN / KEEP** (null-corrected 3.4866x; 20/20 above 1) |
+| f16 `sort`, 4M dense finite ties | 138.065 ms | 100.695 ms | **0.7359x** `[0.6682,0.7522]` | 5.899% | 3.362% | 1.0019 `[0.9939,1.0166]` | 1.787% | **PROFILE REQUIRED / NO-SHIP**, not REJECT (null-corrected 0.7346x) |
+
+EXECUTION / SELF-TIME DISCIPLINE: U16 execution is gate-by-construction and byte-parity-proven;
+these are KEEP rows, so REJECT self-time proof is not applicable. The temporary f16 production
+hook used a safe owned `PyBuffer::to_vec` uint16 scan, and a spy test proved that exhaustive finite
+f16 bits (including infinities/subnormals), dense ties, all supported sort kinds, axes 0/-1/None,
+and metadata-preserving native dtypes entered the f32 route, while NaNs, negative zero,
+non-contiguous, small, 2-D, and non-native-endian inputs delegated byte-exactly. Nevertheless,
+the exact `hz2` benchmark binary has **no profile-verified non-zero self-time**. The earlier
+`vmi1149989` profile (62 self samples in the bench-only f16 pre-scan) belongs to another binary
+and is deliberately not spliced into this row. Therefore no f16 REJECT is written and the losing
+production dispatch is reverted before ship. A future formal REJECT requires a perf-capable
+worker, exact-binary SHA, non-zero target self-time, and the same per-function null gate.
+
+CORRECTNESS / SAFETY: strict-remote `conformance_setops` passed 17/17, including U9..U16
+union/setxor, S9..S16, and all 16 `{i,u}{1,2,4,8} x f{4,8}` structured bitplane combinations.
+The focused f16 route/guard battery passed before measurement; the shipped no-route passthrough
+battery keeps the same byte/dtype edge coverage. Touched production setops remain safe owned-buffer
+code; no C BLAS/LAPACK/XLA linkage was added.
+
+ISA AUDIT (surfaced, separate lever): normal RCH release fingerprints include workspace
+`-C target-feature=+avx2`, and existing `fnp-python` / `fnp-ufunc` disassembly contains real YMM
+`vaddpd` / `vminpd` / `vblendvpd`; there is no repo-wide SSE2 ceiling. Two configuration hazards
+remain: CI's `RUSTFLAGS=-D warnings` overrides `.cargo/config.toml` and silently drops AVX2, and
+the documented profiling `RUSTFLAGS=-C force-frame-pointers=yes` would do the same if forwarded.
+Profile commands must combine AVX2 and frame pointers in Cargo config; CI ISA provenance needs a
+separate fix. No broad ISA/config change is mixed into this setops proof commit.
+
+VALIDATION: strict-remote focused `cargo check` passed after the f16 dispatch revert, and the
+post-revert f16 passthrough battery passed 1/1. After rebasing over `origin/main` at `54233f45`,
+the same focused battery passed 1/1 strict-remote on `hz1`; an all-targets check stops instead at
+three pre-existing `where_py` unit-test call sites in the new parent, while
+`git diff origin/main..HEAD -- crates/fnp-python/src/lib.rs` confirms this commit's production
+delta is only the f16 no-ship comment. Strict-remote clippy with `-D warnings` stops in the
+pre-existing `fnp-ufunc::UFuncArray::nan_filtered` dead-code warning before reaching this diff.
+Direct pinned-toolchain `rustfmt --check` is likewise blocked by the repository's broad
+pre-existing formatting drift (17,733 diff-output lines reported); `git diff --check` is clean.
+UBS's five-changed-file shadow scan emitted no code finding before its Rust module hit the
+300-second timeout, so the timeout is recorded rather than presented as a pass.
 ## 2026-07-10 - RE-DECISION (median gate, no new measurement): the 2026-07-04 "np.sort(float16) via f32 widening - 0.75x, do NOT re-dig" REJECT is REFUTED IN DIRECTION; production lever unblocked
 
 `cc_fnp`, applying the corrected decision method (gate on MEDIAN separation vs the per-function

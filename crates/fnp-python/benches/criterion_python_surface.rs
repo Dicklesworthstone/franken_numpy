@@ -12882,6 +12882,323 @@ fn report_substrate_v2_pair(
     );
 }
 
+const MEDIAN_GATE_FINAL_BATCHES: usize = 10;
+const MEDIAN_GATE_OBSERVATIONS_PER_BATCH: usize = 2;
+
+#[derive(Clone, Copy)]
+struct MedianGateDistribution {
+    median: f64,
+    p10: f64,
+    p90: f64,
+    low: f64,
+    high: f64,
+    cv_pct: f64,
+    above_one: usize,
+}
+
+fn median_gate_quantile(sorted: &[f64], quantile: f64) -> f64 {
+    assert!(!sorted.is_empty());
+    let position = quantile * (sorted.len() - 1) as f64;
+    let lower = position.floor() as usize;
+    let upper = position.ceil() as usize;
+    if lower == upper {
+        sorted[lower]
+    } else {
+        let weight = position - lower as f64;
+        sorted[lower] * (1.0 - weight) + sorted[upper] * weight
+    }
+}
+
+fn median_gate_distribution(samples: &[f64]) -> MedianGateDistribution {
+    assert!(samples.len() >= 2);
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    let variance = samples
+        .iter()
+        .map(|sample| {
+            let delta = sample - mean;
+            delta * delta
+        })
+        .sum::<f64>()
+        / (samples.len() - 1) as f64;
+    MedianGateDistribution {
+        median: median_gate_quantile(&sorted, 0.5),
+        p10: median_gate_quantile(&sorted, 0.1),
+        p90: median_gate_quantile(&sorted, 0.9),
+        low: sorted[0],
+        high: sorted[sorted.len() - 1],
+        cv_pct: variance.sqrt() * 100.0 / mean,
+        above_one: samples.iter().filter(|&&ratio| ratio > 1.0).count(),
+    }
+}
+
+fn median_gate_tail(samples: &RefCell<Vec<f64>>) -> Vec<f64> {
+    let samples = samples.borrow();
+    let retained = MEDIAN_GATE_FINAL_BATCHES * MEDIAN_GATE_OBSERVATIONS_PER_BATCH;
+    assert!(
+        samples.len() >= retained,
+        "Criterion must retain {retained} median-gate observations"
+    );
+    samples[samples.len() - retained..].to_vec()
+}
+
+fn report_median_gate_pair(
+    row: &str,
+    null_base_ns: &RefCell<Vec<f64>>,
+    null_peer_ns: &RefCell<Vec<f64>>,
+    null_ratios: &RefCell<Vec<f64>>,
+    base_ns: &RefCell<Vec<f64>>,
+    candidate_ns: &RefCell<Vec<f64>>,
+    effect_ratios: &RefCell<Vec<f64>>,
+) {
+    if effect_ratios.borrow().is_empty() {
+        return;
+    }
+    let null_base = median_gate_tail(null_base_ns);
+    let null_peer = median_gate_tail(null_peer_ns);
+    let null = median_gate_distribution(&median_gate_tail(null_ratios));
+    let base = median_gate_distribution(&median_gate_tail(base_ns));
+    let candidate = median_gate_distribution(&median_gate_tail(candidate_ns));
+    let effect = median_gate_distribution(&median_gate_tail(effect_ratios));
+    let null_brackets_one = null.p10 <= 1.0 && null.p90 >= 1.0;
+    let verdict = if !null_brackets_one {
+        "BIASED_NULL"
+    } else if effect.median > null.p90 {
+        "WIN"
+    } else if effect.median < null.p10 {
+        "PROFILE_REQUIRED"
+    } else {
+        "UNDECIDED"
+    };
+    let null_base_cv = median_gate_distribution(&null_base).cv_pct;
+    let null_peer_cv = median_gate_distribution(&null_peer).cv_pct;
+    println!(
+        "NULL_MEDIAN_GATE row={row} observations={} base_median_ms={:.6} \
+         candidate_median_ms={:.6} base_cv_pct={:.3} candidate_cv_pct={:.3} \
+         effect_median={:.6} effect_p10={:.6} effect_p90={:.6} \
+         effect_low={:.6} effect_high={:.6} effect_cv_pct={:.3} effect_above_one={} \
+         null_median={:.6} null_p10={:.6} null_p90={:.6} null_low={:.6} \
+         null_high={:.6} null_cv_pct={:.3} null_base_cv_pct={:.3} \
+         null_peer_cv_pct={:.3} null_corrected_median={:.6} verdict={verdict}",
+        effect_ratios
+            .borrow()
+            .len()
+            .min(MEDIAN_GATE_FINAL_BATCHES * MEDIAN_GATE_OBSERVATIONS_PER_BATCH),
+        base.median / 1_000_000.0,
+        candidate.median / 1_000_000.0,
+        base.cv_pct,
+        candidate.cv_pct,
+        effect.median,
+        effect.p10,
+        effect.p90,
+        effect.low,
+        effect.high,
+        effect.cv_pct,
+        effect.above_one,
+        null.median,
+        null.p10,
+        null.p90,
+        null.low,
+        null.high,
+        null.cv_pct,
+        null_base_cv,
+        null_peer_cv,
+        effect.median / null.median,
+    );
+}
+
+fn time_python_binary_call<'py>(
+    function: &Bound<'py, PyAny>,
+    lhs: &Bound<'py, PyAny>,
+    rhs: &Bound<'py, PyAny>,
+) -> Duration {
+    let start = Instant::now();
+    let function = black_box(function);
+    let lhs = black_box(lhs);
+    let rhs = black_box(rhs);
+    let result = function
+        .call1((lhs, rhs))
+        .expect("median-gate binary Python call");
+    drop(black_box(result));
+    start.elapsed()
+}
+
+fn time_python_unary_call<'py>(
+    function: &Bound<'py, PyAny>,
+    input: &Bound<'py, PyAny>,
+) -> Duration {
+    let start = Instant::now();
+    let function = black_box(function);
+    let input = black_box(input);
+    let result = function
+        .call1((input,))
+        .expect("median-gate unary Python call");
+    drop(black_box(result));
+    start.elapsed()
+}
+
+fn bench_median_gate_python_binary<'py>(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    bench_name: &'static str,
+    row: &'static str,
+    base: &Bound<'py, PyAny>,
+    candidate: &Bound<'py, PyAny>,
+    lhs: &Bound<'py, PyAny>,
+    rhs: &Bound<'py, PyAny>,
+) {
+    let null_base_ns = RefCell::new(Vec::new());
+    let null_peer_ns = RefCell::new(Vec::new());
+    let null_ratios = RefCell::new(Vec::new());
+    let base_ns = RefCell::new(Vec::new());
+    let candidate_ns = RefCell::new(Vec::new());
+    let effect_ratios = RefCell::new(Vec::new());
+    group.bench_function(bench_name, |bench| {
+        bench.iter_custom(|iterations| {
+            let mut combined = Duration::ZERO;
+            for _ in 0..iterations {
+                // The exact-function A/A null is always measured first. The two observations
+                // are ABBA then BAAB, balancing call position before the effect is observed.
+                for observation in 0..MEDIAN_GATE_OBSERVATIONS_PER_BATCH {
+                    let outer_base = observation & 1 == 0;
+                    let (base_total, peer_total) = if outer_base {
+                        let a1 = time_python_binary_call(base, lhs, rhs);
+                        let b1 = time_python_binary_call(base, lhs, rhs);
+                        let b2 = time_python_binary_call(base, lhs, rhs);
+                        let a2 = time_python_binary_call(base, lhs, rhs);
+                        (a1 + a2, b1 + b2)
+                    } else {
+                        let b1 = time_python_binary_call(base, lhs, rhs);
+                        let a1 = time_python_binary_call(base, lhs, rhs);
+                        let a2 = time_python_binary_call(base, lhs, rhs);
+                        let b2 = time_python_binary_call(base, lhs, rhs);
+                        (a1 + a2, b1 + b2)
+                    };
+                    let base_average = base_total.as_secs_f64() * 0.5e9;
+                    let peer_average = peer_total.as_secs_f64() * 0.5e9;
+                    null_base_ns.borrow_mut().push(base_average);
+                    null_peer_ns.borrow_mut().push(peer_average);
+                    null_ratios.borrow_mut().push(base_average / peer_average);
+                    combined += base_total + peer_total;
+                }
+                for observation in 0..MEDIAN_GATE_OBSERVATIONS_PER_BATCH {
+                    let outer_base = observation & 1 == 0;
+                    let (base_total, candidate_total) = if outer_base {
+                        let a1 = time_python_binary_call(base, lhs, rhs);
+                        let b1 = time_python_binary_call(candidate, lhs, rhs);
+                        let b2 = time_python_binary_call(candidate, lhs, rhs);
+                        let a2 = time_python_binary_call(base, lhs, rhs);
+                        (a1 + a2, b1 + b2)
+                    } else {
+                        let b1 = time_python_binary_call(candidate, lhs, rhs);
+                        let a1 = time_python_binary_call(base, lhs, rhs);
+                        let a2 = time_python_binary_call(base, lhs, rhs);
+                        let b2 = time_python_binary_call(candidate, lhs, rhs);
+                        (a1 + a2, b1 + b2)
+                    };
+                    let base_average = base_total.as_secs_f64() * 0.5e9;
+                    let candidate_average = candidate_total.as_secs_f64() * 0.5e9;
+                    base_ns.borrow_mut().push(base_average);
+                    candidate_ns.borrow_mut().push(candidate_average);
+                    effect_ratios
+                        .borrow_mut()
+                        .push(base_average / candidate_average);
+                    combined += base_total + candidate_total;
+                }
+            }
+            combined
+        });
+    });
+    report_median_gate_pair(
+        row,
+        &null_base_ns,
+        &null_peer_ns,
+        &null_ratios,
+        &base_ns,
+        &candidate_ns,
+        &effect_ratios,
+    );
+}
+
+fn bench_median_gate_python_unary<'py>(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    bench_name: &'static str,
+    row: &'static str,
+    base: &Bound<'py, PyAny>,
+    candidate: &Bound<'py, PyAny>,
+    input: &Bound<'py, PyAny>,
+) {
+    let null_base_ns = RefCell::new(Vec::new());
+    let null_peer_ns = RefCell::new(Vec::new());
+    let null_ratios = RefCell::new(Vec::new());
+    let base_ns = RefCell::new(Vec::new());
+    let candidate_ns = RefCell::new(Vec::new());
+    let effect_ratios = RefCell::new(Vec::new());
+    group.bench_function(bench_name, |bench| {
+        bench.iter_custom(|iterations| {
+            let mut combined = Duration::ZERO;
+            for _ in 0..iterations {
+                for observation in 0..MEDIAN_GATE_OBSERVATIONS_PER_BATCH {
+                    let outer_base = observation & 1 == 0;
+                    let (base_total, peer_total) = if outer_base {
+                        let a1 = time_python_unary_call(base, input);
+                        let b1 = time_python_unary_call(base, input);
+                        let b2 = time_python_unary_call(base, input);
+                        let a2 = time_python_unary_call(base, input);
+                        (a1 + a2, b1 + b2)
+                    } else {
+                        let b1 = time_python_unary_call(base, input);
+                        let a1 = time_python_unary_call(base, input);
+                        let a2 = time_python_unary_call(base, input);
+                        let b2 = time_python_unary_call(base, input);
+                        (a1 + a2, b1 + b2)
+                    };
+                    let base_average = base_total.as_secs_f64() * 0.5e9;
+                    let peer_average = peer_total.as_secs_f64() * 0.5e9;
+                    null_base_ns.borrow_mut().push(base_average);
+                    null_peer_ns.borrow_mut().push(peer_average);
+                    null_ratios.borrow_mut().push(base_average / peer_average);
+                    combined += base_total + peer_total;
+                }
+                for observation in 0..MEDIAN_GATE_OBSERVATIONS_PER_BATCH {
+                    let outer_base = observation & 1 == 0;
+                    let (base_total, candidate_total) = if outer_base {
+                        let a1 = time_python_unary_call(base, input);
+                        let b1 = time_python_unary_call(candidate, input);
+                        let b2 = time_python_unary_call(candidate, input);
+                        let a2 = time_python_unary_call(base, input);
+                        (a1 + a2, b1 + b2)
+                    } else {
+                        let b1 = time_python_unary_call(candidate, input);
+                        let a1 = time_python_unary_call(base, input);
+                        let a2 = time_python_unary_call(base, input);
+                        let b2 = time_python_unary_call(candidate, input);
+                        (a1 + a2, b1 + b2)
+                    };
+                    let base_average = base_total.as_secs_f64() * 0.5e9;
+                    let candidate_average = candidate_total.as_secs_f64() * 0.5e9;
+                    base_ns.borrow_mut().push(base_average);
+                    candidate_ns.borrow_mut().push(candidate_average);
+                    effect_ratios
+                        .borrow_mut()
+                        .push(base_average / candidate_average);
+                    combined += base_total + candidate_total;
+                }
+            }
+            combined
+        });
+    });
+    report_median_gate_pair(
+        row,
+        &null_base_ns,
+        &null_peer_ns,
+        &null_ratios,
+        &base_ns,
+        &candidate_ns,
+        &effect_ratios,
+    );
+}
+
 fn bench_substrate_v2_python_binary_pair<'py>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     bench_name: &'static str,
@@ -12984,6 +13301,190 @@ fn bench_substrate_v2_python_unary_pair<'py>(
         });
     });
     report_substrate_v2_pair(row, &candidate_samples, &orig_samples);
+}
+
+fn bench_completion_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_completion_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        println!(
+            "ISA_PROVENANCE target_arch={} avx2={} sse2={}",
+            std::env::consts::ARCH,
+            cfg!(target_feature = "avx2"),
+            cfg!(target_feature = "sse2"),
+        );
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_completion_median_gate")
+            .expect("completion bench module");
+        fnp_python(&module).expect("initialize fnp_python completion bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy version")
+            .extract::<String>()
+            .expect("numpy version string");
+        let numpy_simd = numpy
+            .getattr("__config__")
+            .expect("numpy config")
+            .getattr("CONFIG")
+            .expect("numpy CONFIG")
+            .get_item("SIMD Extensions")
+            .expect("numpy SIMD Extensions")
+            .str()
+            .expect("numpy SIMD str")
+            .extract::<String>()
+            .expect("numpy SIMD string value");
+        let numpy_cpu_features = numpy
+            .getattr("_core")
+            .expect("numpy core")
+            .getattr("_multiarray_umath")
+            .expect("numpy multiarray umath")
+            .getattr("__cpu_features__")
+            .expect("numpy runtime CPU features")
+            .str()
+            .expect("numpy runtime CPU feature str")
+            .extract::<String>()
+            .expect("numpy runtime CPU feature string value");
+        println!(
+            "NUMPY_PROVENANCE version={numpy_version} build_simd={numpy_simd} \
+             runtime_cpu_features={numpy_cpu_features}"
+        );
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 powers = np.power(np.uint64(26), np.arange(5, dtype=np.uint64))\n\
+                 u_a_ids = np.arange(0, 1_000_000, dtype=np.uint64)\n\
+                 u_a_words = np.zeros((1_000_000, 16), dtype=np.uint32)\n\
+                 u_a_words[:, :5] = (97 + (u_a_ids[:, None] // powers) % 26).astype(np.uint32)\n\
+                 u_a = u_a_words.reshape(-1).view('U16')\n\
+                 u_fresh_ids = np.arange(1_000_000, 1_500_000, dtype=np.uint64)\n\
+                 u_fresh_words = np.zeros((500_000, 16), dtype=np.uint32)\n\
+                 u_fresh_words[:, :5] = (97 + (u_fresh_ids[:, None] // powers) % 26).astype(np.uint32)\n\
+                 u_fresh = u_fresh_words.reshape(-1).view('U16')\n\
+                 u_b = np.concatenate([u_a[:500_000], u_fresh])\n\
+                 u_union_ids = np.arange(2_000_000, 3_000_000, dtype=np.uint64)\n\
+                 u_union_words = np.zeros((1_000_000, 16), dtype=np.uint32)\n\
+                 u_union_words[:, :5] = (97 + (u_union_ids[:, None] // powers) % 26).astype(np.uint32)\n\
+                 u_union_b = u_union_words.reshape(-1).view('U16')\n",
+            )
+            .expect("completion setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("completion setup");
+        let u_a = namespace.get_item("u_a").expect("u_a present");
+        let u_b = namespace.get_item("u_b").expect("u_b present");
+        let u_union_b = namespace.get_item("u_union_b").expect("u_union_b present");
+        let array_equal = numpy.getattr("array_equal").expect("numpy.array_equal");
+
+        let fnp_unique = module.getattr("unique").expect("fnp unique");
+        let np_unique = numpy.getattr("unique").expect("numpy unique");
+        let fnp_union = module.getattr("union1d").expect("fnp union1d");
+        let np_union = numpy.getattr("union1d").expect("numpy union1d");
+        let fnp_setxor = module.getattr("setxor1d").expect("fnp setxor1d");
+        let np_setxor = numpy.getattr("setxor1d").expect("numpy setxor1d");
+
+        for (label, candidate, base) in [
+            (
+                "U16 unique",
+                fnp_unique.call1((&u_a,)).expect("fnp unique parity"),
+                np_unique.call1((&u_a,)).expect("numpy unique parity"),
+            ),
+            (
+                "U16 disjoint union",
+                fnp_union
+                    .call1((&u_a, &u_union_b))
+                    .expect("fnp union parity"),
+                np_union
+                    .call1((&u_a, &u_union_b))
+                    .expect("numpy union parity"),
+            ),
+            (
+                "U16 50% overlap setxor",
+                fnp_setxor.call1((&u_a, &u_b)).expect("fnp setxor parity"),
+                np_setxor.call1((&u_a, &u_b)).expect("numpy setxor parity"),
+            ),
+        ] {
+            let candidate_dtype = candidate.getattr("dtype").expect("candidate dtype");
+            let base_dtype = base.getattr("dtype").expect("base dtype");
+            assert_eq!(
+                candidate_dtype
+                    .getattr("str")
+                    .expect("candidate dtype str")
+                    .extract::<String>()
+                    .expect("candidate dtype str value"),
+                base_dtype
+                    .getattr("str")
+                    .expect("base dtype str")
+                    .extract::<String>()
+                    .expect("base dtype str value"),
+                "{label} dtype string parity",
+            );
+            assert!(
+                candidate_dtype
+                    .getattr("metadata")
+                    .expect("candidate dtype metadata")
+                    .eq(base_dtype.getattr("metadata").expect("base dtype metadata"))
+                    .expect("dtype metadata equality"),
+                "{label} dtype metadata parity",
+            );
+            assert!(
+                array_equal
+                    .call1((&candidate, &base))
+                    .expect("completion array_equal")
+                    .extract::<bool>()
+                    .expect("completion array_equal bool"),
+                "{label} value parity",
+            );
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "{label} byte parity",
+            );
+        }
+
+        bench_median_gate_python_unary(
+            &mut group,
+            "u16_unique_1m_null_then_effect",
+            "u16_unique_1m",
+            &np_unique,
+            &fnp_unique,
+            &u_a,
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "u16_union_disjoint_1m_null_then_effect",
+            "u16_union_disjoint_1m",
+            &np_union,
+            &fnp_union,
+            &u_a,
+            &u_union_b,
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "u16_setxor_1m_null_then_effect",
+            "u16_setxor_1m",
+            &np_setxor,
+            &fnp_setxor,
+            &u_a,
+            &u_b,
+        );
+    });
+
+    group.finish();
 }
 
 fn bench_wide_string_substrate_v2(c: &mut Criterion) {
@@ -13506,6 +14007,7 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_completion_median_gate,
     bench_wide_string_substrate_v2,
     bench_ledger_integrity_rejects,
     bench_unique_rows_full_boundary,

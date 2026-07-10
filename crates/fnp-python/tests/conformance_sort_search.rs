@@ -178,6 +178,88 @@ print(np.array_equal(result, expected))
     Ok(())
 }
 
+#[test]
+fn sort_f16_no_ship_passthrough_preserves_numpy_bytes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+original_sort = np.sort
+observed_dtypes = []
+
+def sort_spy(value, *args, **kwargs):
+    observed_dtypes.append(np.asarray(value).dtype.str)
+    return original_sort(value, *args, **kwargs)
+
+np.sort = sort_spy
+
+def same_bytes_and_route(value, inner_dtype, **kwargs):
+    expected = original_sort(value, **kwargs)
+    observed_dtypes.clear()
+    actual = fnp.sort(value, **kwargs)
+    return (
+        actual.dtype == expected.dtype
+        and actual.dtype.str == expected.dtype.str
+        and actual.dtype.metadata == expected.dtype.metadata
+        and actual.shape == expected.shape
+        and actual.tobytes() == expected.tobytes()
+        and observed_dtypes == [np.dtype(inner_dtype).str]
+    )
+
+# Exercise every finite f16 bit pattern plus both infinities. The only excluded
+# values are NaNs and -0.0, whose payload/tie ordering is deliberately guarded.
+bits = np.arange(1 << 16, dtype=np.uint16)
+all_values = bits.view(np.float16)
+route_values = all_values[(~np.isnan(all_values)) & (bits != 0x8000)]
+
+finite_ties = np.tile(
+    np.array([0x0000, 0x3c00, 0xbc00, 0x7c00, 0xfc00], dtype=np.uint16),
+    1 << 13,
+).view(np.float16)
+nan_guard = np.tile(
+    np.array([0x0000, 0x3c00, 0x7e01, 0xfe55], dtype=np.uint16),
+    1 << 13,
+).view(np.float16)
+negative_zero_guard = np.tile(
+    np.array([0x0000, 0x8000, 0x3c00, 0xbc00], dtype=np.uint16),
+    1 << 13,
+).view(np.float16)
+noncontiguous = route_values[::2]
+matrix = route_values[:32768].reshape(128, 256)
+non_native_dtype = np.dtype('>f2' if np.little_endian else '<f2')
+non_native_values = route_values.astype(non_native_dtype)
+metadata_dtype = np.dtype(np.float16, metadata={'tag': 'fnp-f16-sort'})
+metadata_values = np.array(route_values, dtype=metadata_dtype, copy=True)
+
+checks = []
+for kind in [None, 'quicksort', 'stable', 'mergesort', 'heapsort']:
+    kwargs = {} if kind is None else {'kind': kind}
+    checks.append(same_bytes_and_route(route_values, np.float16, **kwargs))
+    checks.append(same_bytes_and_route(finite_ties, np.float16, **kwargs))
+    checks.append(same_bytes_and_route(nan_guard, np.float16, **kwargs))
+    checks.append(same_bytes_and_route(negative_zero_guard, np.float16, **kwargs))
+
+checks.extend([
+    same_bytes_and_route(route_values, np.float16, axis=None),
+    same_bytes_and_route(route_values, np.float16, axis=0),
+    same_bytes_and_route(route_values, np.float16, axis=-1),
+    same_bytes_and_route(route_values[:1024], np.float16),
+    same_bytes_and_route(noncontiguous, np.float16),
+    same_bytes_and_route(matrix, np.float16, axis=-1),
+    same_bytes_and_route(non_native_values, non_native_dtype),
+    same_bytes_and_route(metadata_values, metadata_dtype),
+])
+print(all(checks))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 no-ship passthrough should preserve every NumPy byte and dtype edge: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // argsort
 // ─────────────────────────────────────────────────────────────────────────────
