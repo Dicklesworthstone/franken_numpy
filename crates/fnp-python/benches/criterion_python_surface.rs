@@ -13828,6 +13828,102 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
                 &candidate_samples,
                 &orig_samples,
             );
+
+            // PRODUCTION arm (bead deadlock-audit-98chw): fnp.sort(f16) now routes through
+            // try_native_f16_sort_flat for this input; paired vs numpy.sort in the same
+            // interleaved routine, plus an A/A null-control row (per-function noise floor).
+            let fnp_sort = module.getattr("sort").expect("fnp sort");
+            let prod = fnp_sort.call1((&input,)).expect("fnp f16 sort parity call");
+            let prod_bytes: Vec<u8> = prod
+                .call_method0("tobytes")
+                .expect("prod bytes")
+                .extract()
+                .expect("extract prod bytes");
+            let orig_bytes: Vec<u8> = orig
+                .bind(py)
+                .call_method0("tobytes")
+                .expect("orig bytes")
+                .extract()
+                .expect("extract orig bytes");
+            assert_eq!(prod_bytes, orig_bytes, "production f16 sort parity (tobytes)");
+
+            let prod_samples = RefCell::new(Vec::new());
+            let prod_orig_samples = RefCell::new(Vec::new());
+            let prod_order = Cell::new(0u64);
+            group.bench_function("f16_sort_production_4m_paired", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut cand_total = Duration::ZERO;
+                    let mut orig_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let orig_first = prod_order.get() & 1 == 1;
+                        prod_order.set(prod_order.get().wrapping_add(1));
+                        if orig_first {
+                            let start = Instant::now();
+                            black_box(numpy_sort.call1((&input,)).expect("numpy f16 sort"));
+                            orig_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("fnp f16 sort"));
+                            cand_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("fnp f16 sort"));
+                            cand_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(numpy_sort.call1((&input,)).expect("numpy f16 sort"));
+                            orig_total += start.elapsed();
+                        }
+                    }
+                    prod_samples
+                        .borrow_mut()
+                        .push(cand_total.as_secs_f64() * 1e9 / iterations as f64);
+                    prod_orig_samples
+                        .borrow_mut()
+                        .push(orig_total.as_secs_f64() * 1e9 / iterations as f64);
+                    cand_total + orig_total
+                });
+            });
+            report_ledger_pair(
+                "f16_sort_production_4m",
+                &prod_samples,
+                &prod_orig_samples,
+            );
+
+            let null_a = RefCell::new(Vec::new());
+            let null_b = RefCell::new(Vec::new());
+            let null_order = Cell::new(0u64);
+            group.bench_function("f16_sort_production_4m_null_control", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut a_total = Duration::ZERO;
+                    let mut b_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let b_first = null_order.get() & 1 == 1;
+                        null_order.set(null_order.get().wrapping_add(1));
+                        if b_first {
+                            let start = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("null b"));
+                            b_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("null a"));
+                            a_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("null a"));
+                            a_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("null b"));
+                            b_total += start.elapsed();
+                        }
+                    }
+                    null_a
+                        .borrow_mut()
+                        .push(a_total.as_secs_f64() * 1e9 / iterations as f64);
+                    null_b
+                        .borrow_mut()
+                        .push(b_total.as_secs_f64() * 1e9 / iterations as f64);
+                    a_total + b_total
+                });
+            });
+            report_ledger_pair("f16_sort_production_null_AA", &null_a, &null_b);
         }
 
         {

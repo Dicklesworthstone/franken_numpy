@@ -474,3 +474,98 @@ fn argsort_string_stable_packed_latin1_matches_numpy() {
         Ok(())
     });
 }
+
+#[test]
+fn f16_sort_flat_widening_matches_numpy() {
+    // np.sort(1-D float16) routes through the exact f32 widen/sort/narrow fast path for
+    // finite non-(-0.0) data (bead deadlock-audit-98chw); NaN and -0.0 inputs must defer to
+    // the numpy-identical fallback. Byte-equality (tobytes) is the bar in every case, over
+    // random data with inf, subnormals, and dense ties, at n above the 1<<17 gate.
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(285)\n\
+                 n = 200_000\n\
+                 clean = np.round(rng.standard_normal(n), 2).astype(np.float16)\n\
+                 clean[clean == 0] = np.float16(0.25)\n\
+                 clean[:64] = np.float16(np.inf)\n\
+                 clean[64:128] = np.float16(-np.inf)\n\
+                 clean[128:192] = np.float16(6e-8)\n\
+                 clean[192] = np.float16(0.0)\n\
+                 with_nan = clean.copy()\n\
+                 with_nan[777] = np.float16(np.nan)\n\
+                 with_negzero = clean.copy()\n\
+                 with_negzero[999] = np.float16(-0.0)\n\
+                 small = clean[:1000].copy()\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        for name in ["clean", "with_nan", "with_negzero", "small"] {
+            let arr = ns
+                .get_item(name)?
+                .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing arr"))?;
+            let ours = module.getattr("sort")?.call1((&arr,))?;
+            let theirs = numpy.getattr("sort")?.call1((&arr,))?;
+            assert_eq!(
+                ours.getattr("dtype")?.str()?.to_string(),
+                theirs.getattr("dtype")?.str()?.to_string(),
+                "{name}: dtype diverged"
+            );
+            let ours_bytes: Vec<u8> = ours.call_method0("tobytes")?.extract()?;
+            let theirs_bytes: Vec<u8> = theirs.call_method0("tobytes")?.extract()?;
+            if ours_bytes != theirs_bytes {
+                // Divergence found. numpy 2.3.x's direct float16 np.sort emits globally
+                // MIS-SORTED output on AVX-512 workers (x86-simd-sort fp16 defect: observed
+                // on hz2/numpy 2.3.5 - equal bit-multisets, fnp == its own f32-widened sort,
+                // yet direct != widened, which is impossible for two correct sorts). When the
+                // oracle's own output is not ascending, byte-equality is unattainable and
+                // WRONG to demand; require instead that fnp's output is a correct sort:
+                // identical value multiset + ascending order + equal to numpy's own
+                // f32-widened composition. On healthy numpy builds the strict byte-equality
+                // above is the bar.
+                let mut ours_ms: Vec<u16> = ours_bytes
+                    .chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect();
+                let mut theirs_ms: Vec<u16> = theirs_bytes
+                    .chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect();
+                ours_ms.sort_unstable();
+                theirs_ms.sort_unstable();
+                assert_eq!(ours_ms, theirs_ms, "{name}: f16 sort value multisets diverged");
+                let np_sorted: bool = {
+                    // is numpy's own direct output ascending? (NaN-free cases only reach here)
+                    let d = numpy
+                        .getattr("diff")?
+                        .call1((theirs.call_method1("astype", ("float32",))?,))?;
+                    numpy
+                        .getattr("all")?
+                        .call1((d.call_method1("__ge__", (0.0_f64,))?,))?
+                        .extract()?
+                };
+                let widened = arr.call_method1("astype", ("float32",))?;
+                let wsorted = numpy.getattr("sort")?.call1((&widened,))?;
+                let wnarrow = wsorted.call_method1("astype", ("float16",))?;
+                let wbytes: Vec<u8> = wnarrow.call_method0("tobytes")?.extract()?;
+                let np_version: String = numpy.getattr("__version__")?.extract()?;
+                assert!(
+                    !np_sorted,
+                    "{name}: fnp f16 sort diverged from a correctly-sorted numpy oracle (numpy {np_version})"
+                );
+                assert_eq!(
+                    ours_bytes, wbytes,
+                    "{name}: fnp f16 sort does not match the f32-widened reference either (numpy {np_version})"
+                );
+                eprintln!(
+                    "NOTE {name}: numpy {np_version} direct f16 sort emitted NON-ASCENDING output \
+                     (upstream x86-simd-sort fp16 defect); fnp output verified correct instead."
+                );
+            }
+        }
+        Ok(())
+    });
+}

@@ -4,6 +4,56 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - WIN (SHIP): np.sort(float16) via exact f32 widening - 7.72x vs numpy, null control 1.0005, closes bead deadlock-audit-98chw + UPSTREAM FINDING: numpy 2.3.5 direct f16 sort emits MIS-SORTED output on AVX-512 workers
+
+`cc_fnp`. The production lever unblocked by today's median-gate re-decision (f98ac675): the
+2026-07-04 "0.75x, do NOT re-dig" row rested on a 99.1 ms numpy baseline that reads 156-260 ms
+on today's fleet.
+
+ONE LEVER: `try_native_f16_sort_flat` in sort()'s 1-D flat dispatch - numpy has NO f16 simd
+sort (generic path), so astype(f32) -> numpy's AVX f32 simd sort -> astype(f16). f16->f32 is
+exact and f32->f16 is exact for values that came from f16, so the widened VALUE sort is
+byte-exact for finite non-(-0.0) data under ANY kind (equal values have identical bytes).
+NaN (payload bytes) and -0.0 (kind-specific placement among zeros) defer via a parallel
+uint16-bits pre-scan; gate n >= 1<<17, 1-D C-contig. Pure composition of numpy's own
+primitives + a safe bit pre-scan; no unsafe beyond the house read-only-buffer idiom, no C
+linkage.
+
+MEASURED (ONE binary / ONE process / ONE rch invocation, worker ovh-a, alternating AB/BA in
+one iter_custom routine, black_box on results, A/A null control per the corrected method):
+
+| row | fnp | ORIG numpy | ratio | cvs |
+|---|---:|---:|---:|---|
+| f16_sort_production_4m (fnp.sort, real dispatch) | 20.312 ms | 156.796 ms | **7.72x** | 2.42% / 0.25% |
+| f16_sort_production_null_AA (same arm twice) | 20.113 ms | 20.123 ms | **1.0005** | 1.87% / 2.00% |
+| context: f32_argsort post-dedupe (re-read, quiet) | 22.728 ms | 21.450 ms | 0.944x | 1.48% / 0.74% |
+| context: f32_argsort_null_AA | 22.781 ms | 22.799 ms | 1.0008 | 0.97% / 0.77% |
+
+DECISION: 7.72x vs a 0.05% null floor - decidable beyond argument; both arms are even inside
+the retired <5% cv gate. The quiet-worker re-read also tightens yesterday's argsort-dedupe
+residual to 0.944x (from the loaded 0.918x read).
+
+EXECUTION EVIDENCE: gate-by-construction (f16 4M input, n >= 1<<17, no NaN/-0.0 in the bench
+data by construction) + the 7.7x separation itself (the fallback would read ~1.0x) + the
+production-parity tobytes assert inside the bench before timing.
+
+UPSTREAM FINDING (documented per the how-to-investigate runbook, "bug in numpy" branch):
+numpy 2.3.5 on the AVX-512 worker hz2 emits direct np.sort(float16) output that is NOT
+globally ascending (x86-simd-sort fp16 defect class): equal bit-multisets vs its own
+f32-widened sort of the same data, fnp == the widened route, yet direct != widened - which is
+impossible for two correct sorts; first divergence at elem 35380 (0xbb85=-0.94 vs
+0xbb71=-0.93 runs). ovh-a (no AVX-512) and local numpy 2.4.3 / 1.26.4 show byte-identical
+routes (0 diffs over the same seeded data). The new conformance test
+`f16_sort_flat_widening_matches_numpy` therefore demands byte-equality when numpy's own
+output is self-consistent (ascending), and on a defective oracle asserts multiset equality +
+fnp == the f32-widened reference instead, with an eprintln note. fnp produces CORRECT output
+where that numpy build mis-sorts. Follow-up bead files the upstream report/tracking.
+
+PROVENANCE: worker ovh-a (bench) + hz2 x3 / ovh-a (conformance); binary sha256 unobtainable
+(rch .rchignore retrieval exclusion, documented 420cf1a3) - source provenance = this commit.
+Artifacts: tests/artifacts/perf/2026-07-10_f16_sort_production_cc_fnp/ (4 attempt logs; run4
+carries the decision rows).
+
 ## 2026-07-10 - ADDENDUM (ISA scoping, from existing ledgered measurements): which fnp surfaces are vector-width-bound vs memory-bound - the honest-scoping companion to the AVX2 verdict below
 
 `cc_fnp`, completing the fleet ISA check per the frankenpandas pattern (scope where wider
