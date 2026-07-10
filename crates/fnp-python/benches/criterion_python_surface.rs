@@ -7431,7 +7431,8 @@ a = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint8).view('S8').reshape(-1)
 fn bench_string_searchsorted_boundary(c: &mut Criterion) {
     // np.searchsorted into a SORTED 1-D unicode ('U') haystack with a 'U' query array. numpy's
     // per-record codepoint binary search is single-threaded and pathologically slow (~2s @2M+2M).
-    // For Latin-1 fnp does a parallel memcmp binary search — bit-exact insertion indices.
+    // For Latin-1 fnp packs fixed-width records into u64 keys, sorts queries once, and monotonic-merges
+    // insertion indices byte-exactly.
     let mut group = c.benchmark_group("python_string_searchsorted_boundary");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(4));

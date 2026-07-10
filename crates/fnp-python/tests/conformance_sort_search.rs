@@ -726,6 +726,72 @@ print(left and right)
 }
 
 #[test]
+fn searchsorted_packed_latin1_string_records_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+n = 70000
+base = np.arange(n, dtype=np.uint32)
+
+u_cells = np.empty((n, 8), dtype=np.uint32)
+u_cells[:, 0] = 97 + (base // 2048) % 5
+u_cells[:, 1] = 97 + (base // 256) % 7
+u_cells[:, 2] = 0
+u_cells[:, 3] = 97 + (base // 32) % 11
+u_cells[:, 4] = 97 + (base // 8) % 13
+u_cells[:, 5] = 97 + base % 17
+u_cells[:, 6] = 0
+u_cells[:, 7] = 97 + (base * 3) % 19
+u = np.sort(u_cells.reshape(-1).view('U8'))
+uq_cells = u_cells[(base * 37 + 11) % n].copy()
+uq_cells[0, :] = 0
+uq_cells[1, :] = 255
+uq = uq_cells.reshape(-1).view('U8')
+
+s_cells = np.empty((n, 8), dtype=np.uint8)
+s_cells[:, 0] = (97 + (base // 2048) % 5).astype(np.uint8)
+s_cells[:, 1] = (97 + (base // 256) % 7).astype(np.uint8)
+s_cells[:, 2] = 0
+s_cells[:, 3] = (97 + (base // 32) % 11).astype(np.uint8)
+s_cells[:, 4] = (97 + (base // 8) % 13).astype(np.uint8)
+s_cells[:, 5] = (97 + base % 17).astype(np.uint8)
+s_cells[:, 6] = 0
+s_cells[:, 7] = (97 + (base * 3) % 19).astype(np.uint8)
+s = np.sort(s_cells.view('S8').reshape(-1))
+sq_cells = s_cells[(base * 41 + 7) % n].copy()
+sq_cells[0, :] = 0
+sq_cells[1, :] = 255
+sq = sq_cells.view('S8').reshape(-1)
+
+same_u = np.array(['aaaa', 'aaaa', 'bbbb'], dtype='U4')
+same_s = np.array([b'aaaa', b'aaaa', b'bbbb'], dtype='S4')
+
+ok = True
+for label, hay, query in [
+    ('U8', u, uq),
+    ('S8', s, sq),
+    ('U4-small-identical', same_u, np.array(['aaaa', 'aaaz', 'bbbb'], dtype='U4')),
+    ('S4-small-identical', same_s, np.array([b'aaaa', b'aaaz', b'bbbb'], dtype='S4')),
+]:
+    for side in ('left', 'right'):
+        got = fnp.searchsorted(hay, query, side=side)
+        exp = np.searchsorted(hay, query, side=side)
+        if not np.array_equal(got, exp):
+            print((label, side, got[:10].tolist() if hasattr(got, '__len__') else got, exp[:10].tolist() if hasattr(exp, '__len__') else exp))
+            ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "packed Latin-1 string searchsorted should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn searchsorted_left() -> Result<(), String> {
     let script = fnp_script(
         r#"

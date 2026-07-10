@@ -105,6 +105,54 @@ the Gram DIRECTLY into the numpy `empty` buffer (kill the intermediate 32 MiB `V
 (fused) + centering ~0.5 ms + numpy alloc ~1-3 ms ~= 13-15 ms vs ORIG 19.9 ms. Then, and only then,
 the fused mirror is the right kernel.
 
+## 2026-07-10 - WIN (SHIP): string searchsorted Latin-1 U/S via packed-u64 query sort + monotonic merge - 27.3x vs ORIG
+
+`cod_fnp`, packed string setops continuation. LEDGER CHECK FIRST: did not reopen the closed dense row-unique
+occupancy/rank table or U8 union-only helper rejects; this is the open packed word-key string searchsorted bead
+`deadlock-audit-l3lcj`, distinct from those rejected routes and directly extending the shipped string packed-key
+family (sort/argsort/unique/unique_full).
+
+Ranked hotspot table before the lever:
+| Rank | Evidence | Row | Time | Note |
+|---:|---|---|---:|---|
+| 1 | bead prototype profile (cc_fnp, 2026-07-09) | U8 current memcmp binsearch, n=m=2^21 | 2128.7 ms | barely 1.11x over NumPy in that probe |
+| 2 | bead prototype profile | U8 packed-u64 merge kernel | 16.2 ms | same semantic problem, order-preserving key route |
+| 3 | this run pre-edit criterion, worker `vmi1227854` | `fnp_searchsorted_U8_left_2m` | 133.88 ms | release-perf criterion, pre-edit source |
+| 4 | this run pre-edit criterion, worker `vmi1227854` | `numpy_searchsorted_U8_left_2m` | 2957.8 ms | same command, NumPy 1.26 oracle |
+
+Primitive: reuse `pack_fixed_width_string_keys` for S1..8 / Latin-1 U1..8. The haystack is already sorted by the
+searchsorted contract, so packed haystack keys are sorted. Pack queries, sort `(u64_key, u32_original_index)`,
+scan the sorted haystack keys once with a monotonic pointer (`<` for left, `<=` for right), then scatter insertion
+indices back to query order. If packing fails (wide Unicode codepoint) or the haystack key order is not
+nondecreasing, fall through to the older byte-order-compatible memcmp binary search. No C BLAS/LAPACK/XLA, pure
+safe Rust source; existing fresh-output raw-slice writes remain in the local PyO3 unsafe boundary pattern.
+
+MEASURED keep row (release-perf criterion, `rch exec`, worker `ovh-a`, 2M U8 Latin-1 haystack + 2M U8 query,
+same-worker FNP-vs-NumPy row; artifact
+`tests/artifacts/perf/2026-07-10_string_searchsorted_packed_merge_cod_fnp/candidate_criterion.txt`):
+| Probe | fnp packed merge | ORIG NumPy | ORIG/fnp |
+|---|---:|---:|---:|
+| `searchsorted(U8[2M], U8[2M], side=left)` | 53.751 ms | 1466.1 ms | **27.3x** |
+
+Supporting A/B: the pre-edit FNP row from this run was 133.88 ms on worker `vmi1227854`, so the candidate is
+2.49x faster than the old memcmp binary-search path, but that comparison is cross-worker because RCH does not
+expose a worker pin through `rch exec`; the same-worker claim above is candidate vs ORIG NumPy.
+
+CORRECTNESS: `cargo test -p fnp-python --test conformance_sort_search
+searchsorted_packed_latin1_string_records_match_numpy` GREEN. The new shard covers U8 and S8 Latin-1 records with
+embedded NUL bytes, duplicated/equal keys, lower/upper out-of-range probes, and both `side='left'` and
+`side='right'`, plus small all-identical U4/S4 cases. The criterion benchmark also asserts `np.array_equal` for
+left and right before timing.
+
+GATES / profiler note: `rch exec -- cargo check -p fnp-python --lib` GREEN. `cargo check -p fnp-python --tests`
+is still blocked by pre-existing `where_py` lib-test call-signature errors at `crates/fnp-python/src/lib.rs`
+98523/98548/98574; the earlier local `right` scoping error from the first draft is gone. `cargo clippy -p
+fnp-python --lib -- -D warnings` is blocked before this crate by pre-existing `fnp-ufunc::UFuncArray::nan_filtered`
+dead_code. `cargo fmt --check -p fnp-python` is red due broad existing crate formatting drift. `perf stat` and
+`cargo flamegraph` attempts were captured but not usable because RCH refused to offload wrapper/non-compilation
+commands and local execution hit the shared cargo build lock; see `perf_stat_candidate.txt` and
+`flamegraph_attempt.txt`.
+
 ## 2026-07-09 - WIN (SHIP): complex128 setxor1d via dense direct-domain presence grid - 11.2x vs ORIG (un-reverts old 1.22x hash)
 
 `BlackThrush`, dig-deeper round (sixth win this session; completes the c128 dense-domain setop family). The

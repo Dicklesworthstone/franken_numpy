@@ -1,0 +1,4 @@
+  [2m2026-07-10T02:07:05.174911Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: cargo flamegraph -p fnp-python --profile release-perf --bench criterion_python_surface -o tests/artifacts/perf/2026-07-10_string_searchsorted_packed_merge_cod_fnp/flamegraph.svg -- python_string_searchsorted_boundary --noplot[0m
+    [2;3mat[0m rch/src/hook.rs:703 [2;3mon[0m ThreadId(1)
+
+    Blocking waiting for file lock on build directory
