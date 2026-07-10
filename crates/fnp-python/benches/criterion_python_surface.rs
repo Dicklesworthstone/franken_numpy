@@ -13924,6 +13924,138 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
                 });
             });
             report_ledger_pair("f16_sort_production_null_AA", &null_a, &null_b);
+
+            // f16 STABLE ARGSORT production arm (widened stable radix; sibling lever): the
+            // same 4M f16 input is tie-dense by construction (63k distinct values), the case
+            // where stability is load-bearing. Paired vs numpy + A/A null control.
+            let fnp_argsort = module.getattr("argsort").expect("fnp argsort");
+            let numpy_argsort = numpy.getattr("argsort").expect("numpy argsort");
+            let stable_kw = pyo3::types::PyDict::new(py);
+            stable_kw.set_item("kind", "stable").expect("kind kwarg");
+            let ag_prod = fnp_argsort
+                .call((&input,), Some(&stable_kw))
+                .expect("fnp f16 stable argsort parity call");
+            let ag_orig = numpy_argsort
+                .call((&input,), Some(&stable_kw))
+                .expect("numpy f16 stable argsort parity call");
+            assert!(
+                equal
+                    .call1((&ag_prod, &ag_orig))
+                    .expect("f16 argsort array_equal")
+                    .extract::<bool>()
+                    .expect("f16 argsort equality bool"),
+                "production f16 stable argsort parity",
+            );
+
+            let ag_samples = RefCell::new(Vec::new());
+            let ag_orig_samples = RefCell::new(Vec::new());
+            let ag_order = Cell::new(0u64);
+            group.bench_function("f16_argsort_stable_production_4m_paired", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut cand_total = Duration::ZERO;
+                    let mut orig_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let orig_first = ag_order.get() & 1 == 1;
+                        ag_order.set(ag_order.get().wrapping_add(1));
+                        if orig_first {
+                            let start = Instant::now();
+                            black_box(
+                                numpy_argsort
+                                    .call((&input,), Some(&stable_kw))
+                                    .expect("numpy f16 argsort"),
+                            );
+                            orig_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                fnp_argsort
+                                    .call((&input,), Some(&stable_kw))
+                                    .expect("fnp f16 argsort"),
+                            );
+                            cand_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(
+                                fnp_argsort
+                                    .call((&input,), Some(&stable_kw))
+                                    .expect("fnp f16 argsort"),
+                            );
+                            cand_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                numpy_argsort
+                                    .call((&input,), Some(&stable_kw))
+                                    .expect("numpy f16 argsort"),
+                            );
+                            orig_total += start.elapsed();
+                        }
+                    }
+                    ag_samples
+                        .borrow_mut()
+                        .push(cand_total.as_secs_f64() * 1e9 / iterations as f64);
+                    ag_orig_samples
+                        .borrow_mut()
+                        .push(orig_total.as_secs_f64() * 1e9 / iterations as f64);
+                    cand_total + orig_total
+                });
+            });
+            report_ledger_pair(
+                "f16_argsort_stable_production_4m",
+                &ag_samples,
+                &ag_orig_samples,
+            );
+
+            let ag_null_a = RefCell::new(Vec::new());
+            let ag_null_b = RefCell::new(Vec::new());
+            let ag_null_order = Cell::new(0u64);
+            group.bench_function("f16_argsort_stable_production_4m_null_control", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut a_total = Duration::ZERO;
+                    let mut b_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let b_first = ag_null_order.get() & 1 == 1;
+                        ag_null_order.set(ag_null_order.get().wrapping_add(1));
+                        if b_first {
+                            let start = Instant::now();
+                            black_box(
+                                fnp_argsort
+                                    .call((&input,), Some(&stable_kw))
+                                    .expect("null b"),
+                            );
+                            b_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                fnp_argsort
+                                    .call((&input,), Some(&stable_kw))
+                                    .expect("null a"),
+                            );
+                            a_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(
+                                fnp_argsort
+                                    .call((&input,), Some(&stable_kw))
+                                    .expect("null a"),
+                            );
+                            a_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                fnp_argsort
+                                    .call((&input,), Some(&stable_kw))
+                                    .expect("null b"),
+                            );
+                            b_total += start.elapsed();
+                        }
+                    }
+                    ag_null_a
+                        .borrow_mut()
+                        .push(a_total.as_secs_f64() * 1e9 / iterations as f64);
+                    ag_null_b
+                        .borrow_mut()
+                        .push(b_total.as_secs_f64() * 1e9 / iterations as f64);
+                    a_total + b_total
+                });
+            });
+            report_ledger_pair("f16_argsort_stable_null_AA", &ag_null_a, &ag_null_b);
         }
 
         {

@@ -56,6 +56,54 @@ issue in this lever. `git diff --check` passed.
 DECISION: SHIP. The exact-binary median is lower on both workers, the pinned
 Criterion confirmation agrees, and the output proof is bit-exact. Impact 3 x
 confidence 4 / effort 1 = 12.
+## 2026-07-10 - WIN (SHIP): np.argsort(float16, kind=stable) via widened stable radix - 5.53x / 6.54x on two workers, nulls 1.0059 / 0.9984 + SCOPING AMENDMENT for the f16 SORT lever (numpy's AVX-512 fp16 qsort is fast-but-mis-sorting; the widening sort trades 0.74x there for correctness)
+
+`cc_fnp`, sibling of the 7.72x f16 sort lever (de381d49). PROFILE BASIS: numpy's generic f16
+ordering path measured 156.8 ms @4M this morning as the sort ORIG arm; np.argsort(f16, stable)
+still delegated to it entirely (the stable-radix dispatch gated on itemsize 4|8).
+
+ONE LEVER: an ("f", 2) arm in try_native_argsort_stable_flat - astype(f32) then the shipped
+argsort_stable_radix_f32 (fallback argsort_stable_typed::<f32> on the widened array). f16->f32
+is exact, so equal f16s stay equal, distinct stay distinct, and stable ties break by original
+index identically: the widened stable permutation IS the f16 stable permutation. -0.0 needs no
+defer (the radix key normalizes -0.0 to +0.0 = numpy's stable tie-by-index among zeros); NaN
+defers inside the existing fallbacks. 4M f16 elements over ~63k finite values are tie-dense by
+construction, so stability is load-bearing and exercised.
+
+MEASURED (ONE binary / ONE process / ONE rch invocation each, alternating AB/BA in one
+iter_custom routine, black_box, A/A null controls; TWO independent same-binary runs on
+different workers):
+
+| run | row | fnp | ORIG numpy | ratio | cvs | null AA |
+|---|---|---:|---:|---:|---|---|
+| run11 (ovh-a) | f16_argsort_stable_production_4m | 48.399 ms | 267.661 ms | **5.53x** | 5.6% / 0.9% | 1.0059 (1.3%/1.5%) |
+| run12 (2nd worker) | f16_argsort_stable_production_4m | 52.832 ms | 345.271 ms | **6.54x** | 5.8% / 2.8% | 0.9984 (8.6%/9.1%) |
+
+Median gate: 5.5-6.5x vs sub-1% null deviations - decidable on both workers. Same-run context:
+f32-argsort dedupe residual replicates a third time (0.9475, cvs 1.1%, null 1.0026).
+
+CORRECTNESS: conformance_sorting::f16_stable_argsort_widening_matches_numpy GREEN on hz2 (the
+adversarial worker): tie-dense 2M case + mixed +-0.0 no-defer case + NaN defer case, exact
+index array_equal + intp dtype. cargo check green. Parity is by construction and the argsort
+path is immune to the fp16-qsort oracle defect (numpy has no fp16 simd ARGSORT).
+
+SCOPING AMENDMENT for the f16 SORT lever (de381d49) - run12 resolves the 2026-07-04 mystery
+completely: on AVX-512 workers numpy's f16 VALUE sort uses the x86-simd-sort fp16 qsort and
+reads ~99 ms @4M (EXACTLY the old reject's 99.1 ms baseline), where the widening route reads
+133.6 ms = 0.74x - but that same qsort is the one proven to emit MIS-SORTED output (hz2,
+numpy 2.3.5; upstream bead deadlock-audit-f7qjf). So the shipped sort lever WINS 7.4-7.7x on
+generic-path workers (ovh-a/vmi class, replicated again in run11 at 7.41x production) and
+trades 0.74x for CORRECT output on AVX-512-fp16 workers whose numpy is currently buggy. When
+the fleet's numpy is upgraded past the upstream fix, revisit: a healthy fp16 qsort would be
+fast AND correct, making the widening route a regression there - the retry predicate is
+"fleet numpy carries the x86-simd-sort fp16 fix" (tracked in deadlock-audit-f7qjf).
+
+PROVENANCE: workers ovh-a (run11) + second worker (run12; identity in the artifact logs);
+binary sha256 unobtainable (rch .rchignore retrieval exclusion, documented 420cf1a3) - source
+provenance = this commit. Fleet-saturation note: 12 bench attempts were needed across the
+afternoon (10-min client cap vs cold LTO; one attempt fail-closed on
+insufficient_slots=10/active_project_exclusion=1 - the recipe held, no local build ever ran).
+Artifacts: tests/artifacts/perf/2026-07-10_f16_sort_production_cc_fnp/argsort_bench_run*.txt.
 
 ## 2026-07-10 - WIN (SHIP): np.sort(float16) via exact f32 widening - 7.72x vs numpy, null control 1.0005, closes bead deadlock-audit-98chw + UPSTREAM FINDING: numpy 2.3.5 direct f16 sort emits MIS-SORTED output on AVX-512 workers
 

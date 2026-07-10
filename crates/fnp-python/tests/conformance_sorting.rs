@@ -569,3 +569,50 @@ fn f16_sort_flat_widening_matches_numpy() {
         Ok(())
     });
 }
+
+#[test]
+fn f16_stable_argsort_widening_matches_numpy() {
+    // np.argsort(f16, kind='stable') routes through the f32-widened stable radix (exact value
+    // map + stable tie-by-index => identical permutation). 4M elements over f16's ~63k finite
+    // values guarantees dense ties, so the permutation is only right if stability is exact.
+    // Mixed +0.0/-0.0 must NOT defer (radix normalizes -0.0 like numpy's stable ties); NaN
+    // defers to the numpy-identical fallback. argsort output = intp indices => array_equal.
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(286)\n\
+                 n = 2_000_000\n\
+                 ties = np.round(rng.standard_normal(n), 2).astype(np.float16)\n\
+                 zeros = ties.copy()\n\
+                 zeros[::37] = np.float16(0.0)\n\
+                 zeros[::53] = np.float16(-0.0)\n\
+                 with_nan = ties.copy()\n\
+                 with_nan[123_456] = np.float16(np.nan)\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let kw = PyDict::new(py);
+        kw.set_item("kind", "stable")?;
+        for name in ["ties", "zeros", "with_nan"] {
+            let arr = ns
+                .get_item(name)?
+                .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing arr"))?;
+            let ours = module.getattr("argsort")?.call((&arr,), Some(&kw))?;
+            let theirs = numpy.getattr("argsort")?.call((&arr,), Some(&kw))?;
+            let equal: bool = numpy
+                .getattr("array_equal")?
+                .call1((&ours, &theirs))?
+                .extract()?;
+            assert!(equal, "f16 stable argsort ({name}) diverged from numpy");
+            assert_eq!(
+                ours.getattr("dtype")?.str()?.to_string(),
+                theirs.getattr("dtype")?.str()?.to_string(),
+                "{name}: index dtype diverged"
+            );
+        }
+        Ok(())
+    });
+}
