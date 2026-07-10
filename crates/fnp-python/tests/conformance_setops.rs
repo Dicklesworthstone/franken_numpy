@@ -170,6 +170,47 @@ fn union_and_setxor_u8_packed_latin1_strings_match_numpy() {
 }
 
 #[test]
+fn intersect_setdiff_packed_latin1_u8_s8_strings_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(456)\n\
+                 u_a = rng.integers(97, 123, (90_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n\
+                 u_fresh = rng.integers(97, 123, (70_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n\
+                 u_b = np.concatenate([u_a[:30_000], u_fresh])\n\
+                 s_a = rng.integers(97, 123, (90_000, 8), dtype=np.uint8).view('S8').reshape(-1)\n\
+                 s_fresh = rng.integers(97, 123, (70_000, 8), dtype=np.uint8).view('S8').reshape(-1)\n\
+                 s_b = np.concatenate([s_a[:30_000], s_fresh])\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let array_equal = numpy.getattr("array_equal")?;
+        for (left_name, right_name) in [("u_a", "u_b"), ("s_a", "s_b")] {
+            let left = ns
+                .get_item(left_name)?
+                .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing left"))?;
+            let right = ns
+                .get_item(right_name)?
+                .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing right"))?;
+            for op in ["intersect1d", "setdiff1d"] {
+                let ours = module.getattr(op)?.call1((&left, &right))?;
+                let theirs = numpy.getattr(op)?.call1((&left, &right))?;
+                let equal: bool = array_equal.call1((&ours, &theirs))?.extract()?;
+                assert!(equal, "packed Latin-1 string {op} diverged for {left_name}");
+                let ours_dtype = ours.getattr("dtype")?.str()?;
+                let theirs_dtype = theirs.getattr("dtype")?.str()?;
+                let same_dtype = ours_dtype == theirs_dtype.to_str()?;
+                assert!(same_dtype, "packed Latin-1 string {op} changed dtype");
+            }
+        }
+        Ok(())
+    });
+}
+
+#[test]
 fn setxor1d_mixed_struct_dense_integral_float_matches_numpy() {
     with_fnp_and_numpy(|py, module, numpy| {
         let ns = PyDict::new(py);

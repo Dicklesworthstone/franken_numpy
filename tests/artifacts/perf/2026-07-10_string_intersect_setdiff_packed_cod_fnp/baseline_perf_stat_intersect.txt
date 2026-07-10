@@ -1,0 +1,25 @@
+  [2m2026-07-10T02:56:08.367378Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: perf stat -d cargo bench -p fnp-python --profile release-perf --bench criterion_python_surface -- python_string_setops_boundary/fnp_intersect1d_U8_2m[0m
+    [2;3mat[0m rch/src/hook.rs:703 [2;3mon[0m ThreadId(1)
+
+    Blocking waiting for file lock on build directory
+cargo: Interrupt
+
+ Performance counter stats for 'cargo bench -p fnp-python --profile release-perf --bench criterion_python_surface -- python_string_setops_boundary/fnp_intersect1d_U8_2m':
+
+         194595472      task-clock                       #    0.001 CPUs utilized
+               221      context-switches                 #    1.136 K/sec
+                 8      cpu-migrations                   #   41.111 /sec
+             16456      page-faults                      #   84.565 K/sec
+         461118140      instructions                     #    0.66  insn per cycle
+                                                  #    0.44  stalled cycles per insn     (73.32%)
+         701644062      cycles                           #    3.606 GHz                         (72.94%)
+         203858696      stalled-cycles-frontend          #   29.05% frontend cycles idle        (69.74%)
+          94287649      branches                         #  484.532 M/sec                       (71.27%)
+           5443580      branch-misses                    #    5.77% of all branches             (73.25%)
+         171720105      L1-dcache-loads                  #  882.447 M/sec                       (71.22%)
+          10600959      L1-dcache-load-misses            #    6.17% of all L1-dcache accesses   (70.47%)
+
+     182.255319497 seconds time elapsed
+
+       0.115724000 seconds user
+       0.094388000 seconds sys

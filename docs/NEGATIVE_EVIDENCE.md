@@ -153,6 +153,52 @@ dead_code. `cargo fmt --check -p fnp-python` is red due broad existing crate for
 commands and local execution hit the shared cargo build lock; see `perf_stat_candidate.txt` and
 `flamegraph_attempt.txt`.
 
+## 2026-07-10 - WIN (SHIP): string intersect/setdiff Latin-1 U/S via packed-u64 two-pointer set algebra - 18.7x / 14.7x vs ORIG
+
+`cod_fnp`, bead `deadlock-audit-mgabg`, packed string setops continuation. LEDGER CHECK FIRST: did not reopen
+the closed dense row-unique occupancy/rank table, U8 union-only helper, float radix-select median, or float16 sort
+via f32 widening rejects. This is the open packed word-key route for string `intersect1d` / `setdiff1d`, extending
+the already-shipped packed string sort/argsort/unique/unique_full/union1d/setxor1d/searchsorted family.
+
+Ranked hotspot table before the lever (`rch exec -- cargo bench -p fnp-python --profile release-perf --bench
+criterion_python_surface -- python_string_setops_boundary`, worker `vmi1227854`; artifact
+`tests/artifacts/perf/2026-07-10_string_intersect_setdiff_packed_cod_fnp/baseline_criterion_string_setops.txt`):
+| Rank | Row | FNP current | ORIG NumPy | ORIG/current |
+|---:|---|---:|---:|---:|
+| 1 | `intersect1d(U8[2M], U8[2M])` | 738.18 ms | 5313.2 ms | 7.2x |
+| 2 | `setdiff1d(U8[2M], U8[2M])` | 450.16 ms | 4440.4 ms | 9.9x |
+
+Primitive: reuse `pack_fixed_width_string_keys` for S1..8 and Latin-1 U1..8. Pack both operands into
+big-endian order-preserving `u64` keys, `par_sort_unstable` + `dedup` each side, then run a linear two-pointer
+set operation: equality emits `intersect1d`, and advancing a monotone `b` pointer emits `setdiff1d`. Reconstruct
+fresh same-dtype NumPy storage through the existing packed-key output helper. Wider strings, non-Latin-1 Unicode,
+non-contiguous inputs, small inputs, mixed widths/kinds, or packing failure still fall through to the older
+memcmp-sort + hash-membership path / NumPy fallback. No C BLAS/LAPACK/XLA.
+
+MEASURED keep row (release-perf criterion, `rch exec`, worker `hz2`, same-worker FNP-vs-NumPy rows; artifact
+`tests/artifacts/perf/2026-07-10_string_intersect_setdiff_packed_cod_fnp/candidate_criterion_string_setops.txt`):
+| Probe | fnp packed keys | ORIG NumPy | ORIG/fnp |
+|---|---:|---:|---:|
+| `intersect1d(U8[2M], U8[2M])` | 78.066 ms | 1457.5 ms | **18.7x** |
+| `setdiff1d(U8[2M], U8[2M])` | 66.060 ms | 968.14 ms | **14.7x** |
+
+Supporting self-comparison: the pre-edit FNP rows from this run were 738.18 ms / 450.16 ms on worker
+`vmi1227854`, so the candidate is 9.5x / 6.8x faster than the previous memcmp+hash route, but that is
+cross-worker because `rch exec` does not expose worker pinning. The same-worker keep claim is candidate vs ORIG
+NumPy on `hz2`.
+
+CORRECTNESS: focused `cargo test -p fnp-python --test conformance_setops
+intersect_setdiff_packed_latin1_u8_s8_strings_match_numpy -- --nocapture` GREEN. The new shard covers both U8
+Latin-1 and S8 byte records, with shared and fresh records, and checks `intersect1d` / `setdiff1d` via live
+`np.array_equal` plus dtype string equality. The criterion bench also asserts `np.array_equal` before timing both
+U8 operations.
+
+GATES / profiler note: criterion ranked and measured the hotspot. `perf stat` and `cargo flamegraph` were attempted
+before the lever, but RCH treated the wrapper commands as non-compilation and local execution blocked on the shared
+Cargo build-directory lock; artifacts:
+`tests/artifacts/perf/2026-07-10_string_intersect_setdiff_packed_cod_fnp/baseline_perf_stat_intersect.txt` and
+`tests/artifacts/perf/2026-07-10_string_intersect_setdiff_packed_cod_fnp/baseline_flamegraph_intersect.txt`.
+
 ## 2026-07-09 - WIN (SHIP): complex128 setxor1d via dense direct-domain presence grid - 11.2x vs ORIG (un-reverts old 1.22x hash)
 
 `BlackThrush`, dig-deeper round (sixth win this session; completes the c128 dense-domain setop family). The
