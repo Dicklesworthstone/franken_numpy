@@ -1,0 +1,196 @@
+== round 1 ==
+np126 cov 2000x500: 21.26 flt=0
+np126 corrcoef 2000x500: 32.68 flt=0
+np126 cov 1000x1000: 19.38 flt=0
+np126 corrcoef 1000x1000: 21.13 flt=0
+np126 cov 500x5000: 25.84 flt=0
+np126 corrcoef 500x5000: 25.68 flt=0
+np126 cov 200x1000: 1.01 flt=0
+np126 corrcoef 200x1000: 1.08 flt=0
+np126 gauge matmul2048: 155.0
+fnp_head cov 2000x500: 16.96 flt=5
+fnp_head corrcoef 2000x500: 18.85 flt=2
+fnp_head cov 1000x1000: 6.38 flt=0
+fnp_head corrcoef 1000x1000: 6.73 flt=0
+fnp_head cov 500x5000: 11.33 flt=0
+fnp_head corrcoef 500x5000: 12.19 flt=0
+fnp_head cov 200x1000: 0.95 flt=0
+fnp_head corrcoef 200x1000: 0.99 flt=0
+fnp_head gauge matmul2048: 25.0
+fnp_zk cov 2000x500: 15.83 flt=5
+fnp_zk corrcoef 2000x500: 17.96 flt=1
+fnp_zk cov 1000x1000: 5.92 flt=0
+fnp_zk corrcoef 1000x1000: 6.77 flt=0
+fnp_zk cov 500x5000: 11.76 flt=0
+fnp_zk corrcoef 500x5000: 11.39 flt=0
+fnp_zk cov 200x1000: 0.92 flt=0
+fnp_zk corrcoef 200x1000: 0.97 flt=0
+fnp_zk gauge matmul2048: 51.0
+== round 2 ==
+np126 cov 2000x500: 20.36 flt=0
+np126 corrcoef 2000x500: 31.12 flt=0
+np126 cov 1000x1000: 19.28 flt=0
+np126 corrcoef 1000x1000: 21.45 flt=0
+np126 cov 500x5000: 26.51 flt=0
+np126 corrcoef 500x5000: 27.03 flt=0
+np126 cov 200x1000: 0.99 flt=0
+np126 corrcoef 200x1000: 1.06 flt=0
+np126 gauge matmul2048: 32.1
+fnp_head cov 2000x500: 17.79 flt=6
+fnp_head corrcoef 2000x500: 20.21 flt=1
+fnp_head cov 1000x1000: 6.58 flt=0
+fnp_head corrcoef 1000x1000: 7.14 flt=0
+fnp_head cov 500x5000: 11.80 flt=0
+fnp_head corrcoef 500x5000: 12.16 flt=0
+fnp_head cov 200x1000: 0.90 flt=0
+fnp_head corrcoef 200x1000: 1.21 flt=0
+fnp_head gauge matmul2048: 27.3
+fnp_zk cov 2000x500: 16.10 flt=5
+fnp_zk corrcoef 2000x500: 18.17 flt=2
+fnp_zk cov 1000x1000: 5.83 flt=0
+fnp_zk corrcoef 1000x1000: 6.36 flt=0
+fnp_zk cov 500x5000: 10.93 flt=0
+fnp_zk corrcoef 500x5000: 11.13 flt=0
+fnp_zk cov 200x1000: 0.91 flt=0
+fnp_zk corrcoef 200x1000: 0.98 flt=0
+fnp_zk gauge matmul2048: 51.0
+== round 3 ==
+np126 cov 2000x500: 21.47 flt=0
+np126 corrcoef 2000x500: 31.46 flt=0
+np126 cov 1000x1000: 19.89 flt=0
+np126 corrcoef 1000x1000: 21.40 flt=0
+np126 cov 500x5000: 26.78 flt=0
+np126 corrcoef 500x5000: 27.01 flt=0
+np126 cov 200x1000: 1.00 flt=0
+np126 corrcoef 200x1000: 1.07 flt=0
+np126 gauge matmul2048: 32.1
+fnp_head cov 2000x500: 17.31 flt=5
+fnp_head corrcoef 2000x500: 19.91 flt=1
+fnp_head cov 1000x1000: 6.40 flt=0
+fnp_head corrcoef 1000x1000: 7.10 flt=0
+fnp_head cov 500x5000: 11.58 flt=0
+fnp_head corrcoef 500x5000: 11.17 flt=0
+fnp_head cov 200x1000: 0.91 flt=0
+fnp_head corrcoef 200x1000: 0.97 flt=0
+fnp_head gauge matmul2048: 50.0
+fnp_zk cov 2000x500: 16.23 flt=6
+fnp_zk corrcoef 2000x500: 17.47 flt=0
+fnp_zk cov 1000x1000: 5.91 flt=0
+fnp_zk corrcoef 1000x1000: 6.70 flt=0
+fnp_zk cov 500x5000: 10.59 flt=0
+fnp_zk corrcoef 500x5000: 10.96 flt=0
+fnp_zk cov 200x1000: 0.92 flt=0
+fnp_zk corrcoef 200x1000: 0.97 flt=0
+fnp_zk gauge matmul2048: 44.7
+== round 4 ==
+np126 cov 2000x500: 20.54 flt=0
+np126 corrcoef 2000x500: 31.93 flt=0
+np126 cov 1000x1000: 19.59 flt=0
+np126 corrcoef 1000x1000: 21.18 flt=0
+np126 cov 500x5000: 28.46 flt=0
+np126 corrcoef 500x5000: 26.32 flt=0
+np126 cov 200x1000: 0.99 flt=0
+np126 corrcoef 200x1000: 1.06 flt=0
+np126 gauge matmul2048: 36.0
+fnp_head cov 2000x500: 18.92 flt=6
+fnp_head corrcoef 2000x500: 20.35 flt=2
+fnp_head cov 1000x1000: 6.68 flt=0
+fnp_head corrcoef 1000x1000: 7.34 flt=0
+fnp_head cov 500x5000: 11.32 flt=0
+fnp_head corrcoef 500x5000: 11.70 flt=0
+fnp_head cov 200x1000: 1.17 flt=0
+fnp_head corrcoef 200x1000: 1.00 flt=0
+fnp_head gauge matmul2048: 30.7
+fnp_zk cov 2000x500: 17.60 flt=6
+fnp_zk corrcoef 2000x500: 17.78 flt=2
+fnp_zk cov 1000x1000: 6.09 flt=0
+fnp_zk corrcoef 1000x1000: 7.21 flt=0
+fnp_zk cov 500x5000: 10.88 flt=0
+fnp_zk corrcoef 500x5000: 11.49 flt=0
+fnp_zk cov 200x1000: 1.13 flt=0
+fnp_zk corrcoef 200x1000: 0.98 flt=0
+fnp_zk gauge matmul2048: 47.0
+== round 5 ==
+np126 cov 2000x500: 20.14 flt=0
+np126 corrcoef 2000x500: 31.42 flt=0
+np126 cov 1000x1000: 19.58 flt=0
+np126 corrcoef 1000x1000: 21.10 flt=0
+np126 cov 500x5000: 26.64 flt=0
+np126 corrcoef 500x5000: 26.64 flt=0
+np126 cov 200x1000: 1.00 flt=0
+np126 corrcoef 200x1000: 1.07 flt=0
+np126 gauge matmul2048: 31.2
+fnp_head cov 2000x500: 16.58 flt=6
+fnp_head corrcoef 2000x500: 19.37 flt=1
+fnp_head cov 1000x1000: 6.31 flt=0
+fnp_head corrcoef 1000x1000: 6.84 flt=0
+fnp_head cov 500x5000: 11.83 flt=0
+fnp_head corrcoef 500x5000: 11.68 flt=0
+fnp_head cov 200x1000: 1.13 flt=0
+fnp_head corrcoef 200x1000: 0.98 flt=0
+fnp_head gauge matmul2048: 30.0
+fnp_zk cov 2000x500: 16.75 flt=6
+fnp_zk corrcoef 2000x500: 18.33 flt=1
+fnp_zk cov 1000x1000: 6.23 flt=0
+fnp_zk corrcoef 1000x1000: 6.30 flt=0
+fnp_zk cov 500x5000: 11.60 flt=0
+fnp_zk corrcoef 500x5000: 11.88 flt=0
+fnp_zk cov 200x1000: 0.91 flt=0
+fnp_zk corrcoef 200x1000: 0.97 flt=0
+fnp_zk gauge matmul2048: 51.0
+== round 6 ==
+np126 cov 2000x500: 23.18 flt=0
+np126 corrcoef 2000x500: 31.51 flt=0
+np126 cov 1000x1000: 19.43 flt=0
+np126 corrcoef 1000x1000: 21.68 flt=0
+np126 cov 500x5000: 26.88 flt=0
+np126 corrcoef 500x5000: 27.20 flt=0
+np126 cov 200x1000: 1.00 flt=0
+np126 corrcoef 200x1000: 1.09 flt=0
+np126 gauge matmul2048: 28.2
+fnp_head cov 2000x500: 17.94 flt=6
+fnp_head corrcoef 2000x500: 19.49 flt=1
+fnp_head cov 1000x1000: 6.74 flt=0
+fnp_head corrcoef 1000x1000: 6.66 flt=0
+fnp_head cov 500x5000: 11.94 flt=0
+fnp_head corrcoef 500x5000: 11.52 flt=0
+fnp_head cov 200x1000: 0.93 flt=0
+fnp_head corrcoef 200x1000: 1.00 flt=0
+fnp_head gauge matmul2048: 29.8
+fnp_zk cov 2000x500: 15.75 flt=7
+fnp_zk corrcoef 2000x500: 18.47 flt=0
+fnp_zk cov 1000x1000: 6.18 flt=0
+fnp_zk corrcoef 1000x1000: 6.68 flt=0
+fnp_zk cov 500x5000: 10.94 flt=0
+fnp_zk corrcoef 500x5000: 11.68 flt=0
+fnp_zk cov 200x1000: 0.92 flt=0
+fnp_zk corrcoef 200x1000: 0.98 flt=0
+fnp_zk gauge matmul2048: 28.4
+== round 7 ==
+np126 cov 2000x500: 19.54 flt=0
+np126 corrcoef 2000x500: 31.51 flt=0
+np126 cov 1000x1000: 20.01 flt=0
+np126 corrcoef 1000x1000: 21.42 flt=0
+np126 cov 500x5000: 26.34 flt=0
+np126 corrcoef 500x5000: 27.53 flt=0
+np126 cov 200x1000: 0.99 flt=0
+np126 corrcoef 200x1000: 1.08 flt=0
+np126 gauge matmul2048: 31.5
+fnp_head cov 2000x500: 17.15 flt=5
+fnp_head corrcoef 2000x500: 19.18 flt=1
+fnp_head cov 1000x1000: 6.42 flt=0
+fnp_head corrcoef 1000x1000: 7.34 flt=0
+fnp_head cov 500x5000: 11.78 flt=0
+fnp_head corrcoef 500x5000: 11.64 flt=0
+fnp_head cov 200x1000: 0.91 flt=0
+fnp_head corrcoef 200x1000: 1.20 flt=0
+fnp_head gauge matmul2048: 33.0
+fnp_zk cov 2000x500: 16.44 flt=5
+fnp_zk corrcoef 2000x500: 19.83 flt=1
+fnp_zk cov 1000x1000: 6.63 flt=0
+fnp_zk corrcoef 1000x1000: 6.77 flt=0
+fnp_zk cov 500x5000: 11.98 flt=0
+fnp_zk corrcoef 500x5000: 11.50 flt=0
+fnp_zk cov 200x1000: 1.11 flt=0
+fnp_zk corrcoef 200x1000: 0.96 flt=0
+fnp_zk gauge matmul2048: 30.0

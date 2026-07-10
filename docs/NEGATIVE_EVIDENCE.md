@@ -47,6 +47,64 @@ setxor1d_mixed_struct_dense_integral_float_matches_numpy -- --nocapture` GREEN; 
 covers the original i8+f8 and new i4+f4 dtypes for `setxor1d`, `intersect1d`, and `setdiff1d`,
 including `-0.0` / non-integral-float fallback edges. The measured rows are exact
 `np.array_equal` parity, so ULP budget is N/A.
+## 2026-07-10 - WIN (SHIP): cov/corrcoef Gram strip-loop check-free chunks_exact micro-kernel - 1.05-1.17x e2e, BIT-IDENTICAL (profile-led: the kernel was ISSUE-bound on bounds-check/address overhead, not bandwidth)
+
+`cc_fnp`, bead deadlock-audit-zj3m3 continuation after the zero-copy REJECT below. Ledger checked
+first: zero-copy Gram / fused mirror stayed closed; this lever is a pure inner-loop restructure of
+the shipped MR=4 tile.
+
+RANKED FRAME TABLE FIRST (perf record -g, symbolized HEAD build, MALLOC_MMAP_THRESHOLD_=128M +
+MALLOC_TRIM_THRESHOLD_=128M to neutralize the fault-storm mode documented below; consistent
+across cov 2000x500 / corrcoef 2000x500 / cov 500x5000):
+`cov_gram_from_centered::{closure#2}` (the MR=4 strip kernel) **66-70% self**; rayon/crossbeam
+scheduling + sched_yield 8-12% (triangular imbalance idle); numpy's own blas_thread_server 5-7%;
+serial mirror ~2%; vec-zeroing memset 3% (500x5000 only). Output stages are noise, corroborating
+the zero-copy REJECT. Top frame = the kernel itself.
+
+MECHANISM (perf annotate, not a guess): kernel cycles are FLAT across `lea`/`cmp`/`mov (%rsp)`
+address re-derivation, slice bounds checks, and spill reloads rather than concentrated on vector
+loads/mults -- the per-chunk `centered[(i0 + m) * n_obs + ch * 8..]` indexing made LLVM re-derive
+and bounds-check every address every iteration. Issue-bound, NOT bandwidth-bound (so the
+also-considered j-panel cache-blocking wave was deferred, see OPEN).
+
+LEVER (one): mr==MR fast path iterating 5 zipped `chunks_exact(8)` streams (the shared j-row + 4
+i-rows) -> check-free pointer bumps; the short final block (n_vars % 4 != 0) keeps the historical
+indexed loop. Lane fold order is IDENTICAL (chunk ch's product added to acc[m] in ascending ch
+order, mul-then-add under +avx2 without +fma) -> **BIT-IDENTICAL**, proven by the 50-case battery
+(13 shapes x {cov, cov ddof=0, corrcoef} + 1-D + two-operand + const-row + NaN + fortran-defer)
+sha-equal against the HEAD baseline .so, plus the criterion group's embedded allclose assert.
+
+MEASURED A (primary; interleaved python probes, 7 rounds, malloc knobs, BOTH sides storm-mode with
+EQUAL 15793 minor faults/call -- the allocation confound is equalized; np126 control cv ~1%):
+candidate beats HEAD in ~47/49 probe-rounds. min-of-rounds ms:
+| probe | HEAD | candidate | self |
+|---|---|---|---|
+| cov 2000x500 | 16.58 | 15.75 | 1.05x |
+| corrcoef 2000x500 | 18.85 | 17.47 | 1.08x |
+| cov 1000x1000 | 6.31 | 5.83 | 1.08x |
+| corrcoef 1000x1000 | 6.66 | 6.30 | 1.06x |
+| cov 500x5000 | 11.32 | 10.59 | 1.07x |
+| cov/corrcoef 200x1000 | ~parity | ~parity | small-shape gates unaffected |
+
+MEASURED B (criterion, NEW `python_cov_large_boundary` group registered this commit -- it also
+closes the CI-blindness gap from the fault-storm entry; numpy oracle = in-process 2.4.3; fnp rows
+cv < 2.5% in both runs): baseline -> candidate means: cov 2000x500 23.22 -> 20.06 (1.16x),
+corrcoef 2000x500 26.35 -> 23.73 (1.11x), cov 1000x1000 9.02 -> 7.74 (1.16x), corrcoef 1000x1000
+9.99 -> 8.55 (1.17x), cov 500x5000 18.42 -> 16.79 (1.10x), corrcoef 500x5000 18.29 -> 17.25
+(1.06x). CAVEAT (honesty): the numpy CONTROL rows show the baseline run absorbed heavier
+background load (e.g. numpy corrcoef 1000x1000 mean 47.7 ms in the baseline run vs 11.9 ms in the
+candidate run), so the criterion magnitudes may flatter; quote MEASURED A as primary. Both
+measurements agree on direction everywhere.
+
+ubs on the two changed files: rust module MODULE_TIMEOUT at 300s with no findings emitted -- the
+same wedge the 2026-07-09 BlackThrush artifact documents for this crate; `cargo check` for the lib
+and the bench target is green with zero new warnings.
+
+OPEN (next levers for this frame, in evidence order): (1) rayon idle 8-12% from the triangular
+block imbalance -- a pairing schedule (block b with block n_blocks-1-b) would even the per-task
+work; (2) j-panel wave cache-blocking -- re-profile AFTER this ships; if the annotate now shows
+load-port/L3 stalls instead of address overhead, that is the bandwidth lever's turn.
+Artifacts: tests/artifacts/perf/2026-07-10_cov_gram_checkfree_kernel_cc_fnp/.
 
 ## 2026-07-10 - REJECT (measured, reverted) + TWO LANE-CRITICAL MEASUREMENT FINDINGS: cov/corrcoef zero-copy Gram into the numpy buffer + fused mirror + parallel centering (bead deadlock-audit-zj3m3)
 
