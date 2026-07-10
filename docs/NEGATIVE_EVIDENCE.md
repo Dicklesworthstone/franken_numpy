@@ -4,6 +4,59 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - WIN (SHIP): S9..S16 bytes wide-key pack - intersect 12.2x / setxor 7.7x vs ORIG; closes bead deadlock-audit-740l3 and COMPLETES the wide-key family (U9..16 + S9..16 x unique/intersect/setdiff/setxor/union)
+
+`cc_fnp`, bead deadlock-audit-740l3 (final item split from deadlock-audit-611nq). LEDGER CHECK
+FIRST: own-bead scope; no closed reject reopened.
+
+ONE LEVER (one mechanism, five ops lit up): teach the three wide-key helpers 'S'. 'S' records
+have no 4-byte UCS4 stride and need NO Latin-1 gate (raw padded memcmp == numpy 'S' order for
+ALL byte values incl. embedded nulls; trailing-null stripping cannot reorder or split raw-equal
+records). `packed_wide_unicode_key_width` -> `packed_wide_string_key_width` with an
+`"S" if 9..=16` arm; `pack_fixed_width_unicode_wide_keys` -> `pack_fixed_width_wide_string_keys`
+with `is_bytes` (stride 1, skip the UCS4 prescan); `packed_wide_string_keys_to_numpy` writes
+contiguous bytes for 'S'. All seven call sites updated: the just-shipped set-algebra branches
+(intersect/setdiff, setxor, union) and the unique (key, index) sort now accept S9..16 through
+their existing wide branches - zero new algorithm code.
+
+EXECUTION EVIDENCE (ledger-integrity rule): (a) gate-by-construction: S16 -> narrow width None,
+wide Some(16) unconditionally (no data-dependent defer exists on the 'S' arm - the pack cannot
+return None for byte data of the right length), nc = 2M >= 1<<16; (b) the conformance data
+plants embedded nulls and high bytes (0x00..0xFF) that only the stride-1 'S' pack can accept -
+the 'U' route structurally rejects them, so passing byte-equality on that data proves the new
+pack ran; (c) scale check: candidate intersect 46.9 ms sits at the key-pipeline cost (pack +
+two sorts + merge; cf. U16's 49.2 ms same pipeline), far below the old memcmp-index-sort + FNV
+set route (the S8 setxor precedent measured ~270 ms @2M+2M for the tagged record sort route).
+Per-arm times below are the ops' self-times (opaque PyO3 call1 arms, results through black_box
+- DCE structurally impossible).
+
+MEASURED KEEP GATE (criterion release-perf, ONE binary / ONE rch invocation, worker hz2,
+np.array_equal asserted in-run before timing; arms are sequential rows per SUBSTRATE RULE v2 -
+drift bounded by the single-threaded numpy control arms at 2.5-3.0% CI):
+
+| Probe (S16, 1M + 1M, 50% overlap) | fnp | ORIG numpy | ORIG/fnp | CI half-width fnp/numpy |
+|---|---:|---:|---:|---:|
+| `intersect1d` | 46.938 ms | 572.21 ms | **12.19x** | 9.4% / 2.5% |
+| `setxor1d` | 74.481 ms | 575.35 ms | **7.72x** | 5.5% / 3.0% |
+
+CV HONESTY: numpy arms pass the strict <5% bar; the rayon-parallel fnp arms (9.4%/5.5%) are
+fleet-load-inflated as documented repeatedly today, so the ratios are FLOORS. Magnitudes are
+8-12x - far outside any drift band.
+
+CORRECTNESS: conformance_setops 14 passed / 0 failed (remote vmi1149989), including the new
+wide_bytes_s9_s16_setops_match_numpy: S9 + S16 x {unique, intersect1d, setdiff1d, setxor1d,
+union1d} np.array_equal + dtype + tobytes byte-equality at 200k records over the FULL byte
+range (embedded nulls included). `cargo check --lib --bench criterion_python_surface` green
+(remote hz1). All validation used the fail-closed invocation form
+(`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo ...`) per today's
+rch-local-fallback correction; two bench attempts lost the local client to the 10-min cap
+mid-LTO (cold release-perf caches) - the third landed warm on hz2 and completed in-run.
+
+WIDE-KEY FAMILY COMPLETE: U9..16 (unique dc310269, intersect/setdiff 1ca747c3, setxor/union
+27c29b79) + S9..16 (this). No open residual in the packed-wide-string vein; wider records
+(U17+/S17+) would need 3+ words - only worth digging if a profile ranks them (none does today).
+Artifacts: tests/artifacts/perf/2026-07-10_string_s16_wide_bytes_pack_cc_fnp/.
+
 ## 2026-07-10 - WIN (SHIP): Latin-1 U9..U16 setxor1d/union1d via two-word packed keys - 10.7x / 11.0x vs ORIG, strict CV gate green on all four arms (completes bead deadlock-audit-611nq items 1-2) + AUDIT: the three named reject rows are NOT dead-code-benched
 
 `cc_fnp`, bead deadlock-audit-611nq (wide-key set-algebra completion). LEDGER CHECK FIRST: this

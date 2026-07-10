@@ -7999,6 +7999,30 @@ test = np.concatenate([a[:100_000], trand])\n";
         group.bench_function("numpy_isin_S8_2m", |bn| bn.iter(|| black_box(is_nn.call1((&a, &test)).unwrap())));
         group.bench_function("fnp_setxor1d_S8_2m", |bn| bn.iter(|| black_box(xr_ff.call1((&a, &b)).unwrap())));
         group.bench_function("numpy_setxor1d_S8_2m", |bn| bn.iter(|| black_box(xr_nn.call1((&a, &b)).unwrap())));
+
+        // S16: the wide two-word-key byte pack (S9..16 previously fell to the memcmp/FNV routes).
+        // Full byte range incl. embedded nulls (raw padded memcmp == numpy 'S' order).
+        let setup16 = "import numpy as np\n\
+rng = np.random.default_rng(4)\n\
+a16 = rng.integers(0, 256, (1_000_000, 16), dtype=np.uint8).view('S16').reshape(-1)\n\
+brand16 = rng.integers(0, 256, (500_000, 16), dtype=np.uint8).view('S16').reshape(-1)\n\
+b16 = np.concatenate([a16[:500_000], brand16])\n";
+        let ns16 = PyDict::new(py);
+        py.run(std::ffi::CString::new(setup16).unwrap().as_c_str(), Some(&ns16), Some(&ns16))
+            .expect("S16 setup");
+        let a16 = ns16.get_item("a16").expect("a16");
+        let b16 = ns16.get_item("b16").expect("b16");
+        let ix_ff = module.getattr("intersect1d").unwrap();
+        let ix_nn = numpy.getattr("intersect1d").unwrap();
+        for op in ["intersect1d", "setxor1d"] {
+            let f = module.getattr(op).unwrap().call1((&a16, &b16)).unwrap();
+            let n = numpy.getattr(op).unwrap().call1((&a16, &b16)).unwrap();
+            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "S16 {op} mismatch");
+        }
+        group.bench_function("fnp_intersect1d_S16_1m", |bn| bn.iter(|| black_box(ix_ff.call1((&a16, &b16)).unwrap())));
+        group.bench_function("numpy_intersect1d_S16_1m", |bn| bn.iter(|| black_box(ix_nn.call1((&a16, &b16)).unwrap())));
+        group.bench_function("fnp_setxor1d_S16_1m", |bn| bn.iter(|| black_box(xr_ff.call1((&a16, &b16)).unwrap())));
+        group.bench_function("numpy_setxor1d_S16_1m", |bn| bn.iter(|| black_box(xr_nn.call1((&a16, &b16)).unwrap())));
     });
     group.finish();
 }
