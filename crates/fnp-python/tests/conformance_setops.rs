@@ -862,6 +862,53 @@ fn unique_and_sort_string_packed_latin1_large_matches_numpy() {
 }
 
 #[test]
+fn unique_packed_wide_latin1_u9_u16_matches_numpy() {
+    // U16 records no longer fit the packed-u64 path. The two-word key captures all 16
+    // Latin-1 codepoints in NumPy lexicographic order while retaining the original index
+    // as the deterministic tie-break used by the unchanged gather/dedup pipeline.
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(281)\n\
+                 n = 300_000\n\
+                 u9 = rng.integers(97, 123, (n, 9), dtype=np.uint32).reshape(-1).view('U9')\n\
+                 u16 = rng.integers(97, 123, (n, 16), dtype=np.uint32).reshape(-1).view('U16')\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        for name in ["u9", "u16"] {
+            let arr = ns.get_item(name)?.ok_or_else(|| {
+                pyo3::exceptions::PyAssertionError::new_err(format!("missing {name}"))
+            })?;
+            let ours = module.getattr("unique")?.call1((&arr,))?;
+            let theirs = numpy.getattr("unique")?.call1((&arr,))?;
+            let equal: bool = numpy
+                .getattr("array_equal")?
+                .call1((&ours, &theirs))?
+                .extract()?;
+            assert!(
+                equal,
+                "packed-wide Latin-1 {name} unique diverged from numpy"
+            );
+            assert_eq!(
+                ours.getattr("dtype")?.str()?.to_string(),
+                theirs.getattr("dtype")?.str()?.to_string()
+            );
+            let ours_bytes: Vec<u8> = ours.call_method0("tobytes")?.extract()?;
+            let theirs_bytes: Vec<u8> = theirs.call_method0("tobytes")?.extract()?;
+            assert_eq!(
+                ours_bytes, theirs_bytes,
+                "{name} unique output bytes diverged"
+            );
+        }
+        Ok(())
+    });
+}
+
+#[test]
 fn unique_full_string_packed_latin1_large_matches_numpy() {
     // unique(..., return_index/inverse/counts) on large Latin-1 U8/S6 takes the packed-u64
     // (key, index) path; first-occurrence index, inverse map, and counts must all be byte-exact.

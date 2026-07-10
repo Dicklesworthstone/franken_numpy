@@ -56,6 +56,75 @@ the fault-storm residual (deadlock-audit-83ldf) or a hardware change reopens it.
 Artifacts: tests/artifacts/perf/2026-07-10_cov_gram_pairing_schedule_cc_fnp/ (fresh baseline +
 candidate frame tables, per-round A/B with gauges + fault modes, parity battery outputs, patch,
 probe/summarize scripts).
+## 2026-07-10 - WIN (SHIP): Latin-1 U9..U16 unique via two-word packed keys - 4.74x vs ORIG, 2.88x faster than old FNP
+
+`cod_fnp`, bead `franken_numpy-ixs5y.282`, packed string setops continuation. LEDGER CHECK
+FIRST: did not reopen the closed dense row-unique occupancy/rank table, U8 union-only helper,
+float radix-select median, or float16 sort-via-f32-widening rejects. The requested complex128
+dense setops retries were already complete (`union1d`, `intersect1d`, `setdiff1d`, and
+`setxor1d` grid/merge routes), the structured bitplane route was already widened from `(i8,f8)`
+to every int/uint width 1/2/4/8 plus f4/f8 at `75d4f39b`, and the narrow Latin-1 U/S packed-u64
+unique/setops family was already shipped. The first uncovered packed-key residual was flat
+`unique` for Latin-1 Unicode U9..U16, which still sorted record indices through 36..64-byte
+memcmp comparisons.
+
+PROFILE FIRST: pre-edit main's wide-U route was profiled with `perf record -F 999 -g` over
+40 U16[1M] unique calls (37K cycles samples; `perf report --no-children`; one lost chunk).
+The ranked self-time table below shows the top resolved frames; the artifact records **all 41
+frames at or above 0.10%**, including unresolved restricted-kernel frames:
+
+| Rank | Self | Frame |
+|---:|---:|---|
+| 1 | 32.12% | Rayon `par_sort_unstable` recurse over u32 indices + record comparator |
+| 2 | 20.80% | `__memcmp_avx2_movbe` |
+| 3 | 10.28% | `__memmove_avx_unaligned_erms` / memcpy |
+| 4 | 3.72% | parallel Unicode Latin-1 high-byte pre-scan |
+| 5 | 3.06% | unresolved kernel frame |
+| 6 | 1.33% | Rayon insertion sort with record comparator |
+| 7 | 1.16% | parallel sorted-record gather |
+| 8 | 1.14% | unresolved kernel frame |
+| 9 | 0.89% | unresolved kernel frame |
+| 10 | 0.81% | NumPy `unique_string<unsigned int>` setup/parity call |
+| 11 | 0.67% | parallel distinct-output gather |
+| 12 | 0.55% | crossbeam epoch pin |
+
+ONE LEVER: Latin-1 U9..U16 records now pack into a lexicographically ordered pair
+`(high: u64, low: u64)` and sort `(key, original_index)` tuples. Each codepoint byte is packed
+big-endian, so derived tuple order is exactly the existing Latin-1 record order; the original
+index is a deterministic equality tie-break. The gather/dedup/output pipeline is unchanged.
+Non-Latin-1 Unicode, U17+, every S width, non-contiguous arrays, and other unsupported cases
+keep the existing fallback. No unsafe and no C BLAS/LAPACK/XLA.
+
+MEASURED KEEP GATE (same `release-perf` Criterion process on RCH worker `hz2`, job
+`j-29914252970038060`; 10 samples; correctness asserted with `np.array_equal` before timing):
+
+| Probe | FNP candidate | ORIG NumPy | ORIG/fnp | FNP CV | ORIG CV |
+|---|---:|---:|---:|---:|---:|
+| `unique(U16[1M])` | 36.469 ms | 172.73 ms | **4.74x** | **4.990%** | **0.498%** |
+| control `unique(U8[2M])` | 53.598 ms | 323.82 ms | **6.04x** | 16.530% | 3.958% |
+| control `unique(U4[2M], heavy dedup)` | 31.741 ms | 191.22 ms | **6.02x** | 10.736% | 3.939% |
+
+The strict U16 A-B passes the `<5%` CV gate on both candidate and ORIG. The U8/U4 candidate
+controls were noisy but remain about 6x faster than same-worker ORIG and execute code identical
+to pre-edit main. Supporting, explicitly cross-worker self-comparison: the pre-edit FNP U16
+median was 105.048 ms (CV 4.83%), so the candidate point estimate is 2.88x lower; that row is
+routing evidence, not the same-worker keep claim.
+
+CORRECTNESS: full `cargo test -p fnp-python --test conformance_setops -- --nocapture` GREEN on
+`hz2`, 11 passed / 0 failed. The new boundary test covers both U9 and U16 with exact NumPy array,
+dtype, and `tobytes` equality. The measured U8/U4/U16 rows also gate `np.array_equal`; ULP budget
+is N/A. The candidate library and benchmark compile in `release-perf`. Broad lib/tests/benches
+check remains red only on the pre-existing `where_py` lib-test signature errors near
+`lib.rs:98758/98783/98809`; workspace `cargo fmt --check` likewise remains red on thousands of
+pre-existing diffs, while targeted rustfmt inspection found no diff in any changed hunk.
+Workspace clippy with `-D warnings` is independently red on the pre-existing approximate-PI
+test literal in `fnp-io` and dead `fnp_ufunc::nan_filtered` method.
+
+Full commands, raw-sample CV calculations, the complete >=0.10% frame table, baseline stats,
+fallback scope, and proof notes:
+`tests/artifacts/perf/2026-07-10_string_u16_packed_wide_cod_fnp/profile_and_ab.txt`.
+The next open vein is profile-ranked U/S9..16 set algebra; this WIN makes no ceiling claim and
+does not silently extend the key route beyond the proven Unicode-flat-unique boundary.
 
 ## 2026-07-10 - WIN (SHIP): mixed structured setops bitplanes widened to i4+f4 - 173x / 62x vs ORIG
 

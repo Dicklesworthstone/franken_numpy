@@ -1,0 +1,139 @@
+FrankenNumPy wide fixed-width Unicode unique: profile and same-worker A/B
+Date: 2026-07-10
+Agent: cod_fnp
+Bead: franken_numpy-ixs5y.282
+Candidate worker: hz2
+Candidate profile: release-perf
+Environment: OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 RAYON_NUM_THREADS=16
+
+LEDGER-FIRST ROUTING
+====================
+The complex128 dense setops parity/grid family, structured (int/uint width
+1/2/4/8 + float32/float64) bitplane family, and narrow Latin-1 U/S packed-u64
+unique/setops family were already shipped on main. This attempt did not reopen
+the ledger-closed dense row-unique occupancy/rank table, U8 union-only helper,
+float radix-select median, or float16-via-f32 sort ideas. The open residual was
+Latin-1 fixed-width Unicode U9..U16, which still used record-index memcmp sort.
+
+PRE-EDIT BASELINE
+=================
+Input: NumPy seed 281, 1,000,000 mostly-unique Latin-1 records.
+Binary: .probe/fnp_python_head_cee1bffe_fastmode.so. Its wide-U unique route is
+the same record-index memcmp implementation present at pre-edit main 75d4f39b.
+Twelve interleaved local runs:
+
+row                   median_ms   mean_ms   p95_ms   cv_pct   ORIG/FNP
+FNP unique U16          105.048    104.229   107.538    4.83      -
+ORIG NumPy unique U16   781.604    790.248   871.780    9.69     7.44x
+FNP unique S16           33.897          -         -   17.41      -
+ORIG NumPy unique S16   632.979          -         -   18.83    18.67x
+
+The S16 control was already fast and too noisy for a keep/reject decision, so
+the one lever deliberately targets only U9..U16. The pre-edit row is routing
+evidence; the keep gate below is the same-worker candidate-vs-ORIG run.
+
+RANKED SELF-TIME PROFILE (ALL FRAMES >= 0.10%)
+================================================
+Command:
+  perf record -F 999 -g --call-graph dwarf,16384 -- <40 FNP U16 unique calls>
+  perf report --stdio --no-children --percent-limit 0.1 \
+    --sort overhead,symbol,dso --call-graph none
+Profile: 37K cycles:P samples, 41,352 events, one lost chunk. Kernel symbols
+were restricted; unresolved kernel frames remain explicitly listed.
+
+rank  self_pct  frame
+   1     32.12  Rayon par_sort_unstable recurse<u32, wide-record memcmp comparator>
+   2     20.80  __memcmp_avx2_movbe
+   3     10.28  __memmove_avx_unaligned_erms / inlined memcpy
+   4      3.72  parallel Unicode Latin-1 high-byte pre-scan
+   5      3.06  unresolved kernel 0xffffffffb0c1b2b7
+   6      1.33  Rayon insertion_sort_shift_left<u32, memcmp comparator>
+   7      1.16  Rayon sorted-record gather bridge (u32 permutation)
+   8      1.14  unresolved kernel 0xffffffffaf601192
+   9      0.89  unresolved kernel 0xffffffffaf6001bd
+  10      0.81  NumPy unique_string<unsigned int>
+  11      0.67  Rayon distinct-output gather bridge (usize indices)
+  12      0.55  crossbeam_epoch::default::with_handle
+  13      0.54  crossbeam_deque::Stealer::steal
+  14      0.53  unresolved kernel 0xffffffffaf704109
+  15      0.45  unresolved kernel 0xffffffffaf70410b
+  16      0.44  Rayon join_context for sorted-record gather
+  17      0.35  unresolved kernel 0xffffffffafda4e96
+  18      0.33  Rayon join_context for distinct-output gather
+  19      0.30  NumPy string_quicksort_<unicode_tag, unsigned int>
+  20      0.27  fnp_python::try_native_string_unique_flat
+  21      0.27  npy_fnv1a
+  22      0.25  __tls_get_addr
+  23      0.23  unresolved kernel 0xffffffffaf601248
+  24      0.21  unresolved kernel 0xffffffffaf704104
+  25      0.21  unresolved kernel 0xffffffffafdd7edf
+  26      0.20  Rayon WorkerThread::steal scan
+  27      0.19  unresolved kernel 0xffffffffafe52aa1
+  28      0.18  unresolved kernel 0xffffffffb0c3a6aa
+  29      0.18  Rayon choose_pivot<u32, memcmp comparator>
+  30      0.17  unresolved kernel 0xffffffffafb23ff4
+  31      0.16  unresolved kernel 0xffffffffb0c3a6a7
+  32      0.16  _int_free_chunk
+  33      0.15  unresolved kernel 0xffffffffb0c3a8fe
+  34      0.14  unresolved kernel 0xffffffffafe52aa5
+  35      0.13  crossbeam_epoch::Global::try_advance
+  36      0.13  unresolved kernel 0xffffffffafa8999a
+  37      0.13  crossbeam_deque::Worker::pop
+  38      0.12  unresolved kernel 0xffffffffafdd7ee3
+  39      0.11  Rayon StackJob::run_inline for sorted-record gather
+  40      0.11  unresolved kernel 0xffffffffb0c3a87e
+  41      0.10  unresolved kernel 0xffffffffb0c3a8fb
+
+Mechanism selected from ranks 1-2: replace 36..64-byte cache-cold record
+comparisons with one lexicographic (high u64, low u64, original u32 index) key
+sort. Packing is big-endian per Latin-1 codepoint, so derived tuple Ord is the
+same order as the existing record comparator. Non-Latin-1, U17+, all S widths,
+and every unsupported layout keep the existing fallback. No unsafe and no C
+BLAS/LAPACK/XLA were added.
+
+SAME-WORKER RELEASE-PERF KEEP GATE
+==================================
+Command:
+  RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-goldsummit-release \
+  rch --no-self-healing exec -- cargo bench -p fnp-python \
+    --profile release-perf --bench criterion_python_surface -- \
+    python_string_unique_boundary
+RCH job: j-29914252970038060, worker hz2.
+Criterion: 10 samples, 2 s warm-up, 4 s measurement target. Correctness is
+asserted with np.array_equal before timing. CV is the sample standard deviation
+of Criterion's per-iteration times divided by their mean.
+
+row                         criterion_ms [95% interval]  raw_mean_ms  cv_pct  ORIG/FNP
+FNP unique U8 2M             53.598 [49.036, 59.152]       56.199      16.530     -
+ORIG NumPy unique U8 2M      323.82 [317.12, 332.02]       323.824       3.958    6.04x
+FNP unique U4 dedup 2M        31.741 [29.004, 34.785]       31.232      10.736     -
+ORIG NumPy unique U4 dedup   191.22 [187.04, 195.99]       191.223       3.939    6.02x
+FNP unique U16 1M             36.469 [35.334, 37.954]       35.906       4.990     -
+ORIG NumPy unique U16 1M     172.73 [172.21, 173.21]       172.729       0.498    4.74x
+
+The strict measured keep row is U16: both candidate and ORIG CV are below 5%,
+and FNP is 4.74x faster. The pre-edit 105.048 ms FNP median versus the candidate
+36.469 ms point estimate is a supporting 2.88x reduction, but is explicitly
+cross-worker and is not the same-worker keep claim. U8/U4 are regression
+controls; their FNP samples were noisy, but both remain about 6x faster than
+same-worker ORIG and are code-identical to the pre-edit route.
+
+PARITY AND BUILD EVIDENCE
+=========================
+- Focused U16 exact array/dtype/byte test: GREEN on hz2 before the boundary test
+  was widened to cover both U9 and U16.
+- Full `conformance_setops` integration shard: GREEN on hz2, 11 passed / 0
+  failed. The wide-key test covers both U9 and U16 with exact array equality,
+  dtype equality, and output-byte equality against NumPy.
+- The release-perf benchmark compiled the candidate library and benchmark and
+  passed its U8/U4/U16 np.array_equal assertions on hz2.
+- A broad fnp-python lib/tests/benches check reached the candidate library and
+  benchmark but remains red on pre-existing where_py lib-test signature errors
+  near lib.rs:98758/98783/98809; these are outside this lane.
+- The mandated workspace `cargo check --workspace --all-targets` reproduces the
+  same three pre-existing where_py lib-test errors. Workspace clippy with
+  `-D warnings` is independently red on the pre-existing approximate-PI test
+  literal in fnp-io and dead `fnp_ufunc::nan_filtered` method.
+- Workspace cargo fmt --check remains red on thousands of pre-existing diffs.
+  Targeted rustfmt checks found no diff in any changed source/test/bench hunk.

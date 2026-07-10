@@ -7389,9 +7389,9 @@ x4 = rng.integers(97, 123, (2_000_000, 4), dtype=np.uint32).reshape(-1).view('U4
 
 fn bench_string_unique_boundary(c: &mut Criterion) {
     // np.unique on a 1-D fixed-width unicode ('U') array. numpy sorts with the slow per-record
-    // codepoint comparator then dedups. For Latin-1 strings fnp memcmp-sorts record indices,
-    // dedups adjacent-equal, and gathers the distinct records — bit-exact. Two cases: mostly-unique
-    // (U8, big output) and heavy-dedup (U4 over a 4-letter alphabet).
+    // codepoint comparator then dedups. For Latin-1 strings fnp sorts packed word keys, dedups
+    // adjacent-equal records, and gathers the distinct records — bit-exact. The U16 case covers
+    // the two-word wide-key route; U8 mostly-unique and U4 heavy-dedup guard the existing u64 path.
     let mut group = c.benchmark_group("python_string_unique_boundary");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(4));
@@ -7406,7 +7406,8 @@ fn bench_string_unique_boundary(c: &mut Criterion) {
         let setup = "import numpy as np\n\
 rng = np.random.default_rng(0)\n\
 x8 = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n\
-xd = rng.integers(97, 101, (2_000_000, 4), dtype=np.uint32).reshape(-1).view('U4')\n";
+xd = rng.integers(97, 101, (2_000_000, 4), dtype=np.uint32).reshape(-1).view('U4')\n\
+x16 = rng.integers(97, 123, (1_000_000, 16), dtype=np.uint32).reshape(-1).view('U16')\n";
         let ns = PyDict::new(py);
         py.run(
             std::ffi::CString::new(setup).unwrap().as_c_str(),
@@ -7416,11 +7417,16 @@ xd = rng.integers(97, 101, (2_000_000, 4), dtype=np.uint32).reshape(-1).view('U4
         .expect("string unique setup");
         let x8 = ns.get_item("x8").expect("x8");
         let xd = ns.get_item("xd").expect("xd");
+        let x16 = ns.get_item("x16").expect("x16");
         let fnp_unique = module.getattr("unique").expect("fnp unique");
         let numpy_unique = numpy.getattr("unique").expect("numpy unique");
         let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
         // Correctness gate: fnp.unique == numpy.unique for both cases; panics on mismatch.
-        for (arr, label) in [(&x8, "U8-mostly-unique"), (&xd, "U4-heavy-dedup")] {
+        for (arr, label) in [
+            (&x8, "U8-mostly-unique"),
+            (&xd, "U4-heavy-dedup"),
+            (&x16, "U16-mostly-unique"),
+        ] {
             let f = fnp_unique.call1((arr,)).expect("fnp unique");
             let n = numpy_unique.call1((arr,)).expect("numpy unique");
             let eq: bool = np_array_equal
@@ -7441,6 +7447,12 @@ xd = rng.integers(97, 101, (2_000_000, 4), dtype=np.uint32).reshape(-1).view('U4
         });
         group.bench_function("numpy_unique_U4_dedup_2m", |b| {
             b.iter(|| black_box(numpy_unique.call1((&xd,)).expect("numpy unique U4")));
+        });
+        group.bench_function("fnp_unique_U16_1m", |b| {
+            b.iter(|| black_box(fnp_unique.call1((&x16,)).expect("fnp unique U16")));
+        });
+        group.bench_function("numpy_unique_U16_1m", |b| {
+            b.iter(|| black_box(numpy_unique.call1((&x16,)).expect("numpy unique U16")));
         });
     });
     group.finish();
