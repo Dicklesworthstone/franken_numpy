@@ -4,6 +4,107 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-09 - WIN (SHIP): cov/corrcoef Gram MR=4 register tile - 1.10-1.38x self, BIT-IDENTICAL (corrects the "4x4 tile was DRAM-flat / C-BLAS-only" verdict)
+
+`cc_fnp`. Lane: large-n linalg pure-Rust (no C BLAS/LAPACK/XLA, per standing directive).
+
+RANKED PROFILE FIRST (full threads, min-of-5, vs ORIG = NumPy 1.26.4 / openblas64 0.3.23 in
+`.venv-numpy126`; fnp = `.probe` .so under py3.13). Across the whole cov/corrcoef + batched-LU lane
+(39 probes) there are EXACTLY TWO losses, and they are the same shape:
+`cov 2000x500` **0.49x** (ORIG 19.86 ms, fnp 40.43 ms) and `corrcoef 2000x500` **0.68x**. Everything
+else is win-or-parity, and batched LU already DOMINATES 1.26 (`batch_inv 100x128` 29.3x,
+`batch_solve 100x128` 42.2x, `batch_slogdet 100x128` 53.7x, `batch_inv 1000x64` 10.9x). So the
+marching-orders premise "batched LU is a gap" is FALSE vs 1.26 — do not re-dig it.
+Gauge: `matmul 2048^2` ORIG 101.1 ms vs fnp 42.1 ms (fnp 2.40x faster) — note NumPy 1.26's openblas64
+dgemm is itself ~2.6x slower than 2.4.3's scipy-openblas (38.4 ms), so vs-1.26 GEMM-shaped wins are
+partly a legacy-BLAS artifact. Stated for honesty; the cov result below does not depend on it.
+
+ROOT CAUSE (measured, not assumed): `cov_gram_from_centered`'s per-cell `dot8` keeps row i in L1 but
+RE-STREAMS row j from L3 for every cell -> traffic = n_vars^2/2 * n_obs * 8 B = **~8 GiB** at 2000x500.
+At L3 bandwidth that is ~20-40 ms, which is exactly the 40 ms observed. It is L3-bandwidth-bound —
+NOT DRAM-bound and NOT compute-bound (`dot8` at AI=0.125 flop/B is already balanced against Zen3's
+64 B/cycle L1 given `+avx2` WITHOUT `+fma`, so per-cell math is at its floor).
+
+CORRECTION to the prior "cov/corrcoef large-n_vars Gram 3-8x: dot8 ALREADY SIMD-auto-vec'd; gap =
+dsyrk packing + DRAM-bandwidth wall (4x4 tile was DRAM-flat). C-BLAS-only." verdict, and to
+"SOLE REMAINING LEVER = link C-BLAS (bead ...cblas-large-gram-lever-8lnzn)": the 4x4 tile was not
+DRAM-flat, it was REGISTER-SPILLED. This target is a Threadripper PRO 5975WX (Zen3): AVX2, **no
+AVX-512**, 16 ymm. A dot8-shaped cell needs eight f64 lane accumulators = 2 ymm, so a 4x4 tile of them
+needs 32 ymm on a 16-ymm machine. The shape that fits is **MR x 1**: four i-rows share each loaded
+j-row (8 ymm of accumulators + operands), cutting j-row L3 re-streaming ~4x.
+
+LEVER (one): tile `cov_gram_from_centered` by MR=4 row-blocks via `par_chunks_mut(n_vars*MR)` (blocks
+own disjoint rows -> no unsafe). Per-cell math is UNCHANGED: same 8 lanes, same `((a0+a1)+(a2+a3)) +
+((a4+a5)+(a6+a7))` reduce tree, same sequential scalar tail, `acc + a*b` (mul-then-add, never
+`mul_add`, since `.cargo/config.toml` pins `+avx2` without `+fma`). Only the cell VISIT ORDER changes.
+MR=6/8 measured slower (spill).
+
+PARITY: **BIT-IDENTICAL**, proven end-to-end through the Python surface — sha256 of raw bytes over 13
+shapes x {cov, corrcoef} x ddof in {default, 0} is `80883e51...f3bf` for BOTH the old `.probe` .so and
+the new build. (cov's bar is only `np.allclose` and nothing pins its bits, so bit-identity is stronger
+than required.) `np.allclose(rtol=1e-12, atol=1e-14)` vs numpy green on all 13 shapes.
+
+MEASURED (interleaved old/new processes, min-over-7-rounds; untouched `matmul 2048^2` gauge read 0.95x,
+i.e. the box was slightly MORE loaded during the new runs, so these self-speedups are conservative):
+
+| probe | old ms | new ms | self |
+|---|---|---|---|
+| cov 2000x500 | 44.04 | 39.88 | 1.10x |
+| corrcoef 2000x500 | 47.78 | 42.23 | 1.13x |
+| cov 1000x1000 | 10.61 | 7.98 | **1.33x** |
+| corrcoef 1000x1000 | 10.53 | 8.58 | 1.23x |
+| cov 500x5000 | 18.45 | 15.74 | 1.17x |
+| corrcoef 500x5000 | 18.37 | 13.30 | **1.38x** |
+
+Rust fnp-vs-fnp kernel A/B (load-robust): Gram at 2000x500 25.31 -> 13.54 ms (**1.87x kernel**);
+1000x1000 8.57 -> 5.78 ms.
+
+HONEST LIMIT: this improves the ranked hotspot but does NOT flip it. `cov 2000x500` goes 0.49x ->
+~0.50x vs ORIG (39.9 ms vs 19.9 ms) because ~26 ms of that call is NOT the Gram — see the REJECT and
+the follow-up below.
+
+## 2026-07-09 - REJECT (measured, reverted): fusing the symmetric mirror into the Gram kernel - kernel 1.27x FASTER, pipeline 1.51x SLOWER
+
+`cc_fnp`. Same session as the MR=4 tile WIN above. The serial `mirror` pass at the end of
+`cov_gram_from_centered` costs ~8.5 ms cold at 2000x2000 (8M strided, page-faulting scalar writes —
+a third of the whole Gram). Obvious lever: store `(j,i)` while the value is still in the accumulator
+register and delete the mirror entirely.
+
+IT WORKS ON THE KERNEL AND LOSES ON THE PIPELINE. Rust fnp-vs-fnp at 2000x500:
+
+| variant | kernel alone | + production output copy |
+|---|---|---|
+| K0 (shipped `dot8`) | 25.31 ms | 35.28 ms |
+| MR=4 tile, serial mirror | 13.54 ms | **31.23 ms** |
+| MR=4 tile, FUSED mirror | **10.62 ms** | 47.10 ms |
+| MR=8 tile, FUSED mirror | 12.02 ms | 49.96 ms |
+
+End-to-end confirmation (interleaved, gauge-matched): the fused build measured `cov 2000x500` **0.91x**
+and `corrcoef 2000x500` **0.74x** — real regressions — while still winning 1.2-1.25x at 1000x1000 /
+500x5000 (long dots, low store rate). Reverted; the shipped kernel keeps the serial mirror.
+
+MECHANISM (falsified the first guess): NOT false sharing. The fused transpose writes 4 f64 = 32 B =
+half a cache line, so blocks i0 and i0+4 share a line — but MR=8 (a full, 64 B-aligned line per block,
+since n_vars=2000 makes every row start 64 B-aligned) did NOT recover it (49.96 ms). What actually
+happens: the fused kernel leaves the whole 32 MiB result dirty in 64 threads' private caches spread
+over the 5975WX's 8 CCDs (each with its own 32 MiB L3 slice), and the SERIAL scalar copy in
+`build_square_f64_matrix` (`for (slot, val) in output.iter().zip(values) { slot.set(val) }`) then has
+to snoop every line back cross-CCD. Writing the triangle in parallel and mirroring SERIALLY leaves the
+data in a far friendlier state for the serial consumer that follows.
+
+GENERAL RULE (worth internalizing): on a multi-CCD/multi-L3 part, a kernel that spreads its whole
+output across all cores' private caches can PESSIMIZE a serial consumer downstream by more than it
+saves. Benchmark the KERNEL AND ITS CONSUMER, never the kernel alone — a standalone kernel A/B here
+would have shipped a 1.27x "win" that is a 1.51x end-to-end loss.
+
+RETRY-CONDITION: re-attempt the fused mirror ONLY together with a parallel or zero-copy output stage.
+The concrete follow-up (est. flips `cov 2000x500` to a ~1.2-1.5x WIN vs ORIG, filed as a bead): compute
+the Gram DIRECTLY into the numpy `empty` buffer (kill the intermediate 32 MiB `Vec` and the serial
+`slot.set` copy in `build_square_f64_matrix`), and parallelize the per-row centering loop in
+`cov_gram_rowvar_f64` / `cov_gram_two_rowvar_f64` (currently serial). Budget at 2000x500: Gram ~10.6 ms
+(fused) + centering ~0.5 ms + numpy alloc ~1-3 ms ~= 13-15 ms vs ORIG 19.9 ms. Then, and only then,
+the fused mirror is the right kernel.
+
 ## 2026-07-09 - WIN (SHIP): complex128 setxor1d via dense direct-domain presence grid - 11.2x vs ORIG (un-reverts old 1.22x hash)
 
 `BlackThrush`, dig-deeper round (sixth win this session; completes the c128 dense-domain setop family). The
