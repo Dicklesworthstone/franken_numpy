@@ -2912,6 +2912,81 @@ fn bench_statistics_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+// Large-n_vars / large-n_obs cov+corrcoef: the Gram-path shapes where the register
+// tile and its output stages dominate. bench_statistics_boundary tops out at 500x500,
+// which never leaves the small-shape gates, so CI was blind both to Gram-kernel
+// regressions and to the fault-storm allocation mode documented in
+// docs/NEGATIVE_EVIDENCE.md 2026-07-10 (30.5 MiB result buffers refaulted per call in
+// unlucky builds -- these rows make that mode visible as an fnp-vs-numpy ratio shift).
+// Conformance is embedded: the group panics if fnp and numpy diverge beyond 1e-12.
+fn bench_cov_large_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_cov_large_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_cov = module.getattr("cov").expect("fnp_python.cov");
+        let numpy_cov = numpy.getattr("cov").expect("numpy.cov");
+        let fnp_corrcoef = module.getattr("corrcoef").expect("fnp_python.corrcoef");
+        let numpy_corrcoef = numpy.getattr("corrcoef").expect("numpy.corrcoef");
+        let np_allclose = numpy.getattr("allclose").expect("np.allclose");
+
+        let rng = numpy
+            .getattr("random")
+            .expect("np.random")
+            .call_method1("default_rng", (0_u64,))
+            .expect("default_rng");
+        let make_input = |rows: usize, cols: usize| {
+            rng.call_method1("standard_normal", ((rows, cols),))
+                .expect("standard_normal input")
+        };
+        let inputs = [
+            ("2000x500", make_input(2000, 500)),
+            ("1000x1000", make_input(1000, 1000)),
+            ("500x5000", make_input(500, 5000)),
+        ];
+
+        let tol = PyDict::new(py);
+        tol.set_item("rtol", 1e-12_f64).expect("rtol");
+        tol.set_item("atol", 1e-14_f64).expect("atol");
+
+        for (shape, input) in inputs {
+            for (opname, fnp_op, numpy_op) in [
+                ("cov", &fnp_cov, &numpy_cov),
+                ("corrcoef", &fnp_corrcoef, &numpy_corrcoef),
+            ] {
+                let ours = fnp_op.call1((&input,)).expect("fnp result");
+                let oracle = numpy_op.call1((&input,)).expect("numpy result");
+                let close: bool = np_allclose
+                    .call((&ours, &oracle), Some(&tol))
+                    .expect("allclose call")
+                    .extract()
+                    .expect("allclose bool");
+                assert!(close, "fnp.{opname} diverges from numpy at {shape}");
+
+                group.bench_function(format!("fnp_{opname}_rowvar_f64_{shape}"), |bench| {
+                    bench.iter(|| {
+                        black_box(fnp_op.call1((&input,)).expect("fnp benchmark call"));
+                    });
+                });
+                group.bench_function(format!("numpy_{opname}_rowvar_f64_{shape}"), |bench| {
+                    bench.iter(|| {
+                        black_box(numpy_op.call1((&input,)).expect("numpy benchmark call"));
+                    });
+                });
+            }
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_std_var_axis_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_std_var_axis_boundary");
     group.sample_size(10);
@@ -12599,6 +12674,7 @@ criterion_group!(
     bench_f16_matmul_boundary,
     bench_flat_sort_dtype_boundary,
     bench_statistics_boundary,
+    bench_cov_large_boundary,
     bench_std_var_axis_boundary,
     bench_var_multiaxis_boundary,
     bench_var_midaxis_boundary,
