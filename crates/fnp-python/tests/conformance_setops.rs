@@ -329,6 +329,57 @@ fn mixed_struct_dense_bitplanes_all_supported_field_widths_match_numpy() {
 }
 
 #[test]
+fn mixed_struct_dense_bitplanes_value_gate_falls_back_at_scale() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(10_101)\n\
+                 dt = np.dtype([('id', '<i4'), ('val', '<f4')], align=False)\n\
+                 base = np.zeros(40_000, dtype=dt)\n\
+                 base['id'] = rng.integers(-20, 21, 40_000, dtype=np.int32)\n\
+                 base['val'] = rng.integers(-15, 26, 40_000).astype(np.float32)\n\
+                 other = np.zeros(40_000, dtype=dt)\n\
+                 other[:10_000] = base[:10_000]\n\
+                 other['id'][10_000:] = rng.integers(-20, 21, 30_000, dtype=np.int32)\n\
+                 other['val'][10_000:] = rng.integers(-15, 26, 30_000).astype(np.float32)\n\
+                 negative_zero = base.copy()\n\
+                 negative_zero['id'][0] = np.int32(21)\n\
+                 negative_zero['val'][0] = np.float32(-0.0)\n\
+                 fractional = base.copy()\n\
+                 fractional['val'][0] = np.float32(1.5)\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let other = ns.get_item("other")?.ok_or_else(|| {
+            pyo3::exceptions::PyKeyError::new_err("structured fallback rhs missing")
+        })?;
+        let array_equal = numpy.getattr("array_equal")?;
+        for name in ["negative_zero", "fractional"] {
+            let left = ns.get_item(name)?.ok_or_else(|| {
+                pyo3::exceptions::PyKeyError::new_err(format!("{name} missing"))
+            })?;
+            for op in ["intersect1d", "setdiff1d", "setxor1d"] {
+                let ours = module.getattr(op)?.call1((&left, &other))?;
+                let theirs = numpy.getattr(op)?.call1((&left, &other))?;
+                assert!(
+                    array_equal.call1((&ours, &theirs))?.extract::<bool>()?,
+                    "mixed structured {op} fallback diverged for {name}"
+                );
+                assert_eq!(
+                    ours.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    theirs.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "mixed structured {op} fallback changed bytes for {name}"
+                );
+            }
+        }
+        Ok(())
+    });
+}
+
+#[test]
 fn conformance_setops_matrix() {
     static TOTALS: Totals = Totals::new();
 
@@ -1149,6 +1200,57 @@ fn wide_bytes_s9_s16_setops_match_numpy() {
                     "{a_name} {op} output bytes diverged"
                 );
             }
+        }
+        Ok(())
+    });
+}
+
+#[test]
+fn wide_unicode_setops_defer_non_native_byteorder() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 a = np.zeros(200_000, dtype='>U9')\n\
+                 b = np.zeros(200_000, dtype='>U9')\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let a = ns
+            .get_item("a")?
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("big-endian lhs missing"))?;
+        let b = ns
+            .get_item("b")?
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("big-endian rhs missing"))?;
+        let array_equal = numpy.getattr("array_equal")?;
+        for op in [
+            "unique",
+            "union1d",
+            "intersect1d",
+            "setdiff1d",
+            "setxor1d",
+        ] {
+            let ours = if op == "unique" {
+                module.getattr(op)?.call1((&a,))?
+            } else {
+                module.getattr(op)?.call1((&a, &b))?
+            };
+            let theirs = if op == "unique" {
+                numpy.getattr(op)?.call1((&a,))?
+            } else {
+                numpy.getattr(op)?.call1((&a, &b))?
+            };
+            assert!(
+                array_equal.call1((&ours, &theirs))?.extract::<bool>()?,
+                "big-endian wide-unicode {op} values diverged"
+            );
+            assert_eq!(
+                ours.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                theirs.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                "big-endian wide-unicode {op} dtype diverged"
+            );
         }
         Ok(())
     });

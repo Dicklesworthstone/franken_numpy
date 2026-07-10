@@ -48,6 +48,72 @@ the 10-minute local client cap mid-LTO; attempt four runs uncapped in the backgr
 measured WIN/REJECT with sha256 + self-time + worker + cv + null-control median follows when
 it lands.
 
+## 2026-07-10 - CORRECTION + WIN (SHIP S; U BLOCKED): packed wide-string proof rebuilt under interleaved SUBSTRATE v2; S16 unique 2.37x / intersect 8.34x / setxor 5.96x
+
+`cod_fnp`, beads `deadlock-audit-611nq` and `deadlock-audit-740l3`. LEDGER CHECK FIRST:
+commits `27c29b79` and `b05b5bfb` remain correctness-valid, but their sequential Criterion
+ratios do not satisfy the current SUBSTRATE v2 rule. This entry supersedes those numerical
+claims for the rows below. It writes no REJECT and does not renew the unprovenanced sort/argsort
+irreducibility claims reopened by `a73f42c9`.
+
+CORRECTNESS / SAFETY LEVER: retain the packed one-word/two-word U/S routes while replacing
+handwritten raw-slice access in the touched packed-string and dense structured-bitplane fast
+paths with owned `PyBuffer::to_vec` input and owned `Vec<u8>` output reconstructed through
+`PyBytes` + `np.frombuffer(...).copy()`. Native-layout gating now defers non-native Unicode
+dtypes, and touched `u32` permutation routes fail closed above `u32::MAX`. Dense structured
+bitplanes remain enabled for all 16 `{i,u}{1,2,4,8} x f{4,8}` combinations; fractional values,
+non-finite values, and negative zero defer. No C BLAS/LAPACK/XLA linkage was added.
+
+SUBSTRATE v2 METHOD: candidate and ORIG execute inside one `iter_custom` routine in one
+release-perf binary, process, and strict-remote RCH invocation. Every retained sample contains
+at least four order-balanced AB/BA pairs. Both inputs and results pass through `black_box`, and
+NumPy parity is asserted before timing. Rayon was capped at the four slots RCH reserved, avoiding
+the previous default-pool oversubscription. Exact invocation:
+
+`RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo bench -p fnp-python --profile release-perf --bench criterion_python_surface --config 'target.x86_64-unknown-linux-gnu.runner=["sh","-c","export RAYON_NUM_THREADS=4; echo BINSHA256=$(sha256sum \"$1\" | cut -d\" \" -f1); echo HOSTID=$(hostname); echo RAYON_NUM_THREADS=$RAYON_NUM_THREADS; exec \"$@\"","fnp-runner"]' -- python_wide_string_substrate_v2`
+
+Worker `ovh-a` (host `fixmydocuments`), `RAYON_NUM_THREADS=4`, benchmark binary SHA-256
+`05a0b30749e168fbf4039ed49abcc014ea656403e1a5912c253c955ee7aa203f`, ten final normalized
+paired samples per row:
+
+| Probe | fnp mean | ORIG mean | ORIG/fnp | fnp CV | ORIG CV | Decision |
+|---|---:|---:|---:|---:|---:|---|
+| U16 unique, 1M | 151.237 ms | 145.646 ms | 0.9630x | 1.757% | 2.244% | **PROFILE REQUIRED; no REJECT** |
+| U16 union, disjoint 1M+1M | 260.611 ms | 361.478 ms | 1.3870x | 0.754% | 13.392% | **NOISY DISCARD** |
+| U16 setxor, 50% overlap 1M+1M | 214.458 ms | 1054.772 ms | 4.9183x | 4.597% | 33.035% | **NOISY DISCARD** |
+| S16 unique, 1M | 54.481 ms | 129.361 ms | **2.3744x** | 2.704% | 0.197% | **KEEP** |
+| S16 intersect, 50% overlap 1M+1M | 64.526 ms | 538.118 ms | **8.3396x** | 2.681% | 0.269% | **KEEP** |
+| S16 setxor, 50% overlap 1M+1M | 91.082 ms | 542.580 ms | **5.9571x** | 1.486% | 0.981% | **KEEP** |
+
+KEEP GATE: only rows with both CVs `<5%` support a ratio. The U union/setxor observations are
+discarded despite favorable directions. U16 unique is a stable 3.7% loss, but it is explicitly
+NOT a REJECT: no target profile was captured, so the ledger rule forbids an irreducibility or
+do-not-retry claim. A complete earlier invocation on `hz2` (binary SHA-256
+`a2827065596d5befb23f5e7fd246d454d12149e776db91abfca0bf7e9df0feed`) was discarded in full
+because every candidate row or its ORIG partner missed the CV gate; no arms or averages are mixed
+across RCH invocations.
+
+CORRECTNESS: strict-remote `cargo test -p fnp-python --test conformance_setops -- --nocapture`
+passed 17/17 on `vmi1227854`. Coverage includes all structured field-width combinations,
+large fractional/signed-zero fallback sentinels, U9/U16 and S9/S16 packed parity, S9/S16 all five
+set operations over full-range bytes, and non-native `>U9` default-unique plus binary-setop dtype
+normalization. The definitive benchmark invocation exited 0. `git diff --check` is clean. Strict
+RCH rejected `cargo fmt --check` as a non-compilation command (`RCH-E301`), so no local fallback
+was run; UBS's isolated shadow formatter reported clean. The strict-remote clippy result is
+blocked before this crate by pre-existing `fnp-ufunc::UFuncArray::nan_filtered` dead code under
+`-D warnings`; the first remote clippy attempt also hit an `ovh-b` `zerocopy` build-script SIGILL,
+and the clean remote retry on `hz1` reproduced the source-level upstream warning.
+
+SAFE-RUST SCOPE: the touched and measured packed default-unique/set-op paths plus dense
+structured-bitplane paths contain no handwritten `unsafe`. This is not a crate-wide claim:
+pre-existing generic structured fallbacks, string `unique(return_*=...)`, and stale string
+argsort remain outside this proof.
+
+DECISION: close `deadlock-audit-740l3`; the S wide-key family is re-proven and ships. Keep
+`deadlock-audit-611nq` open: U union/setxor need a focused stable-worker rerun, while U unique
+requires a retained non-zero-self-time profile before any REJECT or replacement lever. This is a
+measured blocker, not permission to cite the old sequential ratios.
+
 ## 2026-07-10 - WIN (SHIP): S9..S16 bytes wide-key pack - intersect 12.2x / setxor 7.7x vs ORIG; closes bead deadlock-audit-740l3 and COMPLETES the wide-key family (U9..16 + S9..16 x unique/intersect/setdiff/setxor/union)
 
 `cc_fnp`, bead deadlock-audit-740l3 (final item split from deadlock-audit-611nq). LEDGER CHECK

@@ -12845,6 +12845,9 @@ fn report_ledger_pair(
     candidate_samples: &RefCell<Vec<f64>>,
     orig_samples: &RefCell<Vec<f64>>,
 ) {
+    if candidate_samples.borrow().is_empty() && orig_samples.borrow().is_empty() {
+        return;
+    }
     let (candidate_n, candidate_ns, candidate_cv) = ledger_tail_stats(candidate_samples);
     let (orig_n, orig_ns, orig_cv) = ledger_tail_stats(orig_samples);
     assert_eq!(candidate_n, orig_n);
@@ -12856,6 +12859,280 @@ fn report_ledger_pair(
         orig_ns / 1_000_000.0,
         orig_ns / candidate_ns,
     );
+}
+
+fn report_substrate_v2_pair(
+    row: &str,
+    candidate_samples: &RefCell<Vec<f64>>,
+    orig_samples: &RefCell<Vec<f64>>,
+) {
+    if candidate_samples.borrow().is_empty() && orig_samples.borrow().is_empty() {
+        return;
+    }
+    let (candidate_n, candidate_ns, candidate_cv) = ledger_tail_stats(candidate_samples);
+    let (orig_n, orig_ns, orig_cv) = ledger_tail_stats(orig_samples);
+    assert_eq!(candidate_n, orig_n);
+    println!(
+        "SUBSTRATE_V2 row={row} samples={candidate_n} candidate_mean_ms={:.6} \
+         candidate_cv_pct={candidate_cv:.3} orig_mean_ms={:.6} orig_cv_pct={orig_cv:.3} \
+         orig_over_candidate={:.4}",
+        candidate_ns / 1_000_000.0,
+        orig_ns / 1_000_000.0,
+        orig_ns / candidate_ns,
+    );
+}
+
+fn bench_substrate_v2_python_binary_pair<'py>(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    bench_name: &'static str,
+    row: &'static str,
+    candidate: &Bound<'py, PyAny>,
+    orig: &Bound<'py, PyAny>,
+    lhs: &Bound<'py, PyAny>,
+    rhs: &Bound<'py, PyAny>,
+) {
+    let candidate_samples = RefCell::new(Vec::new());
+    let orig_samples = RefCell::new(Vec::new());
+    let order = Cell::new(0_u64);
+    group.bench_function(bench_name, |bench| {
+        bench.iter_custom(|iterations| {
+            // Slow Python surface rows otherwise collapse to one A/B pair per
+            // Criterion sample.  Keep each sample order-balanced and average
+            // enough interleaved pairs to make worker jitter visible instead
+            // of letting a single interruption decide the row.
+            let measured_iterations = iterations.max(4);
+            let measured_iterations = measured_iterations + (measured_iterations & 1);
+            let mut candidate_total = Duration::ZERO;
+            let mut orig_total = Duration::ZERO;
+            for _ in 0..measured_iterations {
+                let orig_first = order.get() & 1 == 1;
+                order.set(order.get().wrapping_add(1));
+                let time_call = |function: &Bound<'py, PyAny>| {
+                    let start = Instant::now();
+                    let lhs = black_box(lhs);
+                    let rhs = black_box(rhs);
+                    let result = function
+                        .call1((lhs, rhs))
+                        .expect("paired binary Python call");
+                    black_box(result);
+                    start.elapsed()
+                };
+                if orig_first {
+                    orig_total += time_call(orig);
+                    candidate_total += time_call(candidate);
+                } else {
+                    candidate_total += time_call(candidate);
+                    orig_total += time_call(orig);
+                }
+            }
+            candidate_samples
+                .borrow_mut()
+                .push(candidate_total.as_secs_f64() * 1e9 / measured_iterations as f64);
+            orig_samples
+                .borrow_mut()
+                .push(orig_total.as_secs_f64() * 1e9 / measured_iterations as f64);
+            (candidate_total + orig_total)
+                .mul_f64(iterations as f64 / measured_iterations as f64)
+        });
+    });
+    report_substrate_v2_pair(row, &candidate_samples, &orig_samples);
+}
+
+fn bench_substrate_v2_python_unary_pair<'py>(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    bench_name: &'static str,
+    row: &'static str,
+    candidate: &Bound<'py, PyAny>,
+    orig: &Bound<'py, PyAny>,
+    input: &Bound<'py, PyAny>,
+) {
+    let candidate_samples = RefCell::new(Vec::new());
+    let orig_samples = RefCell::new(Vec::new());
+    let order = Cell::new(0_u64);
+    group.bench_function(bench_name, |bench| {
+        bench.iter_custom(|iterations| {
+            let measured_iterations = iterations.max(4);
+            let measured_iterations = measured_iterations + (measured_iterations & 1);
+            let mut candidate_total = Duration::ZERO;
+            let mut orig_total = Duration::ZERO;
+            for _ in 0..measured_iterations {
+                let orig_first = order.get() & 1 == 1;
+                order.set(order.get().wrapping_add(1));
+                let time_call = |function: &Bound<'py, PyAny>| {
+                    let start = Instant::now();
+                    let input = black_box(input);
+                    let result = function.call1((input,)).expect("paired unary Python call");
+                    black_box(result);
+                    start.elapsed()
+                };
+                if orig_first {
+                    orig_total += time_call(orig);
+                    candidate_total += time_call(candidate);
+                } else {
+                    candidate_total += time_call(candidate);
+                    orig_total += time_call(orig);
+                }
+            }
+            candidate_samples
+                .borrow_mut()
+                .push(candidate_total.as_secs_f64() * 1e9 / measured_iterations as f64);
+            orig_samples
+                .borrow_mut()
+                .push(orig_total.as_secs_f64() * 1e9 / measured_iterations as f64);
+            (candidate_total + orig_total)
+                .mul_f64(iterations as f64 / measured_iterations as f64)
+        });
+    });
+    report_substrate_v2_pair(row, &candidate_samples, &orig_samples);
+}
+
+fn bench_wide_string_substrate_v2(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_wide_string_substrate_v2");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_wide_string_v2").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(611)\n\
+                 u_a = rng.integers(97, 123, (1_000_000, 16), dtype=np.uint32).reshape(-1).view('U16')\n\
+                 u_fresh = rng.integers(97, 123, (500_000, 16), dtype=np.uint32).reshape(-1).view('U16')\n\
+                 u_b = np.concatenate([u_a[:500_000], u_fresh])\n\
+                 u_union_b = rng.integers(97, 123, (1_000_000, 16), dtype=np.uint32).reshape(-1).view('U16')\n\
+                 s_a = rng.integers(0, 256, (1_000_000, 16), dtype=np.uint8).view('S16').reshape(-1)\n\
+                 s_fresh = rng.integers(0, 256, (500_000, 16), dtype=np.uint8).view('S16').reshape(-1)\n\
+                 s_b = np.concatenate([s_a[:500_000], s_fresh])\n",
+            )
+            .expect("wide string setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("wide string setup");
+        let u_a = namespace.get_item("u_a").expect("u_a present");
+        let u_b = namespace.get_item("u_b").expect("u_b present");
+        let u_union_b = namespace
+            .get_item("u_union_b")
+            .expect("u_union_b present");
+        let s_a = namespace.get_item("s_a").expect("s_a present");
+        let s_b = namespace.get_item("s_b").expect("s_b present");
+        let array_equal = numpy.getattr("array_equal").expect("numpy.array_equal");
+
+        for (lhs, rhs) in [(&u_a, &u_b), (&s_a, &s_b)] {
+            for op in ["unique", "union1d", "intersect1d", "setxor1d"] {
+                let candidate_fn = module.getattr(op).expect("fnp op");
+                let orig_fn = numpy.getattr(op).expect("numpy op");
+                let candidate = if op == "unique" {
+                    candidate_fn.call1((lhs,)).expect("fnp parity call")
+                } else {
+                    candidate_fn.call1((lhs, rhs)).expect("fnp parity call")
+                };
+                let orig = if op == "unique" {
+                    orig_fn.call1((lhs,)).expect("numpy parity call")
+                } else {
+                    orig_fn.call1((lhs, rhs)).expect("numpy parity call")
+                };
+                assert!(
+                    array_equal
+                        .call1((&candidate, &orig))
+                        .expect("array_equal")
+                        .extract::<bool>()
+                        .expect("array_equal bool"),
+                    "wide string {op} parity",
+                );
+            }
+        }
+        let fnp_union_parity = module
+            .getattr("union1d")
+            .expect("fnp union1d parity function")
+            .call1((&u_a, &u_union_b))
+            .expect("fnp union1d parity call");
+        let numpy_union_parity = numpy
+            .getattr("union1d")
+            .expect("numpy union1d parity function")
+            .call1((&u_a, &u_union_b))
+            .expect("numpy union1d parity call");
+        assert!(
+            array_equal
+                .call1((&fnp_union_parity, &numpy_union_parity))
+                .expect("union array_equal")
+                .extract::<bool>()
+                .expect("union array_equal bool"),
+            "wide string disjoint union parity",
+        );
+
+        let fnp_unique = module.getattr("unique").expect("fnp unique");
+        let np_unique = numpy.getattr("unique").expect("numpy unique");
+        let fnp_union = module.getattr("union1d").expect("fnp union1d");
+        let np_union = numpy.getattr("union1d").expect("numpy union1d");
+        let fnp_intersect = module.getattr("intersect1d").expect("fnp intersect1d");
+        let np_intersect = numpy.getattr("intersect1d").expect("numpy intersect1d");
+        let fnp_setxor = module.getattr("setxor1d").expect("fnp setxor1d");
+        let np_setxor = numpy.getattr("setxor1d").expect("numpy setxor1d");
+
+        bench_substrate_v2_python_unary_pair(
+            &mut group,
+            "u16_unique_1m_paired",
+            "u16_unique_1m",
+            &fnp_unique,
+            &np_unique,
+            &u_a,
+        );
+        bench_substrate_v2_python_binary_pair(
+            &mut group,
+            "u16_union_disjoint_1m_paired",
+            "u16_union_disjoint_1m",
+            &fnp_union,
+            &np_union,
+            &u_a,
+            &u_union_b,
+        );
+        bench_substrate_v2_python_binary_pair(
+            &mut group,
+            "u16_setxor_1m_paired",
+            "u16_setxor_1m",
+            &fnp_setxor,
+            &np_setxor,
+            &u_a,
+            &u_b,
+        );
+        bench_substrate_v2_python_unary_pair(
+            &mut group,
+            "s16_unique_1m_paired",
+            "s16_unique_1m",
+            &fnp_unique,
+            &np_unique,
+            &s_a,
+        );
+        bench_substrate_v2_python_binary_pair(
+            &mut group,
+            "s16_intersect_1m_paired",
+            "s16_intersect_1m",
+            &fnp_intersect,
+            &np_intersect,
+            &s_a,
+            &s_b,
+        );
+        bench_substrate_v2_python_binary_pair(
+            &mut group,
+            "s16_setxor_1m_paired",
+            "s16_setxor_1m",
+            &fnp_setxor,
+            &np_setxor,
+            &s_a,
+            &s_b,
+        );
+    });
+
+    group.finish();
 }
 
 fn bench_ledger_integrity_rejects(c: &mut Criterion) {
@@ -13145,6 +13422,7 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_wide_string_substrate_v2,
     bench_ledger_integrity_rejects,
     bench_unique_rows_full_boundary,
     bench_unique_cols_boundary,
