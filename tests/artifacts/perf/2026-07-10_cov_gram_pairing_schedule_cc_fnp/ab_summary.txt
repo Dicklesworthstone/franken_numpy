@@ -1,0 +1,12 @@
+                 probe     base     cand   self       np  cand/np
+          cov 2000x500    17.80    18.33   0.97x    20.12    1.10x
+     corrcoef 2000x500    19.80    19.98   0.99x    30.14    1.51x
+         cov 1000x1000     6.57     6.92   0.95x     7.21    1.04x
+    corrcoef 1000x1000     7.05     7.06   1.00x     8.22    1.16x
+          cov 500x5000    11.61    12.73   0.91x    27.48    2.16x
+     corrcoef 500x5000    12.34    12.25   1.01x    27.13    2.21x
+          cov 200x1000     0.95     0.92   1.03x     0.92    1.00x
+     corrcoef 200x1000     1.00     0.98   1.02x     0.98    1.00x
+gauge fnp-base: min 41.9 max 54.0 ms over 7 rounds
+gauge fnp-cand: min 45.9 max 96.0 ms over 7 rounds
+gauge np: min 37.9 max 84.8 ms over 7 rounds

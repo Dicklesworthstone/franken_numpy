@@ -1,0 +1,28 @@
+# Candidate (pairing) frame tables — mechanism check
+== covbal_cand_2000x500 ==
+    64.73%  [.] fnp_python::cov_gram_from_centered::{closure#2}
+     3.99%  [.] blas_thread_server
+     3.78%  [.] crossbeam_epoch::default::with_handle::<crossbeam_epoch::default::pin::{closure#0}, crossbeam_epoch::guard::Guard>
+     2.81%  [.] __memset_avx2_unaligned_erms
+     2.54%  [.] fnp_python::cov_gram_from_centered
+     2.33%  [.] fnp_python::build_square_f64_matrix
+     2.00%  [.] <crossbeam_deque::deque::Stealer<rayon_core::job::JobRef>>::steal
+     1.86%  [.] <crossbeam_epoch::internal::Global>::try_advance
+== covbal_base_500x5000 ==
+    65.02%  [.] fnp_python::cov_gram_from_centered::{closure#2}
+     4.32%  [.] crossbeam_epoch::default::with_handle::<crossbeam_epoch::default::pin::{closure#0}, crossbeam_epoch::guard::Guard>
+     3.43%  [.] __memset_avx2_unaligned_erms
+     3.25%  [.] blas_thread_server
+     2.45%  [.] <crossbeam_deque::deque::Stealer<rayon_core::job::JobRef>>::steal
+     2.37%  [.] fnp_python::cov_gram_rowvar_f64
+     2.20%  [.] <crossbeam_epoch::internal::Global>::try_advance
+     1.41%  [k] 0xffffffffaf6001bd
+== covbal_cand_500x5000 ==
+    68.11%  [.] fnp_python::cov_gram_from_centered::{closure#2}
+     3.85%  [.] __memset_avx2_unaligned_erms
+     3.29%  [.] blas_thread_server
+     3.03%  [.] crossbeam_epoch::default::with_handle::<crossbeam_epoch::default::pin::{closure#0}, crossbeam_epoch::guard::Guard>
+     2.63%  [.] fnp_python::cov_gram_rowvar_f64
+     2.06%  [.] <crossbeam_epoch::internal::Global>::try_advance
+     2.04%  [.] <crossbeam_deque::deque::Stealer<rayon_core::job::JobRef>>::steal
+     1.19%  [k] 0xffffffffaf6001bd

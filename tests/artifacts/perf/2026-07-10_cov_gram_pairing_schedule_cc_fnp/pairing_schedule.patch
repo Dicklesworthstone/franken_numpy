@@ -1,0 +1,37 @@
+diff --git a/crates/fnp-python/src/lib.rs b/crates/fnp-python/src/lib.rs
+index 6a0faf97..3e9fe253 100644
+--- a/crates/fnp-python/src/lib.rs
++++ b/crates/fnp-python/src/lib.rs
+@@ -33313,10 +33313,28 @@ fn cov_gram_from_centered(centered: &[f64], n_vars: usize, n_obs: usize, ddof: u
+     // math, so serial and parallel are bit-identical for any gate.
+     let work = (n_vars as u64) * (n_vars as u64) * (n_obs as u64);
+     if n_vars >= 32 && work >= (1 << 22) && rayon::current_num_threads() >= 2 {
+-        result
+-            .par_chunks_mut(n_vars * MR)
+-            .enumerate()
+-            .for_each(|(b, rows)| block(b * MR, rows));
++        // Pairing schedule. Block b's strip spans j <= b*MR, so block cost grows
++        // linearly with b; a plain par_chunks_mut fan-out steals contiguous runs
++        // whose cost varies ~2x and leaves the pool idle at the drain while the
++        // heaviest trailing blocks finish (perf: 9-12% of cycles in crossbeam
++        // steal/epoch + sched_yield at 2000x500). Pairing the heaviest remaining
++        // block with the lightest gives every task near-constant cost, so any
++        // steal is balanced and the drain tail is one balanced task instead of
++        // one maximal block. Per-block cell math and the per-block write pattern
++        // are untouched -> the result is bit-identical under any schedule.
++        let mut blocks: std::collections::VecDeque<(usize, &mut [f64])> =
++            result.chunks_mut(n_vars * MR).enumerate().collect();
++        let mut tasks: Vec<((usize, &mut [f64]), Option<(usize, &mut [f64])>)> =
++            Vec::with_capacity(blocks.len().div_ceil(2));
++        while let Some(heavy) = blocks.pop_back() {
++            tasks.push((heavy, blocks.pop_front()));
++        }
++        tasks.into_par_iter().for_each(|((bh, rows_h), light)| {
++            block(bh * MR, rows_h);
++            if let Some((bl, rows_l)) = light {
++                block(bl * MR, rows_l);
++            }
++        });
+     } else {
+         result
+             .chunks_mut(n_vars * MR)

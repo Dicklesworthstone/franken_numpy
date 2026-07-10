@@ -4,6 +4,59 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - REJECT (measured, reverted): cov Gram pairing schedule for the triangular block imbalance - the 8-12% rayon "idle" is NOT wall-clock-recoverable, and de-phasing the j-walks costs real L3 co-streaming
+
+`cc_fnp`. Lever = OPEN item (1) from the check-free strip-kernel WIN below: pair heavy block
+n_blocks-1-t with light block t (VecDeque pop_back/pop_front -> Vec of two-block tasks,
+into_par_iter) so every rayon task has near-constant cost instead of cost growing linearly with
+the block index. Per-block cell math and write pattern untouched -> BIT-IDENTICAL, proven: the
+50-case battery (13 shapes x {cov, cov ddof=0, corrcoef} + 1-D + two-operand + const-row + NaN +
+fortran-defer) is sha-equal base vs candidate, allclose green vs numpy on all 50. Patch preserved
+at tests/artifacts/perf/2026-07-10_cov_gram_pairing_schedule_cc_fnp/pairing_schedule.patch.
+
+RANKED FRAME TABLE FIRST (fresh, on the post-659e1793 baseline, perf -g + malloc knobs, box load
+~27/64): kernel closure 66.1% self (annotate now cycles on vmovupd/vmulpd/vaddpd + pointer bumps
+-- the checkfree rewrite removed the lea/cmp density; NOT obviously load-stall-bound); crossbeam
+epoch+steal+try_advance+yield ~9-12%; blas_thread_server 3.4%; memset 2.8%; build_square 1.8%.
+Frame #2 = the scheduling share -> this lever, exactly as the OPEN note ranked it.
+
+MEASURED (interleaved base/cand/np processes, 7 rounds, min-of-rounds, malloc knobs, both
+binaries STORM-mode with equal ~15.79k faults/call so the allocation confound is equalized):
+cov 2000x500 0.97x, corrcoef 2000x500 0.99x, cov 1000x1000 0.95x, corrcoef 1000x1000 1.00x,
+**cov 500x5000 0.91x (candidate LOSES 6/7 rounds)**, corrcoef 500x5000 1.01x, 200x1000 ~parity.
+LOAD CAVEAT: the matmul-2048 gauge was asymmetric (base 41.9-54.0 ms, cand 45.9-96.0 ms; np
+control also swung 37.9-84.8), so magnitudes are soft -- but no probe shows a win and the
+500x5000 loss is directionally consistent across rounds. No clean-box re-run attempted; the
+mechanism check below explains the loss, so this is not worth re-measuring.
+
+MECHANISM (profile-confirmed, the reusable part):
+(a) Pairing DID equalize task cost, yet the crossbeam/steal share barely moved (2000x500:
+8.29% -> 7.64%; 500x5000: 8.97% -> 7.13%) and wall time did not improve. The "idle" cycles are
+drain-tail + fan-out spin on threads that are NOT on the critical path -- the call ends when the
+last task ends, and rayon's work-stealing already redistributes par_chunks_mut down to
+single-block granularity, so the old schedule's makespan was already ~one heaviest block, which
+equals the pairing schedule's task size. A cycle-share "idle" frame is only a latency lever if
+the idle sits ON the critical path (e.g. n_blocks < 2x threads with an indivisible heavy block).
+(b) At the n_obs-heavy shape the KERNEL ITSELF got slower (self 65.0% -> 68.1%, wall 0.91x):
+under the contiguous schedule all threads walk j ascending roughly in phase, so the shared
+j-panel is fetched into L3 once and co-streamed by everyone; pairing gives each task a heavy and
+a light block whose j-walks span different ranges, de-phasing the threads and re-streaming the
+panel. **RULE: for triangular kernels where every block scans a shared panel in the same order,
+a contiguous block schedule has emergent cross-thread cache cooperation; balance-motivated
+reordering trades real L3 hits for theoretical idle savings.**
+
+RETRY-CONDITION: revisit Gram scheduling ONLY if a profile shows the drain tail on the critical
+path (n_blocks within ~2x of thread count AND the heaviest block dominating makespan) -- and
+then split the heavy block's j-range into finer tasks (preserves ascending-j phase) instead of
+pairing. ALSO SETTLED here: OPEN item (2)'s precondition (j-panel cache-blocking "if annotate
+shows load stalls") is NOT met at 2000x500 -- annotate on the post-checkfree kernel shows cycles
+spread across vector mul/add with the top load at only ~6.8%; the kernel is near its AVX2
+issue-throughput floor at that shape. The cov/corrcoef Gram frame is CONVERGED on this box until
+the fault-storm residual (deadlock-audit-83ldf) or a hardware change reopens it.
+Artifacts: tests/artifacts/perf/2026-07-10_cov_gram_pairing_schedule_cc_fnp/ (fresh baseline +
+candidate frame tables, per-round A/B with gauges + fault modes, parity battery outputs, patch,
+probe/summarize scripts).
+
 ## 2026-07-10 - WIN (SHIP): mixed structured setops bitplanes widened to i4+f4 - 173x / 62x vs ORIG
 
 `cod_fnp`, bead `deadlock-audit-i6701`, bitplane/packed setops continuation. LEDGER CHECK FIRST:
