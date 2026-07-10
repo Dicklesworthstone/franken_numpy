@@ -4,6 +4,44 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - WIN (SHIP): f16 LAST-AXIS sort 5.25x + stable argsort 10.74x via the widening composition - nulls 1.0043 / 1.0045; completes the f16 ordering family
+
+`cc_fnp`. PROFILE BASIS: numpy's per-lane f16 ordering is the same generic single-threaded
+path as flat (156.8 ms @4M measured this morning); both >=2-D last-axis ops still delegated
+(the lastaxis stable dispatch gated on itemsize 4|8; no f16 lastaxis sort candidate existed).
+
+ONE LEVER (one mechanism, two wirings): (a) `try_native_f16_sort_flat` generalized to
+`try_native_f16_sort(axis_spec)` - 1-D collapsed-axis specs at the flat site, >=2-D
+axis-last at a new lastaxis site; same whole-buffer NaN/-0.0 bit pre-scan, widened
+np.sort(axis=-1), narrow back (per-lane value sorts are independent -> the flat
+byte-exactness argument holds per lane); (b) an ("f", 2) arm in
+try_native_argsort_stable_lastaxis - astype(f32) into the shipped per-lane stable machinery
+(exact value map + stable in-lane tie-by-index => identical index matrix).
+
+MEASURED (ONE binary / ONE process / ONE rch invocation, worker ovh-a, alternating AB/BA in
+one iter_custom routine, black_box, per-row A/A null controls; 2000x2000 view of the 4M f16
+input):
+
+| row | fnp | ORIG numpy | ratio | cvs | null AA |
+|---|---:|---:|---:|---|---|
+| f16_sort_lastaxis_2000x2000 | 21.638 ms | 113.524 ms | **5.25x** | 2.3% / 0.6% | 1.0043 (0.8%/0.8%) |
+| f16_argsort_stable_lastaxis_2000x2000 | 14.411 ms | 154.720 ms | **10.74x** | 3.5% / 0.7% | 1.0045 (1.0%/1.4%) |
+| context: flat f16 stable argsort (2nd replication) | 47.314 ms | 270.295 ms | 5.71x | 1.7% / 2.4% | - |
+
+Median gate: 5.25x / 10.74x vs ~0.4% null deviations - decidable. The argsort lastaxis
+multiple exceeds the flat one because the per-lane parallel machinery amortizes better on
+2000-element lanes than one 4M flat radix.
+
+CORRECTNESS: conformance_sorting::f16_lastaxis_sort_and_stable_argsort_widening_match_numpy
+GREEN on hz2 - axis=-1 + explicit axis=1 + 3-D last-axis, tobytes equality for sort and
+exact index array_equal for argsort, plus axis=0 defer parity and NaN / -0.0 defer cases;
+the two flat f16 tests stay green. cargo check green. f16 ORDERING FAMILY NOW COMPLETE:
+flat sort (de381d49) + flat stable argsort (5c6f0fb0) + lastaxis sort + lastaxis stable
+argsort (this) - remaining f16 ordering surfaces (axis-0, default-kind argsort ties,
+partition) are correctly delegated by semantics (unstable tie order / column layout), not by
+gap. PROVENANCE: worker ovh-a; binary sha256 unobtainable (rch retrieval exclusion,
+documented 420cf1a3); artifacts tests/artifacts/perf/2026-07-10_f16_lastaxis_widening_cc_fnp/.
+
 ## 2026-07-10 - WIN (SHIP): packed complex GEMM uses one row band per Rayon worker - bit-identical, 0.5-2.3% lower same-binary median self-time
 
 `GoldSummit`. PROFILE-FIRST TARGET: a remote Criterion sweep of the direct linalg

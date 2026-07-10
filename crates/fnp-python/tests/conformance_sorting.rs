@@ -616,3 +616,66 @@ fn f16_stable_argsort_widening_matches_numpy() {
         Ok(())
     });
 }
+
+#[test]
+fn f16_lastaxis_sort_and_stable_argsort_widening_match_numpy() {
+    // >=2-D last-axis siblings of the flat f16 widening levers: per-lane value sort
+    // (any kind) and per-lane stable argsort route through the widened f32 machinery.
+    // Covers axis=-1 and explicit axis=1 on 2-D, a 3-D last-axis case, the axis=0
+    // defer (must stay numpy-identical via fallback), and NaN / -0.0 defer cases.
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(287)\n\
+                 m = np.round(rng.standard_normal((1500, 1400)), 2).astype(np.float16)\n\
+                 m[m == 0] = np.float16(0.25)\n\
+                 m3 = np.round(rng.standard_normal((40, 50, 600)), 2).astype(np.float16)\n\
+                 m3[m3 == 0] = np.float16(0.5)\n\
+                 m_nan = m.copy()\n\
+                 m_nan[7, 8] = np.float16(np.nan)\n\
+                 m_negz = m.copy()\n\
+                 m_negz[9, 10] = np.float16(-0.0)\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let array_equal = numpy.getattr("array_equal")?;
+        let stable_kw = PyDict::new(py);
+        stable_kw.set_item("kind", "stable")?;
+        for (name, axis) in [
+            ("m", -1_i64),
+            ("m", 1_i64),
+            ("m3", -1_i64),
+            ("m", 0_i64),
+            ("m_nan", -1_i64),
+            ("m_negz", -1_i64),
+        ] {
+            let arr = ns
+                .get_item(name)?
+                .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing arr"))?;
+            let kw = PyDict::new(py);
+            kw.set_item("axis", axis)?;
+            let ours = module.getattr("sort")?.call((&arr,), Some(&kw))?;
+            let theirs = numpy.getattr("sort")?.call((&arr,), Some(&kw))?;
+            let ours_bytes: Vec<u8> = ours.call_method0("tobytes")?.extract()?;
+            let theirs_bytes: Vec<u8> = theirs.call_method0("tobytes")?.extract()?;
+            assert_eq!(
+                ours_bytes, theirs_bytes,
+                "{name} axis={axis}: f16 lastaxis sort bytes diverged"
+            );
+            let akw = PyDict::new(py);
+            akw.set_item("axis", axis)?;
+            akw.set_item("kind", "stable")?;
+            let ours_a = module.getattr("argsort")?.call((&arr,), Some(&akw))?;
+            let theirs_a = numpy.getattr("argsort")?.call((&arr,), Some(&akw))?;
+            let equal: bool = array_equal.call1((&ours_a, &theirs_a))?.extract()?;
+            assert!(
+                equal,
+                "{name} axis={axis}: f16 lastaxis stable argsort diverged"
+            );
+        }
+        Ok(())
+    });
+}

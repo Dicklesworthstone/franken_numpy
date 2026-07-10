@@ -14056,6 +14056,135 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
                 });
             });
             report_ledger_pair("f16_argsort_stable_null_AA", &ag_null_a, &ag_null_b);
+
+            // LAST-AXIS siblings (2000x2000 view of the same 4M input): per-lane widened
+            // value sort + per-lane widened stable argsort, paired with A/A null controls.
+            let input2d = input
+                .call_method1("reshape", ((2000, 2000),))
+                .expect("reshape 2000x2000");
+            let axis_kw = pyo3::types::PyDict::new(py);
+            axis_kw.set_item("axis", -1).expect("axis kwarg");
+            let fnp_sort2 = module.getattr("sort").expect("fnp sort");
+            let numpy_sort2 = numpy.getattr("sort").expect("numpy sort");
+            let s2_f = fnp_sort2
+                .call((&input2d,), Some(&axis_kw))
+                .expect("fnp f16 lastaxis sort parity");
+            let s2_n = numpy_sort2
+                .call((&input2d,), Some(&axis_kw))
+                .expect("numpy f16 lastaxis sort parity");
+            let s2_fb: Vec<u8> = s2_f
+                .call_method0("tobytes")
+                .expect("bytes")
+                .extract()
+                .expect("extract");
+            let s2_nb: Vec<u8> = s2_n
+                .call_method0("tobytes")
+                .expect("bytes")
+                .extract()
+                .expect("extract");
+            assert_eq!(s2_fb, s2_nb, "f16 lastaxis sort parity (tobytes)");
+            let stable_axis_kw = pyo3::types::PyDict::new(py);
+            stable_axis_kw.set_item("axis", -1).expect("axis kwarg");
+            stable_axis_kw.set_item("kind", "stable").expect("kind kwarg");
+            let a2_f = fnp_argsort
+                .call((&input2d,), Some(&stable_axis_kw))
+                .expect("fnp f16 lastaxis argsort parity");
+            let a2_n = numpy_argsort
+                .call((&input2d,), Some(&stable_axis_kw))
+                .expect("numpy f16 lastaxis argsort parity");
+            assert!(
+                equal
+                    .call1((&a2_f, &a2_n))
+                    .expect("array_equal")
+                    .extract::<bool>()
+                    .expect("bool"),
+                "f16 lastaxis stable argsort parity",
+            );
+
+            for (label, fnp_fn, numpy_fn, kw) in [
+                (
+                    "f16_sort_lastaxis_2000x2000",
+                    &fnp_sort2,
+                    &numpy_sort2,
+                    &axis_kw,
+                ),
+                (
+                    "f16_argsort_stable_lastaxis_2000x2000",
+                    &fnp_argsort,
+                    &numpy_argsort,
+                    &stable_axis_kw,
+                ),
+            ] {
+                let cand = RefCell::new(Vec::new());
+                let orig = RefCell::new(Vec::new());
+                let ord = Cell::new(0u64);
+                group.bench_function(format!("{label}_paired"), |bench| {
+                    bench.iter_custom(|iterations| {
+                        let mut ct = Duration::ZERO;
+                        let mut ot = Duration::ZERO;
+                        for _ in 0..iterations {
+                            let of = ord.get() & 1 == 1;
+                            ord.set(ord.get().wrapping_add(1));
+                            if of {
+                                let s = Instant::now();
+                                black_box(numpy_fn.call((&input2d,), Some(kw)).expect("orig"));
+                                ot += s.elapsed();
+                                let s = Instant::now();
+                                black_box(fnp_fn.call((&input2d,), Some(kw)).expect("cand"));
+                                ct += s.elapsed();
+                            } else {
+                                let s = Instant::now();
+                                black_box(fnp_fn.call((&input2d,), Some(kw)).expect("cand"));
+                                ct += s.elapsed();
+                                let s = Instant::now();
+                                black_box(numpy_fn.call((&input2d,), Some(kw)).expect("orig"));
+                                ot += s.elapsed();
+                            }
+                        }
+                        cand.borrow_mut()
+                            .push(ct.as_secs_f64() * 1e9 / iterations as f64);
+                        orig.borrow_mut()
+                            .push(ot.as_secs_f64() * 1e9 / iterations as f64);
+                        ct + ot
+                    });
+                });
+                report_ledger_pair(label, &cand, &orig);
+
+                let na = RefCell::new(Vec::new());
+                let nb = RefCell::new(Vec::new());
+                let nord = Cell::new(0u64);
+                group.bench_function(format!("{label}_null_control"), |bench| {
+                    bench.iter_custom(|iterations| {
+                        let mut at = Duration::ZERO;
+                        let mut bt = Duration::ZERO;
+                        for _ in 0..iterations {
+                            let bf = nord.get() & 1 == 1;
+                            nord.set(nord.get().wrapping_add(1));
+                            if bf {
+                                let s = Instant::now();
+                                black_box(fnp_fn.call((&input2d,), Some(kw)).expect("nb"));
+                                bt += s.elapsed();
+                                let s = Instant::now();
+                                black_box(fnp_fn.call((&input2d,), Some(kw)).expect("na"));
+                                at += s.elapsed();
+                            } else {
+                                let s = Instant::now();
+                                black_box(fnp_fn.call((&input2d,), Some(kw)).expect("na"));
+                                at += s.elapsed();
+                                let s = Instant::now();
+                                black_box(fnp_fn.call((&input2d,), Some(kw)).expect("nb"));
+                                bt += s.elapsed();
+                            }
+                        }
+                        na.borrow_mut()
+                            .push(at.as_secs_f64() * 1e9 / iterations as f64);
+                        nb.borrow_mut()
+                            .push(bt.as_secs_f64() * 1e9 / iterations as f64);
+                        at + bt
+                    });
+                });
+                report_ledger_pair(&format!("{label}_null_AA"), &na, &nb);
+            }
         }
 
         {
