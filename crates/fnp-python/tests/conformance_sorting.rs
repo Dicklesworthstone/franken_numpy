@@ -730,3 +730,50 @@ fn narrow_int_sort_counting_matches_numpy() {
         Ok(())
     });
 }
+
+#[test]
+fn narrow_int_stable_argsort_counting_matches_numpy() {
+    // np.argsort(narrow int, kind='stable') routes to the parallel counting-prefix stable
+    // argsort. Stability is fully observable in the index array (dense ties are inherent for
+    // 1-/2-byte values at 2M elements), so exact array_equal vs numpy over the full value
+    // range including extremes is the strongest possible check. Small inputs stay on the
+    // fallback and must match trivially.
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(289)\n\
+                 n = 2_000_000\n\
+                 i8a = rng.integers(-128, 128, n, dtype=np.int8)\n\
+                 u8a = rng.integers(0, 256, n, dtype=np.uint8)\n\
+                 i16a = rng.integers(-32768, 32768, n, dtype=np.int16)\n\
+                 u16a = rng.integers(0, 65536, n, dtype=np.uint16)\n\
+                 i16a[:4] = [-32768, 32767, 0, -1]\n\
+                 small = i16a[:1000].copy()\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let kw = PyDict::new(py);
+        kw.set_item("kind", "stable")?;
+        for name in ["i8a", "u8a", "i16a", "u16a", "small"] {
+            let arr = ns
+                .get_item(name)?
+                .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing arr"))?;
+            let ours = module.getattr("argsort")?.call((&arr,), Some(&kw))?;
+            let theirs = numpy.getattr("argsort")?.call((&arr,), Some(&kw))?;
+            let equal: bool = numpy
+                .getattr("array_equal")?
+                .call1((&ours, &theirs))?
+                .extract()?;
+            assert!(equal, "{name}: narrow-int stable argsort diverged from numpy");
+            assert_eq!(
+                ours.getattr("dtype")?.str()?.to_string(),
+                theirs.getattr("dtype")?.str()?.to_string(),
+                "{name}: index dtype diverged"
+            );
+        }
+        Ok(())
+    });
+}

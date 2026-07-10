@@ -4,6 +4,40 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - WIN (SHIP): narrow-int STABLE ARGSORT via the existing counting-prefix machinery - 3.94x / 2.47x on two same-worker runs, nulls 0.9954 / 0.9964; four dispatch arms was the whole lever
+
+`cc_fnp`, sibling of the 66.3x narrow-int counting sort below. PROFILE BASIS: the same
+delegation gap - try_native_argsort_stable_flat gated ("i"|"u", 4|8), so narrow-int stable
+argsort fully delegated to numpy's serial mergesort - AND the in-tree
+`argsort_stable_counting` (parallel per-chunk histograms + global/per-chunk prefix + disjoint
+parallel index writes, RANGE_MAX 1<<20) already implements the exact counting-prefix stable
+argsort these widths need. The UNWIRED-HELPER lever class (ledger 2026-06-09 batch_eigh
+precedent): the entire lever is FOUR dispatch match arms routing ("i"|"u", 1|2) into
+int_argsort_stable::<i8/u8/i16/u16> (whose counting branch always engages: bucket space 256 /
+65,536 <= RANGE_MAX).
+
+BYTE-EXACT by the existing helper's contract: stable order = bucket-ascending, original index
+within bucket - exactly numpy's kind='stable' order; dense ties are inherent (2M+ elements
+over <= 65,536 values) so stability is load-bearing and fully observable in the index output.
+
+MEASURED (ONE binary / ONE process / ONE rch invocation each, worker hz2 both runs,
+alternating AB/BA in one iter_custom routine, black_box, A/A null controls; i16 full-range 8M):
+
+| run | fnp | ORIG numpy | ratio | cvs | null AA |
+|---|---:|---:|---:|---|---|
+| run4 | 27.681 ms | 109.102 ms | **3.94x** | 14.0% / 5.8% | 0.9954 (2.6%/3.5%) |
+| run5 | 35.090 ms | 86.817 ms | **2.47x** | 4.1% / 9.9% | 0.9964 (2.8%/2.0%) |
+
+Median gate: 2.5-3.9x vs sub-0.5% null deviations - decidable in both runs; hz2 background
+load explains the magnitude spread (both arms swing together; the nulls stay pinned).
+
+CORRECTNESS: conformance_sorting::narrow_int_stable_argsort_counting_matches_numpy GREEN on
+hz2: i8/u8/i16/u16 @2M full-range incl. extremes, exact index array_equal + intp dtype, plus
+the below-gate fallback case. cargo check green. OPEN siblings unchanged from the sort entry
+(narrow-int lastaxis, bool). PROVENANCE: worker hz2 x2; binary sha256 unobtainable (rch
+retrieval exclusion, documented 420cf1a3); artifacts
+tests/artifacts/perf/2026-07-10_narrow_int_counting_sort_cc_fnp/argsort_bench_run*.txt.
+
 ## 2026-07-10 - WIN (SHIP): narrow-int (i8/u8/i16/u16) flat sort via PARALLEL COUNTING sort - 66.3x vs numpy at i16 8M, null control 1.0014; supersedes the 2026-06 "1-/2-byte ints excluded" scoping
 
 `cc_fnp`. LEDGER CHECK FIRST: the 2026-06 int-sort entry EXCLUDED 1-/2-byte widths on the

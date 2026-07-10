@@ -14287,6 +14287,98 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
                 });
             });
             report_ledger_pair("narrow_int_i16_sort_null_AA", &na, &nb);
+
+            // Stable ARGSORT sibling on the same 8M i16 input (dense ties by construction;
+            // routes to the parallel counting-prefix stable argsort). Paired + A/A null.
+            let fnp_argsort_n = module.getattr("argsort").expect("fnp argsort");
+            let numpy_argsort_n = numpy.getattr("argsort").expect("numpy argsort");
+            let skw = pyo3::types::PyDict::new(py);
+            skw.set_item("kind", "stable").expect("kind kwarg");
+            let af = fnp_argsort_n
+                .call((&input,), Some(&skw))
+                .expect("fnp i16 stable argsort parity");
+            let an = numpy_argsort_n
+                .call((&input,), Some(&skw))
+                .expect("numpy i16 stable argsort parity");
+            assert!(
+                equal
+                    .call1((&af, &an))
+                    .expect("array_equal")
+                    .extract::<bool>()
+                    .expect("bool"),
+                "narrow-int i16 stable argsort parity",
+            );
+            let cand2 = RefCell::new(Vec::new());
+            let orig2 = RefCell::new(Vec::new());
+            let ord2 = Cell::new(0u64);
+            group.bench_function("narrow_int_i16_argsort_stable_8m_paired", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut ct = Duration::ZERO;
+                    let mut ot = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let of = ord2.get() & 1 == 1;
+                        ord2.set(ord2.get().wrapping_add(1));
+                        if of {
+                            let s = Instant::now();
+                            black_box(numpy_argsort_n.call((&input,), Some(&skw)).expect("orig"));
+                            ot += s.elapsed();
+                            let s = Instant::now();
+                            black_box(fnp_argsort_n.call((&input,), Some(&skw)).expect("cand"));
+                            ct += s.elapsed();
+                        } else {
+                            let s = Instant::now();
+                            black_box(fnp_argsort_n.call((&input,), Some(&skw)).expect("cand"));
+                            ct += s.elapsed();
+                            let s = Instant::now();
+                            black_box(numpy_argsort_n.call((&input,), Some(&skw)).expect("orig"));
+                            ot += s.elapsed();
+                        }
+                    }
+                    cand2
+                        .borrow_mut()
+                        .push(ct.as_secs_f64() * 1e9 / iterations as f64);
+                    orig2
+                        .borrow_mut()
+                        .push(ot.as_secs_f64() * 1e9 / iterations as f64);
+                    ct + ot
+                });
+            });
+            report_ledger_pair("narrow_int_i16_argsort_stable_8m", &cand2, &orig2);
+
+            let na2 = RefCell::new(Vec::new());
+            let nb2 = RefCell::new(Vec::new());
+            let nord2 = Cell::new(0u64);
+            group.bench_function("narrow_int_i16_argsort_stable_8m_null_control", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut at = Duration::ZERO;
+                    let mut bt = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let bf = nord2.get() & 1 == 1;
+                        nord2.set(nord2.get().wrapping_add(1));
+                        if bf {
+                            let s = Instant::now();
+                            black_box(fnp_argsort_n.call((&input,), Some(&skw)).expect("nb"));
+                            bt += s.elapsed();
+                            let s = Instant::now();
+                            black_box(fnp_argsort_n.call((&input,), Some(&skw)).expect("na"));
+                            at += s.elapsed();
+                        } else {
+                            let s = Instant::now();
+                            black_box(fnp_argsort_n.call((&input,), Some(&skw)).expect("na"));
+                            at += s.elapsed();
+                            let s = Instant::now();
+                            black_box(fnp_argsort_n.call((&input,), Some(&skw)).expect("nb"));
+                            bt += s.elapsed();
+                        }
+                    }
+                    na2.borrow_mut()
+                        .push(at.as_secs_f64() * 1e9 / iterations as f64);
+                    nb2.borrow_mut()
+                        .push(bt.as_secs_f64() * 1e9 / iterations as f64);
+                    at + bt
+                });
+            });
+            report_ledger_pair("narrow_int_i16_argsort_stable_null_AA", &na2, &nb2);
         }
 
         {
