@@ -972,6 +972,69 @@ fn intersect_setdiff_packed_wide_latin1_u9_u16_matches_numpy() {
 }
 
 #[test]
+fn setxor_union_packed_wide_latin1_u9_u16_matches_numpy() {
+    // Completes the U9..U16 two-word-key set algebra: setxor1d (source-tagged run-composition
+    // over wide keys) and union1d (dedicated pack of each operand instead of concat+unique).
+    // b shares half its values with a so all runs (pure-a, pure-b, both) occur. The a12w pair
+    // plants one wide (>0xFF) codepoint, which must defer to the numpy-identical fallback.
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(283)\n\
+                 n = 200_000\n\
+                 a9 = rng.integers(97, 123, (n, 9), dtype=np.uint32).reshape(-1).view('U9')\n\
+                 f9 = rng.integers(97, 123, (n // 2, 9), dtype=np.uint32).reshape(-1).view('U9')\n\
+                 b9 = np.concatenate([a9[: n // 2], f9])\n\
+                 a16 = rng.integers(97, 123, (n, 16), dtype=np.uint32).reshape(-1).view('U16')\n\
+                 f16 = rng.integers(97, 123, (n // 2, 16), dtype=np.uint32).reshape(-1).view('U16')\n\
+                 b16 = np.concatenate([a16[: n // 2], f16])\n\
+                 a12 = rng.integers(97, 123, (n, 12), dtype=np.uint32).reshape(-1).view('U12')\n\
+                 f12 = rng.integers(97, 123, (n // 2, 12), dtype=np.uint32).reshape(-1).view('U12')\n\
+                 b12w = np.concatenate([a12[: n // 2], f12])\n\
+                 raw = a12.view(np.uint32).copy()\n\
+                 raw[7] = 0x0142\n\
+                 a12w = raw.view('U12')\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        for (a_name, b_name) in [("a9", "b9"), ("a16", "b16"), ("a12w", "b12w")] {
+            let a = ns.get_item(a_name)?.ok_or_else(|| {
+                pyo3::exceptions::PyAssertionError::new_err(format!("missing {a_name}"))
+            })?;
+            let b = ns.get_item(b_name)?.ok_or_else(|| {
+                pyo3::exceptions::PyAssertionError::new_err(format!("missing {b_name}"))
+            })?;
+            for op in ["setxor1d", "union1d"] {
+                let ours = module.getattr(op)?.call1((&a, &b))?;
+                let theirs = numpy.getattr(op)?.call1((&a, &b))?;
+                let equal: bool = numpy
+                    .getattr("array_equal")?
+                    .call1((&ours, &theirs))?
+                    .extract()?;
+                assert!(
+                    equal,
+                    "packed-wide Latin-1 {a_name} {op} diverged from numpy"
+                );
+                assert_eq!(
+                    ours.getattr("dtype")?.str()?.to_string(),
+                    theirs.getattr("dtype")?.str()?.to_string()
+                );
+                let ours_bytes: Vec<u8> = ours.call_method0("tobytes")?.extract()?;
+                let theirs_bytes: Vec<u8> = theirs.call_method0("tobytes")?.extract()?;
+                assert_eq!(
+                    ours_bytes, theirs_bytes,
+                    "{a_name} {op} output bytes diverged"
+                );
+            }
+        }
+        Ok(())
+    });
+}
+
+#[test]
 fn unique_full_string_packed_latin1_large_matches_numpy() {
     // unique(..., return_index/inverse/counts) on large Latin-1 U8/S6 takes the packed-u64
     // (key, index) path; first-occurrence index, inverse map, and counts must all be byte-exact.

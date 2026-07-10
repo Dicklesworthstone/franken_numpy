@@ -7672,6 +7672,35 @@ b = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8'
         group.bench_function("numpy_union1d_U8_2m", |bn| {
             bn.iter(|| black_box(numpy_u.call1((&a, &b)).expect("numpy union1d")));
         });
+
+        // Latin-1 U16: the wide two-word-key branch (dedicated per-operand pack, no concat).
+        let setup16 = "import numpy as np\n\
+rng = np.random.default_rng(2)\n\
+a16 = rng.integers(97, 123, (1_000_000, 16), dtype=np.uint32).reshape(-1).view('U16')\n\
+b16 = rng.integers(97, 123, (1_000_000, 16), dtype=np.uint32).reshape(-1).view('U16')\n";
+        let ns16 = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup16).unwrap().as_c_str(),
+            Some(&ns16),
+            Some(&ns16),
+        )
+        .expect("string union1d U16 setup");
+        let a16 = ns16.get_item("a16").expect("a16");
+        let b16 = ns16.get_item("b16").expect("b16");
+        let f = fnp_u.call1((&a16, &b16)).expect("fnp union1d U16");
+        let n = numpy_u.call1((&a16, &b16)).expect("numpy union1d U16");
+        let eq: bool = np_array_equal
+            .call1((&f, &n))
+            .expect("array_equal")
+            .extract()
+            .expect("bool");
+        assert!(eq, "string union1d U16 correctness mismatch");
+        group.bench_function("fnp_union1d_U16_1m", |bn| {
+            bn.iter(|| black_box(fnp_u.call1((&a16, &b16)).expect("fnp union1d U16")));
+        });
+        group.bench_function("numpy_union1d_U16_1m", |bn| {
+            bn.iter(|| black_box(numpy_u.call1((&a16, &b16)).expect("numpy union1d U16")));
+        });
     });
     group.finish();
 }
@@ -7821,6 +7850,36 @@ b = np.concatenate([a[:1_000_000], brand])\n";
         });
         group.bench_function("numpy_setxor1d_U8_2m", |bn| {
             bn.iter(|| black_box(numpy_x.call1((&a, &b)).expect("numpy setxor1d")));
+        });
+
+        // Latin-1 U16: the wide two-word-key source-tagged run-composition branch.
+        let setup16 = "import numpy as np\n\
+rng = np.random.default_rng(3)\n\
+a16 = rng.integers(97, 123, (1_000_000, 16), dtype=np.uint32).reshape(-1).view('U16')\n\
+brand16 = rng.integers(97, 123, (500_000, 16), dtype=np.uint32).reshape(-1).view('U16')\n\
+b16 = np.concatenate([a16[:500_000], brand16])\n";
+        let ns16 = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup16).unwrap().as_c_str(),
+            Some(&ns16),
+            Some(&ns16),
+        )
+        .expect("string setxor U16 setup");
+        let a16 = ns16.get_item("a16").expect("a16");
+        let b16 = ns16.get_item("b16").expect("b16");
+        let f = fnp_x.call1((&a16, &b16)).expect("fnp setxor1d U16");
+        let n = numpy_x.call1((&a16, &b16)).expect("numpy setxor1d U16");
+        let eq: bool = np_array_equal
+            .call1((&f, &n))
+            .expect("array_equal")
+            .extract()
+            .expect("bool");
+        assert!(eq, "string setxor1d U16 correctness mismatch");
+        group.bench_function("fnp_setxor1d_U16_1m", |bn| {
+            bn.iter(|| black_box(fnp_x.call1((&a16, &b16)).expect("fnp setxor1d U16")));
+        });
+        group.bench_function("numpy_setxor1d_U16_1m", |bn| {
+            bn.iter(|| black_box(numpy_x.call1((&a16, &b16)).expect("numpy setxor1d U16")));
         });
     });
     group.finish();

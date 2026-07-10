@@ -4,6 +4,72 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - WIN (SHIP): Latin-1 U9..U16 setxor1d/union1d via two-word packed keys - 10.7x / 11.0x vs ORIG, strict CV gate green on all four arms (completes bead deadlock-audit-611nq items 1-2) + AUDIT: the three named reject rows are NOT dead-code-benched
+
+`cc_fnp`, bead deadlock-audit-611nq (wide-key set-algebra completion). LEDGER CHECK FIRST: this
+is the bead's own scope; did not reopen the closed rejects. The marching-orders follow-ons
+"structured field combos beyond (i8,f8)" and "complex128 setops parity retries" are ALREADY
+SHIPPED/COMPLETE (75d4f39b widened structured bitplanes to int/uint 1/2/4/8 x f4/f8; the c128
+retries were confirmed complete in the U9..16 unique entry's ledger check) - not re-dug.
+
+ONE LEVER (one mechanism, two call sites): extend the wide `PackedWideStringKey` route to the
+two remaining set ops. `try_packed_string_setxor` gains a U9..16 branch running the identical
+source-tagged run-composition scan over (wide-key, from_a) tuples; `try_packed_string_union1d`
+gains a U9..16 branch packing EACH operand separately then sort+dedup+unpack - replacing the
+concat + wide-unique routing, which paid a 128 MB record concatenation plus the unique
+pipeline's permutation gathers (union U9..16 was already CORRECT via that route since dc310269;
+this makes it ~2x cheaper). Narrow u64 branches untouched; wide codepoints / S widths / U17+ /
+small-n defer exactly as before. Pure safe-Rust std paths, no C BLAS/LAPACK/XLA.
+
+EXECUTION EVIDENCE (ledger-integrity rule): (a) gate-by-construction: U16 -> narrow width None,
+wide Some(16); bench codepoints 97..122 pass the Latin-1 check; nc = 2M >= 1<<16; (b) timing
+discriminators: setxor's previous route needs a source-tagged memcmp sort of 2M x 64 B records
+(>= ~220 ms by the archived pre-edit 105 ms@1M record-sort measurement) - candidate total is
+66.3 ms; union's previous route costs ~2x the 1M wide-unique (46.5 ms) + concat copy ~= 110-120
+ms - candidate total is 61.0 ms. Neither number is reachable by the old code. Per-arm times
+below ARE the ops' self-times (each arm is one opaque PyO3 call).
+
+MEASURED KEEP GATE (criterion release-perf, ONE binary / ONE rch invocation, worker ovh-a,
+np.array_equal asserted before timing; per SUBSTRATE RULE v2 the arms are sequential rows, NOT
+per-iteration interleaved, so drift does not auto-cancel - drift is instead BOUNDED in-run by
+the single-threaded numpy control arms: numpy intersect U16 reads 703.6 ms here vs 679.8 ms in
+the first 2026-07-10 run (+3.5%), and all four gate arms have CI half-width <= 3.4%. DCE is
+structurally impossible in this family: every arm is an FFI `call1` whose result feeds
+black_box):
+
+| Probe (U16, 1M + 1M, 50% overlap; union disjoint 1M + 1M) | fnp | ORIG numpy | ORIG/fnp | CI half-width fnp/numpy |
+|---|---:|---:|---:|---:|
+| `setxor1d` | 66.283 ms | 711.88 ms | **10.74x** | 0.59% / 0.58% |
+| `union1d` | 61.023 ms | 669.93 ms | **10.98x** | 0.76% / 3.4% |
+| control `intersect1d` (prior lever, same invocation) | 49.242 ms | 703.59 ms | 14.29x | 0.53% / 0.44% |
+| control `unique` (same invocation) | 46.532 ms | 140.61 ms | 3.02x | 0.76% / 0.31% |
+
+Both new-lever rows pass the strict <5% CV gate on BOTH arms. (The pre-existing setdiff control
+row was load-flaky this run - 58.0 ms @ 24% half-width - consistent with its known noisiness;
+its prior same-invocation keeps stand.)
+
+CORRECTNESS: conformance_setops 13 passed / 0 failed on hz2, including the new
+setxor_union_packed_wide_latin1_u9_u16_matches_numpy (U9 + U16 x {setxor1d, union1d}
+np.array_equal + dtype + tobytes byte-equality at 200k records + a planted >0xFF codepoint U12
+defer case). `cargo check --lib --bench criterion_python_surface` green on hz2. Known
+pre-existing reds unchanged (where_py lib-test E0308 x3, now at lib.rs:98956/98981/99007). One
+transient worker infra failure (zerocopy build script on ovh-b) resolved by retry.
+
+REJECT-ROW AUDIT (ordered; ledger-integrity rule applied to the three rows claiming the numpy
+SIMD wall): ALL THREE STAND - none was benched on dead code, each contains an execution
+fingerprint stronger than a self-time percentage: (1) float median radix-select (2026-07-07):
+the fnp arm read 233.8 ms where pure delegation would read ~=numpy's 160 ms - the loss
+magnitude IS the executing-code fingerprint - and the spread-vs-clustered input contrast
+(0.68x vs 1.22x in one binary) matches only the radix-narrowing mechanism; (2) f16 sort via f32
+widening (2026-07-04): fnp 132.0 ms vs numpy 99.1 ms - again above the delegation bound by
+exactly the astype round-trip the root cause names; (3) tie-heavy f32 argsort (2026-07-02): the
+measured loss RESPONDED to permuting the code under test (oracle-before-NaN-scan 1.11x -> 1.07x)
+and the same path wins 3.4x on distinct data - dead code moves neither. No row reopened.
+
+OPEN remaining in the vein: S9..16 bytes (no 4-byte stride; needs a 16-byte big-endian two-u64
+byte pack; separate small lever - re-filed as its own bead).
+Artifacts: tests/artifacts/perf/2026-07-10_string_u16_setxor_union_wide_cc_fnp/.
+
 ## 2026-07-10 - WIN (SHIP): Latin-1 U9..U16 intersect1d/setdiff1d via two-word packed-key set algebra - 15.5x / 6.3x vs ORIG (same-invocation)
 
 `cc_fnp`, covering cod_fnp's packed-setops lane while it is usage-walled (granted until 09:15).
