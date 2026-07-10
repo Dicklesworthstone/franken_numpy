@@ -7733,6 +7733,45 @@ b = np.concatenate([a[:1_000_000], brand])\n";
         group.bench_function("numpy_setdiff1d_U8_2m", |bn| {
             bn.iter(|| black_box(numpy_d.call1((&a, &b)).expect("numpy setdiff")));
         });
+
+        // Latin-1 U16: exercises the two-word packed-key branch (U9..U16), which replaces the
+        // memcmp record-sort + hashed-membership fallback these widths previously used.
+        let setup16 = "import numpy as np\n\
+rng = np.random.default_rng(1)\n\
+a16 = rng.integers(97, 123, (1_000_000, 16), dtype=np.uint32).reshape(-1).view('U16')\n\
+brand16 = rng.integers(97, 123, (500_000, 16), dtype=np.uint32).reshape(-1).view('U16')\n\
+b16 = np.concatenate([a16[:500_000], brand16])\n";
+        let ns16 = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup16).unwrap().as_c_str(),
+            Some(&ns16),
+            Some(&ns16),
+        )
+        .expect("string setops U16 setup");
+        let a16 = ns16.get_item("a16").expect("a16");
+        let b16 = ns16.get_item("b16").expect("b16");
+        for op in ["intersect1d", "setdiff1d"] {
+            let f = module.getattr(op).unwrap().call1((&a16, &b16)).expect("fnp setop U16");
+            let n = numpy.getattr(op).unwrap().call1((&a16, &b16)).expect("numpy setop U16");
+            let eq: bool = np_array_equal
+                .call1((&f, &n))
+                .expect("array_equal")
+                .extract()
+                .expect("bool");
+            assert!(eq, "string {op} U16 correctness mismatch");
+        }
+        group.bench_function("fnp_intersect1d_U16_1m", |bn| {
+            bn.iter(|| black_box(fnp_i.call1((&a16, &b16)).expect("fnp intersect U16")));
+        });
+        group.bench_function("numpy_intersect1d_U16_1m", |bn| {
+            bn.iter(|| black_box(numpy_i.call1((&a16, &b16)).expect("numpy intersect U16")));
+        });
+        group.bench_function("fnp_setdiff1d_U16_1m", |bn| {
+            bn.iter(|| black_box(fnp_d.call1((&a16, &b16)).expect("fnp setdiff U16")));
+        });
+        group.bench_function("numpy_setdiff1d_U16_1m", |bn| {
+            bn.iter(|| black_box(numpy_d.call1((&a16, &b16)).expect("numpy setdiff U16")));
+        });
     });
     group.finish();
 }

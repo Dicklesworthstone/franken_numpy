@@ -1,0 +1,40 @@
+Warning: Unable to complete 10 samples in 4.0s. You may wish to increase target time to 7.0s.
+Benchmarking python_string_setops_boundary/numpy_intersect1d_U16_1m: Collecting 10 samples in estimated 6.9537 s (10 iterations)
+Benchmarking python_string_setops_boundary/numpy_intersect1d_U16_1m: Analyzing
+python_string_setops_boundary/numpy_intersect1d_U16_1m
+                        time:   [675.76 ms 679.78 ms 683.67 ms]
+Benchmarking python_string_setops_boundary/fnp_setdiff1d_U16_1m
+Benchmarking python_string_setops_boundary/fnp_setdiff1d_U16_1m: Warming up for 2.0000 s
+Benchmarking python_string_setops_boundary/fnp_setdiff1d_U16_1m: Collecting 10 samples in estimated 5.1835 s (110 iterations)
+Benchmarking python_string_setops_boundary/fnp_setdiff1d_U16_1m: Analyzing
+python_string_setops_boundary/fnp_setdiff1d_U16_1m
+                        time:   [46.454 ms 46.694 ms 47.196 ms]
+Found 3 outliers among 10 measurements (30.00%)
+  1 (10.00%) low mild
+  2 (20.00%) high mild
+Benchmarking python_string_setops_boundary/numpy_setdiff1d_U16_1m
+Benchmarking python_string_setops_boundary/numpy_setdiff1d_U16_1m: Warming up for 2.0000 s
+Benchmarking python_string_setops_boundary/numpy_setdiff1d_U16_1m: Collecting 10 samples in estimated 7.4660 s (20 iterations)
+Benchmarking python_string_setops_boundary/numpy_setdiff1d_U16_1m: Analyzing
+python_string_setops_boundary/numpy_setdiff1d_U16_1m
+                        time:   [386.11 ms 422.16 ms 464.97 ms]
+
+  [2m2026-07-10T12:29:04.394876Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 624919ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:653 [2;3mon[0m ThreadId(1)
+  [2m2026-07-10T12:29:04.395069Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:702 [2;3mon[0m ThreadId(1)
+  [2m2026-07-10T12:29:04.395084Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639 on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:2328 [2;3mon[0m ThreadId(1)
+  [2m2026-07-10T12:29:04.403809Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 1 retrieval exclude pattern(s) from .rchignore (total: 6)[0m
+    [2;3mat[0m rch/src/transfer.rs:1078 [2;3mon[0m ThreadId(1)
+  [2m2026-07-10T12:29:05.101083Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 705ms (1 files, 1313 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2383 [2;3mon[0m ThreadId(1)
+  [2m2026-07-10T12:29:05.101115Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mArtifacts retrieved: 1 files, 1313 bytes in 705ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:735 [2;3mon[0m ThreadId(1)
+  [2m2026-07-10T12:29:05.101280Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/franken_numpy-ccfnp-covbal-20260710-035639/.rch-target-ovh-a-pool-de51a2be66e609d4bc6cb5c7065f1942 on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:2328 [2;3mon[0m ThreadId(1)
+  [2m2026-07-10T12:29:05.669955Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 568ms (148 files, 3391 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2383 [2;3mon[0m ThreadId(1)
+  [2m2026-07-10T12:29:05.669980Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 148 files, 3391 bytes in 568ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:859 [2;3mon[0m ThreadId(1)
+[RCH] remote ovh-a (636.6s)

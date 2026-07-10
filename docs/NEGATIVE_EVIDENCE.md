@@ -4,6 +4,74 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - WIN (SHIP): Latin-1 U9..U16 intersect1d/setdiff1d via two-word packed-key set algebra - 15.5x / 6.3x vs ORIG (same-invocation)
+
+`cc_fnp`, covering cod_fnp's packed-setops lane while it is usage-walled (granted until 09:15).
+LEDGER CHECK FIRST: this is the declared open vein from the U9..U16 unique WIN below ("the next
+open vein is profile-ranked U/S9..16 set algebra"). Did not reopen the ledger-closed zero-copy
+Gram, float radix-select median, float16 sort-via-f32-widening, tie-heavy f32 argsort, dense
+row-unique occupancy/rank table, or U8 union-only helper.
+
+PROFILE BASIS (reused under the active rch-only disk constraint, not regenerated): the U16[1M]
+ranked frame table in tests/artifacts/perf/2026-07-10_string_u16_packed_wide_cod_fnp/
+profile_and_ab.txt -- 32.12% rayon par_sort record comparator + 20.80% __memcmp_avx2_movbe +
+10.28% memmove = the memcmp record-chase pipeline. U9..U16 intersect1d/setdiff1d still used
+exactly that fallback (memcmp index sort + FNV membership set); the wide-unique WIN removed it
+only for unique. Top attackable frame for these ops by direct transfer.
+
+ONE LEVER: route Latin-1 'U' U9..U16 through `PackedWideStringKey` (high, low) pairs inside
+`try_native_string_intersect_setdiff`: pack both arrays, `par_sort_unstable`, `dedup`, then the
+same sorted two-pointer intersection/difference the narrow packed-u64 branch uses, and
+reconstruct the output records directly from the surviving keys (new
+`packed_wide_string_keys_to_numpy`; a wide key is a complete order-preserving image of a Latin-1
+record, so no gather from the sources). The narrow u64 branch is untouched; non-Latin-1 (any
+codepoint > 0xFF), S9..16, U17+, and non-contiguous inputs defer exactly as before. No C
+BLAS/LAPACK/XLA; unsafe limited to the existing fresh-numpy-buffer write idiom.
+
+EXECUTION EVIDENCE (per today's ledger-integrity alert -- prove the bench exercises the code):
+(a) gate-by-construction: the bench input is U16 -> `packed_string_key_width` None,
+`packed_wide_unicode_key_width` Some(16); codepoints 97..122 pass the Latin-1 prescan; na = 1M
+>= 1<<16 -> the new branch is the only reachable route; (b) timing discriminator: the pre-edit
+memcmp pipeline measured 105.0 ms for ONE record sort at U16[1M] (pre-edit baseline in the
+profile artifact above), while the candidate's ENTIRE intersect1d call (pack + two sorts +
+merge + unpack) is 64.7 ms -- unreachable on the old path, which needs that sort plus a 1M-record
+FNV set build and 1M lookups; (c) the same-invocation `fnp_unique_U16_1m` control (shipped
+wide-key path, shared pack/sort machinery) reads 46.9 ms, consistent with the two-array op
+costing one extra sort.
+
+MEASURED KEEP GATE (criterion release-perf, ONE binary / ONE rch invocation, worker ovh-a;
+np.array_equal asserted on both ops before timing inside the group). Per the same-day
+franken_networkx methodology alert, a ratio split across two rch invocations is INVALID
+(workers are picked non-deterministically and the ratio is not worker-invariant) -- both arms
+here are alternating rows of the same group in the same run:
+
+| Probe (1M + 1M records, 50% overlap) | fnp | ORIG numpy | ORIG/fnp | CI half-width fnp/numpy |
+|---|---:|---:|---:|---:|
+| `intersect1d(U16, U16)` | 64.653 ms | 1.0024 s | **15.5x** | 6.5% / 3.0% |
+| `setdiff1d(U16, U16)` | 57.274 ms | 362.51 ms | **6.3x** | 25% / 0.15% |
+| control `unique(U16[1M])` (pre-existing rows, same invocation) | 46.935 ms | 156.82 ms | 3.3x | 0.5% / 6% |
+
+CV HONESTY: the single-threaded numpy arms are stable; the rayon-parallel fnp arms miss the
+strict <5% bar under tonight's fleet load (documented load asymmetry: parallel arms inflate
+under load while numpy stays flat, so these ratios are FLOORS). Corroboration: an earlier
+independent same-invocation run on the same worker read setdiff 422.16 / 46.694 ms = 9.0x with
+fnp CI half-width 0.79% (that run's fnp intersect row was lost to an output filter, so its
+intersect ratio is unquotable; raw capture archived). A single-arm fnp-only rerun landed on a
+DIFFERENT worker (hz1) and read 100.3 ms with 20% CI -- archived as
+`discarded_cross_invocation_fnp_only_hz1.txt`, an empirical demonstration of why cross-invocation
+ratios are discarded.
+
+CORRECTNESS: `cargo check -p fnp-python --lib` green (remote vmi1227854). `cargo test -p
+fnp-python --test conformance_setops` 12 passed / 0 failed (remote ovh-a) including the new
+`intersect_setdiff_packed_wide_latin1_u9_u16_matches_numpy`: U9 + U16 x {intersect1d, setdiff1d}
+np.array_equal + dtype + tobytes byte-equality at 200k records, plus a planted >0xFF codepoint
+U12 case that must (and does) defer to the numpy-identical fallback. ULP budget N/A (exact).
+
+OPEN next in the vein: setxor1d U9..16 (needs (key, source-tag) pairs for the run-composition
+scan) and union1d U9..16 (single merged sort-dedup); S9..16 stays on the fallback -- bytes lack
+the 4-byte stride, so they need a 16-byte big-endian byte-pair pack, a separate small lever.
+Artifacts: tests/artifacts/perf/2026-07-10_string_u16_intersect_setdiff_wide_cc_fnp/.
+
 ## 2026-07-10 - REJECT (measured, reverted): cov Gram pairing schedule for the triangular block imbalance - the 8-12% rayon "idle" is NOT wall-clock-recoverable, and de-phasing the j-walks costs real L3 co-streaming
 
 `cc_fnp`. Lever = OPEN item (1) from the check-free strip-kernel WIN below: pair heavy block
