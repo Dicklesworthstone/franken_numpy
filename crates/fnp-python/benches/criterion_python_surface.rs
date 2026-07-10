@@ -14188,6 +14188,108 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
         }
 
         {
+            // Narrow-int counting sort: i16 8M full-range (the 2-byte case is where numpy's
+            // serial radix is slowest). Paired vs numpy + A/A null control.
+            let namespace = PyDict::new(py);
+            py.run(
+                std::ffi::CString::new(
+                    "import numpy as np\n\
+                     rng = np.random.default_rng(5)\n\
+                     i16_input = rng.integers(-32768, 32768, 8_000_000, dtype=np.int16)\n",
+                )
+                .expect("i16 setup CString")
+                .as_c_str(),
+                Some(&namespace),
+                Some(&namespace),
+            )
+            .expect("i16 setup");
+            let input = namespace.get_item("i16_input").expect("i16 input");
+            let fnp_sort = module.getattr("sort").expect("fnp sort");
+            let numpy_sort = numpy.getattr("sort").expect("numpy sort");
+            let equal = numpy.getattr("array_equal").expect("array_equal");
+            let f = fnp_sort.call1((&input,)).expect("fnp i16 sort parity");
+            let nres = numpy_sort.call1((&input,)).expect("numpy i16 sort parity");
+            assert!(
+                equal
+                    .call1((&f, &nres))
+                    .expect("array_equal")
+                    .extract::<bool>()
+                    .expect("bool"),
+                "narrow-int i16 sort parity",
+            );
+
+            let cand = RefCell::new(Vec::new());
+            let orig = RefCell::new(Vec::new());
+            let ord = Cell::new(0u64);
+            group.bench_function("narrow_int_i16_sort_8m_paired", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut ct = Duration::ZERO;
+                    let mut ot = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let of = ord.get() & 1 == 1;
+                        ord.set(ord.get().wrapping_add(1));
+                        if of {
+                            let s = Instant::now();
+                            black_box(numpy_sort.call1((&input,)).expect("orig"));
+                            ot += s.elapsed();
+                            let s = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("cand"));
+                            ct += s.elapsed();
+                        } else {
+                            let s = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("cand"));
+                            ct += s.elapsed();
+                            let s = Instant::now();
+                            black_box(numpy_sort.call1((&input,)).expect("orig"));
+                            ot += s.elapsed();
+                        }
+                    }
+                    cand.borrow_mut()
+                        .push(ct.as_secs_f64() * 1e9 / iterations as f64);
+                    orig.borrow_mut()
+                        .push(ot.as_secs_f64() * 1e9 / iterations as f64);
+                    ct + ot
+                });
+            });
+            report_ledger_pair("narrow_int_i16_sort_8m", &cand, &orig);
+
+            let na = RefCell::new(Vec::new());
+            let nb = RefCell::new(Vec::new());
+            let nord = Cell::new(0u64);
+            group.bench_function("narrow_int_i16_sort_8m_null_control", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut at = Duration::ZERO;
+                    let mut bt = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let bf = nord.get() & 1 == 1;
+                        nord.set(nord.get().wrapping_add(1));
+                        if bf {
+                            let s = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("nb"));
+                            bt += s.elapsed();
+                            let s = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("na"));
+                            at += s.elapsed();
+                        } else {
+                            let s = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("na"));
+                            at += s.elapsed();
+                            let s = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("nb"));
+                            bt += s.elapsed();
+                        }
+                    }
+                    na.borrow_mut()
+                        .push(at.as_secs_f64() * 1e9 / iterations as f64);
+                    nb.borrow_mut()
+                        .push(bt.as_secs_f64() * 1e9 / iterations as f64);
+                    at + bt
+                });
+            });
+            report_ledger_pair("narrow_int_i16_sort_null_AA", &na, &nb);
+        }
+
+        {
             let namespace = PyDict::new(py);
             py.run(
                 std::ffi::CString::new(

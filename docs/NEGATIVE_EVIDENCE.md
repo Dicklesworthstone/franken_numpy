@@ -4,6 +4,44 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - WIN (SHIP): narrow-int (i8/u8/i16/u16) flat sort via PARALLEL COUNTING sort - 66.3x vs numpy at i16 8M, null control 1.0014; supersedes the 2026-06 "1-/2-byte ints excluded" scoping
+
+`cc_fnp`. LEDGER CHECK FIRST: the 2026-06 int-sort entry EXCLUDED 1-/2-byte widths on the
+premise "numpy uses an O(n) radix/counting sort... that a COMPARISON par_sort cannot beat" -
+a scoping decision about the comparison primitive, with no counting-sort attempt and no
+retry-condition. This lever is the different primitive (no-ceiling rule): the value-sort
+output is the unique sorted multiset, so a parallel histogram reconstructs it without ever
+comparing or moving elements.
+
+ONE LEVER: `int_sort_flat_counting<T, NB>` - parallel per-chunk histograms folded/reduced
+(u64 counts, 256 or 65,536 buckets, monotonic bucket bijection with two's-complement offset
+for signed) + serial memset-class run-fill straight into the fresh numpy output buffer (the
+fill is bandwidth-bound; parallelizing it buys nothing). Wired into try_native_int_sort_flat
+for ("i"|"u", 1|2); the 4-/8-byte comparison par_sort arms are untouched. BYTE-EXACT
+unconditionally and for EVERY kind: no ties exist for values (equal value = equal bytes).
+
+MEASURED (ONE binary / ONE process / ONE rch invocation, worker ovh-a, alternating AB/BA in
+one iter_custom routine, black_box, A/A null control; i16 full-range 8M):
+
+| row | fnp | ORIG numpy | ratio | cvs | null AA |
+|---|---:|---:|---:|---|---|
+| narrow_int_i16_sort_8m | 4.913 ms | 325.887 ms | **66.34x** | 6.0% / 1.9% | 1.0014 (1.5%/1.8%) |
+
+Median gate: 66x vs a 0.14% null deviation. The 2026-06 premise is also empirically dead on
+today's fleet numpy: 325.9 ms @8M i16 is no "unbeatable O(n) radix" (whether numpy 2.x
+dropped/regressed the narrow radix or it was always this slow at 8M, the counting sort wins
+by an order of magnitude either way).
+
+CORRECTNESS: conformance_sorting::narrow_int_sort_counting_matches_numpy GREEN (remote
+vmi1152480): i8/u8/i16/u16 @2M full-range incl. extremes (i16::MIN/MAX), default + stable
+kinds, dtype + tobytes equality, plus a below-gate fallback case. cargo check green.
+OPEN sibling (not taken here, one-lever discipline): narrow-int STABLE ARGSORT via
+counting-prefix (O(n) stable perm - the current int_argsort_stable covers 4/8-byte only);
+narrow-int LAST-AXIS sort (per-lane counting, lanes >= some min); bool sort (np.bool_
+semantics check needed first).
+PROVENANCE: worker ovh-a; binary sha256 unobtainable (rch retrieval exclusion, documented
+420cf1a3); artifacts tests/artifacts/perf/2026-07-10_narrow_int_counting_sort_cc_fnp/.
+
 ## 2026-07-10 - WIN (SHIP): f16 LAST-AXIS sort 5.25x + stable argsort 10.74x via the widening composition - nulls 1.0043 / 1.0045; completes the f16 ordering family
 
 `cc_fnp`. PROFILE BASIS: numpy's per-lane f16 ordering is the same generic single-threaded

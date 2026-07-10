@@ -679,3 +679,54 @@ fn f16_lastaxis_sort_and_stable_argsort_widening_match_numpy() {
         Ok(())
     });
 }
+
+#[test]
+fn narrow_int_sort_counting_matches_numpy() {
+    // np.sort on 1-/2-byte ints routes to the parallel counting sort (numpy's own path is a
+    // serial radix). A value sort's bytes are the unique sorted multiset, so tobytes equality
+    // must hold for every kind, over the FULL value range including extremes; small inputs
+    // stay on the numpy fallback and must match trivially.
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(288)\n\
+                 n = 2_000_000\n\
+                 i8a = rng.integers(-128, 128, n, dtype=np.int8)\n\
+                 u8a = rng.integers(0, 256, n, dtype=np.uint8)\n\
+                 i16a = rng.integers(-32768, 32768, n, dtype=np.int16)\n\
+                 u16a = rng.integers(0, 65536, n, dtype=np.uint16)\n\
+                 i16a[:4] = [-32768, 32767, 0, -1]\n\
+                 small = i16a[:1000].copy()\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        for name in ["i8a", "u8a", "i16a", "u16a", "small"] {
+            let arr = ns
+                .get_item(name)?
+                .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing arr"))?;
+            for kind in [None, Some("stable")] {
+                let kw = PyDict::new(py);
+                if let Some(k) = kind {
+                    kw.set_item("kind", k)?;
+                }
+                let ours = module.getattr("sort")?.call((&arr,), Some(&kw))?;
+                let theirs = numpy.getattr("sort")?.call((&arr,), Some(&kw))?;
+                assert_eq!(
+                    ours.getattr("dtype")?.str()?.to_string(),
+                    theirs.getattr("dtype")?.str()?.to_string(),
+                    "{name} kind={kind:?}: dtype diverged"
+                );
+                let ours_bytes: Vec<u8> = ours.call_method0("tobytes")?.extract()?;
+                let theirs_bytes: Vec<u8> = theirs.call_method0("tobytes")?.extract()?;
+                assert_eq!(
+                    ours_bytes, theirs_bytes,
+                    "{name} kind={kind:?}: narrow-int sort bytes diverged"
+                );
+            }
+        }
+        Ok(())
+    });
+}
