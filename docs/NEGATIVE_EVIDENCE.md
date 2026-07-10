@@ -4,6 +4,50 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - WIN (SHIP): mixed structured setops bitplanes widened to i4+f4 - 173x / 62x vs ORIG
+
+`cod_fnp`, bead `deadlock-audit-i6701`, bitplane/packed setops continuation. LEDGER CHECK FIRST:
+did not reopen the closed dense row-unique occupancy/rank table, U8 union-only helper, float
+radix-select median, or float16 sort-via-f32-widening rejects. This is the open structured
+field-combo widening requested after the `(i8,f8)` bitplane setops win: the dense set-algebra
+path now accepts two contiguous fields where field 0 is signed/unsigned integer width
+1/2/4/8 and field 1 is float32 or float64.
+
+Primitive: replace the hard-coded `<i8,<f8>` dtype gate with a descriptor for packed
+`int-or-uint + float` records. The existing bitplane algorithm is unchanged: exact-integral,
+finite, non-negative-zero float field values map to a dense two-dimensional value domain;
+`intersect1d` scans `a_bits & b_bits`, `setdiff1d` scans `a_bits & !b_bits`, and `setxor1d`
+uses the same two-source occupancy flags. Output reconstruction writes the original dtype
+widths back (`i1/i2/i4/i8` or `u1/u2/u4/u8`, plus `f4/f8`) in structured value-lexicographic
+order. Padding, non-contiguous records, non-integral floats, NaN, `-0.0`, unsupported fields,
+or oversized/sparse domains still fall through to the generic value-lex/hash route or NumPy.
+No C BLAS/LAPACK/XLA.
+
+MEASURED keep rows (release-perf criterion, `rch exec`, worker `hz2`; bench asserts
+`np.array_equal` before timing; artifacts under
+`tests/artifacts/perf/2026-07-10_struct_mixed_i4f4_bitplanes_cod_fnp/`):
+| Probe | fnp widened bitplanes | ORIG NumPy | ORIG/fnp | stability |
+|---|---:|---:|---:|---:|
+| `intersect1d(struct i4+f4[1M], struct i4+f4[1M])` | 26.462 ms | 4.5778 s | **173.0x** | CI half-width/median 2.0% / 0.6% |
+| `setdiff1d(struct i4+f4[1M], struct i4+f4[1M])` | 29.835 ms | 1.8493 s | **62.0x** | CI half-width/median 1.8% / 1.2% |
+
+Baseline/profiling note: the i4+f4 row was added to `criterion_python_surface` before the
+library lever; two pre-change baseline attempts
+(`baseline_criterion_struct_i4f4.txt`, `baseline_criterion_intersect_i4f4.txt`) spent their
+budget in cold `release-perf` LTO and were interrupted before timing. The keep gate is the
+same-worker candidate-vs-ORIG criterion A/B above; the historical i8+f8 row already ranked
+mixed structured setops as a hot residual, and the i4+f4 row exercises the previously uncovered
+field combo. `perf stat` and `cargo flamegraph` wrapper attempts were bounded at 180s; RCH
+classified `perf stat` as a non-compilation command and both attempts stalled on package/build
+locks (`perf_stat_intersect_i4f4.txt`, `flamegraph_intersect_i4f4.txt`).
+
+CORRECTNESS: `cargo check -p fnp-python --lib` GREEN. Focused
+`cargo test -p fnp-python --test conformance_setops
+setxor1d_mixed_struct_dense_integral_float_matches_numpy -- --nocapture` GREEN; the shard now
+covers the original i8+f8 and new i4+f4 dtypes for `setxor1d`, `intersect1d`, and `setdiff1d`,
+including `-0.0` / non-integral-float fallback edges. The measured rows are exact
+`np.array_equal` parity, so ULP budget is N/A.
+
 ## 2026-07-10 - REJECT (measured, reverted) + TWO LANE-CRITICAL MEASUREMENT FINDINGS: cov/corrcoef zero-copy Gram into the numpy buffer + fused mirror + parallel centering (bead deadlock-audit-zj3m3)
 
 `cc_fnp`. Executed the bead's plan exactly (it honors the fused-mirror retry-condition from the

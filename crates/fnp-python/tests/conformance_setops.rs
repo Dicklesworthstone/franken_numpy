@@ -228,7 +228,18 @@ fn setxor1d_mixed_struct_dense_integral_float_matches_numpy() {
                  b['id'][30_000:] = rng.integers(-200, 700, 70_000)\n\
                  b['val'][30_000:] = rng.integers(-150, 850, 70_000).astype(np.float64)\n\
                  edge_a = np.array([(1, -0.0), (2, 1.5), (3, 3.0)], dtype=dt)\n\
-                 edge_b = np.array([(1, 0.0), (4, 4.0)], dtype=dt)\n"
+                 edge_b = np.array([(1, 0.0), (4, 4.0)], dtype=dt)\n\
+                 dt32 = [('id','<i4'),('val','<f4')]\n\
+                 a32 = np.zeros(100_000, dtype=dt32)\n\
+                 a32['id'] = rng.integers(-200, 700, 100_000, dtype=np.int32)\n\
+                 a32['val'] = rng.integers(-150, 850, 100_000).astype(np.float32)\n\
+                 b32 = np.zeros(100_000, dtype=dt32)\n\
+                 b32['id'][:30_000] = a32['id'][:30_000]\n\
+                 b32['val'][:30_000] = a32['val'][:30_000]\n\
+                 b32['id'][30_000:] = rng.integers(-200, 700, 70_000, dtype=np.int32)\n\
+                 b32['val'][30_000:] = rng.integers(-150, 850, 70_000).astype(np.float32)\n\
+                 edge32_a = np.array([(1, -0.0), (2, 1.5), (3, 3.0)], dtype=dt32)\n\
+                 edge32_b = np.array([(1, 0.0), (4, 4.0)], dtype=dt32)\n"
             ),
             Some(&ns),
             Some(&ns),
@@ -237,7 +248,12 @@ fn setxor1d_mixed_struct_dense_integral_float_matches_numpy() {
         for op in ["setxor1d", "intersect1d", "setdiff1d"] {
             let ours_fn = module.getattr(op)?;
             let numpy_fn = numpy.getattr(op)?;
-            for (left_name, right_name) in [("a", "b"), ("edge_a", "edge_b")] {
+            for (left_name, right_name) in [
+                ("a", "b"),
+                ("a32", "b32"),
+                ("edge_a", "edge_b"),
+                ("edge32_a", "edge32_b"),
+            ] {
                 let left = ns.get_item(left_name)?.expect("left");
                 let right = ns.get_item(right_name)?.expect("right");
                 let ours = ours_fn.call1((&left, &right))?;

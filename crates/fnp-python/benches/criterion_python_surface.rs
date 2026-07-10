@@ -9283,11 +9283,16 @@ fn bench_struct_mixed_setops_boundary(c: &mut Criterion) {
 rng = np.random.default_rng(0)\n\
 dt = [('id','<i8'),('val','<f8')]\n\
 a = np.zeros(1_000_000, dtype=dt); a['id'] = rng.integers(0, 3000, 1_000_000); a['val'] = rng.integers(0, 3000, 1_000_000).astype(np.float64)\n\
-b = np.zeros(1_000_000, dtype=dt); b['id'] = rng.integers(0, 3000, 1_000_000); b['val'] = rng.integers(0, 3000, 1_000_000).astype(np.float64)\n";
+b = np.zeros(1_000_000, dtype=dt); b['id'] = rng.integers(0, 3000, 1_000_000); b['val'] = rng.integers(0, 3000, 1_000_000).astype(np.float64)\n\
+dt32 = [('id','<i4'),('val','<f4')]\n\
+a32 = np.zeros(1_000_000, dtype=dt32); a32['id'] = rng.integers(0, 3000, 1_000_000, dtype=np.int32); a32['val'] = rng.integers(0, 3000, 1_000_000).astype(np.float32)\n\
+b32 = np.zeros(1_000_000, dtype=dt32); b32['id'] = rng.integers(0, 3000, 1_000_000, dtype=np.int32); b32['val'] = rng.integers(0, 3000, 1_000_000).astype(np.float32)\n";
         let ns = PyDict::new(py);
         py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
         let a = ns.get_item("a").expect("a");
         let b = ns.get_item("b").expect("b");
+        let a32 = ns.get_item("a32").expect("a32");
+        let b32 = ns.get_item("b32").expect("b32");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         for op in ["union1d", "intersect1d", "setdiff1d", "setxor1d"] {
             let fnp_fn = module.getattr(op).expect("fnp op");
@@ -9297,6 +9302,18 @@ b = np.zeros(1_000_000, dtype=dt); b['id'] = rng.integers(0, 3000, 1_000_000); b
             assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "{op} mixed struct mismatch");
             group.bench_function(format!("fnp_{op}_struct_i8f8_1m_1m"), |bn| bn.iter(|| black_box(fnp_fn.call1((&a, &b)).unwrap())));
             group.bench_function(format!("numpy_{op}_struct_i8f8_1m_1m"), |bn| bn.iter(|| black_box(np_fn.call1((&a, &b)).unwrap())));
+            let f32 = fnp_fn.call1((&a32, &b32)).expect("fnp i4f4 setop");
+            let n32 = np_fn.call1((&a32, &b32)).expect("numpy i4f4 setop");
+            assert!(
+                eqf.call1((&f32, &n32)).unwrap().extract::<bool>().unwrap(),
+                "{op} mixed i4f4 struct mismatch"
+            );
+            group.bench_function(format!("fnp_{op}_struct_i4f4_1m_1m"), |bn| {
+                bn.iter(|| black_box(fnp_fn.call1((&a32, &b32)).unwrap()))
+            });
+            group.bench_function(format!("numpy_{op}_struct_i4f4_1m_1m"), |bn| {
+                bn.iter(|| black_box(np_fn.call1((&a32, &b32)).unwrap()))
+            });
         }
     });
     group.finish();
