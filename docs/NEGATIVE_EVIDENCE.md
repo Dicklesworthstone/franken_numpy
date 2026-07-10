@@ -4,6 +4,50 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - AMENDMENT (scope-void, no new measurement): the 2026-07-07 "FLOAT median via RADIX-SELECT" REJECT's family-ceiling claim is FALSIFIED BY IN-TREE SHIPPED CODE + two pre-existing container-test failures classified
+
+`cc_fnp`, ledger-integrity route (the frankenlibc pattern: re-decide rows from existing
+evidence without a new measurement). Complements cod_fnp's same-day reopen entry below.
+
+AMENDMENT 1 - scope-void of the radix-select family ceiling. The 2026-07-07 row's MEASUREMENT
+stands (its candidate provably executed: 233.8 ms exceeds the ~160 ms delegation bound by 46%,
+and the spread-vs-clustered contrast in one binary is the radix-narrowing signature). Its
+GENERALIZATION - "Do not re-attempt radix-select for float order statistics... only a
+single-pass in-place parallel partition (parallel introselect / Floyd-Rivest) could beat it" -
+is VOID: `fnp_ufunc::par_select_two` (lib.rs ~29235, backing par_select_median /
+par_select_percentile / par_select_ranks, engaged from the python surface for flat f64
+n >= 1<<19) IS a multi-pass MSD radix narrow over 8-bit digits of f64_sortable_key, and its
+own gate comment records it ~2x FASTER than numpy's introselect at >= 512K. It predates the
+row. The rejected candidate lost to three implementation-specific costs par_select_two does
+not share: (a) an O(n) materialized u64 key buffer (par_select_two recomputes keys inline per
+pass); (b) per-level candidate-set compaction ("filter to it, recurse" = O(n) alloc+copy per
+byte level; par_select_two histograms the full array with a cheap prefix test); (c) two
+independent descents + a keys clone for even n (par_select_two extracts both order statistics
+in ONE descent). RULE going forward: float order-statistic levers extend par_select_two's
+no-copy pattern; the materialize+compact pattern stays rejected. Full analysis:
+tests/artifacts/perf/2026-07-10_reject_row_audit_cc_fnp/AUDIT_REPORT.md (also records why the
+f16-widening and tie-argsort fingerprint audits were superseded by cod_fnp's stronger
+reconstruction findings below - the delegation-bound fingerprints proved EXECUTION but missed
+the stale-baseline and post-4720dc2a double-oracle facts).
+
+AMENDMENT 2 - pre-existing test failures classified (baseline-verified):
+`conformance_sort_search::sort_argsort_python_container_surfaces_match_numpy` and
+`conformance_sort_search::count_nonzero_python_container_surfaces_match_numpy` FAIL IDENTICALLY
+on unmodified origin/main a73f42c9 (remote worker, 0.22 s instant failures, numpy-oracle script
+harness; 42 sibling tests pass). Any in-flight lever touching sort/argsort dispatch should cite
+this classification instead of re-deriving it; root-causing the oracle-harness failures is its
+own follow-up.
+
+IN FLIGHT (named blocker, not a claim): the f32-argsort dispatch-dedupe lever (removes the
+double NaN-scan + double 65,536-sample tie oracle cod_fnp's reopen proved executes twice on
+dense-tie flat input; routing-only, parity by construction) is code-complete on wip commits
+94022f6b+d45ad8df with a null-controlled interleaved harness row added; its measured decision
+is BLOCKED on the release-perf build lottery: four bench attempts landed on four distinct
+cold-cache workers (vmi1227854, vmi1293453, vmi1227854, vmi1152480), the first three killed by
+the 10-minute local client cap mid-LTO; attempt four runs uncapped in the background. The
+measured WIN/REJECT with sha256 + self-time + worker + cv + null-control median follows when
+it lands.
+
 ## 2026-07-10 - WIN (SHIP): S9..S16 bytes wide-key pack - intersect 12.2x / setxor 7.7x vs ORIG; closes bead deadlock-audit-740l3 and COMPLETES the wide-key family (U9..16 + S9..16 x unique/intersect/setdiff/setxor/union)
 
 `cc_fnp`, bead deadlock-audit-740l3 (final item split from deadlock-audit-611nq). LEDGER CHECK
