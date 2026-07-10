@@ -122,7 +122,65 @@ and the same path wins 3.4x on distinct data - dead code moves neither. No row r
 OPEN remaining in the vein: S9..16 bytes (no 4-byte stride; needs a 16-byte big-endian two-u64
 byte pack; separate small lever - re-filed as its own bead).
 Artifacts: tests/artifacts/perf/2026-07-10_string_u16_setxor_union_wide_cc_fnp/.
+## 2026-07-10 - REJECT (NO-SHIP integrity audit): three legacy “irreducible wall” rows fail the current evidence gate; f16-sort and tie-heavy-f32 claims INVALID + REOPENED
 
+`cod_fnp`. LEDGER FIRST: this audit was explicitly ordered despite the old rows being CLOSED. It
+did not retry a production lever. Instead it reconstructed the historical candidates as safe,
+bench-only `#[inline(never)]` references and tested whether the old REJECT evidence survives the
+current substrate rule. The three challenged rows were float median via radix-select (old docs-only
+commit `2e8bb3fc`), float16 sort via f32 widening (`2f758c3b`; read-only historical candidate
+`e179915a`), and tie-heavy flat f32 argsort (`03a2f046`). None had a retained profile, raw samples,
+CV, or alternating A/B; the old Criterion attempts used separate sequential rows, while f32 used a
+loaded-box Python `perf_counter` loop in fixed FNP-then-NumPy order.
+
+ONE EVIDENCE LEVER: add one durable Criterion group whose closure alternates AB/BA and records both
+arms separately. Candidate + bench-only NumPy ORIG run in ONE release-perf binary, ONE process, and
+ONE fail-closed RCH invocation. Correctness is asserted before timing (exact f64 median bits;
+`np.array_equal` for f16 sort and f32 argsort). The median core is the exact historical safe
+algorithm: monotonic IEEE u64 keys, parallel byte histograms/filters above 65,536 survivors, fresh
+filtered Vec per byte, and two independent descents plus full key clone for even n. The f16 route is
+the exact finite/non-minus-zero uint16 pre-scan followed by f32 astype -> NumPy sort -> f16 astype.
+The f32 arm calls TODAY'S real FNP dispatch, not a reconstruction. No production path changed; no
+unsafe and no BLAS/LAPACK/XLA linkage was added.
+
+PROFILE EXECUTION PROOF (worker `vmi1149989`, `perf record -F 199 -e cycles:u`, 77,028 samples,
+zero lost): radix byte-filter closure 1,245 self samples (0.89%), radix histogram/reduce 413
+(0.22%), median key materialization 155 (0.07%), f16 uint16 pre-scan 62 (0.05%), and the real
+`argsort_sample_has_tie::<f32>` plus its quicksort body 27 samples (~0.03%). Therefore NONE of the
+reconstructed rows is dead code in this audit. The monolithic bench subsequently traversed
+unselected setup, so the global top frames are polluted (`PyDict_GetItem` 4.70%, `PyContextVar_Get`
+3.47%, unresolved NumPy 2.39%); the artifact retains ALL 167 frames >=0.10% and exact target sample
+counts. Those setup frames are not used to claim a mechanism or choose a production lever.
+
+MEASURED (same binary/process/worker, ten final normalized paired observations):
+
+| Probe | candidate | ORIG NumPy | ORIG/candidate | candidate CV | ORIG CV |
+|---|---:|---:|---:|---:|---:|
+| median f64 standard-normal 16M, radix-select | 366.795 ms | 200.607 ms | **0.5469x loss** | 41.080% | 16.243% |
+| sort f16 4M, f32 widen/sort/narrow | 37.764 ms | 260.331 ms | **6.8935x signal** | 19.067% | 5.090% |
+| argsort f32 rounded ties 2M, current FNP dispatch | 64.117 ms | 41.628 ms | **0.6492x loss** | 21.242% | 10.633% |
+
+REJECT THIS MEASUREMENT: every arm misses the strict `<5%` CV trust gate, so NONE of these ratios
+is a new keep or renewed REJECT. The integrity conclusions are nevertheless concrete:
+
+1. **Median radix-select: historical REJECT is UNVERIFIED and REOPENED as evidence, not proven
+   dead code.** Fresh direction still loses, but noise forbids renewing the “irreducible” rule.
+   Retry only in a focused profiled binary with CV green; then let its top candidate frame choose a
+   different primitive if radix filtering still loses.
+2. **Float16 widening sort: old 0.75x / `do not re-dig` row is INVALID and REOPENED.** The exact
+   route executed and the fresh direction reversed by ~9.2x relative to the old ratio (6.89x vs
+   0.75x), far beyond ordinary noise, although this run itself cannot ship. Retry condition is a
+   focused alternating profile with both CVs <5%; if green, restore one pure-safe production gate
+   and prove byte parity before keeping.
+3. **Tie-heavy f32 argsort: old “NumPy SIMD wall is irreducible” row is INVALID and REOPENED.**
+   NumPy f32 argsort here is index-introsort, not its value-sort SIMD kernel. Commit `4720dc2a`
+   changed dispatch after the old timing: a dense-tie input now runs the 65,536-value sampled sort
+   in the radix candidate and then AGAIN in the comparison candidate before NumPy delegation.
+   Profile proves that helper executed. The next lever is remove/cache the duplicate oracle result,
+   then profile the remaining single-probe path; do not cite the stale SIMD explanation.
+
+Artifact: `tests/artifacts/perf/2026-07-10_ledger_integrity_revalidation_cod_fnp/README.md`.
+AGENT_NAME=cod_fnp.
 ## 2026-07-10 - WIN (SHIP): Latin-1 U9..U16 intersect1d/setdiff1d via two-word packed-key set algebra - 15.5x / 6.3x vs ORIG (same-invocation)
 
 `cc_fnp`, covering cod_fnp's packed-setops lane while it is usage-walled (granted until 09:15).

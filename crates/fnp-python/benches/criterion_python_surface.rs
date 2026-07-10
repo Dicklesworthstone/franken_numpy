@@ -4,10 +4,13 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use fnp_python::fnp_python;
+use pyo3::Bound;
 use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyTuple};
-use pyo3::{PyResult, Python};
+use pyo3::{Py, PyAny, PyResult, Python};
+use rayon::prelude::*;
+use std::cell::{Cell, RefCell};
 use std::hint::black_box;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn ensure_numpy_available(py: Python<'_>) -> PyResult<()> {
     py.import("numpy").map(drop)
@@ -12668,8 +12671,481 @@ A = rng.integers(0, 20, (500_000, 4)).astype(np.int64)\n",
     group.finish();
 }
 
+// Ledger-integrity retries for three historical REJECT rows. These helpers live only in the
+// benchmark binary: production dispatch is deliberately untouched. `inline(never)` gives perf
+// an exact execution marker for each reconstructed candidate and each NumPy ORIG reference.
+#[inline]
+fn ledger_f64_sortable_key(value: f64) -> u64 {
+    let bits = if value == 0.0 { 0 } else { value.to_bits() };
+    bits ^ ((((bits as i64) >> 63) as u64) | 0x8000_0000_0000_0000)
+}
+
+#[inline]
+fn ledger_f64_from_sortable_key(key: u64) -> f64 {
+    let bits = if key & 0x8000_0000_0000_0000 != 0 {
+        key ^ 0x8000_0000_0000_0000
+    } else {
+        !key
+    };
+    f64::from_bits(bits)
+}
+
+#[inline(never)]
+fn ledger_radix_select_key(mut current: Vec<u64>, mut rank: usize, start_byte: i32) -> u64 {
+    let mut byte = start_byte;
+    loop {
+        let len = current.len();
+        if len <= 1 || byte < 0 {
+            return current[rank];
+        }
+        let shift = (byte as u64) * 8;
+        let histogram: [usize; 256] = if len > (1 << 16) {
+            let chunk_size = (len / (rayon::current_num_threads() * 4).max(1)).max(1);
+            current
+                .par_chunks(chunk_size)
+                .map(|chunk| {
+                    let mut local = [0usize; 256];
+                    for &key in chunk {
+                        local[((key >> shift) & 0xff) as usize] += 1;
+                    }
+                    local
+                })
+                .reduce(
+                    || [0usize; 256],
+                    |mut left, right| {
+                        for digit in 0..256 {
+                            left[digit] += right[digit];
+                        }
+                        left
+                    },
+                )
+        } else {
+            let mut local = [0usize; 256];
+            for &key in &current {
+                local[((key >> shift) & 0xff) as usize] += 1;
+            }
+            local
+        };
+        let mut prefix = 0usize;
+        let mut selected = 255usize;
+        for (digit, &count) in histogram.iter().enumerate() {
+            if prefix + count > rank {
+                selected = digit;
+                break;
+            }
+            prefix += count;
+        }
+        current = if len > (1 << 16) {
+            current
+                .par_iter()
+                .copied()
+                .filter(|&key| ((key >> shift) & 0xff) as usize == selected)
+                .collect()
+        } else {
+            current
+                .iter()
+                .copied()
+                .filter(|&key| ((key >> shift) & 0xff) as usize == selected)
+                .collect()
+        };
+        rank -= prefix;
+        byte -= 1;
+    }
+}
+
+#[inline(never)]
+fn ledger_radix_median_f64(data: &[f64]) -> f64 {
+    assert!(!data.par_iter().any(|value| value.is_nan()));
+    let keys: Vec<u64> = data
+        .par_iter()
+        .map(|&value| ledger_f64_sortable_key(value))
+        .collect();
+    let n = keys.len();
+    if n % 2 == 1 {
+        ledger_f64_from_sortable_key(ledger_radix_select_key(keys, n / 2, 7))
+    } else {
+        let low = ledger_f64_from_sortable_key(ledger_radix_select_key(keys.clone(), n / 2 - 1, 7));
+        let high = ledger_f64_from_sortable_key(ledger_radix_select_key(keys, n / 2, 7));
+        (low + high) / 2.0
+    }
+}
+
+#[inline(never)]
+fn ledger_orig_median_reference(
+    numpy_median: &Bound<'_, PyAny>,
+    input: &Bound<'_, PyAny>,
+) -> PyResult<f64> {
+    numpy_median.call1((input,))?.extract()
+}
+
+#[inline(never)]
+fn ledger_try_native_f16_sort(
+    numpy_sort: &Bound<'_, PyAny>,
+    input: &Bound<'_, PyAny>,
+    input_bits: &[u16],
+) -> PyResult<Py<PyAny>> {
+    let must_defer = input_bits
+        .par_iter()
+        .any(|&bits| bits == 0x8000 || ((bits & 0x7c00) == 0x7c00 && (bits & 0x03ff) != 0));
+    assert!(
+        !must_defer,
+        "finite positive f16 audit input must stay on candidate route"
+    );
+    let widened = input.call_method1("astype", ("float32",))?;
+    let sorted = numpy_sort.call1((&widened,))?;
+    Ok(sorted.call_method1("astype", ("float16",))?.unbind())
+}
+
+#[inline(never)]
+fn ledger_orig_f16_sort_reference(
+    numpy_sort: &Bound<'_, PyAny>,
+    input: &Bound<'_, PyAny>,
+) -> PyResult<Py<PyAny>> {
+    Ok(numpy_sort.call1((input,))?.unbind())
+}
+
+#[inline(never)]
+fn ledger_f32_tie_argsort_candidate(
+    fnp_argsort: &Bound<'_, PyAny>,
+    input: &Bound<'_, PyAny>,
+) -> PyResult<Py<PyAny>> {
+    Ok(fnp_argsort.call1((input,))?.unbind())
+}
+
+#[inline(never)]
+fn ledger_orig_f32_argsort_reference(
+    numpy_argsort: &Bound<'_, PyAny>,
+    input: &Bound<'_, PyAny>,
+) -> PyResult<Py<PyAny>> {
+    Ok(numpy_argsort.call1((input,))?.unbind())
+}
+
+fn ledger_tail_stats(samples: &RefCell<Vec<f64>>) -> (usize, f64, f64) {
+    let samples = samples.borrow();
+    let count = samples.len().min(10);
+    assert!(
+        count >= 2,
+        "Criterion must retain at least two paired samples"
+    );
+    let tail = &samples[samples.len() - count..];
+    let mean = tail.iter().sum::<f64>() / count as f64;
+    let variance = tail
+        .iter()
+        .map(|sample| {
+            let delta = sample - mean;
+            delta * delta
+        })
+        .sum::<f64>()
+        / (count - 1) as f64;
+    (count, mean, variance.sqrt() * 100.0 / mean)
+}
+
+fn report_ledger_pair(
+    row: &str,
+    candidate_samples: &RefCell<Vec<f64>>,
+    orig_samples: &RefCell<Vec<f64>>,
+) {
+    let (candidate_n, candidate_ns, candidate_cv) = ledger_tail_stats(candidate_samples);
+    let (orig_n, orig_ns, orig_cv) = ledger_tail_stats(orig_samples);
+    assert_eq!(candidate_n, orig_n);
+    println!(
+        "LEDGER_AUDIT row={row} samples={candidate_n} candidate_mean_ms={:.6} \
+         candidate_cv_pct={candidate_cv:.3} orig_mean_ms={:.6} orig_cv_pct={orig_cv:.3} \
+         orig_over_candidate={:.4}",
+        candidate_ns / 1_000_000.0,
+        orig_ns / 1_000_000.0,
+        orig_ns / candidate_ns,
+    );
+}
+
+fn bench_ledger_integrity_rejects(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_ledger_integrity_rejects");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(6));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_ledger_audit").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+
+        {
+            let namespace = PyDict::new(py);
+            py.run(
+                std::ffi::CString::new(
+                    "import numpy as np\n\
+                     rng = np.random.default_rng(0)\n\
+                     median_input = rng.standard_normal(16_000_000).astype(np.float64)\n",
+                )
+                .expect("median setup CString")
+                .as_c_str(),
+                Some(&namespace),
+                Some(&namespace),
+            )
+            .expect("median setup");
+            let input = namespace
+                .get_item("median_input")
+                .expect("median input present");
+            let raw: Vec<u8> = input
+                .call_method0("tobytes")
+                .expect("median bytes")
+                .extract()
+                .expect("extract median bytes");
+            let data: Vec<f64> = raw
+                .chunks_exact(8)
+                .map(|chunk| {
+                    f64::from_ne_bytes(chunk.try_into().expect("one native f64 per chunk"))
+                })
+                .collect();
+            assert_eq!(data.len(), 16_000_000);
+            let numpy_median = numpy.getattr("median").expect("numpy.median");
+            let candidate = ledger_radix_median_f64(&data);
+            let orig = ledger_orig_median_reference(&numpy_median, &input)
+                .expect("NumPy median parity reference");
+            assert_eq!(candidate.to_bits(), orig.to_bits(), "radix median parity");
+
+            let candidate_samples = RefCell::new(Vec::new());
+            let orig_samples = RefCell::new(Vec::new());
+            let order = Cell::new(0u64);
+            group.bench_function("radix_median_f64_normal_16m_paired", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut candidate_total = Duration::ZERO;
+                    let mut orig_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let orig_first = order.get() & 1 == 1;
+                        order.set(order.get().wrapping_add(1));
+                        if orig_first {
+                            let start = Instant::now();
+                            black_box(
+                                ledger_orig_median_reference(&numpy_median, &input)
+                                    .expect("NumPy median audit call"),
+                            );
+                            orig_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(ledger_radix_median_f64(&data));
+                            candidate_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(ledger_radix_median_f64(&data));
+                            candidate_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                ledger_orig_median_reference(&numpy_median, &input)
+                                    .expect("NumPy median audit call"),
+                            );
+                            orig_total += start.elapsed();
+                        }
+                    }
+                    candidate_samples
+                        .borrow_mut()
+                        .push(candidate_total.as_secs_f64() * 1e9 / iterations as f64);
+                    orig_samples
+                        .borrow_mut()
+                        .push(orig_total.as_secs_f64() * 1e9 / iterations as f64);
+                    candidate_total + orig_total
+                });
+            });
+            report_ledger_pair(
+                "radix_median_f64_normal_16m",
+                &candidate_samples,
+                &orig_samples,
+            );
+        }
+
+        {
+            let namespace = PyDict::new(py);
+            py.run(
+                std::ffi::CString::new(
+                    "import numpy as np\n\
+                     rng = np.random.default_rng(0)\n\
+                     f16_input = (rng.integers(1, 4000, 4_000_000) / 7).astype(np.float16)\n",
+                )
+                .expect("f16 setup CString")
+                .as_c_str(),
+                Some(&namespace),
+                Some(&namespace),
+            )
+            .expect("f16 setup");
+            let input = namespace.get_item("f16_input").expect("f16 input present");
+            let bit_bytes: Vec<u8> = input
+                .call_method1("view", ("uint16",))
+                .expect("f16 uint16 view")
+                .call_method0("tobytes")
+                .expect("f16 bit bytes")
+                .extract()
+                .expect("extract f16 bit bytes");
+            let input_bits: Vec<u16> = bit_bytes
+                .chunks_exact(2)
+                .map(|chunk| {
+                    u16::from_ne_bytes(chunk.try_into().expect("one native u16 per chunk"))
+                })
+                .collect();
+            assert_eq!(input_bits.len(), 4_000_000);
+            let numpy_sort = numpy.getattr("sort").expect("numpy.sort");
+            let equal = numpy.getattr("array_equal").expect("numpy.array_equal");
+            let candidate = ledger_try_native_f16_sort(&numpy_sort, &input, &input_bits)
+                .expect("f16 widening candidate parity call");
+            let orig =
+                ledger_orig_f16_sort_reference(&numpy_sort, &input).expect("f16 ORIG parity call");
+            assert!(
+                equal
+                    .call1((candidate.bind(py), orig.bind(py)))
+                    .expect("f16 array_equal")
+                    .extract::<bool>()
+                    .expect("f16 equality bool"),
+                "f16 widening-sort parity",
+            );
+
+            let candidate_samples = RefCell::new(Vec::new());
+            let orig_samples = RefCell::new(Vec::new());
+            let order = Cell::new(0u64);
+            group.bench_function("f16_sort_via_f32_widening_4m_paired", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut candidate_total = Duration::ZERO;
+                    let mut orig_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let orig_first = order.get() & 1 == 1;
+                        order.set(order.get().wrapping_add(1));
+                        if orig_first {
+                            let start = Instant::now();
+                            black_box(
+                                ledger_orig_f16_sort_reference(&numpy_sort, &input)
+                                    .expect("f16 ORIG audit call"),
+                            );
+                            orig_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                ledger_try_native_f16_sort(&numpy_sort, &input, &input_bits)
+                                    .expect("f16 widening audit call"),
+                            );
+                            candidate_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(
+                                ledger_try_native_f16_sort(&numpy_sort, &input, &input_bits)
+                                    .expect("f16 widening audit call"),
+                            );
+                            candidate_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                ledger_orig_f16_sort_reference(&numpy_sort, &input)
+                                    .expect("f16 ORIG audit call"),
+                            );
+                            orig_total += start.elapsed();
+                        }
+                    }
+                    candidate_samples
+                        .borrow_mut()
+                        .push(candidate_total.as_secs_f64() * 1e9 / iterations as f64);
+                    orig_samples
+                        .borrow_mut()
+                        .push(orig_total.as_secs_f64() * 1e9 / iterations as f64);
+                    candidate_total + orig_total
+                });
+            });
+            report_ledger_pair(
+                "f16_sort_via_f32_widening_4m",
+                &candidate_samples,
+                &orig_samples,
+            );
+        }
+
+        {
+            let namespace = PyDict::new(py);
+            py.run(
+                std::ffi::CString::new(
+                    "import numpy as np\n\
+                     rng = np.random.default_rng(0)\n\
+                     f32_ties = np.round(rng.standard_normal(2_000_000), 2).astype(np.float32)\n",
+                )
+                .expect("f32 argsort setup CString")
+                .as_c_str(),
+                Some(&namespace),
+                Some(&namespace),
+            )
+            .expect("f32 argsort setup");
+            let input = namespace
+                .get_item("f32_ties")
+                .expect("f32 tie input present");
+            let fnp_argsort = module.getattr("argsort").expect("fnp argsort");
+            let numpy_argsort = numpy.getattr("argsort").expect("numpy.argsort");
+            let equal = numpy.getattr("array_equal").expect("numpy.array_equal");
+            let candidate = ledger_f32_tie_argsort_candidate(&fnp_argsort, &input)
+                .expect("f32 tied candidate parity call");
+            let orig = ledger_orig_f32_argsort_reference(&numpy_argsort, &input)
+                .expect("f32 tied ORIG parity call");
+            assert!(
+                equal
+                    .call1((candidate.bind(py), orig.bind(py)))
+                    .expect("f32 argsort array_equal")
+                    .extract::<bool>()
+                    .expect("f32 argsort equality bool"),
+                "tied f32 argsort parity",
+            );
+
+            let candidate_samples = RefCell::new(Vec::new());
+            let orig_samples = RefCell::new(Vec::new());
+            let order = Cell::new(0u64);
+            group.bench_function("f32_argsort_rounded_ties_2m_paired", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut candidate_total = Duration::ZERO;
+                    let mut orig_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let orig_first = order.get() & 1 == 1;
+                        order.set(order.get().wrapping_add(1));
+                        if orig_first {
+                            let start = Instant::now();
+                            black_box(
+                                ledger_orig_f32_argsort_reference(&numpy_argsort, &input)
+                                    .expect("f32 argsort ORIG audit call"),
+                            );
+                            orig_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                ledger_f32_tie_argsort_candidate(&fnp_argsort, &input)
+                                    .expect("f32 argsort candidate audit call"),
+                            );
+                            candidate_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(
+                                ledger_f32_tie_argsort_candidate(&fnp_argsort, &input)
+                                    .expect("f32 argsort candidate audit call"),
+                            );
+                            candidate_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                ledger_orig_f32_argsort_reference(&numpy_argsort, &input)
+                                    .expect("f32 argsort ORIG audit call"),
+                            );
+                            orig_total += start.elapsed();
+                        }
+                    }
+                    candidate_samples
+                        .borrow_mut()
+                        .push(candidate_total.as_secs_f64() * 1e9 / iterations as f64);
+                    orig_samples
+                        .borrow_mut()
+                        .push(orig_total.as_secs_f64() * 1e9 / iterations as f64);
+                    candidate_total + orig_total
+                });
+            });
+            report_ledger_pair(
+                "f32_argsort_rounded_ties_2m",
+                &candidate_samples,
+                &orig_samples,
+            );
+        }
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_ledger_integrity_rejects,
     bench_unique_rows_full_boundary,
     bench_unique_cols_boundary,
     bench_unique_rows_boundary,
