@@ -4,6 +4,40 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-11 - PROBE (SURFACE, no production change): exp/log passthrough reopen is GO on AVX2 evidence - byte-parity 4/4 + timing 1.60-2.39x vs pinned nulls - but HOLDS for one missing data point (hz2/AVX-512 byte relation)
+
+`cc_fnp`, bead deadlock-audit-gkznn (stays open/in_progress). REOPEN BASIS: the 2026-06-09
+"do not re-wire exp/log without SIMD" comments rest on a pre-zero-copy measurement (native
+30.3ms @4M exp INCLUDING extract+zero-init+rebuild); the shipped transcendental zero-copy
+machinery (e54e3195) removes exactly those costs.
+
+PROBE EVIDENCE (bench group python_f64_exp_log_probe + permanent diagnostic test
+conformance_exp_log::f64_exp_log_numpy_vs_system_libm_byte_probe, worker_isa_probe pattern):
+- BYTE RELATION: numpy 2.4.6 f64 exp/log/log2/log10 == Rust/system scalar libm BIT-EXACT
+  (0 diffs / 1M elements, max_bitdiff=0) on THREE AVX2 hosts: vmi1227854 (bench probe +
+  math-route diagnostic, cross-validated), vmi1293453 (math-route x2). numpy has no AVX2
+  f64 exp/log SIMD kernel - the scalar path IS libm on this fleet class.
+- TIMING (ledger pairs, numpy A/A nulls 0.995-1.013, worker vmi1227854): rayon parallel
+  scalar-libm map WITH a deliberate vec![0.0;n] zero-init handicap beats numpy -
+  exp_1m 2.11x (2.77 vs 5.84ms), exp_4m 1.60x, log_1m 2.39x, log_4m 1.64x.
+- OPEN GATE: hz2 (the fleet's AVX-512 host; numpy dispatches AVX-512 SKX f64 exp/log
+  kernels there, which are historically NOT libm-byte-equal). Introducing a divergence
+  (unlike inheriting tanh's pre-existing one) is not shippable without that data point.
+  Four sampling attempts landed only AVX2 workers (rch picks least-loaded; hz2 saturated).
+- WIRING DESIGN (ready, held): direct zerocopy_f64_unary_flat attempt inside the
+  exp/log/log2/log10 pyfunctions with core_numpy_passthrough FALLBACK - clean arrays
+  native, event-carrying arrays passthrough to numpy so its RuntimeWarning surface is
+  preserved EXACTLY (strictly better warning parity than the sin family; does not expand
+  the tvy7o gap). Guard/dispatch arms: Exp -> f64_over_under_event; Log/Log2/Log10 ->
+  v==0.0 || (v.is_finite() && v<0.0), exact note_unary_float_errors mirrors.
+
+RETRY PREDICATE: one hz2 (or any avx512f=true host) sample of the in-tree diagnostic.
+byte_equal=true there -> wire unconditionally (evidence complete). byte_equal=false ->
+DECISION FORK to surface to the human: ISA-gated delegation (is_x86_feature_detected
+avx512f -> passthrough) vs documented DIVERGENCES.md row vs no-ship.
+Artifacts: tests/artifacts/perf/2026-07-10_f64_transcendental_zerocopy_cc_fnp/
+exp_log_probe_run1.txt + explog_host_probe_attempt*.txt.
+
 ## 2026-07-10 - WIN (SHIP): f64 transcendental unary zero-copy fused-defer path (15 ops) - flips the tanh loss (0.757 -> 1.372/1.613 on two workers), sin 4M 1.59 -> 3.34x; extends the sqrt fused-defer pattern to the whole scalar-libm family + REFUTES the 2026-06-22 medium-N transcendental DEFER row
 
 `cc_fnp`, bead deadlock-audit-scy0o. PROFILE-FIRST BASIS (fresh baseline, worker vmi1227854,

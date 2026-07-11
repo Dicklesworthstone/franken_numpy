@@ -943,3 +943,46 @@ print(all_pass)
     );
     Ok(())
 }
+
+#[test]
+fn f64_exp_log_numpy_vs_system_libm_byte_probe() -> Result<(), String> {
+    // Permanent per-host scoping diagnostic (bead deadlock-audit-gkznn; the
+    // worker_isa_probe pattern): prints whether THIS host's numpy computes f64
+    // exp/log/log2/log10 byte-identically to the system libm (math.exp et al.
+    // call the same platform libm as Rust's f64::exp). numpy dispatches SIMD
+    // kernels for these ops only on AVX-512-class hosts, where the last-ULP
+    // relation can differ; the print records the relation per host so routing
+    // decisions stay evidence-backed. Deliberately assertion-free on the
+    // host-dependent relation.
+    let script = fnp_script(
+        r#"
+import math
+import socket
+cpu = getattr(np._core._multiarray_umath, '__cpu_features__', {})
+rng = np.random.default_rng(20260711)
+e = rng.standard_normal(200_000)
+l = np.abs(rng.standard_normal(200_000)) + 0.5
+for name, ref_fn, data in [
+    ("exp", math.exp, e), ("log", math.log, l),
+    ("log2", math.log2, l), ("log10", math.log10, l),
+]:
+    np_out = getattr(np, name)(data)
+    ref = np.array([ref_fn(float(v)) for v in data])
+    diff = int(np.count_nonzero(np_out.view(np.int64) != ref.view(np.int64)))
+    print(f"EXPLOG_HOST_PROBE host={socket.gethostname()} numpy={np.__version__} "
+          f"avx512f={bool(cpu.get('AVX512F', False))} avx512_skx={bool(cpu.get('AVX512_SKX', False))} "
+          f"op={name} byte_equal={diff == 0} diff_elems={diff}")
+print("PROBE_OK")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    // Surface the per-host relation in the harness output (run with
+    // --nocapture); the oracle subprocess's stdout is otherwise swallowed.
+    println!("{result}");
+    assert!(
+        result.contains("PROBE_OK"),
+        "exp/log host probe should complete: {result}"
+    );
+    Ok(())
+}

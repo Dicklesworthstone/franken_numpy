@@ -574,3 +574,31 @@ Found 1 outliers among 10 measurements (10.00%)
   1 (10.00%) high mild
 NULL_MEDIAN_GATE row=f64_expm1_1m observations=20 base_median_ms=14.142786 candidate_median_ms=9.590590 base_cv_pct=0.724 candidate_cv_pct=16.141 effect_median=1.481617 effect_p10=1.367673 effect_p90=2.006367 effect_low=1.166167 effect_high=2.137840 effect_cv_pct=17.076 effect_above_one=20 null_median=1.004130 null_p10=0.988524 null_p90=1.013891 null_low=0.944985 null_high=1.073970 null_cv_pct=2.548 null_base_cv_pct=3.002 null_peer_cv_pct=2.208 null_corrected_median=1.475523 verdict=WIN
 
+  [2m2026-07-11T04:12:30.085148Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 1198067ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:653 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-11T04:12:30.085530Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:702 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-11T04:12:30.085549Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/franken_numpy on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:2328 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-11T04:12:30.085636Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 1 retrieval exclude pattern(s) from .rchignore (total: 6)[0m
+    [2;3mat[0m rch/src/transfer.rs:1078 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-11T04:12:30.952929Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 867ms (35 files, 2975 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2383 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-11T04:12:30.952975Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mArtifacts retrieved: 35 files, 2975 bytes in 867ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:735 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-11T04:12:30.953101Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/franken_numpy/.rch-target-hz1-pool-bb11943277a8babc6519db2357b55709 on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:2328 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-11T04:12:31.497408Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 544ms (357 files, 12549 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2383 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-11T04:12:31.497431Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 357 files, 12549 bytes in 544ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:859 [2;3mon[0m ThreadId(1)
+
+[RCH] remote hz1 (1211.7s)

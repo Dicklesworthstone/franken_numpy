@@ -109,6 +109,25 @@ DECISION: SHIP. 16/16 WIN rows across two candidate workers vs pinned in-run
 nulls; tanh loss (baseline 0.757) flipped on both (1.372 / 1.613); bit-identity
 proven by construction + route-equality conformance + identical cross-worker
 parity byte patterns.
+
+## Follow-up probe (bead deadlock-audit-gkznn): exp/log passthrough reopen
+
+- exp_log_probe_run1.txt (worker vmi1227854, numpy 2.4.6, AVX2/no-AVX512):
+  BYTE PROBE 4/4 byte-equal — numpy f64 exp/log/log2/log10 == Rust system libm,
+  0 diffs / 1M elements each, max_bitdiff=0. TIMING (ledger pairs, numpy A/A
+  nulls 0.995-1.013): parallel scalar-libm map WITH vec zero-init handicap vs
+  numpy — exp_1m 2.11x (2.77 vs 5.84ms), exp_4m 1.60x (13.59 vs 21.69ms),
+  log_1m 2.39x (2.13 vs 5.11ms), log_4m 1.64x (13.82 vs 22.73ms).
+- Open gate before wiring: hz2 (fleet's AVX-512 host) byte relation — numpy
+  ships AVX-512 SIMD f64 exp/log kernels that may not be libm-byte-equal.
+  Permanent diagnostic test f64_exp_log_numpy_vs_system_libm_byte_probe added
+  to conformance_exp_log.rs (worker_isa_probe pattern); explog_host_probe_
+  attempt*.txt record per-host results.
+- Wiring design (GO case): direct zerocopy_f64_unary_flat attempt inside the
+  exp/log/log2/log10 pyfunctions with core_numpy_passthrough fallback — clean
+  arrays native (probe-proven byte-equal), event-carrying arrays passthrough to
+  numpy so its RuntimeWarning surface is preserved EXACTLY (better than the
+  sin-family warning story; avoids expanding the tvy7o gap).
 - conformance_unary_ops_candidate.txt: route-equality + defer + specials battery.
 
 ### Validation (candidate)

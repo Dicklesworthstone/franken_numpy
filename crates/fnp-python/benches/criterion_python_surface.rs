@@ -13662,6 +13662,203 @@ fn bench_f64_transcendental_median_gate(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_f64_exp_log_probe(c: &mut Criterion) {
+    // Probe for bead deadlock-audit-gkznn (reopen of the stale 2026-06-09
+    // exp/log passthrough decision): (1) BYTE PROBE — does numpy's f64
+    // exp/log/log2/log10 output match Rust scalar system-libm bit-for-bit on
+    // this worker? (2) TIMING — does a rayon parallel scalar-libm map (with a
+    // deliberate vec![0.0; n] zero-init handicap the real zero-copy path would
+    // not pay) beat numpy's kernel? Both must hold before any production
+    // rewiring; the probe writes evidence only.
+    let mut group = c.benchmark_group("python_f64_exp_log_probe");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy version")
+            .extract::<String>()
+            .expect("numpy version string");
+        println!("EXP_LOG_PROBE_NUMPY version={numpy_version}");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 e_1m = rng.standard_normal(1_048_576)\n\
+                 e_4m = rng.standard_normal(4_194_304)\n\
+                 l_1m = np.abs(rng.standard_normal(1_048_576)) + 0.5\n\
+                 l_4m = np.abs(rng.standard_normal(4_194_304)) + 0.5\n",
+            )
+            .expect("probe setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("probe setup");
+        let e_1m = namespace.get_item("e_1m").expect("e_1m present");
+        let e_4m = namespace.get_item("e_4m").expect("e_4m present");
+        let l_1m = namespace.get_item("l_1m").expect("l_1m present");
+        let l_4m = namespace.get_item("l_4m").expect("l_4m present");
+
+        let to_vec = |arr: &Bound<'_, PyAny>| -> Vec<f64> {
+            let raw: Vec<u8> = arr
+                .call_method0("tobytes")
+                .expect("probe input bytes")
+                .extract()
+                .expect("probe input byte Vec");
+            raw.chunks_exact(8)
+                .map(|chunk| f64::from_ne_bytes(chunk.try_into().expect("one native f64")))
+                .collect()
+        };
+
+        // (1) BYTE PROBE: numpy output vs Rust scalar libm, element-exact.
+        for (name, rust_fn, input) in [
+            ("exp", f64::exp as fn(f64) -> f64, &e_1m),
+            ("log", f64::ln as fn(f64) -> f64, &l_1m),
+            ("log2", f64::log2 as fn(f64) -> f64, &l_1m),
+            ("log10", f64::log10 as fn(f64) -> f64, &l_1m),
+        ] {
+            let data = to_vec(input);
+            let np_bytes: Vec<u8> = numpy
+                .getattr(name)
+                .expect("numpy probe fn")
+                .call1((input,))
+                .expect("numpy probe call")
+                .call_method0("tobytes")
+                .expect("numpy probe bytes")
+                .extract()
+                .expect("numpy probe byte Vec");
+            let mut diff_elems = 0usize;
+            let mut first_diff = None;
+            let mut max_bitdiff: u64 = 0;
+            for (index, (np_chunk, &value)) in
+                np_bytes.chunks_exact(8).zip(data.iter()).enumerate()
+            {
+                let np_bits = u64::from_ne_bytes(np_chunk.try_into().expect("np f64 chunk"));
+                let mine_bits = rust_fn(value).to_bits();
+                if np_bits != mine_bits {
+                    diff_elems += 1;
+                    if first_diff.is_none() {
+                        first_diff = Some(index);
+                    }
+                    max_bitdiff = max_bitdiff.max(np_bits.abs_diff(mine_bits));
+                }
+            }
+            println!(
+                "EXP_LOG_PROBE op={name} n=1m byte_equal={} diff_elems={diff_elems} \
+                 first_diff_elem={first_diff:?} max_bitdiff={max_bitdiff}",
+                diff_elems == 0,
+            );
+        }
+
+        // (2) TIMING: ledger-pair ABBA — candidate = parallel scalar-libm map
+        // (zero-init handicap), orig = the numpy call. Plus numpy A/A nulls.
+        for (row, name, rust_fn, input) in [
+            ("exp_log_probe_exp_1m", "exp", f64::exp as fn(f64) -> f64, &e_1m),
+            ("exp_log_probe_exp_4m", "exp", f64::exp as fn(f64) -> f64, &e_4m),
+            ("exp_log_probe_log_1m", "log", f64::ln as fn(f64) -> f64, &l_1m),
+            ("exp_log_probe_log_4m", "log", f64::ln as fn(f64) -> f64, &l_4m),
+        ] {
+            let data = to_vec(input);
+            let np_fn = numpy.getattr(name).expect("numpy timing fn");
+            let run_candidate = || {
+                let n = data.len();
+                let mut out = vec![0.0f64; n];
+                let chunk = n.div_ceil(rayon::current_num_threads().max(1));
+                out.par_chunks_mut(chunk)
+                    .zip(data.par_chunks(chunk))
+                    .for_each(|(o, i)| {
+                        for (slot, &value) in o.iter_mut().zip(i.iter()) {
+                            *slot = rust_fn(value);
+                        }
+                    });
+                out
+            };
+            let candidate_samples = RefCell::new(Vec::new());
+            let orig_samples = RefCell::new(Vec::new());
+            let order = Cell::new(0u64);
+            group.bench_function(format!("{row}_paired"), |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut candidate_total = Duration::ZERO;
+                    let mut orig_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let orig_first = order.get() & 1 == 1;
+                        order.set(order.get().wrapping_add(1));
+                        if orig_first {
+                            let start = Instant::now();
+                            black_box(np_fn.call1((input,)).expect("np timing call"));
+                            orig_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(run_candidate());
+                            candidate_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(run_candidate());
+                            candidate_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(np_fn.call1((input,)).expect("np timing call"));
+                            orig_total += start.elapsed();
+                        }
+                    }
+                    candidate_samples
+                        .borrow_mut()
+                        .push(candidate_total.as_secs_f64() * 1e9 / iterations as f64);
+                    orig_samples
+                        .borrow_mut()
+                        .push(orig_total.as_secs_f64() * 1e9 / iterations as f64);
+                    candidate_total + orig_total
+                });
+            });
+            report_ledger_pair(row, &candidate_samples, &orig_samples);
+
+            let null_a = RefCell::new(Vec::new());
+            let null_b = RefCell::new(Vec::new());
+            let null_order = Cell::new(0u64);
+            group.bench_function(format!("{row}_null_aa"), |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut a_total = Duration::ZERO;
+                    let mut b_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let b_first = null_order.get() & 1 == 1;
+                        null_order.set(null_order.get().wrapping_add(1));
+                        if b_first {
+                            let start = Instant::now();
+                            black_box(np_fn.call1((input,)).expect("np null call"));
+                            b_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(np_fn.call1((input,)).expect("np null call"));
+                            a_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(np_fn.call1((input,)).expect("np null call"));
+                            a_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(np_fn.call1((input,)).expect("np null call"));
+                            b_total += start.elapsed();
+                        }
+                    }
+                    null_a
+                        .borrow_mut()
+                        .push(a_total.as_secs_f64() * 1e9 / iterations as f64);
+                    null_b
+                        .borrow_mut()
+                        .push(b_total.as_secs_f64() * 1e9 / iterations as f64);
+                    a_total + b_total
+                });
+            });
+            report_ledger_pair(&format!("{row}_null"), &null_a, &null_b);
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_wide_string_substrate_v2(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_wide_string_substrate_v2");
     group.sample_size(10);
@@ -14850,6 +15047,7 @@ criterion_group!(
     benches,
     bench_completion_median_gate,
     bench_f64_transcendental_median_gate,
+    bench_f64_exp_log_probe,
     bench_wide_string_substrate_v2,
     bench_ledger_integrity_rejects,
     bench_unique_rows_full_boundary,
