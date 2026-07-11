@@ -21,9 +21,15 @@ LEAD (filed as deadlock-audit-o2ahc, not attempted this tick): a native kernel r
 einsum's per-element sequential per-step-rounded chain is parallelizable ACROSS output
 elements (each chain stays sequential = order-preserving) and MR-tileable for b-row reuse;
 numpy's loop is catastrophic-slow so even a rounding-faithful kernel should win 15-25x.
-GATE: the exact per-step contract (f16(acc + f16(a*b)) vs f16(acc + f32(a)*f32(b)) vs
-float-intermediate variants) must be oracle-matched on small adversarial cases BEFORE any
-kernel work; fleet numpy versions (2.2.4/2.4.6) must agree.
+GATE RESOLVED (same tick, local numpy 2.4.3): the contract is the per-element sequential
+chain acc = f16(f32(acc) + f32(a_ij)*f32(b_jl)) over j in order - PER-STEP narrow to f16
+(H6/H7 byte-exact on discriminating cases; H8 f32-accumulate-once = the matmul contract
+does NOT match). Holds unchanged through k=64/96/200/1000 (no pairwise switch). The 1-D
+'i,i->' spec uses a DIFFERENT path (f32-buffered, narrow once) - scope V1 to the 2-op
+matmul-shaped spec only. IMPLEMENTATION: per-element chains are order-preserving under
+across-element parallelism and MR-tiling (share b-row decodes across 4 f16-accumulator
+rows; widen/narrow per step). Fleet-version agreement (2.2.4/2.4.6) moves into the
+conformance battery, degenerate-bool-pattern style.
 
 ## 2026-07-11 - WIN (SHIP): flat U9..U16/S9..S16 value sort reuses ordered two-word keys - U16 241.19 -> 91.61 ms (2.63x self), S16 169.43 -> 59.03 ms (2.87x self), byte-exact
 
