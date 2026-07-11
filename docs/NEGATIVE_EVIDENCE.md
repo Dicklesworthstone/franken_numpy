@@ -4,6 +4,60 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-11 - NO-SHIP (SURFACE): core `UFuncArray` last-axis product row bands are worker-sensitive; same-worker median regressed 2.08x after a cross-worker apparent win
+
+`GoldSummit`, direct-core sibling of the 2026-06-24 Python-surface `np.prod`
+keep. PROFILE-FIRST TARGET: a new Criterion row isolates
+`UFuncArray::reduce_prod(Some(1), false)` on a 1024x1024 F64 array. Source-path
+inspection put the whole reduction in the serial `reduce_fold_axis_contiguous`
+last-axis fold; unlike `fnp-python::try_zerocopy_f64_prod`, the core path had no
+parallel lane ownership and no existing benchmark row. The synthetic F64 sort row
+was not retried because its dense-integer bitmap continuation is already closed.
+
+ONE LEVER TRIED, THEN REMOVED: above `1 << 18` elements, assign independent
+last-axis product rows to two coarse Rayon bands per worker. Each row retained the
+old element-0 seed and exact left-to-right multiplication order. A threshold-crossing
+raw-bit proof covered signed zero, a noncanonical NaN payload, infinities,
+overflow-followed-by-zero, and finite near-one rows. Static review confirmed exact
+input/output band pairing, including the short final band. The proof test and all 11
+focused `reduce_prod_` tests passed remotely, but correctness was not enough to keep a
+median regression.
+
+MEDIAN GATE (identical strict-remote command and worker `vmi1152480`; baseline and
+candidate both cold-linked under `release-perf`; no other RCH job remained on the
+worker for candidate warmup/measurement):
+
+| read | Criterion interval | median | candidate / baseline | verdict |
+|---|---:|---:|---:|---|
+| serial baseline | 874.35-909.01 us | **891.25 us** | 1.000x | reference |
+| row-band candidate | 1.4751-2.2377 ms | **1.8569 ms** | **2.083x** | **108.3% slower** |
+
+Criterion independently reported `+53.738% / +96.207% / +136.07%`, `p=0.00`,
+"Performance has regressed." The intervals do not overlap, so the requested median
+gate is decisive.
+
+ROUTING NEGATIVE: an earlier candidate run was routed to `vmi1264463` despite
+requesting the baseline worker and appeared to improve the median from 891.25 us to
+716.99 us (19.6%). That cross-worker result is routing evidence only; the exact
+same-worker read reversed it by more than 2x. Do not ship or cite the cross-worker
+number as a win.
+
+DECISION: production and proof-test changes were removed. The Criterion
+`core_ops/reduce_prod_axis1_1024x1024` seam is retained so this core gap remains
+measurable. Do not retry direct row-band ownership under the default Rayon pool.
+RETRY PREDICATE: use a one-binary same-worker ABBA/BAAB harness with a serial arm,
+explicit `RAYON_NUM_THREADS`, finite near-one input, and an A/A null control; or bring
+a genuinely different scheduling primitive that is stable under loaded-box
+contention. Exact benchmark command:
+`RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1152480 env -u CARGO_TARGET_DIR rch exec -- cargo bench -p fnp-conformance --bench criterion_core_ops --profile release-perf -- reduce_prod_axis1_1024x1024`.
+
+VALIDATION/SURFACED INFRASTRUCTURE: targeted `fnp-ufunc` check and Clippy passed;
+11/11 focused product tests passed. Workspace check remains independently red in
+three pre-existing `fnp-python::where_py` test calls, and workspace Clippy remains
+independently red in two pre-existing `fnp-runtime::worker_isa_probe` constant asserts.
+The first workspace-Clippy attempt additionally hit the known `ovh-b` zerocopy
+build-script SIGILL. No local Cargo command was used.
+
 ## 2026-07-11 - WIN (SHIP): int GEMM static-dispatch + MR=4 row-tile kernel - i32 512^2 flips 0.944 LOSS -> 35.4x WIN, i64 2.72 -> 20.2x (fnp self 344 -> 4.96 ms / 307 -> 16.1 ms); ROOT CAUSE: fn-pointer ops made every inner-loop mul/add an indirect call
 
 `cc_fnp` (linalg lane), bead deadlock-audit-nl4mf. The integer-no-BLAS family's one named-open

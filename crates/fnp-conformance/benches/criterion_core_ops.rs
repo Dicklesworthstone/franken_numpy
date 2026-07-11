@@ -59,6 +59,15 @@ fn bench_core_ops(c: &mut Criterion) {
         });
     });
 
+    group.bench_function("reduce_prod_axis1_1024x1024", |b| {
+        b.iter(|| {
+            let out = reduce_in
+                .reduce_prod(Some(1), false)
+                .expect("axis product reduction must succeed");
+            black_box(out.values()[0]);
+        });
+    });
+
     let matmul_dim = 256usize;
     let matmul_lhs = UFuncArray::new(
         vec![matmul_dim, matmul_dim],
