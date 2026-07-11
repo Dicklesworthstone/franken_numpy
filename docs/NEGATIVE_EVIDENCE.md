@@ -4,6 +4,20 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-11 - RECON (SURFACE): f16 einsum TRANSPOSED specs use a DIFFERENT contract class - wide-accumulate-once, but no black-box variant matches exactly; source-read predicate filed (deadlock-audit-transposed lead)
+
+`cc_fnp` (linalg lane), follow-up sibling of the shipped per-step kernel below. RECON
+(local numpy 2.4.3): 'ij,lj->il' (contracted index LAST-axis-contiguous on BOTH operands,
+the a@b.T / attention-scores shape) does NOT follow the per-step-narrow chain (mismatch on
+the k=7 discriminating case). It is wide-accumulate-once (f32-seq, f64-seq, and an 8-lane
+f32 partial scheme ALL match at k=5), but at scale (400 trials, k=9..2000, 'j,j->' family)
+every guessed variant misses 2-3/400 - the exact lane/combine order is none of the three.
+DO NOT implement from black-box guesses: the in-repo oracle source
+legacy_numpy_code/.../einsum_sumprod.c.src carries the half-float sum_of_products variants;
+pin the loop there first (bead filed), then the o2ahc kernel pattern applies unchanged.
+Value note: the transposed shape is the attention/Gram idiom and likely MORE common in f16
+workloads than the plain form.
+
 ## 2026-07-11 - WIN (SHIP): f16 einsum matmul-shaped contraction via the PER-STEP-NARROW contract kernel - 0.99 parity -> 6.25x vs numpy (fnp self 760.5 -> 195.3 ms at 512^2), byte-identical to the cracked contract on fleet numpy
 
 `cc_fnp` (linalg lane), bead deadlock-audit-o2ahc - the implementation of the same-day
