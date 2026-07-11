@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-11 - RECON (SURFACE, lead filed): f16 einsum CANNOT route to the tiled f16 GEMM - einsum's f16 accumulation contract differs from matmul's by up to 37585 ULP (per-step f16 rounding vs f32 accumulate); the real lever is a rounding-faithful native kernel, bead deadlock-audit-o2ahc
+
+`cc_fnp` (linalg lane). After the frontier close, the next unmeasured f16 surface:
+matmul-shaped einsum specs. CODE FACT: einsum_operand_dtype_policy DEFERS all f16 einsum to
+numpy ("accumulation precision the f64 path would not match") - so np.einsum('ij,jk->ik',
+f16, f16) runs numpy's catastrophic loop and fnp inherits it at parity.
+
+RECON (local numpy 2.4.3, semantics only, no timing): np.einsum('ij,jk->ik', a16, b16) vs
+np.matmul(a16, b16) on (128,96)@(96,144): 15,339/18,432 elements DIFFER, max ULP distance
+37,585. That is not last-ULP drift - einsum accumulates with PER-STEP f16 rounding while
+matmul accumulates in f32 and narrows once. CONSEQUENCE: routing einsum specs into the
+shipped tiled GEMM (33f7d73b family) is byte-WRONG by construction; do not retry that form.
+
+LEAD (filed as deadlock-audit-o2ahc, not attempted this tick): a native kernel reproducing
+einsum's per-element sequential per-step-rounded chain is parallelizable ACROSS output
+elements (each chain stays sequential = order-preserving) and MR-tileable for b-row reuse;
+numpy's loop is catastrophic-slow so even a rounding-faithful kernel should win 15-25x.
+GATE: the exact per-step contract (f16(acc + f16(a*b)) vs f16(acc + f32(a)*f32(b)) vs
+float-intermediate variants) must be oracle-matched on small adversarial cases BEFORE any
+kernel work; fleet numpy versions (2.2.4/2.4.6) must agree.
+
 ## 2026-07-11 - WIN (SHIP): flat U9..U16/S9..S16 value sort reuses ordered two-word keys - U16 241.19 -> 91.61 ms (2.63x self), S16 169.43 -> 59.03 ms (2.87x self), byte-exact
 
 `cod_fnp` (sort lane), bead `deadlock-audit-jlqsi`. NEGATIVE-LEDGER FIRST:
