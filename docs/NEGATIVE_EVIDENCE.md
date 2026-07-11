@@ -4,6 +4,47 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-11 - WIN (SHIP): bool flat sort via the existing u8 counting machinery - 37.8x at 8M / 19.8x at 2M vs nulls 1.02/0.98; RESOLVES the narrow-int family's OPEN bool semantics check
+
+`cc_fnp`, bead deadlock-audit-i82jw. The last OPEN sibling of the narrow-int ordering family
+(0f9135eb/6638c908/6dc7afc5) - held back only by "bool needs its semantics check first".
+
+SEMANTICS RESOLVED (the whole gate): numpy's bool sort orders raw BYTES as unsigned values -
+degenerate non-0/1 bool bytes (e.g. uint8-view'd 2/255) sort as 0x00 < 0x01 < 0x02 < ... <
+0xff under EVERY kind, and stable argsort ranks by byte value (local numpy 2.4.3 recon,
+re-verified against fleet numpy 2.4.6 by the new conformance case below). Therefore bool
+sort == u8 sort byte-for-byte and the u8 COUNTING sort is byte-exact for EVERY bool buffer
+with NO defer gate (value sort output = unique sorted multiset; kind irrelevant).
+
+ONE LEVER (UNWIRED-HELPER class): extend try_native_int_sort_flat's kind gate to "b" and add
+a ("b", 1) arm -> bool_sort_flat_counting (mirror of int_sort_flat_counting: parallel
+per-chunk 256-bucket histograms + serial memset-class run-fill; input read through a uint8
+view, output allocated as bool and filled through a uint8 view so dtype AND OWNDATA match
+numpy's np.sort exactly). Gate SORT_PARALLEL_MIN 1<<20 inherited.
+
+MEASURED (ONE binary / ONE process / ONE rch invocation, worker vmi1264463,
+RAYON_NUM_THREADS=4, ABBA/BAAB in one iter_custom routine, black_box, per-row numpy A/A
+nulls, pre-timing byte/dtype parity asserts):
+
+| row | fnp | ORIG numpy | effect (np/fnp) | null AA |
+|---|---:|---:|---:|---:|
+| bool_sort_8m | 4.606 ms | 177.586 ms | **37.84x** | 1.023 |
+| bool_sort_2m | 2.123 ms | 41.046 ms | **19.82x** | 0.985 |
+
+Median gate: 19.8-37.8x vs ~2% null deviations - decidable beyond argument; effect
+replicates across two sizes in-run. numpy's bool sort at 8M reads 177.6 ms - the same
+serial-slow class the narrow-int lever exposed (i16 read 325.9 ms @8M).
+
+CORRECTNESS: conformance_sorting::bool_sort_counting_matches_numpy GREEN remote
+(vmi1293453, fleet numpy 2.4.6): normalized 2M + all-true + all-false + DEGENERATE-BYTE
+(uint8-view'd full-range) + below-gate cases, kinds default + stable, dtype + tobytes +
+OWNDATA equality. cargo check -p fnp-python GREEN (vmi1227854). NARROW-INT ORDERING FAMILY
+now has no OPEN siblings (bool lastaxis / bool stable argsort could reuse the same
+byte-order fact - unfiled, small expected value vs flat; default-kind argsort stays
+correctly delegated for tie-density reasons).
+PROVENANCE: binary sha in bool_sort_bench_run1.txt (runner-printed); artifacts
+tests/artifacts/perf/2026-07-10_f64_transcendental_zerocopy_cc_fnp/bool_sort_*.txt.
+
 ## 2026-07-11 - PROBE (SURFACE, no production change): exp/log passthrough reopen is GO on AVX2 evidence - byte-parity 4/4 + timing 1.60-2.39x vs pinned nulls - but HOLDS for one missing data point (hz2/AVX-512 byte relation)
 
 `cc_fnp`, bead deadlock-audit-gkznn (stays open/in_progress). REOPEN BASIS: the 2026-06-09

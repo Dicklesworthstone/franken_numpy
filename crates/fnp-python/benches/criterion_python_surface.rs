@@ -13859,6 +13859,90 @@ fn bench_f64_exp_log_probe(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_bool_sort_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_bool_sort_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_bool_sort_median_gate").expect("bool sort bench module");
+        fnp_python(&module).expect("initialize fnp_python bool sort bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 b_8m = rng.integers(0, 2, 8_000_000).astype(bool)\n\
+                 b_2m = rng.integers(0, 2, 2_000_000).astype(bool)\n",
+            )
+            .expect("bool sort setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("bool sort setup");
+        let b_8m = namespace.get_item("b_8m").expect("b_8m present");
+        let b_2m = namespace.get_item("b_2m").expect("b_2m present");
+
+        let fnp_sort = module.getattr("sort").expect("fnp sort");
+        let np_sort = numpy.getattr("sort").expect("numpy sort");
+        for (label, input) in [("8m", &b_8m), ("2m", &b_2m)] {
+            let candidate = fnp_sort.call1((input,)).expect("fnp bool sort parity");
+            let base = np_sort.call1((input,)).expect("numpy bool sort parity");
+            assert_eq!(
+                candidate
+                    .getattr("dtype")
+                    .expect("candidate dtype")
+                    .str()
+                    .expect("candidate dtype str")
+                    .to_string(),
+                base.getattr("dtype")
+                    .expect("base dtype")
+                    .str()
+                    .expect("base dtype str")
+                    .to_string(),
+                "bool sort {label} dtype parity",
+            );
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "bool sort {label} byte parity",
+            );
+        }
+
+        bench_median_gate_python_unary(
+            &mut group,
+            "bool_sort_8m_null_then_effect",
+            "bool_sort_8m",
+            &np_sort,
+            &fnp_sort,
+            &b_8m,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "bool_sort_2m_null_then_effect",
+            "bool_sort_2m",
+            &np_sort,
+            &fnp_sort,
+            &b_2m,
+        );
+    });
+
+    group.finish();
+}
+
 fn bench_wide_string_substrate_v2(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_wide_string_substrate_v2");
     group.sample_size(10);
@@ -15048,6 +15132,7 @@ criterion_group!(
     bench_completion_median_gate,
     bench_f64_transcendental_median_gate,
     bench_f64_exp_log_probe,
+    bench_bool_sort_median_gate,
     bench_wide_string_substrate_v2,
     bench_ledger_integrity_rejects,
     bench_unique_rows_full_boundary,

@@ -833,3 +833,66 @@ fn narrow_int_lastaxis_sort_and_stable_argsort_match_numpy() {
         Ok(())
     });
 }
+
+#[test]
+fn bool_sort_counting_matches_numpy() {
+    // np.sort on 1-D bool routes to the parallel u8 counting sort: numpy's bool
+    // sort orders raw BYTES as unsigned values (degenerate non-0/1 bytes
+    // included — verified against the live oracle below), so tobytes equality
+    // must hold for every kind over normalized, constant, and degenerate
+    // buffers; below-gate inputs stay on the numpy fallback and must match
+    // trivially. OWNDATA must match numpy's fresh-allocation contract.
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 n = 2_000_000\n\
+                 ba = rng.integers(0, 2, n).astype(bool)\n\
+                 all_true = np.ones(n, dtype=bool)\n\
+                 all_false = np.zeros(n, dtype=bool)\n\
+                 degenerate = rng.integers(0, 256, n, dtype=np.uint8).view(bool)\n\
+                 small = ba[:1000].copy()\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        for name in ["ba", "all_true", "all_false", "degenerate", "small"] {
+            let arr = ns
+                .get_item(name)?
+                .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing arr"))?;
+            for kind in [None, Some("stable")] {
+                let kw = PyDict::new(py);
+                if let Some(k) = kind {
+                    kw.set_item("kind", k)?;
+                }
+                let ours = module.getattr("sort")?.call((&arr,), Some(&kw))?;
+                let theirs = numpy.getattr("sort")?.call((&arr,), Some(&kw))?;
+                assert_eq!(
+                    ours.getattr("dtype")?.str()?.to_string(),
+                    theirs.getattr("dtype")?.str()?.to_string(),
+                    "{name} kind={kind:?}: bool sort dtype diverged"
+                );
+                let ours_bytes: Vec<u8> = ours.call_method0("tobytes")?.extract()?;
+                let theirs_bytes: Vec<u8> = theirs.call_method0("tobytes")?.extract()?;
+                assert_eq!(
+                    ours_bytes, theirs_bytes,
+                    "{name} kind={kind:?}: bool sort bytes diverged"
+                );
+                assert_eq!(
+                    ours
+                        .getattr("flags")?
+                        .getattr("owndata")?
+                        .extract::<bool>()?,
+                    theirs
+                        .getattr("flags")?
+                        .getattr("owndata")?
+                        .extract::<bool>()?,
+                    "{name} kind={kind:?}: bool sort OWNDATA diverged"
+                );
+            }
+        }
+        Ok(())
+    });
+}
