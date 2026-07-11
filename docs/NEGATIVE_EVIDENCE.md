@@ -4,6 +4,42 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-11 - WIN (SHIP): f16 BROADCAST matmul takes the per-slice MR=4 + decode-scratch tile - 7.28x -> 10.46x vs numpy (fnp self 30.0 -> 9.02 ms at (32,128,128)@(128,96)); f16 GEMM FAMILY FULLY TILED
+
+`cc_fnp` (linalg lane), bead deadlock-audit-qfug3 - the third and last naive f16 GEMM kernel
+(2-D 33f7d73b, batched c84d289a, broadcast this).
+
+PROFILE BASIS (fresh baseline row, worker vmi1227854, null 1.017): f16_matmul_broadcast
+(32,128,128)@(128,96) read 7.28x vs numpy but 0.45 ns/MAC - the same 3x-per-MAC inefficiency
+class the batched kernel had pre-tile. Same-run replications: 2-D 29.85x (4th replication),
+batched 26.97x on this slower-numpy worker (2nd worker for c84d289a).
+
+ONE LEVER (the family tile, transferred with broadcast indexing): per-slice outer
+parallelism + nested MR=4 row blocks + per-block b-row f32 decode scratch; the SHARED
+operand reuses slice 0 (a_base/b_base select by a_batched), the batched operand indexes by
+bb. BYTE-EXACT BY CONSTRUCTION: every output element keeps its original per-slice k-order
+f32 accumulation with identical decoded values and one final narrow.
+
+MEASURED (ONE binary / ONE process / ONE rch invocation per run, ABBA/BAAB, black_box,
+per-row numpy A/A nulls, pre-timing byte parity asserts; baseline vmi1227854, candidate on a
+faster-numpy worker - in-run ratios + fnp self-times carry the decision):
+
+| row | baseline effect | candidate effect | candidate null | fnp ms base -> cand |
+|---|---:|---:|---:|---|
+| f16_matmul_broadcast_32x128 | 7.281 (null 1.017) | **10.461** | 0.986 | 29.98 -> 9.02 (3.32x self) |
+| f16_matmul_batched_8x256 (c84d289a repl.) | 26.969 | 13.049* | 1.008 | 20.72 -> 22.16 |
+| f16_matmul_512 (33f7d73b repl.) | 29.851 | 13.131* | 0.982 | 18.04 -> 19.98 |
+
+*lower candidate effects on the replication rows reflect that worker's faster numpy arm
+(269-286 ms vs 535-555 ms on the baseline worker); the fnp self-times replicate the shipped
+kernels within run-to-run noise.
+
+CORRECTNESS: conformance_ufunc_edge::f16_matmul_parallel_bit_exact_matches_numpy GREEN
+remote (vmi1264463) - the battery's broadcast cases cover BOTH directions ((B,m,k)@(k,n)
+and (m,k)@(B,k,n)) byte-identically, plus batches/tails/inf-nan.
+PROVENANCE: runner-printed hosts/shas;
+tests/artifacts/perf/2026-07-11_f16_matmul_mr4_cc_fnp/broadcast_*.txt.
+
 ## 2026-07-11 - WIN (SHIP): batched f16 matmul takes the MR=4 + decode-scratch tile per slice - 8.16x -> 11.60x vs numpy (fnp self 67.8 -> 21.5 ms at (8,256,256)); + LINALG BOUNDARY RE-SWEEP: DOMINATED (24 pairs, no loss row)
 
 `cc_fnp` (linalg lane), bead deadlock-audit-vgeny.
