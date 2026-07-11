@@ -4,6 +4,40 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-11 - WIN (SHIP): f16 matmul MR=4 row block + per-block b-row decode scratch - 8.58x -> 28.87x vs numpy (fnp self 62.7 -> 18.8 ms at 512^2), byte-exact by k-order preservation
+
+`cc_fnp` (linalg lane), bead deadlock-audit-vxp9t - the k-order-constrained sibling named in
+617e8647. PROFILE BASIS (fresh baseline, worker vmi1227854, null 1.023): f16_matmul_512 read
+8.58x (numpy 535.6 ms widening loop vs fnp 62.7 ms naive parallel ikj) - but the kernel
+re-decoded EVERY b element from f16 to f32 once per output row (m redundant decodes per
+element) and ran one accumulation chain per row.
+
+ONE LEVER: MR=4 row block whose k-loop decodes each b row into a per-task f32 scratch ONCE
+per block (4x fewer decodes) and feeds four independent f32 accumulator rows. BYTE-EXACT BY
+CONSTRUCTION: each output element still accumulates a_dec[i,kk]*b_dec[kk,j] over kk in
+exactly the original order with identical decoded values and narrows to f16 once - the tile
+only changes WHICH elements are computed together (numpy's k-order f32-accumulate contract
+from the original kernel is untouched). Tail blocks (<4 rows) keep the per-row form with the
+same shared scratch.
+
+MEASURED (ONE binary / ONE process / ONE rch invocation per run, ABBA/BAAB, black_box,
+per-row numpy A/A nulls, pre-timing byte parity asserts; baseline + candidate BOTH landed
+vmi1227854 - same-worker before/after):
+
+| row | baseline effect (np/fnp) | candidate effect | candidate null | fnp ms base -> cand |
+|---|---:|---:|---:|---|
+| f16_matmul_512 | 8.579 (null 1.023) | **28.875** | 1.011 | 62.67 -> 18.82 (3.33x self) |
+
+CORRECTNESS: conformance_ufunc_edge::f16_matmul_parallel_bit_exact_matches_numpy GREEN
+remote TWICE (vmi1167313 + the capacity-watcher duplicate) - byte-identical vs numpy across
+square/rectangular/matvec/large-K shapes. TWO fail-closed slot-exhaustion events during
+validation (insufficient_slots=5, active_project_exclusion=2) - the strict-remote recipe
+held, no local cargo; a capacity-watcher chained the reruns when the fleet freed.
+SIBLING LEADS (unfiled): the same decode-scratch + MR tile applies to any future f16 batched
+matmul; f16 matvec stays numpy-delegated (not a gap).
+PROVENANCE: runner-printed host + shas;
+tests/artifacts/perf/2026-07-11_f16_matmul_mr4_cc_fnp/.
+
 ## 2026-07-11 - WIN (SHIP, REFUTES the same-day no-ship UNDER ITS OWN RETRY PREDICATE): core reduce_fold last-axis row bands - 1.33x / 1.47x serial-over-rowband medians vs pinned nulls in the one-binary ABBA harness; covers prod AND the order-dependent min/max folds
 
 `cc_fnp` (linalg lane), bead deadlock-audit-mfyfi. The 43a5e725 no-ship measured a 2.08x
