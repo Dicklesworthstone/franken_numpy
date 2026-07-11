@@ -13487,6 +13487,181 @@ fn bench_completion_median_gate(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_f64_transcendental_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_f64_transcendental_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        println!(
+            "ISA_PROVENANCE target_arch={} avx2={} sse2={}",
+            std::env::consts::ARCH,
+            cfg!(target_feature = "avx2"),
+            cfg!(target_feature = "sse2"),
+        );
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_f64_transcendental_median_gate")
+            .expect("transcendental bench module");
+        fnp_python(&module).expect("initialize fnp_python transcendental bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy version")
+            .extract::<String>()
+            .expect("numpy version string");
+        let numpy_cpu_features = numpy
+            .getattr("_core")
+            .expect("numpy core")
+            .getattr("_multiarray_umath")
+            .expect("numpy multiarray umath")
+            .getattr("__cpu_features__")
+            .expect("numpy runtime CPU features")
+            .str()
+            .expect("numpy runtime CPU feature str")
+            .extract::<String>()
+            .expect("numpy runtime CPU feature string value");
+        println!(
+            "NUMPY_PROVENANCE version={numpy_version} runtime_cpu_features={numpy_cpu_features}"
+        );
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260710)\n\
+                 t_262k = rng.standard_normal(262_144)\n\
+                 t_1m = rng.standard_normal(1_048_576)\n\
+                 t_4m = rng.standard_normal(4_194_304)\n",
+            )
+            .expect("transcendental setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("transcendental setup");
+        let t_262k = namespace.get_item("t_262k").expect("t_262k present");
+        let t_1m = namespace.get_item("t_1m").expect("t_1m present");
+        let t_4m = namespace.get_item("t_4m").expect("t_4m present");
+
+        // Diagnostic parity probe (print, not assert): fnp's native f64 route is
+        // scalar system libm; numpy may dispatch a SIMD kernel on some workers.
+        // Byte-level agreement per worker is itself evidence for the transcendental
+        // lane (see the 2026-07-10 ISA addendum), so record it instead of dying.
+        for name in ["sin", "cos", "tan", "tanh", "expm1"] {
+            let fnp_fn = module.getattr(name).expect("fnp transcendental fn");
+            let np_fn = numpy.getattr(name).expect("numpy transcendental fn");
+            for (label, input) in [("262k", &t_262k), ("1m", &t_1m), ("4m", &t_4m)] {
+                let candidate = fnp_fn.call1((input,)).expect("fnp parity call");
+                let base = np_fn.call1((input,)).expect("numpy parity call");
+                let candidate_bytes: Vec<u8> = candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract()
+                    .expect("candidate byte Vec");
+                let base_bytes: Vec<u8> = base
+                    .call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract()
+                    .expect("base byte Vec");
+                let first_diff = candidate_bytes
+                    .chunks_exact(8)
+                    .zip(base_bytes.chunks_exact(8))
+                    .position(|(a, b)| a != b);
+                let diff_count = candidate_bytes
+                    .chunks_exact(8)
+                    .zip(base_bytes.chunks_exact(8))
+                    .filter(|(a, b)| a != b)
+                    .count();
+                println!(
+                    "TRANSCENDENTAL_PARITY op={name} n={label} byte_equal={} \
+                     diff_elems={diff_count} first_diff_elem={:?}",
+                    candidate_bytes == base_bytes,
+                    first_diff,
+                );
+            }
+        }
+
+        let fnp_sin = module.getattr("sin").expect("fnp sin");
+        let np_sin = numpy.getattr("sin").expect("numpy sin");
+        let fnp_cos = module.getattr("cos").expect("fnp cos");
+        let np_cos = numpy.getattr("cos").expect("numpy cos");
+        let fnp_tan = module.getattr("tan").expect("fnp tan");
+        let np_tan = numpy.getattr("tan").expect("numpy tan");
+        let fnp_tanh = module.getattr("tanh").expect("fnp tanh");
+        let np_tanh = numpy.getattr("tanh").expect("numpy tanh");
+        let fnp_expm1 = module.getattr("expm1").expect("fnp expm1");
+        let np_expm1 = numpy.getattr("expm1").expect("numpy expm1");
+
+        bench_median_gate_python_unary(
+            &mut group,
+            "f64_sin_262k_null_then_effect",
+            "f64_sin_262k",
+            &np_sin,
+            &fnp_sin,
+            &t_262k,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "f64_sin_1m_null_then_effect",
+            "f64_sin_1m",
+            &np_sin,
+            &fnp_sin,
+            &t_1m,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "f64_sin_4m_null_then_effect",
+            "f64_sin_4m",
+            &np_sin,
+            &fnp_sin,
+            &t_4m,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "f64_cos_1m_null_then_effect",
+            "f64_cos_1m",
+            &np_cos,
+            &fnp_cos,
+            &t_1m,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "f64_tan_1m_null_then_effect",
+            "f64_tan_1m",
+            &np_tan,
+            &fnp_tan,
+            &t_1m,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "f64_tanh_1m_null_then_effect",
+            "f64_tanh_1m",
+            &np_tanh,
+            &fnp_tanh,
+            &t_1m,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "f64_expm1_262k_null_then_effect",
+            "f64_expm1_262k",
+            &np_expm1,
+            &fnp_expm1,
+            &t_262k,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "f64_expm1_1m_null_then_effect",
+            "f64_expm1_1m",
+            &np_expm1,
+            &fnp_expm1,
+            &t_1m,
+        );
+    });
+
+    group.finish();
+}
+
 fn bench_wide_string_substrate_v2(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_wide_string_substrate_v2");
     group.sample_size(10);
@@ -14674,6 +14849,7 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_completion_median_gate,
+    bench_f64_transcendental_median_gate,
     bench_wide_string_substrate_v2,
     bench_ledger_integrity_rejects,
     bench_unique_rows_full_boundary,

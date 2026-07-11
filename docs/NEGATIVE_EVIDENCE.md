@@ -4,6 +4,82 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - WIN (SHIP): f64 transcendental unary zero-copy fused-defer path (15 ops) - flips the tanh loss (0.757 -> 1.372/1.613 on two workers), sin 4M 1.59 -> 3.34x; extends the sqrt fused-defer pattern to the whole scalar-libm family + REFUTES the 2026-06-22 medium-N transcendental DEFER row
+
+`cc_fnp`, bead deadlock-audit-scy0o. PROFILE-FIRST BASIS (fresh baseline, worker vmi1227854,
+binary sha 2539a24a..., RAYON_NUM_THREADS=4, numpy 2.4.6 AVX2/FMA3 no-AVX512, nulls
+0.99-1.01): f64 sin/cos/tan/expm1 already WIN 1.59-2.56x vs numpy at 262K-4M - the
+2026-06-22 "medium-N sin/cos/expm1 1.4-1.5x at 2^20" DEFER row is REFUTED on a quiet worker
+(its own retry predicate: loaded-box artifact) - but tanh_1m LOSES 0.757x vs a 1.007 null
+(numpy 2.4.6 ships a vectorized f64 tanh; fnp's native route pays the copy tax around its
+parallel kernel). ROUTE (from code): zerocopy_f64_unary_flat rejects transcendentals ->
+extract_precise_numeric_array (cold mmap copy + fault storm per the in-tree comment) ->
+try_elementwise_unary (vec![0.0;n] zero-init, per-op parallel gate 1<<15) ->
+build_numpy_array_from_ufunc (third copy). 4th application of the ledgered
+"copy-buffer-to-Vec-before-parallel" antipattern thread (cheap unary b88b1995, binary
+fa71f8d2, argextreme; sqrt fused-defer b40ff37b is the warning-surface precedent).
+
+ONE LEVER: extend zerocopy_f64_unary_flat to 15 transcendental ops. No-event ops
+(sin/cos/tan/arctan/arcsinh/tanh/cbrt - no arms in note_unary_float_errors) run a direct
+parallel scalar-libm map off the borrowed buffers; error-tracking ops
+(expm1/log1p/sinh/cosh/arcsin/arccos/arctanh/arccosh) run the same map with per-element
+float-error-event predicates EXACT-mirroring note_unary_float_errors fused in - ANY would-be
+event defers the whole call to the unchanged UFuncArray path, so event recording stays
+identical (error-carrying inputs pay compute-then-defer, the accepted sqrt trade). Parallel
+gate 1<<15 = the native path's parallel_min_len for these ops (regime unchanged; only the
+copies disappear). exp/log/log2/log10 stay numpy passthroughs - separate reopen, bead
+deadlock-audit-gkznn.
+
+BIT-IDENTICAL: same UnaryOp::apply scalar-libm call per element, disjoint chunk writes, no
+accumulation. Proven three ways: (1) route-equality conformance
+(conformance_unary_ops::f64_transcendental_zerocopy_route_matches_native_route_and_numpy -
+array route vs list route BYTE equality, 257 + 100,001 elements x 15 ops; + defer
+byte-exactness + specials/0-d/strided batteries; 18/18 GREEN remote); (2) in-run parity
+probes: sin/cos/tan/expm1 fnp==numpy byte-equal THROUGH THE NEW ROUTE on all three workers;
+(3) tanh's pre-existing numpy divergence reproduced with EXACTLY identical diff counts
+(99992/399921/1601470, same first-diff indices) across three workers and three binaries -
+the route change altered zero output bits.
+
+MEASURED (ONE binary / ONE process / ONE rch invocation per run, ABBA/BAAB inside one
+iter_custom routine, black_box, per-row numpy A/A nulls; baseline vmi1227854, candidates
+vmi1149989 + hz1 - 16/16 candidate WIN rows):
+
+| row | baseline effect (np/fnp) | cand vmi1149989 | cand hz1 | fnp ms base -> vmi1149989 |
+|---|---:|---:|---:|---|
+| f64_sin_262k | 1.813 | 2.065 | 1.746 | 1.817 -> 1.597 |
+| f64_sin_1m | 2.094 | 3.156 | 1.846 | 5.399 -> 3.984 |
+| f64_sin_4m | 1.592 | 3.342 | 2.134 | 29.323 -> 14.065 |
+| f64_cos_1m | 2.232 | 2.857 | 2.174 | 5.330 -> 4.092 |
+| f64_tan_1m | 2.560 | 3.368 | 3.071 | 6.911 -> 5.244 |
+| f64_tanh_1m | **0.757 LOSS** | **1.372** | **1.613** | 7.248 -> 9.172 (worker-scaled; numpy arm 5.4 -> 12.0) |
+| f64_expm1_262k | 1.594 | 1.784 | 2.386 | 1.888 -> 1.836 |
+| f64_expm1_1m | 1.807 | 2.460 | 1.482 | 6.917 -> 5.462 |
+
+Median gate: every candidate row's effect median clears its own in-run null p90 (nulls
+0.98-1.02 across 16 rows); the tanh flip replicates in direction on both candidate workers.
+
+SIDE FINDINGS (beads filed): deadlock-audit-tvy7o - f64 unary float-error events never
+surface as Python RuntimeWarnings (fnp-ufunc queue never drained by fnp-python; numpy warns,
+fnp silent - pre-existing parity debt, applies to sqrt/arcsin/log1p/expm1-overflow class).
+deadlock-audit-d4mc2 - f64 tanh native scalar-libm diverges from numpy 2.4.6's vectorized
+tanh in ~38% of elements TODAY (last-ULP class, deterministic, all three workers;
+sin/cos/tan/expm1 byte-exact on the same workers) - decide delegate-like-f32 vs
+DIVERGENCES.md row.
+
+TOOLING NEGATIVE (do not repeat): `cargo fmt -p fnp-python` is effectively FORBIDDEN - the
+tree is not rustfmt-clean (git diff --check is the whitespace gate actually in force); a
+package-wide fmt churned ~7k lines across 13 files and was recovered by reconstructing
+HEAD + intended edits via git show (whitespace-stripped-hash verification is defeated by
+rustfmt trailing-comma churn; reconstruction is the reliable recovery).
+
+VALIDATION: cargo check -p fnp-python GREEN (hz2). clippy --lib -D warnings -A dead_code:
+ZERO findings in the edited region; remaining errors all pre-existing (deprecated pyo3
+downcast / unused vars at 367..68540 + the documented fnp-ufunc nan_filtered dead-code under
+default flags). conformance_unary_ops 18/18 GREEN remote. UBS: criticals only at
+pre-existing lines. PROVENANCE: binary sha256 printed by the runner in each artifact
+(baseline 2539a24a..., candidate 04badf51... on vmi1149989; hz1 sha in-file); artifacts +
+full method notes in tests/artifacts/perf/2026-07-10_f64_transcendental_zerocopy_cc_fnp/.
+
 ## 2026-07-10 - WIN (SHIP): core UFuncArray last-axis sum uses coarse row-band ownership - bit-identical, replicated 15.8-36.1% lower medians
 
 `GoldSummit`. PROFILE-FIRST TARGET: the core Criterion row
