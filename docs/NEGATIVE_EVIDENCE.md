@@ -4,6 +4,71 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-11 - WIN (SHIP): flat U9..U16/S9..S16 value sort reuses ordered two-word keys - U16 241.19 -> 91.61 ms (2.63x self), S16 169.43 -> 59.03 ms (2.87x self), byte-exact
+
+`cod_fnp` (sort lane), bead `deadlock-audit-jlqsi`. NEGATIVE-LEDGER FIRST:
+the immediately preceding accumulate-static-dispatch reject explicitly named this
+untouched flat-sort frontier. The older "wide-key family complete" entries at
+2026-07-10 cover unique/intersect/setdiff/setxor/union only; they do not cover flat
+value sort. `bv --robot-triage` read a healthy graph (`data_hash`
+`ea1d3735d1d12821`, 2,421 issues, 146 actionable, no cycles), with no open
+unassigned sort bead. No linalg or setops source was touched.
+
+PROFILE FIRST (strict remote, pre-edit binary on effective worker `vmi1149989`,
+`RAYON_NUM_THREADS=4`): `perf record -F 199 -e cycles:u` captured 7,371 samples
+with zero lost. The current U16 route was dominated by compare work: an unresolved
+libc region consistent with record comparison/memcmp held 50.27%, Rayon comparator
+recursion 14.79%, the mandatory Unicode high-byte scan 5.47%, and insertion-sort
+comparison 2.74%; the resolved gather was only about 0.27%. This was a steady-state
+profile of the exact million-element path, not a cold-call inference.
+
+ONE LEVER: inside `try_native_string_sort_flat`, route only native-layout Latin-1
+U9..U16 and S9..S16 through the existing complete, order-preserving
+`PackedWideStringKey { high, low }`, sort `(key, original_index)` pairs, and feed the
+unchanged record gather. Narrow U1..U8/S1..S8 and wider/fallback paths are unchanged.
+The key contains every codepoint/byte in lexicographic order; equal keys therefore
+represent byte-identical records, so unstable tie order cannot change output.
+
+MEDIAN GATE (same effective worker `vmi1264463` before/after each read, six slots
+reserved, `RAYON_NUM_THREADS=4`, one binary/process per read, ABBA/BAAB pairs,
+NumPy A/A null, pre-timing dtype/shape/ownership/raw-byte assertions). Width 16
+was the profiled representative; independent review then required width 9 as the
+compact-record crossover before the full 9..16 route could ship:
+
+| fixture | HEAD FNP median | candidate FNP median | FNP self delta | HEAD effect / null | candidate effect / null |
+|---|---:|---:|---:|---:|---:|
+| U9 lowercase ASCII, 1M | 188.102154 ms | **80.664659 ms** | **2.3319x / -57.12%** | 1.165035 / 1.000436 | **2.837996 / 1.002569** |
+| U16 lowercase ASCII, 1M | 241.193212 ms | **91.610434 ms** | **2.6328x / -62.02%** | 0.965347 / 1.000939 | **2.518444 / 1.007224** |
+| S9 lowercase ASCII, 1M | 154.940143 ms | **59.335614 ms** | **2.6113x / -61.70%** | 1.317287 / 1.008200 | **3.625924 / 0.995497** |
+| S16 lowercase ASCII, 1M | 169.427677 ms | **59.025391 ms** | **2.8704x / -65.16%** | 1.161963 / 0.997552 | **3.432197 / 1.022743** |
+
+Candidate effect p10 exceeded null p90 at every endpoint/representative row, and
+all four candidate rows won 20/20 pairs. Cross-version keep/reject used the FNP
+self medians, not the harness's FNP-versus-NumPy `WIN` label. The packed branch's
+known tradeoff is roughly 40 MB more transient key/pair scratch at n=1M (about
+44 bytes/record peak versus the old 4-byte permutation before the common gather);
+peak memory was not measured, so the ledger does not claim a memory win.
+
+CORRECTNESS: strict-remote
+`sort_string_packed_wide_latin1_matches_numpy` passed 1/1 on `vmi1149989` (2.59 s).
+It forces U9/U16/S9/S16 through the route at n=300,000 with values 0..255, embedded
+NULs, and dense ties, then compares dtype, shape, ownership, and every output byte.
+That byte identity is stronger than the requested per-op ULP tolerance.
+
+DECISION: SHIP. Baseline/candidate binary SHA-256 values were
+`ea74ea3a133fedfcc92e388ba50fac186433964aee0c74b6d4d10667c8f02ec1` and
+`48d06ac84d95449db8f49167358bcb90c441b97135b4d0a5bd8ed8a3349eab6f`
+for width 16, plus
+`86ab023a0ec67621658f2c4239cf0b0cb9ab3915fb06c9ea827424aa368afd55`
+and `10012e0cef1058bccc6bcab0618ac9d88bd82de85f49249113e511458b056ecc`
+for the width-9 crossover pair.
+Strict remote mode refused one over-capacity profile request and never fell back
+locally; requested worker variables were advisory, so mismatched placements were
+cancelled before execution. One validation worker SIGILLed in third-party
+`zerocopy` before project code; the green retry and decisive median pair ran on the
+effective workers printed above. Full provenance and validation record:
+`tests/artifacts/perf/2026-07-11_wide_string_sort_packed_keys_cod_fnp/summary.md`.
+
 ## 2026-07-11 - REJECT / HOLD: `accumulate_extremum_typed` static dispatch - profiled `np_fmax` held 51.27%, but finite 8M median regressed 14.257 -> 17.902 ms (+25.6%); source restored
 
 `cod_fnp` (ufunc/reduction lane), remaining half of `deadlock-audit-wmxzr`. The

@@ -476,6 +476,67 @@ fn argsort_string_stable_packed_latin1_matches_numpy() {
 }
 
 #[test]
+fn sort_string_packed_wide_latin1_matches_numpy() {
+    // Fixed-width U9/U16/S9/S16 records (n >= 1<<18) take the two-word packed-key
+    // value-sort path. The corpus includes dense ties, NUL codepoints/bytes, and the
+    // full unsigned-byte range; sorted dtype, shape, ownership, and bytes must match.
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(291)\n\
+                 n = 300_000\n\
+                 u9 = rng.integers(0, 256, (n, 9), dtype=np.uint32).reshape(-1).view('U9')\n\
+                 u16 = rng.integers(0, 256, (n, 16), dtype=np.uint32).reshape(-1).view('U16')\n\
+                 s9 = rng.integers(0, 256, (n, 9), dtype=np.uint8).reshape(-1).view('S9')\n\
+                 s16 = rng.integers(0, 256, (n, 16), dtype=np.uint8).reshape(-1).view('S16')\n\
+                 u9[1::97] = u9[0]\n\
+                 u16[1::97] = u16[0]\n\
+                 s9[1::97] = s9[0]\n\
+                 s16[1::97] = s16[0]\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        for name in ["u9", "u16", "s9", "s16"] {
+            let arr = ns.get_item(name)?.ok_or_else(|| {
+                pyo3::exceptions::PyAssertionError::new_err(format!("missing {name}"))
+            })?;
+            let ours = module.getattr("sort")?.call1((&arr,))?;
+            let theirs = numpy.getattr("sort")?.call1((&arr,))?;
+            assert_eq!(
+                ours.getattr("dtype")?.str()?.to_string(),
+                theirs.getattr("dtype")?.str()?.to_string(),
+                "packed-wide {name} sort dtype diverged",
+            );
+            assert_eq!(
+                ours.getattr("shape")?.extract::<Vec<usize>>()?,
+                theirs.getattr("shape")?.extract::<Vec<usize>>()?,
+                "packed-wide {name} sort shape diverged",
+            );
+            assert_eq!(
+                ours.getattr("flags")?
+                    .getattr("owndata")?
+                    .extract::<bool>()?,
+                theirs
+                    .getattr("flags")?
+                    .getattr("owndata")?
+                    .extract::<bool>()?,
+                "packed-wide {name} sort ownership diverged",
+            );
+            let ours_bytes: Vec<u8> = ours.call_method0("tobytes")?.extract()?;
+            let theirs_bytes: Vec<u8> = theirs.call_method0("tobytes")?.extract()?;
+            assert_eq!(
+                ours_bytes, theirs_bytes,
+                "packed-wide {name} sort bytes diverged",
+            );
+        }
+        Ok(())
+    });
+}
+
+#[test]
 fn f16_sort_flat_widening_matches_numpy() {
     // np.sort(1-D float16) routes through the exact f32 widen/sort/narrow fast path for
     // finite non-(-0.0) data (bead deadlock-audit-98chw); NaN and -0.0 inputs must defer to

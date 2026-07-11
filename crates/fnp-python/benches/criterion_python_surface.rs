@@ -13943,6 +13943,159 @@ fn bench_bool_sort_median_gate(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_wide_string_sort_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_wide_string_sort_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_wide_string_sort_median_gate")
+            .expect("wide string sort bench module");
+        fnp_python(&module).expect("initialize fnp_python wide string sort bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 u9 = rng.integers(97, 123, (1_000_000, 9), dtype=np.uint32).reshape(-1).view('U9')\n\
+                 u16 = rng.integers(97, 123, (1_000_000, 16), dtype=np.uint32).reshape(-1).view('U16')\n\
+                 s9 = rng.integers(97, 123, (1_000_000, 9), dtype=np.uint8).reshape(-1).view('S9')\n\
+                 s16 = rng.integers(97, 123, (1_000_000, 16), dtype=np.uint8).reshape(-1).view('S16')\n",
+            )
+            .expect("wide string sort setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("wide string sort setup");
+        let u9_input = namespace.get_item("u9").expect("u9 present");
+        let u16_input = namespace.get_item("u16").expect("u16 present");
+        let s9_input = namespace.get_item("s9").expect("s9 present");
+        let s16_input = namespace.get_item("s16").expect("s16 present");
+        let fnp_sort = module.getattr("sort").expect("fnp sort");
+        let numpy_sort = numpy.getattr("sort").expect("numpy sort");
+
+        for (label, input) in [
+            ("U9", &u9_input),
+            ("U16", &u16_input),
+            ("S9", &s9_input),
+            ("S16", &s16_input),
+        ] {
+            let candidate = fnp_sort.call1((input,)).expect("fnp wide string sort parity");
+            let base = numpy_sort
+                .call1((input,))
+                .expect("numpy wide string sort parity");
+            assert_eq!(
+                candidate
+                    .getattr("dtype")
+                    .expect("candidate dtype")
+                    .str()
+                    .expect("candidate dtype str")
+                    .to_string(),
+                base.getattr("dtype")
+                    .expect("base dtype")
+                    .str()
+                    .expect("base dtype str")
+                    .to_string(),
+                "wide string sort {label} dtype parity",
+            );
+            assert_eq!(
+                candidate
+                    .getattr("shape")
+                    .expect("candidate shape")
+                    .extract::<Vec<usize>>()
+                    .expect("candidate shape Vec"),
+                base.getattr("shape")
+                    .expect("base shape")
+                    .extract::<Vec<usize>>()
+                    .expect("base shape Vec"),
+                "wide string sort {label} shape parity",
+            );
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "wide string sort {label} byte parity",
+            );
+            assert_eq!(
+                candidate
+                    .getattr("flags")
+                    .expect("candidate flags")
+                    .getattr("owndata")
+                    .expect("candidate owndata")
+                    .extract::<bool>()
+                    .expect("candidate owndata bool"),
+                base.getattr("flags")
+                    .expect("base flags")
+                    .getattr("owndata")
+                    .expect("base owndata")
+                    .extract::<bool>()
+                    .expect("base owndata bool"),
+                "wide string sort {label} ownership parity",
+            );
+        }
+
+        group.bench_function("wide_string_sort_u16_1m_fnp_profile", |bench| {
+            bench.iter(|| {
+                black_box(
+                    fnp_sort
+                        .call1((black_box(&u16_input),))
+                        .expect("profile fnp U16 sort"),
+                )
+            });
+        });
+        bench_median_gate_python_unary(
+            &mut group,
+            "wide_string_sort_u9_1m_null_then_effect",
+            "wide_string_sort_u9_1m",
+            &numpy_sort,
+            &fnp_sort,
+            &u9_input,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "wide_string_sort_u16_1m_null_then_effect",
+            "wide_string_sort_u16_1m",
+            &numpy_sort,
+            &fnp_sort,
+            &u16_input,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "wide_string_sort_s9_1m_null_then_effect",
+            "wide_string_sort_s9_1m",
+            &numpy_sort,
+            &fnp_sort,
+            &s9_input,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "wide_string_sort_s16_1m_null_then_effect",
+            "wide_string_sort_s16_1m",
+            &numpy_sort,
+            &fnp_sort,
+            &s16_input,
+        );
+    });
+
+    group.finish();
+    if std::env::var_os("FNP_WIDE_STRING_SORT_BENCH_ONLY").is_some() {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        std::process::exit(0);
+    }
+}
+
 fn bench_accumulate_extremum_median_gate(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_accumulate_extremum_median_gate");
     group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
@@ -15702,6 +15855,7 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_wide_string_sort_median_gate,
     bench_accumulate_extremum_median_gate,
     bench_int_convolve_median_gate,
     bench_completion_median_gate,
