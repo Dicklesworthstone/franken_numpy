@@ -532,3 +532,31 @@ python_int_matmul_median_gate/int_matmul_i32_512_null_then_effect
                         time:   [2.1950 s 2.2767 s 2.3701 s]
 NULL_MEDIAN_GATE row=int_matmul_i32_512 observations=20 base_median_ms=177.407954 candidate_median_ms=4.956138 base_cv_pct=8.208 candidate_cv_pct=103.584 effect_median=35.423021 effect_p10=7.030923 effect_p90=54.495305 effect_low=5.978239 effect_high=79.833102 effect_cv_pct=54.127 effect_above_one=20 null_median=1.009184 null_p10=0.950444 null_p90=1.234813 null_low=0.798928 null_high=1.665911 null_cv_pct=18.010 null_base_cv_pct=17.670 null_peer_cv_pct=8.309 null_corrected_median=35.100663 verdict=WIN
 
+  [2m2026-07-11T06:16:53.975608Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 1724895ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:653 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-11T06:16:53.975862Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:702 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-11T06:16:53.975875Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/franken_numpy on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:2328 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-11T06:16:53.975912Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 1 retrieval exclude pattern(s) from .rchignore (total: 6)[0m
+    [2;3mat[0m rch/src/transfer.rs:1078 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-11T06:16:56.516195Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 2540ms (1 files, 2975 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2383 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-11T06:16:56.516216Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mArtifacts retrieved: 1 files, 2975 bytes in 2540ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:735 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-11T06:16:56.516320Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/franken_numpy/.rch-target-vmi1152480-pool-bb11943277a8babc6519db2357b55709 on vmi1152480[0m
+    [2;3mat[0m rch/src/transfer.rs:2328 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-11T06:16:58.916836Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 2400ms (221 files, 1157 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2383 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-11T06:16:58.916864Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 221 files, 1157 bytes in 2400ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:859 [2;3mon[0m ThreadId(1)
+
+[RCH] remote vmi1152480 (1778.3s)

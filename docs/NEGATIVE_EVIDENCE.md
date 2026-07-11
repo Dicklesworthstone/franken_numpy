@@ -4,6 +4,51 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-11 - WIN (SHIP): fn-pointer defect transfer to batched int GEMM + int matrix_power - batched FLIPS 0.767 LOSS -> 10.6x, matrix_power 1.22 -> 11.2x; 2-D rows re-replicate 25.3x/43.4x (3rd worker)
+
+`cc_fnp` (linalg lane), bead deadlock-audit-elht3 - the named sibling transfer of 617e8647.
+
+PROFILE BASIS (fresh 4-row baseline, worker vmi1264463, nulls 1.005-1.015):
+int_matmul_i64_batched (64,128,128) read 0.767 = a REAL LOSS (fnp 247.1 ms vs numpy
+189.1 ms) - fnp's batched kernel was ~14x slower than fnp's own fixed 2-D kernel at the
+IDENTICAL MAC count (17.5 ms) on the same worker in the same run. int_matrix_power_i64_256^5
+read only 1.22x (86.4 ms). Same defect: both kernels took `fn(T,T)->T` mul/add params ->
+indirect call per element. (The 2026-06-28 "batched 12x WIN" entry does not reproduce on
+this worker/shape - either way today's same-process baseline is decisive: it was a LOSS
+before this lever.)
+
+ONE LEVER (the 617e8647 rewrite, transferred): impl-Fn static-dispatch params (call sites
+unchanged) + MR=4 register-blocked row tile. Batched: per-slice outer parallelism with
+NESTED par row-blocks inside each slice (blocks never span a batch boundary, so each block
+sees one b matrix; rayon work-steals across both levels). matrix_power: same tile inside the
+binary-exponentiation `mm` GEMM over raw Vecs. BIT-EXACT: wrapping-integer arithmetic mod
+2^width is associative + commutative -> any blocking/order is byte-identical (family
+invariant; no FMA/rounding wall).
+
+MEASURED (ONE binary / ONE process / ONE rch invocation per run, ABBA/BAAB, black_box,
+per-row numpy A/A nulls, pre-timing byte parity asserts; baseline vmi1264463, candidate
+vmi1149989):
+
+| row | baseline effect (np/fnp) | candidate effect | candidate null | fnp ms base -> cand |
+|---|---:|---:|---:|---|
+| int_matmul_i64_batched | **0.767 LOSS** | **10.56** | 0.992 | 247.1 -> 11.41 |
+| int_matrix_power_i64_256_p5 | 1.219 | **11.25** | 1.004 | 86.4 -> 5.71 |
+| int_matmul_i64_512 (617e8647 replication) | 45.69 (this baseline) | 25.35 | 1.000 | 17.5 -> 11.3 |
+| int_matmul_i32_512 (replication) | 60.61 (this baseline) | 43.43 | 1.012 | 4.77 -> 3.86 |
+
+Median gate: all four candidate rows clear their in-run null p90 decisively; the 2-D rows
+now have THREE independent worker replications (vmi1152480 / vmi1264463 / vmi1149989).
+
+CORRECTNESS: conformance_matmul::int_batched_matmul_native_parallel_bit_exact_matches_numpy
+GREEN (vmi1293453: 3-D/4-D batches, overflow wrap, @ operator, byte-identical);
+conformance_linalg_advanced matrix_power battery 6/6 GREEN (vmi1227854). One transient
+"remote execution failed" fail-closed correctly (no local fallback); one candidate bench
+attempt died mid-build with zero rows and was relaunched (run3 = the decision run).
+REMAINING in the fn-pointer class: accumulate_extremum_typed + int_convolve_typed (cod
+lane, bead deadlock-audit-wmxzr).
+PROVENANCE: binary shas runner-printed;
+tests/artifacts/perf/2026-07-11_int_gemm_fnptr_siblings_cc_fnp/.
+
 ## 2026-07-11 - NO-SHIP (SURFACE): core `UFuncArray` last-axis product row bands are worker-sensitive; same-worker median regressed 2.08x after a cross-worker apparent win
 
 `GoldSummit`, direct-core sibling of the 2026-06-24 Python-surface `np.prod`

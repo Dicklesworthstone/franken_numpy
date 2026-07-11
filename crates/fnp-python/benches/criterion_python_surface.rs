@@ -13964,7 +13964,11 @@ fn bench_int_matmul_median_gate(c: &mut Criterion) {
                  a64 = rng.integers(-2**31, 2**31, (512, 512)).astype(np.int64)\n\
                  b64 = rng.integers(-2**31, 2**31, (512, 512)).astype(np.int64)\n\
                  a32 = rng.integers(-2**15, 2**15, (512, 512)).astype(np.int32)\n\
-                 b32 = rng.integers(-2**15, 2**15, (512, 512)).astype(np.int32)\n",
+                 b32 = rng.integers(-2**15, 2**15, (512, 512)).astype(np.int32)\n\
+                 ab64 = rng.integers(-2**31, 2**31, (64, 128, 128)).astype(np.int64)\n\
+                 bb64 = rng.integers(-2**31, 2**31, (64, 128, 128)).astype(np.int64)\n\
+                 mp64 = rng.integers(-2**31, 2**31, (256, 256)).astype(np.int64)\n\
+                 p5 = 5\n",
             )
             .expect("int matmul setup CString")
             .as_c_str(),
@@ -14030,6 +14034,58 @@ fn bench_int_matmul_median_gate(c: &mut Criterion) {
             &fnp_matmul,
             &a32,
             &b32,
+        );
+
+        let ab64 = namespace.get_item("ab64").expect("ab64 present");
+        let bb64 = namespace.get_item("bb64").expect("bb64 present");
+        let mp64 = namespace.get_item("mp64").expect("mp64 present");
+        let p5 = namespace.get_item("p5").expect("p5 present");
+        let fnp_matrix_power = module
+            .getattr("linalg")
+            .expect("fnp linalg")
+            .getattr("matrix_power")
+            .expect("fnp matrix_power");
+        let np_matrix_power = numpy
+            .getattr("linalg")
+            .expect("numpy linalg")
+            .getattr("matrix_power")
+            .expect("numpy matrix_power");
+        for (label, f_c, f_b, x, y) in [
+            ("i64_batched", &fnp_matmul, &np_matmul, &ab64, &bb64),
+            ("i64_matpow5", &fnp_matrix_power, &np_matrix_power, &mp64, &p5),
+        ] {
+            let candidate = f_c.call1((x, y)).expect("fnp candidate parity");
+            let base = f_b.call1((x, y)).expect("numpy base parity");
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "int {label} byte parity",
+            );
+        }
+        bench_median_gate_python_binary(
+            &mut group,
+            "int_matmul_i64_batched_null_then_effect",
+            "int_matmul_i64_batched",
+            &np_matmul,
+            &fnp_matmul,
+            &ab64,
+            &bb64,
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "int_matrix_power_i64_256_p5_null_then_effect",
+            "int_matrix_power_i64_256_p5",
+            &np_matrix_power,
+            &fnp_matrix_power,
+            &mp64,
+            &p5,
         );
     });
 
