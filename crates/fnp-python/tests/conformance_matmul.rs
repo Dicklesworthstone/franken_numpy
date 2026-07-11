@@ -335,7 +335,9 @@ rng = np.random.default_rng(11)
 ok = True
 # bit-exactness across widths + shapes (square, rectangular, non-square inner)
 for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint8]:
-    for (m, k, n) in [(96, 96, 96), (128, 200, 96), (65, 130, 257)]:
+    # (2, 400, 400): whole output smaller than one MR=4 row block;
+    # (514, 40, 40): MR=4 tail of 2 rows; (65, 130, 257): tail of 1 row.
+    for (m, k, n) in [(96, 96, 96), (128, 200, 96), (65, 130, 257), (2, 400, 400), (514, 40, 40)]:
         info = np.iinfo(dt)
         a = rng.integers(info.min // 2, info.max // 2, (m, k)).astype(dt)
         b = rng.integers(info.min // 2, info.max // 2, (k, n)).astype(dt)

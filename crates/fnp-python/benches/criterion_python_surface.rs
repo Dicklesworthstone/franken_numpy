@@ -13943,6 +13943,99 @@ fn bench_bool_sort_median_gate(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_int_matmul_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_int_matmul_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_int_matmul_median_gate")
+            .expect("int matmul bench module");
+        fnp_python(&module).expect("initialize fnp_python int matmul bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 a64 = rng.integers(-2**31, 2**31, (512, 512)).astype(np.int64)\n\
+                 b64 = rng.integers(-2**31, 2**31, (512, 512)).astype(np.int64)\n\
+                 a32 = rng.integers(-2**15, 2**15, (512, 512)).astype(np.int32)\n\
+                 b32 = rng.integers(-2**15, 2**15, (512, 512)).astype(np.int32)\n",
+            )
+            .expect("int matmul setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("int matmul setup");
+        let a64 = namespace.get_item("a64").expect("a64 present");
+        let b64 = namespace.get_item("b64").expect("b64 present");
+        let a32 = namespace.get_item("a32").expect("a32 present");
+        let b32 = namespace.get_item("b32").expect("b32 present");
+
+        let fnp_matmul = module.getattr("matmul").expect("fnp matmul");
+        let np_matmul = numpy.getattr("matmul").expect("numpy matmul");
+        for (label, x, y) in [
+            ("i64_512", &a64, &b64),
+            ("i32_512", &a32, &b32),
+        ] {
+            let candidate = fnp_matmul.call1((x, y)).expect("fnp int matmul parity");
+            let base = np_matmul.call1((x, y)).expect("numpy int matmul parity");
+            assert_eq!(
+                candidate
+                    .getattr("dtype")
+                    .expect("candidate dtype")
+                    .str()
+                    .expect("candidate dtype str")
+                    .to_string(),
+                base.getattr("dtype")
+                    .expect("base dtype")
+                    .str()
+                    .expect("base dtype str")
+                    .to_string(),
+                "int matmul {label} dtype parity",
+            );
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "int matmul {label} byte parity",
+            );
+        }
+
+        bench_median_gate_python_binary(
+            &mut group,
+            "int_matmul_i64_512_null_then_effect",
+            "int_matmul_i64_512",
+            &np_matmul,
+            &fnp_matmul,
+            &a64,
+            &b64,
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "int_matmul_i32_512_null_then_effect",
+            "int_matmul_i32_512",
+            &np_matmul,
+            &fnp_matmul,
+            &a32,
+            &b32,
+        );
+    });
+
+    group.finish();
+}
+
 fn bench_wide_string_substrate_v2(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_wide_string_substrate_v2");
     group.sample_size(10);
@@ -15133,6 +15226,7 @@ criterion_group!(
     bench_f64_transcendental_median_gate,
     bench_f64_exp_log_probe,
     bench_bool_sort_median_gate,
+    bench_int_matmul_median_gate,
     bench_wide_string_substrate_v2,
     bench_ledger_integrity_rejects,
     bench_unique_rows_full_boundary,

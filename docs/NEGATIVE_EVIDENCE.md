@@ -4,6 +4,58 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-11 - WIN (SHIP): int GEMM static-dispatch + MR=4 row-tile kernel - i32 512^2 flips 0.944 LOSS -> 35.4x WIN, i64 2.72 -> 20.2x (fnp self 344 -> 4.96 ms / 307 -> 16.1 ms); ROOT CAUSE: fn-pointer ops made every inner-loop mul/add an indirect call
+
+`cc_fnp` (linalg lane), bead deadlock-audit-nl4mf. The integer-no-BLAS family's one named-open
+lead ("register-tiled int kernel could push the 2-D residual past 7.7x", 2026-06-28).
+
+PROFILE FINDING (fresh baseline, worker vmi1167313 loaded, RAYON_NUM_THREADS=4, nulls
+0.98-0.99): int_matmul_i64_512 effect 2.72x WIN, but int_matmul_i32_512 effect 0.944
+UNDECIDED-LOSS - and fnp's i32 (343.6 ms) ran SLOWER than fnp's own i64 (307.2 ms). An i32
+GEMM slower than i64 is impossible for a healthy kernel; the tell: int_matmul_typed took
+`mul: fn(T,T)->T, add: fn(T,T)->T` FUNCTION-POINTER params - every inner-loop op an indirect
+call, no inlining, no autovectorization. (The closures at the call sites silently coerced to
+pointers; the 2026-06-28 wins were real but left ~an order of magnitude on the table.)
+
+ONE LEVER (one kernel rewrite, two inseparable aspects): (a) static-dispatch generics
+(`impl Fn(T,T)->T + Sync` - call sites unchanged, dispatch now monomorphic+inlined);
+(b) MR=4 register-blocked row tile (cov Gram 939a3d35 precedent): one b-row load feeds four
+independent accumulator rows via check-free zipped iterators (b traffic /4, 4 dependency
+chains); tail blocks (<4 rows) keep the original per-row streaming form. BIT-EXACT:
+wrapping-integer arithmetic mod 2^width is associative + commutative, so ANY blocking/order
+is byte-identical to numpy's serial accumulation (the family's proven invariant - no FMA /
+rounding-order wall exists for integer GEMM).
+
+MEASURED (ONE binary / ONE process / ONE rch invocation per run, ABBA/BAAB in one
+iter_custom routine, black_box, per-row numpy A/A nulls, pre-timing byte parity asserts;
+baseline vmi1167313, candidate vmi1152480 - in-run ratios are worker-fair):
+
+| row | baseline effect (np/fnp) | candidate effect | candidate null | fnp ms base -> cand |
+|---|---:|---:|---:|---|
+| int_matmul_i64_512 | 2.719 | **20.22** | 1.016 | 307.2 -> 16.11 |
+| int_matmul_i32_512 | **0.944 LOSS** | **35.42** | 1.009 | 343.6 -> 4.956 |
+
+Median gate: both candidate rows clear their in-run null p90 by >20x; the i32 row flips a
+same-process loss to a same-process 35x win (decisive independent of cross-worker load).
+Throughput sanity: i32 4.96 ms = ~27 G MAC/s on 4 threads == 8-wide vpmulld-class
+vectorization; i64 16.1 ms consistent with the AVX2 i64-multiply emulation sequence.
+
+CORRECTNESS: conformance_matmul::int_matmul_native_parallel_bit_exact_matches_numpy GREEN
+remote (vmi1149989) with the battery EXTENDED for the tile: (2,400,400) whole-output smaller
+than one MR block, (514,40,40) tail-of-2, (65,130,257) tail-of-1, across
+i8/i16/i32/i64/u8/u32/u64 + int64/int8 overflow-wrap + the @ operator - byte-identical.
+That build is also the compile validation: two standalone `cargo check` attempts both landed
+on ovh-b (zerocopy build-script SIGILL, documented) - the broken worker is a SCHEDULER
+MAGNET (instant failures keep its slots free, so least-loaded routing keeps picking it).
+
+SIBLING LEADS (unfiled here, one-lever discipline): batched_int_matmul_typed and
+int_matrix_power_typed carry the SAME fn-pointer-param defect class and their own serial
+ikj inner loops - the identical rewrite should transfer (expected same-magnitude wins);
+f16 matmul kernel is k-ORDER-constrained (f32 accumulate in numpy's order) so the MR tile
+applies but ops must stay in-order per element.
+PROVENANCE: binary shas runner-printed in the artifacts;
+tests/artifacts/perf/2026-07-11_int_matmul_mr4_tile_cc_fnp/.
+
 ## 2026-07-11 - WIN (SHIP): bool flat sort via the existing u8 counting machinery - 37.8x at 8M / 19.8x at 2M vs nulls 1.02/0.98; RESOLVES the narrow-int family's OPEN bool semantics check
 
 `cc_fnp`, bead deadlock-audit-i82jw. The last OPEN sibling of the narrow-int ordering family
