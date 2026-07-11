@@ -40,6 +40,50 @@ and (m,k)@(B,k,n)) byte-identically, plus batches/tails/inf-nan.
 PROVENANCE: runner-printed hosts/shas;
 tests/artifacts/perf/2026-07-11_f16_matmul_mr4_cc_fnp/broadcast_*.txt.
 
+## 2026-07-11 - WIN (SHIP): integer convolve static-dispatch taps - 94.94 -> 12.12 ms (7.84x self), paired 0.461 LOSS -> 2.247x vs NumPy, 20/20 wins
+
+`cod_fnp` (ufunc/convolution lane), integer-convolution half of bead
+`deadlock-audit-wmxzr`; the separate `accumulate_extremum_typed` sibling remains open.
+PROFILE-FIRST: a strict-remote `perf record` on vmi1149989 captured 7,509 cycles:u samples
+with zero lost. The exact integer-convolution path held 98.20%: the
+`int_convolve_typed::<i64>` Rayon closure was 52.95%, while the wrapping multiply and add
+closure call frames were 26.26% and 18.99%. That isolates two indirect closure calls per
+tap in the O(n*m) inner loop.
+
+ONE LEVER: change only `int_convolve_typed`'s `fn(T,T)->T` multiply/add parameters to
+statically dispatched `impl Fn(T,T)->T + Sync`. Call sites, gates, allocation, Rayon
+ownership, output slicing, tap loop, tap order, and wrapping arithmetic are unchanged; LLVM
+can now inline the same closures. BIT-IDENTICAL BY CONSTRUCTION: every output visits the
+same `jlo..=jhi` sequence and performs the same wrapping multiply then wrapping add. There
+is no floating-point, tie, RNG, or output-order seam.
+
+MEASURED (same worker vmi1149989 before/after; one binary/process per read; ABBA/BAAB paired
+samples, black_box, NumPy A/A nulls, and pre-timing dtype/shape/raw-byte parity):
+
+| read | numpy median | fnp median | paired np/fnp median [p10,p90] | null median [p10,p90] | wins |
+|---|---:|---:|---|---|---:|
+| baseline | 44.3246 ms | 94.9423 ms | 0.4606 [0.2850,0.5476] | 0.8875 [0.5187,1.1049] | 0/20 |
+| candidate | 26.3882 ms | **12.1151 ms** | **2.2466 [1.9004,2.6245]** | 1.0068 [0.9356,1.0776] | **20/20** |
+
+MEDIAN GATE: fnp self-time improves 7.84x; candidate effect p10 1.9004 exceeds null p90
+1.0776, and null-corrected effect is 2.2315. POST-REBASE REPLICATION on the integrated tree
+atop cc's 9b024cad linalg commit was stronger on the same vmi1149989 worker: fnp 10.7654
+ms, paired effect 2.5310 [2.1120,2.8063], null 0.9938 [0.9241,1.1007], null-corrected
+2.5468, 20/20 wins. CORRECTNESS: strict-remote
+`int_convolve_correlate_native_parallel_bit_exact_matches_numpy` GREEN 1/1, comparing raw
+bytes for signed/unsigned 8/16/32/64 across every mode and convolve/correlate on the main
+shape; a second all-dtype/all-mode convolve case reverses operand lengths, and a separate
+int64/full/convolve case forces overflow (uint16 added as the one missing dtype). No Cargo
+command ran locally.
+RCH degradation was surfaced: one clippy worker lacked cargo-clippy, one workspace-check
+worker SIGILLed in zerocopy's build script, and full remote clippy reached an unrelated
+pre-existing `fnp-runtime/tests/worker_isa_probe.rs` constant-assert warning under
+`-D warnings`. The final full remote check compiled the changed lib/bench, then stopped on
+three pre-existing `where_py` lib-test signature errors at lib.rs:99624/99649/99675; RCH
+also ignored the requested worker and selected vmi1264463. Full evidence and
+binary/perf-data hashes:
+tests/artifacts/perf/2026-07-11_int_convolve_static_dispatch_cod_fnp/summary.md.
+
 ## 2026-07-11 - WIN (SHIP): batched f16 matmul takes the MR=4 + decode-scratch tile per slice - 8.16x -> 11.60x vs numpy (fnp self 67.8 -> 21.5 ms at (8,256,256)); + LINALG BOUNDARY RE-SWEEP: DOMINATED (24 pairs, no loss row)
 
 `cc_fnp` (linalg lane), bead deadlock-audit-vgeny.

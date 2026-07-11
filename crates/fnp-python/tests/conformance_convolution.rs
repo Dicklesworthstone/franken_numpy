@@ -255,7 +255,7 @@ fn int_convolve_correlate_native_parallel_bit_exact_matches_numpy() {
         let script = r#"
 rng = np.random.default_rng(31)
 ok = True
-for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint8]:
+for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32, np.uint16, np.uint8]:
     info = np.iinfo(dt)
     a = rng.integers(info.min // 4, info.max // 4, 5000).astype(dt)
     v = rng.integers(info.min // 4, info.max // 4, 300).astype(dt)

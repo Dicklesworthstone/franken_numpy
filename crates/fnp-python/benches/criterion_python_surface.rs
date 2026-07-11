@@ -13943,6 +13943,111 @@ fn bench_bool_sort_median_gate(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_int_convolve_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_int_convolve_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_int_convolve_median_gate")
+            .expect("int convolve bench module");
+        fnp_python(&module).expect("initialize fnp_python int convolve bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 a = rng.integers(-2**31, 2**31, 200_000).astype(np.int64)\n\
+                 v = rng.integers(-2**31, 2**31, 256).astype(np.int64)\n",
+            )
+            .expect("int convolve setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("int convolve setup");
+        let a = namespace.get_item("a").expect("a present");
+        let v = namespace.get_item("v").expect("v present");
+        let fnp_convolve = module.getattr("convolve").expect("fnp convolve");
+        let numpy_convolve = numpy.getattr("convolve").expect("numpy convolve");
+
+        let candidate = fnp_convolve
+            .call1((&a, &v))
+            .expect("fnp int convolve parity");
+        let base = numpy_convolve
+            .call1((&a, &v))
+            .expect("numpy int convolve parity");
+        assert_eq!(
+            candidate
+                .getattr("dtype")
+                .expect("candidate dtype")
+                .str()
+                .expect("candidate dtype str")
+                .to_string(),
+            base.getattr("dtype")
+                .expect("base dtype")
+                .str()
+                .expect("base dtype str")
+                .to_string(),
+            "int convolve dtype parity",
+        );
+        assert_eq!(
+            candidate
+                .getattr("shape")
+                .expect("candidate shape")
+                .extract::<Vec<usize>>()
+                .expect("candidate shape Vec"),
+            base.getattr("shape")
+                .expect("base shape")
+                .extract::<Vec<usize>>()
+                .expect("base shape Vec"),
+            "int convolve shape parity",
+        );
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "int convolve byte parity",
+        );
+
+        group.bench_function("int_convolve_i64_200k_256_fnp_profile", |bench| {
+            bench.iter(|| {
+                black_box(
+                    fnp_convolve
+                        .call1((black_box(&a), black_box(&v)))
+                        .expect("profile fnp int convolve"),
+                )
+            });
+        });
+        bench_median_gate_python_binary(
+            &mut group,
+            "int_convolve_i64_200k_256_null_then_effect",
+            "int_convolve_i64_200k_256",
+            &numpy_convolve,
+            &fnp_convolve,
+            &a,
+            &v,
+        );
+    });
+
+    group.finish();
+    if std::env::var_os("FNP_INT_CONVOLVE_BENCH_ONLY").is_some() {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        std::process::exit(0);
+    }
+}
+
 fn bench_int_matmul_median_gate(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_int_matmul_median_gate");
     group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
@@ -15417,6 +15522,7 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_int_convolve_median_gate,
     bench_completion_median_gate,
     bench_f64_transcendental_median_gate,
     bench_f64_exp_log_probe,
