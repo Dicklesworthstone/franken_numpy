@@ -4,6 +4,48 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-11 - WIN (SHIP): batched f16 matmul takes the MR=4 + decode-scratch tile per slice - 8.16x -> 11.60x vs numpy (fnp self 67.8 -> 21.5 ms at (8,256,256)); + LINALG BOUNDARY RE-SWEEP: DOMINATED (24 pairs, no loss row)
+
+`cc_fnp` (linalg lane), bead deadlock-audit-vgeny.
+
+PROFILE STEP 1 (fresh python_linalg_boundary sweep, vmi1227854, 48 rows = 24 fnp/numpy
+pairs): the boundary is DOMINATED - batched inv 63-220x WIN, solve family 2.5-10x WIN,
+slogdet 2.4x WIN, eigvalsh/eigh/cholesky delegates at parity (cholesky batch rows ~1.05
+inside overlapping intervals = the documented no-FMA kernel-wall class f6a33cc7, not a
+lever). No actionable loss row. Artifact:
+tests/artifacts/perf/2026-07-11_linalg_boundary_resweep_cc_fnp/sweep_run1.txt.
+
+PROFILE STEP 2 (new median-gate row): the batched f16 route was NOT the assumed delegation -
+try_native_f16_batched_matmul already existed (naive per-row widen kernel) reading 8.16x vs
+numpy but 3.6x WORSE per MAC than the just-shipped 2-D tile (0.51 vs 0.14 ns/MAC on the same
+MAC count). Lever = transfer 33f7d73b's tile: per-slice outer parallelism + nested MR=4 row
+blocks + per-block b-row f32 decode scratch (blocks never span a batch boundary). BYTE-EXACT
+BY CONSTRUCTION: each output element keeps its original per-slice k-order f32 accumulation
+with identical decoded values and a single final narrow.
+
+MEASURED (ONE binary / ONE process / ONE rch invocation per run, ABBA/BAAB, black_box,
+per-row numpy A/A nulls, pre-timing byte parity asserts; baseline vmi1227854, candidate on a
+faster-numpy worker - in-run ratios carry the decision):
+
+| row | baseline effect | candidate effect | candidate null | fnp ms base -> cand |
+|---|---:|---:|---:|---|
+| f16_matmul_batched_8x256 | 8.162 (null 1.001) | **11.605** | 1.009 | 67.85 -> 21.49 (3.16x self) |
+| f16_matmul_512 (33f7d73b re-replication) | 29.687 (null 1.005) | 14.157* | 0.980 | 18.31 -> 17.95 |
+
+*the 512 candidate-row effect is lower ONLY because that worker's numpy arm ran 243 ms vs
+532-548 ms elsewhere; the fnp self-time (17.9 ms) replicates the shipped kernel a THIRD time.
+
+CORRECTNESS: conformance_ufunc_edge::f16_matmul_parallel_bit_exact_matches_numpy GREEN
+remote (vmi1149989) - the existing battery already covers 3-D (8,128,128) + 4-D (4,3,64,64)
+batches (the 4-D case has m=3 < MR, exercising the sub-block tail), broadcast forms, and
+inf/nan propagation, all byte-identical vs numpy.
+
+EXP/LOG PROBE ADDENDUM (bead deadlock-audit-gkznn, still HELD): attempt 6 sampled
+vmi1149989 running numpy 2.2.4 - byte-equal 4/4. The AVX2 GO evidence now spans FOUR hosts
+and TWO numpy versions (2.2.4 + 2.4.6); hz2/avx512f remains the single missing sample.
+PROVENANCE: runner-printed hosts/shas;
+tests/artifacts/perf/2026-07-11_f16_matmul_mr4_cc_fnp/batched_*.txt.
+
 ## 2026-07-11 - WIN (SHIP): f16 matmul MR=4 row block + per-block b-row decode scratch - 8.58x -> 28.87x vs numpy (fnp self 62.7 -> 18.8 ms at 512^2), byte-exact by k-order preservation
 
 `cc_fnp` (linalg lane), bead deadlock-audit-vxp9t - the k-order-constrained sibling named in

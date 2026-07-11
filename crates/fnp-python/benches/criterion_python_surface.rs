@@ -14111,7 +14111,9 @@ fn bench_f16_matmul_median_gate(c: &mut Criterion) {
                 "import numpy as np\n\
                  rng = np.random.default_rng(20260711)\n\
                  h_a = rng.standard_normal((512, 512)).astype(np.float16)\n\
-                 h_b = rng.standard_normal((512, 512)).astype(np.float16)\n",
+                 h_b = rng.standard_normal((512, 512)).astype(np.float16)\n\
+                 hb_a = rng.standard_normal((8, 256, 256)).astype(np.float16)\n\
+                 hb_b = rng.standard_normal((8, 256, 256)).astype(np.float16)\n",
             )
             .expect("f16 matmul setup CString")
             .as_c_str(),
@@ -14161,6 +14163,36 @@ fn bench_f16_matmul_median_gate(c: &mut Criterion) {
             &fnp_matmul,
             &h_a,
             &h_b,
+        );
+
+        let hb_a = namespace.get_item("hb_a").expect("hb_a present");
+        let hb_b = namespace.get_item("hb_b").expect("hb_b present");
+        let candidate = fnp_matmul
+            .call1((&hb_a, &hb_b))
+            .expect("fnp f16 batched matmul parity");
+        let base = np_matmul
+            .call1((&hb_a, &hb_b))
+            .expect("numpy f16 batched matmul parity");
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 batched matmul byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_matmul_batched_8x256_null_then_effect",
+            "f16_matmul_batched_8x256",
+            &np_matmul,
+            &fnp_matmul,
+            &hb_a,
+            &hb_b,
         );
     });
 
