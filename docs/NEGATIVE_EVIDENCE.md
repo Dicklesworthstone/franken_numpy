@@ -4,6 +4,49 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-11 - REJECT / HOLD: `accumulate_extremum_typed` static dispatch - profiled `np_fmax` held 51.27%, but finite 8M median regressed 14.257 -> 17.902 ms (+25.6%); source restored
+
+`cod_fnp` (ufunc/reduction lane), remaining half of `deadlock-audit-wmxzr`. The
+integer-convolution half shipped separately in `9c3b02a1`; this entry resolves the
+untouched accumulate sibling without extending the lever into a second family.
+
+PROFILE FIRST (strict remote, effective worker `vmi1149989`): `perf record -F 199 -e
+cycles:u` captured 4,972 samples with zero lost. `np_fmax` held 51.27% of samples;
+the block-total and output-rescan Rayon closures held 22.72% and 21.05%. The seam was
+therefore real enough to test, but the frame includes the required NaN/ordering
+semantics as well as call overhead; attribution alone did not prove that static
+dispatch would reduce wall time.
+
+ONE LEVER TESTED: replace `combine: fn(T,T)->T` with `impl Fn(T,T)->T + Sync`, and
+branch once at the max/min or bitwise dispatcher so each operation reaches the
+unchanged two-pass scan as a function-item type. Chunking, allocation, gates, scan
+order, max/min tie and NaN rules, bitwise operation mapping, and bool-through-u8
+routing were unchanged. The candidate compiled successfully and the benchmark's
+pre-timing dtype/shape/raw-byte assertion passed.
+
+MEDIAN GATE (same effective worker; six of eight slots reserved so a normal
+co-tenant could not enter; identical one-binary/process ABBA/BAAB command per read):
+
+| fixture | HEAD FNP median | static-dispatch median | FNP delta | HEAD effect / null | candidate effect / null |
+|---|---:|---:|---:|---:|---:|
+| finite standard-normal f64[8M] | 14.256978 ms | **17.902274 ms** | **+25.57% slower** | 2.277776 / 1.008737 | 1.915649 / 0.989480 |
+| sticky-NaN edge probe (discarded as the frontier row) | 11.899382 ms | **12.962021 ms** | **+8.93% slower** | 2.682131 / 1.009272 | 2.746813 / 0.996228 |
+
+For the representative finite row, Criterion's combined paired time regressed
+21.481% (confidence interval +9.747%..+36.224%, p=0.00). The candidate FNP arm was
+also extremely noisy (72.3% CV versus 30.7% at HEAD); there is no defensible hidden
+win. The harness's printed `WIN` is only FNP-versus-NumPy, which was already true at
+HEAD, so it was explicitly not used as the cross-version keep decision.
+
+DECISION: REJECT and HOLD this exact static-dispatch transfer. Production source is
+restored byte-for-byte to HEAD; keep only the finite median/null harness and this
+evidence. Retry only if a future compiler/codegen change or a lower-level profile can
+separate removable call overhead from the required `np_fmax` semantic work and then
+clear the same cross-version median floor. NEXT UNTRIED FRONTIER (not attempted here,
+preserving one lever): reuse `PackedWideStringKey` for flat U9..U16/S9..S16 value sort.
+Full provenance and RCH degradation notes:
+`tests/artifacts/perf/2026-07-11_accumulate_extremum_static_dispatch_cod_fnp/summary.md`.
+
 ## 2026-07-11 - SURFACE (post-v0.2.0 frontier close): multi_dot is PARITY + byte-identical (the lane's last unmeasured rank) - the cc linalg lane's measured surface is fully dominated or policy-walled; exp/log probe attempt 7 = fifth AVX2 host byte-equal
 
 `cc_fnp` (linalg lane). PROFILE STEP: multi_dot was GoldSummit's #2 self-time rank

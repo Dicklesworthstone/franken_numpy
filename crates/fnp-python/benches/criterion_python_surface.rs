@@ -13943,6 +13943,116 @@ fn bench_bool_sort_median_gate(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_accumulate_extremum_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_accumulate_extremum_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_accumulate_extremum_median_gate")
+            .expect("accumulate extremum bench module");
+        fnp_python(&module).expect("initialize fnp_python accumulate extremum bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 x = rng.standard_normal(8_000_000).astype(np.float64)\n",
+            )
+            .expect("accumulate extremum setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("accumulate extremum setup");
+        let input = namespace.get_item("x").expect("x present");
+        let fnp_accumulate = module
+            .getattr("maximum")
+            .expect("fnp maximum")
+            .getattr("accumulate")
+            .expect("fnp maximum.accumulate");
+        let numpy_accumulate = numpy
+            .getattr("maximum")
+            .expect("numpy maximum")
+            .getattr("accumulate")
+            .expect("numpy maximum.accumulate");
+
+        let candidate = fnp_accumulate
+            .call1((&input,))
+            .expect("fnp maximum.accumulate parity");
+        let base = numpy_accumulate
+            .call1((&input,))
+            .expect("numpy maximum.accumulate parity");
+        assert_eq!(
+            candidate
+                .getattr("dtype")
+                .expect("candidate dtype")
+                .str()
+                .expect("candidate dtype str")
+                .to_string(),
+            base.getattr("dtype")
+                .expect("base dtype")
+                .str()
+                .expect("base dtype str")
+                .to_string(),
+            "maximum.accumulate dtype parity",
+        );
+        assert_eq!(
+            candidate
+                .getattr("shape")
+                .expect("candidate shape")
+                .extract::<Vec<usize>>()
+                .expect("candidate shape Vec"),
+            base.getattr("shape")
+                .expect("base shape")
+                .extract::<Vec<usize>>()
+                .expect("base shape Vec"),
+            "maximum.accumulate shape parity",
+        );
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "maximum.accumulate byte parity",
+        );
+
+        group.bench_function("maximum_accumulate_f64_8m_fnp_profile", |bench| {
+            bench.iter(|| {
+                black_box(
+                    fnp_accumulate
+                        .call1((black_box(&input),))
+                        .expect("profile fnp maximum.accumulate"),
+                )
+            });
+        });
+        bench_median_gate_python_unary(
+            &mut group,
+            "maximum_accumulate_f64_8m_null_then_effect",
+            "maximum_accumulate_f64_8m",
+            &numpy_accumulate,
+            &fnp_accumulate,
+            &input,
+        );
+    });
+
+    group.finish();
+    if std::env::var_os("FNP_ACCUMULATE_EXTREMUM_BENCH_ONLY").is_some() {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        std::process::exit(0);
+    }
+}
+
 fn bench_int_convolve_median_gate(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_int_convolve_median_gate");
     group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
@@ -15592,6 +15702,7 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_accumulate_extremum_median_gate,
     bench_int_convolve_median_gate,
     bench_completion_median_gate,
     bench_f64_transcendental_median_gate,
