@@ -4,6 +4,48 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-11 - WIN (SHIP): f16 einsum matmul-shaped contraction via the PER-STEP-NARROW contract kernel - 0.99 parity -> 6.25x vs numpy (fnp self 760.5 -> 195.3 ms at 512^2), byte-identical to the cracked contract on fleet numpy
+
+`cc_fnp` (linalg lane), bead deadlock-audit-o2ahc - the implementation of the same-day
+contract recon below.
+
+PROFILE BASIS (fresh baseline, null 0.995): fnp f16 einsum('ij,jk->ik') DELEGATED to
+numpy's catastrophic naive loop - 760.5 ms at 512^2, effect 0.99 = pure parity-with-slow.
+
+ONE LEVER: try_native_f16_einsum_matmul - explicit "AB,BC->AC" 2-op specs (distinct
+letters), both operands exact f16 C-contiguous 2-D ndarrays, work >= 1<<18, kwargs empty,
+wired inside the einsum Defer policy arm. The kernel reproduces the CRACKED contract
+exactly: each output element accumulates acc = f16(f32(acc) + f32(a_ij)*f32(b_jk)) over j
+in order - accumulating DIRECTLY in the f16 output bits (per-step widen/narrow), parallel
+across MR=4 row blocks with a per-block b-row f32 decode scratch. Each element's chain is
+untouched by the tiling -> byte-identical. The tiled f16 GEMM was deliberately NOT reused
+(its f32-accumulate-once contract is byte-wrong here - the recon entry below).
+
+MEASURED (ONE binary / ONE process / ONE rch invocation per run, ABBA/BAAB, black_box,
+numpy A/A null, pre-timing byte parity assert; baseline and candidate rows in the artifact
+dir):
+
+| row | baseline effect | candidate effect [p10,p90] | candidate null | fnp ms base -> cand |
+|---|---:|---|---:|---|
+| f16_einsum_matmul_512 | 0.990 (null 0.995) | **6.249** [5.703, 6.484], 20/20 above 1 | 1.011 [0.953, 1.058] | 760.5 -> 195.3 (3.9x self) |
+
+Median gate: decisive (p10 5.70 vs null p90 1.06). The per-step-narrow chain costs ~10x
+the matmul tile per element (195 vs 19 ms) - that is the CONTRACT's price, not kernel
+slack; numpy pays the same semantics 6.2x slower. NOTE: the candidate run's rch client hit
+its 1800s SSH timeout AFTER the full row + verdict were delivered (slow loaded worker,
+criterion tail) - exit code 1 is a transport artifact, decision data complete; no local
+fallback ran.
+
+CORRECTNESS: conformance_einsum::f16_einsum_matmul_per_step_contract_bit_exact GREEN on
+fleet numpy (vmi1227854, 2.4.6): byte-identity across (128,96,144)/(512^3)/(2,400,400)
+sub-block/(514,40,40) tail/(65,130,257)/(3,7,4), inf/nan chain propagation, alternate
+letters, below-gate + non-matmul-spec defer cases; the test LOCKS the contract so a future
+numpy loop change fails loudly. In-run byte assert also passed on the bench worker.
+SIBLING LEADS (unfiled, small EV until profiled): implicit 'ij,jk' form (alphabetical-
+output rule), 'ik,kj->ij'-style transposed variants, f16 3-op chains.
+PROVENANCE: runner-printed hosts/shas;
+tests/artifacts/perf/2026-07-11_f16_einsum_contract_kernel_cc_fnp/.
+
 ## 2026-07-11 - RECON (SURFACE, lead filed): f16 einsum CANNOT route to the tiled f16 GEMM - einsum's f16 accumulation contract differs from matmul's by up to 37585 ULP (per-step f16 rounding vs f32 accumulate); the real lever is a rounding-faithful native kernel, bead deadlock-audit-o2ahc
 
 `cc_fnp` (linalg lane). After the frontier close, the next unmeasured f16 surface:

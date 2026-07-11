@@ -839,3 +839,51 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn f16_einsum_matmul_per_step_contract_bit_exact() -> Result<(), String> {
+    // np.einsum's f16 matmul-shaped contraction accumulates each output element
+    // as acc = f16(f32(acc) + f32(a_ij)*f32(b_jk)) over j IN ORDER — a PER-STEP
+    // narrow to f16 (ledger recon 2026-07-11; it differs from np.matmul's
+    // f32-accumulate-once contract by huge margins, so the tiled GEMM must NOT
+    // be reused). The native kernel must be byte-identical to the live oracle
+    // across shapes including MR-tile tails, and this test LOCKS the contract
+    // on the fleet's numpy version: if a future numpy changes its loop, this
+    // fails loudly instead of shipping a stale contract.
+    let script = fnp_script(
+        r#"
+ok = True
+rng = np.random.default_rng(20260711)
+for (m, k, n) in ((128, 96, 144), (512, 512, 512), (2, 400, 400), (514, 40, 40), (65, 130, 257), (3, 7, 4)):
+    a = (rng.standard_normal((m, k)) * 0.3).astype(np.float16)
+    b = (rng.standard_normal((k, n)) * 0.3).astype(np.float16)
+    r = fnp.einsum('ij,jk->ik', a, b); e = np.einsum('ij,jk->ik', a, b)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape
+    ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
+# inf/nan propagation through the per-step chain
+a = (rng.standard_normal((128, 128)) * 0.3).astype(np.float16)
+b = (rng.standard_normal((128, 128)) * 0.3).astype(np.float16)
+a[0, 0] = np.float16(np.inf); b[0, 1] = np.float16(np.nan); a[3, 5] = np.float16(-np.inf)
+r = fnp.einsum('ij,jk->ik', a, b); e = np.einsum('ij,jk->ik', a, b)
+ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
+# alternate letters, same canonical form
+r = fnp.einsum('ab,bc->ac', a, b); e = np.einsum('ab,bc->ac', a, b)
+ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
+# below-gate and non-matmul specs stay on the numpy path (trivially byte-equal)
+sm_a = (rng.standard_normal((8, 8)) * 0.3).astype(np.float16)
+sm_b = (rng.standard_normal((8, 8)) * 0.3).astype(np.float16)
+ok = ok and fnp.einsum('ij,jk->ik', sm_a, sm_b).tobytes() == np.einsum('ij,jk->ik', sm_a, sm_b).tobytes()
+ok = ok and fnp.einsum('ij,jk->ki', a, b).tobytes() == np.einsum('ij,jk->ki', a, b).tobytes()
+ok = ok and np.float16(fnp.einsum('ij,ij->', a, b)).tobytes() == np.float16(np.einsum('ij,ij->', a, b)).tobytes()
+print(bool(ok))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 einsum matmul-shaped contraction must be bit-identical to numpy's per-step contract: {result}"
+    );
+    Ok(())
+}

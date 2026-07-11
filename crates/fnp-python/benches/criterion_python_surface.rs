@@ -14669,6 +14669,86 @@ fn bench_multidot_median_gate(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_f16_einsum_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_f16_einsum_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_f16_einsum_median_gate")
+            .expect("f16 einsum bench module");
+        fnp_python(&module).expect("initialize fnp_python f16 einsum bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        namespace
+            .set_item("fnp_mod", &module)
+            .expect("expose fnp module");
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 es_a = (rng.standard_normal((512, 512)) * 0.3).astype(np.float16)\n\
+                 es_b = (rng.standard_normal((512, 512)) * 0.3).astype(np.float16)\n\
+                 fnp_es = lambda a, b: fnp_mod.einsum('ij,jk->ik', a, b)\n\
+                 np_es = lambda a, b: np.einsum('ij,jk->ik', a, b)\n",
+            )
+            .expect("f16 einsum setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("f16 einsum setup");
+        let es_a = namespace.get_item("es_a").expect("es_a present");
+        let es_b = namespace.get_item("es_b").expect("es_b present");
+        let fnp_es = namespace.get_item("fnp_es").expect("fnp_es present");
+        let np_es = namespace.get_item("np_es").expect("np_es present");
+
+        let candidate = fnp_es.call1((&es_a, &es_b)).expect("fnp f16 einsum parity");
+        let base = np_es.call1((&es_a, &es_b)).expect("numpy f16 einsum parity");
+        assert_eq!(
+            candidate
+                .getattr("dtype")
+                .expect("candidate dtype")
+                .str()
+                .expect("candidate dtype str")
+                .to_string(),
+            base.getattr("dtype")
+                .expect("base dtype")
+                .str()
+                .expect("base dtype str")
+                .to_string(),
+            "f16 einsum dtype parity",
+        );
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum byte parity",
+        );
+
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_matmul_512_null_then_effect",
+            "f16_einsum_matmul_512",
+            &np_es,
+            &fnp_es,
+            &es_a,
+            &es_b,
+        );
+    });
+
+    group.finish();
+}
+
 fn bench_wide_string_substrate_v2(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_wide_string_substrate_v2");
     group.sample_size(10);
@@ -15865,6 +15945,7 @@ criterion_group!(
     bench_int_matmul_median_gate,
     bench_f16_matmul_median_gate,
     bench_multidot_median_gate,
+    bench_f16_einsum_median_gate,
     bench_wide_string_substrate_v2,
     bench_ledger_integrity_rejects,
     bench_unique_rows_full_boundary,
