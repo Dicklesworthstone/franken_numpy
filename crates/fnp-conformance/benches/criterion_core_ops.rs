@@ -171,6 +171,162 @@ fn bench_core_ops(c: &mut Criterion) {
     group.finish();
 }
 
+// One-binary ABBA/BAAB median gate for the reduce_fold last-axis row-band
+// lever, per the 2026-07-11 no-ship retry predicate: serial arm inline (exact
+// per-row left fold), candidate arm = the public reduce_prod path, finite
+// near-one input, plus a serial/serial A/A null. Run with RAYON_NUM_THREADS
+// pinned via the runner wrapper and RCH_WORKER pinned to the no-ship worker.
+fn bench_reduce_prod_row_band_median_gate(c: &mut Criterion) {
+    use std::cell::{Cell, RefCell};
+    use std::time::Instant;
+
+    let mut group = c.benchmark_group("core_reduce_prod_median_gate");
+    let rows = 1024usize;
+    let cols = 1024usize;
+    let values: Vec<f64> = (0..rows * cols)
+        .map(|i| 1.0 + (((i * 131) % 4093) as f64 - 2046.0) * 1.0e-9)
+        .collect();
+    let array = UFuncArray::new(vec![rows, cols], values.clone(), DType::F64)
+        .expect("median-gate input must build");
+    let serial_arm = || {
+        let mut out = Vec::with_capacity(rows);
+        for row in values.chunks_exact(cols) {
+            out.push(row[1..].iter().fold(row[0], |acc, &v| acc * v));
+        }
+        out
+    };
+    let candidate_arm = || {
+        array
+            .reduce_prod(Some(1), false)
+            .expect("candidate reduce_prod must succeed")
+    };
+    // Bit parity before timing: the row-band candidate must equal the serial
+    // per-row fold exactly.
+    let serial_ref = serial_arm();
+    let candidate_ref = candidate_arm();
+    assert_eq!(candidate_ref.values().len(), serial_ref.len());
+    for (candidate, serial) in candidate_ref.values().iter().zip(serial_ref.iter()) {
+        assert_eq!(
+            candidate.to_bits(),
+            serial.to_bits(),
+            "row-band product must be bit-identical to the serial fold"
+        );
+    }
+
+    let report = |label: &str, a: &RefCell<Vec<f64>>, b: &RefCell<Vec<f64>>| {
+        let median = |samples: &mut Vec<f64>| -> f64 {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        let mut a_ns = a.borrow().clone();
+        let mut b_ns = b.borrow().clone();
+        if a_ns.is_empty() || b_ns.is_empty() {
+            return;
+        }
+        let ratios: Vec<f64> = a_ns.iter().zip(b_ns.iter()).map(|(x, y)| x / y).collect();
+        let mut sorted = ratios.clone();
+        sorted.sort_by(f64::total_cmp);
+        println!(
+            "CORE_PROD_GATE row={label} samples={} a_median_us={:.3} b_median_us={:.3} \
+             ratio_median={:.4} ratio_p10={:.4} ratio_p90={:.4}",
+            sorted.len(),
+            median(&mut a_ns) / 1e3,
+            median(&mut b_ns) / 1e3,
+            sorted[sorted.len() / 2],
+            sorted[sorted.len() / 10],
+            sorted[sorted.len() - 1 - sorted.len() / 10],
+        );
+    };
+
+    let serial_ns = RefCell::new(Vec::new());
+    let candidate_ns = RefCell::new(Vec::new());
+    let order = Cell::new(0u64);
+    group.bench_function("prod_1024x1024_serial_vs_rowband_paired", |bench| {
+        bench.iter_custom(|iterations| {
+            let mut serial_total = Duration::ZERO;
+            let mut candidate_total = Duration::ZERO;
+            for _ in 0..iterations {
+                let serial_first = order.get() & 1 == 0;
+                order.set(order.get().wrapping_add(1));
+                if serial_first {
+                    let start = Instant::now();
+                    black_box(serial_arm());
+                    serial_total += start.elapsed();
+                    let start = Instant::now();
+                    black_box(candidate_arm());
+                    candidate_total += start.elapsed();
+                    let start = Instant::now();
+                    black_box(candidate_arm());
+                    candidate_total += start.elapsed();
+                    let start = Instant::now();
+                    black_box(serial_arm());
+                    serial_total += start.elapsed();
+                } else {
+                    let start = Instant::now();
+                    black_box(candidate_arm());
+                    candidate_total += start.elapsed();
+                    let start = Instant::now();
+                    black_box(serial_arm());
+                    serial_total += start.elapsed();
+                    let start = Instant::now();
+                    black_box(serial_arm());
+                    serial_total += start.elapsed();
+                    let start = Instant::now();
+                    black_box(candidate_arm());
+                    candidate_total += start.elapsed();
+                }
+            }
+            serial_ns
+                .borrow_mut()
+                .push(serial_total.as_secs_f64() * 1e9 / (2.0 * iterations as f64));
+            candidate_ns
+                .borrow_mut()
+                .push(candidate_total.as_secs_f64() * 1e9 / (2.0 * iterations as f64));
+            serial_total + candidate_total
+        });
+    });
+    report("serial_over_rowband", &serial_ns, &candidate_ns);
+
+    let null_a = RefCell::new(Vec::new());
+    let null_b = RefCell::new(Vec::new());
+    let null_order = Cell::new(0u64);
+    group.bench_function("prod_1024x1024_serial_null_aa", |bench| {
+        bench.iter_custom(|iterations| {
+            let mut a_total = Duration::ZERO;
+            let mut b_total = Duration::ZERO;
+            for _ in 0..iterations {
+                let b_first = null_order.get() & 1 == 1;
+                null_order.set(null_order.get().wrapping_add(1));
+                if b_first {
+                    let start = Instant::now();
+                    black_box(serial_arm());
+                    b_total += start.elapsed();
+                    let start = Instant::now();
+                    black_box(serial_arm());
+                    a_total += start.elapsed();
+                } else {
+                    let start = Instant::now();
+                    black_box(serial_arm());
+                    a_total += start.elapsed();
+                    let start = Instant::now();
+                    black_box(serial_arm());
+                    b_total += start.elapsed();
+                }
+            }
+            null_a
+                .borrow_mut()
+                .push(a_total.as_secs_f64() * 1e9 / iterations as f64);
+            null_b
+                .borrow_mut()
+                .push(b_total.as_secs_f64() * 1e9 / iterations as f64);
+            a_total + b_total
+        });
+    });
+    report("serial_null_aa", &null_a, &null_b);
+
+    group.finish();
+}
+
 fn criterion_config() -> Criterion {
     Criterion::default()
         .measurement_time(Duration::from_secs(8))
@@ -182,6 +338,6 @@ fn criterion_config() -> Criterion {
 criterion_group! {
     name = benches;
     config = criterion_config();
-    targets = bench_core_ops
+    targets = bench_core_ops, bench_reduce_prod_row_band_median_gate
 }
 criterion_main!(benches);

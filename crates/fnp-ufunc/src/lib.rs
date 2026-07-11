@@ -32276,7 +32276,7 @@ fn reduce_fold_axis_contiguous(
     shape: &[usize],
     axis: usize,
     out_values: &mut [f64],
-    fold: impl Fn(f64, f64) -> f64,
+    fold: impl Fn(f64, f64) -> f64 + Sync,
 ) {
     debug_assert!(axis < shape.len());
     if out_values.is_empty() {
@@ -32290,6 +32290,48 @@ fn reduce_fold_axis_contiguous(
 
     let inner = shape[axis + 1..].iter().copied().product::<usize>();
     let outer = shape[..axis].iter().copied().product::<usize>();
+
+    if inner == 1 {
+        // Last axis: rows are independent, so assign coarse row bands per
+        // Rayon worker (the shipped reduce_sum row-band structure). Each row
+        // keeps the exact element-0 seed and left-to-right fold order, so
+        // every output bit is identical to the serial walk for ANY fold —
+        // including the order-dependent min/max signed-zero folds, whose
+        // "do not parallelize" warnings concern reordering WITHIN a row's
+        // fold; banding parallelizes across rows only (the same argument as
+        // reduce_minmax_axis_simd's across-columns SIMD). This retries the
+        // 2026-07-11 row-band no-ship UNDER its retry predicate (one-binary
+        // ABBA serial-arm harness, pinned RAYON_NUM_THREADS, same worker).
+        if out_values.len() >= 2
+            && values.len() >= REDUCE_SUM_LAST_AXIS_PARALLEL_MIN_ELEMS
+            && rayon::current_num_threads() >= 2
+        {
+            let row_band = out_values
+                .len()
+                .div_ceil(rayon::current_num_threads().saturating_mul(2));
+            out_values
+                .par_chunks_mut(row_band)
+                .zip(values.par_chunks(axis_len * row_band))
+                .for_each(|(slots, value_band)| {
+                    for (slot, row) in slots.iter_mut().zip(value_band.chunks_exact(axis_len)) {
+                        let mut acc = row[0];
+                        for &value in &row[1..] {
+                            acc = fold(acc, value);
+                        }
+                        *slot = acc;
+                    }
+                });
+        } else {
+            for (slot, row) in out_values.iter_mut().zip(values.chunks_exact(axis_len)) {
+                let mut acc = row[0];
+                for &value in &row[1..] {
+                    acc = fold(acc, value);
+                }
+                *slot = acc;
+            }
+        }
+        return;
+    }
 
     let mut out_flat = 0usize;
     for outer_idx in 0..outer {
@@ -43680,6 +43722,85 @@ print(json.dumps(payload))
 
         assert_eq!(output.shape(), &[rows]);
         assert_eq!(output_bits, reference_bits);
+    }
+
+    #[test]
+    fn reduce_fold_last_axis_parallel_matches_serial_row_bits() {
+        // The shared reduce_fold_axis_contiguous last-axis row-band lever must
+        // be bit-identical to the serial per-row fold for EVERY caller: prod
+        // (overflow-then-zero, signed zero, NaN payload, infinities, near-one
+        // rows) and the order-dependent min/max signed-zero folds (banding
+        // parallelizes across rows only; each row keeps its left-to-right
+        // order and element-0 seed).
+        let rows = 512usize;
+        let cols = 1024usize;
+        assert!(rows * cols >= crate::REDUCE_SUM_LAST_AXIS_PARALLEL_MIN_ELEMS);
+        let mut values = Vec::with_capacity(rows * cols);
+        for row in 0..rows {
+            for col in 0..cols {
+                let value = match row {
+                    0 => [1.0e200, 1.0e200, 0.0, 1.0][col % 4], // overflow then zero
+                    1 => [-0.0, 0.0][col % 2],                  // signed-zero tie order
+                    2 if col == 17 => f64::from_bits(0x7ff8_0000_dead_beef), // NaN payload
+                    3 if col == 29 => f64::INFINITY,
+                    4 if col == 31 => f64::NEG_INFINITY,
+                    5 => 1.0 + ((col as f64) - 512.0) * 1.0e-9, // finite near-one
+                    _ => (((row * 131 + col * 17 + 11) % 4093) as f64 - 2046.0) / 8.0,
+                };
+                values.push(value);
+            }
+        }
+
+        let prod_reference: Vec<u64> = values
+            .chunks_exact(cols)
+            .map(|row| row[1..].iter().fold(row[0], |acc, &v| acc * v).to_bits())
+            .collect();
+        let nan_min = |a: f64, b: f64| {
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else if a < b {
+                a
+            } else {
+                b
+            }
+        };
+        let nan_max = |a: f64, b: f64| {
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else if a > b {
+                a
+            } else {
+                b
+            }
+        };
+        let min_reference: Vec<u64> = values
+            .chunks_exact(cols)
+            .map(|row| row[1..].iter().fold(row[0], |acc, &v| nan_min(acc, v)).to_bits())
+            .collect();
+        let max_reference: Vec<u64> = values
+            .chunks_exact(cols)
+            .map(|row| row[1..].iter().fold(row[0], |acc, &v| nan_max(acc, v)).to_bits())
+            .collect();
+
+        let array = UFuncArray::new(vec![rows, cols], values, DType::F64).expect("array");
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("parallel proof pool");
+        let (prod_bits, min_bits, max_bits) = pool.install(|| {
+            let prod = array.reduce_prod(Some(1), false).expect("last-axis prod");
+            let min = array.reduce_min(Some(1), false).expect("last-axis min");
+            let max = array.reduce_max(Some(1), false).expect("last-axis max");
+            (
+                prod.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                min.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                max.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            )
+        });
+
+        assert_eq!(prod_bits, prod_reference, "prod row bits diverged");
+        assert_eq!(min_bits, min_reference, "min row bits diverged");
+        assert_eq!(max_bits, max_reference, "max row bits diverged");
     }
 
     fn large_cancellation_values() -> Vec<f64> {

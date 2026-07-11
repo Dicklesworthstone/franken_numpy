@@ -4,6 +4,52 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-11 - WIN (SHIP, REFUTES the same-day no-ship UNDER ITS OWN RETRY PREDICATE): core reduce_fold last-axis row bands - 1.33x / 1.47x serial-over-rowband medians vs pinned nulls in the one-binary ABBA harness; covers prod AND the order-dependent min/max folds
+
+`cc_fnp` (linalg lane), bead deadlock-audit-mfyfi. The 43a5e725 no-ship measured a 2.08x
+regression comparing TWO separately-cold-linked binaries via plain criterion with unpinned
+Rayon threads, and its own retry predicate prescribed the fix: "one-binary same-worker
+ABBA/BAAB harness with a serial arm, explicit RAYON_NUM_THREADS, finite near-one input, and
+an A/A null control". This lever is that exact harness plus the same row-band production
+change, generalized to the SHARED reduce_fold_axis_contiguous (so prod, min, and max
+last-axis all take it).
+
+ONE LEVER: an inner==1 fast path in reduce_fold_axis_contiguous - coarse row bands
+(rows/(threads*2), the shipped reduce_sum structure) with each row keeping its exact
+element-0 seed and left-to-right fold order. BIT-IDENTICAL for EVERY fold, including the
+order-dependent min/max signed-zero folds: banding parallelizes across rows only, never
+within a row (the reduce_minmax_axis_simd across-columns argument). fold param gains + Sync;
+callers unchanged.
+
+MEASURED (ONE binary, ONE process, ABBA/BAAB inside one iter_custom, serial arm = exact
+inline per-row fold, bit-parity asserted before timing, RAYON_NUM_THREADS=4 via the runner,
+finite near-one 1024x1024 input; both runs landed vmi1293453):
+
+| run | serial median | row-band median | serial/rowband median [p10,p90] | null AA median [p10,p90] |
+|---|---:|---:|---|---|
+| run2 | 850.955 us | 665.597 us | **1.3294** [1.0421, 1.5161] | 0.9994 [0.9894, 1.0143] |
+| run3 | 842.640 us | 585.925 us | **1.4682** [1.3056, 1.9544] | 0.9997 [0.9645, 1.6779] |
+
+Median gate: run2 decisive (effect median 1.33 vs null p90 1.014); run3 replicates in
+direction and magnitude (median 1.47, p10 1.31) with its null MEDIAN pinned at 0.9997 - one
+contended batch stretched run3's null p90 to 1.68 and is reported, not hidden. The serial
+arms (851/843 us) MATCH the no-ship's 891 us baseline; the no-ship's 1.86 ms "candidate" was
+a cross-binary artifact (its own ROUTING NEGATIVE showed a 19.6% cross-worker "win" flipping
+to a 2.08x same-worker "loss" - both artifacts of the two-binary method). RCH_WORKER pin
+note: requesting vmi1152480 did NOT hold (scheduler override, same as the no-ship's routing
+note) - immaterial here because the one-binary harness removes worker identity from the
+comparison entirely.
+
+CORRECTNESS: new fnp-ufunc test reduce_fold_last_axis_parallel_matches_serial_row_bits GREEN
+remote - prod/min/max raw-bit equality vs inline serial references on a 4-thread pool over
+adversarial rows (overflow-then-zero, signed-zero tie order, noncanonical NaN payload,
+infinities, finite near-one). reduce_prod battery + reduce_m (min/max/mean) battery GREEN
+remote (exit 0, two workers). One gate attempt died at exit 143 mid-build and was relaunched;
+an earlier cargo-test invocation with two filters was command-syntax negative evidence
+(cargo takes one TESTNAME).
+PROVENANCE: runner-printed host + shas in
+tests/artifacts/perf/2026-07-11_reduce_fold_rowband_cc_fnp/.
+
 ## 2026-07-11 - WIN (SHIP): fn-pointer defect transfer to batched int GEMM + int matrix_power - batched FLIPS 0.767 LOSS -> 10.6x, matrix_power 1.22 -> 11.2x; 2-D rows re-replicate 25.3x/43.4x (3rd worker)
 
 `cc_fnp` (linalg lane), bead deadlock-audit-elht3 - the named sibling transfer of 617e8647.
