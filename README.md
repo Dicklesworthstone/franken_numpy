@@ -266,7 +266,7 @@ cargo build -p fnp-python --release --features python-extension
 
 ```python
 import fnp_python as np
-np.__version__              # workspace version (0.1.0)
+np.__version__              # workspace version (0.2.0)
 np.__numpy_version__        # version of numpy used as fallback oracle
 np.linalg.solve([[3, 1], [1, 2]], [9, 8])
 ```
@@ -1847,6 +1847,47 @@ cargo run -p fnp-conformance --bin run_fnp_python_api_coverage -- --fail-on-miss
 ## Performance
 
 FrankenNumPy is profile-driven: every optimization is paired with a baseline, a single targeted lever, and a proof-backed delta artifact.
+
+### Measured wins vs NumPy — the `v0.2.0` fast-path campaign (June–July 2026)
+
+The `0.1.x` line reached full `numpy.__all__` parity but delegated most hot
+operations to the fallback NumPy oracle. `v0.2.0` is the payoff of a six-week
+profile-driven campaign — roughly **1,230 landed `perf(...)` commits** — that
+replaced delegation with native safe-Rust `rayon`-parallel kernels wherever NumPy
+leaves throughput on the table: single-threaded ufuncs, the entirely absent
+`float16`/integer BLAS, serial radix sorts, and compute-bound reductions. Every
+ratio below is a measured vs-NumPy speedup from the negative-evidence ledger; see
+[`CHANGELOG.md`](CHANGELOG.md) for the per-capability breakdown and representative
+commits.
+
+| Capability | Representative headline speedups vs NumPy |
+|---|---|
+| **`float16` (no f16 ALU/BLAS in NumPy)** | nan_to_num 91×, var/std/nanvar 23–101×, clip 39×, isnan/isinf 27–33×, floor/ceil/rint 37–40×, transcendentals 10–26× (bit-exact), 2-D f16 matmul 28.9× |
+| **Integer / GEMM (no integer BLAS in NumPy)** | 2-D int `matmul`/`dot` 27–35×, batched 10.6–12×, `inner`/`tensordot`/`matrix_power`/`multi_dot` 7–11× |
+| **Sort / argsort / unique / set-ops** | bool flat sort 37.8×, i16 flat sort 66×, gather-free radix argsort 12–15×, 2-D axis=0 `unique` 49–65×, `isin` hashed-set up to 530× (16M f64) |
+| **Reductions / scans / stats** | non-last-axis `nan*` 15–101×, native argmin/argmax/nanarg* 8.9–53×, integer `median` via histogram 31×, fused `gradient` stencils 8–30× |
+| **Complex / temporal dtypes** | complex `exp`/trig 3–13.7× (NumPy `cexp` is serial), datetime64/timedelta64 argsort up to 65.7×, `isin` 44.7× |
+| **Strings (`np.strings` / `np.char`)** | ASCII translate 183×, upper/lower 32–36×, replace/find/center 4–19.6× |
+| **Array construction / manipulation** | `tile`/`concatenate`/`stack` 2.8–6.2×, `pad` 2.1–4.1×, `cross` on (3,N) 12–27× |
+
+**Honesty methodology.** No win in this release trades accuracy for speed. Each
+kernel is:
+
+- **Isomorphism-preserving / byte-exact by construction** — bit-identical output
+  to the delegated path (same reduction order, tie-break, and rounding), many
+  additionally locked by `golden_sha256` conformance fixtures.
+- **Median-gated against a paired null control** — ratios come from a single
+  binary / single process / single `rch` invocation per read, ABBA/BAAB paired
+  against per-row NumPy A/A nulls with pre-timing byte-parity asserts; a candidate
+  must clear the median gate against its own null before it counts as a win.
+- **Recorded in an append-only negative-evidence ledger**
+  ([`docs/NEGATIVE_EVIDENCE.md`](docs/NEGATIVE_EVIDENCE.md)) — losses, no-ships,
+  reverts, and noisy discarded measurements are kept so dead ends are not
+  rediscovered, and a large fraction of campaign commits are regression *fixes*
+  that flip a default-regime loss back to parity rather than new kernels.
+
+The 2026-05-25 cross-engine baseline below predates this campaign; it is retained
+as the parity-era snapshot of the delegated engine.
 
 - **Release profile.** The workspace `Cargo.toml` does not override `[profile.release]`, so Cargo's defaults apply (`opt-level = 3`, `lto = false`, `codegen-units = 16`, `strip = false`). The workspace adds one custom profile, `release-perf`, defined explicitly: `inherits = "release"`, `lto = "thin"`, `codegen-units = 1`, `debug = "line-tables-only"`. That is the right profile for flamegraph profiling. Downstream consumers that want full LTO are free to add `[profile.release] lto = true` in their own top-level Cargo.toml.
 - **Contiguous reduction kernel.** Axis reductions on contiguous data avoid per-element index computation. A targeted optimization pass (commit `d9cfe90`, 2026-02-13) reduced axis-reduction latency by ~56% (p50/p95/p99 deltas of ~90% on contiguous workloads). See `artifacts/optimization/` and `artifacts/baselines/` for the proof bundle.

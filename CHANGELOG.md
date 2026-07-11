@@ -3,16 +3,292 @@
 All notable changes to FrankenNumPy are documented in this file.
 
 FrankenNumPy is a memory-safe, clean-room Rust reimplementation of NumPy. The
-workspace version is `0.1.0` (pre-release). There are no tagged releases or
-GitHub Releases yet, although the May 2026 "Workspace metadata + crates.io
-publish-readiness" wave (see section below) completed the metadata side of
-publishing — what remains for a tag is the explicit decision to publish.
-Every entry below maps to a date range on the `main` branch. Representative
-commits link to
+workspace version is `0.2.0`. `v0.2.0` is the **first tagged release / GitHub
+Release** and packages the June–July 2026 native-fast-path performance campaign;
+the May 2026 "Workspace metadata + crates.io publish-readiness" wave (see below)
+had already completed the metadata side of publishing. Every entry below maps to
+a date range on the `main` branch. Representative commits link to
 `https://github.com/Dicklesworthstone/franken_numpy/commit/<hash>`.
 
 The sections below are organized by **capability area** rather than diff order,
 so that readers can quickly find what changed in the subsystem they care about.
+
+### Version timeline
+
+| Version | Date | Kind | Summary |
+|---|---|---|---|
+| `v0.2.0` | 2026-07-11 | GitHub Release | Native fast-path performance release: ~1,230 landed `perf(...)` commits (2026-06-01 → 2026-07-11) delivering measured speedups vs NumPy across float16, integer/complex/temporal, sort/unique/set-ops, reductions/scans, strings, and array construction — every win byte-exact by construction and recorded in the append-only negative-evidence ledger. |
+| `0.1.0` | 2026-02-13 → 2026-05-19 | untagged dev head | 100% `numpy.__all__` surface parity (499/499), zero hand-written `unsafe`, dual-mode runtime, conformance/fuzz/RaptorQ infrastructure. Preserved below under "[Unreleased]" and the pre-2026-03-21 detail. |
+
+---
+
+## [0.2.0] — Native fast-path performance release (2026-06-01 through 2026-07-11)
+
+The `0.1.x` line reached full `numpy.__all__` surface parity but delegated most
+hot operations to the fallback NumPy oracle. `0.2.0` is the payoff of a
+continuous, profile-driven optimization campaign: roughly **1,230 landed
+`perf(...)` commits** over six weeks replaced delegation with native safe-Rust
+parallel kernels on the operations where NumPy leaves throughput on the table
+(single-threaded ufuncs, absent `float16`/integer BLAS, serial radix sorts,
+compute-bound reductions).
+
+**The honesty methodology is the point.** Every claimed win in this release was
+gated by the discipline recorded in [`docs/NEGATIVE_EVIDENCE.md`](docs/NEGATIVE_EVIDENCE.md):
+
+- **Isomorphism-preserving / byte-exact by construction.** A kernel only ships
+  if it produces bit-identical output to the delegated path (same reduction
+  order, same tie-break, same rounding); many are additionally locked by
+  `golden_sha256` conformance fixtures. No win trades accuracy for speed.
+- **Paired null control + median-gate.** Ratios come from a single binary / single
+  process / single `rch` invocation per read, ABBA/BAAB paired against per-row
+  NumPy A/A nulls, with pre-timing byte-parity asserts. A candidate must clear the
+  median gate against its own null before it is called a win.
+- **Append-only negative-evidence ledger.** Losses, no-ships, reverts, and noisy
+  discarded measurements are recorded so dead ends are not rediscovered as fresh
+  ideas (e.g. `docs(perf): REJECT float median via radix-select — 0.68x` [`2e8bb3fc`], `unpackbits NO-SHIP — 0.44x` [`94004c47`]). Many commits are pure regression *fixes* that flip a default-regime loss back to parity (see "Regression governance" below).
+
+Speedups below are the measured vs-NumPy ratios recorded in commit subjects and
+the ledger; representative short-hashes point at the landing commit.
+
+### Parallel engine foundation (2026-06-01 → 2026-06-03)
+
+The campaign opened by turning the numeric core parallel and cutting the
+Python↔Rust bridge tax. `+avx2` codegen enabled 4-wide f64 vectorization
+([`74c053a7`]); a register-tiled, j-panel-blocked GEMM kernel parallelized across
+row bands ([`30000d97`], [`e316dd7d`], [`5b445ff7`]); unary/binary transcendental
+ufuncs, last-axis sort/argsort/partition, cumsum/cumprod, FFT (1-D/2-D/N-D),
+histogram/histogram2d, interp, searchsorted, convolve/correlate, and
+einsum/tensordot/inner were all parallelized bit-exact ([`9255f560`],
+[`cbeb8041`], [`0686ea13`], [`c3fd5384`], [`d644c0cc`], [`182bde5d`], [`b39cd1b7`]).
+The bridge itself was rewritten to read/write NumPy arrays via `PyBuffer` instead
+of an O(n) `tolist()` round-trip ([`138c8e0a`], [`fa3704db`]).
+
+- **Delivered capability:** a safe-Rust, `rayon`-parallel kernel layer under the
+  `fnp_python` surface with zero-copy array transfer.
+- **Representative commits:** [`74c053a7`], [`30000d97`], [`e316dd7d`], [`9255f560`], [`138c8e0a`].
+
+### float16 native fast-path family (2026-06-28 → 2026-07-11)
+
+NumPy has no `float16` ALU or BLAS — it widens to `f32`, computes single-threaded,
+and narrows back. FrankenNumPy ships native parallel f16 kernels that are the
+release's largest measured wins:
+
+- **Arithmetic / rounding:** add·mul·sub ~20x ([`b2876ebc`]), floor·ceil·trunc·rint
+  ~37–40x ([`b5da1552`]), divide 4.88x ([`0e5af955`]/[`931bc08a`]), floor_divide
+  25.8x ([`bc7295e6`]), fmod/remainder 15–18x ([`ab43dfd6`]).
+- **Comparisons / bit ops:** maximum/minimum ~23x ([`2871af7d`]), isnan/isinf/isfinite/signbit
+  27–33x ([`6eb3fc9a`]), clip 39x ([`9fa64dd1`]), nan_to_num 91x ([`6fcab122`]).
+- **Transcendentals (exhaustively proven bit-exact):** sin/cos/tanh/cbrt/arctan
+  15–20x ([`9ca5a3c6`]), exp/log family 10.7–26x ([`50b7af20`]).
+- **Reductions:** var/std/nanvar/nanstd 23–101x ([`0f2d4187`], [`4e116ddb`]),
+  nansum 6.6–72x ([`d8523d26`], [`8b062fdf`]), min/max/ptp/argextreme 10–39x
+  ([`ab17b200`], [`034a2370`]), cum*/nancum* along any axis ([`3acdd21b`], [`ec59ae3e`]).
+- **Sort / GEMM:** widened exact-f32 sort 5.25–7.72x + stable argsort up to 10.74x
+  ([`de381d49`], [`b9e20220`]); the f16 GEMM family — which NumPy cannot do in BLAS
+  at all — tiled with per-slice MR=4 row blocks + per-block f32 decode scratch:
+  2-D 28.87x ([`33f7d73b`]), batched 11.6x ([`c84d289a`]), broadcast 10.46x ([`9b024cad`]).
+
+### Integer & GEMM linear algebra (2026-06-28, 2026-07-11)
+
+NumPy also has no integer BLAS. Native parallel integer GEMM: 2-D `dot`/`matmul`
+512² 27–35.4x ([`0d6915ca`], [`617e8647`]), batched (≥3-D) 10.6–12x ([`d8119ba7`],
+[`323ef325`]), and the derived chain — `inner`/`tensordot`/`matrix_power`/`multi_dot`
+7–11x ([`eb0d89ac`], [`2907b493`], [`7fff482b`], [`c3612d4f`]). Integer
+`convolve`/`correlate` run ~2x with statically-dispatched taps ([`cc8f2822`],
+[`9c3b02a1`]). Static-dispatch + MR=4 row-tile flips prior i32-512 and batched
+losses into 20–35x wins.
+
+### Sort, argsort, unique, searchsorted & set-ops (2026-06-29 → 2026-07-11)
+
+A radix/counting-sort family that beats NumPy's introsort/mergesort where the key
+space allows a gather-free pass:
+
+- **Gather-free radix argsort** for distinct int/float/datetime data 12.7–14.4x
+  ([`b72f273b`], [`4720dc2a`], [`279c885c`]); stable LSD-radix float argsort 17.4x
+  ([`0f8f0a0b`]); counting/radix stable int argsort 14.8–32.2x ([`b9951f33`], [`206030a4`]).
+- **Bool/narrow-int flat sort** via u8/counting machinery: bool 37.8x ([`8ee4b749`]),
+  i16 66.3x @ 8M ([`0f9135eb`]).
+- **2-D axis=0 `unique`** via row factorize / value-lex sort: 49x ([`490d9bb9`]),
+  packed-composite small-range 65x ([`228c7092`]).
+- **`searchsorted`** sort-merge / binary search 13–36.6x ([`7a20d60f`], [`0d1ebac7`]);
+  **`isin`** hashed-set up to 530x (16M f64, [`63d7972a`]) and 50.9x structured ([`7a1076e6`]).
+- **Structured / string / complex** sort·unique·set-ops via byte-transform and
+  packed-u64 keys: structured set-ops 15.6–37.8x ([`ca436092`]), structured
+  `searchsorted` 32.6x ([`4735e8e8`]), packed-u64 string sort/unique ([`6d059274`]).
+
+### Reductions, scans & statistics (2026-06-26 → 2026-07-10)
+
+Parallel prefix scans (cumsum/cumprod/accumulate, two-pass) 3–20x ([`741ae88b`],
+[`efdeadd4`], [`32747609`]); non-last-axis `nan*` statistics 15–101x
+([`eba548c9`], [`be79b1cb`], [`450e7b48`]); native argmin/argmax/nanarg* kernels
+8.9–53x ([`e9539734`], [`46687177`], [`df3b9f82`]); integer `median` via histogram
+order-statistics (no sort) 31.3x ([`ec2255d9`]); fused `gradient` stencils 8–30.6x
+([`fc95778d`], [`d23217a3`]); MR=4 register tile for the cov/corrcoef Gram
+([`939a3d35`], [`659e1793`]); zero-copy fused-defer f64 transcendental unary path
+([`e54e3195`]).
+
+### Complex & temporal dtypes (2026-06-28 → 2026-07-07)
+
+Complex128/64 arithmetic and transcendentals — NumPy's `cexp` is single-threaded —
+3–13.7x ([`36904d6a`], [`5f1f7699`], [`b5bf181b`]); complex sort/argsort/unique/cum*
+([`89d46845`], [`eb2c4b3c`], [`44bdcf78`]); datetime64/timedelta64 add/subtract,
+unit conversion, min/max/ptp/argsort, searchsorted/isin/unique via int64-view —
+up to 65.7x argsort ([`279c885c`]), 44.7x isin ([`9b582e07`]).
+
+### String & char native kernels (2026-06-29 → 2026-07-09)
+
+ASCII case/translate kernels 14–183x ([`2905096f`], [`e515ef59`], [`fb5c6dbb`]);
+`np.strings` replace/count/find/center/zfill/expandtabs/slice/index 4–19.6x
+([`8edf31e0`], [`d340596c`], [`0e54d402`]); bytes (`'S'`) twins and a full `np.char`
+mirror; packed-u64 string sort/unique/searchsorted/set-ops for the Latin-1 path.
+
+### Array construction & manipulation (2026-07-01 → 2026-07-03)
+
+Native parallel `full`/`zeros_like`/`ones` ([`c4acd585`], [`048a6a9a`]), multidim
+`tile`/`concatenate`/`stack`/`vstack`/`column_stack` 2.8–6.2x ([`4dfc03d8`],
+[`1b9c4c6c`], [`d651124b`]), `pad` (constant/edge/reflect/wrap) 2.1–4.1x
+([`734369dc`], [`2d9b3cc4`], [`b2a1e5c5`]), `roll`/`repeat`/`insert`/`delete`,
+`take`/`put_along_axis` generalized to all 1/2/4/8-byte dtypes ([`11a29c94`],
+[`3ab9d424`]), `cross` on (3,N) 12–27x ([`e6474912`]). Many construction wins are
+page-fault-bound (the fill itself is the wall).
+
+### Regression governance (continuous)
+
+A large fraction of campaign commits are *fixes*, not new kernels: default-regime
+matmul/dot losses removed by gating native GEMM to the serial-BLAS regime
+([`90733ca6`], [`519b0a55`]), mistuned parallel-gate crossovers repaired
+([`ee8baca5`], [`1d056bda`], [`4959b21d`]), and `average`/`percentile`/`quantile`
+extract-tax fixes flipping 0.09–0.95x losses back to parity ([`7fa27766`],
+[`5dc637ae`], [`ba4af972`]). This is the median-gate methodology working in the
+loss direction — the release ships net wins with no known default-regime
+regressions on the swept surface.
+
+### Evidence sources
+
+- **Git history:** `git log --no-merges --since=2026-06-01` (~1,230 `perf(...)`
+  commits); representative short-hashes above.
+- **Negative-evidence ledger:** [`docs/NEGATIVE_EVIDENCE.md`](docs/NEGATIVE_EVIDENCE.md)
+  (append-only WIN/LOSS/NO-SHIP/REVERT records with measured ratios, null controls,
+  and provenance).
+- **Perf artifacts:** `tests/artifacts/perf/<date>_<lever>_<agent>/` (per-run
+  ABBA/BAAB captures, byte-parity asserts, runner-printed hosts/SHAs).
+- **Scorecards:** [`docs/PERF_RELEASE_READINESS_SCORECARD.md`](docs/PERF_RELEASE_READINESS_SCORECARD.md),
+  [`docs/RELEASE_READINESS_SCORECARD.md`](docs/RELEASE_READINESS_SCORECARD.md).
+
+[`74c053a7`]: https://github.com/Dicklesworthstone/franken_numpy/commit/74c053a7
+[`30000d97`]: https://github.com/Dicklesworthstone/franken_numpy/commit/30000d97
+[`e316dd7d`]: https://github.com/Dicklesworthstone/franken_numpy/commit/e316dd7d
+[`5b445ff7`]: https://github.com/Dicklesworthstone/franken_numpy/commit/5b445ff7
+[`9255f560`]: https://github.com/Dicklesworthstone/franken_numpy/commit/9255f560
+[`cbeb8041`]: https://github.com/Dicklesworthstone/franken_numpy/commit/cbeb8041
+[`0686ea13`]: https://github.com/Dicklesworthstone/franken_numpy/commit/0686ea13
+[`c3fd5384`]: https://github.com/Dicklesworthstone/franken_numpy/commit/c3fd5384
+[`d644c0cc`]: https://github.com/Dicklesworthstone/franken_numpy/commit/d644c0cc
+[`182bde5d`]: https://github.com/Dicklesworthstone/franken_numpy/commit/182bde5d
+[`b39cd1b7`]: https://github.com/Dicklesworthstone/franken_numpy/commit/b39cd1b7
+[`138c8e0a`]: https://github.com/Dicklesworthstone/franken_numpy/commit/138c8e0a
+[`fa3704db`]: https://github.com/Dicklesworthstone/franken_numpy/commit/fa3704db
+[`b2876ebc`]: https://github.com/Dicklesworthstone/franken_numpy/commit/b2876ebc
+[`b5da1552`]: https://github.com/Dicklesworthstone/franken_numpy/commit/b5da1552
+[`0e5af955`]: https://github.com/Dicklesworthstone/franken_numpy/commit/0e5af955
+[`931bc08a`]: https://github.com/Dicklesworthstone/franken_numpy/commit/931bc08a
+[`bc7295e6`]: https://github.com/Dicklesworthstone/franken_numpy/commit/bc7295e6
+[`ab43dfd6`]: https://github.com/Dicklesworthstone/franken_numpy/commit/ab43dfd6
+[`2871af7d`]: https://github.com/Dicklesworthstone/franken_numpy/commit/2871af7d
+[`6eb3fc9a`]: https://github.com/Dicklesworthstone/franken_numpy/commit/6eb3fc9a
+[`9fa64dd1`]: https://github.com/Dicklesworthstone/franken_numpy/commit/9fa64dd1
+[`6fcab122`]: https://github.com/Dicklesworthstone/franken_numpy/commit/6fcab122
+[`9ca5a3c6`]: https://github.com/Dicklesworthstone/franken_numpy/commit/9ca5a3c6
+[`50b7af20`]: https://github.com/Dicklesworthstone/franken_numpy/commit/50b7af20
+[`0f2d4187`]: https://github.com/Dicklesworthstone/franken_numpy/commit/0f2d4187
+[`4e116ddb`]: https://github.com/Dicklesworthstone/franken_numpy/commit/4e116ddb
+[`d8523d26`]: https://github.com/Dicklesworthstone/franken_numpy/commit/d8523d26
+[`8b062fdf`]: https://github.com/Dicklesworthstone/franken_numpy/commit/8b062fdf
+[`ab17b200`]: https://github.com/Dicklesworthstone/franken_numpy/commit/ab17b200
+[`034a2370`]: https://github.com/Dicklesworthstone/franken_numpy/commit/034a2370
+[`3acdd21b`]: https://github.com/Dicklesworthstone/franken_numpy/commit/3acdd21b
+[`ec59ae3e`]: https://github.com/Dicklesworthstone/franken_numpy/commit/ec59ae3e
+[`de381d49`]: https://github.com/Dicklesworthstone/franken_numpy/commit/de381d49
+[`b9e20220`]: https://github.com/Dicklesworthstone/franken_numpy/commit/b9e20220
+[`33f7d73b`]: https://github.com/Dicklesworthstone/franken_numpy/commit/33f7d73b
+[`c84d289a`]: https://github.com/Dicklesworthstone/franken_numpy/commit/c84d289a
+[`9b024cad`]: https://github.com/Dicklesworthstone/franken_numpy/commit/9b024cad
+[`0d6915ca`]: https://github.com/Dicklesworthstone/franken_numpy/commit/0d6915ca
+[`617e8647`]: https://github.com/Dicklesworthstone/franken_numpy/commit/617e8647
+[`d8119ba7`]: https://github.com/Dicklesworthstone/franken_numpy/commit/d8119ba7
+[`323ef325`]: https://github.com/Dicklesworthstone/franken_numpy/commit/323ef325
+[`eb0d89ac`]: https://github.com/Dicklesworthstone/franken_numpy/commit/eb0d89ac
+[`2907b493`]: https://github.com/Dicklesworthstone/franken_numpy/commit/2907b493
+[`7fff482b`]: https://github.com/Dicklesworthstone/franken_numpy/commit/7fff482b
+[`c3612d4f`]: https://github.com/Dicklesworthstone/franken_numpy/commit/c3612d4f
+[`cc8f2822`]: https://github.com/Dicklesworthstone/franken_numpy/commit/cc8f2822
+[`9c3b02a1`]: https://github.com/Dicklesworthstone/franken_numpy/commit/9c3b02a1
+[`b72f273b`]: https://github.com/Dicklesworthstone/franken_numpy/commit/b72f273b
+[`4720dc2a`]: https://github.com/Dicklesworthstone/franken_numpy/commit/4720dc2a
+[`279c885c`]: https://github.com/Dicklesworthstone/franken_numpy/commit/279c885c
+[`0f8f0a0b`]: https://github.com/Dicklesworthstone/franken_numpy/commit/0f8f0a0b
+[`b9951f33`]: https://github.com/Dicklesworthstone/franken_numpy/commit/b9951f33
+[`206030a4`]: https://github.com/Dicklesworthstone/franken_numpy/commit/206030a4
+[`8ee4b749`]: https://github.com/Dicklesworthstone/franken_numpy/commit/8ee4b749
+[`0f9135eb`]: https://github.com/Dicklesworthstone/franken_numpy/commit/0f9135eb
+[`490d9bb9`]: https://github.com/Dicklesworthstone/franken_numpy/commit/490d9bb9
+[`228c7092`]: https://github.com/Dicklesworthstone/franken_numpy/commit/228c7092
+[`7a20d60f`]: https://github.com/Dicklesworthstone/franken_numpy/commit/7a20d60f
+[`0d1ebac7`]: https://github.com/Dicklesworthstone/franken_numpy/commit/0d1ebac7
+[`63d7972a`]: https://github.com/Dicklesworthstone/franken_numpy/commit/63d7972a
+[`7a1076e6`]: https://github.com/Dicklesworthstone/franken_numpy/commit/7a1076e6
+[`ca436092`]: https://github.com/Dicklesworthstone/franken_numpy/commit/ca436092
+[`4735e8e8`]: https://github.com/Dicklesworthstone/franken_numpy/commit/4735e8e8
+[`6d059274`]: https://github.com/Dicklesworthstone/franken_numpy/commit/6d059274
+[`741ae88b`]: https://github.com/Dicklesworthstone/franken_numpy/commit/741ae88b
+[`efdeadd4`]: https://github.com/Dicklesworthstone/franken_numpy/commit/efdeadd4
+[`32747609`]: https://github.com/Dicklesworthstone/franken_numpy/commit/32747609
+[`eba548c9`]: https://github.com/Dicklesworthstone/franken_numpy/commit/eba548c9
+[`be79b1cb`]: https://github.com/Dicklesworthstone/franken_numpy/commit/be79b1cb
+[`450e7b48`]: https://github.com/Dicklesworthstone/franken_numpy/commit/450e7b48
+[`e9539734`]: https://github.com/Dicklesworthstone/franken_numpy/commit/e9539734
+[`46687177`]: https://github.com/Dicklesworthstone/franken_numpy/commit/46687177
+[`df3b9f82`]: https://github.com/Dicklesworthstone/franken_numpy/commit/df3b9f82
+[`ec2255d9`]: https://github.com/Dicklesworthstone/franken_numpy/commit/ec2255d9
+[`fc95778d`]: https://github.com/Dicklesworthstone/franken_numpy/commit/fc95778d
+[`d23217a3`]: https://github.com/Dicklesworthstone/franken_numpy/commit/d23217a3
+[`939a3d35`]: https://github.com/Dicklesworthstone/franken_numpy/commit/939a3d35
+[`659e1793`]: https://github.com/Dicklesworthstone/franken_numpy/commit/659e1793
+[`e54e3195`]: https://github.com/Dicklesworthstone/franken_numpy/commit/e54e3195
+[`36904d6a`]: https://github.com/Dicklesworthstone/franken_numpy/commit/36904d6a
+[`5f1f7699`]: https://github.com/Dicklesworthstone/franken_numpy/commit/5f1f7699
+[`b5bf181b`]: https://github.com/Dicklesworthstone/franken_numpy/commit/b5bf181b
+[`89d46845`]: https://github.com/Dicklesworthstone/franken_numpy/commit/89d46845
+[`eb2c4b3c`]: https://github.com/Dicklesworthstone/franken_numpy/commit/eb2c4b3c
+[`44bdcf78`]: https://github.com/Dicklesworthstone/franken_numpy/commit/44bdcf78
+[`9b582e07`]: https://github.com/Dicklesworthstone/franken_numpy/commit/9b582e07
+[`2905096f`]: https://github.com/Dicklesworthstone/franken_numpy/commit/2905096f
+[`e515ef59`]: https://github.com/Dicklesworthstone/franken_numpy/commit/e515ef59
+[`fb5c6dbb`]: https://github.com/Dicklesworthstone/franken_numpy/commit/fb5c6dbb
+[`8edf31e0`]: https://github.com/Dicklesworthstone/franken_numpy/commit/8edf31e0
+[`d340596c`]: https://github.com/Dicklesworthstone/franken_numpy/commit/d340596c
+[`0e54d402`]: https://github.com/Dicklesworthstone/franken_numpy/commit/0e54d402
+[`c4acd585`]: https://github.com/Dicklesworthstone/franken_numpy/commit/c4acd585
+[`048a6a9a`]: https://github.com/Dicklesworthstone/franken_numpy/commit/048a6a9a
+[`4dfc03d8`]: https://github.com/Dicklesworthstone/franken_numpy/commit/4dfc03d8
+[`1b9c4c6c`]: https://github.com/Dicklesworthstone/franken_numpy/commit/1b9c4c6c
+[`d651124b`]: https://github.com/Dicklesworthstone/franken_numpy/commit/d651124b
+[`734369dc`]: https://github.com/Dicklesworthstone/franken_numpy/commit/734369dc
+[`2d9b3cc4`]: https://github.com/Dicklesworthstone/franken_numpy/commit/2d9b3cc4
+[`b2a1e5c5`]: https://github.com/Dicklesworthstone/franken_numpy/commit/b2a1e5c5
+[`11a29c94`]: https://github.com/Dicklesworthstone/franken_numpy/commit/11a29c94
+[`3ab9d424`]: https://github.com/Dicklesworthstone/franken_numpy/commit/3ab9d424
+[`e6474912`]: https://github.com/Dicklesworthstone/franken_numpy/commit/e6474912
+[`90733ca6`]: https://github.com/Dicklesworthstone/franken_numpy/commit/90733ca6
+[`519b0a55`]: https://github.com/Dicklesworthstone/franken_numpy/commit/519b0a55
+[`ee8baca5`]: https://github.com/Dicklesworthstone/franken_numpy/commit/ee8baca5
+[`1d056bda`]: https://github.com/Dicklesworthstone/franken_numpy/commit/1d056bda
+[`4959b21d`]: https://github.com/Dicklesworthstone/franken_numpy/commit/4959b21d
+[`7fa27766`]: https://github.com/Dicklesworthstone/franken_numpy/commit/7fa27766
+[`5dc637ae`]: https://github.com/Dicklesworthstone/franken_numpy/commit/5dc637ae
+[`ba4af972`]: https://github.com/Dicklesworthstone/franken_numpy/commit/ba4af972
+[`2e8bb3fc`]: https://github.com/Dicklesworthstone/franken_numpy/commit/2e8bb3fc
+[`94004c47`]: https://github.com/Dicklesworthstone/franken_numpy/commit/94004c47
 
 ---
 

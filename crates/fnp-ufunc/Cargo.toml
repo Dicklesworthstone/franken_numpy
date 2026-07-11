@@ -17,10 +17,10 @@ description = "Elementwise and reduction operations: arithmetic, transcendentals
 # - fnp-linalg: bridge for ops that delegate to linalg (matmul fast paths, etc.)
 # - fnp-runtime: RuntimeMode + DecisionAction (consulted by the float-error
 #   machine and the hardened-mode validators)
-fnp-dtype = { path = "../fnp-dtype", version = "0.1.0" }
-fnp-ndarray = { path = "../fnp-ndarray", version = "0.1.0" }
-fnp-linalg = { path = "../fnp-linalg", version = "0.1.0" }
-fnp-runtime = { path = "../fnp-runtime", version = "0.1.0" }
+fnp-dtype = { path = "../fnp-dtype", version = "0.2.0" }
+fnp-ndarray = { path = "../fnp-ndarray", version = "0.2.0" }
+fnp-linalg = { path = "../fnp-linalg", version = "0.2.0" }
+fnp-runtime = { path = "../fnp-runtime", version = "0.2.0" }
 # rayon: data parallelism for compute-bound kernels (register-tiled GEMM). Output
 # row bands are independent, so parallelism keeps results bit-for-bit identical.
 rayon = { workspace = true }

@@ -15,7 +15,7 @@ description = "NumPy-parity RNG: PCG64DXSM, distributions, oracle-verified deter
 # variants (standard_normal_shaped, permutation_shaped, etc.). The non-shaped
 # variants don't depend on ndarray, but the shaped variants need the SCE
 # contracts to build correctly-strided output arrays.
-fnp-ndarray = { version = "0.1.0", path = "../fnp-ndarray" }
+fnp-ndarray = { version = "0.2.0", path = "../fnp-ndarray" }
 getrandom.workspace = true
 # rayon: data-parallel jump-ahead fills for PCG/PCG-DXSM uniform generation
 # (bit-identical stream via per-chunk advance; NumPy's RNG is single-threaded).
