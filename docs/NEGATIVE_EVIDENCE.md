@@ -4,6 +4,42 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-10 - WIN (SHIP): core UFuncArray last-axis sum uses coarse row-band ownership - bit-identical, replicated 15.8-36.1% lower medians
+
+`GoldSummit`. PROFILE-FIRST TARGET: the core Criterion row
+`core_ops/reduce_sum_axis1_1024x1024`; a strict-remote `cycles:u` profile put 95.45%
+self-time in `UFuncArray::reduce_sum` (about 3K samples, zero lost). This is the
+previously serial core `reduce_sum_axis_contiguous` sibling of the 2026-06-24
+`fnp-python` pairwise last-axis sum keep, not a new Python-surface or NumPy-relative
+claim.
+
+ONE LEVER: above `1 << 18` input elements, assign independent last-axis rows in two
+coarse bands per Rayon worker. Every row still calls the unchanged serial
+`reduce_sum_values` on the same ordered slice. A feedback profile of the first
+per-row-task form exposed scheduler and crossbeam-epoch overhead, so the same row
+ownership lever was coarsened rather than adding another primitive.
+
+MEDIAN GATE (same worker `vmi1149989`, `RAYON_NUM_THREADS=8`, identical strict-remote
+Criterion command and 1024x1024 input):
+
+| read | baseline median | candidate median | candidate / baseline | speedup | median reduction |
+|---|---:|---:|---:|---:|---:|
+| candidate 1 | 519,108.222 ns | 331,913.276 ns | 0.63939x | **1.56399x** | **36.0609%** |
+| candidate 2 | 519,108.222 ns | 437,321.594 ns | 0.84245x | **1.18702x** | **15.7552%** |
+
+The second candidate repeated the exact command on the same worker. Its spread was
+broad, but the requested median direction replicated; the gate is median, not spread.
+
+BIT PROOF: `reduce_sum_last_axis_parallel_matches_serial_row_bits` compares raw
+`to_bits()` output against the serial per-row reference above the parallel gate,
+including cancellation, signed zero, NaN, +/-Inf, and deterministic finite rows.
+The strict-remote `reduce_sum_` suite passed 41 tests (one ignored perf test), and
+strict-remote fnp-ufunc all-target clippy passed with only the existing `nan_filtered`
+dead-code lint explicitly allowed. Workspace check remains independently red in
+three pre-existing `fnp-python` `where_py` test calls; `git diff --check` is green.
+DECISION: SHIP. Full commands, profile interpretation, and validation boundaries:
+`tests/artifacts/perf/2026-07-10_fnp_ufunc_lastaxis_sum_goldsummit/summary.md`.
+
 ## 2026-07-10 - WIN (SHIP): narrow-int LAST-AXIS sort 15.9x + stable argsort 1.43x - two same-worker replications, nulls 0.992-1.002; completes the narrow-int ordering family
 
 `cc_fnp`, last-axis siblings of the flat counting levers below. PROFILE BASIS: the same

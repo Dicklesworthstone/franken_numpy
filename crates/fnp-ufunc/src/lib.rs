@@ -50,6 +50,7 @@ const ARGWHERE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const COUNT_NONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 19;
 const COUNT_NONZERO_PARALLEL_CHUNK_ELEMS: usize = 1 << 12;
 const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 20;
+const REDUCE_SUM_LAST_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 18;
 const DELETE_FLAT_SPAN_COPY_MIN_ELEMS: usize = 1 << 14;
 const INSERT_FLAT_SPLICE_MIN_WORK: usize = 1 << 14;
 const PLACE_PARALLEL_MIN_ELEMS: usize = 1 << 20;
@@ -31463,8 +31464,27 @@ fn reduce_sum_axis_contiguous(
     let outer = shape[..axis].iter().copied().product::<usize>();
 
     if inner == 1 {
-        for (slot, chunk) in out_values.iter_mut().zip(values.chunks_exact(axis_len)) {
-            *slot = reduce_sum_values(chunk);
+        if out_values.len() >= 2
+            && values.len() >= REDUCE_SUM_LAST_AXIS_PARALLEL_MIN_ELEMS
+            && rayon::current_num_threads() >= 2
+        {
+            // Rows are independent; keep each row's reduction serial so its bit pattern is
+            // identical to the original serial path.
+            let row_band = out_values
+                .len()
+                .div_ceil(rayon::current_num_threads().saturating_mul(2));
+            out_values
+                .par_chunks_mut(row_band)
+                .zip(values.par_chunks(axis_len * row_band))
+                .for_each(|(slots, value_band)| {
+                    for (slot, row) in slots.iter_mut().zip(value_band.chunks_exact(axis_len)) {
+                        *slot = reduce_sum_values(row);
+                    }
+                });
+        } else {
+            for (slot, chunk) in out_values.iter_mut().zip(values.chunks_exact(axis_len)) {
+                *slot = reduce_sum_values(chunk);
+            }
         }
         return;
     }
@@ -43618,6 +43638,48 @@ print(json.dumps(payload))
 
         let out = arr.reduce_sum(Some(1), false).expect("sum axis=1");
         assert_eq!(out.values(), &[1.0]);
+    }
+
+    #[test]
+    fn reduce_sum_last_axis_parallel_matches_serial_row_bits() {
+        let rows = 257usize;
+        let cols = 1024usize;
+        let mut values = Vec::with_capacity(rows * cols);
+        for row in 0..rows {
+            for col in 0..cols {
+                let value = match row {
+                    0 => [1.0e16, 1.0, -1.0e16, 1.0][col % 4],
+                    1 => -0.0,
+                    2 if col == 17 => f64::NAN,
+                    3 if col == 29 => f64::INFINITY,
+                    4 if col == 31 => f64::INFINITY,
+                    4 if col == 37 => f64::NEG_INFINITY,
+                    _ => (((row * 131 + col * 17 + 11) % 4093) as f64 - 2046.0) / 8.0,
+                };
+                values.push(value);
+            }
+        }
+
+        let reference_bits = values
+            .chunks_exact(cols)
+            .map(|row| crate::reduce_sum_values(row).to_bits())
+            .collect::<Vec<_>>();
+        let array = UFuncArray::new(vec![rows, cols], values, DType::F64).expect("array");
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("parallel proof pool");
+        let output = pool
+            .install(|| array.reduce_sum(Some(1), false))
+            .expect("last-axis sum");
+        let output_bits = output
+            .values()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>();
+
+        assert_eq!(output.shape(), &[rows]);
+        assert_eq!(output_bits, reference_bits);
     }
 
     fn large_cancellation_values() -> Vec<f64> {
