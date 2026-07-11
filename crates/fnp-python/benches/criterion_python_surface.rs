@@ -14336,6 +14336,76 @@ fn bench_f16_matmul_median_gate(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_multidot_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_multidot_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_multidot_median_gate").expect("multidot bench module");
+        fnp_python(&module).expect("initialize fnp_python multidot bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 md_args = [rng.standard_normal((512, 512)) for _ in range(3)]\n",
+            )
+            .expect("multidot setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("multidot setup");
+        let md_args = namespace.get_item("md_args").expect("md_args present");
+
+        let fnp_multidot = module
+            .getattr("linalg")
+            .expect("fnp linalg")
+            .getattr("multi_dot")
+            .expect("fnp multi_dot");
+        let np_multidot = numpy
+            .getattr("linalg")
+            .expect("numpy linalg")
+            .getattr("multi_dot")
+            .expect("numpy multi_dot");
+        let candidate = fnp_multidot
+            .call1((&md_args,))
+            .expect("fnp multi_dot parity");
+        let base = np_multidot
+            .call1((&md_args,))
+            .expect("numpy multi_dot parity");
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "multi_dot byte parity",
+        );
+
+        bench_median_gate_python_unary(
+            &mut group,
+            "multidot_3x512_null_then_effect",
+            "multidot_3x512",
+            &np_multidot,
+            &fnp_multidot,
+            &md_args,
+        );
+    });
+
+    group.finish();
+}
+
 fn bench_wide_string_substrate_v2(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_wide_string_substrate_v2");
     group.sample_size(10);
@@ -15529,6 +15599,7 @@ criterion_group!(
     bench_bool_sort_median_gate,
     bench_int_matmul_median_gate,
     bench_f16_matmul_median_gate,
+    bench_multidot_median_gate,
     bench_wide_string_substrate_v2,
     bench_ledger_integrity_rejects,
     bench_unique_rows_full_boundary,

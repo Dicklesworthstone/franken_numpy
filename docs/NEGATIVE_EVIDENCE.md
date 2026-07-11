@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-11 - SURFACE (post-v0.2.0 frontier close): multi_dot is PARITY + byte-identical (the lane's last unmeasured rank) - the cc linalg lane's measured surface is fully dominated or policy-walled; exp/log probe attempt 7 = fifth AVX2 host byte-equal
+
+`cc_fnp` (linalg lane). PROFILE STEP: multi_dot was GoldSummit's #2 self-time rank
+(5.687 ms context) and had never been gap-measured. New median-gate row
+multidot_3x512 (three 512^2 f64 operands, ONE binary ABBA + numpy A/A null, worker in
+artifact): effect median 1.0226 vs null 0.9718 - UNDECIDED/parity (fnp 61.7 ms vs numpy
+63.9 ms). The pre-timing assert also proved np.linalg.multi_dot BYTE-IDENTICAL to numpy
+for the first time (it rides the BLAS-delegated GEMM chain -> non-lever per the triage
+checklist: parity + policy-walled kernel underneath).
+
+FRONTIER STATE after this close (everything measured this session): linalg boundary
+DOMINATED (24 pairs); int GEMM family rewritten (20-61x); f16 GEMM family fully tiled
+(2-D/batched/broadcast at ~0.15 ns/MAC); reduce_fold last-axis row-banded; multi_dot
+parity/byte-exact; eigvalsh/eigh/cholesky delegates at parity (no-FMA/no-BLAS walls,
+capstone f6a33cc7). REMAINING OPEN: deadlock-audit-gkznn exp/log wiring - attempt 7
+sampled vmi1264463 (numpy 2.4.6, avx512f=false) byte-equal 4/4, making FIVE AVX2 hosts x
+TWO numpy versions all byte-equal; the single avx512f=true sample remains the wiring gate
+(7 attempts, scheduler never routes there); accumulate_extremum_typed fn-pointer sibling
+(cod lane, wmxzr - the convolve half shipped as 9c3b02a1 during the release window);
+parity-policy beads tvy7o / d4mc2 (human call).
+Artifacts: tests/artifacts/perf/2026-07-11_linalg_frontier_close_cc_fnp/.
+
 ## 2026-07-11 - WIN (SHIP): f16 BROADCAST matmul takes the per-slice MR=4 + decode-scratch tile - 7.28x -> 10.46x vs numpy (fnp self 30.0 -> 9.02 ms at (32,128,128)@(128,96)); f16 GEMM FAMILY FULLY TILED
 
 `cc_fnp` (linalg lane), bead deadlock-audit-qfug3 - the third and last naive f16 GEMM kernel
