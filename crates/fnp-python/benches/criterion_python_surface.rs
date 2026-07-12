@@ -14734,66 +14734,6 @@ fn bench_f16_matmul_median_gate(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_f16_cumsum_median_gate(c: &mut Criterion) {
-    // Ship gate for the f16 flat cumsum serial replay: numpy's per-step f16
-    // narrowing makes the chain strictly sequential (parallel prefix is
-    // byte-impossible), so the only lever is serial decode/encode
-    // efficiency. Predicate: sub-1.2x -> unwire.
-    let mut group = c.benchmark_group("python_f16_cumsum_median_gate");
-    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
-    group.measurement_time(Duration::from_secs(5));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module =
-            PyModule::new(py, "fnp_python_f16_cumsum_median_gate").expect("cumsum bench module");
-        fnp_python(&module).expect("initialize fnp_python cumsum bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let namespace = PyDict::new(py);
-        py.run(
-            std::ffi::CString::new(
-                "import numpy as np\n\
-                 rng = np.random.default_rng(20260715)\n\
-                 cs16 = (rng.standard_normal(8_000_000) * 0.3).astype(np.float16)\n",
-            )
-            .expect("cumsum setup CString")
-            .as_c_str(),
-            Some(&namespace),
-            Some(&namespace),
-        )
-        .expect("cumsum setup");
-        let cs16 = namespace.get_item("cs16").expect("cs16 present");
-        let fnp_cumsum = module.getattr("cumsum").expect("fnp cumsum");
-        let np_cumsum = numpy.getattr("cumsum").expect("numpy cumsum");
-        let candidate = fnp_cumsum.call1((&cs16,)).expect("fnp cumsum parity");
-        let base = np_cumsum.call1((&cs16,)).expect("numpy cumsum parity");
-        assert_eq!(
-            candidate
-                .call_method0("tobytes")
-                .expect("candidate bytes")
-                .extract::<Vec<u8>>()
-                .expect("candidate byte Vec"),
-            base.call_method0("tobytes")
-                .expect("base bytes")
-                .extract::<Vec<u8>>()
-                .expect("base byte Vec"),
-            "f16 cumsum byte parity",
-        );
-        bench_median_gate_python_unary(
-            &mut group,
-            "f16_cumsum_8m_null_then_effect",
-            "f16_cumsum_8m",
-            &np_cumsum,
-            &fnp_cumsum,
-            &cs16,
-        );
-    });
-
-    group.finish();
-}
-
 fn bench_multidot_median_gate(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_multidot_median_gate");
     group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
@@ -16755,7 +16695,6 @@ criterion_group!(
     bench_int_matmul_median_gate,
     bench_f16_matmul_median_gate,
     bench_multidot_median_gate,
-    bench_f16_cumsum_median_gate,
     bench_f16_einsum_median_gate,
     bench_wide_string_substrate_v2,
     bench_ledger_integrity_rejects,

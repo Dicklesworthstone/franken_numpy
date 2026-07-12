@@ -51,6 +51,20 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+F16 CUMSUM REJECT under its own predicate (6f3e2fcb shipped the attempt; this entry
+unwires it): the scan contract is PER-STEP f16 NARROWING (discriminator 6/6; the
+wide-f32-accumulator alternative mismatches 6/6) - parallel prefix is
+BYTE-IMPOSSIBLE for f16 scans, the durable fact. The only remaining lever was
+serial decode/encode efficiency, and the gate row measured 1.107 [p10 1.09, p90
+1.14] vs null 1.003 - the session's TIGHTEST CVs (2-3%), 20/20, i.e. a REAL but
+sub-1.2x effect, below the predicate declared at ship time. UNWIRED (kernel, test,
+bench group removed; delegate comment records the reject). Not re-gated post-hoc:
+the 1.2x bar was chosen for the serial-only opportunity cost and holding it is
+worth more than 7ms. REOPEN PREDICATE: a faster f16<->f32 conversion story only
+(+f16c hardware converts - excluded by the pinned +avx2-no-fma build flags; or a
+table-driven decode measured faster than half-crate soft-float). Artifacts
+cumsum_f16_recon* + cumsum_bench_run1.txt (vmi1227854, sha a5d2f2e3...).
+
 F16 MULTI_DOT SHIPPED (a64acc88, top rank of the non-einsum sweep): multidot_f16_3x256
 13.147 [p10 10.12, p90 20.10] vs null 1.016 - 20/20, 10.7 vs 146.3 ms (vmi1293453,
 sha 55628b0c...). numpy's own f16 pairs are the naive ~245x loops; fnp replicates the
