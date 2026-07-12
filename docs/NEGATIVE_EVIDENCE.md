@@ -28,11 +28,28 @@ Defer chain; MR=4 output-row blocks, per-j b-row f32 decode scratch shared by th
 (a's 4 scalars contiguous in a's row j), out rows accumulate in-place as f16 bits.
 Conformance f16_einsum_gram_contract_bit_exact (11 shapes incl m%4/k=1/2/3/k=7/long-k,
 mixed scales, inf/nan/overflow, alternate letters, below-gate, F-order defer, 3
-adjacent-spec exclusions) + bench row f16_einsum_gram_512 queued behind the fleet at
-ledger time (conformance gate before bench; pipeline armed). numpy baseline for the
-idiom ~240 ms at 512^3 (the transposed entry's same-class wide kernel) vs the shipped
-siblings' 12-195 ms natives - expected effect O(10x). RETRY PREDICATE: conformance red
-or sub-parity row -> unwire the dispatch branch (3 lines) + REJECT addendum here.
+adjacent-spec exclusions) went GREEN remote (vmi1149989) and the kernel SHIPPED
+(b130c88b); bench rows landed the same session.
+
+MEASURED (ONE binary / ONE process / ONE rch invocation, worker vmi1227854,
+RAYON_NUM_THREADS=4, null-then-effect ABBA/BAAB, 20 obs/row, pre-timing byte+dtype
+parity asserts, binary sha 42859a0a... runner-printed) - ALL THREE WIN:
+
+| row | effect median [p10,p90] | null AA | fnp ms | numpy ms |
+|---|---|---:|---:|---:|
+| **f16_einsum_gram_512 (NEW)** | **5.729** [5.56, 6.32] | 1.001 | 130.0 | 755.9 |
+| f16_einsum_matmul_512 (repl.) | 6.563 [6.20, 7.08] | 1.028 | 121.3 | 797.6 |
+| f16_einsum_transposed_512 (repl.) | 46.69 [33.7, 51.8] | 1.016 | 9.7 | 460.3 |
+
+The gram numpy baseline (756 ms at 512^3) sits in the per-step class beside the plain
+matmul spec (798 ms), NOT the ~240 ms wide-transposed class - consistent with the
+cracked contract (per-step store/reload chain). Sibling replications land above their
+shipped effects (6.56x vs 6.25x; 46.7x vs 20.5x - this worker's numpy transposed arm
+ran 460 vs 240 ms). The 2-op f16 einsum GEMM-idiom family (plain / transposed / gram)
+is now FULLY NATIVE, all three contract classes source-pinned, locked by conformance,
+and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipeline
+log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
+dispatch branch (3 lines) + REJECT addendum here.
 
 ## 2026-07-12 - SURFACE (probe, no production change): AVX-512 numpy 2.3.5 diverges from scalar libm on 13/16 f64 transcendentals (1-3 ULP) - the shipped native route inherits a numpy divergence on that host class; bead deadlock-audit-fs5pu filed for the policy fork
 
