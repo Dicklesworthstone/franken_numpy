@@ -42,11 +42,26 @@ deliberate vec![0.0;n] zero-init handicap the wired zero-copy path does not pay 
 numpy exp_1m 2.11x (2.77 vs 5.84 ms), exp_4m 1.60x, log_1m 2.39x, log_4m 1.64x. The
 wired route strictly dominates the handicapped probe candidate. Direct median-gate rows
 through the wired pyfunctions (python_f64_exp_log_median_gate, 6 rows incl log2/log10
-4M, pre-timing byte+dtype parity asserts, in-run native_route print) are queued behind
-fleet slot exhaustion at commit time; the artifact lands as a follow-up evidence commit
-(explog_gate_bench_run1.txt). RETRY PREDICATE for the log2/log10 rows specifically: if
-either reads sub-parity vs its null on an avx512f=false worker, narrow the wiring to
-exp/log (same gate, two-op allowlist) - the machinery is per-op dispatched.
+4M, pre-timing byte+dtype parity asserts, in-run native_route print) were queued behind
+fleet slot exhaustion at ship time and LANDED the same session (follow-up commit).
+
+DIRECT ROWS (ONE binary / ONE process / ONE rch invocation, worker vmi1149989, numpy
+2.2.4, in-run print native_route=true, RAYON_NUM_THREADS=4, null-then-effect ABBA/BAAB,
+20 observations/row, binary sha dcc23f84... runner-printed) - ALL SIX WIN, the
+log2/log10 narrow-the-allowlist retry predicate did NOT trigger:
+
+| row | effect median [p10,p90] | null AA | fnp ms | numpy ms | above 1 |
+|---|---|---:|---:|---:|---:|
+| explog_exp_1m | 2.069 [1.53, 2.95] | 0.998 | 2.43 | 4.96 | 20/20 |
+| explog_exp_4m | 2.163 [1.09, 3.15] | 0.967 | 9.95 | 23.33 | 19/20 |
+| explog_log_1m | 1.819 [1.48, 2.34] | 0.971 | 2.85 | 4.81 | 20/20 |
+| explog_log_4m | 2.375 [1.90, 3.18] | 0.999 | 9.96 | 24.34 | 20/20 |
+| explog_log2_4m | 2.168 [1.40, 2.73] | 1.002 | 10.13 | 21.37 | 20/20 |
+| explog_log10_4m | 2.666 [2.05, 3.24] | 0.981 | 13.95 | 37.71 | 20/20 |
+
+The direct rows replicate (and on log10, exceed) the handicapped probe pairs; every
+null sits 0.97-1.00 while every effect median clears 1.8x - decidable far beyond the
+per-function noise floor.
 
 CORRECTNESS: conformance_exp_log 50/50 GREEN remote (vmi1149989, numpy 2.2.4,
 avx512f=false - the native route exercised): NEW
