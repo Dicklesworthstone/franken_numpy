@@ -950,3 +950,65 @@ print(bool(ok))
     );
     Ok(())
 }
+
+#[test]
+fn f16_einsum_gram_contract_bit_exact() -> Result<(), String> {
+    // np.einsum's f16 GRAM spec ('ji,jl->il', the a.T@b idiom) is a THIRD
+    // contract class: with the contracted index FIRST on both operands the
+    // unbuffered loop dispatches half_sum_of_products_stride0_contig_outcontig
+    // -> sum_of_products_muladd's scalar half path (NPYV_CHK=0), a
+    // PER-STEP-NARROW muladd chain per output element over ascending j:
+    //   acc = f16(f32(a[j,i]) * f32(b[j,l]) + f32(acc)), acc0 = f16(+0.0).
+    // Pinned by source read + a 112-case local sweep (ledger 2026-07-12).
+    // This test LOCKS the contract on the fleet's numpy version.
+    let script = fnp_script(
+        r#"
+ok = True
+rng = np.random.default_rng(20260712)
+# (k, m, n): a is (k,m), b is (k,n), out (m,n). Covers m%4 MR tails, k=1/2/3
+# short chains, the k=7 discriminator, long-k chains, and skinny outputs.
+for (k, m, n) in ((96, 128, 144), (512, 512, 512), (400, 2, 400), (40, 514, 40), (130, 65, 257), (7, 129, 300), (517, 129, 5), (2, 61, 3000), (2001, 77, 2), (1, 600, 600), (3, 500, 200)):
+    a = (rng.standard_normal((k, m)) * 0.3).astype(np.float16)
+    b = (rng.standard_normal((k, n)) * 0.3).astype(np.float16)
+    r = fnp.einsum('ji,jl->il', a, b); e = np.einsum('ji,jl->il', a, b)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape
+    ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
+# mixed scales stress the per-step rounding
+a = (rng.standard_normal((130, 96)) * rng.choice([0.01, 1.0, 100.0], (130, 1))).astype(np.float16)
+b = (rng.standard_normal((130, 80)) * rng.choice([0.01, 1.0, 100.0], (130, 1))).astype(np.float16)
+r = fnp.einsum('ji,jl->il', a, b); e = np.einsum('ji,jl->il', a, b)
+ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
+# inf/nan propagation + mid-chain f16 overflow-to-inf (per-step narrow saturates)
+a = (rng.standard_normal((128, 128)) * 0.3).astype(np.float16)
+b = (rng.standard_normal((128, 128)) * 0.3).astype(np.float16)
+a[0, 0] = np.float16(np.inf); b[1, 0] = np.float16(np.nan); a[3, 5] = np.float16(-np.inf)
+a[:, 7] = np.float16(60000); b[:, 9] = np.float16(60000)
+r = fnp.einsum('ji,jl->il', a, b); e = np.einsum('ji,jl->il', a, b)
+ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
+# alternate letters, same canonical form
+r = fnp.einsum('ab,ac->bc', a, b); e = np.einsum('ab,ac->bc', a, b)
+ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
+# below-gate stays on the numpy path (trivially byte-equal)
+sm_a = (rng.standard_normal((8, 8)) * 0.3).astype(np.float16)
+sm_b = (rng.standard_normal((8, 8)) * 0.3).astype(np.float16)
+ok = ok and fnp.einsum('ji,jl->il', sm_a, sm_b).tobytes() == np.einsum('ji,jl->il', sm_a, sm_b).tobytes()
+# non-contiguous operand defers to numpy (buffered path, not our contract)
+at = np.asfortranarray(a)
+r = fnp.einsum('ji,jl->il', at, b); e = np.einsum('ji,jl->il', at, b)
+ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
+# adjacent specs must NOT be captured: transposed-output gram + plain/transposed idioms
+ok = ok and fnp.einsum('ji,jl->li', a, b).tobytes() == np.einsum('ji,jl->li', a, b).tobytes()
+ok = ok and fnp.einsum('ij,jl->il', a, b).tobytes() == np.einsum('ij,jl->il', a, b).tobytes()
+ok = ok and fnp.einsum('ij,lj->il', a, b).tobytes() == np.einsum('ij,lj->il', a, b).tobytes()
+print(bool(ok))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 einsum gram contraction must be bit-identical to numpy's per-step muladd-row contract: {result}"
+    );
+    Ok(())
+}

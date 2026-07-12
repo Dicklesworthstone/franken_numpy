@@ -14830,7 +14830,9 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                  fnp_es = lambda a, b: fnp_mod.einsum('ij,jk->ik', a, b)\n\
                  np_es = lambda a, b: np.einsum('ij,jk->ik', a, b)\n\
                  fnp_es_t = lambda a, b: fnp_mod.einsum('ij,lj->il', a, b)\n\
-                 np_es_t = lambda a, b: np.einsum('ij,lj->il', a, b)\n",
+                 np_es_t = lambda a, b: np.einsum('ij,lj->il', a, b)\n\
+                 fnp_es_g = lambda a, b: fnp_mod.einsum('ji,jl->il', a, b)\n\
+                 np_es_g = lambda a, b: np.einsum('ji,jl->il', a, b)\n",
             )
             .expect("f16 einsum setup CString")
             .as_c_str(),
@@ -14912,6 +14914,41 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
             "f16_einsum_transposed_512",
             &np_es_t,
             &fnp_es_t,
+            &es_a,
+            &es_b,
+        );
+
+        // Gram spec ('ji,jl->il', the a.T@b idiom): the third numpy contract
+        // class (per-step-narrow muladd rows, stride0_contig_outcontig) with
+        // its own kernel. Same 512^2 operands (k = leading axis).
+        let fnp_es_g = namespace.get_item("fnp_es_g").expect("fnp_es_g present");
+        let np_es_g = namespace.get_item("np_es_g").expect("np_es_g present");
+        let candidate_g = fnp_es_g
+            .call1((&es_a, &es_b))
+            .expect("fnp f16 einsum gram parity");
+        let base_g = np_es_g
+            .call1((&es_a, &es_b))
+            .expect("numpy f16 einsum gram parity");
+        assert_eq!(
+            candidate_g
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_g
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum gram byte parity",
+        );
+
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_gram_512_null_then_effect",
+            "f16_einsum_gram_512",
+            &np_es_g,
+            &fnp_es_g,
             &es_a,
             &es_b,
         );
