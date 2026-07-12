@@ -1233,6 +1233,84 @@ print(verdicts if verdicts else True)
 }
 
 #[test]
+fn f16_einsum_elementwise_zero_seed_bit_exact() -> Result<(), String> {
+    // np.einsum's f16 elementwise product ('X,X->X') carries the einsum ZERO
+    // ACCUMULATOR SEED: out = f16(f32(0) + f32(a)*f32(b)) per element. The
+    // seed is visible ONLY on signed zeros (0*-0 -> +0.0 where a raw multiply
+    // gives -0.0) - the discriminator that caught it. Verified on numpy
+    // 2.2.4/2.4.3/2.4.6; this test LOCKS the seed semantics on the fleet.
+    let script = fnp_script(
+        r#"
+verdicts = []
+def check(name, r, e):
+    if r.dtype != e.dtype or r.shape != e.shape:
+        verdicts.append(f"FAIL {name} dtype/shape")
+    elif not bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all()):
+        verdicts.append(f"FAIL {name} bytes")
+rng = np.random.default_rng(20260713)
+for shape, spec in (((2_000_000,), 'j,j->j'), ((1024, 1024), 'ij,ij->ij'), ((16, 256, 256), 'ijk,ijk->ijk')):
+    a = (rng.standard_normal(shape) * 0.3).astype(np.float16)
+    b = (rng.standard_normal(shape) * 0.3).astype(np.float16)
+    check(f"{spec} {shape}", fnp.einsum(spec, a, b), np.einsum(spec, a, b))
+# THE signed-zero seed case + inf/nan/overflow, planted in a native-gate array
+a = (rng.standard_normal(2_000_000) * 0.3).astype(np.float16)
+b = (rng.standard_normal(2_000_000) * 0.3).astype(np.float16)
+a[10] = np.float16(0.0); b[10] = np.float16(-0.0)
+a[11] = np.float16(-0.0); b[11] = np.float16(0.0)
+a[12] = np.float16(np.inf); b[13] = np.float16(np.nan)
+a[14] = np.float16(60000); b[14] = np.float16(60000)
+r = fnp.einsum('j,j->j', a, b); e = np.einsum('j,j->j', a, b)
+check("signed_zero_seed", r, e)
+if not (r[10].tobytes() == np.float16(0.0).tobytes() and not np.signbit(r[10])):
+    verdicts.append(f"FAIL seed canonicalization r[10]={r[10]!r}")
+# below-gate + strided defer + exclusions (transposed-output, diagonal labels)
+sm = (rng.standard_normal(1000) * 0.3).astype(np.float16)
+check("below_gate", fnp.einsum('j,j->j', sm, sm), np.einsum('j,j->j', sm, sm))
+check("strided", fnp.einsum('j,j->j', a[::2], b[::2]), np.einsum('j,j->j', a[::2], b[::2]))
+a2 = (rng.standard_normal((1024, 1024)) * 0.3).astype(np.float16)
+b2 = (rng.standard_normal((1024, 1024)) * 0.3).astype(np.float16)
+check("transposed_out", fnp.einsum('ij,ij->ji', a2, b2), np.einsum('ij,ij->ji', a2, b2))
+check("diagonal", fnp.einsum('ii,ii->i', a2, b2), np.einsum('ii,ii->i', a2, b2))
+# FLOAT no-contraction parity (2026-07-12 broadcast-mul fix): einsum's zero
+# seed canonicalizes exact -0.0 products to +0.0, and einsum NEVER raises the
+# multiply RuntimeWarnings - both must hold through fnp for f64/f32 too.
+import warnings
+for dt in (np.float64, np.float32):
+    az = np.array([0.0, -0.0, -2.0, 3.0, 1e300 if dt == np.float64 else 1e38], dtype=dt)
+    bz = np.array([-0.0, -0.0, 0.0, -0.0, 1e300 if dt == np.float64 else 1e38], dtype=dt)
+    with warnings.catch_warnings(record=True) as fw:
+        warnings.simplefilter("always")
+        r = fnp.einsum('j,j->j', az, bz)
+    with warnings.catch_warnings(record=True) as nw:
+        warnings.simplefilter("always")
+        e = np.einsum('j,j->j', az, bz)
+    if r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL {dt.__name__} signed-zero bytes {r!r} vs {e!r}")
+    if sorted(str(w.message) for w in fw) != sorted(str(w.message) for w in nw):
+        verdicts.append(f"FAIL {dt.__name__} warning parity fnp={[str(w.message) for w in fw]} np={[str(w.message) for w in nw]}")
+# int/bool no-contraction stays on the fast multiply route - byte parity holds
+ia = rng.integers(-100, 100, (512, 512)).astype(np.int32)
+ib = rng.integers(-100, 100, (512, 512)).astype(np.int32)
+for name, rr, ee in (
+    ("int_hadamard", fnp.einsum('ij,ij->ij', ia, ib), np.einsum('ij,ij->ij', ia, ib)),
+    ("int_broadcast", fnp.einsum('ij,j->ij', ia, ib[0]), np.einsum('ij,j->ij', ia, ib[0])),
+):
+    if rr.dtype != ee.dtype or rr.tobytes() != ee.tobytes():
+        verdicts.append(f"FAIL {name}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 einsum elementwise must be bit-identical to numpy's zero-seeded product: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_einsum_dot_1d_buffered_contract_bit_exact() -> Result<(), String> {
     // np.einsum's f16 1-D dot ('j,j->') runs contig_contig_outstride0_two once
     // per 8192-element nditer buffer, folding each chunk's blocked-4 f32 tree

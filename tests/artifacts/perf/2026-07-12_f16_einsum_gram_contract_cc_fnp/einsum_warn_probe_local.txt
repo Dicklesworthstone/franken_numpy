@@ -1,0 +1,7 @@
+elemwise_1d: []
+elemwise_2d: []
+dot: []
+elemwise_small: []
+numpy=2.4.3
+numpy=2.4.6
+numpy=2.2.4

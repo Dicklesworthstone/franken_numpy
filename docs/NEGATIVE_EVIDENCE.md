@@ -51,6 +51,24 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+ELEMENTWISE SPECS + INTRODUCED-DIVERGENCE FIX (same session): the 'X,X->X' elementwise
+recon REFUTED the 2026-06-27 broadcast-mul row's "bit-identical across EVERY dtype"
+claim. einsum's no-contraction loop still carries its ZERO ACCUMULATOR SEED: per
+element out = to(0 + a*b), so EXACT -0.0 products canonicalize to +0.0 (einsum 0*-0 ->
++0.0; np.multiply -> -0.0) on every signed-zero dtype, and np.multiply raises
+overflow/invalid RuntimeWarnings where np.einsum NEVER does (warn probe: silent on
+2.2.4/2.4.3/2.4.6; the fnp-emitted warnings showed up in a remote conformance run -
+that is how this was caught). The shipped try_einsum_broadcast_mul_2op path therefore
+INTRODUCED byte + warning divergence for float/complex no-contraction einsum since
+2026-06-27. FIX: dtype-gate the fast path to int/uint/bool (wrap-silent, no signed
+zeros - byte- and warning-identical there); float/complex fall to the numpy
+passthrough (exact parity; the 2026-06-27 wins were vs fnp's own slow native kernel,
+which the passthrough skips just the same - the handful of vs-numpy multiply
+win/loss rows flip to exact 1.0x). Large-f16 elementwise takes the NEW native
+zero-seeded kernel (13/13 x 3 versions incl the signed-zero discriminator case;
+gate 1<<20). Conformance locks the seed canonicalization, float f64/f32 signed-zero
+bytes, warning-parity multisets, and the int fast-route byte parity.
+
 FULL-CONTRACTION CLOSURE ADDENDUM (same session, a3796aff): 'ij,ij->' and 'ijk,ijk->'
 coalesce to 1-D (same-shape C-contiguous) and ride the dot1d chunk-fold kernel via a
 ~30-line parser generalization ("X,X->", 1..=3 distinct letters) - verified 16/16 x 3
