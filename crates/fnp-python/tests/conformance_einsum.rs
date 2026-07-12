@@ -935,7 +935,8 @@ ok = ok and fnp.einsum('ij,lj->il', sm_a, sm_b).tobytes() == np.einsum('ij,lj->i
 at = np.asfortranarray(a)
 r = fnp.einsum('ij,lj->il', at, b); e = np.einsum('ij,lj->il', at, b)
 ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
-# adjacent specs must NOT be captured: transposed-output and a.T@b forms
+# adjacent specs stay byte-exact: 'ij,lj->li' is now captured by this kernel's
+# operand-swap arm; 'ji,jl->il' by the gram kernel.
 ok = ok and fnp.einsum('ij,lj->li', a, b).tobytes() == np.einsum('ij,lj->li', a, b).tobytes()
 ok = ok and fnp.einsum('ji,jl->il', a, b).tobytes() == np.einsum('ji,jl->il', a, b).tobytes()
 print(bool(ok))
@@ -996,7 +997,8 @@ ok = ok and fnp.einsum('ji,jl->il', sm_a, sm_b).tobytes() == np.einsum('ji,jl->i
 at = np.asfortranarray(a)
 r = fnp.einsum('ji,jl->il', at, b); e = np.einsum('ji,jl->il', at, b)
 ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
-# adjacent specs must NOT be captured: transposed-output gram + plain/transposed idioms
+# adjacent specs stay byte-exact: 'ji,jl->li' is now captured by this kernel's
+# operand-swap arm; the plain/transposed idioms by their own kernels.
 ok = ok and fnp.einsum('ji,jl->li', a, b).tobytes() == np.einsum('ji,jl->li', a, b).tobytes()
 ok = ok and fnp.einsum('ij,jl->il', a, b).tobytes() == np.einsum('ij,jl->il', a, b).tobytes()
 ok = ok and fnp.einsum('ij,lj->il', a, b).tobytes() == np.einsum('ij,lj->il', a, b).tobytes()
@@ -1009,6 +1011,57 @@ print(bool(ok))
         result.trim(),
         "True",
         "f16 einsum gram contraction must be bit-identical to numpy's per-step muladd-row contract: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn f16_einsum_output_transposed_variants_bit_exact() -> Result<(), String> {
+    // The output-transposed forms of both idioms reuse the sibling kernels
+    // with operands swapped: 'ij,lj->li' = transposed kernel(b, a) (same
+    // blocked-4 tree, product commuted); 'ji,jl->li' = gram kernel(b, a)
+    // (same per-step muladd-row chain, product commuted). IEEE f32 multiply
+    // is commutative, so both are byte-exact by construction; verified 16/16
+    // local (swapped_output_verify.py). Non-square shapes exercise the
+    // swapped output dims; tails cover the MR and k%4 edges.
+    let script = fnp_script(
+        r#"
+ok = True
+rng = np.random.default_rng(20260713)
+for (m, k, n) in ((128, 96, 144), (2, 400, 400), (65, 130, 257), (129, 7, 300), (61, 2, 3000), (77, 2001, 2)):
+    a = (rng.standard_normal((m, k)) * 0.3).astype(np.float16)
+    b = (rng.standard_normal((n, k)) * 0.3).astype(np.float16)
+    r = fnp.einsum('ij,lj->li', a, b); e = np.einsum('ij,lj->li', a, b)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape
+    ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
+    ag = (rng.standard_normal((k, m)) * 0.3).astype(np.float16)
+    bg = (rng.standard_normal((k, n)) * 0.3).astype(np.float16)
+    r = fnp.einsum('ji,jl->li', ag, bg); e = np.einsum('ji,jl->li', ag, bg)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape
+    ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
+# inf/nan + overflow through both swapped routes
+a = (rng.standard_normal((96, 128)) * 0.3).astype(np.float16)
+b = (rng.standard_normal((80, 128)) * 0.3).astype(np.float16)
+a[0, 0] = np.float16(np.inf); b[1, 0] = np.float16(np.nan); a[7, :] = np.float16(60000)
+r = fnp.einsum('ij,lj->li', a, b); e = np.einsum('ij,lj->li', a, b)
+ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
+ag = np.ascontiguousarray(a.T); bg = np.ascontiguousarray(b.T)
+r = fnp.einsum('ji,jl->li', ag, bg); e = np.einsum('ji,jl->li', ag, bg)
+ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
+# alternate letters + below-gate numpy path
+ok = ok and fnp.einsum('ab,cb->ca', a, b).tobytes() == np.einsum('ab,cb->ca', a, b).tobytes()
+sm_a = (rng.standard_normal((8, 8)) * 0.3).astype(np.float16)
+sm_b = (rng.standard_normal((8, 8)) * 0.3).astype(np.float16)
+ok = ok and fnp.einsum('ij,lj->li', sm_a, sm_b).tobytes() == np.einsum('ij,lj->li', sm_a, sm_b).tobytes()
+print(bool(ok))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 einsum output-transposed variants must be bit-identical via the operand-swapped kernels: {result}"
     );
     Ok(())
 }

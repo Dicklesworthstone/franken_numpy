@@ -14832,7 +14832,11 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                  fnp_es_t = lambda a, b: fnp_mod.einsum('ij,lj->il', a, b)\n\
                  np_es_t = lambda a, b: np.einsum('ij,lj->il', a, b)\n\
                  fnp_es_g = lambda a, b: fnp_mod.einsum('ji,jl->il', a, b)\n\
-                 np_es_g = lambda a, b: np.einsum('ji,jl->il', a, b)\n",
+                 np_es_g = lambda a, b: np.einsum('ji,jl->il', a, b)\n\
+                 fnp_es_ts = lambda a, b: fnp_mod.einsum('ij,lj->li', a, b)\n\
+                 np_es_ts = lambda a, b: np.einsum('ij,lj->li', a, b)\n\
+                 fnp_es_gs = lambda a, b: fnp_mod.einsum('ji,jl->li', a, b)\n\
+                 np_es_gs = lambda a, b: np.einsum('ji,jl->li', a, b)\n",
             )
             .expect("f16 einsum setup CString")
             .as_c_str(),
@@ -14952,6 +14956,48 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
             &es_a,
             &es_b,
         );
+
+        // Output-transposed variants: operand-swap arms of the transposed and
+        // gram kernels ('ij,lj->li' / 'ji,jl->li'). Rows prove the swapped
+        // dispatch engages the native route (effect >> 1, not numpy ~1.0x).
+        for (bench_name, row, fnp_key, np_key) in [
+            (
+                "f16_einsum_transposed_swapped_512_null_then_effect",
+                "f16_einsum_transposed_swapped_512",
+                "fnp_es_ts",
+                "np_es_ts",
+            ),
+            (
+                "f16_einsum_gram_swapped_512_null_then_effect",
+                "f16_einsum_gram_swapped_512",
+                "fnp_es_gs",
+                "np_es_gs",
+            ),
+        ] {
+            let fnp_fn = namespace.get_item(fnp_key).expect("fnp swapped fn");
+            let np_fn = namespace.get_item(np_key).expect("np swapped fn");
+            let candidate = fnp_fn
+                .call1((&es_a, &es_b))
+                .expect("fnp swapped einsum parity");
+            let base = np_fn
+                .call1((&es_a, &es_b))
+                .expect("numpy swapped einsum parity");
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "f16 einsum swapped-output byte parity ({row})",
+            );
+            bench_median_gate_python_binary(
+                &mut group, bench_name, row, &np_fn, &fnp_fn, &es_a, &es_b,
+            );
+        }
     });
 
     group.finish();
