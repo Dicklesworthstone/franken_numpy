@@ -1276,6 +1276,18 @@ if fnp.einsum('j,j->j', a, b).tobytes() != np.einsum('j,j->j', a, b).tobytes():
 check("implicit_jj", fnp.einsum('j,j', a, b), np.einsum('j,j', a, b))
 # non-contiguous defers to numpy
 check("strided", fnp.einsum('j,j->', a[::2], b[::2]), np.einsum('j,j->', a[::2], b[::2]))
+# 2-D / 3-D full contractions coalesce to the same chunk-fold contract
+for shape, spec in (((1024, 1024), 'ij,ij->'), ((3, 2731), 'ij,ij->'), ((16, 256, 256), 'ijk,ijk->')):
+    a2 = (rng.standard_normal(shape) * 0.3).astype(np.float16)
+    b2 = (rng.standard_normal(shape) * 0.3).astype(np.float16)
+    check(f"full {spec} {shape}", fnp.einsum(spec, a2, b2), np.einsum(spec, a2, b2))
+# exclusions: elementwise output, repeated labels (diagonal), transposed labels
+a2 = (rng.standard_normal((1024, 1024)) * 0.3).astype(np.float16)
+b2 = (rng.standard_normal((1024, 1024)) * 0.3).astype(np.float16)
+if fnp.einsum('ij,ij->ij', a2, b2).tobytes() != np.einsum('ij,ij->ij', a2, b2).tobytes():
+    verdicts.append("FAIL elementwise ij,ij->ij")
+check("diagonal ii,ii->", fnp.einsum('ii,ii->', a2, b2), np.einsum('ii,ii->', a2, b2))
+check("transposed ij,ji->", fnp.einsum('ij,ji->', a2, b2), np.einsum('ij,ji->', a2, b2))
 print(verdicts if verdicts else True)
 "#
         .into(),

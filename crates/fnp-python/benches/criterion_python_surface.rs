@@ -14841,6 +14841,10 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                  dot_b = (rng.standard_normal(8_388_608) * 0.3).astype(np.float16)\n\
                  fnp_es_d = lambda a, b: fnp_mod.einsum('j,j->', a, b)\n\
                  np_es_d = lambda a, b: np.einsum('j,j->', a, b)\n\
+                 fc_a = (rng.standard_normal((2896, 2896)) * 0.3).astype(np.float16)\n\
+                 fc_b = (rng.standard_normal((2896, 2896)) * 0.3).astype(np.float16)\n\
+                 fnp_es_fc = lambda a, b: fnp_mod.einsum('ij,ij->', a, b)\n\
+                 np_es_fc = lambda a, b: np.einsum('ij,ij->', a, b)\n\
                  bat_a = (rng.standard_normal((8, 256, 256)) * 0.3).astype(np.float16)\n\
                  bat_b = (rng.standard_normal((8, 256, 256)) * 0.3).astype(np.float16)\n\
                  fnp_es_b = lambda a, b: fnp_mod.einsum('bij,bjk->bik', a, b)\n\
@@ -15048,6 +15052,41 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
             &fnp_es_d,
             &dot_a,
             &dot_b,
+        );
+
+        // 2-D full contraction ('ij,ij->') at 2896^2 ~ 8.4M: the coalesced
+        // chunk-fold route through the generalized full-contraction parser.
+        let fc_a = namespace.get_item("fc_a").expect("fc_a present");
+        let fc_b = namespace.get_item("fc_b").expect("fc_b present");
+        let fnp_es_fc = namespace.get_item("fnp_es_fc").expect("fnp_es_fc present");
+        let np_es_fc = namespace.get_item("np_es_fc").expect("np_es_fc present");
+        let candidate_fc = fnp_es_fc
+            .call1((&fc_a, &fc_b))
+            .expect("fnp f16 einsum full-contraction parity");
+        let base_fc = np_es_fc
+            .call1((&fc_a, &fc_b))
+            .expect("numpy f16 einsum full-contraction parity");
+        assert_eq!(
+            candidate_fc
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_fc
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum full-contraction byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_fullc_2d_8m_null_then_effect",
+            "f16_einsum_fullc_2d_8m",
+            &np_es_fc,
+            &fnp_es_fc,
+            &fc_a,
+            &fc_b,
         );
 
         // Batched matmul spec ('bij,bjk->bik') at (8,256,256)@(8,256,256):
