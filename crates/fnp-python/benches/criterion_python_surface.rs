@@ -14734,6 +14734,63 @@ fn bench_f16_matmul_median_gate(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_f16_unique_median_gate(c: &mut Criterion) {
+    // f16 unique at 8M: presence-table walk vs numpy's ~600ms-class sort.
+    let mut group = c.benchmark_group("python_f16_unique_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_f16_unique_median_gate").expect("unique bench module");
+        fnp_python(&module).expect("initialize fnp_python unique bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260716)\n\
+                 uq16 = (rng.standard_normal(8_000_000) * 2).astype(np.float16)\n",
+            )
+            .expect("unique setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("unique setup");
+        let uq16 = namespace.get_item("uq16").expect("uq16 present");
+        let fnp_unique = module.getattr("unique").expect("fnp unique");
+        let np_unique = numpy.getattr("unique").expect("numpy unique");
+        let candidate = fnp_unique.call1((&uq16,)).expect("fnp unique parity");
+        let base = np_unique.call1((&uq16,)).expect("numpy unique parity");
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 unique byte parity",
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "f16_unique_8m_null_then_effect",
+            "f16_unique_8m",
+            &np_unique,
+            &fnp_unique,
+            &uq16,
+        );
+    });
+
+    group.finish();
+}
+
 fn bench_isclose_median_gate(c: &mut Criterion) {
     // f64 array-array isclose at 8M: the parallelized zero-copy predicate vs
     // numpy's temp-heavy ufunc chain (~180ms class on hz1).
@@ -16759,6 +16816,7 @@ criterion_group!(
     bench_f16_matmul_median_gate,
     bench_multidot_median_gate,
     bench_isclose_median_gate,
+    bench_f16_unique_median_gate,
     bench_f16_einsum_median_gate,
     bench_wide_string_substrate_v2,
     bench_ledger_integrity_rejects,

@@ -760,3 +760,62 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+#[test]
+fn f16_unique_presence_table_bit_exact() -> Result<(), String> {
+    // f16 unique via the 65536-slot presence table: bit-bijective for inputs
+    // with a single zero pattern and no NaNs; both-zeros/NaN inputs DEFER
+    // (numpy's kept pattern for the equal-class is an introsort partition
+    // artifact - flood-majority at scale, first-occurrence-looking on small
+    // inputs - pinned across three numpy versions, ledger 2026-07-12).
+    let script = fnp_script(
+        r#"
+verdicts = []
+rng = np.random.default_rng(20260716)
+for n in (200000, 2_000_003):
+    a = (rng.standard_normal(n) * 2).astype(np.float16)
+    r = fnp.unique(a); e = np.unique(a)
+    if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL n={n}")
+# single zero pattern (either sign alone), +-inf, denormals, full-range bits
+a = (rng.standard_normal(300000)).astype(np.float16)
+a[a == 0] = np.float16(1.0)
+a[0] = np.float16(-0.0); a[1] = np.float16(np.inf); a[2] = np.float16(-np.inf)
+a[3] = np.uint16(0x0001).view(np.float16); a[4] = np.uint16(0x8001).view(np.float16)
+r = fnp.unique(a); e = np.unique(a)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL neg-zero-only/specials")
+# degenerate full-bit-range coverage via a uint16 ramp viewed as f16 (nan-free slice)
+ramp = np.arange(0, 0x7C00, dtype=np.uint16).view(np.float16)
+big = np.tile(ramp, 8)
+r = fnp.unique(big); e = np.unique(big)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL positive ramp")
+# ambiguity defers: both zeros / NaNs present -> byte-equal via numpy path
+a2 = (rng.standard_normal(300000)).astype(np.float16)
+a2[10] = np.float16(0.0); a2[11] = np.float16(-0.0)
+if fnp.unique(a2).tobytes() != np.unique(a2).tobytes():
+    verdicts.append("FAIL both-zeros defer")
+a3 = (rng.standard_normal(300000)).astype(np.float16)
+a3[10] = np.float16(np.nan)
+if fnp.unique(a3).tobytes() != np.unique(a3).tobytes():
+    verdicts.append("FAIL nan defer")
+# below-gate + kwargs variants stay on numpy
+sm = (rng.standard_normal(1000)).astype(np.float16)
+if fnp.unique(sm).tobytes() != np.unique(sm).tobytes():
+    verdicts.append("FAIL below-gate")
+ri_f, ri_n = fnp.unique(sm, return_counts=True), np.unique(sm, return_counts=True)
+if ri_f[0].tobytes() != ri_n[0].tobytes() or ri_f[1].tobytes() != ri_n[1].tobytes():
+    verdicts.append("FAIL return_counts defer")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 unique presence table must be bit-identical (with ambiguity defers): {result}"
+    );
+    Ok(())
+}
