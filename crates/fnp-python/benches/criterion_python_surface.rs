@@ -14848,7 +14848,11 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                  fnp_es_bt = lambda a, b: fnp_mod.einsum('bij,blj->bil', a, b)\n\
                  np_es_bt = lambda a, b: np.einsum('bij,blj->bil', a, b)\n\
                  fnp_es_bg = lambda a, b: fnp_mod.einsum('bji,bjl->bil', a, b)\n\
-                 np_es_bg = lambda a, b: np.einsum('bji,bjl->bil', a, b)\n",
+                 np_es_bg = lambda a, b: np.einsum('bji,bjl->bil', a, b)\n\
+                 fnp_es_bts = lambda a, b: fnp_mod.einsum('bij,blj->bli', a, b)\n\
+                 np_es_bts = lambda a, b: np.einsum('bij,blj->bli', a, b)\n\
+                 fnp_es_bgs = lambda a, b: fnp_mod.einsum('bji,bjl->bli', a, b)\n\
+                 np_es_bgs = lambda a, b: np.einsum('bji,bjl->bli', a, b)\n",
             )
             .expect("f16 einsum setup CString")
             .as_c_str(),
@@ -15146,6 +15150,47 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
             &bat_a,
             &bat_b,
         );
+
+        // Output-swapped batched forms: operand-swap arms of the batched
+        // transposed/gram kernels. Rows prove the swapped dispatch engages.
+        for (bench_name, row, fnp_key, np_key) in [
+            (
+                "f16_einsum_batched_ts_8x256_null_then_effect",
+                "f16_einsum_batched_ts_8x256",
+                "fnp_es_bts",
+                "np_es_bts",
+            ),
+            (
+                "f16_einsum_batched_gs_8x256_null_then_effect",
+                "f16_einsum_batched_gs_8x256",
+                "fnp_es_bgs",
+                "np_es_bgs",
+            ),
+        ] {
+            let fnp_fn = namespace.get_item(fnp_key).expect("fnp batched-swap fn");
+            let np_fn = namespace.get_item(np_key).expect("np batched-swap fn");
+            let candidate = fnp_fn
+                .call1((&bat_a, &bat_b))
+                .expect("fnp batched-swap parity");
+            let base = np_fn
+                .call1((&bat_a, &bat_b))
+                .expect("numpy batched-swap parity");
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "f16 einsum batched swapped byte parity ({row})",
+            );
+            bench_median_gate_python_binary(
+                &mut group, bench_name, row, &np_fn, &fnp_fn, &bat_a, &bat_b,
+            );
+        }
     });
 
     group.finish();

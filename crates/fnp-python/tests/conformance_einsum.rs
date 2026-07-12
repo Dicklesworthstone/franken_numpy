@@ -1155,10 +1155,14 @@ check("alt_letters", fnp.einsum('qrs,qts->qrt', a, x), np.einsum('qrs,qts->qrt',
 sm_a = (rng.standard_normal((2, 8, 8)) * 0.3).astype(np.float16)
 sm_x = (rng.standard_normal((2, 8, 8)) * 0.3).astype(np.float16)
 check("below_gate", fnp.einsum('bij,blj->bil', sm_a, sm_x), np.einsum('bij,blj->bil', sm_a, sm_x))
-# F-order defers; adjacent specs stay byte-exact via their own routes
+# F-order defers; the swapped-output form rides this kernel's operand-swap arm
 at = np.asfortranarray(a)
 check("f_order", fnp.einsum('bij,blj->bil', at, x), np.einsum('bij,blj->bil', at, x))
 check("out_swapped", fnp.einsum('bij,blj->bli', a, x), np.einsum('bij,blj->bli', a, x))
+for (B, m, k, n) in ((2, 3, 8193, 4), (3, 5, 9000, 3), (1, 64, 9000, 48)):
+    sa = (rng.standard_normal((B, m, k)) * 0.3).astype(np.float16)
+    sx = (rng.standard_normal((B, n, k)) * 0.3).astype(np.float16)
+    check(f"swapped B={B},k={k}", fnp.einsum('bij,blj->bli', sa, sx), np.einsum('bij,blj->bli', sa, sx))
 check("sum_batch", fnp.einsum('bij,blj->il', a, x), np.einsum('bij,blj->il', a, x))
 print(verdicts if verdicts else True)
 "#
@@ -1206,10 +1210,14 @@ check("alt_letters", fnp.einsum('qsr,qst->qrt', a, x), np.einsum('qsr,qst->qrt',
 sm_a = (rng.standard_normal((2, 8, 8)) * 0.3).astype(np.float16)
 sm_x = (rng.standard_normal((2, 8, 8)) * 0.3).astype(np.float16)
 check("below_gate", fnp.einsum('bji,bjl->bil', sm_a, sm_x), np.einsum('bji,bjl->bil', sm_a, sm_x))
-# F-order defers; adjacent specs stay byte-exact via their own routes
+# F-order defers; the swapped-output form rides this kernel's operand-swap arm
 at = np.asfortranarray(a)
 check("f_order", fnp.einsum('bji,bjl->bil', at, x), np.einsum('bji,bjl->bil', at, x))
 check("out_swapped", fnp.einsum('bji,bjl->bli', a, x), np.einsum('bji,bjl->bli', a, x))
+for (B, k, m, n) in ((2, 8193, 3, 4), (1, 9000, 4, 3), (3, 33, 17, 9)):
+    sa = (rng.standard_normal((B, k, m)) * 0.3).astype(np.float16)
+    sx = (rng.standard_normal((B, k, n)) * 0.3).astype(np.float16)
+    check(f"swapped B={B},k={k}", fnp.einsum('bji,bjl->bli', sa, sx), np.einsum('bji,bjl->bli', sa, sx))
 check("sum_batch", fnp.einsum('bji,bjl->il', a, x), np.einsum('bji,bjl->il', a, x))
 print(verdicts if verdicts else True)
 "#
