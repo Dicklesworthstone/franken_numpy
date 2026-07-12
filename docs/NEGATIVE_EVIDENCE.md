@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - PARITY FIX (WIN KEPT): flat quantile/percentile now BYTE-EXACT vs numpy - TWO root causes (one-sided lerp + q*100/100 round trip); bead 19jv4 closed
+
+`cc_fnp`. The 1-2 ULP divergence had two independent causes, both fixed:
+(1) LERP FORM: fnp used the symmetric `a*(1-t) + b*t`; numpy's _lerp is two-sided
+    (`a + diff*t`, overwritten with `b - diff*(1-t)` where t >= 0.5). Replaced at
+    all four sites (serial select, par scalar, par multi-q, test oracle) with
+    numpy_quantile_lerp. Fixed percentile-trio alone (0.25/0.5/0.75 are exact
+    binary fractions).
+(2) SCALE ROUND TRIP: quantile paths converted q -> q*100 -> /100; 0.1*100/100 !=
+    0.1 in f64, shifting the virtual index by an ULP. quantile/quantile_method/
+    quantiles_axis_none now enter fraction-scale cores (percentile_fraction,
+    percentile_method_fraction, fractions_axis_none) DIRECTLY; percentile wrappers
+    divide once, matching numpy's own q/100.
+Formula pinned locally (2M x 9+3 qs byte-match vs 2.4.3); 40 fnp-ufunc unit tests
+incl goldens green; probe re-tightened to tobytes and GREEN on vmi1149989 with the
+win kept (quantile9 1.77x, percentile3 1.45x, loaded-worker run; 2.4-2.7x on the
+earlier quieter runs). RESIDUAL out-of-scope edges (pre-existing, gamma==0 short-
+circuit vs numpy's always-lerp): -0.0-at-exact-index sign normalization and numpy's
+own inf/overflow-diff NaN quirk - the early-return keeps fnp SANER than numpy there.
 ## 2026-07-12 - CONVERGENCE SWEEP #3 + UPSTREAM-OF-EXPECTATION BUG: flat multi-q quantile/percentile is FAST (2.4-2.7x) but 1-2 ULP OFF numpy - byte-parity bug filed; 12 candidates triaged ALREADY-COVERED
 
 `cc_fnp`. Probe row (vmi1227854): quantile9 numpy 190.1ms / fnp 70.1ms (2.71x) with

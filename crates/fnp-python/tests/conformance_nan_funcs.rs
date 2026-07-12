@@ -1116,22 +1116,14 @@ rng = np.random.default_rng(20260712)
 a = rng.standard_normal(8_000_000)
 w = np.abs(rng.standard_normal(8_000_000)) + 0.01
 qs = np.linspace(0.1, 0.9, 9)
-# KNOWN DIVERGENCE (filed 2026-07-12, vmi1227854): the native flat multi-q path is
-# 2.5-2.8x faster than numpy but NOT byte-identical (last-ULP interpolation-formula
-# class). Assert allclose + dtype/shape and print the divergence until the byte fix
-# lands; then tighten these back to tobytes equality.
+# Byte-exact since the numpy_quantile_lerp fix (bead deadlock-audit-19jv4): the
+# linear method now runs numpy's two-sided _lerp, so multi-q flat is tobytes-equal.
 r, e = fnp.quantile(a, qs), np.quantile(a, qs)
-if r.dtype != e.dtype or r.shape != e.shape or not np.allclose(r, e, rtol=1e-14):
-    verdicts.append("FAIL quantile9 allclose")
-db = int(np.sum(r.view(np.uint64) != e.view(np.uint64)))
-du = int(np.max(np.abs(r.view(np.int64) - e.view(np.int64))))
-print(f"QUANTILE9_DIVERGENCE diff_elems={db}/9 max_ulp={du}")
+if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL quantile9 bytes")
 r, e = fnp.percentile(a, [25, 50, 75]), np.percentile(a, [25, 50, 75])
-if r.dtype != e.dtype or r.shape != e.shape or not np.allclose(r, e, rtol=1e-14):
-    verdicts.append("FAIL percentile-trio allclose")
-db = int(np.sum(r.view(np.uint64) != e.view(np.uint64)))
-du = int(np.max(np.abs(r.view(np.int64) - e.view(np.int64))))
-print(f"PERCENTILE3_DIVERGENCE diff_elems={db}/3 max_ulp={du}")
+if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL percentile-trio bytes")
 ra, ea = fnp.average(a, weights=w), np.average(a, weights=w)
 if not np.allclose(ra, ea, rtol=1e-12):
     verdicts.append("FAIL average allclose")

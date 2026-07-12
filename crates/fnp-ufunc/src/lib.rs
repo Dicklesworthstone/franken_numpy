@@ -17463,7 +17463,14 @@ impl UFuncArray {
                 "percentile: q={q} must be in [0, 100]"
             )));
         }
-        let fraction = q / 100.0;
+        self.percentile_fraction(q / 100.0, axis)
+    }
+
+    /// Shared percentile core on the [0, 1] fraction scale. `quantile` enters here
+    /// DIRECTLY: the old q*100 -> /100 round trip perturbed non-binary fractions
+    /// (0.1*100/100 != 0.1 in f64), shifting the virtual index by an ULP and the
+    /// interpolated output with it (bead deadlock-audit-19jv4).
+    fn percentile_fraction(&self, fraction: f64, axis: Option<isize>) -> Result<Self, UFuncError> {
         match axis {
             None => {
                 let n = self.values.len();
@@ -17603,6 +17610,12 @@ impl UFuncArray {
                 )));
             }
         }
+        let fractions: Vec<f64> = qs.iter().map(|&q| q / 100.0).collect();
+        self.fractions_axis_none(&fractions)
+    }
+
+    /// Fraction-scale multi-q core (same round-trip fix; quantiles enter directly).
+    fn fractions_axis_none(&self, qs: &[f64]) -> Result<Self, UFuncError> {
         let n = self.values.len();
         if n == 0 {
             return Ok(Self {
@@ -17645,7 +17658,7 @@ impl UFuncArray {
             qs.iter()
                 .map(|&q| {
                     let mut buf = self.values.clone();
-                    select_percentile_method(&mut buf, q / 100.0, QuantileInterp::Linear)
+                    select_percentile_method(&mut buf, q, QuantileInterp::Linear)
                 })
                 .collect()
         };
@@ -17732,7 +17745,17 @@ impl UFuncArray {
                 "percentile: q={q} must be in [0, 100]"
             )));
         }
-        let fraction = q / 100.0;
+        self.percentile_method_fraction(q / 100.0, axis, method)
+    }
+
+    /// Fraction-scale core for percentile_method (same round-trip fix as
+    /// percentile_fraction; quantile_method enters directly).
+    fn percentile_method_fraction(
+        &self,
+        fraction: f64,
+        axis: Option<isize>,
+        method: QuantileInterp,
+    ) -> Result<Self, UFuncError> {
         match axis {
             None => {
                 if self.values.is_empty() {
@@ -17817,7 +17840,10 @@ impl UFuncArray {
         axis: Option<isize>,
         method: QuantileInterp,
     ) -> Result<Self, UFuncError> {
-        self.percentile_method(q * 100.0, axis, method)
+        if !(0.0..=1.0).contains(&q) {
+            return Err(UFuncError::Msg(format!("quantile: q={q} must be in [0, 1]")));
+        }
+        self.percentile_method_fraction(q, axis, method)
     }
 
     /// Central moment of order `order` over the flattened array
@@ -19601,7 +19627,10 @@ impl UFuncArray {
     ///
     /// Mimics `np.quantile(a, q)`. Like `percentile` but q is in [0, 1] instead of [0, 100].
     pub fn quantile(&self, q: f64, axis: Option<isize>) -> Result<Self, UFuncError> {
-        self.percentile(q * 100.0, axis)
+        if !(0.0..=1.0).contains(&q) {
+            return Err(UFuncError::Msg(format!("quantile: q={q} must be in [0, 1]")));
+        }
+        self.percentile_fraction(q, axis)
     }
 
     /// Compute multiple quantiles over the flattened array.
@@ -19613,8 +19642,8 @@ impl UFuncArray {
                 )));
             }
         }
-        let percentiles: Vec<f64> = qs.iter().map(|&q| q * 100.0).collect();
-        self.percentiles_axis_none(&percentiles)
+        let fractions: Vec<f64> = qs.to_vec();
+        self.fractions_axis_none(&fractions)
     }
 
     /// Weighted average of array elements.
@@ -29029,6 +29058,17 @@ fn format_nd(
     format!("[{}]", parts.join(&sep))
 }
 
+/// numpy `_lerp` replication (numpy/lib/_function_base_impl.py): computes
+/// `a + (b-a)*t`, overwritten with `b - (b-a)*(1-t)` where `t >= 0.5`. The
+/// two-sided form is what np.quantile/percentile's linear method executes, so
+/// it is byte-identical where the symmetric `a*(1-t) + b*t` form drifted by
+/// 1-2 ULP (bead deadlock-audit-19jv4, probe 2026-07-12).
+#[inline]
+fn numpy_quantile_lerp(a: f64, b: f64, t: f64) -> f64 {
+    let diff = b - a;
+    if t >= 0.5 { b - diff * (1.0 - t) } else { a + diff * t }
+}
+
 /// Linear interpolation for percentile on a sorted slice (NumPy default method).
 #[cfg(test)]
 fn interpolate_percentile(sorted: &[f64], fraction: f64) -> f64 {
@@ -29053,7 +29093,7 @@ fn interpolate_percentile_method(sorted: &[f64], fraction: f64, method: Quantile
     }
     let hi = lo + 1;
     match method {
-        QuantileInterp::Linear => sorted[lo] * (1.0 - frac) + sorted[hi] * frac,
+        QuantileInterp::Linear => numpy_quantile_lerp(sorted[lo], sorted[hi], frac),
         QuantileInterp::Lower => sorted[lo],
         QuantileInterp::Higher => sorted[hi],
         QuantileInterp::Nearest => {
@@ -29097,7 +29137,7 @@ fn select_percentile_method(data: &mut [f64], fraction: f64, method: QuantileInt
     let v_hi = *kth_hi;
     let v_lo = left.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     match method {
-        QuantileInterp::Linear => v_lo * (1.0 - frac) + v_hi * frac,
+        QuantileInterp::Linear => numpy_quantile_lerp(v_lo, v_hi, frac),
         QuantileInterp::Lower => v_lo,
         QuantileInterp::Higher => v_hi,
         QuantileInterp::Nearest => {
@@ -29341,7 +29381,7 @@ fn par_select_percentile(data: &[f64], fraction: f64, method: QuantileInterp) ->
     let hi = lo + 1;
     let (v_lo, v_hi) = par_select_two(data, lo, hi);
     match method {
-        QuantileInterp::Linear => v_lo * (1.0 - frac) + v_hi * frac,
+        QuantileInterp::Linear => numpy_quantile_lerp(v_lo, v_hi, frac),
         QuantileInterp::Lower => v_lo,
         QuantileInterp::Higher => v_hi,
         QuantileInterp::Nearest => {
@@ -29369,8 +29409,8 @@ fn key_matches_prefix(key: u64, prefix: u64, fixed: u32) -> bool {
     fixed == 0 || (key >> (64 - fixed)) == prefix
 }
 
-fn percentile_linear_plan(n: usize, q: f64) -> (usize, usize, f64) {
-    let idx = (q / 100.0) * (n - 1) as f64;
+fn percentile_linear_plan(n: usize, fraction: f64) -> (usize, usize, f64) {
+    let idx = fraction * (n - 1) as f64;
     let lo = idx.floor() as usize;
     let frac = idx - lo as f64;
     if frac == 0.0 || lo >= n - 1 {
@@ -29403,7 +29443,7 @@ fn par_select_percentiles_linear(data: &[f64], qs: &[f64]) -> Vec<f64> {
                 v_lo
             } else {
                 let v_hi = selected[ranks.binary_search(&hi).expect("planned hi rank")];
-                v_lo * (1.0 - frac) + v_hi * frac
+                numpy_quantile_lerp(v_lo, v_hi, frac)
             }
         })
         .collect()
