@@ -14851,6 +14851,11 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                  ew64_b = rng.standard_normal(8_388_608)\n\
                  bc64_full = rng.standard_normal((2896, 2896))\n\
                  bc64_vec = rng.standard_normal(2896)\n\
+                 red16 = (rng.standard_normal((2896, 2896)) * 0.3).astype(np.float16)\n\
+                 fnp_es_rj = lambda a: fnp_mod.einsum('ij->j', a)\n\
+                 np_es_rj = lambda a: np.einsum('ij->j', a)\n\
+                 fnp_es_ri = lambda a: fnp_mod.einsum('ij->i', a)\n\
+                 np_es_ri = lambda a: np.einsum('ij->i', a)\n\
                  fnp_es_bc = lambda a, b: fnp_mod.einsum('ij,j->ij', a, b)\n\
                  np_es_bc = lambda a, b: np.einsum('ij,j->ij', a, b)\n\
                  bat_a = (rng.standard_normal((8, 256, 256)) * 0.3).astype(np.float16)\n\
@@ -15194,6 +15199,44 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
             &bc64_full,
             &bc64_vec,
         );
+
+        // f16 reduction specs at 2896^2: col-sum (the 27.9ms strided rank)
+        // and row-sum.
+        let red16 = namespace.get_item("red16").expect("red16 present");
+        for (bench_name, row, fnp_key, np_key) in [
+            (
+                "f16_einsum_colsum_8m_null_then_effect",
+                "f16_einsum_colsum_8m",
+                "fnp_es_rj",
+                "np_es_rj",
+            ),
+            (
+                "f16_einsum_rowsum_8m_null_then_effect",
+                "f16_einsum_rowsum_8m",
+                "fnp_es_ri",
+                "np_es_ri",
+            ),
+        ] {
+            let fnp_fn = namespace.get_item(fnp_key).expect("fnp reduce fn");
+            let np_fn = namespace.get_item(np_key).expect("np reduce fn");
+            let candidate = fnp_fn.call1((&red16,)).expect("fnp reduce parity");
+            let base = np_fn.call1((&red16,)).expect("numpy reduce parity");
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "f16 einsum reduction byte parity ({row})",
+            );
+            bench_median_gate_python_unary(
+                &mut group, bench_name, row, &np_fn, &fnp_fn, &red16,
+            );
+        }
 
         // Batched matmul spec ('bij,bjk->bik') at (8,256,256)@(8,256,256):
         // the plain per-step chain per batch, parallel across batches.

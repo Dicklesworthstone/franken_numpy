@@ -1370,6 +1370,60 @@ print(verdicts if verdicts else True)
 }
 
 #[test]
+fn f16_einsum_reductions_bit_exact() -> Result<(), String> {
+    // Single-operand f16 reductions: row-sum = ONE paired tree per row (no
+    // chunking at any n - the naive 8192-fold hypothesis FAILED at n>8192);
+    // col-sum = per-step-narrow chains down columns; full-sum = per-8192
+    // chunk trees folded through the f16 scalar. Pinned 42/42 on numpy
+    // 2.2.4/2.4.3/2.4.6 (f16_reduce_verify.py). LOCKS all three contracts.
+    let script = fnp_script(
+        r#"
+verdicts = []
+rng = np.random.default_rng(20260714)
+for (m, n) in ((1200, 1000), (3, 9000), (2000, 8193), (37, 65536), (4096, 511)):
+    a = (rng.standard_normal((m, n)) * 0.3).astype(np.float16)
+    for spec in ('ij->i', 'ij->j', 'ij->'):
+        r = fnp.einsum(spec, a); e = np.einsum(spec, a)
+        if type(r).__name__ != type(e).__name__:
+            verdicts.append(f"FAIL {spec} ({m},{n}) type {type(r).__name__} vs {type(e).__name__}")
+        elif np.ndim(r) != np.ndim(e) or np.float16(0).dtype != np.asarray(r).dtype:
+            verdicts.append(f"FAIL {spec} ({m},{n}) shape/dtype")
+        elif np.asarray(r).tobytes() != np.asarray(e).tobytes():
+            verdicts.append(f"FAIL {spec} ({m},{n}) bytes")
+# specials: inf/nan/overflow-to-inf mid-chain
+a = (rng.standard_normal((1200, 1000)) * 0.3).astype(np.float16)
+a[3, 5] = np.float16(np.inf); a[7, 9] = np.float16(np.nan); a[11, :] = np.float16(60000)
+for spec in ('ij->i', 'ij->j', 'ij->'):
+    r = np.asarray(fnp.einsum(spec, a)); e = np.asarray(np.einsum(spec, a))
+    ok = bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all()) if r.ndim else (r.tobytes() == e.tobytes() or (np.isnan(r) and np.isnan(e)))
+    if not ok:
+        verdicts.append(f"FAIL specials {spec}")
+# below-gate + strided defer + exclusions (transpose view, diagonal)
+sm = (rng.standard_normal((10, 10)) * 0.3).astype(np.float16)
+for spec in ('ij->i', 'ij->j', 'ij->'):
+    if np.asarray(fnp.einsum(spec, sm)).tobytes() != np.asarray(np.einsum(spec, sm)).tobytes():
+        verdicts.append(f"FAIL below-gate {spec}")
+if np.asarray(fnp.einsum('ij->i', a[::2])).tobytes() != np.asarray(np.einsum('ij->i', a[::2])).tobytes():
+    verdicts.append("FAIL strided defer")
+if fnp.einsum('ij->ji', a).tobytes() != np.einsum('ij->ji', a).tobytes():
+    verdicts.append("FAIL transpose exclusion")
+sq = (rng.standard_normal((1100, 1100)) * 0.3).astype(np.float16)
+if np.asarray(fnp.einsum('ii->', sq)).tobytes() != np.asarray(np.einsum('ii->', sq)).tobytes():
+    verdicts.append("FAIL diagonal exclusion")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 einsum reductions must be bit-identical to numpy's tree/chain contracts: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_einsum_dot_1d_buffered_contract_bit_exact() -> Result<(), String> {
     // np.einsum's f16 1-D dot ('j,j->') runs contig_contig_outstride0_two once
     // per 8192-element nditer buffer, folding each chunk's blocked-4 f32 tree

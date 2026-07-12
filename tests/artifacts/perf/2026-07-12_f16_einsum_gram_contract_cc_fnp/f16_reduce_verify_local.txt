@@ -1,0 +1,12 @@
+F16_REDUCE_VERIFY numpy=2.4.3 total=42 fails=0
+VERIFY_OK
+F16_REDUCE_VERIFY numpy=2.4.6 total=42 fails=0
+VERIFY_OK
+F16_REDUCE_VERIFY numpy=2.2.4 total=42 fails=0
+VERIFY_OK
+=== chunk discriminator:
+n=8193: ['single', 'ch8192', 'equal_ceil']
+n=9000: ['single']
+n=16389: ['single']
+n=20000: ['single']
+numpy=2.4.3
