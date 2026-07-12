@@ -51,6 +51,13 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+3-OP CHAIN SHIPPED (0aa35d66, bead vfbef CLOSED): f16_einsum_chain3_512 27.704
+[p10 22.34, p90 32.98] vs null 1.000 (CV 3.2%) - 20/20, 42.6 vs 1132.9 ms on
+vmi1227854 (sha 12972306...). Plan fetched from numpy's OWN einsum_path at runtime
+(zero drift risk); pairs through the shipped byte-matched f16 matmul kernel.
+Conformance 11/11 incl both plan orders + optimize=False/string/non-chain
+exclusions. The einsum vein's ranked queue is EMPTY.
+
 3-OP CHAIN RECON (bead vfbef, premise CORRECTED): np.einsum(optimize=True) 3-op f16
 chains are NOT sequential c_einsum pairs - path-faithful einsum-pairs mismatch 4/4
 (the bead's original hypothesis REFUTED with data). They ARE einsum_path plan +
