@@ -51,6 +51,21 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+OUTPUT-ORDER CLOSURE ADDENDUM (same session, 5adb71e3): the output-transposed forms
+'ij,lj->li' and 'ji,jl->li' are the sibling kernels with operands swapped (IEEE f32
+multiply commutative -> identical bits; 16/16 local, swapped_output_verify.py). ~30
+lines of swap-detection dispatch. Conformance GREEN remote 4/4 incl the new
+f16_einsum_output_transposed_variants_bit_exact battery. Route-engagement rows (worker
+vmi1149989, numpy 2.2.4, sha 82b37c5c..., nulls 0.980/0.987, 20/20 each):
+f16_einsum_transposed_swapped_512 24.65x (8.9 vs 221.1 ms),
+f16_einsum_gram_swapped_512 3.29x (125.9 vs 418.7 ms). numpy's baselines for the
+swapped-output forms run FASTER than the direct forms on this worker (221 vs 460 ms
+wide-class; 419 vs 756 ms per-step-class) - the outer-loop order suits its scalar
+loops - so the effects are smaller than the direct rows but decisive (40/40 above 1).
+The 2-op f16 einsum GEMM-idiom family is closed over BOTH operand order and output
+order: six specs, three contract classes, two kernels + two swap arms.
+Artifact swapped_ship_run1.txt.
+
 ## 2026-07-12 - SURFACE (probe, no production change): AVX-512 numpy 2.3.5 diverges from scalar libm on 13/16 f64 transcendentals (1-3 ULP) - the shipped native route inherits a numpy divergence on that host class; bead deadlock-audit-fs5pu filed for the policy fork
 
 `cc_fnp`. NEGATIVE-LEDGER-FIRST: with the exp/log family closed, the open question was
