@@ -4,6 +4,36 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - RECON (contract CRACKED first-hypothesis): f16 einsum GRAM spec ('ji,jl->il', a.T@b) = per-step-narrow MULADD-ROW chain - the third and last 2-op GEMM-idiom contract class decoded; kernel implemented, ship gate in flight
+
+`cc_fnp` (einsum vein), the 'ji,jl->il' sibling lead filed in the xnck7 ship entry.
+SOURCE READ (einsum_sumprod.c.src, in-tree): specs with the summed label FIRST in both
+operands dispatch half_sum_of_products_stride0_contig_outcontig_two, which pins the
+a[j,i] element as a scalar and calls sum_of_products_muladd(b_row, out_row, a_scalar,
+count) - for half always the scalar C path (NPYV_CHK=0). CONTRACT per output element,
+over ascending j: acc = f16(f32(a[j,i]) * f32(b[j,l]) + f32(acc)), acc0 = f16(+0.0) -
+the o2ahc per-step-narrow class in muladd-row form (add order swapped = commutative =
+identical bits; j-ascending per element regardless of loop nesting, so the row-order
+replay is byte-exact by construction).
+
+VERIFIED: 112/112 byte-identical vs local numpy 2.4.3 - k=1..23 every tail, k up to
+2000, two (m,n) shapes, x100 overflow scales (artifact gram_contract_verify.py +
+contract_verify_local.txt, dir 2026-07-12_f16_einsum_gram_contract_cc_fnp). FIRST
+hypothesis held - no black-box guessing needed; the source-read-first method cost
+minutes where xnck7's black-box phase burned a session at 2-3/400.
+
+IMPLEMENTED (same commit series): try_native_f16_einsum_matmul_gram - explicit
+"AB,AC->BC" specs, exact f16 C-contiguous 2-D, work >= 1<<18, wired third in the einsum
+Defer chain; MR=4 output-row blocks, per-j b-row f32 decode scratch shared by the block
+(a's 4 scalars contiguous in a's row j), out rows accumulate in-place as f16 bits.
+Conformance f16_einsum_gram_contract_bit_exact (11 shapes incl m%4/k=1/2/3/k=7/long-k,
+mixed scales, inf/nan/overflow, alternate letters, below-gate, F-order defer, 3
+adjacent-spec exclusions) + bench row f16_einsum_gram_512 queued behind the fleet at
+ledger time (conformance gate before bench; pipeline armed). numpy baseline for the
+idiom ~240 ms at 512^3 (the transposed entry's same-class wide kernel) vs the shipped
+siblings' 12-195 ms natives - expected effect O(10x). RETRY PREDICATE: conformance red
+or sub-parity row -> unwire the dispatch branch (3 lines) + REJECT addendum here.
+
 ## 2026-07-12 - SURFACE (probe, no production change): AVX-512 numpy 2.3.5 diverges from scalar libm on 13/16 f64 transcendentals (1-3 ULP) - the shipped native route inherits a numpy divergence on that host class; bead deadlock-audit-fs5pu filed for the policy fork
 
 `cc_fnp`. NEGATIVE-LEDGER-FIRST: with the exp/log family closed, the open question was
