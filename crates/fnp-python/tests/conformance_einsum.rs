@@ -1370,6 +1370,65 @@ print(verdicts if verdicts else True)
 }
 
 #[test]
+fn f16_einsum_chain3_optimize_bit_exact() -> Result<(), String> {
+    // 3-op f16 chain with optimize=True: numpy = einsum_path plan + MATMUL
+    // pairwise (recon: c_einsum pairs mismatch; matmul pairs byte-match on
+    // four numpy versions). fnp asks numpy's own einsum_path at runtime and
+    // routes pairs through the shipped f16 matmul kernel. optimize=False
+    // (the fused O(n^4) loop), strategy strings, and non-f16 stay numpy's.
+    let script = fnp_script(
+        r#"
+verdicts = []
+rng = np.random.default_rng(20260715)
+# shapes chosen to exercise BOTH plan orders ((0,1)-first and (1,2)-first)
+for (m, k1, k2, n) in ((96, 96, 96, 96), (24, 8, 200, 12), (12, 200, 8, 24), (130, 64, 96, 70)):
+    a = (rng.standard_normal((m, k1)) * 0.3).astype(np.float16)
+    b = (rng.standard_normal((k1, k2)) * 0.3).astype(np.float16)
+    c = (rng.standard_normal((k2, n)) * 0.3).astype(np.float16)
+    r = fnp.einsum('ij,jk,kl->il', a, b, c, optimize=True)
+    e = np.einsum('ij,jk,kl->il', a, b, c, optimize=True)
+    if r.dtype != e.dtype or r.shape != e.shape:
+        verdicts.append(f"FAIL chain ({m},{k1},{k2},{n}) shape/dtype")
+    elif not bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all()):
+        verdicts.append(f"FAIL chain ({m},{k1},{k2},{n}) bytes")
+# alternate letters
+a = (rng.standard_normal((80, 80)) * 0.3).astype(np.float16)
+b = (rng.standard_normal((80, 80)) * 0.3).astype(np.float16)
+c = (rng.standard_normal((80, 80)) * 0.3).astype(np.float16)
+r = fnp.einsum('pq,qr,rs->ps', a, b, c, optimize=True)
+e = np.einsum('pq,qr,rs->ps', a, b, c, optimize=True)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL alt letters")
+# exclusions: optimize=False (fused loop), strategy string, small (below matmul gate)
+sm = (rng.standard_normal((8, 8)) * 0.3).astype(np.float16)
+for kwargs_case, name in (({'optimize': False}, "opt-false"), ({'optimize': 'greedy'}, "opt-greedy")):
+    r = fnp.einsum('ij,jk,kl->il', sm, sm, sm, **kwargs_case)
+    e = np.einsum('ij,jk,kl->il', sm, sm, sm, **kwargs_case)
+    if r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL exclusion {name}")
+r = fnp.einsum('ij,jk,kl->il', sm, sm, sm, optimize=True)
+e = np.einsum('ij,jk,kl->il', sm, sm, sm, optimize=True)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL below-gate")
+# non-chain 3-op spec must defer
+r = fnp.einsum('ij,ij,ij->ij', sm.astype(np.float64), sm.astype(np.float64), sm.astype(np.float64), optimize=True)
+e = np.einsum('ij,ij,ij->ij', sm.astype(np.float64), sm.astype(np.float64), sm.astype(np.float64), optimize=True)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL non-chain defer")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 3-op chain optimize=True must be bit-identical via plan + matmul pairs: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_einsum_reductions_bit_exact() -> Result<(), String> {
     // Single-operand f16 reductions: row-sum = ONE paired tree per row (no
     // chunking at any n - the naive 8192-fold hypothesis FAILED at n>8192);

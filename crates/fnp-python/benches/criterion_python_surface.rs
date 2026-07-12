@@ -14854,6 +14854,11 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                  red16 = (rng.standard_normal((2896, 2896)) * 0.3).astype(np.float16)\n\
                  red64 = rng.standard_normal((2896, 2896))\n\
                  red32 = rng.standard_normal((2896, 2896)).astype(np.float32)\n\
+                 ch_a = (rng.standard_normal((512, 512)) * 0.3).astype(np.float16)\n\
+                 ch_b = (rng.standard_normal((512, 512)) * 0.3).astype(np.float16)\n\
+                 ch_c = (rng.standard_normal((512, 512)) * 0.3).astype(np.float16)\n\
+                 fnp_es_ch = lambda a, b: fnp_mod.einsum('ij,jk,kl->il', a, b, ch_c, optimize=True)\n\
+                 np_es_ch = lambda a, b: np.einsum('ij,jk,kl->il', a, b, ch_c, optimize=True)\n\
                  fnp_es_rj = lambda a: fnp_mod.einsum('ij->j', a)\n\
                  np_es_rj = lambda a: np.einsum('ij->j', a)\n\
                  fnp_es_ri = lambda a: fnp_mod.einsum('ij->i', a)\n\
@@ -15200,6 +15205,39 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
             &fnp_es_bc,
             &bc64_full,
             &bc64_vec,
+        );
+
+        // f16 3-op chain 512^3 with optimize=True: plan + shipped matmul
+        // kernel per pair (c operand captured in the lambda closures).
+        let ch_a = namespace.get_item("ch_a").expect("ch_a present");
+        let ch_b = namespace.get_item("ch_b").expect("ch_b present");
+        let fnp_es_ch = namespace.get_item("fnp_es_ch").expect("fnp_es_ch present");
+        let np_es_ch = namespace.get_item("np_es_ch").expect("np_es_ch present");
+        let candidate_ch = fnp_es_ch
+            .call1((&ch_a, &ch_b))
+            .expect("fnp f16 chain parity");
+        let base_ch = np_es_ch.call1((&ch_a, &ch_b)).expect("numpy f16 chain parity");
+        assert_eq!(
+            candidate_ch
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_ch
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum chain3 byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_chain3_512_null_then_effect",
+            "f16_einsum_chain3_512",
+            &np_es_ch,
+            &fnp_es_ch,
+            &ch_a,
+            &ch_b,
         );
 
         // f16 reduction specs at 2896^2: col-sum (the 27.9ms strided rank)
