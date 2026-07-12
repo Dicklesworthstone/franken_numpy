@@ -51,6 +51,17 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+F16 UNIQUE SHIPPED (1a03f22d, bead r6g4j CLOSED): f16_unique_8m 218.927 [p10 133.8,
+p90 283.7] vs null 1.004 (CV 2.8%) - 20/20, 2.47 vs 546.0 ms (vmi1227854, sha
+2cafa99a...) - the program's LARGEST single-op win. O(n+64k) presence table over the
+float/ordered-int bijection; the recon's scale discriminator OVERTURNED the
+small-input "first occurrence" rule (numpy's kept +-0/NaN pattern is an INTROSORT
+PARTITION ARTIFACT - flood-majority at 1M) so ambiguous inputs defer rather than
+replay introsort. METHOD: bounded-domain dtypes (f16 = 65536 patterns) turn
+sort-class ops into table-class ops - the bool-sort/narrow-int precedent generalized
+to float16; siblings if profiled: f16 setops (isin/intersect/union), f16
+value_counts-style paths, sfgg3's parked searchsorted table.
+
 ISCLOSE PARALLELIZATION SHIPPED (363a51c2, bead ertjg CLOSED - premise corrected):
 the array-array f64/f32 zero-copy isclose paths EXISTED but ran SERIAL; the lever was
 the gated parallel branch (byte-identical per-element predicate, contract 16/16 x 3
