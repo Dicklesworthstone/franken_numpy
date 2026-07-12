@@ -51,6 +51,16 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+WIDE SWEEP #2 (profile-first, three levers filed): f16 unique 600ms (65536-bucket
+table, 20-50x potential, bead r6g4j - edge semantics ORDER-DEPENDENT: the kept zero's
+bit pattern = first input occurrence, nan payloads collapse to one with the selection
+rule unpinned, and hz2's f7qjf qsort bug may make numpy's own unique inconsistent
+there); f16 searchsorted 289ms (u16-order cumulative table, O(1)/query, bead sfgg3);
+f64 isclose/allclose array-b 180/192ms (elementwise predicate, bead ertjg). Also
+ranked but NOT YET cross-checked against fnp coverage: f64 gradient-2d 421ms,
+quantile/percentile 215-282ms, tile-2d 210ms, f16 var/std 92ms, round 90ms, clip
+76ms - triage those against shipped paths before filing. Artifacts wide_rank2*.
+
 F16 CUMSUM REJECT under its own predicate (6f3e2fcb shipped the attempt; this entry
 unwires it): the scan contract is PER-STEP f16 NARROWING (discriminator 6/6; the
 wide-f32-accumulator alternative mismatches 6/6) - parallel prefix is

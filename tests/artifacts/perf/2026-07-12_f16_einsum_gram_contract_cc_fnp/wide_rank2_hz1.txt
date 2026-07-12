@@ -1,0 +1,19 @@
+    599.51 ms  f16 unique 8M
+    421.53 ms  f64 gradient 2d 2896^2
+    288.83 ms  f16 searchsorted 1M into 1M
+    281.66 ms  f64 quantile9 8M
+    215.01 ms  f64 percentile-25/50/75 8M
+    210.31 ms  f64 tile 2896^2 x2
+    192.24 ms  f64 allclose 8M
+    179.67 ms  f64 isclose 8M
+     91.75 ms  f16 var 8M
+     91.75 ms  f16 std 8M
+     90.39 ms  f16 round 8M
+     75.91 ms  f16 clip 8M
+     72.76 ms  f64 histogram2d 1M
+     46.16 ms  f16 maximum.reduce 8M
+     43.40 ms  f16 nanargmax 8M
+     40.46 ms  f64 digitize 1M/100bins
+     29.44 ms  f16 diff 8M
+      7.71 ms  f16 prod 8M
+numpy=2.3.5
