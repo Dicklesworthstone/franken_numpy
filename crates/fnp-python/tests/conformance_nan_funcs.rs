@@ -1143,8 +1143,15 @@ r, e = fnp.percentile(mn, [25, 75], axis=1), np.percentile(mn, [25, 75], axis=1)
 if r.tobytes() != e.tobytes():
     verdicts.append("FAIL nan-lane bytes")
 r, e = fnp.percentile(m, [25, 75], axis=0), np.percentile(m, [25, 75], axis=0)
+if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL percentile-ax0 bytes")
+r, e = fnp.quantile(m, qs, axis=0), np.quantile(m, qs, axis=0)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL quantile9-ax0 bytes")
+mc = m.copy(); mc[123, 7] = np.nan
+r, e = fnp.percentile(mc, [25, 75], axis=0), np.percentile(mc, [25, 75], axis=0)
 if r.tobytes() != e.tobytes():
-    verdicts.append("FAIL axis0-delegate bytes")
+    verdicts.append("FAIL nan-column-ax0 bytes")
 r, e = fnp.quantile(m, qs, axis=1, keepdims=True), np.quantile(m, qs, axis=1, keepdims=True)
 if r.shape != e.shape or r.tobytes() != e.tobytes():
     verdicts.append("FAIL keepdims-delegate bytes")
@@ -1182,6 +1189,7 @@ for name, nf, ff in (
     ("percentile3_ax1", lambda: np.percentile(m, [25, 50, 75], axis=1), lambda: fnp.percentile(m, [25, 50, 75], axis=1)),
     ("quantile9_ax1", lambda: np.quantile(m, qs, axis=1), lambda: fnp.quantile(m, qs, axis=1)),
     ("nanpct3_ax1", lambda: np.nanpercentile(mn, [25, 50, 75], axis=1), lambda: fnp.nanpercentile(mn, [25, 50, 75], axis=1)),
+    ("percentile3_ax0", lambda: np.percentile(m, [25, 50, 75], axis=0), lambda: fnp.percentile(m, [25, 50, 75], axis=0)),
     ("percentile3", lambda: np.percentile(a, [25, 50, 75]), lambda: fnp.percentile(a, [25, 50, 75])),
     ("avg_weights", lambda: np.average(a, weights=w), lambda: fnp.average(a, weights=w)),
 ):

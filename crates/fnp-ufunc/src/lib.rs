@@ -17783,6 +17783,92 @@ impl UFuncArray {
         })
     }
 
+    /// Multi-q percentile/quantile over AXIS 0 of a 2-D array (fraction scale),
+    /// numpy layout [k, cols]. Column lanes are gathered in 8-wide blocks so each
+    /// row read touches one cache line (the naive per-column gather is a miss per
+    /// element); each gathered lane then runs the same sort + shared fraction
+    /// plan + numpy_quantile_lerp as the last-axis kernel - byte-exact by
+    /// construction (order stats value-exact, numpy's own _lerp). A NaN lane
+    /// yields NaN for every q (numpy propagates silently). numpy's delegate
+    /// partitions per call single-threaded (~272ms at 2896^2 x 3 qs on hz1).
+    pub fn fractions_axis0_2d(&self, qs: &[f64]) -> Result<Self, UFuncError> {
+        if self.shape.len() != 2 || qs.is_empty() {
+            return Err(UFuncError::Msg(
+                "fractions_axis0_2d: need ndim == 2 and at least one q".into(),
+            ));
+        }
+        for &q in qs {
+            if !(0.0..=1.0).contains(&q) {
+                return Err(UFuncError::Msg(format!(
+                    "quantile: q={q} must be in [0, 1]"
+                )));
+            }
+        }
+        let rows = self.shape[0];
+        let cols = self.shape[1];
+        if rows == 0 {
+            return Err(UFuncError::Msg(
+                "fractions_axis0_2d: empty reduction lane".into(),
+            ));
+        }
+        let k = qs.len();
+        let values_in = &self.values;
+        let lane_outputs = |buf: &mut Vec<f64>| -> Vec<f64> {
+            if buf.iter().any(|v| v.is_nan()) {
+                return vec![f64::NAN; k];
+            }
+            buf.sort_unstable_by(f64::total_cmp);
+            qs.iter()
+                .map(|&q| {
+                    let (lo, hi, frac) = percentile_linear_plan(rows, q);
+                    if lo == hi {
+                        buf[lo]
+                    } else {
+                        numpy_quantile_lerp(buf[lo], buf[hi], frac)
+                    }
+                })
+                .collect()
+        };
+        const COL_BLOCK: usize = 8;
+        let nblocks = cols.div_ceil(COL_BLOCK);
+        let compute_block = |b: usize| -> Vec<Vec<f64>> {
+            let c0 = b * COL_BLOCK;
+            let blk = COL_BLOCK.min(cols - c0);
+            let mut bufs: Vec<Vec<f64>> = (0..blk).map(|_| vec![0.0f64; rows]).collect();
+            for r in 0..rows {
+                let base = r * cols + c0;
+                for (j, buf) in bufs.iter_mut().enumerate() {
+                    buf[r] = values_in[base + j];
+                }
+            }
+            bufs.iter_mut().map(&lane_outputs).collect()
+        };
+        const FRACTIONS_AXIS_PARALLEL_MIN: usize = 1 << 14;
+        let per_block: Vec<Vec<Vec<f64>>> = if nblocks >= 2
+            && self.values.len() >= FRACTIONS_AXIS_PARALLEL_MIN
+            && rayon::current_num_threads() >= 2
+        {
+            (0..nblocks).into_par_iter().map(compute_block).collect()
+        } else {
+            (0..nblocks).map(compute_block).collect()
+        };
+        let mut values = vec![0.0f64; k * cols];
+        for (b, block) in per_block.iter().enumerate() {
+            for (j, lane_vals) in block.iter().enumerate() {
+                let c = b * COL_BLOCK + j;
+                for (qi, &v) in lane_vals.iter().enumerate() {
+                    values[qi * cols + c] = v;
+                }
+            }
+        }
+        Ok(Self {
+            shape: vec![k, cols],
+            values,
+            dtype: DType::F64,
+            integer_sidecar: None,
+        })
+    }
+
     /// Fraction-scale multi-q core (same round-trip fix; quantiles enter directly).
     fn fractions_axis_none(&self, qs: &[f64]) -> Result<Self, UFuncError> {
         let n = self.values.len();

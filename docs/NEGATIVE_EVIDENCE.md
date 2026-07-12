@@ -4,6 +4,18 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): 2-D axis-0 multi-q percentile/quantile native - 3.46x (47.1 vs 162.8ms at 2896^2 x 3 qs), byte-exact; fourth quantile-lane lever of the session
+
+`cc_fnp`. Closes the non-last-axis multi-q delegate for the 2-D axis=0 case:
+fractions_axis0_2d gathers column lanes in 8-WIDE BLOCKS (each row read is one
+cache line vs a miss-per-element naive column gather), then runs the identical
+sort + shared fraction plan + numpy_quantile_lerp - byte-exact by construction,
+fourth consecutive lever built on the 19jv4 parity machinery. Probe row
+percentile3_ax0 3.456x tobytes-equal; quantile9-ax0 + NaN-column propagation
+parity green; every earlier row unchanged (quantile9_ax1 3.97x, nanpct3_ax1
+4.54x this run). SCOPE: ndim==2 axis 0/-2 (N-D non-last axes still delegate -
+moveaxis generalization unprofiled), linear, no keepdims, f64.
+
 ## 2026-07-12 - WIN (SHIP): nan multi-q percentile/quantile native (flat + LAST axis) - nanpercentile3 ax1 4.19x (64.1 vs 268.7ms), byte-exact; the nan-family array-q delegate is closed
 
 `cc_fnp`. Third lever in the quantile-lane chain (9d5d83ac parity fix -> 7f4a34ad
