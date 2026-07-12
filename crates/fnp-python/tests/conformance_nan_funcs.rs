@@ -1209,6 +1209,17 @@ if r.shape != e.shape or r.tobytes() != e.tobytes():
 r, e = fnp.percentile(a, [25, 50, 75], keepdims=True), np.percentile(a, [25, 50, 75], keepdims=True)
 if r.shape != e.shape or r.tobytes() != e.tobytes():
     verdicts.append("FAIL plain-keepdims-flat-1d bytes")
+# method='midpoint' native unlock: numpy _lerp(a,b,0.5), not (a+b)/2
+for tag, call_f, call_n in (
+    ("mid-flat", lambda: fnp.percentile(a, 37.3, method="midpoint"), lambda: np.percentile(a, 37.3, method="midpoint")),
+    ("mid-ax1", lambda: fnp.percentile(m, 50, axis=1, method="midpoint"), lambda: np.percentile(m, 50, axis=1, method="midpoint")),
+    ("mid-ax0", lambda: fnp.quantile(m, 0.66, axis=0, method="midpoint"), lambda: np.quantile(m, 0.66, axis=0, method="midpoint")),
+    ("mid-exact-idx", lambda: fnp.percentile(a[:100001], 50, method="midpoint"), lambda: np.percentile(a[:100001], 50, method="midpoint")),
+):
+    rf, rn = call_f(), call_n()
+    rf, rn = np.asarray(rf), np.asarray(rn)
+    if rf.shape != rn.shape or rf.tobytes() != rn.tobytes():
+        verdicts.append(f"FAIL {tag} bytes")
 def best(fn, reps=5):
     fn(); best_s = float("inf")
     for _ in range(reps):
@@ -1223,6 +1234,7 @@ for name, nf, ff in (
     ("nanpct3_ax0", lambda: np.nanpercentile(mn, [25, 50, 75], axis=0), lambda: fnp.nanpercentile(mn, [25, 50, 75], axis=0)),
     ("quantile9_ax1_kd", lambda: np.quantile(m, qs, axis=1, keepdims=True), lambda: fnp.quantile(m, qs, axis=1, keepdims=True)),
     ("quantile9_flat_kd", lambda: np.quantile(m, qs, keepdims=True), lambda: fnp.quantile(m, qs, keepdims=True)),
+    ("pct50_ax1_midpoint", lambda: np.percentile(m, 50, axis=1, method="midpoint"), lambda: fnp.percentile(m, 50, axis=1, method="midpoint")),
     ("percentile3", lambda: np.percentile(a, [25, 50, 75]), lambda: fnp.percentile(a, [25, 50, 75])),
     ("avg_weights", lambda: np.average(a, weights=w), lambda: fnp.average(a, weights=w)),
 ):

@@ -29447,7 +29447,9 @@ fn interpolate_percentile_method(sorted: &[f64], fraction: f64, method: Quantile
                 sorted[hi]
             }
         }
-        QuantileInterp::Midpoint => (sorted[lo] + sorted[hi]) / 2.0,
+        // numpy 'midpoint' is _lerp(a, b, 0.5) = b - (b-a)*0.5, NOT (a+b)/2
+        // (pinned 2025/2025 cases vs 2.4.3; midpoint recon 2026-07-12).
+        QuantileInterp::Midpoint => numpy_quantile_lerp(sorted[lo], sorted[hi], 0.5),
     }
 }
 
@@ -29491,7 +29493,7 @@ fn select_percentile_method(data: &mut [f64], fraction: f64, method: QuantileInt
                 v_hi
             }
         }
-        QuantileInterp::Midpoint => (v_lo + v_hi) / 2.0,
+        QuantileInterp::Midpoint => numpy_quantile_lerp(v_lo, v_hi, 0.5),
     }
 }
 
@@ -29735,7 +29737,7 @@ fn par_select_percentile(data: &[f64], fraction: f64, method: QuantileInterp) ->
                 v_hi
             }
         }
-        QuantileInterp::Midpoint => (v_lo + v_hi) / 2.0,
+        QuantileInterp::Midpoint => numpy_quantile_lerp(v_lo, v_hi, 0.5),
     }
 }
 

@@ -4,6 +4,19 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): method='midpoint' native unlock - 1.68x (59.7 vs 100.3ms, pct50 ax1) - the old byte-blocker was the (a+b)/2 arm; numpy midpoint is _lerp(a,b,0.5)
+
+`cc_fnp` / FuchsiaStream. The ledger's standing midpoint delegate reason
+("native axis path isn't byte-exact with numpy there") is RESOLVED by the same
+discovery that fixed 19jv4: numpy's midpoint = _lerp(a, b, 0.5) = b - (b-a)*0.5
+(the t >= 0.5 branch), NOT (a+b)/2. Contract pinned 2025/2025 cases x 5 sizes vs
+2.4.3; all three kernel arms (serial select, par select, test oracle) switched to
+numpy_quantile_lerp(v_lo, v_hi, 0.5); percentile()+quantile() now map
+method='midpoint' -> native (statistical H&F methods still delegate). Gate row
+pct50_ax1_midpoint 1.680x tobytes-equal; midpoint batteries flat/ax1/ax0/
+exact-index green; 33 fnp-ufunc unit tests green. Bonus same-run confirmation:
+quantile9_flat_kd 1.985x (tick-12 unlock replicates on a second worker/run).
+
 ## 2026-07-12 - REPLICATION (WIN): flat plain multi-q keepdims re-unlock clears the retry floor at 1.845x in an optimized remote binary
 
 `CalmGate`. Independent post-land replication of `d4c37daa` pinned the same
