@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - REJECT (unwired same-tick): flat plain multi-q keepdims native unlock measured 0.852x - the wiring was reverted under the cumsum precedent; parity batteries kept as delegate asserts
+
+`cc_fnp`. The unlock (native fractions_axis_none + reshape) parity-passed
+(bytes+shape green for 2-D and 1-D flat-kd) but the AB row quantile9_flat_kd
+read 226.8ms vs numpy 193.2ms = 0.852x LOSS - and 227ms is FAR above the same
+run's flat non-kd native row (82.0ms, 2.25x WIN, 1-D input), so the branch
+likely never engaged for the 2-D input and the time is delegate + wasted
+whole-array extract (the extract-tax class). Gates restored; batteries + AB row
+kept in the probe (they assert delegate parity and document the cost). RETRY
+PREDICATE: trace why the 2-D flat array-q form misses the branch (the flat
+array-q block sits AFTER the scalar-q extract in both fns - a 2-D input may
+fall back earlier); if the route is fixed AND a quiet-worker AB clears 1.2x,
+re-unlock. Other keepdims forms (ax0/ax1, nan flat/ax) are UNAFFECTED - they
+measured 3.78x (0474d008) and stay native.
+
 ## 2026-07-12 - WIN (SHIP): keepdims multi-q unlocked across all four quantile entry points - 3.78x (53.4 vs 202.0ms, quantile9 ax1 keepdims); SIXTH lane lever, pure wiring
 
 `cc_fnp`. keepdims=True previously delegated the ENTIRE multi-q call to numpy
