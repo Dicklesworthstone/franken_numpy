@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP, sweep #4 row 1): f64 ARRAY-bounds clip 3-operand parallel - 2.52x (4.4 vs 11.0ms worker; hz1 basis 192.7ms @8M) - byte-exact with ZERO hazard defers
+
+`cc_fnp` / FuchsiaStream. Sweep #4 opened a fresh op family: numpy clip with
+ARRAY bounds runs the 3-operand ufunc single-threaded and fnp had only
+scalar-bound arms (f64/f32/f16/int). The kernel replicates npy_maximum/
+npy_minimum select rules VERBATIM per element ((x >= y || isnan(x)) ? x : y,
+then the min form) - this preserves NaN payloads and signed-zero choices by
+copying operands, so byte-exactness needs NO hazard defers at all (pinned 500k
+specials-injected cases incl NaN/inf/-0 in all three operands and lo > hi;
+numpy applies min LAST so hi wins inversions). Gate row 2.517x tobytes-equal;
+batteries: specials, inverted bounds, 2-D, below-gate, scalar-bound regression,
+broadcast-shape delegate - all green. SWEEP #4 TRIAGE (this probe round):
+sort/argsort ax0 f64 COVERED (try_zerocopy_f64_sort_axis0), copysign/ldexp/
+frexp/spacing all have native fns (89/38/42/46ms numpy bases - verify arms
+before assuming, but fns exist). Broadcast-bounds clip (row-vector lo/hi) is
+the unfiled sibling.
+
 ## 2026-07-12 - NO-SHIP: single-pass C-contiguity predicate is only 1.14-1.25x at 1-2ns absolute
 
 `CalmGate`, `fnp-ndarray`. Negative-ledger, Git-history, bead, and Agent Mail

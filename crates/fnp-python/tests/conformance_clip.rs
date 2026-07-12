@@ -408,3 +408,68 @@ print(np.array_equal(fnp_result, np_result) and np.all(fnp_result == 5.0))
     );
     Ok(())
 }
+
+#[test]
+fn clip_array_bounds_f64_zerocopy_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // 3-operand array-bounds clip: verbatim npy_maximum/minimum select rules,
+    // byte-exact with no hazard defers (NaN payloads and signed zeros ride the
+    // operand-copy semantics). Batteries: random over the 1<<20 gate, specials
+    // injected into ALL THREE operands (NaN/inf/-0.0), lo > hi inversion, 2-D,
+    // below-gate, scalar-bounds regression, broadcast-shape delegate. Prints a
+    // coarse interleaved best-of-7 A/B for the ship record.
+    let script = fnp_script(
+        r#"
+import time
+verdicts = []
+rng = np.random.default_rng(20260713)
+n = 1 << 21
+a = rng.standard_normal(n)
+lo = rng.standard_normal(n) - 1.0
+hi = rng.standard_normal(n) + 1.0
+for arr in (a, lo, hi):
+    idx = rng.integers(0, n, 6000)
+    arr[idx[:2000]] = np.nan
+    arr[idx[2000:3000]] = np.inf
+    arr[idx[3000:4000]] = -np.inf
+    arr[idx[4000:]] = -0.0
+r, e = fnp.clip(a, lo, hi), np.clip(a, lo, hi)
+if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL specials bytes")
+inv_lo, inv_hi = hi.copy(), lo.copy()  # lo > hi in ~half the lanes
+if fnp.clip(a, inv_lo, inv_hi).tobytes() != np.clip(a, inv_lo, inv_hi).tobytes():
+    verdicts.append("FAIL inverted-bounds bytes")
+m2, l2, h2 = a[: 1 << 20].reshape(1024, 1024), lo[: 1 << 20].reshape(1024, 1024), hi[: 1 << 20].reshape(1024, 1024)
+r, e = fnp.clip(m2, l2, h2), np.clip(m2, l2, h2)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 2-D bytes")
+if fnp.clip(a[:4096], lo[:4096], hi[:4096]).tobytes() != np.clip(a[:4096], lo[:4096], hi[:4096]).tobytes():
+    verdicts.append("FAIL below-gate bytes")
+if fnp.clip(a, -0.5, 0.5).tobytes() != np.clip(a, -0.5, 0.5).tobytes():
+    verdicts.append("FAIL scalar-bounds regression bytes")
+if fnp.clip(m2, l2[0], h2).tobytes() != np.clip(m2, l2[0], h2).tobytes():
+    verdicts.append("FAIL broadcast-delegate bytes")
+def best(fn, reps=7):
+    fn(); best_s = float("inf")
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); best_s = min(best_s, time.perf_counter() - t0)
+    return best_s * 1000
+a8 = rng.standard_normal(8_000_000)
+l8 = rng.standard_normal(8_000_000) - 1.0
+h8 = rng.standard_normal(8_000_000) + 1.0
+tn = best(lambda: np.clip(a8, l8, h8))
+tf = best(lambda: fnp.clip(a8, l8, h8))
+print(f"CLIP_ARRAYS_COARSE_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces CLIP_ARRAYS_COARSE_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "f64 array-bounds clip must be bit-identical incl NaN-payload/signed-zero rules: {result}"
+    );
+    Ok(())
+}
