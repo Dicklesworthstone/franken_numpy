@@ -1331,6 +1331,17 @@ for dt in (np.float64, np.float16):
     sm_v = (rng.standard_normal(10)).astype(dt)
     if fnp.einsum('ij,j->ij', sm_f, sm_v).tobytes() != np.einsum('ij,j->ij', sm_f, sm_v).tobytes():
         verdicts.append(f"FAIL bcast {dt.__name__} below-gate")
+# 3-D broadcast forms incl the middle axis, native at gate size
+f3 = (rng.standard_normal((64, 128, 256))).astype(np.float64)
+v_i = (rng.standard_normal(64)).astype(np.float64)
+v_j = (rng.standard_normal(128)).astype(np.float64)
+v_k = (rng.standard_normal(256)).astype(np.float64)
+f3[0, 0, 0] = -0.0; v_k[0] = 0.0
+for spec, ops in (('ijk,k->ijk', (f3, v_k)), ('ijk,i->ijk', (f3, v_i)),
+                  ('ijk,j->ijk', (f3, v_j)), ('j,ijk->ijk', (v_j, f3))):
+    rb = fnp.einsum(spec, *ops); eb = np.einsum(spec, *ops)
+    if rb.dtype != eb.dtype or rb.tobytes() != eb.tobytes():
+        verdicts.append(f"FAIL bcast3d {spec}")
 # transposed broadcast form not captured (out-of-order labels)
 fb64 = (rng.standard_normal((1200, 1000))).astype(np.float64)
 cv64 = (rng.standard_normal(1200)).astype(np.float64)
