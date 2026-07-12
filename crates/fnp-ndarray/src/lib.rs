@@ -163,10 +163,38 @@ pub fn broadcast_shape(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>, Shape
 }
 
 pub fn broadcast_shapes(shapes: &[&[usize]]) -> Result<Vec<usize>, ShapeError> {
-    let mut acc = Vec::new();
-    for shape in shapes {
-        acc = broadcast_shape(&acc, shape)?;
+    let max_rank = shapes.iter().map(|shape| shape.len()).max().unwrap_or(0);
+    let mut acc = vec![1; max_rank];
+    let mut current_rank = 0;
+
+    for &shape in shapes {
+        let acc_start = max_rank - current_rank;
+        let shape_start = max_rank - shape.len();
+        let merged_start = acc_start.min(shape_start);
+
+        for axis in merged_start..max_rank {
+            let lhs = acc[axis];
+            let rhs = if axis < shape_start {
+                1
+            } else {
+                shape[axis - shape_start]
+            };
+            if lhs != rhs && lhs != 1 && rhs != 1 {
+                return Err(ShapeError::IncompatibleBroadcast {
+                    lhs: acc[acc_start..].to_vec(),
+                    rhs: shape.to_vec(),
+                });
+            }
+        }
+
+        for axis in merged_start..max_rank {
+            if acc[axis] == 1 && axis >= shape_start {
+                acc[axis] = shape[axis - shape_start];
+            }
+        }
+        current_rank = current_rank.max(shape.len());
     }
+
     Ok(acc)
 }
 
@@ -1468,6 +1496,34 @@ mod tests {
     fn broadcast_shapes_empty_list() {
         let r = broadcast_shapes(&[]).unwrap();
         assert!(r.is_empty());
+    }
+
+    #[test]
+    fn broadcast_shapes_in_place_merge_matches_pairwise_fold() {
+        fn pairwise_fold(shapes: &[&[usize]]) -> Result<Vec<usize>, ShapeError> {
+            let mut acc = Vec::new();
+            for &shape in shapes {
+                acc = broadcast_shape(&acc, shape)?;
+            }
+            Ok(acc)
+        }
+
+        let shapes: &[&[usize]] = &[&[], &[0], &[1], &[2], &[0, 3], &[1, 3], &[2, 1], &[4, 2, 5]];
+
+        assert_eq!(broadcast_shapes(&[]), pairwise_fold(&[]));
+        for &first in shapes {
+            assert_eq!(broadcast_shapes(&[first]), pairwise_fold(&[first]));
+            for &second in shapes {
+                for &third in shapes {
+                    let batch = [first, second, third];
+                    assert_eq!(
+                        broadcast_shapes(&batch),
+                        pairwise_fold(&batch),
+                        "batch={batch:?}"
+                    );
+                }
+            }
+        }
     }
 
     // ── reshape edge cases ────────

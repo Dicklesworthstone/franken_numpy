@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): single-allocation `broadcast_shapes` accumulator - 1.16-1.73x
+
+`CalmGate`, `fnp-ndarray`. Negative-ledger and live-bead searches found no prior
+attempt or retry boundary for the multi-input shape constructor. The old fold
+called `broadcast_shape` once per input and replaced the accumulator with a new
+allocation every time. The replacement determines the maximum rank up front,
+allocates one identity-filled accumulator, validates each input against the
+current logical fold result, and merges compatible trailing axes in place.
+Late failures retain the exact prior `IncompatibleBroadcast { lhs: current
+accumulator, rhs: current shape }` payload rather than exposing pre-sized
+leading identity axes.
+
+Pinned same-worker `release-perf` Criterion runs on `vmi1156319` used the
+existing multi-input group. `2_shapes` moved from 59ns to 51ns (**1.16x**),
+`4_shapes` from 112ns to 66ns (**1.70x**), and `8_shapes` from 237ns to 137ns
+(**1.73x**). All 226 `fnp-ndarray` unit, NumPy-conformance, golden-layout,
+metamorphic, and strided-layout tests passed remotely. A 512-combination
+three-shape grid plus empty and single-input cases proves the in-place result
+and exact error payload equal the former pairwise fold across scalars, zeros,
+singletons, incompatible axes, and late rank growth.
+
 ## 2026-07-12 - CORRECTION (regression window 9d5d83ac..here) + WIN ROW: nanmedian AXIS diverged from numpy after the _lerp fix - MEDIAN is mean-of-middles, NOT quantile(0.5); fixed via select_median, 12.16x row recorded
 
 `cc_fnp` / FuchsiaStream. FOUND BY VEIN-FOLLOWING, NOT BY A USER REPORT: while
