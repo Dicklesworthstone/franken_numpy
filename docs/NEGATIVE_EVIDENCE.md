@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (kernel-engaged, coarse-AB): f64 floor_divide ufunc arm 4.35x (43.9 vs 191.1ms at 8M) - the 54b905d6 pending-gate predicate is PAID
+
+`cc_fnp`. One foreground run on vmi1149989: conformance batteries green (random/
+near-multiple/extreme grids byte-exact, hazard classes inf-a/zero-b/nan-a defer
+with warning-list equality, 2-D, below-gate) and the in-test interleaved
+best-of-7 A/B reads numpy 191.056ms / fnp 43.907ms = 4.351x with the PyUFunc arm
+wired. ENGAGEMENT PROOF: the identical test read 0.968x before the arm was wired
+into PyUFunc::__call__ (the pyfunction route is dead code) - the flip to 4.35x is
+the discriminator. Coarse-AB basis, not the 20-observation median gate; the
+f64_floor_divide median-gate row can join the next batch bench, but the >1.2x
+unwire predicate is settled. SIBLING CLOSED: f64 remainder was checked and is
+ALREADY COVERED by the existing try_zerocopy_f64_binary Remainder arm (line
+~344) - not a lever. Also verified covered this tick: modf (f64/f32/f16),
+nextafter (f64/f32/f16), hypot. Open non-f16 costs remaining: logaddexp 243ms
+(needs the exp/log ISA gate - log1p diverges on AVX-512), percentile/median
+axis=1 (219/193ms, per-row selection).
+
 ## 2026-07-12 - WIN (SHIP): f16 around/round(decimals!=0) per-step-narrow chain - 3.60x (31.1 vs 139.0ms at 8M, d=2) + f64 floor_divide ufunc arm FILED (gate pending)
 
 `cc_fnp` (430b703e around, 54b905d6 floor_divide). AROUND: numpy PyArray_Round's
