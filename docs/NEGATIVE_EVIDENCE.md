@@ -51,6 +51,18 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+BATCHED OUTPUT-ORDER CLOSURE ADDENDUM (same session, ec098fc3): 'bij,blj->bli' and
+'bji,bjl->bli' = operand-swap arms of the batched transposed/gram kernels. The
+coalescing/chunk discriminators were RE-RUN per swapped layout per the method rule
+(18/18 x numpy 2.2.4/2.4.3/2.4.6) - the swapped transposed form keeps the chunk-fold
+structure, the swapped gram stays chunk-immune. Conformance GREEN 8/8. MEASURED
+(vmi1227854, sha 94b1c92f..., 20 obs each): batched_ts 17.389 (null 1.005, 26.8 vs
+464.9 ms) and batched_gs 7.781 (null 0.987, 129.5 vs 1004.4 ms) - each replicating
+its unswapped sibling (17.15x / 7.77x) within noise, the cleanest route-engagement
+proof possible. THE f16 EINSUM FAMILY NOW STANDS AT ELEVEN NATIVE SPECS across four
+contract classes, closed over operand order, output order, batching, and the 1-D
+buffered dot; every kernel source-pinned, conformance-locked, median-gate measured.
+
 BATCHED GRAM ADDENDUM (same session, a4b0e7d3): 'bji,bjl->bil' = the 2-op gram
 per-step muladd-row chain per batch slice, CHUNK-IMMUNE per the method rule's
 discriminators (16/16 on numpy 2.2.4/2.4.3/2.4.6 incl k=8193/9000, B=1 vs B>1,
