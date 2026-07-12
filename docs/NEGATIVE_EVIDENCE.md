@@ -51,6 +51,24 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+BATCHED TRANSPOSED ADDENDUM (same session, 57a84783): 'bij,blj->bil' contract is
+COALESCING-DEPENDENT - the vein's key recon. B==1/m==1/n==1 coalesce to the ndim-3
+unbuffered loop = the 2-op single-tree contract; B>1 with m,n>1 stays ndim-4 ->
+BUFFERED -> every element folds per-8192-chunk blocked-4 wide f32 trees through an f16
+store/reload. Single-tree and unconditional-chunk hypotheses each FAILED (2/10, 5/14 -
+the failures LOCALIZED the boundary) before the model held 16/16 on numpy
+2.2.4/2.4.3/2.4.6. Explains the batched matmul's immunity retroactively: per-step
+chains narrow every step, so chunking is invisible; wide trees are chunk-sensitive.
+Kernel defers coalescing cases to numpy; chunk fold degenerates to single tree at
+k<=8192. Conformance locks BOTH the chunk contract and the coalescing boundary.
+MEASURED (vmi1227854, sha 750ca917..., 20 obs): f16_einsum_batched_t_8x256 effect
+17.150 [p10 15.79, p90 18.51] vs null 0.969 - 20/20, 28.1 vs 476.5 ms, CVs 5.6-7.4%.
+METHOD RULE (generalizes): for ndim>=4 einsum specs, ALWAYS test chunk-fold vs
+single-tree hypotheses at k straddling 8192 AND at B=1-vs-B>1 before trusting any
+2-op contract transfer; wide-accumulate contracts are the chunk-sensitive class.
+REMAINING UNFILED: batched gram ('bji,bjl->bil' - per-step class, likely
+chunk-immune like batched matmul), batched output-swapped forms.
+
 BATCHED SPEC ADDENDUM (same session, 43d9d1b8): 'bij,bjk->bik' = the plain per-step
 chain PER BATCH SLICE with no buffering chunk at any k (verified BEFORE implementing
 on numpy 2.2.4/2.4.3/2.4.6 incl k=8192/8193/9000 discriminators - the dot1d
