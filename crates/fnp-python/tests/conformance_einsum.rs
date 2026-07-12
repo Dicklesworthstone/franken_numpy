@@ -887,3 +887,66 @@ print(bool(ok))
     );
     Ok(())
 }
+
+#[test]
+fn f16_einsum_transposed_contract_bit_exact() -> Result<(), String> {
+    // np.einsum's f16 TRANSPOSED matmul spec ('ij,lj->il', the a@b.T idiom) is a
+    // DIFFERENT contract class from the per-step chain above: with the contracted
+    // index last-axis-contiguous on both operands the unbuffered loop dispatches
+    // half_sum_of_products_contig_contig_outstride0_two, which for half is ALWAYS
+    // the scalar C fallback (NPYV_CHK=0): f32 accum over blocks of 4 with the
+    // left-associated tree accum += ((ab0+ab1)+ab2)+ab3, one-at-a-time tail, one
+    // final narrow f16(f32(0) + accum). Pinned by source read of
+    // einsum_sumprod.c.src (ledger 2026-07-11) after black-box guesses failed at
+    // 2-3/400. This test LOCKS the contract on the fleet's numpy version: if a
+    // future numpy changes the loop (e.g. gains a half SIMD path), fail loudly.
+    let script = fnp_script(
+        r#"
+ok = True
+rng = np.random.default_rng(20260711)
+# (m, k, n): a is (m,k), b is (n,k), out (m,n). Covers MR-row tails (m%4),
+# k%4 tails 1/2/3, k<4, the k=7 discriminating case, and long-k chains.
+for (m, k, n) in ((128, 96, 144), (512, 512, 512), (2, 400, 400), (514, 40, 40), (65, 130, 257), (129, 7, 300), (129, 517, 5), (61, 2, 3000), (77, 2001, 2)):
+    a = (rng.standard_normal((m, k)) * 0.3).astype(np.float16)
+    b = (rng.standard_normal((n, k)) * 0.3).astype(np.float16)
+    r = fnp.einsum('ij,lj->il', a, b); e = np.einsum('ij,lj->il', a, b)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape
+    ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
+# mixed scales stress rounding of the block-tree adds
+a = (rng.standard_normal((96, 130)) * rng.choice([0.01, 1.0, 100.0], (96, 1))).astype(np.float16)
+b = (rng.standard_normal((80, 130)) * rng.choice([0.01, 1.0, 100.0], (80, 1))).astype(np.float16)
+r = fnp.einsum('ij,lj->il', a, b); e = np.einsum('ij,lj->il', a, b)
+ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
+# inf/nan propagation + f16 overflow-to-inf through the wide accumulator
+a = (rng.standard_normal((128, 128)) * 0.3).astype(np.float16)
+b = (rng.standard_normal((128, 128)) * 0.3).astype(np.float16)
+a[0, 0] = np.float16(np.inf); b[1, 0] = np.float16(np.nan); a[3, 5] = np.float16(-np.inf)
+a[7, :] = np.float16(60000); b[9, :] = np.float16(60000)
+r = fnp.einsum('ij,lj->il', a, b); e = np.einsum('ij,lj->il', a, b)
+ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
+# alternate letters, same canonical form
+r = fnp.einsum('ab,cb->ac', a, b); e = np.einsum('ab,cb->ac', a, b)
+ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
+# below-gate stays on the numpy path (trivially byte-equal)
+sm_a = (rng.standard_normal((8, 8)) * 0.3).astype(np.float16)
+sm_b = (rng.standard_normal((8, 8)) * 0.3).astype(np.float16)
+ok = ok and fnp.einsum('ij,lj->il', sm_a, sm_b).tobytes() == np.einsum('ij,lj->il', sm_a, sm_b).tobytes()
+# non-contiguous operand defers to numpy (buffered path, not our contract)
+at = np.asfortranarray(a)
+r = fnp.einsum('ij,lj->il', at, b); e = np.einsum('ij,lj->il', at, b)
+ok = ok and bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all())
+# adjacent specs must NOT be captured: transposed-output and a.T@b forms
+ok = ok and fnp.einsum('ij,lj->li', a, b).tobytes() == np.einsum('ij,lj->li', a, b).tobytes()
+ok = ok and fnp.einsum('ji,jl->il', a, b).tobytes() == np.einsum('ji,jl->il', a, b).tobytes()
+print(bool(ok))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 einsum transposed contraction must be bit-identical to numpy's blocked-4 wide contract: {result}"
+    );
+    Ok(())
+}

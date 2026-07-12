@@ -4,6 +4,63 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): f16 einsum TRANSPOSED spec ('ij,lj->il', a@b.T idiom) via the source-pinned blocked-4 wide contract - 1.03 parity -> 20.5x vs numpy (fnp self 238.6 -> 12.4 ms at 512^3), byte-identical on fleet numpy; the source-read predicate PAID
+
+`cc_fnp` (linalg lane), bead deadlock-audit-xnck7 - the follow-through of the recon below,
+which had exhausted black-box contract guesses at 2-3/400 and filed a source-read predicate.
+
+CONTRACT CRACK (the actual lever-enabler): reading legacy_numpy_code/.../einsum_sumprod.c.src
+half variants shows (1) for half, NPYV_CHK=0 - einsum half kernels NEVER take a SIMD path,
+every lane-scheme guess was chasing a path that does not exist; (2) 'ij,lj->il' with both
+operands C-contiguous dispatches (via unbuffered_loop_nop2_ndim3, j innermost, count=FULL k,
+no buffer chunking) into half_sum_of_products_contig_contig_outstride0_two's scalar
+fallback: f32 accum = 0; blocks of 4 over j add the LEFT-ASSOCIATED tree
+accum += ((ab0+ab1)+ab2)+ab3 with ab = f32(a)*f32(b); k%4 tail one product at a time;
+single final narrow out = f16(f32(0) + accum). The block-tree is what pure f32-seq missed.
+KEY INVARIANT: every f16->f32 decode and f16*f16 product is EXACT in f32, so pre-decoding
+operands to f32 scratch and compiler FMA contraction CANNOT perturb the chain - only the
+written addition order matters. Python re-implementation vs local numpy 2.4.3: 400/400 on
+the k=9..2000 sweep that all black-box guesses failed, byte-identical whole matrices incl.
+k%4 tails, k<4, k=7 discriminator, mixed scales, inf/nan (artifact dir has the script).
+
+ONE LEVER: try_native_f16_einsum_matmul_transposed - explicit "AB,CB->AC" 2-op specs
+(distinct letters), both operands exact f16 C-contiguous 2-D, work >= 1<<18, kwargs empty,
+wired beside the per-step sibling in the einsum Defer arm. Whole-B f32 predecode (exact,
+m/4-fold fewer decodes) + MR=4 a-row blocks = 4 independent per-element chains interleaved
+for ILP, each following the pinned blocked-4 order; parallel across row blocks. numpy runs
+the same semantics single-threaded scalar.
+
+MEASURED (ONE binary / ONE process / ONE rch invocation per run, ABBA interleaved,
+black_box, numpy A/A null, pre-timing byte parity assert, RAYON_NUM_THREADS=4, BOTH runs on
+the SAME worker vmi1149989; runner-printed host+sha):
+
+| row | baseline effect | candidate effect [p10,p90] | candidate null | fnp ms base -> cand |
+|---|---:|---|---:|---|
+| f16_einsum_transposed_512 | 1.028 (null 0.997) | **20.46** [14.53, 25.23], 20/20 above 1 | 1.060 [0.90, 1.20] | 238.6 -> 12.4 (19.2x self) |
+
+Median gate: decisive (p10 14.53 vs null p90 1.20; null-corrected 19.31). Candidate CV
+29.6% is parallel-kernel-on-shared-worker spread, not verdict-relevant at this margin.
+NOTE: transposed numpy baseline (~240 ms at 512^3) is ~3x faster than the per-step plain
+spec (760 ms) - the wide-accumulate kernel has no per-step store/reload; our kernel wins
+20x anyway because the chain parallelizes across output elements.
+
+CORRECTNESS: conformance_einsum::f16_einsum_transposed_contract_bit_exact GREEN on fleet
+numpy (vmi1149989, run inside the same rch lane): byte-identity across 9 (m,k,n) shapes
+incl. MR tails/k%4 tails/k<4/k=7/long-k, mixed scales, inf/nan + overflow-to-inf, alternate
+letters, below-gate, non-contiguous defer, and adjacent specs NOT captured ('ij,lj->li',
+'ji,jl->il'). Test LOCKS the contract (a future numpy half-SIMD path fails loudly). numpy
+einsum raises NO RuntimeWarnings on f16 overflow (verified empirically + no floatstatus
+handling in einsum.cpp) - parity is byte-only, nothing to mirror.
+
+SIBLING LEADS (unfiled, profile first): 'ji,jl->il' (a.T@b) = DIFFERENT kernel class
+(sum_of_products_stride0_contig_outcontig muladd rows - per-element chain does NOT apply);
+1-D 'j,j->' at k>8192 takes the BUFFERED path = per-8192-chunk f16 store/reload semantics
+(count-capped, einsum.cpp skips GROWINNER) - any future 1-D f16 dot kernel must reproduce
+the chunking. SURFACED: fnp-python lib UNIT-test target broken on main (3 stale where_py
+call sites, deadlock-audit-w6rqd) - integration/bench targets unaffected.
+PROVENANCE: tests/artifacts/perf/2026-07-11_f16_einsum_transposed_contract_cc_fnp/
+(baseline_bench_run1, candidate_bench_run2, conformance_candidate, verify script).
+
 ## 2026-07-11 - RECON (SURFACE): f16 einsum TRANSPOSED specs use a DIFFERENT contract class - wide-accumulate-once, but no black-box variant matches exactly; source-read predicate filed (deadlock-audit-transposed lead)
 
 `cc_fnp` (linalg lane), follow-up sibling of the shipped per-step kernel below. RECON

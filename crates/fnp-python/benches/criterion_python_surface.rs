@@ -14693,7 +14693,9 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                  es_a = (rng.standard_normal((512, 512)) * 0.3).astype(np.float16)\n\
                  es_b = (rng.standard_normal((512, 512)) * 0.3).astype(np.float16)\n\
                  fnp_es = lambda a, b: fnp_mod.einsum('ij,jk->ik', a, b)\n\
-                 np_es = lambda a, b: np.einsum('ij,jk->ik', a, b)\n",
+                 np_es = lambda a, b: np.einsum('ij,jk->ik', a, b)\n\
+                 fnp_es_t = lambda a, b: fnp_mod.einsum('ij,lj->il', a, b)\n\
+                 np_es_t = lambda a, b: np.einsum('ij,lj->il', a, b)\n",
             )
             .expect("f16 einsum setup CString")
             .as_c_str(),
@@ -14741,6 +14743,40 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
             "f16_einsum_matmul_512",
             &np_es,
             &fnp_es,
+            &es_a,
+            &es_b,
+        );
+
+        // Transposed spec ('ij,lj->il', the a@b.T idiom): a different numpy
+        // contract class (wide-accumulate-once blocked-4) with its own kernel.
+        let fnp_es_t = namespace.get_item("fnp_es_t").expect("fnp_es_t present");
+        let np_es_t = namespace.get_item("np_es_t").expect("np_es_t present");
+        let candidate_t = fnp_es_t
+            .call1((&es_a, &es_b))
+            .expect("fnp f16 einsum transposed parity");
+        let base_t = np_es_t
+            .call1((&es_a, &es_b))
+            .expect("numpy f16 einsum transposed parity");
+        assert_eq!(
+            candidate_t
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_t
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum transposed byte parity",
+        );
+
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_transposed_512_null_then_effect",
+            "f16_einsum_transposed_512",
+            &np_es_t,
+            &fnp_es_t,
             &es_a,
             &es_b,
         );
