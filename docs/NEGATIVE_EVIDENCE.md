@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): allocation-free `can_broadcast` trailing-axis predicate - 2.6-12x across the existing shape matrix
+
+`CalmGate`, `fnp-ndarray`. Negative-ledger-first search found no prior attempt
+for the direct shape predicate. `can_broadcast` called `broadcast_shape(...).is_ok()`,
+allocating a result `Vec` for every compatible pair and cloning both input shapes
+when returning an incompatibility error. The replacement checks the identical
+NumPy trailing-axis rule directly (`l == r || l == 1 || r == 1`, with missing
+leading axes treated as 1) and returns at the first incompatible axis.
+
+Pinned same-worker `release-perf` Criterion runs on `vmi1293453` used the existing
+eight-row `can_broadcast` group. Scalar/equal/1-D rows moved from 10-11ns to 2ns
+(5-5.5x); 2-D rows from 11ns to 3ns (3.67x); 3-D from 13ns to 4ns (3.25x);
+4-D from 13ns to 5ns (2.6x); and the incompatible high-dimensional row from
+24ns to 2ns (12x) because the new predicate neither allocates nor clones the
+error payload. All 223 `fnp-ndarray` unit, NumPy-conformance, golden-layout,
+metamorphic, and strided-layout tests passed remotely; a 144-pair representative
+grid additionally proves the predicate equals `broadcast_shape(...).is_ok()`
+for scalars, zero dimensions, singleton axes, unequal ranks, and failures.
+
 ## 2026-07-12 - WIN (SHIP): N-D non-last-axis multi-q percentile/quantile native - 4.14x (53.4 vs 221.2ms at 8.39M 3-D x 3 qs) - NINTH quantile-lane lever; the lane's axis surface is COMPLETE
 
 `cc_fnp` / FuchsiaStream. fractions_strided_axis generalizes the axis0-2-D

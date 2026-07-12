@@ -91,7 +91,23 @@ impl std::error::Error for ShapeError {}
 
 #[must_use]
 pub fn can_broadcast(lhs: &[usize], rhs: &[usize]) -> bool {
-    broadcast_shape(lhs, rhs).is_ok()
+    let nd = lhs.len().max(rhs.len());
+    for axis_from_end in 0..nd {
+        let l = if axis_from_end < lhs.len() {
+            lhs[lhs.len() - 1 - axis_from_end]
+        } else {
+            1
+        };
+        let r = if axis_from_end < rhs.len() {
+            rhs[rhs.len() - 1 - axis_from_end]
+        } else {
+            1
+        };
+        if l != r && l != 1 && r != 1 {
+            return false;
+        }
+    }
+    true
 }
 
 pub fn broadcast_shape(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>, ShapeError> {
@@ -680,6 +696,33 @@ mod tests {
         let err = broadcast_shape(&[4, 3], &[5, 3]).expect_err("should fail");
         assert!(matches!(err, ShapeError::IncompatibleBroadcast { .. }));
         assert!(!can_broadcast(&[4, 3], &[5, 3]));
+    }
+
+    #[test]
+    fn can_broadcast_matches_shape_construction_predicate() {
+        let shapes: &[&[usize]] = &[
+            &[],
+            &[0],
+            &[1],
+            &[2],
+            &[3],
+            &[0, 1],
+            &[1, 0],
+            &[1, 3],
+            &[2, 1],
+            &[2, 3],
+            &[1, 2, 1],
+            &[4, 1, 5],
+        ];
+        for &lhs in shapes {
+            for &rhs in shapes {
+                assert_eq!(
+                    can_broadcast(lhs, rhs),
+                    broadcast_shape(lhs, rhs).is_ok(),
+                    "predicate disagrees for lhs={lhs:?}, rhs={rhs:?}"
+                );
+            }
+        }
     }
 
     #[test]
