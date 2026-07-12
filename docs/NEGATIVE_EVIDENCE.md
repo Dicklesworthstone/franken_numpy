@@ -51,6 +51,22 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+1-D DOT CLOSURE ADDENDUM (same session, 7605b7f1, bead aey4j CLOSED): 'j,j->' contract
+= per-8192-nditer-buffer blocked-4 f32 tree folded through an f16 store/reload on the
+scalar output (source-pinned store line; verified 22/22 on FOUR numpy versions - 2.2.4 +
+2.4.6 via local scratch venvs after worker ssh proved firewalled, 2.3.5 via hz1/hz2,
+2.4.3 local). Kernel: chunk trees are INDEPENDENT (each accum starts 0) -> parallel;
+only the one-narrow-per-8192 fold is serial. Returns numpy's exact float16 scalar.
+FIRST GATE FAILURE = test bug, not kernel: strict-bytes NaN comparison - f32->f16 NaN
+payload is cast-implementation-specific; sibling batteries' any-nan==any-nan rule
+adopted with per-case verdicts, gate then GREEN 5/5 (numpy 2.4.6 worker). MEASURED
+(vmi1149989, sha cfb75d73..., 20 obs): f16_einsum_dot1d_8m effect 1.512 [p10 1.37, p90
+1.90] vs null 1.025 [p90 1.11] - 20/20 above one, 8.87 vs 13.91 ms. Honest scope: the
+1-D dot is decode/memory-bound (32 MB read at 8M), so the parallel win is bounded far
+below the compute-heavy GEMM idioms' 5-47x; the serial f16 fold is not the limiter.
+EVERY f16 einsum idiom lead ever filed in this vein is now closed. Artifact
+dot1d_ship_run1.txt + dot1d_contract_verify.py.
+
 OUTPUT-ORDER CLOSURE ADDENDUM (same session, 5adb71e3): the output-transposed forms
 'ij,lj->li' and 'ji,jl->li' are the sibling kernels with operands swapped (IEEE f32
 multiply commutative -> identical bits; 16/16 local, swapped_output_verify.py). ~30
