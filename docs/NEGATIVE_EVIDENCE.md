@@ -51,6 +51,17 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+SCOPE-OUT + BUILD FIX (same session): (1) f64/f32 einsum FULL CONTRACTION ('j,j->',
+'ij,ij->') is NOT a portable lever: numpy's double/float contig_contig_outstride0 SOP
+kernels take the NPYV SIMD path (unlike half's NPYV_CHK=0), so the accumulation tree
+depends on the host's SIMD lane width (AVX2 4-wide vs AVX-512 8-wide = different
+bytes per host class). Reproducing it would need per-ISA lane-tree kernels + an ISA
+gate; parked unless a profile ranks f64 einsum dot. (2) deadlock-audit-w6rqd CLOSED:
+the fnp-python lib unit-test target (broken on main since the where_py signature
+change) compiles again - 3 unit tests updated to the args-tuple form; remote
+cargo test -p fnp-python --lib where_ = 12/12 GREEN (the target was uncompilable
+before, so conformance/bench lanes never caught it).
+
 BROADCAST ELEMENTWISE CLOSURE (same session): the four 2-D broadcast no-contraction
 forms ('ij,j->ij', 'ij,i->ij', operand-swapped orders) take a native zero-seeded
 kernel across f64/f32/f16 (contract 12/12 x 3 versions incl planted signed zeros;
