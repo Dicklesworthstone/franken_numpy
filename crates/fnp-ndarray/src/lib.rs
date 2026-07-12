@@ -274,8 +274,7 @@ pub fn broadcast_strides(
         });
     }
 
-    let merged = broadcast_shape(src_shape, dst_shape)?;
-    if merged != dst_shape {
+    if src_shape.len() > dst_shape.len() {
         return Err(ShapeError::IncompatibleBroadcast {
             lhs: src_shape.to_vec(),
             rhs: dst_shape.to_vec(),
@@ -1607,6 +1606,55 @@ mod tests {
         // (4,) → (3, 4): row stride = 0, col stride preserved
         let out = broadcast_strides(&[4], &[8], &[3, 4]).unwrap();
         assert_eq!(out, vec![0, 8]);
+    }
+
+    #[test]
+    fn broadcast_strides_direct_validation_matches_shape_merge() {
+        let shapes: &[&[usize]] = &[
+            &[],
+            &[0],
+            &[1],
+            &[2],
+            &[0, 3],
+            &[1, 3],
+            &[2, 1],
+            &[2, 3],
+            &[1, 2, 1],
+            &[4, 2, 5],
+        ];
+
+        for &src_shape in shapes {
+            let src_strides: Vec<isize> = (1..=src_shape.len())
+                .map(|axis| isize::try_from(axis * 8).unwrap())
+                .collect();
+
+            for &dst_shape in shapes {
+                let expected = match broadcast_shape(src_shape, dst_shape) {
+                    Ok(merged) if merged == dst_shape => {
+                        let mut strides = vec![0; dst_shape.len()];
+                        let offset = dst_shape.len() - src_shape.len();
+                        for (axis, (&src_dim, &src_stride)) in
+                            src_shape.iter().zip(&src_strides).enumerate()
+                        {
+                            if src_dim == dst_shape[axis + offset] {
+                                strides[axis + offset] = src_stride;
+                            }
+                        }
+                        Ok(strides)
+                    }
+                    _ => Err(ShapeError::IncompatibleBroadcast {
+                        lhs: src_shape.to_vec(),
+                        rhs: dst_shape.to_vec(),
+                    }),
+                };
+
+                assert_eq!(
+                    broadcast_strides(src_shape, &src_strides, dst_shape),
+                    expected,
+                    "src={src_shape:?} dst={dst_shape:?}"
+                );
+            }
+        }
     }
 
     // ── element count edge cases ────────

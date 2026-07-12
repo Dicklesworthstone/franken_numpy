@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): direct `broadcast_strides` target validation removes merged-shape allocation - 1.78-2.12x
+
+`CalmGate`, `fnp-ndarray`. Negative-ledger and live-bead searches found no prior
+attempt or retry boundary for this seam. `broadcast_strides` previously called
+`broadcast_shape(src_shape, dst_shape)` and allocated its result solely to check
+that the merged shape equaled the requested target, then allocated the returned
+stride vector. The replacement rejects source ranks larger than the target and
+validates each aligned axis while producing the strides, leaving only the
+required result allocation. Rank-mismatch and incompatible-broadcast error
+payloads and precedence remain unchanged.
+
+Pinned same-worker `release-perf` Criterion runs on `vmi1156319` used the
+existing four-row `broadcast_strides` group. `2d_expand_rows` moved from 69ns
+to 36ns (**1.92x**), `2d_expand_cols` from 70ns to 33ns (**2.12x**),
+`3d_expand` from 64ns to 36ns (**1.78x**), and `4d_expand` from 71ns to 36ns
+(**1.97x**). All 225 `fnp-ndarray` unit, NumPy-conformance, golden-layout,
+metamorphic, and strided-layout tests passed remotely. A 100-pair equivalence
+matrix additionally proves the direct validator matches the old
+`broadcast_shape + merged == target` contract for scalars, zero dimensions,
+singleton axes, rank extension, and rejection paths.
+
 ## 2026-07-12 - WIN (SHIP): nan N-D non-last-axis multi-q - 18.98x (116.3 vs 2208.7ms at 8.39M 3-D x 3 qs) - the session's second-largest ratio; numpy's nan N-D machinery degrades CATASTROPHICALLY (hz1 basis: 1122ms ax1, 6846ms ax0 x 9 qs)
 
 `cc_fnp` / FuchsiaStream. TENTH quantile-lane lever: nan_fractions_strided_axis
