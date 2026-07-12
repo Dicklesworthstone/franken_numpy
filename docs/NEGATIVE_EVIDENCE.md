@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - RETRY PREDICATE PAID (WIN, re-unlock): flat plain multi-q keepdims native - 1.440x on a loaded worker, engagement PROVEN by cost-equality with the flat non-kd row
+
+`cc_fnp`. Root cause of the 0.852x reject found IN CODE: an EARLY unconditional
+`keepdims && axis.is_none() -> fallback` gate in both percentile() and quantile()
+fired before the flat array-q block, so the earlier unlock never engaged (the
+227ms was numpy + a wasted whole-array extract). Fix: the early gate now exempts
+array-q LINEAR (scalar-q keepdims still delegates); the flat block handles
+keepdims via the [k] ++ ones(ndim) reshape. Gate row on a HEAVILY loaded worker
+(all baselines inflated ~1.5x): quantile9_flat_kd 1.440x (213.7 vs 307.7ms) -
+and the fnp cost EQUALS the flat non-kd row's 215.0ms (vs 227-vs-82 divergence
+pre-fix), which is the structural engagement proof. All parity batteries green.
+METHOD NOTE (2nd occurrence today): when a wired branch reads slower than its
+own sibling kernel, suspect an EARLIER gate eating the dispatch - grep every
+`return fallback()` above the branch before believing the branch runs.
+
 ## 2026-07-12 - REJECT (unwired same-tick): flat plain multi-q keepdims native unlock measured 0.852x - the wiring was reverted under the cumsum precedent; parity batteries kept as delegate asserts
 
 `cc_fnp`. The unlock (native fractions_axis_none + reshape) parity-passed
