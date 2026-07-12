@@ -576,6 +576,13 @@ fn detect_internal_overlap(
 
     let item_size = isize::try_from(item_size).map_err(|_| ShapeError::Overflow)?;
     let element_count = element_count(shape)?;
+    if shape
+        .iter()
+        .zip(strides)
+        .any(|(&dim, &stride)| dim > 1 && stride == 0)
+    {
+        return Ok(true);
+    }
     if element_count <= EXACT_OVERLAP_ELEMENT_LIMIT {
         return detect_internal_overlap_exact(shape, strides, item_size, element_count);
     }
@@ -1191,6 +1198,23 @@ mod tests {
         assert!(!broadcast.is_fortran_contiguous());
         assert!(!broadcast.is_writeable());
         assert!(broadcast.has_internal_overlap());
+    }
+
+    #[test]
+    fn obvious_zero_stride_overlap_preserves_edge_semantics() {
+        assert!(super::detect_internal_overlap(&[2, 3], &[24, 0], 8).expect("active zero"));
+        assert!(!super::detect_internal_overlap(&[1], &[0], 8).expect("singleton zero"));
+        assert!(!super::detect_internal_overlap(&[0, 3], &[0, 8], 8).expect("zero extent"));
+
+        // Non-zero-stride collisions still go through the exact detector.
+        assert!(super::detect_internal_overlap(&[2, 2], &[8, 8], 8).expect("collision"));
+        assert!(!super::detect_internal_overlap(&[2, 2], &[16, 8], 8).expect("contiguous"));
+
+        // Keep shape-overflow precedence ahead of the obvious-overlap proof.
+        assert_eq!(
+            super::detect_internal_overlap(&[usize::MAX, 2], &[0, 0], 8),
+            Err(ShapeError::Overflow)
+        );
     }
 
     #[test]

@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): active zero-stride overlap proof bypasses exact offset sort - 42x / 13,850x / 120x on `broadcast_to`
+
+`CalmGate`, `fnp-ndarray`. The exact internal-overlap detector enumerates and
+sorts every byte offset for layouts up to 200,000 elements. Normal broadcast
+views have a stronger O(rank) proof: any axis with `dim > 1 && stride == 0`
+aliases adjacent logical elements. `detect_internal_overlap` now returns true
+for that case after the existing validation and `element_count` checks, so
+rank/item-size/zero-extent/shape-overflow precedence is unchanged. Non-zero
+strides still use the exact or conservative detector without modification.
+
+Pinned same-worker `release-perf` Criterion runs on `vmi1293453` used the three
+existing `NdLayout_broadcast_to` construction rows. `expand_1d` moved from
+2,020ns to 48ns (**42x**), `expand_2d_rows` from 678,630ns to 49ns
+(**13,850x**), and `expand_3d` from 6,222ns to 52ns (**120x**). All 224
+`fnp-ndarray` unit, NumPy-conformance, golden-layout, metamorphic, and strided
+tests passed remotely. The focused proof also covers active and singleton zero
+strides, zero extents, ordinary non-zero-stride collisions/non-overlap, and
+shape-overflow precedence.
+
 ## 2026-07-12 - WIN (SHIP): allocation-free `can_broadcast` trailing-axis predicate - 2.6-12x across the existing shape matrix
 
 `CalmGate`, `fnp-ndarray`. Negative-ledger-first search found no prior attempt
