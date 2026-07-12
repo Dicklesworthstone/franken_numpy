@@ -14786,6 +14786,106 @@ fn bench_f16_unique_median_gate(c: &mut Criterion) {
             &fnp_unique,
             &uq16,
         );
+
+        // f16 isin at 8M/1k: presence-bitmap membership vs numpy's ~1.2s sort path.
+        py.run(
+            std::ffi::CString::new(
+                "iq16 = (rng.standard_normal(1000) * 2).astype(np.float16)\n",
+            )
+            .expect("isin setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("isin setup");
+        let iq16 = namespace.get_item("iq16").expect("iq16 present");
+        let fnp_isin = module.getattr("isin").expect("fnp isin");
+        let np_isin = numpy.getattr("isin").expect("numpy isin");
+        let candidate_i = fnp_isin.call1((&uq16, &iq16)).expect("fnp isin parity");
+        let base_i = np_isin.call1((&uq16, &iq16)).expect("numpy isin parity");
+        assert_eq!(
+            candidate_i
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_i
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 isin byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_isin_8m_null_then_effect",
+            "f16_isin_8m",
+            &np_isin,
+            &fnp_isin,
+            &uq16,
+            &iq16,
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_f16_around_median_gate(c: &mut Criterion) {
+    // f16 round(a, 2) at 8M: the per-step-narrow chain kernel vs numpy's serial
+    // half multiply->rint->divide loops (~90ms class on hz1).
+    let mut group = c.benchmark_group("python_f16_around_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_f16_around_median_gate").expect("around bench module");
+        fnp_python(&module).expect("initialize fnp_python around bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260718)\n\
+                 ra16 = (rng.standard_normal(8_000_000) * 2).astype(np.float16)\n\
+                 dec2 = 2\n",
+            )
+            .expect("around setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("around setup");
+        let ra16 = namespace.get_item("ra16").expect("ra16 present");
+        let dec2 = namespace.get_item("dec2").expect("dec2 present");
+        let fnp_round = module.getattr("round").expect("fnp round");
+        let np_round = numpy.getattr("round").expect("numpy round");
+        let candidate = fnp_round.call1((&ra16, &dec2)).expect("fnp round parity");
+        let base = np_round.call1((&ra16, &dec2)).expect("numpy round parity");
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 around byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_around_8m_null_then_effect",
+            "f16_around_8m",
+            &np_round,
+            &fnp_round,
+            &ra16,
+            &dec2,
+        );
     });
 
     group.finish();
@@ -16817,6 +16917,7 @@ criterion_group!(
     bench_multidot_median_gate,
     bench_isclose_median_gate,
     bench_f16_unique_median_gate,
+    bench_f16_around_median_gate,
     bench_f16_einsum_median_gate,
     bench_wide_string_substrate_v2,
     bench_ledger_integrity_rejects,

@@ -819,3 +819,52 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn f16_isin_bitmap_bit_exact() -> Result<(), String> {
+    // f16 isin via the 65536-slot presence bitmap (the unique-table lever
+    // applied to membership). Pinned semantics: NaN NEVER matches (even the
+    // identical bit pattern); +-0 match each other; invert flips.
+    let script = fnp_script(
+        r#"
+verdicts = []
+rng = np.random.default_rng(20260717)
+for n, m in ((100000, 100), (2_000_003, 5000)):
+    a = (rng.standard_normal(n) * 2).astype(np.float16)
+    t = (rng.standard_normal(m) * 2).astype(np.float16)
+    for inv in (False, True):
+        r = fnp.isin(a, t, invert=inv); e = np.isin(a, t, invert=inv)
+        if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+            verdicts.append(f"FAIL n={n} inv={inv}")
+# semantics battery: nan (both patterns), +-0 cross, inf
+a = np.array([np.nan, 0.0, -0.0, np.inf, 1.5, -1.5], dtype=np.float16)
+a = np.tile(a, 20000)  # over the gate
+t = np.array([np.nan, -0.0, np.inf], dtype=np.float16)
+r = fnp.isin(a, t); e = np.isin(a, t)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL semantics battery")
+t2 = np.array([0xfe00], dtype=np.uint16).view(np.float16)
+r = fnp.isin(a, t2); e = np.isin(a, t2)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL neg-nan test set")
+# 2-D element shape preserved; below-gate defers
+m2 = (rng.standard_normal((300, 400))).astype(np.float16)
+t3 = m2.ravel()[:50]
+r = fnp.isin(m2, t3); e = np.isin(m2, t3)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 2-D shape")
+sm = (rng.standard_normal(100)).astype(np.float16)
+if fnp.isin(sm, sm[:5]).tobytes() != np.isin(sm, sm[:5]).tobytes():
+    verdicts.append("FAIL below-gate")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 isin bitmap must be bit-identical incl nan/signed-zero semantics: {result}"
+    );
+    Ok(())
+}
