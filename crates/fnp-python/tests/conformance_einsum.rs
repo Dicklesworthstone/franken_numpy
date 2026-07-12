@@ -1288,6 +1288,26 @@ for dt in (np.float64, np.float32):
         verdicts.append(f"FAIL {dt.__name__} signed-zero bytes {r!r} vs {e!r}")
     if sorted(str(w.message) for w in fw) != sorted(str(w.message) for w in nw):
         verdicts.append(f"FAIL {dt.__name__} warning parity fnp={[str(w.message) for w in fw]} np={[str(w.message) for w in nw]}")
+    # native-gate-sized (>= 1<<20): exercises the f64/f32 zero-seeded kernel
+    big_a = (rng.standard_normal(2_000_000)).astype(dt)
+    big_b = (rng.standard_normal(2_000_000)).astype(dt)
+    big_a[10] = dt(0.0); big_b[10] = dt(-0.0)
+    big_a[11] = dt(-0.0); big_b[11] = dt(-0.0)
+    big_a[12] = np.inf; big_b[13] = np.nan
+    big_a[14] = dt(1e300) if dt == np.float64 else dt(1e38)
+    big_b[14] = big_a[14]
+    with warnings.catch_warnings(record=True) as fw2:
+        warnings.simplefilter("always")
+        r2 = fnp.einsum('j,j->j', big_a, big_b)
+    with warnings.catch_warnings(record=True) as nw2:
+        warnings.simplefilter("always")
+        e2 = np.einsum('j,j->j', big_a, big_b)
+    if r2.dtype != e2.dtype or r2.tobytes() != e2.tobytes():
+        verdicts.append(f"FAIL {dt.__name__} native-gate bytes")
+    if not (r2[10].tobytes() == dt(0.0).tobytes() and not np.signbit(r2[10])):
+        verdicts.append(f"FAIL {dt.__name__} native-gate seed canonicalization")
+    if sorted(str(w.message) for w in fw2) != sorted(str(w.message) for w in nw2):
+        verdicts.append(f"FAIL {dt.__name__} native-gate warning parity fnp={[str(w.message) for w in fw2]}")
 # int/bool no-contraction stays on the fast multiply route - byte parity holds
 ia = rng.integers(-100, 100, (512, 512)).astype(np.int32)
 ib = rng.integers(-100, 100, (512, 512)).astype(np.int32)

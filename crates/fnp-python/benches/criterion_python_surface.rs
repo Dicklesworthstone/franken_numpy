@@ -14847,6 +14847,8 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                  np_es_fc = lambda a, b: np.einsum('ij,ij->', a, b)\n\
                  fnp_es_ew = lambda a, b: fnp_mod.einsum('j,j->j', a, b)\n\
                  np_es_ew = lambda a, b: np.einsum('j,j->j', a, b)\n\
+                 ew64_a = rng.standard_normal(8_388_608)\n\
+                 ew64_b = rng.standard_normal(8_388_608)\n\
                  bat_a = (rng.standard_normal((8, 256, 256)) * 0.3).astype(np.float16)\n\
                  bat_b = (rng.standard_normal((8, 256, 256)) * 0.3).astype(np.float16)\n\
                  fnp_es_b = lambda a, b: fnp_mod.einsum('bij,bjk->bik', a, b)\n\
@@ -15121,6 +15123,38 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
             &fnp_es_ew,
             &dot_a,
             &dot_b,
+        );
+
+        // f64 elementwise ('j,j->j') at 8M: the f64/f32 zero-seeded kernel.
+        let ew64_a = namespace.get_item("ew64_a").expect("ew64_a present");
+        let ew64_b = namespace.get_item("ew64_b").expect("ew64_b present");
+        let candidate_e64 = fnp_es_ew
+            .call1((&ew64_a, &ew64_b))
+            .expect("fnp f64 einsum elementwise parity");
+        let base_e64 = np_es_ew
+            .call1((&ew64_a, &ew64_b))
+            .expect("numpy f64 einsum elementwise parity");
+        assert_eq!(
+            candidate_e64
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_e64
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f64 einsum elementwise byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f64_einsum_elemwise_8m_null_then_effect",
+            "f64_einsum_elemwise_8m",
+            &np_es_ew,
+            &fnp_es_ew,
+            &ew64_a,
+            &ew64_b,
         );
 
         // Batched matmul spec ('bij,bjk->bik') at (8,256,256)@(8,256,256):

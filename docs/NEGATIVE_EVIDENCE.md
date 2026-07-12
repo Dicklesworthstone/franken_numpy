@@ -51,6 +51,18 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+F64/F32 ELEMENTWISE SIBLING (same session): the zero-seeded elementwise kernel
+extended to f64/f32 in the same no-contraction branch slot (contract 14/14 x 3
+versions, signed-zero + huge-scale batteries; conformance exercises the native route
+at gate size with seed-canonicalization + warning-parity multiset checks for both
+dtypes). MEASURED (vmi1227854, sha 50ffd956..., 20 obs): f64_einsum_elemwise_8m
+2.426 [p10 1.59, p90 3.92] vs null 1.034 [p90 1.18] - 20/20 above one, 5.04 vs
+12.28 ms. This RECOVERS AND BEATS the perf the introduced-divergence fix moved to
+passthrough - float Hadamard einsum is now both byte/warning-exact AND faster than
+numpy. Elementwise family: f16 2.25x, f64 2.43x, f32 covered by the same kernel
+(route-proven via the gate-size conformance case; no dedicated row - same code path,
+half the bandwidth of f64).
+
 ELEMENTWISE DISPATCH + ROW (same session, follow-up to 37a451a6): the first
 f16_einsum_elemwise_8m row read 0.9995x - the DIAGNOSTIC, not the result: the
 no-contraction branch returns the passthrough BEFORE the dtype-policy arm, so the f16
