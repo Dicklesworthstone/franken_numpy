@@ -4,6 +4,20 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): nan N-D non-last-axis multi-q - 18.98x (116.3 vs 2208.7ms at 8.39M 3-D x 3 qs) - the session's second-largest ratio; numpy's nan N-D machinery degrades CATASTROPHICALLY (hz1 basis: 1122ms ax1, 6846ms ax0 x 9 qs)
+
+`cc_fnp` / FuchsiaStream. TENTH quantile-lane lever: nan_fractions_strided_axis
+= the strided 8-wide inner-block gather composed with per-lane NaN compaction -
+byte-exact by construction (compact-then-quantile per moved lane). nanpercentile/
+nanquantile routing now accepts ANY single int axis on ndim >= 2 (last -> nan
+last-axis kernel, 2-D ax0 -> nan column kernel, else nan strided); the nan
+keepdims reshape generalized to the normalized axis (the old logic assumed
+non-last == axis0 and would have mis-shaped 3-D middle axes - caught in wiring).
+Gate row nanpct3_3d_ax1 18.984x tobytes-equal on a LOADED worker; 3-D nan
+ax0/keepdims/all-NaN-lane warning-parity batteries green; all 12 prior rows
+green. The quantile lane's nan surface is now COMPLETE across axes. REMAINING:
+statistical H&F methods, weights= (both niche; profile before digging).
+
 ## 2026-07-12 - WIN (SHIP): active zero-stride overlap proof bypasses exact offset sort - 42x / 13,850x / 120x on `broadcast_to`
 
 `CalmGate`, `fnp-ndarray`. The exact internal-overlap detector enumerates and

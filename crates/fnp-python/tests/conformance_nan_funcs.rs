@@ -1111,6 +1111,7 @@ fn flat_multi_quantile_and_weighted_average_track_numpy() -> Result<(), String> 
     let script = fnp_script(
         r#"
 import time
+import warnings
 verdicts = []
 rng = np.random.default_rng(20260712)
 a = rng.standard_normal(8_000_000)
@@ -1165,6 +1166,27 @@ t3n = t3.copy(); t3n[3, 100, 7] = np.nan
 r, e = fnp.percentile(t3n, [25, 75], axis=1), np.percentile(t3n, [25, 75], axis=1)
 if r.tobytes() != e.tobytes():
     verdicts.append("FAIL 3d-nan-lane bytes")
+# nan N-D non-last-axis multi-q: compaction composed into the strided kernel
+t3nn = t3.copy()
+t3nn.ravel()[rng.integers(0, t3.size, 20000)] = np.nan
+for tag, ax in (("3d-nanpct-ax1", 1), ("3d-nanpct-ax0", 0)):
+    r, e = fnp.nanpercentile(t3nn, [25, 50, 75], axis=ax), np.nanpercentile(t3nn, [25, 50, 75], axis=ax)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL {tag} bytes")
+r, e = fnp.nanquantile(t3nn, qs, axis=1, keepdims=True), np.nanquantile(t3nn, qs, axis=1, keepdims=True)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 3d-nan-keepdims bytes")
+t3all = t3nn.copy(); t3all[5, :, 9] = np.nan
+with warnings.catch_warnings(record=True) as wf:
+    warnings.simplefilter("always")
+    r = fnp.nanpercentile(t3all, [25, 75], axis=1)
+with warnings.catch_warnings(record=True) as wn:
+    warnings.simplefilter("always")
+    e = np.nanpercentile(t3all, [25, 75], axis=1)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 3d-all-nan-lane bytes")
+if [str(w.message) for w in wf] != [str(w.message) for w in wn]:
+    verdicts.append("FAIL 3d-all-nan-lane warnings")
 r, e = fnp.quantile(m, qs, axis=1, keepdims=True), np.quantile(m, qs, axis=1, keepdims=True)
 if r.shape != e.shape or r.tobytes() != e.tobytes():
     verdicts.append("FAIL keepdims-ax1 bytes")
@@ -1172,7 +1194,6 @@ r, e = fnp.percentile(m, [25, 75], axis=0, keepdims=True), np.percentile(m, [25,
 if r.shape != e.shape or r.tobytes() != e.tobytes():
     verdicts.append("FAIL keepdims-ax0 bytes")
 # nan multi-q native path: per-lane NaN compaction + shared plan/lerp
-import warnings
 mn = m.copy()
 mn[rng.integers(0, 2896, 20000), rng.integers(0, 2896, 20000)] = np.nan
 r, e = fnp.nanpercentile(mn, [25, 50, 75], axis=1), np.nanpercentile(mn, [25, 50, 75], axis=1)
@@ -1249,6 +1270,7 @@ for name, nf, ff in (
     ("quantile9_flat_kd", lambda: np.quantile(m, qs, keepdims=True), lambda: fnp.quantile(m, qs, keepdims=True)),
     ("pct50_ax1_midpoint", lambda: np.percentile(m, 50, axis=1, method="midpoint"), lambda: fnp.percentile(m, 50, axis=1, method="midpoint")),
     ("pct3_3d_ax1", lambda: np.percentile(t3, [25, 50, 75], axis=1), lambda: fnp.percentile(t3, [25, 50, 75], axis=1)),
+    ("nanpct3_3d_ax1", lambda: np.nanpercentile(t3nn, [25, 50, 75], axis=1), lambda: fnp.nanpercentile(t3nn, [25, 50, 75], axis=1)),
     ("percentile3", lambda: np.percentile(a, [25, 50, 75]), lambda: fnp.percentile(a, [25, 50, 75])),
     ("avg_weights", lambda: np.average(a, weights=w), lambda: fnp.average(a, weights=w)),
 ):
