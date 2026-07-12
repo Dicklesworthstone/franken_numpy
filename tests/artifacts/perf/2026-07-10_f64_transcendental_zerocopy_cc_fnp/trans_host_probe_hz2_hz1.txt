@@ -1,0 +1,37 @@
+TRANS_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True op=sin byte_equal=True diff_elems=0
+TRANS_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True op=cos byte_equal=True diff_elems=0
+TRANS_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True op=tan byte_equal=False diff_elems=1075 max_bitdiff=1 frac=0.005375
+TRANS_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True op=arctan byte_equal=False diff_elems=664 max_bitdiff=1 frac=0.003320
+TRANS_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True op=arcsinh byte_equal=False diff_elems=334 max_bitdiff=1 frac=0.001670
+TRANS_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True op=tanh byte_equal=False diff_elems=76646 max_bitdiff=3 frac=0.383230
+TRANS_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True op=cbrt byte_equal=False diff_elems=103481 max_bitdiff=3 frac=0.517405
+TRANS_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True op=expm1 byte_equal=False diff_elems=20581 max_bitdiff=1 frac=0.102905
+TRANS_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True op=log1p byte_equal=False diff_elems=20788 max_bitdiff=1 frac=0.103940
+TRANS_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True op=sinh byte_equal=False diff_elems=53420 max_bitdiff=2 frac=0.267100
+TRANS_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True op=cosh byte_equal=False diff_elems=32851 max_bitdiff=1 frac=0.164255
+TRANS_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True op=arcsin byte_equal=False diff_elems=16955 max_bitdiff=1 frac=0.084775
+TRANS_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True op=arccos byte_equal=False diff_elems=19210 max_bitdiff=1 frac=0.096050
+TRANS_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True op=arctanh byte_equal=False diff_elems=46 max_bitdiff=1 frac=0.000230
+TRANS_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True op=arccosh byte_equal=False diff_elems=20 max_bitdiff=1 frac=0.000100
+TRANS_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True op=sqrt byte_equal=True diff_elems=0
+TRANS_HOST_PROBE_ENV glibc=2.43 python=3.14.4
+PROBE_OK
+---
+TRANS_HOST_PROBE host=hetzner1 numpy=2.3.5 avx512f=False op=sin byte_equal=True diff_elems=0
+TRANS_HOST_PROBE host=hetzner1 numpy=2.3.5 avx512f=False op=cos byte_equal=True diff_elems=0
+TRANS_HOST_PROBE host=hetzner1 numpy=2.3.5 avx512f=False op=tan byte_equal=True diff_elems=0
+TRANS_HOST_PROBE host=hetzner1 numpy=2.3.5 avx512f=False op=arctan byte_equal=True diff_elems=0
+TRANS_HOST_PROBE host=hetzner1 numpy=2.3.5 avx512f=False op=arcsinh byte_equal=True diff_elems=0
+TRANS_HOST_PROBE host=hetzner1 numpy=2.3.5 avx512f=False op=tanh byte_equal=False diff_elems=76646 max_bitdiff=3 frac=0.383230
+TRANS_HOST_PROBE host=hetzner1 numpy=2.3.5 avx512f=False op=cbrt byte_equal=True diff_elems=0
+TRANS_HOST_PROBE host=hetzner1 numpy=2.3.5 avx512f=False op=expm1 byte_equal=True diff_elems=0
+TRANS_HOST_PROBE host=hetzner1 numpy=2.3.5 avx512f=False op=log1p byte_equal=True diff_elems=0
+TRANS_HOST_PROBE host=hetzner1 numpy=2.3.5 avx512f=False op=sinh byte_equal=True diff_elems=0
+TRANS_HOST_PROBE host=hetzner1 numpy=2.3.5 avx512f=False op=cosh byte_equal=True diff_elems=0
+TRANS_HOST_PROBE host=hetzner1 numpy=2.3.5 avx512f=False op=arcsin byte_equal=True diff_elems=0
+TRANS_HOST_PROBE host=hetzner1 numpy=2.3.5 avx512f=False op=arccos byte_equal=True diff_elems=0
+TRANS_HOST_PROBE host=hetzner1 numpy=2.3.5 avx512f=False op=arctanh byte_equal=True diff_elems=0
+TRANS_HOST_PROBE host=hetzner1 numpy=2.3.5 avx512f=False op=arccosh byte_equal=True diff_elems=0
+TRANS_HOST_PROBE host=hetzner1 numpy=2.3.5 avx512f=False op=sqrt byte_equal=True diff_elems=0
+TRANS_HOST_PROBE_ENV glibc=2.43 python=3.14.4
+PROBE_OK

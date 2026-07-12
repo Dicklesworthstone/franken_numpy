@@ -4,6 +4,36 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - SURFACE (probe, no production change): AVX-512 numpy 2.3.5 diverges from scalar libm on 13/16 f64 transcendentals (1-3 ULP) - the shipped native route inherits a numpy divergence on that host class; bead deadlock-audit-fs5pu filed for the policy fork
+
+`cc_fnp`. NEGATIVE-LEDGER-FIRST: with the exp/log family closed, the open question was
+whether the SHIPPED 15-op zero-copy transcendental set (e54e3195) carries the same
+AVX-512 byte-relation hazard the exp/log family did. Direct-ssh probe (zero fleet
+slots, probe-body pattern) of numpy vs system libm, 200k standard-normal-domain
+elements per op, hz2 (avx512_skx, numpy 2.3.5) + hz1 (AVX2 control, SAME numpy 2.3.5):
+
+- hz2 DIVERGENT (13/16): cbrt 51.7% of elements (max 3 ULP), tanh 38.3% (3 ULP),
+  sinh 26.7% (2), cosh 16.4% (1), log1p 10.4% (1), expm1 10.3% (1), arccos 9.6% (1),
+  arcsin 8.5% (1), tan 0.54% (1), arctan 0.33% (1), arcsinh 0.17% (1),
+  arctanh 0.02% (1), arccosh 0.01% (1).
+- hz2 BYTE-EQUAL: sin, cos, sqrt (on this domain; assertion-free framing - SIMD
+  kernels may exist and coincide here).
+- hz1 (AVX2, numpy 2.3.5): CLEAN on everything EXCEPT tanh - 76646 diffs, IDENTICAL
+  count to hz2 = the known AVX2+FMA vectorized-tanh kernel (bead d4mc2), not an
+  AVX-512 artifact. This also extends the AVX2 route-parity evidence for the shipped
+  set to a THIRD numpy version (2.3.5).
+
+CLASSIFICATION: INHERITED, not introduced - fnp's native transcendental route is
+scalar libm both pre- and post-zerocopy (route change proven zero-bit on three
+AVX2 workers at ship time), so fnp-vs-numpy divergence on AVX-512 hosts predates the
+2026-07 ships. No revert predicate triggered. IMPLICATION for future levers: any new
+scalar-libm op wired native MUST take the numpy_explog_matches_libm-class ISA gate by
+default (the exp/log/exp2 pattern), and the 15-op set's own AVX-512 handling is now a
+HUMAN policy fork (gate-extend vs DIVERGENCES rows vs status quo) - bead
+deadlock-audit-fs5pu, sample scope one avx512 host x numpy 2.3.5, version drift
+tracked by f7qjf.
+Artifacts: trans_host_probe_hz2_hz1.txt + script, same dir as the family ship.
+
 ## 2026-07-12 - WIN (SHIP, family completion): f64 exp2 joins the ISA-gated zero-copy exp/log family - the fifth and last scalar-libm exp/log-class passthrough closed; hz1/hz2 probes reproduce the family byte relation exactly
 
 `cc_fnp`, family-completion sibling of the exp/log/log2/log10 ship below (same session,
