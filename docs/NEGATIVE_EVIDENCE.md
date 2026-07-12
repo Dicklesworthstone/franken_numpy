@@ -4,6 +4,31 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - NO-SHIP: single-pass C-contiguity predicate is only 1.14-1.25x at 1-2ns absolute
+
+`CalmGate`, `fnp-ndarray`. Negative-ledger, Git-history, bead, and Agent Mail
+searches found no prior `NdLayout::is_contiguous` predicate optimization; the
+nearby `contiguous_strides` buffer reject is a distinct constructor path. The
+candidate fused zero-extent detection into C-order stride validation for
+well-formed layouts, retained a rare full-shape zero guard for mismatched public
+shape/stride ranks, and continued scanning after mismatch/overflow so any zero
+extent still overrode failure exactly as before. The Fortran predicate was left
+untouched. A two-pass reference test covering scalar, zero, singleton,
+overflow, malformed-rank, contiguous, and non-contiguous layouts was drafted
+but not run after the performance gate failed; it was removed with the source.
+
+Pinned same-worker `release-perf` Criterion runs on `vmi1156319` used the three
+existing C-predicate rows. `contiguous_2d` moved from 10ns to 8ns (**1.25x**),
+`broadcast_2d` from 8ns to 7ns (**1.14x**), and `contiguous_5d` from 15ns to
+13ns (**1.15x**). The 1-2ns deltas overlap Criterion's +/-1ns uncertainty on
+the decisive rows, and two of three rows miss the 1.2x matrix floor. The source
+and proof-test candidate were removed.
+
+**No-retry boundary:** do not retry scalar fusion of `shape.contains(&0)` into
+the C-order predicate on the existing 2-D/5-D matrix. Reopen only with a
+distinct representation or a higher-rank real-caller benchmark demonstrating
+at least 1.2x across all tracked rows; benchmark the Fortran twin separately.
+
 ## 2026-07-12 - STALE-REJECT REOPENED (WIN): integer ARRAY-q percentile/quantile now rides the multi-q kernels - 1.80x (10.4 vs 18.6ms at 1024^2 x 3 qs; hz1 basis 128-172ms at 2896^2)
 
 `cc_fnp` / FuchsiaStream. THIRTEENTH lane lever. The "integer input never beats
