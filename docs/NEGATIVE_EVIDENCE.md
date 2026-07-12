@@ -51,6 +51,18 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+3-OP CHAIN RECON (bead vfbef, premise CORRECTED): np.einsum(optimize=True) 3-op f16
+chains are NOT sequential c_einsum pairs - path-faithful einsum-pairs mismatch 4/4
+(the bead's original hypothesis REFUTED with data). They ARE einsum_path plan +
+TENSORDOT/MATMUL pairwise: matmul-pairs byte-match 5/5 shapes on numpy
+2.2.4/2.3.5/2.4.3/2.4.6 incl hz2 (chain3_recon*.py + chain3_recon_local.txt).
+IMPLEMENTATION SHAPE (de-risked): replicate einsum_path's plan (tie-breaks are the
+version-drift risk - conformance-lock them) + route each GEMM-shaped pair through
+fnp's SHIPPED byte-matched f16 matmul kernels (the 33f7d73b class, ~28x per pair);
+gate to kwargs exactly {optimize: True}. METHOD NOTE: the first comparison ignored
+the printed path order (invalid mismatch on (1,2)-first shapes) - honor the plan
+before judging the pair kernel.
+
 F32 REDUCTIONS CRACKED + SHIPPED (follow-up, bead lyfd4 CLOSED): the "unknown small-n
 structure" was ONE wrong assumption in the reference - npyv_sum_f32's lane fold is the
 HADD form (v0+v1)+(v2+v3), not sequential; with it the 4-lane tree matches at EVERY n
