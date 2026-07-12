@@ -1174,6 +1174,57 @@ print(verdicts if verdicts else True)
 }
 
 #[test]
+fn f16_einsum_batched_gram_contract_bit_exact() -> Result<(), String> {
+    // np.einsum's f16 BATCHED GRAM spec ('bji,bjl->bil') runs the 2-op gram
+    // per-step-narrow muladd-row chain per batch slice:
+    //   acc = f16(f32(a[b,j,i]) * f32(x[b,j,l]) + f32(acc)), acc0 = f16(+0.0)
+    // over ascending j. The per-step class is CHUNK-IMMUNE: ndim-4 buffering
+    // and B==1 coalescing produce identical bytes (verified locally on numpy
+    // 2.2.4/2.4.3/2.4.6 incl k=8193/9000, B=1 vs B>1, n=9000 row-chunking).
+    // This test LOCKS the contract on the fleet's numpy version.
+    let script = fnp_script(
+        r#"
+verdicts = []
+def check(name, r, e):
+    if r.dtype != e.dtype or r.shape != e.shape:
+        verdicts.append(f"FAIL {name} dtype/shape")
+    elif not bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all()):
+        verdicts.append(f"FAIL {name} bytes")
+rng = np.random.default_rng(20260713)
+# (B, k, m, n): MR/k tails, chunk-straddling k, B=1 coalescing, skinny dims.
+for (B, k, m, n) in ((8, 96, 64, 80), (2, 128, 256, 96), (2, 8193, 3, 4), (1, 9000, 4, 3), (2, 33, 17, 29), (4, 7, 129, 65), (2, 130, 3, 9000)):
+    a = (rng.standard_normal((B, k, m)) * 0.3).astype(np.float16)
+    x = (rng.standard_normal((B, k, n)) * 0.3).astype(np.float16)
+    check(f"B={B},k={k},m={m},n={n}", fnp.einsum('bji,bjl->bil', a, x), np.einsum('bji,bjl->bil', a, x))
+# mixed scales + inf/nan + overflow through the per-step chains
+a = (rng.standard_normal((3, 130, 96)) * rng.choice([0.01, 1.0, 100.0], (3, 130, 1))).astype(np.float16)
+x = (rng.standard_normal((3, 130, 80)) * 0.3).astype(np.float16)
+a[0, 0, 0] = np.float16(np.inf); x[1, 5, 3] = np.float16(np.nan); a[2, :, 7] = np.float16(60000); x[2, :, 9] = np.float16(60000)
+check("specials", fnp.einsum('bji,bjl->bil', a, x), np.einsum('bji,bjl->bil', a, x))
+# alternate letters + below-gate
+check("alt_letters", fnp.einsum('qsr,qst->qrt', a, x), np.einsum('qsr,qst->qrt', a, x))
+sm_a = (rng.standard_normal((2, 8, 8)) * 0.3).astype(np.float16)
+sm_x = (rng.standard_normal((2, 8, 8)) * 0.3).astype(np.float16)
+check("below_gate", fnp.einsum('bji,bjl->bil', sm_a, sm_x), np.einsum('bji,bjl->bil', sm_a, sm_x))
+# F-order defers; adjacent specs stay byte-exact via their own routes
+at = np.asfortranarray(a)
+check("f_order", fnp.einsum('bji,bjl->bil', at, x), np.einsum('bji,bjl->bil', at, x))
+check("out_swapped", fnp.einsum('bji,bjl->bli', a, x), np.einsum('bji,bjl->bli', a, x))
+check("sum_batch", fnp.einsum('bji,bjl->il', a, x), np.einsum('bji,bjl->il', a, x))
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 einsum batched gram must be bit-identical to numpy's per-batch per-step muladd-row contract: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_einsum_dot_1d_buffered_contract_bit_exact() -> Result<(), String> {
     // np.einsum's f16 1-D dot ('j,j->') runs contig_contig_outstride0_two once
     // per 8192-element nditer buffer, folding each chunk's blocked-4 f32 tree

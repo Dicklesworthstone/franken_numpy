@@ -14846,7 +14846,9 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                  fnp_es_b = lambda a, b: fnp_mod.einsum('bij,bjk->bik', a, b)\n\
                  np_es_b = lambda a, b: np.einsum('bij,bjk->bik', a, b)\n\
                  fnp_es_bt = lambda a, b: fnp_mod.einsum('bij,blj->bil', a, b)\n\
-                 np_es_bt = lambda a, b: np.einsum('bij,blj->bil', a, b)\n",
+                 np_es_bt = lambda a, b: np.einsum('bij,blj->bil', a, b)\n\
+                 fnp_es_bg = lambda a, b: fnp_mod.einsum('bji,bjl->bil', a, b)\n\
+                 np_es_bg = lambda a, b: np.einsum('bji,bjl->bil', a, b)\n",
             )
             .expect("f16 einsum setup CString")
             .as_c_str(),
@@ -15108,6 +15110,39 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
             "f16_einsum_batched_t_8x256",
             &np_es_bt,
             &fnp_es_bt,
+            &bat_a,
+            &bat_b,
+        );
+
+        // Batched gram spec ('bji,bjl->bil'): per-step muladd rows per batch
+        // (chunk-immune per-step class). Same (8,256,256) operands.
+        let fnp_es_bg = namespace.get_item("fnp_es_bg").expect("fnp_es_bg present");
+        let np_es_bg = namespace.get_item("np_es_bg").expect("np_es_bg present");
+        let candidate_bg = fnp_es_bg
+            .call1((&bat_a, &bat_b))
+            .expect("fnp f16 einsum batched-gram parity");
+        let base_bg = np_es_bg
+            .call1((&bat_a, &bat_b))
+            .expect("numpy f16 einsum batched-gram parity");
+        assert_eq!(
+            candidate_bg
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_bg
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum batched gram byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_batched_g_8x256_null_then_effect",
+            "f16_einsum_batched_g_8x256",
+            &np_es_bg,
+            &fnp_es_bg,
             &bat_a,
             &bat_b,
         );
