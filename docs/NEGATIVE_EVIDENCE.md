@@ -4,6 +4,65 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): f64 exp/log/log2/log10 wired to the zero-copy transcendental path behind an avx512f ISA gate - the gkznn retry predicate PAID via a direct hz2 sample: numpy's AVX-512 kernels are NOT libm-byte-equal, so the gate (not a DIVERGENCES row) is the only byte-exact ship
+
+`cc_fnp`, bead deadlock-audit-gkznn (CLOSED by this entry; reopen of the stale 2026-06-09
+"do not re-wire exp/log without SIMD" passthrough decision; probe evidence 90dbcd9b).
+
+THE MISSING SAMPLE (7 scheduler attempts never landed hz2; this session ran the in-tree
+probe body verbatim over ssh on hz2 - pure numpy+math, the fnp .so is loaded-but-unused
+by that diagnostic, so the data point is identical; builds stayed rch-remote): hetzner2
+(AMD EPYC-Genoa, avx512f=true, avx512_skx=true, numpy 2.3.5, glibc 2.43) is
+byte_equal=FALSE on ALL FOUR ops - exp 9361/200k elements differ (4.68%), log 883
+(0.44%), log2 629 (0.31%), log10 53545 (26.77%), max_bitdiff 1-2 ULP. numpy's
+AVX-512-SKX SIMD kernels are confirmed NOT the system libm. Artifacts:
+explog_host_probe_hz2_avx512.txt + the exact script beside it.
+
+DECISION (the ledgered fork, resolved by standing policy): ISA-GATED DELEGATION - the
+only arm introducing ZERO divergence. A DIVERGENCES.md row (wire everywhere) violates
+the byte/ULP-exact standing order; no-ship forfeits the measured 1.60-2.39x on the
+whole AVX2 fleet class. Revisitable by a human if a 1-2 ULP divergence on AVX-512
+hosts is ever deemed acceptable in exchange for native speed there.
+
+ONE LEVER: extend zerocopy_f64_unary_flat's fused-defer transcendental set (e54e3195)
+to Exp/Log/Log2/Log10 behind numpy_explog_matches_libm() (cached
+!is_x86_feature_detected("avx512f"); non-x86-64 = passthrough), wired directly into the
+four pyfunctions with core_numpy_passthrough FALLBACK. Event predicates are EXACT
+note_unary_float_errors mirrors (Exp -> f64_over_under_event; Log family -> v==0.0 ||
+(v.is_finite() && v<0.0)); ANY would-be event defers the whole call to numpy, so the
+RuntimeWarning surface is preserved EXACTLY (strictly better warning parity than the
+sin family; tvy7o gap not expanded). BYTE-EXACT BY CONSTRUCTION on both branches: AVX2
+native = the same libm call numpy's scalar kernel makes (byte-equal on SIX AVX2 host
+samples x THREE numpy versions 2.2.4/2.3.5/2.4.6 counting the conformance run); AVX-512
+= numpy itself.
+
+MEASURED BASIS (probe pairs 90dbcd9b, worker vmi1227854, numpy A/A nulls 0.995-1.013,
+ONE binary ABBA iter_custom, RAYON_NUM_THREADS=4): parallel scalar-libm map WITH a
+deliberate vec![0.0;n] zero-init handicap the wired zero-copy path does not pay beats
+numpy exp_1m 2.11x (2.77 vs 5.84 ms), exp_4m 1.60x, log_1m 2.39x, log_4m 1.64x. The
+wired route strictly dominates the handicapped probe candidate. Direct median-gate rows
+through the wired pyfunctions (python_f64_exp_log_median_gate, 6 rows incl log2/log10
+4M, pre-timing byte+dtype parity asserts, in-run native_route print) are queued behind
+fleet slot exhaustion at commit time; the artifact lands as a follow-up evidence commit
+(explog_gate_bench_run1.txt). RETRY PREDICATE for the log2/log10 rows specifically: if
+either reads sub-parity vs its null on an avx512f=false worker, narrow the wiring to
+exp/log (same gate, two-op allowlist) - the machinery is per-op dispatched.
+
+CORRECTNESS: conformance_exp_log 50/50 GREEN remote (vmi1149989, numpy 2.2.4,
+avx512f=false - the native route exercised): NEW
+f64_exp_log_zerocopy_route_matches_numpy_byte_exactly (array-vs-list route equality +
+tobytes==numpy at 257/100k/1M x 4 ops),
+f64_exp_log_error_inputs_defer_and_warn_like_numpy (8 planted divide/invalid/overflow
+cases: output bytes AND warning category+message multisets equal numpy's, non-empty),
+f64_exp_log_special_values_scalar_and_strided_match (nan/inf/+-0 byte parity, 0-d
+scalar shape, strided + f32 passthrough unchanged). All three are ISA-blind (valid on
+AVX-512 workers too, where the route IS the passthrough).
+PROVENANCE: runner-printed host + shas in artifacts under
+tests/artifacts/perf/2026-07-10_f64_transcendental_zerocopy_cc_fnp/ (explog_wiring_*,
+explog_host_probe_hz2_*). FLEET NOTE: the permanent per-host byte-probe diagnostic
+stays; if numpy ever ships an AVX2-class f64 exp/log kernel diverging from libm, it
+surfaces there (assertion-free, printed per run).
+
 ## 2026-07-12 - WIN (SHIP): f16 einsum TRANSPOSED spec ('ij,lj->il', a@b.T idiom) via the source-pinned blocked-4 wide contract - 1.03 parity -> 20.5x vs numpy (fnp self 238.6 -> 12.4 ms at 512^3), byte-identical on fleet numpy; the source-read predicate PAID
 
 `cc_fnp` (linalg lane), bead deadlock-audit-xnck7 - the follow-through of the recon below,

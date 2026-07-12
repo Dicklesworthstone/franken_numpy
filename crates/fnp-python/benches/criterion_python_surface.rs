@@ -13859,6 +13859,135 @@ fn bench_f64_exp_log_probe(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_f64_exp_log_median_gate(c: &mut Criterion) {
+    // SHIP rows for bead deadlock-audit-gkznn: the ACTUAL wired route
+    // (fnp.exp/log/log2/log10 -> try_zerocopy_f64_unary parallel scalar-libm
+    // map on non-AVX-512 hosts) vs numpy, with pre-timing byte parity asserts.
+    // On an avx512f worker the ISA gate routes these to the numpy passthrough
+    // and the rows read ~1.0x by construction; the probe group's
+    // EXP_LOG_PROBE byte rows identify the worker class in the same run.
+    let mut group = c.benchmark_group("python_f64_exp_log_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_exp_log_median_gate").expect("exp/log bench module");
+        fnp_python(&module).expect("initialize fnp_python exp/log bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        // Worker-class provenance: the rows below are only expected to beat
+        // numpy where the ISA gate enables the native route (x86-64 with
+        // avx512f=false); elsewhere they measure passthrough-vs-numpy ~1.0x.
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy version")
+            .extract::<String>()
+            .expect("numpy version string");
+        #[cfg(target_arch = "x86_64")]
+        let native_route = !std::arch::is_x86_feature_detected!("avx512f");
+        #[cfg(not(target_arch = "x86_64"))]
+        let native_route = false;
+        println!("EXP_LOG_GATE_WORKER numpy={numpy_version} native_route={native_route}");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 e_1m = rng.standard_normal(1_048_576)\n\
+                 e_4m = rng.standard_normal(4_194_304)\n\
+                 l_1m = np.abs(rng.standard_normal(1_048_576)) + 0.5\n\
+                 l_4m = np.abs(rng.standard_normal(4_194_304)) + 0.5\n",
+            )
+            .expect("exp/log gate setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("exp/log gate setup");
+        let e_1m = namespace.get_item("e_1m").expect("e_1m present");
+        let e_4m = namespace.get_item("e_4m").expect("e_4m present");
+        let l_1m = namespace.get_item("l_1m").expect("l_1m present");
+        let l_4m = namespace.get_item("l_4m").expect("l_4m present");
+
+        let rows = [
+            (
+                "explog_exp_1m_null_then_effect",
+                "explog_exp_1m",
+                "exp",
+                &e_1m,
+            ),
+            (
+                "explog_exp_4m_null_then_effect",
+                "explog_exp_4m",
+                "exp",
+                &e_4m,
+            ),
+            (
+                "explog_log_1m_null_then_effect",
+                "explog_log_1m",
+                "log",
+                &l_1m,
+            ),
+            (
+                "explog_log_4m_null_then_effect",
+                "explog_log_4m",
+                "log",
+                &l_4m,
+            ),
+            (
+                "explog_log2_4m_null_then_effect",
+                "explog_log2_4m",
+                "log2",
+                &l_4m,
+            ),
+            (
+                "explog_log10_4m_null_then_effect",
+                "explog_log10_4m",
+                "log10",
+                &l_4m,
+            ),
+        ];
+        for (bench_name, row, op, input) in rows {
+            let fnp_fn = module.getattr(op).expect("fnp exp/log fn");
+            let np_fn = numpy.getattr(op).expect("numpy exp/log fn");
+            let candidate = fnp_fn.call1((input,)).expect("fnp exp/log parity call");
+            let base = np_fn.call1((input,)).expect("numpy exp/log parity call");
+            assert_eq!(
+                candidate
+                    .getattr("dtype")
+                    .expect("candidate dtype")
+                    .str()
+                    .expect("candidate dtype str")
+                    .to_string(),
+                base.getattr("dtype")
+                    .expect("base dtype")
+                    .str()
+                    .expect("base dtype str")
+                    .to_string(),
+                "exp/log {row} dtype parity",
+            );
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "exp/log {row} byte parity",
+            );
+            bench_median_gate_python_unary(&mut group, bench_name, row, &np_fn, &fnp_fn, input);
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_bool_sort_median_gate(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_bool_sort_median_gate");
     group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
@@ -15977,6 +16106,7 @@ criterion_group!(
     bench_completion_median_gate,
     bench_f64_transcendental_median_gate,
     bench_f64_exp_log_probe,
+    bench_f64_exp_log_median_gate,
     bench_bool_sort_median_gate,
     bench_int_matmul_median_gate,
     bench_f16_matmul_median_gate,

@@ -944,6 +944,158 @@ print(all_pass)
     Ok(())
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// f64 exp/log/log2/log10 zero-copy route (bead deadlock-audit-gkznn)
+//
+// On non-AVX-512 x86-64 hosts the native route runs a parallel scalar-libm map
+// off the borrowed numpy buffer (numpy's own kernel IS the system libm there —
+// byte-equal, five-host probe 2026-07-11); on AVX-512 hosts (numpy SIMD
+// kernels, 1-2 ULP off libm) the ISA gate defers everything to the numpy
+// passthrough. Both branches are byte-identical to numpy BY CONSTRUCTION, so
+// every assertion below is valid fleet-wide regardless of worker ISA.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn f64_exp_log_zerocopy_route_matches_numpy_byte_exactly() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20260711)
+verdicts = []
+for n in (257, 100_001, 1_000_000):
+    normal = rng.standard_normal(n)
+    positive = np.abs(rng.standard_normal(n)) + 0.5
+    ops = [("exp", normal), ("log", positive), ("log2", positive), ("log10", positive)]
+    for name, data in ops:
+        arr = np.ascontiguousarray(data, dtype=np.float64)
+        via_array = getattr(fnp, name)(arr)
+        via_list = getattr(fnp, name)(list(arr))
+        np_result = getattr(np, name)(arr)
+        route_ok = (
+            via_array.tobytes() == via_list.tobytes()
+            and via_array.dtype == via_list.dtype
+            and via_array.shape == via_list.shape
+        )
+        oracle_ok = (
+            via_array.tobytes() == np_result.tobytes()
+            and via_array.dtype == np_result.dtype
+        )
+        if not (route_ok and oracle_ok):
+            verdicts.append(f"FAIL {name} n={n} route_ok={route_ok} oracle_ok={oracle_ok}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f64 exp/log/log2/log10 zero-copy route should be byte-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn f64_exp_log_error_inputs_defer_and_warn_like_numpy() -> Result<(), String> {
+    // Planted event-carrying values (log-family x==0 divide / x<0 invalid, exp
+    // overflow) must defer the whole call to the numpy passthrough: outputs
+    // byte-identical AND numpy's RuntimeWarning surface preserved exactly
+    // (category + message, strictly better parity than the sin family).
+    let script = fnp_script(
+        r#"
+import warnings
+rng = np.random.default_rng(42)
+n = 40_000
+verdicts = []
+cases = [
+    ("log", 0.0), ("log", -0.0), ("log", -3.5),
+    ("log2", 0.0), ("log2", -1.0),
+    ("log10", 0.0), ("log10", -2.0),
+    ("exp", 710.0),
+]
+for name, bad in cases:
+    if name == "exp":
+        data = rng.standard_normal(n)
+    else:
+        data = np.abs(rng.standard_normal(n)) + 0.5
+    data = np.ascontiguousarray(data, dtype=np.float64)
+    data[n // 3] = bad
+    with warnings.catch_warnings(record=True) as fnp_warns:
+        warnings.simplefilter("always")
+        fnp_result = getattr(fnp, name)(data)
+    with warnings.catch_warnings(record=True) as np_warns:
+        warnings.simplefilter("always")
+        np_result = getattr(np, name)(data)
+    bytes_ok = fnp_result.tobytes() == np_result.tobytes()
+    fnp_msgs = sorted((w.category.__name__, str(w.message)) for w in fnp_warns)
+    np_msgs = sorted((w.category.__name__, str(w.message)) for w in np_warns)
+    warn_ok = fnp_msgs == np_msgs and len(np_msgs) > 0
+    if not (bytes_ok and warn_ok):
+        verdicts.append(
+            f"FAIL {name} bad={bad} bytes_ok={bytes_ok} fnp_warns={fnp_msgs} np_warns={np_msgs}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f64 exp/log error-carrying inputs should defer with numpy's exact warning surface: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn f64_exp_log_special_values_scalar_and_strided_match() -> Result<(), String> {
+    // NaN / +-inf / exp(+-0) record no float-error event (non-finite inputs are
+    // excluded by every predicate arm) and must match numpy byte-for-byte
+    // through the array route; 0-d arrays keep numpy's scalar return shape;
+    // strided and float32 inputs keep their existing passthrough handling.
+    let script = fnp_script(
+        r#"
+import warnings
+verdicts = []
+exp_specials = np.array([np.nan, np.inf, -np.inf, 0.0, -0.0], dtype=np.float64)
+log_specials = np.array([np.nan, np.inf, 0.5, 2.0], dtype=np.float64)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    for name, specials in [("exp", exp_specials), ("log", log_specials),
+                           ("log2", log_specials), ("log10", log_specials)]:
+        via_array = getattr(fnp, name)(specials)
+        np_result = getattr(np, name)(specials)
+        if via_array.tobytes() != np_result.tobytes():
+            verdicts.append(f"FAIL specials {name}")
+    for name, value in [("exp", 2.0), ("log", 3.0), ("log2", 3.0), ("log10", 3.0)]:
+        zero_d = np.array(value, dtype=np.float64)
+        fnp_scalar = getattr(fnp, name)(zero_d)
+        np_scalar = getattr(np, name)(zero_d)
+        if np.ndim(fnp_scalar) != np.ndim(np_scalar):
+            verdicts.append(f"FAIL 0d-ndim {name}")
+        if np.float64(fnp_scalar).tobytes() != np.float64(np_scalar).tobytes():
+            verdicts.append(f"FAIL 0d-bytes {name}")
+        strided = np.linspace(0.1, 9.7, 20_000)[::2]
+        fnp_strided = getattr(fnp, name)(strided)
+        np_strided = getattr(np, name)(strided)
+        if fnp_strided.tobytes() != np_strided.tobytes():
+            verdicts.append(f"FAIL strided {name}")
+        f32 = np.linspace(0.1, 9.7, 4_096, dtype=np.float32)
+        fnp_f32 = getattr(fnp, name)(f32)
+        np_f32 = getattr(np, name)(f32)
+        if fnp_f32.dtype != np_f32.dtype or fnp_f32.tobytes() != np_f32.tobytes():
+            verdicts.append(f"FAIL f32 {name}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f64 exp/log special values / scalar / strided handling should match numpy: {result}"
+    );
+    Ok(())
+}
+
 #[test]
 fn f64_exp_log_numpy_vs_system_libm_byte_probe() -> Result<(), String> {
     // Permanent per-host scoping diagnostic (bead deadlock-audit-gkznn; the
