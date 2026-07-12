@@ -4,6 +4,29 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - NO-SHIP: direct `isize` buffer for `contiguous_strides` is flat - 0.97-1.05x
+
+`CalmGate`, `fnp-ndarray`. Negative-ledger, Git-history, bead, and Agent Mail
+searches found no prior attempt for replacing the intermediate `Vec<usize>` and
+fallible `isize` collect. The candidate wrote each converted stride directly
+into the returned `Vec<isize>` while preserving item-size/zero-extent
+precedence, C/F axis order, every checked multiplication, and the payload-free
+`Overflow` result. A boundary grid compared it to the old implementation across
+scalars, zero dimensions, both orders, `isize::MAX`, and `usize::MAX` cases.
+
+Pinned same-worker `release-perf` Criterion runs on `vmi1156319` used the five
+existing C-order rows. `1d` moved from 37ns to 38ns (**0.97x**, regression),
+`2d` stayed 36ns (**1.00x**), `3d` moved 39ns to 37ns (**1.05x**), `4d` moved
+39ns to 37ns (**1.05x**), and `6d` moved 45ns to 43ns (**1.05x**). The tiny
+high-rank gains do not clear the null-control/1.2x ship floor and the low-rank
+rows are flat-to-worse, consistent with Rust already optimizing the same-width
+fallible collect well. The source and proof-test candidate were removed.
+
+**No-retry boundary:** do not retry the direct `Vec<usize>` to `Vec<isize>`
+type swap. Reopen only with allocation-profile evidence that a real caller
+performs two heap allocations, or with a distinct algorithm that clears 1.2x
+on the existing same-worker matrix without regressing any row.
+
 ## 2026-07-12 - WIN (SHIP): continuous Hyndman-Fan methods (hazen/weibull/median_unbiased/normal_unbiased) native - 1.56x (95.8 vs 149.3ms, hazen ax1); the quantile lane's ledger list is now EMPTY except weights=
 
 `cc_fnp` / FuchsiaStream. TWELFTH lane lever. Contract pinned 8100/8100 x 4
