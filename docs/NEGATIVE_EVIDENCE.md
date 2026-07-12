@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): f16 isin via the 65536-slot presence BITMAP - 402.6x (3.98 vs 1531.6ms at 8M/1k), the program's largest single-op win
+
+`cc_fnp` (430b703e). The unique presence-table lever (r6g4j, 218.9x) applied to
+membership: an 8KiB L1-resident bitmap of test-set bit patterns, O(n+m) vs numpy's
+sort-concat isin. Semantics pinned x3 numpy versions (2.4.3/2.2.4/2.3.5): NaN NEVER
+matches (nan buckets are never set, so nan queries read false), +-0 match EACH OTHER
+(either zero in the test set sets both zero buckets); bool output = no kept-pattern
+ambiguity. Conformance f16_isin_bitmap_bit_exact GREEN on the worker (nan-pattern
+battery incl 0xfe00, +-0 cross, 2-D shape, invert, below-gate defer). Gate row
+f16_isin_8m on vmi1293453: base 1531.578ms / candidate 3.984ms, effect 402.607
+(p10 263.4 / p90 545.0 / CV 27.1%), 20/20 above one, null 1.0056 (CV 5.6%),
+null-corrected 400.4, verdict=WIN (isin_ship_run1.txt).
+NEXT SIBLINGS (same bounded-domain table class, unfiled): f16 intersect1d/setdiff1d/
+union1d would ride the same bitmap pair-walk; sfgg3's searchsorted table stays parked P3.
+
 ## 2026-07-12 - RECON (contract CRACKED first-hypothesis): f16 einsum GRAM spec ('ji,jl->il', a.T@b) = per-step-narrow MULADD-ROW chain - the third and last 2-op GEMM-idiom contract class decoded; kernel implemented, ship gate in flight
 
 `cc_fnp` (einsum vein), the 'ji,jl->il' sibling lead filed in the xnck7 ship entry.
