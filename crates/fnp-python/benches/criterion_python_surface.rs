@@ -14853,6 +14853,7 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                  bc64_vec = rng.standard_normal(2896)\n\
                  red16 = (rng.standard_normal((2896, 2896)) * 0.3).astype(np.float16)\n\
                  red64 = rng.standard_normal((2896, 2896))\n\
+                 red32 = rng.standard_normal((2896, 2896)).astype(np.float32)\n\
                  fnp_es_rj = lambda a: fnp_mod.einsum('ij->j', a)\n\
                  np_es_rj = lambda a: np.einsum('ij->j', a)\n\
                  fnp_es_ri = lambda a: fnp_mod.einsum('ij->i', a)\n\
@@ -15205,6 +15206,7 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
         // and row-sum.
         let red16 = namespace.get_item("red16").expect("red16 present");
         let red64 = namespace.get_item("red64").expect("red64 present");
+        let red32 = namespace.get_item("red32").expect("red32 present");
         for (bench_name, row, fnp_key, np_key, input) in [
             (
                 "f16_einsum_colsum_8m_null_then_effect",
@@ -15233,6 +15235,20 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                 "fnp_es_ri",
                 "np_es_ri",
                 &red64,
+            ),
+            (
+                "f32_einsum_colsum_8m_null_then_effect",
+                "f32_einsum_colsum_8m",
+                "fnp_es_rj",
+                "np_es_rj",
+                &red32,
+            ),
+            (
+                "f32_einsum_rowsum_8m_null_then_effect",
+                "f32_einsum_rowsum_8m",
+                "fnp_es_ri",
+                "np_es_ri",
+                &red32,
             ),
         ] {
             let fnp_fn = namespace.get_item(fnp_key).expect("fnp reduce fn");

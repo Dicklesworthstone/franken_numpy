@@ -51,6 +51,17 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+F32 REDUCTIONS CRACKED + SHIPPED (follow-up, bead lyfd4 CLOSED): the "unknown small-n
+structure" was ONE wrong assumption in the reference - npyv_sum_f32's lane fold is the
+HADD form (v0+v1)+(v2+v3), not sequential; with it the 4-lane tree matches at EVERY n
+(36/36 x 3 versions + hz2/AVX-512; f32_fold_discriminate.py pins it, and the earlier
+n>8192 sequential-fold "match" was fold-ambiguity - a METHOD caution: a discriminator
+match at ONE regime is not a contract). Kernel beside the f16/f64 siblings. MEASURED
+(vmi1149989, sha a6245733...): f32_colsum 1.568 (null 1.012, 1.83 vs 2.92 ms, 19/20),
+f32_rowsum 1.251 (null 1.000, 0.90 vs 1.22 ms, 17/20 - borderline at sub-ms absolute
+times; median clears the null p90, honest smallest-win-of-the-family scope). The
+einsum single-operand reduction family is now native across f16/f32/f64.
+
 F32 REDUCTION RECON (same session, HELD - bead lyfd4): the f32 transfer of the
 reduction recipe is NOT a clean rerun. Col-sum (per-step f32 chains) and full-sum
 (chunk-fold L4 trees) verified within the 36-case sweep (the 12 fails were all

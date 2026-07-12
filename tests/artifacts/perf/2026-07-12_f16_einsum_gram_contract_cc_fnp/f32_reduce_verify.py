@@ -14,10 +14,7 @@ def lane_tree(av):
         chunk = np.zeros(L, dtype=np.float32); take = min(L, n - i)
         chunk[:take] = av[i:i+take]
         v = chunk + v; i += take
-    acc = np.float32(0.0)
-    for x in v:
-        acc += x
-    return acc
+    return np.float32(np.float32(v[0] + v[1]) + np.float32(v[2] + v[3]))
 
 def fold_full(av, CH=8192):
     out = np.float32(0.0)

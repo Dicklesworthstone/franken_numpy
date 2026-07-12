@@ -1424,6 +1424,20 @@ sm64 = rng.standard_normal((10, 10))
 for spec in ('ij->i', 'ij->j', 'ij->'):
     if np.asarray(fnp.einsum(spec, sm64)).tobytes() != np.asarray(np.einsum(spec, sm64)).tobytes():
         verdicts.append(f"FAIL f64 below-gate {spec}")
+# f32 reductions: 4-lane trees with the HADD lane fold (verified incl AVX-512)
+for (m, n) in ((1200, 1000), (3, 9000), (2000, 8193), (4096, 511)):
+    a32 = rng.standard_normal((m, n)).astype(np.float32)
+    a32[0, 0] = np.float32(-0.0)
+    for spec in ('ij->i', 'ij->j', 'ij->'):
+        r = fnp.einsum(spec, a32); e = np.einsum(spec, a32)
+        if type(r).__name__ != type(e).__name__:
+            verdicts.append(f"FAIL f32 {spec} ({m},{n}) type")
+        elif np.asarray(r).tobytes() != np.asarray(e).tobytes():
+            verdicts.append(f"FAIL f32 {spec} ({m},{n}) bytes")
+sm32 = rng.standard_normal((10, 10)).astype(np.float32)
+for spec in ('ij->i', 'ij->j', 'ij->'):
+    if np.asarray(fnp.einsum(spec, sm32)).tobytes() != np.asarray(np.einsum(spec, sm32)).tobytes():
+        verdicts.append(f"FAIL f32 below-gate {spec}")
 print(verdicts if verdicts else True)
 "#
         .into(),
