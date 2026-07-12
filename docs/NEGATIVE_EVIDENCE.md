@@ -51,6 +51,19 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+ISCLOSE PARALLELIZATION SHIPPED (363a51c2, bead ertjg CLOSED - premise corrected):
+the array-array f64/f32 zero-copy isclose paths EXISTED but ran SERIAL; the lever was
+the gated parallel branch (byte-identical per-element predicate, contract 16/16 x 3
+versions). MEASURED: isclose_f64_8m 6.690 [p10 4.50, p90 11.47] vs null 0.992 -
+20/20, 5.58 vs 38.6 ms (vmi1149989, sha ffce5d8d...). Conformance 17/17 incl the new
+gate-size lock. SFGG3 PREMISE ALSO CORRECTED: fnp already covers f16 searchsorted
+(widen-to-f32 -> the sort-to-sequentialize path); the O(1)-table contract is now
+VERIFIED anyway (4/4 x 4 versions, searchsorted_f16_verify.py - NaN queries return n
+for BOTH sides via the total-order compare, and unsorted haystacks byte-diverge so a
+table must gate on verified-sorted input) and parked as an optimization note (P3).
+METHOD REMINDER (twice in one day): grep the DISPATCH before believing a
+numpy-baseline rank is an fnp gap - the rank measures numpy, not fnp.
+
 WIDE SWEEP #2 (profile-first, three levers filed): f16 unique 600ms (65536-bucket
 table, 20-50x potential, bead r6g4j - edge semantics ORDER-DEPENDENT: the kept zero's
 bit pattern = first input occurrence, nan payloads collapse to one with the selection
