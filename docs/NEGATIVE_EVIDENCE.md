@@ -51,6 +51,18 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+ELEMENTWISE DISPATCH + ROW (same session, follow-up to 37a451a6): the first
+f16_einsum_elemwise_8m row read 0.9995x - the DIAGNOSTIC, not the result: the
+no-contraction branch returns the passthrough BEFORE the dtype-policy arm, so the f16
+kernel was dead code and the row measured numpy-vs-numpy (pre-timing parity asserts
+pass trivially on a passthrough route - a route-engagement row is the only tell).
+FIX: try the native kernel inside the no-contraction branch itself. Row with the
+route ENGAGED (vmi1149989, sha 3223641e..., 20 obs): 2.251 [p10 1.52, p90 4.65] vs
+null 0.999 [p90 1.43] - 20/20 above one, 25.9 vs 62.8 ms, noisy worker (CVs 21-46%)
+but decidable. METHOD NOTE: for kernels behind multi-branch dispatch, a ~1.0x
+route-engagement row after a byte-parity pass means DEAD DISPATCH, not honest parity
+- check the branch order before believing the null.
+
 ELEMENTWISE SPECS + INTRODUCED-DIVERGENCE FIX (same session): the 'X,X->X' elementwise
 recon REFUTED the 2026-06-27 broadcast-mul row's "bit-identical across EVERY dtype"
 claim. einsum's no-contraction loop still carries its ZERO ACCUMULATOR SEED: per
