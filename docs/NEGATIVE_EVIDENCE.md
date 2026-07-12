@@ -51,6 +51,15 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+FULL-CONTRACTION CLOSURE ADDENDUM (same session, a3796aff): 'ij,ij->' and 'ijk,ijk->'
+coalesce to 1-D (same-shape C-contiguous) and ride the dot1d chunk-fold kernel via a
+~30-line parser generalization ("X,X->", 1..=3 distinct letters) - verified 16/16 x 3
+numpy versions incl an 8193-element straddle. Diagonal/transposed-label/elementwise
+specs excluded + conformance-locked. MEASURED (vmi1149989, sha abd17b20..., 20 obs):
+f16_einsum_fullc_2d_8m effect 1.818 [p10 1.59, p90 2.13] vs null 0.990 - 20/20, 7.93
+vs 15.62 ms at 2896^2. Decode/memory-bound class (the dot1d ceiling), honestly scoped.
+FAMILY: THIRTEEN native specs.
+
 BATCHED OUTPUT-ORDER CLOSURE ADDENDUM (same session, ec098fc3): 'bij,blj->bli' and
 'bji,bjl->bli' = operand-swap arms of the batched transposed/gram kernels. The
 coalescing/chunk discriminators were RE-RUN per swapped layout per the method rule
