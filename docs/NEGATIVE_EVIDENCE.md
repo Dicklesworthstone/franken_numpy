@@ -60,14 +60,30 @@ argument as the family ship below.
 
 MEASURED BASIS AT COMMIT: the six direct family rows below (identical machinery,
 identical domain, worker vmi1149989) bracket exp2's per-element libm cost - exp 2.16x
-and log2 2.17x at 4M with nulls 0.97-1.00. The direct explog_exp2_4m row + exp2-folded
-conformance (route byte-equality at 3 sizes, overflow-1030 warning parity, specials/
-0-d/strided/f32 - all ISA-blind) are QUEUED behind a fully saturated fleet at commit
-time (insufficient_slots=8 refusals logged; detached retry pipeline armed, conformance
-gate before bench). Follow-up evidence commit lands exp2_ship_run1 artifacts. RETRY
-PREDICATE: explog_exp2_4m sub-parity vs its null on a native_route=true worker, or ANY
-conformance red -> drop Exp2 from the allowlist (one-line revert) + REJECT addendum
-here.
+and log2 2.17x at 4M with nulls 0.97-1.00. The direct row + exp2-folded conformance
+were QUEUED behind a fully saturated fleet at commit time (6 refusals logged); both
+LANDED the same session:
+
+DIRECT ROWS (follow-up, ONE binary / ONE process / ONE rch invocation, worker
+vmi1227854, numpy 2.4.6, in-run native_route=true, RAYON_NUM_THREADS=4, binary sha
+4896f42e... runner-printed) - conformance first GREEN 50/50 remote (vmi1149989, exp2
+folded into all three wiring tests), then ALL SEVEN rows WIN, retry predicate NOT
+triggered:
+
+| row | effect median [p10,p90] | null AA | fnp ms | numpy ms | above 1 |
+|---|---|---:|---:|---:|---:|
+| **explog_exp2_4m (NEW)** | **2.424** [1.59, 3.48] | 1.013 | 10.02 | 23.61 | 20/20 |
+| explog_exp_1m | 2.230 [1.74, 3.21] | 0.996 | 2.09 | 5.01 | 20/20 |
+| explog_exp_4m | 2.938 [2.24, 3.36] | 1.003 | 7.97 | 23.04 | 20/20 |
+| explog_log_1m | 2.002 [1.69, 2.81] | 0.997 | 2.73 | 5.50 | 20/20 |
+| explog_log_4m | 2.433 [1.84, 3.01] | 0.997 | 9.42 | 25.01 | 20/20 |
+| explog_log2_4m | 2.674 [2.00, 3.47] | 1.001 | 9.20 | 25.26 | 20/20 |
+| explog_log10_4m | 2.165 [1.44, 2.78] | 1.009 | 19.31 | 42.70 | 20/20 |
+
+The six family rows REPLICATE the 5024a790 vmi1149989/numpy-2.2.4 run on a second
+worker and second numpy version - two-worker replication for the whole family, 140/140
+observations above 1.0 across both runs. Artifact exp2_ship_run1.txt (conformance +
+bench in one pipeline log).
 
 ## 2026-07-12 - WIN (SHIP): f64 exp/log/log2/log10 wired to the zero-copy transcendental path behind an avx512f ISA gate - the gkznn retry predicate PAID via a direct hz2 sample: numpy's AVX-512 kernels are NOT libm-byte-equal, so the gate (not a DIVERGENCES row) is the only byte-exact ship
 
