@@ -51,6 +51,16 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+BATCHED SPEC ADDENDUM (same session, 43d9d1b8): 'bij,bjk->bik' = the plain per-step
+chain PER BATCH SLICE with no buffering chunk at any k (verified BEFORE implementing
+on numpy 2.2.4/2.4.3/2.4.6 incl k=8192/8193/9000 discriminators - the dot1d
+cross-version lesson applied up front). Kernel = plain MR=4 j-outer body per batch,
+parallel across batches + nested row blocks. Conformance GREEN 6/6. MEASURED
+(vmi1149989, sha b8adc76a..., 20 obs): f16_einsum_batched_8x256 effect 4.226 [p10
+3.97, p90 4.67] vs null 1.014 - 20/20 above one, 141.4 vs 602.1 ms, CVs 5.5-6.7%.
+einsum still cannot route to the tiled batched GEMM (contract), so this kernel is the
+only byte-exact acceleration for the idiom.
+
 1-D DOT CLOSURE ADDENDUM (same session, 7605b7f1, bead aey4j CLOSED): 'j,j->' contract
 = per-8192-nditer-buffer blocked-4 f32 tree folded through an f16 store/reload on the
 scalar output (source-pinned store line; verified 22/22 on FOUR numpy versions - 2.2.4 +
