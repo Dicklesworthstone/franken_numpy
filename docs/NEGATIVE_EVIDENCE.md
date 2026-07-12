@@ -51,6 +51,18 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+F32 REDUCTION RECON (same session, HELD - bead lyfd4): the f32 transfer of the
+reduction recipe is NOT a clean rerun. Col-sum (per-step f32 chains) and full-sum
+(chunk-fold L4 trees) verified within the 36-case sweep (the 12 fails were all
+row-sum), but 'ij->i' matches the L4 single tree ONLY at n=8193 and NONE of
+{L2,L4,L8,L16,seq,pairwise} at n=41/64/1000 - INVERTED vs f16/f64, where the
+unbuffered path was the simple side. Hypothesis for the next attempt: small-n rows
+get OUTPUT-COALESCED buffering (multiple out elements per inner loop -> contig_one
+kernel, different accumulation) - read einsum.cpp's nop=1 float dispatch before
+guessing further. f32 reductions stay on the numpy passthrough (status quo, zero
+risk); a col/full-only ship is possible if ranked. Artifacts f32_reduce_verify.py +
+f32_rowsum_discriminate.py + f32_reduce_recon_local.txt.
+
 F64 REDUCTIONS + SCOPE-OUT CORRECTION (same session, bead xmc9r CLOSED): the hz1
 96ms row-sum was HOST-SPECIFIC (fleet/local ~3ms) - always cross-check a single-host
 rank outlier before filing it as a pathology. KEY RECON: einsum_sumprod.c.src is

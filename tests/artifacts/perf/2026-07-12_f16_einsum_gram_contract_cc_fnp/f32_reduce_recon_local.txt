@@ -1,0 +1,8 @@
+F32_REDUCE_VERIFY numpy=2.4.3 total=36 fails=12
+VERIFY_FAIL
+=== row discriminator:
+n=41: []
+n=64: []
+n=1000: []
+n=8193: ['L4']
+numpy=2.4.3
