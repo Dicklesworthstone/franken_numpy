@@ -4,6 +4,18 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): nan multi-q AXIS-0 percentile/quantile native - 4.61x (59.8 vs 275.5ms at 2896^2 x 3 qs; numpy 395.7ms on hz1), byte-exact; FIFTH quantile-lane lever off one parity fix
+
+`cc_fnp`. nan_fractions_axis0_2d = the 8-wide block column gather (3b868faa)
+composed with per-lane NaN compaction (1c69d48b) - byte-exact by construction,
+nothing new to prove. Probe row nanpct3_ax0 4.605x tobytes-equal; all-NaN-column
+defer keeps numpy's "All-NaN slice" warning (parity asserted); all seven earlier
+rows green (nanpct3_ax1 4.65x, quantile9_ax1 4.26x this run). The 2-D quantile
+surface (plain + nan, flat/ax0/ax1, scalar + multi-q, linear) is now FULLY
+NATIVE. Lane remainder (unprofiled, likely low-EV): N-D non-last axes via
+moveaxis, H&F methods, keepdims multi-q (reshape-cheap if ever profiled),
+weights=.
+
 ## 2026-07-12 - WIN (SHIP): 2-D axis-0 multi-q percentile/quantile native - 3.46x (47.1 vs 162.8ms at 2896^2 x 3 qs), byte-exact; fourth quantile-lane lever of the session
 
 `cc_fnp`. Closes the non-last-axis multi-q delegate for the 2-D axis=0 case:

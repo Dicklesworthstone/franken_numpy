@@ -1179,6 +1179,21 @@ if r.tobytes() != e.tobytes():
     verdicts.append("FAIL all-nan-lane bytes")
 if [str(w.message) for w in wf] != [str(w.message) for w in wn]:
     verdicts.append("FAIL all-nan-lane warnings")
+# nan multi-q axis 0: block gather + compaction composition
+r, e = fnp.nanpercentile(mn, [25, 50, 75], axis=0), np.nanpercentile(mn, [25, 50, 75], axis=0)
+if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL nanpercentile3-ax0 bytes")
+allnan0 = mn.copy(); allnan0[:, 5] = np.nan
+with warnings.catch_warnings(record=True) as wf:
+    warnings.simplefilter("always")
+    r = fnp.nanquantile(allnan0, [0.25, 0.75], axis=0)
+with warnings.catch_warnings(record=True) as wn:
+    warnings.simplefilter("always")
+    e = np.nanquantile(allnan0, [0.25, 0.75], axis=0)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL all-nan-column-ax0 bytes")
+if [str(w.message) for w in wf] != [str(w.message) for w in wn]:
+    verdicts.append("FAIL all-nan-column-ax0 warnings")
 def best(fn, reps=5):
     fn(); best_s = float("inf")
     for _ in range(reps):
@@ -1190,6 +1205,7 @@ for name, nf, ff in (
     ("quantile9_ax1", lambda: np.quantile(m, qs, axis=1), lambda: fnp.quantile(m, qs, axis=1)),
     ("nanpct3_ax1", lambda: np.nanpercentile(mn, [25, 50, 75], axis=1), lambda: fnp.nanpercentile(mn, [25, 50, 75], axis=1)),
     ("percentile3_ax0", lambda: np.percentile(m, [25, 50, 75], axis=0), lambda: fnp.percentile(m, [25, 50, 75], axis=0)),
+    ("nanpct3_ax0", lambda: np.nanpercentile(mn, [25, 50, 75], axis=0), lambda: fnp.nanpercentile(mn, [25, 50, 75], axis=0)),
     ("percentile3", lambda: np.percentile(a, [25, 50, 75]), lambda: fnp.percentile(a, [25, 50, 75])),
     ("avg_weights", lambda: np.average(a, weights=w), lambda: fnp.average(a, weights=w)),
 ):
