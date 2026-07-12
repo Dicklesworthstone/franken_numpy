@@ -1438,6 +1438,22 @@ sm32 = rng.standard_normal((10, 10)).astype(np.float32)
 for spec in ('ij->i', 'ij->j', 'ij->'):
     if np.asarray(fnp.einsum(spec, sm32)).tobytes() != np.asarray(np.einsum(spec, sm32)).tobytes():
         verdicts.append(f"FAIL f32 below-gate {spec}")
+# 3-D reductions: prefix-out = row mode, suffix-out = col mode over flattened
+# axes (verified 32/32 x 4 samples); middle-axis and permuted outputs defer.
+for (p, q, r) in ((16, 100, 700), (3, 5, 8193)):
+    b16 = (rng.standard_normal((p, q, r)) * 0.3).astype(np.float16)
+    b64 = rng.standard_normal((p, q, r))
+    for arr, name in ((b16, "f16"), (b64, "f64")):
+        for spec in ('ijk->ij', 'ijk->i', 'ijk->k', 'ijk->jk', 'ijk->'):
+            rr = fnp.einsum(spec, arr); ee = np.einsum(spec, arr)
+            if type(rr).__name__ != type(ee).__name__ or np.shape(rr) != np.shape(ee):
+                verdicts.append(f"FAIL 3d {name} {spec} shape/type")
+            elif np.asarray(rr).tobytes() != np.asarray(ee).tobytes():
+                verdicts.append(f"FAIL 3d {name} {spec} bytes")
+        for spec in ('ijk->ik', 'ijk->j', 'ijk->ji'):
+            rr = fnp.einsum(spec, arr); ee = np.einsum(spec, arr)
+            if np.asarray(rr).tobytes() != np.asarray(ee).tobytes():
+                verdicts.append(f"FAIL 3d exclusion {name} {spec}")
 # 1-D full sum 'i->' across all three dtypes (chunk-fold on the flat buffer)
 for n in (2_000_003, 8193):
     v16 = (rng.standard_normal(n) * 0.3).astype(np.float16)
