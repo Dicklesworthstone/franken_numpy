@@ -1268,6 +1268,21 @@ for tag, call_f, call_n in (
     rf, rn = np.asarray(rf), np.asarray(rn)
     if rf.shape != rn.shape or rf.tobytes() != rn.tobytes():
         verdicts.append(f"FAIL {tag} bytes")
+# continuous H&F methods: clamped virtual-index plan + two-sided lerp
+for meth in ("hazen", "weibull", "median_unbiased", "normal_unbiased"):
+    rf = np.asarray(fnp.percentile(a, 37.3, method=meth))
+    rn = np.asarray(np.percentile(a, 37.3, method=meth))
+    if rf.tobytes() != rn.tobytes():
+        verdicts.append(f"FAIL {meth}-flat bytes")
+    r, e = fnp.quantile(m, 0.66, axis=1, method=meth), np.quantile(m, 0.66, axis=1, method=meth)
+    if r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL {meth}-ax1 bytes")
+# clamp edges: tiny/huge q on H&F (vi < 0 and vi >= n-1)
+for qv in (1e-9, 1.0 - 1e-9, 0.0, 1.0):
+    rf = np.asarray(fnp.quantile(a, qv, method="weibull"))
+    rn = np.asarray(np.quantile(a, qv, method="weibull"))
+    if rf.tobytes() != rn.tobytes():
+        verdicts.append(f"FAIL weibull-clamp q={qv} bytes")
 def best(fn, reps=5):
     fn(); best_s = float("inf")
     for _ in range(reps):
@@ -1286,6 +1301,7 @@ for name, nf, ff in (
     ("pct3_3d_ax1", lambda: np.percentile(t3, [25, 50, 75], axis=1), lambda: fnp.percentile(t3, [25, 50, 75], axis=1)),
     ("nanpct3_3d_ax1", lambda: np.nanpercentile(t3nn, [25, 50, 75], axis=1), lambda: fnp.nanpercentile(t3nn, [25, 50, 75], axis=1)),
     ("nanmedian_3d_ax1", lambda: np.nanmedian(t3nn, axis=1), lambda: fnp.nanmedian(t3nn, axis=1)),
+    ("hazen_ax1", lambda: np.percentile(m, 37.3, axis=1, method="hazen"), lambda: fnp.percentile(m, 37.3, axis=1, method="hazen")),
     ("percentile3", lambda: np.percentile(a, [25, 50, 75]), lambda: fnp.percentile(a, [25, 50, 75])),
     ("avg_weights", lambda: np.average(a, weights=w), lambda: fnp.average(a, weights=w)),
 ):

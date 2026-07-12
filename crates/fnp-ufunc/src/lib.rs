@@ -1107,6 +1107,47 @@ pub enum QuantileInterp {
     Nearest,
     /// Average of Lower and Higher.
     Midpoint,
+    /// Hazen plotting positions (alpha = beta = 0.5).
+    Hazen,
+    /// Weibull plotting positions (alpha = beta = 0).
+    Weibull,
+    /// Median-unbiased (alpha = beta = 1/3).
+    MedianUnbiased,
+    /// Normal-unbiased (alpha = beta = 3/8).
+    NormalUnbiased,
+}
+
+impl QuantileInterp {
+    /// (alpha, beta) for the continuous Hyndman-Fan methods; None for the
+    /// discontinuous/linear methods that use the plain (n-1)*q virtual index.
+    fn hf_params(self) -> Option<(f64, f64)> {
+        match self {
+            QuantileInterp::Hazen => Some((0.5, 0.5)),
+            QuantileInterp::Weibull => Some((0.0, 0.0)),
+            QuantileInterp::MedianUnbiased => Some((1.0 / 3.0, 1.0 / 3.0)),
+            QuantileInterp::NormalUnbiased => Some((3.0 / 8.0, 3.0 / 8.0)),
+            _ => None,
+        }
+    }
+}
+
+/// numpy `_compute_virtual_index` + `_get_indexes` clamping for the continuous
+/// Hyndman-Fan methods: vi = n*q + (alpha + q*(1 - alpha - beta)) - 1 (the exact
+/// numpy expression order), then vi < 0 -> both indexes 0, vi >= n-1 -> both
+/// n-1; gamma = vi - CLAMPED lo, fed to the two-sided numpy _lerp (gamma may be
+/// negative or > 1 at the clamps; the lerp degenerates to a or b exactly like
+/// numpy's). Contract pinned 8100/8100 cases x 4 methods x 5 sizes vs 2.4.3
+/// (H&F recon 2026-07-12).
+fn percentile_hf_plan(n: usize, fraction: f64, alpha: f64, beta: f64) -> (usize, usize, f64) {
+    let vi = n as f64 * fraction + (alpha + fraction * (1.0 - alpha - beta)) - 1.0;
+    if vi < 0.0 {
+        (0, 0, vi)
+    } else if vi >= (n - 1) as f64 {
+        (n - 1, n - 1, vi - (n - 1) as f64)
+    } else {
+        let lo = vi.floor() as usize;
+        (lo, lo + 1, vi - lo as f64)
+    }
 }
 
 /// Specification for a single axis of `mgrid`/`ogrid`, matching NumPy's dual semantics.
@@ -29646,6 +29687,10 @@ fn interpolate_percentile_method(sorted: &[f64], fraction: f64, method: Quantile
     if n == 1 {
         return sorted[0];
     }
+    if let Some((alpha, beta)) = method.hf_params() {
+        let (lo, hi, gamma) = percentile_hf_plan(n, fraction, alpha, beta);
+        return numpy_quantile_lerp(sorted[lo], sorted[hi], gamma);
+    }
     let idx = fraction * (n - 1) as f64;
     let lo = idx.floor() as usize;
     let frac = idx - lo as f64;
@@ -29668,6 +29713,12 @@ fn interpolate_percentile_method(sorted: &[f64], fraction: f64, method: Quantile
         // numpy 'midpoint' is _lerp(a, b, 0.5) = b - (b-a)*0.5, NOT (a+b)/2
         // (pinned 2025/2025 cases vs 2.4.3; midpoint recon 2026-07-12).
         QuantileInterp::Midpoint => numpy_quantile_lerp(sorted[lo], sorted[hi], 0.5),
+        QuantileInterp::Hazen
+        | QuantileInterp::Weibull
+        | QuantileInterp::MedianUnbiased
+        | QuantileInterp::NormalUnbiased => {
+            unreachable!("H&F methods return via the dedicated clamped-plan block above")
+        }
     }
 }
 
@@ -29685,6 +29736,20 @@ fn select_percentile_method(data: &mut [f64], fraction: f64, method: QuantileInt
     }
     if n == 1 {
         return data[0];
+    }
+    // Continuous H&F methods: dedicated clamped plan + two-sided lerp; the
+    // linear/discontinuous paths below stay byte-untouched (shared-helper
+    // two-contract lesson, 2026-07-12).
+    if let Some((alpha, beta)) = method.hf_params() {
+        let (lo, hi, gamma) = percentile_hf_plan(n, fraction, alpha, beta);
+        if lo == hi {
+            let (_, kth, _) = data.select_nth_unstable_by(lo, |a, b| a.total_cmp(b));
+            return numpy_quantile_lerp(*kth, *kth, gamma);
+        }
+        let (left, kth_hi, _) = data.select_nth_unstable_by(hi, |a, b| a.total_cmp(b));
+        let v_hi = *kth_hi;
+        let v_lo = left.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        return numpy_quantile_lerp(v_lo, v_hi, gamma);
     }
     let idx = fraction * (n - 1) as f64;
     let lo = idx.floor() as usize;
@@ -29712,6 +29777,12 @@ fn select_percentile_method(data: &mut [f64], fraction: f64, method: QuantileInt
             }
         }
         QuantileInterp::Midpoint => numpy_quantile_lerp(v_lo, v_hi, 0.5),
+        QuantileInterp::Hazen
+        | QuantileInterp::Weibull
+        | QuantileInterp::MedianUnbiased
+        | QuantileInterp::NormalUnbiased => {
+            unreachable!("H&F methods return via the dedicated clamped-plan block above")
+        }
     }
 }
 
@@ -29934,6 +30005,12 @@ fn par_select_percentile(data: &[f64], fraction: f64, method: QuantileInterp) ->
     if n == 1 {
         return data[0];
     }
+    // Continuous H&F methods: dedicated clamped plan (see select_percentile_method).
+    if let Some((alpha, beta)) = method.hf_params() {
+        let (lo, hi, gamma) = percentile_hf_plan(n, fraction, alpha, beta);
+        let (v_lo, v_hi) = par_select_two(data, lo, hi);
+        return numpy_quantile_lerp(v_lo, v_hi, gamma);
+    }
     let idx = fraction * (n - 1) as f64;
     let lo = idx.floor() as usize;
     let frac = idx - lo as f64;
@@ -29956,6 +30033,12 @@ fn par_select_percentile(data: &[f64], fraction: f64, method: QuantileInterp) ->
             }
         }
         QuantileInterp::Midpoint => numpy_quantile_lerp(v_lo, v_hi, 0.5),
+        QuantileInterp::Hazen
+        | QuantileInterp::Weibull
+        | QuantileInterp::MedianUnbiased
+        | QuantileInterp::NormalUnbiased => {
+            unreachable!("H&F methods return via the dedicated clamped-plan block above")
+        }
     }
 }
 

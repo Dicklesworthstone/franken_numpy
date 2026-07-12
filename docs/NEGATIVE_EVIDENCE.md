@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): continuous Hyndman-Fan methods (hazen/weibull/median_unbiased/normal_unbiased) native - 1.56x (95.8 vs 149.3ms, hazen ax1); the quantile lane's ledger list is now EMPTY except weights=
+
+`cc_fnp` / FuchsiaStream. TWELFTH lane lever. Contract pinned 8100/8100 x 4
+methods x 5 sizes vs 2.4.3: vi = n*q + (alpha + q*(1 - alpha - beta)) - 1 (the
+exact numpy _compute_virtual_index expression order), _get_indexes clamps both
+ends (vi < 0 -> both 0; vi >= n-1 -> both n-1), gamma = vi - CLAMPED lo (may be
+negative or > 1 at the clamps - the two-sided lerp degenerates to a/b exactly
+like numpy). Implemented as a DEDICATED early block (hf_params + 
+percentile_hf_plan) in the three selector fns so the proven linear/discontinuous
+paths stay byte-untouched (the tick-16 shared-helper lesson applied); enum
+variants force compiler-audited match coverage. Scalar-q only (multi-q H&F
+delegates via the existing Linear gates). Gate row hazen_ax1 1.559x
+tobytes-equal; batteries: 4 methods x flat+ax1 + weibull clamp edges
+(q = 1e-9 / 1-1e-9 / 0 / 1) all green; 33 fnp-ufunc unit tests green.
+REMAINING in lane: weights= (numpy restricts to inverted_cdf; ultra-niche),
+discontinuous H&F (inverted_cdf family), multi-q H&F. All flagged
+profile-before-digging.
+
 ## 2026-07-12 - WIN (SHIP): single-allocation `broadcast_shapes` accumulator - 1.16-1.73x
 
 `CalmGate`, `fnp-ndarray`. Negative-ledger and live-bead searches found no prior
