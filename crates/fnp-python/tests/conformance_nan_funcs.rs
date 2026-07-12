@@ -1152,6 +1152,19 @@ mc = m.copy(); mc[123, 7] = np.nan
 r, e = fnp.percentile(mc, [25, 75], axis=0), np.percentile(mc, [25, 75], axis=0)
 if r.tobytes() != e.tobytes():
     verdicts.append("FAIL nan-column-ax0 bytes")
+# N-D non-last-axis multi-q via the generalized strided-lane kernel
+t3 = rng.standard_normal((64, 512, 256))
+for tag, ax in (("3d-ax1", 1), ("3d-ax0", 0)):
+    r, e = fnp.percentile(t3, [25, 50, 75], axis=ax), np.percentile(t3, [25, 50, 75], axis=ax)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL {tag} bytes")
+r, e = fnp.quantile(t3, qs, axis=1, keepdims=True), np.quantile(t3, qs, axis=1, keepdims=True)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 3d-ax1-keepdims bytes")
+t3n = t3.copy(); t3n[3, 100, 7] = np.nan
+r, e = fnp.percentile(t3n, [25, 75], axis=1), np.percentile(t3n, [25, 75], axis=1)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 3d-nan-lane bytes")
 r, e = fnp.quantile(m, qs, axis=1, keepdims=True), np.quantile(m, qs, axis=1, keepdims=True)
 if r.shape != e.shape or r.tobytes() != e.tobytes():
     verdicts.append("FAIL keepdims-ax1 bytes")
@@ -1235,6 +1248,7 @@ for name, nf, ff in (
     ("quantile9_ax1_kd", lambda: np.quantile(m, qs, axis=1, keepdims=True), lambda: fnp.quantile(m, qs, axis=1, keepdims=True)),
     ("quantile9_flat_kd", lambda: np.quantile(m, qs, keepdims=True), lambda: fnp.quantile(m, qs, keepdims=True)),
     ("pct50_ax1_midpoint", lambda: np.percentile(m, 50, axis=1, method="midpoint"), lambda: fnp.percentile(m, 50, axis=1, method="midpoint")),
+    ("pct3_3d_ax1", lambda: np.percentile(t3, [25, 50, 75], axis=1), lambda: fnp.percentile(t3, [25, 50, 75], axis=1)),
     ("percentile3", lambda: np.percentile(a, [25, 50, 75]), lambda: fnp.percentile(a, [25, 50, 75])),
     ("avg_weights", lambda: np.average(a, weights=w), lambda: fnp.average(a, weights=w)),
 ):

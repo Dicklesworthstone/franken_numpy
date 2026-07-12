@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): N-D non-last-axis multi-q percentile/quantile native - 4.14x (53.4 vs 221.2ms at 8.39M 3-D x 3 qs) - NINTH quantile-lane lever; the lane's axis surface is COMPLETE
+
+`cc_fnp` / FuchsiaStream. fractions_strided_axis generalizes the axis0-2-D
+8-wide block gather to (outer, axis_len, inner) lanes - blocks run over INNER
+so each axis step reads one cache line; axis0-2-D is the outer==1 special case
+(shipped kernel kept for the 2-D route). Same sort + shared fraction plan +
+numpy_quantile_lerp => byte-exact by construction. Routing now accepts ANY
+single int axis on ndim >= 2 (normalize, last -> contiguous kernel, 2-D ax0 ->
+column kernel, else strided); keepdims reshape generalized to the normalized
+axis. Gate row pct3_3d_ax1 4.143x tobytes-equal (numpy hz1 basis 297-360ms);
+3-D ax0/keepdims/NaN-lane batteries green; all 11 prior rows green (flat-kd
+2.79x + midpoint 1.85x both replicate again). REMAINING lane delegates: nan
+N-D non-last axes (compose nan compaction into the strided kernel - unfiled),
+statistical H&F methods, weights=.
+
 ## 2026-07-12 - WIN (SHIP): method='midpoint' native unlock - 1.68x (59.7 vs 100.3ms, pct50 ax1) - the old byte-blocker was the (a+b)/2 arm; numpy midpoint is _lerp(a,b,0.5)
 
 `cc_fnp` / FuchsiaStream. The ledger's standing midpoint delegate reason
