@@ -51,6 +51,19 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+BROADCAST ELEMENTWISE CLOSURE (same session): the four 2-D broadcast no-contraction
+forms ('ij,j->ij', 'ij,i->ij', operand-swapped orders) take a native zero-seeded
+kernel across f64/f32/f16 (contract 12/12 x 3 versions incl planted signed zeros;
+one kernel, axis + operand-order + dtype parameterized). Conformance exercises all
+four forms at gate size per dtype with byte + warning-multiset locks, below-gate and
+transposed-output exclusions. MEASURED (vmi1227854, sha 425051d2..., 20 obs):
+f64_einsum_bcast_8m 2.923 [p10 1.95, p90 3.64] vs null 1.010 - 20/20, 3.78 vs
+10.99 ms at 2896^2. With this the ENTIRE 2-op no-contraction einsum float surface
+(Hadamard + broadcast, all dtypes) is native, byte/warning-exact, and faster than
+numpy; ints/bools stay on the proven multiply route. 3-D broadcast forms
+('ijk,k->ijk' etc.) remain passthrough - unfiled, same recipe if a profile ranks
+them.
+
 F64/F32 ELEMENTWISE SIBLING (same session): the zero-seeded elementwise kernel
 extended to f64/f32 in the same no-contraction branch slot (contract 14/14 x 3
 versions, signed-zero + huge-scale batteries; conformance exercises the native route

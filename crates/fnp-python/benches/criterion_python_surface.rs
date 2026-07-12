@@ -14849,6 +14849,10 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                  np_es_ew = lambda a, b: np.einsum('j,j->j', a, b)\n\
                  ew64_a = rng.standard_normal(8_388_608)\n\
                  ew64_b = rng.standard_normal(8_388_608)\n\
+                 bc64_full = rng.standard_normal((2896, 2896))\n\
+                 bc64_vec = rng.standard_normal(2896)\n\
+                 fnp_es_bc = lambda a, b: fnp_mod.einsum('ij,j->ij', a, b)\n\
+                 np_es_bc = lambda a, b: np.einsum('ij,j->ij', a, b)\n\
                  bat_a = (rng.standard_normal((8, 256, 256)) * 0.3).astype(np.float16)\n\
                  bat_b = (rng.standard_normal((8, 256, 256)) * 0.3).astype(np.float16)\n\
                  fnp_es_b = lambda a, b: fnp_mod.einsum('bij,bjk->bik', a, b)\n\
@@ -15155,6 +15159,40 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
             &fnp_es_ew,
             &ew64_a,
             &ew64_b,
+        );
+
+        // f64 broadcast form ('ij,j->ij') at 2896^2: the broadcast kernel.
+        let bc64_full = namespace.get_item("bc64_full").expect("bc64_full present");
+        let bc64_vec = namespace.get_item("bc64_vec").expect("bc64_vec present");
+        let fnp_es_bc = namespace.get_item("fnp_es_bc").expect("fnp_es_bc present");
+        let np_es_bc = namespace.get_item("np_es_bc").expect("np_es_bc present");
+        let candidate_bc = fnp_es_bc
+            .call1((&bc64_full, &bc64_vec))
+            .expect("fnp f64 einsum broadcast parity");
+        let base_bc = np_es_bc
+            .call1((&bc64_full, &bc64_vec))
+            .expect("numpy f64 einsum broadcast parity");
+        assert_eq!(
+            candidate_bc
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_bc
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f64 einsum broadcast byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f64_einsum_bcast_8m_null_then_effect",
+            "f64_einsum_bcast_8m",
+            &np_es_bc,
+            &fnp_es_bc,
+            &bc64_full,
+            &bc64_vec,
         );
 
         // Batched matmul spec ('bij,bjk->bik') at (8,256,256)@(8,256,256):

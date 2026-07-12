@@ -1308,6 +1308,34 @@ for dt in (np.float64, np.float32):
         verdicts.append(f"FAIL {dt.__name__} native-gate seed canonicalization")
     if sorted(str(w.message) for w in fw2) != sorted(str(w.message) for w in nw2):
         verdicts.append(f"FAIL {dt.__name__} native-gate warning parity fnp={[str(w.message) for w in fw2]}")
+# BROADCAST elementwise forms (zero-seeded, one 1-D operand, either axis/order):
+# native for floats at gate size, byte- and warning-identical to einsum.
+for dt in (np.float64, np.float16):
+    fullb = (rng.standard_normal((2000, 1000))).astype(dt)
+    rowv = (rng.standard_normal(1000)).astype(dt)
+    colv = (rng.standard_normal(2000)).astype(dt)
+    fullb[0, 0] = dt(-0.0); rowv[0] = dt(0.0); colv[0] = dt(0.0)
+    for spec, ops in (('ij,j->ij', (fullb, rowv)), ('ij,i->ij', (fullb, colv)),
+                      ('j,ij->ij', (rowv, fullb)), ('i,ij->ij', (colv, fullb))):
+        with warnings.catch_warnings(record=True) as fw3:
+            warnings.simplefilter("always")
+            rb = fnp.einsum(spec, *ops)
+        with warnings.catch_warnings(record=True) as nw3:
+            warnings.simplefilter("always")
+            eb = np.einsum(spec, *ops)
+        if rb.dtype != eb.dtype or rb.tobytes() != eb.tobytes():
+            verdicts.append(f"FAIL bcast {dt.__name__} {spec} bytes")
+        if sorted(str(w.message) for w in fw3) != sorted(str(w.message) for w in nw3):
+            verdicts.append(f"FAIL bcast {dt.__name__} {spec} warnings")
+    sm_f = (rng.standard_normal((10, 10))).astype(dt)
+    sm_v = (rng.standard_normal(10)).astype(dt)
+    if fnp.einsum('ij,j->ij', sm_f, sm_v).tobytes() != np.einsum('ij,j->ij', sm_f, sm_v).tobytes():
+        verdicts.append(f"FAIL bcast {dt.__name__} below-gate")
+# transposed broadcast form not captured (out-of-order labels)
+fb64 = (rng.standard_normal((1200, 1000))).astype(np.float64)
+cv64 = (rng.standard_normal(1200)).astype(np.float64)
+if fnp.einsum('ij,i->ji', fb64, cv64).tobytes() != np.einsum('ij,i->ji', fb64, cv64).tobytes():
+    verdicts.append("FAIL bcast transposed-out exclusion")
 # int/bool no-contraction stays on the fast multiply route - byte parity holds
 ia = rng.integers(-100, 100, (512, 512)).astype(np.int32)
 ib = rng.integers(-100, 100, (512, 512)).astype(np.int32)
