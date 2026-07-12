@@ -1444,19 +1444,20 @@ for (p, q, r) in ((16, 100, 700), (3, 5, 8193)):
     b16 = (rng.standard_normal((p, q, r)) * 0.3).astype(np.float16)
     b64 = rng.standard_normal((p, q, r))
     for arr, name in ((b16, "f16"), (b64, "f64")):
-        for spec in ('ijk->ij', 'ijk->i', 'ijk->k', 'ijk->jk', 'ijk->', 'ijk->ik'):
+        for spec in ('ijk->ij', 'ijk->i', 'ijk->k', 'ijk->jk', 'ijk->', 'ijk->ik', 'ijk->j'):
             rr = fnp.einsum(spec, arr); ee = np.einsum(spec, arr)
             if type(rr).__name__ != type(ee).__name__ or np.shape(rr) != np.shape(ee):
                 verdicts.append(f"FAIL 3d {name} {spec} shape/type")
             elif np.asarray(rr).tobytes() != np.asarray(ee).tobytes():
                 verdicts.append(f"FAIL 3d {name} {spec} bytes")
-        for spec in ('ijk->j', 'ijk->ji'):
+        for spec in ('ijk->ji', 'ijk->ki'):
             rr = fnp.einsum(spec, arr); ee = np.einsum(spec, arr)
             if np.asarray(rr).tobytes() != np.asarray(ee).tobytes():
                 verdicts.append(f"FAIL 3d exclusion {name} {spec}")
     b32 = rng.standard_normal((p, q, r)).astype(np.float32)
-    if fnp.einsum('ijk->ik', b32).tobytes() != np.einsum('ijk->ik', b32).tobytes():
-        verdicts.append("FAIL 3d f32 ijk->ik")
+    for spec in ('ijk->ik', 'ijk->j'):
+        if fnp.einsum(spec, b32).tobytes() != np.einsum(spec, b32).tobytes():
+            verdicts.append(f"FAIL 3d f32 {spec}")
 # 1-D full sum 'i->' across all three dtypes (chunk-fold on the flat buffer)
 for n in (2_000_003, 8193):
     v16 = (rng.standard_normal(n) * 0.3).astype(np.float16)
