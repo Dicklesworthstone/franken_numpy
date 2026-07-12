@@ -4,6 +4,18 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): keepdims multi-q unlocked across all four quantile entry points - 3.78x (53.4 vs 202.0ms, quantile9 ax1 keepdims); SIXTH lane lever, pure wiring
+
+`cc_fnp`. keepdims=True previously delegated the ENTIRE multi-q call to numpy
+(160-396ms class) at all four entry points; it is now a reshape after the shipped
+native kernels ([k] ++ input shape with reduced axes -> 1, numpy's exact layout).
+Probe row quantile9_ax1_kd 3.783x tobytes-equal; keepdims batteries green for
+plain ax1/ax0 + nan ax1 + nan flat; all eight prior rows unchanged (nanpct3_ax0
+5.05x this run). Zero new kernel code - the lever is 100%% dispatch wiring.
+LANE REMAINDER (unprofiled): N-D non-last axes via moveaxis, H&F methods,
+weights=, flat plain multi-q keepdims (still delegates - axis=None plain path
+predates the branch; nan flat keepdims IS native).
+
 ## 2026-07-12 - WIN (SHIP): nan multi-q AXIS-0 percentile/quantile native - 4.61x (59.8 vs 275.5ms at 2896^2 x 3 qs; numpy 395.7ms on hz1), byte-exact; FIFTH quantile-lane lever off one parity fix
 
 `cc_fnp`. nan_fractions_axis0_2d = the 8-wide block column gather (3b868faa)

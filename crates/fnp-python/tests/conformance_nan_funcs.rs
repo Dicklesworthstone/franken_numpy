@@ -1154,7 +1154,10 @@ if r.tobytes() != e.tobytes():
     verdicts.append("FAIL nan-column-ax0 bytes")
 r, e = fnp.quantile(m, qs, axis=1, keepdims=True), np.quantile(m, qs, axis=1, keepdims=True)
 if r.shape != e.shape or r.tobytes() != e.tobytes():
-    verdicts.append("FAIL keepdims-delegate bytes")
+    verdicts.append("FAIL keepdims-ax1 bytes")
+r, e = fnp.percentile(m, [25, 75], axis=0, keepdims=True), np.percentile(m, [25, 75], axis=0, keepdims=True)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL keepdims-ax0 bytes")
 # nan multi-q native path: per-lane NaN compaction + shared plan/lerp
 import warnings
 mn = m.copy()
@@ -1194,6 +1197,12 @@ if r.tobytes() != e.tobytes():
     verdicts.append("FAIL all-nan-column-ax0 bytes")
 if [str(w.message) for w in wf] != [str(w.message) for w in wn]:
     verdicts.append("FAIL all-nan-column-ax0 warnings")
+r, e = fnp.nanpercentile(mn, [25, 75], axis=1, keepdims=True), np.nanpercentile(mn, [25, 75], axis=1, keepdims=True)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL nan-keepdims-ax1 bytes")
+r, e = fnp.nanquantile(mn, [0.1, 0.9], keepdims=True), np.nanquantile(mn, [0.1, 0.9], keepdims=True)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL nan-keepdims-flat bytes")
 def best(fn, reps=5):
     fn(); best_s = float("inf")
     for _ in range(reps):
@@ -1206,6 +1215,7 @@ for name, nf, ff in (
     ("nanpct3_ax1", lambda: np.nanpercentile(mn, [25, 50, 75], axis=1), lambda: fnp.nanpercentile(mn, [25, 50, 75], axis=1)),
     ("percentile3_ax0", lambda: np.percentile(m, [25, 50, 75], axis=0), lambda: fnp.percentile(m, [25, 50, 75], axis=0)),
     ("nanpct3_ax0", lambda: np.nanpercentile(mn, [25, 50, 75], axis=0), lambda: fnp.nanpercentile(mn, [25, 50, 75], axis=0)),
+    ("quantile9_ax1_kd", lambda: np.quantile(m, qs, axis=1, keepdims=True), lambda: fnp.quantile(m, qs, axis=1, keepdims=True)),
     ("percentile3", lambda: np.percentile(a, [25, 50, 75]), lambda: fnp.percentile(a, [25, 50, 75])),
     ("avg_weights", lambda: np.average(a, weights=w), lambda: fnp.average(a, weights=w)),
 ):
