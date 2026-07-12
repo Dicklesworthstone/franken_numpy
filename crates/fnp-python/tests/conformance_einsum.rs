@@ -1118,6 +1118,62 @@ print(verdicts if verdicts else True)
 }
 
 #[test]
+fn f16_einsum_batched_transposed_contract_bit_exact() -> Result<(), String> {
+    // np.einsum's f16 BATCHED TRANSPOSED spec ('bij,blj->bil') with B>1 and
+    // m,n>1 runs the BUFFERED ndim-4 path: every output element folds
+    // per-8192-chunk blocked-4 wide f32 trees through an f16 store/reload.
+    // B==1 / m==1 / n==1 coalesce to the ndim-3 unbuffered single-tree
+    // contract (different bytes) and defer to numpy. Verified on numpy
+    // 2.2.4/2.4.3/2.4.6 locally; this test LOCKS both the chunk contract and
+    // the coalescing boundary on the fleet's numpy version.
+    let script = fnp_script(
+        r#"
+verdicts = []
+def check(name, r, e):
+    if r.dtype != e.dtype or r.shape != e.shape:
+        verdicts.append(f"FAIL {name} dtype/shape")
+    elif not bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all()):
+        verdicts.append(f"FAIL {name} bytes")
+rng = np.random.default_rng(20260713)
+# (B, m, k, n): chunk boundaries (8192/8193/16389), MR tails, k tails.
+for (B, m, k, n) in ((8, 64, 96, 80), (2, 256, 128, 96), (2, 3, 8193, 4), (3, 5, 9000, 3), (2, 2, 16389, 2), (16, 17, 33, 29), (4, 129, 7, 65)):
+    a = (rng.standard_normal((B, m, k)) * 0.3).astype(np.float16)
+    x = (rng.standard_normal((B, n, k)) * 0.3).astype(np.float16)
+    check(f"B={B},m={m},k={k},n={n}", fnp.einsum('bij,blj->bil', a, x), np.einsum('bij,blj->bil', a, x))
+# coalescing exclusions: B==1 / m==1 / n==1 stay on the numpy path (different contract)
+for (B, m, k, n) in ((1, 64, 9000, 48), (3, 1, 9000, 48), (3, 64, 9000, 1)):
+    a = (rng.standard_normal((B, m, k)) * 0.3).astype(np.float16)
+    x = (rng.standard_normal((B, n, k)) * 0.3).astype(np.float16)
+    check(f"coalesce B={B},m={m},n={n}", fnp.einsum('bij,blj->bil', a, x), np.einsum('bij,blj->bil', a, x))
+# mixed scales + inf/nan + overflow through the chunk folds
+a = (rng.standard_normal((3, 96, 130)) * rng.choice([0.01, 1.0, 100.0], (3, 96, 1))).astype(np.float16)
+x = (rng.standard_normal((3, 80, 130)) * 0.3).astype(np.float16)
+a[0, 0, 0] = np.float16(np.inf); x[1, 5, 3] = np.float16(np.nan); a[2, 7, :] = np.float16(60000); x[2, 9, :] = np.float16(60000)
+check("specials", fnp.einsum('bij,blj->bil', a, x), np.einsum('bij,blj->bil', a, x))
+# alternate letters + below-gate
+check("alt_letters", fnp.einsum('qrs,qts->qrt', a, x), np.einsum('qrs,qts->qrt', a, x))
+sm_a = (rng.standard_normal((2, 8, 8)) * 0.3).astype(np.float16)
+sm_x = (rng.standard_normal((2, 8, 8)) * 0.3).astype(np.float16)
+check("below_gate", fnp.einsum('bij,blj->bil', sm_a, sm_x), np.einsum('bij,blj->bil', sm_a, sm_x))
+# F-order defers; adjacent specs stay byte-exact via their own routes
+at = np.asfortranarray(a)
+check("f_order", fnp.einsum('bij,blj->bil', at, x), np.einsum('bij,blj->bil', at, x))
+check("out_swapped", fnp.einsum('bij,blj->bli', a, x), np.einsum('bij,blj->bli', a, x))
+check("sum_batch", fnp.einsum('bij,blj->il', a, x), np.einsum('bij,blj->il', a, x))
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 einsum batched transposed must be bit-identical to numpy's buffered chunk-fold contract: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_einsum_dot_1d_buffered_contract_bit_exact() -> Result<(), String> {
     // np.einsum's f16 1-D dot ('j,j->') runs contig_contig_outstride0_two once
     // per 8192-element nditer buffer, folding each chunk's blocked-4 f32 tree

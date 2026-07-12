@@ -14844,7 +14844,9 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                  bat_a = (rng.standard_normal((8, 256, 256)) * 0.3).astype(np.float16)\n\
                  bat_b = (rng.standard_normal((8, 256, 256)) * 0.3).astype(np.float16)\n\
                  fnp_es_b = lambda a, b: fnp_mod.einsum('bij,bjk->bik', a, b)\n\
-                 np_es_b = lambda a, b: np.einsum('bij,bjk->bik', a, b)\n",
+                 np_es_b = lambda a, b: np.einsum('bij,bjk->bik', a, b)\n\
+                 fnp_es_bt = lambda a, b: fnp_mod.einsum('bij,blj->bil', a, b)\n\
+                 np_es_bt = lambda a, b: np.einsum('bij,blj->bil', a, b)\n",
             )
             .expect("f16 einsum setup CString")
             .as_c_str(),
@@ -15073,6 +15075,39 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
             "f16_einsum_batched_8x256",
             &np_es_b,
             &fnp_es_b,
+            &bat_a,
+            &bat_b,
+        );
+
+        // Batched transposed spec ('bij,blj->bil'): buffered chunk-fold wide
+        // trees per element, parallel across batches + row blocks.
+        let fnp_es_bt = namespace.get_item("fnp_es_bt").expect("fnp_es_bt present");
+        let np_es_bt = namespace.get_item("np_es_bt").expect("np_es_bt present");
+        let candidate_bt = fnp_es_bt
+            .call1((&bat_a, &bat_b))
+            .expect("fnp f16 einsum batched-t parity");
+        let base_bt = np_es_bt
+            .call1((&bat_a, &bat_b))
+            .expect("numpy f16 einsum batched-t parity");
+        assert_eq!(
+            candidate_bt
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_bt
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum batched transposed byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_batched_t_8x256_null_then_effect",
+            "f16_einsum_batched_t_8x256",
+            &np_es_bt,
+            &fnp_es_bt,
             &bat_a,
             &bat_b,
         );
