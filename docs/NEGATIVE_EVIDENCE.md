@@ -4,6 +4,41 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP, family completion): f64 exp2 joins the ISA-gated zero-copy exp/log family - the fifth and last scalar-libm exp/log-class passthrough closed; hz1/hz2 probes reproduce the family byte relation exactly
+
+`cc_fnp`, family-completion sibling of the exp/log/log2/log10 ship below (same session,
+70752855/5024a790). LEDGER-FIRST BASIS: fn exp2 was the only remaining family member on
+the stale pre-zero-copy passthrough; its comment cited the same refuted 2026-06-26
+measurement class ("parallel unary path 1.48x SLOWER, 94 vs 64ms@8M" - that 94ms
+INCLUDED extract+zero-init+rebuild). numpy exp2@8M reads the same scalar-libm speed
+class as log2 (64 vs 65 ms@8M in the old rows), and the identical wired machinery beats
+log2 2.17x (row explog_log2_4m below).
+
+PROBES (direct ssh, probe-body pattern from the gkznn close, seed 20260711, 200k
+standard-normal): hz1 (AVX2-class, numpy 2.3.5) numpy exp2 == libm byte_equal=TRUE, 0
+diffs. hz2 (avx512_skx, numpy 2.3.5) byte_equal=FALSE, 10446/200k elements (5.22%), max
+1 ULP - the EXACT exp/log family relation on both ISA classes. Rust f64::exp2 lowers to
+the same libm exp2 symbol math.exp2 calls. Artifacts: exp2_host_probe_hz1_hz2.txt +
+script beside it.
+
+ONE LEVER: add UnaryOp::Exp2 to the gated allowlist/ISA-gate/dispatch/transcendental
+arms (f64_over_under_event - Exp2 shares Exp's note_unary_float_errors arm) + the
+try_zerocopy_f64_unary attempt in fn exp2. Same numpy_explog_matches_libm gate; AVX-512
+hosts and event-carrying inputs defer whole-call to the numpy passthrough
+(RuntimeWarning surface exact). Byte-exact by construction on both branches, same
+argument as the family ship below.
+
+MEASURED BASIS AT COMMIT: the six direct family rows below (identical machinery,
+identical domain, worker vmi1149989) bracket exp2's per-element libm cost - exp 2.16x
+and log2 2.17x at 4M with nulls 0.97-1.00. The direct explog_exp2_4m row + exp2-folded
+conformance (route byte-equality at 3 sizes, overflow-1030 warning parity, specials/
+0-d/strided/f32 - all ISA-blind) are QUEUED behind a fully saturated fleet at commit
+time (insufficient_slots=8 refusals logged; detached retry pipeline armed, conformance
+gate before bench). Follow-up evidence commit lands exp2_ship_run1 artifacts. RETRY
+PREDICATE: explog_exp2_4m sub-parity vs its null on a native_route=true worker, or ANY
+conformance red -> drop Exp2 from the allowlist (one-line revert) + REJECT addendum
+here.
+
 ## 2026-07-12 - WIN (SHIP): f64 exp/log/log2/log10 wired to the zero-copy transcendental path behind an avx512f ISA gate - the gkznn retry predicate PAID via a direct hz2 sample: numpy's AVX-512 kernels are NOT libm-byte-equal, so the gate (not a DIVERGENCES row) is the only byte-exact ship
 
 `cc_fnp`, bead deadlock-audit-gkznn (CLOSED by this entry; reopen of the stale 2026-06-09

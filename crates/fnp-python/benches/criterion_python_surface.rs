@@ -13926,6 +13926,12 @@ fn bench_f64_exp_log_median_gate(c: &mut Criterion) {
                 &e_4m,
             ),
             (
+                "explog_exp2_4m_null_then_effect",
+                "explog_exp2_4m",
+                "exp2",
+                &e_4m,
+            ),
+            (
                 "explog_log_1m_null_then_effect",
                 "explog_log_1m",
                 "log",

@@ -1,0 +1,7 @@
+EXP2_HOST_PROBE host=hetzner1 numpy=2.3.5 avx512f=False avx512_skx=False op=exp2 byte_equal=True diff_elems=0
+EXP2_HOST_PROBE_ENV glibc=2.43 python=3.14.4
+PROBE_OK
+EXP2_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True avx512_skx=True op=exp2 byte_equal=False diff_elems=10446
+EXP2_HOST_PROBE_DETAIL max_bitdiff=1 frac_diff=0.052230 example_x=np.float64(-0.0303030786048103) np=np.float64(0.9792145644616596) libm=np.float64(0.9792145644616597)
+EXP2_HOST_PROBE_ENV glibc=2.43 python=3.14.4
+PROBE_OK

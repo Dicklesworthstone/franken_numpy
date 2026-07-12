@@ -964,7 +964,8 @@ verdicts = []
 for n in (257, 100_001, 1_000_000):
     normal = rng.standard_normal(n)
     positive = np.abs(rng.standard_normal(n)) + 0.5
-    ops = [("exp", normal), ("log", positive), ("log2", positive), ("log10", positive)]
+    ops = [("exp", normal), ("exp2", normal), ("log", positive),
+           ("log2", positive), ("log10", positive)]
     for name, data in ops:
         arr = np.ascontiguousarray(data, dtype=np.float64)
         via_array = getattr(fnp, name)(arr)
@@ -1011,9 +1012,10 @@ cases = [
     ("log2", 0.0), ("log2", -1.0),
     ("log10", 0.0), ("log10", -2.0),
     ("exp", 710.0),
+    ("exp2", 1030.0),
 ]
 for name, bad in cases:
-    if name == "exp":
+    if name in ("exp", "exp2"):
         data = rng.standard_normal(n)
     else:
         data = np.abs(rng.standard_normal(n)) + 0.5
@@ -1059,13 +1061,15 @@ exp_specials = np.array([np.nan, np.inf, -np.inf, 0.0, -0.0], dtype=np.float64)
 log_specials = np.array([np.nan, np.inf, 0.5, 2.0], dtype=np.float64)
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
-    for name, specials in [("exp", exp_specials), ("log", log_specials),
-                           ("log2", log_specials), ("log10", log_specials)]:
+    for name, specials in [("exp", exp_specials), ("exp2", exp_specials),
+                           ("log", log_specials), ("log2", log_specials),
+                           ("log10", log_specials)]:
         via_array = getattr(fnp, name)(specials)
         np_result = getattr(np, name)(specials)
         if via_array.tobytes() != np_result.tobytes():
             verdicts.append(f"FAIL specials {name}")
-    for name, value in [("exp", 2.0), ("log", 3.0), ("log2", 3.0), ("log10", 3.0)]:
+    for name, value in [("exp", 2.0), ("exp2", 2.0), ("log", 3.0),
+                        ("log2", 3.0), ("log10", 3.0)]:
         zero_d = np.array(value, dtype=np.float64)
         fnp_scalar = getattr(fnp, name)(zero_d)
         np_scalar = getattr(np, name)(zero_d)
