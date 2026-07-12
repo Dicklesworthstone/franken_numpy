@@ -4,6 +4,22 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - STALE-REJECT REOPENED (WIN): integer ARRAY-q percentile/quantile now rides the multi-q kernels - 1.80x (10.4 vs 18.6ms at 1024^2 x 3 qs; hz1 basis 128-172ms at 2896^2)
+
+`cc_fnp` / FuchsiaStream. THIRTEENTH lane lever. The "integer input never beats
+numpy percentile/quantile; delegate" gate was measured against the OLD extract+
+select path and predates every 2026-07-12 multi-q kernel - a stale premise.
+CONTRACT (pinned locally): numpy's int percentile == the exact-f64-widened
+percentile BYTE-FOR-BYTE (i64/i32/i16/u8 x flat/ax0/ax1 incl +-1e9 int64), and
+fnp's extract RAISES on any int that cannot round-trip f64 exactly, so the
+fallback stays the safety net for 2^53+ values. Unlock = the tick-12 pattern:
+the integer delegate gate in percentile()/quantile() now exempts ARRAY-q
+(scalar-q ints keep the old measured delegate). Gate row int64_pct3_ax1 1.796x
+tobytes-equal; batteries i64/i16 x ax1/ax0/flat/keepdims + scalar-delegate
+parity green. METHOD NOTE: rejects carry their MEASUREMENT BASIS - when the
+machinery under a reject is rebuilt, the reject is a lead, not a wall (2nd
+occurrence: the 2026-07-10 narrow-int sort reopen was the same class).
+
 ## 2026-07-12 - NO-SHIP: direct `isize` buffer for `contiguous_strides` is flat - 0.97-1.05x
 
 `CalmGate`, `fnp-ndarray`. Negative-ledger, Git-history, bead, and Agent Mail

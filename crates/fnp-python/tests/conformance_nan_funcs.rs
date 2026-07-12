@@ -1283,6 +1283,20 @@ for qv in (1e-9, 1.0 - 1e-9, 0.0, 1.0):
     rn = np.asarray(np.quantile(a, qv, method="weibull"))
     if rf.tobytes() != rn.tobytes():
         verdicts.append(f"FAIL weibull-clamp q={qv} bytes")
+# INTEGER array-q unlock (stale-reject reopen): int percentile == exact-f64-widened, byte-for-byte
+mi64 = rng.integers(-10**9, 10**9, (1024, 1024))
+mi16 = rng.integers(-30000, 30000, (1024, 1024)).astype(np.int16)
+for tag, arr, args, kw in (
+    ("int64-pct3-ax1", mi64, ([25, 50, 75],), {"axis": 1}),
+    ("int64-q9-ax0", mi64, (qs,), {"axis": 0}),
+    ("int16-flat", mi16, ([10, 90],), {}),
+    ("int64-kd", mi64, (qs,), {"axis": 1, "keepdims": True}),
+):
+    r, e = fnp.percentile(arr, *args, **kw), np.percentile(arr, *args, **kw)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL {tag} bytes")
+if fnp.percentile(mi64, 50).tobytes() != np.asarray(np.percentile(mi64, 50)).tobytes():
+    verdicts.append("FAIL int-scalar-delegate bytes")
 def best(fn, reps=5):
     fn(); best_s = float("inf")
     for _ in range(reps):
@@ -1302,6 +1316,7 @@ for name, nf, ff in (
     ("nanpct3_3d_ax1", lambda: np.nanpercentile(t3nn, [25, 50, 75], axis=1), lambda: fnp.nanpercentile(t3nn, [25, 50, 75], axis=1)),
     ("nanmedian_3d_ax1", lambda: np.nanmedian(t3nn, axis=1), lambda: fnp.nanmedian(t3nn, axis=1)),
     ("hazen_ax1", lambda: np.percentile(m, 37.3, axis=1, method="hazen"), lambda: fnp.percentile(m, 37.3, axis=1, method="hazen")),
+    ("int64_pct3_ax1", lambda: np.percentile(mi64, [25, 50, 75], axis=1), lambda: fnp.percentile(mi64, [25, 50, 75], axis=1)),
     ("percentile3", lambda: np.percentile(a, [25, 50, 75]), lambda: fnp.percentile(a, [25, 50, 75])),
     ("avg_weights", lambda: np.average(a, weights=w), lambda: fnp.average(a, weights=w)),
 ):
