@@ -1,0 +1,8 @@
+MIDAXIS_VERIFY numpy=2.4.3 total=15 fails=0
+VERIFY_OK
+MIDAXIS_VERIFY numpy=2.4.6 total=15 fails=0
+VERIFY_OK
+MIDAXIS_VERIFY numpy=2.2.4 total=15 fails=0
+VERIFY_OK
+MIDAXIS_VERIFY numpy=2.3.5 total=15 fails=0
+VERIFY_OK
