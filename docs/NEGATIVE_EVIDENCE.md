@@ -51,6 +51,15 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+F16 REDUCTION SPECS SHIPPED (same session, fc766efa, bead oxok1 CLOSED): contracts
+42/42 x 3 versions - row-sum = ONE paired (d0+d1)+(d2+d3) tree per row with NO
+chunking at any n (discriminator catch #4: the 8192-fold hypothesis failed at
+n>8192); col-sum = per-step-narrow column chains; full-sum = chunk-fold. SECOND
+dead-dispatch catch by the ~1.0x rule (the single-reduce passthrough arm precedes the
+Defer arm; kernel now tried inside it, kwargs-gated). MEASURED engaged (vmi1227854,
+sha 3b8f1f4e..., 20 obs each): colsum_8m 2.901 (null 0.973, 14.2 vs 42.5 ms),
+rowsum_8m 3.841 (null 1.009, 3.57 vs 13.4 ms) - 40/40 above one.
+
 SURFACE RANKING (same session, profile-first for the next cycle): hz1 numpy-self-time
 sweep of the remaining einsum surface (einsum_surface_rank_hz1.txt + script):
 3-op f16 chain UNOPT 1443ms at just 128^3 (O(n^4) fused loop - byte-reachable only by
