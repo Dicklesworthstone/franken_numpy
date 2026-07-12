@@ -1438,6 +1438,15 @@ sm32 = rng.standard_normal((10, 10)).astype(np.float32)
 for spec in ('ij->i', 'ij->j', 'ij->'):
     if np.asarray(fnp.einsum(spec, sm32)).tobytes() != np.asarray(np.einsum(spec, sm32)).tobytes():
         verdicts.append(f"FAIL f32 below-gate {spec}")
+# 1-D full sum 'i->' across all three dtypes (chunk-fold on the flat buffer)
+for n in (2_000_003, 8193):
+    v16 = (rng.standard_normal(n) * 0.3).astype(np.float16)
+    v64 = rng.standard_normal(n)
+    v32 = v64.astype(np.float32)
+    for name, v in (("f16", v16), ("f64", v64), ("f32", v32)):
+        r = fnp.einsum('i->', v); e = np.einsum('i->', v)
+        if type(r).__name__ != type(e).__name__ or np.asarray(r).tobytes() != np.asarray(e).tobytes():
+            verdicts.append(f"FAIL 1d-sum {name} n={n}")
 print(verdicts if verdicts else True)
 "#
         .into(),
