@@ -14836,7 +14836,11 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                  fnp_es_ts = lambda a, b: fnp_mod.einsum('ij,lj->li', a, b)\n\
                  np_es_ts = lambda a, b: np.einsum('ij,lj->li', a, b)\n\
                  fnp_es_gs = lambda a, b: fnp_mod.einsum('ji,jl->li', a, b)\n\
-                 np_es_gs = lambda a, b: np.einsum('ji,jl->li', a, b)\n",
+                 np_es_gs = lambda a, b: np.einsum('ji,jl->li', a, b)\n\
+                 dot_a = (rng.standard_normal(8_388_608) * 0.3).astype(np.float16)\n\
+                 dot_b = (rng.standard_normal(8_388_608) * 0.3).astype(np.float16)\n\
+                 fnp_es_d = lambda a, b: fnp_mod.einsum('j,j->', a, b)\n\
+                 np_es_d = lambda a, b: np.einsum('j,j->', a, b)\n",
             )
             .expect("f16 einsum setup CString")
             .as_c_str(),
@@ -14998,6 +15002,41 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                 &mut group, bench_name, row, &np_fn, &fnp_fn, &es_a, &es_b,
             );
         }
+
+        // 1-D dot ('j,j->') at 8M: per-8192-buffer trees in parallel, serial
+        // f16 fold. Scalar output - parity assert via float16 byte equality.
+        let dot_a = namespace.get_item("dot_a").expect("dot_a present");
+        let dot_b = namespace.get_item("dot_b").expect("dot_b present");
+        let fnp_es_d = namespace.get_item("fnp_es_d").expect("fnp_es_d present");
+        let np_es_d = namespace.get_item("np_es_d").expect("np_es_d present");
+        let candidate_d = fnp_es_d
+            .call1((&dot_a, &dot_b))
+            .expect("fnp f16 einsum dot parity");
+        let base_d = np_es_d
+            .call1((&dot_a, &dot_b))
+            .expect("numpy f16 einsum dot parity");
+        assert_eq!(
+            candidate_d
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_d
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum 1-D dot byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_dot1d_8m_null_then_effect",
+            "f16_einsum_dot1d_8m",
+            &np_es_d,
+            &fnp_es_d,
+            &dot_a,
+            &dot_b,
+        );
     });
 
     group.finish();

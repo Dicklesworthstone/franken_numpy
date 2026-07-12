@@ -1065,3 +1065,60 @@ print(bool(ok))
     );
     Ok(())
 }
+
+#[test]
+fn f16_einsum_dot_1d_buffered_contract_bit_exact() -> Result<(), String> {
+    // np.einsum's f16 1-D dot ('j,j->') runs contig_contig_outstride0_two once
+    // per 8192-element nditer buffer, folding each chunk's blocked-4 f32 tree
+    // through an f16 store/reload on the scalar output:
+    //   out = f16(f32(out) + tree(chunk)), out0 = f16(+0.0).
+    // Pinned by source read + a 22-case local sweep across the buffer
+    // boundaries (ledger 2026-07-12). This test LOCKS the chunking contract
+    // on the fleet's numpy version - if a future numpy grows the buffer or
+    // fuses the fold, fail loudly. k values straddle 8192 multiples; the
+    // native gate is 1<<19, so sub-gate ks also exercise the numpy path.
+    let script = fnp_script(
+        r#"
+verdicts = []
+def check(name, r, e):
+    # House NaN rule (sibling batteries): any-nan == any-nan; payload bits of
+    # f32->f16 NaN conversion are unspecified and differ between casts.
+    rs, es = np.float16(r), np.float16(e)
+    if type(r).__name__ != type(e).__name__:
+        verdicts.append(f"FAIL {name} type {type(r).__name__} vs {type(e).__name__}")
+    elif not (rs.tobytes() == es.tobytes() or (np.isnan(rs) and np.isnan(es))):
+        verdicts.append(f"FAIL {name} bytes {rs!r} vs {es!r}")
+rng = np.random.default_rng(20260712)
+for k in (524288, 524291, 1048576, 1048573, 2097152, 600000):
+    for scale in (0.3, 30.0):
+        a = (rng.standard_normal(k) * scale).astype(np.float16)
+        b = (rng.standard_normal(k) * scale).astype(np.float16)
+        check(f"k={k},x{scale}", fnp.einsum('j,j->', a, b), np.einsum('j,j->', a, b))
+# inf/nan propagation + mid-fold overflow through the f16 store/reload
+a = (rng.standard_normal(1048576) * 0.3).astype(np.float16)
+b = (rng.standard_normal(1048576) * 0.3).astype(np.float16)
+a[123] = np.float16(np.inf); b[8192 * 3 + 5] = np.float16(np.nan)
+check("inf_nan", fnp.einsum('j,j->', a, b), np.einsum('j,j->', a, b))
+af = np.full(1048576, np.float16(60000)); bf = np.full(1048576, np.float16(60000))
+check("overflow", fnp.einsum('j,j->', af, bf), np.einsum('j,j->', af, bf))
+# alternate letter + below-gate numpy path + adjacent specs not captured
+check("alt_letter", fnp.einsum('q,q->', a, b), np.einsum('q,q->', a, b))
+sm = (rng.standard_normal(1000) * 0.3).astype(np.float16)
+check("below_gate", fnp.einsum('j,j->', sm, sm), np.einsum('j,j->', sm, sm))
+if fnp.einsum('j,j->j', a, b).tobytes() != np.einsum('j,j->j', a, b).tobytes():
+    verdicts.append("FAIL elementwise j,j->j")
+check("implicit_jj", fnp.einsum('j,j', a, b), np.einsum('j,j', a, b))
+# non-contiguous defers to numpy
+check("strided", fnp.einsum('j,j->', a[::2], b[::2]), np.einsum('j,j->', a[::2], b[::2]))
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 einsum 1-D dot must be bit-identical to numpy's buffered chunk-fold contract: {result}"
+    );
+    Ok(())
+}
