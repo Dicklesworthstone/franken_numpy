@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): f16 around/round(decimals!=0) per-step-narrow chain - 3.60x (31.1 vs 139.0ms at 8M, d=2) + f64 floor_divide ufunc arm FILED (gate pending)
+
+`cc_fnp` (430b703e around, 54b905d6 floor_divide). AROUND: numpy PyArray_Round's
+f16 loops = per-step f16-narrowing multiply->rint->divide (divide-first for
+negative decimals), scalar cast to f16; replicated in f32 (exact: 24 >= 2*11+2).
+Contract EXHAUSTIVE: all 65536 patterns x decimals -6..6 byte-match numpy
+2.4.3/2.3.5(hz1,hz2)/1.26.4 - 1.26.4 diverges only at |d| >= 5, so the kernel
+gates |d| <= 4; sNaN + finite-overflow elements hazard-defer (warning parity
+verified in-test). Conformance GREEN on worker incl full-domain defer, hazard
+warning-list equality, 2-D, below-gate. Gate row f16_around_8m on vmi1149989
+(noisy worker: base CV 22%): base 138.993ms / candidate 31.067ms, effect 3.598
+(p10 2.63 / p90 6.12), 20/20 above one, null 1.0274 (CV 13.1%), null-corrected
+3.502, verdict=WIN (around_ship_run1.txt).
+FLOOR_DIVIDE (f64): npy_floor_divide is IEEE-exact deterministic - formula
+pinned locally on 300k adversarial cases, 0 fails; conformance batteries green
+remotely BUT pre-wiring (they proved the passthrough route); the PyUFunc f64 arm
+is now wired (int/td/f16 arms pre-existed; the f64 gap was documented in-code).
+NEXT-RUN PREDICATE: run the kernel-engaged median gate first; numpy hz1 cost
+302ms, worker 165ms serial - expected 3-8x if the arm engages; if < 1.2x,
+unwire under the cumsum-revert precedent (ceb9b8e1).
+
 ## 2026-07-12 - WIN (SHIP): f16 isin via the 65536-slot presence BITMAP - 402.6x (3.98 vs 1531.6ms at 8M/1k), the program's largest single-op win
 
 `cc_fnp` (430b703e). The unique presence-table lever (r6g4j, 218.9x) applied to
