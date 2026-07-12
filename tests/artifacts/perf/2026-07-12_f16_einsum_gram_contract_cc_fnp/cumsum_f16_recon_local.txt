@@ -1,0 +1,5 @@
+per-step-narrow fails: 0/6; wide-acc fails: 6/6
+numpy=2.4.3
+per-step-narrow fails: 0/6; wide-acc fails: 6/6
+per-step-narrow fails: 0/6; wide-acc fails: 6/6
+per-step-narrow fails: 0/6; wide-acc fails: 6/6
