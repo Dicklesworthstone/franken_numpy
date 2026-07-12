@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - REPLICATION (WIN): flat plain multi-q keepdims re-unlock clears the retry floor at 1.845x in an optimized remote binary
+
+`CalmGate`. Independent post-land replication of `d4c37daa` pinned the same
+remote worker (`vmi1227854`) and ran the existing same-process surface probe
+with Cargo's optimized `release` profile. `quantile9_flat_kd` measured numpy
+190.122ms / fnp 103.033ms = **1.845x**, above both the ledger's 1.2x ship floor
+and the landing run's load-depressed 1.440x. The pre-timing battery remained
+byte- and shape-exact for 2-D quantile keepdims and 1-D percentile keepdims;
+all existing flat, axis-0, last-axis, plain, and nan rows stayed green.
+
+An earlier debug-profile diagnostic in this replication is performance-INVALID
+and excluded from the decision; the optimized rerun above is the durable result.
+This confirms the re-unlocked branch is a real release-build win rather than a
+loaded-worker or debug-codegen artifact.
+
 ## 2026-07-12 - RETRY PREDICATE PAID (WIN, re-unlock): flat plain multi-q keepdims native - 1.440x on a loaded worker, engagement PROVEN by cost-equality with the flat non-kd row
 
 `cc_fnp`. Root cause of the 0.852x reject found IN CODE: an EARLY unconditional
