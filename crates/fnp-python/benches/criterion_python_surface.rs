@@ -14840,7 +14840,11 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                  dot_a = (rng.standard_normal(8_388_608) * 0.3).astype(np.float16)\n\
                  dot_b = (rng.standard_normal(8_388_608) * 0.3).astype(np.float16)\n\
                  fnp_es_d = lambda a, b: fnp_mod.einsum('j,j->', a, b)\n\
-                 np_es_d = lambda a, b: np.einsum('j,j->', a, b)\n",
+                 np_es_d = lambda a, b: np.einsum('j,j->', a, b)\n\
+                 bat_a = (rng.standard_normal((8, 256, 256)) * 0.3).astype(np.float16)\n\
+                 bat_b = (rng.standard_normal((8, 256, 256)) * 0.3).astype(np.float16)\n\
+                 fnp_es_b = lambda a, b: fnp_mod.einsum('bij,bjk->bik', a, b)\n\
+                 np_es_b = lambda a, b: np.einsum('bij,bjk->bik', a, b)\n",
             )
             .expect("f16 einsum setup CString")
             .as_c_str(),
@@ -15036,6 +15040,41 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
             &fnp_es_d,
             &dot_a,
             &dot_b,
+        );
+
+        // Batched matmul spec ('bij,bjk->bik') at (8,256,256)@(8,256,256):
+        // the plain per-step chain per batch, parallel across batches.
+        let bat_a = namespace.get_item("bat_a").expect("bat_a present");
+        let bat_b = namespace.get_item("bat_b").expect("bat_b present");
+        let fnp_es_b = namespace.get_item("fnp_es_b").expect("fnp_es_b present");
+        let np_es_b = namespace.get_item("np_es_b").expect("np_es_b present");
+        let candidate_b = fnp_es_b
+            .call1((&bat_a, &bat_b))
+            .expect("fnp f16 einsum batched parity");
+        let base_b = np_es_b
+            .call1((&bat_a, &bat_b))
+            .expect("numpy f16 einsum batched parity");
+        assert_eq!(
+            candidate_b
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_b
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum batched byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_batched_8x256_null_then_effect",
+            "f16_einsum_batched_8x256",
+            &np_es_b,
+            &fnp_es_b,
+            &bat_a,
+            &bat_b,
         );
     });
 

@@ -1,0 +1,6 @@
+BATCHED_EINSUM_VERIFY numpy=2.4.3 total=14 fails=0
+VERIFY_OK
+BATCHED_EINSUM_VERIFY numpy=2.4.6 total=6 fails=0
+VERIFY_OK
+BATCHED_EINSUM_VERIFY numpy=2.2.4 total=6 fails=0
+VERIFY_OK

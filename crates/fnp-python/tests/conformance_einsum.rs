@@ -1067,6 +1067,57 @@ print(bool(ok))
 }
 
 #[test]
+fn f16_einsum_batched_matmul_contract_bit_exact() -> Result<(), String> {
+    // np.einsum's f16 BATCHED matmul spec ('bij,bjk->bik') runs the plain
+    // spec's per-step-narrow chain per batch slice:
+    //   acc = f16(f32(acc) + f32(a[b,i,j]) * f32(x[b,j,l])), acc0 = f16(+0.0)
+    // over ascending j, with NO buffering chunk at any k (verified locally to
+    // k=9000 across 8192 on numpy 2.2.4/2.4.3/2.4.6). This test LOCKS the
+    // contract on the fleet's numpy version.
+    let script = fnp_script(
+        r#"
+verdicts = []
+def check(name, r, e):
+    if r.dtype != e.dtype or r.shape != e.shape:
+        verdicts.append(f"FAIL {name} dtype/shape")
+    elif not bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all()):
+        verdicts.append(f"FAIL {name} bytes")
+rng = np.random.default_rng(20260712)
+# (B, m, k, n): covers m%4 MR tails, k tails, batch-of-1, skinny dims, long-k.
+for (B, m, k, n) in ((8, 64, 96, 80), (2, 512, 128, 96), (16, 17, 33, 29), (1, 128, 512, 64), (3, 2, 8193, 5), (4, 129, 7, 65)):
+    a = (rng.standard_normal((B, m, k)) * 0.3).astype(np.float16)
+    x = (rng.standard_normal((B, k, n)) * 0.3).astype(np.float16)
+    check(f"B={B},m={m},k={k},n={n}", fnp.einsum('bij,bjk->bik', a, x), np.einsum('bij,bjk->bik', a, x))
+# mixed scales + inf/nan + mid-chain overflow
+a = (rng.standard_normal((4, 96, 130)) * rng.choice([0.01, 1.0, 100.0], (4, 96, 1))).astype(np.float16)
+x = (rng.standard_normal((4, 130, 80)) * 0.3).astype(np.float16)
+a[0, 0, 0] = np.float16(np.inf); x[1, 5, 3] = np.float16(np.nan); a[2, 7, :] = np.float16(60000); x[2, :, 9] = np.float16(60000)
+check("specials", fnp.einsum('bij,bjk->bik', a, x), np.einsum('bij,bjk->bik', a, x))
+# alternate letters, same canonical form
+check("alt_letters", fnp.einsum('qrs,qst->qrt', a, x), np.einsum('qrs,qst->qrt', a, x))
+# below-gate stays on the numpy path
+sm_a = (rng.standard_normal((2, 8, 8)) * 0.3).astype(np.float16)
+sm_x = (rng.standard_normal((2, 8, 8)) * 0.3).astype(np.float16)
+check("below_gate", fnp.einsum('bij,bjk->bik', sm_a, sm_x), np.einsum('bij,bjk->bik', sm_a, sm_x))
+# non-contiguous defers; adjacent specs not captured stay byte-exact via numpy
+at = np.asfortranarray(a)
+check("f_order", fnp.einsum('bij,bjk->bik', at, x), np.einsum('bij,bjk->bik', at, x))
+check("bcast_spec", fnp.einsum('bij,jk->bik', a, x[0]), np.einsum('bij,jk->bik', a, x[0]))
+check("sum_batch", fnp.einsum('bij,bjk->ik', a, x), np.einsum('bij,bjk->ik', a, x))
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 einsum batched matmul must be bit-identical to numpy's per-batch per-step contract: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_einsum_dot_1d_buffered_contract_bit_exact() -> Result<(), String> {
     // np.einsum's f16 1-D dot ('j,j->') runs contig_contig_outstride0_two once
     // per 8192-element nditer buffer, folding each chunk's blocked-4 f32 tree
