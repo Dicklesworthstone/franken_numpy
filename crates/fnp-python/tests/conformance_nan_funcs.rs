@@ -1127,6 +1127,27 @@ if r.dtype != e.dtype or r.tobytes() != e.tobytes():
 ra, ea = fnp.average(a, weights=w), np.average(a, weights=w)
 if not np.allclose(ra, ea, rtol=1e-12):
     verdicts.append("FAIL average allclose")
+# multi-q LAST-axis native path (fractions_last_axis): byte parity + q-first layout
+m = rng.standard_normal((2896, 2896))
+r, e = fnp.percentile(m, [25, 50, 75], axis=1), np.percentile(m, [25, 50, 75], axis=1)
+if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL percentile3-ax1 bytes")
+r, e = fnp.quantile(m, qs, axis=1), np.quantile(m, qs, axis=1)
+if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL quantile9-ax1 bytes")
+r, e = fnp.quantile(m, [0.5], axis=-1), np.quantile(m, [0.5], axis=-1)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL single-q-list ax-1 bytes")
+mn = m.copy(); mn[7, 123] = np.nan
+r, e = fnp.percentile(mn, [25, 75], axis=1), np.percentile(mn, [25, 75], axis=1)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL nan-lane bytes")
+r, e = fnp.percentile(m, [25, 75], axis=0), np.percentile(m, [25, 75], axis=0)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL axis0-delegate bytes")
+r, e = fnp.quantile(m, qs, axis=1, keepdims=True), np.quantile(m, qs, axis=1, keepdims=True)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL keepdims-delegate bytes")
 def best(fn, reps=5):
     fn(); best_s = float("inf")
     for _ in range(reps):
@@ -1134,6 +1155,8 @@ def best(fn, reps=5):
     return best_s * 1000
 for name, nf, ff in (
     ("quantile9", lambda: np.quantile(a, qs), lambda: fnp.quantile(a, qs)),
+    ("percentile3_ax1", lambda: np.percentile(m, [25, 50, 75], axis=1), lambda: fnp.percentile(m, [25, 50, 75], axis=1)),
+    ("quantile9_ax1", lambda: np.quantile(m, qs, axis=1), lambda: fnp.quantile(m, qs, axis=1)),
     ("percentile3", lambda: np.percentile(a, [25, 50, 75]), lambda: fnp.percentile(a, [25, 50, 75])),
     ("avg_weights", lambda: np.average(a, weights=w), lambda: fnp.average(a, weights=w)),
 ):

@@ -4,6 +4,22 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): multi-q LAST-axis percentile/quantile native path - quantile9 ax1 3.74x (54.9 vs 205.0ms), percentile3 ax1 2.93x (54.8 vs 160.8ms), byte-exact
+
+`cc_fnp`. Closes the documented "Array-q WITH an axis has no native path" delegate:
+fractions_last_axis (fnp-ufunc) sorts each contiguous last-axis lane ONCE and reads
+all k order-stat pairs through the shared fraction-scale percentile_linear_plan +
+numpy_quantile_lerp - byte-exact BY CONSTRUCTION now that the lerp/round-trip fix
+(9d5d83ac) is in: order statistics are value-exact and the lerp is numpy's own
+two-sided _lerp. numpy's delegate partitions per call single-threaded (~161-265ms
+at 2896^2 x 3..9 qs); the lane-parallel kernel + q-first [k, rows] layout wins.
+Probe rows on vmi1149989 (loaded worker): percentile3_ax1 2.933x, quantile9_ax1
+3.735x, tobytes-equal; NaN-lane propagation, [0.5]-single-q-list, axis=0 delegate,
+keepdims delegate all byte-parity green; flat rows stay exact post-refactor
+(quantile9 2.23x, percentile3 2.29x). SCOPE: last axis only (lanes contiguous),
+linear method, no keepdims - non-last axes and H&F methods keep the delegate
+(strided gather per lane profiled unattractive vs numpy's own strided partition).
+
 ## 2026-07-12 - PARITY FIX (WIN KEPT): flat quantile/percentile now BYTE-EXACT vs numpy - TWO root causes (one-sided lerp + q*100/100 round trip); bead 19jv4 closed
 
 `cc_fnp`. The 1-2 ULP divergence had two independent causes, both fixed:

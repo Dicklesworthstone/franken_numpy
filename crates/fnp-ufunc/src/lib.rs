@@ -17614,6 +17614,80 @@ impl UFuncArray {
         self.fractions_axis_none(&fractions)
     }
 
+    /// Multi-q percentile/quantile over the LAST axis (fraction scale), numpy
+    /// layout: output shape = [k] ++ shape[..ndim-1] (the q axis comes FIRST).
+    /// Per lane: one sort, then numpy_quantile_lerp per q via the shared
+    /// fraction-based percentile_linear_plan - order statistics are value-exact
+    /// and the lerp matches numpy's _lerp, so this is byte-identical to numpy's
+    /// delegate (which partitions per call, single-threaded, ~200-265ms at
+    /// 2896^2 x 3..9 qs on hz1). A NaN lane yields NaN for every q (numpy
+    /// propagates silently). Lanes are independent -> parallel across lanes.
+    pub fn fractions_last_axis(&self, qs: &[f64]) -> Result<Self, UFuncError> {
+        let ndim = self.shape.len();
+        if ndim < 2 || qs.is_empty() {
+            return Err(UFuncError::Msg(
+                "fractions_last_axis: need ndim >= 2 and at least one q".into(),
+            ));
+        }
+        for &q in qs {
+            if !(0.0..=1.0).contains(&q) {
+                return Err(UFuncError::Msg(format!(
+                    "quantile: q={q} must be in [0, 1]"
+                )));
+            }
+        }
+        let lane_len = self.shape[ndim - 1];
+        if lane_len == 0 {
+            return Err(UFuncError::Msg(
+                "fractions_last_axis: empty reduction lane".into(),
+            ));
+        }
+        let nlanes = self.values.len() / lane_len;
+        let k = qs.len();
+        let compute_lane = |lane: &[f64]| -> Vec<f64> {
+            if lane.iter().any(|v| v.is_nan()) {
+                return vec![f64::NAN; k];
+            }
+            let mut buf = lane.to_vec();
+            buf.sort_unstable_by(f64::total_cmp);
+            qs.iter()
+                .map(|&q| {
+                    let (lo, hi, frac) = percentile_linear_plan(lane_len, q);
+                    if lo == hi {
+                        buf[lo]
+                    } else {
+                        numpy_quantile_lerp(buf[lo], buf[hi], frac)
+                    }
+                })
+                .collect()
+        };
+        const FRACTIONS_AXIS_PARALLEL_MIN: usize = 1 << 14;
+        let per_lane: Vec<Vec<f64>> = if nlanes >= 2
+            && self.values.len() >= FRACTIONS_AXIS_PARALLEL_MIN
+            && rayon::current_num_threads() >= 2
+        {
+            self.values.par_chunks(lane_len).map(compute_lane).collect()
+        } else {
+            self.values.chunks(lane_len).map(compute_lane).collect()
+        };
+        // Transpose lane-major [nlanes][k] into numpy's q-major [k][nlanes] layout.
+        let mut values = vec![0.0f64; k * nlanes];
+        for (lane_idx, lane_vals) in per_lane.iter().enumerate() {
+            for (qi, &v) in lane_vals.iter().enumerate() {
+                values[qi * nlanes + lane_idx] = v;
+            }
+        }
+        let mut out_shape = Vec::with_capacity(ndim);
+        out_shape.push(k);
+        out_shape.extend_from_slice(&self.shape[..ndim - 1]);
+        Ok(Self {
+            shape: out_shape,
+            values,
+            dtype: DType::F64,
+            integer_sidecar: None,
+        })
+    }
+
     /// Fraction-scale multi-q core (same round-trip fix; quantiles enter directly).
     fn fractions_axis_none(&self, qs: &[f64]) -> Result<Self, UFuncError> {
         let n = self.values.len();
