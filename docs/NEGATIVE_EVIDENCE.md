@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - CORRECTION (regression window 9d5d83ac..here) + WIN ROW: nanmedian AXIS diverged from numpy after the _lerp fix - MEDIAN is mean-of-middles, NOT quantile(0.5); fixed via select_median, 12.16x row recorded
+
+`cc_fnp` / FuchsiaStream. FOUND BY VEIN-FOLLOWING, NOT BY A USER REPORT: while
+probing nan N-D costs, noticed nanmedian's axis arm routes through
+select_percentile_method(0.5, Linear). numpy's _nanmedian1d is np.median
+(compacted) = MEAN of the two middles; (a+b)/2 differs bitwise from the
+two-sided _lerp(0.5) in ~29% of pairs (measured 58037/200000). The OLD
+symmetric a*(1-t)+b*t at t=0.5 happened to EQUAL the mean form (0.5-scaling
+commutes with rounding), so the route was byte-correct until 9d5d83ac swapped
+in numpy_quantile_lerp - silently breaking fnp.nanmedian(axis=k) on
+even-compacted lanes (~9%% of lanes in a NaN-y battery). Fix: the axis arm now
+uses select_median (the proven median contract; empty lane -> NaN); the
+serial-oracle unit test's expectation switched to an explicit mean-of-middles
+form. Probe battery (even/odd lanes x 2-D ax1/ax0 x 3-D ax1) tobytes-GREEN;
+nanmedian_3d_ax1 row lands 12.163x (38.3 vs 466.0ms - the arm was already
+lane-parallel; numpy's nan N-D path is the slow side). LESSON: a shared helper
+serving TWO CONTRACTS (quantile-lerp AND median-mean) is a spring-loaded trap -
+when changing a shared numeric primitive, grep EVERY caller and classify which
+contract each one needs. Flat nanmedian (select_median) and median (all forms)
+were never affected; nanpercentile(50) correctly KEEPS the lerp (quantile
+semantics).
+
 ## 2026-07-12 - WIN (SHIP): direct `broadcast_strides` target validation removes merged-shape allocation - 1.78-2.12x
 
 `CalmGate`, `fnp-ndarray`. Negative-ledger and live-bead searches found no prior

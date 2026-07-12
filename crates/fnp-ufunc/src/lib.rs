@@ -26495,10 +26495,19 @@ impl UFuncArray {
                         .map(|k| values_ref[base_flat + k * strides_ref[ax]])
                         .filter(|v| !v.is_nan())
                         .collect();
-                    // O(L) quickselect instead of an O(L log L) sort of the
-                    // NaN-filtered lane; the 0.5 linear quantile reads only
-                    // sorted[lo]/sorted[lo+1], so this is bit-identical.
-                    select_percentile_method(&mut lane, 0.5, QuantileInterp::Linear)
+                    // MEDIAN semantics, not quantile(0.5): numpy's _nanmedian1d is
+                    // np.median(compacted) = MEAN of the two middles ((a+b)/2), which
+                    // differs bitwise from the two-sided _lerp(0.5) in ~29% of pairs.
+                    // The old symmetric lerp at t=0.5 happened to equal the mean form,
+                    // so routing through select_percentile_method(Linear) was byte-OK
+                    // until the 2026-07-12 numpy_quantile_lerp fix silently broke it
+                    // (regression window 9d5d83ac..this commit). select_median is the
+                    // proven median contract.
+                    if lane.is_empty() {
+                        f64::NAN
+                    } else {
+                        select_median(&mut lane)
+                    }
                 };
                 const NANMEDIAN_PARALLEL_MIN_ELEMS: usize = 1 << 14;
                 let out_values: Vec<f64> = if outer_count >= 2
@@ -51717,7 +51726,15 @@ print(json.dumps(payload))
                     .filter(|v| !v.is_nan())
                     .collect();
                 lane.sort_by(|a, b| a.total_cmp(b));
-                let exp = interpolate_percentile(&lane, 0.5);
+                // MEDIAN oracle (mean of middles), matching numpy _nanmedian1d - NOT
+                // the quantile(0.5) lerp (they differ bitwise; see the kernel comment).
+                let exp = if lane.is_empty() {
+                    f64::NAN
+                } else if lane.len() % 2 == 1 {
+                    lane[lane.len() / 2]
+                } else {
+                    (lane[lane.len() / 2 - 1] + lane[lane.len() / 2]) / 2.0
+                };
                 let got = out.values()[outer];
                 if exp.is_nan() {
                     assert!(

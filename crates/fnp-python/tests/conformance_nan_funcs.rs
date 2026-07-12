@@ -1187,6 +1187,20 @@ if r.tobytes() != e.tobytes():
     verdicts.append("FAIL 3d-all-nan-lane bytes")
 if [str(w.message) for w in wf] != [str(w.message) for w in wn]:
     verdicts.append("FAIL 3d-all-nan-lane warnings")
+# nanmedian MEDIAN-vs-lerp(0.5) regression battery (window 9d5d83ac..fix):
+# even-count compacted lanes are where mean-of-middles differs bitwise from lerp.
+me = rng.standard_normal((4096, 33))
+me[:, 7] = np.nan  # 32 valid per lane = EVEN
+for tag, arr, kw in (
+    ("nanmedian-even-ax1", me, {"axis": 1}),
+    ("nanmedian-even-ax0", me.T.copy(), {"axis": 0}),
+    ("nanmedian-3d-ax1", t3nn, {"axis": 1}),
+    ("nanmedian-odd-ax1", me[:, :32], {"axis": 1}),
+):
+    r, e = fnp.nanmedian(arr, **kw), np.nanmedian(arr, **kw)
+    r, e = np.asarray(r), np.asarray(e)
+    if r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL {tag} bytes")
 r, e = fnp.quantile(m, qs, axis=1, keepdims=True), np.quantile(m, qs, axis=1, keepdims=True)
 if r.shape != e.shape or r.tobytes() != e.tobytes():
     verdicts.append("FAIL keepdims-ax1 bytes")
@@ -1271,6 +1285,7 @@ for name, nf, ff in (
     ("pct50_ax1_midpoint", lambda: np.percentile(m, 50, axis=1, method="midpoint"), lambda: fnp.percentile(m, 50, axis=1, method="midpoint")),
     ("pct3_3d_ax1", lambda: np.percentile(t3, [25, 50, 75], axis=1), lambda: fnp.percentile(t3, [25, 50, 75], axis=1)),
     ("nanpct3_3d_ax1", lambda: np.nanpercentile(t3nn, [25, 50, 75], axis=1), lambda: fnp.nanpercentile(t3nn, [25, 50, 75], axis=1)),
+    ("nanmedian_3d_ax1", lambda: np.nanmedian(t3nn, axis=1), lambda: fnp.nanmedian(t3nn, axis=1)),
     ("percentile3", lambda: np.percentile(a, [25, 50, 75]), lambda: fnp.percentile(a, [25, 50, 75])),
     ("avg_weights", lambda: np.average(a, weights=w), lambda: fnp.average(a, weights=w)),
 ):
