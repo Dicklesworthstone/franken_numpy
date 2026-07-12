@@ -1,0 +1,11 @@
+   1442.74 ms  3op chain f16 'ij,jk,kl->il' 128^3 (O(n^4) UNOPT - 512 took >2min)
+    650.04 ms  3op chain f16 optimize=True
+     95.92 ms  f64 row-sum 'ij->i' 2896^2
+     27.92 ms  f16 col-sum 'ij->j' 2896^2
+      7.34 ms  f16 row-sum 'ij->i' 2896^2
+      7.34 ms  f16 full-sum 'ij->' 2896^2
+      0.23 ms  3op hadamard f64 'ij,ij,ij->ij' 512^2
+      0.01 ms  f16 trace 'ii->' 2896^2
+numpy=2.3.5
+      0.00 ms  f16 transpose 'ij->ji' 2896^2
+      0.00 ms  f16 diag 'ii->i' 2896^2

@@ -51,6 +51,18 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+SURFACE RANKING (same session, profile-first for the next cycle): hz1 numpy-self-time
+sweep of the remaining einsum surface (einsum_surface_rank_hz1.txt + script):
+3-op f16 chain UNOPT 1443ms at just 128^3 (O(n^4) fused loop - byte-reachable only by
+the same loop, capped win; optimize=True 650ms @512^3 = pairwise 2-op half kernels =
+shipped-native-reusable if einsum_path's plan is replicated, bead vfbef);
+f64 row-sum 'ij->i' 95.9ms @2896^2 = ~14x off memory-bound (recon why; candidate for
+an AVX2-lane-tree kernel behind the established avx512f gate, bead xmc9r);
+f16 col-sum 'ij->j' 27.9ms / row-sum + full-sum 7.3ms (portable scalar half
+contracts, the next crackable vein, bead oxok1); transpose/diag/trace ~0 (views).
+The 2-op einsum surface (contraction + no-contraction) has NO remaining unmeasured
+row.
+
 SCOPE-OUT + BUILD FIX (same session): (1) f64/f32 einsum FULL CONTRACTION ('j,j->',
 'ij,ij->') is NOT a portable lever: numpy's double/float contig_contig_outstride0 SOP
 kernels take the NPYV SIMD path (unlike half's NPYV_CHK=0), so the accumulation tree
