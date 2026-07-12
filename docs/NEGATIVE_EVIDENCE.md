@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - CONVERGENCE SWEEP #3 + UPSTREAM-OF-EXPECTATION BUG: flat multi-q quantile/percentile is FAST (2.4-2.7x) but 1-2 ULP OFF numpy - byte-parity bug filed; 12 candidates triaged ALREADY-COVERED
+
+`cc_fnp`. Probe row (vmi1227854): quantile9 numpy 190.1ms / fnp 70.1ms (2.71x) with
+1/9 elems max 2 ULP off; percentile-trio 110.5 / 46.6ms (2.37x) with 2/3 elems 1 ULP
+off; average+weights 14.1 / 3.6ms (3.91x, allclose) - so NONE of the three is a perf
+lever, but the multi-q byte divergence is a filed parity bug (interpolation-formula
+class, suspect (1-g)*lo+g*hi vs lo+g*(hi-lo) in percentiles_axis_none). Probe test
+flat_multi_quantile_and_weighted_average_track_numpy lands as the regression net
+(allclose + printed ULP counts until the byte fix; re-tighten to tobytes after).
+TRIAGED ALREADY-COVERED this tick (do NOT re-derive): unwrap (native fused
+recurrence, row-parallel), trapezoid (typed row kernels), histogram (native),
+fmod (f64+f32 zero-copy parallel), logaddexp (f64+f32+f16 arms - the 243ms hz1
+row is numpy-side only; its loop is scalar npy_exp/log1p, no AVX-512 exposure),
+sinc f64, ediff1d, i0, median/percentile axis (parallel per-lane quickselect),
+remainder, modf, nextafter, hypot. hz1 numpy-side costs recorded: unwrap 836ms,
+i0 4727ms, sinc 404ms, logaddexp 243ms - all already beaten by shipped fnp arms.
+f16 diff widen kernel (2.81x coarse, one warning-parity fix in) sits in stash
+`f16-parked` - next f16-permitted session can land it from there.
+
 ## 2026-07-12 - WIN (kernel-engaged, coarse-AB): f64 floor_divide ufunc arm 4.35x (43.9 vs 191.1ms at 8M) - the 54b905d6 pending-gate predicate is PAID
 
 `cc_fnp`. One foreground run on vmi1149989: conformance batteries green (random/
