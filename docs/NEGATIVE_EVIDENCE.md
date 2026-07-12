@@ -11,8 +11,9 @@ searches found no prior attempt for replacing the intermediate `Vec<usize>` and
 fallible `isize` collect. The candidate wrote each converted stride directly
 into the returned `Vec<isize>` while preserving item-size/zero-extent
 precedence, C/F axis order, every checked multiplication, and the payload-free
-`Overflow` result. A boundary grid compared it to the old implementation across
-scalars, zero dimensions, both orders, `isize::MAX`, and `usize::MAX` cases.
+`Overflow` result. A boundary equivalence grid covering scalars, zero
+dimensions, both orders, `isize::MAX`, and `usize::MAX` was drafted but not run
+after the performance gate failed; it was removed with the source candidate.
 
 Pinned same-worker `release-perf` Criterion runs on `vmi1156319` used the five
 existing C-order rows. `1d` moved from 37ns to 38ns (**0.97x**, regression),
