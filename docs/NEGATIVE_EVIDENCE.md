@@ -51,6 +51,18 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+BATCHED GRAM ADDENDUM (same session, a4b0e7d3): 'bji,bjl->bil' = the 2-op gram
+per-step muladd-row chain per batch slice, CHUNK-IMMUNE per the method rule's
+discriminators (16/16 on numpy 2.2.4/2.4.3/2.4.6 incl k=8193/9000, B=1 vs B>1,
+n=9000 row-chunking) - no B gate needed, unlike the transposed sibling. Conformance
+GREEN 8/8. MEASURED on the SECOND bench attempt (vmi1227854, sha bb8f6956..., 20 obs):
+f16_einsum_batched_g_8x256 effect 7.770 [p10 7.36, p90 8.38] vs null 0.992 - 20/20,
+131.2 vs 1014.7 ms. INFRA NOTE: the first bench attempt ran ~18 min remotely but its
+criterion output was TRUNCATED in the rch stream (log ends at build warnings, zero
+Benchmarking lines); pipeline recipe hardened - an attempt is only accepted if the
+gate row appears in the output, else retry. The batched trio (matmul 4.23x,
+transposed 17.15x, gram 7.77x) completes the einsum family at NINE native specs.
+
 BATCHED TRANSPOSED ADDENDUM (same session, 57a84783): 'bij,blj->bil' contract is
 COALESCING-DEPENDENT - the vein's key recon. B==1/m==1/n==1 coalesce to the ndim-3
 unbuffered loop = the 2-op single-tree contract; B>1 with m,n>1 stays ndim-4 ->
