@@ -51,6 +51,15 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+F16 MULTI_DOT SHIPPED (a64acc88, top rank of the non-einsum sweep): multidot_f16_3x256
+13.147 [p10 10.12, p90 20.10] vs null 1.016 - 20/20, 10.7 vs 146.3 ms (vmi1293453,
+sha 55628b0c...). numpy's own f16 pairs are the naive ~245x loops; fnp replicates the
+documented _multi_dot_three cost rule (5/5 x 4 versions) and routes both pairs through
+the shipped byte-matched f16 matmul kernel. The non-einsum ranking (committed) also
+CLEARED f16-sort/f64-median/f64-nansum (already-shipped fnp paths beat those numpy
+baselines) and flagged f16 cumsum 71ms for a scan-contract recon (sequential f16
+narrowing likely blocks parallel prefix - REJECT-with-evidence expected).
+
 3-OP CHAIN SHIPPED (0aa35d66, bead vfbef CLOSED): f16_einsum_chain3_512 27.704
 [p10 22.34, p90 32.98] vs null 1.000 (CV 3.2%) - 20/20, 42.6 vs 1132.9 ms on
 vmi1227854 (sha 12972306...). Plan fetched from numpy's OWN einsum_path at runtime
