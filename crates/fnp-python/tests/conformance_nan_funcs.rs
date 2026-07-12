@@ -1148,6 +1148,30 @@ if r.tobytes() != e.tobytes():
 r, e = fnp.quantile(m, qs, axis=1, keepdims=True), np.quantile(m, qs, axis=1, keepdims=True)
 if r.shape != e.shape or r.tobytes() != e.tobytes():
     verdicts.append("FAIL keepdims-delegate bytes")
+# nan multi-q native path: per-lane NaN compaction + shared plan/lerp
+import warnings
+mn = m.copy()
+mn[rng.integers(0, 2896, 20000), rng.integers(0, 2896, 20000)] = np.nan
+r, e = fnp.nanpercentile(mn, [25, 50, 75], axis=1), np.nanpercentile(mn, [25, 50, 75], axis=1)
+if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL nanpercentile3-ax1 bytes")
+r, e = fnp.nanquantile(mn, qs, axis=1), np.nanquantile(mn, qs, axis=1)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL nanquantile9-ax1 bytes")
+r, e = fnp.nanquantile(mn.ravel(), [0.1, 0.5, 0.9]), np.nanquantile(mn.ravel(), [0.1, 0.5, 0.9])
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL nan-flat multi-q bytes")
+allnan = mn.copy(); allnan[5, :] = np.nan
+with warnings.catch_warnings(record=True) as wf:
+    warnings.simplefilter("always")
+    r = fnp.nanpercentile(allnan, [25, 75], axis=1)
+with warnings.catch_warnings(record=True) as wn:
+    warnings.simplefilter("always")
+    e = np.nanpercentile(allnan, [25, 75], axis=1)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL all-nan-lane bytes")
+if [str(w.message) for w in wf] != [str(w.message) for w in wn]:
+    verdicts.append("FAIL all-nan-lane warnings")
 def best(fn, reps=5):
     fn(); best_s = float("inf")
     for _ in range(reps):
@@ -1157,6 +1181,7 @@ for name, nf, ff in (
     ("quantile9", lambda: np.quantile(a, qs), lambda: fnp.quantile(a, qs)),
     ("percentile3_ax1", lambda: np.percentile(m, [25, 50, 75], axis=1), lambda: fnp.percentile(m, [25, 50, 75], axis=1)),
     ("quantile9_ax1", lambda: np.quantile(m, qs, axis=1), lambda: fnp.quantile(m, qs, axis=1)),
+    ("nanpct3_ax1", lambda: np.nanpercentile(mn, [25, 50, 75], axis=1), lambda: fnp.nanpercentile(mn, [25, 50, 75], axis=1)),
     ("percentile3", lambda: np.percentile(a, [25, 50, 75]), lambda: fnp.percentile(a, [25, 50, 75])),
     ("avg_weights", lambda: np.average(a, weights=w), lambda: fnp.average(a, weights=w)),
 ):

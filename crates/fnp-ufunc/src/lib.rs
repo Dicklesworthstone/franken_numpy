@@ -17688,6 +17688,101 @@ impl UFuncArray {
         })
     }
 
+    /// NaN-aware multi-q over the flattened array (fraction scale): numpy's
+    /// _nanquantile compacts the NaNs out and runs the plain quantile on the
+    /// remainder, so filtering (order-preserving) + fractions_axis_none is
+    /// byte-exact by construction. An all-NaN input errs so the caller defers
+    /// to numpy (which owns the "All-NaN slice encountered" RuntimeWarning).
+    pub fn nan_fractions_axis_none(&self, qs: &[f64]) -> Result<Self, UFuncError> {
+        let filtered: Vec<f64> = self.values.iter().copied().filter(|v| !v.is_nan()).collect();
+        if filtered.is_empty() {
+            return Err(UFuncError::Msg("nan_fractions: all-NaN input".into()));
+        }
+        let n = filtered.len();
+        let compact = Self {
+            shape: vec![n],
+            values: filtered,
+            dtype: DType::F64,
+            integer_sidecar: None,
+        };
+        compact.fractions_axis_none(qs)
+    }
+
+    /// NaN-aware multi-q over the LAST axis (fraction scale), numpy layout
+    /// [k] ++ shape[..ndim-1]. Per lane: compact NaNs out, sort, and read all k
+    /// order-stat pairs through the shared fraction plan + numpy_quantile_lerp
+    /// with the lane's COMPACTED length - exactly numpy's _nanquantile_1d, so
+    /// byte-exact by construction. Any all-NaN lane errs so the caller defers
+    /// (numpy owns the "All-NaN slice" warning). Lanes are independent ->
+    /// parallel across lanes.
+    pub fn nan_fractions_last_axis(&self, qs: &[f64]) -> Result<Self, UFuncError> {
+        let ndim = self.shape.len();
+        if ndim < 2 || qs.is_empty() {
+            return Err(UFuncError::Msg(
+                "nan_fractions_last_axis: need ndim >= 2 and at least one q".into(),
+            ));
+        }
+        for &q in qs {
+            if !(0.0..=1.0).contains(&q) {
+                return Err(UFuncError::Msg(format!(
+                    "quantile: q={q} must be in [0, 1]"
+                )));
+            }
+        }
+        let lane_len = self.shape[ndim - 1];
+        if lane_len == 0 {
+            return Err(UFuncError::Msg(
+                "nan_fractions_last_axis: empty reduction lane".into(),
+            ));
+        }
+        let nlanes = self.values.len() / lane_len;
+        let k = qs.len();
+        let compute_lane = |lane: &[f64]| -> Result<Vec<f64>, UFuncError> {
+            let mut buf: Vec<f64> = lane.iter().copied().filter(|v| !v.is_nan()).collect();
+            if buf.is_empty() {
+                return Err(UFuncError::Msg("nan_fractions: all-NaN lane".into()));
+            }
+            let m = buf.len();
+            buf.sort_unstable_by(f64::total_cmp);
+            Ok(qs
+                .iter()
+                .map(|&q| {
+                    let (lo, hi, frac) = percentile_linear_plan(m, q);
+                    if lo == hi {
+                        buf[lo]
+                    } else {
+                        numpy_quantile_lerp(buf[lo], buf[hi], frac)
+                    }
+                })
+                .collect())
+        };
+        const FRACTIONS_AXIS_PARALLEL_MIN: usize = 1 << 14;
+        let per_lane: Result<Vec<Vec<f64>>, UFuncError> = if nlanes >= 2
+            && self.values.len() >= FRACTIONS_AXIS_PARALLEL_MIN
+            && rayon::current_num_threads() >= 2
+        {
+            self.values.par_chunks(lane_len).map(compute_lane).collect()
+        } else {
+            self.values.chunks(lane_len).map(compute_lane).collect()
+        };
+        let per_lane = per_lane?;
+        let mut values = vec![0.0f64; k * nlanes];
+        for (lane_idx, lane_vals) in per_lane.iter().enumerate() {
+            for (qi, &v) in lane_vals.iter().enumerate() {
+                values[qi * nlanes + lane_idx] = v;
+            }
+        }
+        let mut out_shape = Vec::with_capacity(ndim);
+        out_shape.push(k);
+        out_shape.extend_from_slice(&self.shape[..ndim - 1]);
+        Ok(Self {
+            shape: out_shape,
+            values,
+            dtype: DType::F64,
+            integer_sidecar: None,
+        })
+    }
+
     /// Fraction-scale multi-q core (same round-trip fix; quantiles enter directly).
     fn fractions_axis_none(&self, qs: &[f64]) -> Result<Self, UFuncError> {
         let n = self.values.len();

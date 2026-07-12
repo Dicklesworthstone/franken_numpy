@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): nan multi-q percentile/quantile native (flat + LAST axis) - nanpercentile3 ax1 4.19x (64.1 vs 268.7ms), byte-exact; the nan-family array-q delegate is closed
+
+`cc_fnp`. Third lever in the quantile-lane chain (9d5d83ac parity fix -> 7f4a34ad
+multi-q axis -> this): numpy's _nanquantile compacts NaNs per lane then runs the
+plain quantile machinery, so nan_fractions_last_axis / nan_fractions_axis_none
+(order-preserving compaction + shared fraction plan + numpy_quantile_lerp) are
+byte-exact BY CONSTRUCTION. numpy's delegate costs 268-362ms at 2896^2 x 3 qs
+(nan machinery taxes even NaN-free inputs); the lane-parallel kernel wins 4.19x
+(probe row nanpct3_ax1, vmi-class worker, tobytes-equal). All-NaN lanes err
+inside -> full delegate so numpy owns the "All-NaN slice encountered" warning
+(parity asserted in-probe). nanquantile9 ax1 + flat nan multi-q byte-green;
+prior probe rows unchanged (percentile3_ax1 2.80x, quantile9_ax1 3.40x).
+SCOPE: f64, linear, no keepdims, flat or last axis; else delegate. REMAINING
+quantile-lane delegates: non-last axes, H&F methods, keepdims multi-q, weights.
+
 ## 2026-07-12 - WIN (SHIP): multi-q LAST-axis percentile/quantile native path - quantile9 ax1 3.74x (54.9 vs 205.0ms), percentile3 ax1 2.93x (54.8 vs 160.8ms), byte-exact
 
 `cc_fnp`. Closes the documented "Array-q WITH an axis has no native path" delegate:
