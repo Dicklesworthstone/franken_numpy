@@ -14799,6 +14799,48 @@ fn bench_multidot_median_gate(c: &mut Criterion) {
             &fnp_multidot,
             &md_args,
         );
+
+        // f16 3-chain: numpy's pairs are the naive ~245x f16 loops; fnp
+        // routes both pairs through the shipped byte-matched f16 matmul
+        // kernel per the replicated _multi_dot_three order rule.
+        py.run(
+            std::ffi::CString::new(
+                "md16_args = [(rng.standard_normal((256, 256)) * 0.3).astype(np.float16) for _ in range(3)]\n",
+            )
+            .expect("multidot f16 setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("multidot f16 setup");
+        let md16_args = namespace.get_item("md16_args").expect("md16_args present");
+        let candidate16 = fnp_multidot
+            .call1((&md16_args,))
+            .expect("fnp f16 multi_dot parity");
+        let base16 = np_multidot
+            .call1((&md16_args,))
+            .expect("numpy f16 multi_dot parity");
+        assert_eq!(
+            candidate16
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base16
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 multi_dot byte parity",
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "multidot_f16_3x256_null_then_effect",
+            "multidot_f16_3x256",
+            &np_multidot,
+            &fnp_multidot,
+            &md16_args,
+        );
     });
 
     group.finish();

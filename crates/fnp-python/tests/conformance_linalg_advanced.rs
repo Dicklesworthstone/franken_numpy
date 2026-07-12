@@ -716,3 +716,49 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn f16_multi_dot_three_chain_bit_exact() -> Result<(), String> {
+    // f16 3-array multi_dot: numpy's _multi_dot_three order rule (documented
+    // cost arithmetic, byte-stable on numpy 2.2.4/2.3.5/2.4.3/2.4.6) + matmul
+    // pairs. fnp replicates the rule and routes both pairs through the
+    // shipped byte-matched f16 matmul kernel. Shapes exercise BOTH orders,
+    // MR tails, and the below-gate fallback.
+    let script = fnp_script(
+        r#"
+verdicts = []
+rng = np.random.default_rng(20260715)
+for (p0, p1, p2, p3) in ((96, 96, 96, 96), (24, 8, 400, 12), (12, 400, 8, 24), (130, 64, 96, 70), (65, 33, 129, 17)):
+    a = (rng.standard_normal((p0, p1)) * 0.3).astype(np.float16)
+    b = (rng.standard_normal((p1, p2)) * 0.3).astype(np.float16)
+    c = (rng.standard_normal((p2, p3)) * 0.3).astype(np.float16)
+    r = fnp.multi_dot([a, b, c]); e = np.linalg.multi_dot([a, b, c])
+    if r.dtype != e.dtype or r.shape != e.shape:
+        verdicts.append(f"FAIL ({p0},{p1},{p2},{p3}) shape/dtype")
+    elif not bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all()):
+        verdicts.append(f"FAIL ({p0},{p1},{p2},{p3}) bytes")
+# below-gate + 1-D endpoints + 4-array + f64 all defer byte-exactly
+sm = (rng.standard_normal((8, 8)) * 0.3).astype(np.float16)
+if fnp.multi_dot([sm, sm, sm]).tobytes() != np.linalg.multi_dot([sm, sm, sm]).tobytes():
+    verdicts.append("FAIL below-gate")
+v = (rng.standard_normal(96) * 0.3).astype(np.float16)
+m1 = (rng.standard_normal((96, 96)) * 0.3).astype(np.float16)
+if fnp.multi_dot([v, m1, m1]).tobytes() != np.linalg.multi_dot([v, m1, m1]).tobytes():
+    verdicts.append("FAIL 1-D endpoint defer")
+if fnp.multi_dot([m1, m1, m1, m1]).tobytes() != np.linalg.multi_dot([m1, m1, m1, m1]).tobytes():
+    verdicts.append("FAIL 4-array defer")
+d64 = rng.standard_normal((96, 96))
+if fnp.multi_dot([d64, d64, d64]).tobytes() != np.linalg.multi_dot([d64, d64, d64]).tobytes():
+    verdicts.append("FAIL f64 defer")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 multi_dot 3-chain must be bit-identical via the order rule + matmul pairs: {result}"
+    );
+    Ok(())
+}

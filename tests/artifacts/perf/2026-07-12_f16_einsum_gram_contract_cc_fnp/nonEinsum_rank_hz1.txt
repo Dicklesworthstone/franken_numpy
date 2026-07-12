@@ -1,0 +1,17 @@
+    600.34 ms  f16 sort 8M
+    107.20 ms  f64 nansum 8M
+    100.77 ms  f64 median 8M
+     71.27 ms  f16 cumsum 8M
+     66.20 ms  f16 multi_dot 3x256
+     33.37 ms  f16 outer 2896x2896
+     32.16 ms  f64 average weighted 8M
+     24.02 ms  f64 nanmean 8M
+     16.17 ms  f16 nansum 8M
+     15.16 ms  f16 dot 1D 8M
+     15.14 ms  f16 vdot 8M
+     15.14 ms  f16 inner 8M
+     12.89 ms  f64 compress 8M
+      9.31 ms  f16 mean 8M
+      5.77 ms  f64 ptp 8M
+numpy=2.3.5
+      0.00 ms  f16 trace 512^2
