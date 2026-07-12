@@ -14734,6 +14734,69 @@ fn bench_f16_matmul_median_gate(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_isclose_median_gate(c: &mut Criterion) {
+    // f64 array-array isclose at 8M: the parallelized zero-copy predicate vs
+    // numpy's temp-heavy ufunc chain (~180ms class on hz1).
+    let mut group = c.benchmark_group("python_isclose_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_isclose_median_gate").expect("isclose bench module");
+        fnp_python(&module).expect("initialize fnp_python isclose bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260716)\n\
+                 ic_a = rng.standard_normal(8_000_000)\n\
+                 ic_b = ic_a + rng.standard_normal(8_000_000) * 1e-7\n",
+            )
+            .expect("isclose setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("isclose setup");
+        let ic_a = namespace.get_item("ic_a").expect("ic_a present");
+        let ic_b = namespace.get_item("ic_b").expect("ic_b present");
+        let fnp_isclose = module.getattr("isclose").expect("fnp isclose");
+        let np_isclose = numpy.getattr("isclose").expect("numpy isclose");
+        let candidate = fnp_isclose
+            .call1((&ic_a, &ic_b))
+            .expect("fnp isclose parity");
+        let base = np_isclose.call1((&ic_a, &ic_b)).expect("numpy isclose parity");
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "isclose byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "isclose_f64_8m_null_then_effect",
+            "isclose_f64_8m",
+            &np_isclose,
+            &fnp_isclose,
+            &ic_a,
+            &ic_b,
+        );
+    });
+
+    group.finish();
+}
+
 fn bench_multidot_median_gate(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_multidot_median_gate");
     group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
@@ -16695,6 +16758,7 @@ criterion_group!(
     bench_int_matmul_median_gate,
     bench_f16_matmul_median_gate,
     bench_multidot_median_gate,
+    bench_isclose_median_gate,
     bench_f16_einsum_median_gate,
     bench_wide_string_substrate_v2,
     bench_ledger_integrity_rejects,

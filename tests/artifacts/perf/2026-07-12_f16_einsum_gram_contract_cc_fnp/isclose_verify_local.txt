@@ -1,0 +1,6 @@
+ISCLOSE_VERIFY numpy=2.4.3 total=16 fails=0
+VERIFY_OK
+ISCLOSE_VERIFY numpy=2.4.6 total=16 fails=0
+VERIFY_OK
+ISCLOSE_VERIFY numpy=2.2.4 total=16 fails=0
+VERIFY_OK
