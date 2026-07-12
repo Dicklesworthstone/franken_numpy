@@ -1410,6 +1410,20 @@ if fnp.einsum('ij->ji', a).tobytes() != np.einsum('ij->ji', a).tobytes():
 sq = (rng.standard_normal((1100, 1100)) * 0.3).astype(np.float16)
 if np.asarray(fnp.einsum('ii->', sq)).tobytes() != np.asarray(np.einsum('ii->', sq)).tobytes():
     verdicts.append("FAIL diagonal exclusion")
+# f64 reductions: portable 2-lane baseline trees (verified incl AVX-512 host)
+for (m, n) in ((1200, 1000), (3, 9000), (2000, 8193)):
+    a64 = rng.standard_normal((m, n))
+    a64[0, 0] = -0.0
+    for spec in ('ij->i', 'ij->j', 'ij->'):
+        r = fnp.einsum(spec, a64); e = np.einsum(spec, a64)
+        if type(r).__name__ != type(e).__name__:
+            verdicts.append(f"FAIL f64 {spec} ({m},{n}) type")
+        elif np.asarray(r).tobytes() != np.asarray(e).tobytes():
+            verdicts.append(f"FAIL f64 {spec} ({m},{n}) bytes")
+sm64 = rng.standard_normal((10, 10))
+for spec in ('ij->i', 'ij->j', 'ij->'):
+    if np.asarray(fnp.einsum(spec, sm64)).tobytes() != np.asarray(np.einsum(spec, sm64)).tobytes():
+        verdicts.append(f"FAIL f64 below-gate {spec}")
 print(verdicts if verdicts else True)
 "#
         .into(),

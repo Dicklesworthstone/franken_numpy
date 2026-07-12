@@ -51,6 +51,20 @@ and median-gate measured. Artifact gram_ship_run1.txt (conformance + bench pipel
 log). RETRY PREDICATE (not triggered): conformance red or sub-parity row -> unwire the
 dispatch branch (3 lines) + REJECT addendum here.
 
+F64 REDUCTIONS + SCOPE-OUT CORRECTION (same session, bead xmc9r CLOSED): the hz1
+96ms row-sum was HOST-SPECIFIC (fleet/local ~3ms) - always cross-check a single-host
+rank outlier before filing it as a pathology. KEY RECON: einsum_sumprod.c.src is
+compiled at the SSE2 BASELINE with no runtime CPU dispatch, so the f64 sum tree is
+the PORTABLE 2-lane form on every x86-64 host (36/36 vs numpy 2.2.4/2.4.3/2.4.6 AND
+hz2/AVX-512 2.3.5) - CORRECTING the earlier "f64 einsum trees are
+host-lane-dependent" scope-out for the REDUCTION family (the GEMM-family SIMD
+kernels in the umath dispatch tables remain host-dependent; einsum's own SOP loops
+are not). f64 kernels shipped beside the f16 siblings (2-lane trees / column chains
+/ chunk-fold). MEASURED (vmi1293453, sha 95163911..., noisy worker CVs 23-37%):
+f64_colsum 1.732 (null 1.038, 3.12 vs 5.10 ms), f64_rowsum 1.336 (null 1.016, 1.93
+vs 2.57 ms) - 18/20 each, effect medians clear null p90s; memory-bound honest
+scope. f16 rows replicate in-run (colsum 3.00x, rowsum 3.09x - third worker).
+
 F16 REDUCTION SPECS SHIPPED (same session, fc766efa, bead oxok1 CLOSED): contracts
 42/42 x 3 versions - row-sum = ONE paired (d0+d1)+(d2+d3) tree per row with NO
 chunking at any n (discriminator catch #4: the 8192-fold hypothesis failed at

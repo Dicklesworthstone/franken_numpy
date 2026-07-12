@@ -14852,6 +14852,7 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                  bc64_full = rng.standard_normal((2896, 2896))\n\
                  bc64_vec = rng.standard_normal(2896)\n\
                  red16 = (rng.standard_normal((2896, 2896)) * 0.3).astype(np.float16)\n\
+                 red64 = rng.standard_normal((2896, 2896))\n\
                  fnp_es_rj = lambda a: fnp_mod.einsum('ij->j', a)\n\
                  np_es_rj = lambda a: np.einsum('ij->j', a)\n\
                  fnp_es_ri = lambda a: fnp_mod.einsum('ij->i', a)\n\
@@ -15203,24 +15204,41 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
         // f16 reduction specs at 2896^2: col-sum (the 27.9ms strided rank)
         // and row-sum.
         let red16 = namespace.get_item("red16").expect("red16 present");
-        for (bench_name, row, fnp_key, np_key) in [
+        let red64 = namespace.get_item("red64").expect("red64 present");
+        for (bench_name, row, fnp_key, np_key, input) in [
             (
                 "f16_einsum_colsum_8m_null_then_effect",
                 "f16_einsum_colsum_8m",
                 "fnp_es_rj",
                 "np_es_rj",
+                &red16,
             ),
             (
                 "f16_einsum_rowsum_8m_null_then_effect",
                 "f16_einsum_rowsum_8m",
                 "fnp_es_ri",
                 "np_es_ri",
+                &red16,
+            ),
+            (
+                "f64_einsum_colsum_8m_null_then_effect",
+                "f64_einsum_colsum_8m",
+                "fnp_es_rj",
+                "np_es_rj",
+                &red64,
+            ),
+            (
+                "f64_einsum_rowsum_8m_null_then_effect",
+                "f64_einsum_rowsum_8m",
+                "fnp_es_ri",
+                "np_es_ri",
+                &red64,
             ),
         ] {
             let fnp_fn = namespace.get_item(fnp_key).expect("fnp reduce fn");
             let np_fn = namespace.get_item(np_key).expect("np reduce fn");
-            let candidate = fnp_fn.call1((&red16,)).expect("fnp reduce parity");
-            let base = np_fn.call1((&red16,)).expect("numpy reduce parity");
+            let candidate = fnp_fn.call1((input,)).expect("fnp reduce parity");
+            let base = np_fn.call1((input,)).expect("numpy reduce parity");
             assert_eq!(
                 candidate
                     .call_method0("tobytes")
@@ -15234,7 +15252,7 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                 "f16 einsum reduction byte parity ({row})",
             );
             bench_median_gate_python_unary(
-                &mut group, bench_name, row, &np_fn, &fnp_fn, &red16,
+                &mut group, bench_name, row, &np_fn, &fnp_fn, input,
             );
         }
 

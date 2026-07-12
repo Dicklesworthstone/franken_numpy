@@ -1,0 +1,20 @@
+F64_REDUCE_VERIFY numpy=2.4.3 total=36 fails=0
+VERIFY_OK
+F64_REDUCE_VERIFY numpy=2.4.6 total=36 fails=0
+VERIFY_OK
+F64_REDUCE_VERIFY numpy=2.2.4 total=36 fails=0
+VERIFY_OK
+F64_REDUCE_VERIFY numpy=2.3.5 total=36 fails=0
+VERIFY_OK
+=== recon:
+einsum ij->i :     4.32 ms
+sum axis=1   :     4.90 ms
+add.reduce a1:     4.44 ms
+einsum ij->  :     3.71 ms
+einsum ij->j :     3.96 ms
+want            np.float64(18.60902872065139)
+scalar_tree     np.float64(18.609028720651416)  match=False
+lane_tree L=2   np.float64(18.60902872065139)  match=True
+lane_tree L=4   np.float64(18.609028720651324)  match=False
+lane_tree L=8   np.float64(18.609028720651395)  match=False
+numpy=2.4.3
