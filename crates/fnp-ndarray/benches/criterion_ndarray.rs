@@ -106,6 +106,15 @@ fn bench_broadcast_shape(c: &mut Criterion) {
         );
     }
 
+    let same_shape = vec![2usize; 64];
+    let equal_shape = same_shape.clone();
+    group.bench_function("same_slice_identity_64d", |b| {
+        b.iter(|| broadcast_shape(black_box(&same_shape), black_box(&same_shape)))
+    });
+    group.bench_function("equal_distinct_control_64d", |b| {
+        b.iter(|| broadcast_shape(black_box(&same_shape), black_box(&equal_shape)))
+    });
+
     group.finish();
 }
 

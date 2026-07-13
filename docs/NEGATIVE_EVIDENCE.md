@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): same-slice `broadcast_shape` skips value scan - 1.30x at rank 64
+
+`CalmGate`, `fnp-ndarray`. Negative-ledger and Git-history searches found no
+prior pointer-identity shortcut for the allocating shape constructor. This is
+distinct from both the rejected scalar constructor shortcut and the shipped
+boolean `can_broadcast` pointer fast path. When both slice references have the
+same pointer and metadata, their values are necessarily equal, so
+`broadcast_shape` can clone the result immediately without first scanning all
+axes. Distinct slices retain the existing value-equality and merge paths;
+output allocation, shape ordering, errors, floating-point state, and RNG state
+are unchanged. Existing equality, commutativity, associativity, scalar, zero,
+and NumPy-style broadcast tests cover the contract.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran on
+effective worker `vmi1156319` (20 samples, 0.25s warm-up, 1s measurement). In
+the same optimized binary, a 64-axis same-slice call took 44ns versus 57ns for
+a distinct-but-equal 64-axis control (**1.30x**); both paths clone the same 512
+bytes, isolating the avoided equality scan. Existing scalar through rank-4
+rows remained in the 33-42ns band. Per the one-benchmark budget, source and
+the durable same-binary comparator were committed immediately without a
+second benchmark, test, or lint pass.
+
 ## 2026-07-12 - WIN (SHIP): BATCHED int einsum chains ("abc,acd,ade->abe", K=3..=6) - 31.20x (11.7 vs 364.3ms at (8,256,256) x 3 ops; hz1 basis 118.8ms) - the associativity vein's last filed sibling closed
 
 `cc_fnp` / FuchsiaStream. einsum_int_batched_chain_spec_matches validates the

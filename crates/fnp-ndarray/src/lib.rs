@@ -114,7 +114,7 @@ pub fn can_broadcast(lhs: &[usize], rhs: &[usize]) -> bool {
 }
 
 pub fn broadcast_shape(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>, ShapeError> {
-    if lhs == rhs {
+    if std::ptr::eq(lhs, rhs) || lhs == rhs {
         return Ok(lhs.to_vec());
     }
 
