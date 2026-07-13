@@ -604,6 +604,28 @@ va = rng.integers(-1000, 1000, 96).astype(np.int64)
 vb = rng.integers(-1000, 1000, (8, 96, 80)).astype(np.int64)
 if fnp.dot(va, vb).tobytes() != np.dot(va, vb).tobytes():
     verdicts.append("FAIL dot 1-D a delegate")
+# non-contiguous operands through the broadcast/mirror/dot-layout arms
+nc3 = rng.integers(-1000, 1000, (8, 96, 96)).astype(np.int64)
+nc2 = rng.integers(-1000, 1000, (96, 96)).astype(np.int64)
+if fnp.matmul(nc3.swapaxes(-1, -2), nc2).tobytes() != np.matmul(nc3.swapaxes(-1, -2), nc2).tobytes():
+    verdicts.append("FAIL broadcast swapaxes x1")
+if fnp.matmul(nc3, nc2.T).tobytes() != np.matmul(nc3, nc2.T).tobytes():
+    verdicts.append("FAIL broadcast non-contig x2")
+if fnp.matmul(nc2.T, nc3).tobytes() != np.matmul(nc2.T, nc3).tobytes():
+    verdicts.append("FAIL mirror non-contig a")
+if fnp.matmul(nc2, nc3.swapaxes(-1, -2)).tobytes() != np.matmul(nc2, nc3.swapaxes(-1, -2)).tobytes():
+    verdicts.append("FAIL mirror swapaxes b")
+if fnp.dot(nc2.T, nc3).tobytes() != np.dot(nc2.T, nc3).tobytes():
+    verdicts.append("FAIL dot-layout non-contig a")
+ncb = rng.random((8, 96, 96)) > 0.9
+ncb2 = rng.random((96, 96)) > 0.9
+if fnp.matmul(ncb.swapaxes(-1, -2), ncb2).tobytes() != np.matmul(ncb.swapaxes(-1, -2), ncb2).tobytes():
+    verdicts.append("FAIL bool broadcast swapaxes")
+# below-gate non-contig broadcast stays a copy-free delegate
+sm3 = rng.integers(-5, 5, (2, 12, 12)).astype(np.int64)
+sm2 = rng.integers(-5, 5, (12, 12)).astype(np.int64)
+if fnp.matmul(sm3.swapaxes(-1, -2), sm2).tobytes() != np.matmul(sm3.swapaxes(-1, -2), sm2).tobytes():
+    verdicts.append("FAIL below-gate non-contig broadcast delegate")
 sa = rng.integers(-5, 5, (2, 10, 10)).astype(np.int64)
 sb = rng.integers(-5, 5, (10, 10)).astype(np.int64)
 if fnp.matmul(sa, sb).tobytes() != np.matmul(sa, sb).tobytes():
@@ -629,6 +651,9 @@ tn = best(lambda: np.matmul(wbb, wba)); tf = best(lambda: fnp.matmul(wbb, wba))
 print(f"MATMUL_BOOL_MIRROR_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 tn = best(lambda: np.dot(wb, wa)); tf = best(lambda: fnp.dot(wb, wa))
 print(f"DOT_INT_2D3D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.matmul(wa.swapaxes(-1, -2), wb))
+tf = best(lambda: fnp.matmul(wa.swapaxes(-1, -2), wb))
+print(f"MATMUL_INT_BROADCAST_NC_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 tn = best(lambda: np.dot(wbb, wba)); tf = best(lambda: fnp.dot(wbb, wba))
 print(f"DOT_BOOL_2D3D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 print(verdicts if verdicts else True)
