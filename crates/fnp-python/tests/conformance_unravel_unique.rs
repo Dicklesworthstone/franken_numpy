@@ -1100,3 +1100,87 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn float_stable_argsort_nan_native_matches_numpy() -> Result<(), String> {
+    // kind='stable' float argsort with NaNs present used to delegate wholesale
+    // (radix AND typed fallback both deferred NaN). numpy's float lt is
+    // `a < b || (b != b && a == a)`: every NaN — either sign bit, any payload —
+    // orders after +inf, and NaN-vs-NaN is a tie broken by original index under
+    // stable kind. Mapping ALL NaNs to one maximal radix key reproduces that
+    // byte-exactly in the stable LSD radix; rows pin sign/payload mixes, dense
+    // NaN ties, specials, f32, and the widened f16 route.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(283)
+verdicts = []
+n = 2_000_000
+def ab(name, a, kind="stable"):
+    if fnp.argsort(a, kind=kind).tobytes() != np.argsort(a, kind=kind).tobytes():
+        verdicts.append(f"FAIL {name}")
+# sparse NaNs of BOTH signs sprinkled into distinct data
+f = rng.standard_normal(n)
+pos = rng.choice(n, 200, replace=False)
+f[pos[:100]] = np.nan
+f[pos[100:]] = -np.nan
+ab("sparse +-nan f64", f)
+# differing NaN payloads must share one key (numpy treats all NaNs as one tie class)
+fp = f.copy()
+fp[pos[:50]] = np.array([0x7FF8_0000_0000_0001] * 50, dtype=np.uint64).view(np.float64)
+fp[pos[150:]] = np.array([0xFFF0_0000_0000_0007] * 50, dtype=np.uint64).view(np.float64)
+ab("nan payload mix f64", fp)
+# dense ties + 10% NaN: stable index order among values AND among NaNs
+d = rng.integers(0, 40, n).astype(np.float64)
+d[rng.random(n) < 0.10] = np.nan
+ab("dense ties 10pct nan f64", d)
+# specials: +-inf, +-0.0, subnormals, +-nan
+s = rng.standard_normal(n)
+s[: n // 8] = np.inf
+s[n // 8 : n // 4] = -np.inf
+s[n // 4 : n // 2 : 2] = 0.0
+s[n // 4 + 1 : n // 2 : 2] = -0.0
+s[n // 2 : n // 2 + 1000] = 5e-324
+s[-2000:-1000] = np.nan
+s[-1000:] = -np.nan
+ab("specials f64", s)
+# f32 twin
+g = rng.standard_normal(n).astype(np.float32)
+g[pos[:100]] = np.float32(np.nan)
+g[pos[100:]] = -np.float32(np.nan)
+ab("sparse +-nan f32", g)
+# f16 widened route
+h = rng.standard_normal(500_000 * 3).astype(np.float16)
+h[rng.random(1_500_000) < 0.05] = np.float16(np.nan)
+ab("5pct nan f16", h)
+# small n keeps prior behavior (below the native gate)
+sm = rng.standard_normal(1000)
+sm[7] = np.nan
+ab("small parity", sm)
+# default kind with NaN still defers -> byte parity
+ab("default-kind nan parity", f, "quicksort")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.standard_normal(8_000_000)
+W[rng.choice(8_000_000, 800, replace=False)] = np.nan
+tn = best(lambda: np.argsort(W, kind="stable")); tf = best(lambda: fnp.argsort(W, kind="stable"))
+print(f"ARGSORT_STABLE_F64_NAN_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces ARGSORT_STABLE_F64_NAN_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "NaN-bearing stable float argsort must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
