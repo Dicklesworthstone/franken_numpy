@@ -1764,6 +1764,37 @@ r = fnp.einsum("...ij,...jk->...ik", e3a, c128b)  # mixed batch rank: broadcasti
 e = np.einsum("...ij,...jk->...ik", e3a, c128b)
 if r.tobytes() != e.tobytes():
     verdicts.append("FAIL ellipsis-mixed-rank delegate bytes")
+# batched transposed idioms: X@Y^T ("abc,adc->abd") and X^T@Y ("acb,acd->abd")
+r = fnp.einsum("abc,adc->abd", e3a, e3b)
+e = np.einsum("abc,adc->abd", e3a, e3b)
+if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL batched X@Y^T bytes")
+r = fnp.einsum("acb,acd->abd", e3a, e3b)
+e = np.einsum("acb,acd->abd", e3a, e3b)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL batched X^T@Y bytes")
+r = fnp.einsum("...ij,...kj->...ik", e3a, e3b)
+e = np.einsum("...ij,...kj->...ik", e3a, e3b)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL batched ellipsis X@Y^T bytes")
+tg4a = rng.integers(-50, 50, (2, 3, 64, 64))
+tg4b = rng.integers(-50, 50, (2, 3, 64, 64))
+r = fnp.einsum("abcd,abed->abce", tg4a, tg4b)
+e = np.einsum("abcd,abed->abce", tg4a, tg4b)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 4-D batched X@Y^T bytes")
+gb = rng.random((8, 128, 128)) > 0.9
+r = fnp.einsum("abc,adc->abd", gb, gb)
+e = np.einsum("abc,adc->abd", gb, gb)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL bool batched X@Y^T bytes")
+# implicit "abc,adc" SUMS the repeated batch letter (shape (b, d)) - delegate
+sm1 = rng.integers(-50, 50, (2, 24, 24))
+sm2 = rng.integers(-50, 50, (2, 24, 24))
+r = fnp.einsum("abc,adc", sm1, sm2)
+e = np.einsum("abc,adc", sm1, sm2)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL implicit batch-sum delegate bytes")
 big = rng.integers(2**60, 2**62, (128, 128))
 r, e = fnp.einsum("ij,jk->ik", big, big), np.einsum("ij,jk->ik", big, big)
 if r.tobytes() != e.tobytes():
@@ -1819,6 +1850,17 @@ print(f"EINSUM_BOOL_GEMM_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f
 tn = best(lambda: np.einsum("...ij,...jk->...ik", qb1, qb2), reps=3)
 tf = best(lambda: fnp.einsum("...ij,...jk->...ik", qb1, qb2), reps=3)
 print(f"EINSUM_ELLIPSIS_INT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.einsum("abc,adc->abd", qb1, qb2), reps=3)
+tf = best(lambda: fnp.einsum("abc,adc->abd", qb1, qb2), reps=3)
+print(f"EINSUM_INT_BATCHED_XYT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.einsum("acb,acd->abd", qb1, qb2), reps=3)
+tf = best(lambda: fnp.einsum("acb,acd->abd", qb1, qb2), reps=3)
+print(f"EINSUM_INT_BATCHED_XTY_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+w3a = rng.random((8, 256, 256)) > 0.9
+w3b = rng.random((8, 256, 256)) > 0.9
+tn = best(lambda: np.einsum("abc,adc->abd", w3a, w3b), reps=3)
+tf = best(lambda: fnp.einsum("abc,adc->abd", w3a, w3b), reps=3)
+print(f"EINSUM_BOOL_BATCHED_XYT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 print(verdicts if verdicts else True)
 "#
         .into(),
