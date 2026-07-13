@@ -1471,3 +1471,71 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn unique_nd_flat_view_matches_numpy() -> Result<(), String> {
+    // np.unique's default axis=None operates on the FLATTENED array; the
+    // dispatch now normalizes C-contiguous N-D input to a zero-copy
+    // reshape(-1) view so the ndim==1-gated flat kernels (string, c128,
+    // c64, datetime, struct) serve N-D input that previously delegated
+    // wholesale. int/f64 kernels read the flat buffer either way
+    // (regression rows). Byte-exact: np.unique(a) IS np.unique(a.ravel());
+    // F-contig / defer cases keep delegate parity.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(313)
+verdicts = []
+def ab(name, a):
+    ours = fnp.unique(a)
+    theirs = np.unique(a)
+    if ours.tobytes() != theirs.tobytes() or str(ours.dtype) != str(theirs.dtype):
+        verdicts.append(f"FAIL {name}")
+# unlocked arms: 2-D datetime64, 2-D complex128, 2-D fixed-width unicode
+D = rng.integers(0, 5_000_000, (1414, 1414)).astype("datetime64[s]")
+ab("2-D datetime64", D)
+C = (rng.standard_normal((1414, 1414)) + 1j * rng.standard_normal((1414, 1414))).astype(np.complex128)
+ab("2-D complex128", C)
+S = np.array([f"k{v:07d}" for v in rng.integers(0, 400_000, 300_000)], dtype="U8").reshape(600, 500)
+ab("2-D unicode", S)
+# already-covered arms keep working through the view (regression)
+ab("3-D small-range int", rng.integers(0, 300, (128, 128, 128)))
+ab("2-D f64", np.round(rng.standard_normal((1500, 1400)), 3))
+# mixed-sign-zero f64 defers (signed-zero-tie parity fix: which zero survives
+# dedup is the sort's algorithm-specific tie choice) - 1-D row pins the fix
+# for the pre-existing flat path, 2-D covered by the rounded row above
+z1 = rng.standard_normal(2_000_000)
+z1[::3] = 0.0
+z1[1::3] = -0.0
+ab("1-D mixed-zero f64", z1)
+# defer/delegate parity: F-contig, NaN complex (kernel defers), small, 1-D
+ab("F-contig datetime", np.asfortranarray(D[:500, :500]))
+Cn = C[:800, :800].copy(); Cn[3, 5] = complex(np.nan, 1.0)
+ab("2-D c128 nan parity", Cn)
+ab("small 2-D", rng.integers(0, 10, (8, 9)))
+ab("1-D unchanged", rng.integers(0, 5_000_000, 2_000_000).astype("datetime64[s]"))
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.unique(C)); tf = best(lambda: fnp.unique(C))
+print(f"UNIQUE_ND_C128_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tnd = best(lambda: np.unique(D)); tfd = best(lambda: fnp.unique(D))
+print(f"UNIQUE_ND_DT64_AB numpy_ms={tnd:.3f} fnp_ms={tfd:.3f} ratio={tnd / tfd:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces UNIQUE_ND_C128_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "N-D flat-view unique must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
