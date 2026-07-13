@@ -4,6 +4,49 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-13 - REJECT: uniform-NaN native arm for the four f64 VALUE-sort kernels - 0.97x/1.13x/1.01x; numpy 2.4.6 AVX-512 qsort has SATURATED the f64 value-sort basis on the gate worker
+
+cc_fnp, gate worker vmi1152480 (numpy 2.4.6). Hypothesis (sibling of the
+SHIPPED 12.46x stable-ARGSORT NaN lever ea712f9c): when every NaN is the
+canonical np.nan bit pattern, np.sort's output is byte-deterministic
+(non-NaN ascending + byte-uniform NaN tail per lane), so relaxing
+f64_sort_values_defer to a three-way verdict and sorting by
+f64_sortable_key (all NaNs -> one maximal key) makes NaN-bearing np.sort
+native in all four value-sort kernels.
+
+Parity: GREEN for canonical np.nan across flat/lastaxis/axis0/midaxis,
+dense ties, specials. BUT the gate caught numpy's AVX-512 x86-simd-sort
+DIVERGING byte-wise on uniform NEGATIVE-sign NaN (FAIL flat uniform -nan)
+- numpy's NaN byte behavior in the SIMD sort is ISA/version-fragile, so
+any native arm here rides a moving target that parity-by-defer avoids by
+construction.
+
+Measured (one invocation each, same worker):
+- flat 8M sparse NaN: numpy 92.916ms vs native 96.052ms = 0.967x LOSS.
+  The 'cleanly wins 1.6-1.85x' claim in try_zerocopy_f64_sort_flat's
+  comment is from a pre-AVX-512-qsort numpy; at 2.4.6 the flat f64 sort
+  basis is ~93ms @8M. STALE-BASIS WARNING for the whole f64 value-sort
+  family: the shipped CLEAN-data flat arm likely no longer clears its
+  original margin on gate workers (unverified - separate audit).
+- lastaxis (4000,2000) 0.5% NaN: 55.003 vs 48.743ms = 1.128x.
+- axis0 same matrix: 72.010 vs 71.232ms = 1.011x (noise).
+Ship bar is 1.4x+ with nulls at ~0.1-2%: REJECT. Kernel arm reverted
+(stash: 'REJECTED uniform-NaN f64 value-sort arm'); parity coverage +
+basis-pinning AB rows kept in
+conformance_unravel_unique::f64_sort_uniform_nan_native_matches_numpy.
+
+FILED FOLLOW-UP (new lever, unmeasured cleanly): the reverted-tree run
+read the DELEGATE path at 0.701x/0.774x vs raw numpy on NaN-bearing axis
+sorts (81.5 vs 57.1ms lastaxis) - the four kernels run the full O(n)
+f64_sort_values_defer scan (no short-circuit reduce) before every defer,
+pure waste on always-deferring data. Candidate: early-exit the scan
+(bail the reduce once verdict is Defer) or fold it into the first sort
+pass. Loaded-worker reading - re-baseline before sizing.
+
+Retry predicate: reopen the native arm only if (a) numpy drops/changes
+the AVX-512 f64 qsort, or (b) a future audit shows the clean-data flat
+arm itself is now a loss (then the whole family re-scopes together).
+
 ## 2026-07-13 - WIN (SHIP): explicit broadcast-A vector `batch_solve` factors once - 2.63x
 
 `CalmGate`, `fnp-linalg`. This pays the ledger's explicit reopen predicate for

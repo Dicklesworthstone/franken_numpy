@@ -1313,3 +1313,94 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn f64_sort_uniform_nan_native_matches_numpy() -> Result<(), String> {
+    // NaN-bearing f64 np.sort parity coverage + gate-worker basis probe.
+    // A native uniform-NaN arm (canonical np.nan -> f64_sortable_key total
+    // order in all four value-sort kernels) was built and gate-REJECTED
+    // 2026-07-13: numpy 2.4.6's AVX-512 f64 qsort saturates this basis -
+    // flat 0.967x (92.9ms @8M), lastaxis 1.128x, axis0 1.011x - and the gate
+    // also caught AVX-512 DIVERGING byte-wise on uniform NEGATIVE-sign NaN
+    // (its NaN byte behavior is ISA/version-fragile; parity-by-defer is
+    // robust by construction). All NaN-bearing rows here go through the
+    // numpy delegate; the AB rows pin the measured bases for future re-eval.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(307)
+verdicts = []
+def ab(name, a, **kw):
+    if fnp.sort(a, **kw).tobytes() != np.sort(a, **kw).tobytes():
+        verdicts.append(f"FAIL {name}")
+n = 2_000_000
+# sparse canonical NaN in distinct data (flat)
+f = rng.standard_normal(n)
+f[rng.choice(n, 500, replace=False)] = np.nan
+ab("flat sparse nan", f)
+# dense ties + 10% NaN
+d = rng.integers(0, 40, n).astype(np.float64)
+d[rng.random(n) < 0.10] = np.nan
+ab("flat dense ties nan", d)
+# specials: +-inf, subnormals, single-sign zeros, canonical NaN
+s = rng.standard_normal(n)
+s[:1000] = np.inf; s[1000:2000] = -np.inf
+s[2000:3000] = 5e-324; s[3000:4000] = 0.0
+s[-1500:] = np.nan
+ab("flat specials nan", s)
+# uniform NEGATIVE-sign NaN defers (gate-measured AVX-512 divergence) -> parity
+g = rng.standard_normal(n)
+g[rng.choice(n, 300, replace=False)] = -np.nan
+ab("flat uniform -nan parity", g)
+ab("lastaxis -nan parity", g[: 1_999_000].reshape(1000, 1999), axis=-1)
+# uniform NON-CANONICAL positive payload defers -> parity
+q = rng.standard_normal(n)
+q[rng.choice(n, 300, replace=False)] = np.array([0x7FF8_0000_0000_0001], dtype=np.uint64).view(np.float64)[0]
+ab("lastaxis odd-payload parity", q[: 1_999_000].reshape(1000, 1999), axis=-1)
+# MIXED NaN payloads -> defer, parity via numpy
+p = f.copy()
+p[7] = np.array([0x7FF8_0000_0000_0001], dtype=np.uint64).view(np.float64)[0]
+ab("flat mixed payload parity", p)
+# mixed-sign zeros WITH uniform NaN -> still defer, parity
+z = f.copy(); z[11] = -0.0; z[13] = 0.0
+ab("flat mixed zeros parity", z)
+# lastaxis / axis0 / midaxis forms with NaN
+m2 = rng.standard_normal((1500, 1500))
+m2[rng.random((1500, 1500)) < 0.01] = np.nan
+ab("lastaxis nan", m2, axis=-1)
+ab("axis0 nan", m2, axis=0)
+m3 = rng.standard_normal((160, 120, 130))
+m3[rng.random((160, 120, 130)) < 0.01] = np.nan
+ab("midaxis nan", m3, axis=1)
+# stable kind with NaN keeps the defer -> parity
+ab("stable kind parity", f, kind="stable")
+# small n parity
+sm = rng.standard_normal(1000); sm[3] = np.nan
+ab("small parity", sm)
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+M = rng.standard_normal((4000, 2000))
+M[rng.random((4000, 2000)) < 0.005] = np.nan
+tn = best(lambda: np.sort(M, axis=-1)); tf = best(lambda: fnp.sort(M, axis=-1))
+print(f"SORT_F64_NAN_LASTAXIS_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn0 = best(lambda: np.sort(M, axis=0)); tf0 = best(lambda: fnp.sort(M, axis=0))
+print(f"SORT_F64_NAN_AXIS0_AB numpy_ms={tn0:.3f} fnp_ms={tf0:.3f} ratio={tn0 / tf0:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces SORT_F64_NAN_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "uniform-NaN f64 sort must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
