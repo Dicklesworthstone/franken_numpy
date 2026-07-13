@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - NO-SHIP: scalar identity fast path for `broadcast_shape` is 0.76x
+
+`CalmGate`, `fnp-ndarray`. Negative-ledger and Git-history searches found no
+prior scalar-pair shortcut or retry boundary. The candidate returned a clone of
+the non-empty shape when either input was rank zero, replacing the generic
+trailing-axis merge and final reverse. This is exact because a scalar supplies
+no axes; allocation count, ordering, errors for non-scalar pairs,
+floating-point behavior, and RNG state are unchanged. Existing scalar, empty,
+zero-axis, commutativity, associativity, and NumPy-style broadcast tests cover
+the identity.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran on
+effective worker `vmi1156319`, with the old generic scalar path copied into an
+adjacent control row in the same optimized binary (20 samples, 0.25s warm-up,
+1s measurement). Scalar-to-1D candidate/control was 33/25ns (**0.76x**), a
+clear regression. Source and benchmark control were restored, and this
+evidence-only closeout was committed immediately without a second benchmark,
+test, or lint pass. Do not retry the scalar-to-1D clone shortcut alone; reopen
+only for a distinct higher-rank workload with its own same-binary control.
+
 ## 2026-07-12 - WIN (SHIP): seed `result_type` from the first dtype - 1.40-1.75x on pair calls
 
 `CalmGate`, `fnp-dtype`. Negative-ledger and Git-history searches found no
