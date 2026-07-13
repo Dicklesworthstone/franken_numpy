@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): direct `cast_to(F64)` construction removes zero-fill + copy - 1.88-28.2x
+
+`CalmGate`, `fnp-dtype`. Negative-ledger and Git-history searches found no
+no-retry boundary for this target specialization. The earlier `cast_to`
+dispatch-hoist win (`00ce3c56`) still allocated a zero-filled F64 destination,
+built the converted values in a second `Vec<f64>`, and copied them unchanged
+into the destination. After the existing same-dtype, structured, string-target,
+and string-source guards, `cast_to(F64)` now returns that proven conversion
+vector directly. This preserves every existing error and conversion rule while
+removing one allocation, its zero-fill, and the final full-buffer copy.
+
+Pinned same-worker `release-perf` Criterion runs on `vmi1156319` used all four
+existing `array_storage_cast/i32_to_f64` rows. 100 elements moved from 146ns to
+69ns (**2.12x**), 1,000 from 585ns to 312ns (**1.88x**), 10,000 from 5,539ns
+to 2,514ns (**2.20x**), and 100,000 from 669,599ns to 23,730ns (**28.2x**).
+All 263 `fnp-dtype` unit, conformance, comprehensive, golden, and metamorphic
+tests passed remotely, including the exhaustive numeric/bool/complex cast
+matrix's bit-exact reference comparison and pinned SHA-256. Remote all-targets
+clippy passed with warnings denied; UBS found no critical issue in the changed
+Rust file.
+
 ## 2026-07-12 - WIN (SHIP, sweep #4 row 1): f64 ARRAY-bounds clip 3-operand parallel - 2.52x (4.4 vs 11.0ms worker; hz1 basis 192.7ms @8M) - byte-exact with ZERO hazard defers
 
 `cc_fnp` / FuchsiaStream. Sweep #4 opened a fresh op family: numpy clip with

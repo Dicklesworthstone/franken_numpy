@@ -1178,6 +1178,9 @@ impl ArrayStorage {
                 to: target,
             });
         }
+        if target == DType::F64 {
+            return Ok(Self::F64(self.to_f64_vec()));
+        }
 
         let mut result = Self::zeros(target, n);
         let src_is_int = self.dtype().is_integer() || self.dtype() == DType::Bool;
