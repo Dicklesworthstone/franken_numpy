@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - NO-SHIP: single-input `broadcast_shapes` identity fast path taxes multi-input calls
+
+`CalmGate`, `fnp-ndarray`. The candidate returned `shape.to_vec()` when
+`broadcast_shapes` received exactly one input, avoiding accumulator
+initialization and two axis scans. This is exact for every dimension value and
+rank because a lone shape broadcasts to itself and the existing path cannot
+report an incompatibility against its all-one accumulator.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran on
+effective worker `vmi1156319`, with the old implementation as adjacent controls
+in the same optimized binary (20 samples, 0.25s warm-up, 1s measurement). The
+one-input rank-8 row improved from 58ns to 36ns (**1.61x**), but the added
+dispatch check regressed all measured multi-input rows: 2 shapes 47->49ns
+(**0.96x**), 4 shapes 66->73ns (**0.90x**), and 8 shapes 127->142ns
+(**0.89x**). Source and temporary benchmark rows were restored, and this
+evidence-only closeout was committed immediately without refinement, a second
+benchmark, tests, or lint. Do not retry a general entry-point single-input
+branch without workload evidence that single-input calls dominate enough to
+pay the measured multi-input tax.
+
 ## 2026-07-12 - NO-SHIP: later-Complex128 `common_type` terminal taxes ordinary pairs
 
 `CalmGate`, `fnp-dtype`. The shipped first-input Complex128 terminal remains a
