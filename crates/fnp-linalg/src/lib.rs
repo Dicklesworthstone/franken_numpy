@@ -8426,6 +8426,57 @@ pub fn batch_solve(
         ));
     }
 
+    // A literal 2-D matrix broadcast across a vector-RHS batch has one LU, not
+    // `batch` independent LUs. Factor the finite, unblocked matrix once, then
+    // preserve the existing per-lane permutation and substitution order.
+    if vector_rhs
+        && a_shape.len() == 2
+        && a_batch == 1
+        && b_batch > 1
+        && n < LU_BLOCK_MIN
+        && a.iter().all(|value| value.is_finite())
+    {
+        let matrix_max_abs = a.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
+        let mut lu = vec![0.0f64; mat_size];
+        let mut perm = vec![0usize; n];
+        lu_factor_unblocked_into(a, n, singularity_threshold, &mut lu, &mut perm)?;
+
+        let solve_factored_into = |b_sub: &[f64], out: &mut [f64]| {
+            for i in 0..n {
+                out[i] = b_sub[perm[i]];
+            }
+            for i in 1..n {
+                for j in 0..i {
+                    out[i] -= lu[i * n + j] * out[j];
+                }
+            }
+            for i in (0..n).rev() {
+                for j in (i + 1)..n {
+                    out[i] -= lu[i * n + j] * out[j];
+                }
+                out[i] /= lu[i * n + i];
+            }
+        };
+
+        let mut result = vec![0.0f64; batch * rhs_width];
+        if batch_should_parallelize(batch, mat_size + rhs_width) {
+            result
+                .par_chunks_mut(rhs_width)
+                .enumerate()
+                .for_each(|(idx, out_chunk)| {
+                    let b_sub = &b[idx * rhs_width..(idx + 1) * rhs_width];
+                    solve_factored_into(b_sub, out_chunk);
+                });
+        } else {
+            for (idx, out_chunk) in result.chunks_mut(rhs_width).enumerate() {
+                let b_sub = &b[idx * rhs_width..(idx + 1) * rhs_width];
+                solve_factored_into(b_sub, out_chunk);
+            }
+        }
+        return Ok(result);
+    }
+
     // Matrix-RHS does m columns of substitution per lane, so its per-lane compute
     // (~O(n²·m)) overtakes the constant per-lane alloc cost at a much smaller n than
     // vector-RHS: same-worker A/B shows matrix-RHS 3.3x @ n=3, 1.3-1.6x @ n=8, but

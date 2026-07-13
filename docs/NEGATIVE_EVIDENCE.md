@@ -4,6 +4,29 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-13 - WIN (SHIP): explicit broadcast-A vector `batch_solve` factors once - 2.63x
+
+`CalmGate`, `fnp-linalg`. This pays the ledger's explicit reopen predicate for
+factor-once broadcast-A solve reuse; the earlier core attempt was blocked by a
+source lease, not rejected. For finite literal 2-D A, batched vector RHS, and
+the existing unblocked-LU regime, `batch_solve` now computes the identical LU
+and pivot permutation once, then shares them across independent RHS lanes.
+Stacked A, matrix RHS, singleton RHS batches, blocked sizes, nonfinite A, and
+all validation/error paths retain the prior implementation.
+
+The singularity threshold, factorizer, permutation, forward substitution, and
+back substitution are unchanged, including their per-lane floating-point
+operation order. An equivalent `[1,n,n]` A shape exercised the old per-lane
+refactor path as an adjacent control, and the benchmark binary asserted raw-bit
+output equality before timing.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran on
+effective worker `vmi1156319` with RCH self-healing disabled (10 samples,
+0.25s warm-up, 1s measurement). Broadcast A with 8,192 vector RHS lanes at
+n=16 improved from 7,354,732ns to 2,795,256ns (**2.63x**). The temporary
+control was removed and the production path was committed immediately without
+a second benchmark, tests, lint, or formatting pass.
+
 ## 2026-07-13 - WIN (SHIP): power-of-two dense `meshgrid` strength-reduces source indexing - 1.55x
 
 `CalmGate`, `fnp-ufunc`. The common no-sidecar dense path now replaces each
