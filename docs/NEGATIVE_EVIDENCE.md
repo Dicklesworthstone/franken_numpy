@@ -4,6 +4,19 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-13 - WIN (SHIP): early-exit f64 sort defer scan - delegate tax 0.70x -> 0.94-1.06x (e4512974)
+
+Pays the delegate-tax follow-up from the reject below, same session.
+f64_sort_values_defer's full fused par-reduce read the whole buffer
+before every defer; now chunks bail as soon as the verdict is certain
+(first NaN, or both zero signs across chunks, relaxed AtomicBools;
+unstarted chunks skip). Verdict-identical by construction; clean inputs
+still pay exactly one pass. Same worker, same AB rows (heavily loaded
+run - ratios are the signal): lastaxis 0.701x -> 0.937x, axis0
+0.774x -> 1.060x, all 13 parity rows green. The sibling defer scans
+(c128/c64/f16 pre-scans) remain full-reduce - candidates if a profile
+ranks them.
+
 ## 2026-07-13 - REJECT: uniform-NaN native arm for the four f64 VALUE-sort kernels - 0.97x/1.13x/1.01x; numpy 2.4.6 AVX-512 qsort has SATURATED the f64 value-sort basis on the gate worker
 
 cc_fnp, gate worker vmi1152480 (numpy 2.4.6). Hypothesis (sibling of the
