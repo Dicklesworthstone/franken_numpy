@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - NO-SHIP: rank-0-to-4 `element_count` specialization is flat
+
+`CalmGate`, `fnp-ndarray`. Negative-ledger and Git-history searches found no
+prior small-rank specialization or retry boundary. The candidate replaced the
+generic checked fold with explicit rank-0 through rank-4 arms while retaining
+the fold for higher ranks. Multiplications remained left-associated and
+checked in identical axis order, preserving overflow-before-later-zero
+precedence; scalar, zero, ordering, floating-point, and RNG behavior were
+unchanged. Existing scalar, zero, overflow, golden, conformance, and
+metamorphic product tests cover that isomorphism.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran on
+effective worker `vmi1156319`, with old-fold controls adjacent in the same
+optimized binary (20 samples, 0.25s warm-up, 1s measurement). Candidate/control
+was 1/1ns for rank 1 small, 2/2ns for rank 1 large, 2/2ns for rank 2, 2/3ns
+for rank 3 (**1.50x**), and 3/3ns for rank 4. The unchanged rank-6 fallback was
+6/5ns. One isolated 1ns gain does not clear the family floor, so source and
+controls were restored and this evidence-only closeout was committed
+immediately without a second benchmark, test, or lint pass. Do not retry
+rank-pattern unrolling on this matrix; reopen only with a distinct caller-level
+lever that clears 1.20x across ranks.
+
 ## 2026-07-12 - WIN (SHIP): int einsum chains generalized to K operands (3..=6) - 4-chain opt=True 63.54x (13.0 vs 823.6ms at 512^2); 3-chain rows re-read 89.1x/437.5x on a quiet worker
 
 `cc_fnp` / FuchsiaStream. einsum_int_chain_spec_matches validates a pure 2-D
