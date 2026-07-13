@@ -1007,3 +1007,96 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+#[ignore = "numpy-baseline probe for lever sizing; run explicitly"]
+fn probe_gate_worker_sort_class_bases() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import time
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+rng = np.random.default_rng(271)
+a = rng.integers(-2**62, 2**62, 8_000_000)
+print(f"BASE argsort_stable_i64_8m {best(lambda: np.argsort(a, kind='stable')):.1f}")
+print(f"BASE argsort_default_i64_8m {best(lambda: np.argsort(a)):.1f}")
+k1 = rng.integers(-2**62, 2**62, 4_000_000)
+k2 = rng.integers(-2**62, 2**62, 4_000_000)
+print(f"BASE lexsort_2xi64_4m {best(lambda: np.lexsort((k1, k2))):.1f}")
+f = rng.standard_normal(8_000_000)
+print(f"BASE argsort_stable_f64_8m {best(lambda: np.argsort(f, kind='stable')):.1f}")
+print("numpy", np.__version__)
+print(True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}");
+    Ok(())
+}
+
+#[test]
+fn wide2_lexsort_bit_exact_matches_numpy() -> Result<(), String> {
+    // Two wide-range int keys (composite span overflow) sort as
+    // (primary, secondary, index) i128 tuples - tuple order IS numpy's
+    // stable lexsort contract, deterministic incl. ties -> byte-exact.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(277)
+verdicts = []
+k1 = rng.integers(-2**62, 2**62, 500_000)
+k2 = rng.integers(-2**62, 2**62, 500_000)
+if fnp.lexsort((k1, k2)).tobytes() != np.lexsort((k1, k2)).tobytes():
+    verdicts.append("FAIL wide i64 pair")
+# ties in the primary key exercise the secondary + stable index
+kp = rng.integers(0, 50, 500_000) * 2**58
+ks = rng.integers(-2**62, 2**62, 500_000)
+if fnp.lexsort((ks, kp)).tobytes() != np.lexsort((ks, kp)).tobytes():
+    verdicts.append("FAIL primary ties")
+# ties in BOTH keys -> original-index stability
+kd1 = rng.integers(0, 10, 500_000) * 2**58
+kd2 = rng.integers(0, 10, 500_000) * 2**58
+if fnp.lexsort((kd1, kd2)).tobytes() != np.lexsort((kd1, kd2)).tobytes():
+    verdicts.append("FAIL double ties stability")
+# mixed widths/signedness
+m1 = rng.integers(0, 2**63, 400_000, dtype=np.uint64, endpoint=True)
+m2 = rng.integers(-2**31, 2**31 - 1, 400_000).astype(np.int32)
+if fnp.lexsort((m2, m1)).tobytes() != np.lexsort((m2, m1)).tobytes():
+    verdicts.append("FAIL mixed u64/i32")
+# 3 keys + small n keep prior behavior (byte parity)
+k3 = rng.integers(-2**62, 2**62, 300_000)
+if fnp.lexsort((k1[:300_000], k2[:300_000], k3)).tobytes() != np.lexsort((k1[:300_000], k2[:300_000], k3)).tobytes():
+    verdicts.append("FAIL 3-key parity")
+s1 = rng.integers(-2**62, 2**62, 1000)
+s2 = rng.integers(-2**62, 2**62, 1000)
+if fnp.lexsort((s1, s2)).tobytes() != np.lexsort((s1, s2)).tobytes():
+    verdicts.append("FAIL small parity")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W1 = rng.integers(-2**62, 2**62, 4_000_000)
+W2 = rng.integers(-2**62, 2**62, 4_000_000)
+tn = best(lambda: np.lexsort((W1, W2))); tf = best(lambda: fnp.lexsort((W1, W2)))
+print(f"LEXSORT_WIDE2_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces LEXSORT_WIDE2_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "wide 2-key lexsort must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
