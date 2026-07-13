@@ -1375,3 +1375,63 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn int_nanargmax_nanargmin_route_to_argextreme_bit_exact_matches_numpy() -> Result<(), String> {
+    // Integer/bool nanargmax/nanargmin route to fnp's argmax/argmin (numpy's
+    // _replace_nan returns non-inexact arrays untouched, so the nan* forms
+    // equal the plain reductions byte-exactly); fnp's native int/bool axis
+    // kernels cover the strided forms numpy runs serially. Ties (first-max),
+    // keepdims, flat, and float inputs (nan machinery intact) all pinned.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(193)
+verdicts = []
+M = rng.integers(-2**40, 2**40, (2048, 1024))
+for fname, nfname in (("nanargmax", "nanargmax"), ("nanargmin", "nanargmin")):
+    ff = getattr(fnp, fname); nf = getattr(np, nfname)
+    for kw in [dict(), dict(axis=0), dict(axis=1), dict(axis=-1), dict(axis=0, keepdims=True)]:
+        r = ff(M, **kw); e = nf(M, **kw)
+        ra = np.asarray(r); ea = np.asarray(e)
+        if ra.dtype != ea.dtype or ra.shape != ea.shape or ra.tobytes() != ea.tobytes():
+            verdicts.append(f"FAIL {fname} {kw}")
+# ties resolve to FIRST occurrence
+T = np.zeros((512, 512), dtype=np.int64); T[7] = 5; T[300] = 5
+if np.asarray(fnp.nanargmax(T, axis=0)).tobytes() != np.asarray(np.nanargmax(T, axis=0)).tobytes():
+    verdicts.append("FAIL tie first-max")
+# bool + narrow widths
+B = rng.random((2048, 1024)) > 0.9
+if np.asarray(fnp.nanargmax(B, axis=0)).tobytes() != np.asarray(np.nanargmax(B, axis=0)).tobytes():
+    verdicts.append("FAIL bool")
+M8 = rng.integers(-100, 100, (2048, 1024)).astype(np.int8)
+if np.asarray(fnp.nanargmin(M8, axis=1)).tobytes() != np.asarray(np.nanargmin(M8, axis=1)).tobytes():
+    verdicts.append("FAIL int8")
+# float inputs keep the nan machinery (regression)
+F = rng.standard_normal((1024, 512)); F[rng.random((1024, 512)) < 0.01] = np.nan
+if np.asarray(fnp.nanargmax(F, axis=1)).tobytes() != np.asarray(np.nanargmax(F, axis=1)).tobytes():
+    verdicts.append("FAIL float nan regression")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-2**40, 2**40, (8192, 4096))
+tn = best(lambda: np.nanargmax(W, axis=0)); tf = best(lambda: fnp.nanargmax(W, axis=0))
+print(f"NANARGMAX_INT_AX0_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces NANARGMAX_INT_AX0_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "int nanargmax/nanargmin routing must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
