@@ -1463,3 +1463,55 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn f64_sort_signed_zero_mix_defers_byte_exact() -> Result<(), String> {
+    // Inputs mixing -0.0 with +0.0 now DEFER in all four f64 value-sort
+    // kernels: the zeros compare equal but differ in bytes, and numpy's
+    // unstable tie arrangement is algorithm-specific (its sorted zero block
+    // is NOT totally ordered by sign), so the native parallel sort must not
+    // produce its own arrangement. Single-sign zeros still engage (ties are
+    // byte-identical). Every row pins bytes against numpy.
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(157)
+verdicts = []
+def mixed(n):
+    a = rng.standard_normal(n)
+    a[rng.random(n) < 0.01] = 0.0
+    a[rng.random(n) < 0.01] = -0.0
+    return a
+a1 = mixed(4_000_000)
+if fnp.sort(a1).tobytes() != np.sort(a1).tobytes():
+    verdicts.append("FAIL flat mixed-zero")
+a2 = mixed(4_194_304).reshape(2048, 2048)
+if fnp.sort(a2, axis=1).tobytes() != np.sort(a2, axis=1).tobytes():
+    verdicts.append("FAIL lastaxis mixed-zero")
+if fnp.sort(a2, axis=0).tobytes() != np.sort(a2, axis=0).tobytes():
+    verdicts.append("FAIL axis0 mixed-zero")
+a3 = mixed(4_194_304).reshape(64, 256, 256)
+if fnp.sort(a3, axis=1).tobytes() != np.sort(a3, axis=1).tobytes():
+    verdicts.append("FAIL midaxis mixed-zero")
+# single-sign zeros still engage natively and stay byte-exact
+b = rng.standard_normal(4_000_000)
+b[rng.random(4_000_000) < 0.02] = -0.0
+if fnp.sort(b).tobytes() != np.sort(b).tobytes():
+    verdicts.append("FAIL neg-zero-only flat")
+c = rng.standard_normal(4_000_000)
+c[rng.random(4_000_000) < 0.02] = 0.0
+if fnp.sort(c).tobytes() != np.sort(c).tobytes():
+    verdicts.append("FAIL pos-zero-only flat")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}");
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "f64 sort signed-zero handling must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}

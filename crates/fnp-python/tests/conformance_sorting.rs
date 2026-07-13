@@ -957,3 +957,4 @@ fn bool_sort_counting_matches_numpy() {
         Ok(())
     });
 }
+
