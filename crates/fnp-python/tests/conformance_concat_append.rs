@@ -855,3 +855,67 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+#[test]
+fn insert_nd_axis_none_flat_view_matches_numpy() -> Result<(), String> {
+    // np.insert(..., axis=None) flattens the input in C order before inserting.
+    // This locks the N-D input-form fast path to byte-exact parity while keeping
+    // explicit-axis and non-C-contiguous inputs on NumPy's existing semantics.
+    let script = fnp_script(
+        r#"
+import time
+
+verdicts = []
+
+def outcome(fn, *args, **kwargs):
+    try:
+        out = np.asarray(fn(*args, **kwargs))
+        return ("ok", str(out.dtype), tuple(out.shape), out.tobytes())
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+def ab(name, arr, obj, value, **kwargs):
+    ours = outcome(fnp.insert, arr, obj, value, **kwargs)
+    theirs = outcome(np.insert, arr, obj, value, **kwargs)
+    if ours != theirs:
+        verdicts.append(f"FAIL {name}")
+
+base = np.array(
+    [[0.0, -0.0, 1.5], [np.inf, -np.inf, np.nan]],
+    dtype=np.float64,
+)
+for idx in (0, 3, base.size, -1, -base.size):
+    ab(f"2-D index {idx}", base, idx, -0.0)
+ab("3-D", np.arange(60, dtype=np.float64).reshape(3, 4, 5), 17, 99.25)
+ab("0-D", np.array(7.0, dtype=np.float64), 1, 8.0)
+ab("F-contiguous defer", np.asfortranarray(np.arange(24.0).reshape(4, 6)), 7, 2.5)
+ab("axis 0 unchanged", np.arange(24.0).reshape(4, 6), 2, 2.5, axis=0)
+ab("axis -1 unchanged", np.arange(24.0).reshape(4, 6), 2, 2.5, axis=-1)
+ab("out of bounds", base, base.size + 1, 2.5)
+
+large = np.arange(8_000_000, dtype=np.float64).reshape(2000, 4000)
+
+def best(fn, reps=3):
+    samples = []
+    for _ in range(reps):
+        start = time.perf_counter()
+        fn()
+        samples.append((time.perf_counter() - start) * 1e3)
+    return min(samples)
+
+numpy_ms = best(lambda: np.insert(large, large.size // 2, -3.25))
+fnp_ms = best(lambda: fnp.insert(large, large.size // 2, -3.25))
+print(f"INSERT_ND_AXIS_NONE_AB numpy_ms={numpy_ms:.3f} fnp_ms={fnp_ms:.3f} ratio={numpy_ms / fnp_ms:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}");
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "N-D axis=None scalar insert must be byte-identical to NumPy: {result}"
+    );
+    Ok(())
+}
