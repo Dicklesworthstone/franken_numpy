@@ -436,3 +436,71 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn int_trapezoid_via_f64_conversion_matches_numpy() -> Result<(), String> {
+    // Integer y/x within +-2^51 convert once to f64 and ride the existing
+    // paths. The fnp f64 FAST path is an allclose-level surface by design
+    // (different summation order, ~1e-14) - int rows assert the same
+    // tolerance the f64 surface already carries; DELEGATED forms (huge
+    // values, non-contig) stay byte-exact since the conversion is
+    // value-transparent to numpy's own chain in range.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(163)
+verdicts = []
+# half-range-safe values per width (in-dtype pairwise adds cannot wrap)
+for dt, lo, hi in [(np.int64, -1000, 1000), (np.int32, -1000, 1000), (np.int16, -1000, 1000), (np.uint8, 0, 100)]:
+    y = rng.integers(lo, hi, 4_000_000).astype(dt)
+    r = fnp.trapezoid(y); e = np.trapezoid(y)
+    if not np.allclose(np.asarray(r, dtype=np.float64), np.asarray(e, dtype=np.float64), rtol=1e-12, atol=1e-6):
+        verdicts.append(f"FAIL 1-D {dt.__name__}")
+# FULL-range uint8 can wrap in-dtype -> must DELEGATE, byte-exact
+yw = rng.integers(0, 256, 2_000_000).astype(np.uint8)
+if np.asarray(fnp.trapezoid(yw)).tobytes() != np.asarray(np.trapezoid(yw)).tobytes():
+    verdicts.append("FAIL full-range uint8 delegate bytes")
+# int y with int x coordinates
+y = rng.integers(-1000, 1000, 2_000_000)
+x = np.arange(2_000_000) * 2
+r = fnp.trapezoid(y, x); e = np.trapezoid(y, x)
+if not np.allclose(float(r), float(e), rtol=1e-12, atol=1e-6):
+    verdicts.append("FAIL int x coords")
+# dx scalar
+r = fnp.trapezoid(y, dx=0.5); e = np.trapezoid(y, dx=0.5)
+if not np.allclose(float(r), float(e), rtol=1e-12, atol=1e-6):
+    verdicts.append("FAIL dx scalar")
+# 2-D axis
+y2 = rng.integers(-1000, 1000, (2048, 1024))
+for ax in (0, 1):
+    r = fnp.trapezoid(y2, axis=ax); e = np.trapezoid(y2, axis=ax)
+    if not np.allclose(r, e, rtol=1e-12, atol=1e-6):
+        verdicts.append(f"FAIL 2-D ax={ax}")
+# huge values keep the delegate: BYTE-exact
+big = rng.integers(2**60, 2**62, 300_000)
+if np.asarray(fnp.trapezoid(big)).tobytes() != np.asarray(np.trapezoid(big)).tobytes():
+    verdicts.append("FAIL huge-value delegate bytes")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-1000, 1000, 16_000_000)
+tn = best(lambda: np.trapezoid(W)); tf = best(lambda: fnp.trapezoid(W))
+print(f"TRAPEZOID_INT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces TRAPEZOID_INT_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "int trapezoid via f64 conversion must match numpy: {result}"
+    );
+    Ok(())
+}
