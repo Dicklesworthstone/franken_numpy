@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): int einsum chains generalized to K operands (3..=6) - 4-chain opt=True 63.54x (13.0 vs 823.6ms at 512^2); 3-chain rows re-read 89.1x/437.5x on a quiet worker
+
+`cc_fnp` / FuchsiaStream. einsum_int_chain_spec_matches validates a pure 2-D
+matmul chain (2-letter operands, consecutive inner letters shared, no repeats,
+output == first++last; implicit only when already alphabetical) and the arm
+left-folds native int GEMMs - any pairing byte-identical by wrapping
+associativity, optimize kwarg accepted. hz1 bases: 4-chain opt=True 1100ms at
+512^2, opt=False 5005ms at just 64^2 (naive O(n^(K+1))). Batteries: 4-chain
+bytes, 5-chain-opt bytes, 4-chain TRANSPOSED-OUT delegate ("->mi" rejected by
+the validator), CYCLIC-TRACE delegate ("ij,jk,ki->" repeated letters
+rejected), prior wrap/mixed rows - all green.
+BENCH-HARNESS TRAP (ledgered for reuse): no-opt K-chain PARITY batteries must
+use TINY mats - numpy's naive fused loop is O(n^(K+1)), so a 4-chain byte
+check at 128^2 is 34e9 ops PER CALL (minutes, timed out two gate attempts);
+32^2 is 33e6. Delegate-parity batteries pay numpy's cost TWICE - size them by
+numpy's complexity, not the kernel's.
+
 ## 2026-07-12 - WIN (SHIP): Complex128-head `common_type` terminal - 26.5x
 
 `CalmGate`, `fnp-dtype`. Negative-ledger and Git-history searches found no

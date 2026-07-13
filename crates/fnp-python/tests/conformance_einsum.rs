@@ -1675,6 +1675,27 @@ r = fnp.einsum("ij,jk,kl->il", c128a, c128b.astype(np.int32), c128c)
 e = np.einsum("ij,jk,kl->il", c128a, c128b.astype(np.int32), c128c)
 if r.dtype != e.dtype or r.tobytes() != e.tobytes():
     verdicts.append("FAIL 3chain-mixed-delegate bytes")
+# K-op generalization: 4- and 5-chains, non-chain guards
+# no-opt K-chain batteries use TINY mats: numpy's naive fused loop is
+# O(n^(K+1)) - at 128^2 a 4-chain is 34e9 ops per call (minutes); 32^2 is 33e6.
+t32 = [rng.integers(-50, 50, (32, 32)) for _ in range(4)]
+d128 = rng.integers(-50, 50, (128, 128))
+r = fnp.einsum("ij,jk,kl,lm->im", *t32)
+e = np.einsum("ij,jk,kl,lm->im", *t32)
+if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 4chain bytes")
+r = fnp.einsum("ab,bc,cd,de,ef->af", c128a, c128b, c128c, d128, c128a, optimize=True)
+e = np.einsum("ab,bc,cd,de,ef->af", c128a, c128b, c128c, d128, c128a, optimize=True)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 5chain-opt bytes")
+r = fnp.einsum("ij,jk,kl,lm->mi", *t32)
+e = np.einsum("ij,jk,kl,lm->mi", *t32)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 4chain-transposed-out delegate bytes")
+r = fnp.einsum("ij,jk,ki->", c128a, c128b, c128c)
+e = np.einsum("ij,jk,ki->", c128a, c128b, c128c)
+if np.asarray(r).tobytes() != np.asarray(e).tobytes():
+    verdicts.append("FAIL cyclic-trace delegate bytes")
 big = rng.integers(2**60, 2**62, (128, 128))
 r, e = fnp.einsum("ij,jk->ik", big, big), np.einsum("ij,jk->ik", big, big)
 if r.tobytes() != e.tobytes():
@@ -1712,6 +1733,10 @@ print(f"EINSUM_INT_3CHAIN_OPT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / t
 tn = best(lambda: np.einsum("ij,jk,kl->il", c128a, c128b, c128c), reps=3)
 tf = best(lambda: fnp.einsum("ij,jk,kl->il", c128a, c128b, c128c), reps=3)
 print(f"EINSUM_INT_3CHAIN_NOOPT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+d512 = rng.integers(-50, 50, (512, 512))
+tn = best(lambda: np.einsum("ij,jk,kl,lm->im", c512a, c512b, c512c, d512, optimize=True), reps=3)
+tf = best(lambda: fnp.einsum("ij,jk,kl,lm->im", c512a, c512b, c512c, d512, optimize=True), reps=3)
+print(f"EINSUM_INT_4CHAIN_OPT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 print(verdicts if verdicts else True)
 "#
         .into(),
