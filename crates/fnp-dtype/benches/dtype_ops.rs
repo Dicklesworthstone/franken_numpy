@@ -4,7 +4,9 @@
 //! and type inference - all hot-path operations in array computations.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use fnp_dtype::{ArrayStorage, DType, can_cast, common_type, min_scalar_type, result_type};
+use fnp_dtype::{
+    ArrayStorage, DType, can_cast, common_type, min_scalar_type, promote, result_type,
+};
 use std::hint::black_box;
 
 fn bench_result_type(c: &mut Criterion) {
@@ -21,6 +23,18 @@ fn bench_result_type(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("pair", name), dtypes, |b, dtypes| {
             b.iter(|| result_type(black_box(dtypes)))
         });
+        group.bench_with_input(
+            BenchmarkId::new("bool_seed_control", name),
+            dtypes,
+            |b, dtypes| {
+                b.iter(|| {
+                    black_box(dtypes)
+                        .iter()
+                        .copied()
+                        .fold(DType::Bool, promote)
+                })
+            },
+        );
     }
 
     let triple = vec![DType::I32, DType::F32, DType::U16];

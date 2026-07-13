@@ -436,7 +436,10 @@ pub const fn can_cast_lossless(src: DType, dst: DType) -> bool {
 /// (np.result_type).
 #[must_use]
 pub fn result_type(dtypes: &[DType]) -> DType {
-    dtypes.iter().copied().fold(DType::Bool, promote)
+    let Some((&first, rest)) = dtypes.split_first() else {
+        return DType::Bool;
+    };
+    rest.iter().copied().fold(first, promote)
 }
 
 /// Check whether a cast is allowed under the given casting rule

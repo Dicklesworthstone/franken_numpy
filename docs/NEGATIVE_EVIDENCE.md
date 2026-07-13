@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): seed `result_type` from the first dtype - 1.40-1.75x on pair calls
+
+`CalmGate`, `fnp-dtype`. Negative-ledger and Git-history searches found no
+prior first-seed attempt or retry boundary. `Bool` is the documented identity
+element of `promote`, so non-empty `result_type` calls now seed the fold from
+their first dtype instead of executing the redundant `promote(Bool, first)`;
+empty input still returns `Bool`. Ordering, later promotion calls, tie behavior,
+floating-point behavior, and RNG state are unchanged. Existing golden,
+conformance, exhaustive pair, permutation, associativity, idempotence, and
+singleton tests cover the isomorphism.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran on
+effective worker `vmi1156319`, with adjacent old-logic controls in the same
+optimized binary (20 samples, 0.25s warm-up, 1s measurement). Candidate/control
+was 6/9ns for I32+F64 (**1.50x**), 4/7ns for U8+I16 (**1.75x**), 5/7ns for
+F32+Complex128 (**1.40x**), and 3/5ns for Bool+U64 (**1.67x**). All tracked
+pair calls clear the 1.20x floor. Per the one-benchmark/no-successive-loop
+budget, the source and durable same-binary controls were committed immediately
+without a second benchmark, test, or lint pass.
+
 ## 2026-07-12 - WIN (SHIP): int 3-op einsum chain "ij,jk,kl->il" - optimize=True 50.47x (12.7 vs 641.6ms at 512^3), optimize=False 124.45x at 128^3 (the 256^3 numpy basis is 7098ms -> ~1000x class) - the associativity vein's biggest fish
 
 `cc_fnp` / FuchsiaStream. numpy's unoptimized 3-op int einsum is a naive FUSED
