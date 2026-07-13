@@ -697,3 +697,80 @@ print(h.hexdigest())
     );
     Ok(())
 }
+
+#[test]
+fn parallel_compact_compress_extract_bit_exact_matches_numpy() -> Result<(), String> {
+    // Large bool-condition compress/extract take the blocked parallel two-pass
+    // (per-block counts -> prefix -> disjoint value gathers); kept values must
+    // be bit-identical to numpy across dtypes, densities, block boundaries,
+    // shorter-condition extract, and NaN/inf/signed-zero payloads.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(83)
+verdicts = []
+N = 4_000_003  # not a block multiple
+cond = rng.random(N) > 0.5
+for name, arr in [
+    ("f64", rng.standard_normal(N)),
+    ("f32", rng.standard_normal(N).astype(np.float32)),
+    ("int64", rng.integers(-2**60, 2**60, N)),
+    ("int8", rng.integers(-100, 100, N).astype(np.int8)),
+    ("uint16", rng.integers(0, 60000, N).astype(np.uint16)),
+    ("bool", rng.random(N) > 0.3),
+]:
+    r = fnp.compress(cond, arr); e = np.compress(cond, arr)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL compress {name}")
+    r = fnp.extract(cond, arr); e = np.extract(cond, arr)
+    if r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL extract {name}")
+# density edges + special payloads
+f = rng.standard_normal(N)
+f[rng.integers(0, N, 30000)] = np.nan
+f[rng.integers(0, N, 30000)] = -0.0
+f[rng.integers(0, N, 30000)] = np.inf
+for dens_name, c in [("all-true", np.ones(N, dtype=bool)), ("all-false", np.zeros(N, dtype=bool)), ("sparse", rng.random(N) > 0.999)]:
+    if fnp.compress(c, f).tobytes() != np.compress(c, f).tobytes():
+        verdicts.append(f"FAIL {dens_name}")
+# extract with condition SHORTER than arr
+short = rng.random(2_000_000) > 0.5
+if fnp.extract(short, f).tobytes() != np.extract(short, f).tobytes():
+    verdicts.append("FAIL short-cond extract")
+# 2-D arr ravels through extract
+M = rng.standard_normal((2048, 1024))
+cm = rng.random((2048, 1024)) > 0.5
+if fnp.extract(cm, M).tobytes() != np.extract(cm, M).tobytes():
+    verdicts.append("FAIL 2-D extract")
+# below-gate keeps the serial branchless path
+sc = rng.random(1000) > 0.5
+sa = rng.standard_normal(1000)
+if fnp.compress(sc, sa).tobytes() != np.compress(sc, sa).tobytes():
+    verdicts.append("FAIL below-gate")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.standard_normal(16_000_000)
+Wc = rng.random(16_000_000) > 0.5
+tn = best(lambda: np.compress(Wc, W)); tf = best(lambda: fnp.compress(Wc, W))
+print(f"COMPRESS_BOOL_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.extract(Wc, W)); tf = best(lambda: fnp.extract(Wc, W))
+print(f"EXTRACT_BOOL_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces COMPRESS/EXTRACT_BOOL_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "parallel compact compress/extract must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
