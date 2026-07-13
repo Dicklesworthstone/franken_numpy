@@ -1604,3 +1604,63 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn histogram_nd_flat_view_matches_numpy() -> Result<(), String> {
+    // np.histogram operates on the FLATTENED input; the dispatch now
+    // normalizes C-contiguous N-D input to a zero-copy reshape(-1) view so
+    // the parallel typed kernels (gated shape.len() == 1) serve the N-D form
+    // (2-D image data is the common case) that previously delegated
+    // wholesale. Byte-exact for counts AND edges; kwarg forms (bins array,
+    // range, weights, density) and F-contig keep the delegate (parity).
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(331)
+verdicts = []
+def ab(name, a, **kw):
+    oh, oe = fnp.histogram(a, **kw)
+    th, te = np.histogram(a, **kw)
+    if oh.tobytes() != th.tobytes() or oe.tobytes() != te.tobytes() \
+       or str(oh.dtype) != str(th.dtype) or str(oe.dtype) != str(te.dtype):
+        verdicts.append(f"FAIL {name}")
+F2 = rng.standard_normal((2828, 2828))
+ab("2-D f64 default", F2)
+ab("2-D f64 bins=64", F2, bins=64)
+ab("3-D int32", rng.integers(-500, 500, (200, 200, 200)).astype(np.int32))
+ab("2-D u8 image", rng.integers(0, 256, (3000, 2500)).astype(np.uint8))
+ab("2-D f32", rng.standard_normal((2000, 2000)).astype(np.float32))
+# kwarg/layout forms keep prior routing -> parity
+ab("range kwarg", F2[:800, :800], bins=32, range=(-2.0, 2.0))
+ab("weights kwarg", F2[:500, :500], weights=np.abs(F2[:500, :500]))
+ab("density kwarg", F2[:500, :500], density=True)
+ab("bins array", F2[:500, :500], bins=np.linspace(-4, 4, 33))
+ab("F-contig", np.asfortranarray(F2[:800, :800]))
+ab("small 2-D", rng.standard_normal((8, 9)))
+ab("1-D unchanged", rng.standard_normal(4_000_000))
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.histogram(F2)); tf = best(lambda: fnp.histogram(F2))
+print(f"HISTOGRAM_ND_F64_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+U = rng.integers(0, 256, (3000, 2500)).astype(np.uint8)
+tnu = best(lambda: np.histogram(U, bins=256)); tfu = best(lambda: fnp.histogram(U, bins=256))
+print(f"HISTOGRAM_ND_U8_AB numpy_ms={tnu:.3f} fnp_ms={tfu:.3f} ratio={tnu / tfu:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces HISTOGRAM_ND_F64_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "N-D flat-view histogram must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
