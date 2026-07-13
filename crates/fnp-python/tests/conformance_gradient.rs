@@ -366,3 +366,76 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn int_gradient_via_f64_conversion_bit_exact_matches_numpy() -> Result<(), String> {
+    // Integer inputs within +-2^51 convert once to f64 and ride every proven
+    // f64 kernel; numpy's int-subtract-then-divide chain is byte-equivalent
+    // there (exact integer differences either way). Out-of-range i64/u64 and
+    // small arrays keep the delegate. Rows cover 1-D/2-D axes, full-tuple,
+    // edge_order=2, scalar dx, coordinate arrays, widths, negatives.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(131)
+verdicts = []
+g1 = rng.integers(-100_000, 100_000, 2_000_000)
+g2 = rng.integers(-100_000, 100_000, (2048, 1024))
+for dt in [np.int64, np.int32, np.int16, np.uint8]:
+    a1 = g1.astype(dt); a2 = g2.astype(dt)
+    r = fnp.gradient(a1); e = np.gradient(a1)
+    if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL 1-D {dt.__name__}")
+    for ax in (0, 1, -1):
+        r = fnp.gradient(a2, axis=ax); e = np.gradient(a2, axis=ax)
+        if r.tobytes() != e.tobytes():
+            verdicts.append(f"FAIL 2-D ax={ax} {dt.__name__}")
+# full tuple, scalar dx, edge_order=2, coordinate arrays
+a2 = g2.copy()
+rt = fnp.gradient(a2); et = np.gradient(a2)
+if len(rt) != 2 or any(rt[i].tobytes() != et[i].tobytes() for i in range(2)):
+    verdicts.append("FAIL full tuple")
+if fnp.gradient(g1, 0.5).tobytes() != np.gradient(g1, 0.5).tobytes():
+    verdicts.append("FAIL scalar dx")
+if fnp.gradient(g1, edge_order=2).tobytes() != np.gradient(g1, edge_order=2).tobytes():
+    verdicts.append("FAIL edge_order=2")
+cx = np.cumsum(rng.random(2_000_000)) + 1.0
+if fnp.gradient(g1, cx).tobytes() != np.gradient(g1, cx).tobytes():
+    verdicts.append("FAIL coordinate array")
+# out-of-range i64 / u64 keep the numpy delegate (wrap contract)
+big = rng.integers(2**60, 2**62, 200_000)
+if fnp.gradient(big).tobytes() != np.gradient(big).tobytes():
+    verdicts.append("FAIL huge-i64 delegate")
+ub = (rng.integers(0, 2**62, 200_000)).astype(np.uint64)
+if fnp.gradient(ub).tobytes() != np.gradient(ub).tobytes():
+    verdicts.append("FAIL huge-u64 delegate")
+sm = rng.integers(-50, 50, 500)
+if fnp.gradient(sm).tobytes() != np.gradient(sm).tobytes():
+    verdicts.append("FAIL small delegate")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-100_000, 100_000, (4096, 4096))
+tn = best(lambda: np.gradient(W, axis=0)); tf = best(lambda: fnp.gradient(W, axis=0))
+print(f"GRADIENT_INT_AX0_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+W1 = rng.integers(-100_000, 100_000, 16_000_000)
+tn = best(lambda: np.gradient(W1)); tf = best(lambda: fnp.gradient(W1))
+print(f"GRADIENT_INT_1D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces GRADIENT_INT_*_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "int gradient via f64 conversion must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
