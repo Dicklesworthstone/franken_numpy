@@ -4,6 +4,36 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): hardware-accelerated NPZ CRC-32 - 18.7-21.6x across STORE read/write
+
+`CalmGate`, `fnp-io`. Negative-ledger and Git-history searches found no CRC
+acceleration attempt or no-retry boundary. The four prior NPZ keeps removed
+payload clones and output reallocations, but the ZIP checksum still used one
+dependent table lookup per byte. The replacement uses `crc32fast::hash` for a
+single slice and one incremental `crc32fast::Hasher` for the writer's
+preamble/header/payload slices. Both implement the same reflected IEEE CRC-32
+state and final complement, including empty segments. `crc32fast` 1.5.0 was
+already locked and compiled transitively through `flate2`; making it a direct
+dependency changes neither the compression backend nor archive layout.
+
+Pinned same-worker `release-perf` Criterion runs on `vmi1156319` used all eight
+existing STORE NPZ rows (10,000 f64 values per member). Write `/1`, `/5`, `/10`,
+and `/20` moved from 220,675/1,098,757/2,298,327/4,548,825ns to
+10,307/53,869/106,191/224,866ns (**21.4x/20.4x/21.6x/20.2x**). Read moved
+from 222,674/1,139,361/2,311,222/4,628,978ns to
+11,191/56,313/123,827/240,230ns (**19.9x/20.2x/18.7x/19.3x**). Every member
+count clears the performance floor, including the hasher-construction guard.
+
+All 389 `fnp-io` unit, fuzz-regression, golden, metamorphic, diagnostic, and
+NumPy-conformance tests passed remotely. The proof includes independent ZIP
+construction, pinned STORE archive/output SHA-256s, STORE/DEFLATE round trips,
+corrupted DEFLATE rejection, and NumPy cross-loads. Strict all-target clippy
+reached one pre-existing test-only approximate-PI literal at `lib.rs:7949`
+(commit `a1fce27f`); the rerun allowing only `clippy::approx_constant` passed
+with every other warning denied. Direct pinned-toolchain rustfmt and diff checks
+passed. UBS's file-wide scan reported only pre-existing heuristic findings
+outside the changed CRC lines.
+
 ## 2026-07-12 - WIN (SHIP, sweep #4 row 3): integer matmul-shaped einsum rides the MR=4 int GEMM - 6.71x (7.8 vs 52.1ms at 512^2 i64; hz1 basis 55.9ms) - the einsum Defer arm's int gap closed with ZERO contract risk
 
 `cc_fnp` / FuchsiaStream. The einsum dtype policy sent ALL integer specs to

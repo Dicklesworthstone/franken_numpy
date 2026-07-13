@@ -2116,42 +2116,16 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
 }
 
 /// IEEE 802.3 CRC-32 (used by ZIP format).
-/// Uses a table-based implementation for performance.
 fn crc32_ieee(data: &[u8]) -> u32 {
-    !crc32_ieee_update(0xFFFF_FFFF, data)
+    crc32fast::hash(data)
 }
 
 fn crc32_ieee_three(first: &[u8], second: &[u8], third: &[u8]) -> u32 {
-    let crc = crc32_ieee_update(0xFFFF_FFFF, first);
-    let crc = crc32_ieee_update(crc, second);
-    !crc32_ieee_update(crc, third)
-}
-
-fn crc32_ieee_update(mut crc: u32, data: &[u8]) -> u32 {
-    const TABLE: [u32; 256] = {
-        let mut table = [0u32; 256];
-        let mut i = 0;
-        while i < 256 {
-            let mut c = i as u32;
-            let mut j = 0;
-            while j < 8 {
-                if c & 1 != 0 {
-                    c = 0xEDB8_8320 ^ (c >> 1);
-                } else {
-                    c >>= 1;
-                }
-                j += 1;
-            }
-            table[i] = c;
-            i += 1;
-        }
-        table
-    };
-
-    for &byte in data {
-        crc = TABLE[(crc as u8 ^ byte) as usize] ^ (crc >> 8);
-    }
-    crc
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(first);
+    hasher.update(second);
+    hasher.update(third);
+    hasher.finalize()
 }
 
 // ── loadtxt / savetxt ────────

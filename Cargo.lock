@@ -705,6 +705,7 @@ name = "fnp-io"
 version = "0.2.0"
 dependencies = [
  "bytemuck",
+ "crc32fast",
  "criterion",
  "flate2",
  "insta",
