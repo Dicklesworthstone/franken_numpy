@@ -339,3 +339,78 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn int_tensordot_tuple_axes_native_gemm_bit_exact_matches_numpy() -> Result<(), String> {
+    // Tuple-axes int tensordot mirrors numpy's transpose+reshape normalization
+    // but lands on the native parallel GEMM (numpy's serial no-BLAS dot read
+    // 508.9ms at 268M MACs). Byte rows across axes spellings, dtypes, negative
+    // axes, non-contig inputs; bool + invalid axes stay delegates.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(59)
+verdicts = []
+for dt in [np.int64, np.int32, np.uint8]:
+    info = np.iinfo(dt)
+    a3 = rng.integers(info.min // 2, info.max // 2, (48, 96, 32)).astype(dt)
+    b3 = rng.integers(info.min // 2, info.max // 2, (96, 32, 80)).astype(dt)
+    a2 = rng.integers(info.min // 2, info.max // 2, (256, 256)).astype(dt)
+    b2 = rng.integers(info.min // 2, info.max // 2, (256, 256)).astype(dt)
+    cases = [
+        (a3, b3, ([1, 2], [0, 1])), (a3, b3, ([2, 1], [1, 0])),
+        (a2, b2, ([0], [1])), (a2, b2, (1, 0)), (a2, b2, ([-1], [-2])),
+        (a2.T, b2, ([0], [1])),
+    ]
+    for x, y, ax in cases:
+        r = fnp.tensordot(x, y, axes=ax)
+        e = np.tensordot(x, y, axes=ax)
+        if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+            verdicts.append(f"FAIL {dt.__name__} axes={ax}")
+# bool stays a byte-identical delegate (numpy early-exit dot is near-optimal)
+ab = rng.random((48, 96, 32)) > 0.9
+bb = rng.random((96, 32, 80)) > 0.9
+r = fnp.tensordot(ab, bb, axes=([1, 2], [0, 1]))
+e = np.tensordot(ab, bb, axes=([1, 2], [0, 1]))
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL bool delegate")
+# invalid axes must still raise via numpy
+a2 = rng.integers(-100, 100, (64, 64))
+for bad in [([0, 0], [0, 1]), ([0], [0, 1]), ([5], [0])]:
+    try:
+        fnp.tensordot(a2, a2, axes=bad)
+        verdicts.append(f"FAIL axes={bad} must raise")
+    except Exception:
+        pass
+# shape-mismatched contraction raises
+try:
+    fnp.tensordot(rng.integers(0, 5, (8, 9)), rng.integers(0, 5, (8, 9)), axes=([1], [0]))
+    verdicts.append("FAIL mismatched contraction must raise")
+except Exception:
+    pass
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+wa = rng.integers(-1000, 1000, (128, 256, 64))
+wb = rng.integers(-1000, 1000, (256, 64, 128))
+tn = best(lambda: np.tensordot(wa, wb, axes=([1, 2], [0, 1])))
+tf = best(lambda: fnp.tensordot(wa, wb, axes=([1, 2], [0, 1])))
+print(f"TENSORDOT_INT_TUPLE_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces TENSORDOT_INT_TUPLE_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "tuple-axes int tensordot must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
