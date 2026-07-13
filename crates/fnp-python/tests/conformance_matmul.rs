@@ -370,6 +370,94 @@ print(ok)
 }
 
 #[test]
+fn bool_matmul_native_bitpacked_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy bool matmul is a scalar early-exit loop; the native bitpacked OR-AND
+    // GEMM (64 pairs per word-AND) must be byte-identical: 0/1 output bytes and
+    // C `&&` truthiness (any nonzero byte is True - pinned on view-created
+    // degenerate bytes), across densities, shapes, and every routed entry point
+    // (matmul/@/dot/inner/tensordot/multi_dot). Batched, matvec, and below-gate
+    // shapes delegate to numpy and must stay byte-identical too.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(23)
+verdicts = []
+for dens in [0.0, 0.01, 0.1, 0.5, 1.0]:
+    for (m, k, n) in [(96, 96, 96), (128, 200, 96), (65, 130, 257), (2, 400, 400), (514, 40, 40), (100, 513, 77)]:
+        a = rng.random((m, k)) < dens
+        b = rng.random((k, n)) < dens
+        r = fnp.matmul(a, b); e = np.matmul(a, b)
+        if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+            verdicts.append(f"FAIL matmul dens={dens} shape=({m},{k},{n})")
+        if (a @ b).tobytes() != e.tobytes():
+            verdicts.append(f"FAIL @ dens={dens} shape=({m},{k},{n})")
+# degenerate non-0/1 bool bytes (view-created): numpy is logical (!=0), 0/1 out
+a8 = (rng.integers(0, 4, (90, 90)) * 64).astype(np.uint8)
+b8 = (rng.integers(0, 4, (90, 90)) * 64).astype(np.uint8)
+if fnp.matmul(a8.view(bool), b8.view(bool)).tobytes() != np.matmul(a8.view(bool), b8.view(bool)).tobytes():
+    verdicts.append("FAIL degenerate-byte matmul")
+# sibling entry points route the same kernel
+a = rng.random((150, 150)) > 0.9
+b = rng.random((150, 150)) > 0.9
+c = rng.random((150, 150)) > 0.9
+if fnp.dot(a, b).tobytes() != np.dot(a, b).tobytes():
+    verdicts.append("FAIL dot")
+if fnp.inner(a, b).tobytes() != np.inner(a, b).tobytes():
+    verdicts.append("FAIL inner square")
+ar = rng.random((200, 300)) > 0.5
+br = rng.random((150, 300)) > 0.5
+if fnp.inner(ar, br).tobytes() != np.inner(ar, br).tobytes():
+    verdicts.append("FAIL inner rect")
+if fnp.tensordot(a, b, axes=1).tobytes() != np.tensordot(a, b, axes=1).tobytes():
+    verdicts.append("FAIL tensordot 2d axes=1")
+t3a = rng.random((40, 50, 60)) > 0.8
+t3b = rng.random((60, 30, 20)) > 0.8
+if fnp.tensordot(t3a, t3b, axes=1).tobytes() != np.tensordot(t3a, t3b, axes=1).tobytes():
+    verdicts.append("FAIL tensordot 3d axes=1")
+if fnp.multi_dot([a, b, c]).tobytes() != np.linalg.multi_dot([a, b, c]).tobytes():
+    verdicts.append("FAIL multi_dot")
+# delegate shapes stay byte-identical (batched 3-D, matvec, below work gate)
+b3a = rng.random((8, 96, 96)) > 0.9
+b3b = rng.random((8, 96, 96)) > 0.9
+if fnp.matmul(b3a, b3b).tobytes() != np.matmul(b3a, b3b).tobytes():
+    verdicts.append("FAIL batched delegate")
+v = rng.random(96) > 0.5
+if fnp.matmul(a[:96, :96], v).tobytes() != np.matmul(a[:96, :96], v).tobytes():
+    verdicts.append("FAIL matvec delegate")
+sa = rng.random((10, 10)) > 0.5
+if fnp.matmul(sa, sa).tobytes() != np.matmul(sa, sa).tobytes():
+    verdicts.append("FAIL below-gate delegate")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+wa = rng.random((1024, 1024)) > 0.9
+wb = rng.random((1024, 1024)) > 0.9
+tn = best(lambda: np.matmul(wa, wb)); tf = best(lambda: fnp.matmul(wa, wb))
+print(f"MATMUL_BOOL_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.dot(wa, wb)); tf = best(lambda: fnp.dot(wa, wb))
+print(f"DOT_BOOL_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.inner(wa, wb)); tf = best(lambda: fnp.inner(wa, wb))
+print(f"INNER_BOOL_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces MATMUL/DOT/INNER_BOOL_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "native bitpacked bool matmul must be bit-identical to numpy across entry points: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn int_batched_matmul_native_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // Batched (>=3-D) integer matmul: numpy uses a naive per-slice serial loop. The
     // native parallel batched GEMM must be byte-identical incl. 4-D batch + overflow wrap.
