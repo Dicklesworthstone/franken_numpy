@@ -484,13 +484,34 @@ for name, arr in [
 f = np.array([0.0, -0.0, np.nan, 1.0, -1.0] * 200_000)
 if fnp.flatnonzero(f).tobytes() != np.flatnonzero(f).tobytes():
     verdicts.append("FAIL float zero/NaN rules")
-# 2-D input: flatnonzero ravels (kernel applies); nonzero stays a delegate tuple
-M = rng.integers(-2, 2, (2048, 1024))
-if fnp.flatnonzero(M).tobytes() != np.flatnonzero(M).tobytes():
-    verdicts.append("FAIL flatnonzero 2-D")
-rt = fnp.nonzero(M); et = np.nonzero(M)
-if len(rt) != 2 or rt[0].tobytes() != et[0].tobytes() or rt[1].tobytes() != et[1].tobytes():
-    verdicts.append("FAIL nonzero 2-D delegate")
+# 2-D input: flatnonzero ravels (flat kernel); nonzero/where write (rows, cols)
+# via the per-block odometer kernel
+for name2, M in [
+    ("int64", rng.integers(-2, 2, (2048, 1024))),
+    ("bool", rng.random((2048, 1024)) > 0.9),
+    ("f64", np.where(rng.random((2048, 1024)) > 0.5, rng.standard_normal((2048, 1024)), 0.0)),
+    ("odd-cols", rng.integers(-2, 2, (999, 1237))),
+    ("tall", rng.integers(-2, 2, (1_000_000, 3))),
+    ("wide", rng.integers(-2, 2, (3, 1_000_000))),
+    ("all-zero", np.zeros((1024, 1024), dtype=np.int64)),
+]:
+    if fnp.flatnonzero(M).tobytes() != np.flatnonzero(M).tobytes():
+        verdicts.append(f"FAIL flatnonzero 2-D {name2}")
+    rt = fnp.nonzero(M); et = np.nonzero(M)
+    if len(rt) != 2 or rt[0].dtype != et[0].dtype or rt[0].tobytes() != et[0].tobytes() or rt[1].tobytes() != et[1].tobytes():
+        verdicts.append(f"FAIL nonzero 2-D {name2}")
+    rw = fnp.where(M); ew = np.where(M)
+    if len(rw) != 2 or rw[0].tobytes() != ew[0].tobytes() or rw[1].tobytes() != ew[1].tobytes():
+        verdicts.append(f"FAIL where-1arg 2-D {name2}")
+# where 1-arg 1-D + 3-D delegate parity
+w1 = rng.integers(-5, 5, 2_000_000)
+rw = fnp.where(w1); ew = np.where(w1)
+if len(rw) != 1 or rw[0].tobytes() != ew[0].tobytes():
+    verdicts.append("FAIL where-1arg 1-D")
+M3 = rng.integers(-2, 2, (64, 128, 128))
+rt = fnp.nonzero(M3); et = np.nonzero(M3)
+if len(rt) != 3 or any(rt[i].tobytes() != et[i].tobytes() for i in range(3)):
+    verdicts.append("FAIL nonzero 3-D delegate")
 # non-contiguous stays a byte-identical delegate
 s = rng.integers(-5, 5, 2_000_000)[::2]
 if fnp.flatnonzero(s).tobytes() != np.flatnonzero(s).tobytes():
@@ -510,6 +531,12 @@ tn = best(lambda: np.flatnonzero(Wb)); tf = best(lambda: fnp.flatnonzero(Wb))
 print(f"FLATNONZERO_BOOL_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 tn = best(lambda: np.nonzero(W)); tf = best(lambda: fnp.nonzero(W))
 print(f"NONZERO_INT64_1D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+W2 = rng.integers(-5, 5, (4096, 4096))
+tn = best(lambda: np.nonzero(W2)); tf = best(lambda: fnp.nonzero(W2))
+print(f"NONZERO_INT64_2D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+W2b = rng.random((4096, 4096)) > 0.9
+tn = best(lambda: np.nonzero(W2b)); tf = best(lambda: fnp.nonzero(W2b))
+print(f"NONZERO_BOOL_2D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 print(verdicts if verdicts else True)
 "#
         .into(),
