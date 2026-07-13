@@ -579,13 +579,31 @@ for dens in [0.0, 0.05, 0.5, 1.0]:
     r = fnp.matmul(mba, mbb); e = np.matmul(mba, mbb)
     if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
         verdicts.append(f"FAIL bool mirror dens={dens}")
-# np.dot(2-D, N-D) contracts to a DIFFERENT layout ((m, B, n)) - must NOT route
-# the mirror arm; pin the delegate byte-for-byte
-da = rng.integers(-1000, 1000, (96, 96)).astype(np.int64)
-db = rng.integers(-1000, 1000, (8, 96, 80)).astype(np.int64)
-rd = fnp.dot(da, db); ed = np.dot(da, db)
-if rd.shape != ed.shape or rd.tobytes() != ed.tobytes():
-    verdicts.append("FAIL dot 2d@3d layout delegate")
+# np.dot(a >=2-D, b >=3-D) contracts to dot's OWN layout ((m, B.., n)): the
+# shared-A kernel + transpose-copy arm must match np.dot byte-for-byte
+for dt in [np.int64, np.int32, np.int8, np.uint64]:
+    info = np.iinfo(dt)
+    for shape_a, shape_b in [((96, 96), (8, 96, 80)), ((50, 64), (2, 3, 64, 40)), ((4, 50, 64), (2, 3, 64, 40))]:
+        da = rng.integers(info.min // 2, info.max // 2, shape_a).astype(dt)
+        db = rng.integers(info.min // 2, info.max // 2, shape_b).astype(dt)
+        rd = fnp.dot(da, db); ed = np.dot(da, db)
+        if rd.dtype != ed.dtype or rd.shape != ed.shape or rd.tobytes() != ed.tobytes():
+            verdicts.append(f"FAIL dot layout {dt.__name__} {shape_a}@{shape_b}")
+da = np.full((60, 60), 5_000_000_000, dtype=np.int64)
+db = np.full((6, 60, 60), 5_000_000_000, dtype=np.int64)
+if fnp.dot(da, db).tobytes() != np.dot(da, db).tobytes():
+    verdicts.append("FAIL dot layout overflow wrap")
+for dens in [0.0, 0.05, 0.5, 1.0]:
+    dba = rng.random((96, 130)) < dens
+    dbb = rng.random((16, 130, 77)) < dens
+    rd = fnp.dot(dba, dbb); ed = np.dot(dba, dbb)
+    if rd.dtype != ed.dtype or rd.shape != ed.shape or rd.tobytes() != ed.tobytes():
+        verdicts.append(f"FAIL bool dot layout dens={dens}")
+# 1-D a stays a byte-identical delegate
+va = rng.integers(-1000, 1000, 96).astype(np.int64)
+vb = rng.integers(-1000, 1000, (8, 96, 80)).astype(np.int64)
+if fnp.dot(va, vb).tobytes() != np.dot(va, vb).tobytes():
+    verdicts.append("FAIL dot 1-D a delegate")
 sa = rng.integers(-5, 5, (2, 10, 10)).astype(np.int64)
 sb = rng.integers(-5, 5, (10, 10)).astype(np.int64)
 if fnp.matmul(sa, sb).tobytes() != np.matmul(sa, sb).tobytes():
@@ -609,6 +627,10 @@ tn = best(lambda: np.matmul(wb, wa)); tf = best(lambda: fnp.matmul(wb, wa))
 print(f"MATMUL_INT_MIRROR_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 tn = best(lambda: np.matmul(wbb, wba)); tf = best(lambda: fnp.matmul(wbb, wba))
 print(f"MATMUL_BOOL_MIRROR_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.dot(wb, wa)); tf = best(lambda: fnp.dot(wb, wa))
+print(f"DOT_INT_2D3D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.dot(wbb, wba)); tf = best(lambda: fnp.dot(wbb, wba))
+print(f"DOT_BOOL_2D3D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 print(verdicts if verdicts else True)
 "#
         .into(),
