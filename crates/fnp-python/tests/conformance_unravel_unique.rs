@@ -1539,3 +1539,68 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn sort_complex_native_complex_matches_numpy() -> Result<(), String> {
+    // np.sort_complex on a complexfloating input is copy + in-place LAST-AXIS
+    // sort + unchanged dtype; the dispatch now routes exact c128/c64 ndarrays
+    // to the shipped flat (1-D) and last-axis (N-D) complex value-sort
+    // kernels instead of the old wholesale numpy defer (stale-routing class).
+    // NaN / -0.0 inputs defer inside the kernels -> numpy fallback parity.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(317)
+verdicts = []
+def ab(name, a):
+    ours = fnp.sort_complex(a)
+    theirs = np.sort_complex(a)
+    if ours.tobytes() != theirs.tobytes() or str(ours.dtype) != str(theirs.dtype) or ours.shape != theirs.shape:
+        verdicts.append(f"FAIL {name}")
+def cplx(shape, dt=np.complex128):
+    return (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)).astype(dt)
+C1 = cplx(4_000_000)
+ab("1-D c128", C1)
+ab("2-D c128 lastaxis", cplx((1500, 1400)))
+ab("1-D c64", cplx(4_000_000, np.complex64))
+ab("2-D c64 lastaxis", cplx((1500, 1400), np.complex64))
+# ties in both components exercise byte-identical tie handling
+T = cplx(2_000_000)
+T[::2] = T[0]
+ab("dense ties c128", T)
+# NaN / -0.0 defer -> numpy fallback parity
+N1 = cplx(1_600_000); N1[7] = complex(np.nan, 1.0)
+ab("c128 nan parity", N1)
+Z1 = cplx(1_600_000); Z1[9] = complex(-0.0, 1.0)
+ab("c128 -0.0 parity", Z1)
+# real/int inputs keep the existing native/fallback routes
+ab("1-D f64 real", rng.standard_normal(1_500_000))
+ab("1-D int", rng.integers(-1000, 1000, 1_500_000))
+ab("2-D real fallback", rng.standard_normal((800, 700)))
+ab("small c128", cplx(64))
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.sort_complex(C1)); tf = best(lambda: fnp.sort_complex(C1))
+print(f"SORT_COMPLEX_C128_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+M = cplx((2000, 2000))
+tn2 = best(lambda: np.sort_complex(M)); tf2 = best(lambda: fnp.sort_complex(M))
+print(f"SORT_COMPLEX_2D_AB numpy_ms={tn2:.3f} fnp_ms={tf2:.3f} ratio={tn2 / tf2:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces SORT_COMPLEX_C128_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "complex sort_complex must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
