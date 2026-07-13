@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - NO-SHIP (one-shot budget): direct I64-to-I32 cast construction
+
+`CalmGate`, `fnp-dtype`. Negative-ledger and Git-history searches found no
+pair-specific retry boundary. The candidate replaced the zero-filled I32
+destination plus `Vec<i128>` intermediary with one direct collection using
+`value as i32`. This is bit-identical to the existing
+`i128::from(value) as i32` for every I64 value; the exhaustive per-element
+reference test and whole-matrix cast SHA-256 already cover the pair.
+
+Per the one-benchmark/no-verification-loop budget, exactly one strict
+remote-only `release-perf` Criterion invocation ran on effective worker
+`vmi1156319` (20 samples, 0.5s warm-up, 2s measurement). Candidate times for
+100/1,000/10,000/100,000 elements were 306/1,632/15,374/159,748ns. The
+published current-path 100,000-element result in commit `00ce3c56` is 59.1us;
+that older run is not paired evidence, but the 159.7us one-shot candidate does
+not justify a speedup claim against it. Source was restored and this
+conservative evidence-only closeout was committed immediately without a
+second benchmark or validation loop. Do not retry under another unpaired
+one-shot budget; reopen only when a paired baseline/candidate measurement is
+explicitly allowed.
+
 ## 2026-07-12 - GATES FORMALIZED (both WIN): f64 floor_divide 4.553x and int64 array-q percentile 1.338x under the 20-obs interleaved ABBA gate - the two coarse-AB debts are paid; sweep #4 declared DRY
 
 `cc_fnp` / FuchsiaStream. A permanent in-probe 20-observation gate (ABBA/BAAB
