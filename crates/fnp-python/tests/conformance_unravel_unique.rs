@@ -1664,3 +1664,65 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn isin_nd_string_complex_flat_view_matches_numpy() -> Result<(), String> {
+    // The string/c128/c64/struct isin arms gate BOTH operands to 1-D; numpy's
+    // isin is elementwise over any element shape and flattens test_elements,
+    // so the dispatch now retries those arms on zero-copy ravel views and
+    // reshapes the bool result back. N-D forms previously delegated wholesale
+    // (numpy string isin sorts |elem|+|test|). Defers keep delegate parity.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(337)
+verdicts = []
+def ab(name, el, te, **kw):
+    ours = fnp.isin(el, te, **kw)
+    theirs = np.isin(el, te, **kw)
+    if ours.tobytes() != theirs.tobytes() or ours.shape != theirs.shape or str(ours.dtype) != str(theirs.dtype):
+        verdicts.append(f"FAIL {name}")
+S2 = np.array([f"id{v:06d}" for v in rng.integers(0, 500_000, 2_100_000)], dtype="U8").reshape(1500, 1400)
+ST = np.array([f"id{v:06d}" for v in rng.integers(0, 500_000, 200_000)], dtype="U8")
+ab("2-D string element", S2, ST)
+ab("2-D string invert", S2, ST, invert=True)
+ab("string 1-D elem 2-D test", ST, S2[:400, :400])
+C2 = (rng.standard_normal((1200, 1200)) + 1j * rng.standard_normal((1200, 1200))).astype(np.complex128)
+CT = C2.ravel()[rng.choice(1_440_000, 100_000, replace=False)].copy()
+ab("2-D c128 element", C2, CT)
+ab("2-D c64 element", C2.astype(np.complex64), CT.astype(np.complex64))
+# c128 NaN defer -> delegate parity through the views
+Cn = C2[:400, :400].copy(); Cn[3, 5] = complex(np.nan, 1.0)
+ab("2-D c128 nan parity", Cn, CT[:1000])
+# layout/scope defers keep parity
+ab("F-contig string", np.asfortranarray(S2[:500, :500]), ST)
+ab("small 2-D string", S2[:4, :5], ST[:100])
+ab("1-D string unchanged", S2.ravel()[:2_000_000], ST)
+# int/f64 N-D were already covered - regression rows
+ab("2-D int regression", rng.integers(0, 500_000, (1500, 1400)), rng.integers(0, 500_000, 200_000))
+ab("2-D f64 regression", np.round(rng.standard_normal((1200, 1200)), 4), np.round(rng.standard_normal(150_000), 4))
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.isin(S2, ST)); tf = best(lambda: fnp.isin(S2, ST))
+print(f"ISIN_ND_STRING_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tnc = best(lambda: np.isin(C2, CT)); tfc = best(lambda: fnp.isin(C2, CT))
+print(f"ISIN_ND_C128_AB numpy_ms={tnc:.3f} fnp_ms={tfc:.3f} ratio={tnc / tfc:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces ISIN_ND_STRING_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "N-D flat-view string/complex isin must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
