@@ -339,6 +339,65 @@ print(np.allclose(fnp_pow, np_pow, rtol=1e-10))
     Ok(())
 }
 
+#[test]
+fn matrix_power_bool_bitpacked_bit_exact_matches_numpy() -> Result<(), String> {
+    // Bool A^n is OR-AND reachability; the binary-exp driver over the bitpacked
+    // bool GEMM must be byte-identical to numpy for every parenthesization-
+    // independent case (semiring associativity), across powers, densities, and
+    // the n<=1 / small-dim / non-square delegates.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(41)
+verdicts = []
+for dens in [0.002, 0.02, 0.3]:
+    for dim in [64, 97, 200]:
+        A = rng.random((dim, dim)) < dens
+        for p in [2, 3, 5, 12, 13]:
+            r = fnp.matrix_power(A, p)
+            e = np.linalg.matrix_power(A, p)
+            if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+                verdicts.append(f"FAIL dens={dens} dim={dim} p={p}")
+# delegates: n=0 identity, n=1 alias-semantics, small dim, non-square error
+A = rng.random((96, 96)) > 0.9
+if fnp.matrix_power(A, 0).tobytes() != np.linalg.matrix_power(A, 0).tobytes():
+    verdicts.append("FAIL n=0")
+if fnp.matrix_power(A, 1).tobytes() != np.linalg.matrix_power(A, 1).tobytes():
+    verdicts.append("FAIL n=1")
+S = rng.random((16, 16)) > 0.5
+if fnp.matrix_power(S, 4).tobytes() != np.linalg.matrix_power(S, 4).tobytes():
+    verdicts.append("FAIL small-dim delegate")
+try:
+    fnp.matrix_power(rng.random((8, 9)) > 0.5, 2)
+    verdicts.append("FAIL non-square must raise")
+except Exception:
+    pass
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.random((1024, 1024)) < 0.005
+tn = best(lambda: np.linalg.matrix_power(W, 13))
+tf = best(lambda: fnp.matrix_power(W, 13))
+print(f"MATPOW_BOOL_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces MATPOW_BOOL_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "bool matrix_power must be bit-identical to numpy incl. delegates: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // svd
 // ─────────────────────────────────────────────────────────────────────────────
