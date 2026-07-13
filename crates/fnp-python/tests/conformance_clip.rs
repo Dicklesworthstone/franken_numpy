@@ -516,10 +516,14 @@ if fnp.clip(z, zl2, zh2).tobytes() != np.clip(z, zl2, zh2).tobytes():
 zlf = np.full((1024, 1024), -0.0); zhf = np.full((1024, 1024), 0.0)
 if fnp.clip(z, zlf, zhf).tobytes() != np.clip(z, zlf, zhf).tobytes():
     verdicts.append("FAIL signed-zero same-shape kernel")
-# other broadcast forms stay byte-identical delegates
+# (m,1) COLUMN bounds now engage the per-row-scalar kernel (same rules)
 col = rng.standard_normal((2048, 1))
 if fnp.clip(a, col, col + 2).tobytes() != np.clip(a, col, col + 2).tobytes():
-    verdicts.append("FAIL column-bounds delegate")
+    verdicts.append("FAIL column-bounds")
+colz = np.zeros((1024, 1)); colz[7] = np.nan
+zc = np.zeros((1024, 1024)); zc[::2] = -0.0
+if fnp.clip(zc, np.full((1024, 1), -0.0), colz).tobytes() != np.clip(zc, np.full((1024, 1), -0.0), colz).tobytes():
+    verdicts.append("FAIL column signed-zero/NaN rules")
 sm = rng.standard_normal((64, 64))
 if fnp.clip(sm, lo[:64], hi[:64]).tobytes() != np.clip(sm, lo[:64], hi[:64]).tobytes():
     verdicts.append("FAIL below-gate delegate")
@@ -595,7 +599,10 @@ Ac = rng.integers(-1000, 1000, (2048, 1024))
 cl = rng.integers(-1200, -800, (2048, 1))
 ch = rng.integers(800, 1200, (2048, 1))
 if fnp.clip(Ac, cl, ch).tobytes() != np.clip(Ac, cl, ch).tobytes():
-    verdicts.append("FAIL column-bounds delegate")
+    verdicts.append("FAIL column-bounds")
+# 3-D a with (m,1) bounds is a DIFFERENT broadcast (leading axes) - delegate
+if fnp.clip(A3, l3[:64].reshape(64, 1), h3[:64].reshape(64, 1)).tobytes() != np.clip(A3, l3[:64].reshape(64, 1), h3[:64].reshape(64, 1)).tobytes():
+    verdicts.append("FAIL 3-D col-bounds delegate")
 sm = rng.integers(-100, 100, (64, 64))
 if fnp.clip(sm, sm - 10, sm + 10).tobytes() != np.clip(sm, sm - 10, sm + 10).tobytes():
     verdicts.append("FAIL below-gate delegate")
@@ -614,6 +621,14 @@ print(f"CLIP_INT64_ARRAYS_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3
 wl = Wl[0].copy(); wh = Wh[0].copy()
 tn = best(lambda: np.clip(W, wl, wh)); tf = best(lambda: fnp.clip(W, wl, wh))
 print(f"CLIP_INT64_BCAST_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+wcl = Wl[:, :1].copy(); wch = Wh[:, :1].copy()
+tn = best(lambda: np.clip(W, wcl, wch)); tf = best(lambda: fnp.clip(W, wcl, wch))
+print(f"CLIP_INT64_COLS_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+Wf = rng.standard_normal((4096, 4096))
+fcl = rng.standard_normal((4096, 1)) - 1
+fch = rng.standard_normal((4096, 1)) + 1
+tn = best(lambda: np.clip(Wf, fcl, fch)); tf = best(lambda: fnp.clip(Wf, fcl, fch))
+print(f"CLIP_F64_COLS_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 print(verdicts if verdicts else True)
 "#
         .into(),
