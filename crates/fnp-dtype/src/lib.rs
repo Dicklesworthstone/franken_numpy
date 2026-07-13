@@ -692,6 +692,9 @@ pub fn common_type(dtypes: &[DType]) -> DType {
     let Some(first) = iter.next() else {
         return DType::F64;
     };
+    if first == DType::Complex128 {
+        return DType::Complex128;
+    }
     let mut result = if first.is_float() || first.is_complex() {
         first
     } else {

@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): Complex128-head `common_type` terminal - 26.5x
+
+`CalmGate`, `fnp-dtype`. Negative-ledger and Git-history searches found no
+prior terminal-type shortcut or retry boundary. `common_type` maps every
+non-float/non-complex dtype to F64 before promotion, and Complex128 absorbs all
+remaining F64/F32/F16/Complex64/Complex128 promotions. Therefore a first input
+of Complex128 fixes the final result regardless of the tail. Input ordering,
+all non-terminal promotion behavior, floating-point values, ties, errors, and
+RNG state are unchanged. Existing common-type unit tests and the exhaustive
+promotion table cover the isomorphism.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran on
+effective worker `vmi1156319`, with old-logic controls adjacent in the same
+optimized binary (20 samples, 0.25s warm-up, 1s measurement). An eight-dtype
+Complex128-head call moved from 53ns to 2ns (**26.5x**). Existing non-terminal
+pairs were 6/6ns, 6/5ns (control uncertainty +/-1ns), and 8/8ns, showing only
+null-scale branch cost. Per the one-benchmark/no-successive-loop budget, the
+source and durable same-binary controls were committed immediately without a
+second benchmark, test, or lint pass.
+
 ## 2026-07-12 - NO-SHIP: scalar identity fast path for `broadcast_shape` is 0.76x
 
 `CalmGate`, `fnp-ndarray`. Negative-ledger and Git-history searches found no

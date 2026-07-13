@@ -107,6 +107,27 @@ fn bench_min_scalar_type(c: &mut Criterion) {
     group.finish();
 }
 
+fn common_type_control(dtypes: &[DType]) -> DType {
+    let mut iter = dtypes.iter().copied();
+    let Some(first) = iter.next() else {
+        return DType::F64;
+    };
+    let mut result = if first.is_float() || first.is_complex() {
+        first
+    } else {
+        DType::F64
+    };
+    for dt in iter {
+        let as_float = if dt.is_float() || dt.is_complex() {
+            dt
+        } else {
+            DType::F64
+        };
+        result = promote(result, as_float);
+    }
+    result
+}
+
 fn bench_common_type(c: &mut Criterion) {
     let mut group = c.benchmark_group("common_type");
 
@@ -123,7 +144,27 @@ fn bench_common_type(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("pair", name), dtypes, |b, dtypes| {
             b.iter(|| common_type(black_box(dtypes)))
         });
+        group.bench_with_input(BenchmarkId::new("control", name), dtypes, |b, dtypes| {
+            b.iter(|| common_type_control(black_box(dtypes)))
+        });
     }
+
+    let complex128_head = vec![
+        DType::Complex128,
+        DType::I32,
+        DType::F64,
+        DType::U64,
+        DType::Complex64,
+        DType::F32,
+        DType::I64,
+        DType::Bool,
+    ];
+    group.bench_function("complex128_head", |b| {
+        b.iter(|| common_type(black_box(&complex128_head)))
+    });
+    group.bench_function("complex128_head_control", |b| {
+        b.iter(|| common_type_control(black_box(&complex128_head)))
+    });
 
     group.finish();
 }
