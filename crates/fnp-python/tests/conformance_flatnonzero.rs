@@ -503,15 +503,26 @@ for name2, M in [
     rw = fnp.where(M); ew = np.where(M)
     if len(rw) != 2 or rw[0].tobytes() != ew[0].tobytes() or rw[1].tobytes() != ew[1].tobytes():
         verdicts.append(f"FAIL where-1arg 2-D {name2}")
-# where 1-arg 1-D + 3-D delegate parity
+# where 1-arg 1-D
 w1 = rng.integers(-5, 5, 2_000_000)
 rw = fnp.where(w1); ew = np.where(w1)
 if len(rw) != 1 or rw[0].tobytes() != ew[0].tobytes():
     verdicts.append("FAIL where-1arg 1-D")
-M3 = rng.integers(-2, 2, (64, 128, 128))
-rt = fnp.nonzero(M3); et = np.nonzero(M3)
-if len(rt) != 3 or any(rt[i].tobytes() != et[i].tobytes() for i in range(3)):
-    verdicts.append("FAIL nonzero 3-D delegate")
+# 3-D+ nonzero/where now write d coordinate arrays via the N-D odometer
+for name3, M3 in [
+    ("3-D int64", rng.integers(-2, 2, (64, 128, 128))),
+    ("3-D bool", rng.random((128, 128, 128)) > 0.9),
+    ("3-D f64", np.where(rng.random((64, 128, 128)) > 0.5, rng.standard_normal((64, 128, 128)), 0.0)),
+    ("4-D int32", rng.integers(-2, 2, (16, 32, 64, 32)).astype(np.int32)),
+    ("3-D odd", rng.integers(-2, 2, (61, 127, 129))),
+    ("3-D all-zero", np.zeros((64, 128, 128), dtype=np.int64)),
+]:
+    rt = fnp.nonzero(M3); et = np.nonzero(M3)
+    if len(rt) != M3.ndim or any(rt[i].dtype != et[i].dtype or rt[i].tobytes() != et[i].tobytes() for i in range(M3.ndim)):
+        verdicts.append(f"FAIL nonzero {name3}")
+    rw = fnp.where(M3); ew = np.where(M3)
+    if len(rw) != M3.ndim or any(rw[i].tobytes() != ew[i].tobytes() for i in range(M3.ndim)):
+        verdicts.append(f"FAIL where-1arg {name3}")
 # non-contiguous stays a byte-identical delegate
 s = rng.integers(-5, 5, 2_000_000)[::2]
 if fnp.flatnonzero(s).tobytes() != np.flatnonzero(s).tobytes():
@@ -537,6 +548,9 @@ print(f"NONZERO_INT64_2D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f
 W2b = rng.random((4096, 4096)) > 0.9
 tn = best(lambda: np.nonzero(W2b)); tf = best(lambda: fnp.nonzero(W2b))
 print(f"NONZERO_BOOL_2D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+W3 = rng.integers(-3, 3, (256, 256, 256))
+tn = best(lambda: np.nonzero(W3)); tf = best(lambda: fnp.nonzero(W3))
+print(f"NONZERO_INT64_3D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 print(verdicts if verdicts else True)
 "#
         .into(),
