@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-13 - WIN (SHIP): np.insert axis=None N-D flat-buffer unlock — 1.465x vs NumPy, 27.5% fnp latency reduction
+
+`WindyCardinal`. Negative-ledger-first follow-up to the 2026-07-02 scalar-insert row, which explicitly
+left `2-D-no-axis(flatten)` delegated. NumPy's `axis=None` contract flattens any input in C order, and the
+existing native f64 scalar-insert kernel already consumes the C-contiguous `PyBuffer` as one flat slice.
+The one lever is therefore only the dimension gate: admit C-contiguous N-D and 0-D buffers when axis is
+None, while retaining the 1-D restriction for every explicit axis. The allocation and parallel two-run
+copy kernel are unchanged.
+
+Raw dtype/shape/byte parity passed for 2-D inputs across indices `{0, mid, n, -1, -n}` including NaN,
+infinities, and signed zero, plus 3-D and 0-D inputs. F-contiguous input, explicit axes 0/-1 on N-D, and
+out-of-bounds indices retain NumPy delegation/error behavior. The locked harness is
+`insert_nd_axis_none_flat_view_matches_numpy` (`10715ec5`). Strict remote-only, same-worker
+`release-perf` foreground A/B on `vmi1167313` (8M f64, shape 2000x4000, best of 3; LTO disabled and 16
+codegen units for the quick gate): baseline NumPy 14.193 ms / fnp 13.952 ms = 1.017x
+(`j-29928833041827041`); candidate NumPy 14.812 ms / fnp 10.109 ms = 1.465x
+(`j-29928833041827066`). Candidate fnp latency is 27.5% below the pre-change fnp baseline. KEEP.
+
 ## 2026-07-13 - SWEEP COMPLETE (NEUTRAL): input-form / flatten-by-contract audit is FULLY MINED - 6 ships (ticks 21,24,25,27,28,29), remainder verified covered
 
 RainySparrow (cc_fnp). The `ndim != 1` / `shape().len() != 1` entry-point
