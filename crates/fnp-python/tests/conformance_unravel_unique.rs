@@ -941,3 +941,69 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn wide_int_unique_bit_exact_matches_numpy() -> Result<(), String> {
+    // Wide-range 4/8-byte int unique PARITY coverage. A native par_sort+dedup
+    // arm was gate-REJECTED at 1.056x: numpy 2.4's hash-table integer unique
+    // runs 8M wide int64 in ~96ms (numpy 2.3.5 on hz2 took 4723ms via its
+    // sort path - a 49x VERSION divergence). The rows pin byte parity of the
+    // existing delegate/native routing across the full dtype range.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(269)
+verdicts = []
+for dt in [np.int64, np.uint64, np.int32, np.uint32]:
+    info = np.iinfo(dt)
+    a = rng.integers(info.min, info.max, 500_000, dtype=dt, endpoint=True)
+    r = fnp.unique(a); e = np.unique(a)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL {dt.__name__}")
+# dup-heavy wide values, all-same, sorted input, N-D ravel
+d = rng.integers(-2**62, 2**62, 50).repeat(20_000)
+if fnp.unique(d).tobytes() != np.unique(d).tobytes():
+    verdicts.append("FAIL dup-heavy")
+s = np.full(400_000, 2**60, dtype=np.int64)
+if fnp.unique(s).tobytes() != np.unique(s).tobytes():
+    verdicts.append("FAIL all-same")
+srt = np.sort(rng.integers(-2**62, 2**62, 400_000))
+if fnp.unique(srt).tobytes() != np.unique(srt).tobytes():
+    verdicts.append("FAIL pre-sorted")
+M = rng.integers(-2**62, 2**62, (800, 600))
+if fnp.unique(M).tobytes() != np.unique(M).tobytes():
+    verdicts.append("FAIL N-D ravel")
+# kwargs forms keep prior behavior (byte parity via delegate/native)
+a = rng.integers(-2**62, 2**62, 400_000)
+rv, rc = fnp.unique(a, return_counts=True)
+ev, ec = np.unique(a, return_counts=True)
+if rv.tobytes() != ev.tobytes() or np.asarray(rc).tobytes() != np.asarray(ec).tobytes():
+    verdicts.append("FAIL return_counts parity")
+# small-range int64 keeps the counting arm (byte parity)
+sm = rng.integers(0, 1000, 2_000_000)
+if fnp.unique(sm).tobytes() != np.unique(sm).tobytes():
+    verdicts.append("FAIL small-range parity")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-2**62, 2**62, 8_000_000)
+if fnp.unique(W).tobytes() != np.unique(W).tobytes():
+    verdicts.append("FAIL 8M wide parity")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces UNIQUE_INT64_WIDE_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "wide int unique must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
