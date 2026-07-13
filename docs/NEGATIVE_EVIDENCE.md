@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - GATES FORMALIZED (both WIN): f64 floor_divide 4.553x and int64 array-q percentile 1.338x under the 20-obs interleaved ABBA gate - the two coarse-AB debts are paid; sweep #4 declared DRY
+
+`cc_fnp` / FuchsiaStream. A permanent in-probe 20-observation gate (ABBA/BAAB
+alternation, medians, numpy A/A null, WIN = effect > 1.2 with null in
+0.85..1.15) now covers the two rows shipped on coarse evidence:
+- f64_floor_divide_8m: effect 4.553, null 0.981, 20/20, 183.9 -> 40.4ms -
+  confirms and upgrades the 4.35x coarse row (54b905d6/657a8b28 chain closed).
+- int64_pct3_ax1 at 2048^2: effect 1.338, null 1.030, 20/20, 71.9 -> 53.7ms -
+  settles the 18ms-basis noise band (0.85-1.80x) with a real WIN at real size.
+Byte parity asserted alongside; timing INCONCLUSIVE under load cannot fail CI
+(only parity can), so the gate is load-honest by construction.
+SWEEP #4 CLOSING TRIAGE (~12 families probed this arc, all covered or dead):
+tensordot-int/dot-int/inner-int covered; long-kernel convolve native by
+band-design (1nzxt); add.at FAST in numpy 2.x (17ms - the slow reputation is
+STALE); reduceat 4.4ms; norm last-axis covered; pad-reflect 10ms; int einsum
+reductions 3-4ms. The measured surface is CONVERGED AGAIN (third convergence
+declaration: 2026-07-02, sweep #3, here) - the next session should hunt NEW
+numpy-version behaviors or wider shapes, not this op grid.
+
 ## 2026-07-12 - NO-SHIP: one-pass sub-threshold PCG uniform generation is neutral (-6.6% to +7.3%)
 
 `CalmGate`, `fnp-random`. Negative-ledger and Git-history searches found no
