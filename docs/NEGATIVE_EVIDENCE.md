@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP, sweep #4 row 3): integer matmul-shaped einsum rides the MR=4 int GEMM - 6.71x (7.8 vs 52.1ms at 512^2 i64; hz1 basis 55.9ms) - the einsum Defer arm's int gap closed with ZERO contract risk
+
+`cc_fnp` / FuchsiaStream. The einsum dtype policy sent ALL integer specs to
+numpy (correct for floats, where each einsum class needed its own cracked
+accumulation contract) - but INTEGER (wrapping) adds are FULLY ASSOCIATIVE, so
+any accumulation order is byte-identical and the shipped int GEMM (617e8647,
+35.4x class) applies verbatim. New arm at the top of the Defer branch:
+"ij,jk->ik" / implicit "ij,jk", int-kind operands, try_native_int_matmul
+re-gates shape/contiguity/same-dtype/min-work and returns None to delegate.
+Gate row 6.710x tobytes-equal; batteries i64/i32/u64 + implicit + i64
+OVERFLOW-WRAP (2^60..2^62 values) + mixed-dtype/transposed-out/below-work
+delegate parity - all green. EXACTNESS-CLASS NOTE (3rd of the day): integer
+ops join selection ops in the zero-defer class - associativity makes order
+irrelevant, wrap included. SIBLINGS (unfiled, same zero-risk argument):
+int batched einsum "abc,acd->abd" -> batched int GEMM; int gram/transposed
+specs -> operand-swapped int GEMM. Probe pad-reflect/symmetric DEAD (10.4ms).
+
 ## 2026-07-12 - WIN (SHIP, sweep #4 row 2): searchsorted sorter= via gather-then-fast-path - 18.21x (37.1 vs 675.6ms at 1M/1M; hz1 probe 55.7ms - the indirect binary search degrades brutally on cache-pressured workers)
 
 `cc_fnp` / FuchsiaStream. numpy's sorter= runs an INDIRECT binary search

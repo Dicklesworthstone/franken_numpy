@@ -1607,3 +1607,67 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn einsum_int_matmul_shaped_routes_to_int_gemm_bit_exact() -> Result<(), String> {
+    // Integer matmul-shaped einsum riding the shipped MR=4 int GEMM: integer
+    // (wrapping) adds are fully associative, so any accumulation order is
+    // byte-identical - asserted here across i64/i32/u64, the implicit form,
+    // an i64 overflow-wrap battery, plus delegate parity for mixed dtypes,
+    // non-matmul int specs, and below-work sizes. Prints a coarse best-of-7
+    // A/B for the ship record.
+    let script = fnp_script(
+        r#"
+import time
+verdicts = []
+rng = np.random.default_rng(20260713)
+ai = rng.integers(-1000, 1000, (512, 512))
+bi = rng.integers(-1000, 1000, (512, 512))
+for tag, x, y in (
+    ("i64", ai, bi),
+    ("i32", ai.astype(np.int32), bi.astype(np.int32)),
+    ("u64", np.abs(ai).astype(np.uint64), np.abs(bi).astype(np.uint64)),
+):
+    r = fnp.einsum("ij,jk->ik", x, y)
+    e = np.einsum("ij,jk->ik", x, y)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL {tag} bytes")
+r, e = fnp.einsum("ij,jk", ai, bi), np.einsum("ij,jk", ai, bi)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL implicit bytes")
+big = rng.integers(2**60, 2**62, (128, 128))
+r, e = fnp.einsum("ij,jk->ik", big, big), np.einsum("ij,jk->ik", big, big)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL overflow-wrap bytes")
+r = fnp.einsum("ij,jk->ik", ai, bi.astype(np.int32))
+e = np.einsum("ij,jk->ik", ai, bi.astype(np.int32))
+if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL mixed-dtype delegate bytes")
+r, e = fnp.einsum("ij,jk->ki", ai, bi), np.einsum("ij,jk->ki", ai, bi)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL transposed-out delegate bytes")
+s16 = ai[:16, :16]
+if fnp.einsum("ij,jk->ik", s16, s16).tobytes() != np.einsum("ij,jk->ik", s16, s16).tobytes():
+    verdicts.append("FAIL below-work delegate bytes")
+def best(fn, reps=7):
+    fn(); best_s = float("inf")
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); best_s = min(best_s, time.perf_counter() - t0)
+    return best_s * 1000
+tn = best(lambda: np.einsum("ij,jk->ik", ai, bi))
+tf = best(lambda: fnp.einsum("ij,jk->ik", ai, bi))
+print(f"EINSUM_INT_COARSE_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces EINSUM_INT_COARSE_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "int matmul-shaped einsum must be bit-identical incl wrap and delegates: {result}"
+    );
+    Ok(())
+}
