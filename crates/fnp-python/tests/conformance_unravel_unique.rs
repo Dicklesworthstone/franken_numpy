@@ -1843,3 +1843,58 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn int_sort_class_stale_basis_probe_and_parity() -> Result<(), String> {
+    // Stale-basis follow-through (the flat-f64-sort regate rule: numpy 2.x
+    // x86-simd-sort ships int qsort/argsort on avx2+ hosts too — re-run
+    // sort-class ABs after any numpy upgrade). Parity rows pin byte-exactness
+    // of whatever routing is live; the AB rows measure the int flat sort /
+    // default argsort arms against the current worker's numpy for the regate
+    // decision.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(353)
+verdicts = []
+def ab(fn, name, a, **kw):
+    if getattr(fnp, fn)(a, **kw).tobytes() != getattr(np, fn)(a, **kw).tobytes():
+        verdicts.append(f"FAIL {fn} {name}")
+W = rng.integers(-2**62, 2**62, 8_000_000)
+I32 = rng.integers(-2**31, 2**31 - 1, 8_000_000).astype(np.int32)
+D = rng.integers(0, 5_000_000_000, 8_000_000).astype("datetime64[ns]")
+ab("sort", "i64 flat", W)
+ab("sort", "i32 flat", I32)
+ab("sort", "dt64 flat", D)
+ab("argsort", "i64 default distinct", np.random.default_rng(354).permutation(8_000_000).astype(np.int64) * 1099511627776 + np.arange(8_000_000))
+ab("sort", "i64 small", W[:1000])
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.sort(W)); tf = best(lambda: fnp.sort(W))
+print(f"SORT_I64_FLAT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn2 = best(lambda: np.sort(I32)); tf2 = best(lambda: fnp.sort(I32))
+print(f"SORT_I32_FLAT_AB numpy_ms={tn2:.3f} fnp_ms={tf2:.3f} ratio={tn2 / tf2:.3f}")
+tn3 = best(lambda: np.sort(D)); tf3 = best(lambda: fnp.sort(D))
+print(f"SORT_DT64_FLAT_AB numpy_ms={tn3:.3f} fnp_ms={tf3:.3f} ratio={tn3 / tf3:.3f}")
+AD = np.random.default_rng(355).permutation(8_000_000).astype(np.int64) * 1099511627776 + np.arange(8_000_000)
+tn4 = best(lambda: np.argsort(AD)); tf4 = best(lambda: fnp.argsort(AD))
+print(f"ARGSORT_I64_DEFAULT_AB numpy_ms={tn4:.3f} fnp_ms={tf4:.3f} ratio={tn4 / tf4:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces SORT_I64_FLAT_AB etc. under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "int sort-class arms must stay bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
