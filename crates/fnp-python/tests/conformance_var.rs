@@ -750,3 +750,67 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn int_var_std_via_f64_conversion_bit_exact_matches_numpy() -> Result<(), String> {
+    // Integer/bool var and std convert once to f64 and ride the whole f64
+    // kernel family; numpy sums with dtype=f64 (elements convert BEFORE any
+    // arithmetic), so the conversion is byte-exact UNCONDITIONALLY - pinned
+    // here including 2^62-scale values. dtype= overrides and small inputs
+    // keep the delegate.
+    let script = fnp_var_script(
+        r#"
+import time
+rng = np.random.default_rng(173)
+verdicts = []
+M = rng.integers(-1000, 1000, (2048, 1024))
+for fname in ("var", "std"):
+    ff = getattr(fnp, fname); nf = getattr(np, fname)
+    for kw in [dict(), dict(axis=1), dict(axis=0), dict(axis=-1), dict(axis=1, ddof=1), dict(axis=0, keepdims=True)]:
+        r = ff(M, **kw); e = nf(M, **kw)
+        ra = np.asarray(r, dtype=np.float64); ea = np.asarray(e, dtype=np.float64)
+        if ra.shape != ea.shape or ra.tobytes() != ea.tobytes():
+            verdicts.append(f"FAIL {fname} {kw}")
+# 3-D middle axis + widths + bool
+M3 = rng.integers(-100, 100, (64, 256, 256)).astype(np.int32)
+if np.asarray(fnp.var(M3, axis=1)).tobytes() != np.asarray(np.var(M3, axis=1)).tobytes():
+    verdicts.append("FAIL int32 3-D mid-axis")
+B = rng.random((2048, 1024)) > 0.7
+if np.asarray(fnp.std(B, axis=1)).tobytes() != np.asarray(np.std(B, axis=1)).tobytes():
+    verdicts.append("FAIL bool std")
+# HUGE values: conversion is unconditional (numpy converts pre-arithmetic too)
+H = rng.integers(-2**62, 2**62, (512, 1024))
+if np.asarray(fnp.var(H, axis=1)).tobytes() != np.asarray(np.var(H, axis=1)).tobytes():
+    verdicts.append("FAIL huge-value bytes")
+# dtype= override + small inputs keep the delegate
+if np.asarray(fnp.var(M, axis=1, dtype=np.float32)).tobytes() != np.asarray(np.var(M, axis=1, dtype=np.float32)).tobytes():
+    verdicts.append("FAIL dtype-override delegate")
+S = rng.integers(-100, 100, (10, 10))
+if np.asarray(fnp.var(S, axis=1)).tobytes() != np.asarray(np.var(S, axis=1)).tobytes():
+    verdicts.append("FAIL small delegate")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-1000, 1000, (4096, 4096))
+tn = best(lambda: np.var(W, axis=1)); tf = best(lambda: fnp.var(W, axis=1))
+print(f"VAR_INT_AX1_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.std(W, axis=0)); tf = best(lambda: fnp.std(W, axis=0))
+print(f"STD_INT_AX0_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces VAR/STD_INT_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "int var/std via f64 conversion must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
