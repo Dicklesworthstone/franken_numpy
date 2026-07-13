@@ -781,3 +781,77 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn int_cov_corrcoef_via_f64_conversion_bit_exact_matches_numpy() -> Result<(), String> {
+    // Integer/bool cov and corrcoef convert once to f64 (numpy's own chain
+    // converts to result_type(m, f64) before any arithmetic - pinned incl.
+    // 2^62-scale values) and ride the converged f64 Gram-lane kernels.
+    // Weights/dtype-override forms and small inputs keep prior behavior.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(223)
+verdicts = []
+M = rng.integers(-1000, 1000, (128, 20_000))
+Y = rng.integers(-1000, 1000, (128, 20_000))
+cases = [
+    ("cov", dict()), ("cov", dict(rowvar=False)), ("cov", dict(bias=True)),
+    ("cov", dict(ddof=0)), ("corrcoef", dict()), ("corrcoef", dict(rowvar=False)),
+]
+for fname, kw in cases:
+    ff = getattr(fnp, fname); nf = getattr(np, fname)
+    r = ff(M, **kw); e = nf(M, **kw)
+    ra = np.asarray(r); ea = np.asarray(e)
+    if ra.dtype != ea.dtype or ra.shape != ea.shape or ra.tobytes() != ea.tobytes():
+        verdicts.append(f"FAIL {fname} {kw}")
+# two-operand y: int stays on prior behavior (conversion is single-operand
+# only - the two-operand native Gram path is not byte-level for converted
+# inputs); parity asserted at the surface's established allclose level.
+r2 = np.asarray(fnp.cov(M, Y)); e2 = np.asarray(np.cov(M, Y))
+if r2.shape != e2.shape or not np.allclose(r2, e2, rtol=1e-10):
+    verdicts.append("FAIL cov two-operand allclose")
+r2 = np.asarray(fnp.corrcoef(M, Y)); e2 = np.asarray(np.corrcoef(M, Y))
+if r2.shape != e2.shape or not np.allclose(r2, e2, rtol=1e-10):
+    verdicts.append("FAIL corrcoef two-operand allclose")
+# bool + huge values (conversion unconditional)
+B = rng.random((64, 20_000)) > 0.6
+if np.asarray(fnp.cov(B)).tobytes() != np.asarray(np.cov(B)).tobytes():
+    verdicts.append("FAIL bool cov")
+H = rng.integers(-2**62, 2**62, (32, 10_000))
+if np.asarray(fnp.cov(H)).tobytes() != np.asarray(np.cov(H)).tobytes():
+    verdicts.append("FAIL huge-value cov")
+# fweights form stays byte-identical (conversion is numpy-transparent)
+fw = rng.integers(1, 5, 20_000)
+if np.asarray(fnp.cov(M, fweights=fw)).tobytes() != np.asarray(np.cov(M, fweights=fw)).tobytes():
+    verdicts.append("FAIL fweights parity")
+# small input keeps prior behavior
+S = rng.integers(-100, 100, (8, 50))
+if np.asarray(fnp.cov(S)).tobytes() != np.asarray(np.cov(S)).tobytes():
+    verdicts.append("FAIL small parity")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-1000, 1000, (256, 100_000))
+tn = best(lambda: np.cov(W)); tf = best(lambda: fnp.cov(W))
+print(f"COV_INT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.corrcoef(W)); tf = best(lambda: fnp.corrcoef(W))
+print(f"CORRCOEF_INT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces COV/CORRCOEF_INT_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "int cov/corrcoef via f64 conversion must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
