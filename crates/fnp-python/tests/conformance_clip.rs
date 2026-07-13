@@ -473,3 +473,79 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn clip_f64_broadcast_row_bounds_bit_exact_matches_numpy() -> Result<(), String> {
+    // (n,) lo/hi row vectors against (.., n) a: the broadcast sibling of the
+    // same-shape array-bounds kernel. Same verbatim maximum/minimum select
+    // rules (NaN in a propagates; NaN bounds poison their element; lo > hi
+    // resolves min-after-max), bounds indexed by the last axis. Other
+    // broadcast forms, small, and non-contiguous inputs keep the delegate.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(73)
+verdicts = []
+for shape in [(2048, 1024), (999, 1237), (16, 64, 2048)]:
+    n = shape[-1]
+    a = rng.standard_normal(shape) * 3
+    lo = rng.standard_normal(n) - 1
+    hi = rng.standard_normal(n) + 1
+    r = fnp.clip(a, lo, hi); e = np.clip(a, lo, hi)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL {shape}")
+# NaN in a / NaN bounds / lo > hi pin the select rules
+a = rng.standard_normal((2048, 1024))
+a[rng.random((2048, 1024)) < 0.01] = np.nan
+lo = rng.standard_normal(1024) - 1
+hi = rng.standard_normal(1024) + 1
+lo[7] = np.nan; hi[13] = np.nan
+lo[100] = 2.0; hi[100] = -2.0  # inverted bounds: min-after-max
+if fnp.clip(a, lo, hi).tobytes() != np.clip(a, lo, hi).tobytes():
+    verdicts.append("FAIL NaN/inverted rules")
+# +-0.0 select identity: STRICT comparisons - ties copy the BOUND operand
+z = np.zeros((1024, 1024)); z[::2] = -0.0
+zl = np.full(1024, -0.0); zh = np.full(1024, 0.0)
+if fnp.clip(z, zl, zh).tobytes() != np.clip(z, zl, zh).tobytes():
+    verdicts.append("FAIL signed-zero rules")
+zl2 = np.full(1024, 0.0); zh2 = np.full(1024, -0.0)
+if fnp.clip(z, zl2, zh2).tobytes() != np.clip(z, zl2, zh2).tobytes():
+    verdicts.append("FAIL signed-zero rules swapped")
+# the same tie rule through the SAME-SHAPE array-bounds kernel (shared
+# contract; its original battery only scattered -0.0 in a, never a tie)
+zlf = np.full((1024, 1024), -0.0); zhf = np.full((1024, 1024), 0.0)
+if fnp.clip(z, zlf, zhf).tobytes() != np.clip(z, zlf, zhf).tobytes():
+    verdicts.append("FAIL signed-zero same-shape kernel")
+# other broadcast forms stay byte-identical delegates
+col = rng.standard_normal((2048, 1))
+if fnp.clip(a, col, col + 2).tobytes() != np.clip(a, col, col + 2).tobytes():
+    verdicts.append("FAIL column-bounds delegate")
+sm = rng.standard_normal((64, 64))
+if fnp.clip(sm, lo[:64], hi[:64]).tobytes() != np.clip(sm, lo[:64], hi[:64]).tobytes():
+    verdicts.append("FAIL below-gate delegate")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.standard_normal((4096, 4096))
+wl = rng.standard_normal(4096) - 1
+wh = rng.standard_normal(4096) + 1
+tn = best(lambda: np.clip(W, wl, wh)); tf = best(lambda: fnp.clip(W, wl, wh))
+print(f"CLIP_F64_BCAST_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces CLIP_F64_BCAST_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "broadcast-row-bounds f64 clip must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
