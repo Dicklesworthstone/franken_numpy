@@ -866,3 +866,47 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+#[ignore = "PARITY GAP (ISA-dependent): flat f64 nansum/var/std byte parity vs numpy depends on the WORKER's numpy SIMD build - one gate worker read all-True at every size, another read False from n=131072 (nansum) / ~2M + all N-D flats (var/std). numpy's pairwise-sum leaf structure varies with vector width (AVX-512 vs AVX2 partial accumulators), so base_sum_simd matches one ISA and sub-ULP-diverges on others - the transcendental ISA-divergence class, sum edition. Fix requires the ISA-gate treatment (worker_isa_probe grid); see dtype-gap-audit memory 2026-07-13."]
+fn f64_var_flat_byte_parity_probe_vs_numpy() -> Result<(), String> {
+    // PROBE preserved for the ISA-gate investigation: nansum rows isolate the
+    // shared pairwise sum core; var/std rows add the sqr-dev pass; 2-D/3-D
+    // rows cover flattened N-D routing.
+    let script = fnp_var_script(
+        r#"
+rng = np.random.default_rng(241)
+rows = []
+for n in [7, 100, 128, 129, 1000, 4096, 131072, 2_000_000, 2_097_152, 4_000_001]:
+    a = rng.standard_normal(n) * 7
+    s_ok = np.float64(fnp.nansum(a)).tobytes() == np.float64(np.nansum(a)).tobytes()
+    v_ok = np.float64(fnp.var(a)).tobytes() == np.float64(np.var(a)).tobytes()
+    sd_ok = np.float64(fnp.std(a)).tobytes() == np.float64(np.std(a)).tobytes()
+    rows.append((n, s_ok, v_ok, sd_ok))
+# 2-D CONTIGUOUS flat (axis=None) f64: distinguishes kernel-vs-routing -
+# the converted-int gate failure was a 2-D flat input
+M2 = rng.standard_normal((2048, 1024)) * 7
+rows.append(("2Dflat", np.float64(fnp.nansum(M2)).tobytes() == np.float64(np.nansum(M2)).tobytes(),
+             np.float64(fnp.var(M2)).tobytes() == np.float64(np.var(M2)).tobytes(),
+             np.float64(fnp.std(M2)).tobytes() == np.float64(np.std(M2)).tobytes()))
+M3 = rng.standard_normal((64, 128, 128))
+rows.append(("3Dflat", True,
+             np.float64(fnp.var(M3)).tobytes() == np.float64(np.var(M3)).tobytes(),
+             np.float64(fnp.std(M3)).tobytes() == np.float64(np.std(M3)).tobytes()))
+for r in rows:
+    print("PROBE", r)
+bad = [r for r in rows if not (r[1] and r[2] and r[3])]
+print([] if not bad else bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}");
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "[]",
+        "flat f64 var/std/nansum must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
