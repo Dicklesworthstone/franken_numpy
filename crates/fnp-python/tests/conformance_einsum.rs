@@ -1735,6 +1735,35 @@ r = fnp.einsum("ij,jk->ki", pa, pb)
 e = np.einsum("ij,jk->ki", pa, pb)
 if r.tobytes() != e.tobytes():
     verdicts.append("FAIL bool transposed-out delegate bytes")
+# ellipsis-spelling normalization: '...' forms of covered int/bool specs
+e3a = rng.integers(-100, 100, (8, 128, 128))
+e3b = rng.integers(-100, 100, (8, 128, 128))
+r = fnp.einsum("...ij,...jk->...ik", e3a, e3b)
+e = np.einsum("...ij,...jk->...ik", e3a, e3b)
+if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL ellipsis-int-batched bytes")
+r = fnp.einsum("...ij,...jk", e3a, e3b)
+e = np.einsum("...ij,...jk", e3a, e3b)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL ellipsis-implicit bytes")
+r = fnp.einsum("...ij,...jk->...ik", c128a, c128b)  # B=0: 2-D operands
+e = np.einsum("...ij,...jk->...ik", c128a, c128b)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL ellipsis-B0 bytes")
+eb = rng.random((8, 128, 128)) > 0.9
+r = fnp.einsum("...ij,...jk->...ik", eb, eb)
+e = np.einsum("...ij,...jk->...ik", eb, eb)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL ellipsis-bool bytes")
+e4 = rng.integers(-50, 50, (2, 3, 32, 32))
+r = fnp.einsum("...ij,...jk->...ik", e4, e4)  # B=2: 4-D delegates (validators are 2/3-letter)
+e = np.einsum("...ij,...jk->...ik", e4, e4)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL ellipsis-4d delegate bytes")
+r = fnp.einsum("...ij,...jk->...ik", e3a, c128b)  # mixed batch rank: broadcasting, delegate
+e = np.einsum("...ij,...jk->...ik", e3a, c128b)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL ellipsis-mixed-rank delegate bytes")
 big = rng.integers(2**60, 2**62, (128, 128))
 r, e = fnp.einsum("ij,jk->ik", big, big), np.einsum("ij,jk->ik", big, big)
 if r.tobytes() != e.tobytes():
@@ -1787,6 +1816,9 @@ wb = rng.random((512, 512)) > 0.9
 tn = best(lambda: np.einsum("ij,jk->ik", wa, wb), reps=3)
 tf = best(lambda: fnp.einsum("ij,jk->ik", wa, wb), reps=3)
 print(f"EINSUM_BOOL_GEMM_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.einsum("...ij,...jk->...ik", qb1, qb2), reps=3)
+tf = best(lambda: fnp.einsum("...ij,...jk->...ik", qb1, qb2), reps=3)
+print(f"EINSUM_ELLIPSIS_INT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 print(verdicts if verdicts else True)
 "#
         .into(),
