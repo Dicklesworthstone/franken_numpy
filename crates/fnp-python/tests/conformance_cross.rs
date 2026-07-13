@@ -394,3 +394,69 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn int_cross_n3_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // Integer (N, 3) cross across all widths: wrapping mul/sub with numpy's
+    // fixed per-component expressions - no accumulation, so byte parity is
+    // structural. Overflow wrap, mixed-dtype/axis-kwarg/non-contig delegates,
+    // and below-gate serial sizes all pinned.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(107)
+verdicts = []
+for dt in [np.int64, np.int32, np.int8, np.uint64, np.uint16]:
+    info = np.iinfo(dt)
+    a = rng.integers(info.min // 2, info.max // 2, (500_000, 3)).astype(dt)
+    b = rng.integers(info.min // 2, info.max // 2, (500_000, 3)).astype(dt)
+    r = fnp.cross(a, b); e = np.cross(a, b)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL {dt.__name__}")
+# overflow wrap (products exceed i64)
+a = np.full((300_000, 3), 5_000_000_000, dtype=np.int64)
+b = np.full((300_000, 3), 7_000_000_000, dtype=np.int64)
+b[:, 1] = -3_000_000_000
+if fnp.cross(a, b).tobytes() != np.cross(a, b).tobytes():
+    verdicts.append("FAIL overflow wrap")
+# delegates: mixed dtype, axis kwargs, non-contiguous, below-gate serial
+ai = rng.integers(-1000, 1000, (400_000, 3))
+bi = rng.integers(-1000, 1000, (400_000, 3))
+if fnp.cross(ai, bi.astype(np.int32)).tobytes() != np.cross(ai, bi.astype(np.int32)).tobytes():
+    verdicts.append("FAIL mixed-dtype delegate")
+a0 = rng.integers(-1000, 1000, (3, 400_000))
+b0 = rng.integers(-1000, 1000, (3, 400_000))
+if fnp.cross(a0, b0, axis=0).tobytes() != np.cross(a0, b0, axis=0).tobytes():
+    verdicts.append("FAIL axis=0 delegate")
+nc = rng.integers(-1000, 1000, (400_000, 6))[:, ::2]
+if fnp.cross(nc, bi).tobytes() != np.cross(nc, bi).tobytes():
+    verdicts.append("FAIL non-contig delegate")
+s = rng.integers(-100, 100, (50, 3))
+t = rng.integers(-100, 100, (50, 3))
+if fnp.cross(s, t).tobytes() != np.cross(s, t).tobytes():
+    verdicts.append("FAIL below-gate serial")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W1 = rng.integers(-1000, 1000, (8_000_000, 3))
+W2 = rng.integers(-1000, 1000, (8_000_000, 3))
+tn = best(lambda: np.cross(W1, W2)); tf = best(lambda: fnp.cross(W1, W2))
+print(f"CROSS_INT64_N3_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces CROSS_INT64_N3_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "int (N,3) cross must be bit-identical to numpy incl. wrap and delegates: {result}"
+    );
+    Ok(())
+}
