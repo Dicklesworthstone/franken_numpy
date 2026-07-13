@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): BATCHED int einsum chains ("abc,acd,ade->abe", K=3..=6) - 31.20x (11.7 vs 364.3ms at (8,256,256) x 3 ops; hz1 basis 118.8ms) - the associativity vein's last filed sibling closed
+
+`cc_fnp` / FuchsiaStream. einsum_int_batched_chain_spec_matches validates the
+3-letter batched chain (shared batch letter, trailing pairs chained, no letter
+repeats, output batch++first-inner++last-inner; implicit only when already
+alphabetical) and the arm left-folds try_native_int_batched_matmul - same
+wrapping-associativity argument, optimize kwarg accepted. Also triaged COVERED
+this tick: multi_dot int (try_native_int_multi_dot, numpy 729ms basis is
+numpy-side only). Batteries: batched 3-chain opt (8,64,64) + noopt (4,16,16 -
+sized by numpy's naive batched O(b*n^(K+1)) per the tick-26 harness rule) +
+transposed-out ("->aeb") delegate - all green. The int einsum surface is now:
+2-op idioms (4 specs) + batched 2-op + 2-D K-chains + BATCHED K-chains, all
+native, all from one associativity argument. Vein CLOSED unless a profile
+ranks 4-D+ batch prefixes or mixed 2-D/batched chains.
+
 ## 2026-07-12 - WIN (SHIP): same-slice `can_broadcast` identity - 6.5x
 
 `CalmGate`, `fnp-ndarray`. Negative-ledger and Git-history searches found no

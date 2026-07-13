@@ -1696,6 +1696,23 @@ r = fnp.einsum("ij,jk,ki->", c128a, c128b, c128c)
 e = np.einsum("ij,jk,ki->", c128a, c128b, c128c)
 if np.asarray(r).tobytes() != np.asarray(e).tobytes():
     verdicts.append("FAIL cyclic-trace delegate bytes")
+# batched chains: fold through the batched int GEMM
+q3a = rng.integers(-50, 50, (8, 64, 64))
+q3b = rng.integers(-50, 50, (8, 64, 64))
+q3c = rng.integers(-50, 50, (8, 64, 64))
+r = fnp.einsum("abc,acd,ade->abe", q3a, q3b, q3c, optimize=True)
+e = np.einsum("abc,acd,ade->abe", q3a, q3b, q3c, optimize=True)
+if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL batched-3chain-opt bytes")
+t3s = [rng.integers(-50, 50, (4, 16, 16)) for _ in range(3)]
+r = fnp.einsum("abc,acd,ade->abe", *t3s)
+e = np.einsum("abc,acd,ade->abe", *t3s)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL batched-3chain-noopt bytes")
+r = fnp.einsum("abc,bcd,bde->abe" if False else "abc,acd,ade->aeb", *t3s)
+e = np.einsum("abc,acd,ade->aeb", *t3s)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL batched-transposed-out delegate bytes")
 big = rng.integers(2**60, 2**62, (128, 128))
 r, e = fnp.einsum("ij,jk->ik", big, big), np.einsum("ij,jk->ik", big, big)
 if r.tobytes() != e.tobytes():
@@ -1737,6 +1754,12 @@ d512 = rng.integers(-50, 50, (512, 512))
 tn = best(lambda: np.einsum("ij,jk,kl,lm->im", c512a, c512b, c512c, d512, optimize=True), reps=3)
 tf = best(lambda: fnp.einsum("ij,jk,kl,lm->im", c512a, c512b, c512c, d512, optimize=True), reps=3)
 print(f"EINSUM_INT_4CHAIN_OPT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+qb1 = rng.integers(-50, 50, (8, 256, 256))
+qb2 = rng.integers(-50, 50, (8, 256, 256))
+qb3 = rng.integers(-50, 50, (8, 256, 256))
+tn = best(lambda: np.einsum("abc,acd,ade->abe", qb1, qb2, qb3, optimize=True), reps=3)
+tf = best(lambda: fnp.einsum("abc,acd,ade->abe", qb1, qb2, qb3, optimize=True), reps=3)
+print(f"EINSUM_INT_BATCHED_3CHAIN_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 print(verdicts if verdicts else True)
 "#
         .into(),
