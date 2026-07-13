@@ -1651,6 +1651,30 @@ if r.tobytes() != e.tobytes():
 r, e = fnp.einsum("ij,kj", ai, bi), np.einsum("ij,kj", ai, bi)
 if r.tobytes() != e.tobytes():
     verdicts.append("FAIL transposed-implicit bytes")
+# 3-op chain: any pairing byte-identical for ints (wrap associativity)
+c128a = rng.integers(-100, 100, (128, 128))
+c128b = rng.integers(-100, 100, (128, 128))
+c128c = rng.integers(-100, 100, (128, 128))
+r = fnp.einsum("ij,jk,kl->il", c128a, c128b, c128c)
+e = np.einsum("ij,jk,kl->il", c128a, c128b, c128c)
+if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 3chain-noopt bytes")
+c256a = rng.integers(-100, 100, (256, 256))
+c256b = rng.integers(-100, 100, (256, 256))
+c256c = rng.integers(-100, 100, (256, 256))
+r = fnp.einsum("ij,jk,kl->il", c256a, c256b, c256c, optimize=True)
+e = np.einsum("ij,jk,kl->il", c256a, c256b, c256c, optimize=True)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 3chain-opt bytes")
+bigc = rng.integers(2**58, 2**60, (64, 64))
+r = fnp.einsum("ij,jk,kl->il", bigc, bigc, bigc)
+e = np.einsum("ij,jk,kl->il", bigc, bigc, bigc)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 3chain-wrap bytes")
+r = fnp.einsum("ij,jk,kl->il", c128a, c128b.astype(np.int32), c128c)
+e = np.einsum("ij,jk,kl->il", c128a, c128b.astype(np.int32), c128c)
+if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 3chain-mixed-delegate bytes")
 big = rng.integers(2**60, 2**62, (128, 128))
 r, e = fnp.einsum("ij,jk->ik", big, big), np.einsum("ij,jk->ik", big, big)
 if r.tobytes() != e.tobytes():
@@ -1679,6 +1703,15 @@ print(f"EINSUM_INT_BATCHED_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.
 tn = best(lambda: np.einsum("ij,kj->ik", ai, bi))
 tf = best(lambda: fnp.einsum("ij,kj->ik", ai, bi))
 print(f"EINSUM_INT_TRANSPOSED_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+c512a = rng.integers(-100, 100, (512, 512))
+c512b = rng.integers(-100, 100, (512, 512))
+c512c = rng.integers(-100, 100, (512, 512))
+tn = best(lambda: np.einsum("ij,jk,kl->il", c512a, c512b, c512c, optimize=True), reps=3)
+tf = best(lambda: fnp.einsum("ij,jk,kl->il", c512a, c512b, c512c, optimize=True), reps=3)
+print(f"EINSUM_INT_3CHAIN_OPT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.einsum("ij,jk,kl->il", c128a, c128b, c128c), reps=3)
+tf = best(lambda: fnp.einsum("ij,jk,kl->il", c128a, c128b, c128c), reps=3)
+print(f"EINSUM_INT_3CHAIN_NOOPT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 print(verdicts if verdicts else True)
 "#
         .into(),

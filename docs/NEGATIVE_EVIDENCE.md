@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): int 3-op einsum chain "ij,jk,kl->il" - optimize=True 50.47x (12.7 vs 641.6ms at 512^3), optimize=False 124.45x at 128^3 (the 256^3 numpy basis is 7098ms -> ~1000x class) - the associativity vein's biggest fish
+
+`cc_fnp` / FuchsiaStream. numpy's unoptimized 3-op int einsum is a naive FUSED
+O(n^4) loop (7.1s at 256^3 on hz1); optimize=True plans pairwise but each pair
+runs the BLAS-less int dot (918ms at 512^3). For INTEGERS, wrapping-add
+associativity makes ANY pairing byte-identical, so BOTH optimize values route
+to two native MR=4 int GEMMs - and the optimize kwarg is accepted by the arm
+precisely because the result is pairing-invariant (the float chains needed
+numpy's own einsum_path plan replication for byte parity; ints need nothing).
+Gate rows: 3CHAIN_OPT 50.468x, 3CHAIN_NOOPT 124.447x; batteries: no-opt/opt
+bytes, 2^58..2^60 wrap, mixed-dtype delegate - all green. The int einsum
+surface now covers: 2-op GEMM idioms (4 specs + implicit), batched, and 3-op
+chains. Unfiled siblings: 4+-op int chains (same argument, left-fold),
+int batched 3-chains.
+
 ## 2026-07-12 - NO-SHIP (one-shot budget): direct I64-to-I32 cast construction
 
 `CalmGate`, `fnp-dtype`. Negative-ledger and Git-history searches found no
