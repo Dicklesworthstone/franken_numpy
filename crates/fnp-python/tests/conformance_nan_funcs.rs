@@ -1297,6 +1297,44 @@ for tag, arr, args, kw in (
         verdicts.append(f"FAIL {tag} bytes")
 if fnp.percentile(mi64, 50).tobytes() != np.asarray(np.percentile(mi64, 50)).tobytes():
     verdicts.append("FAIL int-scalar-delegate bytes")
+# weights= inverted_cdf: source-exact selection kernel
+wq = np.abs(rng.standard_normal(a.size)) + 0.01
+wq[rng.integers(0, a.size, 200000)] = 0.0
+r = fnp.quantile(a, [0.25, 0.5, 0.75], weights=wq, method="inverted_cdf")
+e = np.quantile(a, [0.25, 0.5, 0.75], weights=wq, method="inverted_cdf")
+if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL weighted-q3 bytes")
+at = np.round(a[:300000], 1); at[at == 0] = 0.1
+wt = wq[:300000]
+r = fnp.quantile(at, [0.0, 0.1, 0.5, 0.9, 1.0], weights=wt, method="inverted_cdf")
+e = np.quantile(at, [0.0, 0.1, 0.5, 0.9, 1.0], weights=wt, method="inverted_cdf")
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL weighted-ties-edges bytes")
+rs = fnp.quantile(a, 0.5, weights=wq, method="inverted_cdf")
+es = np.quantile(a, 0.5, weights=wq, method="inverted_cdf")
+if np.asarray(rs).tobytes() != np.asarray(es).tobytes():
+    verdicts.append("FAIL weighted-scalar-q bytes")
+r = fnp.percentile(a, [25, 75], weights=wq, method="inverted_cdf")
+e = np.percentile(a, [25, 75], weights=wq, method="inverted_cdf")
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL weighted-percentile bytes")
+wneg = wq.copy(); wneg[123] = -1.0
+fe = ne = None
+try:
+    fnp.quantile(a, [0.5], weights=wneg, method="inverted_cdf")
+except Exception as ex:
+    fe = type(ex).__name__
+try:
+    np.quantile(a, [0.5], weights=wneg, method="inverted_cdf")
+except Exception as ex:
+    ne = type(ex).__name__
+if fe != ne:
+    verdicts.append(f"FAIL neg-weight error parity fnp={fe} np={ne}")
+an = a.copy(); an[77] = np.nan
+r = fnp.quantile(an, [0.5], weights=wq, method="inverted_cdf")
+e = np.quantile(an, [0.5], weights=wq, method="inverted_cdf")
+if np.asarray(r).tobytes() != np.asarray(e).tobytes():
+    verdicts.append("FAIL weighted-nan-defer bytes")
 def best(fn, reps=5):
     fn(); best_s = float("inf")
     for _ in range(reps):
@@ -1317,6 +1355,7 @@ for name, nf, ff in (
     ("nanmedian_3d_ax1", lambda: np.nanmedian(t3nn, axis=1), lambda: fnp.nanmedian(t3nn, axis=1)),
     ("hazen_ax1", lambda: np.percentile(m, 37.3, axis=1, method="hazen"), lambda: fnp.percentile(m, 37.3, axis=1, method="hazen")),
     ("int64_pct3_ax1", lambda: np.percentile(mi64, [25, 50, 75], axis=1), lambda: fnp.percentile(mi64, [25, 50, 75], axis=1)),
+    ("weighted_q3", lambda: np.quantile(a, [0.25, 0.5, 0.75], weights=wq, method="inverted_cdf"), lambda: fnp.quantile(a, [0.25, 0.5, 0.75], weights=wq, method="inverted_cdf")),
     ("percentile3", lambda: np.percentile(a, [25, 50, 75]), lambda: fnp.percentile(a, [25, 50, 75])),
     ("avg_weights", lambda: np.average(a, weights=w), lambda: fnp.average(a, weights=w)),
 ):

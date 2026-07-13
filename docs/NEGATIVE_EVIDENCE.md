@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): weights= quantile/percentile (inverted_cdf) native - 3.35x (313.7 vs 1052.0ms at 8M x 3 qs; hz1 basis 2685ms) - the quantile lane's LAST item; the lane is 100% mined
+
+`cc_fnp` / FuchsiaStream. FOURTEENTH and final lane lever. numpy's weighted
+quantile is a python-level argsort + take_along_axis + cumsum + per-slice
+searchsorted chain; the kernel replicates it source-exactly: unstable value
+sort (tie representatives are value-equal; +-0 mixes DEFER - introsort-artifact
+class), weights gathered, cdf = SEQUENTIAL cumsum normalized by total, the
+cdf==0 -> -1 zero-weight-prefix fix (only when cdf[0]==0), side='left' search
+clipped to n-1. Pure SELECTION (clip-class exactness): pinned 11136/11136 incl
+dense ties, zero-weight prefixes, exact-boundary qs. Defers own every numpy
+error: negative/NaN weights (ValueError parity asserted in-probe), NaN values,
+zero/non-finite totals. Gate row weighted_q3 3.354x tobytes-equal; batteries:
+ties+edges, scalar-q, percentile-weights (q/100), nan-defer - all green.
+NOISE NOTE: int64_pct3_ax1 read 0.853x this run vs 1.796x on its gate run - an
+18ms-basis row bouncing with worker load (bytes still exact); a 20-obs median
+gate would settle it if anyone cares to formalize.
+LANE CLOSED: plain+nan x flat/all-axes x scalar/multi-q x keepdims x
+linear/midpoint/H&F-continuous x int-input x weights=. Fifteen levers, one
+reject-retried, one regression caught, all from one morning ULP probe.
+
 ## 2026-07-12 - WIN (SHIP): direct `cast_to(F64)` construction removes zero-fill + copy - 1.88-28.2x
 
 `CalmGate`, `fnp-dtype`. Negative-ledger and Git-history searches found no

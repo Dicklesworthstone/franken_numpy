@@ -18208,6 +18208,111 @@ impl UFuncArray {
         })
     }
 
+    /// Weighted flat quantile, numpy method='inverted_cdf' (the only weighted
+    /// method numpy allows). Source-exact replication (numpy 2.x _quantile
+    /// weighted branch): argsort values (UNSTABLE ties are safe - the selected
+    /// value is tie-equal; +-0 mixes defer below), gather weights, cdf =
+    /// sequential cumsum normalized by the total, the cdf==0 -> -1 zero-weight
+    /// prefix fix (applied only when cdf[0] == 0), searchsorted side='left'
+    /// clipped to n-1. Pure SELECTION (no interpolation) -> byte-exact with the
+    /// operand-copy guarantee (pinned 11136/11136 cases incl dense ties,
+    /// zero-weight prefixes, exact-boundary qs vs 2.4.3). Defers (Err) so numpy
+    /// owns errors/ambiguity: NaN values, mixed-sign zero values (tie
+    /// representative is an introsort artifact), negative/NaN weights,
+    /// non-finite or zero weight total. numpy's delegate: 2685ms @8M x 3 qs on
+    /// hz1 (python-level sort + take chain).
+    pub fn weighted_quantile_inverted_cdf(
+        &self,
+        weights: &[f64],
+        qs: &[f64],
+    ) -> Result<Self, UFuncError> {
+        let n = self.values.len();
+        if n == 0 || weights.len() != n || qs.is_empty() {
+            return Err(UFuncError::Msg(
+                "weighted_quantile: need non-empty values, matching weights, >= 1 q".into(),
+            ));
+        }
+        for &q in qs {
+            if !(0.0..=1.0).contains(&q) {
+                return Err(UFuncError::Msg(format!(
+                    "quantile: q={q} must be in [0, 1]"
+                )));
+            }
+        }
+        let mut has_pos_zero = false;
+        let mut has_neg_zero = false;
+        for &v in &self.values {
+            if v.is_nan() {
+                return Err(UFuncError::Msg("weighted_quantile: NaN values defer".into()));
+            }
+            if v == 0.0 {
+                if v.is_sign_negative() {
+                    has_neg_zero = true;
+                } else {
+                    has_pos_zero = true;
+                }
+            }
+        }
+        if has_pos_zero && has_neg_zero {
+            return Err(UFuncError::Msg(
+                "weighted_quantile: mixed-sign zero tie representative is a sort artifact".into(),
+            ));
+        }
+        if weights.iter().any(|&w| !(w >= 0.0)) {
+            return Err(UFuncError::Msg(
+                "weighted_quantile: negative/NaN weights defer to numpy's error".into(),
+            ));
+        }
+        let mut pairs: Vec<(f64, f64)> = self
+            .values
+            .iter()
+            .copied()
+            .zip(weights.iter().copied())
+            .collect();
+        const WEIGHTED_QUANTILE_PARALLEL_MIN: usize = 1 << 16;
+        if n >= WEIGHTED_QUANTILE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            pairs.par_sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        } else {
+            pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        }
+        // Sequential cumsum in sorted order = numpy's exact fold; then normalize.
+        let mut cdf: Vec<f64> = Vec::with_capacity(n);
+        let mut acc = 0.0f64;
+        for &(_, w) in &pairs {
+            acc += w;
+            cdf.push(acc);
+        }
+        let total = acc;
+        if !total.is_finite() || total == 0.0 {
+            return Err(UFuncError::Msg(
+                "weighted_quantile: non-finite or zero weight total defers".into(),
+            ));
+        }
+        for c in cdf.iter_mut() {
+            *c /= total;
+        }
+        if cdf[0] == 0.0 {
+            for c in cdf.iter_mut() {
+                if *c == 0.0 {
+                    *c = -1.0;
+                }
+            }
+        }
+        let values: Vec<f64> = qs
+            .iter()
+            .map(|&q| {
+                let idx = cdf.partition_point(|&c| c < q).min(n - 1);
+                pairs[idx].0
+            })
+            .collect();
+        Ok(Self {
+            shape: vec![qs.len()],
+            values,
+            dtype: DType::F64,
+            integer_sidecar: None,
+        })
+    }
+
     /// Fraction-scale multi-q core (same round-trip fix; quantiles enter directly).
     fn fractions_axis_none(&self, qs: &[f64]) -> Result<Self, UFuncError> {
         let n = self.values.len();
