@@ -814,3 +814,55 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn int_nanvar_nanstd_route_to_var_std_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy's nanvar/nanstd short-circuit non-float dtypes straight to
+    // var/std; fnp now mirrors that routing for int/bool (whose var/std int
+    // conversion arm applies). Extra kwargs keep the delegate.
+    let script = fnp_var_script(
+        r#"
+import time
+rng = np.random.default_rng(181)
+verdicts = []
+M = rng.integers(-1000, 1000, (2048, 1024))
+for fname in ("nanvar", "nanstd"):
+    ff = getattr(fnp, fname); nf = getattr(np, fname)
+    for kw in [dict(), dict(axis=1), dict(axis=0), dict(axis=1, ddof=1), dict(axis=0, keepdims=True)]:
+        r = ff(M, **kw); e = nf(M, **kw)
+        ra = np.asarray(r, dtype=np.float64); ea = np.asarray(e, dtype=np.float64)
+        if ra.shape != ea.shape or ra.tobytes() != ea.tobytes():
+            verdicts.append(f"FAIL {fname} {kw}")
+B = rng.random((2048, 1024)) > 0.7
+if np.asarray(fnp.nanstd(B, axis=1)).tobytes() != np.asarray(np.nanstd(B, axis=1)).tobytes():
+    verdicts.append("FAIL bool nanstd")
+H = rng.integers(-2**62, 2**62, (512, 1024))
+if np.asarray(fnp.nanvar(H, axis=1)).tobytes() != np.asarray(np.nanvar(H, axis=1)).tobytes():
+    verdicts.append("FAIL huge-value nanvar")
+# dtype override keeps delegate
+if np.asarray(fnp.nanvar(M, axis=1, dtype=np.float32)).tobytes() != np.asarray(np.nanvar(M, axis=1, dtype=np.float32)).tobytes():
+    verdicts.append("FAIL dtype-override delegate")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-1000, 1000, (4096, 4096))
+tn = best(lambda: np.nanvar(W, axis=1)); tf = best(lambda: fnp.nanvar(W, axis=1))
+print(f"NANVAR_INT_AX1_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces NANVAR_INT_AX1_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "int nanvar/nanstd routing must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
