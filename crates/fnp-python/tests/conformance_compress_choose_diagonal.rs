@@ -737,6 +737,34 @@ for dens_name, c in [("all-true", np.ones(N, dtype=bool)), ("all-false", np.zero
 short = rng.random(2_000_000) > 0.5
 if fnp.extract(short, f).tobytes() != np.extract(short, f).tobytes():
     verdicts.append("FAIL short-cond extract")
+# NON-BOOL conditions: truthiness per the condition dtype
+arrv = rng.standard_normal(N)
+for cname, c in [
+    ("int64", rng.integers(-3, 3, N)),
+    ("int8", rng.integers(-2, 2, N).astype(np.int8)),
+    ("uint32", rng.integers(0, 3, N).astype(np.uint32)),
+]:
+    r = fnp.extract(c, arrv); e = np.extract(c, arrv)
+    if r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL extract {cname} cond")
+    r = fnp.compress(c, arrv); e = np.compress(c, arrv)
+    if r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL compress {cname} cond")
+# float conditions: -0.0/+0.0 are False, NaN is True (value semantics, not bits)
+fc = np.where(rng.random(N) > 0.5, rng.standard_normal(N), 0.0)
+fc[::97] = -0.0
+fc[::89] = np.nan
+r = fnp.extract(fc, arrv); e = np.extract(fc, arrv)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL extract f64 cond zero/NaN truthiness")
+r = fnp.extract(fc.astype(np.float32), arrv); e = np.extract(fc.astype(np.float32), arrv)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL extract f32 cond")
+# below-gate non-bool cond takes the serial generalized path
+sc2 = rng.integers(-2, 2, 1000)
+sa2 = rng.standard_normal(1000)
+if fnp.extract(sc2, sa2).tobytes() != np.extract(sc2, sa2).tobytes():
+    verdicts.append("FAIL below-gate int cond")
 # 2-D arr ravels through extract
 M = rng.standard_normal((2048, 1024))
 cm = rng.random((2048, 1024)) > 0.5
@@ -760,6 +788,12 @@ tn = best(lambda: np.compress(Wc, W)); tf = best(lambda: fnp.compress(Wc, W))
 print(f"COMPRESS_BOOL_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 tn = best(lambda: np.extract(Wc, W)); tf = best(lambda: fnp.extract(Wc, W))
 print(f"EXTRACT_BOOL_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+Wi = rng.integers(-5, 5, 16_000_000)
+tn = best(lambda: np.extract(Wi, W)); tf = best(lambda: fnp.extract(Wi, W))
+print(f"EXTRACT_INTCOND_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+Wff = np.where(rng.random(16_000_000) > 0.5, rng.standard_normal(16_000_000), 0.0)
+tn = best(lambda: np.extract(Wff, W)); tf = best(lambda: fnp.extract(Wff, W))
+print(f"EXTRACT_F64COND_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 print(verdicts if verdicts else True)
 "#
         .into(),
