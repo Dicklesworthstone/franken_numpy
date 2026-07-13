@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): same-slice `can_broadcast` identity - 6.5x
+
+`CalmGate`, `fnp-ndarray`. Negative-ledger and Git-history searches found no
+prior pointer-identity shortcut or retry boundary. Two slice references with
+the same data pointer and metadata necessarily describe the same shape, so
+`can_broadcast` now returns true before scanning axes when `std::ptr::eq`
+holds. Distinct slices execute the byte-for-byte existing predicate. Shape
+ordering, zero/singleton handling, rejection behavior, floating-point state,
+and RNG state are unchanged; the existing 144-pair equivalence grid and shape
+tests cover the predicate contract.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran on
+effective worker `vmi1156319`, with copied old-logic controls adjacent in the
+same optimized binary (20 samples, 0.25s warm-up, 1s measurement). An explicit
+eight-axis same-slice call moved from 13ns to 2ns (**6.5x**); existing equal
+rows moved 3->2ns (**1.50x**) and 5->2ns (**2.50x**). Other candidate/control
+rows were 4/4, 4/4, 5/7, 7/6 (+/-1ns), 8/9, and 5/5ns: null-scale fallback
+cost with one uncertainty-sized negative row. Per the one-benchmark budget,
+source and durable same-binary controls were committed immediately without a
+second benchmark, test, or lint pass.
+
 ## 2026-07-12 - NO-SHIP: rank-0-to-4 `element_count` specialization is flat
 
 `CalmGate`, `fnp-ndarray`. Negative-ledger and Git-history searches found no

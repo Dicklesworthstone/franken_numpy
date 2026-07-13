@@ -91,6 +91,9 @@ impl std::error::Error for ShapeError {}
 
 #[must_use]
 pub fn can_broadcast(lhs: &[usize], rhs: &[usize]) -> bool {
+    if std::ptr::eq(lhs, rhs) {
+        return true;
+    }
     let nd = lhs.len().max(rhs.len());
     for axis_from_end in 0..nd {
         let l = if axis_from_end < lhs.len() {

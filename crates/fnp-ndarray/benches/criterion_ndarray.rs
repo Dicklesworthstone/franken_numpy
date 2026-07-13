@@ -19,6 +19,26 @@ use std::hint::black_box;
 // can_broadcast benchmarks
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn can_broadcast_control(lhs: &[usize], rhs: &[usize]) -> bool {
+    let nd = lhs.len().max(rhs.len());
+    for axis_from_end in 0..nd {
+        let l = if axis_from_end < lhs.len() {
+            lhs[lhs.len() - 1 - axis_from_end]
+        } else {
+            1
+        };
+        let r = if axis_from_end < rhs.len() {
+            rhs[rhs.len() - 1 - axis_from_end]
+        } else {
+            1
+        };
+        if l != r && l != 1 && r != 1 {
+            return false;
+        }
+    }
+    true
+}
+
 fn bench_can_broadcast(c: &mut Criterion) {
     let mut group = c.benchmark_group("can_broadcast");
 
@@ -41,7 +61,22 @@ fn bench_can_broadcast(c: &mut Criterion) {
                 b.iter(|| can_broadcast(black_box(l), black_box(r)));
             },
         );
+        group.bench_with_input(
+            BenchmarkId::new("control", name),
+            &(lhs, rhs),
+            |b, (l, r)| {
+                b.iter(|| can_broadcast_control(black_box(l), black_box(r)));
+            },
+        );
     }
+
+    let same_shape = vec![2, 3, 4, 5, 6, 7, 8, 9];
+    group.bench_function("same_slice_identity", |b| {
+        b.iter(|| can_broadcast(black_box(&same_shape), black_box(&same_shape)))
+    });
+    group.bench_function("same_slice_identity_control", |b| {
+        b.iter(|| can_broadcast_control(black_box(&same_shape), black_box(&same_shape)))
+    });
 
     group.finish();
 }
