@@ -521,8 +521,9 @@ fn broadcast_batch_int_bool_matmul_bit_exact_matches_numpy() -> Result<(), Strin
     // (B.., m, k) @ (k, n) for int/bool: numpy runs its serial no-BLAS loop per
     // slice; the zero-copy (B*m, k) reshape arm must be byte-identical through
     // matmul, @, and dot (each pinned against its own numpy function). The
-    // (m, k) @ (B, k, n) mirror and below-gate shapes stay byte-identical
-    // delegates.
+    // (m, k) @ (B.., k, n) mirror routes the shared-A batched kernels
+    // (matmul-only: np.dot's 2-D @ N-D layout differs and must stay a
+    // delegate, pinned below). Below-gate shapes stay byte-identical delegates.
     let script = fnp_script(
         r#"
 import time
@@ -557,11 +558,34 @@ ab = rng.random((16, 96, 96)) > 0.9
 bb = rng.random((96, 96)) > 0.9
 if fnp.dot(ab, bb).tobytes() != np.dot(ab, bb).tobytes():
     verdicts.append("FAIL bool dot broadcast")
-# mirror direction (m,k)@(B,k,n) and below-gate stay byte-identical delegates
-ma = rng.integers(-1000, 1000, (96, 96)).astype(np.int64)
-mb = rng.integers(-1000, 1000, (8, 96, 80)).astype(np.int64)
+# mirror direction (m,k)@(B..,k,n): shared-A batched kernels
+for dt in [np.int64, np.int32, np.int8, np.uint64]:
+    info = np.iinfo(dt)
+    for shape_a, shape_b in [((96, 96), (8, 96, 80)), ((50, 64), (2, 3, 64, 40))]:
+        ma = rng.integers(info.min // 2, info.max // 2, shape_a).astype(dt)
+        mb = rng.integers(info.min // 2, info.max // 2, shape_b).astype(dt)
+        r = fnp.matmul(ma, mb); e = np.matmul(ma, mb)
+        if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+            verdicts.append(f"FAIL mirror {dt.__name__} {shape_b}")
+        if (ma @ mb).tobytes() != e.tobytes():
+            verdicts.append(f"FAIL mirror @ {dt.__name__} {shape_b}")
+ma = np.full((60, 60), 5_000_000_000, dtype=np.int64)
+mb = np.full((6, 60, 60), 5_000_000_000, dtype=np.int64)
 if fnp.matmul(ma, mb).tobytes() != np.matmul(ma, mb).tobytes():
-    verdicts.append("FAIL mirror delegate")
+    verdicts.append("FAIL mirror overflow wrap")
+for dens in [0.0, 0.05, 0.5, 1.0]:
+    mba = rng.random((96, 130)) < dens
+    mbb = rng.random((16, 130, 77)) < dens
+    r = fnp.matmul(mba, mbb); e = np.matmul(mba, mbb)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL bool mirror dens={dens}")
+# np.dot(2-D, N-D) contracts to a DIFFERENT layout ((m, B, n)) - must NOT route
+# the mirror arm; pin the delegate byte-for-byte
+da = rng.integers(-1000, 1000, (96, 96)).astype(np.int64)
+db = rng.integers(-1000, 1000, (8, 96, 80)).astype(np.int64)
+rd = fnp.dot(da, db); ed = np.dot(da, db)
+if rd.shape != ed.shape or rd.tobytes() != ed.tobytes():
+    verdicts.append("FAIL dot 2d@3d layout delegate")
 sa = rng.integers(-5, 5, (2, 10, 10)).astype(np.int64)
 sb = rng.integers(-5, 5, (10, 10)).astype(np.int64)
 if fnp.matmul(sa, sb).tobytes() != np.matmul(sa, sb).tobytes():
@@ -581,6 +605,10 @@ wba = rng.random((16, 256, 256)) > 0.9
 wbb = rng.random((256, 256)) > 0.9
 tn = best(lambda: np.matmul(wba, wbb)); tf = best(lambda: fnp.matmul(wba, wbb))
 print(f"MATMUL_BOOL_BROADCAST_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.matmul(wb, wa)); tf = best(lambda: fnp.matmul(wb, wa))
+print(f"MATMUL_INT_MIRROR_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.matmul(wbb, wba)); tf = best(lambda: fnp.matmul(wbb, wba))
+print(f"MATMUL_BOOL_MIRROR_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 print(verdicts if verdicts else True)
 "#
         .into(),
