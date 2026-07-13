@@ -1184,3 +1184,72 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn wide34_lexsort_bit_exact_matches_numpy() -> Result<(), String> {
+    // 3- and 4-key wide-range int lexsort (composite span-product overflow)
+    // sort ([u64; K], index) tuples with each key mapped to an
+    // order-preserving u64 - tuple order IS numpy's stable lexsort contract,
+    // deterministic incl. ties -> byte-exact. 5+ keys keep prior routing.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(281)
+verdicts = []
+def w(n):
+    return rng.integers(-2**62, 2**62, n)
+k1, k2, k3 = w(500_000), w(500_000), w(500_000)
+if fnp.lexsort((k1, k2, k3)).tobytes() != np.lexsort((k1, k2, k3)).tobytes():
+    verdicts.append("FAIL wide i64 triple")
+# dense primary + dense secondary ties exercise tertiary ordering + key priority
+kp = rng.integers(0, 12, 500_000) * 2**58
+ks = rng.integers(0, 12, 500_000) * 2**58
+if fnp.lexsort((k1, ks, kp)).tobytes() != np.lexsort((k1, ks, kp)).tobytes():
+    verdicts.append("FAIL dense primary+secondary")
+# ties in ALL THREE keys -> original-index stability
+d1 = rng.integers(0, 6, 500_000) * 2**58
+d2 = rng.integers(0, 6, 500_000) * 2**58
+d3 = rng.integers(0, 6, 500_000) * 2**58
+if fnp.lexsort((d1, d2, d3)).tobytes() != np.lexsort((d1, d2, d3)).tobytes():
+    verdicts.append("FAIL triple ties stability")
+# mixed widths/signedness incl. u64 above 2**63 as PRIMARY
+m1 = rng.integers(0, 2**63, 400_000, dtype=np.uint64, endpoint=True) * 2
+m2 = rng.integers(-2**31, 2**31 - 1, 400_000).astype(np.int32)
+m3 = w(400_000)
+if fnp.lexsort((m2, m3, m1)).tobytes() != np.lexsort((m2, m3, m1)).tobytes():
+    verdicts.append("FAIL mixed u64/i64/i32")
+# 4 keys wide + a tied layer
+q4 = rng.integers(0, 8, 400_000) * 2**58
+if fnp.lexsort((k1[:400_000], q4, k2[:400_000], k3[:400_000])).tobytes() != np.lexsort((k1[:400_000], q4, k2[:400_000], k3[:400_000])).tobytes():
+    verdicts.append("FAIL 4-key")
+# 5 keys + small n keep prior behavior (byte parity)
+f5 = [w(300_000) for _ in range(5)]
+if fnp.lexsort(tuple(f5)).tobytes() != np.lexsort(tuple(f5)).tobytes():
+    verdicts.append("FAIL 5-key parity")
+s = [w(1000) for _ in range(3)]
+if fnp.lexsort(tuple(s)).tobytes() != np.lexsort(tuple(s)).tobytes():
+    verdicts.append("FAIL small parity")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W1, W2, W3 = w(4_000_000), w(4_000_000), w(4_000_000)
+tn = best(lambda: np.lexsort((W1, W2, W3))); tf = best(lambda: fnp.lexsort((W1, W2, W3)))
+print(f"LEXSORT_WIDE3_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces LEXSORT_WIDE3_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "wide 3/4-key lexsort must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
