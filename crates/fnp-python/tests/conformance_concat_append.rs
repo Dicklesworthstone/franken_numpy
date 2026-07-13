@@ -919,3 +919,67 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn delete_nd_axis_none_flat_view_matches_numpy() -> Result<(), String> {
+    // np.delete(..., axis=None) ravels the input in C order before deleting.
+    // This locks the N-D input-form candidate to raw-byte parity while keeping
+    // explicit-axis and non-C-contiguous inputs on NumPy's existing semantics.
+    let script = fnp_script(
+        r#"
+import time
+
+verdicts = []
+
+def outcome(fn, *args, **kwargs):
+    try:
+        out = np.asarray(fn(*args, **kwargs))
+        return ("ok", str(out.dtype), tuple(out.shape), out.tobytes())
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+def ab(name, arr, obj, **kwargs):
+    ours = outcome(fnp.delete, arr, obj, **kwargs)
+    theirs = outcome(np.delete, arr, obj, **kwargs)
+    if ours != theirs:
+        verdicts.append(f"FAIL {name}")
+
+base = np.array(
+    [[0.0, -0.0, 1.5], [np.inf, -np.inf, np.nan]],
+    dtype=np.float64,
+)
+for idx in (0, 3, base.size - 1, -1, -base.size):
+    ab(f"2-D index {idx}", base, idx)
+ab("3-D", np.arange(60, dtype=np.float64).reshape(3, 4, 5), 17)
+ab("0-D", np.array(7.0, dtype=np.float64), 0)
+ab("F-contiguous defer", np.asfortranarray(np.arange(24.0).reshape(4, 6)), 7)
+ab("axis 0 unchanged", np.arange(24.0).reshape(4, 6), 2, axis=0)
+ab("axis -1 unchanged", np.arange(24.0).reshape(4, 6), 2, axis=-1)
+ab("out of bounds", base, base.size)
+
+large = np.arange(8_000_000, dtype=np.float64).reshape(2000, 4000)
+
+def best(fn, reps=3):
+    samples = []
+    for _ in range(reps):
+        start = time.perf_counter()
+        fn()
+        samples.append((time.perf_counter() - start) * 1e3)
+    return min(samples)
+
+numpy_ms = best(lambda: np.delete(large, large.size // 2))
+fnp_ms = best(lambda: fnp.delete(large, large.size // 2))
+print(f"DELETE_ND_AXIS_NONE_AB numpy_ms={numpy_ms:.3f} fnp_ms={fnp_ms:.3f} ratio={numpy_ms / fnp_ms:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}");
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "N-D axis=None scalar delete must be byte-identical to NumPy: {result}"
+    );
+    Ok(())
+}
