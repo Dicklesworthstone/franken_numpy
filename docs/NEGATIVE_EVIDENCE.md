@@ -4,6 +4,33 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - NO-SHIP: direct F64-to-I32 cast construction is only 1.09-1.24x; 100k is 1.12x
+
+`CalmGate`, `fnp-dtype`. Negative-ledger and Git-history searches found no
+prior direct source/target specialization or no-retry boundary for this core
+cast. The earlier dispatch-hoist win (`00ce3c56`) left three avoidable-looking
+costs in `ArrayStorage::F64 -> I32`: cloning the source into a `Vec<f64>`,
+zero-filling the destination, and copying converted values into it. The
+candidate instead collected the destination directly from the source slice
+using the identical `f64_to_wrapping_i128(value) as i32` expression. Same-type,
+structured, and string guards remained ahead of the candidate.
+
+Pinned same-worker `release-perf` Criterion runs on `vmi1156319` used all four
+existing `array_storage_cast/f64_to_i32` rows. 100 elements moved from 910ns to
+826ns (**1.10x**), 1,000 from 8,445ns to 7,742ns (**1.09x**), 10,000 from
+93,274ns to 75,435ns (**1.24x**, +/-12,584ns), and 100,000 from 881,317ns to
+785,918ns (**1.12x**). Three of four rows miss the 1.2x ship floor, including
+the decisive large row; the lone passing row is also the noisiest. The source
+candidate was removed before correctness/lint validation, leaving this
+evidence-only closeout.
+
+**No-retry boundary:** do not retry allocation-only direct collection for the
+F64-to-I32 source/target pair on this matrix. The residual cost is dominated by
+the wrapping float-to-integer conversion rather than the removed buffers.
+Reopen only with a distinct conversion primitive or vectorized algorithm that
+preserves NaN/infinity/saturation/wrapping behavior and clears 1.2x on every
+tracked size.
+
 ## 2026-07-12 - WIN (SHIP): weights= quantile/percentile (inverted_cdf) native - 3.35x (313.7 vs 1052.0ms at 8M x 3 qs; hz1 basis 2685ms) - the quantile lane's LAST item; the lane is 100% mined
 
 `cc_fnp` / FuchsiaStream. FOURTEENTH and final lane lever. numpy's weighted
