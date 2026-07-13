@@ -1898,3 +1898,65 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn packbits_native_parallel_matches_numpy() -> Result<(), String> {
+    // packbits parity coverage + basis pin. A native parallel packbits arm
+    // (mirror of the shipped unpackbits kernel) was built and gate-REJECTED
+    // 2026-07-13 at 1.040x: numpy's packbits is a SIMD movemask kernel
+    // (64M bools in 3.755ms = ~17 GB/s, memory-bound) - the 'single-threaded
+    // compute-bound' premise transferred from unpackbits was wrong. The
+    // DIRECTION ASYMMETRY: unpack (mask-expand, 8x larger DRAM writes)
+    // shipped at 3.5x; pack (movemask) is saturated. Rows pin passthrough
+    // parity incl. tail bytes, N-D flatten, kwargs, and the round-trip
+    // through the still-native unpackbits.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(359)
+verdicts = []
+def ab(name, a, **kw):
+    ours = fnp.packbits(a, **kw)
+    theirs = np.packbits(a, **kw)
+    if ours.tobytes() != theirs.tobytes() or str(ours.dtype) != str(theirs.dtype) or ours.shape != theirs.shape:
+        verdicts.append(f"FAIL {name}")
+B = rng.random(64_000_000) < 0.5
+ab("1-D bool 64M", B)
+ab("1-D bool tail n%8=3", B[: 32_000_003])
+U = rng.integers(0, 256, 40_000_000).astype(np.uint8)
+ab("1-D uint8 nonzero->1", U)
+ab("2-D bool flatten", B[: 48_000_000].reshape(6000, 8000))
+ab("3-D bool flatten", B[: 24_000_000].reshape(200, 400, 300))
+# kwarg / scope forms keep the delegate -> parity
+ab("axis kwarg", B[: 1_600_000].reshape(400, 4000), axis=1)
+ab("bitorder little", B[:2_000_000], bitorder="little")
+ab("int32 input", rng.integers(0, 2, 2_000_000).astype(np.int32))
+ab("F-contig", np.asfortranarray(B[: 1_000_000].reshape(1000, 1000)))
+ab("small", B[:1000])
+# round-trip through the native unpackbits sibling
+P = fnp.packbits(B[: 32_000_000])
+if not np.array_equal(fnp.unpackbits(P), np.unpackbits(np.packbits(B[: 32_000_000]))):
+    verdicts.append("FAIL roundtrip")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.packbits(B)); tf = best(lambda: fnp.packbits(B))
+print(f"PACKBITS_BOOL_64M_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces PACKBITS_BOOL_64M_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "native packbits must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
