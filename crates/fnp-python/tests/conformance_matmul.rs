@@ -416,11 +416,26 @@ if fnp.tensordot(t3a, t3b, axes=1).tobytes() != np.tensordot(t3a, t3b, axes=1).t
     verdicts.append("FAIL tensordot 3d axes=1")
 if fnp.multi_dot([a, b, c]).tobytes() != np.linalg.multi_dot([a, b, c]).tobytes():
     verdicts.append("FAIL multi_dot")
-# delegate shapes stay byte-identical (batched 3-D, matvec, below work gate)
-b3a = rng.random((8, 96, 96)) > 0.9
-b3b = rng.random((8, 96, 96)) > 0.9
-if fnp.matmul(b3a, b3b).tobytes() != np.matmul(b3a, b3b).tobytes():
-    verdicts.append("FAIL batched delegate")
+# batched (>=3-D matching batch dims) routes the bitpacked kernel too
+for dens in [0.0, 0.05, 0.5, 1.0]:
+    for shape_a, shape_b in [((8, 96, 96), (8, 96, 96)), ((5, 40, 130), (5, 130, 77)), ((2, 3, 64, 100), (2, 3, 100, 48))]:
+        a3 = rng.random(shape_a) < dens
+        b3 = rng.random(shape_b) < dens
+        r = fnp.matmul(a3, b3); e = np.matmul(a3, b3)
+        if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+            verdicts.append(f"FAIL batched dens={dens} shape={shape_a}")
+# batched einsum spec + chain route the same batched kernel
+e3a = rng.random((8, 128, 128)) > 0.9
+e3b = rng.random((8, 128, 128)) > 0.9
+if fnp.einsum("abc,acd->abd", e3a, e3b).tobytes() != np.einsum("abc,acd->abd", e3a, e3b).tobytes():
+    verdicts.append("FAIL batched einsum")
+if fnp.einsum("abc,acd,ade->abe", e3a, e3b, e3a).tobytes() != np.einsum("abc,acd,ade->abe", e3a, e3b, e3a).tobytes():
+    verdicts.append("FAIL batched einsum chain")
+# broadcast-batch (mismatched batch dims) stays a byte-identical delegate
+bba = rng.random((4, 96, 96)) > 0.9
+bbb = rng.random((96, 96)) > 0.9
+if fnp.matmul(bba, bbb).tobytes() != np.matmul(bba, bbb).tobytes():
+    verdicts.append("FAIL broadcast-batch delegate")
 v = rng.random(96) > 0.5
 if fnp.matmul(a[:96, :96], v).tobytes() != np.matmul(a[:96, :96], v).tobytes():
     verdicts.append("FAIL matvec delegate")
@@ -442,6 +457,13 @@ tn = best(lambda: np.dot(wa, wb)); tf = best(lambda: fnp.dot(wa, wb))
 print(f"DOT_BOOL_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 tn = best(lambda: np.inner(wa, wb)); tf = best(lambda: fnp.inner(wa, wb))
 print(f"INNER_BOOL_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+w3a = rng.random((16, 256, 256)) > 0.9
+w3b = rng.random((16, 256, 256)) > 0.9
+tn = best(lambda: np.matmul(w3a, w3b)); tf = best(lambda: fnp.matmul(w3a, w3b))
+print(f"MATMUL_BOOL_BATCHED_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.einsum("abc,acd->abd", w3a, w3b))
+tf = best(lambda: fnp.einsum("abc,acd->abd", w3a, w3b))
+print(f"EINSUM_BOOL_BATCHED_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 print(verdicts if verdicts else True)
 "#
         .into(),
