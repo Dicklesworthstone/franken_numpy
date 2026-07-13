@@ -1253,3 +1253,63 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn wide_rows_lexsort_bit_exact_matches_numpy() -> Result<(), String> {
+    // 2-D ROW-KEYS lexsort form: one (K, n) int array, rows are the keys,
+    // last row primary. Same ([u64; K], index) tuple contract as the
+    // sequence form -> byte-exact; F-contig/strided/5-row/axis=0/bool/small
+    // keep prior routing (delegate parity).
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(293)
+verdicts = []
+def w(*shape):
+    return rng.integers(-2**62, 2**62, shape)
+def ab(name, m, **kw):
+    if fnp.lexsort(m, **kw).tobytes() != np.lexsort(m, **kw).tobytes():
+        verdicts.append(f"FAIL {name}")
+ab("2-row wide i64", w(2, 600_000))
+ab("3-row wide i64", w(3, 600_000))
+# dense PRIMARY (last row) ties exercise lower-row ordering
+mp = w(3, 600_000)
+mp[2] = rng.integers(0, 10, 600_000) * 2**58
+ab("dense primary row", mp)
+# ALL rows dense -> original-index stability (small-span data through the arm)
+ab("all dense rows", rng.integers(0, 7, (3, 600_000)) * 2**58)
+# u64 above 2**63 + i32 dtypes
+ab("u64 rows", rng.integers(0, 2**64, (2, 500_000), dtype=np.uint64))
+ab("i32 rows", rng.integers(-2**31, 2**31 - 1, (3, 500_000)).astype(np.int32))
+# layout/scope defers keep byte parity: F-contig (.T), strided view, 5 rows,
+# axis=0, bool rows, small n
+ab("F-contig transposed", w(400_000, 2).T)
+ab("strided rows", w(2, 800_000)[:, ::2])
+ab("5 rows", w(5, 300_000))
+ab("axis=0", w(2, 1000), axis=0)
+ab("bool rows", rng.integers(0, 2, (2, 400_000)).astype(bool))
+ab("small", w(3, 1000))
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = w(3, 4_000_000)
+tn = best(lambda: np.lexsort(W)); tf = best(lambda: fnp.lexsort(W))
+print(f"LEXSORT_WIDEROWS3_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces LEXSORT_WIDEROWS3_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "wide 2-D row-keys lexsort must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
