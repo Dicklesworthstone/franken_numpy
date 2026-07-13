@@ -435,6 +435,19 @@ impl NdLayout {
     }
 
     pub fn broadcast_to(&self, shape: Vec<usize>) -> Result<Self, ShapeError> {
+        if shape == self.shape
+            && self.shape.len() == self.strides.len()
+            && self.is_contiguous()
+        {
+            return Ok(Self {
+                shape,
+                strides: self.strides.clone(),
+                item_size: self.item_size,
+                writeable: false,
+                has_internal_overlap: false,
+            });
+        }
+
         let strides = broadcast_strides(&self.shape, &self.strides, &shape)?;
         let has_internal_overlap = detect_internal_overlap(&shape, &strides, self.item_size)?;
         Ok(Self {

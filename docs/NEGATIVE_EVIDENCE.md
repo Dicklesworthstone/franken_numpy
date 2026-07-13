@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-13 - WIN (SHIP): identical contiguous `NdLayout::broadcast_to` skips exact overlap sort - 980.7x
+
+`CalmGate`, `fnp-ndarray`. When the target shape exactly matches a layout with
+valid shape/stride rank and proven C contiguity, `broadcast_to` now clones the
+known strides and returns the required read-only, non-overlapping layout. The
+old path rebuilt the same strides and, below the 200,000-element cutoff,
+enumerated and sorted every byte offset to rediscover that a contiguous layout
+does not overlap. Malformed, non-contiguous, expanded, zero-item-size, and
+otherwise uncertain public layouts still use the original validation and
+overlap detector.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran on
+effective worker `vmi1156319` with RCH self-healing disabled. An adjacent
+same-binary control copied the former `broadcast_strides` plus exact overlap
+algorithm (20 samples, 0.25s warm-up, 1s measurement). Identical C-contiguous
+100x100 broadcasting improved from 59,823ns to 61ns (**980.7x**). Ordering,
+shape, strides, item size, read-only status, overlap status, errors, floating
+point, and RNG behavior are unchanged. The temporary control was removed and
+the production fast path was committed immediately without a second benchmark,
+tests, or lint.
+
 ## 2026-07-13 - NO-SHIP: exact unit-interval `uniform` route misses the sub-threshold floor
 
 `CalmGate`, `fnp-random`. This paid the earlier one-pass reject's reopen
