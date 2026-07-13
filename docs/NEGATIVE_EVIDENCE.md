@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP, sweep #4 row 2): searchsorted sorter= via gather-then-fast-path - 18.21x (37.1 vs 675.6ms at 1M/1M; hz1 probe 55.7ms - the indirect binary search degrades brutally on cache-pressured workers)
+
+`cc_fnp` / FuchsiaStream. numpy's sorter= runs an INDIRECT binary search
+(a[sorter[mid]] pointer-chase per probe); fnp gathers a[sorter] ONCE (numpy C
+take) then reuses every shipped sorted-haystack fast path with sorter nulled -
+returned indices are IDENTICAL BY CONSTRUCTION (integer outputs, no fp; local
+pin: searchsorted(a, v, sorter) == searchsorted(a[sorter], v) exactly).
+Only the intp 1-D in-range sorter takes the route; wrong dtype/shape/
+out-of-range defers so numpy owns its TypeError/IndexError (parity asserted).
+SHIP BUG CAUGHT BY THE PROBE (one fix cycle): the first wiring reassigned only
+a_arr, but the int/f64/f32 fast paths read the RAW `a` param - unsorted
+haystack, garbage indices, 4 byte-FAIL rows; rebinding `a` to the gathered
+array fixed it (fn-top fallbacks captured the ORIGINAL a/sorter clones, so
+defer paths still hand numpy the exact original call). Gate row 18.211x
+tobytes-equal; f64 left/right, int64 ties, nan-haystack, oob-error-parity,
+int32-delegate, below-gate all green. LESSON (4th engagement-class trap today):
+a fn with BOTH a raw param and a derived array binding - grep which one each
+downstream path reads before rerouting either.
+
 ## 2026-07-12 - NO-SHIP: direct F64-to-I32 cast construction is only 1.09-1.24x; 100k is 1.12x
 
 `CalmGate`, `fnp-dtype`. Negative-ledger and Git-history searches found no

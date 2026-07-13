@@ -1387,3 +1387,79 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "argsort complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn searchsorted_sorter_gather_route_matches_numpy() -> Result<(), String> {
+    // sorter= route: gather a[sorter] once, then the shipped sorted-haystack fast
+    // paths; indices identical by construction (integer outputs, no fp). Batteries:
+    // f64 + int64 haystacks x side left/right, dense ties, NaN in haystack,
+    // out-of-range sorter error parity, non-intp sorter delegate, below-gate.
+    // Prints a coarse interleaved best-of-7 A/B for the ship record.
+    let script = fnp_script(
+        r#"
+import time
+verdicts = []
+rng = np.random.default_rng(20260713)
+n = 1_000_000
+a = rng.standard_normal(n)
+srt = np.argsort(a, kind="stable")
+v = rng.standard_normal(n)
+for side in ("left", "right"):
+    r = fnp.searchsorted(a, v, side=side, sorter=srt)
+    e = np.searchsorted(a, v, side=side, sorter=srt)
+    if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL f64 side={side} bytes")
+ai = rng.integers(-1000, 1000, n)
+si = np.argsort(ai, kind="stable")
+vi = rng.integers(-1200, 1200, n)
+r, e = fnp.searchsorted(ai, vi, sorter=si), np.searchsorted(ai, vi, sorter=si)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL int64-ties bytes")
+an = a.copy(); an[12345] = np.nan
+sn = np.argsort(an, kind="stable")
+r, e = fnp.searchsorted(an, v[:1000], sorter=sn), np.searchsorted(an, v[:1000], sorter=sn)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL nan-haystack bytes")
+bad = srt.copy(); bad[7] = n + 5
+fe = ne = None
+try:
+    fnp.searchsorted(a, v[:10], sorter=bad)
+except Exception as ex:
+    fe = type(ex).__name__
+try:
+    np.searchsorted(a, v[:10], sorter=bad)
+except Exception as ex:
+    ne = type(ex).__name__
+if fe != ne:
+    verdicts.append(f"FAIL oob-sorter error parity fnp={fe} np={ne}")
+s32 = srt.astype(np.int32)
+r, e = fnp.searchsorted(a, v[:1000], sorter=s32), np.searchsorted(a, v[:1000], sorter=s32)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL int32-sorter delegate bytes")
+small = a[:512]
+ss = np.argsort(small, kind="stable")
+r, e = fnp.searchsorted(small, v[:100], sorter=ss), np.searchsorted(small, v[:100], sorter=ss)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL below-gate bytes")
+def best(fn, reps=7):
+    fn(); best_s = float("inf")
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); best_s = min(best_s, time.perf_counter() - t0)
+    return best_s * 1000
+tn = best(lambda: np.searchsorted(a, v, sorter=srt))
+tf = best(lambda: fnp.searchsorted(a, v, sorter=srt))
+print(f"SEARCHSORTED_SORTER_COARSE_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces SEARCHSORTED_SORTER_COARSE_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "sorter= gather route must return numpy-identical indices incl error parity: {result}"
+    );
+    Ok(())
+}
