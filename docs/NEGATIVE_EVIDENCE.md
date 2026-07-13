@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - NO-SHIP: one-pass sub-threshold PCG uniform generation is neutral (-6.6% to +7.3%)
+
+`CalmGate`, `fnp-random`. Negative-ledger and Git-history searches found no
+prior one-pass uniform retry boundary. The candidate restored the pre-parallel
+serial implementation for `Generator::uniform` below the 65,536-element
+parallel gate: allocate and compute `low + next_f64() * range` in one pass
+instead of filling unit uniforms and applying the affine transform in a second
+sweep. Both PCG backends consume the same inherent `next_f64` draw once per
+element, use the same IEEE expression, advance to the same state, and leave the
+u32 buffer unchanged. Existing raw-bit, post-state, SHA-256, live-NumPy, and
+above-gate parallel/serial golden tests cover that exactness argument.
+
+Pinned same-worker `release-perf` Criterion runs on effective worker
+`vmi1156319` used 20 samples, 0.5s warm-up, and 2s measurement. Baseline to
+candidate was 338 to 315ns at 100 elements (**1.073x**), 2,717 to 2,895ns at
+1,000 (**0.938x**), and 26,517 to 26,747ns at 10,000 (**0.991x**). The only
+positive row misses the 1.20x keep floor and both larger rows regress. Source
+was restored exactly; no correctness run was warranted for the docs-only
+reject. Do not retry this one-pass substitution alone on the existing size
+matrix. Reopen only if it removes another material cost or a same-worker run
+shows at least 1.20x across the sub-threshold family.
+
 ## 2026-07-12 - WIN (SHIP, sweep #4 row 4): int einsum GEMM-idiom FAMILY COMPLETE - batched 13.91x (5.6 vs 78.0ms), transposed 3.33x, gram green; one associativity argument covered what took the f16 family three cracked contract classes
 
 `cc_fnp` / FuchsiaStream. Extends 8ccb98c9 to the whole 2-op family in one arm:
