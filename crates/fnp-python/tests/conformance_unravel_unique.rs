@@ -1792,3 +1792,54 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn f64_flat_sort_avx512_regate_matches_numpy() -> Result<(), String> {
+    // Stale-basis regate (ledger 2026-07-13): on avx512f hosts numpy's
+    // x86-simd-sort f64 qsort owns the flat basis (92.9ms at 8M vs 96.1ms
+    // parallel merge sort, same-run measurement), so the flat f64 value-sort
+    // arm now defers there; the original 1.6-1.85x margin predates that
+    // numpy kernel and survives only on non-AVX-512 hosts, where the arm
+    // stays enabled. AXIS arms are NOT gated (their NaN twins measured
+    // 1.01-1.13x - wins). On the (avx512) gate worker the flat AB should
+    // read ~1.0x (delegate) and the lastaxis control must stay a win.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(349)
+verdicts = []
+def ab(name, a, **kw):
+    if fnp.sort(a, **kw).tobytes() != np.sort(a, **kw).tobytes():
+        verdicts.append(f"FAIL {name}")
+F = rng.standard_normal(8_000_000)
+ab("flat clean f64", F)
+ab("flat stable kind", F, kind="stable")
+ab("flat small", F[:1000])
+M = rng.standard_normal((4000, 2000))
+ab("lastaxis clean", M, axis=-1)
+ab("axis0 clean", M, axis=0)
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.sort(F)); tf = best(lambda: fnp.sort(F))
+print(f"SORT_F64_FLAT_REGATE_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn2 = best(lambda: np.sort(M, axis=-1)); tf2 = best(lambda: fnp.sort(M, axis=-1))
+print(f"SORT_F64_LASTAXIS_CONTROL_AB numpy_ms={tn2:.3f} fnp_ms={tf2:.3f} ratio={tn2 / tf2:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces SORT_F64_FLAT_REGATE_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "regated flat f64 sort must stay bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
