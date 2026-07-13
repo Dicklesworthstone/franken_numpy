@@ -647,6 +647,86 @@ print(verdicts if verdicts else True)
 }
 
 #[test]
+fn noncontig_int_bool_matmul_contiguate_bit_exact_matches_numpy() -> Result<(), String> {
+    // Non-contiguous int/bool GEMM operands (transposed grams A @ B.T, strided
+    // and F-order views, negative strides, batched swapaxes) now take ONE
+    // ascontiguousarray copy after the work gate and route the native kernels;
+    // numpy's serial loop on a strided int operand measured 2652ms at 1024^2.
+    // Values are identical either way, so every row pins bytes against numpy.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(53)
+verdicts = []
+for dt in [np.int64, np.int32, np.uint8]:
+    info = np.iinfo(dt)
+    A = rng.integers(info.min // 2, info.max // 2, (200, 200)).astype(dt)
+    B = rng.integers(info.min // 2, info.max // 2, (200, 200)).astype(dt)
+    W = rng.integers(info.min // 2, info.max // 2, (200, 400)).astype(dt)
+    cases = [
+        ("A@B.T", A, B.T), ("A.T@B", A.T, B), ("A.T@B.T", A.T, B.T),
+        ("strided", W[:, ::2], B), ("neg-stride", A[::-1], B),
+        ("F-order", np.asfortranarray(A), B),
+    ]
+    for name, x, y in cases:
+        r = fnp.matmul(x, y); e = np.matmul(x, y)
+        if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+            verdicts.append(f"FAIL matmul {name} {dt.__name__}")
+        rd = fnp.dot(x, y); ed = np.dot(x, y)
+        if rd.tobytes() != ed.tobytes():
+            verdicts.append(f"FAIL dot {name} {dt.__name__}")
+Ab = rng.random((200, 200)) > 0.9
+Bb = rng.random((200, 400)) > 0.9
+if fnp.matmul(Ab, Ab.T).tobytes() != np.matmul(Ab, Ab.T).tobytes():
+    verdicts.append("FAIL bool A@A.T")
+if fnp.matmul(Bb[:, ::2], Ab).tobytes() != np.matmul(Bb[:, ::2], Ab).tobytes():
+    verdicts.append("FAIL bool strided")
+# batched swapaxes views route the batched dispatcher's contiguation
+A3 = rng.integers(-1000, 1000, (8, 96, 96)).astype(np.int64)
+B3 = rng.integers(-1000, 1000, (8, 96, 96)).astype(np.int64)
+r = fnp.matmul(A3.swapaxes(-1, -2), B3); e = np.matmul(A3.swapaxes(-1, -2), B3)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL batched swapaxes")
+b3 = rng.random((8, 96, 96)) > 0.9
+r = fnp.matmul(b3, b3.swapaxes(-1, -2)); e = np.matmul(b3, b3.swapaxes(-1, -2))
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL bool batched swapaxes")
+# below-gate non-contiguous stays a byte-identical delegate (no copy paid)
+S = rng.integers(-5, 5, (12, 12)).astype(np.int64)
+if fnp.matmul(S, S.T).tobytes() != np.matmul(S, S.T).tobytes():
+    verdicts.append("FAIL below-gate non-contig delegate")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+G = rng.integers(-1000, 1000, (1024, 1024))
+tn = best(lambda: np.matmul(G, G.T)); tf = best(lambda: fnp.matmul(G, G.T))
+print(f"MATMUL_INT_GRAM_T_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+Ws = rng.integers(-1000, 1000, (1024, 2048))[:, ::2]
+tn = best(lambda: np.matmul(Ws, G)); tf = best(lambda: fnp.matmul(Ws, G))
+print(f"MATMUL_INT_STRIDED_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+Gb = rng.random((1024, 1024)) > 0.9
+tn = best(lambda: np.matmul(Gb, Gb.T)); tf = best(lambda: fnp.matmul(Gb, Gb.T))
+print(f"MATMUL_BOOL_GRAM_T_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces MATMUL_*_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "non-contiguous int/bool matmul must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn int_multi_dot_native_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy integer multi_dot is a chain of no-BLAS matmuls (slow). The native int GEMM
     // chain is bit-exact (matrix mult over Z/2^w is associative) incl. overflow wrap and
