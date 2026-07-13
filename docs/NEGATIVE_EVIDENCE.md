@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-13 - WIN (SHIP): np.delete axis=None N-D flat-buffer unlock — 1.706x vs NumPy, 40.1% fnp latency reduction
+
+`WindyCardinal`. Negative-ledger-first follow-up to the input-form sweep's explicitly unpriced
+`delete/insert axis=None flatten` residual. NumPy ravels an N-D input in C order when `axis=None`,
+and the existing native f64 scalar-delete kernel already reads the full C-contiguous `PyBuffer` as
+one flat slice and returns a 1-D result. The one lever is only the dimension gate: admit
+C-contiguous N-D and 0-D buffers for `axis=None`, while preserving the 1-D restriction for every
+explicit axis. Allocation, index normalization, and the parallel two-run copy kernel are unchanged.
+
+Raw dtype/shape/byte parity passed for 2-D inputs across indices `{0, mid, n-1, -1, -n}` including
+NaN, infinities, and signed zero, plus 3-D and 0-D inputs. F-contiguous input, explicit axes 0/-1 on
+N-D, and out-of-bounds indices retain NumPy delegation/error behavior. The locked harness is
+`delete_nd_axis_none_flat_view_matches_numpy`. Strict remote-only, same-worker `release-perf`
+foreground A/B on `vmi1293453` (8M f64, shape 2000x4000, best of 3; LTO disabled and 16 codegen
+units): baseline NumPy 7.501 ms / fnp 6.981 ms = 1.074x (`j-29928833041827182`, source
+`55753936`); candidate NumPy 7.134 ms / fnp 4.182 ms = 1.706x (`j-29928833041827192`, source
+`6a3e980a`). Candidate fnp latency is 40.1% below the pre-change fnp baseline. KEEP.
+
 ## 2026-07-13 - WIN (SHIP): np.insert axis=None N-D flat-buffer unlock — 1.465x vs NumPy, 27.5% fnp latency reduction
 
 `WindyCardinal`. Negative-ledger-first follow-up to the 2026-07-02 scalar-insert row, which explicitly
@@ -21,6 +39,25 @@ out-of-bounds indices retain NumPy delegation/error behavior. The locked harness
 codegen units for the quick gate): baseline NumPy 14.193 ms / fnp 13.952 ms = 1.017x
 (`j-29928833041827041`); candidate NumPy 14.812 ms / fnp 10.109 ms = 1.465x
 (`j-29928833041827066`). Candidate fnp latency is 27.5% below the pre-change fnp baseline. KEEP.
+
+## 2026-07-13 - PROBE (SPLIT VERDICT): np.add.at bases - histogram regime SATURATED, large-target regime 136ms OPEN
+
+RainySparrow, worker vmi1149989 (numpy 2.2.4 - NOTE: the rch pool is
+numpy-VERSION-heterogeneous as well as ISA-heterogeneous; this worker's
+sort bases also differ from the 2.4.6 gate worker's). Priced BEFORE
+building, per the packbits direction-asymmetry lesson:
+- add_at_i64_hist1k_8m: 7.5ms (8M updates into 1k slots) - numpy's
+  ufunc.at fast path (1.24+) is real; ~= bincount_weights_ref 10.1ms.
+  Private-accumulator parallelization would chase ~5ms absolute: REJECT
+  the histogram regime.
+- add_at_i64_large_8m: 136.0ms (8M random updates into 8M slots) -
+  DRAM-latency-bound serial scatter (17ns/update), version-independent
+  physics. OPEN: parallel atomic fetch_add aggregates memory-level
+  parallelism (the searchsorted-MLP class); int wrapping add is
+  commutative so duplicate-index order is byte-irrelevant. Floats stay
+  delegated (observable accumulation order).
+Probe rows added to the #[ignore]d baseline vehicle
+(probe_gate_worker_sort_class_bases).
 
 ## 2026-07-13 - REJECT: native parallel packbits - 1.040x; numpy's packbits is movemask-SIMD saturated (3433bb7a)
 
