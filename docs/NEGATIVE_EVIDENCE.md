@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - NO-SHIP: single-dispatch `ArrayStorage::get_f64` blocks optimized codegen
+
+`CalmGate`, `fnp-dtype`. The candidate replaced the initial `self.len()` enum
+dispatch plus the value dispatch with one match whose arms used `get(index)`.
+Every arm preserved the same numeric conversion, in-bounds NaN behavior for
+string/structured storage, and exact `{index, len}` error; ordering,
+floating-point arithmetic, RNG state, and allocation behavior were unchanged.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran on
+effective worker `vmi1156319` with RCH self-healing disabled and the old logic
+as an adjacent control in the same optimized binary (20 samples, 0.25s warm-up,
+1s measurement). One hundred sequential in-bounds F64 reads regressed from
+160ns to 432ns (**0.37x**). The iterator/closure-shaped match prevented the
+optimizer from producing the much faster code it obtains from the existing
+two-dispatch form. Source and temporary benchmark rows were restored, and this
+evidence-only closeout was committed immediately without refinement, a second
+benchmark, tests, or lint. Do not retry `get(index)`/closure arms as a
+single-dispatch replacement; a future retry needs disassembly-backed codegen
+evidence for a structurally different formulation.
+
 ## 2026-07-12 - NO-SHIP: single-input `broadcast_shapes` identity fast path taxes multi-input calls
 
 `CalmGate`, `fnp-ndarray`. The candidate returned `shape.to_vec()` when
