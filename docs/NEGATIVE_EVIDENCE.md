@@ -4,6 +4,22 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP): BOOL einsum GEMM idioms + chains reroute to numpy's own bool matmul - 5.99x (14.6 vs 87.6ms at 512^2) - the OR-AND semiring is the day's FOURTH zero-defer exactness class
+
+`cc_fnp` / FuchsiaStream. numpy's bool EINSUM loop runs ~107ms at 512^2 while
+its own bool MATMUL runs 14ms - and einsum's bool accumulation is np.add on
+bools = logical OR, exactly the matmul semiring (pinned 0-fail across densities
+0.001..0.99, all idioms via .T views, batched, chains). The arm reroutes bool
+GEMM-idiom specs ("ij,jk->ik", transposed, gram, batched, and both chain
+validators) to numpy.matmul left-folds - pure reroute-to-numpy's-faster-path
+(sorter= precedent), no native kernel at all. OR is associative AND idempotent,
+so any pairing/order is byte-identical. Gate row 5.990x tobytes-equal;
+batteries sparse+dense x 3 idioms, batched, batched-chain, transposed-out
+delegate - all green. EXACTNESS-CLASS LEDGER, final for the day: (1) selection
+ops, (2) integer wrapping ops, (3) integer/bool semiring compositions, (4)
+bool OR-AND - none need hazard defers; float arithmetic remains the only
+contract-crack class.
+
 ## 2026-07-12 - WIN (SHIP): same-slice `broadcast_shape` skips value scan - 1.30x at rank 64
 
 `CalmGate`, `fnp-ndarray`. Negative-ledger and Git-history searches found no

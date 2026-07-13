@@ -1713,6 +1713,28 @@ r = fnp.einsum("abc,bcd,bde->abe" if False else "abc,acd,ade->aeb", *t3s)
 e = np.einsum("abc,acd,ade->aeb", *t3s)
 if r.tobytes() != e.tobytes():
     verdicts.append("FAIL batched-transposed-out delegate bytes")
+# BOOL family: einsum OR-accumulation == matmul semiring (rerouted)
+for dens in (0.01, 0.5):
+    pa = rng.random((256, 256)) > (1 - dens)
+    pb = rng.random((256, 256)) > (1 - dens)
+    for spec, xa, xb in (("ij,jk->ik", pa, pb), ("ij,kj->ik", pa, pb), ("ji,jk->ik", pa, pb)):
+        r, e = fnp.einsum(spec, xa, xb), np.einsum(spec, xa, xb)
+        if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+            verdicts.append(f"FAIL bool {spec} dens={dens} bytes")
+pb3 = [rng.random((4, 64, 64)) > 0.9 for _ in range(3)]
+r = fnp.einsum("abc,acd->abd", pb3[0], pb3[1])
+e = np.einsum("abc,acd->abd", pb3[0], pb3[1])
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL bool batched bytes")
+r = fnp.einsum("abc,acd,ade->abe", *pb3)
+e = np.einsum("abc,acd,ade->abe", *pb3)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL bool batched-chain bytes")
+pс = rng.random((48, 48)) > 0.7
+r = fnp.einsum("ij,jk->ki", pa, pb)
+e = np.einsum("ij,jk->ki", pa, pb)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL bool transposed-out delegate bytes")
 big = rng.integers(2**60, 2**62, (128, 128))
 r, e = fnp.einsum("ij,jk->ik", big, big), np.einsum("ij,jk->ik", big, big)
 if r.tobytes() != e.tobytes():
@@ -1760,6 +1782,11 @@ qb3 = rng.integers(-50, 50, (8, 256, 256))
 tn = best(lambda: np.einsum("abc,acd,ade->abe", qb1, qb2, qb3, optimize=True), reps=3)
 tf = best(lambda: fnp.einsum("abc,acd,ade->abe", qb1, qb2, qb3, optimize=True), reps=3)
 print(f"EINSUM_INT_BATCHED_3CHAIN_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+wa = rng.random((512, 512)) > 0.9
+wb = rng.random((512, 512)) > 0.9
+tn = best(lambda: np.einsum("ij,jk->ik", wa, wb), reps=3)
+tf = best(lambda: fnp.einsum("ij,jk->ik", wa, wb), reps=3)
+print(f"EINSUM_BOOL_GEMM_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 print(verdicts if verdicts else True)
 "#
         .into(),
