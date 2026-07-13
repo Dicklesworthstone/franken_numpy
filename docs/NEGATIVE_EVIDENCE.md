@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - NO-SHIP: later-Complex128 `common_type` terminal taxes ordinary pairs
+
+`CalmGate`, `fnp-dtype`. The shipped first-input Complex128 terminal remains a
+win, but the ledger did not cover reaching Complex128 later in the fold. The
+candidate returned as soon as any promotion produced Complex128, which is
+exact because `common_type` maps all other kinds into the
+F64/F32/F16/Complex64/Complex128 domain that Complex128 absorbs. Ordering,
+results, errors, floating-point values, and RNG state were unchanged; existing
+promotion and common-type tests cover the algebraic argument.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran on
+effective worker `vmi1156319`, with old-logic controls adjacent in the same
+optimized binary (20 samples, 0.25s warm-up, 1s measurement). Complex128 in
+position two with a six-dtype tail improved from 58ns to 13ns (**4.46x**), but
+the per-iteration terminal check regressed every ordinary pair: F32+F64 5->8ns
+(**0.63x**), I32+F32 5->6ns (**0.83x**), and Complex64+Complex128 9->11ns
+(**0.82x**). Source and temporary rows were restored, and this evidence-only
+closeout was committed immediately without refinement, a second benchmark,
+tests, or lint. Do not retry a terminal check inside every fold iteration;
+the existing zero-tax first-input shortcut remains the accepted boundary.
+
 ## 2026-07-12 - WIN (SHIP): BOOL einsum GEMM idioms + chains reroute to numpy's own bool matmul - 5.99x (14.6 vs 87.6ms at 512^2) - the OR-AND semiring is the day's FOURTH zero-defer exactness class
 
 `cc_fnp` / FuchsiaStream. numpy's bool EINSUM loop runs ~107ms at 512^2 while
