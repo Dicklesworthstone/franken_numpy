@@ -22,6 +22,23 @@ codegen units for the quick gate): baseline NumPy 14.193 ms / fnp 13.952 ms = 1.
 (`j-29928833041827041`); candidate NumPy 14.812 ms / fnp 10.109 ms = 1.465x
 (`j-29928833041827066`). Candidate fnp latency is 27.5% below the pre-change fnp baseline. KEEP.
 
+## 2026-07-13 - REJECT: native parallel packbits - 1.040x; numpy's packbits is movemask-SIMD saturated (3433bb7a)
+
+RainySparrow. A parallel packbits arm mirroring the SHIPPED 3.5x
+unpackbits kernel was built and rejected on its single gate run:
+PACKBITS_BOOL_64M_AB numpy_ms=3.755 fnp_ms=3.609 ratio=1.040. numpy's
+pack_inner is SIMD movemask (~17 GB/s at 64M bools, memory-bound); the
+'single-threaded compute-bound' premise borrowed from unpackbits does
+NOT transfer. DIRECTION-ASYMMETRY RULE: an op and its inverse can sit
+in different perf classes - unpack (mask-EXPAND, 8x-larger DRAM writes,
+no movemask inverse) parallelizes 3.5x while pack (movemask compress)
+is saturated single-threaded. Before mirroring a shipped kernel onto
+its inverse op, probe the inverse's numpy basis first (the
+defer-on-special pricing rule, inverse-op edition). Kernel in stash
+('REJECTED native packbits arm'); parity + basis rows kept in
+conformance_unravel_unique::packbits_native_parallel_matches_numpy.
+Retry predicate: none - reopen only if numpy drops the movemask path.
+
 ## 2026-07-13 - NEUTRAL (VALIDATED): int sort-class arms SURVIVE the numpy SIMD-qsort re-baseline (85b20603)
 
 RainySparrow. Follow-through of the f64 regate below on the int family,
