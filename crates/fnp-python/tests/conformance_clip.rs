@@ -643,3 +643,71 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn clip_f32_array_bounds_bit_exact_matches_numpy() -> Result<(), String> {
+    // f32 arms of the consolidated float array-bounds kernel: all three
+    // broadcast forms with the same strict select rules (ties copy the bound,
+    // NaN in a propagates, NaN bounds poison) in f32 precision.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(139)
+verdicts = []
+A = (rng.standard_normal((2048, 1024)) * 3).astype(np.float32)
+A[rng.random((2048, 1024)) < 0.01] = np.nan
+Ls = (rng.standard_normal((2048, 1024)) - 1).astype(np.float32)
+Hs = (rng.standard_normal((2048, 1024)) + 1).astype(np.float32)
+if fnp.clip(A, Ls, Hs).tobytes() != np.clip(A, Ls, Hs).tobytes():
+    verdicts.append("FAIL f32 same-shape")
+lo = Ls[0].copy(); hi = Hs[0].copy()
+lo[7] = np.float32(np.nan); hi[13] = np.float32(np.nan)
+lo[100] = np.float32(2.0); hi[100] = np.float32(-2.0)
+r = fnp.clip(A, lo, hi); e = np.clip(A, lo, hi)
+if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL f32 row bounds NaN/inverted")
+cl = Ls[:, :1].copy(); ch = Hs[:, :1].copy()
+if fnp.clip(A, cl, ch).tobytes() != np.clip(A, cl, ch).tobytes():
+    verdicts.append("FAIL f32 col bounds")
+# f32 signed-zero ties copy the bound operand
+z = np.zeros((1024, 1024), dtype=np.float32); z[::2] = np.float32(-0.0)
+zl = np.full(1024, -0.0, dtype=np.float32); zh = np.full(1024, 0.0, dtype=np.float32)
+if fnp.clip(z, zl, zh).tobytes() != np.clip(z, zl, zh).tobytes():
+    verdicts.append("FAIL f32 signed-zero ties")
+# mixed f64/f32 bounds promote - delegate
+if fnp.clip(A, lo.astype(np.float64), hi).tobytes() != np.clip(A, lo.astype(np.float64), hi).tobytes():
+    verdicts.append("FAIL mixed-precision delegate")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.standard_normal((4096, 4096)).astype(np.float32)
+Wl = (rng.standard_normal((4096, 4096)) - 1).astype(np.float32)
+Wh = (rng.standard_normal((4096, 4096)) + 1).astype(np.float32)
+# f32 same-shape stays a DELEGATE (numpy's 2x-lane SIMD wins there; measured
+# 0.748x loss before the scope cut) - parity row only, no perf claim.
+if fnp.clip(W, Wl, Wh).tobytes() != np.clip(W, Wl, Wh).tobytes():
+    verdicts.append("FAIL f32 same-shape delegate")
+wl = Wl[0].copy(); wh = Wh[0].copy()
+tn = best(lambda: np.clip(W, wl, wh)); tf = best(lambda: fnp.clip(W, wl, wh))
+print(f"CLIP_F32_BCAST_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+wcl = Wl[:, :1].copy(); wch = Wh[:, :1].copy()
+tn = best(lambda: np.clip(W, wcl, wch)); tf = best(lambda: fnp.clip(W, wcl, wch))
+print(f"CLIP_F32_COLS_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces CLIP_F32_*_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "f32 array-bounds clip must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
