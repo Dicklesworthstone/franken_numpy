@@ -19425,11 +19425,25 @@ impl UFuncArray {
                 }
             } else {
                 // Common no-sidecar case: gather directly, skipping the index Vec.
-                let compute = |flat: usize| arr.values[(flat / stride) % alen];
-                let values: Vec<f64> = if parallel {
-                    (0..out_count).into_par_iter().map(compute).collect()
+                // Power-of-two grids can strength-reduce both integer operations.
+                // Keep this branch outside the element loop so the hot closure is
+                // only a shift, mask, and gather.
+                let values: Vec<f64> = if stride.is_power_of_two() && alen.is_power_of_two() {
+                    let shift = stride.trailing_zeros();
+                    let mask = alen - 1;
+                    let compute = |flat: usize| arr.values[(flat >> shift) & mask];
+                    if parallel {
+                        (0..out_count).into_par_iter().map(compute).collect()
+                    } else {
+                        (0..out_count).map(compute).collect()
+                    }
                 } else {
-                    (0..out_count).map(compute).collect()
+                    let compute = |flat: usize| arr.values[(flat / stride) % alen];
+                    if parallel {
+                        (0..out_count).into_par_iter().map(compute).collect()
+                    } else {
+                        (0..out_count).map(compute).collect()
+                    }
                 };
                 Self {
                     shape: out_shape.clone(),

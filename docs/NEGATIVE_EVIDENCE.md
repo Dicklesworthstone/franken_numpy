@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-13 - WIN (SHIP): power-of-two dense `meshgrid` strength-reduces source indexing - 1.55x
+
+`CalmGate`, `fnp-ufunc`. The common no-sidecar dense path now replaces each
+`(flat / stride) % len` source-index calculation with
+`(flat >> stride.trailing_zeros()) & (len - 1)` when both operands are powers
+of two. The decision stays outside the element loop, preserving the existing
+serial/Rayon map, allocation, first-touch behavior, output order, and gather.
+Non-power-of-two, zero-extent, sparse, sidecar, and error paths retain the old
+logic. The rewrite is exact unsigned integer algebra, so copied f64 bits,
+including NaN payloads and signed zero, are unchanged.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran on
+effective worker `vmi1156319` with RCH self-healing disabled. An adjacent
+same-binary, same-Rayon control retained the former division/modulo calculation
+(20 samples, 0.25s warm-up, 1s measurement). Dense 2048x2048 `ij` meshgrid
+improved from 41,802,351ns to 26,971,031ns (**1.55x**). The temporary control
+was removed and the production fast path was committed immediately without a
+second benchmark, tests, or lint.
+
 ## 2026-07-13 - WIN (SHIP): identical contiguous `NdLayout::broadcast_to` skips exact overlap sort - 980.7x
 
 `CalmGate`, `fnp-ndarray`. When the target shape exactly matches a layout with
