@@ -424,10 +424,19 @@ ai = rng.integers(-1000, 1000, (400_000, 3))
 bi = rng.integers(-1000, 1000, (400_000, 3))
 if fnp.cross(ai, bi.astype(np.int32)).tobytes() != np.cross(ai, bi.astype(np.int32)).tobytes():
     verdicts.append("FAIL mixed-dtype delegate")
-a0 = rng.integers(-1000, 1000, (3, 400_000))
-b0 = rng.integers(-1000, 1000, (3, 400_000))
-if fnp.cross(a0, b0, axis=0).tobytes() != np.cross(a0, b0, axis=0).tobytes():
-    verdicts.append("FAIL axis=0 delegate")
+# axis=0 (3,N) int now engages the generalized kernel (all widths + wrap)
+for dt0 in [np.int64, np.int32, np.uint8]:
+    info = np.iinfo(dt0)
+    a0 = rng.integers(info.min // 2, info.max // 2, (3, 400_000)).astype(dt0)
+    b0 = rng.integers(info.min // 2, info.max // 2, (3, 400_000)).astype(dt0)
+    r = fnp.cross(a0, b0, axis=0); e = np.cross(a0, b0, axis=0)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL axis=0 {dt0.__name__}")
+aw = np.full((3, 400_000), 5_000_000_000, dtype=np.int64)
+bw = np.full((3, 400_000), -7_000_000_000, dtype=np.int64)
+bw[1] = 3_000_000_000
+if fnp.cross(aw, bw, axis=0).tobytes() != np.cross(aw, bw, axis=0).tobytes():
+    verdicts.append("FAIL axis=0 overflow wrap")
 nc = rng.integers(-1000, 1000, (400_000, 6))[:, ::2]
 if fnp.cross(nc, bi).tobytes() != np.cross(nc, bi).tobytes():
     verdicts.append("FAIL non-contig delegate")
@@ -446,6 +455,10 @@ W1 = rng.integers(-1000, 1000, (8_000_000, 3))
 W2 = rng.integers(-1000, 1000, (8_000_000, 3))
 tn = best(lambda: np.cross(W1, W2)); tf = best(lambda: fnp.cross(W1, W2))
 print(f"CROSS_INT64_N3_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+V1 = rng.integers(-1000, 1000, (3, 8_000_000))
+V2 = rng.integers(-1000, 1000, (3, 8_000_000))
+tn = best(lambda: np.cross(V1, V2, axis=0)); tf = best(lambda: fnp.cross(V1, V2, axis=0))
+print(f"CROSS_INT64_AX0_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 print(verdicts if verdicts else True)
 "#
         .into(),
