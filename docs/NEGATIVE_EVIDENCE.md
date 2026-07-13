@@ -4,6 +4,32 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-13 - SWEEP COMPLETE (NEUTRAL): input-form / flatten-by-contract audit is FULLY MINED - 6 ships (ticks 21,24,25,27,28,29), remainder verified covered
+
+RainySparrow (cc_fnp). The `ndim != 1` / `shape().len() != 1` entry-point
+sweep, run to exhaustion. SHIPPED from it: 2-D row-keys lexsort 26.3x
+(036439c7), axis=None sort/argsort 6.4x (af051df8), N-D unique 8.4x
+(918870fd), N-D histogram 6.1x (f1a8a48b), N-D isin 9.7x/20.1x
+(cab000bb), N-D setops 52.6x/22.9x (402a1d4c). VERIFIED COVERED (do not
+re-derive - each already reads flat buffers, pre-ravels, or reshapes
+v-shaped output): cumsum/cumprod axis=None any-ndim; extract + compress
+(compact_typed reads full flat buffers); roll axis=None any-ndim (f64 +
+dtype-agnostic arms); ediff1d (flat-buffer kernels); in1d (ravels into
+isin, inherits the N-D retry); searchsorted N-D v (reshapes to v.shape);
+digitize (parallel + N-D reshape); percentile/quantile + nan* flat forms
+(lane's own ndim/keepdims plumbing, lane ledgered 100% mined).
+NO-FORM/NO-ARM: bincount (numpy requires 1-D), convolve/correlate (1-D
+by contract), partition/argpartition (passthrough by measured design,
+selection can at best tie numpy). PARITY AUDIT under the tick-25
+representative rule: f64 intersect1d defers NaN AND any -0.0 (clean);
+string/datetime/int setop ties are byte-identical (safe); c128 arms
+defer -0.0/NaN (clean). Residual unpriced niche: delete/insert
+axis=None flatten (also in a peer's active edit zone today),
+string/struct searchsorted N-D v, unique kwarg-forms N-D for
+string/struct _full kernels (numpy >=2.1 reshapes return_inverse to
+a.shape - handle before attempting). Retry predicate: reopen only for
+a NEW op family or if a profile ranks the residual niches.
+
 ## 2026-07-13 - WIN (SHIP): early-exit f64 sort defer scan - delegate tax 0.70x -> 0.94-1.06x (e4512974)
 
 Pays the delegate-tax follow-up from the reject below, same session.
