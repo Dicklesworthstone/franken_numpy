@@ -517,6 +517,86 @@ print(ok)
 }
 
 #[test]
+fn broadcast_batch_int_bool_matmul_bit_exact_matches_numpy() -> Result<(), String> {
+    // (B.., m, k) @ (k, n) for int/bool: numpy runs its serial no-BLAS loop per
+    // slice; the zero-copy (B*m, k) reshape arm must be byte-identical through
+    // matmul, @, and dot (each pinned against its own numpy function). The
+    // (m, k) @ (B, k, n) mirror and below-gate shapes stay byte-identical
+    // delegates.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(31)
+verdicts = []
+for dt in [np.int64, np.int32, np.int8, np.uint64]:
+    info = np.iinfo(dt)
+    for shape_a, shape_b in [((8, 64, 96), (96, 80)), ((2, 3, 50, 64), (64, 40))]:
+        a = rng.integers(info.min // 2, info.max // 2, shape_a).astype(dt)
+        b = rng.integers(info.min // 2, info.max // 2, shape_b).astype(dt)
+        r = fnp.matmul(a, b); e = np.matmul(a, b)
+        if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+            verdicts.append(f"FAIL matmul {dt.__name__} {shape_a}")
+        if (a @ b).tobytes() != e.tobytes():
+            verdicts.append(f"FAIL @ {dt.__name__} {shape_a}")
+        rd = fnp.dot(a, b); ed = np.dot(a, b)
+        if rd.dtype != ed.dtype or rd.shape != ed.shape or rd.tobytes() != ed.tobytes():
+            verdicts.append(f"FAIL dot {dt.__name__} {shape_a}")
+# overflow wrap through the broadcast arm
+a = np.full((6, 60, 60), 5_000_000_000, dtype=np.int64)
+b = np.full((60, 60), 5_000_000_000, dtype=np.int64)
+if fnp.matmul(a, b).tobytes() != np.matmul(a, b).tobytes():
+    verdicts.append("FAIL overflow wrap")
+for dens in [0.0, 0.05, 0.5, 1.0]:
+    for shape_a, shape_b in [((16, 96, 96), (96, 96)), ((5, 40, 130), (130, 77))]:
+        a = rng.random(shape_a) < dens
+        b = rng.random(shape_b) < dens
+        r = fnp.matmul(a, b); e = np.matmul(a, b)
+        if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+            verdicts.append(f"FAIL bool matmul dens={dens} {shape_a}")
+ab = rng.random((16, 96, 96)) > 0.9
+bb = rng.random((96, 96)) > 0.9
+if fnp.dot(ab, bb).tobytes() != np.dot(ab, bb).tobytes():
+    verdicts.append("FAIL bool dot broadcast")
+# mirror direction (m,k)@(B,k,n) and below-gate stay byte-identical delegates
+ma = rng.integers(-1000, 1000, (96, 96)).astype(np.int64)
+mb = rng.integers(-1000, 1000, (8, 96, 80)).astype(np.int64)
+if fnp.matmul(ma, mb).tobytes() != np.matmul(ma, mb).tobytes():
+    verdicts.append("FAIL mirror delegate")
+sa = rng.integers(-5, 5, (2, 10, 10)).astype(np.int64)
+sb = rng.integers(-5, 5, (10, 10)).astype(np.int64)
+if fnp.matmul(sa, sb).tobytes() != np.matmul(sa, sb).tobytes():
+    verdicts.append("FAIL below-gate delegate")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+wa = rng.integers(-1000, 1000, (16, 256, 256)).astype(np.int64)
+wb = rng.integers(-1000, 1000, (256, 256)).astype(np.int64)
+tn = best(lambda: np.matmul(wa, wb)); tf = best(lambda: fnp.matmul(wa, wb))
+print(f"MATMUL_INT_BROADCAST_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+wba = rng.random((16, 256, 256)) > 0.9
+wbb = rng.random((256, 256)) > 0.9
+tn = best(lambda: np.matmul(wba, wbb)); tf = best(lambda: fnp.matmul(wba, wbb))
+print(f"MATMUL_BOOL_BROADCAST_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces MATMUL_*_BROADCAST_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "broadcast-batch int/bool matmul must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn int_multi_dot_native_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy integer multi_dot is a chain of no-BLAS matmuls (slow). The native int GEMM
     // chain is bit-exact (matrix mult over Z/2^w is associative) incl. overflow wrap and
