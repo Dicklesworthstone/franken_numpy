@@ -1973,3 +1973,83 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn add_at_i64_large_target_parallel_matches_numpy() -> Result<(), String> {
+    // np.add.at(i64, idx, vals) large-target regime: numpy's ufunc.at is a
+    // DRAM-latency-bound serial scatter there (probe: 136ms for 8M into 8M);
+    // the parallel atomic fetch_add arm is byte-exact because wrapping i64
+    // addition commutes (duplicate-index order unobservable) and fetch_add
+    // wraps exactly like numpy's i64 overflow. Histogram-style small targets
+    // (numpy fast path, 7.5ms), floats, scalar vals, other dtypes, 2-D, and
+    // OOB indices keep the delegate (parity / numpy's exact errors).
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(367)
+verdicts = []
+def ab(name, n, idx, vals, dtype=np.int64):
+    a1 = np.zeros(n, dtype=dtype); a2 = np.zeros(n, dtype=dtype)
+    fnp.add.at(a1, idx, vals)
+    np.add.at(a2, idx, vals)
+    if a1.tobytes() != a2.tobytes():
+        verdicts.append(f"FAIL {name}")
+n = 4_000_000
+idx = rng.integers(0, n, 4_000_000)
+vals = rng.integers(-10**9, 10**9, 4_000_000)
+ab("large target dup-heavy", n, idx, vals)
+# negative indices wrap once
+idxn = idx.copy(); idxn[::3] -= n
+ab("negative indices", n, idxn, vals)
+# wrapping overflow parity
+big = rng.integers(2**62, 2**63 - 1, 4_000_000)
+ab("i64 wrap overflow", n, idx, big)
+# delegate-parity forms: histogram-regime small target, f64, scalar vals, i32, 2-D target
+ab("small target delegate", 1024, rng.integers(0, 1024, 4_000_000), vals)
+af1 = np.zeros(n); af2 = np.zeros(n)
+fv = rng.standard_normal(4_000_000)
+fnp.add.at(af1, idx, fv); np.add.at(af2, idx, fv)
+if af1.tobytes() != af2.tobytes():
+    verdicts.append("FAIL f64 delegate")
+s1 = np.zeros(n, dtype=np.int64); s2 = np.zeros(n, dtype=np.int64)
+fnp.add.at(s1, idx, 7); np.add.at(s2, idx, 7)
+if s1.tobytes() != s2.tobytes():
+    verdicts.append("FAIL scalar delegate")
+ab("i32 delegate", n, idx.astype(np.int32), vals.astype(np.int32), dtype=np.int32)
+t1 = np.zeros((2000, 2000), dtype=np.int64); t2 = np.zeros((2000, 2000), dtype=np.int64)
+r = rng.integers(0, 2000, 3_000_000)
+fnp.add.at(t1, r, 1); np.add.at(t2, r, 1)
+if t1.tobytes() != t2.tobytes():
+    verdicts.append("FAIL 2-D delegate")
+# OOB raises identically through the delegate
+try:
+    fnp.add.at(np.zeros(n, dtype=np.int64), np.array([0, n], dtype=np.int64), np.array([1, 1], dtype=np.int64))
+    verdicts.append("FAIL oob no-raise")
+except IndexError:
+    pass
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+A = np.zeros(8_000_000, dtype=np.int64)
+IDX = rng.integers(0, 8_000_000, 8_000_000)
+V = rng.integers(-1000, 1000, 8_000_000)
+tn = best(lambda: np.add.at(A, IDX, V)); tf = best(lambda: fnp.add.at(A, IDX, V))
+print(f"ADD_AT_I64_LARGE_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces ADD_AT_I64_LARGE_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "parallel i64 add.at must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
