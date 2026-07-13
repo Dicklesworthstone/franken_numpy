@@ -549,3 +549,82 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn clip_int_array_bounds_bit_exact_matches_numpy() -> Result<(), String> {
+    // Integer array bounds (same-shape and (n,) row vectors) across all
+    // widths: pure strict-comparison selection, no NaN/signed-zero surface.
+    // Inverted bounds pin min-after-max; extremes pin no-wrap; mixed dtypes,
+    // column bounds, and below-gate keep the delegate.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(79)
+verdicts = []
+for dt in [np.int64, np.int32, np.int8, np.uint64, np.uint8]:
+    info = np.iinfo(dt)
+    A = rng.integers(info.min // 2, info.max // 2, (2048, 1024)).astype(dt)
+    Ls = rng.integers(info.min // 2, 0 if info.min < 0 else info.max // 4, (2048, 1024)).astype(dt)
+    Hs = rng.integers(0 if info.min < 0 else info.max // 4, info.max // 2, (2048, 1024)).astype(dt)
+    r = fnp.clip(A, Ls, Hs); e = np.clip(A, Ls, Hs)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL same-shape {dt.__name__}")
+    lo = Ls[0].copy(); hi = Hs[0].copy()
+    r = fnp.clip(A, lo, hi); e = np.clip(A, lo, hi)
+    if r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL row-bounds {dt.__name__}")
+    # inverted bounds: min-after-max order
+    if fnp.clip(A, hi, lo).tobytes() != np.clip(A, hi, lo).tobytes():
+        verdicts.append(f"FAIL inverted {dt.__name__}")
+# dtype extremes as bounds (no arithmetic, pure compares)
+A = rng.integers(-2**62, 2**62, (2048, 1024))
+lo = np.full(1024, np.iinfo(np.int64).min)
+hi = np.full(1024, np.iinfo(np.int64).max)
+if fnp.clip(A, lo, hi).tobytes() != np.clip(A, lo, hi).tobytes():
+    verdicts.append("FAIL extremes")
+# 3-D row bounds
+A3 = rng.integers(-1000, 1000, (16, 64, 2048))
+l3 = rng.integers(-1200, -800, 2048)
+h3 = rng.integers(800, 1200, 2048)
+if fnp.clip(A3, l3, h3).tobytes() != np.clip(A3, l3, h3).tobytes():
+    verdicts.append("FAIL 3-D row bounds")
+# delegates: mixed dtype, column bounds, below gate
+if fnp.clip(A3, l3.astype(np.int32), h3).tobytes() != np.clip(A3, l3.astype(np.int32), h3).tobytes():
+    verdicts.append("FAIL mixed-dtype delegate")
+Ac = rng.integers(-1000, 1000, (2048, 1024))
+cl = rng.integers(-1200, -800, (2048, 1))
+ch = rng.integers(800, 1200, (2048, 1))
+if fnp.clip(Ac, cl, ch).tobytes() != np.clip(Ac, cl, ch).tobytes():
+    verdicts.append("FAIL column-bounds delegate")
+sm = rng.integers(-100, 100, (64, 64))
+if fnp.clip(sm, sm - 10, sm + 10).tobytes() != np.clip(sm, sm - 10, sm + 10).tobytes():
+    verdicts.append("FAIL below-gate delegate")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-1000, 1000, (4096, 4096))
+Wl = rng.integers(-1200, -800, (4096, 4096))
+Wh = rng.integers(800, 1200, (4096, 4096))
+tn = best(lambda: np.clip(W, Wl, Wh)); tf = best(lambda: fnp.clip(W, Wl, Wh))
+print(f"CLIP_INT64_ARRAYS_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+wl = Wl[0].copy(); wh = Wh[0].copy()
+tn = best(lambda: np.clip(W, wl, wh)); tf = best(lambda: fnp.clip(W, wl, wh))
+print(f"CLIP_INT64_BCAST_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces CLIP_INT64_*_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "int array-bounds clip must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
