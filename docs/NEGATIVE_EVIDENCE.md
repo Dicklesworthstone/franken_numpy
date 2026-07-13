@@ -4,6 +4,20 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-12 - WIN (SHIP, sweep #4 row 4): int einsum GEMM-idiom FAMILY COMPLETE - batched 13.91x (5.6 vs 78.0ms), transposed 3.33x, gram green; one associativity argument covered what took the f16 family three cracked contract classes
+
+`cc_fnp` / FuchsiaStream. Extends 8ccb98c9 to the whole 2-op family in one arm:
+"abc,acd->abd" -> try_native_int_batched_matmul; "ij,kj->ik" (a@b.T) and
+"ji,jk->ik" (a.T@b) -> one ascontiguousarray transpose-copy + the same MR=4 int
+GEMM; implicit spellings included. INTEGER wrapping adds are fully associative,
+so ALL of these are byte-identical with zero contract work - the f16 versions
+of these same specs needed three separately-cracked accumulation contract
+classes (per-step-narrow, wide-accumulate blocked-4, muladd-row). Gate rows:
+EINSUM_INT_BATCHED_AB 13.914x, EINSUM_INT_TRANSPOSED_AB 3.329x (transpose-copy
+included), plain row re-reads 8.545x; batteries batched/transposed/gram/
+implicit + prior wrap/delegate rows all green. The int einsum 2-op GEMM-idiom
+surface now mirrors the f16 family 1:1.
+
 ## 2026-07-12 - WIN (SHIP): hardware-accelerated NPZ CRC-32 - 18.7-21.6x across STORE read/write
 
 `CalmGate`, `fnp-io`. Negative-ledger and Git-history searches found no CRC

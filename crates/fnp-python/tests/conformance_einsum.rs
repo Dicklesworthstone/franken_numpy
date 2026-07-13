@@ -1635,6 +1635,22 @@ for tag, x, y in (
 r, e = fnp.einsum("ij,jk", ai, bi), np.einsum("ij,jk", ai, bi)
 if r.tobytes() != e.tobytes():
     verdicts.append("FAIL implicit bytes")
+# GEMM-idiom family: batched, transposed (a@b.T), gram (a.T@b) - one
+# associativity argument covers all
+ab3 = rng.integers(-1000, 1000, (8, 256, 256))
+bb3 = rng.integers(-1000, 1000, (8, 256, 256))
+r, e = fnp.einsum("abc,acd->abd", ab3, bb3), np.einsum("abc,acd->abd", ab3, bb3)
+if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL batched bytes")
+r, e = fnp.einsum("ij,kj->ik", ai, bi), np.einsum("ij,kj->ik", ai, bi)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL transposed bytes")
+r, e = fnp.einsum("ji,jk->ik", ai, bi), np.einsum("ji,jk->ik", ai, bi)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL gram bytes")
+r, e = fnp.einsum("ij,kj", ai, bi), np.einsum("ij,kj", ai, bi)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL transposed-implicit bytes")
 big = rng.integers(2**60, 2**62, (128, 128))
 r, e = fnp.einsum("ij,jk->ik", big, big), np.einsum("ij,jk->ik", big, big)
 if r.tobytes() != e.tobytes():
@@ -1657,6 +1673,12 @@ def best(fn, reps=7):
 tn = best(lambda: np.einsum("ij,jk->ik", ai, bi))
 tf = best(lambda: fnp.einsum("ij,jk->ik", ai, bi))
 print(f"EINSUM_INT_COARSE_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.einsum("abc,acd->abd", ab3, bb3))
+tf = best(lambda: fnp.einsum("abc,acd->abd", ab3, bb3))
+print(f"EINSUM_INT_BATCHED_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.einsum("ij,kj->ik", ai, bi))
+tf = best(lambda: fnp.einsum("ij,kj->ik", ai, bi))
+print(f"EINSUM_INT_TRANSPOSED_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 print(verdicts if verdicts else True)
 "#
         .into(),
