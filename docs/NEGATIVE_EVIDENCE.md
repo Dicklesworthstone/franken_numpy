@@ -22,6 +22,24 @@ codegen units for the quick gate): baseline NumPy 14.193 ms / fnp 13.952 ms = 1.
 (`j-29928833041827041`); candidate NumPy 14.812 ms / fnp 10.109 ms = 1.465x
 (`j-29928833041827066`). Candidate fnp latency is 27.5% below the pre-change fnp baseline. KEEP.
 
+## 2026-07-13 - WIN (SHIP): flat f64 sort regated off SIMD-qsort hosts - 0.60x loss -> 0.99x parity (fb48ecf9)
+
+RainySparrow. Pays the stale-basis follow-up from the uniform-NaN
+reject: numpy 2.x's x86-simd-sort f64 qsort dispatches on avx2 AND
+avx512 hosts, and the shipped flat arm loses on both sampled classes
+(avx512: 96.1 vs 92.9ms; avx2: 202.3 vs 121.1ms = 0.598x). Regated via
+an avx2-keyed OnceLock ISA gate (exp/log shape); pre-AVX2/non-x86 hosts
+keep the arm. First gate run caught the avx512f-only predicate being
+too narrow - the WORKER POOL IS ISA-HETEROGENEOUS: rch runs land on
+avx2-only workers too, and a lever validated only on the avx512 gate
+worker can be a 0.6x loss elsewhere. OPEN ITEM: the per-lane AXIS f64
+sort arms are core-count-vs-SIMD marginal (0.579x on a small avx2
+worker, 1.990x same-day on a bigger worker, 1.01-1.13x on the avx512
+worker) - kept for now; a cores-aware gate is the candidate fix if a
+profile ranks it. Stale-basis audit family: after ANY numpy upgrade,
+re-run flat-sort-class ABs (this is the stale-cliff-gates class,
+x86-simd-sort edition).
+
 ## 2026-07-13 - SWEEP COMPLETE (NEUTRAL): input-form / flatten-by-contract audit is FULLY MINED - 6 ships (ticks 21,24,25,27,28,29), remainder verified covered
 
 RainySparrow (cc_fnp). The `ndim != 1` / `shape().len() != 1` entry-point
