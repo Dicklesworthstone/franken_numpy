@@ -821,3 +821,57 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn matrix_power_noncontig_base_bit_exact_matches_numpy() -> Result<(), String> {
+    // Transposed/strided int and bool bases now contiguate post-gate and route
+    // the native binary-exp GEMM chain; results must be byte-identical to
+    // numpy across dtypes, powers, and layouts (F-order, strided views).
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(127)
+verdicts = []
+A = rng.integers(-10, 10, (256, 256))
+cases = [
+    ("A.T int64", np.ascontiguousarray(A).T),
+    ("F-order int64", np.asfortranarray(A)),
+    ("strided int64", rng.integers(-10, 10, (256, 512))[:, ::2]),
+]
+for name, M in cases:
+    for p in (2, 3, 5, 13):
+        r = fnp.matrix_power(M, p)
+        e = np.linalg.matrix_power(M, p)
+        if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+            verdicts.append(f"FAIL {name} p={p}")
+Bb = (rng.random((256, 256)) < 0.01)
+Bt = np.ascontiguousarray(Bb).T
+for p in (2, 5, 13):
+    if fnp.matrix_power(Bt, p).tobytes() != np.linalg.matrix_power(Bt, p).tobytes():
+        verdicts.append(f"FAIL bool A.T p={p}")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-10, 10, (512, 512))
+Wt = np.ascontiguousarray(W).T
+tn = best(lambda: np.linalg.matrix_power(Wt, 5))
+tf = best(lambda: fnp.matrix_power(Wt, 5))
+print(f"MATPOW_INT_NC_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces MATPOW_INT_NC_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "non-contiguous-base matrix_power must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
