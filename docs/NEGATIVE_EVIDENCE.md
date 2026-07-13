@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-13 - NO-SHIP: exact unit-interval `uniform` route misses the sub-threshold floor
+
+`CalmGate`, `fnp-random`. This paid the earlier one-pass reject's reopen
+predicate by routing exact `uniform(+0.0, 1.0, size)` calls to the existing
+`random(size)` fill, removing the affine sweep entirely. Validation and empty
+call precedence were unchanged. All six backends consume the same one f64 draw
+per output; the PCG paths share chunking and master-state advancement, and
+`+0 + u*1` is bit-identical to each generated nonnegative finite `u`. Exact
+positive-zero bits deliberately excluded `-0.0` from the route.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran on
+effective worker `vmi1156319` with RCH self-healing disabled. Adjacent
+`uniform(-0.0, 1.0)` controls exercised the old path with the same output bits
+and stream (20 samples, 0.25s warm-up, 1s measurement). Candidate versus
+control was 372 versus 336ns at 100 elements (**0.90x**), 2,696 versus 2,721ns
+at 1,000 (**1.01x**), and 25,215 versus 28,018ns at 10,000 (**1.11x**). The
+only meaningful positive row remained below the 1.20x floor and was noisy.
+Source and temporary rows were restored; this evidence-only closeout was
+committed without a second benchmark, tests, or lint. Do not retry the exact
+unit-interval branch on the existing sub-threshold matrix. Reopen only for a
+separately profiled at/above-parallel-threshold workload that clears 1.20x.
+
 ## 2026-07-12 - NO-SHIP: single-dispatch `ArrayStorage::get_f64` blocks optimized codegen
 
 `CalmGate`, `fnp-dtype`. The candidate replaced the initial `self.len()` enum
