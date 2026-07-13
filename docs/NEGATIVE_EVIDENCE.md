@@ -22,6 +22,18 @@ codegen units for the quick gate): baseline NumPy 14.193 ms / fnp 13.952 ms = 1.
 (`j-29928833041827041`); candidate NumPy 14.812 ms / fnp 10.109 ms = 1.465x
 (`j-29928833041827066`). Candidate fnp latency is 27.5% below the pre-change fnp baseline. KEEP.
 
+## 2026-07-13 - NEUTRAL (VALIDATED): int sort-class arms SURVIVE the numpy SIMD-qsort re-baseline (85b20603)
+
+RainySparrow. Follow-through of the f64 regate below on the int family,
+same worker class: i64 flat sort 2.021x (107.2 vs 53.1ms @8M - the par
+sort still beats numpy's SIMD qsort), dt64 flat 8.280x (no numpy SIMD
+datetime path), distinct-radix i64 default argsort 5.391x (767.7 vs
+142.4ms). NO regate. Exception: i32 flat sort is SATURATED to 1.017x
+by numpy's SIMD i32 qsort - engaging stays harmless, arm kept; flagged
+as the re-probe candidate on a small avx2 worker (the f64 lesson:
+marginal-on-big-worker can be a real loss there). Parity locked in
+conformance_unravel_unique::int_sort_class_stale_basis_probe_and_parity.
+
 ## 2026-07-13 - WIN (SHIP): flat f64 sort regated off SIMD-qsort hosts - 0.60x loss -> 0.99x parity (fb48ecf9)
 
 RainySparrow. Pays the stale-basis follow-up from the uniform-NaN
