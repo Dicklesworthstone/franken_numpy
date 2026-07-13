@@ -1404,3 +1404,70 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn axis_none_sort_argsort_flat_view_matches_numpy() -> Result<(), String> {
+    // np.sort/np.argsort with EXPLICIT axis=None operate on the FLATTENED
+    // array; for C-contiguous N-D input the ravel is a zero-copy reshape
+    // view, so the dispatch now normalizes to 1-D and every flat fast path
+    // (int radix, stable counting, NaN-aware stable radix, par value sort)
+    // serves the form that previously delegated wholesale. Byte-exact by
+    // construction: numpy's axis=None result IS its result on the ravel.
+    // F-contig / non-contig / bool / small keep the delegate (parity).
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(311)
+verdicts = []
+def ab(fn_name, name, a):
+    ours = getattr(fnp, fn_name)(a, axis=None)
+    theirs = getattr(np, fn_name)(a, axis=None)
+    if ours.tobytes() != theirs.tobytes() or ours.shape != theirs.shape:
+        verdicts.append(f"FAIL {fn_name} {name}")
+W2 = rng.integers(-2**62, 2**62, (2000, 2000))
+ab("argsort", "2-D wide int", W2)
+ab("sort", "2-D wide int", W2)
+# 3-D f64 + canonical NaN, stable kind route via the flat stable radix
+F3 = rng.standard_normal((160, 120, 110))
+F3[rng.random((160, 120, 110)) < 0.01] = np.nan
+if fnp.argsort(F3, axis=None, kind="stable").tobytes() != np.argsort(F3, axis=None, kind="stable").tobytes():
+    verdicts.append("FAIL argsort 3-D stable nan")
+ab("sort", "3-D f64 nan (delegate)", F3)
+# dense ties -> the flat default-kind paths defer -> delegate parity through the view
+D2 = rng.integers(0, 50, (1600, 1600))
+ab("argsort", "dense ties", D2)
+ab("sort", "dense ties", D2)
+# layout/scope defers keep parity: F-contig, strided slice, bool, small, 1-D
+ab("argsort", "F-contig", np.asfortranarray(W2[:800, :800]))
+ab("sort", "F-contig", np.asfortranarray(W2[:800, :800]))
+ab("argsort", "strided", W2[::2, ::2])
+ab("sort", "strided", W2[::2, ::2])
+ab("argsort", "bool", rng.integers(0, 2, (1500, 1500)).astype(bool))
+ab("argsort", "small", rng.integers(-2**62, 2**62, (10, 10)))
+ab("argsort", "1-D unchanged", rng.integers(-2**62, 2**62, 2_000_000))
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-2**62, 2**62, (2828, 2828))
+tn = best(lambda: np.argsort(W, axis=None)); tf = best(lambda: fnp.argsort(W, axis=None))
+print(f"ARGSORT_AXISNONE_INT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tns = best(lambda: np.sort(W, axis=None)); tfs = best(lambda: fnp.sort(W, axis=None))
+print(f"SORT_AXISNONE_INT_AB numpy_ms={tns:.3f} fnp_ms={tfs:.3f} ratio={tns / tfs:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces ARGSORT_AXISNONE_INT_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "axis=None flat-view sort/argsort must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
