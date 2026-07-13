@@ -1726,3 +1726,69 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn setops_nd_flat_view_matches_numpy() -> Result<(), String> {
+    // intersect1d/union1d/setdiff1d/setxor1d FLATTEN their inputs by
+    // contract; the entry points now normalize C-contiguous N-D input to
+    // zero-copy reshape(-1) views so the whole 1-D-gated arm chain
+    // (narrow-int, wide-int, string, c128, datetime, struct) serves N-D
+    // forms that previously delegated wholesale. Defers keep delegate
+    // parity with ORIGINAL args.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(347)
+verdicts = []
+def ab(op, name, a, b, **kw):
+    ours = getattr(fnp, op)(a, b, **kw)
+    theirs = getattr(np, op)(a, b, **kw)
+    if ours.tobytes() != theirs.tobytes() or str(ours.dtype) != str(theirs.dtype):
+        verdicts.append(f"FAIL {op} {name}")
+def strs(n, hi):
+    return np.array([f"id{v:06d}" for v in rng.integers(0, hi, n)], dtype="U8")
+S1 = strs(1_200_000, 400_000).reshape(1200, 1000)
+S2 = strs(1_200_000, 400_000).reshape(1000, 1200)
+ab("intersect1d", "2-D string", S1, S2)
+ab("union1d", "2-D string", S1, S2)
+ab("setdiff1d", "2-D string", S1, S2)
+ab("setxor1d", "2-D string", S1[:600, :500], S2[:500, :600])
+W1 = rng.integers(-2**62, 2**62, (1500, 1400))
+W2 = rng.integers(-2**62, 2**62, (1400, 1500))
+ab("intersect1d", "2-D wide int", W1, W2)
+ab("setdiff1d", "2-D wide int", W1, W2)
+ab("union1d", "2-D narrow int", rng.integers(0, 200, (1200, 1100)).astype(np.int16), rng.integers(0, 200, (1100, 1200)).astype(np.int16))
+D1 = rng.integers(0, 3_000_000, (1200, 1100)).astype("datetime64[s]")
+D2 = rng.integers(0, 3_000_000, (1100, 1200)).astype("datetime64[s]")
+ab("setdiff1d", "2-D datetime", D1, D2)
+# mixed 2-D vs 1-D, delegate-parity forms
+ab("intersect1d", "2-D vs 1-D string", S1, S2.ravel()[:300_000])
+ab("intersect1d", "F-contig parity", np.asfortranarray(W1[:500, :500]), W2[:400, :400])
+ab("setdiff1d", "assume_unique parity", np.unique(W1)[:200_000].reshape(400, 500), np.unique(W2)[:200_000], assume_unique=True)
+ab("union1d", "small 2-D", rng.integers(0, 50, (8, 9)), rng.integers(0, 50, (7, 6)))
+ab("intersect1d", "1-D unchanged", W1.ravel()[:2_000_000], W2.ravel()[:2_000_000])
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.union1d(S1, S2)); tf = best(lambda: fnp.union1d(S1, S2))
+print(f"UNION1D_ND_STRING_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tni = best(lambda: np.intersect1d(W1, W2)); tfi = best(lambda: fnp.intersect1d(W1, W2))
+print(f"INTERSECT1D_ND_WIDEINT_AB numpy_ms={tni:.3f} fnp_ms={tfi:.3f} ratio={tni / tfi:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces UNION1D_ND_STRING_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "N-D flat-view setops must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
