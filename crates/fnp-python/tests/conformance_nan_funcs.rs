@@ -1435,3 +1435,62 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn narrow_int_argextreme_nonlast_axis_bit_exact_matches_numpy() -> Result<(), String> {
+    // The narrow-int (1/2-byte) argmax/argmin axis delegate is now LAST-axis
+    // only; non-last axes engage the native narrow arms (numpy's strided walk
+    // probed 249.1ms int16 axis=0 at (8192,4096) vs 4.4ms last-axis). First-
+    // occurrence ties and the last-axis delegate stay pinned. Also reaches
+    // through nanargmax/nanargmin via the int routing.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(199)
+verdicts = []
+for dt in [np.int16, np.int8, np.uint16, np.uint8]:
+    info = np.iinfo(dt)
+    M = rng.integers(info.min, int(info.max) + 1, (2048, 1024)).astype(dt)
+    for fname in ("argmax", "argmin"):
+        ff = getattr(fnp, fname); nf = getattr(np, fname)
+        for ax in (0, -2):
+            r = ff(M, axis=ax); e = nf(M, axis=ax)
+            ra = np.asarray(r); ea = np.asarray(e)
+            if ra.dtype != ea.dtype or ra.tobytes() != ea.tobytes():
+                verdicts.append(f"FAIL {fname} {dt.__name__} ax={ax}")
+        # last axis stays a byte-identical delegate
+        if np.asarray(ff(M, axis=1)).tobytes() != np.asarray(nf(M, axis=1)).tobytes():
+            verdicts.append(f"FAIL {fname} {dt.__name__} last-axis delegate")
+# 3-D middle axis + dense ties (first occurrence)
+M3 = rng.integers(-100, 100, (64, 256, 256)).astype(np.int16)
+if np.asarray(fnp.argmax(M3, axis=1)).tobytes() != np.asarray(np.argmax(M3, axis=1)).tobytes():
+    verdicts.append("FAIL 3-D mid-axis")
+T = np.zeros((512, 512), dtype=np.int8); T[9] = 5; T[400] = 5
+if np.asarray(fnp.argmax(T, axis=0)).tobytes() != np.asarray(np.argmax(T, axis=0)).tobytes():
+    verdicts.append("FAIL tie first-max")
+if np.asarray(fnp.nanargmax(T, axis=0)).tobytes() != np.asarray(np.nanargmax(T, axis=0)).tobytes():
+    verdicts.append("FAIL nanargmax narrow ax0")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-30000, 30000, (8192, 4096)).astype(np.int16)
+tn = best(lambda: np.argmax(W, axis=0)); tf = best(lambda: fnp.argmax(W, axis=0))
+print(f"ARGMAX_INT16_AX0_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces ARGMAX_INT16_AX0_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "narrow-int non-last-axis argextreme must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
