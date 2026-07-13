@@ -868,3 +868,76 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn wide_int_setops_bit_exact_match_numpy() -> Result<(), String> {
+    // Wide (4/8-byte) int set ops via par_sort+dedup+merge: sorted unique
+    // integer outputs are value-deterministic -> byte-exact across the FULL
+    // dtype range (incl. > 2^53, where the old extract-precise route raised
+    // and fell back to numpy's multi-second sort path).
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(257)
+verdicts = []
+for dt in [np.int64, np.uint64, np.int32, np.uint32]:
+    info = np.iinfo(dt)
+    a = rng.integers(info.min, info.max, 400_000, dtype=dt, endpoint=True)
+    b = rng.integers(info.min, info.max, 400_000, dtype=dt, endpoint=True)
+    b[:5000] = a[:5000]  # guaranteed overlap
+    for fname in ("intersect1d", "union1d", "setdiff1d", "setxor1d"):
+        ff = getattr(fnp, fname); nf = getattr(np, fname)
+        r = ff(a, b); e = nf(a, b)
+        if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+            verdicts.append(f"FAIL {fname} {dt.__name__}")
+# duplicates-heavy, disjoint, empty, N-D ravel
+d1 = rng.integers(0, 100, 300_000)
+d2 = rng.integers(50, 150, 300_000)
+for fname in ("intersect1d", "union1d", "setdiff1d", "setxor1d"):
+    ff = getattr(fnp, fname); nf = getattr(np, fname)
+    if ff(d1, d2).tobytes() != nf(d1, d2).tobytes():
+        verdicts.append(f"FAIL dup-heavy {fname}")
+lo = rng.integers(-2**62, -2**61, 200_000)
+hi = rng.integers(2**61, 2**62, 200_000)
+if fnp.intersect1d(lo, hi).tobytes() != np.intersect1d(lo, hi).tobytes():
+    verdicts.append("FAIL disjoint")
+e_ = np.array([], dtype=np.int64)
+big = rng.integers(-2**62, 2**62, 200_000)
+if fnp.union1d(e_, big).tobytes() != np.union1d(e_, big).tobytes():
+    verdicts.append("FAIL empty operand")
+M2 = rng.integers(-2**62, 2**62, (600, 500))
+if fnp.intersect1d(M2, big).tobytes() != np.intersect1d(M2, big).tobytes():
+    verdicts.append("FAIL N-D ravel")
+# assume_unique keeps the delegate
+au1 = np.unique(rng.integers(-2**62, 2**62, 200_000))
+au2 = np.unique(rng.integers(-2**62, 2**62, 200_000))
+if fnp.intersect1d(au1, au2, assume_unique=True).tobytes() != np.intersect1d(au1, au2, assume_unique=True).tobytes():
+    verdicts.append("FAIL assume_unique delegate")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W1 = rng.integers(-2**62, 2**62, 8_000_000)
+W2 = rng.integers(-2**62, 2**62, 8_000_000)
+W2[:100_000] = W1[:100_000]
+tn = best(lambda: np.intersect1d(W1, W2)); tf = best(lambda: fnp.intersect1d(W1, W2))
+print(f"INTERSECT_INT64_WIDE_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.setdiff1d(W1, W2)); tf = best(lambda: fnp.setdiff1d(W1, W2))
+print(f"SETDIFF_INT64_WIDE_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces INTERSECT/UNION_INT64_WIDE_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "wide int setops must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
