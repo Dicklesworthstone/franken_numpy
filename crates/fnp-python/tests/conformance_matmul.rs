@@ -752,6 +752,80 @@ print(verdicts if verdicts else True)
 }
 
 #[test]
+fn int_vecmat_native_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // v @ A (1-D x 2-D) int: numpy's strided column walk measured 70.4ms at
+    // 4096^2 vs 10.1ms for its own matvec; the row-major block-accumulation
+    // kernel must be byte-identical through matmul, @, and dot. matvec (A @ v),
+    // bool, and below-gate stay byte-identical delegates.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(61)
+verdicts = []
+for dt in [np.int64, np.int32, np.int8, np.uint64]:
+    info = np.iinfo(dt)
+    for (k, n) in [(512, 512), (300, 1000), (1000, 700)]:
+        v = rng.integers(info.min // 2, info.max // 2, k).astype(dt)
+        A = rng.integers(info.min // 2, info.max // 2, (k, n)).astype(dt)
+        r = fnp.matmul(v, A); e = np.matmul(v, A)
+        if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+            verdicts.append(f"FAIL matmul {dt.__name__} ({k},{n})")
+        if (v @ A).tobytes() != e.tobytes():
+            verdicts.append(f"FAIL @ {dt.__name__} ({k},{n})")
+        rd = fnp.dot(v, A); ed = np.dot(v, A)
+        if rd.tobytes() != ed.tobytes():
+            verdicts.append(f"FAIL dot {dt.__name__} ({k},{n})")
+# overflow wrap through the kernel
+v = np.full(600, 5_000_000_000, dtype=np.int64)
+A = np.full((600, 600), 5_000_000_000, dtype=np.int64)
+if fnp.matmul(v, A).tobytes() != np.matmul(v, A).tobytes():
+    verdicts.append("FAIL overflow wrap")
+# non-contiguous v (strided column view) and A (transposed)
+M = rng.integers(-1000, 1000, (600, 600)).astype(np.int64)
+vs = M[:, 0]
+if fnp.matmul(vs, M).tobytes() != np.matmul(vs, M).tobytes():
+    verdicts.append("FAIL strided v")
+if fnp.matmul(M[0], M.T).tobytes() != np.matmul(M[0], M.T).tobytes():
+    verdicts.append("FAIL non-contig A")
+# delegates: matvec, bool vecmat, below-gate
+mv = rng.integers(-1000, 1000, 600).astype(np.int64)
+if fnp.matmul(M, mv).tobytes() != np.matmul(M, mv).tobytes():
+    verdicts.append("FAIL matvec delegate")
+vb = rng.random(600) > 0.5
+Ab = rng.random((600, 600)) > 0.9
+if fnp.matmul(vb, Ab).tobytes() != np.matmul(vb, Ab).tobytes():
+    verdicts.append("FAIL bool vecmat delegate")
+sv = rng.integers(-5, 5, 100).astype(np.int64)
+sA = rng.integers(-5, 5, (100, 100)).astype(np.int64)
+if fnp.matmul(sv, sA).tobytes() != np.matmul(sv, sA).tobytes():
+    verdicts.append("FAIL below-gate delegate")
+
+def best(fn, reps=5):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-1000, 1000, (4096, 4096))
+w = rng.integers(-1000, 1000, 4096)
+tn = best(lambda: np.matmul(w, W)); tf = best(lambda: fnp.matmul(w, W))
+print(f"VECMAT_INT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces VECMAT_INT_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "native int vecmat must be bit-identical to numpy incl. delegates: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn int_multi_dot_native_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy integer multi_dot is a chain of no-BLAS matmuls (slow). The native int GEMM
     // chain is bit-exact (matrix mult over Z/2^w is associative) incl. overflow wrap and
