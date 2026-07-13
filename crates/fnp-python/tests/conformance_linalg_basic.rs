@@ -1413,3 +1413,57 @@ print(fnp_raised == np_raised)
     );
     Ok(())
 }
+
+#[test]
+fn int_norm_via_f64_conversion_bit_exact_matches_numpy() -> Result<(), String> {
+    // Integer/bool norm converts once to f64 (numpy's own norm does
+    // x.astype(float) FIRST for every ord - pinned incl. 2^62-scale values)
+    // and rides the native f64 vector-norm axis kernels / numpy's BLAS flat
+    // path. All ords stay semantics-identical post-conversion.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(233)
+verdicts = []
+M = rng.integers(-1000, 1000, (2048, 1024))
+for kw in [dict(axis=1), dict(axis=0), dict(axis=1, keepdims=True), dict(), dict(ord=1, axis=1), dict(ord=np.inf, axis=1), dict(ord=3, axis=0)]:
+    r = fnp.norm(M, **kw); e = np.linalg.norm(M, **kw)
+    ra = np.asarray(r); ea = np.asarray(e)
+    if ra.dtype != ea.dtype or ra.shape != ea.shape or ra.tobytes() != ea.tobytes():
+        verdicts.append(f"FAIL {kw}")
+B = rng.random((2048, 1024)) > 0.7
+if np.asarray(fnp.norm(B, axis=1)).tobytes() != np.asarray(np.linalg.norm(B, axis=1)).tobytes():
+    verdicts.append("FAIL bool")
+H = rng.integers(-2**62, 2**62, (256, 1000))
+if np.asarray(fnp.norm(H, axis=1)).tobytes() != np.asarray(np.linalg.norm(H, axis=1)).tobytes():
+    verdicts.append("FAIL huge values")
+S = rng.integers(-100, 100, (10, 10))
+if np.asarray(fnp.norm(S, axis=1)).tobytes() != np.asarray(np.linalg.norm(S, axis=1)).tobytes():
+    verdicts.append("FAIL small parity")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-1000, 1000, (4096, 4096))
+tn = best(lambda: np.linalg.norm(W, axis=1)); tf = best(lambda: fnp.norm(W, axis=1))
+print(f"NORM_INT_AX1_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+# flat form stays a delegate (gate-measured 0.969x with conversion) - parity row
+if np.float64(fnp.norm(W)).tobytes() != np.float64(np.linalg.norm(W)).tobytes():
+    verdicts.append("FAIL flat delegate parity")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces NORM_INT_*_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "int norm via f64 conversion must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
