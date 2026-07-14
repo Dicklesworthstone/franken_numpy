@@ -2053,3 +2053,69 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn add_at_int_dtype_arms_parallel_match_numpy() -> Result<(), String> {
+    // Generalizes the shipped i64 add.at arm (7d7e8faf) to u64/i32/u32 via
+    // one macro: wrapping addition commutes for every fixed-width int, so
+    // the parallel atomic scatter is byte-exact per dtype, values must share
+    // the target's exact dtype, and the latency-bound large-target physics
+    // is dtype-independent. Mixed-dtype values and i16/u16/i8/u8 targets
+    // keep the delegate (parity).
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(373)
+verdicts = []
+def ab(name, n, idx, vals, dtype):
+    a1 = np.zeros(n, dtype=dtype); a2 = np.zeros(n, dtype=dtype)
+    fnp.add.at(a1, idx, vals)
+    np.add.at(a2, idx, vals)
+    if a1.tobytes() != a2.tobytes():
+        verdicts.append(f"FAIL {name}")
+n = 4_000_000
+idx = rng.integers(0, n, 4_000_000)
+idx[::5] -= n  # negative-index wrap mixed in
+ab("u64", n, idx, rng.integers(0, 2**64, 4_000_000, dtype=np.uint64), np.uint64)
+ab("u64 wrap", n, idx, rng.integers(2**63, 2**64, 4_000_000, dtype=np.uint64), np.uint64)
+ab("i32", n, idx, rng.integers(-2**30, 2**30, 4_000_000).astype(np.int32), np.int32)
+ab("i32 wrap", n, idx, rng.integers(2**30, 2**31 - 1, 4_000_000).astype(np.int32), np.int32)
+ab("u32", n, idx, rng.integers(0, 2**32, 4_000_000, dtype=np.uint32), np.uint32)
+ab("i64 regression", n, idx, rng.integers(-10**9, 10**9, 4_000_000), np.int64)
+# delegate-parity: mixed dtype vals, narrow targets
+m1 = np.zeros(n, dtype=np.uint64); m2 = np.zeros(n, dtype=np.uint64)
+iv = rng.integers(0, 1000, 4_000_000).astype(np.int32)
+fnp.add.at(m1, np.abs(idx), iv); np.add.at(m2, np.abs(idx), iv)
+if m1.tobytes() != m2.tobytes():
+    verdicts.append("FAIL mixed dtype delegate")
+ab("i16 delegate", n, np.abs(idx), rng.integers(0, 100, 4_000_000).astype(np.int16), np.int16)
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+AU = np.zeros(8_000_000, dtype=np.uint64)
+I8 = rng.integers(0, 8_000_000, 8_000_000)
+VU = rng.integers(0, 2**63, 8_000_000, dtype=np.uint64)
+tn = best(lambda: np.add.at(AU, I8, VU)); tf = best(lambda: fnp.add.at(AU, I8, VU))
+print(f"ADD_AT_U64_LARGE_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+A3 = np.zeros(8_000_000, dtype=np.int32)
+V3 = rng.integers(-1000, 1000, 8_000_000).astype(np.int32)
+tn2 = best(lambda: np.add.at(A3, I8, V3)); tf2 = best(lambda: fnp.add.at(A3, I8, V3))
+print(f"ADD_AT_I32_LARGE_AB numpy_ms={tn2:.3f} fnp_ms={tf2:.3f} ratio={tn2 / tf2:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces ADD_AT_U64_LARGE_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "int-dtype add.at arms must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
