@@ -4,6 +4,40 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - NO-SHIP: one-pass slice `choice(replace=true)` gather - 1.35x slower
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.286`, `choice`/`fnp-random`. Robot
+triage again exposed only the out-of-policy C-BLAS/fast-math perf leaf. FFT's
+degenerate-axis work was already complete, so negative-ledger screening pivoted
+to direct Rust random generation. The June `choice(int, ...)` keep covered the
+Python scalar-population route, not this slice-valued API.
+
+Profile/source attribution showed `Generator::choice_with_shuffle` with
+replacement first filled a `Vec<u64>` of bounded indices, then allocated and
+gathered the final `Vec<f64>`. ONE LEVER drew each identical bounded index and
+immediately pushed the selected value into the final vector, removing the index
+allocation and second pass. A same-binary former-control benchmark asserted all
+1,000,000 selected values equal and then asserted the next eight random values
+equal, proving both result and post-call stream state before timing.
+
+Exactly one foreground strict-remote, explicitly non-LTO release command ran on
+requested and effective worker `vmi1153651` (job `j-29928833041828691`), with a
+65,536-value population and 1,000,000 replacement draws. It completed remotely
+with exit code zero in 110.2 seconds:
+
+| arm | Criterion median (95% CI) |
+|---|---:|
+| former index fill then gather | **10.234 ms** `[8.995, 11.035]` |
+| one-pass draw plus gather | 13.777 ms `[12.779, 24.199]` |
+
+The candidate was **1.346x slower** at the median. Removing the allocation did
+not pay for interleaving RNG state updates with random population loads and
+output stores; the former phase-separated loops retain better throughput. The
+source and benchmark hunks were reverted. Retry only with a blocked/batched
+design that preserves phase locality while reducing index storage; do not retry
+per-element draw-plus-gather fusion. No second benchmark, compile, conformance,
+or verification loop ran. NO-SHIP.
+
 ## 2026-07-14 - WIN (SHIP): singleton-axis cumulative direct write - 19.10x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.285`, reductions/`fnp-ufunc`. Robot
