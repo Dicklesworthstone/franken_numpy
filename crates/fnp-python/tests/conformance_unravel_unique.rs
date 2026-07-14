@@ -1041,6 +1041,16 @@ print(f"BASE add_at_i64_hist1k_8m {best(lambda: np.add.at(ti, idx_small, vi)):.1
 print(f"BASE add_at_i64_large_8m {best(lambda: np.add.at(tl, idx_large, vi)):.1f}")
 print(f"BASE add_at_f64_hist1k_8m {best(lambda: np.add.at(tf, idx_small, vf)):.1f}")
 print(f"BASE bincount_weights_ref {best(lambda: np.bincount(idx_small, weights=vf, minlength=1024)):.1f}")
+# reduceat bases (segmented reduction lever pricing, 2026-07-14): many short
+# segments vs few long segments, int + f64 reference.
+W8 = rng.integers(-10**9, 10**9, 8_000_000)
+F8 = rng.standard_normal(8_000_000)
+seg1m = np.sort(rng.integers(0, 8_000_000, 1_000_000))
+seg1k = np.sort(rng.integers(0, 8_000_000, 1_000))
+print(f"BASE add_reduceat_i64_1mseg {best(lambda: np.add.reduceat(W8, seg1m)):.1f}")
+print(f"BASE add_reduceat_i64_1kseg {best(lambda: np.add.reduceat(W8, seg1k)):.1f}")
+print(f"BASE add_reduceat_f64_1mseg {best(lambda: np.add.reduceat(F8, seg1m)):.1f}")
+print(f"BASE max_reduceat_i64_1mseg {best(lambda: np.maximum.reduceat(W8, seg1m)):.1f}")
 print("numpy", np.__version__)
 print(True)
 "#
