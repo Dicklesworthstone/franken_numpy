@@ -2391,3 +2391,62 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn f32_select_fused_parallel_matches_numpy() -> Result<(), String> {
+    // f32 arm of the fused select pass: u32 unsigned view moves NaN/-0.0/inf
+    // bit patterns verbatim (numpy select is k+1 masked-copyto passes for
+    // every dtype - no fused SIMD path, so the clip-style f32 caution does
+    // not apply). Scalar defaults: python floats cast f64->f32 (numpy's own
+    // single rounding); python ints only in the f32-exact range; f16 and
+    // everything else delegates.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(401)
+verdicts = []
+def ab(name, conds, choices, **kw):
+    ours = fnp.select(conds, choices, **kw)
+    theirs = np.select(conds, choices, **kw)
+    if ours.tobytes() != theirs.tobytes() or str(ours.dtype) != str(theirs.dtype) or ours.shape != theirs.shape:
+        verdicts.append(f"FAIL {name}")
+n = 8_000_000
+x = rng.standard_normal(n)
+conds = [x > 0.5, x < -0.5, np.abs(x) < 0.1]
+f32c = [rng.standard_normal(n).astype(np.float32) for _ in range(3)]
+f32c[0][3] = np.float32(np.nan); f32c[1][5] = np.float32(-0.0); f32c[2][7] = np.float32(np.inf)
+ab("f32 default0", conds, f32c)
+ab("f32 float default", conds, f32c, default=2.5)
+ab("f32 rounding default", conds, f32c, default=0.1)
+ab("f32 int default", conds, f32c, default=-7)
+ab("f32 array default", conds, f32c, default=f32c[2])
+ab("f32 2-D", [c.reshape(2000, 4000) for c in conds], [c.reshape(2000, 4000) for c in f32c])
+# big python-int default exceeds f32-exact range -> delegate parity
+ab("f32 bigint default delegate", conds, f32c, default=2**25 + 1)
+ab("f16 delegate", conds, [c.astype(np.float16) for c in f32c])
+ab("f64 regression", conds, [rng.standard_normal(n) for _ in range(3)])
+ab("i64 regression", conds, [rng.integers(-10**9, 10**9, n) for _ in range(3)])
+ab("small", [c[:100] for c in conds], [c[:100] for c in f32c])
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.select(conds, f32c)); tf = best(lambda: fnp.select(conds, f32c))
+print(f"SELECT_F32_3COND_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces SELECT_F32_3COND_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "f32 select must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
