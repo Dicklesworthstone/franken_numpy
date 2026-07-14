@@ -2,7 +2,8 @@
 //! batch_solve. This is the win that makes wiring fnp's own batch_solve into
 //! np.linalg.solve beat numpy's serial-C per-lane LU.
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use fnp_linalg::{batch_solve, solve_nxn};
+use fnp_linalg::{batch_solve, lu_factor_nxn, solve_nxn};
+use rayon::prelude::*;
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -23,6 +24,51 @@ fn old_batch_broadcast_a(a: &[f64], b: &[f64], batch: usize, n: usize) -> Vec<f6
         out.extend_from_slice(&x);
     }
     out
+}
+
+fn old_factor_once_matrix(
+    a: &[f64],
+    b: &[f64],
+    batch: usize,
+    n: usize,
+    rhs_cols: usize,
+) -> Vec<f64> {
+    let (lu, perm, _) = lu_factor_nxn(a, n).unwrap();
+    let rhs_width = n * rhs_cols;
+    let mut result = vec![0.0; batch * rhs_width];
+    result
+        .par_chunks_mut(rhs_width)
+        .enumerate()
+        .for_each(|(idx, out)| {
+            let b_sub = &b[idx * rhs_width..(idx + 1) * rhs_width];
+            for i in 0..n {
+                let p_i = perm[i];
+                for col in 0..rhs_cols {
+                    out[i * rhs_cols + col] = b_sub[p_i * rhs_cols + col];
+                }
+            }
+            for i in 1..n {
+                for j in 0..i {
+                    let l_ij = lu[i * n + j];
+                    for col in 0..rhs_cols {
+                        out[i * rhs_cols + col] -= l_ij * out[j * rhs_cols + col];
+                    }
+                }
+            }
+            for i in (0..n).rev() {
+                for j in (i + 1)..n {
+                    let u_ij = lu[i * n + j];
+                    for col in 0..rhs_cols {
+                        out[i * rhs_cols + col] -= u_ij * out[j * rhs_cols + col];
+                    }
+                }
+                let u_ii = lu[i * n + i];
+                for col in 0..rhs_cols {
+                    out[i * rhs_cols + col] /= u_ii;
+                }
+            }
+        });
+    result
 }
 
 fn make(batch: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
@@ -129,9 +175,13 @@ fn bench(c: &mut Criterion) {
         let b_shape = [batch, n, rhs_cols];
         let literal = batch_solve(&a, &literal_a_shape, &b, &b_shape, false).unwrap();
         let control = batch_solve(&a, &control_a_shape, &b, &b_shape, false).unwrap();
+        let reload_store = old_factor_once_matrix(&a, &b, batch, n, rhs_cols);
         assert_eq!(literal.len(), control.len());
         for (idx, (lhs, rhs)) in literal.iter().zip(&control).enumerate() {
             assert_eq!(lhs.to_bits(), rhs.to_bits(), "flat output {idx} diverged");
+        }
+        for (idx, (lhs, rhs)) in literal.iter().zip(&reload_store).enumerate() {
+            assert_eq!(lhs.to_bits(), rhs.to_bits(), "reload/store output {idx} diverged");
         }
 
         let mut g = c.benchmark_group(format!(
@@ -166,6 +216,17 @@ fn bench(c: &mut Criterion) {
                     )
                     .unwrap(),
                 )
+            })
+        });
+        g.bench_function("reload_store_control", |bb| {
+            bb.iter(|| {
+                black_box(old_factor_once_matrix(
+                    black_box(&a),
+                    black_box(&b),
+                    batch,
+                    n,
+                    rhs_cols,
+                ))
             })
         });
         g.finish();

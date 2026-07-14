@@ -4,6 +4,54 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): 4-column register block for factor-once matrix `batch_solve` substitution - 3.03x
+
+`WindyCardinal`, bead `deadlock-audit-tcfxn`, `fnp-linalg`. Negative-ledger-first
+follow-up to the broadcast-A matrix factor-once keep. Once that lever removes
+127 redundant LU factorizations from the locked 128x128x4 row, the remaining
+repeated work is the 128 independent triangular substitutions. The old loop
+order was `row -> triangular coefficient -> RHS column`, so every destination
+was loaded and stored once per coefficient.
+
+ONE LEVER: the finite literal-2-D-A matrix-RHS factor-once path now carries four
+RHS-column accumulators through each forward/back triangular row and writes each
+destination once. A scalar tail covers column counts not divisible by four.
+Every output element still visits triangular coefficient `j` in the same order;
+permutation, LU, multiply/subtract sequence, division, lane parallelism, errors,
+and all admission gates are unchanged. Vector RHS, stacked or singleton-batch A,
+nonfinite A, blocked sizes, and the regular per-lane matrix path do not reach
+this code.
+
+The existing `batch_solve` Criterion binary gained an exact old-loop control
+that factors A once and uses the former reload/store substitution. Before
+timing, the binary asserted every candidate output bit against both that control
+and the semantically equivalent singleton-batch production route. Both raw-bit
+assertions passed.
+
+Exactly one foreground strict-remote invocation ran on requested and effective
+worker `vmi1149989`:
+
+`RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_SELF_HEAL=0 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch exec -- cargo bench -p fnp-linalg --bench batch_solve --profile release -- batch_solve_broadcast_a_matrix --noplot`
+
+The release build explicitly disabled LTO and completed in 23.73 seconds.
+Criterion used 10 samples, a 250 ms warm-up, and one-second measurement per arm
+on `batch=128, n=128, rhs_cols=4`:
+
+| arm | Criterion estimate |
+|---|---:|
+| former factor-once reload/store control | 3.2856 ms `[2.4372, 4.1763]` |
+| 4-column register-block candidate | **1.0838 ms** `[1.0590, 1.1128]` |
+
+Median speedup is **3.0316x** (67.01% lower latency); even the control's low
+bound is 2.19x slower than the candidate's high bound. The unrelated
+singleton-batch control measured 6.7784 ms. The command exited zero and no
+second benchmark, compile, conformance, or verification loop ran. Timed source
+SHA-256:
+`1be26b223c2345cfd831545d4fafa9b75d6fad3a56d46583d5e1d78b882d6cc1`;
+proof-bench SHA-256:
+`6c041ed234c1042edede259deb1c3b766750b83d3df1ab5228ad4ccdea581306`.
+KEEP.
+
 ## 2026-07-14 - BENCH-BLOCKED (REVERTED): singleton-source multi-axis `broadcast_to` direct fill (`deadlock-audit-kqasq`)
 
 `WindyCardinal`, `fnp-ufunc`. Fresh-subsystem, negative-ledger-first attribution

@@ -8468,23 +8468,64 @@ pub fn batch_solve(
                 }
             }
             for i in 1..n {
-                for j in 0..i {
-                    let l_ij = lu[i * n + j];
-                    for col in 0..rhs_cols {
-                        out[i * rhs_cols + col] -= l_ij * out[j * rhs_cols + col];
+                let row_base = i * rhs_cols;
+                let mut col = 0;
+                while col + 4 <= rhs_cols {
+                    let mut x0 = out[row_base + col];
+                    let mut x1 = out[row_base + col + 1];
+                    let mut x2 = out[row_base + col + 2];
+                    let mut x3 = out[row_base + col + 3];
+                    for j in 0..i {
+                        let l_ij = lu[i * n + j];
+                        let src = j * rhs_cols + col;
+                        x0 -= l_ij * out[src];
+                        x1 -= l_ij * out[src + 1];
+                        x2 -= l_ij * out[src + 2];
+                        x3 -= l_ij * out[src + 3];
                     }
+                    out[row_base + col] = x0;
+                    out[row_base + col + 1] = x1;
+                    out[row_base + col + 2] = x2;
+                    out[row_base + col + 3] = x3;
+                    col += 4;
+                }
+                for col in col..rhs_cols {
+                    let mut x = out[row_base + col];
+                    for j in 0..i {
+                        x -= lu[i * n + j] * out[j * rhs_cols + col];
+                    }
+                    out[row_base + col] = x;
                 }
             }
             for i in (0..n).rev() {
-                for j in (i + 1)..n {
-                    let u_ij = lu[i * n + j];
-                    for col in 0..rhs_cols {
-                        out[i * rhs_cols + col] -= u_ij * out[j * rhs_cols + col];
-                    }
-                }
                 let u_ii = lu[i * n + i];
-                for col in 0..rhs_cols {
-                    out[i * rhs_cols + col] /= u_ii;
+                let row_base = i * rhs_cols;
+                let mut col = 0;
+                while col + 4 <= rhs_cols {
+                    let mut x0 = out[row_base + col];
+                    let mut x1 = out[row_base + col + 1];
+                    let mut x2 = out[row_base + col + 2];
+                    let mut x3 = out[row_base + col + 3];
+                    for j in (i + 1)..n {
+                        let u_ij = lu[i * n + j];
+                        let src = j * rhs_cols + col;
+                        x0 -= u_ij * out[src];
+                        x1 -= u_ij * out[src + 1];
+                        x2 -= u_ij * out[src + 2];
+                        x3 -= u_ij * out[src + 3];
+                    }
+                    out[row_base + col] = x0 / u_ii;
+                    out[row_base + col + 1] = x1 / u_ii;
+                    out[row_base + col + 2] = x2 / u_ii;
+                    out[row_base + col + 3] = x3 / u_ii;
+                    col += 4;
+                }
+                for col in col..rhs_cols {
+                    let mut x = out[row_base + col];
+                    for j in (i + 1)..n {
+                        x -= lu[i * n + j] * out[j * rhs_cols + col];
+                    }
+                    out[row_base + col] = x / u_ii;
                 }
             }
         };
