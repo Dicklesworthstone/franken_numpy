@@ -2914,16 +2914,13 @@ print(verdicts if verdicts else True)
 
 #[test]
 fn histogram_edges_array_parallel_matches_numpy() -> Result<(), String> {
-    // Edges-array histogram parity coverage + basis pin. A parallel
-    // per-element upper-bound arm was built and gate-REJECTED 2026-07-14:
-    // numpy's array-bins path BLOCK-SORTS the data and searches the edges
-    // into each block, making its cost edge-count-FLAT (~56-59ms at 8M for
-    // 64 or 1024 edges) - the per-element search read 1.383x at 64 edges
-    // (below bar) and 0.672x at 1024 (log(ne) scaling loses). Retry
-    // predicate: replicate numpy's block-sort structure with parallel
-    // blocks. All rows here pin delegate parity; the all-equal-bins
-    // digitize row resolves that filed edge (numpy and fnp AGREE - no
-    // divergence).
+    // Edges-array histogram: SECOND design. The per-element upper-bound arm
+    // was gate-REJECTED (1.383x/0.672x - numpy's basis is edge-count-flat);
+    // this arm replicates numpy's OWN block-sort algorithm with the blocks
+    // fanned across rayon (sortable-key NaN-last block sort + inclusive edge
+    // searches + diff). Counts are additive integers, so block partitioning
+    // is byte-irrelevant. The all-equal-bins digitize row (resolved: numpy
+    // and fnp AGREE) rides along.
     let script = fnp_script(
         r#"
 import time
