@@ -4,6 +4,47 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - BENCH-BLOCKED (REVERTED): F-order identity broadcast overlap proof
+
+`ChartreuseCedar`, bead `deadlock-audit-kni1z`, `fnp-ndarray`. Robot triage
+returned no actionable recommendations or quick wins, so this turn pivoted from
+the dtype cast lane into stride calculus. Negative-ledger-first review found the
+shipped C-contiguous identity-broadcast shortcut and no Fortran-contiguous row.
+
+Profile/call-site attribution: `NdLayout::broadcast_to` already returns directly
+when an equal-shape layout is C-contiguous. An equal-shape F-contiguous layout
+instead rebuilds the same strides, enumerates every byte offset, sorts them, and
+scans adjacent offsets to rediscover that the layout has no overlap. The one
+candidate admits F-contiguous layouts through the existing shortcut. C-order,
+shape/rank validation, non-contiguous layouts, real expansions, error precedence,
+ordering, floating-point state, and RNG state are unchanged.
+
+The existing `criterion_ndarray` target carried the exact former offset
+enumeration/sort as a same-binary control on a small 32x32 F-order layout. Its
+pre-timing proof was designed to assert that the candidate is F-contiguous but
+not C-contiguous and that complete returned `NdLayout` metadata equals the
+former path.
+
+Exactly one foreground strict-remote command ran with LTO explicitly disabled:
+
+`RCH_WORKER=vmi1156319 RCH_WORKERS=vmi1156319 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-ndarray --bench criterion_ndarray --profile release -- NdLayout_broadcast_to_fortran_identity --noplot`
+
+RCH admitted effective worker `vmi1149989` (job
+`j-29928833041828479`); strict mode prevented local fallback. The cache missed,
+and the permitted non-LTO release build stopped before timing after 32.9 seconds
+with `E0282/E0283`: the benchmark-only copied detector's `offset` binding needed
+an explicit `isize` annotation. Total RCH time was 60.6 seconds.
+
+No timing means no keep. Production and benchmark hunks were manually restored;
+only this blocker evidence and bead closeout land. Retry by declaring
+`let offset: isize` in the same-binary control, then run the now-warm release
+target once. No second benchmark, compile, conformance, or local Cargo fallback
+ran. Attempted source SHA-256:
+`ddc10ffcba93356acb2b7a80f9bdc836b03d6a19cfab390c2a0ff9662f536b15`;
+attempted proof-bench SHA-256:
+`d82aaab538f99fa5d9a1a03d971978e645a1f2a268426af66ffb95126b677f86`.
+BENCH-BLOCKED.
+
 ## 2026-07-14 - WIN (SHIP): direct `I64` to `I32` storage cast - 6.64x
 
 `IndigoRabbit`, bead `deadlock-audit-vh089`, `fnp-dtype`. Robot triage returned
