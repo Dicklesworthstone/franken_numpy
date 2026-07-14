@@ -2331,3 +2331,63 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn complex_select_fused_parallel_matches_numpy() -> Result<(), String> {
+    // c64 select arm (sibling of the int ship): views to u64 with the same
+    // shape, 4.14x. c128 was gate-REJECTED at 1.020x (pair-move indexing
+    // halves throughput; numpy's own c128 passes are fast) - its rows here
+    // pin DELEGATE parity incl. NaN/-0.0 verbatim movement through numpy.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(397)
+verdicts = []
+def ab(name, conds, choices, **kw):
+    ours = fnp.select(conds, choices, **kw)
+    theirs = np.select(conds, choices, **kw)
+    if ours.tobytes() != theirs.tobytes() or str(ours.dtype) != str(theirs.dtype) or ours.shape != theirs.shape:
+        verdicts.append(f"FAIL {name}")
+n = 4_000_000
+x = rng.standard_normal(n)
+conds = [x > 0.5, x < -0.5, np.abs(x) < 0.1]
+def cplx(dt):
+    c = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(dt)
+    return c
+c128 = [cplx(np.complex128) for _ in range(3)]
+c128[0][7] = complex(np.nan, -0.0)  # verbatim-move rows
+ab("c128 default0", conds, c128)
+ab("c128 array default", conds, c128, default=c128[1])
+c64 = [cplx(np.complex64) for _ in range(3)]
+ab("c64 default0", conds, c64)
+ab("c128 2-D", [c.reshape(2000, 2000) for c in conds], [c.reshape(2000, 2000) for c in c128])
+# nonzero/complex scalar defaults delegate (promotion surface)
+ab("c128 nonzero default delegate", conds, c128, default=1)
+ab("c128 complex default delegate", conds, c128, default=1+2j)
+ab("i64 regression", conds, [rng.integers(-10**9, 10**9, n) for _ in range(3)])
+ab("small c128", [c[:64] for c in conds], [c[:64] for c in c128])
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.select(conds, c128)); tf = best(lambda: fnp.select(conds, c128))
+print(f"SELECT_C128_3COND_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn2 = best(lambda: np.select(conds, c64)); tf2 = best(lambda: fnp.select(conds, c64))
+print(f"SELECT_C64_3COND_AB numpy_ms={tn2:.3f} fnp_ms={tf2:.3f} ratio={tn2 / tf2:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces SELECT_C128_3COND_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "complex select must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
