@@ -1737,7 +1737,7 @@ fn cholesky_blocked(a: &[f64], n: usize, panel_nb: usize) -> Result<Vec<f64>, Li
     Ok(l)
 }
 
-pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+fn validate_cholesky_nxn_input(a: &[f64], n: usize) -> Result<(), LinAlgError> {
     if Some(a.len()) != n.checked_mul(n) || n == 0 {
         return Err(LinAlgError::CholeskyContractViolation(
             "cholesky_nxn: input must be n*n with n > 0",
@@ -1748,7 +1748,10 @@ pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
             "cholesky requires finite entries",
         ));
     }
+    Ok(())
+}
 
+fn cholesky_nxn_general_validated(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     if n >= CHOL_MID_MIN {
         return cholesky_blocked(a, n, cholesky_panel_width(n));
     }
@@ -1782,6 +1785,41 @@ pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
         }
     }
     Ok(l)
+}
+
+pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+    validate_cholesky_nxn_input(a, n)?;
+
+    // Exact diagonal inputs otherwise enter the full blocked factorization at
+    // n >= CHOL_MID_MIN, including panel solves and zero-valued trailing SYRKs.
+    // Restrict admission to +0.0 below the diagonal: the general kernel carries
+    // a -0.0 input through its division, so accepting it here would change bits.
+    if (1..n).all(|row| {
+        a[row * n..row * n + row]
+            .iter()
+            .all(|value| value.to_bits() == 0)
+    }) {
+        let mut l = vec![0.0; n * n];
+        for row in 0..n {
+            let diagonal = a[row * n + row];
+            if diagonal <= 0.0 {
+                return Err(LinAlgError::CholeskyContractViolation(
+                    "matrix is not positive definite",
+                ));
+            }
+            l[row * n + row] = diagonal.sqrt();
+        }
+        return Ok(l);
+    }
+
+    cholesky_nxn_general_validated(a, n)
+}
+
+/// Benchmark control retaining the former unconditional general factorization.
+#[doc(hidden)]
+pub fn cholesky_nxn_general_control(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+    validate_cholesky_nxn_input(a, n)?;
+    cholesky_nxn_general_validated(a, n)
 }
 
 /// Write the lower Cholesky factor `L` (n*n) directly into `out`, with no per-lane

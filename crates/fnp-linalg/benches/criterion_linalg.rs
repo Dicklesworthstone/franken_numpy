@@ -16,11 +16,12 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_linalg::{
     batch_cholesky, batch_det, batch_eigvalsh, batch_inv, batch_matrix_norm, batch_slogdet,
-    batch_trace, cholesky_nxn, complex_matmul, cond_nxn, det_nxn, eigvalsh_nxn, inv_nxn,
-    kron_nxn, matrix_norm_frobenius, matrix_norm_nxn, matrix_power_nxn, multi_dot, qr_nxn,
-    sbr_stage1_dense_to_band_lower_nxn, solve_nxn, svd_mxn_full, svd_nxn,
+    batch_trace, cholesky_nxn, cholesky_nxn_general_control, complex_matmul, cond_nxn, det_nxn,
+    eigvalsh_nxn, inv_nxn, kron_nxn, matrix_norm_frobenius, matrix_norm_nxn, matrix_power_nxn,
+    multi_dot, qr_nxn, sbr_stage1_dense_to_band_lower_nxn, solve_nxn, svd_mxn_full, svd_nxn,
 };
 use std::hint::black_box;
+use std::time::Duration;
 
 fn generate_spd_matrix(n: usize) -> Vec<f64> {
     let mut a = vec![0.0; n * n];
@@ -153,6 +154,33 @@ fn bench_cholesky(c: &mut Criterion) {
         });
     }
 
+    group.finish();
+}
+
+fn bench_cholesky_exact_diagonal(c: &mut Criterion) {
+    let n = 256usize;
+    let a = generate_descending_diagonal_matrix(n);
+    let former = cholesky_nxn_general_control(&a, n).expect("former Cholesky control");
+    let candidate = cholesky_nxn(&a, n).expect("diagonal Cholesky candidate");
+    assert_eq!(former.len(), candidate.len());
+    for (index, (&lhs, &rhs)) in former.iter().zip(&candidate).enumerate() {
+        assert_eq!(
+            lhs.to_bits(),
+            rhs.to_bits(),
+            "diagonal Cholesky output {index} changed bits"
+        );
+    }
+
+    let mut group = c.benchmark_group("cholesky_exact_diagonal_256");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    group.bench_function("former_general_control", |bench| {
+        bench.iter(|| black_box(cholesky_nxn_general_control(black_box(&a), n).unwrap()));
+    });
+    group.bench_function("exact_diagonal_candidate", |bench| {
+        bench.iter(|| black_box(cholesky_nxn(black_box(&a), n).unwrap()));
+    });
     group.finish();
 }
 
@@ -683,6 +711,7 @@ criterion_group!(
     bench_det,
     bench_inv,
     bench_cholesky,
+    bench_cholesky_exact_diagonal,
     bench_qr,
     bench_svd,
     bench_svd_full,

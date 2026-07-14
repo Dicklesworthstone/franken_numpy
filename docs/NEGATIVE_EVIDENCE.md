@@ -4,6 +4,51 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): exact-diagonal Cholesky bypass - 15.79x
+
+`IvoryTurtle`, bead `deadlock-audit-hwlzt`, `fnp-linalg`. Robot triage left only
+an f16 searchsorted bead and an opt-in C-BLAS/fast-math bead, so this pass
+pivoted to a fresh decomposition seam. Negative-ledger review found no prior
+exact-diagonal Cholesky attempt. Source attribution showed that a 256x256
+diagonal input still entered the blocked factorization: diagonal panels,
+triangular panel solves, and trailing SYRK work all ran even though every
+off-diagonal contribution was zero.
+
+ONE LEVER: `cholesky_nxn` now recognizes an exactly diagonal lower triangle and
+writes the square roots directly. Admission requires every lower off-diagonal
+to be positive zero by bit pattern; `-0.0` stays on the general path because
+the former division preserves its sign bit. Full-buffer finite validation,
+non-positive-diagonal errors, ignored upper-triangle behavior, allocation
+shape, and all non-diagonal factorization paths are unchanged.
+
+The existing `criterion_linalg` binary gained a doc-hidden control retaining
+the former unconditional general factorization. Before timing, it asserted
+every output bit from the candidate against that control on a descending
+positive 256x256 diagonal matrix. The assertion passed.
+
+Exactly one foreground strict-remote command ran on requested and effective
+worker `vmi1149989` (job `j-29928833041828513`):
+
+`RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-linalg --bench criterion_linalg --profile release -- cholesky_exact_diagonal_256 --noplot`
+
+The worker cache missed, but the permitted non-LTO release build completed in
+36.73 seconds. Criterion used 10 samples, a 250 ms warm-up, and a one-second
+measurement per arm:
+
+| arm | Criterion estimate |
+|---|---:|
+| former general-factorization control | 779.19 us `[728.10, 848.56]` |
+| exact-diagonal candidate | **49.349 us** `[44.921, 56.083]` |
+
+Midpoint speedup is **15.789x** (93.67% lower latency); even the control's low
+bound is 12.98x slower than the candidate's high bound. The command exited
+zero. No second benchmark, conformance, compile, or verification loop ran.
+Timed source SHA-256:
+`6bfdd34b03d6f8b3322be0be22dab4679feae5163c32b4a16805a29e9399bb4b`;
+proof-bench SHA-256:
+`44f10058af729e3424ab3e69a360d101ba7f1defe39860fb582e2d305dc48c69`.
+KEEP.
+
 ## 2026-07-14 - REJECT (REVERTED): direct-collect serial PCG64 fill - 1.16x slower
 
 `BeigeBay`, bead `deadlock-audit-wctsk`, `fnp-random`. Robot triage's only
