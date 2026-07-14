@@ -983,3 +983,113 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn delete_strided_slice_parallel_matches_numpy() -> Result<(), String> {
+    // Locked parity, native-route, and foreground coverage for the dense
+    // strided-slice delete fast path.
+    let script = fnp_script(
+        r#"
+import time
+
+verdicts = []
+numpy_delete = np.delete
+
+def outcome(fn, *args, **kwargs):
+    try:
+        out = np.asarray(fn(*args, **kwargs))
+        return ("ok", str(out.dtype), tuple(out.shape), out.tobytes())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+def ab(name, arr, obj, **kwargs):
+    ours = outcome(fnp.delete, arr, obj, **kwargs)
+    theirs = outcome(numpy_delete, arr, obj, **kwargs)
+    if ours != theirs:
+        verdicts.append(f"FAIL {name}: {ours[:3]} != {theirs[:3]}")
+
+# Keep the parity rows above the candidate's size gate so they exercise the
+# native route when admitted.  Every supported fixed-width scalar storage
+# width is represented; delete is a byte-preserving stable filter.
+n = 1 << 19
+for dtype in (
+    np.bool_, np.int8, np.uint8, np.int16, np.uint16, np.int32, np.uint32,
+    np.int64, np.uint64, np.float16, np.float32, np.float64,
+):
+    dtype = np.dtype(dtype)
+    dtype_n = max(n, (1 << 22) // dtype.itemsize)
+    if dtype == np.dtype(np.bool_):
+        arr = (np.arange(dtype_n, dtype=np.uint32) & 1).astype(dtype)
+    else:
+        arr = np.arange(dtype_n, dtype=np.uint64).astype(dtype)
+    ab(f"dtype {np.dtype(dtype)} positive step", arr, slice(7, None, 3))
+    ab(f"dtype {np.dtype(dtype)} negative step", arr, slice(-2, -dtype_n, -5))
+
+special = np.arange(n, dtype=np.float64)
+special[:8] = [0.0, -0.0, np.inf, -np.inf, np.nan, 5e-324, -5e-324, 1.5]
+for name, obj in (
+    ("omitted bounds positive", slice(None, None, 2)),
+    ("omitted bounds negative", slice(None, None, -3)),
+    ("clamped bounds", slice(-10 * n, 10 * n, 7)),
+    ("empty positive", slice(19, 19, 2)),
+    ("empty negative", slice(19, 19, -2)),
+):
+    ab(name, special, obj)
+
+# Unsupported forms retain NumPy's behavior, including the exact step-zero
+# ValueError.  These rows also guard the step +/-1 exclusion.
+ab("step one delegate", special, slice(11, n - 11, 1))
+ab("step negative one delegate", special, slice(None, None, -1))
+ab("step zero error", special, slice(None, None, 0))
+ab("below gate", np.arange(1024, dtype=np.float64), slice(None, None, 2))
+ab("complex delegate", np.arange(n, dtype=np.float64).astype(np.complex128), slice(1, None, 2))
+ab("explicit axis delegate", special, slice(1, None, 2), axis=0)
+
+def best(fn, reps=5):
+    samples = []
+    for _ in range(reps):
+        start = time.perf_counter()
+        fn()
+        samples.append((time.perf_counter() - start) * 1e3)
+    return min(samples)
+
+large = np.arange(8_000_000, dtype=np.float64)
+spec = slice(1, None, 3)
+numpy_ms = best(lambda: numpy_delete(large, spec))
+fnp_ms = best(lambda: fnp.delete(large, spec))
+print(f"DELETE_STRIDED_SLICE_AB numpy_ms={numpy_ms:.3f} fnp_ms={fnp_ms:.3f} ratio={numpy_ms / fnp_ms:.3f}")
+
+# Prove eligible inputs avoid the NumPy delete fallback while excluded forms
+# still reach it.  The saved original remains the parity/timing oracle.
+fallback_calls = 0
+def counted_delete(*args, **kwargs):
+    global fallback_calls
+    fallback_calls += 1
+    return numpy_delete(*args, **kwargs)
+np.delete = counted_delete
+before = fallback_calls
+fnp.delete(large, spec)
+fnp.delete(large, slice(-2, None, -3))
+eligible_delegate_count = fallback_calls - before
+after_eligible = fallback_calls
+fnp.delete(large, slice(1, None, 1))
+delegate_hit = fallback_calls == after_eligible + 1
+np.delete = numpy_delete
+if eligible_delegate_count != 0:
+    verdicts.append(f"FAIL candidate delegated {eligible_delegate_count} eligible strided slices")
+if not delegate_hit:
+    verdicts.append("FAIL step-one slice did not delegate")
+
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}");
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "strided-slice delete must be byte-identical to NumPy: {result}"
+    );
+    Ok(())
+}

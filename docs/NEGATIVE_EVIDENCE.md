@@ -4,6 +4,73 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): dense strided-slice `np.delete` via complementary parallel compact - 3.52x vs NumPy
+
+`WindyCardinal`. Negative-ledger-first closeout of the explicit step-strided
+delete residual recorded with the scalar-delete work: NumPy's slice path builds
+a bool keep-mask for the middle span and then performs a serial gather, while
+FNP already has a stable blocked parallel compactor for bool masks. The one
+lever admits the profitable slice shape into that existing primitive. It
+normalizes the slice exactly once with CPython's `PySlice_GetIndicesEx`, fills
+the selected positions false in a fresh keep-mask, and reuses
+`try_zerocopy_any_compact`; values remain in ascending input order and move as
+same-width integer bits, so all payload bytes are preserved.
+
+Admission is deliberately narrower than semantic possibility: exact 1-D
+C-contiguous ndarray, kind bool/int/uint/float with itemsize 1/2/4/8, at least
+`1<<19` elements and 4 MiB, at least two Rayon threads, omitted/None axis, and
+an exact built-in-int slice step with `|step| > 1`. The normalized slice must
+delete at least `ceil(n/16)` elements and span at least `ceil(n/2)`. Empty,
+unit-stride, sparse/narrow-span, small, complex/object/string, non-contiguous,
+subclass, custom-step, and explicit-axis forms keep NumPy's specialized path.
+This avoids turning NumPy's already-fast prefix/suffix memcpy cases into a
+full-mask regression.
+
+`delete_strided_slice_parallel_matches_numpy` passed outcome type, dtype,
+shape, and raw-byte parity for positive and negative steps across bool, every
+integer width/sign, float16/32/64, clamped/omitted/negative bounds, NaN,
+infinities, subnormals, and signed zero. It also pins empty slices, step
+`+1/-1`, step-zero ValueError text, below-gate, complex, and explicit-axis
+delegation. A monkeypatched fallback counter proves that eligible positive and
+negative slices are both native while step-one still delegates.
+
+Strict remote-only same-worker `release-perf` foreground A/B on `vmi1152480`
+(8,000,000 float64 elements, `slice(1, None, 3)`, best of 5, LTO disabled, 16
+codegen units, Cargo `-j1`): delegated baseline job `j-29928833041827866`
+measured NumPy 30.664 ms / FNP 32.789 ms = 0.935x. Candidate job
+`j-29928833041827912` measured NumPy 28.370 ms / FNP 8.051 ms = **3.524x**.
+Candidate FNP latency is 75.45% below baseline FNP (**4.073x faster**); the
+candidate NumPy control was only 7.48% faster, far too small to explain the
+separation.
+
+RCH did not forward the candidate harness's expectation environment variable,
+so the measured release process exited 101 after reporting the 3.524x timing:
+its only verdict was the transport assertion (`eligible_delegate_count` was
+zero, proving both native hits), while every semantic parity/delegation row was
+green. The transport-independent final harness then passed strict remote on
+the same worker as job `j-29928833041827962`; its unoptimized timing is excluded
+from the perf verdict. Strict-remote workspace check job
+`j-29928833041827974` passed on the final current-main snapshot. Clippy job
+`j-29928833041827975` remains blocked solely by the pre-existing unrelated
+`fnp-ufunc::nan_filtered` dead code and `neg_cmp_op_on_partial_ord` lints.
+Remote-required `cargo fmt --check` failed closed with RCH-E301 rather than running
+locally, and UBS's monolithic `lib.rs` scan hit its 300-second module timeout;
+`git diff --check` passed.
+
+Baseline production/test hashes were
+`473794a8555c49507436f3b60f89e0234853924a4e9fcd9eda635083a00d215f` /
+`ca204a34e469f5449d8261e93b4efa923c332f158d2a8117f9c32c7b50a88047`.
+The exact measured candidate hashes were
+`d7748aa2e98deaf965a67490048a880f8e0986eca0f97122e76be9f0f810cdfe` /
+`c0c7bf54db21b7c793516f2d7ae62560e7831b9ce44ad97218d0918acfd0890d`;
+the final transport-independent test hash is
+`1de052b9537c70b7798a2b461869cf412155bcc2e816cb739c0d46f3f6a04623`.
+Main advanced during the cold remote builds through the disjoint histogram
+block-sort (`69b2d8e5`) and later f64 unique/intersect gates (`8bde88b4`,
+`80d6aac3`); none is reachable from `delete`. KEEP. The step-strided delete
+residual is closed; retry predicate: none for the admitted dense/full-span
+regime.
+
 ## 2026-07-14 - WIN (SHIP): c128 `np.select` logical-pair fill - 2.44x FNP self-speedup, 3.27x vs NumPy
 
 `WindyCardinal`. Negative-ledger-first retry of the c128 half rejected in
