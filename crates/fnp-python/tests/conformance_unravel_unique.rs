@@ -2646,3 +2646,63 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn digitize_decreasing_bins_parallel_matches_numpy() -> Result<(), String> {
+    // Decreasing-bins digitize previously delegated to numpy's serial path;
+    // numpy's own formula is len(bins) - searchsorted(bins[::-1], x, side),
+    // so the parallel arm runs the same binary search on the reversed
+    // snapshot with an index flip - byte-exact, incl. NaN -> 0 for free.
+    // Unsorted / NaN-bearing bins keep numpy's error surface.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(431)
+verdicts = []
+def ab(name, x, bins, **kw):
+    ours = fnp.digitize(x, bins, **kw)
+    theirs = np.digitize(x, bins, **kw)
+    if ours.tobytes() != theirs.tobytes() or str(ours.dtype) != str(theirs.dtype):
+        verdicts.append(f"FAIL {name}")
+n = 8_000_000
+x = rng.standard_normal(n) * 100
+x[3] = np.nan; x[5] = np.inf; x[7] = -np.inf
+dbins = np.sort(rng.standard_normal(500) * 100)[::-1].copy()
+ab("f64 decreasing", x, dbins)
+ab("f64 decreasing right", x, dbins, right=True)
+# ties inside the decreasing bins
+tb = np.repeat(np.arange(50, 0, -1) * 3.0, 4)
+ab("decreasing tied bins", x, tb)
+xi = rng.integers(-10**6, 10**6, n)
+ab("i64 decreasing", xi, np.sort(rng.integers(-10**6, 10**6, 300))[::-1].copy())
+ab("increasing regression", x, np.sort(dbins).copy())
+ab("small delegate", x[:1000], dbins)
+# unsorted bins raise identically (delegate -> numpy's error)
+try:
+    fnp.digitize(x[:10], np.array([1.0, 5.0, 2.0]))
+    verdicts.append("FAIL unsorted no-raise")
+except ValueError:
+    pass
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.digitize(x, dbins)); tf = best(lambda: fnp.digitize(x, dbins))
+print(f"DIGITIZE_DECREASING_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces DIGITIZE_DECREASING_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "decreasing-bins digitize must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
