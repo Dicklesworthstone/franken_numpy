@@ -4,6 +4,43 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): native-endian F32 `fromfile` typed-slice decode - 12.43x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.287`, fresh `fromfile`/`fnp-io` lane.
+Robot triage exposed only the out-of-policy C-BLAS/fast-math perf leaf, so
+negative-ledger screening pivoted away from the thinning random vein. Source
+attribution found that native-endian F32 still paid a per-element four-byte
+slice plus generic `decode_element` dispatch, while native-endian F64 already
+used an aligned typed-slice path.
+
+ONE LEVER routes aligned native-endian F32 payloads through
+`try_cast_slice::<u8, f32>` and widens directly to F64, retaining an exact
+`from_ne_bytes` fallback for misaligned input. The benchmark asserted
+bit-identical output over the full aligned corpus (including signed zero, a NaN
+payload, and infinities) and a forced-misaligned 257-element corpus before
+timing.
+
+Foreground remote-only command (release profile, LTO explicitly disabled):
+
+```text
+timeout --signal=TERM 300s env RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-io --bench criterion_io --profile release -- fromfile_native_f32_typed_slice --warm-up-time 0.25 --measurement-time 0.75 --sample-size 10 --noplot
+```
+
+RCH job `j-29928833041828710` ran on requested/effective worker `vmi1149989`
+(cache miss, 48.14 s compile, 94.2 s total) and exited 0:
+
+| arm | Criterion estimate |
+|---|---:|
+| former generic element decoder | 357.53-411.90 us (388.21 us midpoint) |
+| typed-slice candidate | 30.834-31.731 us (31.236 us midpoint) |
+
+Midpoint speedup is **12.428x** (91.95% lower latency); even the closest
+interval bounds separate by 11.27x. Source/bench timed hashes were
+`0ad2895f6987719264fdaad4a48bc9c37cae667590e5422cd9b7d4bf16757c08` and
+`2159e7d4cc9509a1eba0b4e314886a5e548d38843566ee18d6f2970cfb26dcf9`.
+Decision: **SHIP**. Per the one-bench directive, no second compile, benchmark,
+or conformance loop was run.
+
 ## 2026-07-14 - NO-SHIP: one-pass slice `choice(replace=true)` gather - 1.35x slower
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.286`, `choice`/`fnp-random`. Robot

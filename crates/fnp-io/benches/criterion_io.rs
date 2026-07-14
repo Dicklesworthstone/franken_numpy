@@ -10,7 +10,7 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fnp_io::{
-    IOSupportedDType, NpyHeader, read_npy_bytes, read_npz_bytes,
+    IOSupportedDType, NpyHeader, fromfile, read_npy_bytes, read_npz_bytes,
     read_npz_bytes_linear_overlap_control, write_npy_bytes, write_npz_bytes,
 };
 use std::hint::black_box;
@@ -27,6 +27,85 @@ fn make_npy_header(shape: &[usize]) -> NpyHeader {
         fortran_order: false,
         shape: shape.to_vec(),
     }
+}
+
+fn native_f32_dtype() -> IOSupportedDType {
+    #[cfg(target_endian = "little")]
+    {
+        IOSupportedDType::F32
+    }
+    #[cfg(target_endian = "big")]
+    {
+        IOSupportedDType::F32Be
+    }
+}
+
+fn fromfile_f32_former(data: &[u8], count: Option<usize>) -> Vec<f64> {
+    let item_size = core::mem::size_of::<f32>();
+    let max_elems = data.len() / item_size;
+    let n = count.map_or(max_elems, |requested| requested.min(max_elems));
+    (0..n)
+        .map(|index| {
+            let offset = index * item_size;
+            let chunk = &data[offset..offset + item_size];
+            f64::from(f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        })
+        .collect()
+}
+
+fn bench_fromfile_native_f32(c: &mut Criterion) {
+    const ELEMENTS: usize = 262_144;
+    let values: Vec<f32> = (0..ELEMENTS)
+        .map(|index| match index % 8 {
+            0 => -0.0,
+            1 => f32::from_bits(0x7fc0_0042),
+            2 => f32::INFINITY,
+            3 => f32::NEG_INFINITY,
+            _ => index as f32 * 0.25 - 17.0,
+        })
+        .collect();
+    let bytes: &[u8] = bytemuck::cast_slice(&values);
+    let former = fromfile_f32_former(bytes, None);
+    let candidate = fromfile(bytes, native_f32_dtype(), None).unwrap();
+    assert_eq!(
+        candidate
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        former
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+
+    let mut misaligned = Vec::with_capacity(bytes.len() + 1);
+    misaligned.push(0);
+    misaligned.extend_from_slice(bytes);
+    let former_misaligned = fromfile_f32_former(&misaligned[1..], Some(257));
+    let candidate_misaligned = fromfile(&misaligned[1..], native_f32_dtype(), Some(257)).unwrap();
+    assert_eq!(
+        candidate_misaligned
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        former_misaligned
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+
+    let mut group = c.benchmark_group("fromfile_native_f32_typed_slice");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Bytes(bytes.len() as u64));
+    group.bench_function("former_element_decode", |bench| {
+        bench.iter(|| black_box(fromfile_f32_former(black_box(bytes), None)))
+    });
+    group.bench_function("typed_slice_candidate", |bench| {
+        bench.iter(|| black_box(fromfile(black_box(bytes), native_f32_dtype(), None).unwrap()))
+    });
+    group.finish();
 }
 
 fn bench_write_npy(c: &mut Criterion) {
@@ -200,6 +279,7 @@ fn bench_npy_roundtrip(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_fromfile_native_f32,
     bench_write_npy,
     bench_read_npy,
     bench_write_npz,
