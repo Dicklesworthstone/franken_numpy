@@ -62,6 +62,40 @@ fn bench_rot90_k2(c: &mut Criterion) {
     group.finish();
 }
 
+fn old_flip_axes2(arr: &UFuncArray) -> UFuncArray {
+    arr.flip(Some(0)).unwrap().flip(Some(1)).unwrap()
+}
+
+fn bench_flip_axes2(c: &mut Criterion) {
+    let shape = vec![768, 512];
+    let n: usize = shape.iter().product();
+    let data: Vec<f64> = (0..n)
+        .map(|i| match i % 8 {
+            0 => -0.0,
+            1 => f64::from_bits(0x7ff8_0000_0000_0042),
+            _ => (i as f64) * 0.5 - 1.0,
+        })
+        .collect();
+    let arr = UFuncArray::new(shape, data, DType::F64).unwrap();
+
+    let old = old_flip_axes2(&arr);
+    let new = arr.flip_axes(&[0, 1]).unwrap();
+    assert_eq!(new.shape(), old.shape());
+    assert_eq!(
+        new.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        old.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
+
+    let mut group = c.benchmark_group("flip_axes_rank2_two_axes");
+    group.bench_with_input(BenchmarkId::new("old_two_flips", n), &n, |b, _| {
+        b.iter(|| black_box(old_flip_axes2(black_box(&arr))))
+    });
+    group.bench_with_input(BenchmarkId::new("half_turn_route", n), &n, |b, _| {
+        b.iter(|| black_box(arr.flip_axes(black_box(&[0, 1])).unwrap()))
+    });
+    group.finish();
+}
+
 fn bench_flip(c: &mut Criterion) {
     // (shape, axis): axis 0 (single outer block), middle axis (many blocks),
     // last axis (inner==1).
@@ -93,5 +127,5 @@ fn bench_flip(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_rot90_k2, bench_flip);
+criterion_group!(benches, bench_rot90_k2, bench_flip_axes2, bench_flip);
 criterion_main!(benches);

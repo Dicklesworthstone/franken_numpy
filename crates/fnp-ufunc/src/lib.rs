@@ -13540,6 +13540,17 @@ impl UFuncArray {
     ///
     /// Applies flip sequentially along each specified axis.
     pub fn flip_axes(&self, axes: &[isize]) -> Result<Self, UFuncError> {
+        // On a rank-2 array, flipping both distinct axes is exactly the
+        // contiguous half-turn handled by rot90(2). Avoid materializing two
+        // full flip intermediates; duplicate-axis semantics still fall through
+        // to the sequential path (and therefore cancel as before).
+        if self.shape.len() == 2 && axes.len() == 2 {
+            let first = normalize_axis(axes[0], 2)?;
+            let second = normalize_axis(axes[1], 2)?;
+            if first != second {
+                return self.rot90(2);
+            }
+        }
         // Flip the first axis straight from self rather than cloning to seed the
         // loop. Bit-identical (each flip is read-only; same sequence of flips).
         let mut axes_iter = axes.iter();

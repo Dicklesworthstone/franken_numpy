@@ -4,6 +4,45 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - SHIP: rank-2 two-axis `flip_axes` through one half-turn - 36.7x
+
+`IvoryTurtle`, bead `deadlock-audit-qowi9`, `fnp-ufunc`. Robot triage still
+offered only the prohibited f16 lane and the human-decision C-BLAS/fast-math
+lane. The preceding rank-2 half-turn win left the existing `flip` Criterion
+binary as the intended warm target, so this pass screened its nearest consumer
+before pivoting. Negative-ledger search found the older seed-clone removal and
+the single-axis copy kernel, but no fused rank-2 two-axis route.
+
+Profile/source attribution found `flip_axes(&[0, 1])` still calling the
+allocating `flip(axis)` kernel twice. At this 393,216-element shape each call
+also crossed the parallel flip threshold. ONE LEVER recognizes exactly two
+distinct normalized axes on a rank-2 array and routes them through the existing
+one-pass contiguous half-turn. Duplicate axes retain the sequential path and
+its cancellation behavior; higher ranks and all other axis lists are unchanged.
+
+The same binary reconstructed the former two-flip path and asserted identical
+shape plus every `f64::to_bits()` result before timing, including negative zero
+and a noncanonical NaN payload. Exactly one foreground strict-remote command
+ran on requested and effective worker `vmi1149989` (job
+`j-29928833041828585`):
+
+`timeout --signal=TERM 300s env RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-ufunc --bench flip --profile release -- flip_axes_rank2_two_axes --warm-up-time 0.25 --measurement-time 0.75 --sample-size 10 --noplot`
+
+RCH unexpectedly reported another cache miss, but the non-LTO release command
+still returned within the hard cap in 174.9 seconds. Criterion used 10 samples,
+a 250 ms warm-up, and a 750 ms measurement per arm:
+
+| arm | Criterion estimate |
+|---|---:|
+| former two flips | 2.5147 ms `[2.1799, 2.7394]` |
+| half-turn route | **68.449 us** `[66.663, 70.035]` |
+
+The midpoint is 36.7x faster, and the intervals remain separated by more than
+31x at their closest bounds. The pre-benchmark staged UBS Rust scan completed
+without findings attributable to the delta; the build emitted only the
+pre-existing `nan_filtered` dead-code warning. No second benchmark or
+verification loop ran. SHIPPED.
+
 ## 2026-07-14 - SHIP: one-pass rank-2 `rot90(k=2)` - 69.8x
 
 `IvoryTurtle`, bead `deadlock-audit-fs94s`, `fnp-ufunc`. Robot triage again
