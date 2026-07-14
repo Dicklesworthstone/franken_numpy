@@ -4,6 +4,44 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - SHIP: direct `U64` to `U32` storage cast - 4.71x
+
+`IvoryTurtle`, bead `deadlock-audit-xycj5`, `fnp-dtype`. Robot triage again
+offered only the out-of-policy C-BLAS/fast-math lane and f16 work. The random
+ledger contained a same-day serial PCG fill rejection, while core FFT was
+parity-saturated and lacked a clean external former-path control, so this pass
+pivoted from stride calculus to the dtype conversion matrix. Negative-ledger
+and Git-history searches found the shipped `I64` to `I32` sibling but no `U64`
+to `U32` row.
+
+Profile/source attribution showed that `ArrayStorage::U64::cast_to(DType::U32)`
+zero-filled the destination, allocated and filled a 16-byte-per-element
+`Vec<i128>`, then narrowed that staging vector in a second destination write.
+At 100,000 elements the temporary alone was 1.6 MiB. ONE LEVER specializes only
+this pair as a direct typed collect. `i128::from(value) as u32` and
+`value as u32` retain the same low 32 bits for every `u64`, so wrapping,
+ordering, dtype, errors, floating-point state, and RNG state are unchanged.
+
+The same binary retained the former zero-fill plus `i128` staging loop and
+asserted complete `ArrayStorage` equality over zero, `u64::MAX`, values crossing
+`u32::MAX`, and patterned high/low bits before timing. Exactly one foreground
+strict-remote command ran on requested and effective worker `vmi1227854` (job
+`j-29928833041828657`):
+
+`timeout --signal=TERM 300s env RCH_WORKER=vmi1227854 RCH_WORKERS=vmi1227854 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-dtype --bench dtype_ops --profile release -- array_storage_cast_u64_to_u32_direct --warm-up-time 0.25 --measurement-time 0.75 --sample-size 10 --noplot`
+
+The non-LTO release command returned in 69.0 seconds despite an RCH cache miss.
+Criterion used 10 samples, a 250 ms warm-up, and a 750 ms measurement per arm:
+
+| arm | Criterion estimate |
+|---|---:|
+| former zero-fill plus `i128` staging | 64.512 us `[60.029, 68.650]` |
+| direct typed collect | **13.693 us** `[12.364, 17.288]` |
+
+The midpoint is 4.71x faster, and even the closest interval bounds remain
+3.47x apart. UBS reported zero critical findings on the two changed Rust files.
+SHIP.
+
 ## 2026-07-14 - SHIP: opposite-sign equal-magnitude strides prove internal overlap - 10,356x
 
 `IvoryTurtle`, bead `deadlock-audit-8atpt`, `fnp-ndarray`. Robot triage again

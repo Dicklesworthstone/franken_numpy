@@ -271,6 +271,44 @@ fn bench_i64_to_i32_direct(c: &mut Criterion) {
     group.finish();
 }
 
+fn former_u64_to_u32_cast(values: &[u64]) -> ArrayStorage {
+    let mut out = vec![0u32; values.len()];
+    let staged: Vec<i128> = values.iter().map(|&value| i128::from(value)).collect();
+    out.iter_mut()
+        .zip(&staged)
+        .for_each(|(slot, &value)| *slot = value as u32);
+    ArrayStorage::U32(out)
+}
+
+fn bench_u64_to_u32_direct(c: &mut Criterion) {
+    let mut group = c.benchmark_group("array_storage_cast_u64_to_u32_direct");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+
+    let values: Vec<u64> = (0..100_000u64)
+        .map(|index| match index % 4 {
+            0 => index,
+            1 => u64::MAX.wrapping_sub(index),
+            2 => u64::from(u32::MAX).wrapping_add(index),
+            _ => index.wrapping_mul(0x1_0000_0001),
+        })
+        .collect();
+    let storage = ArrayStorage::U64(values.clone());
+    let former = former_u64_to_u32_cast(&values);
+    let direct = storage.cast_to(DType::U32).unwrap();
+    assert_eq!(direct, former, "direct cast changed u64-to-u32 wrapping");
+
+    group.bench_function("former_i128_staging", |b| {
+        b.iter(|| former_u64_to_u32_cast(black_box(&values)))
+    });
+    group.bench_function("direct_typed_collect", |b| {
+        b.iter(|| black_box(&storage).cast_to(black_box(DType::U32)).unwrap())
+    });
+
+    group.finish();
+}
+
 fn bench_to_f64_vec(c: &mut Criterion) {
     let mut group = c.benchmark_group("to_f64_vec");
 
@@ -367,6 +405,7 @@ criterion_group!(
     bench_dtype_parse,
     bench_array_storage_cast,
     bench_i64_to_i32_direct,
+    bench_u64_to_u32_direct,
     bench_to_f64_vec,
     bench_to_complex128_vec,
     bench_array_storage_get_set,

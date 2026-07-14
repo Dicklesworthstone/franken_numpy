@@ -1192,6 +1192,10 @@ impl ArrayStorage {
             return Ok(Self::I32(values.iter().map(|&value| value as i32).collect()));
         }
 
+        if let (Self::U64(values), DType::U32) = (self, target) {
+            return Ok(Self::U32(values.iter().map(|&value| value as u32).collect()));
+        }
+
         let mut result = Self::zeros(target, n);
         let src_is_int = self.dtype().is_integer() || self.dtype() == DType::Bool;
         let dst_is_int = target.is_integer() || target == DType::Bool;
