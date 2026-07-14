@@ -1188,6 +1188,10 @@ impl ArrayStorage {
             return Ok(Self::F64(self.to_f64_vec()));
         }
 
+        if let (Self::I64(values), DType::I32) = (self, target) {
+            return Ok(Self::I32(values.iter().map(|&value| value as i32).collect()));
+        }
+
         let mut result = Self::zeros(target, n);
         let src_is_int = self.dtype().is_integer() || self.dtype() == DType::Bool;
         let dst_is_int = target.is_integer() || target == DType::Bool;

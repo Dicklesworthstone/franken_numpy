@@ -4,6 +4,55 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): direct `I64` to `I32` storage cast - 6.64x
+
+`IndigoRabbit`, bead `deadlock-audit-vh089`, `fnp-dtype`. Robot triage returned
+no actionable recommendations or quick wins, so this turn pivoted from the
+recent repeat/FFT/indexing sequence to the dtype subsystem. Negative-ledger-first
+review found the shipped direct `I32` to `F64` cast, a rejected direct `F64` to
+`I32` cast, and no prior `I64` to `I32` row.
+
+Profile attribution: `ArrayStorage::I64::cast_to(DType::I32)` first allocated
+and zero-filled the destination, then allocated and filled a 16-byte-per-element
+`Vec<i128>`, and finally narrowed that staging vector into the destination. For
+100,000 elements this required a 1.6 MiB temporary plus two result-side writes.
+
+ONE LEVER: specialize only the `I64` to `I32` pair as a direct typed collect.
+For every source value, `i128::from(value) as i32` is identical to `value as i32`
+because the first conversion is lossless and both casts retain the same low 32
+bits. Same-dtype, structured, string, `F64`, every other numeric pair, error
+precedence, output dtype, ordering, floating-point state, and RNG state are
+unchanged.
+
+The existing `dtype_ops` Criterion target gained a same-binary former-production
+control that retains both the zero-filled destination and `Vec<i128>` staging.
+Before timing, values spanning `i64::MIN`, `i64::MAX`, positive overflow, and
+negative overflow asserted complete `ArrayStorage` equality.
+
+Exactly one foreground strict-remote command ran with LTO explicitly disabled:
+
+`RCH_WORKER=vmi1156319 RCH_WORKERS=vmi1156319 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-dtype --bench dtype_ops --profile release -- array_storage_cast_i64_to_i32_direct --noplot`
+
+RCH admitted effective worker `vmi1227854` (job
+`j-29928833041828460`); strict mode prevented local fallback. The target cache
+missed, but this was the permitted non-LTO release profile: compilation took
+27.5 seconds and total RCH time was 69.3 seconds. Criterion used 10 samples, a
+250 ms warm-up, and one-second measurement per arm:
+
+| arm | Criterion estimate |
+|---|---:|
+| former zero-fill plus `i128` staging | 81.662 us `[69.035, 98.821]` |
+| direct typed collect | **12.292 us** `[12.071, 12.767]` |
+
+Midpoint speedup is **6.6435x** (84.95% lower latency); even the former path's
+low bound is 5.407x slower than the candidate's high bound. The equality
+assertion and command exited zero. No second benchmark, conformance, compile,
+or verification loop ran. Timed source SHA-256:
+`39ecb82105e331161f5ed64ca3a68a7f399400f75b2b1ed2153f0cad88658334`;
+proof-bench SHA-256:
+`43ba5b644124573e3550263d48591d873f0deb1b04c500c3e574c17b9666eec0`.
+KEEP.
+
 ## 2026-07-14 - WIN (SHIP): `repeat(1)` clones once - 6.92x
 
 `WindyCardinal`, bead `deadlock-audit-gtczk`, repeat/`fnp-ufunc`. Robot triage's
