@@ -2450,3 +2450,70 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn diff_prepend_append_fused_matches_numpy() -> Result<(), String> {
+    // np.diff(a, prepend=/append=SCALAR) composed concatenate-then-diff in
+    // numpy (full temp copy + subtraction pass) and delegated in fnp; the
+    // fused arm computes boundary elements directly around the same core
+    // subtractions - byte-exact, with scalar promotion mirroring numpy's
+    // concat rules (float f64->f32 single rounding; ints only in-range/
+    // f32-exact). ndarray pends, n=2, N-D, out-of-range keep the delegate.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(409)
+verdicts = []
+def ab(name, a, **kw):
+    ours = fnp.diff(a, **kw)
+    theirs = np.diff(a, **kw)
+    if ours.tobytes() != theirs.tobytes() or str(ours.dtype) != str(theirs.dtype) or ours.shape != theirs.shape:
+        verdicts.append(f"FAIL {name}")
+n = 8_000_000
+f = rng.standard_normal(n)
+ab("f64 prepend0", f, prepend=0.0)
+ab("f64 prepend int0", f, prepend=0)
+ab("f64 append", f, append=1.5)
+ab("f64 both", f, prepend=-2.5, append=7)
+# f32/i32/u64 targets PROMOTE under scalar pends (numpy asanyarray's the
+# scalar to f64/i64 FIRST, then concat promotes) -> delegate parity rows
+ab("f32 promote delegate", rng.standard_normal(n).astype(np.float32), prepend=0.1)
+W = rng.integers(-2**62, 2**62, n)
+ab("i64 wrap", W, prepend=0)
+ab("i64 both huge", W, prepend=2**62, append=-2**62)
+ab("u64 promote delegate", rng.integers(0, 2**64, n, dtype=np.uint64), prepend=5)
+ab("i32 promote delegate", rng.integers(-2**30, 2**30, n).astype(np.int32), prepend=-7)
+ab("f64 bigint prepend", f, prepend=2**60)
+# delegate parity: out-of-range scalar (promotes concat dtype), ndarray pend,
+# n=2, 2-D, f16, small
+ab("i32 oob prepend delegate", rng.integers(-100, 100, n).astype(np.int32), prepend=2**40)
+ab("ndarray prepend delegate", f, prepend=np.array([1.0, 2.0]))
+ab("n2 delegate", f, n=2, prepend=0.0)
+ab("2-D delegate", f[:4_000_000].reshape(2000, 2000), prepend=0.0, axis=1)
+ab("small delegate", f[:1000], prepend=0.0)
+ab("plain regression", f)
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.diff(f, prepend=0.0)); tf = best(lambda: fnp.diff(f, prepend=0.0))
+print(f"DIFF_PREPEND_F64_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn2 = best(lambda: np.diff(W, prepend=0)); tf2 = best(lambda: fnp.diff(W, prepend=0))
+print(f"DIFF_PREPEND_I64_AB numpy_ms={tn2:.3f} fnp_ms={tf2:.3f} ratio={tn2 / tf2:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces DIFF_PREPEND_F64_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "fused diff prepend/append must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
