@@ -67,6 +67,20 @@ fn generate_random_matrix(n: usize, seed: u64) -> Vec<f64> {
         .collect()
 }
 
+fn generate_upper_triangular_matrix(n: usize) -> Vec<f64> {
+    let mut a = vec![0.0; n * n];
+    for row in 0..n {
+        for col in row..n {
+            a[row * n + col] = if row == col {
+                (row % 17 + 1) as f64 * 0.25
+            } else {
+                ((row * 31 + col * 17) % 23) as f64 * 0.125 - 1.25
+            };
+        }
+    }
+    a
+}
+
 fn generate_invertible_matrix(n: usize) -> Vec<f64> {
     let mut a = vec![0.0; n * n];
     for i in 0..n {
@@ -225,6 +239,105 @@ fn bench_qr(c: &mut Criterion) {
         });
     }
 
+    group.finish();
+}
+
+fn qr_upper_triangular_former(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut q = vec![0.0; n * n];
+    for i in 0..n {
+        q[i * n + i] = 1.0;
+    }
+    let mut r = a.to_vec();
+    let mut v = vec![0.0; n];
+    let mut d = vec![0.0; n];
+    let mut f_vec = vec![0.0; n];
+
+    for k in 0..n {
+        let mut col_norm_sq = 0.0;
+        for i in k..n {
+            col_norm_sq += r[i * n + k] * r[i * n + k];
+        }
+        let col_norm = col_norm_sq.sqrt();
+        if col_norm == 0.0 {
+            continue;
+        }
+
+        let sign = if r[k * n + k] >= 0.0 { 1.0 } else { -1.0 };
+        for i in k..n {
+            v[i] = r[i * n + k];
+        }
+        v[k] += sign * col_norm;
+        let v_norm_sq: f64 = v[k..].iter().map(|x| x * x).sum();
+        if v_norm_sq == 0.0 {
+            continue;
+        }
+
+        let scale = 2.0 / v_norm_sq;
+        for dj in d[k..n].iter_mut() {
+            *dj = 0.0;
+        }
+        for i in k..n {
+            let vi = v[i];
+            let row = &r[i * n + k..i * n + n];
+            for (dj, &rij) in d[k..n].iter_mut().zip(row.iter()) {
+                *dj += vi * rij;
+            }
+        }
+        for (fj, &dj) in f_vec[k..n].iter_mut().zip(d[k..n].iter()) {
+            *fj = scale * dj;
+        }
+        for i in k..n {
+            let vi = v[i];
+            let row = &mut r[i * n + k..i * n + n];
+            for (rij, &fj) in row.iter_mut().zip(f_vec[k..n].iter()) {
+                *rij -= fj * vi;
+            }
+        }
+
+        for i in 0..n {
+            let mut dot = 0.0;
+            for j in k..n {
+                dot += q[i * n + j] * v[j];
+            }
+            let factor = scale * dot;
+            for j in k..n {
+                q[i * n + j] -= factor * v[j];
+            }
+        }
+    }
+
+    (q, r)
+}
+
+fn bench_qr_exact_upper_triangular(c: &mut Criterion) {
+    let n = 256usize;
+    let a = generate_upper_triangular_matrix(n);
+    let former = qr_upper_triangular_former(&a, n);
+    let candidate = qr_nxn(&a, n).expect("upper-triangular QR candidate");
+    for (name, lhs, rhs) in [
+        ("Q", former.0.as_slice(), candidate.0.as_slice()),
+        ("R", former.1.as_slice(), candidate.1.as_slice()),
+    ] {
+        assert_eq!(lhs.len(), rhs.len());
+        for (index, (&old, &new)) in lhs.iter().zip(rhs).enumerate() {
+            assert_eq!(
+                old.to_bits(),
+                new.to_bits(),
+                "upper-triangular QR {name}[{index}] changed bits"
+            );
+        }
+    }
+
+    let mut group = c.benchmark_group("qr_exact_upper_triangular_256");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.bench_function("former_unblocked", |bench| {
+        bench.iter(|| black_box(qr_upper_triangular_former(black_box(&a), n)));
+    });
+    group.bench_function("scalar_active_row", |bench| {
+        bench.iter(|| black_box(qr_nxn(black_box(&a), n).unwrap()));
+    });
     group.finish();
 }
 
@@ -741,6 +854,7 @@ criterion_group!(
     bench_cholesky_exact_diagonal,
     bench_cholesky_exact_tridiagonal,
     bench_qr,
+    bench_qr_exact_upper_triangular,
     bench_svd,
     bench_svd_full,
     bench_eigvalsh,

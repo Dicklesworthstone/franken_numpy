@@ -2278,6 +2278,68 @@ fn qr_blocked(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> 
     Ok((q, r))
 }
 
+fn qr_exact_upper_triangular(a: &[f64], n: usize) -> Option<(Vec<f64>, Vec<f64>)> {
+    for row in 1..n {
+        if a[row * n..row * n + row]
+            .iter()
+            .any(|value| value.to_bits() != 0)
+        {
+            return None;
+        }
+    }
+
+    let mut q = vec![0.0; n * n];
+    for i in 0..n {
+        q[i * n + i] = 1.0;
+    }
+    let mut r = a.to_vec();
+
+    // With an exactly positive-zero strict lower triangle, every Householder
+    // vector has only its diagonal component. Reproduce the unblocked scalar
+    // arithmetic on that component and its active row, skipping only products
+    // by known positive zeros.
+    for k in 0..n {
+        let diagonal = r[k * n + k];
+        let mut col_norm_sq = 0.0;
+        col_norm_sq += diagonal * diagonal;
+        if !col_norm_sq.is_finite() {
+            return None;
+        }
+        let col_norm = col_norm_sq.sqrt();
+        if col_norm == 0.0 {
+            continue;
+        }
+
+        let sign = if diagonal >= 0.0 { 1.0 } else { -1.0 };
+        let mut v = diagonal;
+        v += sign * col_norm;
+        let mut v_norm_sq = 0.0;
+        v_norm_sq += v * v;
+        if !v_norm_sq.is_finite() {
+            return None;
+        }
+        if v_norm_sq == 0.0 {
+            continue;
+        }
+
+        let scale = 2.0 / v_norm_sq;
+        for value in &mut r[k * n + k..k * n + n] {
+            let mut dot = 0.0;
+            dot += v * *value;
+            let factor = scale * dot;
+            *value -= factor * v;
+        }
+
+        let diagonal_index = k * n + k;
+        let mut dot = 0.0;
+        dot += q[diagonal_index] * v;
+        let factor = scale * dot;
+        q[diagonal_index] -= factor * v;
+    }
+
+    Some((q, r))
+}
+
 pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
     if Some(a.len()) != n.checked_mul(n) || n == 0 {
         return Err(LinAlgError::ShapeContractViolation(
@@ -2290,6 +2352,11 @@ pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> 
         ));
     }
 
+    if n < QR_BLOCK_MIN
+        && let Some(result) = qr_exact_upper_triangular(a, n)
+    {
+        return Ok(result);
+    }
     if n >= QR_BLOCK_MIN {
         return qr_blocked(a, n);
     }

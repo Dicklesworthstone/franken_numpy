@@ -4,6 +4,42 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - SHIP: exact upper-triangular QR active-row path - 143.53x
+
+`IvoryTurtle`, bead `deadlock-audit-ruzvm`, `fnp-linalg`. Robot triage again
+offered only the prohibited f16 lane and the human-decision C-BLAS/fast-math
+lane, so this pass pivoted from the exhausted structured-Cholesky sequence to a
+fresh QR-decomposition primitive. Negative-ledger search found extensive dense
+QR and eigenvalue-QR work, but no exact upper-triangular Householder shortcut.
+
+Profile/source attribution showed that unblocked `qr_nxn` ran its full O(n^3)
+Householder dot/update loops on an already upper-triangular matrix even though
+every active column contains only its diagonal value. ONE LEVER admits only
+strict lower triangles made of positive-zero bits below the blocked-QR
+crossover, then reproduces the existing scalar reflector arithmetic on the
+active row and Q diagonal in O(n^2). Negative zero, non-triangular inputs,
+non-finite inputs, overflowed reflector intermediates, and blocked-size QR all
+retain the former path.
+
+The same binary reconstructed the complete former unblocked algorithm and
+asserted every Q and R `f64::to_bits()` value before timing. Exactly one
+foreground strict-remote command ran on requested and effective worker
+`vmi1149989` (job `j-29928833041828623`):
+
+`timeout --signal=TERM 300s env RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-linalg --bench criterion_linalg --profile release -- qr_exact_upper_triangular_256 --warm-up-time 0.25 --measurement-time 0.75 --sample-size 10 --noplot`
+
+The non-LTO release command returned in 80.1 seconds despite another RCH cache
+miss. Criterion used 10 samples, a 250 ms warm-up, and a 750 ms measurement per
+arm:
+
+| arm | Criterion estimate |
+|---|---:|
+| former unblocked QR | 7.9509 ms `[7.7028, 8.4948]` |
+| scalar active-row QR | **55.394 us** `[53.961, 57.681]` |
+
+The midpoint is 143.53x faster, and even the closest interval bounds remain
+more than 133x apart. SHIP.
+
 ## 2026-07-14 - SHIP: duplicate active strides prove internal overlap - 23,460x
 
 `IvoryTurtle`, bead `deadlock-audit-kkuu3`, `fnp-ndarray`. Robot triage again
