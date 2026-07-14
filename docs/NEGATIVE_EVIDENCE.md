@@ -4,6 +4,42 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - SHIP: opposite-sign equal-magnitude strides prove internal overlap - 10,356x
+
+`IvoryTurtle`, bead `deadlock-audit-8atpt`, `fnp-ndarray`. Robot triage again
+offered the human-decision C-BLAS/fast-math Gram lane, so this pass pivoted from
+the completed QR decomposition seam back to stride calculus. Negative-ledger
+search found the landed equal-signed-stride certificate, but no certificate for
+active axes whose strides have equal magnitudes and opposite signs.
+
+Profile/source attribution showed that `[244, 244]` with strides `[8, -8]`
+still entered the exact overlap detector, enumerating and sorting 59,536 byte
+offsets even though logical index `(1, 1)` aliases `(0, 0)`. ONE LEVER compares
+active stride magnitudes after the existing validation, element-count, and
+zero-stride gates. Equal-signed strides retain the existing proof; opposite
+signs now use the increment-both alias proof. All other layouts retain the
+exact or conservative detector.
+
+The same binary reconstructed the former exact-offset algorithm and asserted
+full `NdLayout` equality before timing. Exactly one foreground strict-remote
+command ran on requested and effective worker `vmi1149989` (job
+`j-29928833041828646`):
+
+`timeout --signal=TERM 300s env RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-ndarray --bench criterion_ndarray --profile release -- NdLayout_as_strided_opposite_stride --warm-up-time 0.25 --measurement-time 0.75 --sample-size 10 --noplot`
+
+The non-LTO release command returned in 101.2 seconds despite an RCH cache
+miss. Criterion used 10 samples, a 250 ms warm-up, and a 750 ms measurement per
+arm:
+
+| arm | Criterion estimate |
+|---|---:|
+| former exact offsets | 704.88 us `[534.74, 901.03]` |
+| equal-magnitude proof | **68.058 ns** `[62.175, 75.540]` |
+
+The midpoint is 10,356x faster, and even the closest interval bounds remain
+more than 7,078x apart. UBS reported zero critical findings on the two changed
+Rust files. SHIP.
+
 ## 2026-07-14 - SHIP: exact upper-trapezoidal rectangular QR active-row path - 285.68x
 
 `IvoryTurtle`, bead `deadlock-audit-3l9zr`, `fnp-linalg`. Robot triage again

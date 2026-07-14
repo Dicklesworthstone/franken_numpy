@@ -626,15 +626,18 @@ fn detect_internal_overlap(
     {
         return Ok(true);
     }
-    // Two active axes with the same stride alias immediately: incrementing
-    // either axis by one reaches the same byte offset. Sliding-window layouts
-    // naturally duplicate each base stride across their position/window axes.
+    // Two active axes with the same stride magnitude alias immediately. For
+    // equal signs, incrementing either axis reaches the same byte offset; for
+    // opposite signs, incrementing both axes returns to the original offset.
+    // Sliding-window layouts naturally duplicate each base stride across their
+    // position/window axes.
     for (axis, (&dim, &stride)) in shape.iter().zip(strides).enumerate() {
         if dim > 1
-            && shape[axis + 1..]
-                .iter()
-                .zip(&strides[axis + 1..])
-                .any(|(&other_dim, &other_stride)| other_dim > 1 && other_stride == stride)
+            && shape[axis + 1..].iter().zip(&strides[axis + 1..]).any(
+                |(&other_dim, &other_stride)| {
+                    other_dim > 1 && other_stride.unsigned_abs() == stride.unsigned_abs()
+                },
+            )
         {
             return Ok(true);
         }
@@ -1262,8 +1265,11 @@ mod tests {
         assert!(!super::detect_internal_overlap(&[1], &[0], 8).expect("singleton zero"));
         assert!(!super::detect_internal_overlap(&[0, 3], &[0, 8], 8).expect("zero extent"));
 
-        // Non-zero-stride collisions still go through the exact detector.
+        // Equal-magnitude non-zero strides have direct alias certificates.
         assert!(super::detect_internal_overlap(&[2, 2], &[8, 8], 8).expect("collision"));
+        assert!(
+            super::detect_internal_overlap(&[2, 2], &[8, -8], 8).expect("opposite-sign collision")
+        );
         assert!(!super::detect_internal_overlap(&[2, 2], &[16, 8], 8).expect("contiguous"));
 
         // Keep shape-overflow precedence ahead of the obvious-overlap proof.

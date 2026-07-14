@@ -386,6 +386,83 @@ fn bench_ndlayout_sliding_window_duplicate_stride(c: &mut Criterion) {
     group.finish();
 }
 
+fn as_strided_opposite_stride_former(
+    layout: &NdLayout,
+    shape: &[usize],
+    strides: &[isize],
+) -> NdLayout {
+    let count = element_count(shape).unwrap();
+    let mut offsets = Vec::with_capacity(count);
+    let mut indices = vec![0usize; shape.len()];
+    for linear_index in 0..count {
+        let offset: isize = indices
+            .iter()
+            .zip(strides)
+            .map(|(&index, &stride)| isize::try_from(index).unwrap() * stride)
+            .sum();
+        offsets.push(offset);
+
+        if linear_index + 1 == count {
+            break;
+        }
+        for axis in (0..indices.len()).rev() {
+            indices[axis] += 1;
+            if indices[axis] < shape[axis] {
+                break;
+            }
+            indices[axis] = 0;
+        }
+    }
+    offsets.sort_unstable();
+    let item_size = isize::try_from(layout.item_size).unwrap();
+    let has_internal_overlap = offsets
+        .windows(2)
+        .any(|pair| pair[1] < pair[0].checked_add(item_size).unwrap());
+
+    NdLayout {
+        shape: shape.to_vec(),
+        strides: strides.to_vec(),
+        item_size: layout.item_size,
+        writeable: layout.writeable && !has_internal_overlap,
+        has_internal_overlap,
+    }
+}
+
+fn bench_ndlayout_as_strided_opposite_stride(c: &mut Criterion) {
+    let mut group = c.benchmark_group("NdLayout_as_strided_opposite_stride");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+
+    let layout = NdLayout::contiguous(vec![487], 8, MemoryOrder::C).unwrap();
+    let shape = vec![244, 244];
+    let strides = vec![8, -8];
+    let candidate = layout.as_strided(shape.clone(), strides.clone()).unwrap();
+    assert_eq!(
+        candidate,
+        as_strided_opposite_stride_former(&layout, &shape, &strides)
+    );
+    assert!(candidate.has_internal_overlap());
+
+    group.bench_function("former_exact_offsets", |b| {
+        b.iter(|| {
+            as_strided_opposite_stride_former(
+                black_box(&layout),
+                black_box(&shape),
+                black_box(&strides),
+            )
+        });
+    });
+    group.bench_function("equal_magnitude_proof", |b| {
+        b.iter(|| {
+            black_box(&layout)
+                .as_strided(black_box(shape.clone()), black_box(strides.clone()))
+                .unwrap()
+        });
+    });
+    group.finish();
+}
+
 fn bench_ndlayout_contiguous(c: &mut Criterion) {
     let mut group = c.benchmark_group("NdLayout_contiguous");
 
@@ -509,6 +586,7 @@ criterion_group!(
     bench_broadcast_strides,
     bench_ndlayout_broadcast_to_fortran_identity,
     bench_ndlayout_sliding_window_duplicate_stride,
+    bench_ndlayout_as_strided_opposite_stride,
     bench_ndlayout_contiguous,
     bench_ndlayout_broadcast_to,
     bench_ndlayout_is_contiguous,
