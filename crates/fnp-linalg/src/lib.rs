@@ -2439,6 +2439,72 @@ pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> 
     Ok((q, r))
 }
 
+fn qr_mxn_exact_upper_trapezoidal(
+    a: &[f64],
+    m: usize,
+    n: usize,
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    for row in 1..m {
+        let below_diagonal = row.min(n);
+        if a[row * n..row * n + below_diagonal]
+            .iter()
+            .any(|value| value.to_bits() != 0)
+        {
+            return None;
+        }
+    }
+
+    let mut q = vec![0.0; m * m];
+    for i in 0..m {
+        q[i * m + i] = 1.0;
+    }
+    let mut r = a.to_vec();
+
+    // Every admitted reflector has one nonzero component. Preserve the former
+    // scalar operation grouping for that component while skipping products by
+    // the proven positive-zero tail.
+    for col in 0..m.min(n) {
+        let diagonal = r[col * n + col];
+        let mut col_norm_sq = 0.0;
+        col_norm_sq += diagonal * diagonal;
+        if !col_norm_sq.is_finite() {
+            return None;
+        }
+        let col_norm = col_norm_sq.sqrt();
+        if col_norm == 0.0 {
+            continue;
+        }
+
+        let sign = if diagonal >= 0.0 { 1.0 } else { -1.0 };
+        let mut v = diagonal;
+        v += sign * col_norm;
+        let mut v_norm_sq = 0.0;
+        v_norm_sq += v * v;
+        if !v_norm_sq.is_finite() {
+            return None;
+        }
+        if v_norm_sq == 0.0 {
+            continue;
+        }
+
+        let scale = 2.0 / v_norm_sq;
+        for value in &mut r[col * n + col..col * n + n] {
+            let mut dot = 0.0;
+            dot += v * *value;
+            let factor = scale * dot;
+            *value -= factor * v;
+        }
+
+        let diagonal_index = col * m + col;
+        let mut dot = 0.0;
+        dot += q[diagonal_index] * v;
+        let factor = scale * dot;
+        q[diagonal_index] -= factor * v;
+    }
+
+    Some((q, r))
+}
+
 /// QR decomposition of an m×n rectangular matrix (Householder reflections).
 ///
 /// Input `a` is row-major with shape (m, n). Returns `(Q, R)` where:
@@ -2457,6 +2523,10 @@ pub fn qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f64>), Lin
         return Err(LinAlgError::NormDetRankPolicyViolation(
             "matrix entries must be finite for QR",
         ));
+    }
+
+    if let Some(result) = qr_mxn_exact_upper_trapezoidal(a, m, n) {
+        return Ok(result);
     }
 
     // Q = I_m, R = copy of A

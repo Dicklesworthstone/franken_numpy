@@ -18,7 +18,8 @@ use fnp_linalg::{
     batch_cholesky, batch_det, batch_eigvalsh, batch_inv, batch_matrix_norm, batch_slogdet,
     batch_trace, cholesky_nxn, cholesky_nxn_general_control, complex_matmul, cond_nxn, det_nxn,
     eigvalsh_nxn, inv_nxn, kron_nxn, matrix_norm_frobenius, matrix_norm_nxn, matrix_power_nxn,
-    multi_dot, qr_nxn, sbr_stage1_dense_to_band_lower_nxn, solve_nxn, svd_mxn_full, svd_nxn,
+    multi_dot, qr_mxn, qr_nxn, sbr_stage1_dense_to_band_lower_nxn, solve_nxn, svd_mxn_full,
+    svd_nxn,
 };
 use std::hint::black_box;
 use std::time::Duration;
@@ -75,6 +76,20 @@ fn generate_upper_triangular_matrix(n: usize) -> Vec<f64> {
                 (row % 17 + 1) as f64 * 0.25
             } else {
                 ((row * 31 + col * 17) % 23) as f64 * 0.125 - 1.25
+            };
+        }
+    }
+    a
+}
+
+fn generate_upper_trapezoidal_matrix(m: usize, n: usize) -> Vec<f64> {
+    let mut a = vec![0.0; m * n];
+    for row in 0..m.min(n) {
+        for col in row..n {
+            a[row * n + col] = if row == col {
+                (row % 19 + 1) as f64 * 0.25
+            } else {
+                ((row * 29 + col * 13) % 29) as f64 * 0.125 - 1.5
             };
         }
     }
@@ -337,6 +352,104 @@ fn bench_qr_exact_upper_triangular(c: &mut Criterion) {
     });
     group.bench_function("scalar_active_row", |bench| {
         bench.iter(|| black_box(qr_nxn(black_box(&a), n).unwrap()));
+    });
+    group.finish();
+}
+
+fn qr_upper_trapezoidal_former(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut q = vec![0.0; m * m];
+    for i in 0..m {
+        q[i * m + i] = 1.0;
+    }
+    let mut r = a.to_vec();
+    let mut v = vec![0.0; m];
+
+    for col in 0..m.min(n) {
+        let mut col_norm_sq = 0.0;
+        for i in col..m {
+            col_norm_sq += r[i * n + col] * r[i * n + col];
+        }
+        let col_norm = col_norm_sq.sqrt();
+        if col_norm == 0.0 {
+            continue;
+        }
+
+        let sign = if r[col * n + col] >= 0.0 { 1.0 } else { -1.0 };
+        for vi in &mut v[..col] {
+            *vi = 0.0;
+        }
+        for (i, vi) in v[col..m].iter_mut().enumerate() {
+            *vi = r[(i + col) * n + col];
+        }
+        v[col] += sign * col_norm;
+        let v_norm_sq: f64 = v[col..].iter().map(|x| x * x).sum();
+        if v_norm_sq == 0.0 {
+            continue;
+        }
+
+        let scale = 2.0 / v_norm_sq;
+        for j in col..n {
+            let mut dot = 0.0;
+            for i in col..m {
+                dot += v[i] * r[i * n + j];
+            }
+            let factor = scale * dot;
+            for i in col..m {
+                r[i * n + j] -= factor * v[i];
+            }
+        }
+
+        for i in 0..m {
+            let mut dot = 0.0;
+            for j in col..m {
+                dot += q[i * m + j] * v[j];
+            }
+            let factor = scale * dot;
+            for j in col..m {
+                q[i * m + j] -= factor * v[j];
+            }
+        }
+    }
+
+    (q, r)
+}
+
+fn bench_qr_exact_upper_trapezoidal(c: &mut Criterion) {
+    let (m, n) = (256usize, 128usize);
+    let a = generate_upper_trapezoidal_matrix(m, n);
+    let former = qr_upper_trapezoidal_former(&a, m, n);
+    let candidate = qr_mxn(&a, m, n).expect("upper-trapezoidal QR candidate");
+    for (name, lhs, rhs) in [
+        ("Q", former.0.as_slice(), candidate.0.as_slice()),
+        ("R", former.1.as_slice(), candidate.1.as_slice()),
+    ] {
+        assert_eq!(lhs.len(), rhs.len());
+        for (index, (&old, &new)) in lhs.iter().zip(rhs).enumerate() {
+            assert_eq!(
+                old.to_bits(),
+                new.to_bits(),
+                "upper-trapezoidal QR {name}[{index}] changed bits"
+            );
+        }
+    }
+
+    let mut group = c.benchmark_group("qr_exact_upper_trapezoidal_256x128");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.bench_function("former_rectangular", |bench| {
+        bench.iter(|| {
+            black_box(qr_upper_trapezoidal_former(
+                black_box(&a),
+                black_box(m),
+                black_box(n),
+            ))
+        });
+    });
+    group.bench_function("scalar_active_row", |bench| {
+        bench.iter(|| {
+            black_box(qr_mxn(black_box(&a), black_box(m), black_box(n)).unwrap())
+        });
     });
     group.finish();
 }
@@ -855,6 +968,7 @@ criterion_group!(
     bench_cholesky_exact_tridiagonal,
     bench_qr,
     bench_qr_exact_upper_triangular,
+    bench_qr_exact_upper_trapezoidal,
     bench_svd,
     bench_svd_full,
     bench_eigvalsh,

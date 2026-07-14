@@ -4,6 +4,43 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - SHIP: exact upper-trapezoidal rectangular QR active-row path - 285.68x
+
+`IvoryTurtle`, bead `deadlock-audit-3l9zr`, `fnp-linalg`. Robot triage again
+offered only the prohibited f16 lane and the human-decision C-BLAS/fast-math
+lane. The preceding exact upper-triangular QR result was 143.53x rather than a
+thinning micro-vein, so this pass screened its distinct rectangular public
+consumer. Negative-ledger search found no `qr_mxn` or upper-trapezoidal row.
+
+Profile/source attribution showed that `qr_mxn` still executed dense
+column-dot/update work plus full-Q accumulation for every reflector on an exact
+upper-trapezoidal matrix, even though every below-diagonal lane was positive
+zero. ONE LEVER admits only that exact bit pattern and reproduces the former
+scalar reflector arithmetic on the active row and Q diagonal. Negative zero,
+non-trapezoidal inputs, non-finite inputs, and overflowed reflector
+intermediates retain the general path.
+
+The same binary reconstructed the complete former rectangular Householder
+implementation and asserted every Q and R `f64::to_bits()` value before timing.
+Exactly one foreground strict-remote command ran on requested and effective
+worker `vmi1149989` (job `j-29928833041828638`):
+
+`timeout --signal=TERM 300s env RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-linalg --bench criterion_linalg --profile release -- qr_exact_upper_trapezoidal_256x128 --warm-up-time 0.25 --measurement-time 0.75 --sample-size 10 --noplot`
+
+The non-LTO release command returned in 85.8 seconds despite another RCH cache
+miss. Criterion used 10 samples, a 250 ms warm-up, and a 750 ms measurement per
+arm:
+
+| arm | Criterion estimate |
+|---|---:|
+| former rectangular QR | 10.044 ms `[9.7461, 10.524]` |
+| scalar active-row QR | **35.158 us** `[33.540, 36.244]` |
+
+The midpoint is 285.68x faster, and even the closest interval bounds remain
+more than 268x apart. The staged UBS scan retained the immediately preceding
+linalg baseline's exact 85-critical legacy count, with no new critical delta.
+SHIP.
+
 ## 2026-07-14 - SHIP: exact upper-triangular QR active-row path - 143.53x
 
 `IvoryTurtle`, bead `deadlock-audit-ruzvm`, `fnp-linalg`. Robot triage again
