@@ -3185,6 +3185,7 @@ tn2 = best(lambda: np.intersect1d(T1, T2)); tf2 = best(lambda: fnp.intersect1d(T
 print(f"WIDEINT_INTERSECT_TIES_AB numpy_ms={tn2:.3f} fnp_ms={tf2:.3f} ratio={tn2 / tf2:.3f}")
 tn3 = best(lambda: np.setdiff1d(T1, T2)); tf3 = best(lambda: fnp.setdiff1d(T1, T2))
 print(f"WIDEINT_SETDIFF_TIES_AB numpy_ms={tn3:.3f} fnp_ms={tf3:.3f} ratio={tn3 / tf3:.3f}")
+print("numpy", np.__version__)  # version-keyed tie gate: ties delegate on >= 2.4
 print(verdicts if verdicts else True)
 "#
         .into(),
