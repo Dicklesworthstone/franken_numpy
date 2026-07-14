@@ -2765,3 +2765,60 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn string_lastaxis_stable_argsort_matches_numpy() -> Result<(), String> {
+    // np.argsort(2-D 'U'/'S', kind='stable', axis=-1) delegated to numpy's
+    // serial per-lane comparator+index sort; the new arm runs a per-lane
+    // STABLE memcmp perm across rayon lanes - equal-record ties keep
+    // ascending in-lane index, exactly numpy's stable contract. Default kind
+    // (unstable ties), wide codepoints, axis=0, and small keep the delegate.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(439)
+verdicts = []
+def ab(name, a, **kw):
+    ours = fnp.argsort(a, **kw)
+    theirs = np.argsort(a, **kw)
+    if ours.tobytes() != theirs.tobytes() or str(ours.dtype) != str(theirs.dtype) or ours.shape != theirs.shape:
+        verdicts.append(f"FAIL {name}")
+def ustr(n, hi, w="U8"):
+    return np.array([f"id{v:06d}" for v in rng.integers(0, hi, n)], dtype=w)
+U = ustr(2_000_000, 500_000).reshape(2000, 1000)
+ab("2-D U8 stable", U, kind="stable")
+ab("2-D U8 mergesort axis=1", U, kind="mergesort", axis=1)
+ab("ties-heavy stable", ustr(1_600_000, 40).reshape(1600, 1000), kind="stable")
+ab("all-equal lanes stable", np.full((600, 800), "same", dtype="U8"), kind="stable")
+ab("S8 stable", U.astype("S8"), kind="stable")
+ab("3-D stable", ustr(1_920_000, 10**5).reshape(120, 100, 160), kind="stable")
+# delegate parity: default kind (ties -> numpy), wide codepoints, axis=0, small
+ab("default kind delegate", U[:800, :800])
+W = U[:400, :400].copy(); W[3, 5] = "Жxx"
+ab("wide codepoint delegate", W, kind="stable")
+ab("axis=0 delegate", U[:600, :600], kind="stable", axis=0)
+ab("small delegate", U[:8, :8], kind="stable")
+ab("1-D flat stable regression", U.ravel()[:600_000], kind="stable")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.argsort(U, kind="stable", axis=-1)); tf = best(lambda: fnp.argsort(U, kind="stable", axis=-1))
+print(f"ARGSORT_U8_LASTAXIS_STABLE_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces ARGSORT_U8_LASTAXIS_STABLE_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "string lastaxis stable argsort must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
