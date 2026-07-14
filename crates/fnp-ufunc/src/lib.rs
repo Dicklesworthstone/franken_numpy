@@ -19425,24 +19425,46 @@ impl UFuncArray {
                 }
             } else {
                 // Common no-sidecar case: gather directly, skipping the index Vec.
-                // Power-of-two grids can strength-reduce both integer operations.
-                // Keep this branch outside the element loop so the hot closure is
-                // only a shift, mask, and gather.
-                let values: Vec<f64> = if stride.is_power_of_two() && alen.is_power_of_two() {
-                    let shift = stride.trailing_zeros();
-                    let mask = alen - 1;
-                    let compute = |flat: usize| arr.values[(flat >> shift) & mask];
-                    if parallel {
-                        (0..out_count).into_par_iter().map(compute).collect()
-                    } else {
-                        (0..out_count).map(compute).collect()
+                // Strength-reduce each power-of-two operand independently: division
+                // by stride becomes a shift, while modulo by length becomes a mask.
+                // Keeping the four cases outside the element loop leaves no per-cell
+                // branch and lets mixed grids remove one of the two integer divisions.
+                let values: Vec<f64> = match (stride.is_power_of_two(), alen.is_power_of_two()) {
+                    (true, true) => {
+                        let shift = stride.trailing_zeros();
+                        let mask = alen - 1;
+                        let compute = |flat: usize| arr.values[(flat >> shift) & mask];
+                        if parallel {
+                            (0..out_count).into_par_iter().map(compute).collect()
+                        } else {
+                            (0..out_count).map(compute).collect()
+                        }
                     }
-                } else {
-                    let compute = |flat: usize| arr.values[(flat / stride) % alen];
-                    if parallel {
-                        (0..out_count).into_par_iter().map(compute).collect()
-                    } else {
-                        (0..out_count).map(compute).collect()
+                    (true, false) => {
+                        let shift = stride.trailing_zeros();
+                        let compute = |flat: usize| arr.values[(flat >> shift) % alen];
+                        if parallel {
+                            (0..out_count).into_par_iter().map(compute).collect()
+                        } else {
+                            (0..out_count).map(compute).collect()
+                        }
+                    }
+                    (false, true) => {
+                        let mask = alen - 1;
+                        let compute = |flat: usize| arr.values[(flat / stride) & mask];
+                        if parallel {
+                            (0..out_count).into_par_iter().map(compute).collect()
+                        } else {
+                            (0..out_count).map(compute).collect()
+                        }
+                    }
+                    (false, false) => {
+                        let compute = |flat: usize| arr.values[(flat / stride) % alen];
+                        if parallel {
+                            (0..out_count).into_par_iter().map(compute).collect()
+                        } else {
+                            (0..out_count).map(compute).collect()
+                        }
                     }
                 };
                 Self {

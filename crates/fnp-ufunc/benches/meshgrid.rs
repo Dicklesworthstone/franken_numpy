@@ -1,7 +1,9 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_dtype::DType;
 use fnp_ufunc::UFuncArray;
+use rayon::prelude::*;
 use std::hint::black_box;
+use std::time::Duration;
 
 fn old_meshgrid(arrays: &[UFuncArray]) -> Vec<Vec<f64>> {
     let ndim = arrays.len();
@@ -23,6 +25,26 @@ fn old_meshgrid(arrays: &[UFuncArray]) -> Vec<Vec<f64>> {
     out
 }
 
+fn full_divmod_parallel_meshgrid(arrays: &[UFuncArray]) -> Vec<Vec<f64>> {
+    let ndim = arrays.len();
+    let out_shape: Vec<usize> = arrays.iter().map(|a| a.shape()[0]).collect();
+    let out_count: usize = out_shape.iter().product();
+    let mut strides = vec![1usize; ndim];
+    for i in (0..ndim.saturating_sub(1)).rev() {
+        strides[i] = strides[i + 1] * out_shape[i + 1];
+    }
+    arrays
+        .iter()
+        .enumerate()
+        .map(|(axis, arr)| {
+            (0..out_count)
+                .into_par_iter()
+                .map(|flat| arr.values()[(flat / strides[axis]) % out_shape[axis]])
+                .collect()
+        })
+        .collect()
+}
+
 fn bench(c: &mut Criterion) {
     for &n in &[2048usize, 4096] {
         let x = UFuncArray::new(vec![n], (0..n).map(|i| i as f64).collect(), DType::F64).unwrap();
@@ -42,6 +64,50 @@ fn bench(c: &mut Criterion) {
         g.bench_with_input(BenchmarkId::new("par_map", n), &n, |b, _| {
             b.iter(|| {
                 black_box(UFuncArray::meshgrid_advanced(black_box(&arrs), "ij", false).unwrap())
+            })
+        });
+        g.finish();
+    }
+
+    {
+        let (nx, ny) = (2048usize, 2000usize);
+        let x = UFuncArray::new(
+            vec![nx],
+            (0..nx).map(|i| i as f64).collect(),
+            DType::F64,
+        )
+        .unwrap();
+        let y = UFuncArray::new(
+            vec![ny],
+            (0..ny).map(|i| -(i as f64)).collect(),
+            DType::F64,
+        )
+        .unwrap();
+        let arrs = vec![x, y];
+        let control = full_divmod_parallel_meshgrid(&arrs);
+        let candidate = UFuncArray::meshgrid_advanced(&arrs, "ij", false).unwrap();
+        for (grid, reference) in candidate.iter().zip(&control) {
+            assert_eq!(grid.values().len(), reference.len());
+            for (actual, expected) in grid.values().iter().zip(reference) {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+        }
+
+        let mut g = c.benchmark_group(format!("meshgrid_mixed_pow2_{nx}x{ny}"));
+        g.sample_size(10);
+        g.warm_up_time(Duration::from_millis(250));
+        g.measurement_time(Duration::from_secs(1));
+        g.bench_function("full_divmod_control", |b| {
+            b.iter(|| black_box(full_divmod_parallel_meshgrid(black_box(&arrs))))
+        });
+        g.bench_function("partial_strength_reduce", |b| {
+            b.iter(|| {
+                black_box(UFuncArray::meshgrid_advanced(
+                    black_box(&arrs),
+                    "ij",
+                    false,
+                )
+                .unwrap())
             })
         });
         g.finish();

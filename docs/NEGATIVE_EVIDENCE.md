@@ -4,6 +4,42 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): mixed-shape dense `meshgrid` strength-reduces each power-of-two operand - 2.46x
+
+`WindyCardinal`, `fnp-ufunc`. Negative-ledger-first follow-up to the 2026-07-13
+power-of-two dense `meshgrid` keep. That entry's two-way gate retained full
+`(flat / stride) % len` indexing unless both operands were powers of two. This
+one lever strength-reduces the operands independently: a power-of-two stride
+uses a shift even when length is not a power of two, and a power-of-two length
+uses a mask even when stride is not a power of two. The four cases remain
+outside the cell loop, so mixed grids eliminate one integer division without a
+per-cell branch. Non-power-of-two operands retain their original operation;
+sparse, sidecar, zero-extent, validation, allocation, output-order, and gather
+behavior is unchanged.
+
+The proof row uses a mixed `(2048, 2000)` dense `ij` grid. Its same-binary
+control reproduces the old parallel full-divide/modulo implementation, and the
+benchmark asserts every candidate output's raw f64 bits against that control
+before timing. That assertion passed. The rewrite changes only exact unsigned
+index algebra and copies the same source values, so floating-point operation
+order, NaN payloads, signed zero, ties, and RNG state are unchanged.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran with RCH
+self-healing disabled on requested and effective worker `vmi1149989` (job
+`j-29928833041828123`; 10 samples, 250 ms warm-up, one-second measurement,
+LTO disabled, 16 codegen units, Cargo `-j1`). The old full-div/mod control
+measured **14,809,302 ns/iter** and partial strength reduction measured
+**6,023,117 ns/iter**: **2.459x** higher throughput / 59.33% lower latency.
+The control and candidate were timed in the same freshly built binary. Per the
+explicit one-benchmark immediate-commit instruction, no second benchmark or
+successive conformance loop was run.
+
+The remotely compiled source hash was
+`8397a71eb9768958c9b5128786ad2c6fb31e1334c149d4c3e9168742f980d7b5` and the
+proof-bench hash was
+`d2cf0ba36b49339c1aaca7df9343d48ac979e922e55b012adf2a161e17c4d03d`.
+KEEP.
+
 ## 2026-07-14 - WIN (SHIP): broadcast-A matrix `batch_solve` factors once - 2.62x self-speedup
 
 `WindyCardinal`, `fnp-linalg`. Negative-ledger-first sibling of the 2026-07-13
