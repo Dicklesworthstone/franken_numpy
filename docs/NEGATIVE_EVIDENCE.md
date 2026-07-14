@@ -4,6 +4,48 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - REJECT (REVERTED): naive exact-pentadiagonal Cholesky recurrence - blocked-path bit drift
+
+`IvoryTurtle`, bead `deadlock-audit-mxun8`, `fnp-linalg`. Robot triage still
+offered only the prohibited f16 lane and the human-decision C-BLAS/fast-math
+lane. Because the structured-Cholesky seam had just delivered 15.79x and
+12.90x, this pass tested the next broader unledgered case: exact lower
+half-bandwidth-2 SPD matrices.
+
+Profile/source attribution remained strong: a 256x256 pentadiagonal matrix
+enters the full blocked factorization even though its factor retains
+half-bandwidth 2. The attempted ONE LEVER admitted positive-zero entries below
+that band and ran the usual increasing-column/increasing-k scalar recurrence.
+Dense inputs, finite validation, errors, upper-triangle behavior, and the
+landed diagonal/tridiagonal routes were otherwise unchanged.
+
+The same-binary former-general control rejected the candidate before Criterion
+timing. At flat output index 3341, the blocked control produced bits
+`4611305424633002289` while the scalar band recurrence produced
+`4611305424633002290`, a one-ULP difference. Unlike the tridiagonal case, a
+band-2 diagonal can combine two nonzero prior terms across a blocked-panel
+boundary: the blocked kernel groups the trailing update separately from the
+within-panel subtraction, whereas the naive recurrence sums both terms before
+one subtraction. Skipping mathematical zeros therefore was not bit-isomorphic.
+
+Exactly one foreground strict-remote command ran on requested and effective
+worker `vmi1149989` (job `j-29928833041828538`):
+
+`RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-linalg --bench criterion_linalg --profile release -- cholesky_exact_pentadiagonal_256 --noplot`
+
+The permitted non-LTO release build completed in 43.67 seconds; the proof
+failed and the full foreground command returned in 71.3 seconds. No timing was
+recorded, no second compile/benchmark was run, and the production plus proof
+bench hunks were manually restored. Attempted source SHA-256:
+`718922978007ebbfaeca041d1b616034a74781a60f0ac03e45008c0e5309d78d`;
+attempted proof-bench SHA-256:
+`2c38431879ce6596354b9338ac2ba900e90f40a8e86020415e058b44e81aa59c`.
+
+Retry only with a banded kernel that deliberately reproduces blocked panel
+update grouping, or with an explicitly sub-`CHOL_MID_MIN` route proved against
+the unblocked control. Do not retry the naive recurrence at blocked sizes.
+REJECT.
+
 ## 2026-07-14 - WIN (SHIP): exact-tridiagonal Cholesky bypass - 12.90x
 
 `IvoryTurtle`, bead `deadlock-audit-tcfqn`, `fnp-linalg`. Robot triage again
