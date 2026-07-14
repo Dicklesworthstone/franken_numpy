@@ -4,6 +4,45 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): native-endian I32 `fromfile` typed-slice decode - 9.55x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.288`, adjacent `fromfile`/`fnp-io`
+lane. Robot triage again exposed only the out-of-policy C-BLAS/fast-math perf
+leaf. The preceding F32 typed-slice result was 12.43x, so that vein was not
+thinning; negative-ledger search found no native-I32 attempt or rejection.
+
+Source attribution showed native-endian I32 still paying an indexed four-byte
+slice plus generic `decode_element` dispatch for every value. ONE LEVER routes
+aligned input through `try_cast_slice::<u8, i32>` and widens directly to F64,
+while retaining an exact `from_ne_bytes` fallback for misaligned input. Every
+I32 value is exactly representable as F64, so ordering, count clamping, and
+numeric results are unchanged. Before timing, the proof bench asserted equality
+for the full aligned corpus (including `i32::MIN` and `i32::MAX`) and a
+forced-misaligned 257-element corpus.
+
+Single foreground strict-remote command, release profile with LTO disabled:
+
+```text
+RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-io --bench criterion_io --profile release -- fromfile_native_i32_typed_slice --warm-up-time 0.25 --measurement-time 0.75 --sample-size 10 --noplot
+```
+
+RCH overrode the requested worker and admitted job `j-29928833041828721` to
+`vmi1227854`, where the target cache was cold. There was deliberately no shell
+timeout: the untimed release compile completed in 23.15 seconds before
+Criterion began its cheap measurement, so this is a real A/B rather than a
+124/125 false rejection. The command exited 0 after 68.8 seconds total.
+
+| arm | Criterion estimate |
+|---|---:|
+| former generic element decoder | 316.41-339.85 us (331.05 us midpoint) |
+| typed-slice candidate | 33.223-36.288 us (34.662 us midpoint) |
+
+Midpoint speedup is **9.551x** (89.53% lower latency); even the closest interval
+bounds separate by 8.72x. Timed source/bench hashes were
+`23ed79abd54dd78c4b8a5efd99620dd0cb2056abb38d458e3e9c013deb34d2c6` and
+`1d12041720366805a9395cc65c505e8eba33240fcfe9cf59b9bcbea8a476040c`.
+Decision: **SHIP**. No second compile, benchmark, or conformance loop ran.
+
 ## 2026-07-14 - WIN (SHIP): native-endian F32 `fromfile` typed-slice decode - 12.43x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.287`, fresh `fromfile`/`fnp-io` lane.
