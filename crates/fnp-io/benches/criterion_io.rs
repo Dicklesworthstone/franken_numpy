@@ -10,9 +10,11 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fnp_io::{
-    IOSupportedDType, NpyHeader, read_npy_bytes, read_npz_bytes, write_npy_bytes, write_npz_bytes,
+    IOSupportedDType, NpyHeader, read_npy_bytes, read_npz_bytes,
+    read_npz_bytes_linear_overlap_control, write_npy_bytes, write_npz_bytes,
 };
 use std::hint::black_box;
+use std::time::Duration;
 
 fn generate_f64_data(n: usize) -> Vec<u8> {
     let data: Vec<f64> = (0..n).map(|i| i as f64 * 0.1).collect();
@@ -139,6 +141,43 @@ fn bench_read_npz(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_read_npz_overlap_tracking(c: &mut Criterion) {
+    // Maximum legal member count, but only one f64 per member: this isolates
+    // ZIP metadata validation rather than payload bandwidth.
+    let num_arrays = 4_096usize;
+    let data = generate_f64_data(1);
+    let header = make_npy_header(&[1]);
+    let entries: Vec<(String, NpyHeader, Vec<u8>)> = (0..num_arrays)
+        .map(|i| (format!("arr_{i}"), header.clone(), data.clone()))
+        .collect();
+    let entry_refs: Vec<(&str, &NpyHeader, &[u8])> = entries
+        .iter()
+        .map(|(name, h, d)| (name.as_str(), h, d.as_slice()))
+        .collect();
+    let npz_bytes = write_npz_bytes(&entry_refs).expect("write metadata-heavy npz");
+
+    let linear = read_npz_bytes_linear_overlap_control(&npz_bytes, false)
+        .expect("linear overlap control");
+    let ordered = read_npz_bytes(&npz_bytes, false).expect("ordered overlap candidate");
+    assert_eq!(ordered, linear);
+
+    let mut group = c.benchmark_group("read_npz_overlap_tracking");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    group.bench_function("linear_control_4096", |bench| {
+        bench.iter(|| {
+            black_box(
+                read_npz_bytes_linear_overlap_control(black_box(&npz_bytes), false).unwrap(),
+            )
+        })
+    });
+    group.bench_function("ordered_candidate_4096", |bench| {
+        bench.iter(|| black_box(read_npz_bytes(black_box(&npz_bytes), false).unwrap()))
+    });
+    group.finish();
+}
+
 fn bench_npy_roundtrip(c: &mut Criterion) {
     let mut group = c.benchmark_group("npy_roundtrip");
 
@@ -165,6 +204,7 @@ criterion_group!(
     bench_read_npy,
     bench_write_npz,
     bench_read_npz,
+    bench_read_npz_overlap_tracking,
     bench_npy_roundtrip,
 );
 

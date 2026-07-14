@@ -1619,6 +1619,29 @@ pub fn write_npz_bytes_with_compression(
 /// entries. Each entry must decode to a valid `.npy` file.
 /// `allow_pickle` controls whether object dtype payloads are permitted.
 pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, IOError> {
+    read_npz_bytes_impl(data, allow_pickle, NpzRangePolicy::Adaptive)
+}
+
+/// Benchmark control retaining the former linear covered-range scan.
+#[doc(hidden)]
+pub fn read_npz_bytes_linear_overlap_control(
+    data: &[u8],
+    allow_pickle: bool,
+) -> Result<Vec<NpzEntry>, IOError> {
+    read_npz_bytes_impl(data, allow_pickle, NpzRangePolicy::Linear)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NpzRangePolicy {
+    Adaptive,
+    Linear,
+}
+
+fn read_npz_bytes_impl(
+    data: &[u8],
+    allow_pickle: bool,
+    range_policy: NpzRangePolicy,
+) -> Result<Vec<NpzEntry>, IOError> {
     if data.len() < 22 {
         return Err(IOError::NpzArchiveContractViolation(
             "npz: data too short for a ZIP archive",
@@ -1730,8 +1753,18 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
     let mut entries = Vec::with_capacity(entry_count);
     let mut pos = cd_offset;
     let mut total_uncompressed_bytes = 0usize;
-    // Track covered ranges to prevent overlapping entries
-    let mut covered_ranges: Vec<(usize, usize)> = Vec::with_capacity(entry_count);
+    // A linear scan is cheaper for ordinary small archives. Metadata-heavy
+    // archives need ordered predecessor/successor checks so adversarially large
+    // valid member counts do not turn overlap validation into O(m^2) work.
+    const ORDERED_RANGE_MIN_MEMBERS: usize = 128;
+    let use_ordered_ranges = range_policy == NpzRangePolicy::Adaptive
+        && entry_count >= ORDERED_RANGE_MIN_MEMBERS;
+    let mut covered_ranges = if use_ordered_ranges {
+        Vec::new()
+    } else {
+        Vec::with_capacity(entry_count)
+    };
+    let mut ordered_ranges = BTreeMap::<usize, usize>::new();
 
     for _ in 0..entry_count {
         if pos.checked_add(46).is_none_or(|end| end > data.len()) {
@@ -2016,19 +2049,37 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
             ));
         }
 
-        // Check for overlapping entries
+        // Check for overlapping entries. The ordered representation maintains
+        // the same non-overlap invariant, so only the nearest range on either
+        // side can intersect the new range.
         let current_range = (local_offset, data_end);
-        for &(start, end) in &covered_ranges {
-            if (current_range.0 >= start && current_range.0 < end)
-                || (current_range.1 > start && current_range.1 <= end)
-                || (start >= current_range.0 && start < current_range.1)
-            {
-                return Err(IOError::NpzArchiveContractViolation(
-                    "npz: overlapping zip entries detected",
-                ));
-            }
+        let overlaps = if use_ordered_ranges {
+            let predecessor_overlaps = ordered_ranges
+                .range(..=current_range.0)
+                .next_back()
+                .is_some_and(|(_, &end)| current_range.0 < end);
+            let successor_overlaps = ordered_ranges
+                .range(current_range.0..)
+                .next()
+                .is_some_and(|(&start, _)| start < current_range.1);
+            predecessor_overlaps || successor_overlaps
+        } else {
+            covered_ranges.iter().any(|&(start, end)| {
+                (current_range.0 >= start && current_range.0 < end)
+                    || (current_range.1 > start && current_range.1 <= end)
+                    || (start >= current_range.0 && start < current_range.1)
+            })
+        };
+        if overlaps {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: overlapping zip entries detected",
+            ));
         }
-        covered_ranges.push(current_range);
+        if use_ordered_ranges {
+                let _ = ordered_ranges.insert(current_range.0, current_range.1);
+        } else {
+            covered_ranges.push(current_range);
+        }
 
         total_uncompressed_bytes = total_uncompressed_bytes
             .checked_add(uncompressed_size)

@@ -4,6 +4,47 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): ordered NPZ overlap validation - 2.43x
+
+`WindyCardinal`, bead `deadlock-audit-ch5xg`, `fnp-io`. Negative-ledger-first
+attribution followed the recent NPZ CRC and clone-elision keeps into the
+remaining metadata path. `read_npz_bytes` retained every member range in a
+`Vec` and scanned the entire prefix for each new member. A legal 4,096-member
+archive therefore performed 8,386,560 interval comparisons before returning
+its arrays.
+
+ONE LEVER: at 128 or more members, the production reader stores the already
+validated, nonoverlapping ranges in start order and checks only the predecessor
+and successor of the new range. Below that threshold it retains the old linear
+scan. The overlap predicate, touching-range acceptance, error text, CRC/header
+validation, member order, and decoded arrays are unchanged. The existing IO
+Criterion binary carries the former linear implementation as a doc-hidden
+same-parser control; before timing it asserted complete decoded-array equality
+between both routes on a maximum-legal-member archive with one f64 per member.
+
+Exactly one foreground strict-remote command ran on requested and effective
+worker `vmi1149989` (job `j-29928833041828369`):
+
+`RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-io --bench criterion_io --profile release -- read_npz_overlap_tracking --noplot`
+
+The worker cache missed, but the permitted non-LTO release build completed in
+56.98 seconds rather than invoking `release-perf`. Criterion used 10 samples,
+a 250 ms warm-up, and one-second measurement per arm:
+
+| arm | Criterion estimate |
+|---|---:|
+| former linear overlap control | 10.018 ms `[9.3098, 10.549]` |
+| ordered predecessor/successor candidate | **4.1253 ms** `[4.0114, 4.2409]` |
+
+Midpoint speedup is **2.4285x** (58.82% lower latency); even the control's low
+bound is 2.19x slower than the candidate's high bound. The equality assertion
+and command exited zero. No second benchmark, conformance, compile, or
+verification loop ran. Timed source SHA-256:
+`361ca1e14962ddb2141be00770fffc28db799943a200e62ef1b24510a33cc46a`;
+proof-bench SHA-256:
+`aa542e44b56c8ba6fcfb35e7ba352845ad2de5641aef3a52fd7a191e32a03cf7`.
+KEEP.
+
 ## 2026-07-14 - WIN (SHIP): 4-column register block for factor-once matrix `batch_solve` substitution - 3.03x
 
 `WindyCardinal`, bead `deadlock-audit-tcfxn`, `fnp-linalg`. Negative-ledger-first
