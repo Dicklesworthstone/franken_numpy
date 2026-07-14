@@ -2119,3 +2119,71 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn scatter_at_order_free_ops_match_numpy() -> Result<(), String> {
+    // Completes the order-free integer ufunc.at family: subtract (fetch_sub,
+    // wrapping negation commutes), maximum/minimum (fetch_max/fetch_min,
+    // commutative-associative-idempotent) join the shipped add arms across
+    // i64/u64/i32/u32. Any duplicate-index accumulation order is
+    // byte-unobservable for these ops; floats and other forms delegate.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(379)
+verdicts = []
+def ab(op, name, n, idx, vals, dtype, init):
+    a1 = np.full(n, init, dtype=dtype); a2 = np.full(n, init, dtype=dtype)
+    getattr(fnp, op).at(a1, idx, vals)
+    getattr(np, op).at(a2, idx, vals)
+    if a1.tobytes() != a2.tobytes():
+        verdicts.append(f"FAIL {op} {name}")
+n = 4_000_000
+idx = rng.integers(0, n, 4_000_000)
+idx[::5] -= n
+vi = rng.integers(-10**9, 10**9, 4_000_000)
+ab("subtract", "i64", n, idx, vi, np.int64, 0)
+ab("subtract", "i64 wrap", n, idx, rng.integers(2**62, 2**63 - 1, 4_000_000), np.int64, -2**62)
+ab("subtract", "u64 wrap", n, idx, rng.integers(0, 2**64, 4_000_000, dtype=np.uint64), np.uint64, 5)
+ab("subtract", "i32", n, idx, vi.astype(np.int32), np.int32, 0)
+ab("maximum", "i64 extremes", n, idx, rng.integers(-2**63, 2**63 - 1, 4_000_000), np.int64, -2**63)
+ab("maximum", "u32", n, idx, rng.integers(0, 2**32, 4_000_000, dtype=np.uint32), np.uint32, 0)
+ab("minimum", "i64 extremes", n, idx, rng.integers(-2**63, 2**63 - 1, 4_000_000), np.int64, 2**63 - 1)
+ab("minimum", "u64", n, idx, rng.integers(0, 2**64, 4_000_000, dtype=np.uint64), np.uint64, 2**64 - 1)
+ab("add", "i64 regression", n, idx, vi, np.int64, 0)
+# delegate parity: float maximum.at, mixed dtype, small target
+f1 = np.zeros(n); f2 = np.zeros(n)
+fv = rng.standard_normal(4_000_000)
+fnp.maximum.at(f1, np.abs(idx), fv); np.maximum.at(f2, np.abs(idx), fv)
+if f1.tobytes() != f2.tobytes():
+    verdicts.append("FAIL float max delegate")
+ab("subtract", "small delegate", 1024, rng.integers(0, 1024, 4_000_000), vi, np.int64, 0)
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+A = np.zeros(8_000_000, dtype=np.int64)
+I8 = rng.integers(0, 8_000_000, 8_000_000)
+V8 = rng.integers(-1000, 1000, 8_000_000)
+tn = best(lambda: np.subtract.at(A, I8, V8)); tf = best(lambda: fnp.subtract.at(A, I8, V8))
+print(f"SUBTRACT_AT_I64_LARGE_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+M = np.full(8_000_000, -2**63, dtype=np.int64)
+tn2 = best(lambda: np.maximum.at(M, I8, V8)); tf2 = best(lambda: fnp.maximum.at(M, I8, V8))
+print(f"MAXIMUM_AT_I64_LARGE_AB numpy_ms={tn2:.3f} fnp_ms={tf2:.3f} ratio={tn2 / tf2:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces SUBTRACT_AT_I64_LARGE_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "order-free scatter .at ops must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
