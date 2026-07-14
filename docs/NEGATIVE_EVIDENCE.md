@@ -4,6 +4,48 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): fully-kept `triu`/`tril` masks clone directly - 2.80x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.284`, triangular indexing/`fnp-ufunc`.
+Robot triage's only open perf leaf was the out-of-policy C-BLAS/fast-math Gram
+route. Negative-ledger screening found mature gather and dense-meshgrid veins,
+but no full-mask triangle row, so this pass pivoted to triangular indexing.
+
+Profile/source attribution showed `triu` and `tril` always called
+`triangle_build`, which zero-filled the complete destination before copying
+every retained row span. For an offset at or beyond the extreme diagonal, the
+mask retains every element, making the zero fill a redundant full-buffer write.
+ONE LEVER returns `self.clone()` after the existing 2-D validation when
+`triu(k <= 1 - rows)` or `tril(k >= cols - 1)`. Shape, dtype, f64 value bits,
+and any exact i64/u64 sidecar are copied unchanged; every partially masked
+offset retains the existing kernel.
+
+The existing `triangle` Criterion binary gained one focused 1024x1024 A/B. Its
+control faithfully performs the former zero-fill plus complete row copies, and
+pre-timing assertions prove both optimized offsets bit-equal to that control.
+Exactly one foreground strict-remote, explicitly non-LTO release command ran on
+requested and effective worker `vmi1227854` (job `j-29928833041828670`):
+
+`RCH_WORKER=vmi1227854 RCH_WORKERS=vmi1227854 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-ufunc --bench triangle --profile release -- triangle_full_keep --warm-up-time 0.25 --measurement-time 0.75 --sample-size 10 --noplot`
+
+The cache missed, but the non-LTO release compile completed in 64.6 seconds and
+the full RCH command returned in 107.0 seconds, below the five-minute cap:
+
+| arm | Criterion estimate |
+|---|---:|
+| former zero-fill then copy | 535.15 us `[506.18, 578.30]` |
+| direct clone | **190.93 us** `[178.15, 202.27]` |
+
+Midpoint speedup is **2.803x** (64.32% lower latency); even the former low bound
+is 2.502x slower than the candidate high bound. The equality assertions and
+command exited zero. The only diagnostic was the pre-existing unused
+`nan_filtered` warning. No second benchmark, compile, conformance, or
+verification loop ran. Timed source SHA-256:
+`14f164f9795d8cef5a03d61a5ff95124dabec45fae00849f5759f9388d15bc80`;
+proof-bench SHA-256:
+`9bb865082b68ef6306a6a0ee6b4ee15a6834e55acb4347d275ebf67133febf2e`.
+KEEP.
+
 ## 2026-07-14 - SHIP: direct `U64` to `U32` storage cast - 4.71x
 
 `IvoryTurtle`, bead `deadlock-audit-xycj5`, `fnp-dtype`. Robot triage again

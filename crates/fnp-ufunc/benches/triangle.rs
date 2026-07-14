@@ -41,7 +41,54 @@ fn old_tril(values: &[f64], rows: usize, cols: usize, k: i64) -> Vec<f64> {
     out
 }
 
+/// Former `triangle_build` work for an offset whose mask retains every cell:
+/// zero-fill the destination, then overwrite each complete row.
+fn former_full_keep(values: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let mut out = vec![0.0; rows * cols];
+    for r in 0..rows {
+        let start = r * cols;
+        out[start..start + cols].copy_from_slice(&values[start..start + cols]);
+    }
+    out
+}
+
+fn bench_triangle_full_keep(c: &mut Criterion) {
+    let (rows, cols) = (1024usize, 1024usize);
+    let n = rows * cols;
+    let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 - 1.0).collect();
+    let arr = UFuncArray::new(vec![rows, cols], data.clone(), DType::F64).unwrap();
+    let triu_k = 1 - rows as i64;
+    let tril_k = cols as i64 - 1;
+    let former = former_full_keep(&data, rows, cols);
+    let upper = arr.triu(triu_k).unwrap();
+    let lower = arr.tril(tril_k).unwrap();
+    let former_bits: Vec<u64> = former.iter().map(|v| v.to_bits()).collect();
+    assert_eq!(
+        upper.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        former_bits
+    );
+    assert_eq!(
+        lower.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        former_bits
+    );
+
+    let mut group = c.benchmark_group("triangle_full_keep");
+    group.bench_function("former_zero_then_copy", |b| {
+        b.iter(|| black_box(former_full_keep(black_box(&data), rows, cols)))
+    });
+    group.bench_function("clone_direct", |b| {
+        b.iter(|| black_box(arr.triu(black_box(triu_k)).unwrap()))
+    });
+    group.finish();
+}
+
 fn bench_triangle(c: &mut Criterion) {
+    bench_triangle_full_keep(c);
+    // Keep focused proof runs cheap: the historical triangle groups allocate
+    // several 128 MiB matrices before Criterion can filter their measurements.
+    if std::env::args().any(|arg| arg == "triangle_full_keep") {
+        return;
+    }
     let cases: &[(usize, usize)] = &[(4096, 4096), (8192, 2048), (2048, 8192)];
     for &(rows, cols) in cases {
         let n = rows * cols;

@@ -6087,6 +6087,12 @@ impl UFuncArray {
             return Err(UFuncError::Msg("triu requires 2-D input".to_string()));
         }
         let (rows, cols) = (self.shape[0], self.shape[1]);
+        // The smallest `c - r` occurs at the lower-left corner. Once `k` is
+        // at or below that diagonal, every element is retained; cloning avoids
+        // zero-filling the output only to overwrite the entire buffer.
+        if (k as i128) <= 1 - rows as i128 {
+            return Ok(self.clone());
+        }
         let values = triangle_build(&self.values, rows, cols, k, /*upper=*/ true);
         let sidecar_vals = match &self.integer_sidecar {
             Some(IntegerSidecar::I64(v)) => {
@@ -6111,6 +6117,11 @@ impl UFuncArray {
             return Err(UFuncError::Msg("tril requires 2-D input".to_string()));
         }
         let (rows, cols) = (self.shape[0], self.shape[1]);
+        // The largest `c - r` occurs at the upper-right corner. At or above
+        // that diagonal the lower-triangle mask retains the complete array.
+        if (k as i128) >= cols as i128 - 1 {
+            return Ok(self.clone());
+        }
         let values = triangle_build(&self.values, rows, cols, k, /*upper=*/ false);
         let sidecar_vals = match &self.integer_sidecar {
             Some(IntegerSidecar::I64(v)) => {
