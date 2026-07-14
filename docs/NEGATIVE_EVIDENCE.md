@@ -4,6 +4,50 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): full-axis identity `take` clones directly - 24.07x
+
+`WindyCardinal`, bead `deadlock-audit-l4uq0`, indexing/`fnp-ufunc`.
+Negative-ledger-first attribution found no prior identity-`take` row. After
+resolving and validating explicit-axis indices, production still zero-filled an
+output and copied every source lane when the resolved sequence was exactly
+`0..axis_len`.
+
+ONE LEVER: a validated full axis selected once in source order now returns a
+deep clone. Validation remains before the shortcut, preserving first-error
+behavior and negative-index resolution. Shape, dtype, value bits, ordering, and
+any exact integer sidecar are copied unchanged; every reordered, duplicated,
+partial, or invalid index sequence retains the existing gather path.
+
+The existing `take_axis` Criterion binary added one small `256x64`, axis-1
+identity row. Before timing it asserted raw-bit equality for all 16,384 f64
+values. Its control is favorable to the former production route: it returns
+only the gathered `Vec` and avoids both production's zero-fill and array-wrapper
+construction, so the measured speedup is conservative.
+
+Exactly one foreground strict-remote command ran on requested and effective
+worker `vmi1227854` (job `j-29928833041828395`):
+
+`RCH_WORKER=vmi1227854 RCH_WORKERS=vmi1227854 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-ufunc --bench take_axis --profile release -- take_axis_identity --noplot`
+
+The cache missed, but the explicitly non-LTO release build completed in 57.94
+seconds. Criterion used 10 samples, a 250 ms warm-up, and one-second
+measurement per arm:
+
+| arm | Criterion estimate |
+|---|---:|
+| favorable former gather control | 52.990 us `[49.355, 60.105]` |
+| full-axis identity clone | **2.2016 us** `[2.1380, 2.2948]` |
+
+Midpoint speedup is **24.068x** (95.84% lower latency); even the control's low
+bound is 21.51x slower than the candidate's high bound. The equality assertion
+and command exited zero. The only compiler diagnostic was the pre-existing
+unused `nan_filtered` warning. No second benchmark, conformance, compile, or
+verification loop ran. Timed source SHA-256:
+`b215d35de3e8d6b1bb7cb62284b3bafd9b4965c8bac1cb8034bc085c0a65191e`;
+proof-bench SHA-256:
+`e8446d002a34a2547712fc7dbff3d3985e066f559f8337f407801335ace0e684`.
+KEEP.
+
 ## 2026-07-14 - REJECT (REVERTED): hoist `standard_exponential` backend dispatch - 1.79x slower
 
 `WindyCardinal`, bead `deadlock-audit-1qjls`, `fnp-random`. Negative-ledger-first

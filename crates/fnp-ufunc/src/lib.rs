@@ -16001,6 +16001,17 @@ impl UFuncArray {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
 
+                // A full axis selected once in source order is exactly a deep
+                // copy of the input. Validation above still preserves NumPy's
+                // first-error behavior; `Clone` copies values and any exact
+                // integer sidecar contiguously instead of zero-filling and
+                // gathering the same lanes back into their original positions.
+                if resolved.len() == self.shape[ax]
+                    && resolved.iter().copied().eq(0..resolved.len())
+                {
+                    return Ok(self.clone());
+                }
+
                 let mut out_shape = self.shape.clone();
                 out_shape[ax] = resolved.len();
 

@@ -8,7 +8,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_dtype::DType;
 use fnp_ufunc::UFuncArray;
-use std::hint::black_box;
+use std::{hint::black_box, time::Duration};
 
 fn old_take_axis(values: &[f64], shape: &[usize], ax: usize, idx: &[i64]) -> Vec<f64> {
     let inner: usize = shape[ax + 1..].iter().product();
@@ -68,5 +68,47 @@ fn bench_take_axis(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_take_axis);
+fn bench_take_axis_identity(c: &mut Criterion) {
+    let shape = vec![256, 64];
+    let axis = 1usize;
+    let n: usize = shape.iter().product();
+    let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 - 1.0).collect();
+    let arr = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+    let indices: Vec<i64> = (0..shape[axis] as i64).collect();
+
+    let candidate = arr.take(&indices, Some(axis as isize)).unwrap();
+    let control = old_take_axis(&data, &shape, axis, &indices);
+    assert_eq!(
+        candidate
+            .values()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        control
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+
+    let mut group = c.benchmark_group("take_axis_identity");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    group.bench_function("former_gather_256x64", |bench| {
+        bench.iter(|| {
+            black_box(old_take_axis(
+                black_box(&data),
+                &shape,
+                axis,
+                black_box(&indices),
+            ))
+        })
+    });
+    group.bench_function("identity_clone_256x64", |bench| {
+        bench.iter(|| black_box(arr.take(black_box(&indices), Some(axis as isize)).unwrap()))
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_take_axis, bench_take_axis_identity);
 criterion_main!(benches);
