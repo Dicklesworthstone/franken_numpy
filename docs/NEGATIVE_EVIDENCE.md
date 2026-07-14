@@ -160,6 +160,22 @@ unreachable from `diff`. Main then advanced through the likewise-disjoint decrea
 `digitize` commit `b120404c`; strict-remote workspace check passed on that final parent plus this
 candidate. The 15.31x separation is decisive. KEEP. The parked f16 diff residual is closed.
 
+## 2026-07-14 - NEUTRAL (VALIDATED, version-caveated): wide-int setop arms hold in BOTH tie regimes on sort-based numpy (5d251d11)
+
+RainySparrow. Priced the tick-52 collapse hypothesis against the
+wide-int arms: REFUTED favorably on this worker - distinct 74.54x
+(numpy 10.41 SECONDS at 4M+6M wide i64: the calibration family's newest
+extreme, a pathological sort-based wide-int basis), tie-dense intersect
+1.212x and setdiff 1.451x still WINS. Mechanism: on sort-based numpy
+(pre-2.4-hash-unique) the tie collapse is itself expensive, unlike
+f64's SIMD-introsort case - the collapse-vs-full-sort tradeoff is
+keyed on the BASIS's unique algorithm, not on tie density alone.
+VERSION CAVEAT + retry predicate: numpy 2.4's hash unique could flip
+the tie regime; re-price on a 2.4 landing and if it loses there, gate
+with the sampled tie oracle keyed on a RUNTIME NUMPY-VERSION check
+(the regime-gating taxonomy's fourth key: VERSION, joining
+ISA/DATA-SHAPE/SIZE).
+
 ## 2026-07-14 - CROSS-VALIDATED: c128 select retry predicate paid by PEER (cd200121, 2.44x) - independently re-measured 1.956x
 
 RainySparrow. Planned the c128 [u64;2]-chunked-fill retry this tick and
