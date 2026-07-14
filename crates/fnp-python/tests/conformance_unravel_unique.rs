@@ -2583,3 +2583,66 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn block_2d_grid_parallel_assembly_matches_numpy() -> Result<(), String> {
+    // np.block was a passthrough; numpy composes it as recursive concatenate
+    // (two full serial copy layers for [[A,B],[C,D]]). The native arm
+    // assembles the 2-D grid in ONE parallel pass over output rows -
+    // verbatim segment copies through u8 views, byte-exact for any fixed-
+    // width dtype. Ragged grids, dtype mixes, 1-D blocks, deeper nesting,
+    // and small inputs keep the delegate.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(421)
+verdicts = []
+def ab(name, nested):
+    ours = fnp.block(nested)
+    theirs = np.block(nested)
+    if ours.tobytes() != theirs.tobytes() or str(ours.dtype) != str(theirs.dtype) or ours.shape != theirs.shape:
+        verdicts.append(f"FAIL {name}")
+A = rng.standard_normal((2000, 3000)); B = rng.standard_normal((2000, 1000))
+C = rng.standard_normal((1500, 3000)); D = rng.standard_normal((1500, 1000))
+A[0, 0] = np.nan; D[7, 7] = -0.0
+ab("2x2 f64", [[A, B], [C, D]])
+ab("1x3 row", [[A, B, rng.standard_normal((2000, 500))]])
+ab("3x1 col", [[A], [C], [rng.standard_normal((800, 3000))]])
+I = rng.integers(-2**30, 2**30, (1800, 1800)).astype(np.int32)
+ab("2x2 i32", [[I, I[:, :600]], [I[:1000], I[:1000, :600]]])
+U = np.array([f"s{v:04d}" for v in rng.integers(0, 10**4, 1_200_000)], dtype="U5").reshape(1200, 1000)
+ab("2x1 strings", [[U], [U[:400]]])
+# delegate parity: ragged (numpy raises or broadcasts - compare via try),
+# mixed dtype, deeper nesting, 1-D blocks, small
+ab("mixed dtype delegate", [[A.astype(np.float32), B.astype(np.float32)], [C.astype(np.float32), D.astype(np.float32)]])
+ab("deeper nesting delegate", [[[A[:10, :10]]], [[C[:10, :10]]]])
+ab("1-D delegate", [A[0], B[0]])
+ab("small delegate", [[A[:8, :8], B[:8, :2]], [C[:4, :8], D[:4, :2]]])
+try:
+    fnp.block([[A, B[:100]], [C, D]])
+    verdicts.append("FAIL ragged no-raise")
+except ValueError:
+    pass
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.block([[A, B], [C, D]])); tf = best(lambda: fnp.block([[A, B], [C, D]]))
+print(f"BLOCK_2X2_F64_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces BLOCK_2X2_F64_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "parallel 2-D block must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
