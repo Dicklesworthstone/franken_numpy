@@ -4,6 +4,43 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - REJECT (REVERTED): direct-collect serial PCG64 fill - 1.16x slower
+
+`BeigeBay`, bead `deadlock-audit-wctsk`, `fnp-random`. Robot triage's only
+unclaimed performance top-pick was an opt-in C-BLAS/fast-math linalg item that
+conflicted with the pure-safe-Rust directive, so this turn pivoted from the
+mined ndarray identity vein to PCG64. Negative-ledger-first review found the
+parallel PCG fill and direct byte-fill keeps, the rejected exponential dispatch
+hoist, and no prior row for serial `fill_u64` allocation.
+
+Profile/call-site attribution: `parallel_pcg_u64_words` allocated
+`vec![0; len]` before its sub-65,536 serial branch, then overwrote every word
+with the PCG stream. The one candidate returned an exact-size iterator collect
+only in that serial branch; parallel jump-ahead and its initialized output were
+unchanged. Before timing, the same-binary control reproduced the former
+zero-fill loop and proved complete output equality plus equality of the next RNG
+word for both PCG64 and PCG64DXSM at 65,535 words.
+
+Exactly one foreground strict-remote command ran with LTO explicitly disabled:
+
+`RCH_WORKER=vmi1153651 RCH_WORKERS=vmi1153651 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-random --bench random_ops --profile release -- pcg64_fill_u64_serial_allocation --noplot`
+
+RCH admitted `vmi1153651` (job `j-29928833041828501`) with no local fallback.
+The worker unexpectedly reported a cache miss; the permitted non-LTO release
+build finished in 53.94 seconds and the full command in 103.0 seconds.
+Criterion measured direct collect at
+`[163.65 us, 180.27 us, 203.74 us]` and the former zero-filled path at
+`[143.36 us, 155.56 us, 170.25 us]`. The candidate is 1.1588x slower by point
+estimate (+15.88% latency), so the source and proof-benchmark hunks were
+manually restored. Do not retry serial PCG exact-size collect without final
+assembly evidence that the zero-fill survives optimization and a structurally
+different construction primitive. No second benchmark, compile, conformance,
+or verification loop ran. Attempted source SHA-256:
+`2b1a3438efc4696dda894ecd61ac4669f41046193a86abeac3e4bf8c0360f75b`;
+attempted proof-bench SHA-256:
+`a75eae6f9430b6a6c36855e76bce2c9091e9f11a9092ef584c87242515e150e5`.
+REJECT.
+
 ## 2026-07-14 - WIN (SHIP): F-order identity broadcast overlap-scan elision - 287.2x
 
 `MistySeal`, bead `deadlock-audit-kni1z`, `fnp-ndarray`. This is the explicit
