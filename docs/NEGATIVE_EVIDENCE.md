@@ -4,6 +4,43 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): dense `meshgrid` materializes repeated-value blocks - 3.80x
+
+`WindyCardinal`, `fnp-ufunc`. Negative-ledger-first continuation of the two
+shipped dense-meshgrid indexing reductions immediately below. Those rows showed
+that per-cell source-index recovery was the measured hot work; this one lever
+removes it from the common no-sidecar path. A dense broadcast is already a
+sequence of repeated source-value blocks: the last-axis case copies each whole
+source cycle, while other axes fill stride-sized blocks and calculate a source
+index once per block rather than once per output cell. Power-of-two lengths keep
+the shipped mask reduction at block granularity. Sparse grids, integer-sidecar
+grids, shape/error handling, allocation count, output shape, and output order
+are unchanged; zero-sized outputs remain empty without taking a chunk path.
+
+The same-binary proof row compares the previously shipped per-cell partial
+strength reduction with production block fill on a dense `(2048, 2000)` `ij`
+grid. Before timing, it compares every output element by `to_bits()`; this
+passed. Both implementations copy the same source f64 for every flat output
+position and perform no floating-point arithmetic, preserving ordering, ties,
+NaN payloads, signed zero, and RNG state exactly.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran with RCH
+self-healing disabled on requested and effective worker `vmi1149989` (job
+`j-29928833041828141`; 10 samples, 250 ms warm-up, one-second measurement,
+LTO disabled, 16 codegen units, Cargo `-j1`). The partial-strength-reduction
+control measured **46,673,070 ns/iter** (+/- 6,397,242) and block fill measured
+**12,272,160 ns/iter** (+/- 13,335,869): **3.803x** higher throughput / 73.71%
+lower latency. Despite the short run's candidate variance, its reported
+high-side spread remained below the control's low-side spread. Per the explicit
+one-benchmark immediate-commit instruction, no second benchmark or successive
+conformance loop was run.
+
+The remotely compiled source hash was
+`7bf891636bedae086191e67846334ae562eef56ea238b6a9e6ef5fd4d4119b2e` and the
+proof-bench hash was
+`cc530e260d591f9b73817b4b0c6bc5288f6f015ed73674daee3a93e6d6722751`.
+KEEP.
+
 ## 2026-07-14 - WIN (SHIP): mixed-shape dense `meshgrid` strength-reduces each power-of-two operand - 2.46x
 
 `WindyCardinal`, `fnp-ufunc`. Negative-ledger-first follow-up to the 2026-07-13

@@ -19424,49 +19424,43 @@ impl UFuncArray {
                     integer_sidecar: arr.reindexed_integer_sidecar(&source_indices),
                 }
             } else {
-                // Common no-sidecar case: gather directly, skipping the index Vec.
-                // Strength-reduce each power-of-two operand independently: division
-                // by stride becomes a shift, while modulo by length becomes a mask.
-                // Keeping the four cases outside the element loop leaves no per-cell
-                // branch and lets mixed grids remove one of the two integer divisions.
-                let values: Vec<f64> = match (stride.is_power_of_two(), alen.is_power_of_two()) {
-                    (true, true) => {
-                        let shift = stride.trailing_zeros();
+                // Common no-sidecar case: the flat broadcast is a sequence of
+                // repeated-value blocks. Fill those blocks directly instead of
+                // recovering the source index separately for every output cell.
+                let mut values = vec![0.0; out_count];
+                if out_count != 0 {
+                    if stride == 1 {
+                        if parallel {
+                            values
+                                .par_chunks_mut(alen)
+                                .for_each(|cycle| cycle.copy_from_slice(&arr.values));
+                        } else {
+                            for cycle in values.chunks_mut(alen) {
+                                cycle.copy_from_slice(&arr.values);
+                            }
+                        }
+                    } else if alen.is_power_of_two() {
                         let mask = alen - 1;
-                        let compute = |flat: usize| arr.values[(flat >> shift) & mask];
                         if parallel {
-                            (0..out_count).into_par_iter().map(compute).collect()
+                            values.par_chunks_mut(stride).enumerate().for_each(
+                                |(block, chunk)| chunk.fill(arr.values[block & mask]),
+                            );
                         } else {
-                            (0..out_count).map(compute).collect()
+                            for (block, chunk) in values.chunks_mut(stride).enumerate() {
+                                chunk.fill(arr.values[block & mask]);
+                            }
+                        }
+                    } else if parallel {
+                        values
+                            .par_chunks_mut(stride)
+                            .enumerate()
+                            .for_each(|(block, chunk)| chunk.fill(arr.values[block % alen]));
+                    } else {
+                        for (block, chunk) in values.chunks_mut(stride).enumerate() {
+                            chunk.fill(arr.values[block % alen]);
                         }
                     }
-                    (true, false) => {
-                        let shift = stride.trailing_zeros();
-                        let compute = |flat: usize| arr.values[(flat >> shift) % alen];
-                        if parallel {
-                            (0..out_count).into_par_iter().map(compute).collect()
-                        } else {
-                            (0..out_count).map(compute).collect()
-                        }
-                    }
-                    (false, true) => {
-                        let mask = alen - 1;
-                        let compute = |flat: usize| arr.values[(flat / stride) & mask];
-                        if parallel {
-                            (0..out_count).into_par_iter().map(compute).collect()
-                        } else {
-                            (0..out_count).map(compute).collect()
-                        }
-                    }
-                    (false, false) => {
-                        let compute = |flat: usize| arr.values[(flat / stride) % alen];
-                        if parallel {
-                            (0..out_count).into_par_iter().map(compute).collect()
-                        } else {
-                            (0..out_count).map(compute).collect()
-                        }
-                    }
-                };
+                }
                 Self {
                     shape: out_shape.clone(),
                     values,
