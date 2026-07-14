@@ -4,6 +4,40 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): F-order identity broadcast overlap-scan elision - 287.2x
+
+`MistySeal`, bead `deadlock-audit-kni1z`, `fnp-ndarray`. This is the explicit
+retry of the immediately preceding BENCH-BLOCKED row: the same-binary former-path
+control now declares its accumulated offset as `isize`, and the production lever
+is otherwise byte-identical to the blocked attempt.
+
+Profile/call-site attribution: `NdLayout::broadcast_to` already returned directly
+for equal-shape C-contiguous layouts, while an equal-shape F-contiguous layout
+rebuilt identical strides, allocated and enumerated every byte offset, sorted the
+offsets, and scanned adjacent pairs to prove that the contiguous layout did not
+overlap. The one lever admits F-contiguous layouts through the existing identity
+shortcut. The benchmark's pre-timing assertion proved that the 32x32 input is
+F-contiguous but not C-contiguous and that every returned `NdLayout` field matches
+the exact former algorithm.
+
+Exactly one foreground strict-remote command ran, using the prior worker and
+explicitly disabling LTO:
+
+`RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-ndarray --bench criterion_ndarray --profile release -- NdLayout_broadcast_to_fortran_identity --noplot`
+
+RCH admitted `vmi1149989` (job `j-29928833041828487`) with no local fallback.
+The worker unexpectedly reported a cache miss, but this remained the permitted
+non-LTO release profile and completed in 112.8 seconds. Criterion measured the
+candidate at `[40.005 ns, 61.372 ns, 78.289 ns]` and the former path at
+`[13.585 us, 17.629 us, 20.842 us]`: 287.2x by point estimate and at least 173.5x
+using the adverse interval endpoints. C-order, shape/rank validation,
+non-contiguous layouts, real expansions, error precedence, ordering,
+floating-point state, and RNG state are unchanged. Source SHA-256:
+`ddc10ffcba93356acb2b7a80f9bdc836b03d6a19cfab390c2a0ff9662f536b15`;
+proof-bench SHA-256:
+`a6451ca8a1e43f91c15c5d67c11bf666c346f134ede85a3c5b45ff60988c887f`.
+WIN; SHIP.
+
 ## 2026-07-14 - BENCH-BLOCKED (REVERTED): F-order identity broadcast overlap proof
 
 `ChartreuseCedar`, bead `deadlock-audit-kni1z`, `fnp-ndarray`. Robot triage

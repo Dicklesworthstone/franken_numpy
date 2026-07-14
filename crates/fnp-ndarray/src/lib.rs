@@ -437,7 +437,7 @@ impl NdLayout {
     pub fn broadcast_to(&self, shape: Vec<usize>) -> Result<Self, ShapeError> {
         if shape == self.shape
             && self.shape.len() == self.strides.len()
-            && self.is_contiguous()
+            && (self.is_contiguous() || self.is_fortran_contiguous())
         {
             return Ok(Self {
                 shape,

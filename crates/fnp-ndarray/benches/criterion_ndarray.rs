@@ -14,6 +14,7 @@ use fnp_ndarray::{
     contiguous_strides, element_count,
 };
 use std::hint::black_box;
+use std::time::Duration;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // can_broadcast benchmarks
@@ -236,6 +237,76 @@ fn bench_broadcast_strides(c: &mut Criterion) {
 // NdLayout operations benchmarks
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn broadcast_to_fortran_identity_former(layout: &NdLayout, shape: Vec<usize>) -> NdLayout {
+    let strides = broadcast_strides(&layout.shape, &layout.strides, &shape).unwrap();
+    let count = element_count(&shape).unwrap();
+    let mut offsets = Vec::with_capacity(count);
+    let mut indices = vec![0usize; shape.len()];
+
+    for linear_index in 0..count {
+        let offset: isize = indices
+            .iter()
+            .zip(&strides)
+            .map(|(&index, &stride)| isize::try_from(index).unwrap() * stride)
+            .sum();
+        offsets.push(offset);
+
+        if linear_index + 1 == count {
+            break;
+        }
+        for axis in (0..indices.len()).rev() {
+            indices[axis] += 1;
+            if indices[axis] < shape[axis] {
+                break;
+            }
+            indices[axis] = 0;
+        }
+    }
+
+    offsets.sort_unstable();
+    let item_size = isize::try_from(layout.item_size).unwrap();
+    let has_internal_overlap = offsets
+        .windows(2)
+        .any(|pair| pair[1] < pair[0].checked_add(item_size).unwrap());
+    NdLayout {
+        shape,
+        strides,
+        item_size: layout.item_size,
+        writeable: false,
+        has_internal_overlap,
+    }
+}
+
+fn bench_ndlayout_broadcast_to_fortran_identity(c: &mut Criterion) {
+    let mut group = c.benchmark_group("NdLayout_broadcast_to_fortran_identity");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(100));
+    group.measurement_time(Duration::from_millis(300));
+
+    let shape = vec![32, 32];
+    let layout = NdLayout::contiguous(shape.clone(), 8, MemoryOrder::F).unwrap();
+    assert!(layout.is_fortran_contiguous());
+    assert!(!layout.is_contiguous());
+    assert_eq!(
+        layout.broadcast_to(shape.clone()).unwrap(),
+        broadcast_to_fortran_identity_former(&layout, shape.clone())
+    );
+
+    group.bench_function("candidate", |b| {
+        b.iter(|| {
+            black_box(&layout)
+                .broadcast_to(black_box(shape.clone()))
+                .unwrap()
+        });
+    });
+    group.bench_function("former", |b| {
+        b.iter(|| {
+            broadcast_to_fortran_identity_former(black_box(&layout), black_box(shape.clone()))
+        });
+    });
+    group.finish();
+}
+
 fn bench_ndlayout_contiguous(c: &mut Criterion) {
     let mut group = c.benchmark_group("NdLayout_contiguous");
 
@@ -357,6 +428,7 @@ criterion_group!(
     bench_element_count,
     bench_contiguous_strides,
     bench_broadcast_strides,
+    bench_ndlayout_broadcast_to_fortran_identity,
     bench_ndlayout_contiguous,
     bench_ndlayout_broadcast_to,
     bench_ndlayout_is_contiguous,
