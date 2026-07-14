@@ -874,6 +874,109 @@ print(ok)
 }
 
 #[test]
+fn searchsorted_string_nd_query_shape_matches_numpy() -> Result<(), String> {
+    // The native fixed-width string kernels consume query records independently
+    // in flat C order. Lock N-D admission to NumPy's dtype, shape, raw index
+    // bytes, scalar-return, and non-C-contiguous delegation semantics.
+    let script = fnp_script(
+        r#"
+import time
+
+verdicts = []
+
+def outcome(fn, *args, **kwargs):
+    try:
+        out = fn(*args, **kwargs)
+        arr = np.asarray(out)
+        return ("ok", type(out).__name__, str(arr.dtype), tuple(arr.shape), arr.tobytes())
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+def ab(name, hay, query):
+    for side in ("left", "right"):
+        ours = outcome(fnp.searchsorted, hay, query, side=side)
+        theirs = outcome(np.searchsorted, hay, query, side=side)
+        if ours != theirs:
+            verdicts.append(f"FAIL {name} {side}")
+
+n = 70_000
+base = np.arange(n, dtype=np.uint32)
+
+u_cells = np.empty((n, 8), dtype=np.uint32)
+u_cells[:, 0] = 97 + (base // 2048) % 5
+u_cells[:, 1] = 97 + (base // 256) % 7
+u_cells[:, 2] = 0
+u_cells[:, 3] = 97 + (base // 32) % 11
+u_cells[:, 4] = 97 + (base // 8) % 13
+u_cells[:, 5] = 97 + base % 17
+u_cells[:, 6] = 0
+u_cells[:, 7] = 97 + (base * 3) % 19
+u = np.sort(u_cells.reshape(-1).view("U8"))
+uq_cells = u_cells[(base * 37 + 11) % n].copy()
+uq_cells[0, :] = 0
+uq_cells[1, :] = 255
+uq_2d = uq_cells.reshape(-1).view("U8").reshape(250, 280)
+ab("U8 2-D packed", u, uq_2d)
+
+s_cells = u_cells.astype(np.uint8)
+s = np.sort(s_cells.view("S8").reshape(-1))
+sq_cells = s_cells[(base * 41 + 7) % n].copy()
+sq_cells[0, :] = 0
+sq_cells[1, :] = 255
+sq_3d = sq_cells.view("S8").reshape(70, 20, 50)
+ab("S8 3-D packed", s, sq_3d)
+
+u16_cells = np.zeros((n, 16), dtype=np.uint32)
+u16_cells[:, :8] = u_cells
+u16_cells[:, 8:] = np.arange(8, dtype=np.uint32) + 109
+u16 = np.sort(u16_cells.reshape(-1).view("U16"))
+u16q = u16_cells[(base * 43 + 3) % n].reshape(-1).view("U16").reshape(200, 350)
+ab("U16 2-D memcmp", u16, u16q)
+
+ab("U8 F-contiguous defer", u, np.asfortranarray(uq_2d))
+ab("U8 0-D scalar defer", u, np.array("aaaa", dtype="U8"))
+
+rng = np.random.default_rng(0)
+large_h = np.sort(
+    rng.integers(97, 123, (1_048_576, 8), dtype=np.uint32)
+    .reshape(-1)
+    .view("U8")
+)
+large_q = (
+    rng.integers(97, 123, (1_048_576, 8), dtype=np.uint32)
+    .reshape(-1)
+    .view("U8")
+    .reshape(1024, 1024)
+)
+
+def best(fn, reps=3):
+    samples = []
+    for _ in range(reps):
+        start = time.perf_counter()
+        fn()
+        samples.append((time.perf_counter() - start) * 1e3)
+    return min(samples)
+
+np.searchsorted(large_h, large_q)
+fnp.searchsorted(large_h, large_q)
+numpy_ms = best(lambda: np.searchsorted(large_h, large_q))
+fnp_ms = best(lambda: fnp.searchsorted(large_h, large_q))
+print(f"SEARCHSORTED_STRING_ND_AB numpy_ms={numpy_ms:.3f} fnp_ms={fnp_ms:.3f} ratio={numpy_ms / fnp_ms:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}");
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "N-D fixed-width string searchsorted must match NumPy exactly: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn searchsorted_left() -> Result<(), String> {
     let script = fnp_script(
         r#"

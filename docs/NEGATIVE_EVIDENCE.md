@@ -4,6 +4,29 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-13 - WIN (SHIP): C-contiguous N-D fixed-width string `searchsorted` queries - 37.25x fnp speedup
+
+`WindyCardinal`. Negative-ledger-first follow-up to the input-form sweep's explicitly unpriced
+`string/struct searchsorted N-D v` residual, scoped to fixed-width Unicode/bytes strings only. The
+existing native string kernel requires a 1-D query even though each query record is independent and
+NumPy returns insertion points with the query's original shape. The one lever admits exact
+C-contiguous N-D query arrays through a zero-copy `reshape(-1)` view, reuses the unchanged 1-D packed
+key or memcmp kernel, and reshapes its integer output back to `v.shape`. The original query is still
+used for every delegate, so wide-codepoint Unicode, dtype/width mismatch, non-C layouts, subclasses,
+sorter, and other unsupported cases retain NumPy behavior.
+
+Raw outcome parity (success/error class, dtype, shape, and bytes) passed for both `side` values across
+2-D U8 packed-key queries, 3-D S8 packed-key queries, 2-D U16 memcmp-fallback queries, F-contiguous
+defer, and 0-D scalar defer. The locked harness is
+`searchsorted_string_nd_query_shape_matches_numpy`. Strict remote-only, same-worker `release-perf`
+foreground A/B on `vmi1227854` (1,048,576 U8 haystack records and a 1024x1024 U8 query, best of 3;
+LTO disabled and 16 codegen units): delegated baseline NumPy 1355.414 ms / fnp 1410.896 ms = 0.961x
+(`j-29928833041827252`); candidate NumPy 1436.739 ms / fnp 37.880 ms = 37.929x
+(`j-29928833041827268`). Candidate fnp latency is 97.3% below baseline fnp (37.246x faster). The
+candidate snapshot also contained a concurrent, disjoint add.at dtype-extension edit in the shared
+`lib.rs`; it does not touch the searchsorted dispatch/kernel and cannot explain the two-order-of-
+magnitude separation, but the paired binaries were therefore not bit-identical. KEEP.
+
 ## 2026-07-13 - WIN (SHIP): np.delete axis=None N-D flat-buffer unlock — 1.706x vs NumPy, 40.1% fnp latency reduction
 
 `WindyCardinal`. Negative-ledger-first follow-up to the input-form sweep's explicitly unpriced
