@@ -4,6 +4,46 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - REJECT (REVERTED): hoist `standard_exponential` backend dispatch - 1.79x slower
+
+`WindyCardinal`, bead `deadlock-audit-1qjls`, `fnp-random`. Negative-ledger-first
+fresh-subsystem attribution found that `Generator::standard_exponential` calls
+the Ziggurat core through `RngBackend` for every output, while the sibling
+`exponential` method selects the concrete backend before entering its loop.
+The candidate hoisted that six-way backend match once and called an otherwise
+identical generic Ziggurat loop. Draw order, output expression, empty behavior,
+u32-buffer state, and all backend implementations were unchanged.
+
+The crate-local `random_ops` Criterion binary retained the former per-sample
+dispatch as an adjacent control. Before timing, it asserted raw-bit equality
+for all 100,000 PCG64 outputs and equality of the next raw RNG word; both
+assertions passed.
+
+Exactly one foreground strict-remote command ran. Worker `vmi1149989` was
+requested, but RCH admitted effective worker `vmi1153651` (job
+`j-29928833041828387`); no local fallback occurred:
+
+`RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-random --bench random_ops --profile release -- standard_exponential_dispatch --noplot`
+
+The cache missed, but the explicitly non-LTO release build completed in 48.07
+seconds. Criterion used 10 samples, a 250 ms warm-up, and one-second
+measurement per arm:
+
+| arm | Criterion estimate |
+|---|---:|
+| former per-sample dispatch control | **779.64 us** `[729.15, 874.15]` |
+| explicitly hoisted backend match | 1.3944 ms `[1.3697, 1.4178]` |
+
+The candidate is **1.7885x slower** (+78.85% latency); even its low bound is
+1.57x slower than the control's high bound. The likely explanation is that the
+optimizer already specializes or hoists the inline enum route, while the
+explicit six-arm monomorphized shape pessimizes code layout. Production and
+benchmark hunks were manually restored; only this evidence and bead closeout
+land. Do not retry Ziggurat backend-match hoisting without final-binary assembly
+evidence that dispatch remains. Reopen only for a structurally different
+standard-exponential primitive. No second benchmark, conformance, compile, or
+verification loop ran. REJECT.
+
 ## 2026-07-14 - WIN (SHIP): ordered NPZ overlap validation - 2.43x
 
 `WindyCardinal`, bead `deadlock-audit-ch5xg`, `fnp-io`. Negative-ledger-first
