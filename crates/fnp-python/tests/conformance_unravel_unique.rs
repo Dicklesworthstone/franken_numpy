@@ -2911,3 +2911,92 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn histogram_edges_array_parallel_matches_numpy() -> Result<(), String> {
+    // Edges-array histogram parity coverage + basis pin. A parallel
+    // per-element upper-bound arm was built and gate-REJECTED 2026-07-14:
+    // numpy's array-bins path BLOCK-SORTS the data and searches the edges
+    // into each block, making its cost edge-count-FLAT (~56-59ms at 8M for
+    // 64 or 1024 edges) - the per-element search read 1.383x at 64 edges
+    // (below bar) and 0.672x at 1024 (log(ne) scaling loses). Retry
+    // predicate: replicate numpy's block-sort structure with parallel
+    // blocks. All rows here pin delegate parity; the all-equal-bins
+    // digitize row resolves that filed edge (numpy and fnp AGREE - no
+    // divergence).
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(449)
+verdicts = []
+def ab(name, a, bins):
+    oh, oe = fnp.histogram(a, bins=bins)
+    th, te = np.histogram(a, bins=bins)
+    if oh.tobytes() != th.tobytes() or oe.tobytes() != te.tobytes() \
+       or str(oh.dtype) != str(th.dtype) or str(oe.dtype) != str(te.dtype):
+        verdicts.append(f"FAIL {name}")
+n = 8_000_000
+f = rng.standard_normal(n) * 3
+f[3] = np.nan; f[5] = np.inf; f[7] = -np.inf
+E = np.linspace(-9.0, 9.0, 65)
+ab("64 uniform edges", f, E)
+ab("nonuniform edges", f, np.sort(rng.standard_normal(129) * 4))
+ab("dup-edge empty bins", f, np.array([-5.0, -1.0, -1.0, 0.0, 2.0, 2.0, 6.0]))
+# exact tie values on edges + last-edge closure
+t = np.repeat(E, 1000 * 125)
+ab("values == edges", t, E)
+ab("inf edges", f, np.array([-np.inf, -1.0, 1.0, np.inf]))
+ab("2-D flatten", f[:4_000_000].reshape(2000, 2000), E)
+ab("1024 edges", f, np.linspace(-9, 9, 1025))
+# delegates keep parity
+ab("int edges delegate", rng.integers(0, 100, n).astype(np.float64), np.arange(0, 101, 5))
+ab("small delegate", f[:1000], E)
+try:
+    fnp.histogram(f[:100], bins=np.array([1.0, 0.5, 2.0]))
+    verdicts.append("FAIL decreasing no-raise")
+except ValueError:
+    pass
+# int-bins regression through the older arm (clean data - int bins
+# autodetect the range, which raises on NaN/inf)
+fc = rng.standard_normal(2_000_000)
+oh, oe = fnp.histogram(fc, bins=64); th, te = np.histogram(fc, bins=64)
+if oh.tobytes() != th.tobytes() or oe.tobytes() != te.tobytes():
+    verdicts.append("FAIL int-bins regression")
+# FILED EDGE RESOLUTION: all-equal digitize bins - pin whatever numpy does
+try:
+    theirs = np.digitize(f[:10], np.array([5.0, 5.0, 5.0]))
+    ours = fnp.digitize(f[:10], np.array([5.0, 5.0, 5.0]))
+    if ours.tobytes() != theirs.tobytes():
+        verdicts.append("FAIL all-equal digitize values")
+except ValueError:
+    try:
+        fnp.digitize(f[:10], np.array([5.0, 5.0, 5.0]))
+        verdicts.append("FAIL all-equal digitize no-raise")
+    except ValueError:
+        pass
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.histogram(f, bins=E)); tf = best(lambda: fnp.histogram(f, bins=E))
+print(f"HIST_EDGES64_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+E2 = np.linspace(-9, 9, 1025)
+tn2 = best(lambda: np.histogram(f, bins=E2)); tf2 = best(lambda: fnp.histogram(f, bins=E2))
+print(f"HIST_EDGES1024_AB numpy_ms={tn2:.3f} fnp_ms={tf2:.3f} ratio={tn2 / tf2:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces HIST_EDGES64_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "edges-array histogram must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
