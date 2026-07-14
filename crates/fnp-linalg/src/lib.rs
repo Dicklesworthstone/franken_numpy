@@ -1812,6 +1812,39 @@ pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
         return Ok(l);
     }
 
+    // An exact tridiagonal lower triangle produces an exact bidiagonal factor.
+    // As above, require +0.0 outside the admitted band so the zero-initialized
+    // output cannot erase a -0.0 that the general division path would retain.
+    if (2..n).all(|row| {
+        a[row * n..row * n + row - 1]
+            .iter()
+            .all(|value| value.to_bits() == 0)
+    }) {
+        let mut l = vec![0.0; n * n];
+        let first_diagonal = a[0];
+        if first_diagonal <= 0.0 {
+            return Err(LinAlgError::CholeskyContractViolation(
+                "matrix is not positive definite",
+            ));
+        }
+        l[0] = first_diagonal.sqrt();
+
+        for row in 1..n {
+            let row_base = row * n;
+            let previous_diagonal = l[(row - 1) * n + row - 1];
+            let subdiagonal = a[row_base + row - 1] / previous_diagonal;
+            l[row_base + row - 1] = subdiagonal;
+            let diagonal = a[row_base + row] - subdiagonal * subdiagonal;
+            if diagonal <= 0.0 {
+                return Err(LinAlgError::CholeskyContractViolation(
+                    "matrix is not positive definite",
+                ));
+            }
+            l[row_base + row] = diagonal.sqrt();
+        }
+        return Ok(l);
+    }
+
     cholesky_nxn_general_validated(a, n)
 }
 

@@ -4,6 +4,55 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): exact-tridiagonal Cholesky bypass - 12.90x
+
+`IvoryTurtle`, bead `deadlock-audit-tcfqn`, `fnp-linalg`. Robot triage again
+left only the prohibited f16 searchsorted lane and the human-decision
+C-BLAS/fast-math lane. The immediately preceding structured-Cholesky seam was
+still strong rather than thinning, and negative-ledger review found no prior
+tridiagonal or banded Cholesky attempt.
+
+Profile/source attribution: an exact 256x256 SPD tridiagonal matrix still
+entered the blocked general factorization, paying for diagonal panels,
+triangular panel solves, and trailing SYRK updates even though its Cholesky
+factor is exactly bidiagonal.
+
+ONE LEVER: `cholesky_nxn` now recognizes an exact lower-tridiagonal input and
+computes its bidiagonal factor with the scalar recurrence. Admission requires
+every lower entry outside the first subdiagonal to be positive zero by bit
+pattern; `-0.0` remains on the general path so the zero-initialized output
+cannot erase its sign. The recurrence preserves the former division, square,
+subtract, and square-root order. Full-buffer finite validation, non-positive
+definite errors, ignored upper-triangle behavior, dense matrices, and the
+already-landed exact-diagonal path are unchanged.
+
+The existing doc-hidden general-factorization control asserted every candidate
+output bit before timing on the same descending-factor SPD tridiagonal input.
+The assertion passed.
+
+Exactly one foreground strict-remote command ran on requested and effective
+worker `vmi1149989` (job `j-29928833041828525`):
+
+`RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-linalg --bench criterion_linalg --profile release -- cholesky_exact_tridiagonal_256 --noplot`
+
+The worker cache missed, but the permitted non-LTO release build completed in
+38.83 seconds and the full foreground command returned in 89.1 seconds.
+Criterion used 10 samples, a 250 ms warm-up, and a 750 ms measurement per arm:
+
+| arm | Criterion estimate |
+|---|---:|
+| former general-factorization control | 756.71 us `[733.97, 801.40]` |
+| exact-tridiagonal candidate | **58.660 us** `[55.659, 62.800]` |
+
+Midpoint speedup is **12.899x** (92.25% lower latency); even the control's low
+bound is 11.69x slower than the candidate's high bound. The command exited
+zero. No second benchmark, conformance, compile, or verification loop ran.
+Timed source SHA-256:
+`2ddadeeb6eecaaade6cc460a9dc4b41e323cef66f7e14d2714524ad0a72abb0e`;
+proof-bench SHA-256:
+`f9a3e19c17cd035175109730d846d75eb3bfbee20f0a392eeea10fca88405308`.
+KEEP.
+
 ## 2026-07-14 - WIN (SHIP): exact-diagonal Cholesky bypass - 15.79x
 
 `IvoryTurtle`, bead `deadlock-audit-hwlzt`, `fnp-linalg`. Robot triage left only

@@ -184,6 +184,33 @@ fn bench_cholesky_exact_diagonal(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_cholesky_exact_tridiagonal(c: &mut Criterion) {
+    let n = 256usize;
+    let a = generate_spd_tridiagonal_matrix(n);
+    let former = cholesky_nxn_general_control(&a, n).expect("former Cholesky control");
+    let candidate = cholesky_nxn(&a, n).expect("tridiagonal Cholesky candidate");
+    assert_eq!(former.len(), candidate.len());
+    for (index, (&lhs, &rhs)) in former.iter().zip(&candidate).enumerate() {
+        assert_eq!(
+            lhs.to_bits(),
+            rhs.to_bits(),
+            "tridiagonal Cholesky output {index} changed bits"
+        );
+    }
+
+    let mut group = c.benchmark_group("cholesky_exact_tridiagonal_256");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.bench_function("former_general_control", |bench| {
+        bench.iter(|| black_box(cholesky_nxn_general_control(black_box(&a), n).unwrap()));
+    });
+    group.bench_function("exact_tridiagonal_candidate", |bench| {
+        bench.iter(|| black_box(cholesky_nxn(black_box(&a), n).unwrap()));
+    });
+    group.finish();
+}
+
 fn bench_qr(c: &mut Criterion) {
     let mut group = c.benchmark_group("qr_nxn");
 
@@ -712,6 +739,7 @@ criterion_group!(
     bench_inv,
     bench_cholesky,
     bench_cholesky_exact_diagonal,
+    bench_cholesky_exact_tridiagonal,
     bench_qr,
     bench_svd,
     bench_svd_full,
