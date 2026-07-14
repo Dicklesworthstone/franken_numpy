@@ -1051,6 +1051,11 @@ print(f"BASE add_reduceat_i64_1mseg {best(lambda: np.add.reduceat(W8, seg1m)):.1
 print(f"BASE add_reduceat_i64_1kseg {best(lambda: np.add.reduceat(W8, seg1k)):.1f}")
 print(f"BASE add_reduceat_f64_1mseg {best(lambda: np.add.reduceat(F8, seg1m)):.1f}")
 print(f"BASE max_reduceat_i64_1mseg {best(lambda: np.maximum.reduceat(W8, seg1m)):.1f}")
+# two-output exact ufunc bases (modf/frexp/ldexp lever pricing, 2026-07-14)
+E8 = rng.integers(-40, 40, 8_000_000).astype(np.int32)
+print(f"BASE modf_f64_8m {best(lambda: np.modf(F8)):.1f}")
+print(f"BASE frexp_f64_8m {best(lambda: np.frexp(F8)):.1f}")
+print(f"BASE ldexp_f64_8m {best(lambda: np.ldexp(F8, E8)):.1f}")
 print("numpy", np.__version__)
 print(True)
 "#
@@ -2514,6 +2519,67 @@ print(verdicts if verdicts else True)
         last,
         "True",
         "fused diff prepend/append must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn resize_parallel_cyclic_fill_matches_numpy() -> Result<(), String> {
+    // np.resize was a pure passthrough while numpy composes it as an
+    // OVERSIZED serial concat (ceil-multiple writes). The native arm does one
+    // parallel cyclic byte-fill into an exact-size buffer - verbatim element
+    // movement, byte-exact for every fixed-width dtype; hasobject/empty/
+    // zero-size/small keep the delegate.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(419)
+verdicts = []
+def ab(name, a, shape):
+    ours = fnp.resize(a, shape)
+    theirs = np.resize(a, shape)
+    if ours.tobytes() != theirs.tobytes() or str(ours.dtype) != str(theirs.dtype) or ours.shape != theirs.shape:
+        verdicts.append(f"FAIL {name}")
+f = rng.standard_normal(1_000_000)
+f[7] = np.nan; f[9] = -0.0; f[11] = np.inf
+ab("f64 grow 32x", f, 32_000_000)
+ab("f64 grow ragged", f, 31_777_777)
+ab("f64 truncate", f, 300_000)
+ab("f64 same-size 2-D", f, (1000, 1000))
+ab("i32 grow to 2-D", rng.integers(-2**30, 2**30, 3_000_000).astype(np.int32), (4000, 6000))
+ab("u8 image tile", rng.integers(0, 256, 500_000).astype(np.uint8), (3000, 2500))
+ab("c128 grow", (rng.standard_normal(400_000) + 1j * rng.standard_normal(400_000)), 3_000_000)
+ab("dt64 grow", rng.integers(0, 10**9, 800_000).astype("datetime64[s]"), 5_000_000)
+ab("U8 strings grow", np.array([f"id{v:05d}" for v in rng.integers(0, 10**5, 200_000)], dtype="U8"), 2_000_000)
+ab("2-D input flatten", f[:900_000].reshape(900, 1000), 8_000_000)
+ab("3-D target", f, (200, 200, 300))
+# delegate parity: small, zero-size target, empty source
+ab("small delegate", f[:1000], 5000)
+ab("zero-size delegate", f[:100], 0)
+ab("empty-source delegate", np.array([], dtype=np.float64), 10)
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.resize(f, 32_000_000)); tf = best(lambda: fnp.resize(f, 32_000_000))
+print(f"RESIZE_F64_32X_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+U = rng.integers(0, 256, 500_000).astype(np.uint8)
+tn2 = best(lambda: np.resize(U, (8000, 8000))); tf2 = best(lambda: fnp.resize(U, (8000, 8000)))
+print(f"RESIZE_U8_TILE_AB numpy_ms={tn2:.3f} fnp_ms={tf2:.3f} ratio={tn2 / tf2:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces RESIZE_F64_32X_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "parallel resize must be bit-identical to numpy: {result}"
     );
     Ok(())
 }
