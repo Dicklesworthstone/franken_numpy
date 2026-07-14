@@ -27902,6 +27902,9 @@ impl UFuncArray {
                 self.shape, target_shape
             )));
         }
+        if self.shape == target_shape {
+            return Ok(self.clone());
+        }
         // Left-pad shape with 1s
         let mut padded = vec![1usize; ndim - self.shape.len()];
         padded.extend_from_slice(&self.shape);

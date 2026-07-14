@@ -9,7 +9,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_dtype::DType;
 use fnp_ufunc::UFuncArray;
-use std::hint::black_box;
+use std::{hint::black_box, time::Duration};
 
 fn old_bcast(values: &[f64], src_shape: &[usize], target: &[usize]) -> Vec<f64> {
     let ndim = target.len();
@@ -70,5 +70,35 @@ fn bench_broadcast(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_broadcast);
+fn bench_equal_shape_clone(c: &mut Criterion) {
+    let n = 1usize << 18;
+    let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 - 1.0).collect();
+    let arr = UFuncArray::new(vec![n], data, DType::F64).unwrap();
+    let direct = arr.broadcast_to(&[n]).unwrap();
+    let general = arr.broadcast_to(&[1, n]).unwrap();
+    assert_eq!(direct.shape(), &[n]);
+    assert_eq!(general.shape(), &[1, n]);
+    assert_eq!(
+        direct.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        general.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
+
+    let mut group = c.benchmark_group("broadcast_equal_shape_clone");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    group.bench_function("identical_shape", |b| {
+        b.iter(|| black_box(&arr).broadcast_to(black_box(&[n])).unwrap())
+    });
+    group.bench_function("general_path_singleton_control", |b| {
+        b.iter(|| {
+            black_box(&arr)
+                .broadcast_to(black_box(&[1, n]))
+                .unwrap()
+        })
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_equal_shape_clone, bench_broadcast);
 criterion_main!(benches);

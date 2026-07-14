@@ -4,6 +4,50 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): identical-shape `UFuncArray::broadcast_to` clones directly - 54.02x
+
+`WindyCardinal`, `fnp-ufunc`. Negative-ledger-first sibling of the shipped
+identical-layout `NdLayout::broadcast_to` shortcut. The owning `UFuncArray`
+path still sent an unchanged target shape through padded-shape construction,
+stride construction, a full source-index allocation, an indexed value gather,
+and optional sidecar reindexing. The one lever now returns `self.clone()` when
+the requested shape is exactly equal. Every real expansion, validation error,
+dtype, and shape-changing path retains the existing implementation.
+
+This is isomorphic: the shape is unchanged, while `Clone` copies the same dtype,
+f64 bridge bits, and exact integer sidecar in the same order. The benchmark
+asserted raw f64 bit equality before timing. Its adjacent control requested a
+leading singleton shape `[1, n]`; that preserves the same 262,144 values and
+forces the production general gather path without a separate legacy kernel.
+
+Exactly one strict remote-only Criterion invocation used `--profile release`
+with LTO explicitly disabled, 16 codegen units, and four Cargo build jobs. RCH
+requested `vmi1149989` but admitted effective worker `vmi1227854` (job
+`j-29928833041828322`); no local fallback occurred. Ten samples, 250 ms warm-up,
+and one-second measurement produced **45.029 us** for the identical-shape clone
+([44.118, 46.266]) versus **2.4324 ms** for the singleton general-path control
+([2.2427, 2.5897]): **54.02x** higher throughput / 98.15% lower median latency.
+The non-LTO release build finished in 67 seconds and the complete remote job in
+114.8 seconds. Per the immediate-commit instruction, no successive Cargo,
+conformance, lint, or formatting loop ran. KEEP.
+
+## 2026-07-14 - BLOCKED (NO SHIP): complex nancumprod axis-0 proof was bench-cost prohibitive
+
+`WindyCardinal`, `fnp-python`. The explicit open complex nancumsum/nancumprod
+axis-0 seam was implemented as a NaN-replacing column gather/scan/scatter sibling
+of the shipped plain complex axis-0 cumulative kernel. A filtered strict
+remote-only `release-perf` invocation ran on effective worker `vmi1149989` (job
+`j-29928833041828286`), but its cold monolithic benchmark build took 18m42s and
+the harness then spent additional minutes in unrelated unconditional startup
+work without ever reporting the requested timing. The foreground process was
+stopped after more than 24 minutes with no admissible performance result.
+
+Compilation alone is not evidence, so the production helper, dispatcher change,
+and proof-benchmark row were reverted before any commit. No source change from
+that candidate remains. Retry only with an already-compiled dedicated binary or
+a small non-LTO crate-local proof; do not reopen it through the monolithic
+`fnp-python` release-perf Criterion binary. BENCH-BLOCKED.
+
 ## 2026-07-14 - WIN (SHIP): small-pool int32 flat-sort SIMD regate - 1.034x vs favorable native control
 
 `WindyCardinal`, `fnp-python`. Pays the fresh-turn retry predicate in the blocker
