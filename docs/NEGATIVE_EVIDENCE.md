@@ -104,9 +104,10 @@ The parallel per-element upper-bound arm read 1.383x at 64 edges
 LESSON: block-sort + few-searches beats n independent searches once
 searches-per-element x miss-cost exceeds amortized sort cost - price
 numpy's ACTUAL algorithm (read _histograms_impl) before assuming the
-naive structure. Retry predicate: parallel replication of numpy's own
-block-sort structure (blocks across threads; predicted 3-6x). Parity
-rows + basis pins kept in
+naive structure. Retry predicate PAID same-day (69b2d8e5): the parallel
+block-sort replication shipped at 1.531x/1.496x, edge-count-flat like
+numpy's - the predicted 3-6x did not materialize (per-block copy+sort
+is memory-bound), recorded honestly. Parity rows + basis pins in
 conformance_unravel_unique::histogram_edges_array_parallel_matches_numpy.
 BONUS RESOLVED: the all-equal-bins digitize edge (filed with b120404c)
 pins as NO DIVERGENCE - numpy and fnp agree; no code change.
