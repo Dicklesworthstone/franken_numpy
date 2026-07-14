@@ -2822,3 +2822,66 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn string_nonlast_axis_sort_argsort_match_numpy() -> Result<(), String> {
+    // Completes the string axis grid: non-last-axis value sort + stable
+    // argsort via one (outer, alen, inner) strided-gather kernel each -
+    // numpy's strided per-record path is serial. Byte-exact: equal records
+    // are byte-identical (values) and stable ties keep ascending in-lane
+    // index (argsort). Wide codepoints, default-kind argsort, 1-D, and
+    // small keep the delegate.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(443)
+verdicts = []
+def ab(fn, name, a, **kw):
+    ours = getattr(fnp, fn)(a, **kw)
+    theirs = getattr(np, fn)(a, **kw)
+    if ours.tobytes() != theirs.tobytes() or str(ours.dtype) != str(theirs.dtype) or ours.shape != theirs.shape:
+        verdicts.append(f"FAIL {fn} {name}")
+def ustr(n, hi, w="U8"):
+    return np.array([f"id{v:06d}" for v in rng.integers(0, hi, n)], dtype=w)
+U = ustr(2_000_000, 500_000).reshape(2000, 1000)
+ab("sort", "axis=0", U, axis=0)
+ab("sort", "axis=-2", U, axis=-2)
+ab("sort", "3-D mid axis", ustr(1_920_000, 10**5).reshape(120, 100, 160), axis=1)
+ab("sort", "3-D axis=0", ustr(1_920_000, 10**5).reshape(120, 100, 160), axis=0)
+ab("sort", "ties-heavy axis0", ustr(1_600_000, 40).reshape(1600, 1000), axis=0)
+ab("sort", "S8 axis0", U.astype("S8"), axis=0)
+ab("argsort", "stable axis=0", U, kind="stable", axis=0)
+ab("argsort", "stable 3-D mid", ustr(1_920_000, 10**5).reshape(120, 100, 160), kind="stable", axis=1)
+ab("argsort", "stable all-equal cols", np.full((900, 600), "same", dtype="U8"), kind="stable", axis=0)
+ab("argsort", "mergesort S8 axis0", U.astype("S8"), kind="mergesort", axis=0)
+# delegates keep parity
+W = U[:400, :400].copy(); W[3, 5] = "Жxx"
+ab("sort", "wide codepoint delegate", W, axis=0)
+ab("argsort", "default kind delegate", U[:800, :800], axis=0)
+ab("sort", "lastaxis regression", U, axis=1)
+ab("sort", "small delegate", U[:8, :8], axis=0)
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.sort(U, axis=0)); tf = best(lambda: fnp.sort(U, axis=0))
+print(f"SORT_U8_AXIS0_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn2 = best(lambda: np.argsort(U, kind="stable", axis=0)); tf2 = best(lambda: fnp.argsort(U, kind="stable", axis=0))
+print(f"ARGSORT_U8_AXIS0_STABLE_AB numpy_ms={tn2:.3f} fnp_ms={tf2:.3f} ratio={tn2 / tf2:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces SORT_U8_AXIS0_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "string non-last-axis sort/argsort must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
