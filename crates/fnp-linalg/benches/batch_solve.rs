@@ -4,6 +4,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_linalg::{batch_solve, solve_nxn};
 use std::hint::black_box;
+use std::time::Duration;
 
 fn old_batch(a: &[f64], b: &[f64], batch: usize, n: usize) -> Vec<f64> {
     let ms = n * n;
@@ -111,6 +112,59 @@ fn bench(c: &mut Criterion) {
             bb.iter(|| {
                 black_box(
                     batch_solve(black_box(&a), &a_shape, black_box(&b), &b_shape, true).unwrap(),
+                )
+            })
+        });
+        g.finish();
+    }
+
+    // A literal 2-D A and an equivalent singleton-batch A have identical solve
+    // semantics. Keep the latter as a stable per-lane-refactor control while the
+    // former prices factor-once reuse for batched matrix right-hand sides.
+    {
+        let (batch, n, rhs_cols) = (128usize, 128usize, 4usize);
+        let (a, b) = make_broadcast_a(batch * rhs_cols, n);
+        let literal_a_shape = [n, n];
+        let control_a_shape = [1, n, n];
+        let b_shape = [batch, n, rhs_cols];
+        let literal = batch_solve(&a, &literal_a_shape, &b, &b_shape, false).unwrap();
+        let control = batch_solve(&a, &control_a_shape, &b, &b_shape, false).unwrap();
+        assert_eq!(literal.len(), control.len());
+        for (idx, (lhs, rhs)) in literal.iter().zip(&control).enumerate() {
+            assert_eq!(lhs.to_bits(), rhs.to_bits(), "flat output {idx} diverged");
+        }
+
+        let mut g = c.benchmark_group(format!(
+            "batch_solve_broadcast_a_matrix_b{batch}_n{n}_m{rhs_cols}"
+        ));
+        g.sample_size(10);
+        g.warm_up_time(Duration::from_millis(250));
+        g.measurement_time(Duration::from_secs(1));
+        g.bench_function("singleton_batch_control", |bb| {
+            bb.iter(|| {
+                black_box(
+                    batch_solve(
+                        black_box(&a),
+                        &control_a_shape,
+                        black_box(&b),
+                        &b_shape,
+                        false,
+                    )
+                    .unwrap(),
+                )
+            })
+        });
+        g.bench_function("literal_2d_candidate", |bb| {
+            bb.iter(|| {
+                black_box(
+                    batch_solve(
+                        black_box(&a),
+                        &literal_a_shape,
+                        black_box(&b),
+                        &b_shape,
+                        false,
+                    )
+                    .unwrap(),
                 )
             })
         });

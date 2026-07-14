@@ -4,6 +4,57 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): broadcast-A matrix `batch_solve` factors once - 2.62x self-speedup
+
+`WindyCardinal`, `fnp-linalg`. Negative-ledger-first sibling of the 2026-07-13
+explicit broadcast-A vector keep, whose admission boundary deliberately retained
+the prior implementation for matrix RHS. The one lever removes that exclusion:
+for a finite literal 2-D A, batched matrix RHS, more than one RHS lane, and the
+existing `n < LU_BLOCK_MIN` unblocked-LU regime with at least one RHS column,
+`batch_solve` now factors the shared A once and reuses its LU and pivot
+permutation across every RHS matrix.
+
+The matrix permutation, forward substitution, and back substitution loops are
+the same row-major loops used by `solve_nxn_multi` below this gate, including the
+same `i`, `j`, then column order. Thus each output element receives the same
+floating-point operations in the same order; only redundant recomputation of the
+identical LU is removed. The shipped vector-RHS loop remains byte-for-byte
+unchanged. Stacked A, singleton RHS batches, blocked sizes, nonfinite A, and all
+shape/error paths retain the prior implementation. A review-found zero-column
+matrix edge also retains the prior path, with a regular empty-result regression
+test preventing `chunks_mut(0)` admission.
+
+The locked Criterion row compares literal `[n,n]` A with semantically identical
+singleton-batch `[1,n,n]` A for shape `(128,128)` and 128 matrix-RHS lanes of
+shape `(128,4)`. It asserts every output bit is identical before timing; this
+passed in both baseline and candidate binaries. Strict remote-only same-worker
+`release-perf` runs used identical commands, LTO disabled, 16 codegen units,
+Cargo `-j1`, ten samples, 250 ms warm-up, and one-second measurement on effective
+worker `vmi1149989`.
+
+Baseline job `j-29928833041828092` measured singleton-batch control 8.471 ms /
+literal 2-D 7.997 ms. Candidate job `j-29928833041828101` measured the unchanged
+control at 8.300 ms and literal 2-D at **3.059 ms**: **2.615x** lower candidate
+self-time versus baseline (61.75% latency reduction) and **2.714x** versus the
+same-binary control. Control drift was only -2.02%, far below the separation.
+
+Baseline/candidate production hashes were
+`5abd66ebb1c621edbea0cc1756395424c5d6584e0adc0db4cd7471511e4229d4` /
+`bdba619cd9832944ef2cda9a568a1f085f052be3392e10fa58847a1f3713a087`;
+the common proof-bench hash was
+`5febb88aefe5961da08ef09ec131a454a48a575385ac0cce4a7dfe8f6e349114`.
+Both strict-remote builds and proof-bearing benchmark executions exited zero.
+The post-benchmark zero-column guard plus regression produced final reviewed
+source hash
+`9cd30d29e26549063f265a08de8cff8d584093df60c28cf27d511cfe6d3ffb1c`;
+it adds one outer admission predicate and cannot change the timed nonzero row.
+Strict-remote final regression job `j-29928833041828108` passed 1/1 on the
+same worker, compiling the reviewed source and pinning the empty result.
+Main advanced during the pair through disjoint peer commit `8fad63e8`, which
+touches only the `fnp-python` wide-int setop surface and cannot reach this crate.
+KEEP. The broadcast-A factor-once family now covers vector and matrix RHS;
+retry predicate: none inside the admitted finite/unblocked regime.
+
 ## 2026-07-14 - WIN (SHIP): explicit 1-D axis for dense strided-slice `np.delete` - 4.53x vs NumPy
 
 `WindyCardinal`. Negative-ledger-first closeout of the explicit-axis exclusion

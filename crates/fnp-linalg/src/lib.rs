@@ -8426,13 +8426,13 @@ pub fn batch_solve(
         ));
     }
 
-    // A literal 2-D matrix broadcast across a vector-RHS batch has one LU, not
-    // `batch` independent LUs. Factor the finite, unblocked matrix once, then
-    // preserve the existing per-lane permutation and substitution order.
-    if vector_rhs
-        && a_shape.len() == 2
+    // A literal 2-D matrix broadcast across a vector- or matrix-RHS batch has one
+    // LU, not `batch` independent LUs. Factor the finite, unblocked matrix once,
+    // then preserve the existing per-lane permutation and substitution order.
+    if a_shape.len() == 2
         && a_batch == 1
         && b_batch > 1
+        && (vector_rhs || rhs_cols > 0)
         && n < LU_BLOCK_MIN
         && a.iter().all(|value| value.is_finite())
     {
@@ -8443,19 +8443,49 @@ pub fn batch_solve(
         lu_factor_unblocked_into(a, n, singularity_threshold, &mut lu, &mut perm)?;
 
         let solve_factored_into = |b_sub: &[f64], out: &mut [f64]| {
+            if vector_rhs {
+                for i in 0..n {
+                    out[i] = b_sub[perm[i]];
+                }
+                for i in 1..n {
+                    for j in 0..i {
+                        out[i] -= lu[i * n + j] * out[j];
+                    }
+                }
+                for i in (0..n).rev() {
+                    for j in (i + 1)..n {
+                        out[i] -= lu[i * n + j] * out[j];
+                    }
+                    out[i] /= lu[i * n + i];
+                }
+                return;
+            }
+
             for i in 0..n {
-                out[i] = b_sub[perm[i]];
+                let p_i = perm[i];
+                for col in 0..rhs_cols {
+                    out[i * rhs_cols + col] = b_sub[p_i * rhs_cols + col];
+                }
             }
             for i in 1..n {
                 for j in 0..i {
-                    out[i] -= lu[i * n + j] * out[j];
+                    let l_ij = lu[i * n + j];
+                    for col in 0..rhs_cols {
+                        out[i * rhs_cols + col] -= l_ij * out[j * rhs_cols + col];
+                    }
                 }
             }
             for i in (0..n).rev() {
                 for j in (i + 1)..n {
-                    out[i] -= lu[i * n + j] * out[j];
+                    let u_ij = lu[i * n + j];
+                    for col in 0..rhs_cols {
+                        out[i * rhs_cols + col] -= u_ij * out[j * rhs_cols + col];
+                    }
                 }
-                out[i] /= lu[i * n + i];
+                let u_ii = lu[i * n + i];
+                for col in 0..rhs_cols {
+                    out[i * rhs_cols + col] /= u_ii;
+                }
             }
         };
 
@@ -17520,6 +17550,20 @@ mod tests {
         let x = batch_solve(&a, &a_shape, &b, &b_shape, false).expect("matrix rhs batch_solve");
 
         assert_eq!(x, vec![2.0, 1.0, 3.0, 2.0]);
+    }
+
+    #[test]
+    fn batch_solve_broadcast_a_zero_column_matrix_rhs_is_empty() {
+        let n = 16usize;
+        let batch = 3usize;
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            a[i * n + i] = 1.0;
+        }
+
+        let x = batch_solve(&a, &[n, n], &[], &[batch, n, 0], false)
+            .expect("zero-column matrix rhs");
+        assert!(x.is_empty());
     }
 
     #[test]
