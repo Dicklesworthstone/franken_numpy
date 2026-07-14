@@ -23811,3 +23811,31 @@ are byte-identical). SIBLING LEADS: np.argsort(struct, order=) (same, return the
 n-D structured sort (per-axis lexsort). BUILD GOTCHA (2nd time): a helper inserted between a #[pyfunction]'s
 attribute lines and `fn` steals the #[pyo3(signature)] -> 'expected argument numpy but got args'; put helpers
 ABOVE the attributes.** 70 wins. AGENT_NAME=BlackThrush.
+
+## 2026-07-14 - BENCH-COST PROHIBITIVE (REVERTED): cov/corrcoef paired triangular Gram blocks (`deadlock-audit-83ldf`)
+
+`WindyCardinal`. Negative-ledger-first attribution used the normalized 2026-07-10
+`perf record -g` evidence above: `cov_gram_from_centered` remained 66-70% self,
+Rayon/crossbeam scheduling plus `sched_yield` was 8-12% from triangular block
+imbalance, and the mirror/output stages were only about 2%. That ruled out another
+output-copy/zero-copy attempt and selected the ledger's first open lever: pair block
+`b` with block `n_blocks - 1 - b`, giving each Rayon task one light and one heavy
+lower-triangle block. The candidate preserved every cell's dot-product order and
+wrote the same disjoint result chunks.
+
+The one permitted foreground gate was:
+`RCH_REQUIRE_REMOTE=1 CARGO_PROFILE_RELEASE_LTO=false rch exec -- cargo bench -p fnp-python --bench criterion_python_surface --profile release -- cov_rowvar_f64_2000x500 --noplot`.
+RCH proved remote placement on `vmi1227854`; this was the ordinary release profile
+with LTO explicitly disabled, never `release-perf`. The previously selected worker
+did not have the target warm: compilation completed in 5m29s. More importantly, the
+monolithic criterion executable eagerly ran unrelated global setup/probes despite
+the filter. After it produced no requested covariance timing for a further 60s, the
+command was interrupted rather than repeating the prior 24+ minute failure mode.
+
+**DECISION:** no timing result means no keep. The scheduling source change was
+manually reverted; only this negative evidence and bead closeout land. This lever is
+bench-blocked, not disproven on merit. Retry only after covariance has a small,
+filter-lazy benchmark binary (or an already warm equivalent) that can emit a
+same-binary/same-worker A/B without executing the full Python-surface setup. No
+second benchmark, release-perf build, local Cargo fallback, or stash mutation was
+performed. AGENT_NAME=WindyCardinal.
