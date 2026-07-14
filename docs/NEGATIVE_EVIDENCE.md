@@ -4,6 +4,59 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): explicit 1-D axis for dense strided-slice `np.delete` - 4.53x vs NumPy
+
+`WindyCardinal`. Negative-ledger-first closeout of the explicit-axis exclusion
+left by the immediately preceding dense strided-slice delete win. The one
+lever admits exact built-in integer `axis=0/-1` for the same exact 1-D ndarray
+and exact built-in-int slice regime. In one dimension, `axis=None`, `axis=0`,
+and `axis=-1` select the same ordered element sequence and produce the same
+1-D result, so the existing complementary keep-mask plus stable parallel
+compactor is an isomorphic replacement. It performs no floating-point
+arithmetic and copies same-width values, preserving every payload byte.
+
+Admission remains fail-closed: the existing dtype, contiguous-layout, size,
+Rayon-worker, deletion-density, and span gates are unchanged. Explicit axes
+other than `0/-1`, bools, NumPy integer scalars, integer subclasses, custom
+`__index__`, oversized integers, multidimensional inputs, ndarray subclasses,
+and explicit-axis int-index/bool-mask deletes remain NumPy-owned. Before slice
+normalization, custom `start`/`stop` bounds now also defer without evaluation;
+the scalar-delete probe is skipped for slices. These two guardrails ensure a
+stateful custom `axis` or slice bound is evaluated exactly once by NumPy on a
+rejected candidate rather than once in FNP and again on fallback.
+
+`delete_strided_slice_parallel_matches_numpy` passed exact outcome type,
+dtype, shape, and raw-byte parity for explicit `axis=0/-1`, all prior positive
+and negative step rows, and the excluded/error cases above. Dedicated
+stateful-`__index__` rows matched NumPy outcomes and call counts exactly
+(`1/1`). A monkeypatched `numpy.delete` counter proved that the admitted
+explicit-axis slices stayed native while step-one, bool-axis, 2-D, subclass,
+and explicit-axis int-index-array cases delegated.
+
+Strict remote-only same-worker `release-perf` foreground A/B on
+`vmi1149989` (8,000,000 float64 elements, `slice(1, None, 3)`, best of 5,
+LTO disabled, 16 codegen units, Cargo `-j1`) used the exact command and
+profile on both sides. Delegated baseline job `j-29928833041828020`
+measured NumPy 32.574 ms / FNP 21.107 ms = 1.543x. Final candidate job
+`j-29928833041828060` measured NumPy 33.400 ms / FNP 7.372 ms = **4.531x**,
+with the full test green. Candidate FNP latency is 65.07% lower than baseline
+(**2.863x faster**); the NumPy control moved adversely by only 2.54%.
+
+The baseline production-source hash was
+`da59226e2fe7fac036f3547d9386d20b6cc26542b8b77ea52001d40e765b04a4`.
+The exact measured candidate production/test hashes were
+`3a640232fd7fdc718fa30488cf7826df9f90f1d266003018dd8a779604f6d29b` /
+`85b20b99672b787b0be71fe33c122708ff5a604d3fa6e5bad9ad2559f91aea74`.
+Candidate attempt `j-29928833041828045` was canceled before timing when the
+stateful-axis hazard was found; `j-29928833041828058` was canceled during sync
+after RCH routed it to the wrong worker. Neither contributes evidence. Main
+advanced through three disjoint peer test/docs commits during the cold remote
+builds; later peer wide-int source/test dirt appeared only after the measured
+snapshot and is excluded from this candidate and its staging. The targeted
+release test compiled `fnp-python` and passed; emitted warnings were pre-existing
+and outside the owned lines. KEEP. The explicit-axis strided-slice residual is
+closed; retry predicate: none for the admitted 1-D regime.
+
 ## 2026-07-14 - WIN (SHIP): dense strided-slice `np.delete` via complementary parallel compact - 3.52x vs NumPy
 
 `WindyCardinal`. Negative-ledger-first closeout of the explicit step-strided

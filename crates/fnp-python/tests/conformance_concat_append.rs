@@ -1043,7 +1043,48 @@ ab("step negative one delegate", special, slice(None, None, -1))
 ab("step zero error", special, slice(None, None, 0))
 ab("below gate", np.arange(1024, dtype=np.float64), slice(None, None, 2))
 ab("complex delegate", np.arange(n, dtype=np.float64).astype(np.complex128), slice(1, None, 2))
-ab("explicit axis delegate", special, slice(1, None, 2), axis=0)
+ab("explicit axis zero", special, slice(1, None, 2), axis=0)
+ab("explicit axis negative one", special, slice(-2, None, -3), axis=-1)
+ab("invalid explicit axis delegate", special, slice(1, None, 2), axis=1)
+ab("negative invalid explicit axis delegate", special, slice(1, None, 2), axis=-2)
+ab("bool explicit axis delegate", special, slice(1, None, 2), axis=False)
+ab("numpy int explicit axis delegate", special, slice(1, None, 2), axis=np.int64(0))
+class AxisInt(int):
+    pass
+ab("int subclass explicit axis delegate", special, slice(1, None, 2), axis=AxisInt(0))
+ab("huge explicit axis delegate", special, slice(1, None, 2), axis=1 << 100)
+ab("2-D explicit axis delegate", special.reshape(512, -1), slice(1, None, 2), axis=0)
+class ArraySub(np.ndarray):
+    pass
+ab("array subclass explicit axis delegate", special.view(ArraySub), slice(1, None, 2), axis=0)
+
+class CountingAxis:
+    def __init__(self, value):
+        self.value = value
+        self.calls = 0
+    def __index__(self):
+        self.calls += 1
+        return self.value
+
+ours_axis = CountingAxis(0)
+numpy_axis = CountingAxis(0)
+ours_custom = outcome(fnp.delete, special, slice(1, None, 2), axis=ours_axis)
+numpy_custom = outcome(numpy_delete, special, slice(1, None, 2), axis=numpy_axis)
+if ours_custom != numpy_custom or ours_axis.calls != 1 or numpy_axis.calls != 1:
+    verdicts.append(
+        f"FAIL custom axis evaluation: outcomes={ours_custom[:3] == numpy_custom[:3]} "
+        f"calls={ours_axis.calls}/{numpy_axis.calls}"
+    )
+
+ours_bound = CountingAxis(3)
+numpy_bound = CountingAxis(3)
+ours_custom_bound = outcome(fnp.delete, special, slice(ours_bound, 19, 3), axis=0)
+numpy_custom_bound = outcome(numpy_delete, special, slice(numpy_bound, 19, 3), axis=0)
+if ours_custom_bound != numpy_custom_bound or ours_bound.calls != 1 or numpy_bound.calls != 1:
+    verdicts.append(
+        f"FAIL custom slice-bound evaluation: outcomes={ours_custom_bound[:3] == numpy_custom_bound[:3]} "
+        f"calls={ours_bound.calls}/{numpy_bound.calls}"
+    )
 
 def best(fn, reps=5):
     samples = []
@@ -1058,6 +1099,9 @@ spec = slice(1, None, 3)
 numpy_ms = best(lambda: numpy_delete(large, spec))
 fnp_ms = best(lambda: fnp.delete(large, spec))
 print(f"DELETE_STRIDED_SLICE_AB numpy_ms={numpy_ms:.3f} fnp_ms={fnp_ms:.3f} ratio={numpy_ms / fnp_ms:.3f}")
+numpy_axis_ms = best(lambda: numpy_delete(large, spec, axis=0))
+fnp_axis_ms = best(lambda: fnp.delete(large, spec, axis=0))
+print(f"DELETE_STRIDED_SLICE_AXIS0_AB numpy_ms={numpy_axis_ms:.3f} fnp_ms={fnp_axis_ms:.3f} ratio={numpy_axis_ms / fnp_axis_ms:.3f}")
 
 # Prove eligible inputs avoid the NumPy delete fallback while excluded forms
 # still reach it.  The saved original remains the parity/timing oracle.
@@ -1067,18 +1111,27 @@ def counted_delete(*args, **kwargs):
     fallback_calls += 1
     return numpy_delete(*args, **kwargs)
 np.delete = counted_delete
-before = fallback_calls
-fnp.delete(large, spec)
-fnp.delete(large, slice(-2, None, -3))
-eligible_delegate_count = fallback_calls - before
-after_eligible = fallback_calls
-fnp.delete(large, slice(1, None, 1))
-delegate_hit = fallback_calls == after_eligible + 1
+def fallback_delta(call):
+    before = fallback_calls
+    call()
+    return fallback_calls - before
+
+route_checks = (
+    ("axis none positive", lambda: fnp.delete(large, spec), 0),
+    ("axis none negative", lambda: fnp.delete(large, slice(-2, None, -3)), 0),
+    ("axis zero", lambda: fnp.delete(large, spec, axis=0), 0),
+    ("axis negative one", lambda: fnp.delete(large, slice(-2, None, -3), axis=-1), 0),
+    ("step one", lambda: fnp.delete(large, slice(1, None, 1)), 1),
+    ("bool axis", lambda: fnp.delete(large, spec, axis=False), 1),
+    ("2-D axis", lambda: fnp.delete(large.reshape(2000, 4000), spec, axis=0), 1),
+    ("array subclass", lambda: fnp.delete(large.view(ArraySub), spec, axis=0), 1),
+    ("int-index array axis", lambda: fnp.delete(large, np.array([1, 7, 19]), axis=0), 1),
+)
+for name, call, expected in route_checks:
+    observed = fallback_delta(call)
+    if observed != expected:
+        verdicts.append(f"FAIL {name} fallback count {observed} != {expected}")
 np.delete = numpy_delete
-if eligible_delegate_count != 0:
-    verdicts.append(f"FAIL candidate delegated {eligible_delegate_count} eligible strided slices")
-if not delegate_hit:
-    verdicts.append("FAIL step-one slice did not delegate")
 
 print(verdicts if verdicts else True)
 "#
