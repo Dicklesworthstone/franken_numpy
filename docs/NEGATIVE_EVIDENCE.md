@@ -160,6 +160,19 @@ unreachable from `diff`. Main then advanced through the likewise-disjoint decrea
 `digitize` commit `b120404c`; strict-remote workspace check passed on that final parent plus this
 candidate. The 15.31x separation is decisive. KEEP. The parked f16 diff residual is closed.
 
+## 2026-07-14 - CROSS-VALIDATED: c128 select retry predicate paid by PEER (cd200121, 2.44x) - independently re-measured 1.956x
+
+RainySparrow. Planned the c128 [u64;2]-chunked-fill retry this tick and
+found WindyCardinal had already shipped it (cd200121, 2.44x) - the
+SECOND time a reject entry's retry predicate recruited the swarm (after
+the N-D searchsorted residues). My independent gate run on a different
+worker re-validates their arm: SELECT_C128_3COND_AB 1.956x (67.3 vs
+34.4ms), c64 control 1.573x, all parity rows green incl. NaN-component
+and -0.0 verbatim movement. LEDGER-AS-COORDINATION: precise retry
+predicates (mechanism + predicted structure) are executable by any
+agent - write them as if assigning the work. fnp-python surface now
+exhausted INCLUDING retry predicates.
+
 ## 2026-07-14 - WIN (SHIP): tie-density gate for f64 intersect1d - both regimes now win (80d6aac3)
 
 RainySparrow, family sweep member #2. The zero-copy f64 intersect arm
