@@ -2264,3 +2264,70 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn int_select_fused_parallel_matches_numpy() -> Result<(), String> {
+    // np.select with int/uint/bool choices delegated to numpy's k+1
+    // sequential passes while the f64 arm shipped long ago (dtype-gap class).
+    // The new arm runs the same fused first-true-wins parallel pass through
+    // same-width unsigned views - element movement, bit-exact for every
+    // width. Mixed dtypes, out-of-range scalar defaults, and broadcasting
+    // keep the delegate (numpy's promotion surface).
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(389)
+verdicts = []
+def ab(name, conds, choices, **kw):
+    ours = fnp.select(conds, choices, **kw)
+    theirs = np.select(conds, choices, **kw)
+    if ours.tobytes() != theirs.tobytes() or str(ours.dtype) != str(theirs.dtype) or ours.shape != theirs.shape:
+        verdicts.append(f"FAIL {name}")
+n = 8_000_000
+x = rng.integers(-10**9, 10**9, n)
+conds = [x > 10**8, x < -10**8, (x % 7) == 0]
+ch64 = [x * 2, x - 3, rng.integers(-10**9, 10**9, n)]
+ab("i64 default0", conds, ch64)
+ab("i64 scalar default", conds, ch64, default=-42)
+ab("i64 array default", conds, ch64, default=x)
+ab("i64 wrap values", conds, [v * 2**40 for v in ch64])
+u8c = [rng.integers(0, 256, n).astype(np.uint8) for _ in range(3)]
+ab("u8 image", conds, u8c)
+ab("u8 scalar default 255", conds, u8c, default=255)
+i16c = [rng.integers(-3000, 3000, n).astype(np.int16) for _ in range(3)]
+ab("i16", conds, i16c)
+# bool choices DELEGATE: numpy promotes result_type(bool..., default-int-0)
+# to int64 even with the default omitted (gate-caught) - parity via numpy
+bc = [rng.integers(0, 2, n).astype(bool) for _ in range(3)]
+ab("bool choices delegate", conds, bc)
+ab("u32 2-D", [c.reshape(2000, 4000) for c in conds], [rng.integers(0, 2**32, (2000, 4000), dtype=np.uint32) for _ in range(3)])
+# delegate parity: mixed dtypes, out-of-range default, promoting scalar
+ab("mixed dtype delegate", conds, [ch64[0], ch64[1].astype(np.int32), ch64[2]])
+ab("oob default delegate", conds, i16c, default=10**9)
+ab("bool nonzero default delegate", conds, bc, default=1)
+ab("small", [c[:100] for c in conds], [c[:100] for c in ch64])
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.select(conds, ch64)); tf = best(lambda: fnp.select(conds, ch64))
+print(f"SELECT_I64_3COND_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn2 = best(lambda: np.select(conds, u8c, default=255)); tf2 = best(lambda: fnp.select(conds, u8c, default=255))
+print(f"SELECT_U8_3COND_AB numpy_ms={tn2:.3f} fnp_ms={tf2:.3f} ratio={tn2 / tf2:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces SELECT_I64_3COND_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "int select must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
