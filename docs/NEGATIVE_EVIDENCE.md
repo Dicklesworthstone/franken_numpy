@@ -18,6 +18,42 @@ c128 select. LESSON (pair-move class): when an element spans multiple
 move units, index conds per LOGICAL element, not per unit - the naive
 i/em division shows up directly as lost bandwidth.
 
+## 2026-07-14 - WIN (SHIP): C-contiguous N-D mixed structured `unique(return_*)` - 29.10x fnp speedup
+
+`WindyCardinal`. Negative-ledger-first closeout of the mixed-field half of the remaining
+structured `unique kwarg-forms N-D` residual. The proven value-lex record factorizer now admits
+non-scalar C-contiguous N-D inputs, derives the record count from full `size`, retains the `u32`
+permutation bound, checks `size * itemsize`, and reshapes only `return_inverse` to the input shape.
+Unique values, index, and counts remain 1-D; indices remain C-ravel positions. A final review also
+closed two widened-admission traps: malformed non-`None` axes now delegate instead of aliasing
+`axis=None`, and noncanonical structured-bool bytes (for example 0x01 versus 0x02, both true to
+NumPy) delegate rather than being split by raw-byte grouping. Canonical bool storage stays native.
+
+Raw outcome parity (success/error class, tuple/output types, dtype, shape, and bytes) passed for
+2-D all flags, 3-D inverse-only, explicit `axis=None`, alternate integer/float field widths,
+F-contiguous delegation, scalar delegation, NaN delegation, negative-zero delegation, malformed
+axis delegation, noncanonical-bool delegation, and the timed foreground row. The locked harness is
+`unique_struct_mixed_nd_return_flags_match_numpy`.
+
+Strict remote-only, same-worker `release-perf` foreground A/B on `vmi1227854` (524,288 records,
+shape 512x1024, packed `<i4`/`<u2`/bool/`<f8` fields, duplicate-heavy, all three return flags,
+best of 3; LTO disabled and 16 codegen units): delegated baseline NumPy 1348.751 ms / fnp
+1334.062 ms = 1.011x (`j-29928833041827551`); candidate NumPy 1314.307 ms / fnp 45.848 ms =
+28.667x (`j-29928833041827579`). Candidate fnp latency is 96.56% below baseline fnp (29.097x
+faster). Candidate Cargo used `-j2` only to satisfy the same worker's live slot admission; the
+runtime workload and profile were unchanged.
+
+The baseline production source hash was
+`5a7c41d19dad01a2e5675784af2744e49877a1d3f4492f09a0053f8c646d8cb3`; the hardened candidate
+remote snapshot was `2de0d1e33ba3868f5bfc21ac684d04530c4f7cbbeeb7a42e8f9d82d387f2a6b6`, with test hash
+`40976c9a123028d6300bc5589aab7922ddfa37a8b906758ac85fec2ac531e7c4`. A concurrent, disjoint
+`np.diff` edit appeared after the clean baseline and was present in the candidate snapshot; its
+final version subsequently landed as `5015129d`. It does not touch unique dispatch or kernels, and
+the same-worker 29.10x separation is decisive. A wrong-worker submission
+(`j-29928833041827564`) was cancelled during sync before Cargo, and a pre-hardening submission
+(`j-29928833041827566`) was cancelled during compilation before any test or timing; both are
+invalid and excluded. KEEP. The structured mixed/int N-D return-flag residual is now closed.
+
 ## 2026-07-14 - REJECT-BY-PROBE: ufunc.reduceat - numpy's segmented reduce is memory-bound saturated (8fb19e0d)
 
 RainySparrow, worker vmi1149989 (numpy 2.2.4). The last unprobed

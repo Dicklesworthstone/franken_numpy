@@ -831,6 +831,108 @@ print(verdicts if verdicts else True)
     Ok(())
 }
 
+#[test]
+fn unique_struct_mixed_nd_return_flags_match_numpy() -> Result<(), String> {
+    // The mixed-field value-lex factorizer flattens records in C order; only
+    // return_inverse recovers the input shape. Lock every output plus the
+    // float edge-case and non-C fallback boundaries.
+    let script = fnp_script(
+        r#"
+import time
+
+rng = np.random.default_rng(947)
+verdicts = []
+dt = np.dtype([("signed", "<i4"), ("unsigned", "<u2"), ("flag", "?"), ("value", "<f8")])
+
+def records(shape, distinct):
+    keys = rng.integers(0, distinct, int(np.prod(shape)), dtype=np.int64)
+    out = np.empty(keys.size, dtype=dt)
+    out["signed"] = (keys % 100_003) - 50_001
+    out["unsigned"] = keys % 65_521
+    out["flag"] = (keys & 1) != 0
+    out["value"] = (keys % 4_096).astype(np.float64) - 2_047.75
+    return out.reshape(shape)
+
+def outcome(fn, value, **kwargs):
+    try:
+        result = fn(value, **kwargs)
+        fields = result if isinstance(result, tuple) else (result,)
+        return (
+            "ok",
+            type(result).__name__,
+            tuple((type(field).__name__, str(np.asarray(field).dtype), tuple(np.asarray(field).shape), np.asarray(field).tobytes()) for field in fields),
+        )
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+def ab(name, value, **kwargs):
+    ours = outcome(fnp.unique, value, **kwargs)
+    theirs = outcome(np.unique, value, **kwargs)
+    if ours != theirs:
+        verdicts.append(f"FAIL {name}")
+
+two_d = records((320, 512), 71_000)
+three_d = records((80, 64, 32), 73_000)
+ab("2-D all flags", two_d, return_index=True, return_inverse=True, return_counts=True)
+ab("3-D inverse only", three_d, return_inverse=True)
+ab("explicit axis=None", two_d, axis=None, return_index=True, return_inverse=True, return_counts=True)
+ab("F-contiguous defer", np.asfortranarray(three_d), return_inverse=True, return_counts=True)
+
+nan_case = two_d.copy()
+nan_case["value"].flat[7] = np.nan
+ab("NaN defer", nan_case, return_inverse=True, return_counts=True)
+negzero_case = two_d.copy()
+negzero_case["value"].flat[11] = -0.0
+ab("negative-zero defer", negzero_case, return_index=True, return_inverse=True)
+ab("0-D defer", records((1,), 1).reshape(()), return_inverse=True, return_counts=True)
+ab("invalid axis defer", two_d, axis="bad", return_index=True, return_inverse=True, return_counts=True)
+
+raw_bool_dt = np.dtype([("flag", "?"), ("value", "<i4")])
+raw_bool = np.zeros((320, 512), dtype=raw_bool_dt)
+raw_bool["value"] = 7
+raw_bool_bytes = raw_bool.view(np.uint8).reshape(-1, raw_bool_dt.itemsize)
+raw_bool_bytes[:, 0] = np.where(np.arange(raw_bool.size) & 1, 1, 2)
+ab("noncanonical bool defer", raw_bool, return_index=True, return_inverse=True, return_counts=True)
+
+alt_dt = np.dtype([("small", "i1"), ("wide", "<u8"), ("score", "<f4")])
+alt_keys = rng.integers(0, 41_000, 81_920, dtype=np.int64)
+alt = np.empty(alt_keys.size, dtype=alt_dt)
+alt["small"] = (alt_keys % 101) - 50
+alt["wide"] = alt_keys.astype(np.uint64) * np.uint64(1_000_003)
+alt["score"] = (alt_keys % 251).astype(np.float32) - np.float32(124.5)
+ab("alternate widths 3-D", alt.reshape(80, 32, 32), return_index=True, return_inverse=True, return_counts=True)
+
+probe = records((512, 1024), 190_000)
+expected = np.unique(probe, return_index=True, return_inverse=True, return_counts=True)
+actual = fnp.unique(probe, return_index=True, return_inverse=True, return_counts=True)
+if outcome(lambda _: actual, None) != outcome(lambda _: expected, None):
+    verdicts.append("FAIL foreground parity")
+
+def best(fn, reps=3):
+    samples = []
+    for _ in range(reps):
+        start = time.perf_counter()
+        fn()
+        samples.append((time.perf_counter() - start) * 1e3)
+    return min(samples)
+
+numpy_ms = best(lambda: np.unique(probe, return_index=True, return_inverse=True, return_counts=True))
+fnp_ms = best(lambda: fnp.unique(probe, return_index=True, return_inverse=True, return_counts=True))
+print(f"UNIQUE_STRUCT_MIXED_ND_FULL_AB numpy_ms={numpy_ms:.3f} fnp_ms={fnp_ms:.3f} ratio={numpy_ms / fnp_ms:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}");
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "N-D mixed structured unique return flags must match NumPy exactly: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // searchsorted
 // ─────────────────────────────────────────────────────────────────────────────
