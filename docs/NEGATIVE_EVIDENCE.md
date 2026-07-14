@@ -93,6 +93,21 @@ unreachable from `diff`. Main then advanced through the likewise-disjoint decrea
 `digitize` commit `b120404c`; strict-remote workspace check passed on that final parent plus this
 candidate. The 15.31x separation is decisive. KEEP. The parked f16 diff residual is closed.
 
+## 2026-07-14 - WIN (SHIP): flat f64 unique regated off SIMD-qsort hosts - 0.55x ties loss -> 0.99x (8bde88b4)
+
+RainySparrow. The stale-basis sweep's missed member: the shipped f64
+unique flat arm (par_sort + dedup) predates numpy's AVX-512 introsort,
+same as the regated flat sort. Measured on a SIMD worker: 0.995x
+distinct (wasted work), 0.547x dense ties (numpy sort+flags+compress
+43.8ms vs 80.0ms - a REAL regression on the common value-counting
+shape). Regated via the shared avx2-keyed gate; pre-AVX2/non-x86 keep
+the arm. Binary-grid bucket path (O(n+range)) and the
+c128/c64/datetime/string unique kernels (no numpy SIMD sort in their
+bases) unaffected. SWEEP RULE ADDENDUM: a stale-basis sweep must
+enumerate the WHOLE kernel family sharing the saturated primitive
+(everything built on par_sort-vs-numpy-sort), not just the ops named
+in the original claim - unique hid behind sort/argsort for two days.
+
 ## 2026-07-14 - REJECT: edges-array histogram per-element search - numpy's block-sort is edge-count-FLAT (ce2985b3)
 
 RainySparrow. np.histogram(a, bins=EDGES) basis is NOT a serial
