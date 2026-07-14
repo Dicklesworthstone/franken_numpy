@@ -19379,6 +19379,47 @@ impl UFuncArray {
         let out_count: usize = fnp_ndarray::element_count(&out_shape).map_err(UFuncError::Shape)?;
         let out_strides = c_strides_elems(&out_shape);
 
+        fn fill_meshgrid_blocks<T: Copy + Send + Sync>(
+            out: &mut [T],
+            source: &[T],
+            stride: usize,
+            alen: usize,
+            parallel: bool,
+        ) {
+            if out.is_empty() {
+                return;
+            }
+            if stride == 1 {
+                if parallel {
+                    out.par_chunks_mut(alen)
+                        .for_each(|cycle| cycle.copy_from_slice(source));
+                } else {
+                    for cycle in out.chunks_mut(alen) {
+                        cycle.copy_from_slice(source);
+                    }
+                }
+            } else if alen.is_power_of_two() {
+                let mask = alen - 1;
+                if parallel {
+                    out.par_chunks_mut(stride)
+                        .enumerate()
+                        .for_each(|(block, chunk)| chunk.fill(source[block & mask]));
+                } else {
+                    for (block, chunk) in out.chunks_mut(stride).enumerate() {
+                        chunk.fill(source[block & mask]);
+                    }
+                }
+            } else if parallel {
+                out.par_chunks_mut(stride)
+                    .enumerate()
+                    .for_each(|(block, chunk)| chunk.fill(source[block % alen]));
+            } else {
+                for (block, chunk) in out.chunks_mut(stride).enumerate() {
+                    chunk.fill(source[block % alen]);
+                }
+            }
+        }
+
         let mut results = Vec::with_capacity(ndim);
         for (dim, arr) in arrays.iter().enumerate() {
             // Which output axis does this input correspond to?
@@ -19402,26 +19443,34 @@ impl UFuncArray {
             const MESHGRID_PARALLEL_MIN_ELEMS: usize = 1 << 14;
             let parallel =
                 out_count >= MESHGRID_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2;
-            let result = if arr.integer_sidecar.is_some() {
-                // Sidecar present: materialize the source indices (reused to both
-                // gather f64 values and reindex the integer sidecar identically).
-                let mut source_indices = vec![0usize; out_count];
-                if parallel {
-                    source_indices
-                        .par_iter_mut()
-                        .enumerate()
-                        .for_each(|(flat, s)| *s = (flat / stride) % alen);
-                } else {
-                    for (flat, s) in source_indices.iter_mut().enumerate() {
-                        *s = (flat / stride) % alen;
+            let result = if let Some(sidecar) = &arr.integer_sidecar {
+                // Preserve exact integers without building a temporary source-index
+                // vector: both bridge and sidecar payloads follow the same blocks.
+                let mut values = vec![0.0; out_count];
+                fill_meshgrid_blocks(
+                    &mut values,
+                    &arr.values,
+                    stride,
+                    alen,
+                    parallel,
+                );
+                let integer_sidecar = match sidecar {
+                    IntegerSidecar::I64(source) => {
+                        let mut exact = vec![0_i64; out_count];
+                        fill_meshgrid_blocks(&mut exact, source, stride, alen, parallel);
+                        Some(IntegerSidecar::I64(exact))
                     }
-                }
-                let values: Vec<f64> = source_indices.iter().map(|&i| arr.values[i]).collect();
+                    IntegerSidecar::U64(source) => {
+                        let mut exact = vec![0_u64; out_count];
+                        fill_meshgrid_blocks(&mut exact, source, stride, alen, parallel);
+                        Some(IntegerSidecar::U64(exact))
+                    }
+                };
                 Self {
                     shape: out_shape.clone(),
                     values,
                     dtype,
-                    integer_sidecar: arr.reindexed_integer_sidecar(&source_indices),
+                    integer_sidecar,
                 }
             } else {
                 // Common no-sidecar case: the flat broadcast is a sequence of

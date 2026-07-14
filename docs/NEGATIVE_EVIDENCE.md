@@ -4,6 +4,43 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): exact-integer `meshgrid` block-fills bridge and sidecar payloads - 2.79x
+
+`WindyCardinal`, `fnp-ufunc`. Negative-ledger-first closure of the explicit
+integer-sidecar exclusion in the immediately preceding dense `meshgrid` keep.
+The old sidecar branch allocated a full temporary source-index vector, computed
+division/modulo for every output cell, then separately gathered the f64 bridge
+and exact integer payloads through those indices. This one lever directly
+materializes the repeated-value blocks for both payloads, removing the temporary
+index allocation and both per-cell gathers. It handles both i64 and u64 exact
+sidecars. Sparse grids, sidecar-free grids, validation, output shape/order, and
+zero-sized outputs retain their prior paths.
+
+The same-binary proof row uses i64 inputs above `2^53`, ensuring that correctness
+depends on the exact sidecar rather than the lossy f64 bridge. Before timing, it
+compares every bridge value by `to_bits()` and every exact i64 output value
+against a control that reproduces the old source-index allocation and two gather
+passes; both assertions passed. The same source elements occupy the same flat
+positions, with no floating-point arithmetic, reordering, tie decision, or RNG
+state change.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran with RCH
+self-healing disabled on requested and effective worker `vmi1149989` (job
+`j-29928833041828157`; requested 10 samples, 250 ms warm-up, one-second
+measurement, LTO disabled, 16 codegen units, Cargo `-j1`). The per-cell control
+measured **80,102,064 ns/iter** (+/- 5,209,064) and direct sidecar block fill
+measured **28,692,007 ns/iter** (+/- 2,276,798): **2.792x** higher throughput /
+64.18% lower latency. Criterion warned that the one-second target was short for
+ten samples, but the reported spreads do not overlap. Per the explicit
+one-benchmark immediate-commit instruction, no longer rerun or successive
+conformance loop was performed.
+
+The remotely compiled source hash was
+`ff74d3d05880f52464ebb236da7d9e7f5ed0e6a342e2779678dfb77c5265bd53` and the
+proof-bench hash was
+`27e36a3f8a7f032840b13ec49093f2e25583ef955bb866241867fa887b8b3486`.
+KEEP.
+
 ## 2026-07-14 - WIN (SHIP): dense `meshgrid` materializes repeated-value blocks - 3.80x
 
 `WindyCardinal`, `fnp-ufunc`. Negative-ledger-first continuation of the two
