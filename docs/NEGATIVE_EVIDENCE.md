@@ -4,6 +4,35 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - BENCH-BLOCKED (REVERTED): duplicate-active-stride overlap proof - control did not compile
+
+`IvoryTurtle`, bead `deadlock-audit-p9i8i`, `fnp-ndarray`. Robot triage again
+offered only the prohibited f16 lane and the human-decision C-BLAS/fast-math
+lane, so this pass left the twice-mined array-transform route for stride
+calculus. Negative-ledger search found the existing active-zero-stride overlap
+certificate, but no equal-nonzero-stride certificate.
+
+Profile/source attribution found that `sliding_window_view([4, 4])` on a
+contiguous 64x64 layout duplicates each base stride across its position and
+window axes, yet the exact detector enumerates and sorts 59,536 offsets. The
+attempted ONE LEVER returned overlap after existing validation whenever two
+extent-greater-than-one axes shared a stride. The proof benchmark reconstructed
+the former exact-offset algorithm and was intended to assert full `NdLayout`
+equality before timing.
+
+Exactly one foreground strict-remote command ran on requested and effective
+worker `vmi1149989` (job `j-29928833041828597`):
+
+`timeout --signal=TERM 300s env RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-ndarray --bench criterion_ndarray --profile release -- NdLayout_sliding_window_duplicate_stride --warm-up-time 0.25 --measurement-time 0.75 --sample-size 10 --noplot`
+
+RCH reported another cache miss. The command returned exit 101 after 73.9
+seconds, before Criterion launched, because the former-path control's iterator
+sum needed an explicit result type (`E0282` at
+`criterion_ndarray.rs:328`; retry predicate: `let offset: isize = ...sum()`).
+No parity assertion or timing executed, and no second compile/benchmark ran.
+The production and proof-benchmark hunks were restored; only this evidence row
+and the closed bead remain. BENCH-BLOCKED, not a source rejection.
+
 ## 2026-07-14 - SHIP: rank-2 two-axis `flip_axes` through one half-turn - 36.7x
 
 `IvoryTurtle`, bead `deadlock-audit-qowi9`, `fnp-ufunc`. Robot triage still
