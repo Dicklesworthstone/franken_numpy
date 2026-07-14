@@ -4,6 +4,19 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - REJECT-BY-PROBE: ufunc.reduceat - numpy's segmented reduce is memory-bound saturated (8fb19e0d)
+
+RainySparrow, worker vmi1149989 (numpy 2.2.4). The last unprobed
+PyUFunc method delegate, priced before building: add.reduceat 19.1ms
+at 8M i64 / 1M segments, 2.1ms at 1k segments; f64 21.4ms; maximum
+21.2ms. numpy's reduceat inner loop is a single memory-bound stream -
+a parallel per-segment arm would chase ~12ms absolute, below the ship
+bar. No kernel built. PyUFunc METHOD SURFACE NOW FULLY DISPOSITIONED:
+__call__ arms mined (historic), .at CLOSED (order-free int scatter,
+3.6-5.1x, three ships), .accumulate ROUTED (4.2x/3.4x), .reduce ==
+numpy's saturated pairwise sum (skip), .reduceat saturated (this
+probe), .outer == broadcasted call (covered). Retry predicate: none.
+
 ## 2026-07-13 - WIN (SHIP): C-contiguous N-D structured `searchsorted` queries - 125.05x fnp speedup
 
 `WindyCardinal`. Negative-ledger-first follow-up to the input-form sweep's explicitly unpriced
