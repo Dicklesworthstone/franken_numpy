@@ -93,6 +93,22 @@ unreachable from `diff`. Main then advanced through the likewise-disjoint decrea
 `digitize` commit `b120404c`; strict-remote workspace check passed on that final parent plus this
 candidate. The 15.31x separation is decisive. KEEP. The parked f16 diff residual is closed.
 
+## 2026-07-14 - WIN (SHIP): tie-density gate for f64 intersect1d - both regimes now win (80d6aac3)
+
+RainySparrow, family sweep member #2. The zero-copy f64 intersect arm
+LOSES on tie-dense inputs (0.547x - numpy's unique steps COLLAPSE the
+arrays before its sorts) but WINS 1.8-3.6x on distinct-ish inputs.
+DATA-dependent, not ISA-dependent -> gated with the one-sided sampled
+tie oracle rather than the avx2 key, ordered BEFORE the full NaN scan
+(defer-scan-tax: the unordered version read 0.818x on ties from
+scanning 64MB pre-defer). Post-fix: distinct 1.779x, ties 1.296x (the
+deferred tie-dense case lands on the extract-path native which itself
+beats numpy's collapse chain). REGIME-GATING TAXONOMY now has three
+keys: ISA (flat sort/unique regates), DATA-SHAPE (this tie oracle),
+and SIZE (the classic gates) - pick by what the loss actually varies
+with. Remaining par_sort-basis kin unchecked: f32-eighth setxor arm
+(obscure engagement conditions - price only if profiled).
+
 ## 2026-07-14 - WIN (SHIP): flat f64 unique regated off SIMD-qsort hosts - 0.55x ties loss -> 0.99x (8bde88b4)
 
 RainySparrow. The stale-basis sweep's missed member: the shipped f64
