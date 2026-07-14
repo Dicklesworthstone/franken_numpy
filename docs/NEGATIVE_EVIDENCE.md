@@ -93,6 +93,24 @@ unreachable from `diff`. Main then advanced through the likewise-disjoint decrea
 `digitize` commit `b120404c`; strict-remote workspace check passed on that final parent plus this
 candidate. The 15.31x separation is decisive. KEEP. The parked f16 diff residual is closed.
 
+## 2026-07-14 - REJECT: edges-array histogram per-element search - numpy's block-sort is edge-count-FLAT (ce2985b3)
+
+RainySparrow. np.histogram(a, bins=EDGES) basis is NOT a serial
+per-element search: numpy block-sorts the data (~64k blocks) and
+searchsorts the EDGES into each sorted block, so its cost is flat in
+edge count (~56-59ms at 8M for 64 or 1024 edges on the gate worker).
+The parallel per-element upper-bound arm read 1.383x at 64 edges
+(below bar) and 0.672x at 1024 (per-element log(ne) loses). ALGORITHM
+LESSON: block-sort + few-searches beats n independent searches once
+searches-per-element x miss-cost exceeds amortized sort cost - price
+numpy's ACTUAL algorithm (read _histograms_impl) before assuming the
+naive structure. Retry predicate: parallel replication of numpy's own
+block-sort structure (blocks across threads; predicted 3-6x). Parity
+rows + basis pins kept in
+conformance_unravel_unique::histogram_edges_array_parallel_matches_numpy.
+BONUS RESOLVED: the all-equal-bins digitize edge (filed with b120404c)
+pins as NO DIVERGENCE - numpy and fnp agree; no code change.
+
 ## 2026-07-14 - SPLIT (SHIP c64 / REJECT c128): complex np.select arms (0bca33ab)
 
 RainySparrow. c64 select via same-shape u64 view: 4.136x first gate run
