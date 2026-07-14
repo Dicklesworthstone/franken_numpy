@@ -8,7 +8,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_dtype::DType;
 use fnp_ufunc::UFuncArray;
-use std::hint::black_box;
+use std::{hint::black_box, time::Duration};
 
 fn old_repeat(values: &[f64], shape: &[usize], ax: usize, reps: usize) -> Vec<f64> {
     let inner: usize = shape[ax + 1..].iter().product();
@@ -63,5 +63,48 @@ fn bench_repeat(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_repeat);
+fn former_repeat_once_flat(values: &[f64]) -> (Vec<f64>, Vec<usize>) {
+    let repeated = values
+        .iter()
+        .flat_map(|&value| std::iter::repeat_n(value, 1))
+        .collect();
+    let mut source_indices = Vec::with_capacity(values.len());
+    for i in 0..values.len() {
+        source_indices.push(i);
+    }
+    (repeated, source_indices)
+}
+
+fn bench_repeat_once_identity(c: &mut Criterion) {
+    let shape = vec![256, 512];
+    let n: usize = shape.iter().product();
+    let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.25 - 1.0).collect();
+    let arr = UFuncArray::new(shape, data.clone(), DType::F64).unwrap();
+
+    let (control, source_indices) = former_repeat_once_flat(&data);
+    let candidate = arr.repeat(1, None).unwrap();
+    assert_eq!(candidate.shape(), &[n]);
+    assert!(
+        candidate
+            .values()
+            .iter()
+            .zip(&control)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+    assert!(source_indices.iter().copied().eq(0..n));
+
+    let mut group = c.benchmark_group("repeat_once_identity");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    group.bench_function("former_values_plus_indices_256x512", |bench| {
+        bench.iter(|| black_box(former_repeat_once_flat(black_box(&data))))
+    });
+    group.bench_function("clone_flatten_256x512", |bench| {
+        bench.iter(|| black_box(arr.repeat(1, None).unwrap()))
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_repeat, bench_repeat_once_identity);
 criterion_main!(benches);

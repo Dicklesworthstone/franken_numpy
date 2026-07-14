@@ -4,6 +4,57 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): `repeat(1)` clones once - 6.92x
+
+`WindyCardinal`, bead `deadlock-audit-gtczk`, repeat/`fnp-ufunc`. Robot triage's
+only unclaimed perf pick remained the stale opt-in C-BLAS/fast-math policy bead,
+which conflicts with the pure-safe-Rust directive. This turn therefore pivoted
+away from the preceding FFT copy seam into the repeat/tile subsystem.
+Negative-ledger-first review found broad repeat parallel-copy wins and one
+rejected parallel-fill experiment, but no repeats-one identity row.
+
+Profile attribution: `repeat(1, axis=None)` still collected a full value buffer,
+then unconditionally allocated and filled a full `usize` source-index buffer even
+when no integer sidecar existed. Its element mapping is the identity. Explicit
+axis forms performed the same output materialization despite an unchanged shape.
+
+ONE LEVER: after preserving the existing `repeats == 0` behavior, `repeats == 1`
+now deep-clones once. Explicit axes are still normalized before returning;
+`axis=None` changes the cloned shape to `[element_count]`, preserving NumPy's
+flattening semantics. Ordering, dtype, f64 bits, exact integer sidecars, empty
+arrays, invalid-axis errors, and every other repeat count are unchanged.
+
+The existing `repeat` Criterion target gained a favorable former-production
+control for a small `[256,512]` input. It materializes the old value and identity
+source-index vectors but omits the old result wrapper and sidecar-dispatch call.
+Before timing, the row asserted flattened output shape, every f64 output bit, and
+the complete identity source mapping.
+
+Exactly one foreground strict-remote command ran on requested and effective
+worker `vmi1149989` (job `j-29928833041828436`) with LTO explicitly disabled:
+
+`RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-ufunc --bench repeat --profile release -- repeat_once_identity --noplot`
+
+The existing target's remote cache unexpectedly missed, but the permitted
+non-LTO release build finished in 76 seconds and total RCH time was 126.0
+seconds. Per the one-run rule it was not rerun. Criterion used 10 samples, a
+250 ms warm-up, and one-second measurement per arm:
+
+| arm | Criterion estimate |
+|---|---:|
+| former values plus source indices | 145.85 us `[135.70, 156.92]` |
+| clone plus flatten shape | **21.073 us** `[20.506, 21.835]` |
+
+Midpoint speedup is **6.9212x** (85.55% lower latency); even the former path's
+low bound is 6.2148x slower than the candidate's high bound. The equality
+assertions and command exited zero. The only compiler diagnostic was the
+pre-existing unused `nan_filtered` warning. No second benchmark, conformance,
+compile, or verification loop ran. Timed source SHA-256:
+`dcfad0e568e479c489dad06f3e1e7643d4d213a148eb27de440608c4857a66a2`;
+proof-bench SHA-256:
+`8d2fd44daf7ab4c2b8a70f5d1d8efe3eee14eb81ff5d3a500a91dfebff8cdbc6`.
+KEEP.
+
 ## 2026-07-14 - WIN (SHIP): singleton-axis `fftshift` skips zero-shift copies - 2.15x
 
 `WindyCardinal`, bead `deadlock-audit-gzdte`, FFT/`fnp-ufunc`. Robot triage's

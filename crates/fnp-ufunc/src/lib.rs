@@ -13156,6 +13156,16 @@ impl UFuncArray {
                 }
             };
         }
+        if repeats == 1 {
+            let mut out = self.clone();
+            match axis {
+                None => out.shape = vec![out.values.len()],
+                Some(ax) => {
+                    normalize_axis(ax, self.shape.len())?;
+                }
+            }
+            return Ok(out);
+        }
         match axis {
             None => {
                 let values: Vec<f64> = self
