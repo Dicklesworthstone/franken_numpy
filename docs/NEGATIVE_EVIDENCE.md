@@ -4,6 +4,40 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - SHIP: duplicate active strides prove internal overlap - 23,460x
+
+`IvoryTurtle`, bead `deadlock-audit-kkuu3`, `fnp-ndarray`. Robot triage again
+offered only the prohibited f16 lane and the human-decision C-BLAS/fast-math
+lane, so this pass followed the explicit retry predicate from
+`deadlock-audit-p9i8i`. Source attribution showed that
+`sliding_window_view([4, 4])` on a contiguous 64x64 layout duplicates each base
+stride across its position and window axes, while the former exact overlap
+detector enumerated and sorted 59,536 offsets.
+
+ONE LEVER now returns overlap after the existing validation and active
+zero-stride checks whenever two extent-greater-than-one axes share a stride.
+Incrementing either axis reaches the same byte offset, so this is a direct alias
+proof for positive or negative equal strides. Validation, element-count
+overflow precedence, and every other layout route remain unchanged. The proof
+benchmark reconstructed the former exact-offset algorithm and asserted full
+`NdLayout` equality before timing.
+
+Exactly one foreground strict-remote command ran on requested and effective
+worker `vmi1149989` (job `j-29928833041828608`):
+
+`timeout --signal=TERM 300s env RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-ndarray --bench criterion_ndarray --profile release -- NdLayout_sliding_window_duplicate_stride --warm-up-time 0.25 --measurement-time 0.75 --sample-size 10 --noplot`
+
+The non-LTO release command returned in 78.9 seconds despite an RCH cache miss.
+Criterion used 10 samples, a 250 ms warm-up, and a 750 ms measurement per arm:
+
+| arm | Criterion estimate |
+|---|---:|
+| former exact offsets | 837.48 us `[767.47, 876.46]` |
+| duplicate-stride proof | **35.698 ns** `[34.148, 37.794]` |
+
+The midpoint is 23,460x faster, and even the closest interval bounds remain
+more than 20,300x apart. SHIP.
+
 ## 2026-07-14 - BENCH-BLOCKED (REVERTED): duplicate-active-stride overlap proof - control did not compile
 
 `IvoryTurtle`, bead `deadlock-audit-p9i8i`, `fnp-ndarray`. Robot triage again

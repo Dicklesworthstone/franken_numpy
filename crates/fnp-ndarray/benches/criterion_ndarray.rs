@@ -307,6 +307,85 @@ fn bench_ndlayout_broadcast_to_fortran_identity(c: &mut Criterion) {
     group.finish();
 }
 
+fn sliding_window_duplicate_stride_former(
+    layout: &NdLayout,
+    window_shape: &[usize],
+) -> NdLayout {
+    let mut shape = Vec::with_capacity(layout.shape.len() * 2);
+    for (&dim, &window) in layout.shape.iter().zip(window_shape) {
+        shape.push(dim - window + 1);
+    }
+    shape.extend(window_shape.iter().copied());
+
+    let mut strides = Vec::with_capacity(layout.strides.len() * 2);
+    strides.extend(layout.strides.iter().copied());
+    strides.extend(layout.strides.iter().copied());
+
+    let count = element_count(&shape).unwrap();
+    let mut offsets = Vec::with_capacity(count);
+    let mut indices = vec![0usize; shape.len()];
+    for linear_index in 0..count {
+        let offset: isize = indices
+            .iter()
+            .zip(&strides)
+            .map(|(&index, &stride)| isize::try_from(index).unwrap() * stride)
+            .sum();
+        offsets.push(offset);
+
+        if linear_index + 1 == count {
+            break;
+        }
+        for axis in (0..indices.len()).rev() {
+            indices[axis] += 1;
+            if indices[axis] < shape[axis] {
+                break;
+            }
+            indices[axis] = 0;
+        }
+    }
+    offsets.sort_unstable();
+    let item_size = isize::try_from(layout.item_size).unwrap();
+    let has_internal_overlap = offsets
+        .windows(2)
+        .any(|pair| pair[1] < pair[0].checked_add(item_size).unwrap());
+
+    NdLayout {
+        shape,
+        strides,
+        item_size: layout.item_size,
+        writeable: false,
+        has_internal_overlap,
+    }
+}
+
+fn bench_ndlayout_sliding_window_duplicate_stride(c: &mut Criterion) {
+    let mut group = c.benchmark_group("NdLayout_sliding_window_duplicate_stride");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+
+    let layout = NdLayout::contiguous(vec![64, 64], 8, MemoryOrder::C).unwrap();
+    let window = [4, 4];
+    assert_eq!(
+        layout.sliding_window_view(&window).unwrap(),
+        sliding_window_duplicate_stride_former(&layout, &window)
+    );
+
+    group.bench_function("former_exact_offsets", |b| {
+        b.iter(|| {
+            sliding_window_duplicate_stride_former(black_box(&layout), black_box(&window))
+        });
+    });
+    group.bench_function("duplicate_stride_proof", |b| {
+        b.iter(|| {
+            black_box(&layout)
+                .sliding_window_view(black_box(&window))
+                .unwrap()
+        });
+    });
+    group.finish();
+}
+
 fn bench_ndlayout_contiguous(c: &mut Criterion) {
     let mut group = c.benchmark_group("NdLayout_contiguous");
 
@@ -429,6 +508,7 @@ criterion_group!(
     bench_contiguous_strides,
     bench_broadcast_strides,
     bench_ndlayout_broadcast_to_fortran_identity,
+    bench_ndlayout_sliding_window_duplicate_stride,
     bench_ndlayout_contiguous,
     bench_ndlayout_broadcast_to,
     bench_ndlayout_is_contiguous,

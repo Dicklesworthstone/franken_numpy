@@ -626,6 +626,19 @@ fn detect_internal_overlap(
     {
         return Ok(true);
     }
+    // Two active axes with the same stride alias immediately: incrementing
+    // either axis by one reaches the same byte offset. Sliding-window layouts
+    // naturally duplicate each base stride across their position/window axes.
+    for (axis, (&dim, &stride)) in shape.iter().zip(strides).enumerate() {
+        if dim > 1
+            && shape[axis + 1..]
+                .iter()
+                .zip(&strides[axis + 1..])
+                .any(|(&other_dim, &other_stride)| other_dim > 1 && other_stride == stride)
+        {
+            return Ok(true);
+        }
+    }
     if element_count <= EXACT_OVERLAP_ELEMENT_LIMIT {
         return detect_internal_overlap_exact(shape, strides, item_size, element_count);
     }
