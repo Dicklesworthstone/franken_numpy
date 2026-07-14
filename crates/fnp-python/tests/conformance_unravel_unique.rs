@@ -2187,3 +2187,70 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn accumulate_float_complex_routes_to_cumsum_matches_numpy() -> Result<(), String> {
+    // np.cumsum/np.cumprod ARE add.accumulate/multiply.accumulate internally,
+    // but PyUFunc::accumulate only routed int/bool - float/complex/timedelta
+    // fell to the numpy delegate behind a stale 'float reassociation' premise
+    // while fnp's cumsum arms for those dtypes are sequential-per-lane
+    // (byte-exact) and parallel-across-lanes. The routes now inherit the whole
+    // cumsum/cumprod dispatch. dtype=/out= kwargs and non-whitelisted kinds
+    // keep numpy's exact surface.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(383)
+verdicts = []
+def ab(uf, name, a, **kw):
+    ours = getattr(fnp, uf).accumulate(a, **kw)
+    theirs = getattr(np, uf).accumulate(a, **kw)
+    if ours.tobytes() != theirs.tobytes() or str(ours.dtype) != str(theirs.dtype) or ours.shape != theirs.shape:
+        verdicts.append(f"FAIL {uf} {name}")
+F2 = rng.standard_normal((3000, 2000))
+ab("add", "2-D f64 axis0 default", F2)
+ab("add", "2-D f64 axis1", F2, axis=1)
+ab("add", "1-D f64 flat", rng.standard_normal(8_000_000))
+ab("add", "1-D f32", rng.standard_normal(4_000_000).astype(np.float32))
+C2 = (rng.standard_normal((2000, 2000)) + 1j * rng.standard_normal((2000, 2000))).astype(np.complex128)
+ab("add", "2-D c128 axis1", C2, axis=1)
+ab("add", "2-D c128 axis0", C2, axis=0)
+ab("add", "1-D timedelta", rng.integers(-10**9, 10**9, 2_000_000).astype("timedelta64[ns]"))
+ab("multiply", "2-D f64 axis1", np.abs(F2[:1000, :1000]) + 0.5, axis=1)
+ab("multiply", "1-D f64", np.abs(rng.standard_normal(2_000_000)) + 0.5)
+ab("multiply", "2-D c128 axis1", C2[:800, :800], axis=1)
+ab("add", "int regression", rng.integers(-10**6, 10**6, (1500, 1500)), axis=1)
+# kwarg / non-whitelisted forms keep the delegate
+ab("add", "dtype kwarg", F2[:500, :500], axis=1, dtype=np.float32)
+o = np.empty((500, 500))
+ab("add", "out kwarg", F2[:500, :500].copy(), axis=1, out=o)
+try:
+    fnp.add.accumulate(np.array(["a", "b"]))
+    verdicts.append("FAIL str no-raise")
+except TypeError:
+    pass
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.add.accumulate(F2)); tf = best(lambda: fnp.add.accumulate(F2))
+print(f"ADD_ACC_F64_AXIS0_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn2 = best(lambda: np.add.accumulate(C2, axis=1)); tf2 = best(lambda: fnp.add.accumulate(C2, axis=1))
+print(f"ADD_ACC_C128_AXIS1_AB numpy_ms={tn2:.3f} fnp_ms={tf2:.3f} ratio={tn2 / tf2:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces ADD_ACC_F64_AXIS0_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "accumulate float/complex routes must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
