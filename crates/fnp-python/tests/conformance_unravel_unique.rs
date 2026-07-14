@@ -2339,10 +2339,9 @@ print(verdicts if verdicts else True)
 
 #[test]
 fn complex_select_fused_parallel_matches_numpy() -> Result<(), String> {
-    // c64 select arm (sibling of the int ship): views to u64 with the same
-    // shape, 4.14x. c128 was gate-REJECTED at 1.020x (pair-move indexing
-    // halves throughput; numpy's own c128 passes are fast) - its rows here
-    // pin DELEGATE parity incl. NaN/-0.0 verbatim movement through numpy.
+    // c64 views each element as one u64. c128 views each element as a u64
+    // pair, scans conditions once per logical element, and copies both words
+    // together. Raw-byte checks pin NaN payloads and signed zeros verbatim.
     let script = fnp_script(
         r#"
 import time
@@ -2360,9 +2359,36 @@ def cplx(dt):
     c = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(dt)
     return c
 c128 = [cplx(np.complex128) for _ in range(3)]
-c128[0][7] = complex(np.nan, -0.0)  # verbatim-move rows
+c128[0].view(np.uint64).reshape(-1, 2)[7] = [0x7ff8000000000042, 0x8000000000000000]
+c128[1].view(np.uint64).reshape(-1, 2)[7] = [0xfff0000000000000, 0x0000000000000001]
+conds[0][7] = True
+conds[1][7] = True  # overlapping true rows must still select choice 0 as a whole pair
+for c in conds:
+    c[8] = False
+c128[1].view(np.uint64).reshape(-1, 2)[8] = [0x8000000000000000, 0x7ff8000000000099]
 ab("c128 default0", conds, c128)
 ab("c128 array default", conds, c128, default=c128[1])
+
+# Prove both eligible default forms stay inside the native arm. Any fallback
+# dynamically resolves np.select and is counted here.
+real_select = np.select
+def native_ab(name, **kw):
+    expected = real_select(conds, c128, **kw)
+    delegate_calls = []
+    def counted_select(*args, **kwargs):
+        delegate_calls.append(1)
+        return real_select(*args, **kwargs)
+    np.select = counted_select
+    try:
+        actual = fnp.select(conds, c128, **kw)
+    finally:
+        np.select = real_select
+    if delegate_calls:
+        verdicts.append(f"FAIL {name} delegated")
+    if type(actual) is not type(expected) or actual.dtype != expected.dtype or actual.shape != expected.shape or actual.tobytes() != expected.tobytes():
+        verdicts.append(f"FAIL {name} parity")
+native_ab("c128 native default0")
+native_ab("c128 native array default", default=c128[1])
 c64 = [cplx(np.complex64) for _ in range(3)]
 ab("c64 default0", conds, c64)
 ab("c128 2-D", [c.reshape(2000, 2000) for c in conds], [c.reshape(2000, 2000) for c in c128])

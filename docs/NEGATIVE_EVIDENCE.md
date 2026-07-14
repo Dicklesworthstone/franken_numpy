@@ -4,6 +4,61 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): c128 `np.select` logical-pair fill - 2.44x FNP self-speedup, 3.27x vs NumPy
+
+`WindyCardinal`. Negative-ledger-first retry of the c128 half rejected in
+`0bca33ab` / recorded in `b84ec7a9`. The one lever replaces per-u64-unit
+condition indexing with a `[u64; 2]` logical-element pass: scan the conditions
+once, preserve first-true precedence, then copy both real/imag words from the
+same choice or array default. This removes the old `i / element_multiplier`
+tax and also prevents pair tearing. Selection performs no floating-point
+arithmetic, so NaN payloads, infinities, subnormals, and signed zeros move
+verbatim.
+
+Admission remains narrow: exact `complex128` ndarray choices with identical
+dtype and shape, exact bool condition arrays with that shape, contiguous buffer
+views, non-scalar inputs, and default omitted/`None`/integer zero or an exact
+same-dtype array. The existing `1<<16` logical-element/Rayon threshold is
+unchanged. Broadcasting, small/scalar inputs, subclasses, mixed dtypes,
+nonzero or complex scalar defaults, and every unsupported buffer layout still
+delegate to NumPy. The c64/int/f32 single-unit path is unchanged.
+
+`complex_select_fused_parallel_matches_numpy` passed exact Python type, dtype,
+shape, and raw-byte parity. Its battery includes overlapping true conditions,
+distinct NaN payloads, signed zero, infinity/subnormal pair halves, default
+zero, array default, 2-D input, below-gate input, nonzero/complex-default
+delegation, and c64/i64 regressions. A monkeypatched fallback counter proves
+that both eligible c128 default forms reached the native path.
+
+Strict remote-only same-worker `release-perf` foreground A/B on `vmi1149989`
+(4,000,000 c128 elements, three conditions, best of 3, LTO disabled, 16 codegen
+units, Cargo `-j1`): delegated baseline job `j-29928833041827733` measured NumPy
+65.778 ms / FNP 67.407 ms = 0.976x. Candidate job
+`j-29928833041827773` measured NumPy 90.368 ms / FNP 27.643 ms = **3.269x**.
+Candidate FNP latency is 58.99% below baseline FNP (**2.439x faster**). The
+candidate run was noisier/loaded: the unchanged c64 control moved from NumPy
+51.108 ms / FNP 7.573 ms to 41.738 / 10.696 ms. That adverse 41% FNP-control
+drift makes the c128 separation conservative rather than a routing mirage.
+
+The baseline production/test hashes were
+`f4ca99cde5f860ab0f5046a0e3c22c2a51cc6ae9b87a3c9c28e800ded44ccc8a` /
+`d306fcd88c0c727549603fde9786805af449efc2972d5f8d5d2e7c87ed3b00ac`.
+The exact candidate remote snapshot hashes were
+`473794a8555c49507436f3b60f89e0234853924a4e9fcd9eda635083a00d215f` /
+`4753553e565c5321e770d1a8ce10c0b87f82ffc42889325066ad82df1968c6f6`.
+Main advanced during the two cold remote links through disjoint string-sort
+work; the candidate snapshot contained the peer's non-last-axis string hunks,
+subsequently committed as `44437522`, which cannot reach `select`. A later
+peer histogram-edges worktree appeared only after the measured candidate and
+remains unstaged. Strict-remote workspace check job `j-29928833041827805`
+passed. Strict-remote clippy job `j-29928833041827819` remains blocked before
+this crate by the pre-existing `fnp-ufunc::nan_filtered` dead code and
+`neg_cmp_op_on_partial_ord`; remote-required `cargo fmt --check` failed closed
+with RCH-E301 rather than running locally. UBS's monolithic Rust scan hit its
+300-second module timeout without a file-level finding; `git diff --check`
+passed. KEEP. The c128 logical-pair retry is closed; retry predicate: none for
+this select family.
+
 ## 2026-07-14 - WIN (SHIP): parallel float16 1-D `np.diff` - 15.31x fnp self-speedup, 2.34x vs NumPy
 
 `WindyCardinal`. Negative-ledger-first closeout of the parked `f16 diff widen kernel` residual.
