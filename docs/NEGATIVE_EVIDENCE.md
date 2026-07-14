@@ -4,6 +4,35 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - BENCH-BLOCKED (REVERTED): singleton-source multi-axis `broadcast_to` direct fill (`deadlock-audit-kqasq`)
+
+`WindyCardinal`, `fnp-ufunc`. Fresh-subsystem, negative-ledger-first attribution
+found that the shipped one-axis broadcast shortcut already uses `slice::fill`,
+but a one-element source expanded across two or more axes disables that shortcut.
+The general path then allocates an `out_count`-element `usize` source-index map,
+runs the chunked coordinate odometer with every source stride equal to zero, and
+gathers element zero into every output slot. The one candidate, after ordinary
+broadcast validation, directly repeated the sole f64 bridge value and the sole
+exact i64/u64 sidecar value. This preserves shape, dtype, payload bits, integer
+storage, and all error paths.
+
+The proof row used 262,144 outputs and an equal-valued two-element source to
+force the unchanged multi-axis odometer as a same-binary control with identical
+output shape and raw f64 bits. The sole foreground gate was strict remote-only:
+`RCH_REQUIRE_REMOTE=1 CARGO_PROFILE_RELEASE_LTO=false rch exec -- cargo bench -p fnp-ufunc --bench broadcast --profile release -- broadcast_singleton_source_fill --noplot`.
+RCH selected `vmi1227854` (job `j-29928833041828348`); no local fallback or
+`release-perf` build occurred. The library compiled, but the benchmark target
+failed before timing because it imported `ArrayStorage` through the private
+`fnp_ufunc` re-export (`E0603`).
+
+**DECISION:** no timing means no keep. Production and benchmark changes were
+manually reverted; only this blocker evidence and bead closeout land. Retry by
+importing `fnp_dtype::ArrayStorage` directly (or omitting the embedded sidecar
+probe), then run the now-warm same release-profile benchmark once. Do not treat
+the compile failure as evidence against the optimization itself. No second
+benchmark, verification loop, stash mutation, or local Cargo fallback ran.
+AGENT_NAME=WindyCardinal.
+
 ## 2026-07-14 - WIN (SHIP): identical-shape `UFuncArray::broadcast_to` clones directly - 54.02x
 
 `WindyCardinal`, `fnp-ufunc`. Negative-ledger-first sibling of the shipped
