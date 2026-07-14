@@ -808,6 +808,110 @@ print(left and right)
 }
 
 #[test]
+fn searchsorted_structured_nd_query_shape_matches_numpy() -> Result<(), String> {
+    // Structured query records are independent in flat C order. Lock N-D
+    // admission to NumPy's output type, dtype, shape, bytes, side semantics,
+    // and the existing non-C/scalar delegate behavior.
+    let script = fnp_script(
+        r#"
+import time
+
+verdicts = []
+
+def outcome(fn, *args, **kwargs):
+    try:
+        out = fn(*args, **kwargs)
+        arr = np.asarray(out)
+        return ("ok", type(out).__name__, str(arr.dtype), tuple(arr.shape), arr.tobytes())
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+def ab(name, hay, query):
+    for side in ("left", "right"):
+        ours = outcome(fnp.searchsorted, hay, query, side=side)
+        theirs = outcome(np.searchsorted, hay, query, side=side)
+        if ours != theirs:
+            verdicts.append(f"FAIL {name} {side}")
+
+n = 70_000
+base = np.arange(n, dtype=np.int64)
+
+dt_i = [('a', '<i8'), ('b', '<i8')]
+h_i = np.zeros(n, dtype=dt_i)
+h_i['a'] = (base // 5) * 3 - 50_000
+h_i['b'] = (base % 5) - 2
+probe_i = (base * 37) % (n + 2_000)
+q_i = np.zeros(n, dtype=dt_i)
+q_i['a'] = (probe_i // 5) * 3 - 50_003
+q_i['b'] = (probe_i % 11) - 5
+q_i_2d = q_i.reshape(250, 280)
+ab("i64 2-D prefix", h_i, q_i_2d)
+
+dt_u = [('a', '<u8'), ('b', '<u8')]
+base_u = np.arange(n, dtype=np.uint64)
+h_u = np.zeros(n, dtype=dt_u)
+h_u['a'] = base_u // np.uint64(100)
+h_u['b'] = base_u % np.uint64(100)
+q_u = h_u[(base * 41 + 7) % n].copy().reshape(70, 20, 50)
+ab("u64 3-D prefix", h_u, q_u)
+
+dt_m = [('id', '<i8'), ('value', '<f8')]
+h_m = np.zeros(n, dtype=dt_m)
+h_m['id'] = base // 7
+h_m['value'] = (base % 7).astype(np.float64) - 3.0
+probe_m = (base * 43 + 3) % (n + 3_000)
+q_m = np.zeros(n, dtype=dt_m)
+q_m['id'] = probe_m // 7
+q_m['value'] = (probe_m % 13).astype(np.float64) - 6.0
+q_m_2d = q_m.reshape(200, 350)
+ab("mixed i64-f64 2-D valuelex", h_m, q_m_2d)
+
+ab("i64 F-contiguous defer", h_i, np.asfortranarray(q_i_2d))
+ab("i64 scalar defer", h_i, q_i[0])
+
+pn = 524_288
+pbase = np.arange(pn, dtype=np.int64)
+large_h = np.zeros(pn, dtype=dt_i)
+large_h['a'] = pbase // 64
+large_h['b'] = pbase % 64
+large_probe = (pbase * 65_537 + 11) % (pn + 65_536)
+large_q = np.zeros(pn, dtype=dt_i)
+large_q['a'] = large_probe // 64
+large_q['b'] = (large_probe % 71) - 3
+large_q = large_q.reshape(512, 1024)
+
+large_numpy = np.searchsorted(large_h, large_q)
+large_fnp = fnp.searchsorted(large_h, large_q)
+if (large_fnp.dtype != large_numpy.dtype or large_fnp.shape != large_numpy.shape
+        or large_fnp.tobytes() != large_numpy.tobytes()):
+    verdicts.append("FAIL i64 foreground parity")
+
+def best(fn, reps=3):
+    samples = []
+    for _ in range(reps):
+        start = time.perf_counter()
+        fn()
+        samples.append((time.perf_counter() - start) * 1e3)
+    return min(samples)
+
+numpy_ms = best(lambda: np.searchsorted(large_h, large_q))
+fnp_ms = best(lambda: fnp.searchsorted(large_h, large_q))
+print(f"SEARCHSORTED_STRUCT_ND_AB numpy_ms={numpy_ms:.3f} fnp_ms={fnp_ms:.3f} ratio={numpy_ms / fnp_ms:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}");
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "N-D structured searchsorted must match NumPy exactly: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn searchsorted_packed_latin1_string_records_match_numpy() -> Result<(), String> {
     let script = fnp_script(
         r#"

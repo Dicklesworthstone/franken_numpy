@@ -4,6 +4,33 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-13 - WIN (SHIP): C-contiguous N-D structured `searchsorted` queries - 125.05x fnp speedup
+
+`WindyCardinal`. Negative-ledger-first follow-up to the input-form sweep's explicitly unpriced
+`string/struct searchsorted N-D v` residual, scoped to the remaining structured-record half. The
+existing homogeneous-integer and mixed-field structured kernels require a 1-D query even though
+each record is searched independently and NumPy returns insertion points with the query's original
+shape. The one lever admits exact, C-contiguous N-D query arrays through a zero-copy
+`reshape(-1)` view, tries the unchanged homogeneous then mixed-field kernel, and reshapes a native
+integer result back to `v.shape`. Every unsupported case delegates with the original query object.
+
+Raw outcome parity (success/error class, output type, dtype, shape, and bytes) passed for both
+`side` values across homogeneous i64 2-D, homogeneous u64 3-D, and mixed i64/f64 2-D queries.
+F-contiguous and 0-D structured queries retain the original NumPy delegate path. The locked harness
+is `searchsorted_structured_nd_query_shape_matches_numpy`. Strict remote-only, same-worker
+`release-perf` foreground A/B on `vmi1149989` (524,288 two-i64 haystack records and a 512x1024
+query, best of 3; LTO disabled and 16 codegen units): delegated baseline NumPy 569.565 ms / fnp
+638.636 ms = 0.892x (`j-29928833041827326`); candidate NumPy 561.592 ms / fnp 5.107 ms =
+109.974x (`j-29928833041827352`). Candidate fnp latency is 99.20% below baseline fnp (125.051x
+faster). The candidate used Cargo `-j2` only to fit the same worker's two open compilation slots;
+the profile, code generation settings, workload, and foreground execution were unchanged.
+
+An intervening attempt (`j-29928833041827347`) was routed to `vmi1152480` despite a worker
+preference and cancelled before compilation; it is invalid and excluded. The paired snapshots both
+contained the same concurrent, disjoint integer scatter edit in the shared `lib.rs`, subsequently
+landed as `70286c2c`, so only the structured-searchsorted hunk differs between their source inputs.
+KEEP.
+
 ## 2026-07-13 - WIN (SHIP): C-contiguous N-D fixed-width string `searchsorted` queries - 37.25x fnp speedup
 
 `WindyCardinal`. Negative-ledger-first follow-up to the input-form sweep's explicitly unpriced
