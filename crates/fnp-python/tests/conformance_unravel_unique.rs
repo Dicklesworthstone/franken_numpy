@@ -3146,3 +3146,56 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn wide_int_setop_tie_density_probe_and_parity() -> Result<(), String> {
+    // Family-sweep member: the wide-int intersect/setdiff arms (par_sort +
+    // merge, shipped 1.65x/1.58x on DISTINCT data pre-numpy-2.4) have no tie
+    // gate, while numpy 2.4's HASH unique collapses tie-dense integer inputs
+    // in ~96ms-class time (the 49x version divergence datum). Parity rows pin
+    // the live routing; AB rows price both regimes for the gate decision.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(467)
+verdicts = []
+def ab(name, fn, a, b):
+    if getattr(fnp, fn)(a, b).tobytes() != getattr(np, fn)(a, b).tobytes():
+        verdicts.append(f"FAIL {fn} {name}")
+W1 = rng.integers(-2**62, 2**62, 4_000_000)
+W2 = np.concatenate([W1[::3], rng.integers(-2**62, 2**62, 2_000_000)])
+rng.shuffle(W2)
+ab("distinct", "intersect1d", W1, W2)
+ab("distinct", "setdiff1d", W1, W2)
+T1 = rng.integers(0, 500, 4_000_000) * 2**53
+T2 = rng.integers(0, 500, 4_000_000) * 2**53
+ab("tie-dense", "intersect1d", T1, T2)
+ab("tie-dense", "setdiff1d", T1, T2)
+ab("small", "intersect1d", W1[:1000], W2[:1000])
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.intersect1d(W1, W2)); tf = best(lambda: fnp.intersect1d(W1, W2))
+print(f"WIDEINT_INTERSECT_DISTINCT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn2 = best(lambda: np.intersect1d(T1, T2)); tf2 = best(lambda: fnp.intersect1d(T1, T2))
+print(f"WIDEINT_INTERSECT_TIES_AB numpy_ms={tn2:.3f} fnp_ms={tf2:.3f} ratio={tn2 / tf2:.3f}")
+tn3 = best(lambda: np.setdiff1d(T1, T2)); tf3 = best(lambda: fnp.setdiff1d(T1, T2))
+print(f"WIDEINT_SETDIFF_TIES_AB numpy_ms={tn3:.3f} fnp_ms={tf3:.3f} ratio={tn3 / tf3:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces WIDEINT_INTERSECT_TIES_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "wide-int setops must stay bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
