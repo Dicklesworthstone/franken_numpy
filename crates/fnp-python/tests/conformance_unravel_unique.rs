@@ -2706,3 +2706,62 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn string_lastaxis_sort_parallel_matches_numpy() -> Result<(), String> {
+    // np.sort(2-D 'U'/'S', axis=-1) delegated to numpy's serial per-lane
+    // per-record comparator; the new arm runs a per-lane memcmp perm sort
+    // fanned across rayon lanes - byte-exact (equal records byte-identical;
+    // 'U' Latin-1 gate mirrors the flat kernel). Wide codepoints, axis=0,
+    // axis=None flatten (already covered), and small keep prior routing.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(433)
+verdicts = []
+def ab(name, a, **kw):
+    ours = fnp.sort(a, **kw)
+    theirs = np.sort(a, **kw)
+    if ours.tobytes() != theirs.tobytes() or str(ours.dtype) != str(theirs.dtype) or ours.shape != theirs.shape:
+        verdicts.append(f"FAIL {name}")
+def ustr(n, hi, w="U8"):
+    return np.array([f"id{v:06d}" for v in rng.integers(0, hi, n)], dtype=w)
+U = ustr(2_000_000, 500_000).reshape(2000, 1000)
+ab("2-D U8 default axis", U)
+ab("2-D U8 axis=1", U, axis=1)
+ab("2-D U8 axis=-1", U, axis=-1)
+ab("ties-heavy", ustr(1_600_000, 40).reshape(1600, 1000))
+ab("stable kind", U[:800], kind="stable")
+S = U.astype("S8")
+ab("2-D S8 bytes", S)
+ab("3-D lastaxis", ustr(1_920_000, 10**5).reshape(120, 100, 160))
+# defers keep prior routing/parity
+W = U[:400, :400].copy(); W[3, 5] = "Жxx"
+ab("wide codepoint delegate", W)
+ab("axis=0 delegate", U[:600, :600], axis=0)
+ab("axis=None flatten regression", U[:600, :600], axis=None)
+ab("1-D flat regression", U.ravel()[:600_000])
+ab("small delegate", U[:8, :8])
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.sort(U, axis=-1)); tf = best(lambda: fnp.sort(U, axis=-1))
+print(f"SORT_U8_LASTAXIS_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces SORT_U8_LASTAXIS_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "string lastaxis sort must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
