@@ -4,6 +4,41 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): small-pool int32 flat-sort SIMD regate - 1.034x vs favorable native control
+
+`WindyCardinal`, `fnp-python`. Pays the fresh-turn retry predicate in the blocker
+row immediately below. NumPy's AVX2 int32 qsort had already narrowed the native
+Rayon arm to 1.017x on a sampled many-core worker; the one lever now delegates
+flat int32 value sort to NumPy on AVX2 hosts below 16 Rayon threads. Pre-AVX2 and
+non-x86 hosts keep the native arm, sampled >=16-thread pools remain admitted,
+and i64/u32/u64 plus every non-int32 operation are unchanged.
+
+The same-data proof reconstructed the former production primitive as a favorable
+control: clone the exact 8,000,000-element int32 input into a fresh `Vec`, then
+`par_sort_unstable`. Before timing, candidate FNP, NumPy, and that native control
+produced identical output bytes. Integers have no NaN or signed-zero ambiguity;
+the gate changes only which already-proven value-sort implementation runs.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran with RCH
+self-healing disabled on requested and effective worker `vmi1149989` (job
+`j-29928833041828245`). `RCH_ENV_ALLOWLIST` forwarded the proof environment;
+the binary reported `rayon_threads=8`, AVX2 true, and NumPy 2.2.4. Ten samples,
+250 ms warm-up, one-second measurement, LTO disabled, 16 codegen units, and
+Cargo `-j1` measured the favorable old-native control at **49.609 ms**
+([45.258, 53.970]), regated FNP at **47.967 ms** ([45.901, 50.389]), and NumPy
+at **46.420 ms** ([44.365, 48.802]). The gate reduces median FNP latency 3.31%
+versus the favorable old-native reconstruction (**1.034x** throughput), while
+moving NumPy-relative throughput from 0.936x to 0.968x. The intervals overlap,
+so this is a modest keep; the control deliberately understates the old path's
+`numpy.empty` export cost and the dispatch change is isolated to the ledgered
+small-pool loss class.
+
+Production/bench source hashes were
+`137c5753e6af3da01af0f952730c247b48e3cb003bf030de83b05c4176f692f4` /
+`cf68b5a6728a1c3e2e4ef94eddd89e876c31ed791ae6cddb80adf3217ab7f488`.
+Per the one-benchmark immediate-commit instruction, no successive Cargo or
+conformance loop ran. KEEP; reopen only after NumPy's int32 sort basis changes.
+
 ## 2026-07-14 - BLOCKED (INVALID, NO SHIP): int32 flat-sort small-pool SIMD regate - requested Rayon pool was not admitted
 
 `WindyCardinal`, `fnp-python`. Negative-ledger-first follow-up of the explicit

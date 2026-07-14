@@ -2843,6 +2843,105 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_int32_flat_sort_small_pool_regate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_int32_flat_sort_small_pool_regate");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(1));
+    group.warm_up_time(Duration::from_millis(250));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let threads = rayon::current_num_threads();
+        assert_eq!(threads, 8, "proof row requires RAYON_NUM_THREADS=8");
+        #[cfg(target_arch = "x86_64")]
+        let avx2 = std::arch::is_x86_feature_detected!("avx2");
+        #[cfg(not(target_arch = "x86_64"))]
+        let avx2 = false;
+        assert!(avx2, "proof row requires NumPy's AVX2 int32 qsort basis");
+        eprintln!(
+            "INT32_SORT_REGATE host={} rayon_threads={threads} avx2={}",
+            std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_owned()),
+            avx2
+        );
+
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_sort = module.getattr("sort").expect("fnp sort");
+        let numpy_sort = numpy.getattr("sort").expect("numpy sort");
+        let rng = numpy
+            .getattr("random")
+            .expect("numpy.random")
+            .getattr("default_rng")
+            .expect("default_rng")
+            .call1((7_i64,))
+            .expect("rng");
+        let n = 8_000_000_usize;
+        let input = rng
+            .call_method1("integers", (-2_000_000_000_i64, 2_000_000_000_i64, n))
+            .expect("int32 raw")
+            .call_method1("astype", ("int32",))
+            .expect("int32 input");
+
+        // Exact same-data reconstruction of the former production primitive:
+        // allocate/copy, then Rayon comparison-sort. It is intentionally a
+        // favorable control (Vec clone rather than numpy.empty export), so a
+        // loss here is decisive evidence for delegating the small-pool basis.
+        let input_bytes: Vec<u8> = input
+            .call_method0("tobytes")
+            .expect("input bytes")
+            .extract()
+            .expect("extract input bytes");
+        let native_input: Vec<i32> = input_bytes
+            .chunks_exact(std::mem::size_of::<i32>())
+            .map(|bytes| i32::from_ne_bytes(bytes.try_into().expect("i32 bytes")))
+            .collect();
+        assert_eq!(native_input.len(), n);
+
+        // Correctness is outside the timed loop: candidate, NumPy, and the old
+        // native primitive must produce identical value-sort bytes.
+        let fnp_sorted = fnp_sort.call1((&input,)).expect("fnp sort parity");
+        let numpy_sorted = numpy_sort.call1((&input,)).expect("numpy sort parity");
+        let fnp_bytes: Vec<u8> = fnp_sorted
+            .call_method0("tobytes")
+            .expect("fnp bytes")
+            .extract()
+            .expect("extract fnp bytes");
+        let numpy_bytes: Vec<u8> = numpy_sorted
+            .call_method0("tobytes")
+            .expect("numpy bytes")
+            .extract()
+            .expect("extract numpy bytes");
+        assert_eq!(fnp_bytes, numpy_bytes, "regated int32 sort byte mismatch");
+        let mut native_sorted = native_input.clone();
+        native_sorted.par_sort_unstable();
+        assert!(
+            native_sorted
+                .iter()
+                .flat_map(|value| value.to_ne_bytes())
+                .eq(numpy_bytes.iter().copied()),
+            "native int32 control byte mismatch"
+        );
+
+        group.bench_function("control_native_int32_8m", |bench| {
+            bench.iter(|| {
+                let mut output = native_input.clone();
+                output.par_sort_unstable();
+                black_box(output)
+            });
+        });
+        group.bench_function("fnp_regated_int32_8m", |bench| {
+            bench.iter(|| black_box(fnp_sort.call1((&input,)).expect("fnp sort")));
+        });
+        group.bench_function("numpy_int32_8m", |bench| {
+            bench.iter(|| black_box(numpy_sort.call1((&input,)).expect("numpy sort")));
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_statistics_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_statistics_boundary");
     group.sample_size(10);
@@ -17081,6 +17180,7 @@ criterion_group!(
     bench_complex_exp_boundary,
     bench_f16_matmul_boundary,
     bench_flat_sort_dtype_boundary,
+    bench_int32_flat_sort_small_pool_regate,
     bench_statistics_boundary,
     bench_cov_large_boundary,
     bench_std_var_axis_boundary,
