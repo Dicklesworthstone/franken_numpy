@@ -4,6 +4,45 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - SHIP: one-pass rank-2 `rot90(k=2)` - 69.8x
+
+`IvoryTurtle`, bead `deadlock-audit-fs94s`, `fnp-ufunc`. Robot triage again
+offered only the prohibited f16 lane and the human-decision C-BLAS/fast-math
+lane, so this pass pivoted to the array-transformation core. Negative-ledger
+search found earlier Python view-boundary notes and the single-axis flip
+rewrite, but no attempt to collapse the Rust rank-2 half-turn itself.
+
+Profile/source attribution found `UFuncArray::rot90_axes(k=2)` materializing
+`flip(axis0)` and then `flip(axis1)`. Each call allocated an output and moved
+the entire value plane; at 393,216 elements the former path also crossed the
+parallel flip threshold twice. A rank-2 half-turn is exactly one reverse
+traversal of its contiguous plane, so ONE LEVER now collects values (and any
+lossless integer sidecar) in reverse order with one allocation and one pass.
+Higher-rank rotations retain the generic two-axis path.
+
+The same binary reconstructed the former two-flip path and asserted identical
+shape plus every `f64::to_bits()` result before timing, including negative zero
+and a noncanonical NaN payload. Exactly one foreground strict-remote command
+ran on requested and effective worker `vmi1149989` (job
+`j-29928833041828572`):
+
+`timeout --signal=TERM 300s env RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-ufunc --bench flip --profile release -- rot90_rank2_k2 --warm-up-time 0.25 --measurement-time 0.75 --sample-size 10 --noplot`
+
+The non-LTO release command returned in 115.1 seconds, including a 74.8-second
+cache-miss build. Criterion used 10 samples, a 250 ms warm-up, and a 750 ms
+measurement per arm:
+
+| arm | Criterion estimate |
+|---|---:|
+| former two flips | 5.0735 ms `[3.8149, 6.6696]` |
+| one reverse | **72.683 us** `[70.936, 76.437]` |
+
+The midpoint is 69.8x faster and the intervals are separated by roughly 50x
+even at their closest bounds. The pre-benchmark staged UBS Rust scan completed
+without findings attributable to the delta; the build emitted only the
+pre-existing `nan_filtered` dead-code warning. No second benchmark or
+verification loop ran. SHIPPED.
+
 ## 2026-07-14 - BENCH-BLOCKED (REVERTED): direct C-order `nditer` chunk range - cold conformance target hit 5-minute cap
 
 `IvoryTurtle`, bead `deadlock-audit-5cpda`, `fnp-iter`. Robot triage still

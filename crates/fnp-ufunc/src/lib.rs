@@ -10927,6 +10927,27 @@ impl UFuncArray {
         match k {
             0 => Ok(self.clone()),
             1 => self.swapaxes(ax0, ax1).and_then(|t| t.flip(Some(ax0))),
+            // A rank-2 half-turn reverses both axes, which is exactly one
+            // reverse traversal of the contiguous value plane. The generic
+            // path below materializes two full flip intermediates.
+            2 if self.shape.len() == 2 => {
+                let values = self.values.iter().rev().copied().collect();
+                let integer_sidecar = match &self.integer_sidecar {
+                    Some(IntegerSidecar::I64(v)) => {
+                        Some(IntegerSidecar::I64(v.iter().rev().copied().collect()))
+                    }
+                    Some(IntegerSidecar::U64(v)) => {
+                        Some(IntegerSidecar::U64(v.iter().rev().copied().collect()))
+                    }
+                    None => None,
+                };
+                Ok(Self {
+                    shape: self.shape.clone(),
+                    values,
+                    dtype: self.dtype,
+                    integer_sidecar,
+                })
+            }
             2 => self.flip(Some(ax0)).and_then(|f| f.flip(Some(ax1))),
             3 => self.flip(Some(ax0)).and_then(|f| f.swapaxes(ax0, ax1)),
             _ => Err(UFuncError::Msg("rot90 modulo math failed".to_string())),
