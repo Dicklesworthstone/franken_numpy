@@ -110,5 +110,53 @@ fn bench_take_axis_identity(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_take_axis, bench_take_axis_identity);
+fn former_fftshift_all_axes(arr: &UFuncArray, shape: &[usize]) -> UFuncArray {
+    let mut shifted = arr.clone();
+    for (axis, &len) in shape.iter().enumerate() {
+        if len == 0 {
+            continue;
+        }
+        shifted = shifted
+            .roll((len / 2) as isize, Some(axis as isize))
+            .unwrap();
+    }
+    shifted
+}
+
+fn bench_fftshift_singleton_axes(c: &mut Criterion) {
+    let shape = vec![1, 1, 1, 1, 131_072];
+    let n: usize = shape.iter().product();
+    let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.25 - 1.0).collect();
+    let arr = UFuncArray::new(shape.clone(), data, DType::F64).unwrap();
+
+    let control = former_fftshift_all_axes(&arr, &shape);
+    let candidate = arr.fftshift().unwrap();
+    assert_eq!(candidate.shape(), control.shape());
+    assert!(
+        candidate
+            .values()
+            .iter()
+            .zip(control.values())
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+
+    let mut group = c.benchmark_group("fftshift_singleton_axes");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    group.bench_function("former_roll0_clones_1x1x1x1x131072", |bench| {
+        bench.iter(|| black_box(former_fftshift_all_axes(black_box(&arr), &shape)))
+    });
+    group.bench_function("skip_zero_shift_1x1x1x1x131072", |bench| {
+        bench.iter(|| black_box(arr.fftshift().unwrap()))
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_take_axis,
+    bench_take_axis_identity,
+    bench_fftshift_singleton_axes
+);
 criterion_main!(benches);

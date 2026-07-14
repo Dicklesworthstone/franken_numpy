@@ -4,6 +4,52 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): singleton-axis `fftshift` skips zero-shift copies - 2.15x
+
+`WindyCardinal`, bead `deadlock-audit-gzdte`, FFT/`fnp-ufunc`. Robot triage's
+only unclaimed perf pick remained the stale opt-in C-BLAS/fast-math policy bead,
+which conflicts with the pure-safe-Rust directive, so this turn pivoted to a
+fresh FFT seam. Negative-ledger-first review found broad FFT parity rows but no
+singleton-axis shift result.
+
+Profile attribution: `frequency_shift_axes` first cloned the input, then called
+`roll(0, axis)` for every length-1 axis. `roll(0, axis)` itself returns another
+deep clone. A default `fftshift` on `[1,1,1,1,N]` therefore copied all `N`
+elements five times before performing the one nonzero final-axis rotation.
+
+ONE LEVER: after all axes have been normalized and validated, skip an axis when
+its computed half-length shift is zero. This removes only redundant
+`roll(0)` clones. Shape, dtype, value bits, integer sidecars, axis ordering,
+inverse direction, duplicate-axis behavior, and every nonzero shift are
+unchanged. The existing just-used `take_axis` permutation Criterion target
+carried a favorable exact former-path control. Before timing it asserted output
+shape and every f64 output bit on a small `[1,1,1,1,131072]` input.
+
+Exactly one foreground strict-remote command ran with LTO explicitly disabled:
+
+`RCH_WORKER=vmi1227854 RCH_WORKERS=vmi1227854 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-ufunc --bench take_axis --profile release -- fftshift_singleton_axes --noplot`
+
+RCH overrode the requested warm worker and admitted effective worker
+`vmi1149989` (job `j-29928833041828409`). Strict mode prevented local fallback;
+the permitted non-LTO release build cache-missed and finished in 65 seconds,
+with total RCH time 112.7 seconds. Per the one-run rule it was not rerun.
+Criterion used 10 samples, a 250 ms warm-up, and one-second measurement per arm:
+
+| arm | Criterion estimate |
+|---|---:|
+| former sequential `roll(0)` clones | 117.88 us `[113.84, 127.62]` |
+| skip zero-shift axes | **54.938 us** `[53.052, 58.472]` |
+
+Midpoint speedup is **2.1457x** (53.39% lower latency); even the former path's
+low bound is 1.9469x slower than the candidate's high bound. The equality
+assertions and command exited zero. The only compiler diagnostic was the
+pre-existing unused `nan_filtered` warning. No second benchmark, conformance,
+compile, or verification loop ran. Timed source SHA-256:
+`15dda2692d5714517167973d70c63dacae23c2b11e83983000d0b01ee78b1454`;
+proof-bench SHA-256:
+`150cc1c9bd9ada453e8d976cb84c33df431642c10696d7216397dd4d6e1d3535`.
+KEEP.
+
 ## 2026-07-14 - WIN (SHIP): full-axis identity `take` clones directly - 24.07x
 
 `WindyCardinal`, bead `deadlock-audit-l4uq0`, indexing/`fnp-ufunc`.

@@ -23114,6 +23114,9 @@ impl UFuncArray {
                 continue;
             }
             let shift = (len / 2) as isize;
+            if shift == 0 {
+                continue;
+            }
             let shift = if inverse { -shift } else { shift };
             shifted = shifted.roll(shift, Some(axis as isize))?;
         }
