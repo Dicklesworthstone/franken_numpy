@@ -4,6 +4,20 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - SPLIT (SHIP c64 / REJECT c128): complex np.select arms (0bca33ab)
+
+RainySparrow. c64 select via same-shape u64 view: 4.136x first gate run
+(49.6 vs 12.0ms, 3 conds x 4M), 2.573x on the noisier confirm - SHIPPED.
+c128 via a u64-PAIR variant (element multiplier 2): 1.020x - REJECTED;
+the per-u64-unit i/em cond indexing doubles cond lookups and halves
+throughput while numpy's own c128 passes are memory-bound fast (66ms at
+4M). Excluded in-source at the ("c",16) gate with the measurement.
+Retry predicate: a [u64;2]-chunked fill (one cond lookup per LOGICAL
+element, chunks_exact_mut(2)) - only worth building if a profile ranks
+c128 select. LESSON (pair-move class): when an element spans multiple
+move units, index conds per LOGICAL element, not per unit - the naive
+i/em division shows up directly as lost bandwidth.
+
 ## 2026-07-14 - REJECT-BY-PROBE: ufunc.reduceat - numpy's segmented reduce is memory-bound saturated (8fb19e0d)
 
 RainySparrow, worker vmi1149989 (numpy 2.2.4). The last unprobed
