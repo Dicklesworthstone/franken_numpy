@@ -310,3 +310,74 @@ print(all_pass)
     );
     Ok(())
 }
+
+#[test]
+fn diff_f16_1d_parallel_matches_numpy() -> Result<(), String> {
+    // The native candidate widens each adjacent binary16 pair to binary32,
+    // subtracts, and narrows once. Exercise byte parity plus every warning
+    // class that must stay on NumPy's delegated path.
+    let script = fnp_script(
+        r#"
+import time
+import warnings
+verdicts = []
+rng = np.random.default_rng(20260714)
+n = 1 << 21
+a = (rng.standard_normal(n) * 2).astype(np.float16)
+
+def same(tag, arr, **kwargs):
+    with warnings.catch_warnings(record=True) as wf:
+        warnings.simplefilter("always")
+        r = fnp.diff(arr, **kwargs)
+    with warnings.catch_warnings(record=True) as wn:
+        warnings.simplefilter("always")
+        e = np.diff(arr, **kwargs)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL bytes {tag}")
+    if [(w.category.__name__, str(w.message)) for w in wf] != [(w.category.__name__, str(w.message)) for w in wn]:
+        verdicts.append(f"FAIL warnings {tag}")
+
+same("random", a)
+edges = np.array([0.0, -0.0, 6e-8, -6e-8, 65504.0, 65472.0,
+                  -65504.0, 0.5, np.inf, 1.0, -np.inf, -1.0,
+                  2048.0, 2050.0], dtype=np.float16)
+same("edge-cycle", np.tile(edges, n // edges.size + 1)[:n])
+for tag, pair in (
+    ("nan", (np.float16(np.nan), np.float16(1.0))),
+    ("finite-overflow", (np.float16(-65504.0), np.float16(65504.0))),
+    ("positive-inf-invalid", (np.float16(np.inf), np.float16(np.inf))),
+    ("negative-inf-invalid", (np.float16(-np.inf), np.float16(-np.inf))),
+):
+    h = a.copy()
+    h[500000:500002] = pair
+    same(tag, h)
+same("below-gate", a[:4096])
+same("2d-delegate", a[:1 << 20].reshape(1024, 1024), axis=1)
+same("n2-delegate", a, n=2)
+
+def best(fn, reps=5):
+    fn()
+    samples = []
+    for _ in range(reps):
+        t0 = time.perf_counter()
+        fn()
+        samples.append((time.perf_counter() - t0) * 1e3)
+    return min(samples)
+
+timed = (rng.standard_normal(8_000_000) * 2).astype(np.float16)
+tn = best(lambda: np.diff(timed))
+tf = best(lambda: fnp.diff(timed))
+print(f"DIFF_F16_8M_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}");
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "f16 1-D diff must match NumPy bytes and warnings: {result}"
+    );
+    Ok(())
+}

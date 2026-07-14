@@ -4,6 +4,40 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): parallel float16 1-D `np.diff` - 15.31x fnp self-speedup, 2.34x vs NumPy
+
+`WindyCardinal`. Negative-ledger-first closeout of the parked `f16 diff widen kernel` residual.
+The one lever admits only exact, C-contiguous, 1-D float16 ndarrays for `n=1`, axis `0/-1`, at
+least `1<<20` elements, and at least two Rayon threads. It views the input/output as `u16`, widens
+each adjacent binary16 pair to binary32, subtracts, narrows once, and fills independent chunks in
+parallel. Every unsupported shape, dtype, size, order, subclass, kwarg form, and higher-order diff
+retains the existing path.
+
+Warning-sensitive values are fail-closed to `numpy.diff`: any NaN operand, any adjacent pair of
+infinities, or a finite pair whose narrowed difference overflows float16. This is also a correctness
+repair. The pre-change generic float16 path produced the right bytes but swallowed NumPy's
+`overflow encountered in subtract` and `invalid value encountered in subtract` warnings. Raw
+dtype/shape/byte and warning-category/message parity now passes for random finite data, signed zero,
+subnormals, infinities, NaN, finite overflow, both `+inf - +inf` and `-inf - -inf`, below-gate input,
+2-D delegation, and `n=2` delegation. The locked harness is
+`diff_f16_1d_parallel_matches_numpy`.
+
+Strict remote-only same-worker `release-perf` foreground A/B on `vmi1149989` (8,000,000 float16
+elements, best of 5, LTO disabled, 16 codegen units, Cargo `-j1`): the pre-change run measured
+NumPy 26.698 ms / fnp 162.552 ms = 0.164x (`j-29928833041827646`) and failed only the four
+warning-parity rows described above. The candidate measured NumPy 24.890 ms / fnp 10.618 ms =
+2.344x (`j-29928833041827682`) with all batteries green. Candidate fnp latency is 93.47% below
+baseline fnp (15.31x faster).
+
+The baseline production-source hash was
+`52565670f8c54318856b0b2b05d5a1ada49f88060f4d81ca66eb69a6cda5b107`; candidate source was
+`471b031d0247c722c3fbe5d4cffbef1bd245f12c50cb58fe845c094998dbb697`, and the test hash was
+`2a542637ca4a7493c3d0769e9d66f4cec4bd9544a1b495934792b662c5703b28`. The candidate snapshot
+also contained the peer's disjoint `np.block` helper, subsequently committed as `67929ee7`; it is
+unreachable from `diff`. Main then advanced through the likewise-disjoint decreasing-bins
+`digitize` commit `b120404c`; strict-remote workspace check passed on that final parent plus this
+candidate. The 15.31x separation is decisive. KEEP. The parked f16 diff residual is closed.
+
 ## 2026-07-14 - SPLIT (SHIP c64 / REJECT c128): complex np.select arms (0bca33ab)
 
 RainySparrow. c64 select via same-shape u64 view: 4.136x first gate run
