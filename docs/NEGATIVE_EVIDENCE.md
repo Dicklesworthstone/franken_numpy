@@ -4,6 +4,31 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - BLOCKED (INVALID, NO SHIP): int32 flat-sort small-pool SIMD regate - requested Rayon pool was not admitted
+
+`WindyCardinal`, `fnp-python`. Negative-ledger-first follow-up of the explicit
+2026-07-13 int-sort re-probe item: the int32 native flat-sort arm was only
+1.017x on the sampled many-core worker, so the candidate would have delegated
+to NumPy's AVX2 SIMD qsort below 16 Rayon threads while leaving i64/u32/u64 and
+pre-AVX2/non-x86 paths unchanged. The proof vehicle reconstructed the former
+copy-plus-`par_sort_unstable` primitive on the same 8,000,000-element input and
+would have compared it with regated FNP and NumPy after byte-parity assertions.
+
+Exactly one strict remote-only `release-perf` Criterion invocation ran with RCH
+self-healing disabled on requested and effective worker `vmi1149989` (job
+`j-29928833041828219`). The command requested `RAYON_NUM_THREADS=8`, but the
+remote process reported `rayon::current_num_threads() == 10`. The proof guard
+failed closed before parity or any Criterion timing and exited 101; therefore
+this run contains **no valid performance evidence**. The edited production and
+bench sources compiled remotely before that guard, with only pre-existing
+warnings, but compilation is not grounds to ship an unmeasured dispatch gate.
+
+Per the one-benchmark/no-successive-loop instruction, no retry or substitute
+local run was attempted. The production and benchmark edits were reverted and
+only this blocker row is landed. Retry predicate: in a fresh turn, use an RCH
+worker-side environment mechanism that proves the requested Rayon pool before
+timing, then run the same native-control/FNP/NumPy comparison once. HOLD.
+
 ## 2026-07-14 - WIN (SHIP): small-pool f64 axis-sort SIMD regate - 0.579x loss to 1.007x parity
 
 `WindyCardinal`, `fnp-python`. Negative-ledger-first closeout of the explicit
