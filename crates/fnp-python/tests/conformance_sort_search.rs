@@ -753,6 +753,84 @@ print(verdicts if verdicts else True)
     Ok(())
 }
 
+#[test]
+fn unique_struct_int64_nd_return_flags_match_numpy() -> Result<(), String> {
+    // axis=None flattens structured records in C order while return_inverse
+    // recovers the input shape. Lock the all-int64 record factorizer's N-D
+    // admission and its existing fallback boundaries byte-for-byte.
+    let script = fnp_script(
+        r#"
+import time
+
+rng = np.random.default_rng(811)
+verdicts = []
+dt = np.dtype([("x", "<i8"), ("y", "<i8"), ("z", "<i8")])
+
+def records(shape, distinct):
+    keys = rng.integers(0, distinct, int(np.prod(shape)), dtype=np.int64)
+    out = np.empty(keys.size, dtype=dt)
+    out["x"] = keys
+    out["y"] = keys * 3 - 17
+    out["z"] = (keys % 997) * 11
+    return out.reshape(shape)
+
+def outcome(fn, value, **kwargs):
+    try:
+        result = fn(value, **kwargs)
+        fields = result if isinstance(result, tuple) else (result,)
+        return (
+            "ok",
+            type(result).__name__,
+            tuple((type(field).__name__, str(np.asarray(field).dtype), tuple(np.asarray(field).shape), np.asarray(field).tobytes()) for field in fields),
+        )
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+def ab(name, value, **kwargs):
+    ours = outcome(fnp.unique, value, **kwargs)
+    theirs = outcome(np.unique, value, **kwargs)
+    if ours != theirs:
+        verdicts.append(f"FAIL {name}")
+
+two_d = records((320, 512), 57_000)
+three_d = records((80, 64, 32), 61_000)
+ab("2-D all flags", two_d, return_index=True, return_inverse=True, return_counts=True)
+ab("3-D inverse only", three_d, return_inverse=True)
+ab("explicit axis=None", two_d, axis=None, return_index=True, return_inverse=True, return_counts=True)
+ab("F-contiguous defer", np.asfortranarray(three_d), return_inverse=True, return_counts=True)
+ab("0-D defer", records((1,), 1).reshape(()), return_inverse=True, return_counts=True)
+
+probe = records((512, 1024), 180_000)
+expected = np.unique(probe, return_index=True, return_inverse=True, return_counts=True)
+actual = fnp.unique(probe, return_index=True, return_inverse=True, return_counts=True)
+if outcome(lambda _: actual, None) != outcome(lambda _: expected, None):
+    verdicts.append("FAIL foreground parity")
+
+def best(fn, reps=3):
+    samples = []
+    for _ in range(reps):
+        start = time.perf_counter()
+        fn()
+        samples.append((time.perf_counter() - start) * 1e3)
+    return min(samples)
+
+numpy_ms = best(lambda: np.unique(probe, return_index=True, return_inverse=True, return_counts=True))
+fnp_ms = best(lambda: fnp.unique(probe, return_index=True, return_inverse=True, return_counts=True))
+print(f"UNIQUE_STRUCT_I64_ND_FULL_AB numpy_ms={numpy_ms:.3f} fnp_ms={fnp_ms:.3f} ratio={numpy_ms / fnp_ms:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}");
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "N-D all-int64 structured unique return flags must match NumPy exactly: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // searchsorted
 // ─────────────────────────────────────────────────────────────────────────────

@@ -31,6 +31,35 @@ __call__ arms mined (historic), .at CLOSED (order-free int scatter,
 numpy's saturated pairwise sum (skip), .reduceat saturated (this
 probe), .outer == broadcasted call (covered). Retry predicate: none.
 
+## 2026-07-14 - WIN (SHIP): C-contiguous N-D all-int64 structured `unique(return_*)` - 6.34x fnp speedup
+
+`WindyCardinal`. Negative-ledger-first follow-up to the string ship's remaining structured
+`unique kwarg-forms N-D` residual, narrowed to the all-int64 factorizer only. Its proven 1-D
+kernel already treats one structured record as one int64 row; the one lever admits non-scalar
+C-contiguous N-D inputs, derives the record count from full `size`, runs the unchanged flattened
+row factorizer, and reshapes only `return_inverse` to the original input shape. Unique values,
+index, and counts remain 1-D; indices remain C-ravel positions. Exact-ndarray, field-layout,
+endianness, contiguity, scalar, size, and worker gates remain fail-closed to NumPy. The mixed-field
+value-lex `_full` helper remains open and was not widened here.
+
+Raw outcome parity (success/error class, tuple/output types, dtype, shape, and bytes) passed for
+2-D all flags, 3-D inverse-only, explicit `axis=None`, F-contiguous delegation, 0-D delegation,
+and the timed foreground row. Ordering and first-occurrence tie-breaking still come from the
+existing stable record factorizer; floating-point and RNG semantics are not involved. The locked
+harness is `unique_struct_int64_nd_return_flags_match_numpy`.
+
+Strict remote-only, same-worker `release-perf` foreground A/B on `vmi1149989` (524,288 records,
+shape 512x1024, three `<i8` fields, duplicate-heavy grid, all three return flags, best of 3; LTO
+disabled and 16 codegen units): delegated baseline NumPy 673.935 ms / fnp 618.635 ms = 1.089x
+(`j-29928833041827501`); candidate NumPy 784.564 ms / fnp 97.558 ms = 8.042x
+(`j-29928833041827513`). Candidate fnp latency is 84.23% below baseline fnp (6.341x faster),
+despite the candidate's NumPy control being 16.4% slower. Baseline source hash was
+`e16503e2d421433218aed531aa0698391b61298562b50ed4b4dd191f757d261c`; candidate was
+`a9e7b4973506fb6e3e840fc5418e2d90431a7ce9cec36e1cc13a424272228280`. Both snapshots
+contained the same concurrent, disjoint c64 `select`
+worktree edit, subsequently landed as `0bca33ab` with evidence in `b84ec7a9`; therefore the only
+source delta between the paired builds was this structured-unique lever. KEEP.
+
 ## 2026-07-13 - WIN (SHIP): C-contiguous N-D fixed-width string `unique(return_*)` - 4.97x fnp speedup
 
 `WindyCardinal`. Negative-ledger-first follow-up to the input-form sweep's final explicit
