@@ -4,6 +4,40 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): small-pool f64 axis-sort SIMD regate - 0.579x loss to 1.007x parity
+
+`WindyCardinal`, `fnp-python`. Negative-ledger-first closeout of the explicit
+cores-aware-gate item in the 2026-07-13 flat-f64-sort SIMD regate. NumPy's AVX2
+f64 qsort had made the native per-axis Rayon sort a measured 0.579x loss on a
+small worker even though the same native arms retained their prior wins on the
+sampled many-core workers. The one lever now requires at least 16 Rayon threads
+for the last-axis, axis-0, and middle-axis f64 value-sort arms when NumPy has an
+AVX2-class SIMD qsort. Smaller pools delegate directly to NumPy.
+
+The existing flat f64 gate is unchanged. Pre-AVX2/non-x86 hosts keep all axis
+arms, sampled many-core hosts stay admitted, and f64 argsort plus every other
+dtype and operation retain their prior dispatch. Before timing, the Criterion
+vehicle compared the raw bytes of FNP and NumPy last-axis sort results for a
+finite random `(2048, 2048)` f64 matrix; the assertion passed.
+
+Exactly one valid strict remote-only `release-perf` Criterion invocation ran
+with RCH self-healing disabled on requested and effective worker `vmi1149989`
+(job `j-29928833041828184`). The remote runner pinned `RAYON_NUM_THREADS=8`
+and reported AVX2-only NumPy 2.2.4. With ten samples, 250 ms warm-up, one-second
+measurement, LTO disabled, 16 codegen units, and Cargo `-j1`, regated FNP
+measured **26,482,922 ns/iter** (+/- 2,976,143) versus NumPy at
+**26,674,041 ns/iter** (+/- 1,767,775): **1.007x** NumPy/FNP throughput parity,
+removing the ledgered 42.1% throughput deficit. The proof binary SHA-256 was
+`f17578375a223633aa566c2cc9f15db5aafbedd78ca697afd111acaf16c66d7c`.
+
+An earlier submission (`j-29928833041828180`) ignored the requested `hz1`
+preference and was cancelled during source sync before Cargo or timing; it is
+invalid and excluded. Final production/bench source hashes were
+`ba4d7d25100578ba40a7029f9c010f1d23d39c654904e0401aff69f1e5e73337` /
+`98767eebf6a03e8f3666449d3752a9b0cbc8a8ee96487a5ca0c7e0d4dae9f527`.
+Per the one-benchmark immediate-commit instruction, no successive Cargo or
+conformance loop ran. KEEP.
+
 ## 2026-07-14 - WIN (SHIP): exact-integer `meshgrid` block-fills bridge and sidecar payloads - 2.79x
 
 `WindyCardinal`, `fnp-ufunc`. Negative-ledger-first closure of the explicit

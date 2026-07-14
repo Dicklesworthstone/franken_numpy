@@ -11638,6 +11638,29 @@ m3b = rng.standard_normal((256, 256, 64))\n";
         let mshort = ns.get_item("mshort").expect("mshort");
         let m3 = ns.get_item("m3").expect("m3");
         let m3b = ns.get_item("m3b").expect("m3b");
+        // This group is also the foreground proof vehicle for the cores-aware
+        // f64 value-sort gate. Keep the parity assertion outside the timed loop.
+        let fnp_sorted = module
+            .getattr("sort")
+            .expect("fnp sort")
+            .call1((&m,))
+            .expect("fnp sort parity");
+        let numpy_sorted = numpy
+            .getattr("sort")
+            .expect("numpy sort")
+            .call1((&m,))
+            .expect("numpy sort parity");
+        let fnp_bytes: Vec<u8> = fnp_sorted
+            .call_method0("tobytes")
+            .expect("fnp sort bytes")
+            .extract()
+            .expect("extract fnp sort bytes");
+        let numpy_bytes: Vec<u8> = numpy_sorted
+            .call_method0("tobytes")
+            .expect("numpy sort bytes")
+            .extract()
+            .expect("extract numpy sort bytes");
+        assert_eq!(fnp_bytes, numpy_bytes, "f64 last-axis sort byte mismatch");
         for op in ["sort", "argsort"] {
             let fnp_fn = module.getattr(op).expect("fnp op");
             let numpy_fn = numpy.getattr(op).expect("numpy op");
