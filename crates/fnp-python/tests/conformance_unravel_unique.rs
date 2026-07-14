@@ -3044,3 +3044,53 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn f64_intersect1d_stale_basis_probe_and_parity() -> Result<(), String> {
+    // The stale-basis family sweep's next member (the whole-family rule from
+    // the unique regate): try_zerocopy_f64_intersect1d_native par_sorts both
+    // inputs + merges, priced against numpy's unique+sort chain which is now
+    // AVX-512-introsort-based. Parity rows pin the live routing; AB rows
+    // decide keep/regate.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(461)
+verdicts = []
+def ab(name, a, b):
+    if fnp.intersect1d(a, b).tobytes() != np.intersect1d(a, b).tobytes():
+        verdicts.append(f"FAIL {name}")
+a = rng.standard_normal(4_000_000)
+b = np.concatenate([a[::3], rng.standard_normal(2_000_000)])
+rng.shuffle(b)
+ab("overlapping distinct", a, b)
+t1 = np.round(rng.standard_normal(4_000_000), 2)
+t2 = np.round(rng.standard_normal(4_000_000), 2)
+t1[t1 == 0.0] = 0.25; t2[t2 == 0.0] = 0.25
+ab("dense ties", t1, t2)
+ab("small", a[:1000], b[:1000])
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.intersect1d(a, b)); tf = best(lambda: fnp.intersect1d(a, b))
+print(f"INTERSECT_F64_DISTINCT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn2 = best(lambda: np.intersect1d(t1, t2)); tf2 = best(lambda: fnp.intersect1d(t1, t2))
+print(f"INTERSECT_F64_TIES_AB numpy_ms={tn2:.3f} fnp_ms={tf2:.3f} ratio={tn2 / tf2:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces INTERSECT_F64_DISTINCT_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "f64 intersect1d must stay bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
