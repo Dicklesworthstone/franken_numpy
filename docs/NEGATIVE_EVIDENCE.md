@@ -4,6 +4,46 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - BENCH-BLOCKED (REVERTED): direct C-order `nditer` chunk range - cold conformance target hit 5-minute cap
+
+`IvoryTurtle`, bead `deadlock-audit-5cpda`, `fnp-iter`. Robot triage still
+offered only the prohibited f16 lane and the human-decision C-BLAS/fast-math
+lane, so this pass pivoted from the noisy text-I/O no-ship to the previously
+unmined iterator subsystem. Negative-ledger search found no prior C-order
+external-loop index-conversion attempt.
+
+Profile/source attribution found that `operand_linear_indices_for_chunk`
+converted every C-order logical index into a newly allocated multi-index and
+then re-linearized it in C order. For the proof workload's single rank-4,
+65,536-element external-loop chunk, the former path therefore performed 65,536
+temporary vector allocations plus division/modulo work to emit the identity
+range `0..65_536`.
+
+ONE LEVER returned that already-validated contiguous range directly for C
+order, leaving F-order conversion unchanged. A same-binary former-path control
+and complete `NditerStep` equality assertion were embedded before Criterion,
+but the proof never executed because the existing cross-workspace
+`criterion_core_ops` target was not warm.
+
+Exactly one foreground strict-remote command ran on requested and effective
+worker `vmi1149989` (job `j-29928833041828557`):
+
+`timeout --signal=TERM 300s env RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-conformance --bench criterion_core_ops --profile release -- nditer_c_external_chunk --noplot`
+
+The permitted non-LTO release build cold-compiled the conformance target's
+large dependency fanout and reached `Compiling fnp-conformance`, but did not
+emit `Finished` or launch Criterion before the foreground hard cap returned
+exit 124 at 300 seconds. No timing was recorded, no second compile or benchmark
+ran, and the production plus proof-benchmark hunks were manually restored.
+Attempted source SHA-256:
+`0b911a28e5d3225a83e6940414f68e853b72f3cb25446cd022fd1c512d6b3bd0`;
+attempted proof-bench SHA-256:
+`fe86b131ac6be7ff91512f847556a4e107a2c982a901cf7124b3990af6335b62`.
+
+Retry only with an already-warm binary or a dedicated lightweight `fnp-iter`
+Criterion target. Do not retry through a cold `fnp-conformance` build under the
+same cap. BENCH-BLOCKED.
+
 ## 2026-07-14 - NO-SHIP (REVERTED): hoisted `loadtxt(usecols)` row plan - noisy 1.10x point estimate
 
 `IvoryTurtle`, bead `deadlock-audit-x6teb`, `fnp-io`. Robot triage still
