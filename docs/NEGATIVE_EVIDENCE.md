@@ -4,6 +4,52 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - NO-SHIP (REVERTED): hoisted `loadtxt(usecols)` row plan - noisy 1.10x point estimate
+
+`IvoryTurtle`, bead `deadlock-audit-x6teb`, `fnp-io`. Robot triage still
+offered only the prohibited f16 lane and the human-decision C-BLAS/fast-math
+lane, so this pass pivoted away from the thinning structured-Cholesky seam to
+a fresh text-I/O parser primitive. Negative-ledger search found no prior
+`loadtxt` row-plan allocation attempt.
+
+Profile/source attribution found that unquoted `loadtxt_usecols` rebuilt the
+same `BTreeMap<column, output positions>` for every accepted row. The proof
+workload selected `[13, 1, 7, 13]` from 8,192 rows by 16 columns, so the former
+path created at least three inner position-vector allocations per row (24,576
+total), plus repeated tree construction, even though `usecols` is invariant.
+
+ONE LEVER hoisted that immutable plan once per call. A same-binary former-path
+control retained per-row planning, and the benchmark asserted identical row
+counts, column counts, and every parsed `f64` value before timing; duplicate
+and out-of-order selections were deliberately present.
+
+Exactly one foreground strict-remote command ran on requested and effective
+worker `vmi1149989` (job `j-29928833041828548`):
+
+`RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-io --bench criterion_io --profile release -- loadtxt_usecols_plan --noplot`
+
+The permitted non-LTO release build completed in 30.22 seconds and the full
+foreground command returned in 77.6 seconds. Criterion used 10 samples, a
+250 ms warm-up, and a 750 ms measurement per arm:
+
+| arm | Criterion estimate |
+|---|---:|
+| former per-row planner | 3.7196 ms `[3.4458, 3.8892]` |
+| hoisted-plan candidate | **3.3882 ms** `[2.9800, 3.7676]` |
+
+The midpoint is 1.0978x faster (8.91% lower latency), but the confidence
+intervals overlap substantially: the candidate high bound is slower than the
+control low bound. Under the one-shot gate this is directional evidence, not a
+defensible real win. No second benchmark or verification loop ran; production
+and proof-benchmark hunks were manually restored. Attempted source SHA-256:
+`d2dcbe8de073a7c5f60ff4d2eab5edf5bffcd1da7a87cdc939b1afe78167c758`;
+attempted proof-bench SHA-256:
+`87eaabfaf7da9dcef6f144764563ba04cc62368c68afc16636fba5032fc0ec55`.
+
+Retry only with a lower-variance already-warm binary or allocation-count
+evidence plus a predeclared significance floor. Do not ship from this noisy
+single measurement. NO-SHIP.
+
 ## 2026-07-14 - REJECT (REVERTED): naive exact-pentadiagonal Cholesky recurrence - blocked-path bit drift
 
 `IvoryTurtle`, bead `deadlock-audit-mxun8`, `fnp-linalg`. Robot triage still
