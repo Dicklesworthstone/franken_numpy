@@ -3094,3 +3094,55 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn f64_setdiff1d_native_matches_numpy() -> Result<(), String> {
+    // f64 setdiff1d arm (twin of the intersect arm, small-output setop rule):
+    // par_sort + dedup + subtract-merge for the distinct-ish NaN-free regime;
+    // tie-dense inputs defer via the sampled oracle (numpy's unique collapse
+    // wins there), NaN / -0.0 defer, assume_unique delegates.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(463)
+verdicts = []
+def ab(name, a, b, **kw):
+    if fnp.setdiff1d(a, b, **kw).tobytes() != np.setdiff1d(a, b, **kw).tobytes():
+        verdicts.append(f"FAIL {name}")
+a = rng.standard_normal(4_000_000)
+b = np.concatenate([a[::3], rng.standard_normal(2_000_000)])
+rng.shuffle(b)
+ab("overlapping distinct", a, b)
+ab("disjoint", rng.standard_normal(3_000_000) + 100.0, rng.standard_normal(3_000_000) - 100.0)
+t1 = np.round(rng.standard_normal(4_000_000), 2); t1[t1 == 0.0] = 0.25
+t2 = np.round(rng.standard_normal(4_000_000), 2); t2[t2 == 0.0] = 0.25
+ab("dense ties defer", t1, t2)
+n1 = a.copy(); n1[7] = np.nan
+ab("nan defer", n1, b)
+z1 = a.copy(); z1[9] = -0.0
+ab("-0.0 defer", z1, b)
+ab("assume_unique delegate", np.unique(a)[:1_000_000], np.unique(b)[:1_000_000], assume_unique=True)
+ab("small", a[:1000], b[:1000])
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.setdiff1d(a, b)); tf = best(lambda: fnp.setdiff1d(a, b))
+print(f"SETDIFF_F64_DISTINCT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces SETDIFF_F64_DISTINCT_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "f64 setdiff1d must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
