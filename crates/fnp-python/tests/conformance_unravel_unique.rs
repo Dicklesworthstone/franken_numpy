@@ -2997,3 +2997,50 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn f64_unique_flat_stale_basis_probe_and_parity() -> Result<(), String> {
+    // Completes the post-numpy-2.4.6 stale-basis sweep (tick 32 re-ran
+    // sort/argsort/dt64 but missed unique): the shipped f64 unique flat arm
+    // (par_sort + dedup) predates numpy's AVX-512 introsort, the same basis
+    // shift that regated flat f64 sort at 0.60x. Parity rows pin whatever
+    // routing is live; the AB rows price the arm for the keep/regate call.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(457)
+verdicts = []
+def ab(name, a):
+    if fnp.unique(a).tobytes() != np.unique(a).tobytes():
+        verdicts.append(f"FAIL {name}")
+f = rng.standard_normal(8_000_000)
+ab("flat distinct-ish", f)
+d = np.round(rng.standard_normal(8_000_000), 2)
+d[d == 0.0] = 0.25  # single-sign zeros only (mixed-sign defers by design)
+ab("flat dense ties", d)
+ab("small", f[:1000])
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.unique(f)); tf = best(lambda: fnp.unique(f))
+print(f"UNIQUE_F64_DISTINCT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn2 = best(lambda: np.unique(d)); tf2 = best(lambda: fnp.unique(d))
+print(f"UNIQUE_F64_TIES_AB numpy_ms={tn2:.3f} fnp_ms={tf2:.3f} ratio={tn2 / tf2:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces UNIQUE_F64_DISTINCT_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last,
+        "True",
+        "f64 unique must stay bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
