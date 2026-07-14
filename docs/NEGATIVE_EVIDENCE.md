@@ -4,6 +4,52 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): singleton-axis cumulative direct write - 19.10x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.285`, reductions/`fnp-ufunc`. Robot
+triage again offered only the out-of-policy C-BLAS/fast-math perf leaf. The
+negative ledger already covered long last-axis lanes, flat integer prefixes,
+and non-last-axis cumulative parallelism, but contained no singleton-axis row,
+so this pass pivoted from triangular indexing to cumulative reductions.
+
+Profile/source attribution showed `cumulate_axis` zero-filled the entire output
+and, for `[N, 1]` reduced along axis 1, dispatched Rayon over `N` one-element
+lanes. Every lane performs exactly one `fold(identity, value)`. ONE LEVER maps
+that same floating operation directly into the destination when `axis_len == 1`,
+removing the redundant full-buffer fill and tiny-lane dispatch. The exact add or
+multiply still executes, so signed-zero, NaN payload, infinity, dtype, shape,
+and accumulation semantics are unchanged. All axes longer than one retain the
+existing cumulative kernels; the shared helper covers both f64 `cumsum` and
+`cumprod`.
+
+The existing `cumminmax` Criterion binary gained a focused 262,144-element
+`[N,1]` cumsum A/B. Its control faithfully reproduces the former zero-fill plus
+one-element Rayon scans. Before timing, the candidate was asserted shape-,
+dtype-, and raw-bit-equal over data containing `-0.0`, a fixed NaN payload, and
+both infinities. Exactly one foreground strict-remote, explicitly non-LTO
+release command ran on requested and effective worker `vmi1227854` (job
+`j-29928833041828683`):
+
+`RCH_WORKER=vmi1227854 RCH_WORKERS=vmi1227854 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-ufunc --bench cumminmax --profile release -- cumsum_singleton_axis --warm-up-time 0.25 --measurement-time 0.75 --sample-size 10 --noplot`
+
+The cache missed, but the non-LTO release build completed in 69.0 seconds and
+the full RCH command returned in 110.8 seconds, below the five-minute cap:
+
+| arm | Criterion estimate |
+|---|---:|
+| former zero-fill plus Rayon lanes | 918.92 us `[788.76 us, 1.1448 ms]` |
+| direct identity-fold map | **48.120 us** `[47.153, 49.647]` |
+
+Midpoint speedup is **19.096x** (94.76% lower latency); even the former low
+bound is 15.887x slower than the candidate high bound. The equality assertions
+and command exited zero. The only compiler diagnostic was the pre-existing
+unused `nan_filtered` warning. No second benchmark, compile, conformance, or
+verification loop ran. Timed source SHA-256:
+`c9be741c12af2108e9cc076c924a18209f79feadf16fa339563afa0532f741e4`;
+proof-bench SHA-256:
+`ed1e028c487fd29e189897534bc9a00c738938189ad289c8b03d3cd73f751ae3`.
+KEEP.
+
 ## 2026-07-14 - WIN (SHIP): fully-kept `triu`/`tril` masks clone directly - 2.80x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.284`, triangular indexing/`fnp-ufunc`.

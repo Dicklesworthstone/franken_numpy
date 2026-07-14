@@ -33395,13 +33395,21 @@ fn cumulate_axis(
 ) -> Result<Vec<f64>, UFuncError> {
     debug_assert!(axis < shape.len());
     let total = element_count(shape).map_err(UFuncError::Shape)?;
-    let mut out = vec![0.0; total];
-
     let axis_len = shape[axis];
     if axis_len == 0 || total == 0 {
-        return Ok(out);
+        return Ok(vec![0.0; total]);
+    }
+    if axis_len == 1 {
+        // Every lane performs exactly one `fold(identity, value)`. Write that
+        // result directly instead of zero-filling the output and dispatching
+        // one-element scan lanes through Rayon.
+        return Ok(values
+            .iter()
+            .map(|&value| fold(identity, value))
+            .collect());
     }
 
+    let mut out = vec![0.0; total];
     let inner: usize = fnp_ndarray::element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?;
     let outer: usize = fnp_ndarray::element_count(&shape[..axis]).map_err(UFuncError::Shape)?;
 
