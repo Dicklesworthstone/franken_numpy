@@ -17,6 +17,35 @@ __call__ arms mined (historic), .at CLOSED (order-free int scatter,
 numpy's saturated pairwise sum (skip), .reduceat saturated (this
 probe), .outer == broadcasted call (covered). Retry predicate: none.
 
+## 2026-07-13 - WIN (SHIP): C-contiguous N-D fixed-width string `unique(return_*)` - 4.97x fnp speedup
+
+`WindyCardinal`. Negative-ledger-first follow-up to the input-form sweep's final explicit
+`unique kwarg-forms N-D for string/struct _full kernels` residual, scoped to the string half only.
+The shipped string factorizer already computes its record count from the full shape product,
+consumes the C-contiguous byte buffer in flat order, and reshapes `return_inverse` to `a.shape`.
+The one lever removes only its 1-D admission rejection. Exact-ndarray, C-contiguous, dtype,
+width, Latin-1, size, and thread gates are unchanged, and every declined input still reaches the
+original NumPy delegate. Structured `_full` remains open because its helpers use first-axis
+`len()` and emit a flat inverse; it was not widened here.
+
+Raw outcome parity (success/error class, tuple/output types, dtype, shape, and bytes) passed for
+U8 2-D with all flags and inverse-only, S6 3-D with all flags, F-contiguous defer, and wide-codepoint
+Unicode defer. In particular, values/index/counts remain 1-D while inverse recovers the original
+N-D shape, matching NumPy 2.0+. The locked harness is `unique_string_nd_return_flags_match_numpy`.
+Strict remote-only, same-worker `release-perf` foreground A/B on `vmi1264463` (524,288 U8 records,
+shape 512x1024, all three return flags, best of 3; LTO disabled and 16 codegen units): delegated
+baseline NumPy 273.839 ms / fnp 258.593 ms = 1.059x (`j-29928833041827410`); candidate NumPy
+299.016 ms / fnp 52.017 ms = 5.748x (`j-29928833041827433`). Candidate fnp latency is 79.89%
+below baseline fnp (4.971x faster). Candidate Cargo used `-j2` only to fit the same worker's two
+open compilation slots; profile, code generation settings, workload, and foreground execution
+were unchanged.
+
+An earlier candidate submission (`j-29928833041827431`) ignored the worker preference, selected
+`vmi1149989`, and was cancelled during sync before Cargo; it is invalid and excluded. The valid
+candidate snapshot also contained a concurrent, disjoint integer `select` edit in shared `lib.rs`,
+subsequently landed as `72ffaedb`; it cannot affect string `unique`, but the paired binaries were
+therefore not bit-identical. The same-worker 4.97x separation is decisive. KEEP.
+
 ## 2026-07-13 - WIN (SHIP): C-contiguous N-D structured `searchsorted` queries - 125.05x fnp speedup
 
 `WindyCardinal`. Negative-ledger-first follow-up to the input-form sweep's explicitly unpriced

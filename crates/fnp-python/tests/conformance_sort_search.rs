@@ -677,6 +677,82 @@ print(ok)
     Ok(())
 }
 
+#[test]
+fn unique_string_nd_return_flags_match_numpy() -> Result<(), String> {
+    // np.unique's axis=None contract flattens values but, since NumPy 2.0,
+    // restores return_inverse to the input shape. Lock the existing string
+    // factorizer's N-D admission to every output's type, dtype, shape, bytes,
+    // and the original non-C/wide-codepoint delegate behavior.
+    let script = fnp_script(
+        r#"
+import time
+
+rng = np.random.default_rng(727)
+verdicts = []
+
+def outcome(fn, value, **kwargs):
+    try:
+        result = fn(value, **kwargs)
+        fields = result if isinstance(result, tuple) else (result,)
+        return (
+            "ok",
+            type(result).__name__,
+            tuple((type(field).__name__, str(np.asarray(field).dtype), tuple(np.asarray(field).shape), np.asarray(field).tobytes()) for field in fields),
+        )
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+def ab(name, value, **kwargs):
+    ours = outcome(fnp.unique, value, **kwargs)
+    theirs = outcome(np.unique, value, **kwargs)
+    if ours != theirs:
+        verdicts.append(f"FAIL {name}")
+
+n = 280_000
+u = rng.integers(97, 123, (n, 8), dtype=np.uint32).reshape(-1).view("U8").reshape(500, 560)
+s = rng.integers(0, 256, (n, 6), dtype=np.uint8).view("S6").reshape(100, 40, 70)
+
+ab("U8 2-D all flags", u, return_index=True, return_inverse=True, return_counts=True)
+ab("U8 2-D inverse only", u, return_inverse=True)
+ab("S6 3-D all flags", s, return_index=True, return_inverse=True, return_counts=True)
+ab("S6 F-contiguous defer", np.asfortranarray(s), return_inverse=True, return_counts=True)
+
+wide = u.copy()
+wide[3, 5] = "\u0100wide"
+ab("U8 wide-codepoint defer", wide, return_inverse=True, return_counts=True)
+
+pn = 524_288
+probe = rng.integers(97, 123, (pn, 8), dtype=np.uint32).reshape(-1).view("U8").reshape(512, 1024)
+expected = np.unique(probe, return_index=True, return_inverse=True, return_counts=True)
+actual = fnp.unique(probe, return_index=True, return_inverse=True, return_counts=True)
+if outcome(lambda _: actual, None) != outcome(lambda _: expected, None):
+    verdicts.append("FAIL U8 foreground parity")
+
+def best(fn, reps=3):
+    samples = []
+    for _ in range(reps):
+        start = time.perf_counter()
+        fn()
+        samples.append((time.perf_counter() - start) * 1e3)
+    return min(samples)
+
+numpy_ms = best(lambda: np.unique(probe, return_index=True, return_inverse=True, return_counts=True))
+fnp_ms = best(lambda: fnp.unique(probe, return_index=True, return_inverse=True, return_counts=True))
+print(f"UNIQUE_STRING_ND_FULL_AB numpy_ms={numpy_ms:.3f} fnp_ms={fnp_ms:.3f} ratio={numpy_ms / fnp_ms:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}");
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "N-D string unique return flags must match NumPy exactly: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // searchsorted
 // ─────────────────────────────────────────────────────────────────────────────
