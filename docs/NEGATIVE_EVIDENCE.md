@@ -4,6 +4,54 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): non-native-endian U16 `fromfile` typed-slice byteswap - 7.65x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.301`, adjacent `fromfile`/`fnp-io`
+lane. Robot triage again exposed only the out-of-policy C-BLAS/fast-math perf
+leaf. The preceding opposite-endian I16 cut remained an 8.88x win, so the vein
+was not thinning; negative-ledger search found only the native U16 typed-slice
+keep and no opposite-endian U16 attempt.
+
+Source attribution showed non-native-endian U16 still paying two indexed byte
+loads plus generic `decode_element` dispatch per value. ONE LEVER routes aligned
+input through `try_cast_slice::<u8, u16>`, byte-swaps each word, and performs the
+same exact U16-to-F64 widening. A two-byte copy fallback preserves misaligned
+input. Ordering and count clamping are unchanged. Before timing, the proof bench
+asserted full-corpus equality over zero, `u16::MAX`, the high-bit boundary, and
+arbitrary wrapping patterns, plus a forced-misaligned 257-element corpus.
+
+The target was built first with a separate untimed foreground strict-remote
+command and no shell timeout:
+
+```text
+RCH_WORKER=vmi1264463 RCH_WORKERS=vmi1264463 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-io --bench criterion_io --profile release --no-run
+```
+
+RCH admitted warm-up job `j-29928833041828908` to `vmi1264463`; its cache miss
+compiled successfully and exited 0. The sole cheap measurement then ran on that
+same requested worker:
+
+```text
+RCH_WORKER=vmi1264463 RCH_WORKERS=vmi1264463 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-io --bench criterion_io --profile release -- fromfile_non_native_u16_typed_byteswap --warm-up-time 0.25 --measurement-time 0.75 --sample-size 10 --noplot
+```
+
+Measurement job `j-29928833041828910` reported another infrastructure cache
+miss despite the successful same-worker warm build, but no timeout was applied;
+Criterion began after compilation and returned a real A/B with exit 0:
+
+| arm | Criterion estimate | throughput midpoint |
+|---|---:|---:|
+| former generic element decoder | 421.02-457.07 us (437.52 us midpoint) | 1.1160 GiB/s |
+| typed-slice byteswap candidate | 55.997-58.405 us (57.171 us midpoint) | 8.5408 GiB/s |
+
+Midpoint speedup is **7.653x** (86.93% lower latency); even the closest
+interval bounds separate by 7.21x. Timed source/bench hashes were
+`d94eb08135defb800a70583d85a7a73771c94aba4a10b2e012950c17b9c575e7` and
+`fa3d03471550ceeaa494d41496681fc4f9a6b873426d92883faf3571d7018501`.
+Decision: **SHIP**. No second measurement or conformance loop ran. Standalone
+formatter and UBS failures were limited to pre-existing unrelated file-wide
+findings; UBS's embedded clippy, check, and test-build gates were clean.
+
 ## 2026-07-14 - WIN (SHIP): non-native-endian I16 `fromfile` typed-slice byteswap - 8.88x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.300`, adjacent `fromfile`/`fnp-io`
