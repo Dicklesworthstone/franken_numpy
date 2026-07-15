@@ -4,6 +4,38 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): repeated-axis `take` seeds one lane then doubles - 8.40x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.322`. Robot triage again surfaced the
+broad pure-safe-Rust directive and its prohibited C-BLAS/fast-math leaf, so
+negative-ledger screening pivoted away from the exhausted `permuted` family to
+the fresh indexing subsystem. Source attribution on shape `[256, 64]`, axis 1,
+with 64 identical indices found 16,384 one-element `copy_from_slice` calls in
+the generic axis gather.
+
+ONE LEVER recognizes two or more resolved indices that are all identical,
+copies the selected source lane once per outer block, then fills the remaining
+output block by doubling the initialized prefix with `copy_within`. Index
+normalization and bounds checks still run first; output shape, order, dtype,
+signed-zero and NaN payload bits, and exact integer sidecars remain unchanged.
+The focused strict-remote release test proved raw-bit F64 equality and exact
+U64 sidecar preservation.
+
+After an untimed non-LTO release `--no-run` build, the sole same-binary
+Criterion A/B ran on `vmi1264463` with 16 codegen units, 0.25 s warm-up, 0.75 s
+measurement, and 10 samples:
+
+- former per-element source copies: `[87.851 us, 91.528 us, 95.611 us]`
+- seed one lane and double: `[10.596 us, 10.895 us, 11.087 us]`
+- midpoint delta: **8.40x faster / 88.10% less time**, with disjoint intervals
+
+RCH rebuilt the target despite the untimed warm-up, but compilation stayed
+outside Criterion and the measurement returned normally. The focused test and
+benchmark completed with only the unrelated pre-existing dead-code warning for
+`nan_filtered`; UBS reached its broad pre-existing whole-file scan and was
+stopped without findings. **Decision: SHIP.** Do not retry generic repeated-lane
+copy elimination; future `take` work needs a different index pattern.
+
 ## 2026-07-15 - WIN (SHIP): strided-axis `permuted` computes swap addresses directly - 1.47x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.321`. Negative-ledger screening started

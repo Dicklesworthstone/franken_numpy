@@ -184,6 +184,47 @@ fn bench_take_axis_contiguous_subrange(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_take_axis_repeated_index(c: &mut Criterion) {
+    // The 16,384-element output stays below TAKE_PAR_MIN, isolating repeated
+    // lane materialization from Rayon scheduling.
+    let shape = vec![256, 64];
+    let axis = 1usize;
+    let n: usize = shape.iter().product();
+    let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 - 1.0).collect();
+    let arr = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+    let indices = vec![31_i64; 64];
+
+    let candidate = arr.take(&indices, Some(axis as isize)).unwrap();
+    let (control_shape, control_values) = former_take_axis_copy_rows(&data, &shape, axis, &indices);
+    assert_eq!(candidate.shape(), control_shape);
+    assert!(
+        candidate
+            .values()
+            .iter()
+            .zip(&control_values)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+
+    let mut group = c.benchmark_group("take_axis_repeated_index");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.bench_function("former_source_copy_256x64", |bench| {
+        bench.iter(|| {
+            black_box(former_take_axis_copy_rows(
+                black_box(&data),
+                &shape,
+                axis,
+                black_box(&indices),
+            ))
+        })
+    });
+    group.bench_function("seed_and_double_256x64", |bench| {
+        bench.iter(|| black_box(arr.take(black_box(&indices), Some(axis as isize)).unwrap()))
+    });
+    group.finish();
+}
+
 fn former_fftshift_all_axes(arr: &UFuncArray, shape: &[usize]) -> UFuncArray {
     let mut shifted = arr.clone();
     for (axis, &len) in shape.iter().enumerate() {
@@ -232,6 +273,7 @@ criterion_group!(
     bench_take_axis,
     bench_take_axis_identity,
     bench_take_axis_contiguous_subrange,
+    bench_take_axis_repeated_index,
     bench_fftshift_singleton_axes
 );
 criterion_main!(benches);

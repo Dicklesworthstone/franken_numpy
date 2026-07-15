@@ -15940,6 +15940,36 @@ impl UFuncArray {
         }
         let src_stride = src_axis_len * inner;
         let out_block = num_idx * inner;
+        // A constant index list broadcasts the same source lane throughout
+        // each output block. Seed one lane, then double the initialized prefix
+        // in-place instead of re-reading the same source lane `num_idx` times.
+        if resolved.len() >= 2
+            && let Some(&repeated_index) = resolved.first()
+            && resolved.iter().all(|&index| index == repeated_index)
+        {
+            let src_offset = repeated_index * inner;
+            let copy_block = |out_blk: &mut [T], o: usize| {
+                let base = o * src_stride + src_offset;
+                out_blk[..inner].copy_from_slice(&src[base..base + inner]);
+                let mut initialized = inner;
+                while initialized < out_block {
+                    let copy_len = initialized.min(out_block - initialized);
+                    out_blk.copy_within(..copy_len, initialized);
+                    initialized += copy_len;
+                }
+            };
+            const TAKE_PAR_MIN: usize = 1 << 15;
+            if outer >= 2 && n >= TAKE_PAR_MIN && rayon::current_num_threads() >= 2 {
+                out.par_chunks_mut(out_block)
+                    .enumerate()
+                    .for_each(|(o, out_blk)| copy_block(out_blk, o));
+            } else {
+                out.chunks_mut(out_block)
+                    .enumerate()
+                    .for_each(|(o, out_blk)| copy_block(out_blk, o));
+            }
+            return out;
+        }
         // A proper consecutive subrange is contiguous within every outer
         // block. Copy that span once instead of issuing one tiny copy per
         // selected axis lane. The full-axis identity case is handled earlier
@@ -55263,6 +55293,50 @@ print(json.dumps(payload))
         let r = a.take(&[2, 0], Some(1)).unwrap();
         assert_eq!(r.shape(), &[2, 2]);
         assert_eq!(r.values(), &[3.0, 1.0, 6.0, 4.0]);
+    }
+
+    #[test]
+    fn take_axis_repeated_lane_preserves_bits_and_integer_sidecar() {
+        let bits = [
+            0x8000_0000_0000_0000,
+            0x7ff8_0000_0000_1234,
+            f64::INFINITY.to_bits(),
+            f64::NEG_INFINITY.to_bits(),
+            1.25f64.to_bits(),
+            (-2.5f64).to_bits(),
+        ];
+        let values: Vec<f64> = bits.into_iter().map(f64::from_bits).collect();
+        let array = UFuncArray::new(vec![2, 3], values, DType::F64).unwrap();
+        let taken = array.take(&[1, 1, 1, 1], Some(1)).unwrap();
+        assert_eq!(taken.shape(), &[2, 4]);
+        assert_eq!(
+            taken
+                .values()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            vec![
+                bits[1], bits[1], bits[1], bits[1], bits[4], bits[4], bits[4], bits[4]
+            ]
+        );
+
+        let exact = vec![
+            (1_u64 << 53) + 1,
+            (1_u64 << 53) + 3,
+            (1_u64 << 53) + 5,
+            (1_u64 << 53) + 7,
+            (1_u64 << 53) + 9,
+            (1_u64 << 53) + 11,
+        ];
+        let array = UFuncArray::from_storage(vec![2, 3], ArrayStorage::U64(exact.clone())).unwrap();
+        let taken = array.take(&[1, 1, 1, 1], Some(1)).unwrap();
+        assert_eq!(taken.shape(), &[2, 4]);
+        assert_eq!(
+            taken.to_storage().unwrap(),
+            ArrayStorage::U64(vec![
+                exact[1], exact[1], exact[1], exact[1], exact[4], exact[4], exact[4], exact[4],
+            ])
+        );
     }
 
     #[test]
