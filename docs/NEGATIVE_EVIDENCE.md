@@ -4,6 +4,44 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): Pivot-stable lower-triangular determinant bypasses LU - 7.85x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.314`. Robot triage's only concrete
+perf leaf still required prohibited C-BLAS/fast-math, while FFT, einsum, and
+string ledger screening showed those alternative lanes already converged or
+heavily mined. The preceding triangular structure win was 11.69x rather than a
+thinning marginal seam, and the ledger contained no lower-triangular determinant
+attempt.
+
+Source attribution found exact lower-triangular matrices still entering
+`lu_factor_unblocked_into` below `LU_BLOCK_MIN`, executing the full O(n^3)
+trailing rank-1 nest even when every pivot-row value to the right is zero. ONE
+LEVER admits only finite n<512 matrices with positive-zero upper triangles,
+the existing singularity threshold, and a diagonal whose magnitude is at least
+every lower entry in its column. The final condition proves partial pivoting
+cannot swap rows; zero pivot rows then leave every diagonal bit unchanged, so
+the former ordered diagonal product is reused directly. Pivoting, blocked-LU,
+nonfinite, singular, and negative-zero-upper inputs retain the former route.
+
+The focused strict-remote test passed raw-bit comparisons for n=2, 7, and 64
+and explicit deferral cases for a pivoting column and negative-zero upper entry.
+The same-binary benchmark asserted raw-bit equality before timing a dense
+256x256 lower-triangular matrix. After an untimed non-LTO release warm build,
+the sole foreground measurement ran on strict-remote worker `vmi1152480` with
+16 codegen units, 0.25 s warm-up, 0.75 s measurement, and 10 samples:
+
+- former partial-pivot LU: `[963.86 us, 1.0003 ms, 1.0444 ms]`
+- candidate structured diagonal product: `[118.01 us, 127.41 us, 141.98 us]`
+- midpoint delta: **7.85x faster / 87.26% less time**, with disjoint intervals
+
+RCH recompiled for the timed command despite the pinned worker and prior warm
+target; that cache miss was build overhead outside Criterion. UBS's embedded
+fmt/clippy/check/test probes were clean; its nonzero result came from broad
+pre-existing heuristics. Whole-file rustfmt also reported extensive
+pre-existing drift outside this change's hunks, which remained untouched.
+**Decision: SHIP.** This exact pivot-stable lower-determinant route is closed;
+lower-triangular slogdet would require its own one-lever proof.
+
 ## 2026-07-15 - WIN (SHIP): Exact upper-triangular `slogdet` bypasses LU - 11.69x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.313`, fresh `fnp-linalg`
