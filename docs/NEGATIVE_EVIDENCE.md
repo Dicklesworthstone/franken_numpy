@@ -4,6 +4,39 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - NO-SHIP (REVERTED): singleton-axis `flip` clone - noisy 1.18x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.319`. Robot triage again exposed only
+the broad safe-Rust directive plus the prohibited C-BLAS/fast-math leaf. The two
+scalar-operand `kron` classes were complete, so this turn pivoted to the fresh
+direct-Rust structural-array lane. Negative-ledger screening found the existing
+parallel flip-copy kernel and rank-2 fused routes, but no singleton-axis attempt.
+
+Source attribution showed `UFuncArray::flip(axis)` on shape `[131071, 1]`, axis
+1, still zero-filling an output and issuing one-element row copies through the
+Rayon path even though reversing that axis is identity. ONE LEVER returned
+`self.clone()` after axis validation. The pre-timing proof and focused release
+test matched F64 raw bits (signed zero, fixed NaN payload, infinities), shape,
+and the I64 sidecar exactly.
+
+The existing `flip` target was built untimed first, then measured exactly once
+in the foreground on strict-remote worker `vmi1264463` with `--profile release`,
+release LTO disabled, 16 codegen units, 0.25 s warm-up, 0.75 s measurement, and
+10 samples:
+
+- former axis-build kernel: `[610.03 us, 763.90 us, 869.29 us]`
+- candidate identity clone: `[534.14 us, 649.99 us, 751.77 us]`
+- midpoint delta: **1.18x / 14.91% less time**, but the intervals overlap widely
+
+This is a real same-binary A/B, not a timeout, but it does not clear the remote
+variance floor and therefore is not a defensible keep. RCH recompiled despite
+the same-worker untimed warm-up; compile time remained outside Criterion.
+`git diff --check` and focused bench rustfmt passed. Exact-file UBS reported the
+large crate's pre-existing inventory, and the remote build surfaced only the
+pre-existing unused `nan_filtered` warning. Source, test, and benchmark changes
+were restored; only this ledger row and closed bead ship. **Do not retry this
+clone branch without a quiet-worker low-variance A/B or a different primitive.**
+
 ## 2026-07-15 - WIN (SHIP): scalar-LHS `kron` scales the RHS directly - 25.09x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.318`. Robot triage again exposed the
