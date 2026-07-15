@@ -4,6 +4,44 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - NO-SHIP (REVERTED): Exact-U64 singleton-axis cumulative direct fold - noisy 1.03x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.317`. Robot triage again routed to the
+pure-safe-Rust performance directive while its only concrete perf leaf required
+prohibited C-BLAS/fast-math. The preceding exact-I64 singleton-axis cumulative
+keep was 6.38x, and its ledger explicitly left a different dtype as the next
+valid structure, with no prior U64 row.
+
+Source attribution confirmed `cumulate_axis_u64` still zero-filled its output
+and dispatched one-element `[N, 1]`, axis-1 lanes through Rayon before the public
+path rebuilt its f64 bridge. The candidate directly collected
+`fold(identity, value)` when the axis length was one; empty, multi-element,
+I64, and floating routes remained unchanged.
+
+The focused strict-remote test passed exact sidecar equality for U64 cumsum and
+cumprod across zero, values beyond 2^53, and `u64::MAX`. The same-binary
+benchmark reconstructed the former full public cost (source-sidecar clone,
+zero-fill/Rayon lane dispatch, and f64 bridge) and asserted exact sidecar plus
+bridge-bit equality before timing 262,144 elements. After an untimed non-LTO
+release warm build, the sole foreground measurement ran on strict-remote worker
+`vmi1152480` with 16 codegen units, 0.25 s warm-up, 0.75 s measurement, and 10
+samples:
+
+- former zero-fill + Rayon: `[957.80 us, 1.4636 ms, 2.1360 ms]`
+- candidate direct exact fold map: `[1.3076 ms, 1.4230 ms, 1.5368 ms]`
+- midpoint delta: **1.03x faster / 2.77% less time**, with heavily overlapping
+  intervals and one high mild former outlier
+
+RCH recompiled for the timed command despite the pinned worker and successful
+warm build; that cache miss was build overhead outside Criterion. The public
+U64 path's source-sidecar clone and f64 bridge dominate enough that removing
+only singleton-lane dispatch does not clear the variance floor. Static-only UBS
+found only the broad pre-existing heuristic inventory; its local Cargo
+categories were intentionally disabled for strict remote-only compliance.
+**Decision: NO-SHIP; source, test, and benchmark hunks reverted.** Retry only
+with profile evidence that a behavior-preserving public-path representation
+change removes the clone/bridge cost, not this helper shortcut alone.
+
 ## 2026-07-15 - WIN (SHIP): Exact-I64 singleton-axis cumulative direct fold - 6.38x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.316`. Robot triage's only concrete
