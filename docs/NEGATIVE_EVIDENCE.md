@@ -4,6 +4,38 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): singleton-axis `cummin`/`cummax` clone values directly - 9.72x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.304`, fresh cumulative-reductions/
+`fnp-ufunc` lane after the contiguous-`take` indexing win. Robot triage again
+exposed only the broad safe-Rust parent besides the out-of-policy C-BLAS/
+fast-math leaf. Negative-ledger screening found the singleton-axis `cumsum`
+keep but no adjacent `cummin`/`cummax` attempt.
+
+Source attribution showed `cumulative_op` zero-filling the full output and
+dispatching Rayon over one-element lanes for shape `[N, 1]`, axis 1. An extrema
+lane initializes from its only input, so its output is exactly that input bit
+pattern. ONE LEVER returns a direct values clone when `axis_len == 1`, retaining
+the former shape, dtype, and integer-sidecar-dropping result contract. All
+longer axes and both extrema fold definitions remain unchanged.
+
+The existing `cumminmax` target was built untimed first, then measured exactly
+once in the foreground on strict-remote worker `vmi1227854` with
+`--profile release`, release LTO disabled, 16 codegen units, 0.25 s warm-up,
+0.75 s measurement, and 10 samples. The focused F64 `cummin` row used
+262,144 singleton lanes containing signed zero, a fixed NaN payload, and both
+infinities:
+
+- former zero-fill plus Rayon lanes: `[350.96 us, 434.36 us, 529.27 us]`
+- direct values clone: `[43.461 us, 44.693 us, 45.996 us]`
+- midpoint delta: **9.72x faster / 89.71% less time**, with disjoint intervals
+
+The benchmark's pre-timing assertions proved identical shape, dtype, and raw
+F64 bits. RCH recompiled despite the untimed warm-up; that cache miss was
+infrastructure overhead, not timing evidence. The only compiler diagnostic was
+the pre-existing untouched `nan_filtered` dead-code warning. UBS also surfaced
+only broad pre-existing inventories in the large source file. **Decision: SHIP.**
+
 ## 2026-07-14 - WIN (SHIP): contiguous `take(axis)` subranges coalesce row copies - 14.27x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.303`, fresh indexing/`fnp-ufunc`

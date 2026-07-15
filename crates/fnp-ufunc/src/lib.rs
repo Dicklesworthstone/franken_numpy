@@ -18854,6 +18854,19 @@ impl UFuncArray {
                 if axis_len == 0 {
                     return Ok(self.clone());
                 }
+                if axis_len == 1 {
+                    // Each extrema lane initializes its accumulator from its
+                    // only input, so the output value is bit-for-bit the input
+                    // value. Preserve cumulative_op's existing sidecar-dropping
+                    // result contract while skipping zero-fill and one-element
+                    // Rayon scans.
+                    return Ok(Self {
+                        shape: self.shape.clone(),
+                        values: self.values.clone(),
+                        dtype: self.dtype,
+                        integer_sidecar: None,
+                    });
+                }
                 let outer: usize =
                     fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
                 let inner: usize =
