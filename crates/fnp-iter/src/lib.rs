@@ -813,6 +813,10 @@ impl NditerPlan {
             ));
         }
 
+        if self.order == NditerOrder::C {
+            return Ok((iterindex..end).collect());
+        }
+
         (iterindex..end)
             .map(|idx| self.operand_linear_index_for_iterindex(idx))
             .collect()

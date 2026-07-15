@@ -1,8 +1,9 @@
 #![forbid(unsafe_code)]
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fnp_dtype::DType;
 use fnp_io::{IOSupportedDType, load, save};
+use fnp_iter::{Nditer, NditerOptions, NditerOrder, NditerPlan, NditerStep};
 use fnp_ufunc::{BinaryOp, UFuncArray};
 use std::hint::black_box;
 use std::time::Duration;
@@ -327,6 +328,70 @@ fn bench_reduce_prod_row_band_median_gate(c: &mut Criterion) {
     group.finish();
 }
 
+fn former_c_order_nditer_step(plan: &NditerPlan) -> NditerStep {
+    let iterindex = 0usize;
+    let end = iterindex
+        .checked_add(plan.inner_loop_len())
+        .expect("former chunk end must fit");
+    let linear_indices = (iterindex..end)
+        .map(|index| {
+            let multi_index = plan
+                .linear_index_to_multi_index(index)
+                .expect("former multi-index conversion must succeed");
+            multi_index
+                .iter()
+                .enumerate()
+                .try_fold(0usize, |linear, (axis, &coordinate)| {
+                    linear
+                        .checked_mul(plan.shape()[axis])
+                        .and_then(|value| value.checked_add(coordinate))
+                })
+                .expect("former operand index must fit")
+        })
+        .collect();
+
+    NditerStep {
+        iterindex,
+        multi_index: plan
+            .linear_index_to_multi_index(iterindex)
+            .expect("former chunk start must resolve"),
+        linear_indices,
+    }
+}
+
+fn bench_nditer_c_external_chunk(c: &mut Criterion) {
+    let shape = vec![8, 8, 16, 64];
+    let plan = NditerPlan::new(
+        shape,
+        8,
+        NditerOptions {
+            order: NditerOrder::C,
+            external_loop: true,
+        },
+    )
+    .expect("C-order external-loop plan must build");
+    let expected = former_c_order_nditer_step(&plan);
+    let mut proof_iter = Nditer::from_plan(plan.clone());
+    let actual = proof_iter.next().expect("candidate chunk must exist");
+    assert_eq!(actual, expected);
+
+    let mut group = c.benchmark_group("nditer_c_external_chunk");
+    group.throughput(Throughput::Elements(plan.element_count() as u64));
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.bench_function("former_index_round_trip", |bench| {
+        bench.iter(|| black_box(former_c_order_nditer_step(black_box(&plan))))
+    });
+    group.bench_function("direct_operand_range", |bench| {
+        bench.iter(|| {
+            let mut iter = Nditer::from_plan(black_box(plan.clone()));
+            black_box(iter.next().expect("candidate chunk must exist"))
+        })
+    });
+    group.finish();
+}
+
 fn criterion_config() -> Criterion {
     Criterion::default()
         .measurement_time(Duration::from_secs(8))
@@ -338,6 +403,6 @@ fn criterion_config() -> Criterion {
 criterion_group! {
     name = benches;
     config = criterion_config();
-    targets = bench_core_ops, bench_reduce_prod_row_band_median_gate
+    targets = bench_core_ops, bench_reduce_prod_row_band_median_gate, bench_nditer_c_external_chunk
 }
 criterion_main!(benches);

@@ -4,6 +4,42 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): C-order `nditer` chunks emit their operand range directly - 311.64x
+
+`IvoryTurtle`, reopened bead `deadlock-audit-5cpda`, fresh `fnp-iter` retry
+after the 2026-07-14 bench-blocked row. Robot triage again offered only the
+broad safe-Rust parent beside the out-of-policy C-BLAS/fast-math and f16 leaves.
+Negative-ledger screening closed FFT, string, einsum, random-bytes, shape-
+calculus, histogram, and bincount veins before identifying this row's explicit
+retry predicate: warm the existing conformance binary without a timeout, then
+run the already-embedded direct-range proof.
+
+Source attribution showed `operand_linear_indices_for_chunk` converting every
+C-order logical index into a newly allocated multi-index and then folding those
+same row-major digits back into the original index. ONE LEVER keeps the existing
+overflow/end validation and returns `iterindex..end` directly for C order. The
+F-order conversion path, chunk boundaries, step metadata, errors, and iterator
+state machine are unchanged.
+
+The cold `criterion_core_ops` target was built untimed first on strict-remote
+worker `vmi1153651`; the non-LTO release build completed in 7m02s. The sole
+foreground measurement then used `--profile release`, release LTO disabled,
+16 codegen units, 0.25 s warm-up, 0.75 s measurement, and 10 samples on the same
+worker. Its same-binary rank-4 row emitted one 65,536-element external chunk:
+
+- former per-index multi-index round trip: `[2.7270 ms, 2.8243 ms, 2.8936 ms]`
+- direct operand range: `[8.7212 us, 9.0628 us, 9.5428 us]`
+- midpoint delta: **311.64x faster / 99.68% less time**, with disjoint intervals
+
+Before timing, the benchmark asserted complete `NditerStep` equality. The
+focused strict-remote C-order external-loop unit test also passed. RCH discarded
+the warm target and repeated the 7m03s compile before the short measurement;
+that cache miss was infrastructure overhead, not timing evidence. Exact-file
+rustfmt and diff checks passed. UBS's embedded fmt/clippy/check/test probes were
+clean; its nonzero result came from broad pre-existing heuristics in the two
+large files. **Decision: SHIP.** Do not retry C-order chunk index conversion;
+F-order remains a distinct mapping problem.
+
 ## 2026-07-14 - WIN (SHIP): exact upper-triangular determinant bypasses LU - 23.76x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.309`, fresh determinant-decomposition
