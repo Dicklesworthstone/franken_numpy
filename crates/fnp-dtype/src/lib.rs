@@ -1498,6 +1498,20 @@ impl ArrayStorage {
 
     /// Element-wise complex subtraction.
     pub fn complex_sub(&self, other: &Self) -> Result<Self, StorageError> {
+        if let (Self::Complex128(a), Self::Complex128(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| (ar - br, ai - bi))
+                    .collect(),
+            ));
+        }
         let a = self.to_complex128_vec();
         let b = other.to_complex128_vec();
         if a.len() != b.len() {
@@ -2940,6 +2954,33 @@ mod tests {
         let b = ArrayStorage::from_complex128_vec(vec![(1.0, 2.0), (3.0, 4.0)]);
         let c = a.complex_sub(&b).unwrap();
         assert_eq!(c.to_complex128_vec(), vec![(4.0, 4.0), (4.0, 4.0)]);
+    }
+
+    #[test]
+    fn storage_complex_sub_complex128_matches_clone_path_bits() {
+        let a = ArrayStorage::from_complex128_vec(vec![
+            (-0.0, f64::from_bits(0x7ff8_0000_0000_0456)),
+            (f64::INFINITY, f64::MIN_POSITIVE),
+            (f64::from_bits(2), -f64::INFINITY),
+        ]);
+        let b = ArrayStorage::from_complex128_vec(vec![
+            (0.0, 2.0),
+            (-f64::INFINITY, -f64::MIN_POSITIVE),
+            (f64::from_bits(1), f64::INFINITY),
+        ]);
+        let former_a = a.to_complex128_vec();
+        let former_b = b.to_complex128_vec();
+        let former: Vec<_> = former_a
+            .iter()
+            .zip(&former_b)
+            .map(|(&(ar, ai), &(br, bi))| (ar - br, ai - bi))
+            .collect();
+        let direct = a.complex_sub(&b).unwrap().to_complex128_vec();
+
+        for (actual, expected) in direct.iter().zip(&former) {
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+        }
     }
 
     #[test]

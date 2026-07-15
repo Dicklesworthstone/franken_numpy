@@ -4,6 +4,39 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): Complex128 `complex_sub` borrows both inputs - 26.96x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.325`. Robot triage again left the
+broad pure-safe-Rust directive after excluding its prohibited C-BLAS/fast-math
+leaf. The preceding dtype input-clone removal was a 26.99x keep rather than a
+thinning result, and its retry boundary explicitly left sibling binary
+operations as independent hypotheses.
+
+Profile attribution found the same dominant allocation front end in
+`ArrayStorage::complex_sub`: both Complex128 operands were converted with
+`to_complex128_vec()` before the result allocation. At 100,000 elements this
+copied 3.2 MiB into two temporary vectors in addition to the required 1.6 MiB
+output. ONE LEVER borrows and zips the two same-variant Complex128 inputs
+directly. Mixed-storage operands retain the former generic conversion path,
+and length-mismatch errors retain the same dtype fields.
+
+The focused strict-remote non-LTO release test passed both complex-subtraction
+cases, including raw-bit parity with signed zero, a fixed NaN payload,
+infinities, and subnormals. The `dtype_ops` release target received an untimed
+`--no-run` warm-up on `vmi1264463`. A direct warm-binary invocation was then
+refused fail-closed by RCH as non-compilation (`RCH-E301`) before any benchmark
+code ran. The supported direct-Cargo measurement command rebuilt because RCH
+again reported a cache miss; no build timeout was used, and Criterion alone
+capped the measurement windows at 0.75 s with 0.25 s warm-up and 10 samples:
+
+- former clone-both-inputs: `[1.8531 ms, 2.0317 ms, 2.2974 ms]`
+- direct borrowed inputs: `[72.023 us, 75.369 us, 78.253 us]`
+- midpoint delta: **26.96x faster / 96.29% less time**, with disjoint intervals
+
+Verdict: **SHIP**. Retry boundary: do not re-probe Complex128+Complex128
+`complex_sub` input cloning. The multiplication and division paths remain
+separate hypotheses and must each earn their own profile, parity proof, and A/B.
+
 ## 2026-07-15 - WIN (SHIP): Complex128 `complex_add` borrows both inputs - 26.99x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.324`. Robot triage again left the
