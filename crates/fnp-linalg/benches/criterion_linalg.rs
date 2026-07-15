@@ -19,7 +19,8 @@ use fnp_linalg::{
     batch_trace, cholesky_nxn, cholesky_nxn_general_control, complex_matmul, cond_nxn, det_nxn,
     det_nxn_general_control, eigvalsh_nxn, inv_nxn, kron_nxn, matrix_norm_frobenius,
     matrix_norm_nxn, matrix_power_nxn, multi_dot, qr_mxn, qr_nxn,
-    sbr_stage1_dense_to_band_lower_nxn, solve_nxn, svd_mxn_full, svd_nxn,
+    sbr_stage1_dense_to_band_lower_nxn, slogdet_nxn, slogdet_nxn_general_control, solve_nxn,
+    svd_mxn_full, svd_nxn,
 };
 use std::hint::black_box;
 use std::time::Duration;
@@ -170,6 +171,32 @@ fn bench_det_exact_upper_triangular(c: &mut Criterion) {
     });
     group.bench_function("structured_diagonal_product", |bench| {
         bench.iter(|| black_box(det_nxn(black_box(&matrix), n).unwrap()))
+    });
+    group.finish();
+}
+
+fn bench_slogdet_exact_upper_triangular(c: &mut Criterion) {
+    let n = 256usize;
+    let mut matrix = vec![0.0; n * n];
+    for row in 0..n {
+        let magnitude = 1.0 + (row % 7) as f64 * 0.001;
+        matrix[row * n + row] = if row % 2 == 0 { magnitude } else { -magnitude };
+        for col in (row + 1)..n {
+            matrix[row * n + col] = ((row * 17 + col * 13) % 97) as f64 / 101.0 - 0.4;
+        }
+    }
+
+    let former = slogdet_nxn_general_control(&matrix, n).expect("general sign and log determinant");
+    let candidate = slogdet_nxn(&matrix, n).expect("structured sign and log determinant");
+    assert_eq!(candidate.0.to_bits(), former.0.to_bits());
+    assert_eq!(candidate.1.to_bits(), former.1.to_bits());
+
+    let mut group = c.benchmark_group("slogdet_exact_upper_triangular_256");
+    group.bench_function("former_partial_pivot_lu", |bench| {
+        bench.iter(|| black_box(slogdet_nxn_general_control(black_box(&matrix), n).unwrap()))
+    });
+    group.bench_function("structured_diagonal_log_fold", |bench| {
+        bench.iter(|| black_box(slogdet_nxn(black_box(&matrix), n).unwrap()))
     });
     group.finish();
 }
@@ -988,6 +1015,7 @@ criterion_group!(
     bench_solve,
     bench_det,
     bench_det_exact_upper_triangular,
+    bench_slogdet_exact_upper_triangular,
     bench_inv,
     bench_cholesky,
     bench_cholesky_exact_diagonal,

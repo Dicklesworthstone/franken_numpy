@@ -1073,6 +1073,27 @@ fn det_nxn_exact_upper_triangular(a: &[f64], n: usize) -> Option<f64> {
     Some(det)
 }
 
+fn slogdet_nxn_exact_upper_triangular(a: &[f64], n: usize) -> Option<(f64, f64)> {
+    let mut matrix_max_abs = 0.0_f64;
+    for row in 0..n {
+        let row_values = &a[row * n..(row + 1) * n];
+        for (col, &value) in row_values.iter().enumerate() {
+            if !value.is_finite() || (col < row && value.to_bits() != 0) {
+                return None;
+            }
+            matrix_max_abs = matrix_max_abs.max(value.abs());
+        }
+    }
+
+    let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
+    for diagonal in 0..n {
+        if a[diagonal * n + diagonal].abs() <= singularity_threshold {
+            return None;
+        }
+    }
+    Some(slogdet_from_lu_diagonal(a, n, 1.0))
+}
+
 fn det_nxn_general_validated(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
     match lu_decompose_for_det(a, n) {
         Ok((lu, _, sign)) => Ok(det_from_lu_diagonal(&lu, n, sign)),
@@ -1116,6 +1137,29 @@ pub fn det_nxn_general_control(a: &[f64], n: usize) -> Result<f64, LinAlgError> 
 
 /// Sign and log-absolute-determinant for an NxN matrix.
 pub fn slogdet_nxn(a: &[f64], n: usize) -> Result<(f64, f64), LinAlgError> {
+    if Some(a.len()) != n.checked_mul(n) {
+        return Err(LinAlgError::ShapeContractViolation(
+            "slogdet_nxn: input length must equal n*n",
+        ));
+    }
+    if n == 0 {
+        return Ok((1.0, 0.0));
+    }
+
+    if let Some(slogdet) = slogdet_nxn_exact_upper_triangular(a, n) {
+        return Ok(slogdet);
+    }
+
+    match lu_decompose_for_det(a, n) {
+        Ok((lu, _, sign)) => Ok(slogdet_from_lu_diagonal(&lu, n, sign)),
+        Err(LinAlgError::SolverSingularity) => Ok((0.0, f64::NEG_INFINITY)),
+        Err(e) => Err(e),
+    }
+}
+
+/// Former general slogdet route retained for same-binary performance controls.
+#[doc(hidden)]
+pub fn slogdet_nxn_general_control(a: &[f64], n: usize) -> Result<(f64, f64), LinAlgError> {
     if Some(a.len()) != n.checked_mul(n) {
         return Err(LinAlgError::ShapeContractViolation(
             "slogdet_nxn: input length must equal n*n",
@@ -12135,6 +12179,26 @@ mod tests {
             let former = det_nxn_general_control(&matrix, n).expect("general determinant");
             let actual = det_nxn(&matrix, n).expect("structured determinant");
             assert_eq!(actual.to_bits(), former.to_bits(), "n={n}");
+        }
+    }
+
+    #[test]
+    fn slogdet_exact_upper_triangular_matches_general_lu_bits() {
+        for n in [1usize, 2, 7, 64] {
+            let mut matrix = vec![0.0; n * n];
+            for row in 0..n {
+                let magnitude = 1.0 + (row % 7) as f64 * 0.001;
+                matrix[row * n + row] = if row % 2 == 0 { magnitude } else { -magnitude };
+                for col in (row + 1)..n {
+                    matrix[row * n + col] = ((row * 17 + col * 13) % 97) as f64 / 101.0 - 0.4;
+                }
+            }
+
+            let former = super::slogdet_nxn_general_control(&matrix, n)
+                .expect("general sign and logdet");
+            let actual = slogdet_nxn(&matrix, n).expect("structured sign and logdet");
+            assert_eq!(actual.0.to_bits(), former.0.to_bits(), "sign n={n}");
+            assert_eq!(actual.1.to_bits(), former.1.to_bits(), "logdet n={n}");
         }
     }
 

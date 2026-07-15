@@ -4,6 +4,40 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): Exact upper-triangular `slogdet` bypasses LU - 11.69x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.313`, fresh `fnp-linalg`
+decomposition lane after negative-ledger screening found the ndarray
+broadcast/stride family saturated and no prior triangular-slogdet attempt.
+Robot triage's only concrete perf leaf still required prohibited C-BLAS and
+fast-math.
+
+Source attribution found that `det_nxn` already bypassed LU for exact finite
+upper-triangular matrices, while `slogdet_nxn` always paid the partial-pivot LU
+route. ONE LEVER admits the same positive-zero lower triangle, finite-value,
+and singularity-threshold contract, then calls the unchanged
+`slogdet_from_lu_diagonal` fold directly. General, singular, nonfinite, and
+negative-zero-lower inputs retain the former route.
+
+The focused strict-remote raw-bit parity test passed for n=1, 2, 7, and 64.
+The same-binary benchmark also asserted raw-bit equality for sign and log
+determinant before timing a dense 256x256 upper-triangular matrix. After an
+untimed non-LTO release warm build, the sole foreground measurement ran on
+strict-remote worker `vmi1152480` with 16 codegen units, 0.25 s warm-up, 0.75 s
+measurement, and 10 samples:
+
+- former partial-pivot LU: `[974.95 us, 1.0017 ms, 1.0776 ms]`
+- candidate structured diagonal log fold: `[81.025 us, 85.698 us, 91.657 us]`
+- midpoint delta: **11.69x faster / 91.44% less time**, with disjoint intervals
+
+RCH recompiled for the timed command despite the pinned worker and prior warm
+target; that cache miss was build overhead outside Criterion. UBS's embedded
+fmt/clippy/check/test probes were clean; its nonzero result came from broad
+pre-existing heuristics. Whole-file rustfmt also reported extensive
+pre-existing drift outside this change's hunks, which remained untouched.
+**Decision: SHIP.** Exact upper-triangular slogdet dispatch is closed; future
+slogdet work should target a different matrix structure.
+
 ## 2026-07-15 - WIN (SHIP): Poisson batches cache parameter terms - 1.16x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.312`, fresh `fnp-random` distribution
