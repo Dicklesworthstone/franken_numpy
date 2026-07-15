@@ -3956,6 +3956,9 @@ pub fn fromfile(
     if dtype_is_native_endian_i64(dtype) {
         return fromfile_native_endian_i64(data, count);
     }
+    if dtype_is_non_native_endian_i64(dtype) {
+        return fromfile_non_native_endian_i64(data, count);
+    }
     if dtype_is_native_endian_i16(dtype) {
         return fromfile_native_endian_i16(data, count);
     }
@@ -4207,6 +4210,17 @@ fn dtype_is_native_endian_i64(dtype: IOSupportedDType) -> bool {
     }
 }
 
+fn dtype_is_non_native_endian_i64(dtype: IOSupportedDType) -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        matches!(dtype, IOSupportedDType::I64Be)
+    }
+    #[cfg(target_endian = "big")]
+    {
+        matches!(dtype, IOSupportedDType::I64)
+    }
+}
+
 fn dtype_is_native_endian_f64(dtype: IOSupportedDType) -> bool {
     #[cfg(target_endian = "little")]
     {
@@ -4354,6 +4368,28 @@ fn fromfile_native_endian_i64(data: &[u8], count: Option<usize>) -> Result<Vec<f
             let mut bytes = [0u8; 8];
             bytes.copy_from_slice(chunk);
             i64::from_ne_bytes(bytes) as f64
+        })
+        .collect())
+}
+
+fn fromfile_non_native_endian_i64(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let item_size = core::mem::size_of::<i64>();
+    let max_elems = data.len() / item_size;
+    let n = clamp_count(count, max_elems);
+    let payload = &data[..n * item_size];
+    if let Ok(values) = try_cast_slice::<u8, i64>(payload) {
+        return Ok(values
+            .iter()
+            .map(|&value| value.swap_bytes() as f64)
+            .collect());
+    }
+
+    Ok(payload
+        .chunks_exact(item_size)
+        .map(|chunk| {
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(chunk);
+            i64::from_ne_bytes(bytes).swap_bytes() as f64
         })
         .collect())
 }

@@ -62,6 +62,17 @@ fn native_i64_dtype() -> IOSupportedDType {
     }
 }
 
+fn non_native_i64_dtype() -> IOSupportedDType {
+    #[cfg(target_endian = "little")]
+    {
+        IOSupportedDType::I64Be
+    }
+    #[cfg(target_endian = "big")]
+    {
+        IOSupportedDType::I64
+    }
+}
+
 fn native_f32_dtype() -> IOSupportedDType {
     #[cfg(target_endian = "little")]
     {
@@ -159,6 +170,22 @@ fn fromfile_i64_former(data: &[u8], count: Option<usize>) -> Vec<f64> {
             i64::from_ne_bytes([
                 chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
             ]) as f64
+        })
+        .collect()
+}
+
+fn fromfile_non_native_i64_former(data: &[u8], count: Option<usize>) -> Vec<f64> {
+    let item_size = core::mem::size_of::<i64>();
+    let max_elems = data.len() / item_size;
+    let n = count.map_or(max_elems, |requested| requested.min(max_elems));
+    (0..n)
+        .map(|index| {
+            let offset = index * item_size;
+            let chunk = &data[offset..offset + item_size];
+            i64::from_ne_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ])
+            .swap_bytes() as f64
         })
         .collect()
 }
@@ -390,6 +417,62 @@ fn bench_fromfile_native_i64(c: &mut Criterion) {
     });
     group.bench_function("typed_slice_candidate", |bench| {
         bench.iter(|| black_box(fromfile(black_box(bytes), native_i64_dtype(), None).unwrap()))
+    });
+    group.finish();
+}
+
+fn bench_fromfile_non_native_i64(c: &mut Criterion) {
+    const ELEMENTS: usize = 262_144;
+    let values: Vec<i64> = (0..ELEMENTS)
+        .map(|index| match index % 8 {
+            0 => i64::MIN,
+            1 => i64::MAX,
+            2 => -1,
+            3 => 0,
+            4 => (1_i64 << 53) - 1,
+            5 => 1_i64 << 53,
+            6 => (1_i64 << 53) + 1,
+            _ => (index as i64)
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407),
+        })
+        .collect();
+    let stored: Vec<i64> = values.iter().map(|&value| value.swap_bytes()).collect();
+    let bytes: &[u8] = bytemuck::cast_slice(&stored);
+    let former = fromfile_non_native_i64_former(bytes, None);
+    let candidate = fromfile(bytes, non_native_i64_dtype(), None).unwrap();
+    assert!(
+        candidate
+            .iter()
+            .zip(&former)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+
+    let mut padded = vec![0u8; bytes.len() + core::mem::align_of::<i64>()];
+    let misaligned_offset = (0..core::mem::align_of::<i64>())
+        .find(|&offset| (padded.as_ptr() as usize + offset) % core::mem::align_of::<i64>() != 0)
+        .unwrap();
+    padded[misaligned_offset..misaligned_offset + bytes.len()].copy_from_slice(bytes);
+    let misaligned = &padded[misaligned_offset..misaligned_offset + bytes.len()];
+    let former_misaligned = fromfile_non_native_i64_former(misaligned, Some(257));
+    let candidate_misaligned = fromfile(misaligned, non_native_i64_dtype(), Some(257)).unwrap();
+    assert!(
+        candidate_misaligned
+            .iter()
+            .zip(&former_misaligned)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+
+    let mut group = c.benchmark_group("fromfile_non_native_i64_typed_byteswap");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Bytes(bytes.len() as u64));
+    group.bench_function("former_element_decode", |bench| {
+        bench.iter(|| black_box(fromfile_non_native_i64_former(black_box(bytes), None)))
+    });
+    group.bench_function("typed_slice_byteswap_candidate", |bench| {
+        bench.iter(|| black_box(fromfile(black_box(bytes), non_native_i64_dtype(), None).unwrap()))
     });
     group.finish();
 }
@@ -783,6 +866,7 @@ criterion_group!(
     bench_fromfile_native_u64,
     bench_fromfile_non_native_u64,
     bench_fromfile_native_i64,
+    bench_fromfile_non_native_i64,
     bench_fromfile_native_i16,
     bench_fromfile_native_u16,
     bench_fromfile_native_u32,
