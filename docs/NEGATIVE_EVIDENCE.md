@@ -4,6 +4,58 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - NO-SHIP: I8 `fromfile` direct byte-slice decode - 1.17% slower
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.302`, adjacent `fromfile`/`fnp-io`
+lane. Robot triage again exposed only the out-of-policy C-BLAS/fast-math perf
+leaf. The preceding opposite-endian U16 cut remained a 7.65x win, so the IO
+vein was not yet thinning; negative-ledger search found no I8, U8, or bool
+one-byte `fromfile` attempt.
+
+Source attribution showed I8 still entering the generic indexed element loop
+and `decode_element` match. ONE LEVER added an I8 dispatch that iterated the
+clamped byte slice directly and performed the identical two's-complement
+I8-to-F64 widening. Ordering, allocation shape, and count clamping were
+unchanged. Before timing, the proof bench asserted full-corpus equality across
+zero, both signed extrema, all byte-pattern classes, and a 257-element partial
+count.
+
+The target was built first with a separate untimed foreground strict-remote
+command and no shell timeout:
+
+```text
+RCH_WORKER=vmi1264463 RCH_WORKERS=vmi1264463 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-io --bench criterion_io --profile release --no-run
+```
+
+RCH admitted warm-up job `j-29928833041828920` to `vmi1264463`; its cache miss
+compiled successfully and exited 0. The sole cheap measurement then ran on that
+same requested worker:
+
+```text
+RCH_WORKER=vmi1264463 RCH_WORKERS=vmi1264463 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-io --bench criterion_io --profile release -- fromfile_i8_direct_slice --warm-up-time 0.25 --measurement-time 0.75 --sample-size 10 --noplot
+```
+
+Measurement job `j-29928833041828923` reported another infrastructure cache
+miss despite the successful same-worker warm build, but no timeout was applied;
+Criterion began after compilation and returned a real A/B with exit 0:
+
+| arm | Criterion estimate | throughput midpoint |
+|---|---:|---:|
+| former indexed element decoder | 113.67-120.96 us (116.78 us midpoint) | 4.1813 GiB/s |
+| direct byte-slice candidate | 115.13-121.15 us (118.14 us midpoint) | 4.1332 GiB/s |
+
+The candidate was **0.988x** as fast (1.17% higher midpoint latency), with
+fully overlapping intervals. Timed source/bench hashes were
+`50b2cf208c75658a9f33d2326e66318fd3ceb463f97092d30d2c5a3452b683a8` and
+`e63fe08392ff58e743e5d926c4b35fb90feeca79e176ee1d5461f5f88b4a199f`.
+Decision: **NO-SHIP**; source and benchmark hunks were reverted, leaving only
+this evidence row and the closed bead. The direct I8 path should be retried only
+if a compiler/profile change or a broader fused decoder also removes the F64
+output-allocation floor; U8 and bool remain distinct hypotheses. No second
+measurement or conformance loop ran. Standalone formatter and UBS failures were
+limited to pre-existing unrelated file-wide findings; UBS's embedded clippy,
+check, and test-build gates were clean.
+
 ## 2026-07-14 - WIN (SHIP): non-native-endian U16 `fromfile` typed-slice byteswap - 7.65x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.301`, adjacent `fromfile`/`fnp-io`
