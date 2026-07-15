@@ -206,6 +206,143 @@ fn bench_choice_weighted_singleton(c: &mut Criterion) {
     group.finish();
 }
 
+#[derive(Clone)]
+struct BufferedPcg64 {
+    rng: Pcg64Rng,
+    buffered: u32,
+    ready: bool,
+}
+
+impl BufferedPcg64 {
+    fn from_seed_sequence(seed: &SeedSequence) -> Self {
+        Self {
+            rng: Pcg64Rng::from_seed_sequence(seed).unwrap(),
+            buffered: 0,
+            ready: false,
+        }
+    }
+
+    #[expect(clippy::cast_possible_truncation)]
+    fn next_u32(&mut self) -> u32 {
+        if self.ready {
+            self.ready = false;
+            self.buffered
+        } else {
+            let value = self.rng.next_u64();
+            self.buffered = (value >> 32) as u32;
+            self.ready = true;
+            value as u32
+        }
+    }
+
+    fn random_interval(&mut self, max: usize) -> usize {
+        let mask = (max + 1).next_power_of_two() - 1;
+        loop {
+            let value = self.next_u32() as usize & mask;
+            if value <= max {
+                return value;
+            }
+        }
+    }
+
+    fn next_f64(&mut self) -> f64 {
+        self.ready = false;
+        self.rng.next_f64()
+    }
+}
+
+#[inline(never)]
+fn former_permuted_last_axis(
+    rng: &mut BufferedPcg64,
+    input: &[f64],
+    rows: usize,
+    axis_len: usize,
+) -> Vec<f64> {
+    let mut result = input.to_vec();
+    let shape = [rows, axis_len];
+    let strides = [axis_len, 1];
+    for slice_index in 0..rows {
+        let mut multi_index = vec![0usize; 2];
+        let mut remainder = slice_index;
+        for dimension in (0..2).rev() {
+            if dimension == 1 {
+                continue;
+            }
+            multi_index[dimension] = remainder % shape[dimension];
+            remainder /= shape[dimension];
+        }
+        let base_offset = multi_index[0] * strides[0];
+        let indices: Vec<usize> = (0..axis_len)
+            .map(|index| base_offset + index * strides[1])
+            .collect();
+        for index in (1..axis_len).rev() {
+            let swap_index = rng.random_interval(index);
+            result.swap(indices[index], indices[swap_index]);
+        }
+    }
+    result
+}
+
+#[inline(never)]
+fn direct_permuted_last_axis(rng: &mut BufferedPcg64, input: &[f64], axis_len: usize) -> Vec<f64> {
+    let mut result = input.to_vec();
+    for lane in result.chunks_exact_mut(axis_len) {
+        for index in (1..axis_len).rev() {
+            let swap_index = rng.random_interval(index);
+            lane.swap(index, swap_index);
+        }
+    }
+    result
+}
+
+fn bench_permuted_last_axis_allocations(c: &mut Criterion) {
+    const ROWS: usize = 32_768;
+    const AXIS_LEN: usize = 8;
+    let input: Vec<f64> = (0..ROWS * AXIS_LEN).map(|index| index as f64).collect();
+    let seed = seed_sequence();
+
+    let mut former_proof = BufferedPcg64::from_seed_sequence(&seed);
+    let mut direct_proof = BufferedPcg64::from_seed_sequence(&seed);
+    let mut public_proof = pcg64_generator();
+    let former = former_permuted_last_axis(&mut former_proof, &input, ROWS, AXIS_LEN);
+    let direct = direct_permuted_last_axis(&mut direct_proof, &input, AXIS_LEN);
+    let public = public_proof
+        .permuted(&input, &[ROWS, AXIS_LEN], Some(1))
+        .unwrap();
+    assert_eq!(direct, former);
+    assert_eq!(public, former);
+    let former_after = former_proof.next_f64().to_bits();
+    let direct_after = direct_proof.next_f64().to_bits();
+    let public_after = public_proof.random(1)[0].to_bits();
+    assert_eq!(direct_after, former_after);
+    assert_eq!(public_after, former_after);
+
+    let mut former_rng = BufferedPcg64::from_seed_sequence(&seed);
+    let mut direct_rng = BufferedPcg64::from_seed_sequence(&seed);
+    let mut group = c.benchmark_group("permuted_last_axis_allocations");
+    group.throughput(Throughput::Elements((ROWS * AXIS_LEN) as u64));
+    group.bench_function("former_per_row_vectors", |bench| {
+        bench.iter(|| {
+            black_box(former_permuted_last_axis(
+                black_box(&mut former_rng),
+                black_box(&input),
+                ROWS,
+                AXIS_LEN,
+            ))
+        })
+    });
+    group.bench_function("direct_contiguous_lanes", |bench| {
+        bench.iter(|| {
+            black_box(direct_permuted_last_axis(
+                black_box(&mut direct_rng),
+                black_box(&input),
+                AXIS_LEN,
+            ))
+        })
+    });
+    group.finish();
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Bit generator raw throughput
 // ─────────────────────────────────────────────────────────────────────────────
@@ -579,6 +716,7 @@ criterion_group!(
     benches,
     bench_poisson_ptrs_cache,
     bench_choice_weighted_singleton,
+    bench_permuted_last_axis_allocations,
     bench_pcg64_next_u64,
     bench_pcg64dxsm_next_u64,
     bench_philox_next_u64,

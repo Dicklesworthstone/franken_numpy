@@ -6138,6 +6138,21 @@ impl Generator {
             return Err(RandomError::InvalidUpperBound);
         }
 
+        let axis_len = shape[axis];
+        if axis_len <= 1 {
+            return Ok(result);
+        }
+
+        if axis + 1 == shape.len() {
+            for lane in result.chunks_exact_mut(axis_len) {
+                for i in (1..axis_len).rev() {
+                    let j = self.random_interval(i as u64) as usize;
+                    lane.swap(i, j);
+                }
+            }
+            return Ok(result);
+        }
+
         // Compute strides for row-major layout
         let ndim = shape.len();
         let mut strides = vec![1usize; ndim];
@@ -6145,10 +6160,6 @@ impl Generator {
             strides[i] = strides[i + 1] * shape[i + 1];
         }
 
-        let axis_len = shape[axis];
-        if axis_len <= 1 {
-            return Ok(result);
-        }
         let axis_stride = strides[axis];
 
         // Number of independent 1-D slices to shuffle
@@ -18192,6 +18203,55 @@ for child in rng.spawn(n_children):
         let expected = numpy_oracle_permuted(&[3, 4], Some(1));
         assert_eq!(actual.shape(), &[3, 4]);
         assert_eq!(actual.values(), expected.as_slice());
+    }
+
+    #[test]
+    fn permuted_last_axis_matches_former_output_and_stream() {
+        let shape = [257, 8];
+        let data: Vec<f64> = (0..shape.iter().product::<usize>())
+            .map(|value| value as f64)
+            .collect();
+        let mut former = Generator::from_pcg64(42).unwrap();
+        let mut candidate = Generator::from_pcg64(42).unwrap();
+
+        let mut expected = data.clone();
+        let ndim = shape.len();
+        let axis = ndim - 1;
+        let mut strides = vec![1usize; ndim];
+        for index in (0..ndim - 1).rev() {
+            strides[index] = strides[index + 1] * shape[index + 1];
+        }
+        let axis_len = shape[axis];
+        let axis_stride = strides[axis];
+        let n_slices = expected.len() / axis_len;
+        for slice_index in 0..n_slices {
+            let mut multi_index = vec![0usize; ndim];
+            let mut remainder = slice_index;
+            for dimension in (0..ndim).rev() {
+                if dimension == axis {
+                    continue;
+                }
+                multi_index[dimension] = remainder % shape[dimension];
+                remainder /= shape[dimension];
+            }
+            let mut base_offset = 0;
+            for dimension in 0..ndim {
+                if dimension != axis {
+                    base_offset += multi_index[dimension] * strides[dimension];
+                }
+            }
+            let indices: Vec<usize> = (0..axis_len)
+                .map(|index| base_offset + index * axis_stride)
+                .collect();
+            for index in (1..axis_len).rev() {
+                let swap_index = former.random_interval(index as u64) as usize;
+                expected.swap(indices[index], indices[swap_index]);
+            }
+        }
+
+        let actual = candidate.permuted(&data, &shape, Some(axis)).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(candidate.random(16), former.random(16));
     }
 
     #[test]

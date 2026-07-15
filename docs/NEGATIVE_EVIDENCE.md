@@ -4,6 +4,38 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): last-axis `permuted` shuffles contiguous lanes directly - 1.66x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.320`. Robot triage again exposed the
+broad pure-safe-Rust directive plus the prohibited C-BLAS/fast-math leaf. The
+preceding structural-uFunc result was noisy, while negative-ledger screening
+closed raw-PCG fill and byte-transcode retries. This turn therefore pivoted to
+the distinct `fnp-random` permutation path, where source attribution found two
+heap vectors allocated for every last-axis lane.
+
+`Generator::permuted` formerly reconstructed a rank-sized multi-index and an
+axis-sized absolute-index vector for every row, even though C-order last-axis
+lanes are contiguous. ONE LEVER shuffles each `chunks_exact_mut(axis_len)` lane
+directly. The Fisher-Yates loop, `random_interval` calls, slice order, swaps,
+output allocation, validation, and every non-last-axis path are unchanged.
+
+The focused strict-remote release test matched the former output and the next
+16 random values exactly. The same-binary benchmark also asserted former,
+direct-helper, and public-path output equality plus post-call PCG64 stream
+equality before timing 32,768 rows of length 8. After an untimed non-LTO release
+build, the sole foreground measurement ran on effective worker `vmi1153651`
+with 16 codegen units, 0.25 s warm-up, 0.75 s measurement, and 10 samples:
+
+- former per-row vectors: `[2.9375 ms, 3.0681 ms, 3.2028 ms]`
+- direct contiguous lanes: `[1.7804 ms, 1.8488 ms, 1.9197 ms]`
+- midpoint delta: **1.66x faster / 39.74% less time**, with disjoint intervals
+
+RCH rebuilt the dependency graph despite the untimed warm-up; compilation stayed
+outside Criterion. The benchmark hunk passed rustfmt and `git diff --check`;
+exact-file UBS reported only the crate's broad pre-existing heuristic inventory.
+**Decision: SHIP.** Do not retry last-axis per-row index-vector removal; other
+axes retain a distinct strided-addressing problem.
+
 ## 2026-07-15 - NO-SHIP (REVERTED): singleton-axis `flip` clone - noisy 1.18x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.319`. Robot triage again exposed only
