@@ -1049,6 +1049,38 @@ fn slogdet_from_lu_diagonal(lu: &[f64], n: usize, sign: f64) -> (f64, f64) {
     (det_sign, log_abs_det)
 }
 
+fn det_nxn_exact_upper_triangular(a: &[f64], n: usize) -> Option<f64> {
+    let mut matrix_max_abs = 0.0_f64;
+    for row in 0..n {
+        let row_values = &a[row * n..(row + 1) * n];
+        for (col, &value) in row_values.iter().enumerate() {
+            if !value.is_finite() || (col < row && value.to_bits() != 0) {
+                return None;
+            }
+            matrix_max_abs = matrix_max_abs.max(value.abs());
+        }
+    }
+
+    let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
+    let mut det = 1.0;
+    for diagonal in 0..n {
+        let value = a[diagonal * n + diagonal];
+        if value.abs() <= singularity_threshold {
+            return None;
+        }
+        det *= value;
+    }
+    Some(det)
+}
+
+fn det_nxn_general_validated(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
+    match lu_decompose_for_det(a, n) {
+        Ok((lu, _, sign)) => Ok(det_from_lu_diagonal(&lu, n, sign)),
+        Err(LinAlgError::SolverSingularity) => Ok(0.0),
+        Err(e) => Err(e),
+    }
+}
+
 /// Determinant of an NxN matrix (flat row-major).  Returns 0.0 for singular
 /// matrices instead of erroring.
 pub fn det_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
@@ -1061,11 +1093,25 @@ pub fn det_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
         return Ok(1.0);
     }
 
-    match lu_decompose_for_det(a, n) {
-        Ok((lu, _, sign)) => Ok(det_from_lu_diagonal(&lu, n, sign)),
-        Err(LinAlgError::SolverSingularity) => Ok(0.0),
-        Err(e) => Err(e),
+    if let Some(det) = det_nxn_exact_upper_triangular(a, n) {
+        return Ok(det);
     }
+
+    det_nxn_general_validated(a, n)
+}
+
+/// Former general determinant route retained for same-binary performance controls.
+#[doc(hidden)]
+pub fn det_nxn_general_control(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
+    if Some(a.len()) != n.checked_mul(n) {
+        return Err(LinAlgError::ShapeContractViolation(
+            "det_nxn: input length must equal n*n",
+        ));
+    }
+    if n == 0 {
+        return Ok(1.0);
+    }
+    det_nxn_general_validated(a, n)
 }
 
 /// Sign and log-absolute-determinant for an NxN matrix.
@@ -9935,6 +9981,7 @@ mod tests {
         cross_product,
         det_2x2,
         det_nxn,
+        det_nxn_general_control,
         eig_nxn,
         eig_nxn_full,
         eigh_2x2,
@@ -12071,6 +12118,24 @@ mod tests {
     fn det_empty_matrix_returns_one() {
         let d0 = det_nxn(&[], 0).expect("empty det");
         assert_eq!(d0, 1.0);
+    }
+
+    #[test]
+    fn det_exact_upper_triangular_matches_general_lu_bits() {
+        for n in [1usize, 2, 7, 64] {
+            let mut matrix = vec![0.0; n * n];
+            for row in 0..n {
+                let magnitude = 1.0 + (row % 7) as f64 * 0.001;
+                matrix[row * n + row] = if row % 2 == 0 { magnitude } else { -magnitude };
+                for col in (row + 1)..n {
+                    matrix[row * n + col] = ((row * 17 + col * 13) % 97) as f64 / 101.0 - 0.4;
+                }
+            }
+
+            let former = det_nxn_general_control(&matrix, n).expect("general determinant");
+            let actual = det_nxn(&matrix, n).expect("structured determinant");
+            assert_eq!(actual.to_bits(), former.to_bits(), "n={n}");
+        }
     }
 
     #[test]

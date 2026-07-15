@@ -17,9 +17,9 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_linalg::{
     batch_cholesky, batch_det, batch_eigvalsh, batch_inv, batch_matrix_norm, batch_slogdet,
     batch_trace, cholesky_nxn, cholesky_nxn_general_control, complex_matmul, cond_nxn, det_nxn,
-    eigvalsh_nxn, inv_nxn, kron_nxn, matrix_norm_frobenius, matrix_norm_nxn, matrix_power_nxn,
-    multi_dot, qr_mxn, qr_nxn, sbr_stage1_dense_to_band_lower_nxn, solve_nxn, svd_mxn_full,
-    svd_nxn,
+    det_nxn_general_control, eigvalsh_nxn, inv_nxn, kron_nxn, matrix_norm_frobenius,
+    matrix_norm_nxn, matrix_power_nxn, multi_dot, qr_mxn, qr_nxn,
+    sbr_stage1_dense_to_band_lower_nxn, solve_nxn, svd_mxn_full, svd_nxn,
 };
 use std::hint::black_box;
 use std::time::Duration;
@@ -146,6 +146,31 @@ fn bench_det(c: &mut Criterion) {
         });
     }
 
+    group.finish();
+}
+
+fn bench_det_exact_upper_triangular(c: &mut Criterion) {
+    let n = 256usize;
+    let mut matrix = vec![0.0; n * n];
+    for row in 0..n {
+        let magnitude = 1.0 + (row % 7) as f64 * 0.001;
+        matrix[row * n + row] = if row % 2 == 0 { magnitude } else { -magnitude };
+        for col in (row + 1)..n {
+            matrix[row * n + col] = ((row * 17 + col * 13) % 97) as f64 / 101.0 - 0.4;
+        }
+    }
+
+    let former = det_nxn_general_control(&matrix, n).expect("general determinant");
+    let candidate = det_nxn(&matrix, n).expect("structured determinant");
+    assert_eq!(candidate.to_bits(), former.to_bits());
+
+    let mut group = c.benchmark_group("det_exact_upper_triangular_256");
+    group.bench_function("former_partial_pivot_lu", |bench| {
+        bench.iter(|| black_box(det_nxn_general_control(black_box(&matrix), n).unwrap()))
+    });
+    group.bench_function("structured_diagonal_product", |bench| {
+        bench.iter(|| black_box(det_nxn(black_box(&matrix), n).unwrap()))
+    });
     group.finish();
 }
 
@@ -962,6 +987,7 @@ criterion_group!(
     bench_kron,
     bench_solve,
     bench_det,
+    bench_det_exact_upper_triangular,
     bench_inv,
     bench_cholesky,
     bench_cholesky_exact_diagonal,

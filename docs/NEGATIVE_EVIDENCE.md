@@ -4,6 +4,42 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): exact upper-triangular determinant bypasses LU - 23.76x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.309`, fresh determinant-decomposition
+lane after negative-ledger screening rejected already-shipped diagonal and
+tridiagonal Cholesky, a rejected pentadiagonal Cholesky experiment, and an
+explicitly bandwidth-bound string-affix no-ship. Robot triage again exposed
+only the broad safe-Rust parent beside the out-of-policy C-BLAS/fast-math and
+f16 leaves; the ledger contained no triangular determinant attempt.
+
+Source attribution showed `det_nxn` always copying the matrix and entering
+partial-pivot LU. ONE LEVER recognizes all-finite exact upper-triangular inputs
+whose lower triangle is positive zero and whose diagonal clears the existing
+singularity threshold. For that admitted class LU performs no swaps and leaves
+the diagonal unchanged, so multiplying the original diagonal in the former
+left-to-right order is raw-bit isomorphic. Negative zero, non-finite values,
+and singular or threshold-sensitive inputs retain the general LU path.
+
+The `criterion_linalg` target was built untimed first, then measured exactly
+once in the foreground on strict-remote worker `vmi1153651` with
+`--profile release`, release LTO disabled, 16 codegen units, 0.25 s warm-up,
+0.75 s measurement, and 10 samples. The focused same-binary row used an exact
+upper-triangular `256x256` F64 matrix:
+
+- former partial-pivot LU: `[2.0225 ms, 2.3733 ms, 2.9169 ms]`
+- structured diagonal product: `[96.465 us, 99.877 us, 107.70 us]`
+- midpoint delta: **23.76x faster / 95.79% less time**, with disjoint intervals
+
+Before timing, the same-binary benchmark asserted raw-bit equality, and the
+focused strict-remote unit test passed for `n = 1, 2, 7, 64`. RCH recompiled
+despite the untimed same-worker warm-up; that cache miss was infrastructure
+overhead, not timing evidence. Hunk-local formatting was clean; whole-file
+rustfmt drift and broad UBS heuristics were pre-existing outside this lever,
+while UBS's embedded compiler/clippy/test probes were clean. **Decision: SHIP.**
+Do not retest upper-triangular determinant dispatch; other determinant
+structures require a separately proved path.
+
 ## 2026-07-14 - WIN (SHIP): singleton weighted choice scans without a CDF - 1.83x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.307`, fresh weighted-choice/
