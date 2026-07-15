@@ -4,6 +4,38 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): Complex128 `complex_mul` borrows both inputs - 18.68x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.326`. Robot triage again left the
+broad pure-safe-Rust directive after excluding its prohibited C-BLAS/fast-math
+leaf. Negative-ledger screening found that the 2026-06-28 native parallel
+COMPLEX multiply entry belongs to the `fnp-python` UFunc zero-copy dispatch
+path, not this safe-Rust `ArrayStorage` API. The preceding `complex_sub` entry
+explicitly left multiplication as a separate hypothesis.
+
+Profile attribution found the same dominant allocation front end in
+`ArrayStorage::complex_mul`: both Complex128 operands were converted with
+`to_complex128_vec()` before the result allocation. At 100,000 elements this
+copied 3.2 MiB into two temporary vectors in addition to the required 1.6 MiB
+output. ONE LEVER borrows and zips the two same-variant Complex128 inputs
+directly. Mixed-storage operands retain the former generic conversion path,
+length-mismatch errors retain the same dtype fields, and the floating-point
+operation order is unchanged.
+
+Proof: strict remote-only release test on effective worker `vmi1264463` passed
+both focused `storage_complex_mul` tests, including raw-bit equality against
+the former clone path across signed zero, NaN, subnormal, and ordinary finite
+values (2 passed). Same-binary Criterion A/B used release with LTO disabled,
+100,000 Complex128 elements, 10 samples, 250 ms warm-up, and 750 ms measurement:
+
+- former clone-both-inputs: `[2.2028 ms, 2.3011 ms, 2.4378 ms]`
+- direct borrowed inputs: `[121.23 us, 123.21 us, 126.38 us]`
+- midpoint delta: **18.68x faster / 94.65% less time**, with disjoint intervals
+
+Verdict: **SHIP**. Retry boundary: do not re-probe Complex128+Complex128
+`complex_mul` input cloning. The division path remains a separate hypothesis
+and must earn its own profile, parity proof, and A/B.
+
 ## 2026-07-15 - WIN (SHIP): Complex128 `complex_sub` borrows both inputs - 26.96x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.325`. Robot triage again left the

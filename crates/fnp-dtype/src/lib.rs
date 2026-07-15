@@ -1530,6 +1530,20 @@ impl ArrayStorage {
 
     /// Element-wise complex multiplication: (a+bi)(c+di) = (ac-bd) + (ad+bc)i.
     pub fn complex_mul(&self, other: &Self) -> Result<Self, StorageError> {
+        if let (Self::Complex128(a), Self::Complex128(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| (ar * br - ai * bi, ar * bi + ai * br))
+                    .collect(),
+            ));
+        }
         let a = self.to_complex128_vec();
         let b = other.to_complex128_vec();
         if a.len() != b.len() {
@@ -2992,6 +3006,29 @@ mod tests {
         let v = c.to_complex128_vec();
         assert!((v[0].0 - (-5.0)).abs() < 1e-10);
         assert!((v[0].1 - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn storage_complex_mul_complex128_matches_clone_path_bits() {
+        let a = ArrayStorage::from_complex128_vec(vec![
+            (-0.0, f64::from_bits(0x7ff8_0000_0000_0789)),
+            (f64::MIN_POSITIVE, f64::from_bits(1)),
+            (1.5, -2.75),
+        ]);
+        let b = ArrayStorage::from_complex128_vec(vec![(0.0, 2.0), (0.5, -2.0), (-4.25, 0.125)]);
+        let former_a = a.to_complex128_vec();
+        let former_b = b.to_complex128_vec();
+        let former: Vec<_> = former_a
+            .iter()
+            .zip(&former_b)
+            .map(|(&(ar, ai), &(br, bi))| (ar * br - ai * bi, ar * bi + ai * br))
+            .collect();
+        let direct = a.complex_mul(&b).unwrap().to_complex128_vec();
+
+        for (actual, expected) in direct.iter().zip(&former) {
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+        }
     }
 
     #[test]

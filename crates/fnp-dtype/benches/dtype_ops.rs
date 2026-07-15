@@ -465,6 +465,57 @@ fn bench_complex128_sub_direct(c: &mut Criterion) {
     group.finish();
 }
 
+fn former_complex128_mul(lhs: &ArrayStorage, rhs: &ArrayStorage) -> ArrayStorage {
+    let lhs = lhs.to_complex128_vec();
+    let rhs = rhs.to_complex128_vec();
+    ArrayStorage::Complex128(
+        lhs.iter()
+            .zip(&rhs)
+            .map(|(&(ar, ai), &(br, bi))| (ar * br - ai * bi, ar * bi + ai * br))
+            .collect(),
+    )
+}
+
+fn bench_complex128_mul_direct(c: &mut Criterion) {
+    let mut group = c.benchmark_group("complex128_mul_direct");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+
+    let lhs = ArrayStorage::Complex128(
+        (0..100_000)
+            .map(|index| {
+                let value = f64::from(index) * 0.25 - 12_500.0;
+                (value, -value * 0.5)
+            })
+            .collect(),
+    );
+    let rhs = ArrayStorage::Complex128(
+        (0..100_000)
+            .map(|index| {
+                let value = f64::from(index) * 0.125 - 6_250.0;
+                (-value, value * 0.75)
+            })
+            .collect(),
+    );
+    let former = former_complex128_mul(&lhs, &rhs).to_complex128_vec();
+    let direct = lhs.complex_mul(&rhs).unwrap().to_complex128_vec();
+    assert_eq!(direct.len(), former.len());
+    for (actual, expected) in direct.iter().zip(&former) {
+        assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+        assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+    }
+
+    group.bench_function("former_clone_both_inputs", |b| {
+        b.iter(|| former_complex128_mul(black_box(&lhs), black_box(&rhs)))
+    });
+    group.bench_function("direct_borrow_both_inputs", |b| {
+        b.iter(|| black_box(&lhs).complex_mul(black_box(&rhs)).unwrap())
+    });
+
+    group.finish();
+}
+
 fn former_complex128_sum(storage: &ArrayStorage) -> (f64, f64) {
     let pairs = storage.to_complex128_vec();
     pairs
@@ -584,6 +635,7 @@ criterion_group!(
     bench_to_complex128_vec,
     bench_complex128_add_direct,
     bench_complex128_sub_direct,
+    bench_complex128_mul_direct,
     bench_complex128_sum_direct,
     bench_complex128_prod_direct,
     bench_array_storage_get_set,
