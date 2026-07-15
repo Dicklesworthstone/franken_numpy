@@ -22,6 +22,111 @@ fn pcg64_generator() -> Generator {
     Generator::from_bit_generator(bit_generator)
 }
 
+#[allow(clippy::excessive_precision)]
+fn former_random_loggam(x: f64) -> f64 {
+    const A: [f64; 10] = [
+        8.333333333333333e-02,
+        -2.777777777777778e-03,
+        7.936507936507937e-04,
+        -5.952380952380952e-04,
+        8.417508417508418e-04,
+        -1.917526917526918e-03,
+        6.410256410256410e-03,
+        -2.955065359477124e-02,
+        1.796443723688307e-01,
+        -1.39243221690590e+00,
+    ];
+
+    if x == 1.0 || x == 2.0 {
+        return 0.0;
+    }
+
+    let n = if x < 7.0 { (7.0 - x) as i64 } else { 0 };
+    let mut x0 = x + n as f64;
+    let x2 = (1.0 / x0) * (1.0 / x0);
+    let mut gl0 = A[9];
+    for k in (0..=8).rev() {
+        gl0 = gl0 * x2 + A[k];
+    }
+    let mut gl = gl0 / x0 + 0.5 * 1.8378770664093453 + (x0 - 0.5) * x0.ln() - x0;
+    if x < 7.0 {
+        for _ in 0..n {
+            gl -= (x0 - 1.0).ln();
+            x0 -= 1.0;
+        }
+    }
+    gl
+}
+
+#[inline(never)]
+fn former_poisson_ptrs_one(rng: &mut Pcg64Rng, lam: f64) -> u64 {
+    let slam = lam.sqrt();
+    let loglam = lam.ln();
+    let b = 0.931 + 2.53 * slam;
+    let a = -0.059 + 0.02483 * b;
+    let invalpha = 1.1239 + 1.1328 / (b - 3.4);
+    let vr = 0.9277 - 3.6224 / (b - 2.0);
+    loop {
+        let u = rng.next_f64() - 0.5;
+        let v = rng.next_f64();
+        let us = 0.5 - u.abs();
+        let k = ((2.0 * a / us + b) * u + lam + 0.43).floor() as i64;
+        if us >= 0.07 && v <= vr {
+            return k as u64;
+        }
+        if k < 0 || (us < 0.013 && v > us) {
+            continue;
+        }
+        if v.ln() + invalpha.ln() - (a / (us * us) + b).ln()
+            <= -lam + (k as f64) * loglam - former_random_loggam((k + 1) as f64)
+        {
+            return k as u64;
+        }
+    }
+}
+
+fn former_poisson_ptrs(rng: &mut Pcg64Rng, lam: f64, size: usize) -> Vec<u64> {
+    (0..size)
+        .map(|_| former_poisson_ptrs_one(rng, lam))
+        .collect()
+}
+
+fn bench_poisson_ptrs_cache(c: &mut Criterion) {
+    const SIZE: usize = 100_000;
+    const LAM: f64 = 20.0;
+
+    let mut former_proof = Pcg64Rng::from_seed_sequence(&seed_sequence()).unwrap();
+    let mut candidate_proof = pcg64_generator();
+    let former = former_poisson_ptrs(&mut former_proof, LAM, SIZE);
+    let candidate = candidate_proof.poisson(LAM, SIZE).unwrap();
+    assert_eq!(former, candidate);
+    assert_eq!(former_proof.next_u64(), candidate_proof.next_u64());
+
+    let mut former_rng = Pcg64Rng::from_seed_sequence(&seed_sequence()).unwrap();
+    let mut candidate_generator = pcg64_generator();
+    let mut group = c.benchmark_group("poisson_ptrs_parameter_cache");
+    group.throughput(Throughput::Elements(SIZE as u64));
+    group.bench_function("former_recompute_per_sample", |bench| {
+        bench.iter(|| {
+            black_box(former_poisson_ptrs(
+                black_box(&mut former_rng),
+                black_box(LAM),
+                black_box(SIZE),
+            ))
+        })
+    });
+    group.bench_function("candidate_cache_per_batch", |bench| {
+        bench.iter(|| {
+            black_box(
+                candidate_generator
+                    .poisson(black_box(LAM), black_box(SIZE))
+                    .unwrap(),
+            )
+        })
+    });
+    group.finish();
+}
+
 #[inline(never)]
 fn former_choice_weighted_replace_one(
     generator: &mut Generator,
@@ -472,6 +577,7 @@ fn bench_pcg_fill_u64_large(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_poisson_ptrs_cache,
     bench_choice_weighted_singleton,
     bench_pcg64_next_u64,
     bench_pcg64dxsm_next_u64,

@@ -3884,6 +3884,31 @@ impl BinomialCache {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PoissonPtrsCache {
+    lam: f64,
+    loglam: f64,
+    b: f64,
+    a: f64,
+    log_invalpha: f64,
+    vr: f64,
+}
+
+impl PoissonPtrsCache {
+    fn new(lam: f64) -> Self {
+        let b = 0.931 + 2.53 * lam.sqrt();
+        let a = -0.059 + 0.02483 * b;
+        Self {
+            lam,
+            loglam: lam.ln(),
+            b,
+            a,
+            log_invalpha: (1.1239 + 1.1328 / (b - 3.4)).ln(),
+            vr: 0.9277 - 3.6224 / (b - 2.0),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Generator {
     bit_generator: BitGenerator,
@@ -4976,24 +5001,32 @@ impl Generator {
         if !(0.0..=POISSON_LAM_MAX).contains(&lam) {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size).map(|_| self.sample_poisson_single(lam)).collect())
+        if lam >= 10.0 {
+            let cache = PoissonPtrsCache::new(lam);
+            return Ok((0..size).map(|_| self.poisson_ptrs(cache) as u64).collect());
+        }
+        if lam == 0.0 {
+            Ok(vec![0; size])
+        } else {
+            let enlam = (-lam).exp();
+            Ok((0..size).map(|_| self.poisson_mult(enlam) as u64).collect())
+        }
     }
 
     /// Single Poisson sample matching NumPy's `random_poisson` dispatcher.
     fn sample_poisson_single(&mut self, lam: f64) -> u64 {
         if lam >= 10.0 {
-            self.poisson_ptrs(lam) as u64
+            self.poisson_ptrs(PoissonPtrsCache::new(lam)) as u64
         } else if lam == 0.0 {
             0
         } else {
-            self.poisson_mult(lam) as u64
+            self.poisson_mult((-lam).exp()) as u64
         }
     }
 
     /// Multiplicative (Knuth) method for small lambda.
     /// Matches `random_poisson_mult()` in NumPy's distributions.c.
-    fn poisson_mult(&mut self, lam: f64) -> i64 {
-        let enlam = (-lam).exp();
+    fn poisson_mult(&mut self, enlam: f64) -> i64 {
         let mut x: i64 = 0;
         let mut prod = 1.0;
         loop {
@@ -5011,28 +5044,21 @@ impl Generator {
     /// Matches `random_poisson_ptrs()` in NumPy's distributions.c.
     /// W. Hörmann, "The transformed rejection method for generating
     /// Poisson random variables", Insurance: Mathematics and Economics 12, 39-45 (1993).
-    fn poisson_ptrs(&mut self, lam: f64) -> i64 {
-        let slam = lam.sqrt();
-        let loglam = lam.ln();
-        let b = 0.931 + 2.53 * slam;
-        let a = -0.059 + 0.02483 * b;
-        let invalpha = 1.1239 + 1.1328 / (b - 3.4);
-        let vr = 0.9277 - 3.6224 / (b - 2.0);
-
+    fn poisson_ptrs(&mut self, cache: PoissonPtrsCache) -> i64 {
         loop {
             let u = self.next_f64() - 0.5;
             let v = self.next_f64();
             let us = 0.5 - u.abs();
-            let k = ((2.0 * a / us + b) * u + lam + 0.43).floor() as i64;
+            let k = ((2.0 * cache.a / us + cache.b) * u + cache.lam + 0.43).floor() as i64;
 
-            if us >= 0.07 && v <= vr {
+            if us >= 0.07 && v <= cache.vr {
                 return k;
             }
             if k < 0 || (us < 0.013 && v > us) {
                 continue;
             }
-            if v.ln() + invalpha.ln() - (a / (us * us) + b).ln()
-                <= -lam + (k as f64) * loglam - random_loggam((k + 1) as f64)
+            if v.ln() + cache.log_invalpha - (cache.a / (us * us) + cache.b).ln()
+                <= -cache.lam + (k as f64) * cache.loglam - random_loggam((k + 1) as f64)
             {
                 return k;
             }

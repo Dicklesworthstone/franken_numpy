@@ -4,6 +4,39 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): Poisson batches cache parameter terms - 1.16x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.312`, fresh `fnp-random` distribution
+lane after the dtype sum/product family was explicitly closed. Robot triage's
+only concrete perf leaf required prohibited C-BLAS/fast-math. Negative-ledger
+screening found prior PCG fill, standard-exponential dispatch, uniform, bytes,
+and singleton-choice work, but no Poisson parameter-cache attempt.
+
+Source attribution found batched `Generator::poisson` recomputing terms that
+depend only on `lam` for every output: `exp(-lam)` in the small-lambda method,
+and `sqrt(lam)`, `ln(lam)`, the PTRS coefficients, and `ln(invalpha)` in the
+large-lambda method. ONE LEVER computes those terms once per batch and passes a
+copyable cache into the unchanged PTRS rejection loop. RNG draw order,
+acceptance inequalities, output order, scalar Poisson consumers, validation,
+and zero-lambda behavior are unchanged.
+
+The focused strict-remote small/large Poisson oracle tests passed. The same-
+binary benchmark then asserted equality of all 100,000 `lam=20` outputs and the
+next raw PCG64 word before timing. After an untimed non-LTO release warm build,
+the sole foreground measurement ran on strict-remote worker `vmi1152480` with
+16 codegen units, 0.25 s warm-up, 0.75 s measurement, and 10 samples:
+
+- former per-sample PTRS parameter recomputation: `[5.1537 ms, 5.4814 ms, 5.7049 ms]`
+- candidate per-batch parameter cache: `[4.5383 ms, 4.7381 ms, 4.8846 ms]`
+- midpoint delta: **1.16x faster / 13.56% less time**, with disjoint intervals
+
+RCH recompiled for the timed command despite the same pinned worker and warm
+target; that cache miss was build overhead, not timing evidence. Exact-file
+rustfmt and diff checks passed. UBS's embedded fmt/clippy/check/test probes were
+clean; its nonzero result came from broad pre-existing heuristics and expected
+benchmark assertions/unwraps. **Decision: SHIP.** Do not retry Poisson
+parameter-term caching; algorithmic Poisson changes require a separate proof.
+
 ## 2026-07-15 - WIN (SHIP): Complex128 `complex_prod` folds borrowed storage - 1.35x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.311`, second and final allocation cut
