@@ -4,6 +4,38 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): scalar-RHS `kron` scales the LHS directly - 17.30x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.306`, fresh `fnp-linalg` structured-
+operand lane after the scalar-kernel convolution win. Robot triage exposed the
+broad safe-Rust parent and an out-of-policy C-BLAS/fast-math leaf. The ledger
+closed dense parallel and identity-RHS `kron`, but its retry predicate explicitly
+left new structured operand classes open; it contained no scalar-RHS attempt.
+
+Source attribution showed `kron_nxn(A, [[b]])` still allocating a zero-filled
+output and routing every output row through runtime quotient/remainder, slice
+construction, and two nested loops for one multiplication. ONE LEVER recognizes
+the validated one-element RHS and directly collects `A[i] * b`. The multiplication
+orientation, output shape, empty-output behavior, signed-zero/NaN/Inf semantics,
+and every non-scalar RHS path remain unchanged.
+
+The existing `kron` target was built untimed first, then measured exactly once
+in the foreground on strict-remote worker `vmi1149989` with `--profile release`,
+release LTO disabled, 16 codegen units, 0.25 s warm-up, 0.75 s measurement, and
+10 samples. The focused row used a `131071x1` F64 LHS and `1x1` RHS:
+
+- former generic row fill: `[533.25 us, 569.84 us, 610.62 us]`
+- direct scalar-RHS scale: `[30.458 us, 32.934 us, 35.108 us]`
+- midpoint delta: **17.30x faster / 94.22% less time**, with disjoint intervals
+
+The benchmark's pre-timing assertion proved raw-bit equality over all 131,071
+outputs, including signed zero, NaN, and infinity. RCH recompiled despite the
+untimed same-worker warm-up; that cache miss was infrastructure overhead, not
+timing evidence. Focused rustfmt and diff checks passed. UBS surfaced broad
+whole-file inventories plus expected benchmark unwraps, while its embedded
+format/clippy/build checks were clean. **Decision: SHIP.** Do not retest scalar
+RHS `kron`; scalar LHS is a distinct adjacent class and must earn its own A/B.
+
 ## 2026-07-14 - WIN (SHIP): scalar-kernel `convolve` skips gather setup and zero-fill - 2.76x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.305`, fresh convolution/`fnp-ufunc`

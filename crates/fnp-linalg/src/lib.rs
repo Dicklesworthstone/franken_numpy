@@ -6071,6 +6071,10 @@ pub fn kron_nxn(
     if out_count == 0 {
         return Ok(Vec::new());
     }
+    if b.len() == 1 {
+        let rhs = b[0];
+        return Ok(a.iter().map(|&value| value * rhs).collect());
+    }
     if let Some(identity_result) = kron_identity_rhs_nonnegative_fast_path(a, m, n, b, p, q) {
         return Ok(identity_result);
     }
@@ -16392,6 +16396,10 @@ mod tests {
         let a = [3.0];
         let b = [1.0, 2.0, 3.0, 4.0];
         let result = kron_nxn(&a, 1, 1, &b, 2, 2).unwrap();
+        assert_eq!(result, vec![3.0, 6.0, 9.0, 12.0]);
+
+        // [1, 2; 3, 4] ⊗ [3] takes the scalar-RHS scaling path.
+        let result = kron_nxn(&b, 2, 2, &a, 1, 1).unwrap();
         assert_eq!(result, vec![3.0, 6.0, 9.0, 12.0]);
     }
 
