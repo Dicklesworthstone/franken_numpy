@@ -7,13 +7,98 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fnp_random::{
-    BitGenerator, BitGeneratorKind, Generator, Pcg64DxsmRng, Pcg64Rng, PhiloxRng, SeedSequence,
-    Sfc64Rng,
+    BitGenerator, BitGeneratorKind, Generator, Pcg64DxsmRng, Pcg64Rng, PhiloxRng, RandomError,
+    SeedSequence, Sfc64Rng,
 };
 use std::hint::black_box;
 
 fn seed_sequence() -> SeedSequence {
     SeedSequence::new(&[42]).unwrap()
+}
+
+fn pcg64_generator() -> Generator {
+    let bit_generator =
+        BitGenerator::from_seed_sequence(BitGeneratorKind::Pcg64, &seed_sequence()).unwrap();
+    Generator::from_bit_generator(bit_generator)
+}
+
+#[inline(never)]
+fn former_choice_weighted_replace_one(
+    generator: &mut Generator,
+    values: &[f64],
+    probabilities: &[f64],
+) -> Result<Vec<f64>, RandomError> {
+    let n = values.len();
+    if probabilities.len() != n {
+        return Err(RandomError::InvalidUpperBound);
+    }
+    let sum_tolerance = f64::EPSILON.sqrt();
+    let sum: f64 = probabilities.iter().sum();
+    if !sum.is_finite()
+        || (sum - 1.0).abs() > sum_tolerance
+        || probabilities
+            .iter()
+            .any(|&probability| !probability.is_finite() || probability < 0.0)
+    {
+        return Err(RandomError::InvalidUpperBound);
+    }
+
+    let mut cdf = Vec::with_capacity(n);
+    let mut cumulative = 0.0;
+    for &probability in probabilities {
+        cumulative += probability;
+        cdf.push(cumulative);
+    }
+    let draw = generator.next_f64();
+    let index = cdf.partition_point(|&value| value <= draw).min(n - 1);
+    Ok(vec![values[index]])
+}
+
+fn bench_choice_weighted_singleton(c: &mut Criterion) {
+    const LEN: usize = 131_071;
+    let mut values: Vec<f64> = (0..LEN).map(|index| index as f64 * 0.25 - 7.0).collect();
+    values[0] = f64::from_bits(0x7ff8_0000_0000_0042);
+    let mut probabilities = vec![0.0; LEN];
+    probabilities[0] = 1.0;
+
+    let mut former_proof = pcg64_generator();
+    let mut candidate_proof = former_proof.clone();
+    for _ in 0..64 {
+        let former =
+            former_choice_weighted_replace_one(&mut former_proof, &values, &probabilities).unwrap();
+        let candidate = candidate_proof
+            .choice_weighted(&values, 1, true, &probabilities)
+            .unwrap();
+        assert_eq!(former[0].to_bits(), candidate[0].to_bits());
+    }
+    assert_eq!(former_proof, candidate_proof);
+
+    let mut former_generator = pcg64_generator();
+    let mut candidate_generator = pcg64_generator();
+    let mut group = c.benchmark_group("choice_weighted_singleton");
+    group.throughput(Throughput::Elements(LEN as u64));
+    group.bench_function("former_materialized_cdf", |bench| {
+        bench.iter(|| {
+            black_box(
+                former_choice_weighted_replace_one(
+                    black_box(&mut former_generator),
+                    black_box(&values),
+                    black_box(&probabilities),
+                )
+                .unwrap(),
+            )
+        })
+    });
+    group.bench_function("direct_cumulative_scan", |bench| {
+        bench.iter(|| {
+            black_box(
+                candidate_generator
+                    .choice_weighted(black_box(&values), 1, true, black_box(&probabilities))
+                    .unwrap(),
+            )
+        })
+    });
+    group.finish();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -387,6 +472,7 @@ fn bench_pcg_fill_u64_large(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_choice_weighted_singleton,
     bench_pcg64_next_u64,
     bench_pcg64dxsm_next_u64,
     bench_philox_next_u64,

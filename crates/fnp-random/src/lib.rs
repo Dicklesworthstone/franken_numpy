@@ -5417,6 +5417,18 @@ impl Generator {
             return Err(RandomError::InvalidParameter);
         }
 
+        if replace && size == 1 {
+            let draw = self.next_f64();
+            let mut cumulative = 0.0;
+            for (&value, &prob) in a.iter().zip(p) {
+                cumulative += prob;
+                if cumulative > draw {
+                    return Ok(vec![value]);
+                }
+            }
+            return Ok(vec![a[n - 1]]);
+        }
+
         if replace {
             // Inverse-CDF sampling
             let mut cdf = Vec::with_capacity(n);

@@ -4,6 +4,41 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): singleton weighted choice scans without a CDF - 1.83x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.307`, fresh weighted-choice/
+`fnp-random` lane after the scalar-RHS `kron` win. Robot triage again exposed
+only the broad safe-Rust parent besides the out-of-policy C-BLAS/fast-math and
+f16 leaves. Negative-ledger screening found the same-day serial PCG fill reject
+and mature distribution-fill keeps, but no weighted-choice CDF attempt.
+
+Source attribution showed `choice_weighted(..., size=1, replace=true)` fully
+validating the probabilities, materializing an `n`-element cumulative-distribution
+vector, drawing once, then binary-searching that temporary. ONE LEVER retains the
+full validation, draws the same one F64, and accumulates probabilities in the same
+left-to-right order until the former `cdf > draw` boundary. If rounding leaves no
+entry above the draw, it selects the last value exactly like the former
+`partition_point(...).min(n - 1)`. All other sizes and no-replacement sampling
+retain the existing paths.
+
+The existing `random_ops` target was built untimed first, then measured exactly
+once in the foreground on strict-remote worker `vmi1153651` with
+`--profile release`, release LTO disabled, 16 codegen units, 0.25 s warm-up,
+0.75 s measurement, and 10 samples. The focused row used 131,071 values and a
+valid one-hot probability vector:
+
+- former materialized CDF: `[981.52 us, 1.0278 ms, 1.0715 ms]`
+- direct cumulative scan: `[519.03 us, 561.02 us, 584.24 us]`
+- midpoint delta: **1.83x faster / 45.42% less time**, with disjoint intervals
+
+Before timing, 64 sequential calls proved the selected fixed-NaN payload raw-bit
+equal and the complete post-call `Generator` state equal. RCH recompiled despite
+the untimed same-worker warm-up; that cache miss was infrastructure overhead, not
+timing evidence. Focused diff and rustfmt checks passed. UBS surfaced broad
+whole-file heuristics plus expected benchmark unwraps, while its embedded
+format/clippy/build checks were clean. **Decision: SHIP.** Do not retest the
+singleton replacement CDF; larger output counts remain on the general path.
+
 ## 2026-07-14 - WIN (SHIP): scalar-RHS `kron` scales the LHS directly - 17.30x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.306`, fresh `fnp-linalg` structured-
