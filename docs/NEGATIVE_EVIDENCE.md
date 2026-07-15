@@ -4,6 +4,37 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): Complex128 `complex_add` borrows both inputs - 26.99x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.324`. Robot triage again left the
+broad pure-safe-Rust directive after excluding its prohibited C-BLAS/fast-math
+leaf. Because the preceding two indexing turns were both strong keeps but the
+vein was repeating, negative-ledger screening pivoted to the fresh `fnp-dtype`
+subsystem.
+
+Source attribution found that `ArrayStorage::complex_add` converted both
+Complex128 operands with `to_complex128_vec()` before allocating its result.
+At 100,000 elements this copied 3.2 MiB into two temporary vectors in addition
+to the required 1.6 MiB output. ONE LEVER borrows and zips the two same-variant
+Complex128 inputs directly. Mixed-storage operands retain the former generic
+conversion path, and length-mismatch errors retain the same dtype fields.
+
+The focused strict-remote non-LTO release test passed all three complex-add
+cases, including raw-bit parity with signed zero, a fixed NaN payload,
+infinities, and subnormals. After an untimed `dtype_ops --no-run` warm-up, the
+sole same-binary Criterion A/B ran on `vmi1264463` with 16 codegen units,
+0.25 s warm-up, 0.75 s measurement, and 10 samples. RCH rebuilt the target
+before the measurement despite that warm-up, but the five-minute cap did not
+fire and both variants ran in the same resulting binary:
+
+- former clone-both-inputs: `[1.7796 ms, 1.9664 ms, 2.2348 ms]`
+- direct borrowed inputs: `[72.131 us, 72.858 us, 73.807 us]`
+- midpoint delta: **26.99x faster / 96.30% less time**, with disjoint intervals
+
+Verdict: **SHIP**. Retry boundary: do not re-probe Complex128+Complex128
+`complex_add` input cloning. The sibling binary operations remain separate
+hypotheses and must each earn their own profile, parity proof, and A/B.
+
 ## 2026-07-15 - WIN (SHIP): flat `put` coalesces consecutive duplicate runs - 9.66x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.323`. Robot triage again surfaced the
