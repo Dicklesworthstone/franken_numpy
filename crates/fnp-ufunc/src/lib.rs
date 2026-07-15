@@ -33544,13 +33544,18 @@ fn cumulate_axis_i64(
 ) -> Result<Vec<i64>, UFuncError> {
     debug_assert!(axis < shape.len());
     let total = element_count(shape).map_err(UFuncError::Shape)?;
-    let mut out = vec![0i64; total];
-
     let axis_len = shape[axis];
     if axis_len == 0 || total == 0 {
-        return Ok(out);
+        return Ok(vec![0i64; total]);
+    }
+    if axis_len == 1 {
+        return Ok(values
+            .iter()
+            .map(|&value| fold(identity, value))
+            .collect());
     }
 
+    let mut out = vec![0i64; total];
     let inner: usize = fnp_ndarray::element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?;
     let outer: usize = fnp_ndarray::element_count(&shape[..axis]).map_err(UFuncError::Shape)?;
 
@@ -48092,6 +48097,44 @@ print(json.dumps(payload))
         assert_eq!(
             hex, "0a85ae5a21c4ae6be5bf85a48db4d2a8bdf7285e4e79bd04910a023d694b1da2",
             "cummin/cummax row-wise golden digest drifted"
+        );
+    }
+
+    #[test]
+    fn cumulate_axis_i64_singleton_matches_former_lane_bits() {
+        let values = vec![
+            i64::MIN,
+            -((1_i64 << 53) + 7),
+            -1,
+            0,
+            1,
+            (1_i64 << 53) + 7,
+            i64::MAX,
+        ];
+        let shape = [values.len(), 1];
+
+        let sum = super::cumulate_axis_i64(&values, &shape, 1, 0, i64::wrapping_add)
+            .expect("singleton i64 cumsum helper");
+        let prod = super::cumulate_axis_i64(&values, &shape, 1, 1, i64::wrapping_mul)
+            .expect("singleton i64 cumprod helper");
+        assert_eq!(sum, values);
+        assert_eq!(prod, values);
+
+        let arr = UFuncArray::from_storage(shape.to_vec(), ArrayStorage::I64(values.clone()))
+            .expect("exact i64 array");
+        let cumsum = arr.cumsum(Some(1)).expect("singleton i64 cumsum");
+        let cumprod = arr.cumprod(Some(1)).expect("singleton i64 cumprod");
+        assert_eq!(cumsum.shape(), shape);
+        assert_eq!(cumprod.shape(), shape);
+        assert_eq!(cumsum.dtype(), DType::I64);
+        assert_eq!(cumprod.dtype(), DType::I64);
+        assert_eq!(
+            cumsum.to_storage().expect("exact cumsum storage"),
+            ArrayStorage::I64(values.clone())
+        );
+        assert_eq!(
+            cumprod.to_storage().expect("exact cumprod storage"),
+            ArrayStorage::I64(values)
         );
     }
 

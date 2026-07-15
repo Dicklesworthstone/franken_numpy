@@ -4,6 +4,40 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): Exact-I64 singleton-axis cumulative direct fold - 6.38x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.316`. Robot triage's only concrete
+performance leaf required prohibited C-BLAS/fast-math, while the four most
+recent linalg structure keeps had explicitly closed that family. Negative-ledger
+screening instead found the floating cumulative helper's 19.10x singleton-axis
+shortcut, but no corresponding exact-I64 attempt.
+
+Source attribution found `cumulate_axis_i64` still zero-filling its output and
+dispatching one-element `[N, 1]`, axis-1 lanes through Rayon. For a singleton
+axis, each lane is exactly `fold(identity, value)`, so ONE LEVER writes those
+results directly and leaves empty, multi-element, U64, and floating routes
+unchanged. The shared helper covers exact-I64 cumsum and cumprod.
+
+The focused strict-remote test passed exact sidecar equality for cumsum and
+cumprod across `i64::MIN/MAX`, signed values, and values beyond 2^53. The
+same-binary benchmark reconstructed the former full public cost (source-sidecar
+clone, zero-fill/Rayon lane dispatch, and f64 bridge) and asserted exact sidecar
+plus bridge-bit equality before timing 262,144 elements. After an untimed
+non-LTO release warm build, the sole foreground measurement ran on strict-remote
+worker `vmi1152480` with 16 codegen units, 0.25 s warm-up, 0.75 s measurement,
+and 10 samples:
+
+- former zero-fill + Rayon: `[874.53 us, 1.1402 ms, 1.3013 ms]`
+- candidate direct exact fold map: `[160.29 us, 178.67 us, 195.51 us]`
+- midpoint delta: **6.38x faster / 84.33% less time**, with disjoint intervals
+
+RCH recompiled for the timed command despite the pinned worker and successful
+warm build; that cache miss was build overhead outside Criterion. Exact-file
+UBS's nonzero result came from broad pre-existing heuristics; it reported
+formatting, clippy, build, and test health clean, and no unsafe blocks.
+**Decision: SHIP.** Exact-I64 singleton-axis cumulative dispatch is closed;
+future cumulative work should target a different dtype or axis structure.
+
 ## 2026-07-15 - WIN (SHIP): Pivot-stable lower-triangular `slogdet` bypasses LU - 8.79x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.315`. Robot triage again surfaced the
