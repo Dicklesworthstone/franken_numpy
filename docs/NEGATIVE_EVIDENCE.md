@@ -4,6 +4,53 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): native-endian I64 `fromfile` typed-slice decode - 11.73x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.292`, adjacent `fromfile`/`fnp-io`
+lane. Robot triage again exposed only the out-of-policy C-BLAS/fast-math perf
+leaf. The preceding native-I16 cut remained an 8.44x win, so this pass tested
+the remaining signed wide-integer sibling; negative-ledger search found no
+native-I64 attempt.
+
+Source attribution showed native-endian I64 still paying eight indexed byte
+loads plus generic `decode_element` dispatch per value. ONE LEVER routes aligned
+input through `try_cast_slice::<u8, i64>` and applies the same Rust `i64 as f64`
+conversion directly, retaining the exact `from_ne_bytes` fallback for
+misaligned input. Ordering and count clamping are unchanged, and both paths use
+the identical integer-to-float rounding operation. Before timing, the proof
+bench asserted raw-bit equality over `i64::MIN`, `i64::MAX`, values bracketing
+2^53, arbitrary wrapping values, and a forced-misaligned 257-element corpus.
+
+The target was built first with a separate untimed foreground strict-remote
+command and no shell timeout:
+
+```text
+RCH_WORKER=vmi1227854 RCH_WORKERS=vmi1227854 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-io --bench criterion_io --profile release --no-run
+```
+
+RCH admitted warm-up job `j-29928833041828777` to `vmi1227854`; its cache miss
+compiled in 23.70 seconds and exited 0. The sole cheap measurement then ran on
+that same worker:
+
+```text
+RCH_WORKER=vmi1227854 RCH_WORKERS=vmi1227854 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-io --bench criterion_io --profile release -- fromfile_native_i64_typed_slice --warm-up-time 0.25 --measurement-time 0.75 --sample-size 10 --noplot
+```
+
+Measurement job `j-29928833041828781` again reported a cache miss despite the
+same worker-scoped target path, but no timeout was applied; Criterion began only
+after the 24.71-second compile and returned a real A/B with exit 0:
+
+| arm | Criterion estimate |
+|---|---:|
+| former generic element decoder | 647.33-780.81 us (724.91 us midpoint) |
+| typed-slice candidate | 51.995-70.639 us (61.791 us midpoint) |
+
+Midpoint speedup is **11.732x** (91.48% lower latency); even the closest interval
+bounds separate by 9.16x. Timed source/bench hashes were
+`4691ca7e0245a4c584b0a3a151c13783ac6578462e04d1263fb56ae1359decc0` and
+`4f6c20ff0e0ff9ba76becd88c027d7f35314691d039e93df48b1c2c48ecd32e4`.
+Decision: **SHIP**. No second measurement or conformance loop ran.
+
 ## 2026-07-14 - WIN (SHIP): native-endian I16 `fromfile` typed-slice decode - 8.44x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.291`, adjacent `fromfile`/`fnp-io`
