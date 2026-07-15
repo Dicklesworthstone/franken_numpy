@@ -161,6 +161,17 @@ fn native_i16_dtype() -> IOSupportedDType {
     }
 }
 
+fn non_native_i16_dtype() -> IOSupportedDType {
+    #[cfg(target_endian = "little")]
+    {
+        IOSupportedDType::I16Be
+    }
+    #[cfg(target_endian = "big")]
+    {
+        IOSupportedDType::I16
+    }
+}
+
 fn native_u16_dtype() -> IOSupportedDType {
     #[cfg(target_endian = "little")]
     {
@@ -341,6 +352,19 @@ fn fromfile_i16_former(data: &[u8], count: Option<usize>) -> Vec<f64> {
             let offset = index * item_size;
             let chunk = &data[offset..offset + item_size];
             f64::from(i16::from_ne_bytes([chunk[0], chunk[1]]))
+        })
+        .collect()
+}
+
+fn fromfile_non_native_i16_former(data: &[u8], count: Option<usize>) -> Vec<f64> {
+    let item_size = core::mem::size_of::<i16>();
+    let max_elems = data.len() / item_size;
+    let n = count.map_or(max_elems, |requested| requested.min(max_elems));
+    (0..n)
+        .map(|index| {
+            let offset = index * item_size;
+            let chunk = &data[offset..offset + item_size];
+            f64::from(i16::from_ne_bytes([chunk[0], chunk[1]]).swap_bytes())
         })
         .collect()
 }
@@ -672,6 +696,47 @@ fn bench_fromfile_native_i16(c: &mut Criterion) {
     });
     group.bench_function("typed_slice_candidate", |bench| {
         bench.iter(|| black_box(fromfile(black_box(bytes), native_i16_dtype(), None).unwrap()))
+    });
+    group.finish();
+}
+
+fn bench_fromfile_non_native_i16(c: &mut Criterion) {
+    const ELEMENTS: usize = 262_144;
+    let values: Vec<i16> = (0..ELEMENTS)
+        .map(|index| match index % 8 {
+            0 => i16::MIN,
+            1 => i16::MAX,
+            2 => -1,
+            3 => 0,
+            _ => (index as i16).wrapping_mul(257).wrapping_sub(17),
+        })
+        .collect();
+    let stored: Vec<i16> = values.iter().map(|&value| value.swap_bytes()).collect();
+    let bytes: &[u8] = bytemuck::cast_slice(&stored);
+    let former = fromfile_non_native_i16_former(bytes, None);
+    let candidate = fromfile(bytes, non_native_i16_dtype(), None).unwrap();
+    assert_eq!(candidate, former);
+
+    let mut padded = vec![0u8; bytes.len() + core::mem::align_of::<i16>()];
+    let misaligned_offset = (0..core::mem::align_of::<i16>())
+        .find(|&offset| (padded.as_ptr() as usize + offset) % core::mem::align_of::<i16>() != 0)
+        .unwrap();
+    padded[misaligned_offset..misaligned_offset + bytes.len()].copy_from_slice(bytes);
+    let misaligned = &padded[misaligned_offset..misaligned_offset + bytes.len()];
+    let former_misaligned = fromfile_non_native_i16_former(misaligned, Some(257));
+    let candidate_misaligned = fromfile(misaligned, non_native_i16_dtype(), Some(257)).unwrap();
+    assert_eq!(candidate_misaligned, former_misaligned);
+
+    let mut group = c.benchmark_group("fromfile_non_native_i16_typed_byteswap");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Bytes(bytes.len() as u64));
+    group.bench_function("former_element_decode", |bench| {
+        bench.iter(|| black_box(fromfile_non_native_i16_former(black_box(bytes), None)))
+    });
+    group.bench_function("typed_slice_byteswap_candidate", |bench| {
+        bench.iter(|| black_box(fromfile(black_box(bytes), non_native_i16_dtype(), None).unwrap()))
     });
     group.finish();
 }
@@ -1166,6 +1231,7 @@ criterion_group!(
     bench_fromfile_non_native_i64,
     bench_fromfile_non_native_f64,
     bench_fromfile_native_i16,
+    bench_fromfile_non_native_i16,
     bench_fromfile_native_u16,
     bench_fromfile_native_u32,
     bench_fromfile_non_native_u32,
