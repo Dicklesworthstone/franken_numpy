@@ -1742,6 +1742,11 @@ impl ArrayStorage {
     /// Element-wise complex product reduction.
     #[must_use]
     pub fn complex_prod(&self) -> (f64, f64) {
+        if let Self::Complex128(pairs) = self {
+            return pairs.iter().fold((1.0, 0.0), |(pr, pi), &(r, i)| {
+                (pr * r - pi * i, pr * i + pi * r)
+            });
+        }
         let pairs = self.to_complex128_vec();
         pairs.iter().fold((1.0, 0.0), |(pr, pi), &(r, i)| {
             (pr * r - pi * i, pr * i + pi * r)

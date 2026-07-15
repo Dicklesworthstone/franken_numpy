@@ -4,6 +4,34 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): Complex128 `complex_prod` folds borrowed storage - 1.35x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.311`, second and final allocation cut
+in the `fnp-dtype` complex-reduction seam. Robot triage's top perf leaf required
+prohibited external C-BLAS/fast-math, while negative-ledger screening showed
+the existing complex-product rows belonged to Python/ufunc axis kernels rather
+than this API. Source attribution found `ArrayStorage::complex_prod` cloning all
+Complex128 pairs through `to_complex128_vec()` before its ordered recurrence.
+
+ONE LEVER folds the borrowed `Complex128` slice directly. Other storage variants
+retain the former conversion path; multiplication expressions, initial state,
+and left-to-right order are identical. The same-binary benchmark asserted raw-
+bit equality of both result components before timing 100,000 pairs, and the
+focused strict-remote `storage_complex_prod` unit test passed.
+
+After an untimed release warm build, the sole foreground measurement ran on
+strict-remote worker `vmi1152480` with release LTO disabled, 16 codegen units,
+0.25 s warm-up, 0.75 s measurement, and 10 samples:
+
+- former clone then fold: `[263.87 us, 282.43 us, 302.96 us]`
+- direct borrowed fold: `[198.04 us, 209.68 us, 222.31 us]`
+- midpoint delta: **1.35x faster / 25.76% less time**, with disjoint intervals
+
+Exact-file UBS passed. The pinned rustfmt check repeated four pre-existing
+formatting diffs outside this change's hunks; those lines remain untouched.
+**Decision: SHIP.** The clone-before-fold seam for Complex128 sum/product is now
+closed; pivot away from this dtype micro-family next.
+
 ## 2026-07-15 - WIN (SHIP): Complex128 `complex_sum` folds borrowed storage - 2.63x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.310`, fresh `fnp-dtype` reduction lane.

@@ -399,6 +399,42 @@ fn bench_complex128_sum_direct(c: &mut Criterion) {
     group.finish();
 }
 
+fn former_complex128_prod(storage: &ArrayStorage) -> (f64, f64) {
+    let pairs = storage.to_complex128_vec();
+    pairs.iter().fold((1.0, 0.0), |(pr, pi), &(r, i)| {
+        (pr * r - pi * i, pr * i + pi * r)
+    })
+}
+
+fn bench_complex128_prod_direct(c: &mut Criterion) {
+    let mut group = c.benchmark_group("complex128_prod_direct");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+
+    let storage = ArrayStorage::Complex128(
+        (0..100_000)
+            .map(|index| {
+                let offset = f64::from(index % 7) - 3.0;
+                (1.0 + offset * 1e-8, offset * 1e-7)
+            })
+            .collect(),
+    );
+    let former = former_complex128_prod(&storage);
+    let direct = storage.complex_prod();
+    assert_eq!(direct.0.to_bits(), former.0.to_bits());
+    assert_eq!(direct.1.to_bits(), former.1.to_bits());
+
+    group.bench_function("former_clone_then_fold", |b| {
+        b.iter(|| former_complex128_prod(black_box(&storage)))
+    });
+    group.bench_function("direct_borrowed_fold", |b| {
+        b.iter(|| black_box(&storage).complex_prod())
+    });
+
+    group.finish();
+}
+
 fn bench_array_storage_get_set(c: &mut Criterion) {
     let mut group = c.benchmark_group("array_storage_access");
 
@@ -445,6 +481,7 @@ criterion_group!(
     bench_to_f64_vec,
     bench_to_complex128_vec,
     bench_complex128_sum_direct,
+    bench_complex128_prod_direct,
     bench_array_storage_get_set,
 );
 
