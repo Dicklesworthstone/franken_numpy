@@ -4,6 +4,34 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): Complex128 `complex_sum` folds borrowed storage - 2.63x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.310`, fresh `fnp-dtype` reduction lane.
+Robot triage's top perf leaf required prohibited C-BLAS/fast-math; negative-ledger
+screening also ruled out the recently mined iterator, I/O decode, linalg
+decomposition, scalar-ufunc, and dtype-promotion/cast seams. Source attribution
+then found `ArrayStorage::complex_sum` cloning every Complex128 pair through
+`to_complex128_vec()` before performing the required left-to-right fold.
+
+ONE LEVER folds the borrowed `Complex128` slice directly. Other storage variants
+retain the former conversion path, and the addition order is unchanged. The
+same-binary benchmark asserted raw-bit equality of both result components before
+timing 100,000 pairs. The focused strict-remote `storage_complex_sum` unit test
+passed.
+
+The release target was built untimed first, then the sole foreground measurement
+ran on strict-remote worker `vmi1149989` with release LTO disabled, 16 codegen
+units, 0.25 s warm-up, 0.75 s measurement, and 10 samples:
+
+- former clone then fold: `[126.79 us, 141.38 us, 158.80 us]`
+- direct borrowed fold: `[52.499 us, 53.780 us, 55.525 us]`
+- midpoint delta: **2.63x faster / 61.96% less time**, with disjoint intervals
+
+Exact-file UBS passed. The pinned rustfmt check surfaced four pre-existing
+formatting diffs outside this change's hunks; those lines were left untouched.
+**Decision: SHIP.** Do not retry Complex128 sum allocation removal; Complex64
+and product reductions remain separate candidates.
+
 ## 2026-07-15 - WIN (SHIP): C-order `nditer` chunks emit their operand range directly - 311.64x
 
 `IvoryTurtle`, reopened bead `deadlock-audit-5cpda`, fresh `fnp-iter` retry

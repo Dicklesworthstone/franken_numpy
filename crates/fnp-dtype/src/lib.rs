@@ -1728,6 +1728,11 @@ impl ArrayStorage {
     /// Element-wise complex sum reduction.
     #[must_use]
     pub fn complex_sum(&self) -> (f64, f64) {
+        if let Self::Complex128(pairs) = self {
+            return pairs
+                .iter()
+                .fold((0.0, 0.0), |(sr, si), &(r, i)| (sr + r, si + i));
+        }
         let pairs = self.to_complex128_vec();
         pairs
             .iter()
