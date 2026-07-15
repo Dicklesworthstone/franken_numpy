@@ -501,6 +501,38 @@ fn bench_put_mask_f64_masked_cycling(c: &mut Criterion) {
     group.finish();
 }
 
+#[inline(never)]
+fn polyval_degree_zero_former(coeffs: &UFuncArray, x: &UFuncArray) -> UFuncArray {
+    let values = x
+        .values()
+        .iter()
+        .map(|&xi| {
+            let mut result = 0.0;
+            for &coefficient in coeffs.values() {
+                result = result * xi + coefficient;
+            }
+            result
+        })
+        .collect();
+    UFuncArray::new(x.shape().to_vec(), values, DType::F64).unwrap()
+}
+
+fn bench_polyval_degree_zero(c: &mut Criterion) {
+    let mut group = c.benchmark_group("polyval_degree_zero");
+    let size = 1_000_000usize;
+    group.throughput(Throughput::Elements(size as u64));
+    let x = make_sign_array(size);
+    let coeffs = UFuncArray::new(vec![1], vec![-0.0], DType::F64).unwrap();
+
+    group.bench_function("former_dynamic_horner", |bench| {
+        bench.iter(|| polyval_degree_zero_former(black_box(&coeffs), black_box(&x)))
+    });
+    group.bench_function("specialized", |bench| {
+        bench.iter(|| UFuncArray::polyval(black_box(&coeffs), black_box(&x)).unwrap())
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_add,
@@ -523,6 +555,7 @@ criterion_group!(
     bench_copyto_equal_shape_masked,
     bench_putmask_f64_masked,
     bench_place_f64_masked_cycling,
-    bench_put_mask_f64_masked_cycling
+    bench_put_mask_f64_masked_cycling,
+    bench_polyval_degree_zero
 );
 criterion_main!(benches);

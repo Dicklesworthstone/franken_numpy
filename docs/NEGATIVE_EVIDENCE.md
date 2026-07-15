@@ -25844,3 +25844,26 @@ filter-lazy benchmark binary (or an already warm equivalent) that can emit a
 same-binary/same-worker A/B without executing the full Python-surface setup. No
 second benchmark, release-perf build, local Cargo fallback, or stash mutation was
 performed. AGENT_NAME=WindyCardinal.
+
+## 2026-07-14 - WIN (LANDED): degree-zero `polyval` skips dynamic Horner loop (`franken_numpy-ixs5y.308`)
+
+`IvoryTurtle`. Negative-ledger screening showed the broad einsum families were already
+exhaustively harvested, while the adjacent polynomial sweep had no degree-zero core-kernel
+entry. Source attribution found that `UFuncArray::polyval` ran a dynamic coefficient-slice
+loop for every point even when the slice contained exactly one coefficient. The specialized
+path evaluates the identical one-step expression `0.0 * x + coefficient`; it deliberately
+does not fill with the coefficient, preserving the former NaN/Inf propagation and signed-zero
+arithmetic bit for bit.
+
+One same-binary Criterion A/B used 1,000,000 mixed finite/NaN/Inf/signed-zero inputs on remote
+worker `vmi1149989`, ordinary `--profile release`, LTO disabled, 16 codegen units, 0.25 s
+warm-up, 0.75 s measurement, and 10 samples. The former dynamic Horner path measured
+729.46-869.40 us (792.10 us midpoint); the specialized path measured 162.37-169.61 us
+(165.72 us midpoint): **4.78x midpoint speedup**. The timed command was
+`RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 rch --no-self-healing exec -- cargo bench -p fnp-ufunc --bench elementwise --profile release -- polyval_degree_zero --warm-up-time 0.25 --measurement-time 0.75 --sample-size 10 --noplot`.
+An untimed release `--no-run` build preceded it; RCH's fresh job sandbox nevertheless rebuilt
+the graph before measuring, but the actual Criterion measurement stayed short and returned
+normally. The focused remote raw-bit test passed across finite values, both zero signs,
+infinities, and NaNs. UBS reported only its broad pre-existing whole-file heuristic inventory;
+standalone rustfmt likewise found pre-existing formatting drift outside these hunks. No stash
+was touched. AGENT_NAME=IvoryTurtle.

@@ -21663,7 +21663,12 @@ impl UFuncArray {
             result
         };
         const POLYVAL_PARALLEL_MIN_ELEMS: usize = 1 << 12;
-        let values: Vec<f64> = if x.values.len() >= POLYVAL_PARALLEL_MIN_ELEMS
+        let values: Vec<f64> = if let [coefficient] = coeffs_ref.as_slice() {
+            // Preserve the former one-step Horner expression exactly rather than
+            // filling with `coefficient`: 0*x intentionally propagates NaN/Inf
+            // and participates in signed-zero arithmetic.
+            x.values.iter().map(|&xi| 0.0 * xi + *coefficient).collect()
+        } else if x.values.len() >= POLYVAL_PARALLEL_MIN_ELEMS
             && coeffs_ref.len() >= 2
             && rayon::current_num_threads() >= 2
         {
@@ -57122,6 +57127,37 @@ print(json.dumps(payload))
         let x = UFuncArray::new(vec![3], vec![0.0, 1.0, 100.0], DType::F64).unwrap();
         let r = UFuncArray::polyval(&c, &x).unwrap();
         assert_eq!(r.values(), &[42.0, 42.0, 42.0]);
+    }
+
+    #[test]
+    fn polyval_constant_preserves_former_horner_edge_bits() {
+        let x_values = vec![
+            0.0,
+            -0.0,
+            2.0,
+            -3.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ];
+        let x = UFuncArray::new(vec![x_values.len()], x_values.clone(), DType::F64).unwrap();
+
+        for coefficient in [42.0, 0.0, -0.0, f64::INFINITY, f64::NAN] {
+            let c = UFuncArray::new(vec![1], vec![coefficient], DType::F64).unwrap();
+            let actual = UFuncArray::polyval(&c, &x).unwrap();
+            let expected: Vec<u64> = x_values
+                .iter()
+                .map(|&xi| (0.0 * xi + coefficient).to_bits())
+                .collect();
+            assert_eq!(
+                actual
+                    .values()
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
     }
 
     #[test]
