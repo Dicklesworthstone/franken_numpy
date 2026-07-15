@@ -21287,7 +21287,21 @@ impl UFuncArray {
         // kernels: for long kernels the scatter's autovectorized SAXPY wins and is
         // kept below. Threshold chosen empirically at the scatter/gather crossover.
         const CONVOLVE_GATHER_MAX_M: usize = 96;
-        let full: Vec<f64> = if n.min(m) >= CONVOLVE_FFT_MIN_MINDIM
+        let full: Vec<f64> = if m == 1 {
+            // The generic short-kernel gather allocates a reversed one-element
+            // kernel, zero-fills `full`, then performs exactly one multiply-add
+            // per output. Collect that identical expression directly so signed
+            // zero and NaN behavior stay bit-for-bit unchanged while removing
+            // the temporary and redundant full-buffer write.
+            let scalar = k[0];
+            a.iter()
+                .map(|&value| {
+                    let mut acc = 0.0f64;
+                    acc += value * scalar;
+                    acc
+                })
+                .collect()
+        } else if n.min(m) >= CONVOLVE_FFT_MIN_MINDIM
             && n.saturating_mul(m) >= CONVOLVE_FFT_COST_FACTOR.saturating_mul(fft_work)
         {
             fft_linear_convolve(a, k, full_len)

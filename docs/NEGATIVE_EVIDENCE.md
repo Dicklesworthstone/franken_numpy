@@ -4,6 +4,42 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): scalar-kernel `convolve` skips gather setup and zero-fill - 2.76x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.305`, fresh convolution/`fnp-ufunc`
+lane after the singleton cumulative-extrema win. Robot triage again exposed
+only the broad safe-Rust parent besides the out-of-policy C-BLAS/fast-math
+leaf. The ledger covered short-kernel gather and Python zero-copy routing but
+contained no length-one kernel specialization.
+
+Source attribution showed F64 `convolve_mode` with `m == 1` allocating a
+reversed one-element kernel, zero-filling the full output, then evaluating one
+`0.0 + value * scalar` term per output through the generic gather. ONE LEVER
+directly collects that identical expression in one pass, removing the temporary
+kernel and redundant full-buffer write. Longer kernels, mode trimming, dtype,
+validation, and error behavior are unchanged; `full`, `same`, and `valid` all
+retain the same length for a scalar kernel.
+
+The existing `convolve` target was built untimed first, then measured exactly
+once in the foreground on strict-remote worker `vmi1149989` with
+`--profile release`, release LTO disabled, 16 codegen units, 0.25 s warm-up,
+0.75 s measurement, and 10 samples. RCH routed the warm-up away from the
+requested worker, so the timed command was pinned to the actual admitted worker.
+The focused row used 262,144 F64 values and a `[-2.0]` kernel:
+
+- former reverse + zero-fill + gather: `[120.74 us, 127.28 us, 133.23 us]`
+- direct single-pass collect: `[44.755 us, 46.074 us, 47.674 us]`
+- midpoint delta: **2.76x faster / 63.80% less time**, with disjoint intervals
+
+Criterion reported outliers in both arms, but the intervals remain separated by
+more than 2.5x. The pre-timing assertions proved identical shape, dtype, and raw
+F64 bits over signed zero, a fixed NaN payload, and both infinities. RCH
+recompiled despite the untimed warm-up; that cache miss was infrastructure
+overhead, not timing evidence. The only compiler diagnostic was the pre-existing
+untouched `nan_filtered` warning. UBS surfaced only broad pre-existing
+inventories and reported its embedded format/clippy/build checks clean.
+**Decision: SHIP.**
+
 ## 2026-07-14 - WIN (SHIP): singleton-axis `cummin`/`cummax` clone values directly - 9.72x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.304`, fresh cumulative-reductions/

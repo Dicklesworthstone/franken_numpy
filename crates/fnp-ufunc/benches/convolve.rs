@@ -2,7 +2,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use fnp_dtype::DType;
-use fnp_ufunc::UFuncArray;
+use fnp_ufunc::{UFuncArray, convolve_gather_fill};
 use rayon::prelude::*;
 use std::hint::black_box;
 
@@ -62,7 +62,55 @@ fn scatter(a: &[f64], k: &[f64], floor_is_m: bool) -> Vec<f64> {
     full
 }
 
+fn former_scalar_kernel(a: &[f64], scalar: f64) -> Vec<f64> {
+    let reversed_kernel = vec![scalar];
+    let mut full = vec![0.0f64; a.len()];
+    convolve_gather_fill(a, &reversed_kernel, a.len(), 1, &mut full, 0);
+    full
+}
+
+fn bench_scalar_kernel(c: &mut Criterion) {
+    let n = 1usize << 18;
+    let mut data = mk(n, 23);
+    data[0] = -0.0;
+    data[1] = f64::from_bits(0x7ff8_0000_0000_0042);
+    data[2] = f64::INFINITY;
+    data[3] = f64::NEG_INFINITY;
+    let scalar = -2.0;
+    let a = UFuncArray::new(vec![n], data.clone(), DType::F64).unwrap();
+    let k = UFuncArray::new(vec![1], vec![scalar], DType::F64).unwrap();
+
+    let former = former_scalar_kernel(&data, scalar);
+    let candidate = a.convolve_mode(&k, "full").unwrap();
+    assert_eq!(candidate.shape(), &[n]);
+    assert_eq!(candidate.dtype(), DType::F64);
+    assert_eq!(
+        candidate
+            .values()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        former
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+
+    let mut group = c.benchmark_group("convolve_scalar_kernel");
+    group.bench_function("former_gather_setup_zero_fill", |b| {
+        b.iter(|| black_box(former_scalar_kernel(black_box(&data), scalar)))
+    });
+    group.bench_function("direct_single_pass_collect", |b| {
+        b.iter(|| black_box(a.convolve_mode(black_box(&k), "full").unwrap()))
+    });
+    group.finish();
+}
+
 fn bench(c: &mut Criterion) {
+    bench_scalar_kernel(c);
+    if std::env::args().any(|arg| arg == "convolve_scalar_kernel") {
+        return;
+    }
     // (n, m): direct+large-m cases where block sizing matters, plus a small-m control.
     let shapes = [
         (5_000usize, 20_000usize), // kernel >> signal: old -> ~1 block, new -> ~32
