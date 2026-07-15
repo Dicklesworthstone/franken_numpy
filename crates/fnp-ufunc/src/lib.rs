@@ -16705,6 +16705,36 @@ impl UFuncArray {
             return Err(UFuncError::Msg("put: vals must not be empty".to_string()));
         }
         let n = self.values.len() as i64;
+        // Consecutive duplicate indices are last-write-wins. On the exact F64
+        // path there is no integer-sidecar validation or other observable work
+        // between stores, so apply only the final value from each run. Resolve
+        // runs in their original order so a later invalid index still leaves
+        // every preceding destination at exactly the former final value.
+        if indices.len() >= 8
+            && self.dtype == DType::F64
+            && self.integer_sidecar.is_none()
+            && vals.dtype == DType::F64
+            && vals.integer_sidecar.is_none()
+        {
+            let mut run_start = 0usize;
+            while run_start < indices.len() {
+                let idx = indices[run_start];
+                let mut run_end = run_start + 1;
+                while run_end < indices.len() && indices[run_end] == idx {
+                    run_end += 1;
+                }
+
+                let resolved = if idx < 0 { idx + n } else { idx };
+                if resolved < 0 || resolved >= n {
+                    return Err(UFuncError::Msg(format!(
+                        "put: index {idx} out of bounds for size {n}"
+                    )));
+                }
+                self.values[resolved as usize] = vals.values[(run_end - 1) % vals.values.len()];
+                run_start = run_end;
+            }
+            return Ok(());
+        }
         for (i, &idx) in indices.iter().enumerate() {
             let resolved = if idx < 0 { idx + n } else { idx };
             if resolved < 0 || resolved >= n {
@@ -62537,6 +62567,64 @@ print(json.dumps(payload))
         let vals = UFuncArray::new(vec![3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
         a.put(&[0, 2, 4], &vals).unwrap();
         assert_eq!(a.values(), &[10.0, 0.0, 20.0, 0.0, 30.0]);
+    }
+
+    #[test]
+    fn put_duplicate_runs_preserve_bits_errors_and_integer_sidecars() {
+        let original = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let values = vec![
+            f64::from_bits(0x7ff8_0000_0000_1234),
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::from_bits(0x7ff8_0000_0000_5678),
+        ];
+        let indices = [2, 2, 2, -1, -1, 1, 1, 2];
+        let mut expected = original.clone();
+        for (position, &index) in indices.iter().enumerate() {
+            let resolved = if index < 0 {
+                index + expected.len() as i64
+            } else {
+                index
+            };
+            expected[resolved as usize] = values[position % values.len()];
+        }
+
+        let mut actual = UFuncArray::new(vec![original.len()], original, DType::F64).unwrap();
+        let values = UFuncArray::new(vec![values.len()], values, DType::F64).unwrap();
+        actual.put(&indices, &values).unwrap();
+        assert!(
+            actual
+                .values()
+                .iter()
+                .zip(&expected)
+                .all(|(got, want)| got.to_bits() == want.to_bits())
+        );
+
+        let mut partial = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let partial_values = UFuncArray::new(
+            vec![8],
+            vec![10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0],
+            DType::F64,
+        )
+        .unwrap();
+        let error = partial
+            .put(&[1, 1, 1, 1, 1, 1, 1, 9], &partial_values)
+            .expect_err("the final invalid run must still fail");
+        assert!(matches!(error, UFuncError::Msg(message) if message.contains("out of bounds")));
+        assert_eq!(partial.values()[1].to_bits(), 16.0_f64.to_bits());
+
+        let large = (1_u64 << 63) + 8195;
+        let mut exact =
+            UFuncArray::from_storage(vec![4], ArrayStorage::U64(vec![1, 2, 3, 4])).unwrap();
+        let exact_values =
+            UFuncArray::from_storage(vec![3], ArrayStorage::U64(vec![large, large + 1, u64::MAX]))
+                .unwrap();
+        exact.put(&[1, 1, 3, 3, 1, 1, 1, 1], &exact_values).unwrap();
+        assert_eq!(
+            exact.to_storage().unwrap(),
+            ArrayStorage::U64(vec![1, large + 1, 3, large])
+        );
     }
 
     #[test]

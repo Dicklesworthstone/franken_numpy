@@ -225,6 +225,63 @@ fn bench_take_axis_repeated_index(c: &mut Criterion) {
     group.finish();
 }
 
+fn former_put_duplicate_runs(original: &[f64], indices: &[i64], values: &[f64]) -> Vec<f64> {
+    let mut output = original.to_vec();
+    let len = output.len() as i64;
+    for (position, &index) in indices.iter().enumerate() {
+        let resolved = if index < 0 { index + len } else { index };
+        assert!(resolved >= 0 && resolved < len);
+        output[resolved as usize] = values[position % values.len()];
+    }
+    output
+}
+
+fn bench_put_duplicate_runs(c: &mut Criterion) {
+    let original: Vec<f64> = (0..4096).map(|i| i as f64 * 0.25 - 17.0).collect();
+    let indices = vec![2047_i64; 65_536];
+    let mut values: Vec<f64> = (0..257).map(|i| i as f64 * 1.5 - 91.0).collect();
+    values[0] = -0.0;
+    values[1] = f64::from_bits(0x7ff8_0000_0000_1234);
+    values[2] = f64::INFINITY;
+    let base = UFuncArray::new(vec![original.len()], original.clone(), DType::F64).unwrap();
+    let value_array = UFuncArray::new(vec![values.len()], values.clone(), DType::F64).unwrap();
+
+    let control = former_put_duplicate_runs(&original, &indices, &values);
+    let mut candidate = base.clone();
+    candidate.put(&indices, &value_array).unwrap();
+    assert!(
+        candidate
+            .values()
+            .iter()
+            .zip(&control)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+
+    let mut group = c.benchmark_group("put_duplicate_runs");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.bench_function("former_65536_writes", |bench| {
+        bench.iter(|| {
+            black_box(former_put_duplicate_runs(
+                black_box(&original),
+                black_box(&indices),
+                black_box(&values),
+            ))
+        })
+    });
+    group.bench_function("coalesced_single_run", |bench| {
+        bench.iter(|| {
+            let mut array = black_box(base.clone());
+            array
+                .put(black_box(&indices), black_box(&value_array))
+                .unwrap();
+            black_box(array)
+        })
+    });
+    group.finish();
+}
+
 fn former_fftshift_all_axes(arr: &UFuncArray, shape: &[usize]) -> UFuncArray {
     let mut shifted = arr.clone();
     for (axis, &len) in shape.iter().enumerate() {
@@ -274,6 +331,7 @@ criterion_group!(
     bench_take_axis_identity,
     bench_take_axis_contiguous_subrange,
     bench_take_axis_repeated_index,
+    bench_put_duplicate_runs,
     bench_fftshift_singleton_axes
 );
 criterion_main!(benches);

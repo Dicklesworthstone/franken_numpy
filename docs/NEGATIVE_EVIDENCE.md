@@ -4,6 +4,41 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): flat `put` coalesces consecutive duplicate runs - 9.66x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.323`. Robot triage again surfaced the
+broad pure-safe-Rust directive and its prohibited C-BLAS/fast-math leaf. The
+preceding indexing result was still a strong 8.40x, and negative-ledger
+screening found no direct-Rust flat-`put` duplicate-run attempt, so this turn
+stayed in indexing but moved from gather materialization to in-place scatter.
+
+Source attribution found that 65,536 consecutive equal indices performed
+65,536 bounds resolutions, cyclic value selections, mutation-dispatch calls,
+and stores to one destination. ONE LEVER recognizes the exact F64/no-sidecar
+path and applies only the last value from each consecutive equal-index run.
+Runs remain ordered, so a later invalid index leaves all preceding destinations
+at exactly the former final value; integer and sidecar routes retain the generic
+per-index loop.
+
+The focused strict-remote release test proved raw-bit F64 equality including
+signed zero, fixed NaN payloads, and infinities; it also proved partial mutation
+before a later bounds error and exact U64 sidecar behavior above 2^53. After an
+untimed non-LTO release `--no-run` build, the sole same-binary Criterion A/B ran
+on `vmi1264463` with 16 codegen units, 0.25 s warm-up, 0.75 s measurement, and
+10 samples:
+
+- former 65,536 writes: `[359.35 us, 361.55 us, 364.30 us]`
+- one coalesced run: `[35.185 us, 37.412 us, 39.596 us]`
+- midpoint delta: **9.66x faster / 89.65% less time**, with disjoint intervals
+
+RCH rebuilt the target despite the untimed warm-up, but compilation stayed
+outside Criterion and the measurement returned normally. `git diff --check`
+passed; the touched hunks were rustfmt-clean while the whole-file formatter
+reported unrelated existing drift. UBS entered its broad pre-existing
+whole-file scan for about 90 seconds without a finding and was stopped.
+**Decision: SHIP.** Do not retry consecutive-duplicate exact-F64 flat `put`;
+future scatter work needs a different index structure or dtype.
+
 ## 2026-07-15 - WIN (SHIP): repeated-axis `take` seeds one lane then doubles - 8.40x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.322`. Robot triage again surfaced the
