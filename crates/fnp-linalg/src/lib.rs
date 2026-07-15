@@ -1124,6 +1124,34 @@ fn slogdet_nxn_exact_upper_triangular(a: &[f64], n: usize) -> Option<(f64, f64)>
     Some(slogdet_from_lu_diagonal(a, n, 1.0))
 }
 
+fn slogdet_nxn_exact_lower_triangular_no_pivot(a: &[f64], n: usize) -> Option<(f64, f64)> {
+    if n >= LU_BLOCK_MIN {
+        return None;
+    }
+
+    let mut matrix_max_abs = 0.0_f64;
+    for row in 0..n {
+        let row_values = &a[row * n..(row + 1) * n];
+        for (col, &value) in row_values.iter().enumerate() {
+            if !value.is_finite() || (col > row && value.to_bits() != 0) {
+                return None;
+            }
+            matrix_max_abs = matrix_max_abs.max(value.abs());
+        }
+    }
+
+    let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
+    for col in 0..n {
+        let diagonal = a[col * n + col];
+        if diagonal.abs() <= singularity_threshold
+            || ((col + 1)..n).any(|row| a[row * n + col].abs() > diagonal.abs())
+        {
+            return None;
+        }
+    }
+    Some(slogdet_from_lu_diagonal(a, n, 1.0))
+}
+
 fn det_nxn_general_validated(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
     match lu_decompose_for_det(a, n) {
         Ok((lu, _, sign)) => Ok(det_from_lu_diagonal(&lu, n, sign)),
@@ -1180,6 +1208,9 @@ pub fn slogdet_nxn(a: &[f64], n: usize) -> Result<(f64, f64), LinAlgError> {
     }
 
     if let Some(slogdet) = slogdet_nxn_exact_upper_triangular(a, n) {
+        return Ok(slogdet);
+    }
+    if let Some(slogdet) = slogdet_nxn_exact_lower_triangular_no_pivot(a, n) {
         return Ok(slogdet);
     }
 
@@ -12250,12 +12281,39 @@ mod tests {
                 }
             }
 
+            let former =
+                super::slogdet_nxn_general_control(&matrix, n).expect("general sign and logdet");
+            let actual = slogdet_nxn(&matrix, n).expect("structured sign and logdet");
+            assert_eq!(actual.0.to_bits(), former.0.to_bits(), "sign n={n}");
+            assert_eq!(actual.1.to_bits(), former.1.to_bits(), "logdet n={n}");
+        }
+    }
+
+    #[test]
+    fn slogdet_exact_lower_triangular_no_pivot_matches_general_lu_bits() {
+        for n in [2usize, 7, 64] {
+            let mut matrix = vec![0.0; n * n];
+            for row in 0..n {
+                let magnitude = 2.0 + (row % 7) as f64 * 0.001;
+                matrix[row * n + row] = if row % 2 == 0 { magnitude } else { -magnitude };
+                for col in 0..row {
+                    matrix[row * n + col] = ((row * 17 + col * 13) % 97) as f64 / 101.0 - 0.4;
+                }
+            }
+
             let former = super::slogdet_nxn_general_control(&matrix, n)
                 .expect("general sign and logdet");
             let actual = slogdet_nxn(&matrix, n).expect("structured sign and logdet");
             assert_eq!(actual.0.to_bits(), former.0.to_bits(), "sign n={n}");
             assert_eq!(actual.1.to_bits(), former.1.to_bits(), "logdet n={n}");
         }
+
+        let pivoting = [1.0, 0.0, 2.0, 3.0];
+        assert!(super::slogdet_nxn_exact_lower_triangular_no_pivot(&pivoting, 2).is_none());
+        let negative_zero_upper = [2.0, -0.0, 0.25, 3.0];
+        assert!(
+            super::slogdet_nxn_exact_lower_triangular_no_pivot(&negative_zero_upper, 2).is_none()
+        );
     }
 
     #[test]

@@ -4,6 +4,42 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): Pivot-stable lower-triangular `slogdet` bypasses LU - 8.79x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.315`. Robot triage again surfaced the
+broad no-gaps directive and a concrete C-BLAS/fast-math leaf prohibited by its
+pure-safe-Rust contract. The preceding triangular keeps remained large rather
+than marginal, and the newest ledger row explicitly required a separate
+lower-triangular `slogdet` proof.
+
+Source attribution found that exact lower-triangular matrices still entered
+the full O(n^3) unblocked partial-pivot LU below `LU_BLOCK_MIN`, even though each
+pivot-row value to the right is zero. ONE LEVER admits only finite n<512
+matrices with positive-zero upper triangles, the existing singularity
+threshold, and a diagonal whose magnitude is at least every lower value in its
+column. Those conditions prove no pivot swap and preserve every diagonal bit,
+so the unchanged ordered sign/log fold can consume the input directly.
+Pivoting, blocked-LU, nonfinite, singular, and negative-zero-upper inputs retain
+the former route.
+
+The focused strict-remote test passed raw-bit sign and log comparisons for n=2,
+7, and 64 plus explicit pivoting and negative-zero deferrals. The same-binary
+benchmark asserted both output components bit-for-bit before timing a dense
+256x256 lower-triangular matrix. After an untimed non-LTO release warm build,
+the sole foreground measurement ran on strict-remote worker `vmi1152480` with
+16 codegen units, 0.25 s warm-up, 0.75 s measurement, and 10 samples:
+
+- former partial-pivot LU: `[984.16 us, 1.0974 ms, 1.1661 ms]`
+- candidate structured diagonal log fold: `[120.55 us, 124.80 us, 130.50 us]`
+- midpoint delta: **8.79x faster / 88.63% less time**, with disjoint intervals
+
+RCH recompiled for the timed command despite the pinned worker and prior warm
+target; that cache miss was build overhead outside Criterion. Exact-file UBS
+and diff checks were run before timing; whole-file rustfmt reported extensive
+pre-existing drift outside this change's hunks, which remained untouched.
+**Decision: SHIP.** Pivot-stable exact lower-triangular `slogdet` dispatch is
+closed; future determinant work should target a different matrix structure.
+
 ## 2026-07-15 - WIN (SHIP): Pivot-stable lower-triangular determinant bypasses LU - 7.85x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.314`. Robot triage's only concrete
