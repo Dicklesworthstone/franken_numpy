@@ -343,6 +343,135 @@ fn bench_permuted_last_axis_allocations(c: &mut Criterion) {
     group.finish();
 }
 
+#[inline(never)]
+fn former_permuted_strided_axis(
+    rng: &mut BufferedPcg64,
+    input: &[f64],
+    shape: [usize; 3],
+    axis: usize,
+) -> Vec<f64> {
+    let mut result = input.to_vec();
+    let ndim = shape.len();
+    let mut strides = vec![1usize; ndim];
+    for index in (0..ndim - 1).rev() {
+        strides[index] = strides[index + 1] * shape[index + 1];
+    }
+    let axis_len = shape[axis];
+    let axis_stride = strides[axis];
+    let n_slices = result.len() / axis_len;
+    for slice_index in 0..n_slices {
+        let mut multi_index = vec![0usize; ndim];
+        let mut remainder = slice_index;
+        for dimension in (0..ndim).rev() {
+            if dimension == axis {
+                continue;
+            }
+            multi_index[dimension] = remainder % shape[dimension];
+            remainder /= shape[dimension];
+        }
+        let mut base_offset = 0;
+        for dimension in 0..ndim {
+            if dimension != axis {
+                base_offset += multi_index[dimension] * strides[dimension];
+            }
+        }
+        let indices: Vec<usize> = (0..axis_len)
+            .map(|index| base_offset + index * axis_stride)
+            .collect();
+        for index in (1..axis_len).rev() {
+            let swap_index = rng.random_interval(index);
+            result.swap(indices[index], indices[swap_index]);
+        }
+    }
+    result
+}
+
+#[inline(never)]
+fn direct_permuted_strided_axis(
+    rng: &mut BufferedPcg64,
+    input: &[f64],
+    shape: [usize; 3],
+    axis: usize,
+) -> Vec<f64> {
+    let mut result = input.to_vec();
+    let ndim = shape.len();
+    let mut strides = vec![1usize; ndim];
+    for index in (0..ndim - 1).rev() {
+        strides[index] = strides[index + 1] * shape[index + 1];
+    }
+    let axis_len = shape[axis];
+    let axis_stride = strides[axis];
+    let n_slices = result.len() / axis_len;
+    for slice_index in 0..n_slices {
+        let mut remainder = slice_index;
+        let mut base_offset = 0;
+        for dimension in (0..ndim).rev() {
+            if dimension == axis {
+                continue;
+            }
+            let coordinate = remainder % shape[dimension];
+            remainder /= shape[dimension];
+            base_offset += coordinate * strides[dimension];
+        }
+        for index in (1..axis_len).rev() {
+            let swap_index = rng.random_interval(index);
+            result.swap(
+                base_offset + index * axis_stride,
+                base_offset + swap_index * axis_stride,
+            );
+        }
+    }
+    result
+}
+
+fn bench_permuted_strided_axis_allocations(c: &mut Criterion) {
+    const SHAPE: [usize; 3] = [256, 8, 128];
+    const AXIS: usize = 1;
+    const LEN: usize = SHAPE[0] * SHAPE[1] * SHAPE[2];
+    let input: Vec<f64> = (0..LEN).map(|index| index as f64).collect();
+    let seed = seed_sequence();
+
+    let mut former_proof = BufferedPcg64::from_seed_sequence(&seed);
+    let mut direct_proof = BufferedPcg64::from_seed_sequence(&seed);
+    let mut public_proof = pcg64_generator();
+    let former = former_permuted_strided_axis(&mut former_proof, &input, SHAPE, AXIS);
+    let direct = direct_permuted_strided_axis(&mut direct_proof, &input, SHAPE, AXIS);
+    let public = public_proof.permuted(&input, &SHAPE, Some(AXIS)).unwrap();
+    assert_eq!(direct, former);
+    assert_eq!(public, former);
+    let former_after = former_proof.next_f64().to_bits();
+    let direct_after = direct_proof.next_f64().to_bits();
+    let public_after = public_proof.random(1)[0].to_bits();
+    assert_eq!(direct_after, former_after);
+    assert_eq!(public_after, former_after);
+
+    let mut former_rng = BufferedPcg64::from_seed_sequence(&seed);
+    let mut direct_rng = BufferedPcg64::from_seed_sequence(&seed);
+    let mut group = c.benchmark_group("permuted_strided_axis_allocations");
+    group.throughput(Throughput::Elements(LEN as u64));
+    group.bench_function("former_per_slice_vectors", |bench| {
+        bench.iter(|| {
+            black_box(former_permuted_strided_axis(
+                black_box(&mut former_rng),
+                black_box(&input),
+                SHAPE,
+                AXIS,
+            ))
+        })
+    });
+    group.bench_function("direct_strided_addresses", |bench| {
+        bench.iter(|| {
+            black_box(direct_permuted_strided_axis(
+                black_box(&mut direct_rng),
+                black_box(&input),
+                SHAPE,
+                AXIS,
+            ))
+        })
+    });
+    group.finish();
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Bit generator raw throughput
 // ─────────────────────────────────────────────────────────────────────────────
@@ -717,6 +846,7 @@ criterion_group!(
     bench_poisson_ptrs_cache,
     bench_choice_weighted_singleton,
     bench_permuted_last_axis_allocations,
+    bench_permuted_strided_axis_allocations,
     bench_pcg64_next_u64,
     bench_pcg64dxsm_next_u64,
     bench_philox_next_u64,

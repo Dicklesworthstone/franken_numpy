@@ -4,6 +4,38 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): strided-axis `permuted` computes swap addresses directly - 1.47x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.321`. Negative-ledger screening started
+from the just-landed contiguous-last-axis sibling, whose retry note explicitly
+left the non-last-axis strided-addressing problem open. Source attribution on
+shape `[256, 8, 128]`, axis 1, found 32,768 independent slices and two heap
+vectors per slice: a rank-sized multi-index plus an axis-sized absolute-index
+table, or 65,536 short-lived allocations per call.
+
+ONE LEVER decodes each slice index directly into its identical row-major base
+offset and swaps at `base + index * axis_stride`. Slice order, reverse
+Fisher-Yates order, `random_interval` calls, swap pairs, output allocation, and
+all last-axis/axis-none behavior remain unchanged. The focused strict-remote
+release test matched the former output and the next 16 PCG64 values exactly.
+The benchmark also asserted former-helper, direct-helper, and public-path output
+plus post-call stream equality before timing.
+
+After an untimed non-LTO release `--no-run` build, the sole same-binary
+Criterion A/B ran on `vmi1153651` with 16 codegen units, 0.25 s warm-up, 0.75 s
+measurement, and 10 samples:
+
+- former per-slice vectors: `[4.0070 ms, 4.4535 ms, 4.8824 ms]`
+- direct strided addresses: `[2.7822 ms, 3.0324 ms, 3.3167 ms]`
+- midpoint delta: **1.47x faster / 31.91% less time**, with disjoint intervals
+
+RCH rebuilt the target despite the untimed warm-up, but compilation stayed
+outside Criterion and the measurement returned normally. Exact-file rustfmt
+identified and the patch fixed its one local line-wrap delta; the workspace-wide
+fmt gate remains blocked by unrelated pre-existing drift. UBS reached its broad
+pre-existing whole-file scan inventory. **Decision: SHIP.** Do not retry generic
+`permuted` per-slice vector removal; future work needs a different random kernel.
+
 ## 2026-07-15 - WIN (SHIP): last-axis `permuted` shuffles contiguous lanes directly - 1.66x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.320`. Robot triage again exposed the

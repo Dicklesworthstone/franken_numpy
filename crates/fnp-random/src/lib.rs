@@ -6167,32 +6167,21 @@ impl Generator {
 
         // For each slice along the axis, perform Fisher-Yates shuffle
         for slice_idx in 0..n_slices {
-            // Compute multi-index excluding axis dimension
-            let mut multi_idx = vec![0usize; ndim];
             let mut rem = slice_idx;
+            let mut base_offset = 0;
             for d in (0..ndim).rev() {
                 if d == axis {
                     continue;
                 }
-                multi_idx[d] = rem % shape[d];
+                let coordinate = rem % shape[d];
                 rem /= shape[d];
-            }
-            let mut base_offset = 0;
-            for d in 0..ndim {
-                if d != axis {
-                    base_offset += multi_idx[d] * strides[d];
-                }
+                base_offset += coordinate * strides[d];
             }
 
-            // Gather indices along the axis
-            let indices: Vec<usize> = (0..axis_len)
-                .map(|k| base_offset + k * axis_stride)
-                .collect();
-
-            // Fisher-Yates shuffle on these indices (random_interval for generic arrays)
+            // Fisher-Yates shuffle at the strided addresses (random_interval for generic arrays)
             for i in (1..axis_len).rev() {
                 let j = self.random_interval(i as u64) as usize;
-                result.swap(indices[i], indices[j]);
+                result.swap(base_offset + i * axis_stride, base_offset + j * axis_stride);
             }
         }
 
@@ -18217,6 +18206,55 @@ for child in rng.spawn(n_children):
         let mut expected = data.clone();
         let ndim = shape.len();
         let axis = ndim - 1;
+        let mut strides = vec![1usize; ndim];
+        for index in (0..ndim - 1).rev() {
+            strides[index] = strides[index + 1] * shape[index + 1];
+        }
+        let axis_len = shape[axis];
+        let axis_stride = strides[axis];
+        let n_slices = expected.len() / axis_len;
+        for slice_index in 0..n_slices {
+            let mut multi_index = vec![0usize; ndim];
+            let mut remainder = slice_index;
+            for dimension in (0..ndim).rev() {
+                if dimension == axis {
+                    continue;
+                }
+                multi_index[dimension] = remainder % shape[dimension];
+                remainder /= shape[dimension];
+            }
+            let mut base_offset = 0;
+            for dimension in 0..ndim {
+                if dimension != axis {
+                    base_offset += multi_index[dimension] * strides[dimension];
+                }
+            }
+            let indices: Vec<usize> = (0..axis_len)
+                .map(|index| base_offset + index * axis_stride)
+                .collect();
+            for index in (1..axis_len).rev() {
+                let swap_index = former.random_interval(index as u64) as usize;
+                expected.swap(indices[index], indices[swap_index]);
+            }
+        }
+
+        let actual = candidate.permuted(&data, &shape, Some(axis)).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(candidate.random(16), former.random(16));
+    }
+
+    #[test]
+    fn permuted_strided_axis_matches_former_output_and_stream() {
+        let shape = [17, 8, 5];
+        let axis = 1;
+        let data: Vec<f64> = (0..shape.iter().product::<usize>())
+            .map(|value| value as f64)
+            .collect();
+        let mut former = Generator::from_pcg64(42).unwrap();
+        let mut candidate = Generator::from_pcg64(42).unwrap();
+
+        let mut expected = data.clone();
+        let ndim = shape.len();
         let mut strides = vec![1usize; ndim];
         for index in (0..ndim - 1).rev() {
             strides[index] = strides[index + 1] * shape[index + 1];
