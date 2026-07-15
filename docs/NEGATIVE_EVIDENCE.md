@@ -4,6 +4,38 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): scalar-LHS `kron` scales the RHS directly - 25.09x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.318`. Robot triage again exposed the
+broad safe-Rust parent plus an out-of-policy C-BLAS/fast-math leaf. Negative-
+ledger screening rejected the stale pad-wrap lead because its periodic-copy
+lever had already shipped, rejected the converged PCG64 family, and found the
+scalar-RHS `kron` row explicitly left scalar LHS as a distinct unmeasured class.
+
+Source attribution showed `kron_nxn([[a]], B)` still zero-filling the output and
+routing each output row through quotient/remainder, slice construction, and two
+nested loops for one multiplication. ONE LEVER recognizes the validated
+one-element LHS and directly collects `a * B[i]`. The multiplication remains in
+the exact `lhs * rhs` orientation; output shape, empty-output behavior, signed-
+zero/NaN/Inf semantics, and every non-scalar-LHS path remain unchanged.
+
+The existing `kron` target was built untimed first, then measured exactly once
+in the foreground on strict-remote worker `vmi1264463` with `--profile release`,
+release LTO disabled, 16 codegen units, 0.25 s warm-up, 0.75 s measurement, and
+10 samples. The focused row used a `1x1` F64 LHS and `131071x1` RHS:
+
+- former generic row fill: `[771.20 us, 800.95 us, 854.24 us]`
+- direct scalar-LHS scale: `[31.347 us, 31.930 us, 32.714 us]`
+- midpoint delta: **25.09x faster / 96.01% less time**, with disjoint intervals
+
+The benchmark pre-timing assertion and focused release test proved raw-bit
+equality, including signed zero, a fixed NaN payload, and infinities. RCH
+recompiled despite the same-worker untimed warm-up; that cache miss was outside
+Criterion and is not timing evidence. `git diff --check` passed. Exact-file UBS
+reported the crate's broad pre-existing inventory; `rustfmt --check` likewise
+reported pre-existing drift in untouched linalg sections. **Decision: SHIP.**
+Do not retest either scalar-operand `kron` class.
+
 ## 2026-07-15 - NO-SHIP (REVERTED): Exact-U64 singleton-axis cumulative direct fold - noisy 1.03x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.317`. Robot triage again routed to the

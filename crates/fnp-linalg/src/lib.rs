@@ -6225,6 +6225,10 @@ pub fn kron_nxn(
     if out_count == 0 {
         return Ok(Vec::new());
     }
+    if a.len() == 1 {
+        let lhs = a[0];
+        return Ok(b.iter().map(|&value| lhs * value).collect());
+    }
     if b.len() == 1 {
         let rhs = b[0];
         return Ok(a.iter().map(|&value| value * rhs).collect());
@@ -16644,6 +16648,30 @@ mod tests {
         // [1, 2; 3, 4] ⊗ [3] takes the scalar-RHS scaling path.
         let result = kron_nxn(&b, 2, 2, &a, 1, 1).unwrap();
         assert_eq!(result, vec![3.0, 6.0, 9.0, 12.0]);
+    }
+
+    #[test]
+    fn kron_scalar_lhs_fast_path_matches_generic_product_bits() {
+        let a = [-0.75];
+        let b = [
+            -0.0,
+            0.0,
+            1.25,
+            f64::from_bits(0x7ff8_0000_0000_0123),
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        let got = kron_nxn(&a, 1, 1, &b, 2, 3).unwrap();
+        let mut want = vec![0.0; b.len()];
+        for k in 0..2 {
+            for l in 0..3 {
+                want[k * 3 + l] = a[0] * b[k * 3 + l];
+            }
+        }
+        assert_eq!(
+            got.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            want.iter().map(|value| value.to_bits()).collect::<Vec<_>>()
+        );
     }
 
     // ── multi_dot tests ──
