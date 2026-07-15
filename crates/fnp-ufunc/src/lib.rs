@@ -15940,6 +15940,34 @@ impl UFuncArray {
         }
         let src_stride = src_axis_len * inner;
         let out_block = num_idx * inner;
+        // A proper consecutive subrange is contiguous within every outer
+        // block. Copy that span once instead of issuing one tiny copy per
+        // selected axis lane. The full-axis identity case is handled earlier
+        // by `take`; this also covers interior and prefix/suffix ranges while
+        // retaining the same generic path for exact integer sidecars.
+        if let Some(&start) = resolved.first()
+            && resolved
+                .iter()
+                .enumerate()
+                .all(|(offset, &index)| start.checked_add(offset) == Some(index))
+        {
+            let src_offset = start * inner;
+            let copy_block = |out_blk: &mut [T], o: usize| {
+                let base = o * src_stride + src_offset;
+                out_blk.copy_from_slice(&src[base..base + out_block]);
+            };
+            const TAKE_PAR_MIN: usize = 1 << 15;
+            if outer >= 2 && n >= TAKE_PAR_MIN && rayon::current_num_threads() >= 2 {
+                out.par_chunks_mut(out_block)
+                    .enumerate()
+                    .for_each(|(o, out_blk)| copy_block(out_blk, o));
+            } else {
+                out.chunks_mut(out_block)
+                    .enumerate()
+                    .for_each(|(o, out_blk)| copy_block(out_blk, o));
+            }
+            return out;
+        }
         let do_block = |out_blk: &mut [T], o: usize| {
             let src_base = o * src_stride;
             for (j, &ri) in resolved.iter().enumerate() {

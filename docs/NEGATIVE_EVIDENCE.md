@@ -4,6 +4,37 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-14 - WIN (SHIP): contiguous `take(axis)` subranges coalesce row copies - 14.27x
+
+`IvoryTurtle`, bead `franken_numpy-ixs5y.303`, fresh indexing/`fnp-ufunc`
+lane after the I8 `fromfile` no-ship thinned the IO vein. Robot triage exposed
+only the broad safe-Rust parent besides the out-of-policy C-BLAS/fast-math
+leaf; the negative ledger had the full-axis identity shortcut but no proper
+contiguous-subrange attempt.
+
+Source attribution found `take_axis_build` issuing `resolved.len()` separate
+`copy_from_slice` calls per outer block. ONE LEVER detects strictly consecutive
+resolved indices and copies their contiguous span once per outer block. The
+generic builder keeps the same validation, output shape, dtype, ordering, and
+I64/U64 integer-sidecar relocation; non-consecutive gathers are unchanged.
+
+The existing `take_axis` Criterion target was built untimed first, then measured
+once in the foreground on strict-remote worker `vmi1264463` with
+`--profile release`, release LTO disabled, 16 codegen units, 0.25 s warm-up,
+0.75 s measurement, and 10 samples. The proper interior range `[8, 56)` on
+shape `[256, 64]`, axis 1 (12,288 output elements, below the Rayon threshold)
+returned:
+
+- former per-row copies: `[78.752 us, 88.759 us, 94.796 us]`
+- contiguous block copy: `[5.8161 us, 6.2186 us, 6.5519 us]`
+- midpoint delta: **14.27x faster / 93.0% less time**, with disjoint intervals
+
+The benchmark's pre-timing assertion proved identical output shape and
+bit-exact F64 values. RCH recompiled despite the untimed warm-up; that cache
+miss was infrastructure overhead, not timing evidence. The only compiler
+diagnostic was the pre-existing untouched `nan_filtered` dead-code warning.
+**Decision: SHIP.**
+
 ## 2026-07-14 - NO-SHIP: I8 `fromfile` direct byte-slice decode - 1.17% slower
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.302`, adjacent `fromfile`/`fnp-io`

@@ -110,6 +110,80 @@ fn bench_take_axis_identity(c: &mut Criterion) {
     group.finish();
 }
 
+fn former_take_axis_copy_rows(
+    values: &[f64],
+    shape: &[usize],
+    ax: usize,
+    indices: &[i64],
+) -> (Vec<usize>, Vec<f64>) {
+    let axis_len = shape[ax] as i64;
+    let resolved: Vec<usize> = indices
+        .iter()
+        .map(|&index| {
+            let index = if index < 0 { index + axis_len } else { index };
+            index as usize
+        })
+        .collect();
+    let outer: usize = shape[..ax].iter().product();
+    let inner: usize = shape[ax + 1..].iter().product();
+    let src_stride = shape[ax] * inner;
+    let out_block = resolved.len() * inner;
+    let mut values_out = vec![0.0; outer * out_block];
+    for (outer_index, out_blk) in values_out.chunks_mut(out_block).enumerate() {
+        let src_base = outer_index * src_stride;
+        for (index_index, &resolved_index) in resolved.iter().enumerate() {
+            let source_base = src_base + resolved_index * inner;
+            out_blk[index_index * inner..(index_index + 1) * inner]
+                .copy_from_slice(&values[source_base..source_base + inner]);
+        }
+    }
+    let mut shape_out = shape.to_vec();
+    shape_out[ax] = resolved.len();
+    (shape_out, values_out)
+}
+
+fn bench_take_axis_contiguous_subrange(c: &mut Criterion) {
+    // The 12,288-element output stays below TAKE_PAR_MIN, isolating the copy
+    // coalescing lever from rayon scheduling. This is a proper interior range,
+    // so the existing full-axis identity shortcut cannot admit it.
+    let shape = vec![256, 64];
+    let axis = 1usize;
+    let n: usize = shape.iter().product();
+    let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 - 1.0).collect();
+    let arr = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+    let indices: Vec<i64> = (8..56).collect();
+
+    let candidate = arr.take(&indices, Some(axis as isize)).unwrap();
+    let (control_shape, control_values) = former_take_axis_copy_rows(&data, &shape, axis, &indices);
+    assert_eq!(candidate.shape(), control_shape);
+    assert!(
+        candidate
+            .values()
+            .iter()
+            .zip(&control_values)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+
+    let mut group = c.benchmark_group("take_axis_contiguous_subrange");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.bench_function("former_row_copies_256x8_56", |bench| {
+        bench.iter(|| {
+            black_box(former_take_axis_copy_rows(
+                black_box(&data),
+                &shape,
+                axis,
+                black_box(&indices),
+            ))
+        })
+    });
+    group.bench_function("contiguous_block_copy_256x8_56", |bench| {
+        bench.iter(|| black_box(arr.take(black_box(&indices), Some(axis as isize)).unwrap()))
+    });
+    group.finish();
+}
+
 fn former_fftshift_all_axes(arr: &UFuncArray, shape: &[usize]) -> UFuncArray {
     let mut shifted = arr.clone();
     for (axis, &len) in shape.iter().enumerate() {
@@ -157,6 +231,7 @@ criterion_group!(
     benches,
     bench_take_axis,
     bench_take_axis_identity,
+    bench_take_axis_contiguous_subrange,
     bench_fftshift_singleton_axes
 );
 criterion_main!(benches);
