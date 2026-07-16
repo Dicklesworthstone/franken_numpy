@@ -4,6 +4,51 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): Complex64 `complex_div` widens directly into its Complex128 output - 4.74x; the c64 convert-both family is CLOSED
+
+`BlackThrush`, bead `franken_numpy-ixs5y.355`, the last leaf of the `.343`
+family. Robot triage again left the P1 umbrella after its parked f16 and
+policy-gated C-BLAS leaves.
+
+Source attribution: `complex_div`'s Complex64+Complex64 pair fell to
+`to_complex128_vec()` on BOTH inputs before dividing. A pre-edit profile
+(1K-class samples, honored-pin `vmi1293453`) put the division collect frame
+at 44.66% (the kernel itself, which remains), `to_complex128_vec` at
+**22.73%**, and kernel fault/allocation at ~23% - removable copies about 45%
+of cycles.
+
+ONE LEVER: the Complex64 fast arm widens inline and runs the IDENTICAL
+division kernel on identically widened components - including the
+`denom == 0.0 -> (NaN, NaN)` arm, so a subnormal f32 divisor that widens to
+a nonzero f64 takes the quotient arm in BOTH paths and an exact zero takes
+the NaN arm in both. Focused test pins exactly those two divisor classes
+plus NaN payloads, negative zero, infinities, and the length-mismatch error
+(139 + 112 crate tests green). The bench asserts the faithful convert-both
+replica bit-for-bit before timing, with a zero divisor in the corpus.
+
+One foreground same-binary A/B (ordinary `--profile release`, LTO disabled,
+20 samples, 0.5 s warm-up, 2 s window, honored-pin effective worker
+`vmi1293453`, job `j-29933730227290689`):
+
+| arm | Criterion estimate |
+|---|---:|
+| former convert-both-inputs | 860.31 us `[823.54, 898.29]` |
+| direct inline widening | **181.32 us** `[171.56, 190.51]` |
+
+Midpoint **4.74x faster / 78.9% less time**; closest interval bounds are
+more than 4.3x apart. FAMILY CLOSED with the predicted monotone-by-kernel-
+weight scorecard: add 14.67x, sub 17.78x, mul 12.87x, div 4.74x - the
+heavier the surviving per-element kernel, the smaller the share the removed
+copies held. Timed source SHA-256:
+`c05815e9d4f19ae3a238ec7ebef44dfeb8838428f38bbacfa447a40d5830f983`; bench
+SHA-256: `b06812bd765620d348ac732300054f94814c9ea4dfeea036a396751408167a05`.
+Verdict: **SHIP**. Do not re-probe any Complex64+Complex64 binary-op input
+materialization. Mixed Complex64+Complex128 pairs remain the only separate
+hypothesis in this family; with this and the fnp-random noncentral leaf (in
+flight on the sibling session), the shallow relocation surface across
+fnp-io/iter/dtype/random is EXHAUSTED - next frontier per the standing plan:
+fnp-python dispatch (heavier setup) or the old conditional opens.
+
 ## 2026-07-16 - WIN (SHIP): Complex64 `complex_mul` widens directly into its Complex128 output - 12.87x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.354`, the second declared sibling of

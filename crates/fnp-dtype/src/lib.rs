@@ -1641,6 +1641,34 @@ impl ArrayStorage {
                     .collect(),
             ));
         }
+        // Complex64 pairs widen inline into the Complex128 output instead of
+        // materializing both inputs via `to_complex128_vec` (the .343/.353/
+        // .354 shape; the identical division kernel runs on identically
+        // widened components - including the zero-divisor NaN arm - so the
+        // result is bit-for-bit the former path's).
+        if let (Self::Complex64(a), Self::Complex64(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| {
+                        let (ar, ai) = (f64::from(ar), f64::from(ai));
+                        let (br, bi) = (f64::from(br), f64::from(bi));
+                        let denom = br * br + bi * bi;
+                        if denom == 0.0 {
+                            (f64::NAN, f64::NAN)
+                        } else {
+                            ((ar * br + ai * bi) / denom, (ai * br - ar * bi) / denom)
+                        }
+                    })
+                    .collect(),
+            ));
+        }
         let a = self.to_complex128_vec();
         let b = other.to_complex128_vec();
         if a.len() != b.len() {
@@ -3071,6 +3099,57 @@ mod tests {
         let long = ArrayStorage::from_complex64_vec(vec![(3.0, 4.0), (5.0, 6.0)]);
         assert!(matches!(
             short.complex_add(&long),
+            Err(StorageError::UnsupportedCast {
+                from: DType::Complex64,
+                to: DType::Complex64,
+            })
+        ));
+    }
+
+    #[test]
+    fn storage_complex_div_complex64_matches_widened_clone_path_bits() {
+        let a = ArrayStorage::from_complex64_vec(vec![
+            (-0.0, f32::from_bits(0x7fc0_0123)),
+            (f32::INFINITY, f32::MIN_POSITIVE),
+            (f32::from_bits(1), -f32::INFINITY),
+            (3.5, -2.25),
+            (1.0, 1.0),
+        ]);
+        let b = ArrayStorage::from_complex64_vec(vec![
+            (0.0, 2.0),
+            (-f32::INFINITY, -f32::MIN_POSITIVE),
+            // Subnormal divisor: widens to a nonzero f64, so BOTH paths take
+            // the quotient arm from identically widened components.
+            (f32::from_bits(2), 0.0),
+            (-1.5, 0.75),
+            // Exact zero divisor: both paths take the (NaN, NaN) arm.
+            (0.0, -0.0),
+        ]);
+        let former_a = a.to_complex128_vec();
+        let former_b = b.to_complex128_vec();
+        let former: Vec<_> = former_a
+            .iter()
+            .zip(&former_b)
+            .map(|(&(ar, ai), &(br, bi))| {
+                let denom = br * br + bi * bi;
+                if denom == 0.0 {
+                    (f64::NAN, f64::NAN)
+                } else {
+                    ((ar * br + ai * bi) / denom, (ai * br - ar * bi) / denom)
+                }
+            })
+            .collect();
+        let direct = a.complex_div(&b).unwrap().to_complex128_vec();
+
+        for (actual, expected) in direct.iter().zip(&former) {
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+        }
+
+        let short = ArrayStorage::from_complex64_vec(vec![(1.0, 2.0)]);
+        let long = ArrayStorage::from_complex64_vec(vec![(3.0, 4.0), (5.0, 6.0)]);
+        assert!(matches!(
+            short.complex_div(&long),
             Err(StorageError::UnsupportedCast {
                 from: DType::Complex64,
                 to: DType::Complex64,
