@@ -9,10 +9,15 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fnp_dtype::DType;
 use fnp_ufunc::UFuncArray;
+use rayon::prelude::*;
 use std::hint::black_box;
 
 fn focused_identity_only() -> bool {
     std::env::args().any(|arg| arg.starts_with("transpose_identity"))
+}
+
+fn focused_suffix_only() -> bool {
+    std::env::args().any(|arg| arg.starts_with("transpose_suffix"))
 }
 
 /// Previous kernel: per-element index decomposition + strided gather (2-D).
@@ -37,7 +42,7 @@ fn old_transpose(values: &[f64], r: usize, c: usize) -> Vec<f64> {
 }
 
 fn bench_transpose(c: &mut Criterion) {
-    if focused_identity_only() {
+    if focused_identity_only() || focused_suffix_only() {
         return;
     }
     for &(r, cc) in &[(4096usize, 4096usize), (2048, 2048), (1024, 4096)] {
@@ -88,7 +93,7 @@ fn old_batched_t(values: &[f64], dims: &[usize]) -> Vec<f64> {
 }
 
 fn bench_transpose_batched(c: &mut Criterion) {
-    if focused_identity_only() {
+    if focused_identity_only() || focused_suffix_only() {
         return;
     }
     // Batched matrix transpose (swapaxes(-1,-2) on a stack): the dominant N-D case.
@@ -204,6 +209,9 @@ fn c_strides(shape: &[usize]) -> Vec<usize> {
 }
 
 fn bench_transpose_identity(c: &mut Criterion) {
+    if focused_suffix_only() {
+        return;
+    }
     let dims = vec![64usize, 32, 8];
     let identity: Vec<usize> = (0..dims.len()).collect();
     let count: usize = dims.iter().product();
@@ -252,8 +260,107 @@ fn bench_transpose_identity(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_transpose_general(c: &mut Criterion) {
+/// Chunked parallel odometer gather — a frozen copy of the production general
+/// path (values, no sidecar) so the suffix-identity A/B isolates the
+/// block-copy lever inside one binary.
+fn former_suffix_odometer(values: &[f64], dims: &[usize], perm: &[usize]) -> (Vec<usize>, Vec<f64>) {
+    let ndim = dims.len();
+    let new_shape: Vec<usize> = perm.iter().map(|&a| dims[a]).collect();
+    let old_strides = c_strides(dims);
+    let new_strides = c_strides(&new_shape);
+    let src_step: Vec<usize> = (0..ndim).map(|d| old_strides[perm[d]]).collect();
+    let total: usize = dims.iter().product();
+    const TRANSPOSE_CHUNK: usize = 1 << 14;
+    const TRANSPOSE_PAR_MIN: usize = 1 << 15;
+    let parallel = total >= TRANSPOSE_PAR_MIN && rayon::current_num_threads() >= 2;
+    let mut new_values = vec![0.0f64; total];
+    let fill_values = |(ci, chunk): (usize, &mut [f64])| {
+        if chunk.is_empty() {
+            return;
+        }
+        let f0 = ci * TRANSPOSE_CHUNK;
+        let mut coord = vec![0usize; ndim];
+        let mut rem = f0;
+        for d in 0..ndim {
+            coord[d] = rem / new_strides[d];
+            rem %= new_strides[d];
+        }
+        let mut off: usize = (0..ndim).map(|d| coord[d] * src_step[d]).sum();
+        for slot in chunk.iter_mut() {
+            *slot = values[off];
+            let mut d = ndim;
+            while d > 0 {
+                d -= 1;
+                coord[d] += 1;
+                off += src_step[d];
+                if coord[d] < new_shape[d] {
+                    break;
+                }
+                coord[d] = 0;
+                off -= new_shape[d] * src_step[d];
+            }
+        }
+    };
+    if parallel {
+        new_values
+            .par_chunks_mut(TRANSPOSE_CHUNK)
+            .enumerate()
+            .for_each(fill_values);
+    } else {
+        new_values
+            .chunks_mut(TRANSPOSE_CHUNK)
+            .enumerate()
+            .for_each(fill_values);
+    }
+    (new_shape, new_values)
+}
+
+fn bench_transpose_suffix(c: &mut Criterion) {
     if focused_identity_only() {
+        return;
+    }
+    // Leading-axes permutations that keep the last axis in place (swapaxes(0,1)
+    // on a stack and its 4-D sibling): the last-two-swap fast path does NOT
+    // cover these, so they ride the generic gather. One cache-resident shape
+    // and one DRAM-resident shape.
+    let cases: &[(Vec<usize>, Vec<usize>)] = &[
+        (vec![64, 64, 64], vec![1, 0, 2]),
+        (vec![256, 256, 256], vec![1, 0, 2]),
+        (vec![32, 32, 32, 16], vec![2, 0, 1, 3]),
+    ];
+    for (dims, perm) in cases {
+        let n: usize = dims.iter().product();
+        let data: Vec<f64> = (0..n)
+            .map(|i| f64::from_bits(0x3ff0_0000_0000_0000 ^ (i as u64).wrapping_mul(0x9e37_79b9)))
+            .collect();
+        let arr = UFuncArray::new(dims.clone(), data.clone(), DType::F64).unwrap();
+        let pu: Vec<usize> = perm.clone();
+        let (former_shape, former_values) = former_suffix_odometer(&data, dims, perm);
+        let got = arr.transpose(Some(&pu)).unwrap();
+        assert_eq!(got.shape(), former_shape);
+        assert_eq!(
+            got.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            former_values
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        let mut group = c.benchmark_group(format!("transpose_suffix_{dims:?}_{perm:?}"));
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(
+            BenchmarkId::new("former_parallel_odometer", n),
+            &n,
+            |b, _| b.iter(|| black_box(former_suffix_odometer(black_box(&data), dims, perm))),
+        );
+        group.bench_with_input(BenchmarkId::new("public_path", n), &n, |b, _| {
+            b.iter(|| black_box(arr.transpose(black_box(Some(&pu))).unwrap()))
+        });
+        group.finish();
+    }
+}
+
+fn bench_transpose_general(c: &mut Criterion) {
+    if focused_identity_only() || focused_suffix_only() {
         return;
     }
     // Arbitrary permutations (rotations / non-adjacent moveaxis), the case the
@@ -292,6 +399,7 @@ criterion_group!(
     bench_transpose_identity,
     bench_transpose,
     bench_transpose_batched,
-    bench_transpose_general
+    bench_transpose_general,
+    bench_transpose_suffix
 );
 criterion_main!(benches);

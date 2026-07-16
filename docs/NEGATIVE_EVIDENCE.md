@@ -4,6 +4,72 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): suffix-identity transposes copy contiguous blocks - 2.93x / 2.01x / 1.28x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.330`. Robot triage again selected the
+P1 pure-safe-Rust performance umbrella after excluding its parked f16 leaf and
+policy-gated C-BLAS leaf. Negative-ledger screening found no prior non-identity
+transpose attempt beyond the shipped identity clone (`ixs5y.329`), whose entry
+explicitly left "non-identity axis orders" to earn their own profile. This turn
+took that conditional open: permutations that move only LEADING axes while a
+trailing run of axes keeps its position (`perm[d] == d` for `d >= k`, e.g.
+`swapaxes(0,1)` on a stack = `[1, 0, 2]`) still ran the generic per-element
+odometer gather, even though source and destination agree on the trailing block
+layout, making every output block of `block = prod(shape[k..])` elements one
+contiguous source run.
+
+A pre-edit remote `perf record -F 199 -e cycles:u` profile captured 4K+ samples
+with zero lost on effective worker `vmi1293453` (256^3 f64, perm `[1, 0, 2]`,
+`RAYON_NUM_THREADS=4`, runner-wrapped bench binary): the generic
+`UFuncArray::transpose::{closure#4}` odometer gather held **84.76%** of user
+cycles; kernel frames (faults/allocation) held most of the rest.
+
+ONE LEVER: after the identity and last-two-swap branches, `transpose` now
+detects the longest identity suffix (`suffix_start`), and for `block >= 2`
+copies whole blocks with `copy_from_slice`, advancing the source run start with
+a prefix-only odometer — one amortized-O(1) step per block instead of per
+element. `transpose_suffix_blocks_par` is generic over `T: Copy`, so values and
+the exact i64/u64 sidecar move through the same kernel; parallel chunks hold a
+whole number of blocks at the former `1 << 14` chunk / `1 << 15` threshold
+constants. Identity, last-two-swap (`perm[ndim-1] == ndim-2` — disjoint by
+construction), `block == 1` (size-1 trailing axes), all other permutations,
+validation errors, and allocation shape are unchanged.
+
+Strict-remote non-LTO release proof: two focused tests
+(`transpose_suffix_identity_blocks_match_naive_gather` across six shape/perm
+cases incl. 4-D two-axis-suffix, size-1 trailing axis, the parallel-threshold
+crossing, NaN-payload/-0.0/subnormal/infinity bit patterns, and an empty array;
+`transpose_suffix_identity_preserves_exact_integer_sidecars` with i64/u64
+sidecars beyond 2^53) passed among the 19-test transpose filter, and the
+owned-crate all-target release Clippy run added no new warnings (the two
+pre-existing lib lints at 18469/26415 predate this change). The bench's former
+arm is a frozen copy of the production parallel odometer, and its setup asserts
+raw-bit equality against the public path before timing.
+
+One foreground same-binary A/B ran with ordinary `--profile release`, LTO
+disabled, `RAYON_NUM_THREADS=4`, 10 samples, 250 ms warm-up, 750 ms target
+window on effective worker `vmi1293453` (job `j-29933307944763610`):
+
+| case | former parallel odometer | block-copy candidate | midpoint |
+|---|---:|---:|---:|
+| `[64, 64, 64]` perm `[1,0,2]` (block 64, cache-resident) | 442.73 us `[367.01, 556.21]` | 151.14 us `[91.29, 191.30]` | **2.93x** |
+| `[32, 32, 32, 16]` perm `[2,0,1,3]` (block 16) | 637.63 us `[527.13, 708.42]` | 317.02 us `[282.22, 350.93]` | **2.01x** |
+| `[256, 256, 256]` perm `[1,0,2]` (block 256, DRAM-resident) | 24.472 ms `[23.054, 25.849]` | 19.059 ms `[18.118, 20.092]` | **1.28x** |
+
+All three intervals are disjoint. The DRAM-resident shape is honestly scoped:
+at 128 MiB per array the move is bandwidth-bound, so the odometer removal only
+recovers the per-element bookkeeping share. Criterion warned it needed ~1.4 s
+to fit 10 samples on the 256^3 arms and extended the window itself; no timeout
+wrapper was used and no build event was classified as evidence. Timed source
+SHA-256: `587905d48639354f390d3dbac22988530e77f8931536c47978a5e557bc6e9d51`;
+bench SHA-256:
+`e72192d261c7c370c430123c8c94f3d26484f9d5d23051e621c088a2f1aefbeb`.
+Verdict: **SHIP**. Do not re-probe suffix-identity block copies; permutations
+whose trailing output axis moves (e.g. `[2, 0, 1]` rotations) still ride the
+generic odometer gather and must earn their own profile — the natural sibling
+is coalescing the INNER odometer axis into strided lane copies when
+`src_step[ndim-1] != 1`.
+
 ## 2026-07-15 - WIN (SHIP): identity transpose clones after full axis validation - 11.58x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.329`. Robot triage again selected the

@@ -10162,6 +10162,55 @@ impl UFuncArray {
         let new_strides = c_strides_elems(&new_shape);
         // Source-offset increment when output axis `d` advances by one element.
         let src_step: Vec<usize> = (0..ndim).map(|d| old_strides[perm[d]]).collect();
+
+        // Suffix-identity permutation fast path (moves among the LEADING axes
+        // only, e.g. swapaxes(0,1) on a stack, perm [1,0,2]): every axis at or
+        // beyond `suffix_start` keeps its position, so source and destination
+        // agree on the trailing block layout and each output block of `block`
+        // elements is one contiguous source run. The odometer gather below
+        // would still walk those runs element by element. Pure relocation,
+        // bit-for-bit identical — values and the i64/u64 sidecar move through
+        // the same kernel. Identity (handled above) and last-two-swap
+        // (`perm[ndim-1] == ndim-2`) can never reach this branch.
+        let mut suffix_start = ndim;
+        while suffix_start > 0 && perm[suffix_start - 1] == suffix_start - 1 {
+            suffix_start -= 1;
+        }
+        if suffix_start < ndim && total > 0 {
+            let block: usize = self.shape[suffix_start..].iter().product();
+            if block >= 2 {
+                let prefix_shape = &new_shape[..suffix_start];
+                let prefix_step = &src_step[..suffix_start];
+                let mut new_values = vec![0.0f64; total];
+                transpose_suffix_blocks_par(
+                    &self.values,
+                    &mut new_values,
+                    prefix_shape,
+                    prefix_step,
+                    block,
+                );
+                let new_sidecar = match &self.integer_sidecar {
+                    Some(IntegerSidecar::I64(v)) => {
+                        let mut out = vec![0i64; total];
+                        transpose_suffix_blocks_par(v, &mut out, prefix_shape, prefix_step, block);
+                        Some(IntegerSidecar::I64(out))
+                    }
+                    Some(IntegerSidecar::U64(v)) => {
+                        let mut out = vec![0u64; total];
+                        transpose_suffix_blocks_par(v, &mut out, prefix_shape, prefix_step, block);
+                        Some(IntegerSidecar::U64(out))
+                    }
+                    None => None,
+                };
+                return Ok(Self {
+                    shape: new_shape,
+                    values: new_values,
+                    dtype: self.dtype,
+                    integer_sidecar: new_sidecar,
+                });
+            }
+        }
+
         const TRANSPOSE_CHUNK: usize = 1 << 14;
         const TRANSPOSE_PAR_MIN: usize = 1 << 15;
         let parallel = total >= TRANSPOSE_PAR_MIN && rayon::current_num_threads() >= 2;
@@ -34674,6 +34723,69 @@ fn transpose_last2_par<T: Copy + Send + Sync>(
     }
 }
 
+/// Transpose for a suffix-identity permutation (`perm[d] == d` for every
+/// `d >= k`): the trailing axes keep identical C-strides in source and
+/// destination, so each destination block of `block = prod(shape[k..])`
+/// elements is one contiguous source run. Copies whole blocks, advancing the
+/// run start with a prefix-only odometer (one amortized-O(1) step per block
+/// instead of per element). `prefix_shape` is the permuted leading shape
+/// (`new_shape[..k]`) and `prefix_step` the source-offset increment per leading
+/// output axis (`old_strides[perm[d]]`). A pure data move, so bit-for-bit
+/// identical to the per-element gather.
+fn transpose_suffix_blocks_par<T: Copy + Send + Sync>(
+    src: &[T],
+    dst: &mut [T],
+    prefix_shape: &[usize],
+    prefix_step: &[usize],
+    block: usize,
+) {
+    const TRANSPOSE_CHUNK: usize = 1 << 14;
+    const TRANSPOSE_PAR_MIN: usize = 1 << 15;
+    let k = prefix_shape.len();
+    // Parallel chunks hold a whole number of blocks near the odometer chunk size.
+    let blocks_per_chunk = (TRANSPOSE_CHUNK / block).max(1);
+    let chunk_elems = blocks_per_chunk * block;
+    // C-strides over the permuted leading shape, in units of blocks.
+    let mut prefix_strides = vec![1usize; k];
+    for d in (0..k.saturating_sub(1)).rev() {
+        prefix_strides[d] = prefix_strides[d + 1] * prefix_shape[d + 1];
+    }
+    let fill = |(ci, chunk): (usize, &mut [T])| {
+        if chunk.is_empty() {
+            return;
+        }
+        // Decompose the chunk's first block index into leading coordinates.
+        let mut coord = vec![0usize; k];
+        let mut rem = ci * blocks_per_chunk;
+        for d in 0..k {
+            coord[d] = rem / prefix_strides[d];
+            rem %= prefix_strides[d];
+        }
+        let mut off: usize = (0..k).map(|d| coord[d] * prefix_step[d]).sum();
+        for out in chunk.chunks_mut(block) {
+            out.copy_from_slice(&src[off..off + block]);
+            // Odometer increment over the leading axes (least-significant last).
+            let mut d = k;
+            while d > 0 {
+                d -= 1;
+                coord[d] += 1;
+                off += prefix_step[d];
+                if coord[d] < prefix_shape[d] {
+                    break;
+                }
+                coord[d] = 0;
+                off -= prefix_shape[d] * prefix_step[d];
+            }
+        }
+    };
+    let parallel = dst.len() >= TRANSPOSE_PAR_MIN && rayon::current_num_threads() >= 2;
+    if parallel {
+        dst.par_chunks_mut(chunk_elems).enumerate().for_each(fill);
+    } else {
+        dst.chunks_mut(chunk_elems).enumerate().for_each(fill);
+    }
+}
+
 fn transpose_tiled(src: &[f64], dst: &mut [f64], r: usize, c: usize) {
     const T: usize = 32;
     let mut i0 = 0;
@@ -49272,6 +49384,167 @@ print(json.dumps(payload))
             }
             _ => panic!("identity transpose must preserve the u64 sidecar"),
         }
+    }
+
+    /// Naive reference permutation: per-element coordinate decomposition with
+    /// `ndim` divisions — the obviously-correct gather every fast path must
+    /// reproduce bit-for-bit.
+    fn naive_permute_bits(values: &[f64], dims: &[usize], perm: &[usize]) -> Vec<u64> {
+        let ndim = dims.len();
+        let new_shape: Vec<usize> = perm.iter().map(|&a| dims[a]).collect();
+        let mut old_strides = vec![1usize; ndim];
+        for d in (0..ndim.saturating_sub(1)).rev() {
+            old_strides[d] = old_strides[d + 1] * dims[d + 1];
+        }
+        let mut new_strides = vec![1usize; ndim];
+        for d in (0..ndim.saturating_sub(1)).rev() {
+            new_strides[d] = new_strides[d + 1] * new_shape[d + 1];
+        }
+        let total: usize = dims.iter().product();
+        (0..total)
+            .map(|flat_new| {
+                let mut rem = flat_new;
+                let mut flat_old = 0usize;
+                for (na, &ns) in new_strides.iter().enumerate() {
+                    flat_old += (rem / ns) * old_strides[perm[na]];
+                    rem %= ns;
+                }
+                values[flat_old].to_bits()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn transpose_suffix_identity_blocks_match_naive_gather() {
+        // Leading-axes permutations that keep a trailing run of axes in place
+        // ride the block-copy fast path; size-1 trailing axes (block == 1) and
+        // the parallel-threshold crossing stay covered too.
+        let cases: &[(&[usize], &[usize])] = &[
+            (&[5, 4, 3], &[1, 0, 2]),
+            (&[3, 4, 2, 5], &[2, 0, 1, 3]),
+            (&[3, 4, 2, 5], &[1, 0, 2, 3]),
+            (&[4, 3, 1], &[1, 0, 2]),
+            (&[7, 5, 2, 3], &[2, 1, 0, 3]),
+            (&[64, 32, 32], &[1, 0, 2]),
+        ];
+        for &(dims, perm) in cases {
+            let total: usize = dims.iter().product();
+            // Exercise payload-carrying bit patterns, not just ordinary values.
+            let special = [
+                (-0.0_f64).to_bits(),
+                0x0000_0000_0000_0001, // subnormal
+                f64::INFINITY.to_bits(),
+                f64::NEG_INFINITY.to_bits(),
+                0x7ff8_0000_0000_0042, // NaN payload
+            ];
+            let data: Vec<f64> = (0..total)
+                .map(|i| {
+                    if i % 97 == 0 {
+                        f64::from_bits(special[i % special.len()])
+                    } else {
+                        f64::from_bits(0x3ff0_0000_0000_0000 ^ (i as u64).wrapping_mul(0x9e37))
+                    }
+                })
+                .collect();
+            let arr =
+                UFuncArray::new(dims.to_vec(), data.clone(), DType::F64).expect("suffix input");
+            let out = arr.transpose(Some(perm)).expect("suffix transpose");
+            let expected_shape: Vec<usize> = perm.iter().map(|&a| dims[a]).collect();
+            assert_eq!(out.shape(), expected_shape, "shape for {dims:?} {perm:?}");
+            assert_eq!(
+                out.values()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                naive_permute_bits(&data, dims, perm),
+                "bits for {dims:?} {perm:?}"
+            );
+            assert_ne!(out.values().as_ptr(), arr.values().as_ptr());
+        }
+
+        let empty = UFuncArray::new(vec![0, 3, 2], vec![], DType::F64).expect("empty array");
+        let out = empty
+            .transpose(Some(&[1, 0, 2]))
+            .expect("empty suffix transpose");
+        assert_eq!(out.shape(), &[3, 0, 2]);
+    }
+
+    #[test]
+    fn transpose_suffix_identity_preserves_exact_integer_sidecars() {
+        let dims = vec![2usize, 3, 2];
+        let perm = [1usize, 0, 2];
+        let signed_values: Vec<i64> = vec![
+            i64::MIN,
+            -((1_i64 << 53) + 7),
+            -1,
+            0,
+            1,
+            (1_i64 << 53) + 9,
+            i64::MAX,
+            42,
+            -(1_i64 << 62),
+            (1_i64 << 61) + 3,
+            -3,
+            5,
+        ];
+        let signed =
+            UFuncArray::from_storage(dims.clone(), ArrayStorage::I64(signed_values.clone()))
+                .expect("signed array");
+        let signed_out = signed
+            .transpose(Some(&perm))
+            .expect("signed suffix transpose");
+        // Reference order from the naive gather over the sidecar itself.
+        let expected_signed: Vec<i64> = {
+            let mut out = Vec::with_capacity(12);
+            for j in 0..3 {
+                for i in 0..2 {
+                    for l in 0..2 {
+                        out.push(signed_values[i * 6 + j * 2 + l]);
+                    }
+                }
+            }
+            out
+        };
+        assert_eq!(
+            signed_out.to_storage().expect("signed storage"),
+            ArrayStorage::I64(expected_signed)
+        );
+
+        let unsigned_values: Vec<u64> = vec![
+            0,
+            1_u64 << 63,
+            (1_u64 << 53) + 11,
+            u64::MAX,
+            7,
+            (1_u64 << 62) + 1,
+            13,
+            1,
+            (1_u64 << 60) + 5,
+            2,
+            (1_u64 << 59) + 9,
+            3,
+        ];
+        let unsigned =
+            UFuncArray::from_storage(dims.clone(), ArrayStorage::U64(unsigned_values.clone()))
+                .expect("unsigned array");
+        let unsigned_out = unsigned
+            .transpose(Some(&perm))
+            .expect("unsigned suffix transpose");
+        let expected_unsigned: Vec<u64> = {
+            let mut out = Vec::with_capacity(12);
+            for j in 0..3 {
+                for i in 0..2 {
+                    for l in 0..2 {
+                        out.push(unsigned_values[i * 6 + j * 2 + l]);
+                    }
+                }
+            }
+            out
+        };
+        assert_eq!(
+            unsigned_out.to_storage().expect("unsigned storage"),
+            ArrayStorage::U64(expected_unsigned)
+        );
     }
 
     #[test]
