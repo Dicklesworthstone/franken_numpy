@@ -4,6 +4,54 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - REJECT (REVERTED): legacy `RandomState` gamma shape cache - 0.973x, overlapping
+
+`BlackThrush`, bead `franken_numpy-ixs5y.352`, the explicit legacy
+`RandomState` residual left by `.338` after the Generator gamma-cache family
+was mined. Robot triage again pointed at the P1 performance umbrella; the
+negative ledger routed this attempt away from the already-shipped Generator
+siblings and into the still-unmeasured legacy sampler.
+
+Profile first: a pre-edit stage-attribution fixture on effective worker
+`vmi1149989` (job `j-29933730227290569`) measured the public fixed-shape
+`RandomState::standard_gamma(5, 100000)` path at 3.6858 ms
+`[3.5929, 3.7750]` and an exact replica of its per-sample shape-term build at
+314.79 us `[301.42, 333.85]` - **8.54% of the full-path midpoint**. That
+cleared the attribution gate but was not used as accept/reject timing.
+
+ONE LEVER tested: build the existing `GammaShapeCache` once per legacy batch
+and pass it through an otherwise draw-for-draw identical legacy sampler for
+both `standard_gamma` and scaled `gamma`. The benchmark's pre-timing guard
+proved raw output bits and the complete `RandomState` position identical to
+the exact former per-sample implementation for shapes 0, 0.25, 0.5, 1, 2.5,
+5, NaN, and infinity.
+
+One foreground same-binary A/B used ordinary `--profile release` with LTO
+disabled, 10 samples, 250 ms warm-up, and a 750 ms measurement window. RCH
+workers repeatedly reaped their release targets between separate jobs, so
+the admissible run performed the **untimed `--no-run` warm-up first and the
+measurement second in one remote allocation** (effective worker
+`vmi1293453`, job `j-29933730227290640`; second Cargo phase finished in
+0.08 s):
+
+| arm | Criterion estimate |
+|---|---:|
+| exact former per-sample recompute | 3.5090 ms `[3.4324, 3.6455]` |
+| batch `GammaShapeCache` candidate | 3.6056 ms `[3.5242, 3.7228]` |
+
+Candidate/former time = **1.0275x (2.75% slower)**, equivalently **0.973x
+throughput**, with heavily overlapping intervals. The predeclared >=1.05x
+floor is not met. DIAGNOSIS: the isolated shape-term work exists, but in the
+full legacy rejection sampler the added per-draw enum dispatch/code-layout
+cost erases it; the full-path paired measurement outranks the stage model.
+Production and benchmark changes were REVERTED verbatim. Reverted source
+SHA-256: `8e1ecc623ba8a356c5b8408bb198cda298c1a2f1ea5cf51c617658fcdca1da9c`;
+bench SHA-256:
+`6aea84e4a759b35bed921717c142ff3249a37dd0c1b793ee248c3cae5b054fe9`.
+Verdict: **REJECT** - do not retry enum-backed batch caching in legacy
+`RandomState::{standard_gamma,gamma}`. The remaining fnp-random residual is
+the separately declared noncentral family.
+
 ## 2026-07-16 - WIN (SHIP): Complex64 `complex_sub` widens directly into its Complex128 output - 17.78x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.353`, the first declared sibling of
