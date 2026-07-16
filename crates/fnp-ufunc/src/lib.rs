@@ -11192,30 +11192,27 @@ impl UFuncArray {
                 integer_sidecar: None,
             });
         }
-        if self.integer_sidecar.is_none() {
-            let mut values = Vec::with_capacity(new_count);
-            let seed_len = self.values.len().min(new_count);
-            values.extend_from_slice(&self.values[..seed_len]);
-            while values.len() < new_count {
-                let copy_len = values.len().min(new_count - values.len());
-                values.extend_from_within(..copy_len);
+        // Both payload classes ride one seed-and-double kernel (the .359
+        // lever, extended to sidecars in .362): a cyclic repeat of the flat
+        // source is exactly seed-then-double, so the former per-cell modulo,
+        // the materialized source-index vector, and the sidecar gather all
+        // disappear. Pure relocation, bit-for-bit identical; sharing the
+        // helper means the sidecar and non-sidecar branches cannot diverge.
+        let values = resize_seed_double(&self.values, new_count);
+        let integer_sidecar = match &self.integer_sidecar {
+            Some(IntegerSidecar::I64(v)) => {
+                Some(IntegerSidecar::I64(resize_seed_double(v, new_count)))
             }
-            return Ok(Self {
-                shape: new_shape.to_vec(),
-                values,
-                dtype: self.dtype,
-                integer_sidecar: None,
-            });
-        }
-        let values: Vec<f64> = (0..new_count)
-            .map(|i| self.values[i % self.values.len()])
-            .collect();
-        let source_indices: Vec<usize> = (0..new_count).map(|i| i % self.values.len()).collect();
+            Some(IntegerSidecar::U64(v)) => {
+                Some(IntegerSidecar::U64(resize_seed_double(v, new_count)))
+            }
+            None => None,
+        };
         Ok(Self {
             shape: new_shape.to_vec(),
             values,
             dtype: self.dtype,
-            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+            integer_sidecar,
         })
     }
 
@@ -34757,6 +34754,21 @@ fn transpose_last2_par<T: Copy + Send + Sync>(
     }
 }
 
+/// Fill `new_count` elements by cyclically repeating `src`: seed with the
+/// prefix, then double via `extend_from_within` (the .359 resize kernel,
+/// generic over the f64 bridge and the i64/u64 sidecar payloads). Produces
+/// exactly `src[i % src.len()]` at every position - a pure relocation.
+fn resize_seed_double<T: Copy>(src: &[T], new_count: usize) -> Vec<T> {
+    let mut out = Vec::with_capacity(new_count);
+    let seed_len = src.len().min(new_count);
+    out.extend_from_slice(&src[..seed_len]);
+    while out.len() < new_count {
+        let copy_len = out.len().min(new_count - out.len());
+        out.extend_from_within(..copy_len);
+    }
+    out
+}
+
 /// Transpose for a suffix-identity permutation (`perm[d] == d` for every
 /// `d >= k`): the trailing axes keep identical C-strides in source and
 /// destination, so each destination block of `block = prod(shape[k..])`
@@ -49501,6 +49513,43 @@ print(json.dumps(payload))
             .transpose(Some(&[1, 0, 2]))
             .expect("empty suffix transpose");
         assert_eq!(out.shape(), &[3, 0, 2]);
+    }
+
+    #[test]
+    fn resize_sidecar_seed_double_matches_modulo_gather() {
+        // Sidecar resize must reproduce the former modulo-gather path exactly:
+        // f64 bridge bits AND exact integer payloads beyond 2^53, for expand
+        // (non-multiple lengths), exact-multiple, and shrink cases.
+        let signed_values = vec![i64::MIN, -((1_i64 << 53) + 7), (1_i64 << 53) + 9, i64::MAX, 42];
+        let arr = UFuncArray::from_storage(vec![5], ArrayStorage::I64(signed_values.clone()))
+            .expect("sidecar array");
+        for &new_len in &[13usize, 10, 3, 5, 1] {
+            let out = arr.resize(&[new_len]).expect("sidecar resize");
+            assert_eq!(out.shape(), &[new_len]);
+            // Former reference: bridge and sidecar gathered via i % len.
+            let expected_bridge: Vec<u64> = (0..new_len)
+                .map(|i| arr.values()[i % 5].to_bits())
+                .collect();
+            let expected_sidecar: Vec<i64> =
+                (0..new_len).map(|i| signed_values[i % 5]).collect();
+            assert_eq!(
+                out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                expected_bridge,
+                "bridge at len {new_len}"
+            );
+            assert_eq!(
+                out.to_storage().expect("storage"),
+                ArrayStorage::I64(expected_sidecar),
+                "sidecar at len {new_len}"
+            );
+        }
+
+        let unsigned_values = vec![0u64, 1_u64 << 63, (1_u64 << 53) + 11, u64::MAX];
+        let arr = UFuncArray::from_storage(vec![4], ArrayStorage::U64(unsigned_values.clone()))
+            .expect("unsigned array");
+        let out = arr.resize(&[9]).expect("unsigned sidecar resize");
+        let expected: Vec<u64> = (0..9).map(|i| unsigned_values[i % 4]).collect();
+        assert_eq!(out.to_storage().expect("storage"), ArrayStorage::U64(expected));
     }
 
     #[test]

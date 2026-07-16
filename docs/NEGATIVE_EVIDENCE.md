@@ -4,6 +4,60 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): sidecar `resize` payloads seed-and-double - 3.50x; plus a stale-conditional-opens audit
+
+`BlackThrush`, bead `franken_numpy-ixs5y.362`, the `.359` declared sibling
+("integer-sidecar reindexing is a separate contract-bound lane"). Robot
+triage again left the P1 umbrella after its parked f16 and policy-gated
+C-BLAS leaves.
+
+FRONTIER AUDIT FIRST (correcting my own stale memory, recorded so the next
+session inherits the truth): of the three "old conditional opens" carried in
+the index since the 2026-07-13 mega-vein, TWO are already closed - the
+axis-sort cores gate shipped as WindyCardinal's 2026-07-14 small-pool regate
+(0.579x -> 1.007x parity), and the i32 avx2 re-probe shipped as the
+`I32_FLAT_SORT_SIMD_MIN_THREADS` gate with its `small_pool_regate` bench.
+The third (flat-sum ISA grid, bead fs5pu) is a HUMAN decision fork on
+AVX-512 transcendental divergence, not a takeable perf bead. fnp-runtime
+remains barren; the complex storage surface closed without remainder at
+`.361`. The genuinely open frontier is fnp-python dispatch profiling - and
+the axis-sort regate's pipeline proves it runs entirely strict-remote (the
+local-.so gotchas apply to LOCAL testing only).
+
+THIS TICK'S LEVER: sidecar `resize` still computed `i % len` twice per
+output cell, materialized a full `source_indices: Vec<usize>` (8 bytes per
+cell), and gathered the sidecar through it - while the non-sidecar branch
+got `.359`'s seed-and-double. A generic `resize_seed_double<T: Copy>` now
+serves BOTH branches and both payloads (f64 bridge, i64/u64 sidecar) - the
+single-source-of-truth move, so the branches cannot diverge; a cyclic repeat
+of the flat source is exactly seed-then-double, pure relocation. Focused
+test pins bridge bits AND exact sidecar payloads beyond 2^53 across expand
+(non-multiple), exact-multiple, shrink, and length-1 cases for i64 and u64
+(5 resize tests green). The bench asserts the faithful modulo/index/gather
+replica bit-for-bit before timing. Profile gate by `.359`'s measured
+attribution of the identical modulo/index shape.
+
+One foreground same-binary A/B (ordinary `--profile release`, LTO disabled,
+20 samples, 0.5 s warm-up, 2 s window, honored-pin `vmi1293453`, job
+`j-29933730227290849`; 1M-element i64 sidecar source resized to 4M):
+
+| arm | Criterion estimate |
+|---|---:|
+| former modulo + index vec + gather | 101.95 ms `[95.770, 109.74]` |
+| candidate seed-and-double both payloads | **29.091 ms** `[27.732, 31.094]` |
+
+Midpoint **3.50x faster / 71.5% less time**; closest bounds more than 3x
+apart - above the non-sidecar sibling's 2.79x because two payloads shed the
+index vector and gather at once. (A first bench run silently measured
+nothing: the group registration was missing its trailing comma and criterion
+reported the fns as dead code - caught by the unused-function warnings, not
+by a green exit. Bench-vehicle rule: verify the new group appears in
+criterion_group before trusting any run.) Timed source SHA-256:
+`4bf570765e021579a8c5154a5c394f047370afc59aee06b6bfdf52464ce7d2ac`; bench
+SHA-256: `20c2f854ab4428b14bee37507d0b46de513bb01b550468d6fb192367702c421b`.
+Verdict: **SHIP**. Do not re-probe sidecar resize reindexing. With this, the
+`.359` resize lane is closed for both payload classes.
+
 ## 2026-07-16 - WIN (SHIP): `complex_pow` borrow-or-widen - 1.40x/1.21x; the complex storage surface is closed INCLUDING pow, and its length quirk is now a filed parity bead
 
 `BlackThrush`, bead `franken_numpy-ixs5y.361`, the declared contract-read

@@ -117,6 +117,60 @@ fn bench_repeat_once_identity(c: &mut Criterion) {
     group.finish();
 }
 
+/// Faithful replica of the FORMER sidecar resize path: per-cell modulo for
+/// the bridge, a materialized source-index vector, and a sidecar gather
+/// through it - exactly what production did before the .362 seed-and-double.
+fn resize_sidecar_modulo_control(array: &UFuncArray, output_len: usize) -> UFuncArray {
+    let src_len = array.values().len();
+    let values: Vec<f64> = (0..output_len)
+        .map(|index| array.values()[index % src_len])
+        .collect();
+    let source_indices: Vec<usize> = (0..output_len).map(|index| index % src_len).collect();
+    let gathered: Vec<i64> = match array.integer_sidecar() {
+        Some(fnp_ufunc::IntegerSidecar::I64(v)) => {
+            source_indices.iter().map(|&i| v[i]).collect()
+        }
+        _ => panic!("benchmark requires an i64 sidecar"),
+    };
+    UFuncArray::from_storage(vec![output_len], fnp_dtype::ArrayStorage::I64(gathered.clone()))
+        .map(|out| {
+            // Bridge equality is asserted by the caller against `values`.
+            black_box(&values);
+            out
+        })
+        .unwrap()
+}
+
+fn bench_resize_sidecar(c: &mut Criterion) {
+    const SRC_LEN: usize = 1_048_576;
+    const OUTPUT_LEN: usize = 4_000_000;
+    let signed: Vec<i64> = (0..SRC_LEN as i64)
+        .map(|i| (1_i64 << 53) + i * 7919)
+        .collect();
+    let array = UFuncArray::from_storage(vec![SRC_LEN], fnp_dtype::ArrayStorage::I64(signed))
+        .expect("sidecar bench array");
+
+    let former = resize_sidecar_modulo_control(&array, OUTPUT_LEN);
+    let candidate = array.resize(&[OUTPUT_LEN]).unwrap();
+    assert_eq!(
+        candidate.to_storage().expect("candidate storage"),
+        former.to_storage().expect("former storage"),
+        "sidecar resize bit mismatch"
+    );
+
+    let mut group = c.benchmark_group("resize_sidecar");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(2));
+    group.bench_function("former_modulo_index_gather", |bench| {
+        bench.iter(|| black_box(resize_sidecar_modulo_control(black_box(&array), OUTPUT_LEN)))
+    });
+    group.bench_function("candidate_seed_double", |bench| {
+        bench.iter(|| black_box(array.resize(black_box(&[OUTPUT_LEN])).unwrap()))
+    });
+    group.finish();
+}
+
 fn bench_resize_repeat(c: &mut Criterion) {
     const SOURCE_LEN: usize = 1_024;
     const OUTPUT_LEN: usize = 8_388_608;
@@ -177,6 +231,7 @@ criterion_group!(
     benches,
     bench_repeat,
     bench_repeat_once_identity,
-    bench_resize_repeat
+    bench_resize_repeat,
+    bench_resize_sidecar
 );
 criterion_main!(benches);
