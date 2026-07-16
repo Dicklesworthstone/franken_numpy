@@ -4,6 +4,60 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): unselected `loadtxt` rows parse directly into the output - 1.39x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.347`, the strongest declared sibling
+of the `.346` genfromtxt direct-extend win. Robot triage again left the P1
+umbrella after its parked f16 and policy-gated C-BLAS leaves.
+
+Source attribution: `parse_loadtxt_row` collects a fresh `Vec<f64>` per row
+(with a first-error short-circuit through the `Result` collect) and the
+caller copies it into `values`. A pre-edit `perf record -F 199 -e cycles:u`
+profile (1K samples, zero lost, effective worker `vmi1293453`, 8,192 rows x
+16 comma-separated cols) put the per-row collect/try_fold frame at
+**10.21%**, under float parsing 44.2%, memchr 13.5%, and trim 6.4% - above
+the `.346` gate that yielded 1.24x. (First profile attempt hit a connection
+reset on `vmi1227854`; the retry on `vmi1293453` succeeded - the failed job
+produced no timing and is not evidence.)
+
+ONE LEVER: a `parse_loadtxt_row_into` helper extends `values` directly from
+the token iterator, used only by `loadtxt_usecols`'s unselected branch.
+loadtxt's OWN error precedence is preserved - parse short-circuit, then
+ncols, then budget (NOTE: ncols before budget, the OPPOSITE order from
+genfromtxt - each family keeps its own), with the budget check
+`values.len() > MAX` being the former `row_start + row_len > MAX` verbatim;
+every error discards `values`, so partial extension is unobservable. The
+usecols planned path and `loadtxt_usecols_signed` (both still on
+`parse_loadtxt_row`-shaped rows) are unchanged. Contract test pins
+negative-zero bits, both delimiter paths, the exact parse-error message,
+both ragged directions, and usecols independence (327 + 68 green). The bench
+asserts the faithful per-row-Vec replica against the public path bit-for-bit
+before timing.
+
+One foreground same-binary A/B under the variance protocol (ordinary
+`--profile release`, LTO disabled, 20 samples, 0.5 s warm-up, 2 s window,
+honored-pin effective worker `vmi1293453`, job `j-29933730227290415`):
+
+| arm | Criterion estimate |
+|---|---:|
+| former per-row Vec | 5.4227 ms `[5.0810, 5.7062]` |
+| candidate direct extend | **3.9064 ms** `[3.7744, 4.0831]` |
+
+Midpoint **1.388x / 28.0% less time**, intervals cleanly disjoint - the
+predeclared floor (disjoint AND >= 1.05x) is cleared. Stronger than
+genfromtxt's 1.24x because loadtxt's parse loop is leaner (no
+filling-values fallback), so the removed alloc/copy is a larger share.
+Timed source SHA-256:
+`3dd67434caef18499f64bf583dd5eedf10b9f1ed31e84ef7e93f6ce79ea732dd`; bench
+SHA-256: `0419f7af4007943d49e848becf329b987d55d45ca9764d59bb88f3bf6b7dae68`.
+Verdict: **SHIP**. Do not re-probe the unselected loadtxt per-row
+intermediate. REMAINING TEXT-PARSER SIBLINGS (declared, unmeasured):
+`loadtxt_usecols_signed` (per-row `parse_loadtxt_row` when unselected, plus
+per-row signed resolution), the usecols planned path's per-row `selected`
+Vec (scatter needs random access - would need extend-zeros-then-scatter
+into `values`), `genfromtxt_full` (per-row collect + skip_footer-gated
+`all_lines` Vec).
+
 ## 2026-07-16 - WIN (SHIP): `genfromtxt` rows parse directly into the output - 1.24x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.346`. Robot triage again left the P1

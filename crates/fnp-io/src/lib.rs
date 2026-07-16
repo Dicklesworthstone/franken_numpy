@@ -1010,7 +1010,16 @@ pub fn write_npy_bytes_with_version(
     Ok(encoded)
 }
 
-pub fn read_npy_bytes(payload: &[u8], allow_pickle: bool) -> Result<NpyArrayBytes, IOError> {
+struct ParsedNpyBytes<'a> {
+    version: (u8, u8),
+    header: NpyHeader,
+    payload: &'a [u8],
+}
+
+fn parse_npy_bytes_borrowed<'a>(
+    payload: &'a [u8],
+    allow_pickle: bool,
+) -> Result<ParsedNpyBytes<'a>, IOError> {
     let version = validate_magic_version(payload)?;
     let (header_offset, header_len) = read_header_span(payload, version)?;
     let header_end = header_offset
@@ -1031,10 +1040,19 @@ pub fn read_npy_bytes(payload: &[u8], allow_pickle: bool) -> Result<NpyArrayByte
         let _ = validate_read_payload(&header.shape, body.len(), header.descr)?;
     }
 
-    Ok(NpyArrayBytes {
+    Ok(ParsedNpyBytes {
         version,
         header,
-        payload: Arc::from(body),
+        payload: body,
+    })
+}
+
+pub fn read_npy_bytes(payload: &[u8], allow_pickle: bool) -> Result<NpyArrayBytes, IOError> {
+    let parsed = parse_npy_bytes_borrowed(payload, allow_pickle)?;
+    Ok(NpyArrayBytes {
+        version: parsed.version,
+        header: parsed.header,
+        payload: Arc::from(parsed.payload),
     })
 }
 
@@ -2260,27 +2278,48 @@ pub fn loadtxt_usecols(
         if nrows >= max_rows {
             break;
         }
-        let row_vals = if let Some(plan) = &plan {
-            parse_loadtxt_row_usecols_planned(trimmed, delimiter, plan)?
-        } else {
-            parse_loadtxt_row(trimmed, delimiter)?
-        };
-
-        match ncols {
-            None => ncols = Some(row_vals.len()),
-            Some(expected) if row_vals.len() != expected => {
+        if let Some(plan) = &plan {
+            let row_vals = parse_loadtxt_row_usecols_planned(trimmed, delimiter, plan)?;
+            match ncols {
+                None => ncols = Some(row_vals.len()),
+                Some(expected) if row_vals.len() != expected => {
+                    return Err(IOError::ReadPayloadIncomplete(
+                        "loadtxt: inconsistent number of columns",
+                    ));
+                }
+                _ => {}
+            }
+            if values.len() + row_vals.len() > MAX_TEXT_ELEMENTS {
                 return Err(IOError::ReadPayloadIncomplete(
-                    "loadtxt: inconsistent number of columns",
+                    "loadtxt: text exceeds MAX_TEXT_ELEMENTS budget",
                 ));
             }
-            _ => {}
+            values.extend(row_vals);
+        } else {
+            // Unselected rows parse directly into the output (no per-row Vec,
+            // no row copy - the .346 genfromtxt lever). Error precedence is
+            // loadtxt's own: parse short-circuit, then ncols, then budget
+            // (`values.len() > MAX` is the former `row_start + row_len > MAX`
+            // verbatim); every error discards `values`, so partial extension
+            // is unobservable.
+            let row_start = values.len();
+            parse_loadtxt_row_into(&mut values, trimmed, delimiter)?;
+            let row_len = values.len() - row_start;
+            match ncols {
+                None => ncols = Some(row_len),
+                Some(expected) if row_len != expected => {
+                    return Err(IOError::ReadPayloadIncomplete(
+                        "loadtxt: inconsistent number of columns",
+                    ));
+                }
+                _ => {}
+            }
+            if values.len() > MAX_TEXT_ELEMENTS {
+                return Err(IOError::ReadPayloadIncomplete(
+                    "loadtxt: text exceeds MAX_TEXT_ELEMENTS budget",
+                ));
+            }
         }
-        if values.len() + row_vals.len() > MAX_TEXT_ELEMENTS {
-            return Err(IOError::ReadPayloadIncomplete(
-                "loadtxt: text exceeds MAX_TEXT_ELEMENTS budget",
-            ));
-        }
-        values.extend(row_vals);
         nrows += 1;
     }
     Ok(TextArrayData {
@@ -2403,6 +2442,30 @@ pub fn loadtxt_quotechar(
         nrows,
         ncols: ncols.unwrap_or(0),
     })
+}
+
+/// Parse one row's tokens directly into `out` (the .346 direct-extend shape),
+/// preserving [`parse_loadtxt_row`]'s exact token iteration, trimming, and
+/// first-error short-circuit.
+fn parse_loadtxt_row_into(
+    out: &mut Vec<f64>,
+    trimmed: &str,
+    delimiter: char,
+) -> Result<(), IOError> {
+    if delimiter == ' ' {
+        for s in trimmed.split_whitespace() {
+            out.push(s.parse::<f64>().map_err(|_| {
+                IOError::ReadPayloadIncomplete("loadtxt: parse error in row")
+            })?);
+        }
+    } else {
+        for s in trimmed.split(delimiter) {
+            out.push(s.trim().parse::<f64>().map_err(|_| {
+                IOError::ReadPayloadIncomplete("loadtxt: parse error in row")
+            })?);
+        }
+    }
+    Ok(())
 }
 
 fn parse_loadtxt_row(trimmed: &str, delimiter: char) -> Result<Vec<f64>, IOError> {
@@ -5155,13 +5218,13 @@ pub fn save(shape: &[usize], values: &[f64], dtype: IOSupportedDType) -> Result<
 ///
 /// Returns (shape, values, dtype).
 pub fn load(data: &[u8]) -> Result<(Vec<usize>, Vec<f64>, IOSupportedDType), IOError> {
-    let npy = read_npy_bytes(data, false)?;
+    let npy = parse_npy_bytes_borrowed(data, false)?;
     let dtype = npy.header.descr;
     let shape = npy.header.shape;
     let values = if dtype_is_native_endian_f64(dtype) {
-        fromfile_native_endian_f64(&npy.payload, None)?
+        fromfile_native_endian_f64(npy.payload, None)?
     } else {
-        fromfile(&npy.payload, dtype, None)?
+        fromfile(npy.payload, dtype, None)?
     };
     Ok((shape, values, dtype))
 }
@@ -7258,6 +7321,34 @@ mm.flush()
     }
 
     // ── loadtxt / savetxt tests ────────
+
+    #[test]
+    fn loadtxt_direct_extend_preserves_contract() {
+        // The direct-into-output row parse must preserve exact bits (negative
+        // zero), both delimiter paths, parse-error short-circuit with the
+        // exact message, ragged errors in BOTH directions, and the usecols
+        // path's independence from the restructure.
+        let text = "-0,2.5,3\n7,8,9\n";
+        let result = loadtxt(text, ',', '#', 0, usize::MAX).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.values[0].to_bits(), (-0.0f64).to_bits());
+
+        let parse_err = loadtxt("1,2\nbad,4\n", ',', '#', 0, usize::MAX).unwrap_err();
+        assert_eq!(parse_err.to_string(), "loadtxt: parse error in row");
+
+        let longer = loadtxt("1 2\n3 4 5\n", ' ', '#', 0, usize::MAX).unwrap_err();
+        assert_eq!(longer.to_string(), "loadtxt: inconsistent number of columns");
+        let shorter = loadtxt("1 2 3\n4\n", ' ', '#', 0, usize::MAX).unwrap_err();
+        assert_eq!(
+            shorter.to_string(),
+            "loadtxt: inconsistent number of columns"
+        );
+
+        // usecols path unchanged by the restructure.
+        let selected =
+            loadtxt_usecols("1,2,3\n4,5,6\n", ',', '#', 0, usize::MAX, Some(&[2, 0])).unwrap();
+        assert_eq!(selected.values, vec![3.0, 1.0, 6.0, 4.0]);
+    }
 
     #[test]
     fn loadtxt_basic() {
@@ -9966,6 +10057,50 @@ mm.flush()
         // -0.0 vs +0.0 preserved via bit pattern (== equates them, so test bits).
         assert_eq!(loaded_values[3].to_bits(), (-0.0_f64).to_bits());
         assert_eq!(loaded_values[4].to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn load_borrowed_body_matches_owned_control_on_misaligned_input_and_errors() {
+        let shape = &[7];
+        let values = &[
+            f64::from_bits(0x7ff8_0000_0000_1234),
+            -0.0,
+            f64::from_bits(1),
+            f64::MIN_POSITIVE,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1.25,
+        ];
+        let encoded = save(shape, values, native_endian_f64_dtype()).unwrap();
+        let mut padded = Vec::with_capacity(encoded.len() + 1);
+        padded.push(0);
+        padded.extend_from_slice(&encoded);
+        let misaligned = &padded[1..];
+
+        let owned = read_npy_bytes(misaligned, false).unwrap();
+        let owned_dtype = owned.header.descr;
+        let owned_shape = owned.header.shape;
+        let owned_values = fromfile(owned.payload.as_ref(), owned_dtype, None).unwrap();
+        let (borrowed_shape, borrowed_values, borrowed_dtype) = load(misaligned).unwrap();
+
+        assert_eq!(borrowed_shape, owned_shape);
+        assert_eq!(borrowed_dtype, owned_dtype);
+        assert_eq!(borrowed_values.len(), owned_values.len());
+        for (borrowed, owned) in borrowed_values.iter().zip(&owned_values) {
+            assert_eq!(borrowed.to_bits(), owned.to_bits());
+        }
+
+        let invalid_magic = [0u8; 8];
+        assert_eq!(
+            load(&invalid_magic).unwrap_err(),
+            read_npy_bytes(&invalid_magic, false).unwrap_err()
+        );
+        let mut truncated = encoded;
+        let _ = truncated.pop();
+        assert_eq!(
+            load(&truncated).unwrap_err(),
+            read_npy_bytes(&truncated, false).unwrap_err()
+        );
     }
 
     #[test]

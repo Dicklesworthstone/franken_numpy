@@ -711,6 +711,96 @@ fn loadtxt_usecols_former(
     (values, nrows, ncols.unwrap_or(0))
 }
 
+/// Faithful replica of the CURRENT unselected `loadtxt` path: a fresh
+/// `Vec<f64>` collected per accepted row (with parse short-circuit), then the
+/// caller's ncols-before-budget checks, then a copy into the output - exactly
+/// production's per-row allocation shape.
+#[inline(never)]
+fn loadtxt_plain_former(
+    text: &str,
+    delimiter: char,
+    comments: char,
+) -> (Vec<f64>, usize, usize) {
+    let mut values = Vec::new();
+    let mut ncols: Option<usize> = None;
+    let mut nrows = 0usize;
+    for line in text.lines() {
+        let trimmed = match line.find(comments) {
+            Some(pos) => &line[..pos],
+            None => line,
+        }
+        .trim();
+        if trimmed.is_empty() || trimmed.starts_with(comments) {
+            continue;
+        }
+        let row_vals: Vec<f64> = if delimiter == ' ' {
+            trimmed
+                .split_whitespace()
+                .map(|s| s.parse::<f64>().unwrap())
+                .collect()
+        } else {
+            trimmed
+                .split(delimiter)
+                .map(|s| s.trim().parse::<f64>().unwrap())
+                .collect()
+        };
+        match ncols {
+            None => ncols = Some(row_vals.len()),
+            Some(expected) => assert_eq!(row_vals.len(), expected),
+        }
+        values.extend(row_vals);
+        nrows += 1;
+    }
+    (values, nrows, ncols.unwrap_or(0))
+}
+
+fn bench_loadtxt_plain_rows(c: &mut Criterion) {
+    const ROWS: usize = 8_192;
+    const COLS: usize = 16;
+
+    let mut text = String::new();
+    for row in 0..ROWS {
+        for col in 0..COLS {
+            if col > 0 {
+                text.push(',');
+            }
+            text.push_str(&format!("{}.{}", row % 977, col));
+        }
+        text.push('\n');
+    }
+
+    let (former_values, former_rows, former_cols) = loadtxt_plain_former(&text, ',', '#');
+    let current = fnp_io::loadtxt_usecols(&text, ',', '#', 0, usize::MAX, None).unwrap();
+    assert_eq!(current.nrows, former_rows);
+    assert_eq!(current.ncols, former_cols);
+    assert!(
+        current
+            .values
+            .iter()
+            .zip(&former_values)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+
+    // Variance protocol: 20 samples, 2 s window, quiet worker; floor
+    // predeclared in the bead (disjoint AND >= 1.05x).
+    let mut group = c.benchmark_group("loadtxt_plain_rows");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(2));
+    group.throughput(Throughput::Elements((ROWS * COLS) as u64));
+    group.bench_function("former_per_row_vec", |bench| {
+        bench.iter(|| black_box(loadtxt_plain_former(black_box(&text), ',', '#')))
+    });
+    group.bench_function("candidate_direct_extend", |bench| {
+        bench.iter(|| {
+            black_box(
+                fnp_io::loadtxt_usecols(black_box(&text), ',', '#', 0, usize::MAX, None).unwrap(),
+            )
+        })
+    });
+    group.finish();
+}
+
 fn bench_loadtxt_usecols_plan(c: &mut Criterion) {
     const ROWS: usize = 8_192;
     const COLS: usize = 16;
@@ -1576,9 +1666,7 @@ fn bench_fromfile_non_native_f32(c: &mut Criterion) {
     group.finish();
 }
 
-fn load_npy_owned_body_former(
-    data: &[u8],
-) -> (Vec<usize>, Vec<f64>, IOSupportedDType) {
+fn load_npy_owned_body_former(data: &[u8]) -> (Vec<usize>, Vec<f64>, IOSupportedDType) {
     let npy = read_npy_bytes(data, false).expect("read NPY");
     let dtype = npy.header.descr;
     let shape = npy.header.shape;
@@ -1604,6 +1692,7 @@ fn bench_load_npy_borrowed_body(c: &mut Criterion) {
     let data = generate_f64_data(ELEMENTS);
     let header = make_npy_header(&[ELEMENTS]);
     let npy_bytes = write_npy_bytes(&header, &data, false).expect("write NPY");
+    let owned_npy = read_npy_bytes(&npy_bytes, false).expect("read NPY profile fixture");
     let former = load_npy_owned_body_former(&npy_bytes);
     let current = load(&npy_bytes).expect("load NPY");
     assert_loaded_f64_bits_eq(&former, &current);
@@ -1613,6 +1702,21 @@ fn bench_load_npy_borrowed_body(c: &mut Criterion) {
     group.sample_size(10);
     group.warm_up_time(Duration::from_millis(250));
     group.measurement_time(Duration::from_millis(750));
+    group.bench_function("profile_parse_and_owned_body_copy", |bench| {
+        bench.iter(|| black_box(read_npy_bytes(black_box(&npy_bytes), false).expect("read NPY")))
+    });
+    group.bench_function("profile_decode_owned_body", |bench| {
+        bench.iter(|| {
+            black_box(
+                fromfile(
+                    black_box(owned_npy.payload.as_ref()),
+                    owned_npy.header.descr,
+                    None,
+                )
+                .expect("decode NPY body"),
+            )
+        })
+    });
     group.bench_function("former_owned_body_copy", |bench| {
         bench.iter(|| black_box(load_npy_owned_body_former(black_box(&npy_bytes))))
     });
@@ -1797,6 +1901,7 @@ criterion_group!(
     bench_fromfile_text_literal_bounded_prefix,
     bench_fromfile_text_wildcard_bounded_prefix,
     bench_loadtxt_usecols_plan,
+    bench_loadtxt_plain_rows,
     bench_genfromtxt_row_scratch,
     bench_fromfile_native_u64,
     bench_fromfile_non_native_u64,
