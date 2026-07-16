@@ -3688,40 +3688,49 @@ pub fn genfromtxt(
         if trimmed.is_empty() || trimmed.starts_with(comments) {
             continue;
         }
-        let row_vals: Vec<f64> = if delimiter == ' ' {
-            trimmed
-                .split_whitespace()
-                .map(|s| s.trim().parse::<f64>().unwrap_or(filling_values))
-                .collect()
-        } else {
-            trimmed
-                .split(delimiter)
-                .map(|s| s.trim().parse::<f64>().unwrap_or(filling_values))
-                .collect()
-        };
-
-        let current_ncols = row_vals.len();
-        let target_ncols = ncols.unwrap_or(current_ncols);
-
-        if values.len() + target_ncols > MAX_TEXT_ELEMENTS {
-            return Err(IOError::ReadPayloadIncomplete(
-                "genfromtxt: text exceeds MAX_TEXT_ELEMENTS budget",
-            ));
+        // Rows parse directly into the output (no per-row Vec, no row copy).
+        // Error precedence is preserved exactly: for established columns the
+        // budget check uses the expected width - the same condition the
+        // former code evaluated after collecting - and every error discards
+        // `values`, so parsing before the ragged check is unobservable.
+        let row_start = values.len();
+        if let Some(expected) = ncols {
+            if row_start + expected > MAX_TEXT_ELEMENTS {
+                return Err(IOError::ReadPayloadIncomplete(
+                    "genfromtxt: text exceeds MAX_TEXT_ELEMENTS budget",
+                ));
+            }
         }
+        if delimiter == ' ' {
+            values.extend(
+                trimmed
+                    .split_whitespace()
+                    .map(|s| s.trim().parse::<f64>().unwrap_or(filling_values)),
+            );
+        } else {
+            values.extend(
+                trimmed
+                    .split(delimiter)
+                    .map(|s| s.trim().parse::<f64>().unwrap_or(filling_values)),
+            );
+        }
+        let current_ncols = values.len() - row_start;
 
         match ncols {
             None => {
+                if current_ncols > MAX_TEXT_ELEMENTS {
+                    return Err(IOError::ReadPayloadIncomplete(
+                        "genfromtxt: text exceeds MAX_TEXT_ELEMENTS budget",
+                    ));
+                }
                 ncols = Some(current_ncols);
-                values.extend(row_vals);
             }
             Some(expected) if current_ncols != expected => {
                 return Err(IOError::ReadPayloadIncomplete(
                     "genfromtxt: inconsistent number of columns",
                 ));
             }
-            Some(_) => {
-                values.extend(row_vals);
-            }
+            Some(_) => {}
         }
         nrows += 1;
     }
@@ -8127,6 +8136,32 @@ mm.flush()
         assert_eq!(result.values[0], 1.0);
         assert!(result.values[4].is_nan()); // missing value
         assert_eq!(result.values[5], 6.0);
+    }
+
+    #[test]
+    fn genfromtxt_direct_extend_preserves_contract() {
+        // The direct-into-output row parse must preserve exact bits (negative
+        // zero), the whitespace path, filling substitution position, ragged
+        // errors in BOTH directions (shorter and longer rows), and the exact
+        // error message.
+        let text = "-0,2.5,bad\n7,n/a,9\n";
+        let result = genfromtxt(text, ',', '#', 0, -1.25).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 3);
+        assert_eq!(result.values[0].to_bits(), (-0.0f64).to_bits());
+        assert_eq!(result.values[2].to_bits(), (-1.25f64).to_bits());
+        assert_eq!(result.values[4].to_bits(), (-1.25f64).to_bits());
+
+        let longer = genfromtxt("1 2\n3 4 5\n", ' ', '#', 0, 0.0).unwrap_err();
+        assert_eq!(
+            longer.to_string(),
+            "genfromtxt: inconsistent number of columns"
+        );
+        let shorter = genfromtxt("1 2 3\n4\n", ' ', '#', 0, 0.0).unwrap_err();
+        assert_eq!(
+            shorter.to_string(),
+            "genfromtxt: inconsistent number of columns"
+        );
     }
 
     #[test]

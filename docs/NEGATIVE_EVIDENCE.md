@@ -4,6 +4,61 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): `genfromtxt` rows parse directly into the output - 1.24x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.346`. Robot triage again left the P1
+umbrella after its parked f16 and policy-gated C-BLAS leaves. The noisy
+no-ship retry sweep closed last tick (the remaining vmi1264463 entries all
+sanity-checked: the I8 fromfile no-ship's 4.18 GiB/s absolutes are plausible
+and memory-bound - correctly rejected; every other entry there was a disjoint
+win), so this turn scouted fresh surface in the warm crate: `genfromtxt`.
+Ledger screening found no genfromtxt perf attempt (only the loadtxt usecols
+row-plan work).
+
+Source attribution: `genfromtxt` collected a fresh `Vec<f64>` per accepted
+row (`row_vals`) and then copied it into `values` - one alloc/free pair plus
+one row copy per line. A pre-edit `perf record -F 199 -e cycles:u` profile
+(1K samples, zero lost, effective worker `vmi1293453`, 8,192 rows x 16
+comma-separated cols with `n/a` fills) put the per-row `Vec` from_iter frame
+at **9.16%**, under float parsing ~34.4%, memchr line scanning 16.1%, and
+CharSearcher splitting ~12%. The profile upgraded the planned scratch-buffer
+lever to the stronger one: parse rows DIRECTLY into the output, removing the
+alloc/free AND the copy.
+
+ONE LEVER: rows `values.extend(...)` straight from the token iterator.
+Error-precedence preservation was reasoned explicitly: for established
+columns the budget check runs BEFORE parsing using the expected width - the
+identical condition the former code evaluated after collecting
+(`values.len() + expected`) - so a row that is both ragged and
+budget-crossing still reports the budget error first; the first row checks
+`current_ncols` after parsing exactly as before; and every error path
+discards `values`, so partial extension is unobservable. Contract test pins
+negative-zero bits, filling substitution positions, both ragged directions
+with exact messages, plus the existing missing-value/skip-header/comment
+tests (326 + 68 green). The bench asserts the faithful per-row-Vec replica
+against the public path bit-for-bit before timing.
+
+THREE foreground same-binary A/Bs under the variance protocol (20 samples,
+2 s windows) because rch twice routed the pinned `vmi1293453` request to
+`vmi1152480` (presumed peer bench contention). All three are internally valid
+same-worker interleaved A/Bs and all three are DISJOINT:
+
+| run | worker | former per-row Vec | direct extend | midpoint |
+|---|---|---:|---:|---:|
+| 1 (drift) | vmi1152480 | 7.1955 ms `[6.2728, 8.5267]` | 4.7297 ms `[4.6398, 4.8039]` | 1.52x (wide former) |
+| 2 (drift) | vmi1152480 | 6.4482 ms `[5.9888, 6.8654]` | 5.5223 ms `[5.1647, 5.9343]` | 1.17x (barely disjoint) |
+| 3 (EVIDENCE, honored pin) | vmi1227854 | 5.5635 ms `[5.3186, 5.8581]` | **4.4878 ms** `[4.3547, 4.6739]` | **1.240x, cleanly disjoint** |
+
+The predeclared floor (disjoint AND >= 1.05x) is cleared in every run; the
+quiet-worker run is the evidence row. Timed source SHA-256:
+`ffa79ada91e8fa4caa7a5de883afc360ad8f4225b1ca325a9be0c483fe4cf901`; bench
+SHA-256: `b0fab3313cfe7c84e19f15690be4f4ab5b81c84ae4f8095b40112bb2734beece`.
+Verdict: **SHIP**. Do not re-probe the genfromtxt per-row intermediate.
+DECLARED SIBLINGS (unmeasured): `genfromtxt_full` repeats the same per-row
+collect AND eager-collects an `all_lines: Vec<&str>` that is only required
+when `skip_footer > 0`; `loadtxt`'s unselected path (`parse_loadtxt_row`)
+likely has the same per-row shape - grep before assuming.
+
 ## 2026-07-16 - RETRY PAID (WIN, SHIP): singleton-axis `flip` identity clone - 19.3x; the .319 "noisy 1.18x" was a swamped measurement
 
 `BlackThrush`, bead `franken_numpy-ixs5y.344`, paying the retry predicate of

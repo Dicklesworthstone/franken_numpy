@@ -10,7 +10,7 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fnp_io::{
-    IOSupportedDType, NpyHeader, fromfile, fromfile_text, read_npy_bytes, read_npz_bytes,
+    IOSupportedDType, NpyHeader, fromfile, fromfile_text, load, read_npy_bytes, read_npz_bytes,
     read_npz_bytes_linear_overlap_control, write_npy_bytes, write_npz_bytes,
 };
 use std::hint::black_box;
@@ -777,6 +777,92 @@ fn bench_loadtxt_usecols_plan(c: &mut Criterion) {
     group.finish();
 }
 
+/// Faithful replica of the CURRENT `genfromtxt` comma path: a fresh
+/// `Vec<f64>` collected per accepted row, then copied into the output -
+/// exactly production's per-row allocation shape.
+#[inline(never)]
+fn genfromtxt_former(
+    text: &str,
+    delimiter: char,
+    comments: char,
+    filling_values: f64,
+) -> (Vec<f64>, usize, usize) {
+    let mut values = Vec::new();
+    let mut ncols: Option<usize> = None;
+    let mut nrows = 0usize;
+    for line in text.lines() {
+        let trimmed = match line.find(comments) {
+            Some(pos) => &line[..pos],
+            None => line,
+        }
+        .trim();
+        if trimmed.is_empty() || trimmed.starts_with(comments) {
+            continue;
+        }
+        let row_vals: Vec<f64> = trimmed
+            .split(delimiter)
+            .map(|s| s.trim().parse::<f64>().unwrap_or(filling_values))
+            .collect();
+        let current_ncols = row_vals.len();
+        match ncols {
+            None => ncols = Some(current_ncols),
+            Some(expected) => assert_eq!(current_ncols, expected),
+        }
+        values.extend(row_vals);
+        nrows += 1;
+    }
+    (values, nrows, ncols.unwrap_or(0))
+}
+
+fn bench_genfromtxt_row_scratch(c: &mut Criterion) {
+    const ROWS: usize = 8_192;
+    const COLS: usize = 16;
+
+    let mut text = String::new();
+    for row in 0..ROWS {
+        for col in 0..COLS {
+            if col > 0 {
+                text.push(',');
+            }
+            // Mix parseable floats with unparseable tokens to exercise
+            // filling_values.
+            if (row + col) % 37 == 0 {
+                text.push_str("n/a");
+            } else {
+                text.push_str(&format!("{}.{}", row % 977, col));
+            }
+        }
+        text.push('\n');
+    }
+
+    let (former_values, former_rows, former_cols) = genfromtxt_former(&text, ',', '#', -9.5);
+    let current = fnp_io::genfromtxt(&text, ',', '#', 0, -9.5).unwrap();
+    assert_eq!(current.nrows, former_rows);
+    assert_eq!(current.ncols, former_cols);
+    assert!(
+        current
+            .values
+            .iter()
+            .zip(&former_values)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+
+    // Variance protocol: 20 samples, 2 s window, warm pinned worker; floor
+    // predeclared in the bead (disjoint AND >= 1.05x).
+    let mut group = c.benchmark_group("genfromtxt_row_scratch");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(2));
+    group.throughput(Throughput::Elements((ROWS * COLS) as u64));
+    group.bench_function("former_per_row_vec", |bench| {
+        bench.iter(|| black_box(genfromtxt_former(black_box(&text), ',', '#', -9.5)))
+    });
+    group.bench_function("candidate_scratch_reuse", |bench| {
+        bench.iter(|| black_box(fnp_io::genfromtxt(black_box(&text), ',', '#', 0, -9.5).unwrap()))
+    });
+    group.finish();
+}
+
 fn bench_fromfile_native_u64(c: &mut Criterion) {
     const ELEMENTS: usize = 262_144;
     let values: Vec<u64> = (0..ELEMENTS)
@@ -1490,6 +1576,52 @@ fn bench_fromfile_non_native_f32(c: &mut Criterion) {
     group.finish();
 }
 
+fn load_npy_owned_body_former(
+    data: &[u8],
+) -> (Vec<usize>, Vec<f64>, IOSupportedDType) {
+    let npy = read_npy_bytes(data, false).expect("read NPY");
+    let dtype = npy.header.descr;
+    let shape = npy.header.shape;
+    let values = fromfile(npy.payload.as_ref(), dtype, None).expect("decode NPY body");
+    (shape, values, dtype)
+}
+
+fn assert_loaded_f64_bits_eq(
+    former: &(Vec<usize>, Vec<f64>, IOSupportedDType),
+    current: &(Vec<usize>, Vec<f64>, IOSupportedDType),
+) {
+    assert_eq!(current.0, former.0);
+    assert_eq!(current.2, former.2);
+    assert_eq!(current.1.len(), former.1.len());
+    for (current, former) in current.1.iter().zip(&former.1) {
+        assert_eq!(current.to_bits(), former.to_bits());
+    }
+}
+
+fn bench_load_npy_borrowed_body(c: &mut Criterion) {
+    const ELEMENTS: usize = 1_000_000;
+
+    let data = generate_f64_data(ELEMENTS);
+    let header = make_npy_header(&[ELEMENTS]);
+    let npy_bytes = write_npy_bytes(&header, &data, false).expect("write NPY");
+    let former = load_npy_owned_body_former(&npy_bytes);
+    let current = load(&npy_bytes).expect("load NPY");
+    assert_loaded_f64_bits_eq(&former, &current);
+
+    let mut group = c.benchmark_group("load_npy_borrowed_body");
+    group.throughput(Throughput::Bytes(npy_bytes.len() as u64));
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.bench_function("former_owned_body_copy", |bench| {
+        bench.iter(|| black_box(load_npy_owned_body_former(black_box(&npy_bytes))))
+    });
+    group.bench_function("public_load", |bench| {
+        bench.iter(|| black_box(load(black_box(&npy_bytes)).expect("load NPY")))
+    });
+    group.finish();
+}
+
 fn bench_write_npy(c: &mut Criterion) {
     let mut group = c.benchmark_group("write_npy_bytes");
 
@@ -1665,6 +1797,7 @@ criterion_group!(
     bench_fromfile_text_literal_bounded_prefix,
     bench_fromfile_text_wildcard_bounded_prefix,
     bench_loadtxt_usecols_plan,
+    bench_genfromtxt_row_scratch,
     bench_fromfile_native_u64,
     bench_fromfile_non_native_u64,
     bench_fromfile_native_i64,
@@ -1680,6 +1813,7 @@ criterion_group!(
     bench_fromfile_non_native_i32,
     bench_fromfile_native_f32,
     bench_fromfile_non_native_f32,
+    bench_load_npy_borrowed_body,
     bench_write_npy,
     bench_read_npy,
     bench_write_npz,
