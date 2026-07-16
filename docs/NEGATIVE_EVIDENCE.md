@@ -4,6 +4,60 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - REJECT (REVERTED): C-order element-step multi-index odometer - 1.009x, intervals overlap
+
+`BlackThrush`, bead `franken_numpy-ixs5y.349`. Robot triage again selected the
+P1 safe-Rust performance umbrella. Negative-ledger screening closed the
+three-member `fnp-io` direct-extend vein and routed to the explicit open
+residual from `.333`: non-external C-order `Nditer` still decodes its logical
+multi-index on every element step; an incremental odometer had not been tried.
+The C/F external-loop keeps and `.333`'s F-order second-decode removal are
+disjoint from this state-carrying candidate.
+
+PROFILE FIRST, before editing production: on shape `[4; 9]` (262,144 complete
+steps), the isolated per-step C-order multi-index decode measured 13.801 ms
+`[13.299, 14.220]`, versus 26.505 ms `[24.665, 27.932]` for the former-model
+iterator and 31.334 ms `[28.631, 34.356]` for untouched public `Nditer`
+(ordinary `--profile release`, LTO disabled, effective worker `vmi1293453`,
+job `j-29933730227290474`). Decode alone was 44.0% of the untouched-public
+midpoint, so the profile gate cleared.
+
+ONE LEVER (subsequently reverted): retain the next C-order element
+multi-index in `Nditer`, advance it as a rightmost-axis-first odometer after
+`next`/`iternext`, and rebuild it only on seek/reset. F order and both
+external-loop paths stayed on their old representation. A focused release
+proof covered exact complete streams (scalar, zero extent, singleton axes,
+and rank 9), seek/reset/current/finished transitions, mid-stream clone tails,
+and all three untouched controls (effective worker `vmi1293453`, job
+`j-29933730227290491`; 1 passed).
+
+The requested no-run warm-up completed on `vmi1152480` (job
+`j-29933730227290502`), but RCH rerouted the first bench to cold
+`vmi1227854`; that returned pass was treated as warm-up evidence only. The
+foreground repeat stayed on `vmi1227854` and completed every Criterion arm
+before an artifact-retrieval interrupt (job `j-29933730227290517`; ordinary
+`--profile release`, LTO disabled, 10 samples, 250 ms Criterion warm-up,
+750 ms target):
+
+| arm | Criterion estimate |
+|---|---:|
+| former per-step decode model | 26.410 ms `[23.138, 29.839]` |
+| public odometer candidate | 26.184 ms `[24.261, 28.317]` |
+
+The same-binary midpoint ratio is only **1.009x / 0.86% less time**, and the
+intervals overlap broadly; this misses both parts of the predeclared floor
+(disjoint AND >= 1.05x). The former-model arm was already faster than
+untouched public `Nditer` in the pre-edit profile, so this is a conservative
+proof failure rather than evidence that the exact old public path regresses.
+RCH then evicted the warmed release cache again; because the complete runtime
+A/B had already returned, the redundant job was stopped during artifact
+retrieval rather than treating cache/build behavior as a reject. Verdict:
+**REJECT; production and bench changes reverted, ledger only.** Do not retry
+an odometer stored beside `Nditer` with the same per-step public `Vec`
+materialization. Reopen only with an exact code-switched old/new path in one
+binary, or with a representation that also removes the contract-bound
+per-step `multi_index` allocation/copy while preserving seek semantics.
+
 ## 2026-07-16 - WIN (SHIP): unselected `genfromtxt_full` rows parse directly into the output - 1.35x; direct-extend family 3-for-3
 
 `BlackThrush`, bead `franken_numpy-ixs5y.348`, the third member of the
