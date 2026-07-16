@@ -450,6 +450,68 @@ fn bench_fromfile_text_bounded_prefix(c: &mut Criterion) {
     group.finish();
 }
 
+/// Faithful replica of the CURRENT general path for a pure-literal separator
+/// with a bounded count: eager whole-input `split(sep)` collect, then the
+/// same trim/empty-field/parse loop with the count break. The candidate must
+/// reproduce it bit-for-bit while only streaming the tokenization.
+#[inline(never)]
+fn fromfile_text_literal_bounded_former(text: &str, sep: &str, count: usize) -> Vec<f64> {
+    let fields: Vec<&str> = text.split(sep).collect();
+    let mut values = Vec::new();
+    let mut iter = fields.into_iter().peekable();
+    while let Some(field) = iter.next() {
+        if values.len() >= count {
+            break;
+        }
+        let field = field.trim();
+        if field.is_empty() {
+            if iter.peek().is_none() {
+                continue;
+            }
+            panic!("unexpected empty field in benchmark input");
+        }
+        values.push(field.parse::<f64>().unwrap());
+    }
+    values
+}
+
+fn bench_fromfile_text_literal_bounded_prefix(c: &mut Criterion) {
+    const TOKEN_COUNT: usize = 131_071;
+    const PREFIX_COUNT: usize = 32;
+
+    let text = vec!["1.25"; TOKEN_COUNT].join(",");
+    let former = fromfile_text_literal_bounded_former(&text, ",", PREFIX_COUNT);
+    let current = fromfile_text(&text, ",", Some(PREFIX_COUNT)).unwrap();
+    assert_eq!(current.len(), PREFIX_COUNT);
+    assert_eq!(former.len(), PREFIX_COUNT);
+    assert!(
+        current
+            .iter()
+            .zip(&former)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+
+    let mut group = c.benchmark_group("fromfile_text_literal_bounded_prefix");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements(PREFIX_COUNT as u64));
+    group.bench_function("former_eager_collect", |bench| {
+        bench.iter(|| {
+            black_box(fromfile_text_literal_bounded_former(
+                black_box(&text),
+                black_box(","),
+                PREFIX_COUNT,
+            ))
+        })
+    });
+    group.bench_function("public_bounded_count", |bench| {
+        bench
+            .iter(|| black_box(fromfile_text(black_box(&text), ",", Some(PREFIX_COUNT)).unwrap()))
+    });
+    group.finish();
+}
+
 fn bench_fromfile_native_u64(c: &mut Criterion) {
     const ELEMENTS: usize = 262_144;
     let values: Vec<u64> = (0..ELEMENTS)
@@ -1335,6 +1397,7 @@ fn bench_npy_roundtrip(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_fromfile_text_bounded_prefix,
+    bench_fromfile_text_literal_bounded_prefix,
     bench_fromfile_native_u64,
     bench_fromfile_non_native_u64,
     bench_fromfile_native_i64,

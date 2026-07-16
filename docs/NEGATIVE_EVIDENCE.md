@@ -4,6 +4,64 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): bounded literal-separator `fromfile_text` streams its prefix - 1,282x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.339`. Robot triage again left the P1
+umbrella after its parked f16 and policy-gated C-BLAS leaves. The fnp-random
+parameter-cache lane is mined to its two declared low-traffic leaves, so this
+turn pivoted to the `.332` entry's declared sibling: bounded reads with
+separators containing literal characters "still use the eager splitter and
+must earn independent profiles". Ledger screening found no attempt since.
+
+Source attribution: for a bounded count with a pure-literal separator (e.g.
+`sep=","`), `fromfile_text_with_budget` materialized EVERY token of the input
+- `split_text_with_sep` collects `text.split(sep)` into a `Vec<&str>` -
+before the count break discarded the suffix. A pre-edit
+`perf record -F 199 -e cycles:u` profile (1K samples, zero lost, effective
+worker `vmi1293453`, 131,071 comma-separated tokens, `count=32`) measured the
+defect directly: `TwoWaySearcher::next` 65.92% + `Split::next` 25.41% +
+`Vec<&str>` collect 3.32% - ~95% of the path tokenized a suffix the count
+check then threw away.
+
+ONE LEVER: a conjunction branch for `count = Some(k)` AND a separator that is
+neither whitespace-only nor space-wildcarded iterates `text.split(sep)`
+lazily with the SAME trim/empty-field/trailing-separator/budget loop -
+`str::split` yields exactly the token sequence `split_text_with_sep` collects
+for this case, so behavior is identical by construction and the scan stops
+after `k` parsed values. Wildcard-space separators (`", "`-style) and
+unbounded reads keep the eager path - the remaining declared siblings.
+
+PROOF: new `fromfile_text_bounded_literal_streams_exact_prefix` pins prefix
+equality with the unbounded parse, exact bits including negative zero,
+count-stop before a malformed suffix (never inspected by the former path
+either), internal-empty errors inside the prefix, trailing-separator
+tolerance, count beyond available tokens, count zero, multi-char separators,
+and space-trimmed fields; the full fnp-io suite passed 324 + 68 across
+targets. Clippy: 16 pre-existing warnings, all in the earlier typed-decode
+bench helpers (lines 543-973), none in this change. The bench setup asserts
+the faithful eager replica against the public path bit-for-bit before timing.
+
+One foreground same-binary A/B (ordinary `--profile release`, LTO disabled,
+10 samples, 250 ms warm-up, 750 ms target, pinned effective worker
+`vmi1293453`, job `j-29933730227290161`), former arm = faithful replica of
+the current eager path (collect + same loop; fully replicable pure string
+code, per the `.336` faithful-replica preference):
+
+| arm | Criterion estimate |
+|---|---:|
+| former eager whole-input collect | 1.5302 ms `[1.4196, 1.6474]` |
+| streaming literal prefix | **1.1931 us** `[1.1629, 1.2122]` |
+
+Midpoint **1,282.5x faster / 99.922% less time**; the interval bounds are
+three orders of magnitude apart. Timed source SHA-256:
+`018a0016b66fbee4fede85e7124ad02bb5789fb23aeb4d9a5a537dc441813060`; bench
+SHA-256: `761b56a5e730e3f242cb5cc1c4a8a092fe171cf2b3f199607617cc8ef15dd831`.
+Verdict: **SHIP**. Do not re-probe bounded pure-literal prefixes. REMAINING
+`fromfile_text` siblings (declared, unclaimed): bounded space-wildcard
+separators (the custom scanner would need a lazy variant), and unbounded
+reads' intermediate `Vec<&str>` (streams into the output Vec instead; smaller
+EV - tokenization itself is mandatory there).
+
 ## 2026-07-16 - WIN (SHIP): bounded commensurate-stride overlap certificate - 9,323x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.337`. Robot triage (data hash
