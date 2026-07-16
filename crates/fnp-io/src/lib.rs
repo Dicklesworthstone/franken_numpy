@@ -3847,24 +3847,23 @@ pub fn genfromtxt_full(
     let mut nrows = 0usize;
 
     for &trimmed in all_lines.iter().take(effective_len) {
-        let row_vals: Vec<f64> = if config.delimiter == ' ' {
-            trimmed
-                .split_whitespace()
-                .map(|s| s.parse::<f64>().unwrap_or(config.filling_values))
-                .collect()
-        } else {
-            trimmed
-                .split(config.delimiter)
-                .map(|s| s.trim().parse::<f64>().unwrap_or(config.filling_values))
-                .collect()
-        };
-
-        let raw_ncols = row_vals.len();
-
-        // Apply usecols filter. NumPy permits row-width drift when the
-        // selected columns are still present, but fails if a selected column is
-        // missing from an offending row.
-        let row_vals: Vec<f64> = if let Some(cols) = config.usecols {
+        if let Some(cols) = config.usecols {
+            // The usecols filter needs the materialized row for indexed
+            // selection with NumPy's width-drift tolerance: row-width drift is
+            // permitted while every selected column is present, but a row
+            // missing a selected column fails.
+            let row_vals: Vec<f64> = if config.delimiter == ' ' {
+                trimmed
+                    .split_whitespace()
+                    .map(|s| s.parse::<f64>().unwrap_or(config.filling_values))
+                    .collect()
+            } else {
+                trimmed
+                    .split(config.delimiter)
+                    .map(|s| s.trim().parse::<f64>().unwrap_or(config.filling_values))
+                    .collect()
+            };
+            let raw_ncols = row_vals.len();
             let mut selected = Vec::with_capacity(cols.len());
             for &c in cols {
                 if c >= raw_ncols {
@@ -3874,8 +3873,38 @@ pub fn genfromtxt_full(
                 }
                 selected.push(row_vals[c]);
             }
-            selected
+            let current_ncols = selected.len();
+            let target_ncols = ncols.unwrap_or(current_ncols);
+            if values.len() + target_ncols > MAX_TEXT_ELEMENTS {
+                return Err(IOError::ReadPayloadIncomplete(
+                    "genfromtxt: text exceeds MAX_TEXT_ELEMENTS budget",
+                ));
+            }
+            if ncols.is_none() {
+                ncols = Some(current_ncols);
+            }
+            values.extend(selected);
         } else {
+            // Unselected rows parse directly into the output (the .346/.347
+            // direct-extend lever). Precedence preserved: parse (filling
+            // substitution, never errors), then ncols, then budget - where
+            // `values.len() > MAX` is the former `row_start + target` verbatim
+            // because target equals the current width in every reachable case.
+            let row_start = values.len();
+            if config.delimiter == ' ' {
+                values.extend(
+                    trimmed
+                        .split_whitespace()
+                        .map(|s| s.parse::<f64>().unwrap_or(config.filling_values)),
+                );
+            } else {
+                values.extend(
+                    trimmed
+                        .split(config.delimiter)
+                        .map(|s| s.trim().parse::<f64>().unwrap_or(config.filling_values)),
+                );
+            }
+            let raw_ncols = values.len() - row_start;
             if let Some(expected) = ncols
                 && raw_ncols != expected
             {
@@ -3883,25 +3912,13 @@ pub fn genfromtxt_full(
                     "genfromtxt: inconsistent number of columns",
                 ));
             }
-            row_vals
-        };
-
-        let current_ncols = row_vals.len();
-        let target_ncols = ncols.unwrap_or(current_ncols);
-
-        if values.len() + target_ncols > MAX_TEXT_ELEMENTS {
-            return Err(IOError::ReadPayloadIncomplete(
-                "genfromtxt: text exceeds MAX_TEXT_ELEMENTS budget",
-            ));
-        }
-
-        match ncols {
-            None => {
-                ncols = Some(current_ncols);
-                values.extend(row_vals);
+            if values.len() > MAX_TEXT_ELEMENTS {
+                return Err(IOError::ReadPayloadIncomplete(
+                    "genfromtxt: text exceeds MAX_TEXT_ELEMENTS budget",
+                ));
             }
-            Some(_) => {
-                values.extend(row_vals);
+            if ncols.is_none() {
+                ncols = Some(raw_ncols);
             }
         }
         nrows += 1;
@@ -8281,6 +8298,53 @@ mm.flush()
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 2);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn genfromtxt_full_direct_extend_preserves_contract() {
+        // The unselected direct-extend must preserve exact bits (negative
+        // zero), filling substitution positions, both ragged directions with
+        // the exact message, and the usecols branch's independence (incl.
+        // width drift and out-of-bounds).
+        let config = GenFromTxtConfig {
+            delimiter: ',',
+            filling_values: -1.25,
+            ..Default::default()
+        };
+        let result = genfromtxt_full("-0,2.5,bad\n7,n/a,9\n", &config).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 3);
+        assert_eq!(result.values[0].to_bits(), (-0.0f64).to_bits());
+        assert_eq!(result.values[2].to_bits(), (-1.25f64).to_bits());
+        assert_eq!(result.values[4].to_bits(), (-1.25f64).to_bits());
+
+        let space_config = GenFromTxtConfig::default();
+        let longer = genfromtxt_full("1 2\n3 4 5\n", &space_config).unwrap_err();
+        assert_eq!(
+            longer.to_string(),
+            "genfromtxt: inconsistent number of columns"
+        );
+        let shorter = genfromtxt_full("1 2 3\n4\n", &space_config).unwrap_err();
+        assert_eq!(
+            shorter.to_string(),
+            "genfromtxt: inconsistent number of columns"
+        );
+
+        // usecols branch unchanged: width drift tolerated, OOB still errors.
+        let usecols_config = GenFromTxtConfig {
+            delimiter: ',',
+            usecols: Some(&[1, 0]),
+            ..Default::default()
+        };
+        let drift = genfromtxt_full("1,2,3\n4,5\n", &usecols_config).unwrap();
+        assert_eq!(drift.values, vec![2.0, 1.0, 5.0, 4.0]);
+        let oob_config = GenFromTxtConfig {
+            delimiter: ',',
+            usecols: Some(&[2]),
+            ..Default::default()
+        };
+        let oob = genfromtxt_full("1,2,3\n4,5\n", &oob_config).unwrap_err();
+        assert_eq!(oob.to_string(), "genfromtxt: usecols index out of bounds");
     }
 
     #[test]

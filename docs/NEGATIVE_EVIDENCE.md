@@ -4,6 +4,55 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): unselected `genfromtxt_full` rows parse directly into the output - 1.35x; direct-extend family 3-for-3
+
+`BlackThrush`, bead `franken_numpy-ixs5y.348`, the third member of the
+text-parser direct-extend family (.346 genfromtxt 1.24x, .347 loadtxt
+1.388x). Robot triage again left the P1 umbrella after its parked f16 and
+policy-gated C-BLAS leaves.
+
+Source attribution: `genfromtxt_full`'s unselected path collected a fresh
+`Vec<f64>` per row and copied it into `values`; the usecols branch
+additionally allocates a `selected` Vec but genuinely needs the materialized
+row for indexed selection with NumPy's width-drift tolerance, so it stays. A
+pre-edit profile (1K samples, zero lost; the report's head-truncation cut the
+collect frame but the visible shape - parse 38.5%, memchr 14% - matches the
+two measured siblings whose collect frames read 9.16% and 10.21%; the gate
+was accepted on structural identity with those precedents and the A/B as
+decider).
+
+ONE LEVER: unselected rows `values.extend(...)` straight from the token
+iterator. Precedence preserved: parse (filling substitution, never errors),
+then ncols, then budget - `values.len() > MAX` is the former
+`row_start + target_ncols` verbatim because `target_ncols` equals the
+current width in every reachable unselected case; every error discards
+`values`. The usecols branch (indexed selection, width drift, out-of-bounds)
+and the skip_footer-gated eager `all_lines` Vec are unchanged - the latter
+remains a declared sibling (streamable when `skip_footer == 0`, pointer-pair
+cost only). Contract test pins negative-zero bits, filling positions, both
+ragged directions with exact messages, width drift, and usecols
+out-of-bounds (329 green). The bench asserts the faithful replica (eager
+all_lines + per-row Vec, shared-cost identical) bit-for-bit before timing.
+
+One foreground same-binary A/B under the variance protocol (ordinary
+`--profile release`, LTO disabled, 20 samples, 0.5 s warm-up, 2 s window,
+honored-pin effective worker `vmi1293453`, job `j-29933730227290457`):
+
+| arm | Criterion estimate |
+|---|---:|
+| former per-row Vec | 5.3193 ms `[5.0879, 5.5420]` |
+| candidate direct extend | **3.9285 ms** `[3.7152, 4.1398]` |
+
+Midpoint **1.354x / 26.1% less time**, intervals cleanly disjoint - the
+predeclared floor (disjoint AND >= 1.05x) is cleared. Timed source SHA-256:
+`ca3581dac1965a736462938e4c6a3c62a42cd742568a8d52582a8246bc52ee32`; bench
+SHA-256: `1620b91cd6c1bb26700b1a2d4ba67ad815d13bb383ac6c4f71d488368fae20ce`.
+Verdict: **SHIP**. Do not re-probe unselected genfromtxt_full rows. The
+direct-extend family is now CLOSED for the three plain-row readers; remaining
+text-parser leaves (declared, lower EV): `loadtxt_usecols_signed`, the
+usecols planned scatter Vec (needs extend-zeros-then-scatter), the
+skip_footer==0 `all_lines` stream, and the quoted usecols plan hoist.
+
 ## 2026-07-16 - WIN (SHIP): high-level NPY load decodes a borrowed body - 16.30x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.345`. Negative-ledger and history

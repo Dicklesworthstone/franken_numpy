@@ -754,6 +754,110 @@ fn loadtxt_plain_former(
     (values, nrows, ncols.unwrap_or(0))
 }
 
+/// Faithful replica of the CURRENT unselected `genfromtxt_full` path: the
+/// eager `all_lines` collect (kept by the lever, shared cost in both arms)
+/// plus a fresh `Vec<f64>` per row copied into the output.
+#[inline(never)]
+fn genfromtxt_full_plain_former(
+    text: &str,
+    delimiter: char,
+    comments: char,
+    filling_values: f64,
+) -> (Vec<f64>, usize, usize) {
+    let all_lines: Vec<&str> = text
+        .lines()
+        .filter_map(|line| {
+            let trimmed = match line.find(comments) {
+                Some(pos) => &line[..pos],
+                None => line,
+            }
+            .trim();
+            if trimmed.is_empty() || trimmed.starts_with(comments) {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+        .collect();
+
+    let mut values = Vec::new();
+    let mut ncols: Option<usize> = None;
+    let mut nrows = 0usize;
+    for &trimmed in all_lines.iter() {
+        let row_vals: Vec<f64> = trimmed
+            .split(delimiter)
+            .map(|s| s.trim().parse::<f64>().unwrap_or(filling_values))
+            .collect();
+        match ncols {
+            None => ncols = Some(row_vals.len()),
+            Some(expected) => assert_eq!(row_vals.len(), expected),
+        }
+        values.extend(row_vals);
+        nrows += 1;
+    }
+    (values, nrows, ncols.unwrap_or(0))
+}
+
+fn bench_genfromtxt_full_plain_rows(c: &mut Criterion) {
+    const ROWS: usize = 8_192;
+    const COLS: usize = 16;
+
+    let mut text = String::new();
+    for row in 0..ROWS {
+        for col in 0..COLS {
+            if col > 0 {
+                text.push(',');
+            }
+            if (row + col) % 37 == 0 {
+                text.push_str("n/a");
+            } else {
+                text.push_str(&format!("{}.{}", row % 977, col));
+            }
+        }
+        text.push('\n');
+    }
+
+    let (former_values, former_rows, former_cols) =
+        genfromtxt_full_plain_former(&text, ',', '#', -9.5);
+    let config = fnp_io::GenFromTxtConfig {
+        delimiter: ',',
+        filling_values: -9.5,
+        ..Default::default()
+    };
+    let current = fnp_io::genfromtxt_full(&text, &config).unwrap();
+    assert_eq!(current.nrows, former_rows);
+    assert_eq!(current.ncols, former_cols);
+    assert!(
+        current
+            .values
+            .iter()
+            .zip(&former_values)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+
+    // Variance protocol: 20 samples, 2 s window, quiet worker; floor
+    // predeclared in the bead (disjoint AND >= 1.05x).
+    let mut group = c.benchmark_group("genfromtxt_full_plain_rows");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(2));
+    group.throughput(Throughput::Elements((ROWS * COLS) as u64));
+    group.bench_function("former_per_row_vec", |bench| {
+        bench.iter(|| {
+            black_box(genfromtxt_full_plain_former(
+                black_box(&text),
+                ',',
+                '#',
+                -9.5,
+            ))
+        })
+    });
+    group.bench_function("candidate_direct_extend", |bench| {
+        bench.iter(|| black_box(fnp_io::genfromtxt_full(black_box(&text), &config).unwrap()))
+    });
+    group.finish();
+}
+
 fn bench_loadtxt_plain_rows(c: &mut Criterion) {
     const ROWS: usize = 8_192;
     const COLS: usize = 16;
@@ -1902,6 +2006,7 @@ criterion_group!(
     bench_fromfile_text_wildcard_bounded_prefix,
     bench_loadtxt_usecols_plan,
     bench_loadtxt_plain_rows,
+    bench_genfromtxt_full_plain_rows,
     bench_genfromtxt_row_scratch,
     bench_fromfile_native_u64,
     bench_fromfile_non_native_u64,
