@@ -4,6 +4,55 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - REJECT (REVERTED): `noncentral_chisquare` fixed gamma-shape cache - 1.085x midpoint, overlapping
+
+`BlackThrush`, bead `franken_numpy-ixs5y.356`, the explicit Generator
+noncentral residual left by `.338` / `.335` after the legacy `.352` reject.
+Robot triage again pointed at the P1 performance umbrella; the negative ledger
+routed this attempt away from the already-mined direct gamma consumers and
+into `Generator::noncentral_chisquare` only. `noncentral_f` was deliberately
+excluded and remains a separate sibling.
+
+Profile first: a pre-edit ordinary-release stage fixture on effective worker
+`vmi1293453` (job `j-29933730227290683`) measured the current public
+`noncentral_chisquare(5, 1, 100000)` path at 2.7813 ms
+`[2.7051, 2.8670]` and an exact replica of its per-sample fixed gamma-cache
+construction at 336.75 us `[320.26, 351.69]` - **12.11% of the full-path
+midpoint**. That cleared the attribution gate but was not used for the
+accept/reject verdict.
+
+ONE LEVER tested: for the central (`nonc == 0`) and normal-shift (`df > 1`)
+regimes, compute the existing `GammaShapeCache` once per public batch and feed
+it to the otherwise unchanged gamma sampler. The `df <= 1` Poisson-mixture
+branch retained its draw-dependent gamma shape verbatim; `sqrt(nonc)` stayed
+inside the per-sample loop. A doc-hidden exact former control made the final
+A/B same-binary and machinery-identical. Its pre-timing guard matched every
+output bit and the next raw RNG draw for central, normal-shift, dynamic-
+mixture, NaN-parameter, and zero-size cases.
+
+One foreground same-binary A/B used ordinary `--profile release` with LTO
+disabled, 10 samples, 250 ms warm-up, and a 750 ms measurement window. The
+cold build received an untimed `--no-run` warm-up before the capped
+measurement in the same remote allocation (effective worker `vmi1293453`, job
+`j-29933730227290698`; the measurement's Cargo phase finished in 0.08 s):
+
+| arm | Criterion estimate |
+|---|---:|
+| exact former per-sample recompute | 2.6837 ms `[2.5179, 2.8975]` |
+| batch `GammaShapeCache` candidate | **2.4745 ms** `[2.3256, 2.5835]` |
+
+Midpoint throughput improved **1.0845x** (7.80% less time), but the intervals
+overlap from 2.5179 to 2.5835 ms. The predeclared floor required BOTH >=1.05x
+and disjoint intervals, so this directional signal is not admissible as a
+ship. Production and benchmark changes were REVERTED verbatim. Reverted
+source SHA-256:
+`8e1ecc623ba8a356c5b8408bb198cda298c1a2f1ea5cf51c617658fcdca1da9c`;
+bench SHA-256:
+`6aea84e4a759b35bed921717c142ff3249a37dd0c1b793ee248c3cae5b054fe9`.
+Verdict: **REJECT** - do not retry the same fixed gamma-cache lever in
+`noncentral_chisquare` without a changed sampler or an explicitly stronger
+variance protocol. The separately declared `noncentral_f` leaf remains open.
+
 ## 2026-07-16 - WIN (SHIP): Complex64 `complex_div` widens directly into its Complex128 output - 4.74x; the c64 convert-both family is CLOSED
 
 `BlackThrush`, bead `franken_numpy-ixs5y.355`, the last leaf of the `.343`
