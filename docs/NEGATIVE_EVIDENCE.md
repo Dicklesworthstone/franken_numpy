@@ -4,6 +4,69 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): non-sidecar `resize` seeds and doubles instead of building discarded modulo indices - 2.79x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.359`. Robot triage again pointed at
+the P1 no-gaps umbrella. The recent random-distribution cache vein had thinned
+and the complex dtype family was sibling-owned, so scouting pivoted to the
+fresh `fnp-ufunc::UFuncArray::resize` subsystem. For ordinary floating arrays,
+the former path generated the repeated values with a modulo per element, then
+generated a second full `Vec<usize>` of the same modulo indices even though
+`reindexed_integer_sidecar` immediately returned `None`.
+
+PROFILE FIRST, before the production edit, on source length 1,024 resized to
+8,388,608 (ordinary `--profile release`, LTO disabled, 10 samples, 250 ms
+warm-up, 750 ms windows, cold untimed `--no-run` warm-up first; effective
+worker `vmi1227854`, job `j-29933730227290738`):
+
+| stage | Criterion estimate |
+|---|---:|
+| current public path | 77.602 ms `[75.530, 79.847]` |
+| values modulo pass | 36.111 ms `[34.680, 37.729]` |
+| discarded index modulo pass | 39.989 ms `[38.064, 41.998]` |
+
+The discarded index pass alone was **51.53%** of the public-path midpoint;
+the two isolated modulo stages accounted for 98.06%, so attribution was
+strong enough to take the lever.
+
+ONE LEVER: when `integer_sidecar` is `None`, copy one source seed (or the
+shrinking prefix) and grow it with `Vec::extend_from_within` doubling. Shape
+overflow and empty-source handling remain in their former order, while the
+I64/U64 sidecar route retains the exact modulo values + source-index logic.
+The exact-former A/B control was temporary and moved back into benchmark/test
+scope after timing so no control-only production API shipped; the candidate
+body did not change. Bit proofs cover output lengths 0/1/2/5/7/8/19/64 and
+NaN payloads, signed zero, infinities, and finite values. The existing large
+U64 sidecar test pins the untouched integer route.
+
+One foreground same-binary A/B used the same fixture and ordinary release
+profile. Requested `hz2` routed to effective worker `vmi1152480`; its cold
+target received an untimed warm-up in the same allocation, then the capped
+measurement Cargo phase completed in 0.11 s (job
+`j-29933730227290752`):
+
+| arm | Criterion estimate |
+|---|---:|
+| exact former values + discarded indices | 94.153 ms `[83.363, 107.87]` |
+| seed-and-double candidate | **33.726 ms** `[31.910, 35.728]` |
+
+The intervals are widely disjoint: **2.792x faster, 64.18% less time**. A
+prior retry on `vmi1227854` (job `j-29933730227290748`) was cancelled when it
+immediately re-downloaded and rebuilt the release cache; it contributed no
+timing evidence. Remote validation: all four `resize_` unit tests passed on
+effective worker `vmi1153651` (job `j-29933730227290761`). Strict targeted
+Clippy reached two unrelated existing findings (`nan_filtered` dead code and
+the weights partial-order comparison); suppressing only those exact findings
+left the owned lib + bench clean on `vmi1227854` (job
+`j-29933730227290785`). Workspace fmt remains pre-blocked by unrelated and
+peer-owned files; the owned benchmark is rustfmt-clean and the owned diff
+passes `git diff --check`. Landed source SHA-256:
+`ab135549fcd51e66c558553bd48bf1471ebefd13e9556870ee13498fcd713b2a`;
+bench SHA-256:
+`bd4c48da3d4607abeb019fbecc304005f018ecaae841906eb3ca00368d90060f`.
+Verdict: **SHIP**. Do not re-probe non-sidecar `resize` modulo/index removal;
+integer-sidecar reindexing is a separate contract-bound lane.
+
 ## 2026-07-16 - WIN (SHIP): complex unary exp/log/sqrt borrow-or-widen - 1.27x/1.14x/4.1x; the lane rule priced each op correctly in advance
 
 `BlackThrush`, bead `franken_numpy-ixs5y.360`. Robot triage again left the P1

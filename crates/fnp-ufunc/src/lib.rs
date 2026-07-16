@@ -11192,6 +11192,21 @@ impl UFuncArray {
                 integer_sidecar: None,
             });
         }
+        if self.integer_sidecar.is_none() {
+            let mut values = Vec::with_capacity(new_count);
+            let seed_len = self.values.len().min(new_count);
+            values.extend_from_slice(&self.values[..seed_len]);
+            while values.len() < new_count {
+                let copy_len = values.len().min(new_count - values.len());
+                values.extend_from_within(..copy_len);
+            }
+            return Ok(Self {
+                shape: new_shape.to_vec(),
+                values,
+                dtype: self.dtype,
+                integer_sidecar: None,
+            });
+        }
         let values: Vec<f64> = (0..new_count)
             .map(|i| self.values[i % self.values.len()])
             .collect();
@@ -60127,6 +60142,42 @@ print(json.dumps(payload))
                 9_007_199_254_740_993,
             ])
         );
+    }
+
+    #[test]
+    fn resize_non_integer_fast_path_matches_modulo_control_bits() {
+        let source = vec![
+            0.0,
+            -0.0,
+            f64::from_bits(0x7ff8_0000_0000_1234),
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1.25,
+            -3.5,
+        ];
+        let array = UFuncArray::new(vec![source.len()], source, DType::F64).unwrap();
+
+        for new_count in [0, 1, 2, 5, 7, 8, 19, 64] {
+            let former_values: Vec<f64> = (0..new_count)
+                .map(|index| array.values[index % array.values.len()])
+                .collect();
+            let candidate = array.resize(&[new_count]).unwrap();
+            assert_eq!(candidate.shape, vec![new_count]);
+            assert_eq!(candidate.dtype, DType::F64);
+            assert_eq!(candidate.integer_sidecar, None);
+            assert_eq!(
+                candidate
+                    .values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                former_values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "resize bit mismatch at output length {new_count}"
+            );
+        }
     }
 
     // ── polynomial: polyfit, polyder, polyint, roots ──

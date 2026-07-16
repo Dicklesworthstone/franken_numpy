@@ -31,6 +31,17 @@ fn old_repeat(values: &[f64], shape: &[usize], ax: usize, reps: usize) -> Vec<f6
     out
 }
 
+fn resize_modulo_control(array: &UFuncArray, output_len: usize) -> UFuncArray {
+    let values = (0..output_len)
+        .map(|index| array.values()[index % array.values().len()])
+        .collect();
+    let source_indices: Vec<usize> = (0..output_len)
+        .map(|index| index % array.values().len())
+        .collect();
+    black_box(source_indices);
+    UFuncArray::new(vec![output_len], values, array.dtype()).unwrap()
+}
+
 fn bench_repeat(c: &mut Criterion) {
     // (shape, axis, repeats) — axis 0 (outer==1, inner large), middle axis, and
     // last axis (inner==1).
@@ -106,5 +117,66 @@ fn bench_repeat_once_identity(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_repeat, bench_repeat_once_identity);
+fn bench_resize_repeat(c: &mut Criterion) {
+    const SOURCE_LEN: usize = 1_024;
+    const OUTPUT_LEN: usize = 8_388_608;
+
+    let proof_values = vec![
+        0.0,
+        -0.0,
+        f64::from_bits(0x7ff8_0000_0000_1234),
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        1.25,
+        -3.5,
+    ];
+    let proof_array = UFuncArray::new(vec![proof_values.len()], proof_values, DType::F64).unwrap();
+    for output_len in [0, 1, 2, 5, 7, 8, 19, 64] {
+        let former = resize_modulo_control(&proof_array, output_len);
+        let candidate = proof_array.resize(&[output_len]).unwrap();
+        assert_eq!(candidate.shape(), former.shape());
+        assert_eq!(candidate.dtype(), former.dtype());
+        assert_eq!(
+            candidate.has_integer_sidecar(),
+            former.has_integer_sidecar()
+        );
+        assert_eq!(
+            candidate
+                .values()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            former
+                .values()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "resize bit mismatch at output length {output_len}"
+        );
+    }
+
+    let values: Vec<f64> = (0..SOURCE_LEN)
+        .map(|index| index as f64 * 0.25 - 17.0)
+        .collect();
+    let array = UFuncArray::new(vec![SOURCE_LEN], values, DType::F64).unwrap();
+
+    let mut group = c.benchmark_group("resize_repeat");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.bench_function("former_values_plus_indices_modulo", |bench| {
+        bench.iter(|| black_box(resize_modulo_control(black_box(&array), OUTPUT_LEN)))
+    });
+    group.bench_function("candidate_seed_and_double", |bench| {
+        bench.iter(|| black_box(array.resize(black_box(&[OUTPUT_LEN])).unwrap()))
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_repeat,
+    bench_repeat_once_identity,
+    bench_resize_repeat
+);
 criterion_main!(benches);
