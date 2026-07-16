@@ -4,6 +4,59 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - RETRY PAID (WIN, SHIP): hoisted `loadtxt(usecols)` row plan - 1.21x disjoint under the x6teb predicate
+
+`BlackThrush`, bead `franken_numpy-ixs5y.342`, paying the retry predicate of
+the 2026-07-14 x6teb NO-SHIP ("hoisted loadtxt(usecols) row plan - noisy
+1.10x point estimate"; predicate: "lower-variance already-warm binary ...
+plus a predeclared significance floor"). Robot triage again left the P1
+umbrella after its parked f16 and policy-gated C-BLAS leaves; the bounded
+`fromfile_text` class closed last tick, and this negative-ledger retry was
+the highest-EV open. FLOOR PREDECLARED in the bead before measuring: ship iff
+intervals DISJOINT and midpoint >= 1.05x, else the no-ship stands permanently.
+
+Same lever as x6teb, reconstructed: unquoted `loadtxt_usecols` rebuilt the
+`BTreeMap<column, output positions>` plan (plus its per-distinct-column inner
+Vecs) for every accepted row despite `usecols` being call-invariant. A
+`UsecolsPlan` is now built once per call;
+`parse_loadtxt_row_usecols_planned` carries the identical parse loop
+(including the `n_out == 0` early return and the out-of-bounds tail check),
+and the per-row wrapper delegates to it so every other caller keeps its
+former behavior. A profile of the frozen former replica (1K samples, zero
+lost, effective worker `vmi1293453`, 8,192 rows x 16 cols, usecols
+`[13, 1, 7, 13]` with duplicate and out-of-order selections) showed the
+former frame at 40.38% with `BTreeMap::or_default` alone at **7.12%**,
+memchr line-splitting 9.08%, and float parsing ~13.6% - the plan build is a
+real single-digit slice, matching x6teb's 1.10x point estimate.
+
+The full fnp-io suite passed (325 + 68 across targets; the pre-existing
+usecols tests, including duplicate/out-of-order coverage, now route through
+the hoisted plan). The bench asserts the frozen former replica (row loop +
+per-row plan build) against the public path bit-for-bit before timing.
+
+One foreground same-binary A/B under the predeclared protocol (ordinary
+`--profile release`, LTO disabled, 20 samples, 0.5 s warm-up, 2 s window,
+warm pinned effective worker `vmi1293453`, job `j-29933730227290256`):
+
+| arm | Criterion estimate |
+|---|---:|
+| former per-row planner | 2.8256 ms `[2.6788, 2.9675]` |
+| hoisted-plan candidate | **2.3428 ms** `[2.2354, 2.4303]` |
+
+Midpoint **1.206x / 17.1% less time**, intervals DISJOINT - the floor
+(disjoint AND >= 1.05x) is cleared, overturning the x6teb no-ship: the
+effect was real, its first measurement was noise-limited (10 samples,
+750 ms). METHOD: this is the third confirmation that the 20-sample/2-s
+pinned-warm protocol turns "directional" 1.1x-class effects into
+defensible verdicts (.335 beta re-run, .338 dirichlet, here). Timed source
+SHA-256: `a27296ef70313d958b1cc3e7b6d991b7d24e3881f11ab7952acfb2d0505a77d7`;
+bench SHA-256:
+`f45cb66250baf51561822ee22536d9f6bcee02e29a59fbdaf84a47ac83858da2`.
+Verdict: **SHIP**. Do not re-probe the unquoted usecols row plan. Possible
+siblings if ever profiled: the quoted (`parse_loadtxt_row_usecols_quote`) and
+signed (`parse_loadtxt_row_usecols_signed`) variants repeat the same per-row
+plan shape but were not measured here.
+
 ## 2026-07-16 - WIN (SHIP): all-zero `batch_matrix_rank` lanes bypass values-only SVD - 3.28x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.340`. Robot triage again selected the

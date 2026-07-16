@@ -2243,6 +2243,9 @@ pub fn loadtxt_usecols(
     max_rows: usize,
     usecols: Option<&[usize]>,
 ) -> Result<TextArrayData, IOError> {
+    // The selection is invariant across rows: build the column plan once
+    // instead of once per accepted row (x6teb retry).
+    let plan = usecols.map(build_usecols_plan);
     let mut values = Vec::new();
     let mut ncols: Option<usize> = None;
     let mut nrows = 0usize;
@@ -2257,8 +2260,8 @@ pub fn loadtxt_usecols(
         if nrows >= max_rows {
             break;
         }
-        let row_vals = if let Some(cols) = usecols {
-            parse_loadtxt_row_usecols(trimmed, delimiter, cols)?
+        let row_vals = if let Some(plan) = &plan {
+            parse_loadtxt_row_usecols_planned(trimmed, delimiter, plan)?
         } else {
             parse_loadtxt_row(trimmed, delimiter)?
         };
@@ -2417,15 +2420,17 @@ fn parse_loadtxt_row(trimmed: &str, delimiter: char) -> Result<Vec<f64>, IOError
     parsed.map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))
 }
 
-fn parse_loadtxt_row_usecols(
-    trimmed: &str,
-    delimiter: char,
-    cols: &[usize],
-) -> Result<Vec<f64>, IOError> {
-    if cols.is_empty() {
-        return Ok(Vec::new());
-    }
+/// Immutable per-call column-selection plan: `usecols` never changes between
+/// rows, so the column -> output-position map (with duplicate and
+/// out-of-order selections preserved) is built once and shared by every row
+/// (retry of the x6teb no-ship under its predeclared measurement predicate).
+struct UsecolsPlan {
+    positions: BTreeMap<usize, Vec<usize>>,
+    max_col: usize,
+    n_out: usize,
+}
 
+fn build_usecols_plan(cols: &[usize]) -> UsecolsPlan {
     let mut positions: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     let mut max_col = 0usize;
     for (pos, &col) in cols.iter().enumerate() {
@@ -2434,8 +2439,34 @@ fn parse_loadtxt_row_usecols(
             max_col = col;
         }
     }
+    UsecolsPlan {
+        positions,
+        max_col,
+        n_out: cols.len(),
+    }
+}
 
-    let mut selected = vec![0.0; cols.len()];
+fn parse_loadtxt_row_usecols(
+    trimmed: &str,
+    delimiter: char,
+    cols: &[usize],
+) -> Result<Vec<f64>, IOError> {
+    let plan = build_usecols_plan(cols);
+    parse_loadtxt_row_usecols_planned(trimmed, delimiter, &plan)
+}
+
+fn parse_loadtxt_row_usecols_planned(
+    trimmed: &str,
+    delimiter: char,
+    plan: &UsecolsPlan,
+) -> Result<Vec<f64>, IOError> {
+    if plan.n_out == 0 {
+        return Ok(Vec::new());
+    }
+
+    let positions = &plan.positions;
+    let max_col = plan.max_col;
+    let mut selected = vec![0.0; plan.n_out];
     let mut col_idx = 0usize;
 
     if delimiter == ' ' {

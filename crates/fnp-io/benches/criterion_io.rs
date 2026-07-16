@@ -638,6 +638,145 @@ fn bench_fromfile_text_wildcard_bounded_prefix(c: &mut Criterion) {
     group.finish();
 }
 
+/// Faithful replica of the FORMER `loadtxt_usecols` unquoted f64 path: the
+/// row loop (comment strip, trims, ragged checks) with the column plan -
+/// `BTreeMap<column, output positions>` plus its inner Vecs - rebuilt for
+/// every accepted row, exactly as production did before the hoist.
+#[inline(never)]
+fn loadtxt_usecols_former(
+    text: &str,
+    delimiter: char,
+    comments: char,
+    cols: &[usize],
+) -> (Vec<f64>, usize, usize) {
+    use std::collections::BTreeMap;
+    let mut values = Vec::new();
+    let mut ncols: Option<usize> = None;
+    let mut nrows = 0usize;
+    for line in text.lines() {
+        let trimmed = match line.find(comments) {
+            Some(pos) => &line[..pos],
+            None => line,
+        }
+        .trim();
+        if trimmed.is_empty() || trimmed.starts_with(comments) {
+            continue;
+        }
+        // Former per-row plan build.
+        let mut positions: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        let mut max_col = 0usize;
+        for (pos, &col) in cols.iter().enumerate() {
+            positions.entry(col).or_default().push(pos);
+            if col > max_col {
+                max_col = col;
+            }
+        }
+        let mut selected = vec![0.0; cols.len()];
+        let mut col_idx = 0usize;
+        if delimiter == ' ' {
+            for token in trimmed.split_whitespace() {
+                if col_idx > max_col {
+                    break;
+                }
+                if let Some(pos_list) = positions.get(&col_idx) {
+                    let value = token.parse::<f64>().unwrap();
+                    for &pos in pos_list {
+                        selected[pos] = value;
+                    }
+                }
+                col_idx += 1;
+            }
+        } else {
+            for token in trimmed.split(delimiter) {
+                if col_idx > max_col {
+                    break;
+                }
+                if let Some(pos_list) = positions.get(&col_idx) {
+                    let value = token.trim().parse::<f64>().unwrap();
+                    for &pos in pos_list {
+                        selected[pos] = value;
+                    }
+                }
+                col_idx += 1;
+            }
+        }
+        assert!(col_idx > max_col, "usecols index out of bounds");
+        match ncols {
+            None => ncols = Some(selected.len()),
+            Some(expected) => assert_eq!(selected.len(), expected),
+        }
+        values.extend(selected);
+        nrows += 1;
+    }
+    (values, nrows, ncols.unwrap_or(0))
+}
+
+fn bench_loadtxt_usecols_plan(c: &mut Criterion) {
+    const ROWS: usize = 8_192;
+    const COLS: usize = 16;
+    // Duplicate and out-of-order selections deliberately present (x6teb shape).
+    const USECOLS: [usize; 4] = [13, 1, 7, 13];
+
+    let mut text = String::new();
+    for row in 0..ROWS {
+        for col in 0..COLS {
+            if col > 0 {
+                text.push(' ');
+            }
+            text.push_str(&format!("{}.{}", row % 977, col));
+        }
+        text.push('\n');
+    }
+
+    let (former_values, former_rows, former_cols) =
+        loadtxt_usecols_former(&text, ' ', '#', &USECOLS);
+    let current = fnp_io::loadtxt_usecols(&text, ' ', '#', 0, usize::MAX, Some(&USECOLS)).unwrap();
+    assert_eq!(current.nrows, former_rows);
+    assert_eq!(current.ncols, former_cols);
+    assert_eq!(current.values.len(), former_values.len());
+    assert!(
+        current
+            .values
+            .iter()
+            .zip(&former_values)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+
+    // x6teb retry protocol: 20 samples and a 2 s window on a warm pinned
+    // worker, with the significance floor predeclared in the bead/ledger.
+    let mut group = c.benchmark_group("loadtxt_usecols_plan");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(2));
+    group.throughput(Throughput::Elements((ROWS * USECOLS.len()) as u64));
+    group.bench_function("former_per_row_planner", |bench| {
+        bench.iter(|| {
+            black_box(loadtxt_usecols_former(
+                black_box(&text),
+                ' ',
+                '#',
+                black_box(&USECOLS),
+            ))
+        })
+    });
+    group.bench_function("hoisted_plan_candidate", |bench| {
+        bench.iter(|| {
+            black_box(
+                fnp_io::loadtxt_usecols(
+                    black_box(&text),
+                    ' ',
+                    '#',
+                    0,
+                    usize::MAX,
+                    black_box(Some(&USECOLS)),
+                )
+                .unwrap(),
+            )
+        })
+    });
+    group.finish();
+}
+
 fn bench_fromfile_native_u64(c: &mut Criterion) {
     const ELEMENTS: usize = 262_144;
     let values: Vec<u64> = (0..ELEMENTS)
@@ -1525,6 +1664,7 @@ criterion_group!(
     bench_fromfile_text_bounded_prefix,
     bench_fromfile_text_literal_bounded_prefix,
     bench_fromfile_text_wildcard_bounded_prefix,
+    bench_loadtxt_usecols_plan,
     bench_fromfile_native_u64,
     bench_fromfile_non_native_u64,
     bench_fromfile_native_i64,
