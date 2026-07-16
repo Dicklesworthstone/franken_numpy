@@ -10,7 +10,7 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fnp_io::{
-    IOSupportedDType, NpyHeader, fromfile, read_npy_bytes, read_npz_bytes,
+    IOSupportedDType, NpyHeader, fromfile, fromfile_text, read_npy_bytes, read_npz_bytes,
     read_npz_bytes_linear_overlap_control, write_npy_bytes, write_npz_bytes,
 };
 use std::hint::black_box;
@@ -404,6 +404,50 @@ fn fromfile_non_native_u16_former(data: &[u8], count: Option<usize>) -> Vec<f64>
             f64::from(u16::from_ne_bytes([chunk[0], chunk[1]]).swap_bytes())
         })
         .collect()
+}
+
+#[inline(never)]
+fn fromfile_text_bounded_prefix_former(text: &str, count: usize) -> Vec<f64> {
+    let fields: Vec<&str> = text.split_whitespace().collect();
+    fields
+        .into_iter()
+        .take(count)
+        .map(|field| field.trim().parse::<f64>().unwrap())
+        .collect()
+}
+
+fn bench_fromfile_text_bounded_prefix(c: &mut Criterion) {
+    const TOKEN_COUNT: usize = 131_071;
+    const PREFIX_COUNT: usize = 32;
+
+    let text = "1.25 ".repeat(TOKEN_COUNT);
+    let former = fromfile_text_bounded_prefix_former(&text, PREFIX_COUNT);
+    let current = fromfile_text(&text, " ", Some(PREFIX_COUNT)).unwrap();
+    assert!(
+        current
+            .iter()
+            .zip(&former)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+    assert_eq!(current.len(), PREFIX_COUNT);
+
+    let mut group = c.benchmark_group("fromfile_text_bounded_prefix");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements(PREFIX_COUNT as u64));
+    group.bench_function("former_eager_collect", |bench| {
+        bench.iter(|| {
+            black_box(fromfile_text_bounded_prefix_former(
+                black_box(&text),
+                PREFIX_COUNT,
+            ))
+        })
+    });
+    group.bench_function("public_bounded_count", |bench| {
+        bench.iter(|| black_box(fromfile_text(black_box(&text), " ", Some(PREFIX_COUNT)).unwrap()))
+    });
+    group.finish();
 }
 
 fn bench_fromfile_native_u64(c: &mut Criterion) {
@@ -1290,6 +1334,7 @@ fn bench_npy_roundtrip(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_fromfile_text_bounded_prefix,
     bench_fromfile_native_u64,
     bench_fromfile_non_native_u64,
     bench_fromfile_native_i64,

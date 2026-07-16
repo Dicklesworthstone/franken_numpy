@@ -4049,6 +4049,22 @@ fn fromfile_text_with_budget(
         ));
     }
 
+    if let Some(max) = count.filter(|_| sep_is_only_spaces(sep)) {
+        let mut values = Vec::new();
+        for field in text.split_whitespace().take(max) {
+            if values.len() >= max_elements {
+                return Err(IOError::ReadPayloadIncomplete(
+                    "fromfile_text: text exceeds MAX_TEXT_ELEMENTS budget",
+                ));
+            }
+            let parsed = field.parse::<f64>().map_err(|_| {
+                IOError::ReadPayloadIncomplete("fromfile_text: could not parse float")
+            })?;
+            values.push(parsed);
+        }
+        return Ok(values);
+    }
+
     let max = count.unwrap_or(usize::MAX);
     let mut values = Vec::new();
 
@@ -8231,6 +8247,30 @@ mm.flush()
         let text = "1 2 3 4 5";
         let result = fromfile_text(text, " ", Some(3)).unwrap();
         assert_eq!(result, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn fromfile_text_bounded_whitespace_stops_at_exact_prefix() {
+        let result = fromfile_text("-0\t2.5\n3 invalid suffix", "\t", Some(3)).unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].to_bits(), (-0.0f64).to_bits());
+        assert_eq!(result[1].to_bits(), 2.5f64.to_bits());
+        assert_eq!(result[2].to_bits(), 3.0f64.to_bits());
+        assert_eq!(
+            fromfile_text("invalid suffix", " ", Some(0)).unwrap(),
+            Vec::<f64>::new()
+        );
+    }
+
+    #[test]
+    fn fromfile_text_bounded_whitespace_preserves_budget_precedence() {
+        assert_eq!(
+            fromfile_text_with_budget("1 2 invalid", " ", Some(2), 2).unwrap(),
+            vec![1.0, 2.0]
+        );
+        let err = fromfile_text_with_budget("1 2 invalid", " ", Some(3), 2)
+            .expect_err("budget must fire before parsing the next field");
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
     }
 
     #[test]

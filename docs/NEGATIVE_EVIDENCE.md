@@ -4,6 +4,55 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): bounded whitespace `fromfile_text` streams its prefix - 1,186x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.332`. Robot triage again selected the
+P1 safe-Rust performance umbrella after its parked f16 and policy-gated C-BLAS
+leaves were excluded. The preceding transpose vein had reached a
+bandwidth-bound suffix-block copy, so negative-ledger screening pivoted to the
+fresh `fnp-io` text parser. The ledger contained the binary `fromfile` typed
+decode sweep and its I8 no-ship, but no `fromfile_text` performance attempt.
+
+Pre-edit `perf record -F 199 -e cycles:u` attribution on effective worker
+`vmi1264463` captured 1,027 samples with zero lost. For a 131,071-token
+whitespace input with `count=32`, `SplitWhitespace::next` held **87.05%** of
+cycles and collecting the `Vec<&str>` held another **10.29%**: **97.34%** of
+the path tokenized the whole suffix before the existing count check discarded
+it.
+
+ONE LEVER: after the unchanged empty-separator validation,
+`fromfile_text_with_budget` now handles only the conjunction of an all-whitespace
+separator and bounded `count=Some(k)` by iterating
+`text.split_whitespace().take(k)` directly. Unbounded reads, literal and mixed
+separators, binary I/O, error strings, and all other parser paths are unchanged.
+Within the prefix, float parsing and the element-budget check retain their
+former order; a malformed suffix after `k` was never parsed before and remains
+ignored. Focused non-LTO release proof passed all 12 `fromfile_text` tests,
+including exact negative-zero bits, tab/newline whitespace, zero count,
+malformed suffixes, and the count-versus-budget boundary.
+
+One foreground same-binary Criterion A/B used ordinary `--profile release`,
+LTO disabled, 10 samples, 250 ms warm-up, and a 750 ms measurement target on
+requested/effective worker `vmi1227854` (job `j-29933307944763751`):
+
+| arm | Criterion estimate |
+|---|---:|
+| former eager whole-input collect | 1.1694 ms `[1.0868, 1.2387]` |
+| bounded streaming prefix | **985.83 ns** `[916.75, 1,037.9]` |
+
+The midpoint is **1,186.23x faster / 99.916% lower latency**; even the closest
+interval bounds are 1,047x apart. `vmi1264463` repeatedly evicted the ordinary
+release pool, so the required cold untimed warm-up was moved to `vmi1227854`
+without a timeout wrapper before this measurement. The final RCH job also
+reported a cache miss, but its build completed and the actual same-binary A/B
+returned normally; no build event was classified as evidence. Timed source
+SHA-256: `309b88397e657932606bfe1cb9f55dcc505dac857c9b896e61a39394f94b8b5b`;
+bench SHA-256:
+`89fadf5ba44e538a7bbcb17ebb2f5851b15964804eb50fa79319de76a79c0bdc`.
+Verdict: **SHIP**. Do not re-probe bounded all-whitespace prefixes; unbounded
+text reads and separators containing literal characters still use the eager
+splitter and must earn independent profiles. AGENT_NAME=BlackThrush.
+
 ## 2026-07-16 - WIN (SHIP): suffix-identity transposes copy contiguous blocks - 2.93x / 2.01x / 1.28x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.330`. Robot triage again selected the
