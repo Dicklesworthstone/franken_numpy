@@ -9275,12 +9275,10 @@ pub fn batch_matrix_norm(
     })
 }
 
-/// Batched matrix rank: rank on (..., m, n) → (...).
-pub fn batch_matrix_rank(
+fn parse_batch_matrix_rank_input(
     data: &[f64],
     shape: &[usize],
-    rcond: f64,
-) -> Result<Vec<usize>, LinAlgError> {
+) -> Result<(usize, usize, usize), LinAlgError> {
     let (batch, m, n) = parse_batched_shape(shape)?;
     if m != n {
         return Err(LinAlgError::ShapeContractViolation(
@@ -9293,6 +9291,38 @@ pub fn batch_matrix_rank(
             "batch_matrix_rank: data length does not match shape",
         ));
     }
+    Ok((batch, n, mat_size))
+}
+
+/// Batched matrix rank: rank on (..., m, n) → (...).
+pub fn batch_matrix_rank(
+    data: &[f64],
+    shape: &[usize],
+    rcond: f64,
+) -> Result<Vec<usize>, LinAlgError> {
+    let (batch, n, mat_size) = parse_batch_matrix_rank_input(data, shape)?;
+    batch_map_lanes(batch, mat_size, |b| {
+        let lane = &data[b * mat_size..(b + 1) * mat_size];
+        if n > 0
+            && rcond.is_finite()
+            && rcond >= 0.0
+            && lane.iter().all(|&value| value == 0.0)
+        {
+            Ok(0)
+        } else {
+            matrix_rank_nxn(lane, n, rcond)
+        }
+    })
+}
+
+/// Former all-SVD batched matrix-rank route retained for same-binary controls.
+#[doc(hidden)]
+pub fn batch_matrix_rank_general_control(
+    data: &[f64],
+    shape: &[usize],
+    rcond: f64,
+) -> Result<Vec<usize>, LinAlgError> {
+    let (batch, n, mat_size) = parse_batch_matrix_rank_input(data, shape)?;
     batch_map_lanes(batch, mat_size, |b| {
         matrix_rank_nxn(&data[b * mat_size..(b + 1) * mat_size], n, rcond)
     })
@@ -10014,6 +10044,40 @@ pub fn complex_conjugate_transpose(a: &[f64], m: usize, n: usize) -> Vec<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn batch_matrix_rank_zero_certificate_matches_general_control() {
+        let n = 3usize;
+        let mat_size = n * n;
+        let mut data = vec![0.0; 4 * mat_size];
+
+        for value in &mut data[mat_size..2 * mat_size] {
+            *value = -0.0;
+        }
+        data[2 * mat_size] = 3.0;
+        data[2 * mat_size + 4] = 2.0;
+        data[2 * mat_size + 8] = 1.0;
+        data[3 * mat_size..4 * mat_size]
+            .copy_from_slice(&[1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 0.0, 0.0, 0.0]);
+
+        let shape = [4, n, n];
+        for rcond in [0.0, 1e-12] {
+            let former = super::batch_matrix_rank_general_control(&data, &shape, rcond);
+            let certified = super::batch_matrix_rank(&data, &shape, rcond);
+            assert_eq!(certified, former);
+        }
+
+        let zeros = [0.0; 4];
+        for rcond in [-1.0, f64::INFINITY, f64::NAN] {
+            let former = super::batch_matrix_rank_general_control(&zeros, &[1, 2, 2], rcond);
+            let certified = super::batch_matrix_rank(&zeros, &[1, 2, 2], rcond);
+            assert_eq!(certified, former);
+        }
+
+        let former = super::batch_matrix_rank_general_control(&[], &[0, 0, 0], f64::NAN);
+        let certified = super::batch_matrix_rank(&[], &[0, 0, 0], f64::NAN);
+        assert_eq!(certified, former);
+    }
+
     #[test]
     fn batch_inv_small_matrices_parallel_matches_serial_bits() {
         // A large batch of small (n < 128) matrices now takes the parallel path via

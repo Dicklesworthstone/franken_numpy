@@ -4,6 +4,60 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): all-zero `batch_matrix_rank` lanes bypass values-only SVD - 3.28x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.340`. Robot triage again selected the
+P1 performance umbrella. The immediately active `fnp-io` text-prefix bead owned
+that source and benchmark surface, while the older matrix-rank ledger rows only
+covered Python delegation and large-SVD load noise. This turn therefore pivoted
+to the fresh direct-Rust `fnp-linalg::batch_matrix_rank` path; no ledger or
+history row covered structured all-zero lanes.
+
+PROFILE FIRST: on untouched production code, a strict-remote non-LTO release
+`perf record -F 199 -e cycles:u` run of 1,024 zero 32x32 lanes captured 3,176
+samples with zero lost on effective worker `vmi1149989` (job
+`j-29933730227290176`). `matrix_rank_mxn` held **46.42%** of cycles,
+`svd_bidiag_values_with_max_iters` **31.14%**, and `__libc_calloc` another
+**3.16%**. The path was spending its time proving a rank that is known exactly
+from the input bits.
+
+ONE LEVER: after preserving the exact batched shape/data checks, each lane now
+returns rank zero when `n > 0`, `rcond` is finite and nonnegative, and every
+entry compares equal to zero. Both `+0.0` and `-0.0` satisfy the certificate;
+NaN/Inf and invalid-`rcond` lanes retain the former `matrix_rank_nxn` path.
+All nonzero lanes retain the full SVD fallback. A doc-hidden all-SVD control is
+kept for same-binary measurement.
+
+PROOF: the focused release test compares the public route against the retained
+general control across positive-zero and signed-zero lanes, dense full-rank and
+rank-deficient lanes, `rcond` 0/default-style, negative/infinite/NaN `rcond`,
+and the empty-batch/zero-dimension edge; 1/1 passed remotely. The benchmark
+setup asserts exact `Vec<usize>` equality before timing. The certificate cannot
+change lowest-index error behavior because only successful rank-zero lanes are
+removed from the existing lane-ordered collector.
+
+FOREGROUND same-binary A/B, ordinary `--profile release`, LTO disabled,
+`RAYON_NUM_THREADS=4`, 10 samples / 250 ms warm-up / 750 ms target. An initial
+effective-worker reroute to loaded `vmi1152480` was positive but inconclusive
+(1.2290 ms vs 924.98 us = 1.329x; overlapping intervals). Per the worker-switch
+rule, the confirmation ran on honored `vmi1149989` (job
+`j-29933730227290228`) and separated decisively:
+
+| arm | Criterion estimate |
+|---|---:|
+| former all-SVD | 1.2388 ms `[882.05 us, 1.5734 ms]` |
+| all-zero certificate | **377.70 us** `[273.34, 501.65]` |
+
+Midpoint **3.279x faster / 69.5% less time**; conservative interval ratio
+`882.05 / 501.65 = 1.758x`. RCH reported cache misses despite untimed warm-up
+builds and two worker switches, but no build timeout was used as evidence and
+both timed arms executed in the same final binary. Timed source SHA-256:
+`48bc8b08b3061e31e01d304ec556195e7b196f5d724a8c946cc2606c8d66bd3e`;
+bench SHA-256:
+`3ea32e0e01e206c987bf50369b847558ca1f840c89e39faa2b7b81f01122abf2`.
+Verdict: **SHIP**. Remaining matrix-rank work must target a different exact
+structure class; do not re-probe all-zero batched lanes.
+
 ## 2026-07-16 - WIN (SHIP): bounded space-wildcard `fromfile_text` streams its prefix - 1,861x; the eager splitter now collects the lazy scanner
 
 `BlackThrush`, bead `franken_numpy-ixs5y.341`, closing the second of the two
