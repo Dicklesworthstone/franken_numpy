@@ -4,6 +4,76 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): non-external F-order nditer steps fold their own multi-index - 1.15x (conservative floor)
+
+`BlackThrush`, bead `franken_numpy-ixs5y.333`. Robot triage again left the P1
+pure-safe-Rust umbrella after excluding the parked f16 leaf and policy-gated
+C-BLAS leaf. The transpose vein is design-gated after the `.331` rotation
+REJECT, so this turn took the other standing conditional open, `.328`'s
+"non-external/general F-order mapping remains on the unchanged fallback and
+must earn its own profile". Ledger screen: the C-order chunk keep (311.64x) and
+the aligned F-order external ship (26.28x) never touched the per-element path.
+
+Source attribution: a non-external F-order `Nditer` step (chunk_len == 1)
+decoded the same iterindex TWICE - once in `step_for_chunk` for the public
+`NditerStep::multi_index` field, and once inside
+`operand_linear_indices_for_chunk`'s general fallback before folding the
+operand index - paying two `Vec<usize>` allocations and two per-axis divmod
+loops per element. A pre-edit `perf record -F 199 -e cycles:u` profile (1K
+samples, zero lost, effective worker `vmi1293453`, shape `[64, 64, 64]`,
+262,144 steps) matched: `operand_linear_indices_for_chunk` 18.06% (second
+decode inlined) + `linear_index_to_multi_index` 15.60% +
+`operand_linear_index_for_iterindex` 2.62%, with ~20% more in allocator frames
+(cfree 6.26%, Vec from_iter 6.21%, calloc/malloc/alloc_zeroed ~5.4%, unresolved
+libc allocator ~4%).
+
+ONE LEVER: `step_for_chunk` now folds the already-decoded `multi_index`
+directly (`operand_linear_index(&multi_index)`) when `chunk_len == 1` and the
+order is F, skipping the fallback's second decode and its Vec. The C-order
+range short-circuit, external-loop chunks (both `.328`'s aligned fast path and
+the misaligned fallback), seek/boundary validation, and all error surfaces are
+unchanged. Focused release test
+`nditer_f_order_element_steps_match_manual_reconstruction` asserts complete
+step-stream equality against the former double-decode construction across
+scalar/1-D/2-D/3-D/4-D shapes including size-1 axes, plus C-order and
+external-loop controls (28/28 crate nditer tests green); the crate's all-target
+release Clippy run emitted zero warnings. The bench also asserts complete
+step-stream equality before timing.
+
+TWO same-binary A/Bs on effective worker `vmi1293453`, ordinary
+`--profile release`, LTO disabled, 10 samples, 250 ms warm-up, 750 ms target:
+
+1. FLAWED-then-corrected methodology note: a bare manual loop building the
+   former steps via public plan calls measured 19.040 ms `[18.319, 19.698]`
+   vs the new public path's 20.128 ms `[19.964, 20.448]` (job
+   `j-29933307944763818`) - i.e. the `Nditer` iterator machinery itself
+   (chunk bookkeeping, bounds checks, Option/finished checks) costs MORE than
+   the removed decode. That row is evidence about iterator overhead, NOT the
+   lever; a bare-loop former arm understates any step-construction lever.
+2. Corrected arm - the public iterator PLUS exactly the removed work (one
+   extra `linear_index_to_multi_index` and its Vec per element), identical
+   iterator machinery in both arms (job `j-29933307944763830`):
+
+| arm | Criterion estimate |
+|---|---:|
+| former-model (public + removed decode) | 24.241 ms `[23.562, 24.906]` |
+| public single-decode path | **21.076 ms** `[20.222, 22.824]` |
+
+Midpoint **1.150x / 13.1% less time**, intervals disjoint (Criterion change
+p = 0.02). The former-model arm is CONSERVATIVE: it reproduces the removed
+decode+Vec but not the removed `(range).map().collect()` scaffolding of the
+former fallback, so the true former-vs-new delta is at least this row. Timed
+source SHA-256:
+`554f16c5a1deeb5bfd6570d28a7fb125b091d88643a47cd54e10b50a74bc6f86`; bench
+SHA-256: `224cf65cfe1236b920edcc30b8fd2e249718c0cf1265f4dbb6e04fd712bdd4ec`.
+Verdict: **SHIP** (strictly-less-work relocation of an existing fold; stream
+equality proven). Do not re-probe the single-element double decode. REMAINING
+on this path (next profile targets, in measured order): the iterator
+machinery itself (larger than the decode - an incremental odometer carrying
+multi/operand state across `next()` would attack it but must survive `seek`),
+and the per-step `vec![linear]`/`multi_index` allocations mandated by the
+public `NditerStep` contract.
+
 ## 2026-07-16 - WIN (SHIP): bounded whitespace `fromfile_text` streams its prefix - 1,186x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.332`. Robot triage again selected the

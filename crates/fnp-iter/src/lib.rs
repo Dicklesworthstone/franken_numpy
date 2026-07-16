@@ -1123,12 +1123,23 @@ impl Nditer {
 
         let iterindex = self.chunk_start(chunk_index);
         let chunk_len = Self::chunk_len_for_plan(&self.plan);
+        let multi_index = self.plan.linear_index_to_multi_index(iterindex)?;
+        // A single-element F-order step's operand position is fully determined
+        // by the step's own multi-index, so fold it directly instead of letting
+        // the chunk fallback re-decode the same iterindex (a second per-element
+        // Vec allocation and divmod loop). The C-order range short-circuit,
+        // external-loop chunks (aligned fast path and general fallback),
+        // seek/boundary validation, and error surfaces are unchanged.
+        let linear_indices = if chunk_len == 1 && self.plan.order() == NditerOrder::F {
+            vec![self.plan.operand_linear_index(&multi_index)?]
+        } else {
+            self.plan
+                .operand_linear_indices_for_chunk(iterindex, chunk_len)?
+        };
         Ok(NditerStep {
             iterindex,
-            multi_index: self.plan.linear_index_to_multi_index(iterindex)?,
-            linear_indices: self
-                .plan
-                .operand_linear_indices_for_chunk(iterindex, chunk_len)?,
+            multi_index,
+            linear_indices,
         })
     }
 }
@@ -2252,6 +2263,110 @@ mod tests {
             };
             assert!(record.is_replay_complete());
             assert_eq!(record.reason_code, *reason_code);
+        }
+    }
+
+    #[test]
+    fn nditer_f_order_element_steps_match_manual_reconstruction() {
+        // The single-decode non-external F-order step must emit exactly the
+        // stream the double-decode construction produced: multi-index from the
+        // plan decode, operand index from re-decoding and folding the same
+        // iterindex. Covers scalar, size-1 axes, 1-D..4-D, and C-order plus an
+        // external-loop plan as unchanged controls.
+        let shapes: &[Vec<usize>] = &[
+            vec![],
+            vec![1],
+            vec![5],
+            vec![3, 4],
+            vec![2, 3, 4],
+            vec![3, 1, 4, 2],
+        ];
+        for shape in shapes {
+            let plan = NditerPlan::new(
+                shape.clone(),
+                8,
+                NditerOptions {
+                    order: NditerOrder::F,
+                    external_loop: false,
+                },
+            )
+            .expect("F-order element plan");
+            let manual: Vec<NditerStep> = (0..plan.element_count())
+                .map(|iterindex| {
+                    let multi_index = plan
+                        .linear_index_to_multi_index(iterindex)
+                        .expect("manual multi-index");
+                    let second_decode = plan
+                        .linear_index_to_multi_index(iterindex)
+                        .expect("manual second decode");
+                    let linear = second_decode
+                        .iter()
+                        .enumerate()
+                        .try_fold(0usize, |acc, (axis, &coordinate)| {
+                            acc.checked_mul(plan.shape()[axis])
+                                .and_then(|value| value.checked_add(coordinate))
+                        })
+                        .expect("manual operand index");
+                    NditerStep {
+                        iterindex,
+                        multi_index,
+                        linear_indices: vec![linear],
+                    }
+                })
+                .collect();
+            let public: Vec<NditerStep> = Nditer::from_plan(plan).collect();
+            assert_eq!(public, manual, "F-order step stream for {shape:?}");
+        }
+
+        // C-order control: the range short-circuit is untouched.
+        let c_plan = NditerPlan::new(
+            vec![2, 3, 4],
+            8,
+            NditerOptions {
+                order: NditerOrder::C,
+                external_loop: false,
+            },
+        )
+        .expect("C-order control plan");
+        for (iterindex, step) in Nditer::from_plan(c_plan).enumerate() {
+            assert_eq!(step.iterindex, iterindex);
+            assert_eq!(step.linear_indices, vec![iterindex]);
+        }
+
+        // External-loop control: chunked emission is untouched by the
+        // single-element branch.
+        let ext_plan = NditerPlan::new(
+            vec![4, 3],
+            8,
+            NditerOptions {
+                order: NditerOrder::F,
+                external_loop: true,
+            },
+        )
+        .expect("external control plan");
+        let ext_steps: Vec<NditerStep> = Nditer::from_plan(ext_plan.clone()).collect();
+        let manual_ext: Vec<Vec<usize>> = (0..ext_steps.len())
+            .map(|chunk| {
+                let start = chunk * ext_plan.inner_loop_len();
+                (start..start + ext_plan.inner_loop_len())
+                    .map(|iterindex| {
+                        let multi = ext_plan
+                            .linear_index_to_multi_index(iterindex)
+                            .expect("external multi");
+                        multi
+                            .iter()
+                            .enumerate()
+                            .try_fold(0usize, |acc, (axis, &coordinate)| {
+                                acc.checked_mul(ext_plan.shape()[axis])
+                                    .and_then(|value| value.checked_add(coordinate))
+                            })
+                            .expect("external operand index")
+                    })
+                    .collect()
+            })
+            .collect();
+        for (step, want) in ext_steps.iter().zip(manual_ext.iter()) {
+            assert_eq!(&step.linear_indices, want, "external chunk stream");
         }
     }
 
