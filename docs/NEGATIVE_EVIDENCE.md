@@ -4,6 +4,53 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): `complex_pow` borrow-or-widen - 1.40x/1.21x; the complex storage surface is closed INCLUDING pow, and its length quirk is now a filed parity bead
+
+`BlackThrush`, bead `franken_numpy-ixs5y.361`, the declared contract-read
+leftover. Robot triage again left the P1 umbrella after its parked f16 and
+policy-gated C-BLAS leaves.
+
+CONTRACT READ FIRST (as the .360 entry demanded): `complex_pow` silently
+truncates to `min(bases.len(), exps.len())` on length mismatch - unlike
+every other binary complex op (UnsupportedCast) and unlike numpy (which
+never silently truncates). No in-tree caller can currently hit the mismatch,
+so the quirk is latent; it is now FILED as parity bead `deadlock-audit-ljt7c`
+for the oracle process rather than changed inside a perf tick. The perf
+lever deliberately preserves the truncation verbatim: `.zip()` truncates to
+the shorter operand, which IS the min-length contract.
+
+ONE LEVER: all four complex pair combinations borrow/widen instead of
+materializing both inputs, and the z^w kernel chain is extracted into ONE
+shared `complex_pow_kernel` fn used by every path including the real-dtype
+conversion fallback - the .341 single-source-of-truth move, so bit
+divergence between paths is impossible by construction. Focused test sweeps
+the four pair combinations over NaN payloads, signed zeros, infinities, and
+subnormals, and pins the min-length truncation for complex pairs AND the
+fallback (143 + 112 crate tests green). The bench asserts the faithful
+convert-both replica bit-for-bit before timing.
+
+A/Bs on honored-pin `vmi1293453` (20 samples, 2 s windows; job
+`j-29933730227290799` plus a c64-row re-run after its first candidate
+interval came back noisy-overlapping - protocol: overlap = re-run, and the
+re-run went disjoint):
+
+| row | former convert-both | direct borrow/widen | midpoint |
+|---|---:|---:|---:|
+| c128^c128 | 6.0147 ms `[5.7339, 6.3146]` | **4.3007 ms** `[4.1310, 4.5364]` | **1.399x, disjoint** |
+| c64^c64 (re-run) | 5.6131 ms `[5.4412, 5.8117]` | **4.6450 ms** `[4.3190, 5.0017]` | **1.208x, disjoint** |
+
+Both clear the predeclared floor, and both EXCEED the lane-rule estimate
+(~1.1-1.2x) - with two full input copies removed, the fault share outweighs
+even this family's heaviest kernel. Timed source SHA-256:
+`eb2f4f6d41592d4342dc45cb4e98823b1c16f12eef16e044c6279c054b38da5e`; bench
+SHA-256: `6159c664e017b92eede83c9abb2c0d6e0eac36e2e09e0fe61550cc2655f51757`.
+Verdict: **SHIP**. The complex storage surface is now closed WITHOUT
+REMAINDER: binary (same-dtype, c64, mixed), unary (exp/log/sqrt), and pow -
+fourteen leaves, every one profiled or precedent-priced, floor-gated, and
+bit-pinned. The frontier for the next session is unambiguous: fnp-python
+dispatch (re-read the local-.so/hz notes first) or the old conditional
+opens (axis-sort cores gate, i32 avx2 re-probe, flat-sum ISA grid).
+
 ## 2026-07-16 - WIN (SHIP): non-sidecar `resize` seeds and doubles instead of building discarded modulo indices - 2.79x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.359`. Robot triage again pointed at

@@ -772,6 +772,70 @@ fn bench_complex_unary_borrow(c: &mut Criterion) {
     group.finish();
 }
 
+/// Faithful replica of the CURRENT convert-both `complex_pow` path.
+fn former_complex_pow(lhs: &ArrayStorage, rhs: &ArrayStorage) -> ArrayStorage {
+    let bases = lhs.to_complex128_vec();
+    let exps = rhs.to_complex128_vec();
+    let n = bases.len().min(exps.len());
+    ArrayStorage::Complex128(
+        (0..n)
+            .map(|idx| {
+                let (zr, zi) = bases[idx];
+                let (wr, wi) = exps[idx];
+                let mag = (zr * zr + zi * zi).sqrt();
+                let ang = zi.atan2(zr);
+                let log_r = mag.ln();
+                let log_i = ang;
+                let prod_r = wr * log_r - wi * log_i;
+                let prod_i = wr * log_i + wi * log_r;
+                let ea = prod_r.exp();
+                (ea * prod_i.cos(), ea * prod_i.sin())
+            })
+            .collect(),
+    )
+}
+
+fn bench_complex_pow_borrow(c: &mut Criterion) {
+    let mut group = c.benchmark_group("complex_pow_borrow");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(2));
+
+    let c128 = ArrayStorage::Complex128(
+        (0..100_000)
+            .map(|index| {
+                let value = f64::from(index) * 0.000_05 - 2.5;
+                (1.5 + value * 0.1, value * 0.25)
+            })
+            .collect(),
+    );
+    let c64 = ArrayStorage::Complex64(
+        (0..100_000)
+            .map(|index| {
+                let value = index as f32 * 0.000_1 - 5.0;
+                (1.25 - value * 0.05, value * 0.5)
+            })
+            .collect(),
+    );
+    for (name, lhs, rhs) in [("c128_c128", &c128, &c128), ("c64_c64", &c64, &c64)] {
+        let former = former_complex_pow(lhs, rhs).to_complex128_vec();
+        let public = lhs.complex_pow(rhs).to_complex128_vec();
+        assert_eq!(public.len(), former.len());
+        for (actual, expected) in public.iter().zip(&former) {
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+        }
+        group.bench_function(format!("former_convert_{name}"), |b| {
+            b.iter(|| former_complex_pow(black_box(lhs), black_box(rhs)))
+        });
+        group.bench_function(format!("direct_borrow_{name}"), |b| {
+            b.iter(|| black_box(lhs).complex_pow(black_box(rhs)))
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_complex64_add_direct(c: &mut Criterion) {
     let mut group = c.benchmark_group("complex64_add_direct");
     group.sample_size(10);
@@ -1136,6 +1200,7 @@ criterion_group!(
     bench_complex_mixed_add_direct,
     bench_complex_mixed_ops_direct,
     bench_complex_unary_borrow,
+    bench_complex_pow_borrow,
     bench_complex128_add_direct,
     bench_complex128_sub_direct,
     bench_complex128_mul_direct,

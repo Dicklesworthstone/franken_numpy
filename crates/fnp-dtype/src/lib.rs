@@ -921,6 +921,20 @@ impl std::fmt::Display for StorageError {
     }
 }
 
+/// z^w = exp(w * log(z)) - the single kernel shared by every `complex_pow`
+/// path (borrowed, widened, and converted), preserving the exact former
+/// expression order.
+fn complex_pow_kernel((zr, zi): (f64, f64), (wr, wi): (f64, f64)) -> (f64, f64) {
+    let mag = (zr * zr + zi * zi).sqrt();
+    let ang = zi.atan2(zr);
+    let log_r = mag.ln();
+    let log_i = ang;
+    let prod_r = wr * log_r - wi * log_i;
+    let prod_i = wr * log_i + wi * log_r;
+    let ea = prod_r.exp();
+    (ea * prod_i.cos(), ea * prod_i.sin())
+}
+
 impl ArrayStorage {
     /// Number of elements in the storage.
     #[must_use]
@@ -2037,28 +2051,57 @@ impl ArrayStorage {
     /// Element-wise complex power: z^w = exp(w * log(z)).
     #[must_use]
     pub fn complex_pow(&self, exponent: &Self) -> Self {
-        let bases = self.to_complex128_vec();
-        let exps = exponent.to_complex128_vec();
-        let n = bases.len().min(exps.len());
-        Self::Complex128(
-            (0..n)
-                .map(|idx| {
-                    let (zr, zi) = bases[idx];
-                    let (wr, wi) = exps[idx];
-                    // z^w = exp(w * log(z))
-                    let mag = (zr * zr + zi * zi).sqrt();
-                    let ang = zi.atan2(zr);
-                    let log_r = mag.ln();
-                    let log_i = ang;
-                    // w * log(z)
-                    let prod_r = wr * log_r - wi * log_i;
-                    let prod_i = wr * log_i + wi * log_r;
-                    // exp(prod)
-                    let ea = prod_r.exp();
-                    (ea * prod_i.cos(), ea * prod_i.sin())
-                })
-                .collect(),
-        )
+        // Complex pairs avoid input materialization: Complex128 borrows,
+        // Complex64 widens inline (the .360 family). `.zip()` truncates to
+        // the shorter operand, preserving the existing min-length semantics
+        // verbatim (deadlock-audit-ljt7c tracks whether that contract should
+        // instead error like the other binary complex ops). All paths share
+        // one kernel fn, so bit divergence between them is impossible.
+        match (self, exponent) {
+            (Self::Complex128(a), Self::Complex128(b)) => Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&z, &w)| complex_pow_kernel(z, w))
+                    .collect(),
+            ),
+            (Self::Complex64(a), Self::Complex64(b)) => Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(zr, zi), &(wr, wi))| {
+                        complex_pow_kernel(
+                            (f64::from(zr), f64::from(zi)),
+                            (f64::from(wr), f64::from(wi)),
+                        )
+                    })
+                    .collect(),
+            ),
+            (Self::Complex64(a), Self::Complex128(b)) => Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(zr, zi), &w)| {
+                        complex_pow_kernel((f64::from(zr), f64::from(zi)), w)
+                    })
+                    .collect(),
+            ),
+            (Self::Complex128(a), Self::Complex64(b)) => Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&z, &(wr, wi))| {
+                        complex_pow_kernel(z, (f64::from(wr), f64::from(wi)))
+                    })
+                    .collect(),
+            ),
+            _ => {
+                let bases = self.to_complex128_vec();
+                let exps = exponent.to_complex128_vec();
+                let n = bases.len().min(exps.len());
+                Self::Complex128(
+                    (0..n)
+                        .map(|idx| complex_pow_kernel(bases[idx], exps[idx]))
+                        .collect(),
+                )
+            }
+        }
     }
 
     /// Element-wise complex sin: sin(a+bi) = sin(a)*cosh(b) + i*cos(a)*sinh(b).
@@ -3315,6 +3358,47 @@ mod tests {
                 to: DType::Complex64,
             })
         ));
+    }
+
+    #[test]
+    fn storage_complex_pow_pairs_match_converted_path_bits() {
+        // All four complex pair combinations must be bit-for-bit the former
+        // convert-both path, and the min-length truncation semantics must be
+        // preserved exactly (zip == min) for complex pairs and the fallback.
+        let c128 = ArrayStorage::Complex128(vec![
+            (0.0, -0.0),
+            (f64::NEG_INFINITY, 4.5e-300),
+            (f64::from_bits(0x7ff8_0000_0000_0042), 1.5),
+            (-2.5, 3.25),
+        ]);
+        let c64 = ArrayStorage::from_complex64_vec(vec![
+            (-0.0, f32::from_bits(0x7fc0_0123)),
+            (f32::INFINITY, f32::MIN_POSITIVE),
+            (1.5, -0.0),
+            (-2.5, 3.25),
+        ]);
+        for (lhs, rhs) in [(&c128, &c128), (&c64, &c64), (&c64, &c128), (&c128, &c64)] {
+            let bases = lhs.to_complex128_vec();
+            let exps = rhs.to_complex128_vec();
+            let n = bases.len().min(exps.len());
+            let former: Vec<_> = (0..n)
+                .map(|idx| crate::complex_pow_kernel(bases[idx], exps[idx]))
+                .collect();
+            let direct = lhs.complex_pow(rhs).to_complex128_vec();
+            assert_eq!(direct.len(), former.len());
+            for (actual, expected) in direct.iter().zip(&former) {
+                assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+                assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+            }
+        }
+
+        // Min-length truncation preserved for complex pairs and the fallback.
+        let short = ArrayStorage::Complex128(vec![(2.0, 0.0)]);
+        let long = ArrayStorage::Complex128(vec![(3.0, 0.0), (4.0, 0.0)]);
+        assert_eq!(short.complex_pow(&long).len(), 1);
+        assert_eq!(long.complex_pow(&short).len(), 1);
+        let real = ArrayStorage::F64(vec![2.0, 3.0, 4.0]);
+        assert_eq!(real.complex_pow(&short).len(), 1);
     }
 
     #[test]
