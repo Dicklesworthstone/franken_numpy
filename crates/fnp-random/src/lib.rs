@@ -2814,6 +2814,42 @@ fn exponential_from_core<R: ZigguratRngCore>(rng: &mut R, scale: f64, size: usiz
         .collect()
 }
 
+/// Parameter-only terms of gamma sampling, computed once per batch. Every
+/// field holds the exact expression the sampling loops formerly evaluated in
+/// place, and none of them consumes an RNG draw, so hoisting them preserves
+/// the output stream bit-for-bit. Mirrors the Poisson parameter cache
+/// (franken_numpy-ixs5y.312).
+#[derive(Clone, Copy)]
+enum GammaShapeCache {
+    /// `shape == 1.0`, `shape == 0.0`, and non-finite shapes: the early
+    /// returns never read cached terms, so nothing is computed (matching the
+    /// former per-call cost exactly).
+    Degenerate,
+    /// `shape < 1.0` (uniform + exponential rejection).
+    Small { one_minus_shape: f64, inv_shape: f64 },
+    /// Finite `shape > 1.0` (Marsaglia-Tsang).
+    MarsagliaTsang { d: f64, c: f64 },
+}
+
+impl GammaShapeCache {
+    fn new(shape_param: f64) -> Self {
+        if shape_param == 1.0 || shape_param == 0.0 || !shape_param.is_finite() {
+            Self::Degenerate
+        } else if shape_param < 1.0 {
+            Self::Small {
+                one_minus_shape: 1.0 - shape_param,
+                inv_shape: 1.0 / shape_param,
+            }
+        } else {
+            let d = shape_param - 1.0 / 3.0;
+            Self::MarsagliaTsang {
+                d,
+                c: 1.0 / (9.0 * d).sqrt(),
+            }
+        }
+    }
+}
+
 #[inline(always)]
 fn sample_ziggurat_normal_core<R: ZigguratRngCore + ?Sized>(rng: &mut R) -> f64 {
     use crate::ziggurat::{
@@ -4904,7 +4940,11 @@ impl Generator {
         if shape_param == 0.0 {
             return Ok(vec![0.0; size]);
         }
-        Ok((0..size).map(|_| self.sample_gamma(shape_param)).collect())
+        // Parameter-only terms once per batch (bit-identical hoist, .312 sibling).
+        let cache = GammaShapeCache::new(shape_param);
+        Ok((0..size)
+            .map(|_| self.sample_gamma_cached(shape_param, cache))
+            .collect())
     }
 
     /// Generate random bytes.
@@ -5601,12 +5641,18 @@ impl Generator {
             }
             return Ok(vec![0.0; size]);
         }
+        // Parameter-only terms once per batch (bit-identical hoist, .312 sibling).
+        let cache = GammaShapeCache::new(shape_param);
         Ok((0..size)
-            .map(|_| self.sample_gamma(shape_param) * scale)
+            .map(|_| self.sample_gamma_cached(shape_param, cache) * scale)
             .collect())
     }
 
     fn sample_gamma(&mut self, shape_param: f64) -> f64 {
+        self.sample_gamma_cached(shape_param, GammaShapeCache::new(shape_param))
+    }
+
+    fn sample_gamma_cached(&mut self, shape_param: f64, cache: GammaShapeCache) -> f64 {
         if shape_param == 1.0 {
             // Special case: gamma(1) = exponential(1)
             return self.sample_ziggurat_exponential();
@@ -5621,18 +5667,27 @@ impl Generator {
         }
         if shape_param < 1.0 {
             // NumPy's exact algorithm for shape < 1 from distributions.c:
-            // Uses uniform + exponential rejection.
+            // Uses uniform + exponential rejection. The parameter-only terms
+            // come from the batch cache; the defensive arm re-evaluates the
+            // exact same expressions, so both sources are bit-identical.
+            let (one_minus_shape, inv_shape) = match cache {
+                GammaShapeCache::Small {
+                    one_minus_shape,
+                    inv_shape,
+                } => (one_minus_shape, inv_shape),
+                _ => (1.0 - shape_param, 1.0 / shape_param),
+            };
             loop {
                 let u = self.next_f64();
                 let v = self.sample_ziggurat_exponential();
-                if u <= 1.0 - shape_param {
-                    let x = u.powf(1.0 / shape_param);
+                if u <= one_minus_shape {
+                    let x = u.powf(inv_shape);
                     if x <= v {
                         return x;
                     }
                 } else {
                     let y = -((1.0 - u) / shape_param).ln();
-                    let x = (1.0 - shape_param + shape_param * y).powf(1.0 / shape_param);
+                    let x = (one_minus_shape + shape_param * y).powf(inv_shape);
                     if x <= v + y {
                         return x;
                     }
@@ -5640,8 +5695,13 @@ impl Generator {
             }
         }
         // Marsaglia and Tsang's method for shape >= 1
-        let d = shape_param - 1.0 / 3.0;
-        let c = 1.0 / (9.0 * d).sqrt();
+        let (d, c) = match cache {
+            GammaShapeCache::MarsagliaTsang { d, c } => (d, c),
+            _ => {
+                let d = shape_param - 1.0 / 3.0;
+                (d, 1.0 / (9.0 * d).sqrt())
+            }
+        };
         loop {
             let x = self.sample_standard_normal_single();
             let v = (1.0 + c * x).powi(3);
@@ -15750,6 +15810,45 @@ for child in rng.spawn(n_children):
         ];
         let after = g.random(5);
         assert_f64_seq("geometric_p_one_after", &after, &expected_after);
+    }
+
+    #[test]
+    fn gamma_batch_matches_singleton_stream() {
+        // The per-batch GammaShapeCache must not change what a batched draw
+        // produces relative to repeated single draws with the same seed, and
+        // both must leave the raw stream in the same place. Covers the
+        // small-shape rejection, Marsaglia-Tsang, and every degenerate early
+        // return, for standard_gamma and scaled gamma.
+        let shapes = [0.25f64, 0.5, 1.0, 2.5, 5.0, 20.0, 0.0, f64::INFINITY];
+        let mut batch = oracle_gen();
+        let mut single = oracle_gen();
+        for &shape in &shapes {
+            let batched = batch.standard_gamma(shape, 32).unwrap();
+            let singles: Vec<f64> = (0..32)
+                .map(|_| single.standard_gamma(shape, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "standard_gamma batch/singleton divergence at shape {shape}"
+            );
+        }
+        assert_eq!(batch.next_u64(), single.next_u64());
+
+        let mut batch = oracle_gen();
+        let mut single = oracle_gen();
+        for &shape in &shapes {
+            let batched = batch.gamma(shape, 2.5, 32).unwrap();
+            let singles: Vec<f64> = (0..32)
+                .map(|_| single.gamma(shape, 2.5, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "gamma batch/singleton divergence at shape {shape}"
+            );
+        }
+        assert_eq!(batch.next_u64(), single.next_u64());
     }
 
     #[test]

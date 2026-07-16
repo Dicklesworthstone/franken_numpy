@@ -4,6 +4,74 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): gamma sampling hoists shape-only terms per batch - 1.17x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.334`. Robot triage again left the P1
+pure-safe-Rust umbrella after its parked f16 and policy-gated C-BLAS leaves.
+The fnp-iter per-element path is at its contract-bound floor (the `.333` entry
+records the remaining budget as iterator machinery plus `NditerStep`-mandated
+allocations), so this turn pivoted to the `fnp-random` distribution lane the
+Poisson parameter cache (`.312`, 1.16x) opened. That entry barred only Poisson
+retries; ledger screening found no gamma parameter-cache attempt.
+
+Source attribution: batched `Generator::gamma`/`standard_gamma` call
+`sample_gamma` per sample, which recomputed parameter-only terms every draw -
+the Marsaglia-Tsang `d = shape - 1/3` and `c = 1/sqrt(9d)` per sample for
+finite `shape > 1`, and `1 - shape` / `1/shape` per rejection ITERATION inside
+the small-shape loop. NumPy's own `random_standard_gamma` recomputes these per
+call too, so the hoist beats the upstream loop structure while leaving the
+draw sequence untouched (the terms consume no RNG words). A pre-edit
+`perf record -F 199 -e cycles:u` profile (1K samples, zero lost, effective
+worker `vmi1293453`, `standard_gamma(5.0, 100_000)`) put `sample_gamma` at
+**58.34%** of cycles with the term recomputation inlined, over ziggurat normal
+14.52% and raw RNG ~13%.
+
+ONE LEVER: a three-variant `GammaShapeCache` (Degenerate / Small /
+MarsagliaTsang) built once per batch in `gamma()` and `standard_gamma()`;
+`sample_gamma_cached` reads the exact former expressions from the cache, with
+defensive arms that re-evaluate the identical expressions on variant mismatch.
+`sample_gamma` now builds the cache per call, so every other consumer
+(beta, dirichlet, chisquare, standard_t, f, negative_binomial, noncentral
+family) keeps its former per-call cost and stream; the Degenerate variant
+computes nothing for the `shape == 1/0/non-finite` early returns, matching the
+former cost there exactly. The small-shape substitutions preserve the
+evaluation trees: `u <= one_minus_shape`, `one_minus_shape + shape * y`
+(left-associated exactly as before), `powf(inv_shape)`; the `(1-u)/shape`
+division deliberately stays a division.
+
+PROOF: new `gamma_batch_matches_singleton_stream` pins batch-vs-singleton
+bit equality plus final raw-stream position across shapes
+{0.25, 0.5, 1.0, 2.5, 5.0, 20.0, 0.0, inf} for both entry points; the full
+crate suite passed 434 + 12 + 16 with the live NumPy oracle tests
+(`gamma/standard_gamma_matches_live_numpy_oracle`, legacy RandomState oracles,
+zero-size stream preservation) all green. Clippy: the only warning is the
+pre-existing intentional `vec!` in the permuted bench's former-allocation
+replica, untouched. The bench setup asserts the batch/singleton equivalence
+before timing.
+
+One foreground same-binary A/B (ordinary `--profile release`, LTO disabled,
+10 samples, 250 ms warm-up, 750 ms target, effective worker `vmi1293453`, job
+`j-29933307944763895`), former arm per the `.333` bench-arm rule (public path
+PLUS exactly the removed per-sample `d`/`c` work - operation-exact here since
+the terms are RNG-independent):
+
+| arm | Criterion estimate |
+|---|---:|
+| former-model (public + per-sample d/c) | 1.9217 ms `[1.8672, 2.0335]` |
+| candidate per-batch cache | **1.6466 ms** `[1.5798, 1.6937]` |
+
+Midpoint **1.167x / 14.3% less time**, intervals disjoint. The small-shape
+per-iteration hoist rides the same cache with stream equality proven but its
+regime unmeasured (its loop is powf-dominated; expect less than the MT row).
+Timed source SHA-256:
+`d2583004f6e9fcc9cd74ecb810a8ece9012d6428e8b5321a30a949ef22ab45d8`; bench
+SHA-256: `884c96518b533f7733c781f105cccd7715d13c8426d9b9e2d8de9af9142fe281`.
+Verdict: **SHIP**. Do not retry gamma parameter-term caching. OPEN SIBLINGS
+(unclaimed, same design): thread the batch cache through the FIXED-shape
+internal loops of chisquare/standard_t/f/negative_binomial (each calls
+`sample_gamma` per sample with a parameter-only shape); vonmises kappa terms;
+the legacy `RandomState` gamma path if its sampler shares the structure.
+
 ## 2026-07-16 - WIN (SHIP): non-external F-order nditer steps fold their own multi-index - 1.15x (conservative floor)
 
 `BlackThrush`, bead `franken_numpy-ixs5y.333`. Robot triage again left the P1

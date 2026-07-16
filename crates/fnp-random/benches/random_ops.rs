@@ -127,6 +127,69 @@ fn bench_poisson_ptrs_cache(c: &mut Criterion) {
     group.finish();
 }
 
+/// The public batched gamma path PLUS exactly the parameter-only work the
+/// per-batch cache removes: one Marsaglia-Tsang `d`/`c` recomputation per
+/// sample. The removed terms consume no RNG draws, so this additive model is
+/// operation-exact (same machinery in both arms — see the `.333` bench-arm
+/// rule: bare-loop former arms understate batch levers).
+fn former_model_standard_gamma(generator: &mut Generator, shape: f64, size: usize) -> Vec<f64> {
+    let out = generator.standard_gamma(shape, size).unwrap();
+    for _ in 0..size {
+        let s = black_box(shape);
+        let d = s - 1.0 / 3.0;
+        let c = 1.0 / (9.0 * d).sqrt();
+        black_box((d, c));
+    }
+    out
+}
+
+fn bench_gamma_shape_cache(c: &mut Criterion) {
+    const SIZE: usize = 100_000;
+    const SHAPE: f64 = 5.0;
+
+    // Batch-vs-singleton stream equivalence: the cache must not change what a
+    // batched draw produces relative to repeated single draws, and both must
+    // leave the raw stream in the same place.
+    let mut batch_proof = pcg64_generator();
+    let mut single_proof = pcg64_generator();
+    for &shape in &[0.5f64, 1.0, 5.0, 20.0] {
+        let batch = batch_proof.standard_gamma(shape, 64).unwrap();
+        let singles: Vec<f64> = (0..64)
+            .map(|_| single_proof.standard_gamma(shape, 1).unwrap()[0])
+            .collect();
+        assert_eq!(
+            batch.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "gamma batch/singleton divergence at shape {shape}"
+        );
+    }
+    assert_eq!(batch_proof.next_u64(), single_proof.next_u64());
+
+    let mut former_generator = pcg64_generator();
+    let mut candidate_generator = pcg64_generator();
+    let mut group = c.benchmark_group("gamma_shape_parameter_cache");
+    group.throughput(Throughput::Elements(SIZE as u64));
+    group.bench_function("former_model_recompute_terms", |bench| {
+        bench.iter(|| {
+            black_box(former_model_standard_gamma(
+                black_box(&mut former_generator),
+                black_box(SHAPE),
+                black_box(SIZE),
+            ))
+        })
+    });
+    group.bench_function("candidate_batch_cache", |bench| {
+        bench.iter(|| {
+            black_box(
+                candidate_generator
+                    .standard_gamma(black_box(SHAPE), black_box(SIZE))
+                    .unwrap(),
+            )
+        })
+    });
+    group.finish();
+}
+
 #[inline(never)]
 fn former_choice_weighted_replace_one(
     generator: &mut Generator,
@@ -844,6 +907,7 @@ fn bench_pcg_fill_u64_large(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_poisson_ptrs_cache,
+    bench_gamma_shape_cache,
     bench_choice_weighted_singleton,
     bench_permuted_last_axis_allocations,
     bench_permuted_strided_axis_allocations,
