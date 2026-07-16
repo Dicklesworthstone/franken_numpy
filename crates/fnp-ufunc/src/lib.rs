@@ -10100,6 +10100,13 @@ impl UFuncArray {
             None => (0..ndim).rev().collect(),
         };
 
+        // Validation above must run before this shortcut so malformed axis lists
+        // retain their existing errors. An identity permutation is already in
+        // output order, but the API still returns an independently owned array.
+        if perm.iter().copied().eq(0..ndim) {
+            return Ok(self.clone());
+        }
+
         let new_shape: Vec<usize> = perm.iter().map(|&a| self.shape[a]).collect();
         let total = self.values.len();
 
@@ -10110,8 +10117,8 @@ impl UFuncArray {
         // strided through cache). Each `r×c` plane becomes `c×r`; a stack of planes
         // parallelizes across planes, a lone matrix parallelizes across row bands.
         // Pure relocation, so bit-for-bit identical — values and the i64/u64 sidecar
-        // are moved by the same kernel. Identity and other permutations fall through
-        // to the generic copy path.
+        // are moved by the same kernel. Other permutations fall through to the
+        // generic copy path.
         let is_last2_swap = ndim >= 2
             && perm[ndim - 2] == ndim - 1
             && perm[ndim - 1] == ndim - 2
@@ -49172,11 +49179,99 @@ print(json.dumps(payload))
 
     #[test]
     fn transpose_identity() {
-        let arr = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
-            .expect("arr");
+        let expected_bits = [
+            (-0.0_f64).to_bits(),
+            0.0_f64.to_bits(),
+            1,
+            f64::INFINITY.to_bits(),
+            f64::NEG_INFINITY.to_bits(),
+            0x7ff8_0000_0000_0042,
+        ];
+        let arr = UFuncArray::new(
+            vec![2, 3],
+            expected_bits.map(f64::from_bits).to_vec(),
+            DType::F64,
+        )
+        .expect("arr");
         let out = arr.transpose(Some(&[0, 1])).expect("identity transpose");
         assert_eq!(out.shape(), &[2, 3]);
-        assert_eq!(out.values(), arr.values());
+        assert_eq!(out.dtype(), DType::F64);
+        assert_eq!(
+            out.values()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected_bits
+        );
+        assert_ne!(out.values().as_ptr(), arr.values().as_ptr());
+
+        assert!(matches!(
+            arr.transpose(Some(&[0])),
+            Err(UFuncError::AxisOutOfBounds { axis: 1, ndim: 2 })
+        ));
+        assert!(matches!(
+            arr.transpose(Some(&[0, 2])),
+            Err(UFuncError::AxisOutOfBounds { axis: 2, ndim: 2 })
+        ));
+        assert!(matches!(
+            arr.transpose(Some(&[0, 0])),
+            Err(UFuncError::AxisOutOfBounds { axis: -1, ndim: 2 })
+        ));
+
+        let scalar = UFuncArray::new(vec![], vec![f64::from_bits(expected_bits[5])], DType::F64)
+            .expect("scalar");
+        assert_eq!(
+            scalar.transpose(None).expect("scalar transpose").values()[0].to_bits(),
+            expected_bits[5]
+        );
+        let empty = UFuncArray::new(vec![0, 3], vec![], DType::F64).expect("empty array");
+        assert_eq!(
+            empty
+                .transpose(Some(&[0, 1]))
+                .expect("empty identity transpose")
+                .shape(),
+            &[0, 3]
+        );
+    }
+
+    #[test]
+    fn transpose_identity_preserves_exact_integer_sidecars() {
+        let signed_values = vec![i64::MIN, -((1_i64 << 53) + 7), 0, (1_i64 << 53) + 9];
+        let signed = UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(signed_values.clone()))
+            .expect("signed array");
+        let signed_out = signed
+            .transpose(Some(&[0, 1]))
+            .expect("signed identity transpose");
+        assert_eq!(
+            signed_out.to_storage().expect("signed storage"),
+            ArrayStorage::I64(signed_values)
+        );
+        match (signed.integer_sidecar(), signed_out.integer_sidecar()) {
+            (Some(IntegerSidecar::I64(input)), Some(IntegerSidecar::I64(output))) => {
+                assert_eq!(output, input);
+                assert_ne!(output.as_ptr(), input.as_ptr());
+            }
+            _ => panic!("identity transpose must preserve the i64 sidecar"),
+        }
+
+        let unsigned_values = vec![0, 1_u64 << 63, (1_u64 << 53) + 11, u64::MAX];
+        let unsigned =
+            UFuncArray::from_storage(vec![2, 2], ArrayStorage::U64(unsigned_values.clone()))
+                .expect("unsigned array");
+        let unsigned_out = unsigned
+            .transpose(Some(&[0, 1]))
+            .expect("unsigned identity transpose");
+        assert_eq!(
+            unsigned_out.to_storage().expect("unsigned storage"),
+            ArrayStorage::U64(unsigned_values)
+        );
+        match (unsigned.integer_sidecar(), unsigned_out.integer_sidecar()) {
+            (Some(IntegerSidecar::U64(input)), Some(IntegerSidecar::U64(output))) => {
+                assert_eq!(output, input);
+                assert_ne!(output.as_ptr(), input.as_ptr());
+            }
+            _ => panic!("identity transpose must preserve the u64 sidecar"),
+        }
     }
 
     #[test]

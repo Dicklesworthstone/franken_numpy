@@ -6,10 +6,14 @@
 //! every output index into a multi-index with `ndim` integer divisions and then
 //! gathers strided from the source. Both produce bit-identical output.
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fnp_dtype::DType;
 use fnp_ufunc::UFuncArray;
 use std::hint::black_box;
+
+fn focused_identity_only() -> bool {
+    std::env::args().any(|arg| arg.starts_with("transpose_identity"))
+}
 
 /// Previous kernel: per-element index decomposition + strided gather (2-D).
 fn old_transpose(values: &[f64], r: usize, c: usize) -> Vec<f64> {
@@ -33,6 +37,9 @@ fn old_transpose(values: &[f64], r: usize, c: usize) -> Vec<f64> {
 }
 
 fn bench_transpose(c: &mut Criterion) {
+    if focused_identity_only() {
+        return;
+    }
     for &(r, cc) in &[(4096usize, 4096usize), (2048, 2048), (1024, 4096)] {
         let n = r * cc;
         let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 - 1.0).collect();
@@ -81,6 +88,9 @@ fn old_batched_t(values: &[f64], dims: &[usize]) -> Vec<f64> {
 }
 
 fn bench_transpose_batched(c: &mut Criterion) {
+    if focused_identity_only() {
+        return;
+    }
     // Batched matrix transpose (swapaxes(-1,-2) on a stack): the dominant N-D case.
     for dims in [
         vec![64usize, 512, 512],
@@ -137,7 +147,115 @@ fn old_general(values: &[f64], dims: &[usize], perm: &[usize]) -> Vec<f64> {
     out
 }
 
+fn former_identity_transpose(values: &[f64], dims: &[usize]) -> (Vec<usize>, Vec<f64>) {
+    let ndim = dims.len();
+    let perm: Vec<usize> = (0..ndim).collect();
+    let mut seen = vec![false; ndim];
+    for &axis in &perm {
+        seen[axis] = true;
+    }
+    assert!(seen.into_iter().all(|present| present));
+
+    let new_shape: Vec<usize> = perm.iter().map(|&axis| dims[axis]).collect();
+    let old_strides = c_strides(dims);
+    let new_strides = c_strides(&new_shape);
+    let src_step: Vec<usize> = (0..ndim).map(|axis| old_strides[perm[axis]]).collect();
+    let mut new_values = vec![0.0; values.len()];
+    const TRANSPOSE_CHUNK: usize = 1 << 14;
+
+    for (chunk_index, chunk) in new_values.chunks_mut(TRANSPOSE_CHUNK).enumerate() {
+        let first_output = chunk_index * TRANSPOSE_CHUNK;
+        let mut coordinates = vec![0usize; ndim];
+        let mut remainder = first_output;
+        for axis in 0..ndim {
+            coordinates[axis] = remainder / new_strides[axis];
+            remainder %= new_strides[axis];
+        }
+        let mut source_offset: usize = (0..ndim)
+            .map(|axis| coordinates[axis] * src_step[axis])
+            .sum();
+        for slot in chunk {
+            *slot = values[source_offset];
+            let mut axis = ndim;
+            while axis > 0 {
+                axis -= 1;
+                coordinates[axis] += 1;
+                source_offset += src_step[axis];
+                if coordinates[axis] < new_shape[axis] {
+                    break;
+                }
+                coordinates[axis] = 0;
+                source_offset -= new_shape[axis] * src_step[axis];
+            }
+        }
+    }
+
+    (new_shape, new_values)
+}
+
+fn c_strides(shape: &[usize]) -> Vec<usize> {
+    let mut strides = vec![1usize; shape.len()];
+    let mut stride = 1usize;
+    for axis in (0..shape.len()).rev() {
+        strides[axis] = stride;
+        stride *= shape[axis];
+    }
+    strides
+}
+
+fn bench_transpose_identity(c: &mut Criterion) {
+    let dims = vec![64usize, 32, 8];
+    let identity: Vec<usize> = (0..dims.len()).collect();
+    let count: usize = dims.iter().product();
+    assert_eq!(count, 1 << 14);
+    let data: Vec<f64> = (0..count)
+        .map(|index| f64::from_bits(0x3ff0_0000_0000_0000 ^ index as u64))
+        .collect();
+    let array = UFuncArray::new(dims.clone(), data.clone(), DType::F64)
+        .expect("identity-transpose benchmark input");
+    let (former_shape, former_values) = former_identity_transpose(&data, &dims);
+    let public = array
+        .transpose(Some(&identity))
+        .expect("public identity transpose");
+    assert_eq!(public.shape(), former_shape);
+    assert_eq!(
+        public
+            .values()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        former_values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+
+    let mut group = c.benchmark_group("transpose_identity");
+    group.throughput(Throughput::Elements(count as u64));
+    group.bench_function("former_generic_odometer", |bench| {
+        bench.iter(|| {
+            black_box(former_identity_transpose(
+                black_box(&data),
+                black_box(&dims),
+            ))
+        })
+    });
+    group.bench_function("public_identity_path", |bench| {
+        bench.iter(|| {
+            black_box(
+                array
+                    .transpose(black_box(Some(&identity)))
+                    .expect("public identity transpose"),
+            )
+        })
+    });
+    group.finish();
+}
+
 fn bench_transpose_general(c: &mut Criterion) {
+    if focused_identity_only() {
+        return;
+    }
     // Arbitrary permutations (rotations / non-adjacent moveaxis), the case the
     // last-two-swap fast path does NOT cover.
     let cases: &[(Vec<usize>, Vec<usize>)] = &[
@@ -171,6 +289,7 @@ fn bench_transpose_general(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_transpose_identity,
     bench_transpose,
     bench_transpose_batched,
     bench_transpose_general

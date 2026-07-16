@@ -4,6 +4,53 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): identity transpose clones after full axis validation - 11.58x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.329`. Robot triage again selected the
+P1 pure-safe-Rust performance umbrella after excluding its parked f16 leaf and
+policy-gated C-BLAS leaf. Negative-ledger screening found no prior identity
+transpose attempt, so this turn pivoted from the preceding `fnp-iter` work to
+the fresh `fnp-ufunc` transpose subsystem. An explicit identity permutation
+still allocated the output and ran every element through the generic odometer
+gather even though source and destination order were identical.
+
+A pre-edit remote `perf record` profile captured 1,054 cycle samples on
+effective worker `vmi1149989`. The generic
+`UFuncArray::transpose::{closure#4}` gather accounted for **95.49%** of cycles;
+the outer `transpose` method accounted for another 0.12%. ONE LEVER recognizes
+an identity permutation after the complete length, bounds, and permutation
+validation and returns `self.clone()`. The result remains independently owned,
+while malformed-axis errors and every non-identity permutation retain their
+former paths.
+
+Strict-remote non-LTO release proof passed two focused tests. They compare raw
+F64 bits for signed zero, a subnormal, infinities, and a fixed NaN payload;
+preserve exact I64 and U64 sidecars beyond `2^53`; verify independent backing
+allocations; cover scalar and empty identities; and pin the former wrong-length,
+out-of-range, and duplicate-axis errors. The benchmark's former arm is a copy of
+the current serial odometer kernel rather than the older division-heavy helper,
+and its setup asserts raw-bit equality against the public path.
+
+One foreground same-binary A/B used ordinary `--profile release` with LTO
+disabled, shape `[64, 32, 8]` (16,384 elements, below the parallel threshold),
+10 samples, a 250 ms warm-up, and a 750 ms measurement window on effective
+worker `vmi1293453`:
+
+- former generic odometer: `[18.637 us, 18.946 us, 19.405 us]`
+- validated identity clone: `[1.5987 us, 1.6366 us, 1.6660 us]`
+- midpoint delta: **11.58x faster / 91.36% less time**, with disjoint intervals
+
+RCH repeatedly discarded the ordinary release cache on `vmi1149989`; a switch
+request was routed to `vmi1152480`, whose warmed target was also evicted before
+measurement. That non-evidence build was interrupted. Diagnostics then honored
+`RCH_WORKER=vmi1293453`; an untimed warm-up and the capped measurement ran
+sequentially in one foreground remote job, taking 54.06 s and 0.08 s for the
+two build phases respectively before the benchmark returned. No timeout wrapper
+or local fallback was used, and no build event was classified as a reject.
+Verdict: **SHIP**. Do not re-probe validated explicit identity permutations;
+non-identity axis orders remain on the unchanged gather paths and must earn
+their own profile.
+
 ## 2026-07-15 - WIN (SHIP): F-order external chunks emit one strided operand run - 26.28x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.328`. Robot triage left the P1
