@@ -318,11 +318,9 @@ pub fn generate_sidecar_from_payload_with_config(
     };
 
     let source_symbol_count = payload.len().div_ceil(usize::from(symbol_size)).max(1);
-    let systematic = SystematicParams::try_for_source_block(
-        source_symbol_count,
-        usize::from(symbol_size),
-    )
-    .map_err(|err| format!("invalid RaptorQ source block: {err:?}"))?;
+    let systematic =
+        SystematicParams::try_for_source_block(source_symbol_count, usize::from(symbol_size))
+            .map_err(|err| format!("invalid RaptorQ source block: {err:?}"))?;
     let repair_count = systematic
         .l
         .saturating_sub(source_symbol_count)

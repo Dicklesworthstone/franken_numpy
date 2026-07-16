@@ -19737,9 +19737,7 @@ fn generate_rng_samples(
         "f_distribution" => {
             map_fallible_random_values(generator.f_distribution(case.param_a, case.param_b, draws))
         }
-        "standard_t" => {
-            map_fallible_random_values(generator.standard_t(case.param_a, draws))
-        }
+        "standard_t" => map_fallible_random_values(generator.standard_t(case.param_a, draws)),
         "noncentral_chisquare" => map_fallible_random_values(generator.noncentral_chisquare(
             case.param_a,
             case.param_b,
@@ -19772,9 +19770,7 @@ fn generate_rng_samples(
         "zipf" => generator
             .zipf(case.param_a, draws)
             .map_err(|e| RngSuiteError::new("parameter_violation", e.to_string())),
-        "wald" => {
-            map_fallible_random_values(generator.wald(case.param_a, case.param_b, draws))
-        }
+        "wald" => map_fallible_random_values(generator.wald(case.param_a, case.param_b, draws)),
         "logseries" => generator
             .logseries(case.param_a, draws)
             .map(|vals| vals.into_iter().map(|v| v as f64).collect())

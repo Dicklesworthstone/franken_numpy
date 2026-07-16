@@ -14622,34 +14622,37 @@ impl UFuncArray {
         if out_batch_count >= CROSS_PARALLEL_MIN_BATCHES && rayon::current_num_threads() >= 2 {
             if vector_output {
                 let mut values = vec![0.0; out_len];
-                values.par_chunks_mut(3).enumerate().for_each(|(flat, out)| {
-                    let (a_base, b_base) = cross_bases(
-                        flat,
-                        &out_batch,
-                        &out_strides,
-                        &a_steps,
-                        &b_steps,
-                        a_len,
-                        b_len,
-                    );
-                    let ax = self.values[a_base];
-                    let ay = self.values[a_base + 1];
-                    let az = if a_len == 3 {
-                        self.values[a_base + 2]
-                    } else {
-                        0.0
-                    };
-                    let bx = other.values[b_base];
-                    let by = other.values[b_base + 1];
-                    let bz = if b_len == 3 {
-                        other.values[b_base + 2]
-                    } else {
-                        0.0
-                    };
-                    out[0] = ay * bz - az * by;
-                    out[1] = az * bx - ax * bz;
-                    out[2] = ax * by - ay * bx;
-                });
+                values
+                    .par_chunks_mut(3)
+                    .enumerate()
+                    .for_each(|(flat, out)| {
+                        let (a_base, b_base) = cross_bases(
+                            flat,
+                            &out_batch,
+                            &out_strides,
+                            &a_steps,
+                            &b_steps,
+                            a_len,
+                            b_len,
+                        );
+                        let ax = self.values[a_base];
+                        let ay = self.values[a_base + 1];
+                        let az = if a_len == 3 {
+                            self.values[a_base + 2]
+                        } else {
+                            0.0
+                        };
+                        let bx = other.values[b_base];
+                        let by = other.values[b_base + 1];
+                        let bz = if b_len == 3 {
+                            other.values[b_base + 2]
+                        } else {
+                            0.0
+                        };
+                        out[0] = ay * bz - az * by;
+                        out[1] = az * bx - ax * bz;
+                        out[2] = ax * by - ay * bx;
+                    });
                 return Self::from_values_with_dtype(out_shape, values, dtype);
             }
 
@@ -21934,12 +21937,8 @@ impl UFuncArray {
             ));
         }
         let roots_values = &roots.values;
-        let eval_point =
-            |&x: &f64| roots_values.iter().fold(1.0, |acc, &r| acc * (x - r));
-        let result_vals: Vec<f64> = if self
-            .values
-            .len()
-            .saturating_mul(roots_values.len())
+        let eval_point = |&x: &f64| roots_values.iter().fold(1.0, |acc, &r| acc * (x - r));
+        let result_vals: Vec<f64> = if self.values.len().saturating_mul(roots_values.len())
             >= POLYVALFROMROOTS_PARALLEL_MIN_WORK
             && roots_values.len() >= 2
             && rayon::current_num_threads() >= 2
@@ -21996,7 +21995,10 @@ impl UFuncArray {
             && deg_x.saturating_mul(deg_y) >= 4
             && rayon::current_num_threads() >= 2
         {
-            (0..x.values.len()).into_par_iter().map(eval_point).collect()
+            (0..x.values.len())
+                .into_par_iter()
+                .map(eval_point)
+                .collect()
         } else {
             (0..x.values.len()).map(eval_point).collect()
         };
@@ -22054,7 +22056,10 @@ impl UFuncArray {
             && deg_x.saturating_mul(deg_y).saturating_mul(deg_z) >= 4
             && rayon::current_num_threads() >= 2
         {
-            (0..x.values.len()).into_par_iter().map(eval_point).collect()
+            (0..x.values.len())
+                .into_par_iter()
+                .map(eval_point)
+                .collect()
         } else {
             (0..x.values.len()).map(eval_point).collect()
         };
@@ -22572,8 +22577,9 @@ impl UFuncArray {
         // vectorized cos edges out our serial cos at cache-resident sizes (1.1x@100K) while we
         // already win at 4M; multi-threaded chunks win across the board. Bit-identical (same
         // per-point formula; collect from a parallel map preserves index order).
-        let point =
-            |i: usize| 0.54 - 0.46 * (2.0 * std::f64::consts::PI * i as f64 / (m as f64 - 1.0)).cos();
+        let point = |i: usize| {
+            0.54 - 0.46 * (2.0 * std::f64::consts::PI * i as f64 / (m as f64 - 1.0)).cos()
+        };
         // Serial cos-map is par-or-WIN vs numpy at ALL practical sizes (BlackThrush 2026-06-22:
         // 100K-4M = 0.80-1.06x, load-independent); the rayon path gave NO benefit and was a
         // swarm-contention LANDMINE (8-11x at 100K under load). Keep serial for practical M.
@@ -26934,8 +26940,12 @@ impl UFuncArray {
                 // (no nan_filtered() UFuncArray + no median(None) re-clone -> single alloc
                 // instead of two). Mirrors median(None): serial select_median for medium N,
                 // par_select_median >=1<<19. all-NaN -> NaN (matches median of an empty array).
-                let filtered: Vec<f64> =
-                    self.values.iter().copied().filter(|v| !v.is_nan()).collect();
+                let filtered: Vec<f64> = self
+                    .values
+                    .iter()
+                    .copied()
+                    .filter(|v| !v.is_nan())
+                    .collect();
                 if filtered.is_empty() {
                     return Ok(Self::scalar(f64::NAN, DType::F64));
                 }
@@ -43175,23 +43185,23 @@ mod tests {
         frompyfunc_python_import_with_interpreter, frompyfunc_python_with_interpreter, gcd_arrays,
         geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermeder, hermediv,
         hermefit, hermefromroots, hermeint, hermemul, hermeroots, hermesub, hermeval, hermfit,
-        hermfromroots, hermint,
-        hermmul, hermroots, hermsub, hermval, hypot, interpolate_percentile, is_busday, isnat,
-        isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv, lagfit, lagfromroots, lagint, lagmul,
-        lagroots, lagsub, lagval, lcm_arrays, ldexp, leg2poly, legadd, legder, legdiv, legfit,
-        legfromroots, legint, legmul, legroots, legsub, legval, logaddexp, logaddexp2, ma_is_mask,
-        ma_is_masked, ma_make_mask, ma_mask_or, ma_maximum_fill_value,
-        ma_maximum_fill_value_for_dtype, ma_minimum_fill_value, ma_minimum_fill_value_for_dtype,
-        matmul_accumulate_serial, mediate_ufunc_runtime_policy, modf, nextafter,
-        normalize_fixed_signature_keywords, normalize_signature_keywords, note_unary_float_errors,
-        pad_empty, pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
-        plan_binary_dispatch, plan_binary_dispatch_with_registry,
-        plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
-        reduce_frompyfunc_values, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
-        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_logn, scimath_power,
-        scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex, spacing,
-        take_float_error_events, transpose_tiled, unique_all, unique_counts, unique_inverse,
-        unique_values, validate_override_payload_class, where_nonzero,
+        hermfromroots, hermint, hermmul, hermroots, hermsub, hermval, hypot,
+        interpolate_percentile, is_busday, isnat, isneginf, isposinf, lag2poly, lagadd, lagder,
+        lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays, ldexp,
+        leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub,
+        legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or,
+        ma_maximum_fill_value, ma_maximum_fill_value_for_dtype, ma_minimum_fill_value,
+        ma_minimum_fill_value_for_dtype, matmul_accumulate_serial, mediate_ufunc_runtime_policy,
+        modf, nextafter, normalize_fixed_signature_keywords, normalize_signature_keywords,
+        note_unary_float_errors, pad_empty, pad_linear_ramp, pad_stat,
+        parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
+        plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
+        poly2herm, poly2herme, poly2lag, poly2leg, reduce_frompyfunc_values,
+        resolve_override_dispatch, scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log,
+        scimath_log2, scimath_log10, scimath_logn, scimath_power, scimath_sqrt, seterr,
+        seterr_state, seterrcall, signbit, sort_complex, spacing, take_float_error_events,
+        transpose_tiled, unique_all, unique_counts, unique_inverse, unique_values,
+        validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -56385,13 +56395,11 @@ print(json.dumps(payload))
         let expected: Vec<f64> = original
             .iter()
             .zip(&mask_values)
-            .map(|(&current, &mask_value)| {
-                if mask_value != 0.0 {
-                    value
-                } else {
-                    current
-                }
-            })
+            .map(
+                |(&current, &mask_value)| {
+                    if mask_value != 0.0 { value } else { current }
+                },
+            )
             .collect();
 
         let mut actual = UFuncArray::new(vec![n], original, DType::F64).unwrap();
@@ -60575,7 +60583,11 @@ print(json.dumps(payload))
     fn polynomial_2poly_matches_numpy_golden() {
         // numpy.polynomial.*.{X}2poly([1,2,3,4,5]) — basis -> power-series conversion.
         let c = [1.0, 2.0, 3.0, 4.0, 5.0];
-        poly_close_vec(&cheb2poly(&c), &[3.0, -10.0, -34.0, 16.0, 40.0], "cheb2poly");
+        poly_close_vec(
+            &cheb2poly(&c),
+            &[3.0, -10.0, -34.0, 16.0, 40.0],
+            "cheb2poly",
+        );
         poly_close_vec(
             &leg2poly(&c),
             &[1.375, -4.0, -14.25, 10.0, 21.875],
@@ -60675,15 +60687,7 @@ print(json.dumps(payload))
         );
         poly_close_vec(
             &hermint(&c, 2),
-            &[
-                4.5,
-                -2.5,
-                0.125,
-                0.083_333_33,
-                0.0625,
-                0.05,
-                0.041_666_67,
-            ],
+            &[4.5, -2.5, 0.125, 0.083_333_33, 0.0625, 0.05, 0.041_666_67],
             "hermint2",
         );
         poly_close_vec(
@@ -60697,7 +60701,11 @@ print(json.dumps(payload))
     fn polynomial_fromroots_matches_numpy_golden() {
         // numpy.polynomial.*.{X}fromroots([-1.5, 0.5, 2.0]).
         let r = [-1.5, 0.5, 2.0];
-        poly_close_vec(&chebfromroots(&r), &[1.0, -2.0, -0.5, 0.25], "chebfromroots");
+        poly_close_vec(
+            &chebfromroots(&r),
+            &[1.0, -2.0, -0.5, 0.25],
+            "chebfromroots",
+        );
         poly_close_vec(
             &legfromroots(&r),
             &[1.166_666_67, -2.15, -0.666_666_67, 0.4],
@@ -60837,15 +60845,7 @@ print(json.dumps(payload))
         );
         poly_close_vec(
             &hermeint(&c, 2),
-            &[
-                2.25,
-                -2.0,
-                0.5,
-                0.333_333_33,
-                0.25,
-                0.2,
-                0.166_666_67,
-            ],
+            &[2.25, -2.0, 0.5, 0.333_333_33, 0.25, 0.2, 0.166_666_67],
             "hermeint2",
         );
         // der undoes int (the constant is removed by differentiation).
@@ -61814,18 +61814,17 @@ print(json.dumps(payload))
         let sidecar_values: Vec<i64> = (0..sidecar_n)
             .map(|i| (1_i64 << 53) + i as i64 * 17 - 9)
             .collect();
-        let sidecar = UFuncArray::from_storage(
-            vec![sidecar_n],
-            ArrayStorage::I64(sidecar_values.clone()),
-        )
-        .unwrap();
-        let sidecar_out = sidecar.delete(&[0, sidecar_n / 2, sidecar_n - 1, 0], None).unwrap();
+        let sidecar =
+            UFuncArray::from_storage(vec![sidecar_n], ArrayStorage::I64(sidecar_values.clone()))
+                .unwrap();
+        let sidecar_out = sidecar
+            .delete(&[0, sidecar_n / 2, sidecar_n - 1, 0], None)
+            .unwrap();
         let expected_sidecar: Vec<i64> = sidecar_values
             .iter()
             .enumerate()
             .filter_map(|(idx, &value)| {
-                (idx != 0 && idx != sidecar_n / 2 && idx != sidecar_n - 1)
-                    .then_some(value)
+                (idx != 0 && idx != sidecar_n / 2 && idx != sidecar_n - 1).then_some(value)
             })
             .collect();
         assert_eq!(
@@ -63093,13 +63092,11 @@ print(json.dumps(payload))
         let expected: Vec<f64> = condition_values
             .iter()
             .zip(&arr_values)
-            .filter_map(|(&condition, &value)| {
-                if condition != 0.0 {
-                    Some(value)
-                } else {
-                    None
-                }
-            })
+            .filter_map(
+                |(&condition, &value)| {
+                    if condition != 0.0 { Some(value) } else { None }
+                },
+            )
             .collect();
 
         let condition = UFuncArray::new(vec![n], condition_values, DType::Bool).unwrap();
@@ -63229,8 +63226,7 @@ print(json.dumps(payload))
         let large = (1_i64 << 53) + 17;
         let mut sidecar_dst =
             UFuncArray::from_storage(vec![4], ArrayStorage::I64(vec![1, 2, 3, 4])).unwrap();
-        let sidecar_mask =
-            UFuncArray::new(vec![4], vec![1.0, 0.0, 1.0, 1.0], DType::Bool).unwrap();
+        let sidecar_mask = UFuncArray::new(vec![4], vec![1.0, 0.0, 1.0, 1.0], DType::Bool).unwrap();
         let sidecar_vals =
             UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![large, large + 1])).unwrap();
         sidecar_dst.place(&sidecar_mask, &sidecar_vals).unwrap();
@@ -65799,7 +65795,10 @@ print(json.dumps(payload))
             // Parseval.
             let energy_time: f64 = x.iter().map(|v| v * v).sum();
             let energy_freq: f64 = (0..n)
-                .map(|k| fx.values[2 * k] * fx.values[2 * k] + fx.values[2 * k + 1] * fx.values[2 * k + 1])
+                .map(|k| {
+                    fx.values[2 * k] * fx.values[2 * k]
+                        + fx.values[2 * k + 1] * fx.values[2 * k + 1]
+                })
                 .sum();
             assert!(
                 (n as f64 * energy_time - energy_freq).abs() <= 1e-8 * (1.0 + energy_freq.abs()),
@@ -68654,9 +68653,7 @@ print(json.dumps(payload))
         let cond2_vals: Vec<f64> = (0..n)
             .map(|i| if ((i * 7 + 5) % 13) < 4 { 1.0 } else { 0.0 })
             .collect();
-        let cond3_vals: Vec<f64> = (0..n)
-            .map(|i| if i % 5 == 0 { 1.0 } else { 0.0 })
-            .collect();
+        let cond3_vals: Vec<f64> = (0..n).map(|i| if i % 5 == 0 { 1.0 } else { 0.0 }).collect();
         let choice1_vals: Vec<f64> = (0..n)
             .map(|i| {
                 if i % 101 == 0 {

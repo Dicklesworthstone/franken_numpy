@@ -18,14 +18,14 @@ fn numpy_oracle(script: &str) -> Result<String, String> {
         .stdin
         .take()
         .ok_or_else(|| format!("python3 stdin should be available\nScript: {script}"))?;
-    stdin
-        .write_all(script.as_bytes())
-        .map_err(|error| format!("failed to write Python oracle script: {error}\nScript: {script}"))?;
+    stdin.write_all(script.as_bytes()).map_err(|error| {
+        format!("failed to write Python oracle script: {error}\nScript: {script}")
+    })?;
     drop(stdin);
 
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("failed to read Python oracle output: {error}\nScript: {script}"))?;
+    let output = child.wait_with_output().map_err(|error| {
+        format!("failed to read Python oracle output: {error}\nScript: {script}")
+    })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));

@@ -136,10 +136,7 @@ fn arrays_close(a: &[f64], b: &[f64], tol: f64) -> bool {
 #[test]
 fn mean_python_container_keyword_outcomes_match_numpy() -> Result<(), String> {
     let cases = [
-        (
-            "list input scalar",
-            "result = MODULE.mean([1, 2, 3])",
-        ),
+        ("list input scalar", "result = MODULE.mean([1, 2, 3])"),
         (
             "tuple input axis keepdims",
             "result = MODULE.mean(((1, 2, 3), (4, 5, 6)), axis=1, keepdims=True)",
@@ -160,10 +157,7 @@ fn mean_python_container_keyword_outcomes_match_numpy() -> Result<(), String> {
             "out = np.empty((2,), dtype=np.float64)
 result = MODULE.mean(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=0, out=out)",
         ),
-        (
-            "axis error type",
-            "result = MODULE.mean([1, 2, 3], axis=2)",
-        ),
+        ("axis error type", "result = MODULE.mean([1, 2, 3], axis=2)"),
     ];
 
     for (name, body) in cases {

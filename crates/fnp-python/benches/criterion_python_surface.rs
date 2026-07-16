@@ -222,7 +222,12 @@ dt = rng.integers(0, 10**18, 16_000_000).astype(np.int64).view('datetime64[ns]')
             });
         });
         group.bench_function("numpy_datetime_ns_to_us_16m", |b| {
-            b.iter(|| black_box(dt.call_method1("astype", ("datetime64[us]",)).expect("np astype")));
+            b.iter(|| {
+                black_box(
+                    dt.call_method1("astype", ("datetime64[us]",))
+                        .expect("np astype"),
+                )
+            });
         });
     });
 
@@ -443,7 +448,10 @@ fn bench_max_min_reduction_boundary(c: &mut Criterion) {
 
         // 3-D middle axis (axis=1): block-parallel non-last path.
         let input3d = numpy
-            .call_method1("linspace", (-1.0_f64, 1.0_f64, 256_usize * 256_usize * 64_usize))
+            .call_method1(
+                "linspace",
+                (-1.0_f64, 1.0_f64, 256_usize * 256_usize * 64_usize),
+            )
             .expect("4M f64 3d source")
             .call_method1("reshape", ((256_usize, 256_usize, 64_usize),))
             .expect("256x256x64 reshape");
@@ -557,7 +565,10 @@ fn bench_ptp_axis0_boundary(c: &mut Criterion) {
 
         // 3-D axis=0: outer==1, inner=128*256=32768 — the fixed single-group path.
         let input3d = numpy
-            .call_method1("linspace", (-1.0_f64, 1.0_f64, 256_usize * 128_usize * 256_usize))
+            .call_method1(
+                "linspace",
+                (-1.0_f64, 1.0_f64, 256_usize * 128_usize * 256_usize),
+            )
             .expect("8M f64 3d source")
             .call_method1("reshape", ((256_usize, 128_usize, 256_usize),))
             .expect("256x128x256 reshape");
@@ -1572,7 +1583,9 @@ fn bench_char_ascii_boundary(c: &mut Criterion) {
             .call_method1("maketrans", ("abcdXYZ9", "ABCDxyz0"))
             .expect("maketrans");
         let fnp_tr = fnp_char.getattr("translate").expect("fnp char.translate");
-        let numpy_tr = numpy_char.getattr("translate").expect("numpy char.translate");
+        let numpy_tr = numpy_char
+            .getattr("translate")
+            .expect("numpy char.translate");
         group.bench_function("fnp_char_translate_u20_ascii_1m", |bench| {
             bench.iter(|| black_box(fnp_tr.call1((&input, &tbl)).expect("fnp translate")));
         });
@@ -1597,7 +1610,11 @@ fn bench_char_ascii_boundary(c: &mut Criterion) {
         let kw3 = PyDict::new(py);
         kw3.set_item("dtype", "<U20").expect("dtype kw3");
         let input_ws = numpy
-            .call_method("full", ((1_000_000_usize,), "   azByCxD0123   "), Some(&kw3))
+            .call_method(
+                "full",
+                ((1_000_000_usize,), "   azByCxD0123   "),
+                Some(&kw3),
+            )
             .expect("1M U20 ws-padded input");
         let fnp_strip = fnp_char.getattr("strip").expect("fnp char.strip");
         let numpy_strip = numpy_char.getattr("strip").expect("numpy char.strip");
@@ -1852,7 +1869,11 @@ x8 = rng.standard_normal(8_000_000)\n";
             });
             group.bench_function(format!("numpy_histogram_{label}"), |bench| {
                 bench.iter(|| {
-                    black_box(numpy_hist.call((x,), Some(&big_kwargs)).expect("numpy hist big"))
+                    black_box(
+                        numpy_hist
+                            .call((x,), Some(&big_kwargs))
+                            .expect("numpy hist big"),
+                    )
                 });
             });
         }
@@ -2482,7 +2503,9 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
             bch.iter(|| black_box(numpy_argsort.call1((&permf32,)).expect("numpy argsort f32")));
         });
         // datetime64 flat argsort on DISTINCT ticks (int64-backed; numpy non-simd introsort)
-        let permdt = perm.call_method1("astype", ("datetime64[s]",)).expect("perm datetime64");
+        let permdt = perm
+            .call_method1("astype", ("datetime64[s]",))
+            .expect("perm datetime64");
         group.bench_function("fnp_argsort_datetime64_16m", |bch| {
             bch.iter(|| black_box(fnp_argsort.call1((&permdt,)).expect("fnp argsort dt64")));
         });
@@ -2500,7 +2523,14 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
             .call_method1("standard_normal", (16_000_000_usize,))
             .expect("c imag");
         let permc = perm
-            .call_method1("__add__", (cim.call_method1("__mul__", (pyo3::types::PyComplex::from_doubles(py, 0.0, 1.0),)).expect("1j*im"),))
+            .call_method1(
+                "__add__",
+                (cim.call_method1(
+                    "__mul__",
+                    (pyo3::types::PyComplex::from_doubles(py, 0.0, 1.0),),
+                )
+                .expect("1j*im"),),
+            )
             .expect("re+1j*im")
             .call_method1("astype", ("complex128",))
             .expect("perm c128");
@@ -2589,7 +2619,13 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
             bch.iter(|| black_box(fnp_argsort.call1((&la_f32,)).expect("fnp argsort la f32")));
         });
         group.bench_function("numpy_argsort_f32_lastaxis_16Mx", |bch| {
-            bch.iter(|| black_box(numpy_argsort.call1((&la_f32,)).expect("numpy argsort la f32")));
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call1((&la_f32,))
+                        .expect("numpy argsort la f32"),
+                )
+            });
         });
         let a0_f32 = a0.call_method1("astype", ("float32",)).expect("a0 f32");
         group.bench_function("fnp_argsort_f32_axis0_16Mx", |bch| {
@@ -2634,11 +2670,12 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
         let la_c = la
             .call_method1(
                 "__add__",
-                (rng
-                    .call_method1("standard_normal", (la.getattr("shape").expect("la shape"),))
-                    .expect("la imag")
-                    .call_method1("__mul__", (&onej,))
-                    .expect("1j*la_im"),),
+                (
+                    rng.call_method1("standard_normal", (la.getattr("shape").expect("la shape"),))
+                        .expect("la imag")
+                        .call_method1("__mul__", (&onej,))
+                        .expect("1j*la_im"),
+                ),
             )
             .expect("la re+im")
             .call_method1("astype", ("complex128",))
@@ -2647,50 +2684,74 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
             bch.iter(|| black_box(fnp_argsort.call1((&la_c,)).expect("fnp argsort la c128")));
         });
         group.bench_function("numpy_argsort_c128_lastaxis_16Mx", |bch| {
-            bch.iter(|| black_box(numpy_argsort.call1((&la_c,)).expect("numpy argsort la c128")));
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call1((&la_c,))
+                        .expect("numpy argsort la c128"),
+                )
+            });
         });
         let a0_c = a0
             .call_method1(
                 "__add__",
-                (rng
-                    .call_method1("standard_normal", (a0.getattr("shape").expect("a0 shape"),))
-                    .expect("a0 imag")
-                    .call_method1("__mul__", (&onej,))
-                    .expect("1j*a0_im"),),
+                (
+                    rng.call_method1("standard_normal", (a0.getattr("shape").expect("a0 shape"),))
+                        .expect("a0 imag")
+                        .call_method1("__mul__", (&onej,))
+                        .expect("1j*a0_im"),
+                ),
             )
             .expect("a0 re+im")
             .call_method1("astype", ("complex128",))
             .expect("a0 c128");
         group.bench_function("fnp_argsort_c128_axis0_16Mx", |bch| {
             bch.iter(|| {
-                black_box(fnp_argsort.call((&a0_c,), Some(&axis0_kwargs)).expect("fnp argsort a0 c128"))
+                black_box(
+                    fnp_argsort
+                        .call((&a0_c,), Some(&axis0_kwargs))
+                        .expect("fnp argsort a0 c128"),
+                )
             });
         });
         group.bench_function("numpy_argsort_c128_axis0_16Mx", |bch| {
             bch.iter(|| {
-                black_box(numpy_argsort.call((&a0_c,), Some(&axis0_kwargs)).expect("numpy argsort a0 c128"))
+                black_box(
+                    numpy_argsort
+                        .call((&a0_c,), Some(&axis0_kwargs))
+                        .expect("numpy argsort a0 c128"),
+                )
             });
         });
         let am_c = am
             .call_method1(
                 "__add__",
-                (rng
-                    .call_method1("standard_normal", (am.getattr("shape").expect("am shape"),))
-                    .expect("am imag")
-                    .call_method1("__mul__", (&onej,))
-                    .expect("1j*am_im"),),
+                (
+                    rng.call_method1("standard_normal", (am.getattr("shape").expect("am shape"),))
+                        .expect("am imag")
+                        .call_method1("__mul__", (&onej,))
+                        .expect("1j*am_im"),
+                ),
             )
             .expect("am re+im")
             .call_method1("astype", ("complex128",))
             .expect("am c128");
         group.bench_function("fnp_argsort_c128_midaxis_16Mx", |bch| {
             bch.iter(|| {
-                black_box(fnp_argsort.call((&am_c,), Some(&axis1_kwargs)).expect("fnp argsort am c128"))
+                black_box(
+                    fnp_argsort
+                        .call((&am_c,), Some(&axis1_kwargs))
+                        .expect("fnp argsort am c128"),
+                )
             });
         });
         group.bench_function("numpy_argsort_c128_midaxis_16Mx", |bch| {
             bch.iter(|| {
-                black_box(numpy_argsort.call((&am_c,), Some(&axis1_kwargs)).expect("numpy argsort am c128"))
+                black_box(
+                    numpy_argsort
+                        .call((&am_c,), Some(&axis1_kwargs))
+                        .expect("numpy argsort am c128"),
+                )
             });
         });
         // COMPLEX128 VALUE sort (np.sort): flat (permc, 16M distinct-real) + last-axis (la_c, distinct-per-lane)
@@ -2709,26 +2770,44 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
         // COMPLEX128 VALUE sort AXIS0 + MIDAXIS: reuse a0_c (distinct-per-column) + am_c (distinct-per-lane)
         group.bench_function("fnp_sort_c128_axis0_16Mx", |bch| {
             bch.iter(|| {
-                black_box(fnp_sort.call((&a0_c,), Some(&axis0_kwargs)).expect("fnp sort a0 c128"))
+                black_box(
+                    fnp_sort
+                        .call((&a0_c,), Some(&axis0_kwargs))
+                        .expect("fnp sort a0 c128"),
+                )
             });
         });
         group.bench_function("numpy_sort_c128_axis0_16Mx", |bch| {
             bch.iter(|| {
-                black_box(numpy_sort.call((&a0_c,), Some(&axis0_kwargs)).expect("numpy sort a0 c128"))
+                black_box(
+                    numpy_sort
+                        .call((&a0_c,), Some(&axis0_kwargs))
+                        .expect("numpy sort a0 c128"),
+                )
             });
         });
         group.bench_function("fnp_sort_c128_midaxis_16Mx", |bch| {
             bch.iter(|| {
-                black_box(fnp_sort.call((&am_c,), Some(&axis1_kwargs)).expect("fnp sort am c128"))
+                black_box(
+                    fnp_sort
+                        .call((&am_c,), Some(&axis1_kwargs))
+                        .expect("fnp sort am c128"),
+                )
             });
         });
         group.bench_function("numpy_sort_c128_midaxis_16Mx", |bch| {
             bch.iter(|| {
-                black_box(numpy_sort.call((&am_c,), Some(&axis1_kwargs)).expect("numpy sort am c128"))
+                black_box(
+                    numpy_sort
+                        .call((&am_c,), Some(&axis1_kwargs))
+                        .expect("numpy sort am c128"),
+                )
             });
         });
         // COMPLEX64 VALUE sort (np.sort): permc/la_c cast to complex64 (distinct-real -> tie-free)
-        let permc64 = permc.call_method1("astype", ("complex64",)).expect("permc64");
+        let permc64 = permc
+            .call_method1("astype", ("complex64",))
+            .expect("permc64");
         group.bench_function("fnp_sort_c64_16m", |bch| {
             bch.iter(|| black_box(fnp_sort.call1((&permc64,)).expect("fnp sort c64")));
         });
@@ -2753,59 +2832,105 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
             bch.iter(|| black_box(fnp_argsort.call1((&la_c64,)).expect("fnp argsort la c64")));
         });
         group.bench_function("numpy_argsort_c64_lastaxis_16Mx", |bch| {
-            bch.iter(|| black_box(numpy_argsort.call1((&la_c64,)).expect("numpy argsort la c64")));
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call1((&la_c64,))
+                        .expect("numpy argsort la c64"),
+                )
+            });
         });
         // COMPLEX64 argsort AXIS0 + MIDAXIS: reuse a0_c/am_c (distinct-real) cast to complex64
         let a0_c64 = a0_c.call_method1("astype", ("complex64",)).expect("a0_c64");
         group.bench_function("fnp_argsort_c64_axis0_16Mx", |bch| {
             bch.iter(|| {
-                black_box(fnp_argsort.call((&a0_c64,), Some(&axis0_kwargs)).expect("fnp argsort a0 c64"))
+                black_box(
+                    fnp_argsort
+                        .call((&a0_c64,), Some(&axis0_kwargs))
+                        .expect("fnp argsort a0 c64"),
+                )
             });
         });
         group.bench_function("numpy_argsort_c64_axis0_16Mx", |bch| {
             bch.iter(|| {
-                black_box(numpy_argsort.call((&a0_c64,), Some(&axis0_kwargs)).expect("numpy argsort a0 c64"))
+                black_box(
+                    numpy_argsort
+                        .call((&a0_c64,), Some(&axis0_kwargs))
+                        .expect("numpy argsort a0 c64"),
+                )
             });
         });
         let am_c64 = am_c.call_method1("astype", ("complex64",)).expect("am_c64");
         group.bench_function("fnp_argsort_c64_midaxis_16Mx", |bch| {
             bch.iter(|| {
-                black_box(fnp_argsort.call((&am_c64,), Some(&axis1_kwargs)).expect("fnp argsort am c64"))
+                black_box(
+                    fnp_argsort
+                        .call((&am_c64,), Some(&axis1_kwargs))
+                        .expect("fnp argsort am c64"),
+                )
             });
         });
         group.bench_function("numpy_argsort_c64_midaxis_16Mx", |bch| {
             bch.iter(|| {
-                black_box(numpy_argsort.call((&am_c64,), Some(&axis1_kwargs)).expect("numpy argsort am c64"))
+                black_box(
+                    numpy_argsort
+                        .call((&am_c64,), Some(&axis1_kwargs))
+                        .expect("numpy argsort am c64"),
+                )
             });
         });
         // COMPLEX64 VALUE sort AXIS0 + MIDAXIS: reuse a0_c64 (distinct-per-column) + am_c64 (distinct-per-lane)
         group.bench_function("fnp_sort_c64_axis0_16Mx", |bch| {
             bch.iter(|| {
-                black_box(fnp_sort.call((&a0_c64,), Some(&axis0_kwargs)).expect("fnp sort a0 c64"))
+                black_box(
+                    fnp_sort
+                        .call((&a0_c64,), Some(&axis0_kwargs))
+                        .expect("fnp sort a0 c64"),
+                )
             });
         });
         group.bench_function("numpy_sort_c64_axis0_16Mx", |bch| {
             bch.iter(|| {
-                black_box(numpy_sort.call((&a0_c64,), Some(&axis0_kwargs)).expect("numpy sort a0 c64"))
+                black_box(
+                    numpy_sort
+                        .call((&a0_c64,), Some(&axis0_kwargs))
+                        .expect("numpy sort a0 c64"),
+                )
             });
         });
         group.bench_function("fnp_sort_c64_midaxis_16Mx", |bch| {
             bch.iter(|| {
-                black_box(fnp_sort.call((&am_c64,), Some(&axis1_kwargs)).expect("fnp sort am c64"))
+                black_box(
+                    fnp_sort
+                        .call((&am_c64,), Some(&axis1_kwargs))
+                        .expect("fnp sort am c64"),
+                )
             });
         });
         group.bench_function("numpy_sort_c64_midaxis_16Mx", |bch| {
             bch.iter(|| {
-                black_box(numpy_sort.call((&am_c64,), Some(&axis1_kwargs)).expect("numpy sort am c64"))
+                black_box(
+                    numpy_sort
+                        .call((&am_c64,), Some(&axis1_kwargs))
+                        .expect("numpy sort am c64"),
+                )
             });
         });
         // datetime64 last-axis argsort: la (16384x1024 distinct-per-lane int64) cast to datetime64[s]
-        let la_dt = la.call_method1("astype", ("datetime64[s]",)).expect("la dt64");
+        let la_dt = la
+            .call_method1("astype", ("datetime64[s]",))
+            .expect("la dt64");
         group.bench_function("fnp_argsort_datetime64_lastaxis_16Mx", |bch| {
             bch.iter(|| black_box(fnp_argsort.call1((&la_dt,)).expect("fnp argsort la dt64")));
         });
         group.bench_function("numpy_argsort_datetime64_lastaxis_16Mx", |bch| {
-            bch.iter(|| black_box(numpy_argsort.call1((&la_dt,)).expect("numpy argsort la dt64")));
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call1((&la_dt,))
+                        .expect("numpy argsort la dt64"),
+                )
+            });
         });
         // datetime64 last-axis VALUE sort (np.sort) on the same 16384x1024 distinct-per-lane dt64.
         group.bench_function("fnp_sort_datetime64_lastaxis_16Mx", |bch| {
@@ -2826,17 +2951,43 @@ fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
             .call_method1("astype", ("int64",))
             .expect("m3 int64");
         group.bench_function("fnp_sort_int64_midaxis_16Mx", |bch| {
-            bch.iter(|| black_box(fnp_sort.call((&m3,), Some(&m3_kwargs)).expect("fnp sort m3")));
+            bch.iter(|| {
+                black_box(
+                    fnp_sort
+                        .call((&m3,), Some(&m3_kwargs))
+                        .expect("fnp sort m3"),
+                )
+            });
         });
         group.bench_function("numpy_sort_int64_midaxis_16Mx", |bch| {
-            bch.iter(|| black_box(numpy_sort.call((&m3,), Some(&m3_kwargs)).expect("numpy sort m3")));
+            bch.iter(|| {
+                black_box(
+                    numpy_sort
+                        .call((&m3,), Some(&m3_kwargs))
+                        .expect("numpy sort m3"),
+                )
+            });
         });
-        let m3_dt = m3.call_method1("astype", ("datetime64[s]",)).expect("m3 dt64");
+        let m3_dt = m3
+            .call_method1("astype", ("datetime64[s]",))
+            .expect("m3 dt64");
         group.bench_function("fnp_sort_datetime64_midaxis_16Mx", |bch| {
-            bch.iter(|| black_box(fnp_sort.call((&m3_dt,), Some(&m3_kwargs)).expect("fnp sort m3 dt")));
+            bch.iter(|| {
+                black_box(
+                    fnp_sort
+                        .call((&m3_dt,), Some(&m3_kwargs))
+                        .expect("fnp sort m3 dt"),
+                )
+            });
         });
         group.bench_function("numpy_sort_datetime64_midaxis_16Mx", |bch| {
-            bch.iter(|| black_box(numpy_sort.call((&m3_dt,), Some(&m3_kwargs)).expect("numpy sort m3 dt")));
+            bch.iter(|| {
+                black_box(
+                    numpy_sort
+                        .call((&m3_dt,), Some(&m3_kwargs))
+                        .expect("numpy sort m3 dt"),
+                )
+            });
         });
     });
 
@@ -3302,7 +3453,9 @@ fn bench_var_midaxis_boundary(c: &mut Criterion) {
             let fnp_kwargs = PyDict::new(py);
             fnp_kwargs.set_item("axis", 1_i64).expect("fnp axis kwarg");
             let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("axis", 1_i64).expect("numpy axis kwarg");
+            numpy_kwargs
+                .set_item("axis", 1_i64)
+                .expect("numpy axis kwarg");
 
             group.bench_function(format!("fnp_var_f64_axis1_{label}"), |bench| {
                 bench.iter(|| {
@@ -3382,7 +3535,10 @@ fn bench_var_f32_axis_boundary(c: &mut Criterion) {
             .call_method1("astype", (&f32_dtype,))
             .expect("astype f32");
 
-        for (label, input, axis) in [("mid_256x128x256", &mid, 1_i64), ("axis0_4000x2000", &ax0, 0_i64)] {
+        for (label, input, axis) in [
+            ("mid_256x128x256", &mid, 1_i64),
+            ("axis0_4000x2000", &ax0, 0_i64),
+        ] {
             let fkw = PyDict::new(py);
             fkw.set_item("axis", axis).expect("axis");
             let nkw = PyDict::new(py);
@@ -3391,13 +3547,17 @@ fn bench_var_f32_axis_boundary(c: &mut Criterion) {
                 bench.iter(|| black_box(fnp_var.call((input,), Some(&fkw)).expect("fnp var f32")));
             });
             group.bench_function(format!("numpy_var_f32_{label}"), |bench| {
-                bench.iter(|| black_box(numpy_var.call((input,), Some(&nkw)).expect("numpy var f32")));
+                bench.iter(|| {
+                    black_box(numpy_var.call((input,), Some(&nkw)).expect("numpy var f32"))
+                });
             });
             group.bench_function(format!("fnp_std_f32_{label}"), |bench| {
                 bench.iter(|| black_box(fnp_std.call((input,), Some(&fkw)).expect("fnp std f32")));
             });
             group.bench_function(format!("numpy_std_f32_{label}"), |bench| {
-                bench.iter(|| black_box(numpy_std.call((input,), Some(&nkw)).expect("numpy std f32")));
+                bench.iter(|| {
+                    black_box(numpy_std.call((input,), Some(&nkw)).expect("numpy std f32"))
+                });
             });
         }
     });
@@ -3512,17 +3672,35 @@ a[a > 2.0] = np.nan\n",
             b.iter(|| black_box(fnp_nansum.call((&a64,), Some(&kw)).expect("fnp nansum f64")));
         });
         group.bench_function("numpy_nansum_f64_mid", |b| {
-            b.iter(|| black_box(numpy_nansum.call((&a64,), Some(&kw2)).expect("np nansum f64")));
+            b.iter(|| {
+                black_box(
+                    numpy_nansum
+                        .call((&a64,), Some(&kw2))
+                        .expect("np nansum f64"),
+                )
+            });
         });
         // f64 nansum LAST axis: per-lane pairwise (now bit-exact, was sequential) + parallel.
         let lax = PyDict::new(py);
         lax.set_item("axis", 2_i64).unwrap();
         let lax2 = lax.clone();
         group.bench_function("fnp_nansum_f64_last", |b| {
-            b.iter(|| black_box(fnp_nansum.call((&a64,), Some(&lax)).expect("fnp nansum f64 last")));
+            b.iter(|| {
+                black_box(
+                    fnp_nansum
+                        .call((&a64,), Some(&lax))
+                        .expect("fnp nansum f64 last"),
+                )
+            });
         });
         group.bench_function("numpy_nansum_f64_last", |b| {
-            b.iter(|| black_box(numpy_nansum.call((&a64,), Some(&lax2)).expect("np nansum f64 last")));
+            b.iter(|| {
+                black_box(
+                    numpy_nansum
+                        .call((&a64,), Some(&lax2))
+                        .expect("np nansum f64 last"),
+                )
+            });
         });
     });
 
@@ -3560,35 +3738,78 @@ fn bench_nanvar_f32_axis_boundary(c: &mut Criterion) {
             let idx = numpy
                 .call_method1("arange", (0_i64, total, 10_i64))
                 .expect("nan stride");
-            arr.call_method1("__setitem__", (idx, &nan)).expect("inject NaN");
-            arr.call_method1("reshape", (PyTuple::new(py, dims.iter().copied()).unwrap(),))
-                .expect("reshape")
+            arr.call_method1("__setitem__", (idx, &nan))
+                .expect("inject NaN");
+            arr.call_method1(
+                "reshape",
+                (PyTuple::new(py, dims.iter().copied()).unwrap(),),
+            )
+            .expect("reshape")
         };
         let mid = build(&[256, 128, 256], 256 * 128 * 256);
         let ax0 = build(&[4000, 2000], 4000 * 2000);
 
-        for (label, input, axis) in [("mid_256x128x256", &mid, 1_i64), ("axis0_4000x2000", &ax0, 0_i64)] {
+        for (label, input, axis) in [
+            ("mid_256x128x256", &mid, 1_i64),
+            ("axis0_4000x2000", &ax0, 0_i64),
+        ] {
             let fkw = PyDict::new(py);
             fkw.set_item("axis", axis).expect("axis");
             let nkw = PyDict::new(py);
             nkw.set_item("axis", axis).expect("axis");
             group.bench_function(format!("fnp_nanvar_f32_{label}"), |b| {
-                b.iter(|| black_box(fnp_nanvar.call((input,), Some(&fkw)).expect("fnp nanvar f32")));
+                b.iter(|| {
+                    black_box(
+                        fnp_nanvar
+                            .call((input,), Some(&fkw))
+                            .expect("fnp nanvar f32"),
+                    )
+                });
             });
             group.bench_function(format!("numpy_nanvar_f32_{label}"), |b| {
-                b.iter(|| black_box(numpy_nanvar.call((input,), Some(&nkw)).expect("numpy nanvar f32")));
+                b.iter(|| {
+                    black_box(
+                        numpy_nanvar
+                            .call((input,), Some(&nkw))
+                            .expect("numpy nanvar f32"),
+                    )
+                });
             });
             group.bench_function(format!("fnp_nanstd_f32_{label}"), |b| {
-                b.iter(|| black_box(fnp_nanstd.call((input,), Some(&fkw)).expect("fnp nanstd f32")));
+                b.iter(|| {
+                    black_box(
+                        fnp_nanstd
+                            .call((input,), Some(&fkw))
+                            .expect("fnp nanstd f32"),
+                    )
+                });
             });
             group.bench_function(format!("numpy_nanstd_f32_{label}"), |b| {
-                b.iter(|| black_box(numpy_nanstd.call((input,), Some(&nkw)).expect("numpy nanstd f32")));
+                b.iter(|| {
+                    black_box(
+                        numpy_nanstd
+                            .call((input,), Some(&nkw))
+                            .expect("numpy nanstd f32"),
+                    )
+                });
             });
             group.bench_function(format!("fnp_nanmean_f32_{label}"), |b| {
-                b.iter(|| black_box(fnp_nanmean.call((input,), Some(&fkw)).expect("fnp nanmean f32")));
+                b.iter(|| {
+                    black_box(
+                        fnp_nanmean
+                            .call((input,), Some(&fkw))
+                            .expect("fnp nanmean f32"),
+                    )
+                });
             });
             group.bench_function(format!("numpy_nanmean_f32_{label}"), |b| {
-                b.iter(|| black_box(numpy_nanmean.call((input,), Some(&nkw)).expect("numpy nanmean f32")));
+                b.iter(|| {
+                    black_box(
+                        numpy_nanmean
+                            .call((input,), Some(&nkw))
+                            .expect("numpy nanmean f32"),
+                    )
+                });
             });
         }
     });
@@ -3631,9 +3852,13 @@ fn bench_nanvar_f32_last_axis_boundary(c: &mut Criterion) {
             let idx = numpy
                 .call_method1("arange", (0_i64, total, 10_i64))
                 .expect("nan stride");
-            arr.call_method1("__setitem__", (idx, &nan)).expect("inject NaN");
-            arr.call_method1("reshape", (PyTuple::new(py, dims.iter().copied()).unwrap(),))
-                .expect("reshape")
+            arr.call_method1("__setitem__", (idx, &nan))
+                .expect("inject NaN");
+            arr.call_method1(
+                "reshape",
+                (PyTuple::new(py, dims.iter().copied()).unwrap(),),
+            )
+            .expect("reshape")
         };
         let last2d = build(&[1000, 2048], 1000 * 2048);
         let trail3d = build(&[512, 64, 64], 512 * 64 * 64);
@@ -3652,22 +3877,58 @@ fn bench_nanvar_f32_last_axis_boundary(c: &mut Criterion) {
             let fkw = kw;
             let nkw = kw;
             group.bench_function(format!("fnp_nanvar_f32_{label}"), |b| {
-                b.iter(|| black_box(fnp_nanvar.call((input,), Some(&fkw)).expect("fnp nanvar f32")));
+                b.iter(|| {
+                    black_box(
+                        fnp_nanvar
+                            .call((input,), Some(&fkw))
+                            .expect("fnp nanvar f32"),
+                    )
+                });
             });
             group.bench_function(format!("numpy_nanvar_f32_{label}"), |b| {
-                b.iter(|| black_box(numpy_nanvar.call((input,), Some(&nkw)).expect("numpy nanvar f32")));
+                b.iter(|| {
+                    black_box(
+                        numpy_nanvar
+                            .call((input,), Some(&nkw))
+                            .expect("numpy nanvar f32"),
+                    )
+                });
             });
             group.bench_function(format!("fnp_nanstd_f32_{label}"), |b| {
-                b.iter(|| black_box(fnp_nanstd.call((input,), Some(&fkw)).expect("fnp nanstd f32")));
+                b.iter(|| {
+                    black_box(
+                        fnp_nanstd
+                            .call((input,), Some(&fkw))
+                            .expect("fnp nanstd f32"),
+                    )
+                });
             });
             group.bench_function(format!("numpy_nanstd_f32_{label}"), |b| {
-                b.iter(|| black_box(numpy_nanstd.call((input,), Some(&nkw)).expect("numpy nanstd f32")));
+                b.iter(|| {
+                    black_box(
+                        numpy_nanstd
+                            .call((input,), Some(&nkw))
+                            .expect("numpy nanstd f32"),
+                    )
+                });
             });
             group.bench_function(format!("fnp_nanmean_f32_{label}"), |b| {
-                b.iter(|| black_box(fnp_nanmean.call((input,), Some(&fkw)).expect("fnp nanmean f32")));
+                b.iter(|| {
+                    black_box(
+                        fnp_nanmean
+                            .call((input,), Some(&fkw))
+                            .expect("fnp nanmean f32"),
+                    )
+                });
             });
             group.bench_function(format!("numpy_nanmean_f32_{label}"), |b| {
-                b.iter(|| black_box(numpy_nanmean.call((input,), Some(&nkw)).expect("numpy nanmean f32")));
+                b.iter(|| {
+                    black_box(
+                        numpy_nanmean
+                            .call((input,), Some(&nkw))
+                            .expect("numpy nanmean f32"),
+                    )
+                });
             });
         }
     });
@@ -3709,7 +3970,9 @@ fn bench_nanvar_midaxis_boundary(c: &mut Criterion) {
                 .expect("nanvar midaxis f64 input")
                 .call_method1("reshape", ((d0, d1, d2),))
                 .expect("nanvar midaxis 3-D shape");
-            let flat = input.call_method1("reshape", ((size,),)).expect("flat view");
+            let flat = input
+                .call_method1("reshape", ((size,),))
+                .expect("flat view");
             let idx = numpy
                 .call_method1("arange", (0_i64, size, 10_i64))
                 .expect("nan index stride");
@@ -3720,7 +3983,9 @@ fn bench_nanvar_midaxis_boundary(c: &mut Criterion) {
             let fnp_kwargs = PyDict::new(py);
             fnp_kwargs.set_item("axis", 1_i64).expect("fnp axis kwarg");
             let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("axis", 1_i64).expect("numpy axis kwarg");
+            numpy_kwargs
+                .set_item("axis", 1_i64)
+                .expect("numpy axis kwarg");
 
             group.bench_function(format!("fnp_nanvar_f64_axis1_{label}"), |bench| {
                 bench.iter(|| {
@@ -3813,7 +4078,9 @@ fn bench_var_axis0_boundary(c: &mut Criterion) {
             let fnp_kwargs = PyDict::new(py);
             fnp_kwargs.set_item("axis", 0_i64).expect("fnp axis kwarg");
             let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("axis", 0_i64).expect("numpy axis kwarg");
+            numpy_kwargs
+                .set_item("axis", 0_i64)
+                .expect("numpy axis kwarg");
 
             group.bench_function(format!("fnp_var_f64_axis0_{label}"), |bench| {
                 bench.iter(|| {
@@ -3970,8 +4237,10 @@ fn bench_prod_lastaxis_boundary(c: &mut Criterion) {
         let fnp_prod = module.getattr("prod").expect("fnp_python.prod");
         let numpy_prod = numpy.getattr("prod").expect("numpy.prod");
 
-        for (label, rows, cols) in [("8192x1024", 8192_i64, 1024_i64), ("65536x256", 65536_i64, 256_i64)]
-        {
+        for (label, rows, cols) in [
+            ("8192x1024", 8192_i64, 1024_i64),
+            ("65536x256", 65536_i64, 256_i64),
+        ] {
             let size = rows * cols;
             // values near 1.0 so the product stays finite across the axis.
             let input = numpy
@@ -3982,7 +4251,9 @@ fn bench_prod_lastaxis_boundary(c: &mut Criterion) {
             let fnp_kwargs = PyDict::new(py);
             fnp_kwargs.set_item("axis", -1_i64).expect("fnp axis kwarg");
             let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("axis", -1_i64).expect("numpy axis kwarg");
+            numpy_kwargs
+                .set_item("axis", -1_i64)
+                .expect("numpy axis kwarg");
 
             group.bench_function(format!("fnp_prod_f64_axis_last_{label}"), |bench| {
                 bench.iter(|| {
@@ -4021,8 +4292,10 @@ fn bench_cumsum_lastaxis_boundary(c: &mut Criterion) {
         let fnp_cumsum = module.getattr("cumsum").expect("fnp_python.cumsum");
         let numpy_cumsum = numpy.getattr("cumsum").expect("numpy.cumsum");
 
-        for (label, rows, cols) in [("8192x1024", 8192_i64, 1024_i64), ("65536x256", 65536_i64, 256_i64)]
-        {
+        for (label, rows, cols) in [
+            ("8192x1024", 8192_i64, 1024_i64),
+            ("65536x256", 65536_i64, 256_i64),
+        ] {
             let size = rows * cols;
             let input = numpy
                 .call_method1("linspace", (-1.0_f64, 1.0_f64, size))
@@ -4032,7 +4305,9 @@ fn bench_cumsum_lastaxis_boundary(c: &mut Criterion) {
             let fnp_kwargs = PyDict::new(py);
             fnp_kwargs.set_item("axis", -1_i64).expect("fnp axis kwarg");
             let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("axis", -1_i64).expect("numpy axis kwarg");
+            numpy_kwargs
+                .set_item("axis", -1_i64)
+                .expect("numpy axis kwarg");
 
             group.bench_function(format!("fnp_cumsum_f64_axis_last_{label}"), |bench| {
                 bench.iter(|| {
@@ -4091,17 +4366,24 @@ fn bench_complex_cumprod_lastaxis_boundary(c: &mut Criterion) {
             .call1((0.0_f64, 1.0_f64))
             .expect("1j");
         let base = cosv
-            .call_method1("__add__", (sinv.call_method1("__mul__", (&j,)).expect("i*sin"),))
+            .call_method1(
+                "__add__",
+                (sinv.call_method1("__mul__", (&j,)).expect("i*sin"),),
+            )
             .expect("complex base")
             .call_method1("reshape", ((rows, cols),))
             .expect("complex 2-D shape");
 
         for (label, cname) in [("complex128", "complex128"), ("complex64", "complex64")] {
-            let input = base.call_method1("astype", (cname,)).expect("astype complex");
+            let input = base
+                .call_method1("astype", (cname,))
+                .expect("astype complex");
             let fnp_kwargs = PyDict::new(py);
             fnp_kwargs.set_item("axis", -1_i64).expect("fnp axis kwarg");
             let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("axis", -1_i64).expect("numpy axis kwarg");
+            numpy_kwargs
+                .set_item("axis", -1_i64)
+                .expect("numpy axis kwarg");
 
             group.bench_function(format!("fnp_cumprod_{label}_axis_last_16M"), |bench| {
                 bench.iter(|| {
@@ -4157,17 +4439,24 @@ fn bench_complex_nancumprod_lastaxis_boundary(c: &mut Criterion) {
             .call1((0.0_f64, 1.0_f64))
             .expect("1j");
         let base = cosv
-            .call_method1("__add__", (sinv.call_method1("__mul__", (&j,)).expect("i*sin"),))
+            .call_method1(
+                "__add__",
+                (sinv.call_method1("__mul__", (&j,)).expect("i*sin"),),
+            )
             .expect("complex base")
             .call_method1("reshape", ((rows, cols),))
             .expect("complex 2-D shape");
 
         for (label, cname) in [("complex128", "complex128"), ("complex64", "complex64")] {
-            let input = base.call_method1("astype", (cname,)).expect("astype complex");
+            let input = base
+                .call_method1("astype", (cname,))
+                .expect("astype complex");
             let fnp_kwargs = PyDict::new(py);
             fnp_kwargs.set_item("axis", -1_i64).expect("fnp axis kwarg");
             let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("axis", -1_i64).expect("numpy axis kwarg");
+            numpy_kwargs
+                .set_item("axis", -1_i64)
+                .expect("numpy axis kwarg");
 
             group.bench_function(format!("fnp_nancumprod_{label}_axis_last_16M"), |bench| {
                 bench.iter(|| {
@@ -4226,17 +4515,24 @@ fn bench_complex_cumulative_midaxis_boundary(c: &mut Criterion) {
             .call1((0.0_f64, 1.0_f64))
             .expect("1j");
         let base = cosv
-            .call_method1("__add__", (sinv.call_method1("__mul__", (&j,)).expect("i*sin"),))
+            .call_method1(
+                "__add__",
+                (sinv.call_method1("__mul__", (&j,)).expect("i*sin"),),
+            )
             .expect("complex base")
             .call_method1("reshape", ((n, n, n),))
             .expect("complex 3-D shape");
 
         for (label, cname) in [("complex128", "complex128"), ("complex64", "complex64")] {
-            let input = base.call_method1("astype", (cname,)).expect("astype complex");
+            let input = base
+                .call_method1("astype", (cname,))
+                .expect("astype complex");
             let fnp_kwargs = PyDict::new(py);
             fnp_kwargs.set_item("axis", 1_i64).expect("fnp axis kwarg");
             let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("axis", 1_i64).expect("numpy axis kwarg");
+            numpy_kwargs
+                .set_item("axis", 1_i64)
+                .expect("numpy axis kwarg");
 
             group.bench_function(format!("fnp_cumprod_{label}_axis_mid_16M"), |bench| {
                 bench.iter(|| {
@@ -4309,16 +4605,23 @@ fn bench_complex_cumulative_axis0_boundary(c: &mut Criterion) {
             let cosv = numpy.call_method1("cos", (&theta,)).expect("cos");
             let sinv = numpy.call_method1("sin", (&theta,)).expect("sin");
             let base = cosv
-                .call_method1("__add__", (sinv.call_method1("__mul__", (&j,)).expect("i*sin"),))
+                .call_method1(
+                    "__add__",
+                    (sinv.call_method1("__mul__", (&j,)).expect("i*sin"),),
+                )
                 .expect("complex base")
                 .call_method1("reshape", ((n, n),))
                 .expect("complex 2-D shape");
             for (dlabel, cname) in [("complex128", "complex128"), ("complex64", "complex64")] {
-                let input = base.call_method1("astype", (cname,)).expect("astype complex");
+                let input = base
+                    .call_method1("astype", (cname,))
+                    .expect("astype complex");
                 let fnp_kwargs = PyDict::new(py);
                 fnp_kwargs.set_item("axis", 0_i64).expect("fnp axis kwarg");
                 let numpy_kwargs = PyDict::new(py);
-                numpy_kwargs.set_item("axis", 0_i64).expect("numpy axis kwarg");
+                numpy_kwargs
+                    .set_item("axis", 0_i64)
+                    .expect("numpy axis kwarg");
 
                 group.bench_function(format!("fnp_cumprod_{dlabel}_axis0_{label}"), |bench| {
                     bench.iter(|| {
@@ -4409,7 +4712,13 @@ x = rng.standard_normal(8_000_000)\n";
         let fnp_max = module.getattr("maximum").expect("fnp maximum");
         let numpy_max = numpy.getattr("maximum").expect("numpy maximum");
         group.bench_function("fnp_maximum_accumulate_f64_8m", |b| {
-            b.iter(|| black_box(fnp_max.call_method1("accumulate", (&x,)).expect("fnp max.accum")));
+            b.iter(|| {
+                black_box(
+                    fnp_max
+                        .call_method1("accumulate", (&x,))
+                        .expect("fnp max.accum"),
+                )
+            });
         });
         group.bench_function("numpy_maximum_accumulate_f64_8m", |b| {
             b.iter(|| {
@@ -4430,16 +4739,40 @@ x = rng.standard_normal(8_000_000)\n";
             .call_method1("__mod__", (1_000_003_i64,))
             .expect("xi");
         group.bench_function("fnp_maximum_accumulate_f32_8m", |b| {
-            b.iter(|| black_box(fnp_max.call_method1("accumulate", (&x32,)).expect("fnp max.accum f32")));
+            b.iter(|| {
+                black_box(
+                    fnp_max
+                        .call_method1("accumulate", (&x32,))
+                        .expect("fnp max.accum f32"),
+                )
+            });
         });
         group.bench_function("numpy_maximum_accumulate_f32_8m", |b| {
-            b.iter(|| black_box(numpy_max.call_method1("accumulate", (&x32,)).expect("np max.accum f32")));
+            b.iter(|| {
+                black_box(
+                    numpy_max
+                        .call_method1("accumulate", (&x32,))
+                        .expect("np max.accum f32"),
+                )
+            });
         });
         group.bench_function("fnp_maximum_accumulate_i64_8m", |b| {
-            b.iter(|| black_box(fnp_max.call_method1("accumulate", (&xi,)).expect("fnp max.accum i64")));
+            b.iter(|| {
+                black_box(
+                    fnp_max
+                        .call_method1("accumulate", (&xi,))
+                        .expect("fnp max.accum i64"),
+                )
+            });
         });
         group.bench_function("numpy_maximum_accumulate_i64_8m", |b| {
-            b.iter(|| black_box(numpy_max.call_method1("accumulate", (&xi,)).expect("np max.accum i64")));
+            b.iter(|| {
+                black_box(
+                    numpy_max
+                        .call_method1("accumulate", (&xi,))
+                        .expect("np max.accum i64"),
+                )
+            });
         });
 
         // add.accumulate(int) routes to the parallel cumsum path (== np.cumsum); a win
@@ -4450,20 +4783,44 @@ x = rng.standard_normal(8_000_000)\n";
             .call_method1("arange", (8_000_000_i64,))
             .expect("8M i64 arange");
         group.bench_function("fnp_add_accumulate_i64_8m", |b| {
-            b.iter(|| black_box(fnp_add.call_method1("accumulate", (&xa,)).expect("fnp add.accum i64")));
+            b.iter(|| {
+                black_box(
+                    fnp_add
+                        .call_method1("accumulate", (&xa,))
+                        .expect("fnp add.accum i64"),
+                )
+            });
         });
         group.bench_function("numpy_add_accumulate_i64_8m", |b| {
-            b.iter(|| black_box(numpy_add.call_method1("accumulate", (&xa,)).expect("np add.accum i64")));
+            b.iter(|| {
+                black_box(
+                    numpy_add
+                        .call_method1("accumulate", (&xa,))
+                        .expect("np add.accum i64"),
+                )
+            });
         });
 
         // bitwise_or.accumulate(int) native two-pass prefix vs numpy serial.
         let fnp_or = module.getattr("bitwise_or").expect("fnp bitwise_or");
         let numpy_or = numpy.getattr("bitwise_or").expect("numpy bitwise_or");
         group.bench_function("fnp_bitwise_or_accumulate_i64_8m", |b| {
-            b.iter(|| black_box(fnp_or.call_method1("accumulate", (&xi,)).expect("fnp or.accum i64")));
+            b.iter(|| {
+                black_box(
+                    fnp_or
+                        .call_method1("accumulate", (&xi,))
+                        .expect("fnp or.accum i64"),
+                )
+            });
         });
         group.bench_function("numpy_bitwise_or_accumulate_i64_8m", |b| {
-            b.iter(|| black_box(numpy_or.call_method1("accumulate", (&xi,)).expect("np or.accum i64")));
+            b.iter(|| {
+                black_box(
+                    numpy_or
+                        .call_method1("accumulate", (&xi,))
+                        .expect("np or.accum i64"),
+                )
+            });
         });
 
         // logical_and/or/xor.accumulate(bool): numpy runs a serial dependency-chain scan
@@ -4479,26 +4836,62 @@ x = rng.standard_normal(8_000_000)\n";
         let fnp_land = module.getattr("logical_and").expect("fnp logical_and");
         let numpy_land = numpy.getattr("logical_and").expect("numpy logical_and");
         group.bench_function("fnp_logical_and_accumulate_bool_8m", |b| {
-            b.iter(|| black_box(fnp_land.call_method1("accumulate", (&xb,)).expect("fnp land.accum bool")));
+            b.iter(|| {
+                black_box(
+                    fnp_land
+                        .call_method1("accumulate", (&xb,))
+                        .expect("fnp land.accum bool"),
+                )
+            });
         });
         group.bench_function("numpy_logical_and_accumulate_bool_8m", |b| {
-            b.iter(|| black_box(numpy_land.call_method1("accumulate", (&xb,)).expect("np land.accum bool")));
+            b.iter(|| {
+                black_box(
+                    numpy_land
+                        .call_method1("accumulate", (&xb,))
+                        .expect("np land.accum bool"),
+                )
+            });
         });
         let fnp_lor = module.getattr("logical_or").expect("fnp logical_or");
         let numpy_lor = numpy.getattr("logical_or").expect("numpy logical_or");
         group.bench_function("fnp_logical_or_accumulate_bool_8m", |b| {
-            b.iter(|| black_box(fnp_lor.call_method1("accumulate", (&xb,)).expect("fnp lor.accum bool")));
+            b.iter(|| {
+                black_box(
+                    fnp_lor
+                        .call_method1("accumulate", (&xb,))
+                        .expect("fnp lor.accum bool"),
+                )
+            });
         });
         group.bench_function("numpy_logical_or_accumulate_bool_8m", |b| {
-            b.iter(|| black_box(numpy_lor.call_method1("accumulate", (&xb,)).expect("np lor.accum bool")));
+            b.iter(|| {
+                black_box(
+                    numpy_lor
+                        .call_method1("accumulate", (&xb,))
+                        .expect("np lor.accum bool"),
+                )
+            });
         });
         let fnp_lxor = module.getattr("logical_xor").expect("fnp logical_xor");
         let numpy_lxor = numpy.getattr("logical_xor").expect("numpy logical_xor");
         group.bench_function("fnp_logical_xor_accumulate_bool_8m", |b| {
-            b.iter(|| black_box(fnp_lxor.call_method1("accumulate", (&xb,)).expect("fnp lxor.accum bool")));
+            b.iter(|| {
+                black_box(
+                    fnp_lxor
+                        .call_method1("accumulate", (&xb,))
+                        .expect("fnp lxor.accum bool"),
+                )
+            });
         });
         group.bench_function("numpy_logical_xor_accumulate_bool_8m", |b| {
-            b.iter(|| black_box(numpy_lxor.call_method1("accumulate", (&xb,)).expect("np lxor.accum bool")));
+            b.iter(|| {
+                black_box(
+                    numpy_lxor
+                        .call_method1("accumulate", (&xb,))
+                        .expect("np lxor.accum bool"),
+                )
+            });
         });
     });
 
@@ -4539,7 +4932,9 @@ fn bench_cum_midaxis_boundary(c: &mut Criterion) {
             let fnp_kwargs = PyDict::new(py);
             fnp_kwargs.set_item("axis", 1_i64).expect("fnp axis kwarg");
             let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("axis", 1_i64).expect("numpy axis kwarg");
+            numpy_kwargs
+                .set_item("axis", 1_i64)
+                .expect("numpy axis kwarg");
 
             group.bench_function(format!("fnp_cumsum_f64_axis1_{label}"), |bench| {
                 bench.iter(|| {
@@ -4626,7 +5021,9 @@ fn bench_int_cum_boundary(c: &mut Criterion) {
             });
             group.bench_function(format!("numpy_cumsum_i64_{label}"), |bench| {
                 bench.iter(|| {
-                    let r = numpy_cumsum.call((arr,), Some(&nk)).expect("numpy int cumsum");
+                    let r = numpy_cumsum
+                        .call((arr,), Some(&nk))
+                        .expect("numpy int cumsum");
                     black_box(r);
                 });
             });
@@ -4651,8 +5048,10 @@ fn bench_vander_boundary(c: &mut Criterion) {
         let fnp_vander = module.getattr("vander").expect("fnp_python.vander");
         let numpy_vander = numpy.getattr("vander").expect("numpy.vander");
 
-        for (label, n, cols) in [("200k_x8", 200_000_i64, 8_i64), ("500k_x12", 500_000_i64, 12_i64)]
-        {
+        for (label, n, cols) in [
+            ("200k_x8", 200_000_i64, 8_i64),
+            ("500k_x12", 500_000_i64, 12_i64),
+        ] {
             let x = numpy
                 .call_method1("linspace", (-1.5_f64, 1.5_f64, n))
                 .expect("vander x input");
@@ -4698,8 +5097,10 @@ fn bench_polyval_boundary(c: &mut Criterion) {
         let fnp_polyval = module.getattr("polyval").expect("fnp_python.polyval");
         let numpy_polyval = numpy.getattr("polyval").expect("numpy.polyval");
 
-        for (label, n, deg) in [("1M_deg5", 1_000_000_i64, 5_i64), ("4M_deg8", 4_000_000_i64, 8_i64)]
-        {
+        for (label, n, deg) in [
+            ("1M_deg5", 1_000_000_i64, 5_i64),
+            ("4M_deg8", 4_000_000_i64, 8_i64),
+        ] {
             let x = numpy
                 .call_method1("linspace", (-3.0_f64, 3.0_f64, n))
                 .expect("polyval x input");
@@ -4709,17 +5110,13 @@ fn bench_polyval_boundary(c: &mut Criterion) {
 
             group.bench_function(format!("fnp_polyval_f64_{label}"), |bench| {
                 bench.iter(|| {
-                    let result = fnp_polyval
-                        .call1((&p, &x))
-                        .expect("fnp polyval call");
+                    let result = fnp_polyval.call1((&p, &x)).expect("fnp polyval call");
                     black_box(result);
                 });
             });
             group.bench_function(format!("numpy_polyval_f64_{label}"), |bench| {
                 bench.iter(|| {
-                    let result = numpy_polyval
-                        .call1((&p, &x))
-                        .expect("numpy polyval call");
+                    let result = numpy_polyval.call1((&p, &x)).expect("numpy polyval call");
                     black_box(result);
                 });
             });
@@ -4953,7 +5350,9 @@ fn bench_gradient_axis_boundary(c: &mut Criterion) {
             let fnp_kwargs = PyDict::new(py);
             fnp_kwargs.set_item("axis", 0_i64).expect("fnp axis kwarg");
             let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("axis", 0_i64).expect("numpy axis kwarg");
+            numpy_kwargs
+                .set_item("axis", 0_i64)
+                .expect("numpy axis kwarg");
 
             group.bench_function(format!("fnp_gradient_f64_axis0_{label}"), |bench| {
                 bench.iter(|| {
@@ -4980,7 +5379,9 @@ fn bench_gradient_axis_boundary(c: &mut Criterion) {
             });
             group.bench_function(format!("numpy_gradient_f64_full_{label}"), |bench| {
                 bench.iter(|| {
-                    let result = numpy_grad.call1((&input,)).expect("numpy gradient full call");
+                    let result = numpy_grad
+                        .call1((&input,))
+                        .expect("numpy gradient full call");
                     black_box(result);
                 });
             });
@@ -5046,7 +5447,9 @@ fn bench_norm_axis_boundary(c: &mut Criterion) {
             });
 
             let fnp_l1_kwargs = PyDict::new(py);
-            fnp_l1_kwargs.set_item("ord", 1_i64).expect("fnp l1 ord kwarg");
+            fnp_l1_kwargs
+                .set_item("ord", 1_i64)
+                .expect("fnp l1 ord kwarg");
             fnp_l1_kwargs
                 .set_item("axis", -1_i64)
                 .expect("fnp l1 axis kwarg");
@@ -5078,7 +5481,9 @@ fn bench_norm_axis_boundary(c: &mut Criterion) {
 
             let inf = f64::INFINITY;
             let fnp_inf_kwargs = PyDict::new(py);
-            fnp_inf_kwargs.set_item("ord", inf).expect("fnp inf ord kwarg");
+            fnp_inf_kwargs
+                .set_item("ord", inf)
+                .expect("fnp inf ord kwarg");
             fnp_inf_kwargs
                 .set_item("axis", -1_i64)
                 .expect("fnp inf axis kwarg");
@@ -5147,8 +5552,16 @@ a = rng.standard_normal((4096, 512, 8)).astype(np.float32)\ninf = np.inf\n",
         .expect("norm f32 setup");
         let a = ns.get_item("a").expect("a");
         let inf = ns.get_item("inf").expect("inf");
-        let fnp_norm = module.getattr("linalg").unwrap().getattr("norm").expect("fnp norm");
-        let numpy_norm = numpy.getattr("linalg").unwrap().getattr("norm").expect("np norm");
+        let fnp_norm = module
+            .getattr("linalg")
+            .unwrap()
+            .getattr("norm")
+            .expect("fnp norm");
+        let numpy_norm = numpy
+            .getattr("linalg")
+            .unwrap()
+            .getattr("norm")
+            .expect("np norm");
         for (label, ordv) in [("maxabs", inf.clone())] {
             let kw = PyDict::new(py);
             kw.set_item("ord", &ordv).unwrap();
@@ -5207,8 +5620,12 @@ fn bench_norm_nonlast_axis_boundary(c: &mut Criterion) {
                 fnp_kwargs.set_item("ord", ord_val).expect("fnp ord kwarg");
                 fnp_kwargs.set_item("axis", axis).expect("fnp axis kwarg");
                 let numpy_kwargs = PyDict::new(py);
-                numpy_kwargs.set_item("ord", ord_val).expect("numpy ord kwarg");
-                numpy_kwargs.set_item("axis", axis).expect("numpy axis kwarg");
+                numpy_kwargs
+                    .set_item("ord", ord_val)
+                    .expect("numpy ord kwarg");
+                numpy_kwargs
+                    .set_item("axis", axis)
+                    .expect("numpy axis kwarg");
 
                 group.bench_function(format!("fnp_norm_{ord_label}_{label}"), |bench| {
                     bench.iter(|| {
@@ -5578,10 +5995,22 @@ x = rng.standard_normal((2048, 2048))\ncond = rng.random(2048) < 0.5\n",
         kw.set_item("axis", 1_i64).unwrap();
         let kw2 = kw.clone();
         group.bench_function("fnp_compress_2d_axis1", |b| {
-            b.iter(|| black_box(fnp_compress.call((&cond, &x), Some(&kw)).expect("fnp compress")));
+            b.iter(|| {
+                black_box(
+                    fnp_compress
+                        .call((&cond, &x), Some(&kw))
+                        .expect("fnp compress"),
+                )
+            });
         });
         group.bench_function("numpy_compress_2d_axis1", |b| {
-            b.iter(|| black_box(numpy_compress.call((&cond, &x), Some(&kw2)).expect("np compress")));
+            b.iter(|| {
+                black_box(
+                    numpy_compress
+                        .call((&cond, &x), Some(&kw2))
+                        .expect("np compress"),
+                )
+            });
         });
     });
 
@@ -5690,22 +6119,10 @@ x = rng.integers(-1000, 1000, (4096, 4096)).astype(np.int64)\n",
         let shifts = (3_i64, 5_i64);
         let axes = (0_i64, 1_i64);
         group.bench_function("fnp_roll_2d_multi_int64", |b| {
-            b.iter(|| {
-                black_box(
-                    fnp_roll
-                        .call1((&x, shifts, axes))
-                        .expect("fnp roll"),
-                )
-            });
+            b.iter(|| black_box(fnp_roll.call1((&x, shifts, axes)).expect("fnp roll")));
         });
         group.bench_function("numpy_roll_2d_multi_int64", |b| {
-            b.iter(|| {
-                black_box(
-                    numpy_roll
-                        .call1((&x, shifts, axes))
-                        .expect("np roll"),
-                )
-            });
+            b.iter(|| black_box(numpy_roll.call1((&x, shifts, axes)).expect("np roll")));
         });
     });
 
@@ -6580,10 +6997,22 @@ imp = np.random.default_rng(9).integers(-3, 3, (256, 256)).astype(np.int64)\n";
         .expect("int matpow setup");
         let imp = imp_ns.get_item("imp").expect("imp");
         group.bench_function("fnp_matrix_power_i64_256_n5", |bench| {
-            bench.iter(|| black_box(fnp_matrix_power.call1((&imp, 5_i64)).expect("fnp int matpow")));
+            bench.iter(|| {
+                black_box(
+                    fnp_matrix_power
+                        .call1((&imp, 5_i64))
+                        .expect("fnp int matpow"),
+                )
+            });
         });
         group.bench_function("numpy_matrix_power_i64_256_n5", |bench| {
-            bench.iter(|| black_box(numpy_matrix_power.call1((&imp, 5_i64)).expect("np int matpow")));
+            bench.iter(|| {
+                black_box(
+                    numpy_matrix_power
+                        .call1((&imp, 5_i64))
+                        .expect("np int matpow"),
+                )
+            });
         });
 
         for (label, input) in [
@@ -6637,7 +7066,9 @@ fn bench_unary_parallel_boundary(c: &mut Criterion) {
             .expect("8M base")
             .call_method1("__sub__", (4_000_000_i64,))
             .expect("centered base");
-        let f32_in = base.call_method1("astype", ("float32",)).expect("f32 input");
+        let f32_in = base
+            .call_method1("astype", ("float32",))
+            .expect("f32 input");
         let i64_in = base.call_method1("astype", ("int64",)).expect("i64 input");
         let i32_in = base.call_method1("astype", ("int32",)).expect("i32 input");
         let u64_in = base.call_method1("astype", ("uint64",)).expect("u64 input");
@@ -6698,10 +7129,22 @@ fn bench_clip_boundary(c: &mut Criterion) {
         let fnp_clip = module.getattr("clip").expect("fnp clip");
         let numpy_clip = numpy.getattr("clip").expect("numpy clip");
         group.bench_function("fnp_clip_f64_8m", |b| {
-            b.iter(|| black_box(fnp_clip.call1((&input, -1000.0_f64, 1000.0_f64)).expect("fnp clip")));
+            b.iter(|| {
+                black_box(
+                    fnp_clip
+                        .call1((&input, -1000.0_f64, 1000.0_f64))
+                        .expect("fnp clip"),
+                )
+            });
         });
         group.bench_function("numpy_clip_f64_8m", |b| {
-            b.iter(|| black_box(numpy_clip.call1((&input, -1000.0_f64, 1000.0_f64)).expect("numpy clip")));
+            b.iter(|| {
+                black_box(
+                    numpy_clip
+                        .call1((&input, -1000.0_f64, 1000.0_f64))
+                        .expect("numpy clip"),
+                )
+            });
         });
 
         let input_f32 = input
@@ -6782,7 +7225,13 @@ v = rng.integers(-100, 100, 256).astype(np.int64)\n";
             b.iter(|| black_box(fnp_conv.call1((&a, &v, "full")).expect("fnp int convolve")));
         });
         group.bench_function("numpy_convolve_i64_200k_256", |b| {
-            b.iter(|| black_box(numpy_conv.call1((&a, &v, "full")).expect("numpy int convolve")));
+            b.iter(|| {
+                black_box(
+                    numpy_conv
+                        .call1((&a, &v, "full"))
+                        .expect("numpy int convolve"),
+                )
+            });
         });
     });
 
@@ -6826,13 +7275,7 @@ v = rng.standard_normal(256).astype(np.float64)\n";
             b.iter(|| black_box(fnp_conv.call1((&a, &v, "same")).expect("fnp convolve")));
         });
         group.bench_function("numpy_convolve_f64_1m_256_same", |b| {
-            b.iter(|| {
-                black_box(
-                    numpy_conv
-                        .call1((&a, &v, "same"))
-                        .expect("numpy convolve"),
-                )
-            });
+            b.iter(|| black_box(numpy_conv.call1((&a, &v, "same")).expect("numpy convolve")));
         });
         group.bench_function("fnp_correlate_f64_1m_256_valid", |b| {
             b.iter(|| black_box(fnp_corr.call1((&a, &v, "valid")).expect("fnp correlate")));
@@ -6931,7 +7374,13 @@ fn bench_where_boundary(c: &mut Criterion) {
         let ia32 = ia.call_method1("astype", ("int32",)).expect("ia32");
         let ib32 = ib.call_method1("astype", ("int32",)).expect("ib32");
         group.bench_function("fnp_where_i32_8m", |bn| {
-            bn.iter(|| black_box(fnp_where.call1((&imask, &ia32, &ib32)).expect("fnp where i32")));
+            bn.iter(|| {
+                black_box(
+                    fnp_where
+                        .call1((&imask, &ia32, &ib32))
+                        .expect("fnp where i32"),
+                )
+            });
         });
         group.bench_function("numpy_where_i32_8m", |bn| {
             bn.iter(|| {
@@ -6982,19 +7431,39 @@ fn bench_around_boundary(c: &mut Criterion) {
             .call_method1("view", ("complex128",))
             .expect("c128 view");
         group.bench_function("fnp_around_c128_4m", |b| {
-            b.iter(|| black_box(fnp_around.call1((&input_c, 3_i64)).expect("fnp around c128")));
+            b.iter(|| {
+                black_box(
+                    fnp_around
+                        .call1((&input_c, 3_i64))
+                        .expect("fnp around c128"),
+                )
+            });
         });
         group.bench_function("numpy_around_c128_4m", |b| {
-            b.iter(|| black_box(numpy_around.call1((&input_c, 3_i64)).expect("numpy around c128")));
+            b.iter(|| {
+                black_box(
+                    numpy_around
+                        .call1((&input_c, 3_i64))
+                        .expect("numpy around c128"),
+                )
+            });
         });
 
         // f32 sibling — compute-heavy (round-ties-even + mul/div) so wins at 4-byte.
-        let input32 = input.call_method1("astype", ("float32",)).expect("f32 input");
+        let input32 = input
+            .call_method1("astype", ("float32",))
+            .expect("f32 input");
         group.bench_function("fnp_around_f32_8m", |b| {
             b.iter(|| black_box(fnp_around.call1((&input32, 3_i64)).expect("fnp around f32")));
         });
         group.bench_function("numpy_around_f32_8m", |b| {
-            b.iter(|| black_box(numpy_around.call1((&input32, 3_i64)).expect("numpy around f32")));
+            b.iter(|| {
+                black_box(
+                    numpy_around
+                        .call1((&input32, 3_i64))
+                        .expect("numpy around f32"),
+                )
+            });
         });
     });
 
@@ -7229,12 +7698,20 @@ xi = rng.integers(-1000, 1000, 8_000_000).astype(np.int32)\n";
         // width and asymmetric tuple width; panics on any mismatch.
         for (arr, label) in [(&x, "f64"), (&xi, "i32")] {
             let scalar = (
-                fnp_pad.call1((arr, 4000_i64, "edge")).expect("fnp pad edge scalar"),
-                numpy_pad.call1((arr, 4000_i64, "edge")).expect("numpy pad edge scalar"),
+                fnp_pad
+                    .call1((arr, 4000_i64, "edge"))
+                    .expect("fnp pad edge scalar"),
+                numpy_pad
+                    .call1((arr, 4000_i64, "edge"))
+                    .expect("numpy pad edge scalar"),
             );
             let tuple = (
-                fnp_pad.call1((arr, (3_i64, 7_i64), "edge")).expect("fnp pad edge tuple"),
-                numpy_pad.call1((arr, (3_i64, 7_i64), "edge")).expect("numpy pad edge tuple"),
+                fnp_pad
+                    .call1((arr, (3_i64, 7_i64), "edge"))
+                    .expect("fnp pad edge tuple"),
+                numpy_pad
+                    .call1((arr, (3_i64, 7_i64), "edge"))
+                    .expect("numpy pad edge tuple"),
             );
             for (f, n) in [scalar, tuple] {
                 let eq: bool = np_array_equal
@@ -7246,16 +7723,40 @@ xi = rng.integers(-1000, 1000, 8_000_000).astype(np.int32)\n";
             }
         }
         group.bench_function("fnp_pad_edge_f64_8m", |b| {
-            b.iter(|| black_box(fnp_pad.call1((&x, 4000_i64, "edge")).expect("fnp pad edge f64")));
+            b.iter(|| {
+                black_box(
+                    fnp_pad
+                        .call1((&x, 4000_i64, "edge"))
+                        .expect("fnp pad edge f64"),
+                )
+            });
         });
         group.bench_function("numpy_pad_edge_f64_8m", |b| {
-            b.iter(|| black_box(numpy_pad.call1((&x, 4000_i64, "edge")).expect("numpy pad edge f64")));
+            b.iter(|| {
+                black_box(
+                    numpy_pad
+                        .call1((&x, 4000_i64, "edge"))
+                        .expect("numpy pad edge f64"),
+                )
+            });
         });
         group.bench_function("fnp_pad_edge_i32_8m", |b| {
-            b.iter(|| black_box(fnp_pad.call1((&xi, 4000_i64, "edge")).expect("fnp pad edge i32")));
+            b.iter(|| {
+                black_box(
+                    fnp_pad
+                        .call1((&xi, 4000_i64, "edge"))
+                        .expect("fnp pad edge i32"),
+                )
+            });
         });
         group.bench_function("numpy_pad_edge_i32_8m", |b| {
-            b.iter(|| black_box(numpy_pad.call1((&xi, 4000_i64, "edge")).expect("numpy pad edge i32")));
+            b.iter(|| {
+                black_box(
+                    numpy_pad
+                        .call1((&xi, 4000_i64, "edge"))
+                        .expect("numpy pad edge i32"),
+                )
+            });
         });
     });
     group.finish();
@@ -7299,12 +7800,20 @@ fn bench_pad_wrap_boundary(c: &mut Criterion) {
         // width and asymmetric tuple width; panics on any mismatch.
         for (arr, label) in [(&x, "f64"), (&xi, "i32")] {
             let scalar = (
-                fnp_pad.call1((arr, 4000_i64, "wrap")).expect("fnp pad wrap scalar"),
-                numpy_pad.call1((arr, 4000_i64, "wrap")).expect("numpy pad wrap scalar"),
+                fnp_pad
+                    .call1((arr, 4000_i64, "wrap"))
+                    .expect("fnp pad wrap scalar"),
+                numpy_pad
+                    .call1((arr, 4000_i64, "wrap"))
+                    .expect("numpy pad wrap scalar"),
             );
             let tuple = (
-                fnp_pad.call1((arr, (3_i64, 7_i64), "wrap")).expect("fnp pad wrap tuple"),
-                numpy_pad.call1((arr, (3_i64, 7_i64), "wrap")).expect("numpy pad wrap tuple"),
+                fnp_pad
+                    .call1((arr, (3_i64, 7_i64), "wrap"))
+                    .expect("fnp pad wrap tuple"),
+                numpy_pad
+                    .call1((arr, (3_i64, 7_i64), "wrap"))
+                    .expect("numpy pad wrap tuple"),
             );
             for (f, n) in [scalar, tuple] {
                 let eq: bool = np_array_equal
@@ -7329,16 +7838,40 @@ fn bench_pad_wrap_boundary(c: &mut Criterion) {
             .expect("bool");
         assert!(eq, "pad wrap multi-tile correctness mismatch");
         group.bench_function("fnp_pad_wrap_f64_8m", |b| {
-            b.iter(|| black_box(fnp_pad.call1((&x, 4000_i64, "wrap")).expect("fnp pad wrap f64")));
+            b.iter(|| {
+                black_box(
+                    fnp_pad
+                        .call1((&x, 4000_i64, "wrap"))
+                        .expect("fnp pad wrap f64"),
+                )
+            });
         });
         group.bench_function("numpy_pad_wrap_f64_8m", |b| {
-            b.iter(|| black_box(numpy_pad.call1((&x, 4000_i64, "wrap")).expect("numpy pad wrap f64")));
+            b.iter(|| {
+                black_box(
+                    numpy_pad
+                        .call1((&x, 4000_i64, "wrap"))
+                        .expect("numpy pad wrap f64"),
+                )
+            });
         });
         group.bench_function("fnp_pad_wrap_i32_8m", |b| {
-            b.iter(|| black_box(fnp_pad.call1((&xi, 4000_i64, "wrap")).expect("fnp pad wrap i32")));
+            b.iter(|| {
+                black_box(
+                    fnp_pad
+                        .call1((&xi, 4000_i64, "wrap"))
+                        .expect("fnp pad wrap i32"),
+                )
+            });
         });
         group.bench_function("numpy_pad_wrap_i32_8m", |b| {
-            b.iter(|| black_box(numpy_pad.call1((&xi, 4000_i64, "wrap")).expect("numpy pad wrap i32")));
+            b.iter(|| {
+                black_box(
+                    numpy_pad
+                        .call1((&xi, 4000_i64, "wrap"))
+                        .expect("numpy pad wrap i32"),
+                )
+            });
         });
         group.bench_function("fnp_pad_wrap_i32_multitile_8m", |b| {
             b.iter(|| {
@@ -7399,11 +7932,17 @@ xi = rng.integers(-1000, 1000, 8_000_000).astype(np.int32)\n";
             for (arr, label) in [(&x, "f64"), (&xi, "i32")] {
                 let scalar = (
                     fnp_pad.call1((arr, 4000_i64, md)).expect("fnp pad scalar"),
-                    numpy_pad.call1((arr, 4000_i64, md)).expect("numpy pad scalar"),
+                    numpy_pad
+                        .call1((arr, 4000_i64, md))
+                        .expect("numpy pad scalar"),
                 );
                 let tuple = (
-                    fnp_pad.call1((arr, (3_i64, 7_i64), md)).expect("fnp pad tuple"),
-                    numpy_pad.call1((arr, (3_i64, 7_i64), md)).expect("numpy pad tuple"),
+                    fnp_pad
+                        .call1((arr, (3_i64, 7_i64), md))
+                        .expect("fnp pad tuple"),
+                    numpy_pad
+                        .call1((arr, (3_i64, 7_i64), md))
+                        .expect("numpy pad tuple"),
                 );
                 for (f, n) in [scalar, tuple] {
                     let eq: bool = np_array_equal
@@ -7416,16 +7955,40 @@ xi = rng.integers(-1000, 1000, 8_000_000).astype(np.int32)\n";
             }
         }
         group.bench_function("fnp_pad_reflect_f64_8m", |b| {
-            b.iter(|| black_box(fnp_pad.call1((&x, 4000_i64, "reflect")).expect("fnp reflect f64")));
+            b.iter(|| {
+                black_box(
+                    fnp_pad
+                        .call1((&x, 4000_i64, "reflect"))
+                        .expect("fnp reflect f64"),
+                )
+            });
         });
         group.bench_function("numpy_pad_reflect_f64_8m", |b| {
-            b.iter(|| black_box(numpy_pad.call1((&x, 4000_i64, "reflect")).expect("numpy reflect f64")));
+            b.iter(|| {
+                black_box(
+                    numpy_pad
+                        .call1((&x, 4000_i64, "reflect"))
+                        .expect("numpy reflect f64"),
+                )
+            });
         });
         group.bench_function("fnp_pad_symmetric_i32_8m", |b| {
-            b.iter(|| black_box(fnp_pad.call1((&xi, 4000_i64, "symmetric")).expect("fnp symmetric i32")));
+            b.iter(|| {
+                black_box(
+                    fnp_pad
+                        .call1((&xi, 4000_i64, "symmetric"))
+                        .expect("fnp symmetric i32"),
+                )
+            });
         });
         group.bench_function("numpy_pad_symmetric_i32_8m", |b| {
-            b.iter(|| black_box(numpy_pad.call1((&xi, 4000_i64, "symmetric")).expect("numpy symmetric i32")));
+            b.iter(|| {
+                black_box(
+                    numpy_pad
+                        .call1((&xi, 4000_i64, "symmetric"))
+                        .expect("numpy symmetric i32"),
+                )
+            });
         });
     });
     group.finish();
@@ -7593,8 +8156,12 @@ a = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint8).view('S8').reshape(-1)
         kw.set_item("return_inverse", true).expect("rinv");
         kw.set_item("return_counts", true).expect("rc");
         {
-            let got = fnp_unique.call((&a,), Some(&kw)).expect("fnp unique full S8");
-            let exp = numpy_unique.call((&a,), Some(&kw)).expect("numpy unique full S8");
+            let got = fnp_unique
+                .call((&a,), Some(&kw))
+                .expect("fnp unique full S8");
+            let exp = numpy_unique
+                .call((&a,), Some(&kw))
+                .expect("numpy unique full S8");
             let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
             for t in 0..4usize {
                 let g = got.get_item(t).expect("got item");
@@ -7604,14 +8171,29 @@ a = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint8).view('S8').reshape(-1)
                     .expect("array_equal")
                     .extract()
                     .expect("bool");
-                assert!(eq, "string unique return_* correctness mismatch at tuple index {t}");
+                assert!(
+                    eq,
+                    "string unique return_* correctness mismatch at tuple index {t}"
+                );
             }
         }
         group.bench_function("fnp_unique_S8_full_2m", |b| {
-            b.iter(|| black_box(fnp_unique.call((&a,), Some(&kw)).expect("fnp unique full S8")));
+            b.iter(|| {
+                black_box(
+                    fnp_unique
+                        .call((&a,), Some(&kw))
+                        .expect("fnp unique full S8"),
+                )
+            });
         });
         group.bench_function("numpy_unique_S8_full_2m", |b| {
-            b.iter(|| black_box(numpy_unique.call((&a,), Some(&kw)).expect("numpy unique full S8")));
+            b.iter(|| {
+                black_box(
+                    numpy_unique
+                        .call((&a,), Some(&kw))
+                        .expect("numpy unique full S8"),
+                )
+            });
         });
     });
     group.finish();
@@ -7653,8 +8235,12 @@ q8 = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8
         for side in ["left", "right"] {
             let kw = PyDict::new(py);
             kw.set_item("side", side).unwrap();
-            let f = fnp_ss.call((&h8, &q8), Some(&kw)).expect("fnp searchsorted");
-            let n = numpy_ss.call((&h8, &q8), Some(&kw)).expect("numpy searchsorted");
+            let f = fnp_ss
+                .call((&h8, &q8), Some(&kw))
+                .expect("fnp searchsorted");
+            let n = numpy_ss
+                .call((&h8, &q8), Some(&kw))
+                .expect("numpy searchsorted");
             let eq: bool = np_array_equal
                 .call1((&f, &n))
                 .expect("array_equal")
@@ -7839,8 +8425,16 @@ b = np.concatenate([a[:1_000_000], brand])\n";
         let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
         // Correctness gate for both ops.
         for op in ["intersect1d", "setdiff1d"] {
-            let f = module.getattr(op).unwrap().call1((&a, &b)).expect("fnp setop");
-            let n = numpy.getattr(op).unwrap().call1((&a, &b)).expect("numpy setop");
+            let f = module
+                .getattr(op)
+                .unwrap()
+                .call1((&a, &b))
+                .expect("fnp setop");
+            let n = numpy
+                .getattr(op)
+                .unwrap()
+                .call1((&a, &b))
+                .expect("numpy setop");
             let eq: bool = np_array_equal
                 .call1((&f, &n))
                 .expect("array_equal")
@@ -7882,8 +8476,16 @@ b16 = np.concatenate([a16[:500_000], brand16])\n";
         let a16 = ns16.get_item("a16").expect("a16");
         let b16 = ns16.get_item("b16").expect("b16");
         for op in ["intersect1d", "setdiff1d"] {
-            let f = module.getattr(op).unwrap().call1((&a16, &b16)).expect("fnp setop U16");
-            let n = numpy.getattr(op).unwrap().call1((&a16, &b16)).expect("numpy setop U16");
+            let f = module
+                .getattr(op)
+                .unwrap()
+                .call1((&a16, &b16))
+                .expect("fnp setop U16");
+            let n = numpy
+                .getattr(op)
+                .unwrap()
+                .call1((&a16, &b16))
+                .expect("numpy setop U16");
             let eq: bool = np_array_equal
                 .call1((&f, &n))
                 .expect("array_equal")
@@ -8024,8 +8626,16 @@ b = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint8).view('S8').reshape(-1)
             assert!(eq, "bytes {op} correctness mismatch");
         }
         {
-            let f = module.getattr("union1d").unwrap().call1((&a, &b)).expect("fnp union1d");
-            let n = numpy.getattr("union1d").unwrap().call1((&a, &b)).expect("numpy union1d");
+            let f = module
+                .getattr("union1d")
+                .unwrap()
+                .call1((&a, &b))
+                .expect("fnp union1d");
+            let n = numpy
+                .getattr("union1d")
+                .unwrap()
+                .call1((&a, &b))
+                .expect("numpy union1d");
             let eq: bool = np_array_equal.call1((&f, &n)).unwrap().extract().unwrap();
             assert!(eq, "bytes union1d correctness mismatch");
         }
@@ -8035,12 +8645,24 @@ b = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint8).view('S8').reshape(-1)
         let numpy_uniq = numpy.getattr("unique").unwrap();
         let fnp_uni = module.getattr("union1d").unwrap();
         let numpy_uni = numpy.getattr("union1d").unwrap();
-        group.bench_function("fnp_sort_S8_2m", |bn| bn.iter(|| black_box(fnp_sort.call1((&a,)).unwrap())));
-        group.bench_function("numpy_sort_S8_2m", |bn| bn.iter(|| black_box(numpy_sort.call1((&a,)).unwrap())));
-        group.bench_function("fnp_unique_S8_2m", |bn| bn.iter(|| black_box(fnp_uniq.call1((&a,)).unwrap())));
-        group.bench_function("numpy_unique_S8_2m", |bn| bn.iter(|| black_box(numpy_uniq.call1((&a,)).unwrap())));
-        group.bench_function("fnp_union1d_S8_2m", |bn| bn.iter(|| black_box(fnp_uni.call1((&a, &b)).unwrap())));
-        group.bench_function("numpy_union1d_S8_2m", |bn| bn.iter(|| black_box(numpy_uni.call1((&a, &b)).unwrap())));
+        group.bench_function("fnp_sort_S8_2m", |bn| {
+            bn.iter(|| black_box(fnp_sort.call1((&a,)).unwrap()))
+        });
+        group.bench_function("numpy_sort_S8_2m", |bn| {
+            bn.iter(|| black_box(numpy_sort.call1((&a,)).unwrap()))
+        });
+        group.bench_function("fnp_unique_S8_2m", |bn| {
+            bn.iter(|| black_box(fnp_uniq.call1((&a,)).unwrap()))
+        });
+        group.bench_function("numpy_unique_S8_2m", |bn| {
+            bn.iter(|| black_box(numpy_uniq.call1((&a,)).unwrap()))
+        });
+        group.bench_function("fnp_union1d_S8_2m", |bn| {
+            bn.iter(|| black_box(fnp_uni.call1((&a, &b)).unwrap()))
+        });
+        group.bench_function("numpy_union1d_S8_2m", |bn| {
+            bn.iter(|| black_box(numpy_uni.call1((&a, &b)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -8070,7 +8692,12 @@ b = np.concatenate([a[:1_000_000], brand])\n\
 trand = rng.integers(97, 123, (100_000, 8), dtype=np.uint8).view('S8').reshape(-1)\n\
 test = np.concatenate([a[:100_000], trand])\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").unwrap();
         let h = ns.get_item("h").unwrap();
         let q = ns.get_item("q").unwrap();
@@ -8078,16 +8705,39 @@ test = np.concatenate([a[:100_000], trand])\n";
         let test = ns.get_item("test").unwrap();
         let eqf = numpy.getattr("array_equal").unwrap();
         // Correctness for all 5 ops.
-        let ss_f = module.getattr("searchsorted").unwrap().call1((&h, &q)).unwrap();
-        let ss_n = numpy.getattr("searchsorted").unwrap().call1((&h, &q)).unwrap();
-        assert!(eqf.call1((&ss_f, &ss_n)).unwrap().extract::<bool>().unwrap(), "S searchsorted mismatch");
+        let ss_f = module
+            .getattr("searchsorted")
+            .unwrap()
+            .call1((&h, &q))
+            .unwrap();
+        let ss_n = numpy
+            .getattr("searchsorted")
+            .unwrap()
+            .call1((&h, &q))
+            .unwrap();
+        assert!(
+            eqf.call1((&ss_f, &ss_n))
+                .unwrap()
+                .extract::<bool>()
+                .unwrap(),
+            "S searchsorted mismatch"
+        );
         let is_f = module.getattr("isin").unwrap().call1((&a, &test)).unwrap();
         let is_n = numpy.getattr("isin").unwrap().call1((&a, &test)).unwrap();
-        assert!(eqf.call1((&is_f, &is_n)).unwrap().extract::<bool>().unwrap(), "S isin mismatch");
+        assert!(
+            eqf.call1((&is_f, &is_n))
+                .unwrap()
+                .extract::<bool>()
+                .unwrap(),
+            "S isin mismatch"
+        );
         for op in ["intersect1d", "setdiff1d", "setxor1d"] {
             let f = module.getattr(op).unwrap().call1((&a, &b)).unwrap();
             let n = numpy.getattr(op).unwrap().call1((&a, &b)).unwrap();
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "S {op} mismatch");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "S {op} mismatch"
+            );
         }
         let ss_ff = module.getattr("searchsorted").unwrap();
         let ss_nn = numpy.getattr("searchsorted").unwrap();
@@ -8095,12 +8745,24 @@ test = np.concatenate([a[:100_000], trand])\n";
         let is_nn = numpy.getattr("isin").unwrap();
         let xr_ff = module.getattr("setxor1d").unwrap();
         let xr_nn = numpy.getattr("setxor1d").unwrap();
-        group.bench_function("fnp_searchsorted_S8_2m", |bn| bn.iter(|| black_box(ss_ff.call1((&h, &q)).unwrap())));
-        group.bench_function("numpy_searchsorted_S8_2m", |bn| bn.iter(|| black_box(ss_nn.call1((&h, &q)).unwrap())));
-        group.bench_function("fnp_isin_S8_2m", |bn| bn.iter(|| black_box(is_ff.call1((&a, &test)).unwrap())));
-        group.bench_function("numpy_isin_S8_2m", |bn| bn.iter(|| black_box(is_nn.call1((&a, &test)).unwrap())));
-        group.bench_function("fnp_setxor1d_S8_2m", |bn| bn.iter(|| black_box(xr_ff.call1((&a, &b)).unwrap())));
-        group.bench_function("numpy_setxor1d_S8_2m", |bn| bn.iter(|| black_box(xr_nn.call1((&a, &b)).unwrap())));
+        group.bench_function("fnp_searchsorted_S8_2m", |bn| {
+            bn.iter(|| black_box(ss_ff.call1((&h, &q)).unwrap()))
+        });
+        group.bench_function("numpy_searchsorted_S8_2m", |bn| {
+            bn.iter(|| black_box(ss_nn.call1((&h, &q)).unwrap()))
+        });
+        group.bench_function("fnp_isin_S8_2m", |bn| {
+            bn.iter(|| black_box(is_ff.call1((&a, &test)).unwrap()))
+        });
+        group.bench_function("numpy_isin_S8_2m", |bn| {
+            bn.iter(|| black_box(is_nn.call1((&a, &test)).unwrap()))
+        });
+        group.bench_function("fnp_setxor1d_S8_2m", |bn| {
+            bn.iter(|| black_box(xr_ff.call1((&a, &b)).unwrap()))
+        });
+        group.bench_function("numpy_setxor1d_S8_2m", |bn| {
+            bn.iter(|| black_box(xr_nn.call1((&a, &b)).unwrap()))
+        });
 
         // S16: the wide two-word-key byte pack (S9..16 previously fell to the memcmp/FNV routes).
         // Full byte range incl. embedded nulls (raw padded memcmp == numpy 'S' order).
@@ -8110,8 +8772,12 @@ a16 = rng.integers(0, 256, (1_000_000, 16), dtype=np.uint8).view('S16').reshape(
 brand16 = rng.integers(0, 256, (500_000, 16), dtype=np.uint8).view('S16').reshape(-1)\n\
 b16 = np.concatenate([a16[:500_000], brand16])\n";
         let ns16 = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup16).unwrap().as_c_str(), Some(&ns16), Some(&ns16))
-            .expect("S16 setup");
+        py.run(
+            std::ffi::CString::new(setup16).unwrap().as_c_str(),
+            Some(&ns16),
+            Some(&ns16),
+        )
+        .expect("S16 setup");
         let a16 = ns16.get_item("a16").expect("a16");
         let b16 = ns16.get_item("b16").expect("b16");
         let ix_ff = module.getattr("intersect1d").unwrap();
@@ -8119,12 +8785,23 @@ b16 = np.concatenate([a16[:500_000], brand16])\n";
         for op in ["intersect1d", "setxor1d"] {
             let f = module.getattr(op).unwrap().call1((&a16, &b16)).unwrap();
             let n = numpy.getattr(op).unwrap().call1((&a16, &b16)).unwrap();
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "S16 {op} mismatch");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "S16 {op} mismatch"
+            );
         }
-        group.bench_function("fnp_intersect1d_S16_1m", |bn| bn.iter(|| black_box(ix_ff.call1((&a16, &b16)).unwrap())));
-        group.bench_function("numpy_intersect1d_S16_1m", |bn| bn.iter(|| black_box(ix_nn.call1((&a16, &b16)).unwrap())));
-        group.bench_function("fnp_setxor1d_S16_1m", |bn| bn.iter(|| black_box(xr_ff.call1((&a16, &b16)).unwrap())));
-        group.bench_function("numpy_setxor1d_S16_1m", |bn| bn.iter(|| black_box(xr_nn.call1((&a16, &b16)).unwrap())));
+        group.bench_function("fnp_intersect1d_S16_1m", |bn| {
+            bn.iter(|| black_box(ix_ff.call1((&a16, &b16)).unwrap()))
+        });
+        group.bench_function("numpy_intersect1d_S16_1m", |bn| {
+            bn.iter(|| black_box(ix_nn.call1((&a16, &b16)).unwrap()))
+        });
+        group.bench_function("fnp_setxor1d_S16_1m", |bn| {
+            bn.iter(|| black_box(xr_ff.call1((&a16, &b16)).unwrap()))
+        });
+        group.bench_function("numpy_setxor1d_S16_1m", |bn| {
+            bn.iter(|| black_box(xr_nn.call1((&a16, &b16)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -8150,16 +8827,28 @@ re = rng.integers(0, 1000, 2_000_000).astype(np.float64)\n\
 im = rng.integers(0, 1000, 2_000_000).astype(np.float64)\n\
 c = re + 1j * im\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let cc = ns.get_item("c").expect("c");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         let f = fnp_u.call1((&cc,)).expect("fnp unique");
         let n = numpy_u.call1((&cc,)).expect("numpy unique");
-        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "complex unique mismatch");
-        group.bench_function("fnp_unique_c128_2m", |bn| bn.iter(|| black_box(fnp_u.call1((&cc,)).unwrap())));
-        group.bench_function("numpy_unique_c128_2m", |bn| bn.iter(|| black_box(numpy_u.call1((&cc,)).unwrap())));
+        assert!(
+            eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+            "complex unique mismatch"
+        );
+        group.bench_function("fnp_unique_c128_2m", |bn| {
+            bn.iter(|| black_box(fnp_u.call1((&cc,)).unwrap()))
+        });
+        group.bench_function("numpy_unique_c128_2m", |bn| {
+            bn.iter(|| black_box(numpy_u.call1((&cc,)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -8184,16 +8873,28 @@ re = rng.integers(0, 1000, 2_000_000).astype(np.float32)\n\
 im = rng.integers(0, 1000, 2_000_000).astype(np.float32)\n\
 c = (re + 1j * im).astype(np.complex64)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let cc = ns.get_item("c").expect("c");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         let f = fnp_u.call1((&cc,)).expect("fnp unique");
         let n = numpy_u.call1((&cc,)).expect("numpy unique");
-        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "complex64 unique mismatch");
-        group.bench_function("fnp_unique_c64_2m", |bn| bn.iter(|| black_box(fnp_u.call1((&cc,)).unwrap())));
-        group.bench_function("numpy_unique_c64_2m", |bn| bn.iter(|| black_box(numpy_u.call1((&cc,)).unwrap())));
+        assert!(
+            eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+            "complex64 unique mismatch"
+        );
+        group.bench_function("fnp_unique_c64_2m", |bn| {
+            bn.iter(|| black_box(fnp_u.call1((&cc,)).unwrap()))
+        });
+        group.bench_function("numpy_unique_c64_2m", |bn| {
+            bn.iter(|| black_box(numpy_u.call1((&cc,)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -8217,7 +8918,12 @@ rng = np.random.default_rng(0)\n\
 h = np.sort(rng.integers(0, 1000, 2_000_000).astype(np.float64) + 1j * rng.integers(0, 1000, 2_000_000).astype(np.float64))\n\
 q = rng.integers(0, 1000, 2_000_000).astype(np.float64) + 1j * rng.integers(0, 1000, 2_000_000).astype(np.float64)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let h = ns.get_item("h").expect("h");
         let q = ns.get_item("q").expect("q");
         let fnp_ss = module.getattr("searchsorted").expect("fnp searchsorted");
@@ -8228,10 +8934,17 @@ q = rng.integers(0, 1000, 2_000_000).astype(np.float64) + 1j * rng.integers(0, 1
             kw.set_item("side", side).unwrap();
             let f = fnp_ss.call((&h, &q), Some(&kw)).expect("fnp ss");
             let n = numpy_ss.call((&h, &q), Some(&kw)).expect("numpy ss");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "complex searchsorted mismatch side={side}");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "complex searchsorted mismatch side={side}"
+            );
         }
-        group.bench_function("fnp_searchsorted_c128_2m", |bn| bn.iter(|| black_box(fnp_ss.call1((&h, &q)).unwrap())));
-        group.bench_function("numpy_searchsorted_c128_2m", |bn| bn.iter(|| black_box(numpy_ss.call1((&h, &q)).unwrap())));
+        group.bench_function("fnp_searchsorted_c128_2m", |bn| {
+            bn.iter(|| black_box(fnp_ss.call1((&h, &q)).unwrap()))
+        });
+        group.bench_function("numpy_searchsorted_c128_2m", |bn| {
+            bn.iter(|| black_box(numpy_ss.call1((&h, &q)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -8256,7 +8969,12 @@ a = rng.integers(0, 1000, 2_000_000).astype(np.float64) + 1j * rng.integers(0, 1
 trand = rng.integers(0, 1000, 100_000).astype(np.float64) + 1j * rng.integers(0, 1000, 100_000).astype(np.float64)\n\
 test = np.concatenate([a[:100_000], trand])\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let test = ns.get_item("test").expect("test");
         let fnp_isin = module.getattr("isin").expect("fnp isin");
@@ -8267,10 +8985,17 @@ test = np.concatenate([a[:100_000], trand])\n";
             kw.set_item("invert", inv).unwrap();
             let f = fnp_isin.call((&a, &test), Some(&kw)).expect("fnp isin");
             let n = numpy_isin.call((&a, &test), Some(&kw)).expect("numpy isin");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "complex isin mismatch invert={inv}");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "complex isin mismatch invert={inv}"
+            );
         }
-        group.bench_function("fnp_isin_c128_2m", |bn| bn.iter(|| black_box(fnp_isin.call1((&a, &test)).unwrap())));
-        group.bench_function("numpy_isin_c128_2m", |bn| bn.iter(|| black_box(numpy_isin.call1((&a, &test)).unwrap())));
+        group.bench_function("fnp_isin_c128_2m", |bn| {
+            bn.iter(|| black_box(fnp_isin.call1((&a, &test)).unwrap()))
+        });
+        group.bench_function("numpy_isin_c128_2m", |bn| {
+            bn.iter(|| black_box(numpy_isin.call1((&a, &test)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -8296,7 +9021,12 @@ a = (rng.integers(0,1000,2_000_000)+1j*rng.integers(0,1000,2_000_000)).astype(np
 trand = (rng.integers(0,1000,100_000)+1j*rng.integers(0,1000,100_000)).astype(np.complex64)\n\
 test = np.concatenate([a[:100_000], trand])\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let h = ns.get_item("h").unwrap();
         let q = ns.get_item("q").unwrap();
         let a = ns.get_item("a").unwrap();
@@ -8304,25 +9034,57 @@ test = np.concatenate([a[:100_000], trand])\n";
         let eqf = numpy.getattr("array_equal").unwrap();
         // searchsorted correctness (left+right) + isin (default+invert).
         for side in ["left", "right"] {
-            let kw = PyDict::new(py); kw.set_item("side", side).unwrap();
-            let f = module.getattr("searchsorted").unwrap().call((&h, &q), Some(&kw)).unwrap();
-            let n = numpy.getattr("searchsorted").unwrap().call((&h, &q), Some(&kw)).unwrap();
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "c64 searchsorted mismatch side={side}");
+            let kw = PyDict::new(py);
+            kw.set_item("side", side).unwrap();
+            let f = module
+                .getattr("searchsorted")
+                .unwrap()
+                .call((&h, &q), Some(&kw))
+                .unwrap();
+            let n = numpy
+                .getattr("searchsorted")
+                .unwrap()
+                .call((&h, &q), Some(&kw))
+                .unwrap();
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "c64 searchsorted mismatch side={side}"
+            );
         }
         for inv in [false, true] {
-            let kw = PyDict::new(py); kw.set_item("invert", inv).unwrap();
-            let f = module.getattr("isin").unwrap().call((&a, &test), Some(&kw)).unwrap();
-            let n = numpy.getattr("isin").unwrap().call((&a, &test), Some(&kw)).unwrap();
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "c64 isin mismatch invert={inv}");
+            let kw = PyDict::new(py);
+            kw.set_item("invert", inv).unwrap();
+            let f = module
+                .getattr("isin")
+                .unwrap()
+                .call((&a, &test), Some(&kw))
+                .unwrap();
+            let n = numpy
+                .getattr("isin")
+                .unwrap()
+                .call((&a, &test), Some(&kw))
+                .unwrap();
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "c64 isin mismatch invert={inv}"
+            );
         }
         let ss_f = module.getattr("searchsorted").unwrap();
         let ss_n = numpy.getattr("searchsorted").unwrap();
         let is_f = module.getattr("isin").unwrap();
         let is_n = numpy.getattr("isin").unwrap();
-        group.bench_function("fnp_searchsorted_c64_2m", |bn| bn.iter(|| black_box(ss_f.call1((&h, &q)).unwrap())));
-        group.bench_function("numpy_searchsorted_c64_2m", |bn| bn.iter(|| black_box(ss_n.call1((&h, &q)).unwrap())));
-        group.bench_function("fnp_isin_c64_2m", |bn| bn.iter(|| black_box(is_f.call1((&a, &test)).unwrap())));
-        group.bench_function("numpy_isin_c64_2m", |bn| bn.iter(|| black_box(is_n.call1((&a, &test)).unwrap())));
+        group.bench_function("fnp_searchsorted_c64_2m", |bn| {
+            bn.iter(|| black_box(ss_f.call1((&h, &q)).unwrap()))
+        });
+        group.bench_function("numpy_searchsorted_c64_2m", |bn| {
+            bn.iter(|| black_box(ss_n.call1((&h, &q)).unwrap()))
+        });
+        group.bench_function("fnp_isin_c64_2m", |bn| {
+            bn.iter(|| black_box(is_f.call1((&a, &test)).unwrap()))
+        });
+        group.bench_function("numpy_isin_c64_2m", |bn| {
+            bn.iter(|| black_box(is_n.call1((&a, &test)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -8346,7 +9108,12 @@ rng = np.random.default_rng(0)\n\
 dt = rng.integers(0, 100000, 2_000_000).astype('datetime64[s]')\n\
 td = rng.integers(0, 100000, 2_000_000).astype('timedelta64[s]')\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let dt = ns.get_item("dt").expect("dt");
         let td = ns.get_item("td").expect("td");
         let fnp_u = module.getattr("unique").expect("fnp unique");
@@ -8355,10 +9122,17 @@ td = rng.integers(0, 100000, 2_000_000).astype('timedelta64[s]')\n";
         for (arr, label) in [(&dt, "datetime64"), (&td, "timedelta64")] {
             let f = fnp_u.call1((arr,)).expect("fnp unique");
             let n = numpy_u.call1((arr,)).expect("numpy unique");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "{label} unique mismatch");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "{label} unique mismatch"
+            );
         }
-        group.bench_function("fnp_unique_datetime64_2m", |bn| bn.iter(|| black_box(fnp_u.call1((&dt,)).unwrap())));
-        group.bench_function("numpy_unique_datetime64_2m", |bn| bn.iter(|| black_box(numpy_u.call1((&dt,)).unwrap())));
+        group.bench_function("fnp_unique_datetime64_2m", |bn| {
+            bn.iter(|| black_box(fnp_u.call1((&dt,)).unwrap()))
+        });
+        group.bench_function("numpy_unique_datetime64_2m", |bn| {
+            bn.iter(|| black_box(numpy_u.call1((&dt,)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -8385,16 +9159,28 @@ a['a'] = rng.integers(-50, 50, n)\n\
 a['b'] = rng.integers(-50, 50, n)\n\
 a['c'] = rng.integers(-50, 50, n)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         let f = fnp_u.call1((&a,)).expect("fnp unique");
         let n = numpy_u.call1((&a,)).expect("numpy unique");
-        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "unique struct mismatch");
-        group.bench_function("fnp_unique_struct_3xi8_1m", |bn| bn.iter(|| black_box(fnp_u.call1((&a,)).unwrap())));
-        group.bench_function("numpy_unique_struct_3xi8_1m", |bn| bn.iter(|| black_box(numpy_u.call1((&a,)).unwrap())));
+        assert!(
+            eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+            "unique struct mismatch"
+        );
+        group.bench_function("fnp_unique_struct_3xi8_1m", |bn| {
+            bn.iter(|| black_box(fnp_u.call1((&a,)).unwrap()))
+        });
+        group.bench_function("numpy_unique_struct_3xi8_1m", |bn| {
+            bn.iter(|| black_box(numpy_u.call1((&a,)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -8422,16 +9208,28 @@ a['id'] = rng.integers(-100000, 100000, n)\n\
 a['val'] = rng.integers(-100000, 100000, n).astype(np.float64)\n\
 a['flag'] = rng.integers(0, 100, n)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         let f = fnp_u.call1((&a,)).expect("fnp unique");
         let n = numpy_u.call1((&a,)).expect("numpy unique");
-        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "unique struct mixed mismatch");
-        group.bench_function("fnp_unique_struct_i8f8i4_1m", |bn| bn.iter(|| black_box(fnp_u.call1((&a,)).unwrap())));
-        group.bench_function("numpy_unique_struct_i8f8i4_1m", |bn| bn.iter(|| black_box(numpy_u.call1((&a,)).unwrap())));
+        assert!(
+            eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+            "unique struct mixed mismatch"
+        );
+        group.bench_function("fnp_unique_struct_i8f8i4_1m", |bn| {
+            bn.iter(|| black_box(fnp_u.call1((&a,)).unwrap()))
+        });
+        group.bench_function("numpy_unique_struct_i8f8i4_1m", |bn| {
+            bn.iter(|| black_box(numpy_u.call1((&a,)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -8455,34 +9253,57 @@ rng = np.random.default_rng(0)\n\
 base = rng.integers(0, 100000, (250_000, 3)).astype('datetime64[s]')\n\
 a = np.concatenate([base, base])\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         // plain
-        let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+        let kw = PyDict::new(py);
+        kw.set_item("axis", 0_i64).unwrap();
         let f = fnp_u.call((&a,), Some(&kw)).expect("fnp unique");
         let n = numpy_u.call((&a,), Some(&kw)).expect("numpy unique");
-        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "datetime rows plain mismatch");
+        assert!(
+            eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+            "datetime rows plain mismatch"
+        );
         // factorize
         let kwf = PyDict::new(py);
         kwf.set_item("axis", 0_i64).unwrap();
         kwf.set_item("return_index", true).unwrap();
         kwf.set_item("return_inverse", true).unwrap();
         kwf.set_item("return_counts", true).unwrap();
-        let ft = fnp_u.call((&a,), Some(&kwf)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
-        let nt = numpy_u.call((&a,), Some(&kwf)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+        let ft = fnp_u
+            .call((&a,), Some(&kwf))
+            .expect("fnp full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
+        let nt = numpy_u
+            .call((&a,), Some(&kwf))
+            .expect("numpy full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
         for i in 0..4 {
-            let eq: bool = eqf.call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap())).unwrap().extract().unwrap();
+            let eq: bool = eqf
+                .call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap()))
+                .unwrap()
+                .extract()
+                .unwrap();
             assert!(eq, "datetime rows factorize element {i} mismatch");
         }
         group.bench_function("fnp_unique_rows_datetime_500kx3", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
             bn.iter(|| black_box(fnp_u.call((&a,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_unique_rows_datetime_500kx3", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
             bn.iter(|| black_box(numpy_u.call((&a,), Some(&kw)).unwrap()));
         });
     });
@@ -8508,32 +9329,55 @@ rng = np.random.default_rng(0)\n\
 base = rng.integers(0, 50, (250_000, 4)).astype(np.float16)\n\
 a = np.concatenate([base, base])\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
-        let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+        let kw = PyDict::new(py);
+        kw.set_item("axis", 0_i64).unwrap();
         let f = fnp_u.call((&a,), Some(&kw)).expect("fnp unique");
         let n = numpy_u.call((&a,), Some(&kw)).expect("numpy unique");
-        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "f16 rows plain mismatch");
+        assert!(
+            eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+            "f16 rows plain mismatch"
+        );
         let kwf = PyDict::new(py);
         kwf.set_item("axis", 0_i64).unwrap();
         kwf.set_item("return_index", true).unwrap();
         kwf.set_item("return_inverse", true).unwrap();
         kwf.set_item("return_counts", true).unwrap();
-        let ft = fnp_u.call((&a,), Some(&kwf)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
-        let nt = numpy_u.call((&a,), Some(&kwf)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+        let ft = fnp_u
+            .call((&a,), Some(&kwf))
+            .expect("fnp full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
+        let nt = numpy_u
+            .call((&a,), Some(&kwf))
+            .expect("numpy full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
         for i in 0..4 {
-            let eq: bool = eqf.call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap())).unwrap().extract().unwrap();
+            let eq: bool = eqf
+                .call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap()))
+                .unwrap()
+                .extract()
+                .unwrap();
             assert!(eq, "f16 rows factorize element {i} mismatch");
         }
         group.bench_function("fnp_unique_rows_f16_500kx4", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
             bn.iter(|| black_box(fnp_u.call((&a,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_unique_rows_f16_500kx4", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
             bn.iter(|| black_box(numpy_u.call((&a,), Some(&kw)).unwrap()));
         });
     });
@@ -8561,7 +9405,12 @@ a['a'] = rng.integers(-30, 30, n)\n\
 a['b'] = rng.integers(-30, 30, n)\n\
 a['c'] = rng.integers(-30, 30, n)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
@@ -8570,10 +9419,22 @@ a['c'] = rng.integers(-30, 30, n)\n";
         kwfull.set_item("return_index", true).unwrap();
         kwfull.set_item("return_inverse", true).unwrap();
         kwfull.set_item("return_counts", true).unwrap();
-        let ft = fnp_u.call((&a,), Some(&kwfull)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
-        let nt = numpy_u.call((&a,), Some(&kwfull)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+        let ft = fnp_u
+            .call((&a,), Some(&kwfull))
+            .expect("fnp full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
+        let nt = numpy_u
+            .call((&a,), Some(&kwfull))
+            .expect("numpy full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
         for i in 0..4 {
-            let eq: bool = eqf.call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap())).unwrap().extract().unwrap();
+            let eq: bool = eqf
+                .call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap()))
+                .unwrap()
+                .extract()
+                .unwrap();
             assert!(eq, "struct factorize element {i} mismatch");
         }
         group.bench_function("fnp_unique_struct_factorize_3xi8_1m", |bn| {
@@ -8613,7 +9474,12 @@ rng = np.random.default_rng(0)\n\
 dt = [('id','<i8'),('val','<f8')]\n\
 a = np.zeros(1_000_000, dtype=dt); a['id'] = rng.integers(0, 10000, 1_000_000); a['val'] = rng.integers(0, 10000, 1_000_000).astype(np.float64)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
@@ -8622,10 +9488,22 @@ a = np.zeros(1_000_000, dtype=dt); a['id'] = rng.integers(0, 10000, 1_000_000); 
         kwf.set_item("return_index", true).unwrap();
         kwf.set_item("return_inverse", true).unwrap();
         kwf.set_item("return_counts", true).unwrap();
-        let ft = fnp_u.call((&a,), Some(&kwf)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
-        let nt = numpy_u.call((&a,), Some(&kwf)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+        let ft = fnp_u
+            .call((&a,), Some(&kwf))
+            .expect("fnp full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
+        let nt = numpy_u
+            .call((&a,), Some(&kwf))
+            .expect("numpy full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
         for i in 0..4 {
-            let eq: bool = eqf.call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap())).unwrap().extract().unwrap();
+            let eq: bool = eqf
+                .call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap()))
+                .unwrap()
+                .extract()
+                .unwrap();
             assert!(eq, "mixed struct factorize element {i} mismatch");
         }
         group.bench_function("fnp_unique_struct_mixed_factorize_1m", |bn| {
@@ -8668,7 +9546,12 @@ k2 = rng.standard_normal(2_000_000)\n\
 keys2 = (k0, k1)\n\
 keys3 = (k0, k1, k2)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let keys2 = ns.get_item("keys2").expect("keys2");
         let keys3 = ns.get_item("keys3").expect("keys3");
         let fnp_lx = module.getattr("lexsort").expect("fnp lexsort");
@@ -8677,12 +9560,23 @@ keys3 = (k0, k1, k2)\n";
         for (keys, label) in [(&keys2, "2key"), (&keys3, "3key")] {
             let f = fnp_lx.call1((keys,)).expect("fnp lexsort");
             let n = numpy_lx.call1((keys,)).expect("numpy lexsort");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "lexsort float {label} mismatch");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "lexsort float {label} mismatch"
+            );
         }
-        group.bench_function("fnp_lexsort_f64_2key_2m", |bn| bn.iter(|| black_box(fnp_lx.call1((&keys2,)).unwrap())));
-        group.bench_function("numpy_lexsort_f64_2key_2m", |bn| bn.iter(|| black_box(numpy_lx.call1((&keys2,)).unwrap())));
-        group.bench_function("fnp_lexsort_f64_3key_2m", |bn| bn.iter(|| black_box(fnp_lx.call1((&keys3,)).unwrap())));
-        group.bench_function("numpy_lexsort_f64_3key_2m", |bn| bn.iter(|| black_box(numpy_lx.call1((&keys3,)).unwrap())));
+        group.bench_function("fnp_lexsort_f64_2key_2m", |bn| {
+            bn.iter(|| black_box(fnp_lx.call1((&keys2,)).unwrap()))
+        });
+        group.bench_function("numpy_lexsort_f64_2key_2m", |bn| {
+            bn.iter(|| black_box(numpy_lx.call1((&keys2,)).unwrap()))
+        });
+        group.bench_function("fnp_lexsort_f64_3key_2m", |bn| {
+            bn.iter(|| black_box(fnp_lx.call1((&keys3,)).unwrap()))
+        });
+        group.bench_function("numpy_lexsort_f64_3key_2m", |bn| {
+            bn.iter(|| black_box(numpy_lx.call1((&keys3,)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -8709,7 +9603,12 @@ dt = [('id','<i8'),('val','<f8')]\n\
 a = np.zeros(1_000_000, dtype=dt); a['id'] = rng.integers(0, 10000, 1_000_000); a['val'] = rng.integers(0, 10000, 1_000_000).astype(np.float64)\n\
 a_argsort = np.zeros(1_000_000, dtype=dt); a_argsort['id'] = rng.permutation(1_000_000); a_argsort['val'] = rng.standard_normal(1_000_000)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let a_argsort = ns.get_item("a_argsort").expect("a_argsort");
         let fnp_s = module.getattr("sort").expect("fnp sort");
@@ -8719,15 +9618,25 @@ a_argsort = np.zeros(1_000_000, dtype=dt); a_argsort['id'] = rng.permutation(1_0
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         let f = fnp_s.call1((&a,)).expect("fnp sort");
         let n = numpy_s.call1((&a,)).expect("numpy sort");
-        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "sort mixed struct mismatch");
+        assert!(
+            eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+            "sort mixed struct mismatch"
+        );
         let f_idx = fnp_as.call1((&a_argsort,)).expect("fnp argsort");
         let n_idx = numpy_as.call1((&a_argsort,)).expect("numpy argsort");
         assert!(
-            eqf.call1((&f_idx, &n_idx)).unwrap().extract::<bool>().unwrap(),
+            eqf.call1((&f_idx, &n_idx))
+                .unwrap()
+                .extract::<bool>()
+                .unwrap(),
             "argsort mixed struct mismatch"
         );
-        group.bench_function("fnp_sort_struct_i8f8_1m", |bn| bn.iter(|| black_box(fnp_s.call1((&a,)).unwrap())));
-        group.bench_function("numpy_sort_struct_i8f8_1m", |bn| bn.iter(|| black_box(numpy_s.call1((&a,)).unwrap())));
+        group.bench_function("fnp_sort_struct_i8f8_1m", |bn| {
+            bn.iter(|| black_box(fnp_s.call1((&a,)).unwrap()))
+        });
+        group.bench_function("numpy_sort_struct_i8f8_1m", |bn| {
+            bn.iter(|| black_box(numpy_s.call1((&a,)).unwrap()))
+        });
         group.bench_function("fnp_argsort_struct_i8f8_distinct_1m", |bn| {
             bn.iter(|| black_box(fnp_as.call1((&a_argsort,)).unwrap()))
         });
@@ -8757,32 +9666,45 @@ rng = np.random.default_rng(0)\n\
 di = rng.integers(0, 1000, 8_000_000).astype(np.int64)\n\
 df = rng.integers(0, 1000, 8_000_000).astype(np.float64)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let di = ns.get_item("di").expect("di");
         let df = ns.get_item("df").expect("df");
         let fnp_as = module.getattr("argsort").expect("fnp argsort");
         let numpy_as = numpy.getattr("argsort").expect("numpy argsort");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         for (arr, label) in [(&di, "i64"), (&df, "f64")] {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             let f = fnp_as.call((arr,), Some(&kw)).expect("fnp argsort");
             let n = numpy_as.call((arr,), Some(&kw)).expect("numpy argsort");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "argsort {label} dense stable mismatch");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "argsort {label} dense stable mismatch"
+            );
         }
         group.bench_function("fnp_argsort_i64_dense_stable_8m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(fnp_as.call((&di,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_argsort_i64_dense_stable_8m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(numpy_as.call((&di,), Some(&kw)).unwrap()));
         });
         group.bench_function("fnp_argsort_f64_dense_stable_8m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(fnp_as.call((&df,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_argsort_f64_dense_stable_8m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(numpy_as.call((&df,), Some(&kw)).unwrap()));
         });
     });
@@ -8809,32 +9731,50 @@ rng = np.random.default_rng(0)\n\
 mi = np.ascontiguousarray(rng.integers(0, 100, (4000, 2000)).astype(np.int64))\n\
 mf = np.ascontiguousarray(rng.integers(0, 100, (4000, 2000)).astype(np.float64))\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let mi = ns.get_item("mi").expect("mi");
         let mf = ns.get_item("mf").expect("mf");
         let fnp_as = module.getattr("argsort").expect("fnp argsort");
         let numpy_as = numpy.getattr("argsort").expect("numpy argsort");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         for (arr, label) in [(&mi, "i64"), (&mf, "f64")] {
-            let kw = PyDict::new(py); kw.set_item("axis", -1).unwrap(); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", -1).unwrap();
+            kw.set_item("kind", "stable").unwrap();
             let f = fnp_as.call((arr,), Some(&kw)).expect("fnp argsort");
             let n = numpy_as.call((arr,), Some(&kw)).expect("numpy argsort");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "argsort 2D {label} axis=-1 stable mismatch");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "argsort 2D {label} axis=-1 stable mismatch"
+            );
         }
         group.bench_function("fnp_argsort_i64_2d_lastaxis_stable_8m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", -1).unwrap(); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", -1).unwrap();
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(fnp_as.call((&mi,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_argsort_i64_2d_lastaxis_stable_8m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", -1).unwrap(); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", -1).unwrap();
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(numpy_as.call((&mi,), Some(&kw)).unwrap()));
         });
         group.bench_function("fnp_argsort_f64_2d_lastaxis_stable_8m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", -1).unwrap(); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", -1).unwrap();
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(fnp_as.call((&mf,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_argsort_f64_2d_lastaxis_stable_8m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", -1).unwrap(); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", -1).unwrap();
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(numpy_as.call((&mf,), Some(&kw)).unwrap()));
         });
     });
@@ -8861,32 +9801,45 @@ rng = np.random.default_rng(0)\n\
 wi = rng.integers(0, 2**30, 16_000_000).astype(np.int64)\n\
 wu = rng.integers(0, 2**52, 16_000_000).astype(np.uint64)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let wi = ns.get_item("wi").expect("wi");
         let wu = ns.get_item("wu").expect("wu");
         let fnp_as = module.getattr("argsort").expect("fnp argsort");
         let numpy_as = numpy.getattr("argsort").expect("numpy argsort");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         for (arr, label) in [(&wi, "i64_2p30"), (&wu, "u64_2p52")] {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             let f = fnp_as.call((arr,), Some(&kw)).expect("fnp argsort");
             let n = numpy_as.call((arr,), Some(&kw)).expect("numpy argsort");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "argsort wide {label} stable mismatch");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "argsort wide {label} stable mismatch"
+            );
         }
         group.bench_function("fnp_argsort_i64_wide_stable_16m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(fnp_as.call((&wi,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_argsort_i64_wide_stable_16m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(numpy_as.call((&wi,), Some(&kw)).unwrap()));
         });
         group.bench_function("fnp_argsort_u64_wide_stable_16m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(fnp_as.call((&wu,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_argsort_u64_wide_stable_16m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(numpy_as.call((&wu,), Some(&kw)).unwrap()));
         });
     });
@@ -8914,32 +9867,45 @@ f64 = rng.standard_normal(16_000_000)\n\
 f64[rng.integers(0, 16_000_000, 1000)] *= -1.0\n\
 f32 = rng.integers(-100000, 100000, 16_000_000).astype(np.float32) / 7.0\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let f64a = ns.get_item("f64").expect("f64");
         let f32a = ns.get_item("f32").expect("f32");
         let fnp_as = module.getattr("argsort").expect("fnp argsort");
         let numpy_as = numpy.getattr("argsort").expect("numpy argsort");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         for (arr, label) in [(&f64a, "f64"), (&f32a, "f32")] {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             let f = fnp_as.call((arr,), Some(&kw)).expect("fnp argsort");
             let n = numpy_as.call((arr,), Some(&kw)).expect("numpy argsort");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "argsort float {label} stable mismatch");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "argsort float {label} stable mismatch"
+            );
         }
         group.bench_function("fnp_argsort_f64_stable_16m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(fnp_as.call((&f64a,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_argsort_f64_stable_16m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(numpy_as.call((&f64a,), Some(&kw)).unwrap()));
         });
         group.bench_function("fnp_argsort_f32_stable_16m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(fnp_as.call((&f32a,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_argsort_f32_stable_16m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(numpy_as.call((&f32a,), Some(&kw)).unwrap()));
         });
     });
@@ -8968,22 +9934,42 @@ di = rng.permutation(16_000_000).astype(np.int64)\n\
 du = rng.permutation(16_000_000).astype(np.uint64)\n\
 tied = rng.integers(0, 1000, 16_000_000).astype(np.int64)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let di = ns.get_item("di").expect("di");
         let du = ns.get_item("du").expect("du");
         let tied = ns.get_item("tied").expect("tied");
         let fnp_as = module.getattr("argsort").expect("fnp argsort");
         let numpy_as = numpy.getattr("argsort").expect("numpy argsort");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
-        for (arr, label) in [(&di, "i64_distinct"), (&du, "u64_distinct"), (&tied, "i64_tied")] {
+        for (arr, label) in [
+            (&di, "i64_distinct"),
+            (&du, "u64_distinct"),
+            (&tied, "i64_tied"),
+        ] {
             let f = fnp_as.call1((arr,)).expect("fnp argsort");
             let n = numpy_as.call1((arr,)).expect("numpy argsort");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "default argsort {label} mismatch");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "default argsort {label} mismatch"
+            );
         }
-        group.bench_function("fnp_argsort_i64_distinct_default_16m", |bn| bn.iter(|| black_box(fnp_as.call1((&di,)).unwrap())));
-        group.bench_function("numpy_argsort_i64_distinct_default_16m", |bn| bn.iter(|| black_box(numpy_as.call1((&di,)).unwrap())));
-        group.bench_function("fnp_argsort_u64_distinct_default_16m", |bn| bn.iter(|| black_box(fnp_as.call1((&du,)).unwrap())));
-        group.bench_function("numpy_argsort_u64_distinct_default_16m", |bn| bn.iter(|| black_box(numpy_as.call1((&du,)).unwrap())));
+        group.bench_function("fnp_argsort_i64_distinct_default_16m", |bn| {
+            bn.iter(|| black_box(fnp_as.call1((&di,)).unwrap()))
+        });
+        group.bench_function("numpy_argsort_i64_distinct_default_16m", |bn| {
+            bn.iter(|| black_box(numpy_as.call1((&di,)).unwrap()))
+        });
+        group.bench_function("fnp_argsort_u64_distinct_default_16m", |bn| {
+            bn.iter(|| black_box(fnp_as.call1((&du,)).unwrap()))
+        });
+        group.bench_function("numpy_argsort_u64_distinct_default_16m", |bn| {
+            bn.iter(|| black_box(numpy_as.call1((&du,)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -9007,24 +9993,44 @@ fn bench_argsort_default_float_radix_boundary(c: &mut Criterion) {
 rng = np.random.default_rng(0)\n\
 f64d = rng.standard_normal(16_000_000)\n\
 f32d = rng.permutation(16_000_000).astype(np.float32)\n\
-tied = np.round(rng.standard_normal(16_000_000), 2)\n";  // f32d: ints < 2**24 exact -> distinct; tied: dense dups -> defers
+tied = np.round(rng.standard_normal(16_000_000), 2)\n"; // f32d: ints < 2**24 exact -> distinct; tied: dense dups -> defers
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let f64d = ns.get_item("f64d").expect("f64d");
         let f32d = ns.get_item("f32d").expect("f32d");
         let tied = ns.get_item("tied").expect("tied");
         let fnp_as = module.getattr("argsort").expect("fnp argsort");
         let numpy_as = numpy.getattr("argsort").expect("numpy argsort");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
-        for (arr, label) in [(&f64d, "f64_distinct"), (&f32d, "f32_distinct"), (&tied, "f64_tied")] {
+        for (arr, label) in [
+            (&f64d, "f64_distinct"),
+            (&f32d, "f32_distinct"),
+            (&tied, "f64_tied"),
+        ] {
             let f = fnp_as.call1((arr,)).expect("fnp argsort");
             let n = numpy_as.call1((arr,)).expect("numpy argsort");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "default float argsort {label} mismatch");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "default float argsort {label} mismatch"
+            );
         }
-        group.bench_function("fnp_argsort_f64_distinct_default_16m", |bn| bn.iter(|| black_box(fnp_as.call1((&f64d,)).unwrap())));
-        group.bench_function("numpy_argsort_f64_distinct_default_16m", |bn| bn.iter(|| black_box(numpy_as.call1((&f64d,)).unwrap())));
-        group.bench_function("fnp_argsort_f32_distinct_default_16m", |bn| bn.iter(|| black_box(fnp_as.call1((&f32d,)).unwrap())));
-        group.bench_function("numpy_argsort_f32_distinct_default_16m", |bn| bn.iter(|| black_box(numpy_as.call1((&f32d,)).unwrap())));
+        group.bench_function("fnp_argsort_f64_distinct_default_16m", |bn| {
+            bn.iter(|| black_box(fnp_as.call1((&f64d,)).unwrap()))
+        });
+        group.bench_function("numpy_argsort_f64_distinct_default_16m", |bn| {
+            bn.iter(|| black_box(numpy_as.call1((&f64d,)).unwrap()))
+        });
+        group.bench_function("fnp_argsort_f32_distinct_default_16m", |bn| {
+            bn.iter(|| black_box(fnp_as.call1((&f32d,)).unwrap()))
+        });
+        group.bench_function("numpy_argsort_f32_distinct_default_16m", |bn| {
+            bn.iter(|| black_box(numpy_as.call1((&f32d,)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -9046,9 +10052,14 @@ fn bench_argsort_datetime_radix_boundary(c: &mut Criterion) {
         let setup = "import numpy as np\n\
 rng = np.random.default_rng(0)\n\
 dt = rng.permutation(16_000_000).astype('datetime64[s]')\n\
-dt_tied = rng.integers(0, 1000, 16_000_000).astype('datetime64[s]')\n";  // distinct + dense-tied
+dt_tied = rng.integers(0, 1000, 16_000_000).astype('datetime64[s]')\n"; // distinct + dense-tied
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let dt = ns.get_item("dt").expect("dt");
         let dt_tied = ns.get_item("dt_tied").expect("dt_tied");
         let fnp_as = module.getattr("argsort").expect("fnp argsort");
@@ -9058,21 +10069,34 @@ dt_tied = rng.integers(0, 1000, 16_000_000).astype('datetime64[s]')\n";  // dist
         for (arr, label) in [(&dt, "distinct_default"), (&dt_tied, "tied_default")] {
             let f = fnp_as.call1((arr,)).expect("fnp argsort");
             let n = numpy_as.call1((arr,)).expect("numpy argsort");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "datetime argsort {label} mismatch");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "datetime argsort {label} mismatch"
+            );
         }
         // stable kind on tied datetime (dense) -> counting/radix, bit-exact
-        let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+        let kw = PyDict::new(py);
+        kw.set_item("kind", "stable").unwrap();
         let fs = fnp_as.call((&dt_tied,), Some(&kw)).expect("fnp stable");
         let ns_ = numpy_as.call((&dt_tied,), Some(&kw)).expect("numpy stable");
-        assert!(eqf.call1((&fs, &ns_)).unwrap().extract::<bool>().unwrap(), "datetime argsort stable tied mismatch");
-        group.bench_function("fnp_argsort_datetime_distinct_default_16m", |bn| bn.iter(|| black_box(fnp_as.call1((&dt,)).unwrap())));
-        group.bench_function("numpy_argsort_datetime_distinct_default_16m", |bn| bn.iter(|| black_box(numpy_as.call1((&dt,)).unwrap())));
+        assert!(
+            eqf.call1((&fs, &ns_)).unwrap().extract::<bool>().unwrap(),
+            "datetime argsort stable tied mismatch"
+        );
+        group.bench_function("fnp_argsort_datetime_distinct_default_16m", |bn| {
+            bn.iter(|| black_box(fnp_as.call1((&dt,)).unwrap()))
+        });
+        group.bench_function("numpy_argsort_datetime_distinct_default_16m", |bn| {
+            bn.iter(|| black_box(numpy_as.call1((&dt,)).unwrap()))
+        });
         group.bench_function("fnp_argsort_datetime_tied_stable_16m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(fnp_as.call((&dt_tied,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_argsort_datetime_tied_stable_16m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(numpy_as.call((&dt_tied,), Some(&kw)).unwrap()));
         });
     });
@@ -9100,22 +10124,41 @@ even_i64 = rng.integers(0, 1000, 16_000_000).astype(np.int64)\n\
 odd_i64  = rng.integers(-500, 500, 16_000_001).astype(np.int64)\n\
 i16 = rng.integers(0, 30000, 16_000_000).astype(np.int16)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let fnp_m = module.getattr("median").expect("fnp median");
         let numpy_m = numpy.getattr("median").expect("numpy median");
         for name in ["even_i64", "odd_i64", "i16"] {
             let arr = ns.get_item(name).expect("arr");
             let f = fnp_m.call1((&arr,)).expect("fnp median");
             let n = numpy_m.call1((&arr,)).expect("numpy median");
-            let eq: bool = numpy.getattr("equal").unwrap().call1((&f, &n)).unwrap().extract().unwrap();
+            let eq: bool = numpy
+                .getattr("equal")
+                .unwrap()
+                .call1((&f, &n))
+                .unwrap()
+                .extract()
+                .unwrap();
             assert!(eq, "median {name} mismatch: fnp {:?} numpy {:?}", f, n);
         }
         let ev = ns.get_item("even_i64").expect("ev");
         let i16a = ns.get_item("i16").expect("i16a");
-        group.bench_function("fnp_median_i64_dense_16m", |bn| bn.iter(|| black_box(fnp_m.call1((&ev,)).unwrap())));
-        group.bench_function("numpy_median_i64_dense_16m", |bn| bn.iter(|| black_box(numpy_m.call1((&ev,)).unwrap())));
-        group.bench_function("fnp_median_i16_dense_16m", |bn| bn.iter(|| black_box(fnp_m.call1((&i16a,)).unwrap())));
-        group.bench_function("numpy_median_i16_dense_16m", |bn| bn.iter(|| black_box(numpy_m.call1((&i16a,)).unwrap())));
+        group.bench_function("fnp_median_i64_dense_16m", |bn| {
+            bn.iter(|| black_box(fnp_m.call1((&ev,)).unwrap()))
+        });
+        group.bench_function("numpy_median_i64_dense_16m", |bn| {
+            bn.iter(|| black_box(numpy_m.call1((&ev,)).unwrap()))
+        });
+        group.bench_function("fnp_median_i16_dense_16m", |bn| {
+            bn.iter(|| black_box(fnp_m.call1((&i16a,)).unwrap()))
+        });
+        group.bench_function("numpy_median_i16_dense_16m", |bn| {
+            bn.iter(|| black_box(numpy_m.call1((&i16a,)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -9140,22 +10183,50 @@ rng = np.random.default_rng(8)\n\
 i64 = rng.integers(-500, 500, 16_000_000).astype(np.int64)\n\
 u16 = rng.integers(0, 30000, 16_000_000).astype(np.uint16)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let fnp_percentile = module.getattr("percentile").expect("fnp percentile");
         let numpy_percentile = numpy.getattr("percentile").expect("numpy percentile");
         let fnp_quantile = module.getattr("quantile").expect("fnp quantile");
         let numpy_quantile = numpy.getattr("quantile").expect("numpy quantile");
         let i64_arr = ns.get_item("i64").expect("i64");
         let u16_arr = ns.get_item("u16").expect("u16");
-        for (name, arr, p, q) in [("i64", &i64_arr, 12.5_f64, 0.125_f64), ("u16", &u16_arr, 75.0, 0.75)] {
+        for (name, arr, p, q) in [
+            ("i64", &i64_arr, 12.5_f64, 0.125_f64),
+            ("u16", &u16_arr, 75.0, 0.75),
+        ] {
             let fp = fnp_percentile.call1((arr, p)).expect("fnp percentile");
             let np = numpy_percentile.call1((arr, p)).expect("numpy percentile");
             let fq = fnp_quantile.call1((arr, q)).expect("fnp quantile");
             let nq = numpy_quantile.call1((arr, q)).expect("numpy quantile");
-            let eq_p: bool = numpy.getattr("array_equal").unwrap().call1((&fp, &np)).unwrap().extract().unwrap();
-            let eq_q: bool = numpy.getattr("array_equal").unwrap().call1((&fq, &nq)).unwrap().extract().unwrap();
-            assert!(eq_p, "percentile {name} mismatch: fnp {:?} numpy {:?}", fp, np);
-            assert!(eq_q, "quantile {name} mismatch: fnp {:?} numpy {:?}", fq, nq);
+            let eq_p: bool = numpy
+                .getattr("array_equal")
+                .unwrap()
+                .call1((&fp, &np))
+                .unwrap()
+                .extract()
+                .unwrap();
+            let eq_q: bool = numpy
+                .getattr("array_equal")
+                .unwrap()
+                .call1((&fq, &nq))
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert!(
+                eq_p,
+                "percentile {name} mismatch: fnp {:?} numpy {:?}",
+                fp, np
+            );
+            assert!(
+                eq_q,
+                "quantile {name} mismatch: fnp {:?} numpy {:?}",
+                fq, nq
+            );
         }
         group.bench_function("fnp_percentile_i64_dense_16m_p12_5", |bn| {
             bn.iter(|| black_box(fnp_percentile.call1((&i64_arr, 12.5_f64)).unwrap()));
@@ -9192,8 +10263,12 @@ rng = np.random.default_rng(0)\n\
 dt = rng.integers(0, 1000, 8_000_000).astype('datetime64[s]')\n\
 cz = (rng.integers(0, 100, 8_000_000) + 1j*rng.integers(0, 100, 8_000_000)).astype(np.complex128)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns))
-            .expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let dt = ns.get_item("dt").expect("dt");
         let cz = ns.get_item("cz").expect("cz");
         let fnp_as = module.getattr("argsort").expect("fnp argsort");
@@ -9252,32 +10327,45 @@ rng = np.random.default_rng(0)\n\
 u = rng.integers(97, 123, (2_000_000, 6), dtype=np.uint32).reshape(-1).view('U6')\n\
 s = rng.integers(97, 123, (2_000_000, 6), dtype=np.uint8).reshape(-1).view('S6')\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let u = ns.get_item("u").expect("u");
         let s = ns.get_item("s").expect("s");
         let fnp_as = module.getattr("argsort").expect("fnp argsort");
         let numpy_as = numpy.getattr("argsort").expect("numpy argsort");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         for (arr, label) in [(&u, "U6"), (&s, "S6")] {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             let f = fnp_as.call((arr,), Some(&kw)).expect("fnp argsort");
             let n = numpy_as.call((arr,), Some(&kw)).expect("numpy argsort");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "argsort {label} stable mismatch");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "argsort {label} stable mismatch"
+            );
         }
         group.bench_function("fnp_argsort_U6_stable_2m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(fnp_as.call((&u,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_argsort_U6_stable_2m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(numpy_as.call((&u,), Some(&kw)).unwrap()));
         });
         group.bench_function("fnp_argsort_S6_stable_2m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(fnp_as.call((&s,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_argsort_S6_stable_2m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(numpy_as.call((&s,), Some(&kw)).unwrap()));
         });
     });
@@ -9303,21 +10391,32 @@ rng = np.random.default_rng(0)\n\
 dt = [('id','<i8'),('val','<f8')]\n\
 a = np.zeros(2_000_000, dtype=dt); a['id'] = rng.integers(0, 100000, 2_000_000); a['val'] = rng.integers(0, 100000, 2_000_000).astype(np.float64)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let fnp_as = module.getattr("argsort").expect("fnp argsort");
         let numpy_as = numpy.getattr("argsort").expect("numpy argsort");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
-        let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+        let kw = PyDict::new(py);
+        kw.set_item("kind", "stable").unwrap();
         let f = fnp_as.call((&a,), Some(&kw)).expect("fnp argsort");
         let n = numpy_as.call((&a,), Some(&kw)).expect("numpy argsort");
-        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "argsort struct stable mismatch");
+        assert!(
+            eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+            "argsort struct stable mismatch"
+        );
         group.bench_function("fnp_argsort_struct_i8f8_2m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(fnp_as.call((&a,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_argsort_struct_i8f8_2m", |bn| {
-            let kw = PyDict::new(py); kw.set_item("kind", "stable").unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("kind", "stable").unwrap();
             bn.iter(|| black_box(numpy_as.call((&a,), Some(&kw)).unwrap()));
         });
     });
@@ -9342,18 +10441,35 @@ fn bench_unique_arrayapi_boundary(c: &mut Criterion) {
 rng = np.random.default_rng(0)\n\
 s = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8')\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let s = ns.get_item("s").expect("s");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         // correctness: compare each namedtuple field of unique_counts and unique_all
         for op in ["unique_counts", "unique_all"] {
             let fnp_fn = module.getattr(op).expect("fnp op");
             let np_fn = numpy.getattr(op).expect("numpy op");
-            let f = fnp_fn.call1((&s,)).expect("fnp").downcast_into::<pyo3::types::PyTuple>().unwrap();
-            let n = np_fn.call1((&s,)).expect("numpy").downcast_into::<pyo3::types::PyTuple>().unwrap();
+            let f = fnp_fn
+                .call1((&s,))
+                .expect("fnp")
+                .downcast_into::<pyo3::types::PyTuple>()
+                .unwrap();
+            let n = np_fn
+                .call1((&s,))
+                .expect("numpy")
+                .downcast_into::<pyo3::types::PyTuple>()
+                .unwrap();
             let nfields = if op == "unique_counts" { 2 } else { 4 };
             for i in 0..nfields {
-                let eq: bool = eqf.call1((f.get_item(i).unwrap(), n.get_item(i).unwrap())).unwrap().extract().unwrap();
+                let eq: bool = eqf
+                    .call1((f.get_item(i).unwrap(), n.get_item(i).unwrap()))
+                    .unwrap()
+                    .extract()
+                    .unwrap();
                 assert!(eq, "{op} field {i} mismatch");
             }
         }
@@ -9361,10 +10477,18 @@ s = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8'
         let np_uc = numpy.getattr("unique_counts").unwrap();
         let fnp_ua = module.getattr("unique_all").unwrap();
         let np_ua = numpy.getattr("unique_all").unwrap();
-        group.bench_function("fnp_unique_counts_U8_2m", |bn| bn.iter(|| black_box(fnp_uc.call1((&s,)).unwrap())));
-        group.bench_function("numpy_unique_counts_U8_2m", |bn| bn.iter(|| black_box(np_uc.call1((&s,)).unwrap())));
-        group.bench_function("fnp_unique_all_U8_2m", |bn| bn.iter(|| black_box(fnp_ua.call1((&s,)).unwrap())));
-        group.bench_function("numpy_unique_all_U8_2m", |bn| bn.iter(|| black_box(np_ua.call1((&s,)).unwrap())));
+        group.bench_function("fnp_unique_counts_U8_2m", |bn| {
+            bn.iter(|| black_box(fnp_uc.call1((&s,)).unwrap()))
+        });
+        group.bench_function("numpy_unique_counts_U8_2m", |bn| {
+            bn.iter(|| black_box(np_uc.call1((&s,)).unwrap()))
+        });
+        group.bench_function("fnp_unique_all_U8_2m", |bn| {
+            bn.iter(|| black_box(fnp_ua.call1((&s,)).unwrap()))
+        });
+        group.bench_function("numpy_unique_all_U8_2m", |bn| {
+            bn.iter(|| black_box(np_ua.call1((&s,)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -9389,7 +10513,12 @@ dt = [('a','<i8'),('b','<i8')]\n\
 a = np.zeros(1_000_000, dtype=dt); a['a'] = rng.integers(0, 1000, 1_000_000); a['b'] = rng.integers(0, 1000, 1_000_000)\n\
 b = np.zeros(500_000, dtype=dt); b['a'] = rng.integers(0, 1000, 500_000); b['b'] = rng.integers(0, 1000, 500_000)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let b = ns.get_item("b").expect("b");
         let fnp_isin = module.getattr("isin").expect("fnp isin");
@@ -9397,9 +10526,16 @@ b = np.zeros(500_000, dtype=dt); b['a'] = rng.integers(0, 1000, 500_000); b['b']
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         let f = fnp_isin.call1((&a, &b)).expect("fnp isin");
         let n = numpy_isin.call1((&a, &b)).expect("numpy isin");
-        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "isin struct mismatch");
-        group.bench_function("fnp_isin_struct_2xi8_1m_500k", |bn| bn.iter(|| black_box(fnp_isin.call1((&a, &b)).unwrap())));
-        group.bench_function("numpy_isin_struct_2xi8_1m_500k", |bn| bn.iter(|| black_box(numpy_isin.call1((&a, &b)).unwrap())));
+        assert!(
+            eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+            "isin struct mismatch"
+        );
+        group.bench_function("fnp_isin_struct_2xi8_1m_500k", |bn| {
+            bn.iter(|| black_box(fnp_isin.call1((&a, &b)).unwrap()))
+        });
+        group.bench_function("numpy_isin_struct_2xi8_1m_500k", |bn| {
+            bn.iter(|| black_box(numpy_isin.call1((&a, &b)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -9424,7 +10560,12 @@ dt = [('id','<i8'),('val','<f8')]\n\
 a = np.zeros(1_000_000, dtype=dt); a['id'] = rng.integers(0, 1000, 1_000_000); a['val'] = rng.integers(0, 1000, 1_000_000).astype(np.float64)\n\
 b = np.zeros(500_000, dtype=dt); b['id'] = rng.integers(0, 1000, 500_000); b['val'] = rng.integers(0, 1000, 500_000).astype(np.float64)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let b = ns.get_item("b").expect("b");
         let fnp_isin = module.getattr("isin").expect("fnp isin");
@@ -9432,9 +10573,16 @@ b = np.zeros(500_000, dtype=dt); b['id'] = rng.integers(0, 1000, 500_000); b['va
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         let f = fnp_isin.call1((&a, &b)).expect("fnp isin");
         let n = numpy_isin.call1((&a, &b)).expect("numpy isin");
-        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "isin struct int+f8 mismatch");
-        group.bench_function("fnp_isin_struct_i8f8_1m_500k", |bn| bn.iter(|| black_box(fnp_isin.call1((&a, &b)).unwrap())));
-        group.bench_function("numpy_isin_struct_i8f8_1m_500k", |bn| bn.iter(|| black_box(numpy_isin.call1((&a, &b)).unwrap())));
+        assert!(
+            eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+            "isin struct int+f8 mismatch"
+        );
+        group.bench_function("fnp_isin_struct_i8f8_1m_500k", |bn| {
+            bn.iter(|| black_box(fnp_isin.call1((&a, &b)).unwrap()))
+        });
+        group.bench_function("numpy_isin_struct_i8f8_1m_500k", |bn| {
+            bn.iter(|| black_box(numpy_isin.call1((&a, &b)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -9459,20 +10607,37 @@ dt = [('a','<i8'),('b','<i8')]\n\
 hay = np.zeros(2_000_000, dtype=dt); hay['a'] = rng.integers(0, 100000, 2_000_000); hay['b'] = rng.integers(0, 100000, 2_000_000); hay = np.sort(hay)\n\
 q = np.zeros(2_000_000, dtype=dt); q['a'] = rng.integers(0, 100000, 2_000_000); q['b'] = rng.integers(0, 100000, 2_000_000)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let hay = ns.get_item("hay").expect("hay");
         let q = ns.get_item("q").expect("q");
         let fnp_ss = module.getattr("searchsorted").expect("fnp searchsorted");
         let numpy_ss = numpy.getattr("searchsorted").expect("numpy searchsorted");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         for side in ["left", "right"] {
-            let kw = PyDict::new(py); kw.set_item("side", side).unwrap();
-            let f = fnp_ss.call((&hay, &q), Some(&kw)).expect("fnp searchsorted");
-            let n = numpy_ss.call((&hay, &q), Some(&kw)).expect("numpy searchsorted");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "searchsorted struct side={side} mismatch");
+            let kw = PyDict::new(py);
+            kw.set_item("side", side).unwrap();
+            let f = fnp_ss
+                .call((&hay, &q), Some(&kw))
+                .expect("fnp searchsorted");
+            let n = numpy_ss
+                .call((&hay, &q), Some(&kw))
+                .expect("numpy searchsorted");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "searchsorted struct side={side} mismatch"
+            );
         }
-        group.bench_function("fnp_searchsorted_struct_2xi8_2m_2m", |bn| bn.iter(|| black_box(fnp_ss.call1((&hay, &q)).unwrap())));
-        group.bench_function("numpy_searchsorted_struct_2xi8_2m_2m", |bn| bn.iter(|| black_box(numpy_ss.call1((&hay, &q)).unwrap())));
+        group.bench_function("fnp_searchsorted_struct_2xi8_2m_2m", |bn| {
+            bn.iter(|| black_box(fnp_ss.call1((&hay, &q)).unwrap()))
+        });
+        group.bench_function("numpy_searchsorted_struct_2xi8_2m_2m", |bn| {
+            bn.iter(|| black_box(numpy_ss.call1((&hay, &q)).unwrap()))
+        });
 
         let setup_u64 = "import numpy as np\n\
 rng = np.random.default_rng(1)\n\
@@ -9486,17 +10651,34 @@ q_u = np.zeros(n, dtype=dt)\n\
 qa = rng.integers(0, n, n, dtype=np.uint64)\n\
 q_u['a'] = qa // np.uint64(1000)\n\
 q_u['b'] = qa % np.uint64(1000)\n";
-        py.run(std::ffi::CString::new(setup_u64).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("u64 setup");
+        py.run(
+            std::ffi::CString::new(setup_u64).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("u64 setup");
         let hay_u = ns.get_item("hay_u").expect("hay_u");
         let q_u = ns.get_item("q_u").expect("q_u");
         for side in ["left", "right"] {
-            let kw = PyDict::new(py); kw.set_item("side", side).unwrap();
-            let f = fnp_ss.call((&hay_u, &q_u), Some(&kw)).expect("fnp u64 searchsorted");
-            let n = numpy_ss.call((&hay_u, &q_u), Some(&kw)).expect("numpy u64 searchsorted");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "u64 searchsorted struct side={side} mismatch");
+            let kw = PyDict::new(py);
+            kw.set_item("side", side).unwrap();
+            let f = fnp_ss
+                .call((&hay_u, &q_u), Some(&kw))
+                .expect("fnp u64 searchsorted");
+            let n = numpy_ss
+                .call((&hay_u, &q_u), Some(&kw))
+                .expect("numpy u64 searchsorted");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "u64 searchsorted struct side={side} mismatch"
+            );
         }
-        group.bench_function("fnp_searchsorted_struct_2xu8_1m_1m", |bn| bn.iter(|| black_box(fnp_ss.call1((&hay_u, &q_u)).unwrap())));
-        group.bench_function("numpy_searchsorted_struct_2xu8_1m_1m", |bn| bn.iter(|| black_box(numpy_ss.call1((&hay_u, &q_u)).unwrap())));
+        group.bench_function("fnp_searchsorted_struct_2xu8_1m_1m", |bn| {
+            bn.iter(|| black_box(fnp_ss.call1((&hay_u, &q_u)).unwrap()))
+        });
+        group.bench_function("numpy_searchsorted_struct_2xu8_1m_1m", |bn| {
+            bn.iter(|| black_box(numpy_ss.call1((&hay_u, &q_u)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -9521,20 +10703,37 @@ dt = [('id','<i8'),('val','<f8')]\n\
 hay = np.zeros(2_000_000, dtype=dt); hay['id'] = rng.integers(0, 100000, 2_000_000); hay['val'] = rng.integers(0, 100000, 2_000_000).astype(np.float64); hay = np.sort(hay)\n\
 q = np.zeros(2_000_000, dtype=dt); q['id'] = rng.integers(0, 100000, 2_000_000); q['val'] = rng.integers(0, 100000, 2_000_000).astype(np.float64)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let hay = ns.get_item("hay").expect("hay");
         let q = ns.get_item("q").expect("q");
         let fnp_ss = module.getattr("searchsorted").expect("fnp searchsorted");
         let numpy_ss = numpy.getattr("searchsorted").expect("numpy searchsorted");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         for side in ["left", "right"] {
-            let kw = PyDict::new(py); kw.set_item("side", side).unwrap();
-            let f = fnp_ss.call((&hay, &q), Some(&kw)).expect("fnp searchsorted");
-            let n = numpy_ss.call((&hay, &q), Some(&kw)).expect("numpy searchsorted");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "searchsorted mixed struct side={side} mismatch");
+            let kw = PyDict::new(py);
+            kw.set_item("side", side).unwrap();
+            let f = fnp_ss
+                .call((&hay, &q), Some(&kw))
+                .expect("fnp searchsorted");
+            let n = numpy_ss
+                .call((&hay, &q), Some(&kw))
+                .expect("numpy searchsorted");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "searchsorted mixed struct side={side} mismatch"
+            );
         }
-        group.bench_function("fnp_searchsorted_struct_i8f8_2m_2m", |bn| bn.iter(|| black_box(fnp_ss.call1((&hay, &q)).unwrap())));
-        group.bench_function("numpy_searchsorted_struct_i8f8_2m_2m", |bn| bn.iter(|| black_box(numpy_ss.call1((&hay, &q)).unwrap())));
+        group.bench_function("fnp_searchsorted_struct_i8f8_2m_2m", |bn| {
+            bn.iter(|| black_box(fnp_ss.call1((&hay, &q)).unwrap()))
+        });
+        group.bench_function("numpy_searchsorted_struct_i8f8_2m_2m", |bn| {
+            bn.iter(|| black_box(numpy_ss.call1((&hay, &q)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -9559,7 +10758,12 @@ dt = [('a','<i8'),('b','<i8')]\n\
 a = np.zeros(1_000_000, dtype=dt); a['a'] = rng.integers(0, 3000, 1_000_000); a['b'] = rng.integers(0, 3000, 1_000_000)\n\
 b = np.zeros(1_000_000, dtype=dt); b['a'] = rng.integers(0, 3000, 1_000_000); b['b'] = rng.integers(0, 3000, 1_000_000)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let b = ns.get_item("b").expect("b");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
@@ -9568,9 +10772,16 @@ b = np.zeros(1_000_000, dtype=dt); b['a'] = rng.integers(0, 3000, 1_000_000); b[
             let np_fn = numpy.getattr(op).expect("numpy op");
             let f = fnp_fn.call1((&a, &b)).expect("fnp setop");
             let n = np_fn.call1((&a, &b)).expect("numpy setop");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "{op} struct mismatch");
-            group.bench_function(format!("fnp_{op}_struct_1m_1m"), |bn| bn.iter(|| black_box(fnp_fn.call1((&a, &b)).unwrap())));
-            group.bench_function(format!("numpy_{op}_struct_1m_1m"), |bn| bn.iter(|| black_box(np_fn.call1((&a, &b)).unwrap())));
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "{op} struct mismatch"
+            );
+            group.bench_function(format!("fnp_{op}_struct_1m_1m"), |bn| {
+                bn.iter(|| black_box(fnp_fn.call1((&a, &b)).unwrap()))
+            });
+            group.bench_function(format!("numpy_{op}_struct_1m_1m"), |bn| {
+                bn.iter(|| black_box(np_fn.call1((&a, &b)).unwrap()))
+            });
         }
     });
     group.finish();
@@ -9599,7 +10810,12 @@ dt32 = [('id','<i4'),('val','<f4')]\n\
 a32 = np.zeros(1_000_000, dtype=dt32); a32['id'] = rng.integers(0, 3000, 1_000_000, dtype=np.int32); a32['val'] = rng.integers(0, 3000, 1_000_000).astype(np.float32)\n\
 b32 = np.zeros(1_000_000, dtype=dt32); b32['id'] = rng.integers(0, 3000, 1_000_000, dtype=np.int32); b32['val'] = rng.integers(0, 3000, 1_000_000).astype(np.float32)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let b = ns.get_item("b").expect("b");
         let a32 = ns.get_item("a32").expect("a32");
@@ -9610,9 +10826,16 @@ b32 = np.zeros(1_000_000, dtype=dt32); b32['id'] = rng.integers(0, 3000, 1_000_0
             let np_fn = numpy.getattr(op).expect("numpy op");
             let f = fnp_fn.call1((&a, &b)).expect("fnp setop");
             let n = np_fn.call1((&a, &b)).expect("numpy setop");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "{op} mixed struct mismatch");
-            group.bench_function(format!("fnp_{op}_struct_i8f8_1m_1m"), |bn| bn.iter(|| black_box(fnp_fn.call1((&a, &b)).unwrap())));
-            group.bench_function(format!("numpy_{op}_struct_i8f8_1m_1m"), |bn| bn.iter(|| black_box(np_fn.call1((&a, &b)).unwrap())));
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "{op} mixed struct mismatch"
+            );
+            group.bench_function(format!("fnp_{op}_struct_i8f8_1m_1m"), |bn| {
+                bn.iter(|| black_box(fnp_fn.call1((&a, &b)).unwrap()))
+            });
+            group.bench_function(format!("numpy_{op}_struct_i8f8_1m_1m"), |bn| {
+                bn.iter(|| black_box(np_fn.call1((&a, &b)).unwrap()))
+            });
             let f32 = fnp_fn.call1((&a32, &b32)).expect("fnp i4f4 setop");
             let n32 = np_fn.call1((&a32, &b32)).expect("numpy i4f4 setop");
             assert!(
@@ -9649,7 +10872,12 @@ rng = np.random.default_rng(0)\n\
 a = (rng.integers(0, 3000, 2_000_000) + 1j * rng.integers(0, 3000, 2_000_000)).astype(np.complex128)\n\
 b = (rng.integers(0, 3000, 2_000_000) + 1j * rng.integers(0, 3000, 2_000_000)).astype(np.complex128)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let b = ns.get_item("b").expect("b");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
@@ -9659,9 +10887,16 @@ b = (rng.integers(0, 3000, 2_000_000) + 1j * rng.integers(0, 3000, 2_000_000)).a
             let np_fn = numpy.getattr(op).expect("numpy op");
             let f = fnp_fn.call1((&a, &b)).expect("fnp setop");
             let n = np_fn.call1((&a, &b)).expect("numpy setop");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "{op} c128 mismatch");
-            group.bench_function(format!("fnp_{op}_c128_2m_2m"), |bn| bn.iter(|| black_box(fnp_fn.call1((&a, &b)).unwrap())));
-            group.bench_function(format!("numpy_{op}_c128_2m_2m"), |bn| bn.iter(|| black_box(np_fn.call1((&a, &b)).unwrap())));
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "{op} c128 mismatch"
+            );
+            group.bench_function(format!("fnp_{op}_c128_2m_2m"), |bn| {
+                bn.iter(|| black_box(fnp_fn.call1((&a, &b)).unwrap()))
+            });
+            group.bench_function(format!("numpy_{op}_c128_2m_2m"), |bn| {
+                bn.iter(|| black_box(np_fn.call1((&a, &b)).unwrap()))
+            });
         }
     });
     group.finish();
@@ -9686,7 +10921,12 @@ rng = np.random.default_rng(0)\n\
 a = rng.integers(0, 3000, 2_000_000).astype('datetime64[s]')\n\
 b = rng.integers(0, 3000, 2_000_000).astype('datetime64[s]')\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let b = ns.get_item("b").expect("b");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
@@ -9695,9 +10935,16 @@ b = rng.integers(0, 3000, 2_000_000).astype('datetime64[s]')\n";
             let np_fn = numpy.getattr(op).expect("numpy op");
             let f = fnp_fn.call1((&a, &b)).expect("fnp setop");
             let n = np_fn.call1((&a, &b)).expect("numpy setop");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "{op} datetime mismatch");
-            group.bench_function(format!("fnp_{op}_datetime_2m_2m"), |bn| bn.iter(|| black_box(fnp_fn.call1((&a, &b)).unwrap())));
-            group.bench_function(format!("numpy_{op}_datetime_2m_2m"), |bn| bn.iter(|| black_box(np_fn.call1((&a, &b)).unwrap())));
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "{op} datetime mismatch"
+            );
+            group.bench_function(format!("fnp_{op}_datetime_2m_2m"), |bn| {
+                bn.iter(|| black_box(fnp_fn.call1((&a, &b)).unwrap()))
+            });
+            group.bench_function(format!("numpy_{op}_datetime_2m_2m"), |bn| {
+                bn.iter(|| black_box(np_fn.call1((&a, &b)).unwrap()))
+            });
         }
     });
     group.finish();
@@ -9724,26 +10971,51 @@ q = rng.integers(0, 10**9, 2_000_000).astype('datetime64[s]')\n\
 ia = rng.integers(0, 100000, 2_000_000).astype('datetime64[s]')\n\
 ib = rng.integers(0, 100000, 1_000_000).astype('datetime64[s]')\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
-        let (hay, q, ia, ib) = (ns.get_item("hay").unwrap(), ns.get_item("q").unwrap(), ns.get_item("ia").unwrap(), ns.get_item("ib").unwrap());
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
+        let (hay, q, ia, ib) = (
+            ns.get_item("hay").unwrap(),
+            ns.get_item("q").unwrap(),
+            ns.get_item("ia").unwrap(),
+            ns.get_item("ib").unwrap(),
+        );
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
         let fnp_ss = module.getattr("searchsorted").unwrap();
         let numpy_ss = numpy.getattr("searchsorted").unwrap();
         let fnp_isin = module.getattr("isin").unwrap();
         let numpy_isin = numpy.getattr("isin").unwrap();
         for side in ["left", "right"] {
-            let kw = PyDict::new(py); kw.set_item("side", side).unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("side", side).unwrap();
             let f = fnp_ss.call((&hay, &q), Some(&kw)).unwrap();
             let n = numpy_ss.call((&hay, &q), Some(&kw)).unwrap();
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "datetime searchsorted {side} mismatch");
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "datetime searchsorted {side} mismatch"
+            );
         }
         let fi = fnp_isin.call1((&ia, &ib)).unwrap();
         let ni = numpy_isin.call1((&ia, &ib)).unwrap();
-        assert!(eqf.call1((&fi, &ni)).unwrap().extract::<bool>().unwrap(), "datetime isin mismatch");
-        group.bench_function("fnp_searchsorted_datetime_2m_2m", |bn| bn.iter(|| black_box(fnp_ss.call1((&hay, &q)).unwrap())));
-        group.bench_function("numpy_searchsorted_datetime_2m_2m", |bn| bn.iter(|| black_box(numpy_ss.call1((&hay, &q)).unwrap())));
-        group.bench_function("fnp_isin_datetime_2m_1m", |bn| bn.iter(|| black_box(fnp_isin.call1((&ia, &ib)).unwrap())));
-        group.bench_function("numpy_isin_datetime_2m_1m", |bn| bn.iter(|| black_box(numpy_isin.call1((&ia, &ib)).unwrap())));
+        assert!(
+            eqf.call1((&fi, &ni)).unwrap().extract::<bool>().unwrap(),
+            "datetime isin mismatch"
+        );
+        group.bench_function("fnp_searchsorted_datetime_2m_2m", |bn| {
+            bn.iter(|| black_box(fnp_ss.call1((&hay, &q)).unwrap()))
+        });
+        group.bench_function("numpy_searchsorted_datetime_2m_2m", |bn| {
+            bn.iter(|| black_box(numpy_ss.call1((&hay, &q)).unwrap()))
+        });
+        group.bench_function("fnp_isin_datetime_2m_1m", |bn| {
+            bn.iter(|| black_box(fnp_isin.call1((&ia, &ib)).unwrap()))
+        });
+        group.bench_function("numpy_isin_datetime_2m_1m", |bn| {
+            bn.iter(|| black_box(numpy_isin.call1((&ia, &ib)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -9770,21 +11042,74 @@ hq = (rng.integers(0, 2000, 2_000_000) / 7).astype(np.float16)\n\
 ia = (rng.integers(0, 2000, 2_000_000) / 7).astype(np.float16)\n\
 ib = (rng.integers(0, 2000, 1_000_000) / 7).astype(np.float16)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
-        let (u, hs, hq, ia, ib) = (ns.get_item("u").unwrap(), ns.get_item("hs").unwrap(), ns.get_item("hq").unwrap(), ns.get_item("ia").unwrap(), ns.get_item("ib").unwrap());
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
+        let (u, hs, hq, ia, ib) = (
+            ns.get_item("u").unwrap(),
+            ns.get_item("hs").unwrap(),
+            ns.get_item("hq").unwrap(),
+            ns.get_item("ia").unwrap(),
+            ns.get_item("ib").unwrap(),
+        );
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
-        let (fu, nu_) = (module.getattr("unique").unwrap(), numpy.getattr("unique").unwrap());
-        let (fss, nss) = (module.getattr("searchsorted").unwrap(), numpy.getattr("searchsorted").unwrap());
-        let (fi, ni) = (module.getattr("isin").unwrap(), numpy.getattr("isin").unwrap());
-        assert!(eqf.call1((fu.call1((&u,)).unwrap(), nu_.call1((&u,)).unwrap())).unwrap().extract::<bool>().unwrap(), "f16 unique mismatch");
-        assert!(eqf.call1((fss.call1((&hs, &hq)).unwrap(), nss.call1((&hs, &hq)).unwrap())).unwrap().extract::<bool>().unwrap(), "f16 searchsorted mismatch");
-        assert!(eqf.call1((fi.call1((&ia, &ib)).unwrap(), ni.call1((&ia, &ib)).unwrap())).unwrap().extract::<bool>().unwrap(), "f16 isin mismatch");
-        group.bench_function("fnp_unique_f16_4m", |bn| bn.iter(|| black_box(fu.call1((&u,)).unwrap())));
-        group.bench_function("numpy_unique_f16_4m", |bn| bn.iter(|| black_box(nu_.call1((&u,)).unwrap())));
-        group.bench_function("fnp_searchsorted_f16_2m_2m", |bn| bn.iter(|| black_box(fss.call1((&hs, &hq)).unwrap())));
-        group.bench_function("numpy_searchsorted_f16_2m_2m", |bn| bn.iter(|| black_box(nss.call1((&hs, &hq)).unwrap())));
-        group.bench_function("fnp_isin_f16_2m_1m", |bn| bn.iter(|| black_box(fi.call1((&ia, &ib)).unwrap())));
-        group.bench_function("numpy_isin_f16_2m_1m", |bn| bn.iter(|| black_box(ni.call1((&ia, &ib)).unwrap())));
+        let (fu, nu_) = (
+            module.getattr("unique").unwrap(),
+            numpy.getattr("unique").unwrap(),
+        );
+        let (fss, nss) = (
+            module.getattr("searchsorted").unwrap(),
+            numpy.getattr("searchsorted").unwrap(),
+        );
+        let (fi, ni) = (
+            module.getattr("isin").unwrap(),
+            numpy.getattr("isin").unwrap(),
+        );
+        assert!(
+            eqf.call1((fu.call1((&u,)).unwrap(), nu_.call1((&u,)).unwrap()))
+                .unwrap()
+                .extract::<bool>()
+                .unwrap(),
+            "f16 unique mismatch"
+        );
+        assert!(
+            eqf.call1((
+                fss.call1((&hs, &hq)).unwrap(),
+                nss.call1((&hs, &hq)).unwrap()
+            ))
+            .unwrap()
+            .extract::<bool>()
+            .unwrap(),
+            "f16 searchsorted mismatch"
+        );
+        assert!(
+            eqf.call1((fi.call1((&ia, &ib)).unwrap(), ni.call1((&ia, &ib)).unwrap()))
+                .unwrap()
+                .extract::<bool>()
+                .unwrap(),
+            "f16 isin mismatch"
+        );
+        group.bench_function("fnp_unique_f16_4m", |bn| {
+            bn.iter(|| black_box(fu.call1((&u,)).unwrap()))
+        });
+        group.bench_function("numpy_unique_f16_4m", |bn| {
+            bn.iter(|| black_box(nu_.call1((&u,)).unwrap()))
+        });
+        group.bench_function("fnp_searchsorted_f16_2m_2m", |bn| {
+            bn.iter(|| black_box(fss.call1((&hs, &hq)).unwrap()))
+        });
+        group.bench_function("numpy_searchsorted_f16_2m_2m", |bn| {
+            bn.iter(|| black_box(nss.call1((&hs, &hq)).unwrap()))
+        });
+        group.bench_function("fnp_isin_f16_2m_1m", |bn| {
+            bn.iter(|| black_box(fi.call1((&ia, &ib)).unwrap()))
+        });
+        group.bench_function("numpy_isin_f16_2m_1m", |bn| {
+            bn.iter(|| black_box(ni.call1((&ia, &ib)).unwrap()))
+        });
     });
     group.finish();
 }
@@ -9808,7 +11133,12 @@ rng = np.random.default_rng(0)\n\
 a = (rng.integers(0, 3000, 2_000_000) / 7).astype(np.float16)\n\
 b = (rng.integers(0, 3000, 2_000_000) / 7).astype(np.float16)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let b = ns.get_item("b").expect("b");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
@@ -9817,9 +11147,16 @@ b = (rng.integers(0, 3000, 2_000_000) / 7).astype(np.float16)\n";
             let np_fn = numpy.getattr(op).expect("numpy op");
             let f = fnp_fn.call1((&a, &b)).expect("fnp setop");
             let n = np_fn.call1((&a, &b)).expect("numpy setop");
-            assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "{op} f16 mismatch");
-            group.bench_function(format!("fnp_{op}_f16_2m_2m"), |bn| bn.iter(|| black_box(fnp_fn.call1((&a, &b)).unwrap())));
-            group.bench_function(format!("numpy_{op}_f16_2m_2m"), |bn| bn.iter(|| black_box(np_fn.call1((&a, &b)).unwrap())));
+            assert!(
+                eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+                "{op} f16 mismatch"
+            );
+            group.bench_function(format!("fnp_{op}_f16_2m_2m"), |bn| {
+                bn.iter(|| black_box(fnp_fn.call1((&a, &b)).unwrap()))
+            });
+            group.bench_function(format!("numpy_{op}_f16_2m_2m"), |bn| {
+                bn.iter(|| black_box(np_fn.call1((&a, &b)).unwrap()))
+            });
         }
     });
     group.finish();
@@ -9846,21 +11183,32 @@ rng = np.random.default_rng(0)\n\
 base = rng.integers(-10**15, 10**15, (250_000, 3)).astype(np.int64)\n\
 a = np.concatenate([base, base])\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
-        let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+        let kw = PyDict::new(py);
+        kw.set_item("axis", 0_i64).unwrap();
         let f = fnp_u.call((&a,), Some(&kw)).expect("fnp unique");
         let n = numpy_u.call((&a,), Some(&kw)).expect("numpy unique");
-        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "unique rows lexsort mismatch");
+        assert!(
+            eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+            "unique rows lexsort mismatch"
+        );
         group.bench_function("fnp_unique_rows_i64_500kx3", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
             bn.iter(|| black_box(fnp_u.call((&a,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_unique_rows_i64_500kx3", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
             bn.iter(|| black_box(numpy_u.call((&a,), Some(&kw)).unwrap()));
         });
     });
@@ -9992,7 +11340,12 @@ rng = np.random.default_rng(0)\n\
 base = rng.integers(-10**15, 10**15, (250_000, 3)).astype(np.int64)\n\
 a = np.concatenate([base, base])\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
@@ -10003,10 +11356,22 @@ a = np.concatenate([base, base])\n";
         kwfull.set_item("return_inverse", true).unwrap();
         kwfull.set_item("return_counts", true).unwrap();
         // Correctness: compare each of the 4 tuple elements.
-        let ft = fnp_u.call((&a,), Some(&kwfull)).expect("fnp unique full").downcast_into::<pyo3::types::PyTuple>().unwrap();
-        let nt = numpy_u.call((&a,), Some(&kwfull)).expect("numpy unique full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+        let ft = fnp_u
+            .call((&a,), Some(&kwfull))
+            .expect("fnp unique full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
+        let nt = numpy_u
+            .call((&a,), Some(&kwfull))
+            .expect("numpy unique full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
         for i in 0..4 {
-            let eq: bool = eqf.call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap())).unwrap().extract().unwrap();
+            let eq: bool = eqf
+                .call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap()))
+                .unwrap()
+                .extract()
+                .unwrap();
             assert!(eq, "unique rows factorize element {i} mismatch");
         }
         group.bench_function("fnp_unique_rows_factorize_500kx3", |bn| {
@@ -10049,21 +11414,32 @@ rng = np.random.default_rng(0)\n\
 base = rng.integers(-100, 100, (250_000, 4)).astype(np.float64)\n\
 a = np.concatenate([base, base])\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
-        let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+        let kw = PyDict::new(py);
+        kw.set_item("axis", 0_i64).unwrap();
         let f = fnp_u.call((&a,), Some(&kw)).expect("fnp unique");
         let n = numpy_u.call((&a,), Some(&kw)).expect("numpy unique");
-        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "unique rows f64 mismatch");
+        assert!(
+            eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+            "unique rows f64 mismatch"
+        );
         group.bench_function("fnp_unique_rows_f64_500kx4", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
             bn.iter(|| black_box(fnp_u.call((&a,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_unique_rows_f64_500kx4", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
             bn.iter(|| black_box(numpy_u.call((&a,), Some(&kw)).unwrap()));
         });
     });
@@ -10088,21 +11464,32 @@ rng = np.random.default_rng(0)\n\
 base = rng.integers(-100, 100, (250_000, 4)).astype(np.float32)\n\
 a = np.concatenate([base, base])\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
-        let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+        let kw = PyDict::new(py);
+        kw.set_item("axis", 0_i64).unwrap();
         let f = fnp_u.call((&a,), Some(&kw)).expect("fnp unique");
         let n = numpy_u.call((&a,), Some(&kw)).expect("numpy unique");
-        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "unique rows f32 mismatch");
+        assert!(
+            eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+            "unique rows f32 mismatch"
+        );
         group.bench_function("fnp_unique_rows_f32_500kx4", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
             bn.iter(|| black_box(fnp_u.call((&a,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_unique_rows_f32_500kx4", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
             bn.iter(|| black_box(numpy_u.call((&a,), Some(&kw)).unwrap()));
         });
     });
@@ -10127,7 +11514,12 @@ rng = np.random.default_rng(0)\n\
 base = rng.integers(-100, 100, (250_000, 4)).astype(np.float64)\n\
 a = np.concatenate([base, base])\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
@@ -10137,10 +11529,22 @@ a = np.concatenate([base, base])\n";
         kwfull.set_item("return_index", true).unwrap();
         kwfull.set_item("return_inverse", true).unwrap();
         kwfull.set_item("return_counts", true).unwrap();
-        let ft = fnp_u.call((&a,), Some(&kwfull)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
-        let nt = numpy_u.call((&a,), Some(&kwfull)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+        let ft = fnp_u
+            .call((&a,), Some(&kwfull))
+            .expect("fnp full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
+        let nt = numpy_u
+            .call((&a,), Some(&kwfull))
+            .expect("numpy full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
         for i in 0..4 {
-            let eq: bool = eqf.call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap())).unwrap().extract().unwrap();
+            let eq: bool = eqf
+                .call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap()))
+                .unwrap()
+                .extract()
+                .unwrap();
             assert!(eq, "f64 factorize element {i} mismatch");
         }
         group.bench_function("fnp_unique_rows_f64_factorize_500kx4", |bn| {
@@ -10181,7 +11585,12 @@ rng = np.random.default_rng(0)\n\
 base = rng.integers(-100, 100, (250_000, 4)).astype(np.float32)\n\
 a = np.concatenate([base, base])\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
@@ -10191,10 +11600,22 @@ a = np.concatenate([base, base])\n";
         kwfull.set_item("return_index", true).unwrap();
         kwfull.set_item("return_inverse", true).unwrap();
         kwfull.set_item("return_counts", true).unwrap();
-        let ft = fnp_u.call((&a,), Some(&kwfull)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
-        let nt = numpy_u.call((&a,), Some(&kwfull)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+        let ft = fnp_u
+            .call((&a,), Some(&kwfull))
+            .expect("fnp full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
+        let nt = numpy_u
+            .call((&a,), Some(&kwfull))
+            .expect("numpy full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
         for i in 0..4 {
-            let eq: bool = eqf.call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap())).unwrap().extract().unwrap();
+            let eq: bool = eqf
+                .call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap()))
+                .unwrap()
+                .extract()
+                .unwrap();
             assert!(eq, "f32 factorize element {i} mismatch");
         }
         group.bench_function("fnp_unique_rows_f32_factorize_500kx4", |bn| {
@@ -10235,21 +11656,32 @@ rng = np.random.default_rng(0)\n\
 base = (rng.integers(0, 50, (250_000, 3)) + 1j * rng.integers(0, 50, (250_000, 3))).astype(np.complex128)\n\
 a = np.concatenate([base, base])\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
-        let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+        let kw = PyDict::new(py);
+        kw.set_item("axis", 0_i64).unwrap();
         let f = fnp_u.call((&a,), Some(&kw)).expect("fnp unique");
         let n = numpy_u.call((&a,), Some(&kw)).expect("numpy unique");
-        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "unique rows c128 mismatch");
+        assert!(
+            eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+            "unique rows c128 mismatch"
+        );
         group.bench_function("fnp_unique_rows_c128_500kx3", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
             bn.iter(|| black_box(fnp_u.call((&a,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_unique_rows_c128_500kx3", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
             bn.iter(|| black_box(numpy_u.call((&a,), Some(&kw)).unwrap()));
         });
     });
@@ -10275,32 +11707,55 @@ rng = np.random.default_rng(0)\n\
 base = (rng.integers(0, 50, (250_000, 3)) + 1j * rng.integers(0, 50, (250_000, 3))).astype(np.complex64)\n\
 a = np.concatenate([base, base])\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
-        let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+        let kw = PyDict::new(py);
+        kw.set_item("axis", 0_i64).unwrap();
         let f = fnp_u.call((&a,), Some(&kw)).expect("fnp unique");
         let n = numpy_u.call((&a,), Some(&kw)).expect("numpy unique");
-        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "c64 rows plain mismatch");
+        assert!(
+            eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+            "c64 rows plain mismatch"
+        );
         let kwf = PyDict::new(py);
         kwf.set_item("axis", 0_i64).unwrap();
         kwf.set_item("return_index", true).unwrap();
         kwf.set_item("return_inverse", true).unwrap();
         kwf.set_item("return_counts", true).unwrap();
-        let ft = fnp_u.call((&a,), Some(&kwf)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
-        let nt = numpy_u.call((&a,), Some(&kwf)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+        let ft = fnp_u
+            .call((&a,), Some(&kwf))
+            .expect("fnp full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
+        let nt = numpy_u
+            .call((&a,), Some(&kwf))
+            .expect("numpy full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
         for i in 0..4 {
-            let eq: bool = eqf.call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap())).unwrap().extract().unwrap();
+            let eq: bool = eqf
+                .call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap()))
+                .unwrap()
+                .extract()
+                .unwrap();
             assert!(eq, "c64 rows factorize element {i} mismatch");
         }
         group.bench_function("fnp_unique_rows_c64_500kx3", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
             bn.iter(|| black_box(fnp_u.call((&a,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_unique_rows_c64_500kx3", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", 0_i64).unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 0_i64).unwrap();
             bn.iter(|| black_box(numpy_u.call((&a,), Some(&kw)).unwrap()));
         });
     });
@@ -10325,7 +11780,12 @@ rng = np.random.default_rng(0)\n\
 base = (rng.integers(0, 50, (250_000, 3)) + 1j * rng.integers(0, 50, (250_000, 3))).astype(np.complex128)\n\
 a = np.concatenate([base, base])\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
@@ -10335,10 +11795,22 @@ a = np.concatenate([base, base])\n";
         kwfull.set_item("return_index", true).unwrap();
         kwfull.set_item("return_inverse", true).unwrap();
         kwfull.set_item("return_counts", true).unwrap();
-        let ft = fnp_u.call((&a,), Some(&kwfull)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
-        let nt = numpy_u.call((&a,), Some(&kwfull)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+        let ft = fnp_u
+            .call((&a,), Some(&kwfull))
+            .expect("fnp full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
+        let nt = numpy_u
+            .call((&a,), Some(&kwfull))
+            .expect("numpy full")
+            .downcast_into::<pyo3::types::PyTuple>()
+            .unwrap();
         for i in 0..4 {
-            let eq: bool = eqf.call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap())).unwrap().extract().unwrap();
+            let eq: bool = eqf
+                .call1((ft.get_item(i).unwrap(), nt.get_item(i).unwrap()))
+                .unwrap()
+                .extract()
+                .unwrap();
             assert!(eq, "c128 factorize element {i} mismatch");
         }
         group.bench_function("fnp_unique_rows_c128_factorize_500kx3", |bn| {
@@ -10380,21 +11852,32 @@ rng = np.random.default_rng(0)\n\
 base = rng.integers(-10**15, 10**15, (3, 250_000)).astype(np.int64)\n\
 a = np.concatenate([base, base], axis=1)\n";
         let ns = PyDict::new(py);
-        py.run(std::ffi::CString::new(setup).unwrap().as_c_str(), Some(&ns), Some(&ns)).expect("setup");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("setup");
         let a = ns.get_item("a").expect("a");
         let fnp_u = module.getattr("unique").expect("fnp unique");
         let numpy_u = numpy.getattr("unique").expect("numpy unique");
         let eqf = numpy.getattr("array_equal").expect("np.array_equal");
-        let kw = PyDict::new(py); kw.set_item("axis", 1_i64).unwrap();
+        let kw = PyDict::new(py);
+        kw.set_item("axis", 1_i64).unwrap();
         let f = fnp_u.call((&a,), Some(&kw)).expect("fnp unique");
         let n = numpy_u.call((&a,), Some(&kw)).expect("numpy unique");
-        assert!(eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(), "unique cols axis=1 mismatch");
+        assert!(
+            eqf.call1((&f, &n)).unwrap().extract::<bool>().unwrap(),
+            "unique cols axis=1 mismatch"
+        );
         group.bench_function("fnp_unique_cols_i64_3x500k", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", 1_i64).unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 1_i64).unwrap();
             bn.iter(|| black_box(fnp_u.call((&a,), Some(&kw)).unwrap()));
         });
         group.bench_function("numpy_unique_cols_i64_3x500k", |bn| {
-            let kw = PyDict::new(py); kw.set_item("axis", 1_i64).unwrap();
+            let kw = PyDict::new(py);
+            kw.set_item("axis", 1_i64).unwrap();
             bn.iter(|| black_box(numpy_u.call((&a,), Some(&kw)).unwrap()));
         });
     });
@@ -10541,7 +12024,13 @@ x_big = rng.integers(0, 512, 64_000_000)\n";
             b.iter(|| black_box(fnp_bc.call((&x_k1000,), Some(&kw)).expect("fnp wbincount")));
         });
         group.bench_function("numpy_bincount_weighted_4m_k1000", |b| {
-            b.iter(|| black_box(numpy_bc.call((&x_k1000,), Some(&kw2)).expect("np wbincount")));
+            b.iter(|| {
+                black_box(
+                    numpy_bc
+                        .call((&x_k1000,), Some(&kw2))
+                        .expect("np wbincount"),
+                )
+            });
         });
     });
 
@@ -10617,10 +12106,22 @@ v_big = rng2.standard_normal(4_000_000)\n";
             b.iter(|| black_box(numpy_ss.call1((&a, &v)).expect("numpy searchsorted")));
         });
         group.bench_function("fnp_searchsorted_f64_4m_haystack4m", |b| {
-            b.iter(|| black_box(fnp_ss.call1((&a_big, &v_big)).expect("fnp searchsorted big")));
+            b.iter(|| {
+                black_box(
+                    fnp_ss
+                        .call1((&a_big, &v_big))
+                        .expect("fnp searchsorted big"),
+                )
+            });
         });
         group.bench_function("numpy_searchsorted_f64_4m_haystack4m", |b| {
-            b.iter(|| black_box(numpy_ss.call1((&a_big, &v_big)).expect("numpy searchsorted big")));
+            b.iter(|| {
+                black_box(
+                    numpy_ss
+                        .call1((&a_big, &v_big))
+                        .expect("numpy searchsorted big"),
+                )
+            });
         });
 
         // f32 twin: 4M sorted f32 haystack + 4M f32 queries. Correctness gate (both sides byte-identical
@@ -10643,21 +12144,40 @@ v_f32 = rng3.standard_normal(4_000_000).astype(np.float32)\n";
             for side in ["left", "right"] {
                 let kw = PyDict::new(py);
                 kw.set_item("side", side).expect("side");
-                let got = fnp_ss.call((&a_f32, &v_f32), Some(&kw)).expect("fnp ss f32");
-                let exp = numpy_ss.call((&a_f32, &v_f32), Some(&kw)).expect("np ss f32");
+                let got = fnp_ss
+                    .call((&a_f32, &v_f32), Some(&kw))
+                    .expect("fnp ss f32");
+                let exp = numpy_ss
+                    .call((&a_f32, &v_f32), Some(&kw))
+                    .expect("np ss f32");
                 let eq: bool = np_array_equal
                     .call1((&got, &exp))
                     .expect("array_equal")
                     .extract()
                     .expect("bool");
-                assert!(eq, "searchsorted f32 merge correctness mismatch: side={side}");
+                assert!(
+                    eq,
+                    "searchsorted f32 merge correctness mismatch: side={side}"
+                );
             }
         }
         group.bench_function("fnp_searchsorted_f32_4m_haystack4m", |b| {
-            b.iter(|| black_box(fnp_ss.call1((&a_f32, &v_f32)).expect("fnp searchsorted f32")));
+            b.iter(|| {
+                black_box(
+                    fnp_ss
+                        .call1((&a_f32, &v_f32))
+                        .expect("fnp searchsorted f32"),
+                )
+            });
         });
         group.bench_function("numpy_searchsorted_f32_4m_haystack4m", |b| {
-            b.iter(|| black_box(numpy_ss.call1((&a_f32, &v_f32)).expect("numpy searchsorted f32")));
+            b.iter(|| {
+                black_box(
+                    numpy_ss
+                        .call1((&a_f32, &v_f32))
+                        .expect("numpy searchsorted f32"),
+                )
+            });
         });
 
         // i64 twin: integer ordering is total, so the same query-sort + monotonic merge should
@@ -10680,21 +12200,40 @@ v_i64 = rng4.integers(-2_500_000_000, 2_500_000_000, 4_000_000, dtype=np.int64)\
             for side in ["left", "right"] {
                 let kw = PyDict::new(py);
                 kw.set_item("side", side).expect("side");
-                let got = fnp_ss.call((&a_i64, &v_i64), Some(&kw)).expect("fnp ss i64");
-                let exp = numpy_ss.call((&a_i64, &v_i64), Some(&kw)).expect("np ss i64");
+                let got = fnp_ss
+                    .call((&a_i64, &v_i64), Some(&kw))
+                    .expect("fnp ss i64");
+                let exp = numpy_ss
+                    .call((&a_i64, &v_i64), Some(&kw))
+                    .expect("np ss i64");
                 let eq: bool = np_array_equal
                     .call1((&got, &exp))
                     .expect("array_equal")
                     .extract()
                     .expect("bool");
-                assert!(eq, "searchsorted i64 merge correctness mismatch: side={side}");
+                assert!(
+                    eq,
+                    "searchsorted i64 merge correctness mismatch: side={side}"
+                );
             }
         }
         group.bench_function("fnp_searchsorted_i64_4m_haystack4m", |b| {
-            b.iter(|| black_box(fnp_ss.call1((&a_i64, &v_i64)).expect("fnp searchsorted i64")));
+            b.iter(|| {
+                black_box(
+                    fnp_ss
+                        .call1((&a_i64, &v_i64))
+                        .expect("fnp searchsorted i64"),
+                )
+            });
         });
         group.bench_function("numpy_searchsorted_i64_4m_haystack4m", |b| {
-            b.iter(|| black_box(numpy_ss.call1((&a_i64, &v_i64)).expect("numpy searchsorted i64")));
+            b.iter(|| {
+                black_box(
+                    numpy_ss
+                        .call1((&a_i64, &v_i64))
+                        .expect("numpy searchsorted i64"),
+                )
+            });
         });
     });
 
@@ -10737,7 +12276,13 @@ m = rng.standard_normal((512, 4096))\n",
             b.iter(|| black_box(fnp_repeat.call((&m, 3_i64), Some(&kw)).expect("fnp repeat")));
         });
         group.bench_function("numpy_repeat_2d_axis1_c3", |b| {
-            b.iter(|| black_box(numpy_repeat.call((&m, 3_i64), Some(&kw2)).expect("np repeat")));
+            b.iter(|| {
+                black_box(
+                    numpy_repeat
+                        .call((&m, 3_i64), Some(&kw2))
+                        .expect("np repeat"),
+                )
+            });
         });
     });
 
@@ -10895,8 +12440,12 @@ idx = rng.integers(0, 2048, (2048, 2048))\n",
         .expect("take_along c64 setup");
         let x = ns.get_item("x").expect("x");
         let idx = ns.get_item("idx").expect("idx");
-        let fnp_ta = module.getattr("take_along_axis").expect("fnp take_along_axis");
-        let numpy_ta = numpy.getattr("take_along_axis").expect("numpy take_along_axis");
+        let fnp_ta = module
+            .getattr("take_along_axis")
+            .expect("fnp take_along_axis");
+        let numpy_ta = numpy
+            .getattr("take_along_axis")
+            .expect("numpy take_along_axis");
         group.bench_function("fnp_take_along_c64", |b| {
             b.iter(|| black_box(fnp_ta.call1((&x, &idx, 1_i64)).expect("fnp ta")));
         });
@@ -10934,14 +12483,24 @@ idx = rng.integers(0, 4096, (4096, 2048)).astype(np.int64)\n";
         .expect("take_along_axis setup");
         let a = ns.get_item("a").expect("a");
         let idx = ns.get_item("idx").expect("idx");
-        let fnp_t = module.getattr("take_along_axis").expect("fnp take_along_axis");
-        let numpy_t = numpy.getattr("take_along_axis").expect("numpy take_along_axis");
+        let fnp_t = module
+            .getattr("take_along_axis")
+            .expect("fnp take_along_axis");
+        let numpy_t = numpy
+            .getattr("take_along_axis")
+            .expect("numpy take_along_axis");
         let axis = 1_i64;
         group.bench_function("fnp_take_along_axis_f64_8m", |b| {
             b.iter(|| black_box(fnp_t.call1((&a, &idx, axis)).expect("fnp take_along_axis")));
         });
         group.bench_function("numpy_take_along_axis_f64_8m", |b| {
-            b.iter(|| black_box(numpy_t.call1((&a, &idx, axis)).expect("numpy take_along_axis")));
+            b.iter(|| {
+                black_box(
+                    numpy_t
+                        .call1((&a, &idx, axis))
+                        .expect("numpy take_along_axis"),
+                )
+            });
         });
     });
 
@@ -10979,10 +12538,22 @@ idx = rng.integers(0, 4096, 2048).astype(np.int64)\n";
         let kwargs = PyDict::new(py);
         kwargs.set_item("axis", 1_i64).expect("axis");
         group.bench_function("fnp_take_axis1_f64_8m", |b| {
-            b.iter(|| black_box(fnp_take.call((&a, &idx), Some(&kwargs)).expect("fnp take axis")));
+            b.iter(|| {
+                black_box(
+                    fnp_take
+                        .call((&a, &idx), Some(&kwargs))
+                        .expect("fnp take axis"),
+                )
+            });
         });
         group.bench_function("numpy_take_axis1_f64_8m", |b| {
-            b.iter(|| black_box(numpy_take.call((&a, &idx), Some(&kwargs)).expect("numpy take axis")));
+            b.iter(|| {
+                black_box(
+                    numpy_take
+                        .call((&a, &idx), Some(&kwargs))
+                        .expect("numpy take axis"),
+                )
+            });
         });
     });
 
@@ -11067,9 +12638,11 @@ hb = rng.standard_normal(16_000_000).astype(np.float16)\n";
         // f16 fmod/remainder: numpy widens f16->f32 (~214ms / ~317ms @16M, slowest f16 binary).
         // hb has near-zero entries; replace them so divisors are non-zero (kernel engages).
         py.run(
-            std::ffi::CString::new("hbnz = np.where(np.abs(hb) < np.float16(0.05), np.float16(1.5), hb)")
-                .unwrap()
-                .as_c_str(),
+            std::ffi::CString::new(
+                "hbnz = np.where(np.abs(hb) < np.float16(0.05), np.float16(1.5), hb)",
+            )
+            .unwrap()
+            .as_c_str(),
             Some(&ns),
             Some(&ns),
         )
@@ -11099,7 +12672,9 @@ hb = rng.standard_normal(16_000_000).astype(np.float16)\n";
         }
         // f16 unary rounding ops floor/ceil/trunc/rint: numpy has no native f16 ALU and emulates
         // via widen->f32->op->narrow (compute-bound, ~77-126ms at 16M); native parallel wins ~15-30x.
-        for op in ["floor", "ceil", "trunc", "rint", "isnan", "isfinite", "signbit"] {
+        for op in [
+            "floor", "ceil", "trunc", "rint", "isnan", "isfinite", "signbit",
+        ] {
             let fnp_fn = module.getattr(op).expect("fnp unary op");
             let numpy_fn = numpy.getattr(op).expect("numpy unary op");
             group.bench_function(format!("fnp_{op}_f16_16m"), |bch| {
@@ -11151,7 +12726,9 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
                 bch.iter(|| black_box(fnp_recip.call1((&hrecip,)).expect("fnp f16 reciprocal")));
             });
             group.bench_function("numpy_reciprocal_f16_16m", |bch| {
-                bch.iter(|| black_box(numpy_recip.call1((&hrecip,)).expect("numpy f16 reciprocal")));
+                bch.iter(|| {
+                    black_box(numpy_recip.call1((&hrecip,)).expect("numpy f16 reciprocal"))
+                });
             });
         }
         // f16 modf: numpy widens f16->f32, splits into (trunc, frac), narrows both — single-threaded
@@ -11181,11 +12758,9 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
         // f16 ldexp: numpy widens f16->f32, scalbnf, narrows — single-threaded (~108ms@16M = ~1.2
         // GB/s, compute-bound). Native parallel exact-pow2-scale wins. (i32 exponent in [-5,5).)
         py.run(
-            std::ffi::CString::new(
-                "lde = rng.integers(-5, 5, 16_000_000, dtype=np.int32)",
-            )
-            .unwrap()
-            .as_c_str(),
+            std::ffi::CString::new("lde = rng.integers(-5, 5, 16_000_000, dtype=np.int32)")
+                .unwrap()
+                .as_c_str(),
             Some(&ns),
             Some(&ns),
         )
@@ -11222,12 +12797,20 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
         for (arr, tag) in [(&cc128, "c128"), (&cc64, "c64")] {
             group.bench_function(format!("fnp_cumsum_lastaxis_{tag}_16m"), |bch| {
                 bch.iter(|| {
-                    black_box(fnp_cumsum.call((arr,), Some(&kw_ax1)).expect("fnp complex cumsum"))
+                    black_box(
+                        fnp_cumsum
+                            .call((arr,), Some(&kw_ax1))
+                            .expect("fnp complex cumsum"),
+                    )
                 });
             });
             group.bench_function(format!("numpy_cumsum_lastaxis_{tag}_16m"), |bch| {
                 bch.iter(|| {
-                    black_box(numpy_cumsum.call((arr,), Some(&kw_ax1)).expect("numpy complex cumsum"))
+                    black_box(
+                        numpy_cumsum
+                            .call((arr,), Some(&kw_ax1))
+                            .expect("numpy complex cumsum"),
+                    )
                 });
             });
         }
@@ -11236,11 +12819,21 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
             let fnp_clip = module.getattr("clip").expect("fnp clip");
             let numpy_clip = numpy.getattr("clip").expect("numpy clip");
             group.bench_function("fnp_clip_f16_16m", |bch| {
-                bch.iter(|| black_box(fnp_clip.call1((&ha, -0.5f64, 0.5f64)).expect("fnp f16 clip")));
+                bch.iter(|| {
+                    black_box(
+                        fnp_clip
+                            .call1((&ha, -0.5f64, 0.5f64))
+                            .expect("fnp f16 clip"),
+                    )
+                });
             });
             group.bench_function("numpy_clip_f16_16m", |bch| {
                 bch.iter(|| {
-                    black_box(numpy_clip.call1((&ha, -0.5f64, 0.5f64)).expect("numpy f16 clip"))
+                    black_box(
+                        numpy_clip
+                            .call1((&ha, -0.5f64, 0.5f64))
+                            .expect("numpy f16 clip"),
+                    )
                 });
             });
         }
@@ -11281,7 +12874,9 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
         }
         // f16 last-axis argmax/argmin: numpy widens f16->f32 per lane; native per-lane scan wins.
         py.run(
-            std::ffi::CString::new("hsq2 = hsq.reshape(4000, 4000)").unwrap().as_c_str(),
+            std::ffi::CString::new("hsq2 = hsq.reshape(4000, 4000)")
+                .unwrap()
+                .as_c_str(),
             Some(&ns),
             Some(&ns),
         )
@@ -11298,25 +12893,37 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
             let numpy_fn = numpy.getattr(op).expect("numpy f16 minmax op");
             group.bench_function(format!("fnp_{op}_lastaxis_f16_16m"), |bch| {
                 bch.iter(|| {
-                    black_box(fnp_fn.call((&hsq2,), Some(&kw_axis)).expect("fnp f16 lastaxis minmax"))
+                    black_box(
+                        fnp_fn
+                            .call((&hsq2,), Some(&kw_axis))
+                            .expect("fnp f16 lastaxis minmax"),
+                    )
                 });
             });
             group.bench_function(format!("numpy_{op}_lastaxis_f16_16m"), |bch| {
                 bch.iter(|| {
                     black_box(
-                        numpy_fn.call((&hsq2,), Some(&kw_axis)).expect("numpy f16 lastaxis minmax"),
+                        numpy_fn
+                            .call((&hsq2,), Some(&kw_axis))
+                            .expect("numpy f16 lastaxis minmax"),
                     )
                 });
             });
             group.bench_function(format!("fnp_{op}_axis0_f16_16m"), |bch| {
                 bch.iter(|| {
-                    black_box(fnp_fn.call((&hsq2,), Some(&kw_axis0)).expect("fnp f16 axis0 minmax"))
+                    black_box(
+                        fnp_fn
+                            .call((&hsq2,), Some(&kw_axis0))
+                            .expect("fnp f16 axis0 minmax"),
+                    )
                 });
             });
             group.bench_function(format!("numpy_{op}_axis0_f16_16m"), |bch| {
                 bch.iter(|| {
                     black_box(
-                        numpy_fn.call((&hsq2,), Some(&kw_axis0)).expect("numpy f16 axis0 minmax"),
+                        numpy_fn
+                            .call((&hsq2,), Some(&kw_axis0))
+                            .expect("numpy f16 axis0 minmax"),
                     )
                 });
             });
@@ -11327,22 +12934,38 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
         let numpy_ptp = numpy.getattr("ptp").expect("numpy ptp");
         group.bench_function("fnp_ptp_lastaxis_f16_16m", |bch| {
             bch.iter(|| {
-                black_box(fnp_ptp.call((&hsq2,), Some(&kw_axis)).expect("fnp f16 lastaxis ptp"))
+                black_box(
+                    fnp_ptp
+                        .call((&hsq2,), Some(&kw_axis))
+                        .expect("fnp f16 lastaxis ptp"),
+                )
             });
         });
         group.bench_function("numpy_ptp_lastaxis_f16_16m", |bch| {
             bch.iter(|| {
-                black_box(numpy_ptp.call((&hsq2,), Some(&kw_axis)).expect("numpy f16 lastaxis ptp"))
+                black_box(
+                    numpy_ptp
+                        .call((&hsq2,), Some(&kw_axis))
+                        .expect("numpy f16 lastaxis ptp"),
+                )
             });
         });
         group.bench_function("fnp_ptp_axis0_f16_16m", |bch| {
             bch.iter(|| {
-                black_box(fnp_ptp.call((&hsq2,), Some(&kw_axis0)).expect("fnp f16 axis0 ptp"))
+                black_box(
+                    fnp_ptp
+                        .call((&hsq2,), Some(&kw_axis0))
+                        .expect("fnp f16 axis0 ptp"),
+                )
             });
         });
         group.bench_function("numpy_ptp_axis0_f16_16m", |bch| {
             bch.iter(|| {
-                black_box(numpy_ptp.call((&hsq2,), Some(&kw_axis0)).expect("numpy f16 axis0 ptp"))
+                black_box(
+                    numpy_ptp
+                        .call((&hsq2,), Some(&kw_axis0))
+                        .expect("numpy f16 axis0 ptp"),
+                )
             });
         });
         // f16 nanmin/nanmax flat + last-axis + axis-0: numpy widens f16->f32 skip-NaN (~32ms@16M);
@@ -11371,25 +12994,37 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
             });
             group.bench_function(format!("fnp_{op}_lastaxis_f16_16m"), |bch| {
                 bch.iter(|| {
-                    black_box(fnp_fn.call((&hsqn2,), Some(&kw_axis)).expect("fnp f16 lastaxis nan"))
+                    black_box(
+                        fnp_fn
+                            .call((&hsqn2,), Some(&kw_axis))
+                            .expect("fnp f16 lastaxis nan"),
+                    )
                 });
             });
             group.bench_function(format!("numpy_{op}_lastaxis_f16_16m"), |bch| {
                 bch.iter(|| {
                     black_box(
-                        numpy_fn.call((&hsqn2,), Some(&kw_axis)).expect("numpy f16 lastaxis nan"),
+                        numpy_fn
+                            .call((&hsqn2,), Some(&kw_axis))
+                            .expect("numpy f16 lastaxis nan"),
                     )
                 });
             });
             group.bench_function(format!("fnp_{op}_axis0_f16_16m"), |bch| {
                 bch.iter(|| {
-                    black_box(fnp_fn.call((&hsqn2,), Some(&kw_axis0)).expect("fnp f16 axis0 nan"))
+                    black_box(
+                        fnp_fn
+                            .call((&hsqn2,), Some(&kw_axis0))
+                            .expect("fnp f16 axis0 nan"),
+                    )
                 });
             });
             group.bench_function(format!("numpy_{op}_axis0_f16_16m"), |bch| {
                 bch.iter(|| {
                     black_box(
-                        numpy_fn.call((&hsqn2,), Some(&kw_axis0)).expect("numpy f16 axis0 nan"),
+                        numpy_fn
+                            .call((&hsqn2,), Some(&kw_axis0))
+                            .expect("numpy f16 axis0 nan"),
                     )
                 });
             });
@@ -11401,25 +13036,37 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
             let numpy_fn = numpy.getattr(op).expect("numpy f16 cum op");
             group.bench_function(format!("fnp_{op}_lastaxis_f16_16m"), |bch| {
                 bch.iter(|| {
-                    black_box(fnp_fn.call((&hsq2,), Some(&kw_axis)).expect("fnp f16 lastaxis cum"))
+                    black_box(
+                        fnp_fn
+                            .call((&hsq2,), Some(&kw_axis))
+                            .expect("fnp f16 lastaxis cum"),
+                    )
                 });
             });
             group.bench_function(format!("numpy_{op}_lastaxis_f16_16m"), |bch| {
                 bch.iter(|| {
                     black_box(
-                        numpy_fn.call((&hsq2,), Some(&kw_axis)).expect("numpy f16 lastaxis cum"),
+                        numpy_fn
+                            .call((&hsq2,), Some(&kw_axis))
+                            .expect("numpy f16 lastaxis cum"),
                     )
                 });
             });
             group.bench_function(format!("fnp_{op}_axis0_f16_16m"), |bch| {
                 bch.iter(|| {
-                    black_box(fnp_fn.call((&hsq2,), Some(&kw_axis0)).expect("fnp f16 axis0 cum"))
+                    black_box(
+                        fnp_fn
+                            .call((&hsq2,), Some(&kw_axis0))
+                            .expect("fnp f16 axis0 cum"),
+                    )
                 });
             });
             group.bench_function(format!("numpy_{op}_axis0_f16_16m"), |bch| {
                 bch.iter(|| {
                     black_box(
-                        numpy_fn.call((&hsq2,), Some(&kw_axis0)).expect("numpy f16 axis0 cum"),
+                        numpy_fn
+                            .call((&hsq2,), Some(&kw_axis0))
+                            .expect("numpy f16 axis0 cum"),
                     )
                 });
             });
@@ -11432,28 +13079,36 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
             group.bench_function(format!("fnp_{op}_lastaxis_f16_16m"), |bch| {
                 bch.iter(|| {
                     black_box(
-                        fnp_fn.call((&hsqn2,), Some(&kw_axis)).expect("fnp f16 lastaxis nancum"),
+                        fnp_fn
+                            .call((&hsqn2,), Some(&kw_axis))
+                            .expect("fnp f16 lastaxis nancum"),
                     )
                 });
             });
             group.bench_function(format!("numpy_{op}_lastaxis_f16_16m"), |bch| {
                 bch.iter(|| {
                     black_box(
-                        numpy_fn.call((&hsqn2,), Some(&kw_axis)).expect("numpy f16 lastaxis nancum"),
+                        numpy_fn
+                            .call((&hsqn2,), Some(&kw_axis))
+                            .expect("numpy f16 lastaxis nancum"),
                     )
                 });
             });
             group.bench_function(format!("fnp_{op}_axis0_f16_16m"), |bch| {
                 bch.iter(|| {
                     black_box(
-                        fnp_fn.call((&hsqn2,), Some(&kw_axis0)).expect("fnp f16 axis0 nancum"),
+                        fnp_fn
+                            .call((&hsqn2,), Some(&kw_axis0))
+                            .expect("fnp f16 axis0 nancum"),
                     )
                 });
             });
             group.bench_function(format!("numpy_{op}_axis0_f16_16m"), |bch| {
                 bch.iter(|| {
                     black_box(
-                        numpy_fn.call((&hsqn2,), Some(&kw_axis0)).expect("numpy f16 axis0 nancum"),
+                        numpy_fn
+                            .call((&hsqn2,), Some(&kw_axis0))
+                            .expect("numpy f16 axis0 nancum"),
                     )
                 });
             });
@@ -11478,13 +13133,19 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
         for (arr, tag) in [(&c64, "f64"), (&ci64, "i64")] {
             group.bench_function(format!("fnp_cumsum_axis0_{tag}_16m"), |bch| {
                 bch.iter(|| {
-                    black_box(fnp_cumsum.call((arr,), Some(&kw_axis0)).expect("fnp cumsum axis0"))
+                    black_box(
+                        fnp_cumsum
+                            .call((arr,), Some(&kw_axis0))
+                            .expect("fnp cumsum axis0"),
+                    )
                 });
             });
             group.bench_function(format!("numpy_cumsum_axis0_{tag}_16m"), |bch| {
                 bch.iter(|| {
                     black_box(
-                        numpy_cumsum.call((arr,), Some(&kw_axis0)).expect("numpy cumsum axis0"),
+                        numpy_cumsum
+                            .call((arr,), Some(&kw_axis0))
+                            .expect("numpy cumsum axis0"),
                     )
                 });
             });
@@ -11519,13 +13180,19 @@ hsq = (np.abs(rng.standard_normal(16_000_000)) * 10.0).astype(np.float16)\n";
             let numpy_fn = numpy.getattr(op).expect("numpy arg op");
             group.bench_function(format!("fnp_{op}_axis0_f16_16m"), |bch| {
                 bch.iter(|| {
-                    black_box(fnp_fn.call((&hsq2,), Some(&kw_axis0)).expect("fnp f16 axis0 arg"))
+                    black_box(
+                        fnp_fn
+                            .call((&hsq2,), Some(&kw_axis0))
+                            .expect("fnp f16 axis0 arg"),
+                    )
                 });
             });
             group.bench_function(format!("numpy_{op}_axis0_f16_16m"), |bch| {
                 bch.iter(|| {
                     black_box(
-                        numpy_fn.call((&hsq2,), Some(&kw_axis0)).expect("numpy f16 axis0 arg"),
+                        numpy_fn
+                            .call((&hsq2,), Some(&kw_axis0))
+                            .expect("numpy f16 axis0 arg"),
                     )
                 });
             });
@@ -12031,26 +13698,17 @@ bti = rng.integers(-100, 100, (64, 64, 64)).astype(np.int64)\n";
             let a = ns.get_item(format!("a{sz}")).expect("a");
             let b = ns.get_item(format!("b{sz}")).expect("b");
             group.bench_function(format!("fnp_tensordot_axes1_{sz}x{sz}"), |bch| {
-                bch.iter(|| {
-                    black_box(
-                        fnp_tensordot
-                            .call1((&a, &b, 1_i64))
-                            .expect("fnp call"),
-                    )
-                });
+                bch.iter(|| black_box(fnp_tensordot.call1((&a, &b, 1_i64)).expect("fnp call")));
             });
             group.bench_function(format!("numpy_tensordot_axes1_{sz}x{sz}"), |bch| {
-                bch.iter(|| {
-                    black_box(
-                        np_tensordot
-                            .call1((&a, &b, 1_i64))
-                            .expect("numpy call"),
-                    )
-                });
+                bch.iter(|| black_box(np_tensordot.call1((&a, &b, 1_i64)).expect("numpy call")));
             });
         }
         // Batched (3-D) matmul: native parallel-across-batch packed GEMM vs numpy slow BLAS.
-        for (tag, ak, bk) in [("64x256x256", "a3d", "b3d"), ("256x128x128", "a3db", "b3db")] {
+        for (tag, ak, bk) in [
+            ("64x256x256", "a3d", "b3d"),
+            ("256x128x128", "a3db", "b3db"),
+        ] {
             let a = ns.get_item(ak).expect("a3d");
             let b = ns.get_item(bk).expect("b3d");
             group.bench_function(format!("fnp_matmul_batched_{tag}"), |bch| {
@@ -12779,14 +14437,23 @@ A = rng.integers(0, 20, (500_000, 4)).astype(np.int64)\n",
                     .expect("array_equal")
                     .extract()
                     .expect("bool");
-                assert!(eq, "unique(axis=0) return_* correctness mismatch at tuple index {t}");
+                assert!(
+                    eq,
+                    "unique(axis=0) return_* correctness mismatch at tuple index {t}"
+                );
             }
         }
         group.bench_function("fnp_unique_rows_full_500k4", |b| {
             b.iter(|| black_box(fnp_unique.call((&a,), Some(&kw)).expect("fnp unique full")));
         });
         group.bench_function("numpy_unique_rows_full_500k4", |b| {
-            b.iter(|| black_box(numpy_unique.call((&a,), Some(&kw)).expect("numpy unique full")));
+            b.iter(|| {
+                black_box(
+                    numpy_unique
+                        .call((&a,), Some(&kw))
+                        .expect("numpy unique full"),
+                )
+            });
         });
     });
 
@@ -13370,8 +15037,7 @@ fn bench_substrate_v2_python_binary_pair<'py>(
             orig_samples
                 .borrow_mut()
                 .push(orig_total.as_secs_f64() * 1e9 / measured_iterations as f64);
-            (candidate_total + orig_total)
-                .mul_f64(iterations as f64 / measured_iterations as f64)
+            (candidate_total + orig_total).mul_f64(iterations as f64 / measured_iterations as f64)
         });
     });
     report_substrate_v2_pair(row, &candidate_samples, &orig_samples);
@@ -13418,8 +15084,7 @@ fn bench_substrate_v2_python_unary_pair<'py>(
             orig_samples
                 .borrow_mut()
                 .push(orig_total.as_secs_f64() * 1e9 / measured_iterations as f64);
-            (candidate_total + orig_total)
-                .mul_f64(iterations as f64 / measured_iterations as f64)
+            (candidate_total + orig_total).mul_f64(iterations as f64 / measured_iterations as f64)
         });
     });
     report_substrate_v2_pair(row, &candidate_samples, &orig_samples);
@@ -15873,9 +17538,7 @@ fn bench_wide_string_substrate_v2(c: &mut Criterion) {
         .expect("wide string setup");
         let u_a = namespace.get_item("u_a").expect("u_a present");
         let u_b = namespace.get_item("u_b").expect("u_b present");
-        let u_union_b = namespace
-            .get_item("u_union_b")
-            .expect("u_union_b present");
+        let u_union_b = namespace.get_item("u_union_b").expect("u_union_b present");
         let s_a = namespace.get_item("s_a").expect("s_a present");
         let s_b = namespace.get_item("s_b").expect("s_b present");
         let array_equal = numpy.getattr("array_equal").expect("numpy.array_equal");
@@ -16198,7 +17861,10 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
                 .expect("orig bytes")
                 .extract()
                 .expect("extract orig bytes");
-            assert_eq!(prod_bytes, orig_bytes, "production f16 sort parity (tobytes)");
+            assert_eq!(
+                prod_bytes, orig_bytes,
+                "production f16 sort parity (tobytes)"
+            );
 
             let prod_samples = RefCell::new(Vec::new());
             let prod_orig_samples = RefCell::new(Vec::new());
@@ -16235,11 +17901,7 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
                     cand_total + orig_total
                 });
             });
-            report_ledger_pair(
-                "f16_sort_production_4m",
-                &prod_samples,
-                &prod_orig_samples,
-            );
+            report_ledger_pair("f16_sort_production_4m", &prod_samples, &prod_orig_samples);
 
             let null_a = RefCell::new(Vec::new());
             let null_b = RefCell::new(Vec::new());
@@ -16438,7 +18100,9 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
             assert_eq!(s2_fb, s2_nb, "f16 lastaxis sort parity (tobytes)");
             let stable_axis_kw = pyo3::types::PyDict::new(py);
             stable_axis_kw.set_item("axis", -1).expect("axis kwarg");
-            stable_axis_kw.set_item("kind", "stable").expect("kind kwarg");
+            stable_axis_kw
+                .set_item("kind", "stable")
+                .expect("kind kwarg");
             let a2_f = fnp_argsort
                 .call((&input2d,), Some(&stable_axis_kw))
                 .expect("fnp f16 lastaxis argsort parity");
@@ -16743,7 +18407,9 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
             let stax_kw = pyo3::types::PyDict::new(py);
             stax_kw.set_item("axis", -1).expect("axis kwarg");
             stax_kw.set_item("kind", "stable").expect("kind kwarg");
-            let sf = fnp_sort.call((&input2d,), Some(&axkw)).expect("fnp lastaxis parity");
+            let sf = fnp_sort
+                .call((&input2d,), Some(&axkw))
+                .expect("fnp lastaxis parity");
             let sn = numpy_sort
                 .call((&input2d,), Some(&axkw))
                 .expect("numpy lastaxis parity");

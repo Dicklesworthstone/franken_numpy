@@ -287,10 +287,7 @@ print(np.allclose(result, expected))
 #[test]
 fn average_python_container_keyword_outcomes_match_numpy() -> Result<(), String> {
     let cases = [
-        (
-            "list input scalar",
-            "result = MODULE.average([1, 2, 3, 4])",
-        ),
+        ("list input scalar", "result = MODULE.average([1, 2, 3, 4])"),
         (
             "tuple input axis weights returned",
             "result = MODULE.average(

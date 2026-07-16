@@ -131,7 +131,13 @@ fn bench_boolean_set_f64_masked(c: &mut Criterion) {
         let mask = UFuncArray::new(
             vec![*size],
             (0..*size)
-                .map(|i| if matches!(i % 17, 0 | 4 | 9 | 15) { 1.0 } else { 0.0 })
+                .map(|i| {
+                    if matches!(i % 17, 0 | 4 | 9 | 15) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
                 .collect(),
             DType::Bool,
         )
@@ -397,7 +403,13 @@ fn bench_copyto_equal_shape_masked(c: &mut Criterion) {
         let mask = UFuncArray::new(
             vec![*size],
             (0..*size)
-                .map(|i| if matches!(i % 11, 0 | 3 | 7) { 1.0 } else { 0.0 })
+                .map(|i| {
+                    if matches!(i % 11, 0 | 3 | 7) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
                 .collect(),
             DType::Bool,
         )
@@ -426,7 +438,13 @@ fn bench_putmask_f64_masked(c: &mut Criterion) {
         let mask = UFuncArray::new(
             vec![*size],
             (0..*size)
-                .map(|i| if matches!(i % 13, 0 | 2 | 8) { 1.0 } else { 0.0 })
+                .map(|i| {
+                    if matches!(i % 13, 0 | 2 | 8) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
                 .collect(),
             DType::Bool,
         )
@@ -454,7 +472,13 @@ fn bench_place_f64_masked_cycling(c: &mut Criterion) {
         let mask = UFuncArray::new(
             vec![*size],
             (0..*size)
-                .map(|i| if matches!(i % 19, 3 | 7 | 11) { 1.0 } else { 0.0 })
+                .map(|i| {
+                    if matches!(i % 19, 3 | 7 | 11) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
                 .collect(),
             DType::Bool,
         )
@@ -482,7 +506,13 @@ fn bench_put_mask_f64_masked_cycling(c: &mut Criterion) {
         let mask = UFuncArray::new(
             vec![*size],
             (0..*size)
-                .map(|i| if matches!((i * 37 + 5) % 41, 0 | 3 | 11 | 17 | 29) { 1.0 } else { 0.0 })
+                .map(|i| {
+                    if matches!((i * 37 + 5) % 41, 0 | 3 | 11 | 17 | 29) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
                 .collect(),
             DType::Bool,
         )

@@ -126,10 +126,7 @@ fn intersect_setdiff_complex128_sorted_merge_matches_numpy() {
             let ours = module.getattr(op)?.call1((&a, &b))?;
             let theirs = numpy.getattr(op)?.call1((&a, &b))?;
             let equal: bool = array_equal.call1((&ours, &theirs))?.extract()?;
-            assert!(
-                equal,
-                "complex128 sorted-merge {op} diverged from numpy"
-            );
+            assert!(equal, "complex128 sorted-merge {op} diverged from numpy");
             let dtype = ours.getattr("dtype")?.str()?.to_string();
             assert_eq!(dtype, "complex128");
         }
@@ -358,9 +355,9 @@ fn mixed_struct_dense_bitplanes_value_gate_falls_back_at_scale() {
         })?;
         let array_equal = numpy.getattr("array_equal")?;
         for name in ["negative_zero", "fractional"] {
-            let left = ns.get_item(name)?.ok_or_else(|| {
-                pyo3::exceptions::PyKeyError::new_err(format!("{name} missing"))
-            })?;
+            let left = ns
+                .get_item(name)?
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("{name} missing")))?;
             for op in ["intersect1d", "setdiff1d", "setxor1d"] {
                 let ours = module.getattr(op)?.call1((&left, &other))?;
                 let theirs = numpy.getattr(op)?.call1((&left, &other))?;
@@ -1225,13 +1222,7 @@ fn wide_unicode_setops_defer_non_native_byteorder() {
             .get_item("b")?
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("big-endian rhs missing"))?;
         let array_equal = numpy.getattr("array_equal")?;
-        for op in [
-            "unique",
-            "union1d",
-            "intersect1d",
-            "setdiff1d",
-            "setxor1d",
-        ] {
+        for op in ["unique", "union1d", "intersect1d", "setdiff1d", "setxor1d"] {
             let ours = if op == "unique" {
                 module.getattr(op)?.call1((&a,))?
             } else {
@@ -1248,7 +1239,10 @@ fn wide_unicode_setops_defer_non_native_byteorder() {
             );
             assert_eq!(
                 ours.getattr("dtype")?.getattr("str")?.extract::<String>()?,
-                theirs.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                theirs
+                    .getattr("dtype")?
+                    .getattr("str")?
+                    .extract::<String>()?,
                 "big-endian wide-unicode {op} dtype diverged"
             );
         }
@@ -1289,7 +1283,10 @@ fn unique_full_string_packed_latin1_large_matches_numpy() {
                 let o = ours.get_item(k)?;
                 let t = theirs.get_item(k)?;
                 let equal: bool = array_equal.call1((&o, &t))?.extract()?;
-                assert!(equal, "packed Latin-1 {name} unique_full field {k} diverged from numpy");
+                assert!(
+                    equal,
+                    "packed Latin-1 {name} unique_full field {k} diverged from numpy"
+                );
             }
         }
         Ok(())
@@ -1323,8 +1320,14 @@ fn setxor1d_complex128_dense_integral_grid_matches_numpy() {
             .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err("missing b"))?;
         let ours = module.getattr("setxor1d")?.call1((&a, &b))?;
         let theirs = numpy.getattr("setxor1d")?.call1((&a, &b))?;
-        let equal: bool = numpy.getattr("array_equal")?.call1((&ours, &theirs))?.extract()?;
-        assert!(equal, "dense integral complex128 setxor1d diverged from numpy");
+        let equal: bool = numpy
+            .getattr("array_equal")?
+            .call1((&ours, &theirs))?
+            .extract()?;
+        assert!(
+            equal,
+            "dense integral complex128 setxor1d diverged from numpy"
+        );
         let dtype = ours.getattr("dtype")?.str()?.to_string();
         assert_eq!(dtype, "complex128");
         Ok(())

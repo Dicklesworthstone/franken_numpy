@@ -971,12 +971,16 @@ fn bench_batch_det_slogdet(c: &mut Criterion) {
     for (batch, n) in [(8192usize, 4usize), (2048, 8)] {
         let (data, shape) = generate_batch_invertible(batch, n);
         let id = format!("{batch}x{n}x{n}");
-        group.bench_with_input(BenchmarkId::new("det", id.clone()), &shape, |bench, shape| {
-            bench.iter(|| {
-                let result = batch_det(black_box(&data), black_box(shape));
-                black_box(result)
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("det", id.clone()),
+            &shape,
+            |bench, shape| {
+                bench.iter(|| {
+                    let result = batch_det(black_box(&data), black_box(shape));
+                    black_box(result)
+                });
+            },
+        );
         group.bench_with_input(BenchmarkId::new("slogdet", id), &shape, |bench, shape| {
             bench.iter(|| {
                 let result = batch_slogdet(black_box(&data), black_box(shape));
@@ -1000,7 +1004,8 @@ fn bench_batch_matrix_norm_fro(c: &mut Criterion) {
         let id = format!("{batch}x{m}x{n}");
         group.bench_with_input(BenchmarkId::new("shape", id), &shape, |bench, shape| {
             bench.iter(|| {
-                let result = batch_matrix_norm(black_box(&data), black_box(shape), black_box("fro"));
+                let result =
+                    batch_matrix_norm(black_box(&data), black_box(shape), black_box("fro"));
                 black_box(result)
             });
         });

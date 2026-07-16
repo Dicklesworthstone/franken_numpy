@@ -469,7 +469,10 @@ fn argsort_string_stable_packed_latin1_matches_numpy() {
             let ours = module.getattr("argsort")?.call((&arr,), Some(&kw))?;
             let theirs = numpy.getattr("argsort")?.call((&arr,), Some(&kw))?;
             let equal: bool = array_equal.call1((&ours, &theirs))?.extract()?;
-            assert!(equal, "packed Latin-1 {name} stable argsort diverged from numpy");
+            assert!(
+                equal,
+                "packed Latin-1 {name} stable argsort diverged from numpy"
+            );
         }
         Ok(())
     });
@@ -597,7 +600,10 @@ fn f16_sort_flat_widening_matches_numpy() {
                     .collect();
                 ours_ms.sort_unstable();
                 theirs_ms.sort_unstable();
-                assert_eq!(ours_ms, theirs_ms, "{name}: f16 sort value multisets diverged");
+                assert_eq!(
+                    ours_ms, theirs_ms,
+                    "{name}: f16 sort value multisets diverged"
+                );
                 let np_sorted: bool = {
                     // is numpy's own direct output ascending? (NaN-free cases only reach here)
                     let d = numpy
@@ -828,7 +834,10 @@ fn narrow_int_stable_argsort_counting_matches_numpy() {
                 .getattr("array_equal")?
                 .call1((&ours, &theirs))?
                 .extract()?;
-            assert!(equal, "{name}: narrow-int stable argsort diverged from numpy");
+            assert!(
+                equal,
+                "{name}: narrow-int stable argsort diverged from numpy"
+            );
             assert_eq!(
                 ours.getattr("dtype")?.str()?.to_string(),
                 theirs.getattr("dtype")?.str()?.to_string(),

@@ -2571,8 +2571,8 @@ print(ok)
 }
 
 #[test]
-fn f16_unary_floor_ceil_trunc_rint_parallel_full_domain_bit_exact_matches_numpy() -> Result<(), String>
-{
+fn f16_unary_floor_ceil_trunc_rint_parallel_full_domain_bit_exact_matches_numpy()
+-> Result<(), String> {
     // numpy has no native f16 ALU: floor/ceil/trunc/rint widen->f32->op->narrow (compute-bound).
     // The native parallel widen path must be byte-identical to numpy over EVERY f16 bit pattern
     // (all 65536, incl. every nan/inf/subnormal/-0.0), tiled past the 1<<20 gate to engage the

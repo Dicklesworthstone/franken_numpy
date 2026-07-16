@@ -15,7 +15,7 @@
 //! `(fmt, value)` pair (e.g. an integer conversion that overflows), the golden
 //! records `ERR:<PyType>` and the test only requires that `savetxt` also errors.
 
-use fnp_io::{savetxt, SaveTxtConfig};
+use fnp_io::{SaveTxtConfig, savetxt};
 
 fn render(fmt: &str, v: f64) -> String {
     let config = SaveTxtConfig {

@@ -281,8 +281,11 @@ fn histogram_bin_edges_python_container_keyword_surfaces_match_numpy() -> Result
     ];
 
     for (label, setup, call_expr) in cases {
-        let numpy_result =
-            numpy_oracle(&numpy_outcome_script("np.histogram_bin_edges", setup, call_expr))?;
+        let numpy_result = numpy_oracle(&numpy_outcome_script(
+            "np.histogram_bin_edges",
+            setup,
+            call_expr,
+        ))?;
         let rust_result =
             numpy_oracle(&fnp_outcome_script("histogram_bin_edges", setup, call_expr))?;
 
@@ -314,11 +317,7 @@ fn digitize_python_container_keyword_surfaces_match_numpy() -> Result<(), String
             "",
             "op([0.5, 1.5, 3.5], [4, 3, 2, 1], right=True)",
         ),
-        (
-            "nonmonotonic bins error type",
-            "",
-            "op([1, 2], [0, 2, 1])",
-        ),
+        ("nonmonotonic bins error type", "", "op([1, 2], [0, 2, 1])"),
     ];
 
     for (label, setup, call_expr) in cases {

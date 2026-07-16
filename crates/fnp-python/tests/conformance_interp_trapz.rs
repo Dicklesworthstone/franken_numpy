@@ -103,11 +103,7 @@ fn interp_python_container_keyword_surfaces_match_numpy() -> Result<(), String> 
             "xp = np.array([0.0, 2.0, 4.0])\nfp = np.array([0.0, 20.0, 40.0])",
             "op((1.0, 3.0), xp, fp)",
         ),
-        (
-            "missing fp error type",
-            "",
-            "op([0.0], [0.0])",
-        ),
+        ("missing fp error type", "", "op([0.0], [0.0])"),
         (
             "xp fp length mismatch error type",
             "",
