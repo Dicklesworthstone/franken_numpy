@@ -4,6 +4,73 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): unit-window C/F-contiguous sliding views bypass exact overlap sorting - 9,702x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.363`. Robot triage was healthy
+(`data_hash e8929269f34b2f8b`, 145 actionable, none in progress) but its
+literal top perf leaf was the prohibited C-BLAS route. The random and complex
+storage veins were closed, so this pass pivoted to a fresh `fnp-ndarray`
+residual. Negative-ledger search found the shipped zero-stride,
+duplicate-stride, opposite-sign, and commensurate overlap certificates, but no
+all-unit-window certificate.
+
+PROFILE FIRST, before the production edit: a C-contiguous `[244,244]` layout
+with window `[1,1]` produces the base position layout plus two singleton axes,
+yet the current path enumerated and sorted all 59,536 offsets. Ordinary
+`--profile release`, LTO disabled, 10 samples, 250 ms warm-up, 750 ms windows;
+the cold target received an untimed `--no-run` warm-up before the capped
+measurement (requested/effective worker `vmi1227854`, job
+`j-29933730227290831`, warm-up build 32.38 s, measurement Cargo phase 0.07 s):
+
+| profile arm | Criterion estimate |
+|---|---:|
+| current public path | 400.14 us `[380.27, 421.14]` |
+| exact-offset stage | 377.76 us `[371.83, 383.70]` |
+| C/F contiguity proof stage | 4.5989 ns `[4.3501, 4.8359]` |
+
+The exact detector accounts for essentially the whole call, while the proposed
+proof is O(rank).
+
+ONE LEVER: after preserving rank/window validation and constructing the same
+shape/strides, `sliding_window_view` returns non-overlap directly only when
+every window extent is one and the source strides mathematically satisfy the
+existing C- or Fortran-contiguity proof. Appended axes are singleton and cannot
+participate in overlap; the remaining axes are exactly the proven-contiguous
+base layout. Item-size zero still falls through and raises
+`InvalidItemSize`; non-unit, expanded, negative-stride, and otherwise uncertain
+layouts retain the exact/conservative detector. Read-only status, shape,
+strides, and item size are unchanged.
+
+The final benchmark asserts full `NdLayout` equality against the adjacent
+exact-former helper before timing. Requested `vmi1227854` routed to effective
+worker `vmi1152480`; that cold target again received an untimed warm-up in the
+same allocation, then the measurement Cargo phase completed in 0.08 s (job
+`j-29933730227290841`):
+
+| arm | Criterion estimate |
+|---|---:|
+| former exact offsets + sort | 416.61 us `[393.12, 446.04]` |
+| unit-window contiguous proof | **42.940 ns** `[37.156, 48.019]` |
+
+Midpoints are **9,702.14x** apart (**99.9897% less time**); even the closest
+interval bounds are 8,186.76x apart. Eight focused `sliding_window_` tests pass,
+including C/F orders across scalar/singleton/multidimensional shapes, exact
+shape/stride/read-only state, ordinary overlapping windows, zero windows,
+invalid windows, and invalid-item-size precedence. Targeted release Clippy for
+the lib + benchmark is clean on effective `vmi1152480` (job
+`j-29933730227290851`). The preceding `vmi1227854` validation job
+`j-29933730227290848` completed all eight tests, then was cancelled during
+Clippy when that worker re-downloaded its release cache again; no incomplete
+gate was counted. Workspace fmt remains pre-blocked by the already-ledgered
+older sliding-window benchmark formatting, while the owned source is
+rustfmt-clean and the owned diff passes `git diff --check`. Landed source
+SHA-256: `f4f89d86d5aae1f4fb78b94e85ba64277e9207172ab2cfc9e0084c8f9b14cbb0`;
+bench SHA-256:
+`af73305db0cbfd5cb030b8a73da9a8824b4b6c31ee069bf56d301394f2c4853e`.
+Verdict: **SHIP**. Do not re-probe unit-window overlap detection for
+mathematically C/F-contiguous layouts; non-contiguous unit-window proofs remain
+a separate shape-specific lane.
+
 ## 2026-07-16 - WIN (SHIP): sidecar `resize` payloads seed-and-double - 3.50x; plus a stale-conditional-opens audit
 
 `BlackThrush`, bead `franken_numpy-ixs5y.362`, the `.359` declared sibling

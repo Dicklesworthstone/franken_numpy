@@ -386,6 +386,32 @@ fn bench_ndlayout_sliding_window_duplicate_stride(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_ndlayout_sliding_window_unit(c: &mut Criterion) {
+    let mut group = c.benchmark_group("NdLayout_sliding_window_unit");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+
+    let layout = NdLayout::contiguous(vec![244, 244], 8, MemoryOrder::C).unwrap();
+    let window = [1, 1];
+    let current = layout.sliding_window_view(&window).unwrap();
+    let exact = sliding_window_duplicate_stride_former(&layout, &window);
+    assert_eq!(current, exact);
+    assert!(!current.has_internal_overlap());
+
+    group.bench_function("former_exact_offsets", |b| {
+        b.iter(|| sliding_window_duplicate_stride_former(black_box(&layout), black_box(&window)));
+    });
+    group.bench_function("unit_window_contiguous_proof", |b| {
+        b.iter(|| {
+            black_box(&layout)
+                .sliding_window_view(black_box(&window))
+                .unwrap()
+        });
+    });
+    group.finish();
+}
+
 fn as_strided_opposite_stride_former(
     layout: &NdLayout,
     shape: &[usize],
@@ -621,6 +647,7 @@ criterion_group!(
     bench_broadcast_strides,
     bench_ndlayout_broadcast_to_fortran_identity,
     bench_ndlayout_sliding_window_duplicate_stride,
+    bench_ndlayout_sliding_window_unit,
     bench_ndlayout_as_strided_opposite_stride,
     bench_ndlayout_as_strided_commensurate_stride,
     bench_ndlayout_contiguous,

@@ -584,7 +584,13 @@ impl NdLayout {
         let mut strides = Vec::with_capacity(self.strides.len() * 2);
         strides.extend(self.strides.iter().copied());
         strides.extend(self.strides.iter().copied());
-        let has_internal_overlap = detect_internal_overlap(&shape, &strides, self.item_size)?;
+        let unit_window_contiguous = window_shape.iter().all(|&window| window == 1)
+            && (self.is_contiguous() || self.is_fortran_contiguous());
+        let has_internal_overlap = if unit_window_contiguous {
+            false
+        } else {
+            detect_internal_overlap(&shape, &strides, self.item_size)?
+        };
 
         Ok(Self {
             shape,
@@ -1395,6 +1401,43 @@ mod tests {
             .expect("unit window should succeed");
         assert!(!view.has_internal_overlap());
         assert!(!view.is_writeable());
+    }
+
+    #[test]
+    fn sliding_window_unit_shape_is_non_overlapping_for_both_contiguous_orders() {
+        for shape in [vec![], vec![1], vec![3, 4], vec![2, 1, 5]] {
+            for order in [MemoryOrder::C, MemoryOrder::F] {
+                let base = NdLayout::contiguous(shape.clone(), 8, order).expect("layout");
+                let window = vec![1; shape.len()];
+                let view = base
+                    .sliding_window_view(&window)
+                    .expect("unit window should succeed");
+
+                let mut expected_shape = shape.clone();
+                expected_shape.extend(window.iter().copied());
+                let mut expected_strides = base.strides.clone();
+                expected_strides.extend(base.strides.iter().copied());
+                assert_eq!(view.shape, expected_shape);
+                assert_eq!(view.strides, expected_strides);
+                assert!(!view.has_internal_overlap());
+                assert!(!view.is_writeable());
+            }
+        }
+    }
+
+    #[test]
+    fn sliding_window_unit_shape_preserves_invalid_item_size_error() {
+        let invalid = NdLayout {
+            shape: vec![1],
+            strides: vec![0],
+            item_size: 0,
+            writeable: true,
+            has_internal_overlap: false,
+        };
+        assert_eq!(
+            invalid.sliding_window_view(&[1]),
+            Err(ShapeError::InvalidItemSize)
+        );
     }
 
     #[test]
