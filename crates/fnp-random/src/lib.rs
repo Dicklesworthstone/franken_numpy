@@ -5783,10 +5783,13 @@ impl Generator {
                 })
                 .collect());
         }
+        // Fixed shapes: parameter-only gamma terms once per batch (.334 sibling).
+        let cache_a = GammaShapeCache::new(a);
+        let cache_b = GammaShapeCache::new(b);
         Ok((0..size)
             .map(|_| {
-                let x = self.sample_gamma(a);
-                let y = self.sample_gamma(b);
+                let x = self.sample_gamma_cached(a, cache_a);
+                let y = self.sample_gamma_cached(b, cache_b);
                 if x == 0.0 && y == 0.0 {
                     0.0
                 } else {
@@ -6128,9 +6131,11 @@ impl Generator {
         if !n.is_finite() || n <= 0.0 || p.is_nan() || p <= 0.0 || p > 1.0 {
             return Err(RandomError::InvalidParameter);
         }
+        // Fixed shape: parameter-only gamma terms once per batch (.334 sibling).
+        let cache_n = GammaShapeCache::new(n);
         Ok((0..size)
             .map(|_| {
-                let y = self.sample_gamma(n) * (1.0 - p) / p;
+                let y = self.sample_gamma_cached(n, cache_n) * (1.0 - p) / p;
                 self.sample_poisson_single(y)
             })
             .collect())
@@ -6147,10 +6152,16 @@ impl Generator {
         if dfnum <= 0.0 || dfden <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
+        // Fixed shapes: the hoisted `dfnum / 2.0` values are the identical f64s
+        // the loop formerly recomputed, so the streams are unchanged (.334 sibling).
+        let half_dfnum = dfnum / 2.0;
+        let half_dfden = dfden / 2.0;
+        let cache_num = GammaShapeCache::new(half_dfnum);
+        let cache_den = GammaShapeCache::new(half_dfden);
         Ok((0..size)
             .map(|_| {
-                let x1 = self.sample_gamma(dfnum / 2.0) * 2.0 / dfnum;
-                let x2 = self.sample_gamma(dfden / 2.0) * 2.0 / dfden;
+                let x1 = self.sample_gamma_cached(half_dfnum, cache_num) * 2.0 / dfnum;
+                let x2 = self.sample_gamma_cached(half_dfden, cache_den) * 2.0 / dfden;
                 x1 / x2
             })
             .collect())
@@ -6265,10 +6276,13 @@ impl Generator {
         if df <= 0.0 || df.is_sign_negative() {
             return Err(RandomError::InvalidParameter);
         }
+        // Fixed shape: parameter-only gamma terms once per batch (.334 sibling).
+        let half_df = df / 2.0;
+        let cache_df = GammaShapeCache::new(half_df);
         Ok((0..size)
             .map(|_| {
                 let z = self.sample_standard_normal_single();
-                let chi2 = self.sample_gamma(df / 2.0) * 2.0;
+                let chi2 = self.sample_gamma_cached(half_df, cache_df) * 2.0;
                 z / (chi2 / df).sqrt()
             })
             .collect())
@@ -15846,6 +15860,58 @@ for child in rng.spawn(n_children):
                 batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 "gamma batch/singleton divergence at shape {shape}"
+            );
+        }
+        assert_eq!(batch.next_u64(), single.next_u64());
+    }
+
+    #[test]
+    fn gamma_consumers_batch_match_singleton_stream() {
+        // The fixed-shape cache hoists in beta/negative_binomial/f/standard_t
+        // must not change what a batched draw produces relative to repeated
+        // single draws with the same seed, including small-shape (< 1),
+        // Marsaglia-Tsang (> 1), and exponential (== 1 via shape 2.0/2) regimes.
+        let mut batch = oracle_gen();
+        let mut single = oracle_gen();
+        for &(a, b) in &[(2.5f64, 4.0f64), (0.5, 3.0), (1.5, 0.75), (1.0, 1.0)] {
+            let batched = batch.beta(a, b, 24).unwrap();
+            let singles: Vec<f64> = (0..24).map(|_| single.beta(a, b, 1).unwrap()[0]).collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "beta batch/singleton divergence at ({a}, {b})"
+            );
+        }
+        for &n in &[0.5f64, 1.0, 7.5] {
+            let batched = batch.negative_binomial(n, 0.35, 24).unwrap();
+            let singles: Vec<u64> = (0..24)
+                .map(|_| single.negative_binomial(n, 0.35, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched, singles,
+                "negative_binomial batch/singleton divergence at n {n}"
+            );
+        }
+        for &(dfnum, dfden) in &[(5.0f64, 8.0f64), (1.0, 2.0), (0.5, 3.5)] {
+            let batched = batch.f_distribution(dfnum, dfden, 24).unwrap();
+            let singles: Vec<f64> = (0..24)
+                .map(|_| single.f_distribution(dfnum, dfden, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "f batch/singleton divergence at ({dfnum}, {dfden})"
+            );
+        }
+        for &df in &[1.0f64, 2.0, 10.5] {
+            let batched = batch.standard_t(df, 24).unwrap();
+            let singles: Vec<f64> = (0..24)
+                .map(|_| single.standard_t(df, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "standard_t batch/singleton divergence at df {df}"
             );
         }
         assert_eq!(batch.next_u64(), single.next_u64());

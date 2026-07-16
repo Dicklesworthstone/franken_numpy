@@ -190,6 +190,79 @@ fn bench_gamma_shape_cache(c: &mut Criterion) {
     group.finish();
 }
 
+/// Replica of one per-sample `GammaShapeCache::new` (the exact branch chain
+/// and expressions), used to model the work the fixed-shape hoist removes.
+fn gamma_cache_build_model(shape: f64) -> (f64, f64) {
+    if shape == 1.0 || shape == 0.0 || !shape.is_finite() {
+        (0.0, 0.0)
+    } else if shape < 1.0 {
+        (1.0 - shape, 1.0 / shape)
+    } else {
+        let d = shape - 1.0 / 3.0;
+        (d, 1.0 / (9.0 * d).sqrt())
+    }
+}
+
+/// The public batched beta path PLUS exactly the parameter-only work the
+/// fixed-shape hoist removes: TWO gamma cache builds per sample (one per
+/// shape). Same machinery in both arms (`.333` bench-arm rule); the removed
+/// terms consume no RNG draws, so the additive model is operation-exact.
+fn former_model_beta(generator: &mut Generator, a: f64, b: f64, size: usize) -> Vec<f64> {
+    let out = generator.beta(a, b, size).unwrap();
+    for _ in 0..size {
+        black_box(gamma_cache_build_model(black_box(a)));
+        black_box(gamma_cache_build_model(black_box(b)));
+    }
+    out
+}
+
+fn bench_beta_gamma_shape_cache(c: &mut Criterion) {
+    const SIZE: usize = 100_000;
+    const A: f64 = 2.5;
+    const B: f64 = 4.0;
+
+    // Batch-vs-singleton stream equivalence for every hoisted loop.
+    let mut batch_proof = pcg64_generator();
+    let mut single_proof = pcg64_generator();
+    for &(a, b) in &[(2.5f64, 4.0f64), (0.5, 3.0), (1.5, 0.75)] {
+        let batch = batch_proof.beta(a, b, 32).unwrap();
+        let singles: Vec<f64> = (0..32)
+            .map(|_| single_proof.beta(a, b, 1).unwrap()[0])
+            .collect();
+        assert_eq!(
+            batch.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "beta batch/singleton divergence at ({a}, {b})"
+        );
+    }
+    assert_eq!(batch_proof.next_u64(), single_proof.next_u64());
+
+    let mut former_generator = pcg64_generator();
+    let mut candidate_generator = pcg64_generator();
+    let mut group = c.benchmark_group("beta_gamma_shape_cache");
+    group.throughput(Throughput::Elements(SIZE as u64));
+    group.bench_function("former_model_recompute_caches", |bench| {
+        bench.iter(|| {
+            black_box(former_model_beta(
+                black_box(&mut former_generator),
+                black_box(A),
+                black_box(B),
+                black_box(SIZE),
+            ))
+        })
+    });
+    group.bench_function("candidate_hoisted_caches", |bench| {
+        bench.iter(|| {
+            black_box(
+                candidate_generator
+                    .beta(black_box(A), black_box(B), black_box(SIZE))
+                    .unwrap(),
+            )
+        })
+    });
+    group.finish();
+}
+
 #[inline(never)]
 fn former_choice_weighted_replace_one(
     generator: &mut Generator,
@@ -908,6 +981,7 @@ criterion_group!(
     benches,
     bench_poisson_ptrs_cache,
     bench_gamma_shape_cache,
+    bench_beta_gamma_shape_cache,
     bench_choice_weighted_singleton,
     bench_permuted_last_axis_allocations,
     bench_permuted_strided_axis_allocations,

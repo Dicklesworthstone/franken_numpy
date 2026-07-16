@@ -4,6 +4,58 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): beta/negbinom/f/t hoist their fixed-shape gamma caches - 1.19x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.335`, the first declared sibling of
+the `.334` gamma cache. Robot triage again left the P1 umbrella after its
+parked f16 and policy-gated C-BLAS leaves. After `.334`, `sample_gamma`
+builds a `GammaShapeCache` per call, so the fixed-shape internal batch loops
+still paid a per-sample cache build: `beta` (two shapes), `negative_binomial`
+(one), `f_distribution` (two, shapes `dfnum/2` and `dfden/2`), `standard_t`
+(one, `df/2`).
+
+A pre-edit `perf record -F 199 -e cycles:u` profile of `beta(2.5, 4.0,
+100_000)` (1K samples, zero lost, effective worker `vmi1293453`) showed
+`sample_gamma_cached` at 38.77% and the beta batch closure - where the
+per-call cache builds inline - at 22.11%, over ziggurat 14.68% and raw RNG
+~13%.
+
+ONE LEVER: the four loops build their `GammaShapeCache`(s) once per batch and
+call `sample_gamma_cached`. The hoisted `dfnum / 2.0`-style shape values are
+the identical f64s the loops formerly recomputed, and the caches consume no
+RNG draws, so every stream is bit-identical. Out of scope (still-open
+siblings): the noncentral family (threads a shared per-sample helper whose
+signature would change), dirichlet (needs a per-alpha cache vector), vonmises
+kappa terms, legacy `RandomState` gamma.
+
+PROOF: new `gamma_consumers_batch_match_singleton_stream` pins
+batch-vs-singleton bit equality plus final raw-stream position for all four
+distributions across small-shape/MT/exponential regimes (13 parameter sets);
+full crate suite 435 + 12 + 16 green including the live NumPy gamma oracles;
+clippy added nothing (the intentional `vec!` in the permuted former-arm
+replica remains the only bench warning). The bench setup asserts beta
+batch/singleton equivalence before timing.
+
+Foreground same-binary A/B, former arm per the `.333` rule (public beta PLUS
+exactly the removed work - two cache-build replicas per sample,
+operation-exact since RNG-independent), `beta(2.5, 4.0, 100_000)`:
+
+| run | former-model | candidate hoisted | midpoint |
+|---|---:|---:|---:|
+| 10 samples, drifted worker `vmi1152480` (job `j-29933307944763936`) | 5.4224 ms `[4.9863, 6.2681]` | 4.4486 ms `[3.8858, 5.1997]` | 1.219x, OVERLAPPING - not evidence |
+| 20 samples, 2 s window, pinned `vmi1293453` | 4.3861 ms `[4.2855, 4.5383]` | 3.6903 ms `[3.5551, 3.8750]` | **1.189x, disjoint** |
+
+The overlapping first run is retained as a worker-drift datum only; the
+20-sample pinned run is the evidence row. negative_binomial/f/standard_t ride
+the same relocation with stream equality proven but their regimes unmeasured
+(one cache build per sample instead of beta's two; expect less than the beta
+row). Timed source SHA-256:
+`a8700ebcc88c27dcfd1a18f096d29fd5053e4c16e093269623876e254bd3b083`; bench
+SHA-256: `a9ede981519c02588def709df55f6e6e0d25e31d1cbf61c1cc0744efd534e6c7`.
+Verdict: **SHIP**. Do not re-probe fixed-shape gamma-cache hoists in these
+four loops. The distribution parameter-cache lane's remaining leaves are the
+out-of-scope list above; after those, the lane is likely mined.
+
 ## 2026-07-16 - WIN (SHIP): gamma sampling hoists shape-only terms per batch - 1.17x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.334`. Robot triage again left the P1
