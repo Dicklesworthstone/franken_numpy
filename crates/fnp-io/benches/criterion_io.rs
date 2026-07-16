@@ -961,6 +961,128 @@ fn bench_loadtxt_plain_rows(c: &mut Criterion) {
     group.finish();
 }
 
+/// Faithful replica of the CURRENT (post-.342) usecols path: the column plan
+/// hoisted once per call, but each row still scattering into a fresh
+/// `selected` Vec (`vec![0.0; n_out]`) that is then copied into the output.
+/// The scatter-into candidate must reproduce it bit-for-bit while removing
+/// only the per-row Vec and copy.
+#[inline(never)]
+fn loadtxt_usecols_hoisted_former(
+    text: &str,
+    delimiter: char,
+    comments: char,
+    cols: &[usize],
+) -> (Vec<f64>, usize, usize) {
+    use std::collections::BTreeMap;
+    let mut positions: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let mut max_col = 0usize;
+    for (pos, &col) in cols.iter().enumerate() {
+        positions.entry(col).or_default().push(pos);
+        if col > max_col {
+            max_col = col;
+        }
+    }
+    let mut values = Vec::new();
+    let mut ncols: Option<usize> = None;
+    let mut nrows = 0usize;
+    for line in text.lines() {
+        let trimmed = match line.find(comments) {
+            Some(pos) => &line[..pos],
+            None => line,
+        }
+        .trim();
+        if trimmed.is_empty() || trimmed.starts_with(comments) {
+            continue;
+        }
+        let mut selected = vec![0.0; cols.len()];
+        let mut col_idx = 0usize;
+        for token in trimmed.split(delimiter) {
+            if col_idx > max_col {
+                break;
+            }
+            if let Some(pos_list) = positions.get(&col_idx) {
+                let value = token.trim().parse::<f64>().unwrap();
+                for &pos in pos_list {
+                    selected[pos] = value;
+                }
+            }
+            col_idx += 1;
+        }
+        assert!(col_idx > max_col, "usecols index out of bounds");
+        match ncols {
+            None => ncols = Some(selected.len()),
+            Some(expected) => assert_eq!(selected.len(), expected),
+        }
+        values.extend(selected);
+        nrows += 1;
+    }
+    (values, nrows, ncols.unwrap_or(0))
+}
+
+fn bench_loadtxt_usecols_scatter(c: &mut Criterion) {
+    const ROWS: usize = 8_192;
+    const COLS: usize = 16;
+    const USECOLS: [usize; 4] = [13, 1, 7, 13];
+
+    let mut text = String::new();
+    for row in 0..ROWS {
+        for col in 0..COLS {
+            if col > 0 {
+                text.push(',');
+            }
+            text.push_str(&format!("{}.{}", row % 977, col));
+        }
+        text.push('\n');
+    }
+
+    let (former_values, former_rows, former_cols) =
+        loadtxt_usecols_hoisted_former(&text, ',', '#', &USECOLS);
+    let current = fnp_io::loadtxt_usecols(&text, ',', '#', 0, usize::MAX, Some(&USECOLS)).unwrap();
+    assert_eq!(current.nrows, former_rows);
+    assert_eq!(current.ncols, former_cols);
+    assert!(
+        current
+            .values
+            .iter()
+            .zip(&former_values)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+
+    // Variance protocol: 20 samples, 2 s window, quiet worker; floor
+    // predeclared in the bead (disjoint AND >= 1.05x).
+    let mut group = c.benchmark_group("loadtxt_usecols_scatter");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(2));
+    group.throughput(Throughput::Elements((ROWS * USECOLS.len()) as u64));
+    group.bench_function("former_selected_vec", |bench| {
+        bench.iter(|| {
+            black_box(loadtxt_usecols_hoisted_former(
+                black_box(&text),
+                ',',
+                '#',
+                black_box(&USECOLS),
+            ))
+        })
+    });
+    group.bench_function("candidate_scatter_into", |bench| {
+        bench.iter(|| {
+            black_box(
+                fnp_io::loadtxt_usecols(
+                    black_box(&text),
+                    ',',
+                    '#',
+                    0,
+                    usize::MAX,
+                    black_box(Some(&USECOLS)),
+                )
+                .unwrap(),
+            )
+        })
+    });
+    group.finish();
+}
+
 fn bench_loadtxt_usecols_plan(c: &mut Criterion) {
     const ROWS: usize = 8_192;
     const COLS: usize = 16;
@@ -2061,6 +2183,7 @@ criterion_group!(
     bench_fromfile_text_literal_bounded_prefix,
     bench_fromfile_text_wildcard_bounded_prefix,
     bench_loadtxt_usecols_plan,
+    bench_loadtxt_usecols_scatter,
     bench_loadtxt_plain_rows,
     bench_genfromtxt_full_plain_rows,
     bench_tofile_text_integral,

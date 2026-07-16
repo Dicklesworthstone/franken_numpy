@@ -2279,6 +2279,12 @@ pub fn loadtxt_usecols(
             break;
         }
         if let Some(plan) = &plan {
+            // NOTE (2026-07-16 REJECT, ledger + bench loadtxt_usecols_scatter):
+            // scattering selected rows directly into `values` measured
+            // 0.86-0.95x - the per-row 32B `selected` Vec is thread-cache
+            // cheap, and bounds-checked random-access writes into the large
+            // output cost more than the removed alloc+copy. Sequential
+            // direct-extend pays (.346/.347/.348); scatter-shaped rows do not.
             let row_vals = parse_loadtxt_row_usecols_planned(trimmed, delimiter, plan)?;
             match ncols {
                 None => ncols = Some(row_vals.len()),

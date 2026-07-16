@@ -4,6 +4,52 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - REJECT (REVERTED): usecols rows scattered directly into the output - 0.86-0.95x; the direct-extend family's boundary is now measured from both sides
+
+`BlackThrush`, bead `franken_numpy-ixs5y.351`, the scatter-shaped member of
+the text-parser direct-extend family (.346/.347/.348 all paid 1.24-1.39x on
+sequential rows). Robot triage again left the P1 umbrella after its parked
+f16 and policy-gated C-BLAS leaves.
+
+Source attribution: the .342-hoisted usecols path still allocated a per-row
+`selected` Vec (`vec![0.0; n_out]`) that the caller copies into `values`.
+The tested ONE LEVER (`parse_loadtxt_row_usecols_planned_into`) resized
+`values` by `n_out` and scattered `values[row_start + pos] = value` directly
+- structurally less work on paper (alloc and copy removed), admissible under
+the .350 frame rule. Behavior was identical (precedence reasoned: parse
+errors before budget, the ncols mismatch arm unreachable since selected
+width always equals `n_out`, errors discard `values`; full suite green with
+the duplicate/out-of-order golden tests routing through the scatter). A
+pre-edit profile showed tokenization dominating (CharSearcher 25.2% +
+memchr 23.4%) with the fn frame + allocator at ~21%, predicting a thin ~1.1x.
+
+TWO foreground same-binary A/Bs (20 samples, 2 s windows, honored-pin
+`vmi1293453`; former arm = post-.342 replica isolating ONLY the scatter):
+
+| run | former per-row selected Vec | scatter-into candidate | midpoint |
+|---|---:|---:|---:|
+| 1 (job `j-29933730227290567`) | 2.3070 ms `[2.2367, 2.3761]` | 2.4402 ms `[2.2691, 2.6138]` | 0.945x, overlapping |
+| 2 | 2.1258 ms `[2.0194, 2.2732]` | 2.4774 ms `[2.3690, 2.5956]` | **0.858x - disjoint LOSS** |
+
+DIAGNOSIS: a 32-byte per-row allocation is thread-cache cheap (~tens of ns),
+and the replacement pays MORE in bounds-checked random-access writes into
+the large output (`row_start + pos` indexing that LLVM cannot elide because
+`pos` flows from the plan's position lists) than the removed alloc + 4-element
+copy. FAMILY BOUNDARY NOW MEASURED FROM BOTH SIDES: direct-extend pays when
+rows append SEQUENTIALLY from the parse iterator (1.24-1.39x); it LOSES when
+the row shape requires random-access scatter (0.86-0.95x). REVERTED
+(production restored verbatim with a source note; the
+`loadtxt_usecols_scatter` bench group is KEPT as a null-pair pin with its
+bit-equality assert). Post-revert suite green (329 + 61). Reverted source
+SHA-256: `9c72182c1b971998c89a6a8cd6d1c87b800746fff2aa27710c3010e9d53694da`;
+bench SHA-256:
+`0f1fb01ccee75151a3ebc56b5e8e41fa180425072625632f49b7579716e84e0c`.
+Verdict: **REJECT** - bars scatter-into-output conversions for
+plan-positioned rows. With this, the fnp-io text lane is FULLY MINED: every
+remaining declared leaf (signed usecols, quoted plan hoist, all_lines
+stream) is at or below this EV class. Next surface must come from untouched
+crates (fnp-runtime) or the fnp-random noncentral leaf.
+
 ## 2026-07-16 - NO-SHIP (REVERTED): `tofile_text` manual integer formatting - 1.00-1.10x overlapping; frame % is not removable %
 
 `BlackThrush`, bead `franken_numpy-ixs5y.350`, fresh write-side scout after
