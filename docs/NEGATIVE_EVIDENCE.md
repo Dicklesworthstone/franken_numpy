@@ -4,6 +4,76 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): single-field structured reads bulk-copy the packed record prefix - 27.36x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.365`. Robot triage was healthy
+(`data_hash c3974bef9bc93dd2`, 145 actionable, none in progress), but its
+literal top perf leaf was the prohibited C-BLAS route. Negative-ledger review
+also stopped a tempting stale route: the non-external nditer odometer was
+already rejected at 1.009x with overlapping intervals (`.349`). Although an
+older frontier note called shallow `fnp-io` relocation exhausted, exact ledger
+and history search found no `fromfile_structured` measurement. This pass
+therefore took that fresh residual.
+
+PROFILE FIRST, before the production edit: a one-field structured descriptor
+packs each field across the complete record, so the selected records are one
+contiguous byte prefix. The generic decoder nevertheless performed one
+`extend_from_slice` per record. Ordinary `--profile release`, LTO disabled,
+10 samples, 250 ms warm-up, 750 ms windows; the cold target received an
+untimed `--no-run` build before only the measurement was capped (effective
+worker `vmi1152480`, job `j-29933730227290886`, warm-up build 49.24 s,
+measurement Cargo phase 0.09 s):
+
+| profile arm | Criterion estimate |
+|---|---:|
+| current public path | 6.5991 ms `[5.3239, 7.9030]` |
+| exact generic record loop | 4.9626 ms `[4.5890, 5.4040]` |
+| one-prefix bulk-copy model | 199.18 us `[179.40, 236.13]` |
+
+The faithful loop accounts for the call and the model exposes a roughly 33x
+gap, easily clearing the predeclared opportunity floor.
+
+ONE LEVER: after the unchanged record-size validation, zero-size rejection,
+count clamp, and field-offset validation, `fromfile_structured` recognizes
+exactly one field and copies `data[..n * record_size]` once. A sole field's
+item size is the complete packed record size by descriptor construction, so
+this is byte-for-byte the same concatenated column. Multi-field descriptors
+retain the generic gather loop. Shape, descriptor clone, C-order marker,
+trailing-partial-record handling, count clamping, and invalid dtype errors are
+unchanged.
+
+The final benchmark freezes the exact former record/field loop and asserts the
+complete `StructuredNpyData` (shape, order, descriptor, and column bytes)
+against the public candidate before timing. `vmi1152480` immediately evicted
+its newly warmed target on the final rerun (`j-29933730227290892`), so that
+non-evidence job was cancelled and routing switched. Effective worker
+`vmi1293453` received its own untimed cold warm-up; the measurement Cargo phase
+then completed in 0.10 s (job `j-29933730227290894`):
+
+| arm | Criterion estimate |
+|---|---:|
+| former exact record loop | 4.7599 ms `[4.4323, 5.0378]` |
+| public single-prefix bulk copy | **173.96 us** `[169.10, 179.28]` |
+
+Midpoints are **27.362x** apart (**96.345% less time**); even the closest
+interval bounds are 24.723x apart. Three focused `fromfile_structured` release
+tests pass on effective worker `vmi1149989` (`j-29933730227290904`), covering
+the existing bounded/excess multi-field controls plus single-field unbounded,
+bounded, excess-count, partial-tail, empty, arbitrary `Bytes(7)`, zero-size,
+and Object-dtype cases. Strict release Clippy reached the crate on that worker
+(`j-29933730227290910`) and failed only on pre-existing, unowned findings:
+dead `parse_loadtxt_row_usecols` at line 2518 and a collapsible `if` at line
+3766. Those lines were not changed or staged. Full-file rustfmt is likewise
+pre-blocked by older unrelated diffs; the owned hunks and `git diff --check`
+are clean. `vmi1293453` also evicted its target before validation
+(`j-29933730227290898`), so that incomplete job was cancelled and not counted.
+Timed source SHA-256:
+`fb2f09d8e34433f110d340a17d6787cc2a04830be1e9d31a7318e6fec2b3cd4c`;
+bench SHA-256:
+`2588f41d75e12283e55c6609f00e566fb12715cc8a3d0f9df55ac48051e7d1de`.
+Verdict: **SHIP**. Do not re-probe one-field structured record gathering;
+multi-field layout transformations remain a separate lane.
+
 ## 2026-07-16 - WIN (SHIP): unit-window C/F-contiguous sliding views bypass exact overlap sorting - 9,702x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.363`. Robot triage was healthy

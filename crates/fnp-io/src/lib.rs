@@ -6065,6 +6065,15 @@ pub fn fromfile_structured(
     let n = clamp_count(count, max_records);
 
     let offsets = descriptor.field_offsets()?;
+    if descriptor.fields.len() == 1 {
+        return Ok(StructuredNpyData {
+            shape: vec![n],
+            fortran_order: false,
+            descriptor: descriptor.clone(),
+            columns: vec![data[..n * record_size].to_vec()],
+        });
+    }
+
     let mut columns: Vec<Vec<u8>> = descriptor
         .fields
         .iter()
@@ -10855,6 +10864,50 @@ mm.flush()
         assert_eq!(result.shape, vec![2]);
         assert_eq!(result.columns[0], col_x);
         assert_eq!(result.columns[1], col_y);
+    }
+
+    #[test]
+    fn fromfile_structured_single_field_copies_the_selected_record_prefix() {
+        let desc = StructuredIODescriptor {
+            fields: vec![StructuredIOField {
+                name: "payload".to_string(),
+                dtype: IOSupportedDType::Bytes(7),
+            }],
+        };
+        let records: Vec<u8> = (0..21).map(|value| (value * 17 + 3) as u8).collect();
+        let mut data = records.clone();
+        data.extend_from_slice(&[0xde, 0xad, 0xbe]);
+
+        let all = fromfile_structured(&data, &desc, None).expect("all complete records");
+        assert_eq!(all.shape, vec![3]);
+        assert!(!all.fortran_order);
+        assert_eq!(all.descriptor, desc);
+        assert_eq!(all.columns, vec![records.clone()]);
+
+        let bounded = fromfile_structured(&data, &desc, Some(2)).expect("bounded records");
+        assert_eq!(bounded.shape, vec![2]);
+        assert_eq!(bounded.columns, vec![records[..14].to_vec()]);
+
+        let excess = fromfile_structured(&data, &desc, Some(99)).expect("clamped records");
+        assert_eq!(excess.shape, vec![3]);
+        assert_eq!(excess.columns, vec![records]);
+
+        let empty = fromfile_structured(&[], &desc, None).expect("empty input");
+        assert_eq!(empty.shape, vec![0]);
+        assert_eq!(empty.columns, vec![Vec::<u8>::new()]);
+
+        for invalid_dtype in [IOSupportedDType::Bytes(0), IOSupportedDType::Object] {
+            let invalid = StructuredIODescriptor {
+                fields: vec![StructuredIOField {
+                    name: "invalid".to_string(),
+                    dtype: invalid_dtype,
+                }],
+            };
+            assert_eq!(
+                fromfile_structured(&[], &invalid, None).unwrap_err(),
+                IOError::DTypeDescriptorInvalid
+            );
+        }
     }
 
     #[test]

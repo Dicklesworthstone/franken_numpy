@@ -10,7 +10,8 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fnp_io::{
-    IOSupportedDType, NpyHeader, fromfile, fromfile_text, load, read_npy_bytes, read_npz_bytes,
+    IOSupportedDType, NpyHeader, StructuredIODescriptor, StructuredIOField, StructuredNpyData,
+    fromfile, fromfile_structured, fromfile_text, load, read_npy_bytes, read_npz_bytes,
     read_npz_bytes_linear_overlap_control, write_npy_bytes, write_npz_bytes,
 };
 use std::hint::black_box;
@@ -2008,6 +2009,92 @@ fn bench_load_npy_borrowed_body(c: &mut Criterion) {
     group.finish();
 }
 
+#[inline(never)]
+fn fromfile_structured_single_field_former(
+    data: &[u8],
+    descriptor: &StructuredIODescriptor,
+    count: Option<usize>,
+) -> StructuredNpyData {
+    let record_size = descriptor.record_size().expect("valid descriptor");
+    let max_records = data.len() / record_size;
+    let n = count.map_or(max_records, |requested| requested.min(max_records));
+    let offsets = descriptor.field_offsets().expect("field offsets");
+    let mut columns: Vec<Vec<u8>> = descriptor
+        .fields
+        .iter()
+        .map(|field| {
+            let size = field.dtype.item_size().expect("sized dtype");
+            Vec::with_capacity(n * size)
+        })
+        .collect();
+
+    for record_idx in 0..n {
+        let record_start = record_idx * record_size;
+        for (field_idx, field) in descriptor.fields.iter().enumerate() {
+            let field_size = field.dtype.item_size().expect("sized dtype");
+            let field_start = record_start + offsets[field_idx];
+            let field_end = field_start + field_size;
+            columns[field_idx].extend_from_slice(&data[field_start..field_end]);
+        }
+    }
+
+    StructuredNpyData {
+        shape: vec![n],
+        fortran_order: false,
+        descriptor: descriptor.clone(),
+        columns,
+    }
+}
+
+fn assert_structured_data_eq(lhs: &StructuredNpyData, rhs: &StructuredNpyData) {
+    assert_eq!(lhs.shape, rhs.shape);
+    assert_eq!(lhs.fortran_order, rhs.fortran_order);
+    assert_eq!(lhs.descriptor, rhs.descriptor);
+    assert_eq!(lhs.columns, rhs.columns);
+}
+
+fn bench_fromfile_structured_single_field(c: &mut Criterion) {
+    const RECORDS: usize = 1_048_576;
+
+    let descriptor = StructuredIODescriptor {
+        fields: vec![StructuredIOField {
+            name: "value".to_string(),
+            dtype: IOSupportedDType::F64,
+        }],
+    };
+    let values: Vec<u64> = (0..RECORDS)
+        .map(|index| (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+        .collect();
+    let data = bytemuck::cast_slice::<u64, u8>(&values);
+    let current = fromfile_structured(data, &descriptor, None).expect("structured read");
+    let former = fromfile_structured_single_field_former(data, &descriptor, None);
+    assert_structured_data_eq(&current, &former);
+
+    let mut group = c.benchmark_group("fromfile_structured_single_field");
+    group.throughput(Throughput::Bytes(data.len() as u64));
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.bench_function("former_exact_record_loop", |bench| {
+        bench.iter(|| {
+            black_box(fromfile_structured_single_field_former(
+                black_box(data),
+                black_box(&descriptor),
+                None,
+            ))
+        })
+    });
+    group.bench_function("public_single_prefix_bulk_copy", |bench| {
+        bench.iter(|| {
+            black_box(
+                fromfile_structured(black_box(data), black_box(&descriptor), None)
+                    .expect("structured read"),
+            )
+        })
+    });
+    group.finish();
+}
+
 fn bench_write_npy(c: &mut Criterion) {
     let mut group = c.benchmark_group("write_npy_bytes");
 
@@ -2204,6 +2291,7 @@ criterion_group!(
     bench_fromfile_native_f32,
     bench_fromfile_non_native_f32,
     bench_load_npy_borrowed_body,
+    bench_fromfile_structured_single_field,
     bench_write_npy,
     bench_read_npy,
     bench_write_npz,
