@@ -555,6 +555,60 @@ fn bench_complex64_div_direct(c: &mut Criterion) {
     group.finish();
 }
 
+/// Faithful replica of the CURRENT mixed Complex64+Complex128 `complex_add`
+/// path: BOTH inputs materialized via `to_complex128_vec` before adding.
+fn former_mixed_add(lhs: &ArrayStorage, rhs: &ArrayStorage) -> ArrayStorage {
+    let lhs = lhs.to_complex128_vec();
+    let rhs = rhs.to_complex128_vec();
+    ArrayStorage::Complex128(
+        lhs.iter()
+            .zip(&rhs)
+            .map(|(&(ar, ai), &(br, bi))| (ar + br, ai + bi))
+            .collect(),
+    )
+}
+
+fn bench_complex_mixed_add_direct(c: &mut Criterion) {
+    let mut group = c.benchmark_group("complex_mixed_add_direct");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(2));
+
+    let c64 = ArrayStorage::Complex64(
+        (0..100_000)
+            .map(|index| {
+                let value = index as f32 * 0.25 - 12_500.0;
+                (value, -value * 0.5)
+            })
+            .collect(),
+    );
+    let c128 = ArrayStorage::Complex128(
+        (0..100_000)
+            .map(|index| {
+                let value = f64::from(index) * 0.125 - 6_250.0;
+                (-value, value * 0.75)
+            })
+            .collect(),
+    );
+    for (label, lhs, rhs) in [("c64_lhs", &c64, &c128), ("c128_lhs", &c128, &c64)] {
+        let former = former_mixed_add(lhs, rhs).to_complex128_vec();
+        let public = lhs.complex_add(rhs).unwrap().to_complex128_vec();
+        assert_eq!(public.len(), former.len());
+        for (actual, expected) in public.iter().zip(&former) {
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+        }
+        group.bench_function(format!("former_convert_both_{label}"), |b| {
+            b.iter(|| former_mixed_add(black_box(lhs), black_box(rhs)))
+        });
+        group.bench_function(format!("direct_borrow_widen_{label}"), |b| {
+            b.iter(|| black_box(lhs).complex_add(black_box(rhs)).unwrap())
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_complex64_add_direct(c: &mut Criterion) {
     let mut group = c.benchmark_group("complex64_add_direct");
     group.sample_size(10);
@@ -916,6 +970,7 @@ criterion_group!(
     bench_complex64_sub_direct,
     bench_complex64_mul_direct,
     bench_complex64_div_direct,
+    bench_complex_mixed_add_direct,
     bench_complex128_add_direct,
     bench_complex128_sub_direct,
     bench_complex128_mul_direct,

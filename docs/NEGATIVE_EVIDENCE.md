@@ -4,6 +4,51 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): mixed Complex64+Complex128 `complex_add` borrows and widens - 18.2x/18.5x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.357`, the mixed-pair hypothesis the
+c64 convert-both family (.343/.353/.354/.355, closed at add 14.67x / sub
+17.78x / mul 12.87x / div 4.74x) explicitly left separate. Robot triage
+again left the P1 umbrella after its parked f16 and policy-gated C-BLAS
+leaves.
+
+Source attribution: both mixed `complex_add` orientations fell to
+`to_complex128_vec()` on BOTH inputs - materializing a copy of the
+Complex128 side that could be borrowed outright, plus widening the Complex64
+side through a full temporary. A pre-edit profile (honored-pin
+`vmi1293453`) showed kernel fault/alloc 32.77% + `to_complex128_vec` 13.47%
++ libc allocator ~17% - conversion and allocation about 63% of cycles.
+
+ONE LEVER: two symmetric mixed fast arms - borrow the Complex128 operand,
+widen the Complex64 operand inline, preserving operand order
+(`f64::from(ar) + br` vs `ar + f64::from(br)`), so results are bit-for-bit
+the former path's. Length errors and all other pairs unchanged. Focused test
+pins both orientations over NaN payloads, negative zero, mixed infinities,
+and subnormals, plus both length-mismatch directions (140 + 112 crate tests
+green). The bench asserts the faithful convert-both replica bit-for-bit
+before timing, per orientation.
+
+One foreground same-binary A/B (ordinary `--profile release`, LTO disabled,
+20 samples, 0.5 s warm-up, 2 s windows, honored-pin effective worker
+`vmi1293453`, job `j-29933730227290721`):
+
+| orientation | former convert-both | direct borrow+widen | midpoint |
+|---|---:|---:|---:|
+| Complex64 lhs | 888.20 us `[834.04, 952.73]` | **48.756 us** `[47.295, 50.076]` | **18.22x** |
+| Complex128 lhs | 870.04 us `[809.37, 940.12]` | **46.926 us** `[45.126, 49.559]` | **18.54x** |
+
+Both cleanly disjoint - mixed pairs pay MORE than same-dtype c64 pairs
+because one operand is borrowed with no widening at all. Timed source
+SHA-256: `5be4dff473eb70b778ef1ae6457fcc23278ba7af8f56d49cfbeeaae14c4ac335`;
+bench SHA-256:
+`75aaee3deed1f6241aa91809719e460aae3334367cd43e2172c2e9e8506e692b`.
+Verdict: **SHIP**. Do not re-probe mixed `complex_add` materialization.
+DECLARED SIBLINGS (unmeasured, trivially takeable with this established
+pattern): mixed sub/mul/div orientations - after those, the complex binary
+storage surface is fully closed. With the sibling session's noncentral
+reject landing the same hour, fnp-random is fully mined; the post-complex
+frontier remains fnp-python dispatch or the old conditional opens.
+
 ## 2026-07-16 - REJECT (REVERTED): `noncentral_chisquare` fixed gamma-shape cache - 1.085x midpoint, overlapping
 
 `BlackThrush`, bead `franken_numpy-ixs5y.356`, the explicit Generator

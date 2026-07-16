@@ -1496,6 +1496,38 @@ impl ArrayStorage {
                     .collect(),
             ));
         }
+        // Mixed pairs borrow the Complex128 operand and widen the Complex64
+        // one inline instead of materializing both via `to_complex128_vec`
+        // (the .343 family lever; identical f64::from-then-add order and
+        // operand order, so results are bit-for-bit the former path's).
+        if let (Self::Complex64(a), Self::Complex128(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| (f64::from(ar) + br, f64::from(ai) + bi))
+                    .collect(),
+            ));
+        }
+        if let (Self::Complex128(a), Self::Complex64(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| (ar + f64::from(br), ai + f64::from(bi)))
+                    .collect(),
+            ));
+        }
         let a = self.to_complex128_vec();
         let b = other.to_complex128_vec();
         if a.len() != b.len() {
@@ -3104,6 +3136,41 @@ mod tests {
                 to: DType::Complex64,
             })
         ));
+    }
+
+    #[test]
+    fn storage_complex_add_mixed_pairs_match_widened_clone_path_bits() {
+        // Both mixed orientations must be bit-for-bit the former
+        // convert-both path, including operand order (self + other).
+        let c64 = ArrayStorage::from_complex64_vec(vec![
+            (-0.0, f32::from_bits(0x7fc0_0123)),
+            (f32::INFINITY, f32::MIN_POSITIVE),
+            (f32::from_bits(1), -f32::INFINITY),
+        ]);
+        let c128 = ArrayStorage::Complex128(vec![
+            (0.0, 2.0),
+            (f64::NEG_INFINITY, -4.5e-300),
+            (f64::from_bits(3), f64::INFINITY),
+        ]);
+        for (lhs, rhs) in [(&c64, &c128), (&c128, &c64)] {
+            let former_a = lhs.to_complex128_vec();
+            let former_b = rhs.to_complex128_vec();
+            let former: Vec<_> = former_a
+                .iter()
+                .zip(&former_b)
+                .map(|(&(ar, ai), &(br, bi))| (ar + br, ai + bi))
+                .collect();
+            let direct = lhs.complex_add(rhs).unwrap().to_complex128_vec();
+            for (actual, expected) in direct.iter().zip(&former) {
+                assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+                assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+            }
+        }
+
+        let short = ArrayStorage::from_complex64_vec(vec![(1.0, 2.0)]);
+        let long = ArrayStorage::Complex128(vec![(3.0, 4.0), (5.0, 6.0)]);
+        assert!(short.complex_add(&long).is_err());
+        assert!(long.complex_add(&short).is_err());
     }
 
     #[test]
