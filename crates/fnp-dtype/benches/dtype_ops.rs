@@ -374,6 +374,57 @@ fn former_complex128_add(lhs: &ArrayStorage, rhs: &ArrayStorage) -> ArrayStorage
     )
 }
 
+fn former_complex64_add(lhs: &ArrayStorage, rhs: &ArrayStorage) -> ArrayStorage {
+    let lhs = lhs.to_complex128_vec();
+    let rhs = rhs.to_complex128_vec();
+    ArrayStorage::Complex128(
+        lhs.iter()
+            .zip(&rhs)
+            .map(|(&(ar, ai), &(br, bi))| (ar + br, ai + bi))
+            .collect(),
+    )
+}
+
+fn bench_complex64_add_direct(c: &mut Criterion) {
+    let mut group = c.benchmark_group("complex64_add_direct");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+
+    let lhs = ArrayStorage::Complex64(
+        (0..100_000)
+            .map(|index| {
+                let value = index as f32 * 0.25 - 12_500.0;
+                (value, -value * 0.5)
+            })
+            .collect(),
+    );
+    let rhs = ArrayStorage::Complex64(
+        (0..100_000)
+            .map(|index| {
+                let value = index as f32 * 0.125 - 6_250.0;
+                (-value, value * 0.75)
+            })
+            .collect(),
+    );
+    let former = former_complex64_add(&lhs, &rhs).to_complex128_vec();
+    let public = lhs.complex_add(&rhs).unwrap().to_complex128_vec();
+    assert_eq!(public.len(), former.len());
+    for (actual, expected) in public.iter().zip(&former) {
+        assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+        assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+    }
+
+    group.bench_function("former_generic_control", |b| {
+        b.iter(|| former_complex64_add(black_box(&lhs), black_box(&rhs)))
+    });
+    group.bench_function("public_current_or_direct", |b| {
+        b.iter(|| black_box(&lhs).complex_add(black_box(&rhs)).unwrap())
+    });
+
+    group.finish();
+}
+
 fn bench_complex128_add_direct(c: &mut Criterion) {
     let mut group = c.benchmark_group("complex128_add_direct");
     group.sample_size(10);
@@ -691,6 +742,7 @@ criterion_group!(
     bench_u64_to_u32_direct,
     bench_to_f64_vec,
     bench_to_complex128_vec,
+    bench_complex64_add_direct,
     bench_complex128_add_direct,
     bench_complex128_sub_direct,
     bench_complex128_mul_direct,

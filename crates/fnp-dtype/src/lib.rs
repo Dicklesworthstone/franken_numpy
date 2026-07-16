@@ -1480,6 +1480,22 @@ impl ArrayStorage {
                     .collect(),
             ));
         }
+        if let (Self::Complex64(a), Self::Complex64(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| {
+                        (f64::from(ar) + f64::from(br), f64::from(ai) + f64::from(bi))
+                    })
+                    .collect(),
+            ));
+        }
         let a = self.to_complex128_vec();
         let b = other.to_complex128_vec();
         if a.len() != b.len() {
@@ -2981,6 +2997,43 @@ mod tests {
             assert_eq!(actual.0.to_bits(), expected.0.to_bits());
             assert_eq!(actual.1.to_bits(), expected.1.to_bits());
         }
+    }
+
+    #[test]
+    fn storage_complex_add_complex64_matches_widened_clone_path_bits() {
+        let a = ArrayStorage::from_complex64_vec(vec![
+            (-0.0, f32::from_bits(0x7fc0_0123)),
+            (f32::INFINITY, f32::MIN_POSITIVE),
+            (f32::from_bits(1), -f32::INFINITY),
+        ]);
+        let b = ArrayStorage::from_complex64_vec(vec![
+            (0.0, 2.0),
+            (-f32::INFINITY, -f32::MIN_POSITIVE),
+            (f32::from_bits(2), f32::INFINITY),
+        ]);
+        let former_a = a.to_complex128_vec();
+        let former_b = b.to_complex128_vec();
+        let former: Vec<_> = former_a
+            .iter()
+            .zip(&former_b)
+            .map(|(&(ar, ai), &(br, bi))| (ar + br, ai + bi))
+            .collect();
+        let direct = a.complex_add(&b).unwrap().to_complex128_vec();
+
+        for (actual, expected) in direct.iter().zip(&former) {
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+        }
+
+        let short = ArrayStorage::from_complex64_vec(vec![(1.0, 2.0)]);
+        let long = ArrayStorage::from_complex64_vec(vec![(3.0, 4.0), (5.0, 6.0)]);
+        assert!(matches!(
+            short.complex_add(&long),
+            Err(StorageError::UnsupportedCast {
+                from: DType::Complex64,
+                to: DType::Complex64,
+            })
+        ));
     }
 
     #[test]

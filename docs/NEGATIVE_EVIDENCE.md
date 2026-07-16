@@ -4,6 +4,60 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): Complex64 `complex_add` widens directly into its Complex128 output - 14.67x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.343`. Robot triage again selected the
+P1 pure-safe-Rust performance umbrella. The active `fnp-io` retry owned that
+dirty surface, and the immediately preceding direct-Rust linalg seam had
+shipped, so negative-ledger screening pivoted to fresh `fnp-dtype`. The four
+existing binary-operation entries cover same-variant Complex128 inputs only;
+no ledger or history row covered Complex64 operands.
+
+PROFILE FIRST: with production untouched and only a faithful benchmark fixture
+added, strict-remote ordinary `--profile release` (LTO disabled) profiled the
+public `Complex64 + Complex64` fallback for five seconds on effective worker
+`vmi1227854`, job `j-29933730227290274`, binary SHA-256
+`7b5c45b12cb7e58f0da9dda845591ac286e1cc94495b152e3fbaaec499741316`.
+The 1,080-cycle-sample capture lost zero samples. `to_complex128_vec` was the
+largest user-space symbol at **29.58%**, and `ArrayStorage::complex_add` held
+another **19.49%**: both operands were widened into full temporary
+`Vec<(f64, f64)>` buffers before allocating the required Complex128 output.
+
+ONE LEVER: the exact `Complex64 + Complex64` conjunction now borrows and zips
+both typed slices, widens each f32 component with the same exact `f64::from`,
+and performs the same two additions directly into the required Complex128
+result. Output dtype and arithmetic order are unchanged. Length mismatch still
+returns `UnsupportedCast { Complex64, Complex64 }`; every mixed-storage pair
+retains the former generic conversion path. No subtraction, multiplication,
+division, reduction, cast, or promotion path changed.
+
+PROOF: the focused remote release test compares raw f64 output bits against
+the former widened-clone construction for signed zero, a fixed f32 NaN payload,
+infinities, minimum normal values, and subnormals, and pins the Complex64
+length-mismatch fields; 1/1 passed on job `j-29933730227290280`. The benchmark
+also asserts full raw-bit equality before timing.
+
+FOREGROUND same-binary A/B, ordinary `--profile release`, LTO disabled,
+`RAYON_NUM_THREADS=4`, 10 samples / 250 ms warm-up / 750 ms target, effective
+worker `vmi1264463`, job `j-29933730227290289`:
+
+| arm | Criterion estimate |
+|---|---:|
+| former widened temporary vectors | 1.6718 ms `[1.5540, 1.8578 ms]` |
+| borrowed inline widening | **113.97 us** `[111.51, 117.19 us]` |
+
+Midpoint **14.669x faster / 93.18% less time**; conservative interval ratio
+`1,554.0 / 117.19 = 13.261x`. The initial worker repeatedly missed its release
+cache and reset SSH during artifact retrieval, so the final target received an
+untimed, unwrapped warm-up after switching `RCH_WORKER` to `vmi1264463`; the
+final RCH invocation still rebuilt, but both timed arms then ran in one process
+and no timeout was used as evidence. Timed source SHA-256:
+`f03ac7038db5dc7ce9c2db9f0592b27b8280badc99d44564da025f415a19bb2d`;
+bench SHA-256:
+`ea95497e7116f38ae10e03ad75a1a35abf4eb7a10418802af89525f98c243772`.
+Verdict: **SHIP**. Do not re-probe Complex64+Complex64 `complex_add` input
+materialization; other operations or mixed pairs are separate hypotheses.
+
 ## 2026-07-16 - RETRY PAID (WIN, SHIP): hoisted `loadtxt(usecols)` row plan - 1.21x disjoint under the x6teb predicate
 
 `BlackThrush`, bead `franken_numpy-ixs5y.342`, paying the retry predicate of
