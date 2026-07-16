@@ -4,6 +4,60 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - RETRY PAID (WIN, SHIP): singleton-axis `flip` identity clone - 19.3x; the .319 "noisy 1.18x" was a swamped measurement
+
+`BlackThrush`, bead `franken_numpy-ixs5y.344`, paying the retry predicate of
+the 2026-07-15 `.319` NO-SHIP ("singleton-axis flip clone - noisy 1.18x";
+predicate: "Do not retry this clone branch without a quiet-worker
+low-variance A/B or a different primitive"). Robot triage again left the P1
+umbrella after its parked f16 and policy-gated C-BLAS leaves; this was the
+strongest candidate from the declared ledger scan for noise-limited no-ships
+payable by the variance protocol. FLOOR PREDECLARED in the bead before
+measuring: ship iff intervals DISJOINT and midpoint >= 1.05x.
+
+Same lever as `.319`, reconstructed: `flip(axis)` with `shape[ax] <= 1` is
+the identity relocation, but production still zero-filled an output and ran
+`flip_axis_build` - which degenerates to per-element parallel chunks on
+`[131071, 1]` axis 1 (`block == 1`). A pre-edit `perf record -F 199 -e
+cycles:u` profile (4K samples, zero lost, effective worker `vmi1293453`,
+`RAYON_NUM_THREADS=4`) put the degenerate rayon consumer at **46.24%** of
+cycles with rayon/crossbeam scheduling ~13% and libc fill/copy ~12%. ONE
+LEVER returns `self.clone()` after axis normalization; empty axes ride the
+same branch (identity on zero elements); every non-singleton flip is
+unchanged. Focused release test pins raw bits (signed zero, subnormal,
+infinities, NaN payload), positive and negative axis indexing, the axis-0
+singleton, exact i64 sidecars beyond 2^53 with fresh backing, empty axes, and
+a non-singleton control (11/11 flip tests green). Clippy: only the two
+pre-existing lib lints. The bench asserts the frozen former-kernel replica
+against the public path bit-for-bit before timing.
+
+One foreground same-binary A/B under the predeclared protocol (ordinary
+`--profile release`, LTO disabled, 20 samples, 0.5 s warm-up, 2 s window,
+warm pinned effective worker `vmi1293453`, job `j-29933730227290304`):
+
+| arm | Criterion estimate |
+|---|---:|
+| former axis-build kernel | 410.10 us `[369.42, 456.57]` |
+| candidate identity clone | **21.293 us** `[20.918, 21.684]` |
+
+Midpoint **19.26x faster / 94.8% less time**; closest interval bounds are
+~17x apart. DIAGNOSIS OF THE ORIGINAL NO-SHIP: `.319` measured BOTH arms at
+534-869 us on loaded `vmi1264463` - a 1 MiB clone cannot cost 650 us, so the
+worker's contention swamped both arms and compressed a ~19x effect into a
+"noisy 1.18x". The variance protocol did not merely tighten intervals here;
+it un-swamped the measurement entirely. LEDGER RULE SHARPENED: when a
+no-ship's ABSOLUTE numbers are implausible for the operation (estimate
+bytes/us), suspect a swamped worker, not a small effect - the point estimate
+under contention says nothing about the true ratio. Timed source SHA-256:
+`e817931c9f5b442ebc70ee6aae6aaa277422e1062a2da7f19cb3d7aa64d82449`; bench
+SHA-256: `f1a082b3e41aee80ab84c33a4b2e3b9937e4a08130a84ac870e8294e84c1aa3b`.
+Verdict: **SHIP**. Do not re-probe singleton-axis flip. The remaining
+"noisy" no-ships from the scan: Exact-U64 singleton cumulative (1.03x - its
+absolute numbers were plausible, likely a genuinely small effect; retry only
+with allocation evidence) and the 2026-06-28 compress/extract density gate
+(pre-relaxation era, "noise or slower" - a different-design question, not a
+measurement one).
+
 ## 2026-07-16 - WIN (SHIP): Complex64 `complex_add` widens directly into its Complex128 output - 14.67x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.343`. Robot triage again selected the

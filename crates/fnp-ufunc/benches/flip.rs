@@ -5,10 +5,92 @@
 //! previous behaviour: clone then swap mirror elements one at a time. Both produce
 //! bit-identical output.
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fnp_dtype::DType;
 use fnp_ufunc::UFuncArray;
+use rayon::prelude::*;
 use std::hint::black_box;
+use std::time::Duration;
+
+/// Frozen replica of the CURRENT singleton-axis flip kernel: zero-filled
+/// output plus the generic block copy (which degenerates to one-element
+/// parallel chunks for `[outer, 1]` axis 1), exactly as `flip_axis_build`
+/// runs it today. The identity-clone candidate must reproduce it bit-for-bit.
+#[inline(never)]
+fn former_flip_singleton_values(src: &[f64], outer: usize, axis_len: usize, inner: usize) -> Vec<f64> {
+    let n = outer * axis_len * inner;
+    let mut out = vec![0.0f64; n];
+    if n == 0 {
+        return out;
+    }
+    let block = axis_len * inner;
+    let do_block = |(out_blk, in_blk): (&mut [f64], &[f64])| {
+        for k in 0..axis_len {
+            let rk = axis_len - 1 - k;
+            out_blk[k * inner..k * inner + inner]
+                .copy_from_slice(&in_blk[rk * inner..rk * inner + inner]);
+        }
+    };
+    const FLIP_PAR_MIN: usize = 1 << 15;
+    if outer >= 2 && n >= FLIP_PAR_MIN && rayon::current_num_threads() >= 2 {
+        out.par_chunks_mut(block)
+            .zip(src.par_chunks(block))
+            .for_each(do_block);
+    } else if n >= FLIP_PAR_MIN && rayon::current_num_threads() >= 2 {
+        out.par_chunks_mut(inner.max(1))
+            .enumerate()
+            .for_each(|(k, out_row)| {
+                let rk = axis_len - 1 - k;
+                out_row.copy_from_slice(&src[rk * inner..rk * inner + inner]);
+            });
+    } else {
+        out.chunks_mut(block)
+            .zip(src.chunks(block))
+            .for_each(do_block);
+    }
+    out
+}
+
+fn bench_flip_singleton_axis(c: &mut Criterion) {
+    const OUTER: usize = 131_071;
+    let data: Vec<f64> = (0..OUTER)
+        .map(|i| f64::from_bits(0x3ff0_0000_0000_0000 ^ (i as u64).wrapping_mul(0x9e37)))
+        .collect();
+    let arr = UFuncArray::new(vec![OUTER, 1], data.clone(), DType::F64).unwrap();
+
+    let former = former_flip_singleton_values(&data, OUTER, 1, 1);
+    let public = arr.flip(Some(1)).unwrap();
+    assert_eq!(public.shape(), &[OUTER, 1]);
+    assert!(
+        public
+            .values()
+            .iter()
+            .zip(&former)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+
+    // .319 retry protocol: 20 samples and a 2 s window on a warm pinned
+    // worker, floor predeclared in the bead/ledger.
+    let mut group = c.benchmark_group("flip_singleton_axis");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(2));
+    group.throughput(Throughput::Elements(OUTER as u64));
+    group.bench_function("former_axis_build_kernel", |bench| {
+        bench.iter(|| {
+            black_box(former_flip_singleton_values(
+                black_box(&data),
+                OUTER,
+                1,
+                1,
+            ))
+        })
+    });
+    group.bench_function("candidate_identity_clone", |bench| {
+        bench.iter(|| black_box(arr.flip(black_box(Some(1))).unwrap()))
+    });
+    group.finish();
+}
 
 fn old_flip(values: &[f64], shape: &[usize], ax: usize) -> Vec<f64> {
     let inner: usize = shape[ax + 1..].iter().product();
@@ -127,5 +209,11 @@ fn bench_flip(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_rot90_k2, bench_flip_axes2, bench_flip);
+criterion_group!(
+    benches,
+    bench_rot90_k2,
+    bench_flip_axes2,
+    bench_flip,
+    bench_flip_singleton_axis
+);
 criterion_main!(benches);

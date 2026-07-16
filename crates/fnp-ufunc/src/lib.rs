@@ -13587,6 +13587,16 @@ impl UFuncArray {
             }
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
+                // Reversing a singleton (or empty) axis is the identity
+                // relocation: return an independently owned copy instead of
+                // zero-filling an output and running the block-copy kernel,
+                // which degenerates to per-element parallel chunks here
+                // (.319 retry under its quiet-worker low-variance predicate;
+                // profile: the degenerate rayon consumer held 46% of cycles
+                // on [131071, 1] axis 1).
+                if self.shape[ax] <= 1 {
+                    return Ok(self.clone());
+                }
                 let inner: usize =
                     fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
                 let outer: usize =
@@ -54866,6 +54876,65 @@ print(json.dumps(payload))
             UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let flipped = arr.flip(Some(1)).unwrap();
         assert_eq!(flipped.values(), &[3.0, 2.0, 1.0, 6.0, 5.0, 4.0]);
+    }
+
+    #[test]
+    fn flip_singleton_axis_identity_clone() {
+        // Reversing a singleton axis is the identity: the clone shortcut must
+        // preserve raw bits (signed zero, NaN payload, infinities), shape,
+        // exact integer sidecars, and independent backing, and must not
+        // disturb empty axes, axis-0 singletons, negative axis indexing, or
+        // non-singleton flips.
+        let bits = [
+            (-0.0_f64).to_bits(),
+            0x0000_0000_0000_0001,
+            f64::INFINITY.to_bits(),
+            f64::NEG_INFINITY.to_bits(),
+            0x7ff8_0000_0000_0042,
+            0x3ff0_0000_0000_0000,
+        ];
+        let arr = UFuncArray::new(vec![6, 1], bits.map(f64::from_bits).to_vec(), DType::F64)
+            .expect("singleton input");
+        for &axis in &[1isize, -1] {
+            let out = arr.flip(Some(axis)).expect("singleton flip");
+            assert_eq!(out.shape(), &[6, 1]);
+            assert_eq!(
+                out.values()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                bits.to_vec()
+            );
+            assert_ne!(out.values().as_ptr(), arr.values().as_ptr());
+        }
+
+        // Axis-0 singleton.
+        let row = UFuncArray::new(vec![1, 4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let out = row.flip(Some(0)).unwrap();
+        assert_eq!(out.values(), &[1.0, 2.0, 3.0, 4.0]);
+
+        // Exact integer sidecar beyond 2^53 preserved with fresh backing.
+        let signed_values = vec![i64::MIN, -((1_i64 << 53) + 7), (1_i64 << 53) + 9, i64::MAX];
+        let signed =
+            UFuncArray::from_storage(vec![4, 1], ArrayStorage::I64(signed_values.clone()))
+                .expect("signed array");
+        let signed_out = signed.flip(Some(1)).expect("signed singleton flip");
+        assert_eq!(
+            signed_out.to_storage().expect("signed storage"),
+            ArrayStorage::I64(signed_values)
+        );
+
+        // Empty axis stays empty.
+        let empty = UFuncArray::new(vec![3, 0], vec![], DType::F64).unwrap();
+        assert_eq!(empty.flip(Some(1)).unwrap().shape(), &[3, 0]);
+
+        // Non-singleton flips are untouched by the shortcut.
+        let dense = UFuncArray::new(vec![2, 3], (0..6).map(|i| i as f64).collect(), DType::F64)
+            .unwrap();
+        assert_eq!(
+            dense.flip(Some(1)).unwrap().values(),
+            &[2.0, 1.0, 0.0, 5.0, 4.0, 3.0]
+        );
     }
 
     #[test]
