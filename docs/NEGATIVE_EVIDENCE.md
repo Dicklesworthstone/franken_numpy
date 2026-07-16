@@ -4,6 +4,59 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): high-level NPY load decodes a borrowed body - 16.30x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.345`. Negative-ledger and history
+screening found no prior attempt on the high-level NPY body-ownership seam, so
+this was a fresh `fnp-io` lane: `read_npy_bytes` copied the entire validated
+body into an `Arc<[u8]>`, while `load` immediately decoded that body and
+dropped the Arc.
+
+PROFILE FIRST, before the production edit: an ordinary release stage profile
+(LTO disabled, effective worker `vmi1264463`, job
+`j-29933730227290411`) measured parse plus owned-body copy at 597.95 us
+`[569.30, 631.81]`, owned-body decode at 540.07 us
+`[495.74, 582.37]`, the faithful former path at 1.8085 ms
+`[1.6914, 1.9989]`, and untouched public `load` at 1.8214 ms
+`[1.7571, 1.9036]`. The body copy was the largest isolated stage and about
+33.1% of the former-path midpoint. Exact sampled-symbol profiling repeatedly
+lost its remote release cache (and one replacement worker failed SSH
+preflight), so the turn switched workers and pivoted to this same-binary stage
+attribution rather than treating a build failure as evidence.
+
+ONE LEVER: extract the existing NPY parse/validation sequence into a private
+borrowed-body parser. Public `read_npy_bytes` still creates the same owned
+`Arc<[u8]>`; only high-level numeric `load` passes the validated borrowed body
+to the unchanged decoder. NPY header/version checks, pickle rejection,
+object/read payload validation, the public owned API, NPZ, structured, text,
+and string paths are unchanged. A focused release test on `vmi1264463` (job
+`j-29933730227290426`) proved full `to_bits()` parity for NaN payloads,
+negative zero, subnormal/normal boundaries, infinities, and deliberately
+misaligned input, plus exact bad-magic and truncated-body errors.
+
+After the required untimed release warm-up (job
+`j-29933730227290435`), one capped foreground same-binary A/B ran on the same
+worker with 10 samples, 250 ms warm-up, 750 ms measurement window, ordinary
+`--profile release`, and LTO disabled (job `j-29933730227290439`):
+
+| arm | Criterion estimate |
+|---|---:|
+| former owned-body copy | 13.277 ms `[11.835, 14.272]` |
+| public borrowed-body load | **0.81436 ms** `[0.64185, 0.93881]` |
+
+The observed midpoint is **16.30x / 93.9% less time**; even the pessimistic
+cross-interval ratio is **12.61x**, with cleanly disjoint intervals. The former
+arm showed allocator-pressure absolute drift from the profile run, but the
+faithful former and candidate arms were timed in the same binary and the
+pre-edit public baseline independently confirms the direction (1.8214 ms to
+0.81436 ms, 2.24x). Timed source SHA-256:
+`5bdcc31691a89a9bf02678620994b43726b16b3d5b7505980852f5b86b1bc0f1`;
+bench SHA-256:
+`1620b91cd6c1bb26700b1a2d4ba67ad815d13bb383ac6c4f71d488368fae20ce`.
+Verdict: **SHIP**. Do not re-probe copying the validated body in high-level
+numeric `load`; public owned `read_npy_bytes` is deliberately outside this
+lever.
+
 ## 2026-07-16 - WIN (SHIP): unselected `loadtxt` rows parse directly into the output - 1.39x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.347`, the strongest declared sibling
