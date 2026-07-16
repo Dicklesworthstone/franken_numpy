@@ -4,6 +4,64 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): bounded commensurate-stride overlap certificate - 9,323x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.337`. Robot triage (data hash
+`8548d6de6fec8210`) again selected the P1 performance umbrella after its
+parked f16 and policy-gated C-BLAS leaves. The active random parameter-cache
+vein was already owned by `.336`/`.338`, so negative-ledger screening pivoted
+to a fresh `fnp-ndarray` subsystem. Existing overlap rows covered active zero
+strides, duplicate strides, and equal-magnitude opposite strides; no row or
+history hit covered unequal commensurate strides or a GCD witness.
+
+PROFILE FIRST: on the untouched production detector, a strict-remote
+non-LTO release `perf record -F 199 -e cycles:u` run of
+`NdLayout::as_strided([244,244], [8,16])` captured 1K samples with zero lost
+on effective worker `vmi1152480` (job `j-29933307944764006`). The exact
+59,536-offset path spent **66.72%** in unstable quicksort and **26.88%** in
+`detect_internal_overlap_exact`; another 3.50% was sort pivot selection.
+
+ONE LEVER: before the bounded exact enumeration, active unequal stride pairs
+now use Euclid's GCD to construct the minimal duplicate-offset witness. For
+strides `si,sj` and `g=gcd(|si|,|sj|)`, the required steps are
+`|sj|/g` on axis i and `|si|/g` on axis j; if both fit inside their extents,
+the two logical indices alias for either sign pattern. `[244,244]` / `[8,16]`
+therefore proves `(2,0) == (0,1)` without allocating or sorting. The proof is
+limited to the existing `<=200,000` exact regime, follows all prior
+validation/count/zero/equal-magnitude checks, and calls the span validator
+before returning so the former exact detector's overflow precedence remains.
+Insufficient extents and all unproved layouts retain the former exact or
+conservative fallback unchanged.
+
+PROOF: the benchmark setup asserts full `NdLayout` equality against a frozen
+former exact-offset implementation before timing. Focused tests cover both
+sign patterns, insufficient and singleton extents, and an overflowing
+commensurate witness; an exhaustive small 2-D grid compares the public result
+against `detect_internal_overlap_exact` for every shape in `1..=5` squared
+and every stride pair in `-5..=5` squared. The release crate suite and clippy
+gate are green (101/101 tests; all-targets `-D warnings`); workspace fmt
+remains blocked only by two pre-existing formatting diffs in the older
+sliding-window benchmark.
+
+Foreground same-binary A/B after an untimed cold warm-up, effective worker
+`vmi1227854`, job `j-29933307944764036`, release profile with LTO disabled,
+10 samples / 250 ms warm-up / 750 ms measurement:
+
+| former exact offsets | public GCD certificate | midpoint | conservative interval ratio |
+|---:|---:|---:|---:|
+| 580.14 us `[543.04, 622.40]` | 62.225 ns `[61.391, 62.932]` | **9,323.262x** | 8,628.996x-10,138.294x |
+
+RCH repeatedly reported cache MISS on `vmi1227854`; four alternate requested
+workers were not honored by placement diagnostics. This does not contaminate
+the result: the warm-up build was untimed, and both A/B arms executed in the
+same final binary after compilation. Timed source SHA-256:
+`11cb4cd5ef9801031a9877693aef6b042869ed3ac2419b60278b2d153f79bfb4`;
+bench SHA-256:
+`1b545e3cf94476b5b26d3dfcae3e12e0a49adb84747c9e9cb0eac63a7ee0d139`.
+Verdict: **SHIP**. Do not re-probe pairwise bounded unequal-commensurate
+duplicate-offset witnesses; remaining overlap work must prove a different
+multi-axis or interval-overlap class.
+
 ## 2026-07-16 - WIN (SHIP): dirichlet reuses a per-alpha gamma-cache vector - 1.08x conservative floor
 
 `BlackThrush`, bead `franken_numpy-ixs5y.338`, the dirichlet leaf of the

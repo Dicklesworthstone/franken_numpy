@@ -617,6 +617,7 @@ fn detect_internal_overlap(
         return Ok(false);
     }
 
+    let item_size_bytes = item_size;
     let item_size = isize::try_from(item_size).map_err(|_| ShapeError::Overflow)?;
     let element_count = element_count(shape)?;
     if shape
@@ -642,11 +643,59 @@ fn detect_internal_overlap(
             return Ok(true);
         }
     }
+    if element_count <= EXACT_OVERLAP_ELEMENT_LIMIT
+        && has_bounded_commensurate_stride_overlap(shape, strides)
+    {
+        // The exact detector formerly visited every offset before sorting, so
+        // retain its overflow precedence before accepting the pair witness.
+        let required_nbytes = required_view_nbytes(shape, strides, item_size_bytes)?;
+        if isize::try_from(required_nbytes).is_ok() {
+            return Ok(true);
+        }
+    }
     if element_count <= EXACT_OVERLAP_ELEMENT_LIMIT {
         return detect_internal_overlap_exact(shape, strides, item_size, element_count);
     }
 
     detect_internal_overlap_conservative(shape, strides, item_size)
+}
+
+fn has_bounded_commensurate_stride_overlap(shape: &[usize], strides: &[isize]) -> bool {
+    for (axis, (&dim, &stride)) in shape.iter().zip(strides).enumerate() {
+        if dim <= 1 || stride == 0 {
+            continue;
+        }
+
+        let stride_magnitude = stride.unsigned_abs();
+        for (&other_dim, &other_stride) in shape[axis + 1..].iter().zip(&strides[axis + 1..]) {
+            if other_dim <= 1 || other_stride == 0 {
+                continue;
+            }
+
+            let other_magnitude = other_stride.unsigned_abs();
+            if stride_magnitude == other_magnitude {
+                continue;
+            }
+
+            let divisor = greatest_common_divisor(stride_magnitude, other_magnitude);
+            let axis_steps = other_magnitude / divisor;
+            let other_axis_steps = stride_magnitude / divisor;
+            if axis_steps < dim && other_axis_steps < other_dim {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn greatest_common_divisor(mut lhs: usize, mut rhs: usize) -> usize {
+    while rhs != 0 {
+        let remainder = lhs % rhs;
+        lhs = rhs;
+        rhs = remainder;
+    }
+    lhs
 }
 
 fn detect_internal_overlap_exact(
@@ -1297,6 +1346,45 @@ mod tests {
             .expect("non-overlapping noncanonical stride span fits in base storage");
         assert!(!view.has_internal_overlap());
         assert!(view.is_writeable());
+    }
+
+    #[test]
+    fn commensurate_stride_overlap_respects_extent_bounds_and_signs() {
+        assert!(
+            super::detect_internal_overlap(&[3, 2], &[8, 16], 8).expect("positive-stride witness")
+        );
+        assert!(
+            super::detect_internal_overlap(&[3, 2], &[8, -16], 8).expect("opposite-stride witness")
+        );
+        assert!(!super::detect_internal_overlap(&[2, 2], &[8, 16], 8).expect("short axis"));
+        assert!(!super::detect_internal_overlap(&[1, 3], &[8, 16], 8).expect("singleton axis"));
+
+        let half_max = (isize::MAX - 1) / 2;
+        assert_eq!(
+            super::detect_internal_overlap(&[2, 3], &[isize::MAX - 1, half_max], 1),
+            Err(ShapeError::Overflow)
+        );
+    }
+
+    #[test]
+    fn commensurate_stride_certificate_matches_exact_grid() {
+        for first_dim in 1..=5 {
+            for second_dim in 1..=5 {
+                let shape = [first_dim, second_dim];
+                let count = first_dim * second_dim;
+                for first_stride in -5..=5 {
+                    for second_stride in -5..=5 {
+                        let strides = [first_stride, second_stride];
+                        let expected =
+                            super::detect_internal_overlap_exact(&shape, &strides, 1, count)
+                                .expect("small grid cannot overflow");
+                        let actual = super::detect_internal_overlap(&shape, &strides, 1)
+                            .expect("small grid cannot overflow");
+                        assert_eq!(actual, expected, "shape={shape:?}, strides={strides:?}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
