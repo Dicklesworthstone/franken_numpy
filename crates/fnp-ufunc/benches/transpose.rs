@@ -20,6 +20,10 @@ fn focused_suffix_only() -> bool {
     std::env::args().any(|arg| arg.starts_with("transpose_suffix"))
 }
 
+fn focused_rotation_only() -> bool {
+    std::env::args().any(|arg| arg.starts_with("transpose_rotation"))
+}
+
 /// Previous kernel: per-element index decomposition + strided gather (2-D).
 fn old_transpose(values: &[f64], r: usize, c: usize) -> Vec<f64> {
     // new shape is [c, r]; new C-strides are [r, 1]; old C-strides are [c, 1].
@@ -42,7 +46,7 @@ fn old_transpose(values: &[f64], r: usize, c: usize) -> Vec<f64> {
 }
 
 fn bench_transpose(c: &mut Criterion) {
-    if focused_identity_only() || focused_suffix_only() {
+    if focused_identity_only() || focused_suffix_only() || focused_rotation_only() {
         return;
     }
     for &(r, cc) in &[(4096usize, 4096usize), (2048, 2048), (1024, 4096)] {
@@ -93,7 +97,7 @@ fn old_batched_t(values: &[f64], dims: &[usize]) -> Vec<f64> {
 }
 
 fn bench_transpose_batched(c: &mut Criterion) {
-    if focused_identity_only() || focused_suffix_only() {
+    if focused_identity_only() || focused_suffix_only() || focused_rotation_only() {
         return;
     }
     // Batched matrix transpose (swapaxes(-1,-2) on a stack): the dominant N-D case.
@@ -209,7 +213,7 @@ fn c_strides(shape: &[usize]) -> Vec<usize> {
 }
 
 fn bench_transpose_identity(c: &mut Criterion) {
-    if focused_suffix_only() {
+    if focused_suffix_only() || focused_rotation_only() {
         return;
     }
     let dims = vec![64usize, 32, 8];
@@ -261,9 +265,9 @@ fn bench_transpose_identity(c: &mut Criterion) {
 }
 
 /// Chunked parallel odometer gather — a frozen copy of the production general
-/// path (values, no sidecar) so the suffix-identity A/B isolates the
-/// block-copy lever inside one binary.
-fn former_suffix_odometer(values: &[f64], dims: &[usize], perm: &[usize]) -> (Vec<usize>, Vec<f64>) {
+/// path (values, no sidecar) so the suffix-identity and block-rotation A/Bs
+/// isolate their levers inside one binary.
+fn former_general_odometer(values: &[f64], dims: &[usize], perm: &[usize]) -> (Vec<usize>, Vec<f64>) {
     let ndim = dims.len();
     let new_shape: Vec<usize> = perm.iter().map(|&a| dims[a]).collect();
     let old_strides = c_strides(dims);
@@ -316,7 +320,7 @@ fn former_suffix_odometer(values: &[f64], dims: &[usize], perm: &[usize]) -> (Ve
 }
 
 fn bench_transpose_suffix(c: &mut Criterion) {
-    if focused_identity_only() {
+    if focused_identity_only() || focused_rotation_only() {
         return;
     }
     // Leading-axes permutations that keep the last axis in place (swapaxes(0,1)
@@ -335,7 +339,7 @@ fn bench_transpose_suffix(c: &mut Criterion) {
             .collect();
         let arr = UFuncArray::new(dims.clone(), data.clone(), DType::F64).unwrap();
         let pu: Vec<usize> = perm.clone();
-        let (former_shape, former_values) = former_suffix_odometer(&data, dims, perm);
+        let (former_shape, former_values) = former_general_odometer(&data, dims, perm);
         let got = arr.transpose(Some(&pu)).unwrap();
         assert_eq!(got.shape(), former_shape);
         assert_eq!(
@@ -350,7 +354,52 @@ fn bench_transpose_suffix(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("former_parallel_odometer", n),
             &n,
-            |b, _| b.iter(|| black_box(former_suffix_odometer(black_box(&data), dims, perm))),
+            |b, _| b.iter(|| black_box(former_general_odometer(black_box(&data), dims, perm))),
+        );
+        group.bench_with_input(BenchmarkId::new("public_path", n), &n, |b, _| {
+            b.iter(|| black_box(arr.transpose(black_box(Some(&pu))).unwrap()))
+        });
+        group.finish();
+    }
+}
+
+fn bench_transpose_rotation(c: &mut Criterion) {
+    if focused_identity_only() || focused_suffix_only() {
+        return;
+    }
+    // Block rotations (perm[d] == (g+d) % ndim): two order-preserved axis
+    // groups swap places, i.e. exactly the 2-D transpose of the array viewed
+    // as (prod(dims[..g]), prod(dims[g..])). One cache-resident shape, both
+    // 3-D rotation directions at DRAM scale, and a 4-D two-group rotation.
+    let cases: &[(Vec<usize>, Vec<usize>)] = &[
+        (vec![64, 64, 64], vec![2, 0, 1]),
+        (vec![256, 256, 256], vec![2, 0, 1]),
+        (vec![256, 256, 256], vec![1, 2, 0]),
+        (vec![32, 32, 32, 16], vec![2, 3, 0, 1]),
+    ];
+    for (dims, perm) in cases {
+        let n: usize = dims.iter().product();
+        let data: Vec<f64> = (0..n)
+            .map(|i| f64::from_bits(0x3ff0_0000_0000_0000 ^ (i as u64).wrapping_mul(0x9e37_79b9)))
+            .collect();
+        let arr = UFuncArray::new(dims.clone(), data.clone(), DType::F64).unwrap();
+        let pu: Vec<usize> = perm.clone();
+        let (former_shape, former_values) = former_general_odometer(&data, dims, perm);
+        let got = arr.transpose(Some(&pu)).unwrap();
+        assert_eq!(got.shape(), former_shape);
+        assert_eq!(
+            got.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            former_values
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        let mut group = c.benchmark_group(format!("transpose_rotation_{dims:?}_{perm:?}"));
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(
+            BenchmarkId::new("former_parallel_odometer", n),
+            &n,
+            |b, _| b.iter(|| black_box(former_general_odometer(black_box(&data), dims, perm))),
         );
         group.bench_with_input(BenchmarkId::new("public_path", n), &n, |b, _| {
             b.iter(|| black_box(arr.transpose(black_box(Some(&pu))).unwrap()))
@@ -360,7 +409,7 @@ fn bench_transpose_suffix(c: &mut Criterion) {
 }
 
 fn bench_transpose_general(c: &mut Criterion) {
-    if focused_identity_only() || focused_suffix_only() {
+    if focused_identity_only() || focused_suffix_only() || focused_rotation_only() {
         return;
     }
     // Arbitrary permutations (rotations / non-adjacent moveaxis), the case the
@@ -400,6 +449,7 @@ criterion_group!(
     bench_transpose,
     bench_transpose_batched,
     bench_transpose_general,
-    bench_transpose_suffix
+    bench_transpose_suffix,
+    bench_transpose_rotation
 );
 criterion_main!(benches);

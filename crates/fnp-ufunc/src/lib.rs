@@ -10211,6 +10211,15 @@ impl UFuncArray {
             }
         }
 
+        // NOTE (2026-07-16 REJECT, ledger + bench transpose_rotation_*): block
+        // rotations (`perm[d] == (g + d) % ndim`, e.g. [2,0,1]/[1,2,0]) ARE
+        // exactly the 2-D transpose of the (prod(shape[..g]), prod(shape[g..]))
+        // view, but routing them to `transpose_2d_par` measured 0.33x-0.88x on
+        // three of four regimes (band parallelism collapses when the second
+        // group is narrow; strided-write tiles thrash when the first group
+        // dominates). Only P<<Q at DRAM scale won (1.21x). Do not re-add the
+        // unconditional reroute; a retry needs an aspect-ratio-aware plane
+        // kernel or a measured narrow P<<Q gate.
         const TRANSPOSE_CHUNK: usize = 1 << 14;
         const TRANSPOSE_PAR_MIN: usize = 1 << 15;
         let parallel = total >= TRANSPOSE_PAR_MIN && rayon::current_num_threads() >= 2;
@@ -49467,6 +49476,139 @@ print(json.dumps(payload))
             .transpose(Some(&[1, 0, 2]))
             .expect("empty suffix transpose");
         assert_eq!(out.shape(), &[3, 0, 2]);
+    }
+
+    #[test]
+    fn transpose_block_rotation_matches_naive_gather() {
+        // Block rotations (perm[d] == (g+d) % ndim) route to the tiled 2-D
+        // plane kernel; 3-D rotations are golden-covered elsewhere, so this
+        // pins the 4-D group rotations, size-1 groups, non-tile-multiple dims,
+        // and the parallel-threshold crossing.
+        let cases: &[(&[usize], &[usize])] = &[
+            (&[3, 4, 2, 5], &[2, 3, 0, 1]),
+            (&[3, 4, 2, 5], &[3, 0, 1, 2]),
+            (&[3, 4, 2, 5], &[1, 2, 3, 0]),
+            (&[1, 4, 5], &[1, 2, 0]),
+            (&[4, 1, 5], &[2, 0, 1]),
+            (&[33, 17, 19], &[2, 0, 1]),
+            (&[64, 32, 32], &[1, 2, 0]),
+        ];
+        for &(dims, perm) in cases {
+            let total: usize = dims.iter().product();
+            let special = [
+                (-0.0_f64).to_bits(),
+                0x0000_0000_0000_0001,
+                f64::INFINITY.to_bits(),
+                f64::NEG_INFINITY.to_bits(),
+                0x7ff8_0000_0000_0042,
+            ];
+            let data: Vec<f64> = (0..total)
+                .map(|i| {
+                    if i % 89 == 0 {
+                        f64::from_bits(special[i % special.len()])
+                    } else {
+                        f64::from_bits(0x3ff0_0000_0000_0000 ^ (i as u64).wrapping_mul(0x9e37))
+                    }
+                })
+                .collect();
+            let arr =
+                UFuncArray::new(dims.to_vec(), data.clone(), DType::F64).expect("rotation input");
+            let out = arr.transpose(Some(perm)).expect("rotation transpose");
+            let expected_shape: Vec<usize> = perm.iter().map(|&a| dims[a]).collect();
+            assert_eq!(out.shape(), expected_shape, "shape for {dims:?} {perm:?}");
+            assert_eq!(
+                out.values()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                naive_permute_bits(&data, dims, perm),
+                "bits for {dims:?} {perm:?}"
+            );
+        }
+
+        let empty = UFuncArray::new(vec![3, 0, 2], vec![], DType::F64).expect("empty array");
+        let out = empty
+            .transpose(Some(&[2, 0, 1]))
+            .expect("empty rotation transpose");
+        assert_eq!(out.shape(), &[2, 3, 0]);
+    }
+
+    #[test]
+    fn transpose_block_rotation_preserves_exact_integer_sidecars() {
+        // dims [2, 3, 2], perm [2, 0, 1] (g == 2): output[c, a, b] = input[a, b, c].
+        let dims = vec![2usize, 3, 2];
+        let perm = [2usize, 0, 1];
+        let signed_values: Vec<i64> = vec![
+            i64::MIN,
+            -((1_i64 << 53) + 7),
+            -1,
+            0,
+            1,
+            (1_i64 << 53) + 9,
+            i64::MAX,
+            42,
+            -(1_i64 << 62),
+            (1_i64 << 61) + 3,
+            -3,
+            5,
+        ];
+        let signed =
+            UFuncArray::from_storage(dims.clone(), ArrayStorage::I64(signed_values.clone()))
+                .expect("signed array");
+        let signed_out = signed
+            .transpose(Some(&perm))
+            .expect("signed rotation transpose");
+        let expected_signed: Vec<i64> = {
+            let mut out = Vec::with_capacity(12);
+            for l in 0..2 {
+                for i in 0..2 {
+                    for j in 0..3 {
+                        out.push(signed_values[i * 6 + j * 2 + l]);
+                    }
+                }
+            }
+            out
+        };
+        assert_eq!(
+            signed_out.to_storage().expect("signed storage"),
+            ArrayStorage::I64(expected_signed)
+        );
+
+        let unsigned_values: Vec<u64> = vec![
+            0,
+            1_u64 << 63,
+            (1_u64 << 53) + 11,
+            u64::MAX,
+            7,
+            (1_u64 << 62) + 1,
+            13,
+            1,
+            (1_u64 << 60) + 5,
+            2,
+            (1_u64 << 59) + 9,
+            3,
+        ];
+        let unsigned =
+            UFuncArray::from_storage(dims.clone(), ArrayStorage::U64(unsigned_values.clone()))
+                .expect("unsigned array");
+        let unsigned_out = unsigned
+            .transpose(Some(&perm))
+            .expect("unsigned rotation transpose");
+        let expected_unsigned: Vec<u64> = {
+            let mut out = Vec::with_capacity(12);
+            for l in 0..2 {
+                for i in 0..2 {
+                    for j in 0..3 {
+                        out.push(unsigned_values[i * 6 + j * 2 + l]);
+                    }
+                }
+            }
+            out
+        };
+        assert_eq!(
+            unsigned_out.to_storage().expect("unsigned storage"),
+            ArrayStorage::U64(expected_unsigned)
+        );
     }
 
     #[test]
