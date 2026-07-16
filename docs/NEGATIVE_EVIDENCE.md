@@ -53,6 +53,70 @@ Verdict: **SHIP**. Do not re-probe bounded all-whitespace prefixes; unbounded
 text reads and separators containing literal characters still use the eager
 splitter and must earn independent profiles. AGENT_NAME=BlackThrush.
 
+## 2026-07-16 - REJECT (UNWIRED): block-rotation transposes routed to the tiled 2-D plane kernel - 0.33x / 0.49x / 0.88x / 1.21x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.331`. Robot triage again left the P1
+pure-safe-Rust umbrella after excluding the parked f16 leaf and policy-gated
+C-BLAS leaf; the suffix-identity ship (`ixs5y.330`) had declared rotation
+permutations the open sibling. Negative-ledger screening found no prior
+attempt (the `rot90(k=2)` half-turn entry is a flip composition, not an axis
+permutation).
+
+The reduction is mathematically exact and remains true: a block rotation
+(`perm[d] == (g + d) % ndim`, e.g. `[2, 0, 1]`, `[1, 2, 0]`, 4-D `[2, 3, 0, 1]`)
+is precisely the 2-D transpose of the array viewed as
+`(P, Q) = (prod(shape[..g]), prod(shape[g..]))`. The tested lever routed such
+perms to the shipped cache-tiled band-parallel `transpose_2d_par` (generic over
+values and the i64/u64 sidecar). Correctness held everywhere: the pre-existing
+golden test bit-verified the rerouted `[2,0,1]`/`[1,2,0]` cases against the
+naive gather, and two new focused tests (4-D rotations, size-1 groups,
+non-tile-multiple dims, threshold crossing, exact sidecars) passed - 21/21.
+
+A pre-lever remote `perf record -F 199 -e cycles:u` profile captured 8K samples
+with zero lost on effective worker `vmi1293453` (256^3 f64, perm `[2, 0, 1]`,
+`RAYON_NUM_THREADS=4`): the frozen former-production odometer arm (bit-identical
+code to the pre-edit public path; the production source already carried the
+candidate when the profile ran) held **93.19%** of user cycles, confirming the
+seam was real.
+
+One foreground same-binary A/B (ordinary `--profile release`, LTO disabled,
+`RAYON_NUM_THREADS=4`, 10 samples, 250 ms warm-up, 750 ms target window,
+effective worker `vmi1293453`, job `j-29933307944763735`) REFUTED the routing
+on three of four regimes:
+
+| case | former parallel odometer | tiled 2-D reroute | midpoint |
+|---|---:|---:|---:|
+| `[64, 64, 64]` perm `[2,0,1]` (P=4096, Q=64, cache-resident) | 451.51 us `[325.87, 568.80]` | 1.3496 ms `[1.2766, 1.4814]` | **0.33x LOSS** |
+| `[32, 32, 32, 16]` perm `[2,3,0,1]` (P=1024, Q=512) | 795.50 us `[703.78, 911.29]` | 1.6338 ms `[1.5756, 1.6838]` | **0.49x LOSS** |
+| `[256, 256, 256]` perm `[2,0,1]` (P=65536, Q=256, DRAM) | 39.415 ms `[38.523, 40.286]` | 44.765 ms `[38.903, 54.096]` | **0.88x LOSS** |
+| `[256, 256, 256]` perm `[1,2,0]` (P=256, Q=65536, DRAM) | 30.756 ms `[29.130, 32.667]` | 25.342 ms `[23.394, 27.551]` | 1.21x win (disjoint) |
+
+MECHANISM: `transpose_2d_par` parallelizes over bands of `TILE = 32` columns
+(`ceil(Q/32)` bands), so a narrow second group (Q=64 -> 2 bands) starves the
+pool; and when P dominates, each tile's destination writes stride by `P`
+elements (32 KiB at P=4096), thrashing lines the odometer's contiguous
+destination stream never touches. The kernel is tuned for the square-ish
+planes the 2-D/last-two paths feed it, not extreme aspect ratios. Only the
+P<<Q direction at DRAM scale (where reads coalesce and bands abound) beat the
+odometer, and only by 1.21x.
+
+UNWIRED the dispatch branch (production keeps the generic parallel odometer; a
+source comment records the reject). KEPT: the two focused correctness tests
+(they pin the generic path on 4-D rotations, size-1 groups, and exact sidecars,
+previously uncovered) and the `transpose_rotation_*` bench groups as the retry
+vehicle (post-unwire they read ~1.0x as a null pair). No timeout wrapper was
+used; every rch job returned with output in under two minutes; no build event
+was classified as evidence. Unwired source SHA-256:
+`bc0506874eee490f26c4e67cca56069c960f2b5afe0b7793518c5fa72dcd04ed`; bench
+SHA-256: `4c22f1350309f315ea15a8384b4a8c62698e10a3c3689fc4403da2413fd66e0a`.
+Verdict: **REJECT** - this bars the UNCONDITIONAL reroute to the band-parallel
+tiled kernel only. RETRY PREDICATE (either): (a) an aspect-ratio-aware plane
+kernel - row-band parallelism when Q/TILE < threads, or a tile loop order that
+keeps destination writes contiguous when P >> Q - measured on the SAME four
+rows; or (b) a narrow gate routing only P<<Q DRAM-scale rotations, shipped only
+if a cache-resident P<<Q row (e.g. `[64, 64, 64]` perm `[1, 2, 0]`, unmeasured
+here) also clears 1.2x. The generic odometer remains the floor to beat.
+
 ## 2026-07-16 - WIN (SHIP): suffix-identity transposes copy contiguous blocks - 2.93x / 2.01x / 1.28x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.330`. Robot triage again selected the
