@@ -4,6 +4,50 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): Complex64 `complex_mul` widens directly into its Complex128 output - 12.87x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.354`, the second declared sibling of
+the `.343` add / `.353` sub family. Robot triage again left the P1 umbrella
+after its parked f16 and policy-gated C-BLAS leaves.
+
+Source attribution: `complex_mul`'s Complex64+Complex64 pair fell to
+`to_complex128_vec()` on BOTH inputs before multiplying. A pre-edit profile
+(drifted to `vmi1153651`; attribution is workload-shaped, not timing) showed
+kernel fault/allocation frames at ~52% - the two materialized copies
+dominating even harder than `.353`'s 34% - with `complex_mul` at 6.65% and
+`to_complex128_vec` at 2.33% user cycles. Same removable-copies shape;
+passes both the frame rule and the access-pattern rule.
+
+ONE LEVER: the Complex64 fast arm widens inline per element with the
+identical `f64::from`-then-multiply expression tree
+(`(ar*br - ai*bi, ar*bi + ai*br)` on widened components), so results are
+bit-for-bit the former convert-then-multiply path's. Length-mismatch errors,
+the Complex128 arm, and mixed pairs unchanged. Focused test mirrors the
+family tests (NaN payloads, negative zero, infinities, subnormals, finite
+products, length-mismatch error; 138 + 112 crate tests green). The bench
+asserts the faithful convert-both replica bit-for-bit before timing.
+
+One foreground same-binary A/B (ordinary `--profile release`, LTO disabled,
+20 samples, 0.5 s warm-up, 2 s window; rch drifted the pin to `vmi1149989`,
+job `j-29933730227290657` - both arms interleaved on that one worker, and at
+this magnitude the drift cannot change the verdict):
+
+| arm | Criterion estimate |
+|---|---:|
+| former convert-both-inputs | 750.24 us `[715.29, 787.45]` |
+| direct inline widening | **58.306 us** `[57.056, 59.866]` |
+
+Midpoint **12.87x faster / 92.2% less time**; closest interval bounds are
+more than 11.9x apart. Family scorecard: add 14.67x, sub 17.78x, mul 12.87x
+(lower as predicted from the heavier per-element arithmetic). Timed source
+SHA-256: `2f5d55cf34e8f5ac0d063724e02451ade5f4bb3f14522cec879fab1c349de898`;
+bench SHA-256:
+`ebd3660d825d6859b8e48bb1fef7d9ea3219c3627fc6e607fdc0e6223ecf78a6`.
+Verdict: **SHIP**. Do not re-probe Complex64+Complex64 `complex_mul` input
+materialization. REMAINING FAMILY SIBLING: Complex64 `complex_div` (same
+shape; the division kernel is heavier still, expect the family's lowest
+ratio); mixed pairs remain separate hypotheses.
+
 ## 2026-07-16 - REJECT (REVERTED): legacy `RandomState` gamma shape cache - 0.973x, overlapping
 
 `BlackThrush`, bead `franken_numpy-ixs5y.352`, the explicit legacy
