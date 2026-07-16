@@ -1923,6 +1923,26 @@ impl ArrayStorage {
     /// Element-wise complex exponential: exp(a+bi) = exp(a) * (cos(b) + i*sin(b)).
     #[must_use]
     pub fn complex_exp(&self) -> Self {
+        // Complex inputs avoid the whole-vector materialization: Complex128
+        // borrows, Complex64 widens inline (identical kernel expression tree;
+        // the .360 unary sibling of the closed binary borrow/widen surface).
+        if let Self::Complex128(v) = self {
+            return Self::Complex128(v.iter().map(|&(r, i)| {
+                let ea = r.exp();
+                (ea * i.cos(), ea * i.sin())
+            }).collect());
+        }
+        if let Self::Complex64(v) = self {
+            return Self::Complex128(
+                v.iter()
+                    .map(|&(r, i)| {
+                        let (r, i) = (f64::from(r), f64::from(i));
+                        let ea = r.exp();
+                        (ea * i.cos(), ea * i.sin())
+                    })
+                    .collect(),
+            );
+        }
         let pairs = self.to_complex128_vec();
         Self::Complex128(
             pairs
@@ -1938,6 +1958,28 @@ impl ArrayStorage {
     /// Element-wise complex natural logarithm: log(a+bi) = log|z| + i*arg(z).
     #[must_use]
     pub fn complex_log(&self) -> Self {
+        // Complex inputs avoid the whole-vector materialization: Complex128
+        // borrows, Complex64 widens inline (identical kernel expression tree;
+        // the .360 unary sibling of the closed binary borrow/widen surface).
+        if let Self::Complex128(v) = self {
+            return Self::Complex128(v.iter().map(|&(r, i)| {
+                let mag = (r * r + i * i).sqrt();
+                let ang = i.atan2(r);
+                (mag.ln(), ang)
+            }).collect());
+        }
+        if let Self::Complex64(v) = self {
+            return Self::Complex128(
+                v.iter()
+                    .map(|&(r, i)| {
+                        let (r, i) = (f64::from(r), f64::from(i));
+                        let mag = (r * r + i * i).sqrt();
+                        let ang = i.atan2(r);
+                        (mag.ln(), ang)
+                    })
+                    .collect(),
+            );
+        }
         let pairs = self.to_complex128_vec();
         Self::Complex128(
             pairs
@@ -1954,6 +1996,30 @@ impl ArrayStorage {
     /// Element-wise complex square root.
     #[must_use]
     pub fn complex_sqrt(&self) -> Self {
+        // Complex inputs avoid the whole-vector materialization: Complex128
+        // borrows, Complex64 widens inline (identical kernel expression tree;
+        // the .360 unary sibling of the closed binary borrow/widen surface).
+        if let Self::Complex128(v) = self {
+            return Self::Complex128(v.iter().map(|&(r, i)| {
+                let mag = (r * r + i * i).sqrt();
+                let re = f64::midpoint(mag, r).sqrt();
+                let im = f64::midpoint(mag, -r).sqrt();
+                (re, if i >= 0.0 { im } else { -im })
+            }).collect());
+        }
+        if let Self::Complex64(v) = self {
+            return Self::Complex128(
+                v.iter()
+                    .map(|&(r, i)| {
+                        let (r, i) = (f64::from(r), f64::from(i));
+                        let mag = (r * r + i * i).sqrt();
+                        let re = f64::midpoint(mag, r).sqrt();
+                        let im = f64::midpoint(mag, -r).sqrt();
+                        (re, if i >= 0.0 { im } else { -im })
+                    })
+                    .collect(),
+            );
+        }
         let pairs = self.to_complex128_vec();
         Self::Complex128(
             pairs
@@ -3249,6 +3315,78 @@ mod tests {
                 to: DType::Complex64,
             })
         ));
+    }
+
+    #[test]
+    fn storage_complex_unary_borrow_matches_converted_path_bits() {
+        // exp/log/sqrt on Complex128 (borrow) and Complex64 (widen) inputs
+        // must be bit-for-bit the former convert-then-op path, including NaN
+        // payloads, signed zero, infinities, and the sqrt sign-of-imaginary
+        // branch on negative-zero imaginaries.
+        let c128 = ArrayStorage::Complex128(vec![
+            (0.0, -0.0),
+            (f64::NEG_INFINITY, 4.5e-300),
+            (f64::from_bits(0x7ff8_0000_0000_0042), 1.5),
+            (-2.5, 3.25),
+        ]);
+        let c64 = ArrayStorage::from_complex64_vec(vec![
+            (-0.0, f32::from_bits(0x7fc0_0123)),
+            (f32::INFINITY, f32::MIN_POSITIVE),
+            (1.5, -0.0),
+            (-2.5, 3.25),
+        ]);
+        for input in [&c128, &c64] {
+            let pairs = input.to_complex128_vec();
+            let former_exp: Vec<_> = pairs
+                .iter()
+                .map(|&(r, i)| {
+                    let ea = r.exp();
+                    (ea * i.cos(), ea * i.sin())
+                })
+                .collect();
+            let former_log: Vec<_> = pairs
+                .iter()
+                .map(|&(r, i)| {
+                    let mag = (r * r + i * i).sqrt();
+                    (mag.ln(), i.atan2(r))
+                })
+                .collect();
+            let former_sqrt: Vec<_> = pairs
+                .iter()
+                .map(|&(r, i)| {
+                    let mag = (r * r + i * i).sqrt();
+                    let re = f64::midpoint(mag, r).sqrt();
+                    let im = f64::midpoint(mag, -r).sqrt();
+                    (re, if i >= 0.0 { im } else { -im })
+                })
+                .collect();
+            for (former, direct) in [
+                (former_exp, input.complex_exp().to_complex128_vec()),
+                (former_log, input.complex_log().to_complex128_vec()),
+                (former_sqrt, input.complex_sqrt().to_complex128_vec()),
+            ] {
+                for (actual, expected) in direct.iter().zip(&former) {
+                    assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+                    assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+                }
+            }
+        }
+
+        // Real-dtype inputs keep the conversion fallback.
+        let real = ArrayStorage::F64(vec![1.0, -4.0]);
+        let via_convert = real.to_complex128_vec();
+        let expected: Vec<_> = via_convert
+            .iter()
+            .map(|&(r, i)| {
+                let ea = r.exp();
+                (ea * i.cos(), ea * i.sin())
+            })
+            .collect();
+        let direct = real.complex_exp().to_complex128_vec();
+        for (actual, exp) in direct.iter().zip(&expected) {
+            assert_eq!(actual.0.to_bits(), exp.0.to_bits());
+            assert_eq!(actual.1.to_bits(), exp.1.to_bits());
+        }
     }
 
     #[test]

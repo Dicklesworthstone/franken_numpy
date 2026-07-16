@@ -687,6 +687,91 @@ fn bench_complex_mixed_ops_direct(c: &mut Criterion) {
     group.finish();
 }
 
+/// Faithful replicas of the CURRENT complex unary paths: the input fully
+/// materialized via `to_complex128_vec` (a whole-vector copy even for native
+/// Complex128) before the transcendental kernel.
+fn former_unary_op(
+    input: &ArrayStorage,
+    kernel: fn((f64, f64)) -> (f64, f64),
+) -> ArrayStorage {
+    let pairs = input.to_complex128_vec();
+    ArrayStorage::Complex128(pairs.iter().map(|&z| kernel(z)).collect())
+}
+
+fn bench_complex_unary_borrow(c: &mut Criterion) {
+    let mut group = c.benchmark_group("complex_unary_borrow");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(2));
+
+    let c128 = ArrayStorage::Complex128(
+        (0..100_000)
+            .map(|index| {
+                let value = f64::from(index) * 0.000_125 - 6.25;
+                (-value, value * 0.75)
+            })
+            .collect(),
+    );
+    let c64 = ArrayStorage::Complex64(
+        (0..100_000)
+            .map(|index| {
+                let value = index as f32 * 0.000_25 - 12.5;
+                (value, -value * 0.5)
+            })
+            .collect(),
+    );
+    type Kernel = fn((f64, f64)) -> (f64, f64);
+    let exp_k: Kernel = |(r, i)| {
+        let ea = r.exp();
+        (ea * i.cos(), ea * i.sin())
+    };
+    let log_k: Kernel = |(r, i)| {
+        let mag = (r * r + i * i).sqrt();
+        let ang = i.atan2(r);
+        (mag.ln(), ang)
+    };
+    let sqrt_k: Kernel = |(r, i)| {
+        let mag = (r * r + i * i).sqrt();
+        let re = f64::midpoint(mag, r).sqrt();
+        let im = f64::midpoint(mag, -r).sqrt();
+        (re, if i >= 0.0 { im } else { -im })
+    };
+    let rows: [(&str, &ArrayStorage, Kernel); 4] = [
+        ("exp_c128", &c128, exp_k),
+        ("log_c128", &c128, log_k),
+        ("sqrt_c128", &c128, sqrt_k),
+        ("sqrt_c64", &c64, sqrt_k),
+    ];
+    for (name, input, kernel) in rows {
+        let former = former_unary_op(input, kernel).to_complex128_vec();
+        let public = match name {
+            n if n.starts_with("exp") => input.complex_exp(),
+            n if n.starts_with("log") => input.complex_log(),
+            _ => input.complex_sqrt(),
+        }
+        .to_complex128_vec();
+        assert_eq!(public.len(), former.len());
+        for (actual, expected) in public.iter().zip(&former) {
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+        }
+        group.bench_function(format!("former_convert_{name}"), |b| {
+            b.iter(|| former_unary_op(black_box(input), kernel))
+        });
+        group.bench_function(format!("direct_borrow_{name}"), |b| {
+            b.iter(|| {
+                match name {
+                    n if n.starts_with("exp") => black_box(input).complex_exp(),
+                    n if n.starts_with("log") => black_box(input).complex_log(),
+                    _ => black_box(input).complex_sqrt(),
+                }
+            })
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_complex64_add_direct(c: &mut Criterion) {
     let mut group = c.benchmark_group("complex64_add_direct");
     group.sample_size(10);
@@ -1050,6 +1135,7 @@ criterion_group!(
     bench_complex64_div_direct,
     bench_complex_mixed_add_direct,
     bench_complex_mixed_ops_direct,
+    bench_complex_unary_borrow,
     bench_complex128_add_direct,
     bench_complex128_sub_direct,
     bench_complex128_mul_direct,

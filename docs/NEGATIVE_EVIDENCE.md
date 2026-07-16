@@ -4,6 +4,54 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): complex unary exp/log/sqrt borrow-or-widen - 1.27x/1.14x/4.1x; the lane rule priced each op correctly in advance
+
+`BlackThrush`, bead `franken_numpy-ixs5y.360`. Robot triage again left the P1
+umbrella after its parked f16 and policy-gated C-BLAS leaves. The `.358`
+closure barred BINARY pairs only; scouting found the UNARY siblings open:
+`complex_exp`, `complex_log`, and `complex_sqrt` call `to_complex128_vec()`
+unconditionally, so native Complex128 input pays a FULL whole-vector copy
+(the `.324` borrow shape) and Complex64 widens through a temporary.
+
+A pre-edit profile of exp/c128 (honored-pin `vmi1293453`) showed libm
+transcendentals dominating (~33%+ visible) with the fn frame at 11.9% - the
+vonmises lane rule (hoists pay proportional to removed-work/loop-body)
+predicted modest exp/log ratios and a strong sqrt ratio, and the per-op
+floors were predeclared to let each op decide.
+
+ONE LEVER (three ops, borrow-or-widen): Complex128 borrows, Complex64 widens
+inline, identical kernel expression trees per op (including sqrt's
+sign-of-imaginary branch); real-dtype inputs keep the conversion fallback.
+Focused test sweeps all three ops over both complex dtypes with NaN
+payloads, signed zero (incl. negative-zero imaginary for sqrt's branch),
+infinities, and subnormals, plus a real-dtype fallback pin (142 + 112 crate
+tests green). The bench asserts each row's convert replica bit-for-bit
+before timing.
+
+One foreground bench run, four A/B rows (ordinary `--profile release`, LTO
+disabled, 20 samples, 0.5 s warm-up, 2 s windows, honored-pin
+`vmi1293453`, job `j-29933730227290769`):
+
+| row | former convert | direct borrow/widen | midpoint |
+|---|---:|---:|---:|
+| exp c128 | 2.1069 ms `[1.9554, 2.3411]` | **1.6575 ms** `[1.6299, 1.6841]` | **1.271x** |
+| log c128 | 2.2417 ms `[2.1483, 2.3439]` | **1.9648 ms** `[1.8862, 2.0553]` | **1.141x** |
+| sqrt c128 | 689.94 us `[674.69, 702.88]` | **169.89 us** `[167.04, 172.84]` | **4.06x** |
+| sqrt c64 | 674.04 us `[664.09, 682.13]` | **163.00 us** `[161.88, 164.97]` | **4.14x** |
+
+All four disjoint; all four clear the predeclared floor. The
+removed-work/loop-body rule priced this family in advance: cos/sin/exp and
+ln/atan2 bodies dilute the copy removal to 1.14-1.27x, while sqrt's light
+kernel exposes it at 4.1x. Timed source SHA-256:
+`e120134d05111450cfce1fcf56016f89b93cae8f283a73becf0aee50d7106e04`; bench
+SHA-256: `52b955670e17327b735e1b6b5895b1ba458d41c54a83f9fe1286fa83765b7596`.
+Verdict: **SHIP** (all three ops). Do not re-probe unary complex input
+materialization for exp/log/sqrt. DECLARED SIBLING: `complex_pow`
+(binary-shaped with a length-min quirk - contract read needed before
+touching). The complex storage surface is now closed across binary AND these
+unary leaves; the frontier stands: fnp-python dispatch or the old
+conditional opens.
+
 ## 2026-07-16 - WIN (SHIP): mixed sub/mul/div borrow-and-widen - 20.6x/18.0x/6.2x; the complex binary storage surface is FULLY CLOSED
 
 `BlackThrush`, bead `franken_numpy-ixs5y.358`, completing the `.357` mixed
