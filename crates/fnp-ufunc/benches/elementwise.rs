@@ -1,6 +1,6 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fnp_dtype::{ArrayStorage, DType};
-use fnp_ufunc::{UFuncArray, UnaryOp, add, divide, multiply, subtract, where_nonzero};
+use fnp_ufunc::{MaskedArray, UFuncArray, UnaryOp, add, divide, multiply, subtract, where_nonzero};
 use std::hint::black_box;
 
 fn make_array(n: usize) -> UFuncArray {
@@ -563,6 +563,50 @@ fn bench_polyval_degree_zero(c: &mut Criterion) {
     group.finish();
 }
 
+#[inline(never)]
+fn masked_count_axis_no_mask_former(data: &UFuncArray, axis: isize) -> UFuncArray {
+    UFuncArray::ones(data.shape().to_vec(), DType::F64)
+        .unwrap()
+        .reduce_sum(Some(axis), false)
+        .unwrap()
+}
+
+fn assert_ufunc_array_bits_eq(lhs: &UFuncArray, rhs: &UFuncArray) {
+    assert_eq!(lhs.shape(), rhs.shape());
+    assert_eq!(lhs.dtype(), rhs.dtype());
+    assert_eq!(lhs.integer_sidecar(), rhs.integer_sidecar());
+    assert_eq!(lhs.values().len(), rhs.values().len());
+    assert!(
+        lhs.values()
+            .iter()
+            .zip(rhs.values())
+            .all(|(&left, &right)| left.to_bits() == right.to_bits())
+    );
+}
+
+fn bench_masked_count_axis_no_mask(c: &mut Criterion) {
+    let mut group = c.benchmark_group("masked_count_axis_no_mask");
+    group.sample_size(10);
+    group.warm_up_time(std::time::Duration::from_millis(250));
+    group.measurement_time(std::time::Duration::from_millis(750));
+
+    let shape = vec![4096, 1024];
+    let data =
+        UFuncArray::new(shape.clone(), vec![7.0; shape.iter().product()], DType::F64).unwrap();
+    let masked = MaskedArray::new(data.clone(), None, None).unwrap();
+    let candidate = masked.count(Some(1)).unwrap();
+    let former = masked_count_axis_no_mask_former(&data, 1);
+    assert_ufunc_array_bits_eq(&candidate, &former);
+
+    group.bench_function("former_exact_ones_reduce", |bench| {
+        bench.iter(|| masked_count_axis_no_mask_former(black_box(&data), black_box(1)))
+    });
+    group.bench_function("shape_metadata", |bench| {
+        bench.iter(|| black_box(&masked).count(black_box(Some(1))).unwrap())
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_add,
@@ -586,6 +630,7 @@ criterion_group!(
     bench_putmask_f64_masked,
     bench_place_f64_masked_cycling,
     bench_put_mask_f64_masked_cycling,
-    bench_polyval_degree_zero
+    bench_polyval_degree_zero,
+    bench_masked_count_axis_no_mask
 );
 criterion_main!(benches);

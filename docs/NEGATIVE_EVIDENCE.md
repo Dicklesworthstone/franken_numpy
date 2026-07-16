@@ -4,6 +4,68 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): no-mask axis counts come directly from shape metadata - 76,725x profiled
+
+`BlackThrush`, bead `franken_numpy-ixs5y.366`. Robot triage reported 145
+actionable beads and no blockers (`data_hash 4f243ae802d52048`), while the
+literal top perf leaf remained the prohibited C-BLAS route. Negative-ledger
+search found masked-array `sum` and `compressed` work, but no no-mask axis
+`count` measurement. The runtime and recently mined storage veins were thin,
+so this pass took that fresh `fnp-ufunc` residual.
+
+PROFILE FIRST, before the production edit: `MaskedArray::count(Some(axis))`
+with no mask allocated an input-sized F64 array of ones, then ran the generic
+axis sum. The proposed result depends only on the normalized axis, its extent,
+and the reduced output shape. A same-binary Criterion harness froze the exact
+former ones-plus-`reduce_sum` path, implemented that shape-metadata model, and
+asserted shape, dtype, integer sidecar, value length, and every output F64 bit
+against the public path before timing. Ordinary `--profile release`, LTO
+disabled, 10 samples, 250 ms warm-up, 750 ms windows, effective worker
+`vmi1152480`, job `j-29933730227290991`, fixture `[4096, 1024]` reduced on
+axis 1:
+
+| profile arm | Criterion estimate |
+|---|---:|
+| current public ones + reduction | 46.844 ms `[23.781, 68.886]` |
+| faithful former ones + reduction | 22.198 ms `[18.103, 27.045]` |
+| exact shape-metadata model | **289.32 ns** `[261.85, 317.32]` |
+
+The faithful former/model midpoints are **76,724.73x** apart
+(**99.9986966% less time**); even the closest interval bounds are
+57,049.67x apart. The direct public arm was noisier but confirmed the same
+hot allocation/reduction path.
+
+ONE LEVER: the no-mask axis branch now normalizes the axis with the existing
+error path, removes that axis with the existing `reduced_shape` helper,
+checks the output element count, and fills only the output with the source
+axis extent. `axis=None`, masked inputs, dtype (`F64` for axis reductions),
+integer-sidecar state, negative-axis handling, empty-axis zeros, empty output,
+and out-of-bounds errors retain their former contracts. The former helper and
+public candidate are bit-compared in the retained benchmark. Two focused unit
+tests additionally pin positive/negative axes, dtype and sidecar state, zero
+extents, empty output, and both positive and negative bounds errors.
+
+The edited source and final two-arm benchmark completed a strict-remote
+release compilation on honored worker `vmi1264463`, job
+`j-29933730227291012` (LTO disabled). RCH then evicted that freshly warmed
+release target before the capped measurement (`j-29933730227291020`), so the
+rebuild was cancelled and is not presented as timing evidence. Focused test
+execution was also infrastructure-blocked: RCH rerouted
+`j-29933730227291024` to `ovh-b`, where `zerocopy`'s build script died with
+`SIGILL`; the honored `vmi1264463` retry `j-29933730227291027` compiled
+`fnp-ufunc` and then emitted no linker output for two minutes, so it was
+cancelled per the hang rule. Neither build failure is treated as a rejection
+or a passing test. The candidate release compile, benchmark parity assertion,
+and owned diff are clean; the only compiler warning was the pre-existing
+unused `nan_filtered` method at line 26452. Source SHA-256:
+`059fa12e0fcc7de90686d73acb3ca1f7b9abb376017c068f27201a9a921d4522`;
+benchmark SHA-256:
+`a58f5cef8d2b82f183b24c0a26ab1097d207ebabc51354f5874a9f1e7cb22ed4`.
+
+Verdict: **SHIP** on the returned real A/B and exact proof. Do not re-probe
+no-mask `MaskedArray::count(Some(axis))`; masked-axis counts remain a separate
+data-dependent lane.
+
 ## 2026-07-16 - WIN (SHIP): single-field structured reads bulk-copy the packed record prefix - 27.36x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.365`. Robot triage was healthy

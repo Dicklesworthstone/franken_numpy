@@ -37003,15 +37003,17 @@ impl MaskedArray {
                         let total = self.data.values().len() as f64;
                         Ok(UFuncArray::scalar(total, DType::I64))
                     }
-                    Some(_) => {
-                        // All valid: sum of ones along axis gives dimension size
-                        let ones = UFuncArray {
-                            shape: self.data.shape().to_vec(),
-                            values: vec![1.0; self.data.values().len()],
+                    Some(axis) => {
+                        let axis = normalize_axis(axis, self.data.shape().len())?;
+                        let axis_len = self.data.shape()[axis] as f64;
+                        let shape = reduced_shape(self.data.shape(), axis, false);
+                        let output_len = element_count(&shape).map_err(UFuncError::Shape)?;
+                        Ok(UFuncArray {
+                            shape,
+                            values: vec![axis_len; output_len],
                             dtype: DType::F64,
                             integer_sidecar: None,
-                        };
-                        Ok(ones.reduce_sum(axis, false)?)
+                        })
                     }
                 }
             }
@@ -70138,6 +70140,53 @@ print(json.dumps(payload))
         let ma = MaskedArray::new(data, Some(mask), None).unwrap();
         let c = ma.count(None).unwrap();
         assert_eq!(c.values(), &[2.0]); // 2 valid elements
+    }
+
+    #[test]
+    fn masked_array_count_no_mask_axis_uses_shape() {
+        let data = UFuncArray::new(vec![2, 3, 4], vec![7.0; 24], DType::F64).unwrap();
+        let ma = MaskedArray::new(data, None, None).unwrap();
+
+        let first = ma.count(Some(0)).unwrap();
+        assert_eq!(first.shape(), &[3, 4]);
+        assert_eq!(first.values(), &[2.0; 12]);
+        assert_eq!(first.dtype(), DType::F64);
+        assert_eq!(first.integer_sidecar(), None);
+
+        let last = ma.count(Some(-1)).unwrap();
+        assert_eq!(last.shape(), &[2, 3]);
+        assert_eq!(last.values(), &[4.0; 6]);
+        assert_eq!(last.dtype(), DType::F64);
+        assert_eq!(last.integer_sidecar(), None);
+    }
+
+    #[test]
+    fn masked_array_count_no_mask_axis_preserves_empty_and_error_semantics() {
+        let data = UFuncArray::new(vec![3, 0, 4], vec![], DType::F64).unwrap();
+        let ma = MaskedArray::new(data, None, None).unwrap();
+
+        let empty_axis = ma.count(Some(1)).unwrap();
+        assert_eq!(empty_axis.shape(), &[3, 4]);
+        assert_eq!(empty_axis.values(), &[0.0; 12]);
+
+        let empty_output = ma.count(Some(0)).unwrap();
+        assert_eq!(empty_output.shape(), &[0, 4]);
+        assert!(empty_output.values().is_empty());
+
+        assert!(matches!(
+            ma.count(Some(3)),
+            Err(MAError::UFunc(UFuncError::AxisOutOfBounds {
+                axis: 3,
+                ndim: 3
+            }))
+        ));
+        assert!(matches!(
+            ma.count(Some(-4)),
+            Err(MAError::UFunc(UFuncError::AxisOutOfBounds {
+                axis: -4,
+                ndim: 3
+            }))
+        ));
     }
 
     #[test]
