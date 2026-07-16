@@ -4,6 +4,43 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): Complex128 `complex_div` borrows both inputs - 6.93x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.327`. Robot triage left the broad
+pure-safe-Rust directive after excluding its prohibited C-BLAS/fast-math leaf.
+The three preceding `fnp-dtype` entries were strong 18.68-26.99x keeps rather
+than a thinning vein, and the `complex_mul` retry boundary explicitly preserved
+division as a separate hypothesis. The older 2026-06-28 complex-division entry
+belongs to the `fnp-python` UFunc route, not this safe-Rust `ArrayStorage` API.
+
+A pre-edit remote `perf record` profile of the 100,000-element public API path
+captured 1,006 cycle samples on `vmi1264463`; the `complex_div` result collector
+was the top resolved user-space frame at 9.43%. Source accounting showed the
+larger removable front end: both Complex128 operands passed through
+`to_complex128_vec()`, copying 3.2 MiB before allocating the required 1.6 MiB
+result. ONE LEVER borrows and zips the two same-variant inputs directly. The
+mixed-storage conversion path, length error, zero-divisor NaNs, and arithmetic
+operation order are unchanged.
+
+Strict remote-only non-LTO release proof passed all three focused division tests,
+including raw-bit equality against the clone path for signed zero, a fixed NaN
+payload, subnormals, ordinary finite inputs, and the zero-divisor branch. The
+owned-crate all-targets Clippy gate also passed with warnings denied. One
+same-binary Criterion A/B used effective worker `vmi1152480`, ordinary
+`--profile release`, 100,000 Complex128 pairs, 10 samples, a 250 ms warm-up,
+and a 750 ms measurement window:
+
+- former clone-both-inputs: `[1.0103 ms, 1.1179 ms, 1.2950 ms]`
+- direct borrowed inputs: `[151.94 us, 161.41 us, 170.28 us]`
+- midpoint delta: **6.93x faster / 85.56% less time**, with disjoint intervals
+
+RCH repeatedly discarded release caches on `vmi1264463`, so the in-flight test
+build was interrupted and the worker was changed as required. Subsequent jobs
+remained output-producing; their cache misses are build-routing evidence only,
+not reject evidence. Verdict: **SHIP**. Do not re-probe Complex128+Complex128
+`complex_div` input cloning; the mixed-storage conversion family remains a
+distinct hypothesis and must earn its own profile and A/B.
+
 ## 2026-07-15 - WIN (SHIP): Complex128 `complex_mul` borrows both inputs - 18.68x
 
 `IvoryTurtle`, bead `franken_numpy-ixs5y.326`. Robot triage again left the

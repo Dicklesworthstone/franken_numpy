@@ -1562,6 +1562,27 @@ impl ArrayStorage {
 
     /// Element-wise complex division: (a+bi)/(c+di).
     pub fn complex_div(&self, other: &Self) -> Result<Self, StorageError> {
+        if let (Self::Complex128(a), Self::Complex128(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| {
+                        let denom = br * br + bi * bi;
+                        if denom == 0.0 {
+                            (f64::NAN, f64::NAN)
+                        } else {
+                            ((ar * br + ai * bi) / denom, (ai * br - ar * bi) / denom)
+                        }
+                    })
+                    .collect(),
+            ));
+        }
         let a = self.to_complex128_vec();
         let b = other.to_complex128_vec();
         if a.len() != b.len() {
@@ -3040,6 +3061,40 @@ mod tests {
         let v = c.to_complex128_vec();
         assert!((v[0].0 - 11.0 / 25.0).abs() < 1e-10);
         assert!((v[0].1 - 2.0 / 25.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn storage_complex_div_complex128_matches_clone_path_bits() {
+        let a = ArrayStorage::from_complex128_vec(vec![
+            (-0.0, f64::from_bits(0x7ff8_0000_0000_0abc)),
+            (f64::MIN_POSITIVE, f64::from_bits(1)),
+            (1.5, -2.75),
+        ]);
+        let b = ArrayStorage::from_complex128_vec(vec![
+            (0.0, -0.0),
+            (0.5, -2.0),
+            (-4.25, 0.125),
+        ]);
+        let former_a = a.to_complex128_vec();
+        let former_b = b.to_complex128_vec();
+        let former: Vec<_> = former_a
+            .iter()
+            .zip(&former_b)
+            .map(|(&(ar, ai), &(br, bi))| {
+                let denom = br * br + bi * bi;
+                if denom == 0.0 {
+                    (f64::NAN, f64::NAN)
+                } else {
+                    ((ar * br + ai * bi) / denom, (ai * br - ar * bi) / denom)
+                }
+            })
+            .collect();
+        let direct = a.complex_div(&b).unwrap().to_complex128_vec();
+
+        for (actual, expected) in direct.iter().zip(&former) {
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+        }
     }
 
     #[test]
