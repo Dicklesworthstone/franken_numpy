@@ -798,6 +798,62 @@ fn genfromtxt_full_plain_former(
     (values, nrows, ncols.unwrap_or(0))
 }
 
+/// Faithful replica of the CURRENT `tofile_text`: every integral-valued
+/// element routed through `write!` fmt machinery as an i64, floats through
+/// `write!("{v}")`, no capacity hint - exactly production's shape.
+#[inline(never)]
+fn tofile_text_former(values: &[f64], sep: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    for (idx, v) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(sep);
+        }
+        if v.fract() == 0.0
+            && v.is_finite()
+            && v.abs() < 1e15
+            && !(*v == 0.0 && v.is_sign_negative())
+        {
+            let _ = write!(&mut out, "{}", *v as i64);
+        } else {
+            let _ = write!(&mut out, "{v}");
+        }
+    }
+    out
+}
+
+fn bench_tofile_text_integral(c: &mut Criterion) {
+    const ELEMENTS: usize = 131_072;
+    // Integral-heavy with a sprinkle of true floats and specials, mirroring
+    // typical integer-valued exports.
+    let values: Vec<f64> = (0..ELEMENTS)
+        .map(|i| match i % 19 {
+            17 => (i as f64) * 0.25 + 0.5,
+            18 => -(i as f64) * 1.75,
+            _ => ((i as i64 * 7919) % 2_000_003 - 1_000_001) as f64,
+        })
+        .collect();
+
+    let former = tofile_text_former(&values, ",");
+    let current = fnp_io::tofile_text(&values, ",");
+    assert_eq!(current, former);
+
+    // Variance protocol: 20 samples, 2 s window; floor predeclared in the
+    // bead (disjoint AND >= 1.05x).
+    let mut group = c.benchmark_group("tofile_text_integral");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(2));
+    group.throughput(Throughput::Elements(ELEMENTS as u64));
+    group.bench_function("former_fmt_machinery", |bench| {
+        bench.iter(|| black_box(tofile_text_former(black_box(&values), black_box(","))))
+    });
+    group.bench_function("candidate_manual_int", |bench| {
+        bench.iter(|| black_box(fnp_io::tofile_text(black_box(&values), black_box(","))))
+    });
+    group.finish();
+}
+
 fn bench_genfromtxt_full_plain_rows(c: &mut Criterion) {
     const ROWS: usize = 8_192;
     const COLS: usize = 16;
@@ -2007,6 +2063,7 @@ criterion_group!(
     bench_loadtxt_usecols_plan,
     bench_loadtxt_plain_rows,
     bench_genfromtxt_full_plain_rows,
+    bench_tofile_text_integral,
     bench_genfromtxt_row_scratch,
     bench_fromfile_native_u64,
     bench_fromfile_non_native_u64,

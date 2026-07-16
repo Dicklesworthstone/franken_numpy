@@ -4315,6 +4315,11 @@ pub fn tofile_text(values: &[f64], sep: &str) -> String {
             && v.abs() < 1e15
             && !(*v == 0.0 && v.is_sign_negative())
         {
+            // NOTE (2026-07-16 NO-SHIP, ledger + bench tofile_text_integral):
+            // replacing this write! with a manual digit loop measured
+            // 1.00-1.10x overlapping - Display's cost IS the digit loop, and
+            // a reimplementation removes only dispatch. Do not retry without
+            // a design that does structurally less work per element.
             let _ = write!(&mut out, "{}", *v as i64);
         } else {
             let _ = write!(&mut out, "{v}");

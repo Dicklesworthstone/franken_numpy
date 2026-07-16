@@ -4,6 +4,61 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - NO-SHIP (REVERTED): `tofile_text` manual integer formatting - 1.00-1.10x overlapping; frame % is not removable %
+
+`BlackThrush`, bead `franken_numpy-ixs5y.350`, fresh write-side scout after
+the text-parser direct-extend family closed 3-for-3. Robot triage again left
+the P1 umbrella after its parked f16 and policy-gated C-BLAS leaves. Ledger
+screening found no `tofile_text`/`savetxt` perf attempt (savetxt was
+inspected and skipped: a parity-critical format-spec engine with capacity
+pre-allocation already in place).
+
+Source attribution: `tofile_text` routes every integral-valued element
+(fract == 0, finite, |v| < 1e15, not -0.0) through `write!` fmt machinery to
+print an i64. A pre-edit profile (integral-heavy 131,072-element workload,
+effective worker `vmi1293453`) showed what READ as a large removable share:
+`isize::Display::fmt` 19.30% + `core::fmt::write` 8.10% +
+`Formatter::pad_integral` 7.72% + fmt-path `write_str` 7.01% - about 42%.
+The tested ONE LEVER replaced the integral branch with a stack-buffer digit
+loop, byte-identical to `i64` Display by construction (verified by a
+boundary + 10k-sweep unit test while it existed, and by the bench's whole-
+output equality assert).
+
+TWO foreground same-binary A/Bs under the variance protocol (20 samples, 2 s
+windows, honored-pin `vmi1293453`, jobs `j-29933730227290525` and the
+immediate re-run):
+
+| run | former fmt machinery | manual digit loop | midpoint |
+|---|---:|---:|---:|
+| 1 | 3.6848 ms `[3.4842, 3.8854]` | 3.3499 ms `[3.1587, 3.5932]` | 1.100x, OVERLAPPING |
+| 2 | 3.7523 ms `[3.5765, 3.9712]` | 3.7365 ms `[3.5111, 3.9694]` | 1.004x, OVERLAPPING |
+
+The predeclared floor (DISJOINT and >= 1.05x) is not met; the true effect is
+noise-level. DIAGNOSIS - the profile misled in a NEW way worth naming:
+**frame percent is not removable percent.** `isize::Display::fmt`'s 19.3%
+IS the divide-by-ten digit loop, and the replacement re-implements the same
+loop minus only the `fmt::Arguments`/`Formatter` dispatch; the actually
+removable share was the single-digit dispatch slice, swamped by String
+growth and the float-branch grisu work. Contrast with the paying levers of
+this program: hoists and direct-extends remove work ENTIRELY (a cache
+rebuilt per row becomes one build; an intermediate Vec disappears), they do
+not re-implement the same arithmetic one call-layer lower. REVERTED
+(production `write!` restored verbatim, unit test removed with its fn); the
+`tofile_text_integral` bench group is KEPT as a null-pair retry vehicle with
+its whole-output equality assert. Post-revert fnp-io suite green
+(329 + 61 across targets, including the peer's newly landed binary `tofile`
+tests). Reverted source SHA-256:
+`eb481186f9e32919dcc36ed98bb6af081e037881250efd4cd904c582015bd62d`; bench
+SHA-256: `f8e1177b5c7b17eb3f4990954cea6b6295bb8ad840dc3575c8024f1ac34f2476`.
+Verdict: **NO-SHIP** - bars re-implementing integer Display for this branch.
+Retry only with a design doing structurally less work per element (e.g. a
+two-digits-at-a-time table formatter IF a profile isolates the digit loop
+itself as dominant, or output capacity pre-reservation measured on its own).
+COORDINATION NOTE: mid-tick, the sibling session's in-flight fnp-io test
+briefly broke crate test compilation (cast_slice inference); flagged by
+mail, fixed and committed on their side within minutes - bench targets
+stayed usable throughout because the break was cfg(test)-only.
+
 ## 2026-07-16 - REJECT (REVERTED): C-order element-step multi-index odometer - 1.009x, intervals overlap
 
 `BlackThrush`, bead `franken_numpy-ixs5y.349`. Robot triage again selected the
