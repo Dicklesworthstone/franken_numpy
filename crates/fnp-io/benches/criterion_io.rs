@@ -512,6 +512,132 @@ fn bench_fromfile_text_literal_bounded_prefix(c: &mut Criterion) {
     group.finish();
 }
 
+/// Faithful replica of the CURRENT space-wildcard path with a bounded count:
+/// eager whole-input scan collecting every field, then the same
+/// trim/empty-field/parse loop with the count break. Frozen copy of the
+/// production scanner (tokens, wildcard matcher, emission order) so the lazy
+/// candidate must reproduce it bit-for-bit.
+#[derive(Clone, Copy)]
+enum FormerSepToken {
+    SpaceWildcard,
+    Literal(char),
+}
+
+fn former_match_space_wildcard_sep(
+    text: &str,
+    start: usize,
+    tokens: &[FormerSepToken],
+) -> Option<usize> {
+    let mut offset = 0usize;
+    let mut iter = text[start..].chars().peekable();
+    for token in tokens {
+        match token {
+            FormerSepToken::SpaceWildcard => {
+                while let Some(&ch) = iter.peek() {
+                    if ch.is_whitespace() {
+                        iter.next();
+                        offset += ch.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            FormerSepToken::Literal(expected) => match iter.next() {
+                Some(ch) if ch == *expected => {
+                    offset += ch.len_utf8();
+                }
+                _ => return None,
+            },
+        }
+    }
+    Some(start + offset)
+}
+
+#[inline(never)]
+fn fromfile_text_wildcard_bounded_former(text: &str, sep: &str, count: usize) -> Vec<f64> {
+    let tokens: Vec<FormerSepToken> = sep
+        .chars()
+        .map(|c| {
+            if c.is_whitespace() {
+                FormerSepToken::SpaceWildcard
+            } else {
+                FormerSepToken::Literal(c)
+            }
+        })
+        .collect();
+    let mut parts = Vec::new();
+    let mut field_start = 0usize;
+    let mut idx = 0usize;
+    while idx <= text.len() {
+        if let Some(end) = former_match_space_wildcard_sep(text, idx, &tokens) {
+            parts.push(&text[field_start..idx]);
+            field_start = end;
+            idx = end;
+            continue;
+        }
+        if idx == text.len() {
+            break;
+        }
+        let ch = text[idx..].chars().next().expect("valid utf-8");
+        idx += ch.len_utf8();
+    }
+    parts.push(&text[field_start..]);
+
+    let mut values = Vec::new();
+    let mut iter = parts.into_iter().peekable();
+    while let Some(field) = iter.next() {
+        if values.len() >= count {
+            break;
+        }
+        let field = field.trim();
+        if field.is_empty() {
+            if iter.peek().is_none() {
+                continue;
+            }
+            panic!("unexpected empty field in benchmark input");
+        }
+        values.push(field.parse::<f64>().unwrap());
+    }
+    values
+}
+
+fn bench_fromfile_text_wildcard_bounded_prefix(c: &mut Criterion) {
+    const TOKEN_COUNT: usize = 131_071;
+    const PREFIX_COUNT: usize = 32;
+
+    let text = vec!["1.25"; TOKEN_COUNT].join(", ");
+    let former = fromfile_text_wildcard_bounded_former(&text, ", ", PREFIX_COUNT);
+    let current = fromfile_text(&text, ", ", Some(PREFIX_COUNT)).unwrap();
+    assert_eq!(current.len(), PREFIX_COUNT);
+    assert_eq!(former.len(), PREFIX_COUNT);
+    assert!(
+        current
+            .iter()
+            .zip(&former)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+
+    let mut group = c.benchmark_group("fromfile_text_wildcard_bounded_prefix");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements(PREFIX_COUNT as u64));
+    group.bench_function("former_eager_scan", |bench| {
+        bench.iter(|| {
+            black_box(fromfile_text_wildcard_bounded_former(
+                black_box(&text),
+                black_box(", "),
+                PREFIX_COUNT,
+            ))
+        })
+    });
+    group.bench_function("public_bounded_count", |bench| {
+        bench
+            .iter(|| black_box(fromfile_text(black_box(&text), ", ", Some(PREFIX_COUNT)).unwrap()))
+    });
+    group.finish();
+}
+
 fn bench_fromfile_native_u64(c: &mut Criterion) {
     const ELEMENTS: usize = 262_144;
     let values: Vec<u64> = (0..ELEMENTS)
@@ -1398,6 +1524,7 @@ criterion_group!(
     benches,
     bench_fromfile_text_bounded_prefix,
     bench_fromfile_text_literal_bounded_prefix,
+    bench_fromfile_text_wildcard_bounded_prefix,
     bench_fromfile_native_u64,
     bench_fromfile_non_native_u64,
     bench_fromfile_native_i64,

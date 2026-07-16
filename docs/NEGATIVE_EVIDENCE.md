@@ -4,6 +4,64 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): bounded space-wildcard `fromfile_text` streams its prefix - 1,861x; the eager splitter now collects the lazy scanner
+
+`BlackThrush`, bead `franken_numpy-ixs5y.341`, closing the second of the two
+siblings `.339` declared. Robot triage again left the P1 umbrella after its
+parked f16 and policy-gated C-BLAS leaves. This is the third member of the
+`fromfile_text` eager-tokenize-then-discard class (.332 whitespace 1,186x,
+.339 pure-literal 1,282x).
+
+A pre-edit `perf record -F 199 -e cycles:u` profile (1K samples, zero lost,
+effective worker `vmi1293453`, 131,071 tokens joined by `", "`, `count=32`)
+put `split_text_with_sep` at **94.67%** of user cycles - the custom
+space-wildcard scanner walked and collected the entire input before the count
+break discarded it.
+
+ONE LEVER: a lazy `SpaceWildcardFields` iterator with the exact scan and
+emission order of the former collect loop (field before each separator match,
+tail exactly once; every match consumes >= 1 byte because a literal character
+is mandatory - whitespace-only separators route elsewhere - so the scan
+always advances). `split_with_space_wildcards` now COLLECTS this iterator, so
+eager and lazy paths cannot diverge by construction. The bounded branch
+widens to all non-whitespace separators through a shared
+`parse_bounded_text_prefix` helper (the `.339` loop extracted verbatim;
+literal separators keep `str::split`, wildcard separators use the new
+iterator). Unbounded reads keep collecting - the same output through the same
+iterator.
+
+PROOF: new `fromfile_text_bounded_wildcard_streams_exact_prefix` pins prefix
+equality with the unbounded parse, exact bits including negative zero,
+count-stop before malformed suffixes, the adjacent-separator internal-empty
+error inside the prefix, trailing-separator tolerance, count zero, wildcard
+runs matching zero-or-many whitespace chars, and tab wildcards; the full
+fnp-io suite passed 325 + 68 across targets, including every pre-existing
+wildcard-separator test now routing through the collected iterator. Clippy:
+the same 16 pre-existing typed-decode bench warnings at shifted lines; none
+in this change. The bench setup asserts the frozen eager-scanner replica
+against the public path bit-for-bit before timing.
+
+One foreground same-binary A/B (ordinary `--profile release`, LTO disabled,
+10 samples, 250 ms warm-up, 750 ms target, pinned effective worker
+`vmi1293453`, job `j-29933730227290218`), former arm = frozen faithful
+replica of the eager scanner plus the bounded loop:
+
+| arm | Criterion estimate |
+|---|---:|
+| former eager whole-input scan | 2.6151 ms `[2.4011, 2.8010]` |
+| streaming wildcard prefix | **1.4050 us** `[1.2855, 1.5073]` |
+
+Midpoint **1,861.3x faster / 99.946% less time**; interval bounds three
+orders of magnitude apart. Timed source SHA-256:
+`ccd8d1defd94e67295b1a74c5dfe795734634db6c05a0b7d61e5a96bab2048dc`; bench
+SHA-256: `542d7c2949555625e81ec3034cfa139a85d439b671a811e20ba993853ca0ba2d`.
+Verdict: **SHIP**. Do not re-probe bounded space-wildcard prefixes. The
+`fromfile_text` eager-tokenize-then-discard class is now CLOSED for bounded
+reads across all three separator families; the only remaining declared
+sibling is the unbounded reads' intermediate `Vec<&str>` (small EV -
+tokenization itself is mandatory there, only the pointer-pair Vec is
+avoidable).
+
 ## 2026-07-16 - WIN (SHIP): bounded literal-separator `fromfile_text` streams its prefix - 1,282x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.339`. Robot triage again left the P1

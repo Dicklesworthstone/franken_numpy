@@ -3865,40 +3865,109 @@ fn split_text_with_sep<'a>(text: &'a str, sep: &str) -> Vec<&'a str> {
 }
 
 fn split_with_space_wildcards<'a>(text: &'a str, sep: &str) -> Vec<&'a str> {
-    let tokens: Vec<SepToken> = sep
-        .chars()
-        .map(|c| {
-            if c.is_whitespace() {
-                SepToken::SpaceWildcard
-            } else {
-                SepToken::Literal(c)
-            }
-        })
-        .collect();
-    if tokens.is_empty() {
+    if sep.is_empty() {
         return vec![text];
     }
+    SpaceWildcardFields::new(text, sep).collect()
+}
 
-    let mut parts = Vec::new();
-    let mut field_start = 0usize;
-    let mut idx = 0usize;
-
-    while idx <= text.len() {
-        if let Some(end) = match_space_wildcard_sep(text, idx, &tokens) {
-            parts.push(&text[field_start..idx]);
-            field_start = end;
-            idx = end;
-            continue;
-        }
-        if idx == text.len() {
+/// Shared bounded-prefix parse loop (the general path's loop verbatim, minus
+/// eager tokenization): stops pulling fields once `max` values are parsed, so
+/// lazy field sources never scan the discarded suffix. Empty fields are
+/// tolerated only as the final trailing token; the element budget keeps its
+/// precedence over the count break.
+fn parse_bounded_text_prefix<'a, I: Iterator<Item = &'a str>>(
+    fields: I,
+    max: usize,
+    max_elements: usize,
+) -> Result<Vec<f64>, IOError> {
+    let mut values = Vec::new();
+    let mut iter = fields.peekable();
+    while let Some(field) = iter.next() {
+        if values.len() >= max {
             break;
         }
-        let ch = text[idx..].chars().next().expect("valid utf-8");
-        idx += ch.len_utf8();
+        if values.len() >= max_elements {
+            return Err(IOError::ReadPayloadIncomplete(
+                "fromfile_text: text exceeds MAX_TEXT_ELEMENTS budget",
+            ));
+        }
+        let field = field.trim();
+        if field.is_empty() {
+            if iter.peek().is_none() {
+                continue;
+            }
+            return Err(IOError::ReadPayloadIncomplete("fromfile_text: parse error"));
+        }
+        let parsed = field
+            .parse::<f64>()
+            .map_err(|_| IOError::ReadPayloadIncomplete("fromfile_text: could not parse float"))?;
+        values.push(parsed);
     }
+    Ok(values)
+}
 
-    parts.push(&text[field_start..]);
-    parts
+/// Lazy field iterator with the exact scan and emission order the eager
+/// [`split_with_space_wildcards`] collect produces (that function now
+/// collects this iterator, so the two cannot diverge): the field before each
+/// separator match, then the tail exactly once. Every separator match
+/// consumes at least one byte - a literal character is mandatory because
+/// whitespace-only separators route to the whitespace path - so the scan
+/// always advances and bounded consumers can stop pulling mid-input.
+struct SpaceWildcardFields<'a> {
+    text: &'a str,
+    tokens: Vec<SepToken>,
+    field_start: usize,
+    idx: usize,
+    finished: bool,
+}
+
+impl<'a> SpaceWildcardFields<'a> {
+    fn new(text: &'a str, sep: &str) -> Self {
+        debug_assert!(!sep.is_empty());
+        let tokens = sep
+            .chars()
+            .map(|c| {
+                if c.is_whitespace() {
+                    SepToken::SpaceWildcard
+                } else {
+                    SepToken::Literal(c)
+                }
+            })
+            .collect();
+        Self {
+            text,
+            tokens,
+            field_start: 0,
+            idx: 0,
+            finished: false,
+        }
+    }
+}
+
+impl<'a> Iterator for SpaceWildcardFields<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        if self.finished {
+            return None;
+        }
+        while self.idx <= self.text.len() {
+            if let Some(end) = match_space_wildcard_sep(self.text, self.idx, &self.tokens) {
+                let field = &self.text[self.field_start..self.idx];
+                self.field_start = end;
+                self.idx = end;
+                return Some(field);
+            }
+            if self.idx == self.text.len() {
+                break;
+            }
+            let ch = self.text[self.idx..].chars().next().expect("valid utf-8");
+            self.idx += ch.len_utf8();
+        }
+        self.finished = true;
+        Some(&self.text[self.field_start..])
+    }
 }
 
 fn match_space_wildcard_sep(text: &str, start: usize, tokens: &[SepToken]) -> Option<usize> {
@@ -4065,38 +4134,20 @@ fn fromfile_text_with_budget(
         return Ok(values);
     }
 
-    // Bounded pure-literal separators stream the prefix lazily: `str::split`
-    // yields the exact token sequence `split_text_with_sep` would collect for
-    // this case, so the trim/empty-field/trailing-separator/budget semantics
-    // below are unchanged - only the whole-input tokenization and its
-    // `Vec<&str>` are skipped once `max` values are parsed (the bounded
-    // whitespace branch above is the .332 precedent; wildcard-space
-    // separators and unbounded reads keep the eager path).
-    if let Some(max) = count.filter(|_| !sep_is_only_spaces(sep) && !sep_has_space(sep)) {
-        let mut values = Vec::new();
-        let mut iter = text.split(sep).peekable();
-        while let Some(field) = iter.next() {
-            if values.len() >= max {
-                break;
-            }
-            if values.len() >= max_elements {
-                return Err(IOError::ReadPayloadIncomplete(
-                    "fromfile_text: text exceeds MAX_TEXT_ELEMENTS budget",
-                ));
-            }
-            let field = field.trim();
-            if field.is_empty() {
-                if iter.peek().is_none() {
-                    continue;
-                }
-                return Err(IOError::ReadPayloadIncomplete("fromfile_text: parse error"));
-            }
-            let parsed = field.parse::<f64>().map_err(|_| {
-                IOError::ReadPayloadIncomplete("fromfile_text: could not parse float")
-            })?;
-            values.push(parsed);
-        }
-        return Ok(values);
+    // Bounded non-whitespace separators stream the prefix lazily: the lazy
+    // iterators yield the exact token sequence `split_text_with_sep` would
+    // collect (pure literals via `str::split`; space-wildcard separators via
+    // `SpaceWildcardFields`, which the eager splitter itself now collects),
+    // so the trim/empty-field/trailing-separator/budget semantics are
+    // unchanged - only the whole-input tokenization and its `Vec<&str>` are
+    // skipped once `max` values are parsed (.332 whitespace precedent; .339
+    // literal precedent; unbounded reads keep the eager path).
+    if let Some(max) = count.filter(|_| !sep_is_only_spaces(sep)) {
+        return if sep_has_space(sep) {
+            parse_bounded_text_prefix(SpaceWildcardFields::new(text, sep), max, max_elements)
+        } else {
+            parse_bounded_text_prefix(text.split(sep), max, max_elements)
+        };
     }
 
     let max = count.unwrap_or(usize::MAX);
@@ -8331,6 +8382,55 @@ mm.flush()
         assert_eq!(
             fromfile_text(" 1 , 2 ,junk", ",", Some(2)).unwrap(),
             vec![1.0, 2.0]
+        );
+    }
+
+    #[test]
+    fn fromfile_text_bounded_wildcard_streams_exact_prefix() {
+        // The lazy space-wildcard branch must match the eager scanner's
+        // semantics exactly (the eager splitter now collects the same
+        // iterator, so unbounded reads double as the reference).
+        let text = "-0, 2.5,\t3, 4.25, 5";
+        let bounded = fromfile_text(text, ", ", Some(3)).unwrap();
+        let unbounded = fromfile_text(text, ", ", None).unwrap();
+        assert_eq!(
+            bounded.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            unbounded[..3]
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(bounded[0].to_bits(), (-0.0f64).to_bits());
+
+        // Malformed suffix beyond the count is never inspected.
+        assert_eq!(
+            fromfile_text("1, 2, 3, junk", ", ", Some(3)).unwrap(),
+            vec![1.0, 2.0, 3.0]
+        );
+        // Adjacent separators create an internal empty field, which still
+        // errors inside the prefix ("1, , 2": ','+wildcard eats one space,
+        // the next ',' starts a new match with an empty field between).
+        let err = fromfile_text("1, , 2", ", ", Some(3)).expect_err("empty field should fail");
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+        // Trailing separator with count beyond available tokens.
+        assert_eq!(
+            fromfile_text("1, 2, ", ", ", Some(5)).unwrap(),
+            vec![1.0, 2.0]
+        );
+        // Count zero parses nothing, even from a malformed input.
+        assert_eq!(
+            fromfile_text("junk, junk", ", ", Some(0)).unwrap(),
+            Vec::<f64>::new()
+        );
+        // Wildcard runs: the whitespace position may match zero or many chars.
+        assert_eq!(
+            fromfile_text("1,2,     3,junk", ", ", Some(3)).unwrap(),
+            vec![1.0, 2.0, 3.0]
+        );
+        // Tab in the separator is a wildcard too.
+        assert_eq!(
+            fromfile_text("1,\t2,3, x", ",\t", Some(3)).unwrap(),
+            vec![1.0, 2.0, 3.0]
         );
     }
 
