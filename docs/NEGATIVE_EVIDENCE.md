@@ -4,6 +4,51 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-15 - WIN (SHIP): F-order external chunks emit one strided operand run - 26.28x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.328`. Robot triage left the P1
+pure-safe-Rust performance umbrella after excluding the parked f16 search path
+and policy-gated C-BLAS leaf. Negative-ledger screening also showed that the
+four-result Complex128 binary-input clone family was exhausted. This turn
+therefore pivoted to the fresh `fnp-iter` subsystem, where the prior 311.64x
+C-order chunk keep explicitly left F-order as a distinct mapping problem.
+
+A pre-edit remote `perf record` profile captured 989 cycle samples on effective
+worker `vmi1152480`. `NditerPlan::linear_index_to_multi_index` was the largest
+frame at 51.40%, its `operand_linear_index_for_iterindex` caller accounted for
+another 13.98%, and allocation/free frames occupied much of the remainder.
+Source attribution matched the profile: every lane in an aligned F-order
+external-loop chunk allocated and decoded a multi-index, then folded that same
+index into the C-backed operand's row-major linear position.
+
+ONE LEVER resolves the chunk start once and emits the checked arithmetic
+progression along axis 0 using the C-operand stride. The shortcut is restricted
+to aligned, full-length F-order external chunks with `inner_loop_axis == 0`;
+the general F-order path, C-order path, chunk-boundary validation, overflow
+errors, iterator state, and step metadata remain unchanged. A focused release
+test compared every emitted chunk with the former per-index conversion across
+six shapes, while the existing seek/chunk regression covered a nonzero chunk
+start (2 passed). The owned crate's all-target release Clippy gate also passed
+with warnings denied.
+
+The new narrow `fnp-iter` Criterion target received an untimed non-LTO release
+warm-up before profiling. One foreground same-binary A/B then used ordinary
+`--profile release`, release LTO disabled, shape `[65_536, 2, 2, 2]`, one
+65,536-element chunk, 10 samples, a 250 ms warm-up, and a 750 ms measurement
+window on effective worker `vmi1152480`:
+
+- former per-index multi-index round trip: `[1.2264 ms, 1.3240 ms, 1.4775 ms]`
+- checked axis-0 operand stride: `[47.878 us, 50.381 us, 53.035 us]`
+- midpoint delta: **26.28x faster / 96.19% less time**, with disjoint intervals
+
+RCH generated separate release target fingerprints and reported cache misses;
+requested switches to `vmi1156319` and `ovh-a` were both routed back to
+`vmi1152480`. All jobs remained strict-remote, output-producing, and completed
+in under two minutes, so no timeout was used or misclassified as evidence.
+Verdict: **SHIP**. Do not re-probe aligned F-order external-loop C-operand
+per-lane index conversion; non-external/general F-order mapping remains on the
+unchanged fallback and must earn its own profile.
+
 ## 2026-07-15 - WIN (SHIP): Complex128 `complex_div` borrows both inputs - 6.93x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.327`. Robot triage left the broad

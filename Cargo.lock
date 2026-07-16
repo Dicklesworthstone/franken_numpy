@@ -716,6 +716,7 @@ dependencies = [
 name = "fnp-iter"
 version = "0.2.0"
 dependencies = [
+ "criterion",
  "serde",
  "serde_json",
 ]

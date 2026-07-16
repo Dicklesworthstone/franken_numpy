@@ -817,6 +817,26 @@ impl NditerPlan {
             return Ok((iterindex..end).collect());
         }
 
+        if self.external_loop
+            && self.inner_loop_axis == Some(0)
+            && self.inner_loop_len != 0
+            && chunk_len == self.inner_loop_len
+            && iterindex.is_multiple_of(self.inner_loop_len)
+        {
+            let start = self.operand_linear_index_for_iterindex(iterindex)?;
+            let operand_stride = self.element_count / self.inner_loop_len;
+            return (0..chunk_len)
+                .map(|offset| {
+                    offset
+                        .checked_mul(operand_stride)
+                        .and_then(|delta| start.checked_add(delta))
+                        .ok_or(NditerError::InvalidConfiguration(
+                            "operand linear index overflow while resolving nditer chunk",
+                        ))
+                })
+                .collect();
+        }
+
         (iterindex..end)
             .map(|idx| self.operand_linear_index_for_iterindex(idx))
             .collect()
@@ -2575,6 +2595,39 @@ mod tests {
             .set_iterindex(1)
             .expect_err("mid-chunk external_loop seek should fail");
         assert_eq!(err.reason_code(), "nditer_multi_index_contract_violation");
+    }
+
+    #[test]
+    fn nditer_wrapper_external_loop_f_order_matches_index_round_trip() {
+        for shape in [
+            vec![1],
+            vec![4],
+            vec![3, 4],
+            vec![2, 3, 4],
+            vec![5, 1, 3],
+            vec![7, 2, 1, 3],
+        ] {
+            let plan = NditerPlan::new(
+                shape,
+                8,
+                NditerOptions {
+                    order: NditerOrder::F,
+                    external_loop: true,
+                },
+            )
+            .expect("F-order external-loop plan");
+            let chunk_len = plan.inner_loop_len();
+
+            for actual in Nditer::from_plan(plan.clone()) {
+                let expected = (actual.iterindex..actual.iterindex + chunk_len)
+                    .map(|index| {
+                        plan.operand_linear_index_for_iterindex(index)
+                            .expect("former per-index conversion")
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(actual.linear_indices, expected);
+            }
+        }
     }
 
     #[test]
