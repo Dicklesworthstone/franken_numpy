@@ -609,6 +609,84 @@ fn bench_complex_mixed_add_direct(c: &mut Criterion) {
     group.finish();
 }
 
+/// Faithful replicas of the CURRENT mixed-pair sub/mul/div paths: both
+/// inputs materialized via `to_complex128_vec` before the op kernel.
+fn former_mixed_op(
+    lhs: &ArrayStorage,
+    rhs: &ArrayStorage,
+    kernel: fn((f64, f64), (f64, f64)) -> (f64, f64),
+) -> ArrayStorage {
+    let lhs = lhs.to_complex128_vec();
+    let rhs = rhs.to_complex128_vec();
+    ArrayStorage::Complex128(lhs.iter().zip(&rhs).map(|(&a, &b)| kernel(a, b)).collect())
+}
+
+fn bench_complex_mixed_ops_direct(c: &mut Criterion) {
+    let mut group = c.benchmark_group("complex_mixed_ops_direct");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(2));
+
+    let c64 = ArrayStorage::Complex64(
+        (0..100_000)
+            .map(|index| {
+                let value = index as f32 * 0.25 - 12_500.0;
+                (value, -value * 0.5)
+            })
+            .collect(),
+    );
+    let c128 = ArrayStorage::Complex128(
+        (0..100_000)
+            .map(|index| {
+                let value = f64::from(index) * 0.125 - 6_250.0;
+                if index == 77 { (0.0, 0.0) } else { (-value, value * 0.75) }
+            })
+            .collect(),
+    );
+    type Kernel = fn((f64, f64), (f64, f64)) -> (f64, f64);
+    let sub: Kernel = |(ar, ai), (br, bi)| (ar - br, ai - bi);
+    let mul: Kernel = |(ar, ai), (br, bi)| (ar * br - ai * bi, ar * bi + ai * br);
+    let div: Kernel = |(ar, ai), (br, bi)| {
+        let denom = br * br + bi * bi;
+        if denom == 0.0 {
+            (f64::NAN, f64::NAN)
+        } else {
+            ((ar * br + ai * bi) / denom, (ai * br - ar * bi) / denom)
+        }
+    };
+    let ops: [(&str, Kernel); 3] = [("sub", sub), ("mul", mul), ("div", div)];
+    for (name, kernel) in ops {
+        let former = former_mixed_op(&c64, &c128, kernel).to_complex128_vec();
+        let public = match name {
+            "sub" => c64.complex_sub(&c128),
+            "mul" => c64.complex_mul(&c128),
+            _ => c64.complex_div(&c128),
+        }
+        .unwrap()
+        .to_complex128_vec();
+        assert_eq!(public.len(), former.len());
+        for (actual, expected) in public.iter().zip(&former) {
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+        }
+        group.bench_function(format!("former_convert_both_{name}"), |b| {
+            b.iter(|| former_mixed_op(black_box(&c64), black_box(&c128), kernel))
+        });
+        group.bench_function(format!("direct_borrow_widen_{name}"), |b| {
+            b.iter(|| {
+                match name {
+                    "sub" => black_box(&c64).complex_sub(black_box(&c128)),
+                    "mul" => black_box(&c64).complex_mul(black_box(&c128)),
+                    _ => black_box(&c64).complex_div(black_box(&c128)),
+                }
+                .unwrap()
+            })
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_complex64_add_direct(c: &mut Criterion) {
     let mut group = c.benchmark_group("complex64_add_direct");
     group.sample_size(10);
@@ -971,6 +1049,7 @@ criterion_group!(
     bench_complex64_mul_direct,
     bench_complex64_div_direct,
     bench_complex_mixed_add_direct,
+    bench_complex_mixed_ops_direct,
     bench_complex128_add_direct,
     bench_complex128_sub_direct,
     bench_complex128_mul_direct,

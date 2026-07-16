@@ -4,6 +4,51 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): mixed sub/mul/div borrow-and-widen - 20.6x/18.0x/6.2x; the complex binary storage surface is FULLY CLOSED
+
+`BlackThrush`, bead `franken_numpy-ixs5y.358`, completing the `.357` mixed
+family in one templated pass. Robot triage again left the P1 umbrella after
+its parked f16 and policy-gated C-BLAS leaves.
+
+Source attribution: all six remaining mixed orientations (sub/mul/div x two
+operand orders) still materialized BOTH inputs via `to_complex128_vec`. The
+profile gate carries by family precedent, stated rather than re-measured:
+`.357` measured conversion+allocation at ~63% of cycles on the IDENTICAL
+shape, `.355` at ~45% with the heavier division kernel - three more profiles
+of the same code shape would have added nothing the per-op A/Bs don't decide.
+
+ONE LEVER (six arms, one family): each op's mixed pair borrows the
+Complex128 operand and widens the Complex64 operand inline, preserving the
+exact kernel expression tree and operand order per op - including the
+division zero-divisor NaN arm on identically widened components. Focused
+test sweeps all three ops x both orientations over NaN payloads, negative
+zero, mixed infinities, subnormals, the zero divisor, and length-mismatch
+errors (141 + 112 crate tests green). The bench asserts each op's faithful
+convert-both replica bit-for-bit before timing.
+
+One foreground same-binary bench run, three independent A/B rows (ordinary
+`--profile release`, LTO disabled, 20 samples, 0.5 s warm-up, 2 s windows,
+honored-pin effective worker `vmi1293453`, job `j-29933730227290742`):
+
+| op | former convert-both | direct borrow+widen | midpoint |
+|---|---:|---:|---:|
+| sub | 941.10 us `[913.76, 969.34]` | **45.792 us** `[44.667, 47.212]` | **20.55x** |
+| mul | 956.27 us `[925.52, 993.60]` | **53.009 us** `[51.562, 54.493]` | **18.04x** |
+| div | 1.0133 ms `[971.74 us, 1.0545 ms]` | **163.48 us** `[158.88, 167.20]` | **6.20x** |
+
+All three cleanly disjoint; the monotone-by-kernel-weight pattern holds
+across the mixed family too. COMPLETE SURFACE SCORECARD (ten leaves,
+2026-07-16): c128 borrows .324-.327 (6.9-27.0x), c64 inline-widen
+add/sub/mul/div (14.67x/17.78x/12.87x/4.74x), mixed add (18.2x/18.5x),
+mixed sub/mul/div (20.6x/18.0x/6.2x). Timed source SHA-256:
+`aa3f53694bcb019b172b42e54012681942d7bf82b19cc2714010181d41e18946`; bench
+SHA-256: `be358b3060a9e6689e35806e49188bc75a9fb446adfabce8cb3412346da92750`.
+Verdict: **SHIP**. The complex binary storage surface is CLOSED - do not
+re-probe input materialization for ANY complex binary-op pair. The frontier
+is now genuinely elsewhere: fnp-python dispatch (heavier setup) or the old
+conditional opens (axis-sort cores gate, i32 avx2 re-probe, flat-sum ISA
+grid).
+
 ## 2026-07-16 - WIN (SHIP): mixed Complex64+Complex128 `complex_add` borrows and widens - 18.2x/18.5x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.357`, the mixed-pair hypothesis the
