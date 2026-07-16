@@ -263,6 +263,108 @@ fn bench_beta_gamma_shape_cache(c: &mut Criterion) {
     group.finish();
 }
 
+/// Faithful replica of the FORMER Best-Fisher vonmises batch loop over the
+/// public `Generator::next_f64` (the same method the production loop draws
+/// from): the kappa-only `s` is recomputed per sample in its true dependency
+/// position, unlike an additive model loop whose independent iterations
+/// pipeline the recomputation away. Valid for 1e-5 <= kappa <= 1e6 (the
+/// rejection regime, which consumes only `next_f64` draws).
+#[inline(never)]
+fn former_vonmises_best_fisher(
+    generator: &mut Generator,
+    mu: f64,
+    kappa: f64,
+    size: usize,
+) -> Vec<f64> {
+    fn wrap_angle_to_pi(angle: f64) -> f64 {
+        (angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
+    }
+    (0..size)
+        .map(|_| {
+            let s = if kappa < 1e-5 {
+                1.0 / kappa + kappa
+            } else {
+                let r = 1.0 + (1.0 + 4.0 * kappa * kappa).sqrt();
+                let rho = (r - (2.0 * r).sqrt()) / (2.0 * kappa);
+                (1.0 + rho * rho) / (2.0 * rho)
+            };
+            loop {
+                let u1 = generator.next_f64();
+                let z = (std::f64::consts::PI * u1).cos();
+                let w = (1.0 + s * z) / (s + z);
+                let y = kappa * (s - w);
+                let u2 = generator.next_f64();
+                if y * (2.0 - y) - u2 >= 0.0 || (y / u2).ln() + 1.0 - y >= 0.0 {
+                    let u3 = generator.next_f64();
+                    let theta = if u3 < 0.5 { -w.acos() } else { w.acos() };
+                    return wrap_angle_to_pi(mu + theta);
+                }
+            }
+        })
+        .collect()
+}
+
+fn bench_vonmises_kappa_cache(c: &mut Criterion) {
+    const SIZE: usize = 100_000;
+    const MU: f64 = 1.25;
+    const KAPPA: f64 = 2.5;
+
+    // Batch-vs-singleton stream equivalence across the three touched kappa
+    // regimes (small-s series, Best-Fisher rejection, large-kappa normal
+    // approximation).
+    let mut batch_proof = pcg64_generator();
+    let mut single_proof = pcg64_generator();
+    for &kappa in &[5e-6f64, 2.5, 1e7] {
+        let batch = batch_proof.vonmises(MU, kappa, 32).unwrap();
+        let singles: Vec<f64> = (0..32)
+            .map(|_| single_proof.vonmises(MU, kappa, 1).unwrap()[0])
+            .collect();
+        assert_eq!(
+            batch.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "vonmises batch/singleton divergence at kappa {kappa}"
+        );
+    }
+    assert_eq!(batch_proof.next_u64(), single_proof.next_u64());
+
+    // The faithful former replica must reproduce the public path bit-for-bit
+    // (it recomputes s per sample; the hoist must not change any draw).
+    let mut replica_proof = pcg64_generator();
+    let mut public_proof = pcg64_generator();
+    let replica = former_vonmises_best_fisher(&mut replica_proof, MU, KAPPA, 4096);
+    let public = public_proof.vonmises(MU, KAPPA, 4096).unwrap();
+    assert_eq!(
+        replica.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        public.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
+    assert_eq!(replica_proof.next_u64(), public_proof.next_u64());
+
+    let mut former_generator = pcg64_generator();
+    let mut candidate_generator = pcg64_generator();
+    let mut group = c.benchmark_group("vonmises_kappa_cache");
+    group.throughput(Throughput::Elements(SIZE as u64));
+    group.bench_function("former_full_replica", |bench| {
+        bench.iter(|| {
+            black_box(former_vonmises_best_fisher(
+                black_box(&mut former_generator),
+                black_box(MU),
+                black_box(KAPPA),
+                black_box(SIZE),
+            ))
+        })
+    });
+    group.bench_function("candidate_hoisted_terms", |bench| {
+        bench.iter(|| {
+            black_box(
+                candidate_generator
+                    .vonmises(black_box(MU), black_box(KAPPA), black_box(SIZE))
+                    .unwrap(),
+            )
+        })
+    });
+    group.finish();
+}
+
 #[inline(never)]
 fn former_choice_weighted_replace_one(
     generator: &mut Generator,
@@ -982,6 +1084,7 @@ criterion_group!(
     bench_poisson_ptrs_cache,
     bench_gamma_shape_cache,
     bench_beta_gamma_shape_cache,
+    bench_vonmises_kappa_cache,
     bench_choice_weighted_singleton,
     bench_permuted_last_axis_allocations,
     bench_permuted_strided_axis_allocations,

@@ -6383,6 +6383,11 @@ impl Generator {
                 RngBackend::Sfc64(rng) => vonmises_uniform_from_core(rng, size),
             });
         }
+        // NOTE (2026-07-16 NO-SHIP, ledger + bench vonmises_kappa_cache):
+        // hoisting the kappa-only terms (Best-Fisher s, large-kappa scale)
+        // per batch is stream-safe but measured 1.02-1.04x, noise-level -
+        // the per-sample cos/ln/acos rejection body dominates. Do not re-hoist
+        // without a faster rejection body to expose the terms.
         Ok((0..size)
             .map(|_| {
                 if kappa > 1e6 {
@@ -15912,6 +15917,29 @@ for child in rng.spawn(n_children):
                 batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 "standard_t batch/singleton divergence at df {df}"
+            );
+        }
+        assert_eq!(batch.next_u64(), single.next_u64());
+    }
+
+    #[test]
+    fn vonmises_batch_matches_singleton_stream() {
+        // The per-batch kappa-term hoist (and the batch-level split of the
+        // large-kappa normal approximation) must not change what a batched
+        // draw produces relative to repeated single draws with the same seed.
+        // Covers the small-s series (kappa < 1e-5), the Best-Fisher rejection
+        // loop, and the kappa > 1e6 normal approximation.
+        let mut batch = oracle_gen();
+        let mut single = oracle_gen();
+        for &kappa in &[5e-6f64, 0.5, 2.5, 4.0, 1e7] {
+            let batched = batch.vonmises(1.25, kappa, 24).unwrap();
+            let singles: Vec<f64> = (0..24)
+                .map(|_| single.vonmises(1.25, kappa, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "vonmises batch/singleton divergence at kappa {kappa}"
             );
         }
         assert_eq!(batch.next_u64(), single.next_u64());

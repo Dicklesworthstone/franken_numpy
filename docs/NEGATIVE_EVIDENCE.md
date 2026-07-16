@@ -4,6 +4,60 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - NO-SHIP (REVERTED): vonmises kappa-only term hoist - 1.02-1.04x, noise-level under a transcendental rejection body
+
+`BlackThrush`, bead `franken_numpy-ixs5y.336`, next leaf of the fnp-random
+parameter-cache lane (.312/.334/.335). Robot triage again left the P1 umbrella
+after its parked f16 and policy-gated C-BLAS leaves. Negative-ledger screening
+found no prior vonmises perf attempt.
+
+Source attribution: for 1e-8 <= kappa <= 1e6, `Generator::vonmises` recomputes
+the kappa-only Best-Fisher `s` per sample (`r = 1 + sqrt(1 + 4k^2)`,
+`rho = (r - sqrt(2r)) / 2k`, `s = (1 + rho^2) / 2rho` - two sqrts plus
+divisions), and the `kappa > 1e6` normal approximation recomputes
+`sqrt(1/kappa)` per sample; the per-sample regime branch is batch-invariant. A
+pre-edit `perf record -F 199 -e cycles:u` profile (895 samples, zero lost,
+effective worker `vmi1293453`, `vonmises(1.25, 2.5, 100_000)`) showed the
+batch closure at 44.88% with libm cos 21.97% + acos 13.85% + log 5.93% - the
+rejection body is transcendental-dominated, which correctly predicted the
+outcome.
+
+The tested lever hoisted `s` (and split the batch-invariant large-kappa branch
+with a hoisted scale) with exact former expressions; streams bit-identical
+(new `vonmises_batch_matches_singleton_stream` across five kappa regimes plus
+final stream position - KEPT; full suite 436+12+16 green including the
+vonmises golden and live NumPy oracle).
+
+TWO A/B designs on pinned `vmi1293453`, 20 samples, 2 s windows, both
+foreground (`kappa = 2.5`, the Best-Fisher regime; jobs `j-...986`, `j-...990`):
+
+| arm design | former | candidate hoisted | midpoint |
+|---|---:|---:|---:|
+| additive removed-work model (10-sample first pass) | 7.2385 ms `[7.0704, 7.4000]` | 7.0929 ms `[6.7039, 7.6122]` | 1.021x, OVERLAPPING |
+| faithful full replica (public `next_f64`, s in true dependency position, bit-asserted vs public incl. stream position) | 6.7589 ms `[6.6653, 6.8817]` | 6.4862 ms `[6.3777, 6.6459]` | 1.042x, barely disjoint |
+
+METHOD NOTE: the additive model (the `.333` rule) understates removed work
+that sits in a per-sample DEPENDENCY CHAIN - independent model-loop iterations
+pipeline two sqrts to near-zero effective cost. The faithful replica is the
+correct arm when the loop consumes only public draw methods; both designs
+agree the true effect is 2-4%.
+
+REVERTED per program convention (flip-clone 1.18x and U64-cumsum 1.03x
+precedents): a noise-level relocation is not worth the dispatch surface. KEPT:
+the batch-vs-singleton test (pins stream equivalence regardless) and the
+`vonmises_kappa_cache` bench group as the retry vehicle (post-revert its
+replica arm and the public path are the same code, a null pair; its setup
+asserts remain). Reverted source SHA-256:
+`ccb41e01bd20c399b64f3744e3843a4e69025be16d215ecc218cc6f68b8eb614`; bench
+SHA-256: `2d52c7e0348df7539e271578e932857cc55aaf491bb7102dd59ac294124f4983`.
+Verdict: **NO-SHIP** - this bars kappa-term hoisting under the CURRENT
+transcendental rejection body. LANE RULE settled by gamma-vs-vonmises: a
+parameter-cache hoist pays in proportion to removed-work / loop-body ratio -
+ziggurat-bodied loops (gamma 1.17x, beta 1.19x) pay; cos/ln/acos-bodied loops
+do not. Remaining lane leaves re-triaged under this rule: noncentral family
+and dirichlet (gamma-bodied, still viable); logseries/geometric-class bodies
+should be profiled for body weight BEFORE building the hoist.
+
 ## 2026-07-16 - WIN (SHIP): beta/negbinom/f/t hoist their fixed-shape gamma caches - 1.19x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.335`, the first declared sibling of
