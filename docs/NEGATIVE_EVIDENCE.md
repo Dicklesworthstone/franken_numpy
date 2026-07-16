@@ -4,6 +4,63 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): dirichlet reuses a per-alpha gamma-cache vector - 1.08x conservative floor
+
+`BlackThrush`, bead `franken_numpy-ixs5y.338`, the dirichlet leaf of the
+fnp-random parameter-cache lane (.312/.334/.335; vonmises closed by the .336
+no-ship). Robot triage again left the P1 umbrella after its parked f16 and
+policy-gated C-BLAS leaves. The .336 lane rule admits this leaf: dirichlet's
+per-component body IS the gamma sampler (ziggurat-bodied), the class that
+pays.
+
+Source attribution: `Generator::dirichlet` called `sample_gamma(a)` per alpha
+component per draw, rebuilding `GammaShapeCache::new(a)` every time even
+though the alpha vector is batch-fixed. A pre-edit
+`perf record -F 199 -e cycles:u` profile (1K samples, zero lost, effective
+worker `vmi1293453`, `dirichlet([2.5, 4.0, 1.5, 0.5, 3.0], 20_000)`) put
+`sample_gamma_cached` at 28.57% with the per-call cache build inlined, the
+per-draw inner `Vec` collect at 11.80%, ziggurat at 10.92%, and the sub-1
+component's `powf` at 7.63%.
+
+ONE LEVER: build `Vec<GammaShapeCache>` (one per component) once per batch and
+call `sample_gamma_cached` via `alpha.iter().zip(&caches)`; the caches consume
+no RNG draws, so every stream is bit-identical. Per-draw allocation shape,
+zero-sum handling, validation, and every other consumer are unchanged.
+
+PROOF: new `dirichlet_batch_matches_singleton_stream` pins batch-vs-singleton
+bit equality plus final raw-stream position across four alpha sets (sub-1,
+MT, exponential, zero, and NaN components); full crate suite 437 + 12 + 16
+green including the dirichlet golden and live NumPy oracle; clippy added
+nothing beyond the pre-existing intentional bench `vec!`. The bench setup
+asserts the batch/singleton equivalence before timing.
+
+Foreground same-binary A/B (ordinary `--profile release`, LTO disabled, 20
+samples, 0.5 s warm-up, 2 s window, pinned effective worker `vmi1293453`, job
+`j-29933730227290115`), former arm = public dirichlet PLUS one cache-build
+replica per component per draw (additive model; per the .336 method note it
+UNDERSTATES dependency-chained removed work, and no faithful replica is
+possible here because the gamma body's ziggurat cores are private - the
+measured ratio is therefore a conservative floor):
+
+| arm | Criterion estimate |
+|---|---:|
+| former-model (public + 5 cache builds/draw) | 3.1332 ms `[3.0391, 3.2349]` |
+| candidate per-alpha cache vector | **2.9027 ms** `[2.8327, 3.0092]` |
+
+Midpoint **1.079x / 7.4% less time**, intervals disjoint. The floor is lower
+than gamma's 1.167x / beta's 1.189x because dirichlet's per-draw overhead
+(inner collect, sum, normalize, outer Vec-of-Vec) dilutes the per-sample
+savings - consistent with the .336 removed-work/loop-body rule. Timed source
+SHA-256: `8e1ecc623ba8a356c5b8408bb198cda298c1a2f1ea5cf51c617658fcdca1da9c`;
+bench SHA-256:
+`6aea84e4a759b35bed921717c142ff3249a37dd0c1b793ee248c3cae5b054fe9`.
+Verdict: **SHIP** (disjoint real effect, strictly-less-work relocation,
+stream-proven). Do not re-probe per-alpha cache vectors. LANE STATUS: the
+fnp-random parameter-cache lane is now MINED except two declared leaves - the
+noncentral family (requires threading a cache through the shared per-sample
+helper's signature) and the legacy `RandomState` gamma path (verify structure
+first); both are gamma-bodied and admissible under the .336 rule.
+
 ## 2026-07-16 - NO-SHIP (REVERTED): vonmises kappa-only term hoist - 1.02-1.04x, noise-level under a transcendental rejection body
 
 `BlackThrush`, bead `franken_numpy-ixs5y.336`, next leaf of the fnp-random

@@ -263,6 +263,78 @@ fn bench_beta_gamma_shape_cache(c: &mut Criterion) {
     group.finish();
 }
 
+/// The public batched dirichlet path PLUS exactly the parameter-only work the
+/// per-alpha cache vector removes: one gamma cache build per component per
+/// draw. Additive model per the `.333` rule; per the `.336` method note it
+/// UNDERSTATES dependency-chained removed work (a faithful replica is not
+/// possible here - the gamma body's ziggurat cores are private), so the
+/// measured ratio is a conservative floor.
+fn former_model_dirichlet(generator: &mut Generator, alpha: &[f64], size: usize) -> Vec<Vec<f64>> {
+    let out = generator.dirichlet(alpha, size).unwrap();
+    for _ in 0..size {
+        for &a in alpha {
+            black_box(gamma_cache_build_model(black_box(a)));
+        }
+    }
+    out
+}
+
+fn bench_dirichlet_gamma_shape_cache(c: &mut Criterion) {
+    const SIZE: usize = 20_000;
+    let alpha = [2.5f64, 4.0, 1.5, 0.5, 3.0];
+
+    // Batch-vs-singleton stream equivalence: the per-alpha cache vector must
+    // not change what a batched draw produces relative to repeated single
+    // draws, including zero and sub-1 components.
+    let mut batch_proof = pcg64_generator();
+    let mut single_proof = pcg64_generator();
+    for alphas in [&alpha[..], &[0.5f64, 0.0, 2.0][..]] {
+        let batch = batch_proof.dirichlet(alphas, 16).unwrap();
+        let singles: Vec<Vec<f64>> = (0..16)
+            .map(|_| {
+                single_proof
+                    .dirichlet(alphas, 1)
+                    .unwrap()
+                    .into_iter()
+                    .next()
+                    .unwrap()
+            })
+            .collect();
+        for (draw_index, (b, s)) in batch.iter().zip(singles.iter()).enumerate() {
+            assert_eq!(
+                b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                s.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "dirichlet batch/singleton divergence at draw {draw_index} for {alphas:?}"
+            );
+        }
+    }
+    assert_eq!(batch_proof.next_u64(), single_proof.next_u64());
+
+    let mut former_generator = pcg64_generator();
+    let mut candidate_generator = pcg64_generator();
+    let mut group = c.benchmark_group("dirichlet_gamma_shape_cache");
+    group.throughput(Throughput::Elements((SIZE * alpha.len()) as u64));
+    group.bench_function("former_model_recompute_caches", |bench| {
+        bench.iter(|| {
+            black_box(former_model_dirichlet(
+                black_box(&mut former_generator),
+                black_box(&alpha),
+                black_box(SIZE),
+            ))
+        })
+    });
+    group.bench_function("candidate_cache_vector", |bench| {
+        bench.iter(|| {
+            black_box(
+                candidate_generator
+                    .dirichlet(black_box(&alpha), black_box(SIZE))
+                    .unwrap(),
+            )
+        })
+    });
+    group.finish();
+}
+
 /// Faithful replica of the FORMER Best-Fisher vonmises batch loop over the
 /// public `Generator::next_f64` (the same method the production loop draws
 /// from): the kappa-only `s` is recomputed per sample in its true dependency
@@ -1084,6 +1156,7 @@ criterion_group!(
     bench_poisson_ptrs_cache,
     bench_gamma_shape_cache,
     bench_beta_gamma_shape_cache,
+    bench_dirichlet_gamma_shape_cache,
     bench_vonmises_kappa_cache,
     bench_choice_weighted_singleton,
     bench_permuted_last_axis_allocations,

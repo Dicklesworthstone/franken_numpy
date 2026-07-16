@@ -6079,9 +6079,21 @@ impl Generator {
         if alpha.iter().any(|&a| a < 0.0) {
             return Err(RandomError::InvalidParameter);
         }
+        // The alpha vector is batch-fixed: build each component's
+        // parameter-only gamma terms once and reuse them across every draw
+        // (.334/.335 sibling; caches consume no RNG draws, so the output
+        // stream is bit-identical).
+        let caches: Vec<GammaShapeCache> = alpha
+            .iter()
+            .map(|&a| GammaShapeCache::new(a))
+            .collect();
         Ok((0..size)
             .map(|_| {
-                let gamma_samples: Vec<f64> = alpha.iter().map(|&a| self.sample_gamma(a)).collect();
+                let gamma_samples: Vec<f64> = alpha
+                    .iter()
+                    .zip(&caches)
+                    .map(|(&a, &cache)| self.sample_gamma_cached(a, cache))
+                    .collect();
                 let sum: f64 = gamma_samples.iter().sum();
                 if sum == 0.0 {
                     vec![0.0; gamma_samples.len()]
@@ -15918,6 +15930,43 @@ for child in rng.spawn(n_children):
                 singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 "standard_t batch/singleton divergence at df {df}"
             );
+        }
+        assert_eq!(batch.next_u64(), single.next_u64());
+    }
+
+    #[test]
+    fn dirichlet_batch_matches_singleton_stream() {
+        // The per-alpha cache vector must not change what a batched draw
+        // produces relative to repeated single draws with the same seed.
+        // Mixed regimes per component: sub-1, Marsaglia-Tsang, exponential
+        // (a == 1), zero, and NaN alphas.
+        let alphas_sets: &[&[f64]] = &[
+            &[2.5, 4.0, 1.5, 0.5, 3.0],
+            &[0.5, 0.0, 2.0],
+            &[1.0, 1.0],
+            &[f64::NAN, 2.0],
+        ];
+        let mut batch = oracle_gen();
+        let mut single = oracle_gen();
+        for &alphas in alphas_sets {
+            let batched = batch.dirichlet(alphas, 16).unwrap();
+            let singles: Vec<Vec<f64>> = (0..16)
+                .map(|_| {
+                    single
+                        .dirichlet(alphas, 1)
+                        .unwrap()
+                        .into_iter()
+                        .next()
+                        .unwrap()
+                })
+                .collect();
+            for (draw, (b, s)) in batched.iter().zip(singles.iter()).enumerate() {
+                assert_eq!(
+                    b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    s.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    "dirichlet batch/singleton divergence at draw {draw} for {alphas:?}"
+                );
+            }
         }
         assert_eq!(batch.next_u64(), single.next_u64());
     }
