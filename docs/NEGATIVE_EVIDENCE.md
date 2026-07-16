@@ -4,6 +4,56 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - WIN (SHIP): Complex64 `complex_sub` widens directly into its Complex128 output - 17.78x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.353`, the first declared sibling of
+the `.343` Complex64 `complex_add` ship ("other operations or mixed pairs are
+separate hypotheses"). Robot triage again left the P1 umbrella after its
+parked f16 and policy-gated C-BLAS leaves; fnp-runtime was scouted first and
+found BARREN for perf (a 1,672-line policy/compatibility-decision crate with
+one call site in hot code and no numeric kernels) - recorded here so the next
+fresh-surface hunt skips it.
+
+Source attribution: `complex_sub`'s Complex64+Complex64 pair fell to
+`to_complex128_vec()` on BOTH inputs - two fully materialized widened copies
+- before subtracting. A pre-edit `perf record -F 199 -e cycles:u` profile
+(effective worker `vmi1293453`, 100,000-element pair) put
+`to_complex128_vec` at **30.67%** of user cycles with ~34% more in kernel
+fault/allocation frames from the two copies, and `complex_sub` itself at
+18.19% - the .343 shape exactly. The lever passes both method rules: the
+copies are removed ENTIRELY (frame % = removable % here) and the replacement
+reads the same data sequentially (no access-pattern regression).
+
+ONE LEVER: a Complex64 fast arm mirroring `.343` - widen inline per element
+with the identical `f64::from`-then-subtract order (`to_complex128_vec`'s
+Complex64 arm is `f64::from` per component, so the result is bit-for-bit the
+former path's). Length-mismatch errors, the Complex128 arm, and every mixed
+pair keep the former paths. Focused test mirrors the `.343` test: NaN
+payloads, negative zero, infinities, subnormal bit patterns, and the
+length-mismatch error (137 + 112 crate tests green). The bench asserts the
+faithful convert-both replica against the public path bit-for-bit before
+timing.
+
+One foreground same-binary A/B under the variance protocol (ordinary
+`--profile release`, LTO disabled, 20 samples, 0.5 s warm-up, 2 s window,
+honored-pin effective worker `vmi1293453`, job `j-29933730227290624`):
+
+| arm | Criterion estimate |
+|---|---:|
+| former convert-both-inputs | 752.45 us `[717.49, 788.93]` |
+| direct inline widening | **42.321 us** `[41.824, 43.071]` |
+
+Midpoint **17.78x faster / 94.4% less time**; closest interval bounds are
+more than 16x apart - family-consistent with `.343`'s 14.67x. Timed source
+SHA-256: `4672cec85f0cb214eb8251a68c432029d4364f579e76190dddf62738e54cc26e`;
+bench SHA-256:
+`bbebc74c5366c34777105eb0cfac56ad9dafb6b42ce0d95747aed840c78987c4`.
+Verdict: **SHIP**. Do not re-probe Complex64+Complex64 `complex_sub` input
+materialization. REMAINING FAMILY SIBLINGS (declared, unmeasured):
+Complex64 `complex_mul` and `complex_div` (same convert-both shape, same
+lever, more arithmetic per element so expect somewhat lower ratios); mixed
+Complex64+Complex128 pairs remain separate hypotheses.
+
 ## 2026-07-16 - REJECT (REVERTED): usecols rows scattered directly into the output - 0.86-0.95x; the direct-extend family's boundary is now measured from both sides
 
 `BlackThrush`, bead `franken_numpy-ixs5y.351`, the scatter-shaped member of
