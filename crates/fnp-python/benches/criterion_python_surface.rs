@@ -4719,6 +4719,85 @@ fn bench_loadtxt_text_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_genfromtxt_text_boundary(c: &mut Criterion) {
+    // SIBLING of the loadtxt fork (.364/.367): fnp-python's genfromtxt native
+    // path carries the SAME inline Vec<Vec<String>> tokenizer. Its native gate
+    // requires an explicit numeric dtype (default-None defers to numpy), so
+    // this arm calls `dtype=float64`. numpy's genfromtxt is its SLOW
+    // rich/Python-level parser, so this ratio decides whether a real vs-numpy
+    // gap exists here at all before any delegation lever.
+    let mut group = c.benchmark_group("python_genfromtxt_text_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    let mut text = String::new();
+    for row in 0..8192usize {
+        for col in 0..16usize {
+            if col > 0 {
+                text.push(',');
+            }
+            text.push_str(&format!("{}.{}", row % 977, col));
+        }
+        text.push('\n');
+    }
+    let path = std::env::temp_dir().join("fnp_bench_genfromtxt_boundary.csv");
+    std::fs::write(&path, &text).expect("write bench corpus");
+    let path_str = path.to_str().expect("utf8 temp path").to_string();
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_genfromtxt = module.getattr("genfromtxt").expect("fnp genfromtxt");
+        let numpy_genfromtxt = numpy.getattr("genfromtxt").expect("numpy genfromtxt");
+        let float64 = numpy.getattr("float64").expect("numpy.float64");
+        let kwargs = pyo3::types::PyDict::new(py);
+        kwargs.set_item("delimiter", ",").expect("kwargs");
+        kwargs.set_item("dtype", &float64).expect("kwargs");
+
+        // Pre-flight parity: same shape and bytes from both.
+        let fnp_out = fnp_genfromtxt
+            .call((path_str.as_str(),), Some(&kwargs))
+            .expect("fnp genfromtxt");
+        let numpy_out = numpy_genfromtxt
+            .call((path_str.as_str(),), Some(&kwargs))
+            .expect("numpy genfromtxt");
+        let equal: bool = numpy
+            .call_method1("array_equal", (&fnp_out, &numpy_out))
+            .expect("array_equal")
+            .extract()
+            .expect("bool");
+        assert!(
+            equal,
+            "fnp/numpy genfromtxt outputs differ on the bench corpus"
+        );
+
+        group.bench_function("fnp_genfromtxt_f64_8192x16", |b| {
+            b.iter(|| {
+                black_box(
+                    fnp_genfromtxt
+                        .call((path_str.as_str(),), Some(&kwargs))
+                        .expect("fnp genfromtxt"),
+                )
+            });
+        });
+        group.bench_function("numpy_genfromtxt_f64_8192x16", |b| {
+            b.iter(|| {
+                black_box(
+                    numpy_genfromtxt
+                        .call((path_str.as_str(),), Some(&kwargs))
+                        .expect("numpy genfromtxt"),
+                )
+            });
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_cumsum_flat_boundary(c: &mut Criterion) {
     // FLAT 1-D integer np.cumsum(8M) — a single-lane prefix sum. numpy's 1-D cumsum is
     // a serial dependency chain; the native two-pass block scan breaks it across cores
@@ -18940,6 +19019,7 @@ criterion_group!(
     bench_complex_cumulative_midaxis_boundary,
     bench_complex_cumulative_axis0_boundary,
     bench_loadtxt_text_boundary,
+    bench_genfromtxt_text_boundary,
     bench_cumsum_flat_boundary,
     bench_accumulate_extremum_boundary,
     bench_cum_midaxis_boundary,

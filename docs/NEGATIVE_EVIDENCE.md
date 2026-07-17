@@ -4,6 +4,66 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-17 - WIN (margin-widener, "no ceiling"): python-surface `genfromtxt` float path delegated to fnp_io - fnp already LED 4.19x, now 13.03x vs numpy (2.53x internal)
+
+`BlackThrush`, bead `franken_numpy-ixs5y.368`, the declared-open genfromtxt
+sibling of the .367 loadtxt delegation. KEY FINDING FIRST (negative
+evidence): unlike `loadtxt`, there was **no vs-numpy gap here to begin
+with** - numpy 2.x's `genfromtxt` is its SLOW rich/Python-level parser
+(47.7 ms on the corpus vs its own `loadtxt`'s 6.3 ms, 7.5x slower), so the
+fnp-python fork - the identical `Vec<Vec<String>>` String-per-token
+tokenizer that LOST 0.574x at loadtxt - **already won 4.19x** at
+genfromtxt. The .367 loadtxt gap was specific to numpy's FAST C loadtxt;
+it does NOT generalize. A future agent scanning "genfromtxt fork = same bad
+shape" would wrongly expect a loss - the baseline says otherwise.
+
+Shipped anyway under the umbrella's "no ceiling": delegation is the proven
+.367 sibling (fnp_io::genfromtxt is the .346 direct-extend reader, same
+~4 ms class as loadtxt_usecols), so widening a 4.19x lead to 13.03x while
+stripping 131k allocations/call is free EV at near-zero risk.
+
+THE LEVER (crates/fnp-python/src/lib.rs `fn genfromtxt`, content
+`9e3d02fb886cb320`): when `usecols` is None, `skip_footer==0`, dtype is
+F16/F32/F64, comment marker is a single char, and delimiter is None /
+all-whitespace / single char, call
+`fnp_io::genfromtxt(&text, delim, comment, skip_header, f64::NAN)` instead
+of the fork loop. Semantics verified against source line-by-line: identical
+`split_once` comment strip, `skip_header` counted as raw top lines (matches
+fnp_io's `line_idx < skip_header`), split_whitespace collapse for
+whitespace-family delimiters, per-token trim. fnp_io fills NaN on an
+unparseable token - which is EXACTLY numpy's default-filling behavior, and
+where the fork instead returned `fallback` (numpy -> NaN) the observable
+result is the same. Ragged rows / budget errors and the zero-row case map
+to the same numpy fallback. skip_footer!=0, usecols, int/bool/complex, and
+multi-char comment/delimiter stay on the fork.
+
+CONFORMANCE: all 7 genfromtxt tests in `conformance_io` green on release
+remote. Bench parity pre-flight `np.array_equal` passed both pre- and
+post-delegation.
+
+THE MEASUREMENT (new `python_genfromtxt_text_boundary` group, same 8192x16
+comma corpus / sampling as .364/.367: 10 samples, 2 s warm-up, 4 s windows,
+honored-pin `vmi1293453`; `dtype=float64` engages the native path since
+default-None defers to numpy):
+
+| arm | before (fork) | after (delegated) |
+|---|---:|---:|
+| fnp `genfromtxt` | 11.386 ms `[10.898, 11.934]` | **4.4993 ms** `[4.3266, 4.6214]` |
+| numpy `genfromtxt` | 47.745 ms `[45.915, 51.535]` | 58.623 ms `[54.496, 65.438]` |
+
+**fnp 4.19x -> 13.03x WIN vs numpy; 2.53x internal, disjoint** (fork
+`[10.898, 11.934]` vs delegated `[4.3266, 4.6214]`, wide gap). numpy's arm
+is noisier run-to-run (47-58 ms) but the same ~50 ms slow-parser class both
+times. Predeclared floor ("new-fnp beats old-fnp disjointly, vs-numpy
+honest") met.
+
+DECLARED-OPEN python-surface leaves after this: int/bool loadtxt/genfromtxt
+delegation (fnp_io returns f64; needs an int-preserving parse or i64-retry
+port - and note f64->i64 narrowing diverges above 2^53, so this likely
+wants a self-contained single-pass i64 parse in the fork, not fnp_io);
+usecols delegation via `loadtxt_usecols_signed`; genfromtxt skip_footer!=0
+via `genfromtxt_full` + GenFromTxtConfig.
+
 ## 2026-07-17 - WIN: python-surface `loadtxt` float path delegated to fnp_io's single-pass parser - 0.574x LOSS flipped to 1.445x vs numpy (2.77x internal)
 
 `BlackThrush`, bead `franken_numpy-ixs5y.367`, closing the .364 loss
