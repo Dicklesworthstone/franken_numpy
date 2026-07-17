@@ -4,6 +4,59 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-17 - WIN: python-surface `loadtxt` float path delegated to fnp_io's single-pass parser - 0.574x LOSS flipped to 1.445x vs numpy (2.77x internal)
+
+`BlackThrush`, bead `franken_numpy-ixs5y.367`, closing the .364 loss
+baseline with the delegation lever the bead predeclared ("if fnp_io-pure is
+well under numpy's C parser time, surface delegation to fnp_io is the
+play"; datum: fnp_io direct-extend = 4.0777 ms `[3.9178, 4.2845]` on the
+exact .364 corpus vs numpy's 6.938 ms whole call).
+
+THE LEVER (crates/fnp-python/src/lib.rs `fn loadtxt`, content
+`70b040ab357c748a`): when `usecols` is None, dtype is F16/F32/F64, the
+comment marker is a single char, and the delimiter is None /
+all-whitespace / a single char, skip the fork's `rows: Vec<Vec<String>>`
+tokenizer (one heap String per token, second parse pass) and call
+`fnp_io::loadtxt(&text, delim_char, comment_char, skip_count, usize::MAX)`
+- fnp_io's direct-extend parser from .346-.348. Semantics guards verified
+against source line-by-line: identical `split_once` comment strip, raw-line
+skiprows accounting, split_whitespace collapse for whitespace-family
+delimiters, per-token trim before `parse::<f64>()`, and every fnp_io error
+(ragged rows, parse failure, element budget) plus the zero-row result maps
+to the same numpy `fallback` the fork used. The native gate already
+excludes converters/encoding/max_rows/like/ndmin, so none of those needed
+mapping. Multi-char delimiters/comments, int/bool/complex dtypes, and
+usecols stay on the old fork untouched.
+
+CONFORMANCE: all 8 loadtxt tests in `conformance_io` green on release
+remote (basic/delimiter/dtype/skiprows/usecols/comments/unpack/max_rows).
+`conformance_diagnostics` fails ONLY on the pre-existing
+`divide_float_zero_warning` arithmetic divergence (standing bead tvy7o,
+float-error events never become warnings) - `loadtxt_bad_token_valueerror`
+is absent from the mismatch list, so error parity holds.
+
+THE MEASUREMENT (same `python_loadtxt_text_boundary` group, corpus, and
+sampling as the .364 baseline: 10 samples, 2 s warm-up, 4 s windows, both
+arms interleaved in one job, `np.array_equal` pre-flight passed, job
+`bjjrrv50d`):
+
+| arm | Criterion estimate |
+|---|---:|
+| fnp `loadtxt` (delegated) | **4.3752 ms** `[4.2737, 4.4710]` |
+| numpy `loadtxt` | 6.3215 ms `[6.0392, 6.6430]` |
+
+**1.445x WIN vs numpy, disjoint intervals** (predeclared floor was
+"new-fnp beats old-fnp disjointly, vs-numpy reported honestly" - old fnp
+was 12.097 ms `[11.482, 12.520]`, so the internal improvement is 2.77x,
+disjoint by a wide margin). The 4.375 ms surface time vs the 4.078 ms
+fnp_io-pure datum bounds the remaining pyo3 bridge + ndarray-build overhead
+at ~0.3 ms - thin residue, not a follow-up lever.
+
+DECLARED-OPEN leaves unchanged from .364: genfromtxt python-side fork
+(same delegation shape, needs the GenFromTxtConfig mapping), int/bool
+dtype delegation (fnp_io returns f64; needs an int-preserving parse or
+i64-retry port), usecols delegation via `loadtxt_usecols_signed`.
+
 ## 2026-07-16 - LOSS BASELINE (LEDGERED): python-surface `loadtxt` is 0.574x vs numpy - the text parsers are FORKED and the python fork kept every defect fnp-io fixed
 
 `BlackThrush`, bead `franken_numpy-ixs5y.364`, opening the fnp-python
