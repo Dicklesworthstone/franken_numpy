@@ -4,6 +4,53 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-16 - LOSS BASELINE (LEDGERED): python-surface `loadtxt` is 0.574x vs numpy - the text parsers are FORKED and the python fork kept every defect fnp-io fixed
+
+`BlackThrush`, bead `franken_numpy-ixs5y.364`, opening the fnp-python
+dispatch frontier with the wide-sweep entry form: one real measured
+vs-numpy ratio plus source-attributed levers, production untouched.
+
+DISCOVERY: fnp-python's `loadtxt`/`genfromtxt` do NOT route through
+`fnp_io` - the crate imports only `load/save/savez` from it and carries its
+OWN inline tokenizer. Every fnp-io text win of the last day (usecols plan
+hoist 1.21x, direct-extend family 1.24-1.39x, bounded streaming
+1,186-1,861x) therefore stops at the storage/IO layer and never reaches
+`np.loadtxt`. The python fork's shape is worse than any fnp-io former path:
+`rows: Vec<Vec<String>>` - a heap `String` PER TOKEN (131k allocations on
+the bench corpus), a `Vec` per row, all rows materialized, then a SECOND
+pass parses each `String` (with an i64-then-f64 retry for integer dtypes).
+
+Also verified while scouting (recorded so nobody re-derives it): the python
+ufunc surface's complex mul/div use their own `try_zerocopy_complex_binary`
+path and complex add/sub deliberately delegate (numpy's complex add is
+SIMD-bound) - the .324-.361 ArrayStorage complex wins serve
+conversion/IO/storage consumers by design, and no surface parity issue
+exists there.
+
+THE BASELINE (new `python_loadtxt_text_boundary` group; parity pre-flight
+`np.array_equal` passed; 10 samples, 2 s warm-up, 4 s windows, honored-pin
+`vmi1293453`, job `j-29933730227291050`; plain f64 8192x16 comma corpus from
+a temp file):
+
+| arm | Criterion estimate |
+|---|---:|
+| fnp `loadtxt` | 12.097 ms `[11.482, 12.520]` |
+| numpy `loadtxt` | **6.9378 ms** `[6.3713, 7.3198]` |
+
+**fnp is 0.574x - a 1.74x LOSS with disjoint intervals.** numpy 2.x's
+rewritten C `loadtxt` beats the String-per-token fork decisively. RANKED
+LEVERS for the follow-up ticks (all fnp-io-proven techniques): (1) replace
+the two-pass `Vec<Vec<String>>` with a single direct parse pass over `&str`
+tokens (the direct-extend family shape; the dtype-retry logic needs a
+restructure or a first-row dtype probe); (2) evaluate delegating the plain
+numeric cases to `fnp_io::loadtxt` instead of maintaining the fork - but
+MEASURE fnp_io against numpy's C parser first (unknown standing; fnp_io's
+1.39x was against its own former self); (3) usecols/converters/unpack
+variants stay on their current paths until the plain case wins. Bench
+SHA-256: `2049796c02e2019f3d7ef293aa2447182f88f54f49e7d3328998253a41e0229e`.
+The build cost note for planning: fnp-python cold bench builds run ~6
+minutes remote - budget ticks accordingly.
+
 ## 2026-07-16 - WIN (SHIP): no-mask axis counts come directly from shape metadata - 76,725x profiled
 
 `BlackThrush`, bead `franken_numpy-ixs5y.366`. Robot triage reported 145
