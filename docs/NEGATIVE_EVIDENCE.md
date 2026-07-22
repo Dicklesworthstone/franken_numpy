@@ -4,6 +4,80 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-22 - WIN (KEEP): `noncentral_f` hoists its fixed numerator/denominator gamma-shape caches - 1.1460x
+
+`GoldSummit`, bead `franken_numpy-ixs5y.371`. Ledger and recent Git history
+were screened before editing. The fixed-cache probe in
+`noncentral_chisquare` is CLOSED after `.356`'s noisy 1.085x reject, while
+that entry explicitly excluded `noncentral_f` and declared it a separate open
+sibling. The retained change does not reopen the rejected batch.
+
+PROFILE FIRST, with production untouched: `noncentral_f(5, 20, 2, 100000)`
+measured 10.804 ms (`[10.575, 11.000]`) on effective worker
+`vmi1264463`. A strict-remote `perf record -F 499 -e cycles:u -g` run on the
+same worker captured 1,000 cycle samples with zero loss. The profile placed
+`sample_gamma_cached` at 20.64% self, the `noncentral_f` fold at 17.56% self,
+and `sample_noncentral_chisquare` at 7.10% self. This supported the precise
+two-fixed-shape hypothesis: every output rebuilt denominator gamma terms, and
+the central / `dfnum > 1` numerator regimes rebuilt another fixed cache.
+
+ONE LEVER: compute the denominator shape/cache once per public batch. For
+`nonc == 0`, also cache `dfnum/2`; for finite-or-infinite non-NaN `nonc` with
+`dfnum > 1`, cache `(dfnum-1)/2`. The `dfnum <= 1` Poisson-mixture path keeps
+its draw-dependent gamma shape, and the NaN-nonc path deliberately falls back
+to the former helper so its early NaN return consumes no numerator draws.
+Validation order, numerator-before-denominator draw order, gamma/normal
+expressions, and final division association are unchanged.
+
+The acceptance run was one exact-binary interleaved ABBA/BAAB comparison on
+effective worker `ovh-a`, ordinary `--profile release` with LTO disabled, 10
+observations, and 32 calls averaged per arm observation:
+
+| row | lhs mean | rhs mean | lhs CV | rhs CV | lhs/rhs |
+|---|---:|---:|---:|---:|---:|
+| exact former / hoisted candidate | 4.309554 ms | **3.760532 ms** | 1.508% | 1.030% | **1.1460x** |
+| candidate A/A null | 3.778228 ms | 3.762049 ms | 1.119% | 1.373% | 1.0043x |
+
+The null is within 0.43% of unity and every arm is below the mandatory 5% CV
+ceiling. An earlier four-call run on `vmi1264463` is excluded: effect CVs were
+20.122% / 127.765% and null CVs 33.454% / 23.793%, so neither its 0.3745x
+effect ratio nor 1.0877x null ratio participates in the decision.
+
+BEHAVIOR ISOMORPHISM: the temporary same-binary former control matched every
+output `to_bits()` and the next raw RNG word for shifted (`dfnum > 1`), dynamic
+Poisson-mixture (`dfnum <= 1`), central (`nonc == 0`), and NaN-nonc regimes.
+That control was removed before landing. The permanent batch-versus-singleton
+test pins the same four regimes bit-for-bit plus post-batch RNG state. All 10
+focused `noncentral_f` tests passed remotely, including the fixed golden
+sequence, both live NumPy oracle tests, and NaN stream parity. The strict-
+remote divergence ledger passed with zero entries.
+
+ALIEN RECOMMENDATION CONTRACT: this instantiates guarded multi-stage/runtime
+specialization from `alien_cs_graveyard.md` sections 6.7 and 6.17. EV was 8.0
+(`impact=2 * confidence=4 * reuse=2 / effort=2`), tier A. The smallest wedge
+is fixed denominator caching plus fixed numerator caching only where the
+runtime regime proves the shape invariant. Budget is O(1), and every dynamic
+or NaN-sensitive case retains the generic helper. Expected loss is one cache
+construction per public call; calibration is the A/B plus null above. Risks
+were RNG-state drift and NaN-path draw drift, both pinned by exact next-state
+proof. Source is internal safe Rust; legal review, interference, and external
+paper reproduction are N/A. Rollback is one commit revert. Comparator is the
+former per-sample cache construction in the same binary.
+
+REPRODUCTION:
+
+```bash
+RCH_REQUIRE_REMOTE=1 RCH_WORKER=ovh-a CARGO_PROFILE_RELEASE_LTO=false rch exec -- cargo bench -p fnp-random --bench random_ops --profile release -- noncentral_f_fixed_shape_cache --noplot
+```
+
+Parent `1c65da12`; source SHA-256
+`86e2884ac8cf62bddd9ec0d9b66403a8bc4ba485a721e39acf011562fbc04d4f`;
+benchmark SHA-256
+`dd934a5e94ad94b17c4819021d716fc0fdcb5487da73bc54b304a46e866fcccc`.
+Verdict: **KEEP**. Do not retry fixed gamma-cache hoisting in
+`noncentral_f`; a future random-distribution lever must change the sampler or
+target a different measured primitive.
+
 ## 2026-07-22 - REJECT/HOLD (production untouched): bounded tail ring for all-negative signed `loadtxt` usecols - 1.82-1.98x directional, but no run cleared the CV/null gate
 
 `GoldSummit`, bead `franken_numpy-ixs5y.370`. Ledger and recent-history

@@ -6350,10 +6350,34 @@ impl Generator {
         if dfnum <= 0.0 || dfden <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
+
+        let denominator_shape = dfden / 2.0;
+        let denominator_cache = GammaShapeCache::new(denominator_shape);
+        let central_numerator = nonc == 0.0;
+        let numerator_cache = if central_numerator {
+            let shape = dfnum / 2.0;
+            Some((shape, GammaShapeCache::new(shape)))
+        } else if !nonc.is_nan() && dfnum > 1.0 {
+            let shape = (dfnum - 1.0) / 2.0;
+            Some((shape, GammaShapeCache::new(shape)))
+        } else {
+            None
+        };
+
         Ok((0..size)
             .map(|_| {
-                let nc_chi2 = self.sample_noncentral_chisquare(dfnum, nonc);
-                let chi2 = self.sample_gamma(dfden / 2.0) * 2.0;
+                let nc_chi2 = if let Some((shape, cache)) = numerator_cache {
+                    let chi2_part = self.sample_gamma_cached(shape, cache) * 2.0;
+                    if central_numerator {
+                        chi2_part
+                    } else {
+                        let z = self.sample_standard_normal_single() + nonc.sqrt();
+                        chi2_part + z * z
+                    }
+                } else {
+                    self.sample_noncentral_chisquare(dfnum, nonc)
+                };
+                let chi2 = self.sample_gamma_cached(denominator_shape, denominator_cache) * 2.0;
                 (nc_chi2 / dfnum) / (chi2 / dfden)
             })
             .collect())
@@ -13866,6 +13890,31 @@ for child in rng.spawn(n_children):
         let actual = noncentral.noncentral_f(5.0, 10.0, 0.0, 8).unwrap();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn noncentral_f_batch_matches_singleton_stream() {
+        for &(dfnum, dfden, nonc) in &[
+            (5.0, 20.0, 2.0),
+            (0.5, 20.0, 2.0),
+            (5.0, 20.0, 0.0),
+            (2.0, 5.0, f64::NAN),
+        ] {
+            let mut batch = test_generator();
+            let mut singleton = test_generator();
+            let batch_values = batch.noncentral_f(dfnum, dfden, nonc, 64).unwrap();
+            let singleton_values = (0..64)
+                .map(|_| singleton.noncentral_f(dfnum, dfden, nonc, 1).unwrap()[0])
+                .collect::<Vec<_>>();
+            assert!(
+                batch_values
+                    .iter()
+                    .zip(&singleton_values)
+                    .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits()),
+                "batch/singleton mismatch for ({dfnum}, {dfden}, {nonc})"
+            );
+            assert_eq!(batch.next_u64(), singleton.next_u64());
+        }
     }
 
     #[test]

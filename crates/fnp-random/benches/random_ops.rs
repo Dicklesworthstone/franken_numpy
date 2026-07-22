@@ -11,6 +11,7 @@ use fnp_random::{
     SeedSequence, Sfc64Rng,
 };
 use std::hint::black_box;
+use std::time::Duration;
 
 fn seed_sequence() -> SeedSequence {
     SeedSequence::new(&[42]).unwrap()
@@ -1151,6 +1152,35 @@ fn bench_pcg_fill_u64_large(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_noncentral_f_fixed_shape_cache(c: &mut Criterion) {
+    const SIZE: usize = 100_000;
+    const DFNUM: f64 = 5.0;
+    const DFDEN: f64 = 20.0;
+    const NONC: f64 = 2.0;
+
+    let mut generator = pcg64_generator();
+    let mut group = c.benchmark_group("noncentral_f_fixed_shape_cache");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements(SIZE as u64));
+    group.bench_function("hoisted_shape_terms", |bench| {
+        bench.iter(|| {
+            black_box(
+                generator
+                    .noncentral_f(
+                        black_box(DFNUM),
+                        black_box(DFDEN),
+                        black_box(NONC),
+                        black_box(SIZE),
+                    )
+                    .unwrap(),
+            )
+        })
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_poisson_ptrs_cache,
@@ -1179,6 +1209,7 @@ criterion_group!(
     bench_generator_bytes,
     bench_bitgen_comparison,
     bench_pcg_fill_u64_large,
+    bench_noncentral_f_fixed_shape_cache,
 );
 
 criterion_main!(benches);
