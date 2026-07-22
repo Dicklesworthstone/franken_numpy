@@ -4,6 +4,86 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-22 - WIN (KEEP): fuse masked `MaskedArray::count` validity materialization with axis reduction - 1.2582x
+
+`GoldSummit`, bead `franken_numpy-ixs5y.372`. The ledger and recent Git log
+were screened before editing. The no-mask `MaskedArray::count(Some(axis))`
+shape-only specialization is CLOSED by `.366`; that entry explicitly leaves
+masked-axis counts as a separate data-dependent lane. This change exercises
+that declared-open lane and does not retry the no-mask lever.
+
+PROFILE FIRST, with production untouched: the 4,096 x 1,024 fixture masks one
+cell in seven and reduces axis 1. Its former invert-then-reduce pipeline
+measured 16.128 ms (`[15.112, 16.737]`) on effective worker `vmi1227854`; the
+direct-loop model measured 12.949 ms (`[12.770, 13.145]`), a directional
+1.245x. A strict-remote three-second `perf record -F 499 -e cycles:u -g` run
+captured 2,648 cycle samples with zero loss. The contiguous reduction closure
+held 30.76% self and `MaskedArray::count` held 25.54% self, while direct-model
+setup was 1.03%. The input-sized inverse-mask allocation plus generic
+reduction was therefore a measured hotspot.
+
+ONE LEVER: fuse validity conversion and reduction. Masked total count now
+folds validity directly into a scalar; masked axis count allocates only the
+final reduced output and accumulates exact `0.0`/`1.0` values in the same
+C-order and increasing-axis order as the former pipeline. This removes the
+input-sized `Vec<f64>` and generic reduction dispatch. No-mask count, axis
+normalization, output shape, dtype, integer sidecar, and errors are unchanged.
+The implementation is pure safe Rust.
+
+The decisive run was one exact-binary interleaved ABBA/BAAB comparison on
+effective worker `vmi1227854`, ordinary `--profile release` with LTO disabled,
+10 observations, and 32 calls averaged per arm observation:
+
+| row | lhs mean | rhs mean | lhs CV | rhs CV | lhs/rhs |
+|---|---:|---:|---:|---:|---:|
+| exact former / fused candidate | 16.357589 ms | **13.001222 ms** | 4.294% | 1.459% | **1.2582x** |
+| candidate A/A null | 12.998189 ms | 13.070599 ms | 2.284% | 4.986% | 0.9945x |
+
+The null is within 0.55% of unity and every arm is strictly below the
+mandatory 5% CV ceiling. Two earlier same-worker four-call runs are excluded:
+their effect ratios were 1.2956x and 1.1944x, but the former-arm CVs were
+7.765% and 8.248%. Their candidate/null CVs cleared the gate and null ratios
+were 1.0072x and 1.0039x, but an invalid effect arm makes each whole run
+inadmissible.
+
+BEHAVIOR ISOMORPHISM: the permanent benchmark compares every output bit with
+the exact former invert-then-`reduce_sum` implementation before timing. A unit
+test repeats that bitwise former/candidate comparison for total count and axes
+`0`, `1`, and `-1`, including `-0.0`, nonzero values, and NaN masks; explicit
+expected-value checks additionally pin all output shapes, F64 dtype, and the
+absent integer sidecar. Empty-axis, empty-output, and positive/negative
+out-of-bounds behavior are pinned separately. All five focused release tests
+passed remotely. The strict-remote divergence ledger passed with zero entries.
+
+ALIEN RECOMMENDATION CONTRACT: this instantiates partial evaluation and loop
+fusion from `alien_cs_graveyard.md` section 6.7: the intermediate inverse-mask
+program is deforested into its sole consumer, while the runtime axis selects a
+specialized affine traversal. EV was 12.0
+(`impact=3 * confidence=4 * reuse=2 / effort=2`), tier A. The smallest wedge
+is only masked count; every other masked-array reduction retains its generic
+implementation. Memory budget drops from O(input + output) to O(output).
+Expected loss is one full input allocation/write plus generic reduction
+dispatch. Calibration is the A/B plus null above. Risks were traversal-order
+drift, NaN/zero validity drift, output-shape drift, and dtype drift; the exact
+former-path bit proof and edge tests cover them. Source is internal safe Rust;
+legal review, external-paper reproduction, interference, and demo linkage are
+N/A. Rollback is one commit revert. Comparator is the former implementation
+retained verbatim inside the benchmark.
+
+REPRODUCTION:
+
+```bash
+RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1227854 CARGO_PROFILE_RELEASE_LTO=false rch exec -- cargo bench -p fnp-ufunc --bench elementwise --profile release -- masked_count_axis_masked --noplot
+```
+
+Measured atop `78d93a54` and landed after the non-overlapping peer linalg
+commit `ac7a71a8`; source SHA-256
+`c647a22275b6530a63b215065816fa219a4c4e18084422500978a21af37303c4`;
+benchmark SHA-256
+`1a8606dd9325aea7f320d8d075563066a42a298e16bb52e3daabb95bdb43042e`.
+Verdict: **KEEP**. Masked count inverse-materialization fusion is CLOSED; a
+future ufunc lever must target a different operation or a different primitive.
+
 ## 2026-07-22 - WIN (KEEP): `noncentral_f` hoists its fixed numerator/denominator gamma-shape caches - 1.1460x
 
 `GoldSummit`, bead `franken_numpy-ixs5y.371`. Ledger and recent Git history

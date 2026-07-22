@@ -2,6 +2,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 use fnp_dtype::{ArrayStorage, DType};
 use fnp_ufunc::{MaskedArray, UFuncArray, UnaryOp, add, divide, multiply, subtract, where_nonzero};
 use std::hint::black_box;
+use std::time::Instant;
 
 fn make_array(n: usize) -> UFuncArray {
     let values: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 + 1.0).collect();
@@ -607,6 +608,126 @@ fn bench_masked_count_axis_no_mask(c: &mut Criterion) {
     group.finish();
 }
 
+#[inline(never)]
+fn masked_count_axis_masked_former(mask: &UFuncArray, axis: isize) -> UFuncArray {
+    let inverted = mask
+        .values()
+        .iter()
+        .map(|&value| if value == 0.0 { 1.0 } else { 0.0 })
+        .collect();
+    UFuncArray::new(mask.shape().to_vec(), inverted, DType::F64)
+        .unwrap()
+        .reduce_sum(Some(axis), false)
+        .unwrap()
+}
+
+fn masked_count_time_ns(repetitions: usize, mut operation: impl FnMut() -> UFuncArray) -> f64 {
+    let started = Instant::now();
+    for _ in 0..repetitions {
+        black_box(operation());
+    }
+    started.elapsed().as_nanos() as f64 / repetitions as f64
+}
+
+fn mean_and_cv(samples: &[f64]) -> (f64, f64) {
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    let variance = samples
+        .iter()
+        .map(|sample| (sample - mean) * (sample - mean))
+        .sum::<f64>()
+        / (samples.len() - 1) as f64;
+    (mean, variance.sqrt() / mean * 100.0)
+}
+
+fn bench_masked_count_axis_masked(c: &mut Criterion) {
+    let mut group = c.benchmark_group("masked_count_axis_masked");
+    group.sample_size(10);
+    group.warm_up_time(std::time::Duration::from_millis(250));
+    group.measurement_time(std::time::Duration::from_millis(750));
+
+    let shape = vec![4096, 1024];
+    let data = UFuncArray::new(
+        shape.clone(),
+        (0..shape.iter().product())
+            .map(|index| index as f64)
+            .collect(),
+        DType::F64,
+    )
+    .unwrap();
+    let mask = UFuncArray::new(
+        shape,
+        (0..data.values().len())
+            .map(|index| ((index % 7) == 0) as u8 as f64)
+            .collect(),
+        DType::Bool,
+    )
+    .unwrap();
+    let masked = MaskedArray::new(data, Some(mask.clone()), None).unwrap();
+    let former = masked_count_axis_masked_former(&mask, 1);
+    let candidate = masked.count(Some(1)).unwrap();
+    assert_ufunc_array_bits_eq(&former, &candidate);
+
+    const OBSERVATIONS: usize = 10;
+    const REPETITIONS: usize = 32;
+    let mut former_samples = Vec::with_capacity(OBSERVATIONS);
+    let mut candidate_samples = Vec::with_capacity(OBSERVATIONS);
+    let mut null_lhs_samples = Vec::with_capacity(OBSERVATIONS);
+    let mut null_rhs_samples = Vec::with_capacity(OBSERVATIONS);
+    for observation in 0..OBSERVATIONS {
+        let former_op = || masked_count_axis_masked_former(&mask, 1);
+        let candidate_op = || masked.count(Some(1)).unwrap();
+        let (former_first, candidate_first, candidate_second, former_second) =
+            if observation % 2 == 0 {
+                (
+                    masked_count_time_ns(REPETITIONS, former_op),
+                    masked_count_time_ns(REPETITIONS, candidate_op),
+                    masked_count_time_ns(REPETITIONS, candidate_op),
+                    masked_count_time_ns(REPETITIONS, former_op),
+                )
+            } else {
+                let candidate_first = masked_count_time_ns(REPETITIONS, candidate_op);
+                let former_first = masked_count_time_ns(REPETITIONS, former_op);
+                let former_second = masked_count_time_ns(REPETITIONS, former_op);
+                let candidate_second = masked_count_time_ns(REPETITIONS, candidate_op);
+                (
+                    former_first,
+                    candidate_first,
+                    candidate_second,
+                    former_second,
+                )
+            };
+        former_samples.push((former_first + former_second) * 0.5);
+        candidate_samples.push((candidate_first + candidate_second) * 0.5);
+
+        let null_lhs = masked_count_time_ns(REPETITIONS, candidate_op);
+        let null_rhs = masked_count_time_ns(REPETITIONS, candidate_op);
+        let null_rhs_second = masked_count_time_ns(REPETITIONS, candidate_op);
+        let null_lhs_second = masked_count_time_ns(REPETITIONS, candidate_op);
+        null_lhs_samples.push((null_lhs + null_lhs_second) * 0.5);
+        null_rhs_samples.push((null_rhs + null_rhs_second) * 0.5);
+    }
+    let (former_mean, former_cv) = mean_and_cv(&former_samples);
+    let (candidate_mean, candidate_cv) = mean_and_cv(&candidate_samples);
+    let (null_lhs_mean, null_lhs_cv) = mean_and_cv(&null_lhs_samples);
+    let (null_rhs_mean, null_rhs_cv) = mean_and_cv(&null_rhs_samples);
+    eprintln!(
+        "masked_count_axis_masked_abba former_ns={former_mean:.3} candidate_ns={candidate_mean:.3} former_cv={former_cv:.3}% candidate_cv={candidate_cv:.3}% ratio={:.4}x",
+        former_mean / candidate_mean
+    );
+    eprintln!(
+        "masked_count_axis_masked_null candidate_lhs_ns={null_lhs_mean:.3} candidate_rhs_ns={null_rhs_mean:.3} lhs_cv={null_lhs_cv:.3}% rhs_cv={null_rhs_cv:.3}% ratio={:.4}x",
+        null_lhs_mean / null_rhs_mean
+    );
+
+    group.bench_function("former_invert_then_reduce", |bench| {
+        bench.iter(|| masked_count_axis_masked_former(black_box(&mask), black_box(1)))
+    });
+    group.bench_function("direct_count", |bench| {
+        bench.iter(|| black_box(&masked).count(black_box(Some(1))).unwrap())
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_add,
@@ -631,6 +752,7 @@ criterion_group!(
     bench_place_f64_masked_cycling,
     bench_put_mask_f64_masked_cycling,
     bench_polyval_degree_zero,
-    bench_masked_count_axis_no_mask
+    bench_masked_count_axis_no_mask,
+    bench_masked_count_axis_masked
 );
 criterion_main!(benches);
