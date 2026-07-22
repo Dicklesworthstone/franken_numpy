@@ -7513,8 +7513,56 @@ const PACKED_NR: usize = 8;
 // k in ascending order. Every output element sums k in the SAME ascending order
 // as the naive ikj loop, so the result is BIT-IDENTICAL (locked by the
 // mat_mul_*_row_parallel_matches_serial_reference_and_golden_sha256 tests).
+/// Row-tile height for the AVX-512 regime.
+///
+/// Measured 2026-07-22 on `hz2` (AMD EPYC Genoa / Zen 4, `avx512f`): dropping
+/// the tile from MR=4 to MR=2 is 18.5% faster at n=512 and 19.2% faster at
+/// n=1024, against an A/A null-control spread of 1.3-2.7%. The SAME tile is
+/// 18.6% slower on AVX2, so this is a genuine ISA regime split rather than a
+/// universally better shape - hence the runtime gate rather than a new constant.
+///
+/// Basis caveat: Zen 4 implements AVX-512 as double-pumped 256-bit. No Intel
+/// native-512 host exists in the fleet, so that microarchitecture is unmeasured;
+/// refine this gate with an Intel datapoint rather than assuming it carries.
+const PACKED_MR_AVX512: usize = 2;
+
+/// Selects the row-tile height for the host ISA. `is_x86_feature_detected!` is
+/// a safe macro, so this keeps the crate's `#![forbid(unsafe_code)]` contract.
+fn packed_tile_rows() -> usize {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx512f") {
+            return PACKED_MR_AVX512;
+        }
+    }
+    PACKED_MR
+}
+
 fn packed_gemm_serial(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
-    let m_full = m - m % PACKED_MR;
+    // Tile height is chosen once per call, then the body is monomorphized for
+    // that height so the register tile stays a compile-time-sized array.
+    if packed_tile_rows() == PACKED_MR_AVX512 {
+        packed_gemm_serial_tiled::<PACKED_MR_AVX512>(a, b, m, k, n, out);
+    } else {
+        packed_gemm_serial_tiled::<PACKED_MR>(a, b, m, k, n, out);
+    }
+}
+
+/// The packed kernel, generic over row-tile height. `MR` changes only which
+/// output elements share a register tile; every element still accumulates k in
+/// ascending order, so all instantiations are BIT-IDENTICAL to each other and
+/// to the pre-2026-07-22 fixed-MR=4 kernel. Verified byte-for-byte across
+/// MR in {2,4,6,8} x NR in {8,16} by `benches/gemm_microkernel.rs`, which is why
+/// this regate needs no golden-sha256 regeneration.
+fn packed_gemm_serial_tiled<const MR: usize>(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    out: &mut [f64],
+) {
+    let m_full = m - m % MR;
     let n_full = n - n % PACKED_NR;
     let nc = {
         let cols = (256 * 1024) / (k.max(1) * core::mem::size_of::<f64>());
@@ -7532,7 +7580,7 @@ fn packed_gemm_serial(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &
             }
             let mut i0 = 0;
             while i0 < m_full {
-                let mut acc = [[0.0f64; PACKED_NR]; PACKED_MR];
+                let mut acc = [[0.0f64; PACKED_NR]; MR];
                 for kk in 0..k {
                     let brow = &bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR];
                     for (ii, row) in acc.iter_mut().enumerate() {
@@ -7548,7 +7596,7 @@ fn packed_gemm_serial(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &
                         *slot += v;
                     }
                 }
-                i0 += PACKED_MR;
+                i0 += MR;
             }
             j0 += PACKED_NR;
         }
