@@ -7513,18 +7513,29 @@ const PACKED_NR: usize = 8;
 // k in ascending order. Every output element sums k in the SAME ascending order
 // as the naive ikj loop, so the result is BIT-IDENTICAL (locked by the
 // mat_mul_*_row_parallel_matches_serial_reference_and_golden_sha256 tests).
-/// Row-tile height for the AVX-512 regime.
+/// Narrow row tile. Two regimes select it, measured 2026-07-22:
 ///
-/// Measured 2026-07-22 on `hz2` (AMD EPYC Genoa / Zen 4, `avx512f`): dropping
-/// the tile from MR=4 to MR=2 is 18.5% faster at n=512 and 19.2% faster at
-/// n=1024, against an A/A null-control spread of 1.3-2.7%. The SAME tile is
-/// 18.6% slower on AVX2, so this is a genuine ISA regime split rather than a
-/// universally better shape - hence the runtime gate rather than a new constant.
+/// 1. LARGE k (square, k = n): only on AVX-512. On `hz2` (AMD EPYC Genoa /
+///    Zen 4, `avx512f`) MR=2 is 18.5% faster at n=512 and 19.2% at n=1024
+///    against an A/A null-control spread of 1.3-2.7%, while the SAME tile is
+///    18.6% SLOWER on AVX2. Genuine ISA split - hence a runtime gate.
+/// 2. SMALL k (panel widths): on BOTH ISAs. At the trailing-update shapes the
+///    blocked factorizations actually use, MR=2 wins by 19.0-21.6% on AVX-512
+///    and 21.8-26.8% on AVX2. With a short k-loop the accumulator tile is
+///    loaded and flushed far more often relative to the work it amortizes, so
+///    the smaller tile wins regardless of register width.
 ///
-/// Basis caveat: Zen 4 implements AVX-512 as double-pumped 256-bit. No Intel
-/// native-512 host exists in the fleet, so that microarchitecture is unmeasured;
-/// refine this gate with an Intel datapoint rather than assuming it carries.
-const PACKED_MR_AVX512: usize = 2;
+/// Basis caveat for regime 1: Zen 4 implements AVX-512 as double-pumped
+/// 256-bit and no Intel native-512 host exists in the fleet, so that
+/// microarchitecture is unmeasured; refine with an Intel datapoint rather than
+/// assuming it carries.
+const PACKED_MR_NARROW: usize = 2;
+
+/// Largest k measured in the small-k regime. Every in-tree `sub_assign` caller
+/// passes a panel width (`LU_PANEL_NB` = 64, `TRSM_PANEL_NB` = 128, SVD 128),
+/// so this covers the production range; anything wider falls back to the
+/// ISA-gated choice rather than extrapolating past the measurement.
+const PACKED_NARROW_K_MAX: usize = 128;
 
 /// Selects the row-tile height for the host ISA. `is_x86_feature_detected!` is
 /// a safe macro, so this keeps the crate's `#![forbid(unsafe_code)]` contract.
@@ -7532,17 +7543,27 @@ fn packed_tile_rows() -> usize {
     #[cfg(target_arch = "x86_64")]
     {
         if std::arch::is_x86_feature_detected!("avx512f") {
-            return PACKED_MR_AVX512;
+            return PACKED_MR_NARROW;
         }
     }
     PACKED_MR
 }
 
+/// Row-tile height for the trailing-update kernels, which are dominated by the
+/// short-k regime. Falls back to the ISA gate outside the measured k range.
+fn packed_sub_assign_tile_rows(k: usize) -> usize {
+    if k <= PACKED_NARROW_K_MAX {
+        PACKED_MR_NARROW
+    } else {
+        packed_tile_rows()
+    }
+}
+
 fn packed_gemm_serial(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
     // Tile height is chosen once per call, then the body is monomorphized for
     // that height so the register tile stays a compile-time-sized array.
-    if packed_tile_rows() == PACKED_MR_AVX512 {
-        packed_gemm_serial_tiled::<PACKED_MR_AVX512>(a, b, m, k, n, out);
+    if packed_tile_rows() == PACKED_MR_NARROW {
+        packed_gemm_serial_tiled::<PACKED_MR_NARROW>(a, b, m, k, n, out);
     } else {
         packed_gemm_serial_tiled::<PACKED_MR>(a, b, m, k, n, out);
     }
@@ -7733,7 +7754,26 @@ fn packed_gemm_sub_assign_serial(
     n: usize,
     target: &mut [f64],
 ) {
-    let m_full = m - m % PACKED_MR;
+    if packed_sub_assign_tile_rows(k) == PACKED_MR_NARROW {
+        packed_gemm_sub_assign_serial_tiled::<PACKED_MR_NARROW>(a, b, m, k, n, target);
+    } else {
+        packed_gemm_sub_assign_serial_tiled::<PACKED_MR>(a, b, m, k, n, target);
+    }
+}
+
+/// Trailing-update kernel, generic over row-tile height. As with
+/// `packed_gemm_serial_tiled`, `MR` only regroups which output elements share a
+/// register tile; each element still accumulates k ascending before the single
+/// subtracting writeback, so all instantiations are BIT-IDENTICAL.
+fn packed_gemm_sub_assign_serial_tiled<const MR: usize>(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    target: &mut [f64],
+) {
+    let m_full = m - m % MR;
     let n_full = n - n % PACKED_NR;
     let nc = {
         let cols = (256 * 1024) / (k.max(1) * core::mem::size_of::<f64>());
@@ -7751,7 +7791,7 @@ fn packed_gemm_sub_assign_serial(
             }
             let mut i0 = 0;
             while i0 < m_full {
-                let mut acc = [[0.0f64; PACKED_NR]; PACKED_MR];
+                let mut acc = [[0.0f64; PACKED_NR]; MR];
                 for kk in 0..k {
                     let brow = &bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR];
                     for (ii, row) in acc.iter_mut().enumerate() {
@@ -7767,7 +7807,7 @@ fn packed_gemm_sub_assign_serial(
                         *slot -= v;
                     }
                 }
-                i0 += PACKED_MR;
+                i0 += MR;
             }
             j0 += PACKED_NR;
         }
