@@ -4,6 +4,85 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-22 - WIN (KEEP): partially evaluate nonnegative signed `loadtxt` usecols into the unsigned call-level plan - 1.5125x
+
+`GoldSummit`, bead `franken_numpy-ixs5y.369`. Ledger and recent-history
+search came first. The unsigned `loadtxt_usecols` plan-hoist was already a
+closed 1.21x win (`.342`), and direct scatter into the output was a closed
+0.86-0.95x reject (`.351`); neither was retried. The signed sibling was
+explicitly left unmeasured. Its former path split every accepted row into a
+`Vec<&str>`, resolved every requested signed index against that row's width,
+allocated a selected row, and then copied it into the output even when every
+requested index was nonnegative and therefore invariant across rows.
+
+PROFILE-FIRST MODEL: the retained `loadtxt_signed_nonnegative_staging`
+benchmark uses 8,192 rows x 16 comma-separated columns and the duplicate,
+out-of-order signed selection `[13, 1, 7, 13]`. Before production changed, it
+interleaved the public former path with the exact proposed composition:
+convert `isize` columns to `usize` once, then call the already-proven unsigned
+planned parser. It checks dimensions, length, and every output `f64::to_bits()`
+before timing. Eight parses are averaged per observation; ABBA/BAAB reverses
+the outer arm on every observation. Ordinary `--profile release`, LTO
+disabled, 10 samples, 250 ms warm-up, 750 ms requested measurement window,
+strict remote effective worker `ovh-a`:
+
+| row | lhs mean | rhs mean | lhs CV | rhs CV | lhs/rhs |
+|---|---:|---:|---:|---:|---:|
+| former / staged candidate | 2.973521 ms | **1.966028 ms** | 1.210% | 1.072% | **1.5125x** |
+| former A/A null | 2.770388 ms | 2.800870 ms | 2.666% | 4.493% | 0.9891x |
+
+The combined Criterion effect estimate was `[9.8231, 9.9478] ms` (95%
+confidence interval); the paired per-arm means and CVs above are the decision
+statistic. The null is within 1.1% of unity and every arm is below the 5% CV
+ceiling. An earlier unbatched `vmi1149989` probe and a post-edit confirmation
+on that same contended worker showed the same direction (1.4505x and 1.2810x)
+but had 6.7-25.5% CV. A later exact-binary `ovh-a` run measured 1.3535x with
+effect CV 4.480%/3.879%, but its candidate A/A null CV was 5.368%/11.849%; a
+routed `vmi1153651` retry measured 1.1859x under 30-47% CV. All four noisy
+runs are explicitly excluded from the keep decision.
+
+ONE LEVER: `loadtxt_usecols_signed` now attempts a single checked conversion
+of the call-invariant `usecols`. When all indices are nonnegative, it delegates
+to `loadtxt_usecols`, reusing its hoisted duplicate/order-preserving plan. It
+returns directly only on specialized success; any specialized error replays
+through the former signed resolver so request-order parse-versus-bounds error
+precedence and the exact message remain unchanged. A conversion failure means
+at least one negative index, so execution likewise falls through to the former
+row-width-relative resolver. `None`, mixed or all-negative selections,
+comments, raw-line `skiprows`, `max_rows`, ragged-row errors, empty selections,
+and element-budget checks retain their former path or the behavior-isomorphic
+established unsigned success path. Focused tests compare dimensions and every
+`to_bits()` result for positive duplicate/out-of-order columns, comments,
+skiprows, infinity, negative zero, and ignored nonnumeric fields, and pin both
+orders of the parse-error/bounds-error collision; the existing negative-index,
+mixed-order, variable-row-width, and bounds tests pin the fallback.
+
+ALIEN PRIMITIVE / ADOPTION CONTRACT: this is the guarded multi-stage
+programming and runtime-specialization pattern from `alien_cs_graveyard.md`
+sections 6.7 and 6.17: specialize only after a cheap runtime predicate, with a
+deterministic generic deoptimization path. Opportunity score was 4.0
+(`impact=3`, `confidence=4`, `effort=3`), adoption tier A. The smallest wedge
+is precisely the all-nonnegative `Some(usecols)` case; the budgeted mode is one
+O(k) conversion per call, and the expected-loss action for a failed conversion
+or specialized parse is exact generic replay. Calibration is the interleaved
+A/B plus A/A null above; rollback is one commit revert. This is a
+hypothesis-inspired application of the corpus pattern, not a claim that an
+external paper or production system was independently reproduced.
+
+REPRODUCTION:
+
+```bash
+RCH_REQUIRE_REMOTE=1 RCH_WORKER=ovh-a CARGO_PROFILE_RELEASE_LTO=false rch exec -- cargo bench -p fnp-io --bench criterion_io --profile release -- loadtxt_signed_nonnegative_staging --noplot
+```
+
+Parent `8d7415dc`; source SHA-256
+`8cd134fc7d168c83b7b99f0494a9d9235afe048d0a200c9701e54228bc5d78fd`;
+benchmark SHA-256
+`6e85f18ccf1fa3f956edc6217e67cefcdd506c940e957e072cf7c0d6e139b019`.
+Verdict: **KEEP**. Do not re-probe nonnegative signed-usecols plan hoisting;
+negative-index planning is a different row-width-dependent primitive and must
+start from its own measured hotspot.
+
 ## 2026-07-17 - WIN (margin-widener, "no ceiling"): python-surface `genfromtxt` float path delegated to fnp_io - fnp already LED 4.19x, now 13.03x vs numpy (2.53x internal)
 
 `BlackThrush`, bead `franken_numpy-ixs5y.368`, the declared-open genfromtxt

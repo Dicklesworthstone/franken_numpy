@@ -14,8 +14,9 @@ use fnp_io::{
     fromfile, fromfile_structured, fromfile_text, load, read_npy_bytes, read_npz_bytes,
     read_npz_bytes_linear_overlap_control, write_npy_bytes, write_npz_bytes,
 };
+use std::cell::{Cell, RefCell};
 use std::hint::black_box;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn generate_f64_data(n: usize) -> Vec<u8> {
     let data: Vec<f64> = (0..n).map(|i| i as f64 * 0.1).collect();
@@ -1150,6 +1151,213 @@ fn bench_loadtxt_usecols_plan(c: &mut Criterion) {
     group.finish();
 }
 
+/// Former signed-usecols valid-input path, retained as the A/B comparator for
+/// the exact nonnegative corpus measured by this benchmark.
+#[inline(never)]
+fn loadtxt_signed_nonnegative_former(text: &str, usecols: &[isize]) -> fnp_io::TextArrayData {
+    let mut values = Vec::new();
+    let mut ncols = None;
+    let mut nrows = 0usize;
+    for line in text.lines() {
+        let trimmed = line
+            .split_once('#')
+            .map_or(line, |(prefix, _)| prefix)
+            .trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let fields = trimmed.split(',').collect::<Vec<_>>();
+        let mut row_values = Vec::with_capacity(usecols.len());
+        for &column in usecols {
+            let index = usize::try_from(column).expect("nonnegative former usecol");
+            assert!(index < fields.len(), "former usecol in bounds");
+            row_values.push(fields[index].trim().parse::<f64>().unwrap());
+        }
+        match ncols {
+            None => ncols = Some(row_values.len()),
+            Some(expected) => assert_eq!(row_values.len(), expected),
+        }
+        values.extend(row_values);
+        nrows += 1;
+    }
+    fnp_io::TextArrayData {
+        values,
+        nrows,
+        ncols: ncols.unwrap_or(0),
+    }
+}
+
+#[inline(never)]
+fn loadtxt_signed_nonnegative_staged(
+    text: &str,
+    delimiter: char,
+    comments: char,
+    usecols: &[isize],
+) -> fnp_io::TextArrayData {
+    let unsigned = usecols
+        .iter()
+        .map(|&col| usize::try_from(col).expect("nonnegative staged usecol"))
+        .collect::<Vec<_>>();
+    fnp_io::loadtxt_usecols(text, delimiter, comments, 0, usize::MAX, Some(&unsigned)).unwrap()
+}
+
+fn time_loadtxt_signed(text: &str, usecols: &[isize], staged: bool) -> Duration {
+    const REPETITIONS: u32 = 8;
+    let start = Instant::now();
+    for _ in 0..REPETITIONS {
+        let output = if staged {
+            fnp_io::loadtxt_usecols_signed(text, ',', '#', 0, usize::MAX, Some(usecols)).unwrap()
+        } else {
+            loadtxt_signed_nonnegative_former(text, usecols)
+        };
+        drop(black_box(output));
+    }
+    start.elapsed() / REPETITIONS
+}
+
+fn report_loadtxt_signed_pair(
+    row: &str,
+    lhs_samples: &RefCell<Vec<f64>>,
+    rhs_samples: &RefCell<Vec<f64>>,
+) {
+    fn tail_stats(samples: &RefCell<Vec<f64>>) -> (usize, f64, f64) {
+        let samples = samples.borrow();
+        let count = samples.len().min(10);
+        assert!(count >= 2, "paired loadtxt bench retained too few samples");
+        let tail = &samples[samples.len() - count..];
+        let mean = tail.iter().sum::<f64>() / count as f64;
+        let variance = tail
+            .iter()
+            .map(|sample| {
+                let delta = sample - mean;
+                delta * delta
+            })
+            .sum::<f64>()
+            / (count - 1) as f64;
+        (count, mean, variance.sqrt() * 100.0 / mean)
+    }
+
+    let (lhs_n, lhs_ns, lhs_cv) = tail_stats(lhs_samples);
+    let (rhs_n, rhs_ns, rhs_cv) = tail_stats(rhs_samples);
+    assert_eq!(lhs_n, rhs_n);
+    println!(
+        "LOADTXT_SIGNED_PAIR row={row} samples={lhs_n} lhs_mean_ms={:.6} \
+         lhs_cv_pct={lhs_cv:.3} rhs_mean_ms={:.6} rhs_cv_pct={rhs_cv:.3} \
+         lhs_over_rhs={:.4}",
+        lhs_ns / 1_000_000.0,
+        rhs_ns / 1_000_000.0,
+        lhs_ns / rhs_ns,
+    );
+}
+
+fn bench_loadtxt_signed_nonnegative_staging(c: &mut Criterion) {
+    const ROWS: usize = 8_192;
+    const COLS: usize = 16;
+    const USECOLS: [isize; 4] = [13, 1, 7, 13];
+
+    let mut text = String::new();
+    for row in 0..ROWS {
+        for col in 0..COLS {
+            if col > 0 {
+                text.push(',');
+            }
+            text.push_str(&format!("{}.{}", row % 977, col));
+        }
+        text.push('\n');
+    }
+
+    let current =
+        fnp_io::loadtxt_usecols_signed(&text, ',', '#', 0, usize::MAX, Some(&USECOLS)).unwrap();
+    let staged = loadtxt_signed_nonnegative_staged(&text, ',', '#', &USECOLS);
+    assert_eq!(current.nrows, staged.nrows);
+    assert_eq!(current.ncols, staged.ncols);
+    assert_eq!(current.values.len(), staged.values.len());
+    assert!(
+        current
+            .values
+            .iter()
+            .zip(&staged.values)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+
+    let mut group = c.benchmark_group("loadtxt_signed_nonnegative_staging");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements((ROWS * USECOLS.len()) as u64));
+
+    let base_samples = RefCell::new(Vec::new());
+    let staged_samples = RefCell::new(Vec::new());
+    let order = Cell::new(0usize);
+    group.bench_function("former_vs_candidate_abba", |bench| {
+        bench.iter_custom(|iterations| {
+            let mut combined = Duration::ZERO;
+            for _ in 0..iterations {
+                let staged_outer = order.get() & 1 == 1;
+                order.set(order.get().wrapping_add(1));
+                let (base_total, staged_total) = if staged_outer {
+                    let b1 = time_loadtxt_signed(&text, &USECOLS, true);
+                    let a1 = time_loadtxt_signed(&text, &USECOLS, false);
+                    let a2 = time_loadtxt_signed(&text, &USECOLS, false);
+                    let b2 = time_loadtxt_signed(&text, &USECOLS, true);
+                    (a1 + a2, b1 + b2)
+                } else {
+                    let a1 = time_loadtxt_signed(&text, &USECOLS, false);
+                    let b1 = time_loadtxt_signed(&text, &USECOLS, true);
+                    let b2 = time_loadtxt_signed(&text, &USECOLS, true);
+                    let a2 = time_loadtxt_signed(&text, &USECOLS, false);
+                    (a1 + a2, b1 + b2)
+                };
+                base_samples
+                    .borrow_mut()
+                    .push(base_total.as_secs_f64() * 0.5e9);
+                staged_samples
+                    .borrow_mut()
+                    .push(staged_total.as_secs_f64() * 0.5e9);
+                combined += base_total + staged_total;
+            }
+            combined
+        });
+    });
+    report_loadtxt_signed_pair(
+        "effect_former_over_candidate",
+        &base_samples,
+        &staged_samples,
+    );
+
+    let null_a = RefCell::new(Vec::new());
+    let null_b = RefCell::new(Vec::new());
+    let null_order = Cell::new(0usize);
+    group.bench_function("candidate_aa_null_abba", |bench| {
+        bench.iter_custom(|iterations| {
+            let mut combined = Duration::ZERO;
+            for _ in 0..iterations {
+                let b_outer = null_order.get() & 1 == 1;
+                null_order.set(null_order.get().wrapping_add(1));
+                let (a_total, b_total) = if b_outer {
+                    let b1 = time_loadtxt_signed(&text, &USECOLS, true);
+                    let a1 = time_loadtxt_signed(&text, &USECOLS, true);
+                    let a2 = time_loadtxt_signed(&text, &USECOLS, true);
+                    let b2 = time_loadtxt_signed(&text, &USECOLS, true);
+                    (a1 + a2, b1 + b2)
+                } else {
+                    let a1 = time_loadtxt_signed(&text, &USECOLS, true);
+                    let b1 = time_loadtxt_signed(&text, &USECOLS, true);
+                    let b2 = time_loadtxt_signed(&text, &USECOLS, true);
+                    let a2 = time_loadtxt_signed(&text, &USECOLS, true);
+                    (a1 + a2, b1 + b2)
+                };
+                null_a.borrow_mut().push(a_total.as_secs_f64() * 0.5e9);
+                null_b.borrow_mut().push(b_total.as_secs_f64() * 0.5e9);
+                combined += a_total + b_total;
+            }
+            combined
+        });
+    });
+    report_loadtxt_signed_pair("null_candidate_aa", &null_a, &null_b);
+    group.finish();
+}
+
 /// Faithful replica of the CURRENT `genfromtxt` comma path: a fresh
 /// `Vec<f64>` collected per accepted row, then copied into the output -
 /// exactly production's per-row allocation shape.
@@ -2271,6 +2479,7 @@ criterion_group!(
     bench_fromfile_text_wildcard_bounded_prefix,
     bench_loadtxt_usecols_plan,
     bench_loadtxt_usecols_scatter,
+    bench_loadtxt_signed_nonnegative_staging,
     bench_loadtxt_plain_rows,
     bench_genfromtxt_full_plain_rows,
     bench_tofile_text_integral,

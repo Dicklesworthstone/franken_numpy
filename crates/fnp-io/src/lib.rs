@@ -2346,6 +2346,34 @@ pub fn loadtxt_usecols_signed(
     max_rows: usize,
     usecols: Option<&[isize]>,
 ) -> Result<TextArrayData, IOError> {
+    if let Some(cols) = usecols {
+        // Positive signed selections are row-invariant. Partially evaluate
+        // that case once, then reuse the unsigned call-level plan instead of
+        // splitting every row and resolving every requested index per row.
+        // Any negative index keeps the width-relative generic path below.
+        let unsigned = cols
+            .iter()
+            .copied()
+            .map(usize::try_from)
+            .collect::<Result<Vec<_>, _>>();
+        if let Ok(unsigned) = unsigned
+            && let Ok(parsed) = loadtxt_usecols(
+                text,
+                delimiter,
+                comments,
+                skiprows,
+                max_rows,
+                Some(&unsigned),
+            )
+        {
+            return Ok(parsed);
+        }
+        // Replay conversion or specialized parsing failures through the
+        // former resolver so a selected parse error versus a later bounds
+        // error retains the signed API's request-order precedence and exact
+        // message.
+    }
+
     let mut values = Vec::new();
     let mut ncols: Option<usize> = None;
     let mut nrows = 0usize;
@@ -8830,6 +8858,40 @@ mm.flush()
         let err = loadtxt_usecols_signed(text, ' ', '#', 0, usize::MAX, Some(&[-3]))
             .expect_err("negative usecols out of bounds");
         assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+    }
+
+    #[test]
+    fn loadtxt_signed_nonnegative_usecols_are_bit_identical_to_unsigned_plan() {
+        let text = "ignored header\n1,skip,-0,4.5 # comment\n2,nope,inf,-7.25\n";
+        let signed =
+            loadtxt_usecols_signed(text, ',', '#', 1, usize::MAX, Some(&[3, 0, 3])).unwrap();
+        let unsigned = loadtxt_usecols(text, ',', '#', 1, usize::MAX, Some(&[3, 0, 3])).unwrap();
+
+        assert_eq!(signed.nrows, unsigned.nrows);
+        assert_eq!(signed.ncols, unsigned.ncols);
+        assert_eq!(signed.values.len(), unsigned.values.len());
+        assert!(
+            signed
+                .values
+                .iter()
+                .zip(&unsigned.values)
+                .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+        );
+    }
+
+    #[test]
+    fn loadtxt_signed_nonnegative_specialization_replays_former_error_precedence() {
+        let text = "bad,2,3\n";
+        let bounds_first =
+            loadtxt_usecols_signed(text, ',', '#', 0, usize::MAX, Some(&[5, 0])).unwrap_err();
+        assert_eq!(
+            bounds_first.to_string(),
+            "loadtxt: usecols index out of bounds"
+        );
+
+        let parse_first =
+            loadtxt_usecols_signed(text, ',', '#', 0, usize::MAX, Some(&[0, 5])).unwrap_err();
+        assert_eq!(parse_first.to_string(), "loadtxt: parse error in row");
     }
 
     #[test]
