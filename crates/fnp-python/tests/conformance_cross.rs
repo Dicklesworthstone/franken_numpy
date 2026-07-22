@@ -467,8 +467,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces CROSS_INT64_N3_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "int (N,3) cross must be bit-identical to numpy incl. wrap and delegates: {result}"
     );
     Ok(())

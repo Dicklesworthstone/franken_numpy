@@ -1869,8 +1869,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces EINSUM_INT_COARSE_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "int matmul-shaped einsum must be bit-identical incl wrap and delegates: {result}"
     );
     Ok(())

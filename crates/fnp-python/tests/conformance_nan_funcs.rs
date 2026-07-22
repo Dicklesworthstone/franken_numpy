@@ -1369,8 +1369,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces SURFACE_PROBE_AB rows under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "flat multi-quantile/percentile must stay byte-exact and weighted average allclose: {result}"
     );
     Ok(())
@@ -1429,8 +1428,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces NANARGMAX_INT_AX0_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "int nanargmax/nanargmin routing must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -1488,8 +1486,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces ARGMAX_INT16_AX0_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "narrow-int non-last-axis argextreme must be bit-identical to numpy: {result}"
     );
     Ok(())

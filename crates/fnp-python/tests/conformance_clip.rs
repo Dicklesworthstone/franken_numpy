@@ -467,8 +467,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces CLIP_ARRAYS_COARSE_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "f64 array-bounds clip must be bit-identical incl NaN-payload/signed-zero rules: {result}"
     );
     Ok(())
@@ -547,8 +546,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces CLIP_F64_BCAST_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "broadcast-row-bounds f64 clip must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -637,8 +635,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces CLIP_INT64_*_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "int array-bounds clip must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -705,8 +702,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces CLIP_F32_*_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "f32 array-bounds clip must be bit-identical to numpy: {result}"
     );
     Ok(())

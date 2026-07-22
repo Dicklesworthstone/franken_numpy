@@ -548,8 +548,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces TRIU/TRIL_INDICES_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "parallel tri-indices fill must be bit-identical to numpy: {result}"
     );
     Ok(())

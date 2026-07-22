@@ -472,8 +472,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces MATMUL/DOT/INNER_BOOL_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "native bitpacked bool matmul must be bit-identical to numpy across entry points: {result}"
     );
     Ok(())
@@ -664,8 +663,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces MATMUL_*_BROADCAST_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "broadcast-batch int/bool matmul must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -744,8 +742,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces MATMUL_*_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "non-contiguous int/bool matmul must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -818,8 +815,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces VECMAT_INT_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "native int vecmat must be bit-identical to numpy incl. delegates: {result}"
     );
     Ok(())
