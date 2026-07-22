@@ -4694,7 +4694,10 @@ fn bench_loadtxt_text_boundary(c: &mut Criterion) {
             .expect("array_equal")
             .extract()
             .expect("bool");
-        assert!(equal, "fnp/numpy loadtxt outputs differ on the bench corpus");
+        assert!(
+            equal,
+            "fnp/numpy loadtxt outputs differ on the bench corpus"
+        );
 
         group.bench_function("fnp_loadtxt_f64_8192x16", |b| {
             b.iter(|| {
@@ -15929,8 +15932,7 @@ fn bench_f64_exp_log_probe(c: &mut Criterion) {
             let mut diff_elems = 0usize;
             let mut first_diff = None;
             let mut max_bitdiff: u64 = 0;
-            for (index, (np_chunk, &value)) in
-                np_bytes.chunks_exact(8).zip(data.iter()).enumerate()
+            for (index, (np_chunk, &value)) in np_bytes.chunks_exact(8).zip(data.iter()).enumerate()
             {
                 let np_bits = u64::from_ne_bytes(np_chunk.try_into().expect("np f64 chunk"));
                 let mine_bits = rust_fn(value).to_bits();
@@ -15952,10 +15954,30 @@ fn bench_f64_exp_log_probe(c: &mut Criterion) {
         // (2) TIMING: ledger-pair ABBA — candidate = parallel scalar-libm map
         // (zero-init handicap), orig = the numpy call. Plus numpy A/A nulls.
         for (row, name, rust_fn, input) in [
-            ("exp_log_probe_exp_1m", "exp", f64::exp as fn(f64) -> f64, &e_1m),
-            ("exp_log_probe_exp_4m", "exp", f64::exp as fn(f64) -> f64, &e_4m),
-            ("exp_log_probe_log_1m", "log", f64::ln as fn(f64) -> f64, &l_1m),
-            ("exp_log_probe_log_4m", "log", f64::ln as fn(f64) -> f64, &l_4m),
+            (
+                "exp_log_probe_exp_1m",
+                "exp",
+                f64::exp as fn(f64) -> f64,
+                &e_1m,
+            ),
+            (
+                "exp_log_probe_exp_4m",
+                "exp",
+                f64::exp as fn(f64) -> f64,
+                &e_4m,
+            ),
+            (
+                "exp_log_probe_log_1m",
+                "log",
+                f64::ln as fn(f64) -> f64,
+                &l_1m,
+            ),
+            (
+                "exp_log_probe_log_4m",
+                "log",
+                f64::ln as fn(f64) -> f64,
+                &l_4m,
+            ),
         ] {
             let data = to_vec(input);
             let np_fn = numpy.getattr(name).expect("numpy timing fn");
@@ -16312,7 +16334,9 @@ fn bench_wide_string_sort_median_gate(c: &mut Criterion) {
             ("S9", &s9_input),
             ("S16", &s16_input),
         ] {
-            let candidate = fnp_sort.call1((input,)).expect("fnp wide string sort parity");
+            let candidate = fnp_sort
+                .call1((input,))
+                .expect("fnp wide string sort parity");
             let base = numpy_sort
                 .call1((input,))
                 .expect("numpy wide string sort parity");
@@ -16678,10 +16702,7 @@ fn bench_int_matmul_median_gate(c: &mut Criterion) {
 
         let fnp_matmul = module.getattr("matmul").expect("fnp matmul");
         let np_matmul = numpy.getattr("matmul").expect("numpy matmul");
-        for (label, x, y) in [
-            ("i64_512", &a64, &b64),
-            ("i32_512", &a32, &b32),
-        ] {
+        for (label, x, y) in [("i64_512", &a64, &b64), ("i32_512", &a32, &b32)] {
             let candidate = fnp_matmul.call1((x, y)).expect("fnp int matmul parity");
             let base = np_matmul.call1((x, y)).expect("numpy int matmul parity");
             assert_eq!(
@@ -16747,7 +16768,13 @@ fn bench_int_matmul_median_gate(c: &mut Criterion) {
             .expect("numpy matrix_power");
         for (label, f_c, f_b, x, y) in [
             ("i64_batched", &fnp_matmul, &np_matmul, &ab64, &bb64),
-            ("i64_matpow5", &fnp_matrix_power, &np_matrix_power, &mp64, &p5),
+            (
+                "i64_matpow5",
+                &fnp_matrix_power,
+                &np_matrix_power,
+                &mp64,
+                &p5,
+            ),
         ] {
             let candidate = f_c.call1((x, y)).expect("fnp candidate parity");
             let base = f_b.call1((x, y)).expect("numpy base parity");
@@ -16823,8 +16850,12 @@ fn bench_f16_matmul_median_gate(c: &mut Criterion) {
 
         let fnp_matmul = module.getattr("matmul").expect("fnp matmul");
         let np_matmul = numpy.getattr("matmul").expect("numpy matmul");
-        let candidate = fnp_matmul.call1((&h_a, &h_b)).expect("fnp f16 matmul parity");
-        let base = np_matmul.call1((&h_a, &h_b)).expect("numpy f16 matmul parity");
+        let candidate = fnp_matmul
+            .call1((&h_a, &h_b))
+            .expect("fnp f16 matmul parity");
+        let base = np_matmul
+            .call1((&h_a, &h_b))
+            .expect("numpy f16 matmul parity");
         assert_eq!(
             candidate
                 .getattr("dtype")
@@ -16981,11 +17012,9 @@ fn bench_f16_unique_median_gate(c: &mut Criterion) {
 
         // f16 isin at 8M/1k: presence-bitmap membership vs numpy's ~1.2s sort path.
         py.run(
-            std::ffi::CString::new(
-                "iq16 = (rng.standard_normal(1000) * 2).astype(np.float16)\n",
-            )
-            .expect("isin setup CString")
-            .as_c_str(),
+            std::ffi::CString::new("iq16 = (rng.standard_normal(1000) * 2).astype(np.float16)\n")
+                .expect("isin setup CString")
+                .as_c_str(),
             Some(&namespace),
             Some(&namespace),
         )
@@ -17119,7 +17148,9 @@ fn bench_isclose_median_gate(c: &mut Criterion) {
         let candidate = fnp_isclose
             .call1((&ic_a, &ic_b))
             .expect("fnp isclose parity");
-        let base = np_isclose.call1((&ic_a, &ic_b)).expect("numpy isclose parity");
+        let base = np_isclose
+            .call1((&ic_a, &ic_b))
+            .expect("numpy isclose parity");
         assert_eq!(
             candidate
                 .call_method0("tobytes")
@@ -17344,7 +17375,9 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
         let np_es = namespace.get_item("np_es").expect("np_es present");
 
         let candidate = fnp_es.call1((&es_a, &es_b)).expect("fnp f16 einsum parity");
-        let base = np_es.call1((&es_a, &es_b)).expect("numpy f16 einsum parity");
+        let base = np_es
+            .call1((&es_a, &es_b))
+            .expect("numpy f16 einsum parity");
         assert_eq!(
             candidate
                 .getattr("dtype")
@@ -17670,7 +17703,9 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
         let candidate_ch = fnp_es_ch
             .call1((&ch_a, &ch_b))
             .expect("fnp f16 chain parity");
-        let base_ch = np_es_ch.call1((&ch_a, &ch_b)).expect("numpy f16 chain parity");
+        let base_ch = np_es_ch
+            .call1((&ch_a, &ch_b))
+            .expect("numpy f16 chain parity");
         assert_eq!(
             candidate_ch
                 .call_method0("tobytes")
@@ -17759,9 +17794,7 @@ fn bench_f16_einsum_median_gate(c: &mut Criterion) {
                     .expect("base byte Vec"),
                 "f16 einsum reduction byte parity ({row})",
             );
-            bench_median_gate_python_unary(
-                &mut group, bench_name, row, &np_fn, &fnp_fn, input,
-            );
+            bench_median_gate_python_unary(&mut group, bench_name, row, &np_fn, &fnp_fn, input);
         }
 
         // Batched matmul spec ('bij,bjk->bik') at (8,256,256)@(8,256,256):

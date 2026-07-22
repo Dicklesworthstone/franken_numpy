@@ -307,10 +307,7 @@ fn bench_ndlayout_broadcast_to_fortran_identity(c: &mut Criterion) {
     group.finish();
 }
 
-fn sliding_window_duplicate_stride_former(
-    layout: &NdLayout,
-    window_shape: &[usize],
-) -> NdLayout {
+fn sliding_window_duplicate_stride_former(layout: &NdLayout, window_shape: &[usize]) -> NdLayout {
     let mut shape = Vec::with_capacity(layout.shape.len() * 2);
     for (&dim, &window) in layout.shape.iter().zip(window_shape) {
         shape.push(dim - window + 1);
@@ -372,9 +369,7 @@ fn bench_ndlayout_sliding_window_duplicate_stride(c: &mut Criterion) {
     );
 
     group.bench_function("former_exact_offsets", |b| {
-        b.iter(|| {
-            sliding_window_duplicate_stride_former(black_box(&layout), black_box(&window))
-        });
+        b.iter(|| sliding_window_duplicate_stride_former(black_box(&layout), black_box(&window)));
     });
     group.bench_function("duplicate_stride_proof", |b| {
         b.iter(|| {

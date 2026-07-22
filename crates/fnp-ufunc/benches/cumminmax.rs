@@ -70,9 +70,7 @@ fn former_cumsum_singleton(values: &[f64]) -> Vec<f64> {
             .zip(values.par_chunks(1))
             .for_each(scan_lane);
     } else {
-        out.chunks_mut(1)
-            .zip(values.chunks(1))
-            .for_each(scan_lane);
+        out.chunks_mut(1).zip(values.chunks(1)).for_each(scan_lane);
     }
     out
 }

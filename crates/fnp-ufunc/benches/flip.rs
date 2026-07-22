@@ -17,7 +17,12 @@ use std::time::Duration;
 /// parallel chunks for `[outer, 1]` axis 1), exactly as `flip_axis_build`
 /// runs it today. The identity-clone candidate must reproduce it bit-for-bit.
 #[inline(never)]
-fn former_flip_singleton_values(src: &[f64], outer: usize, axis_len: usize, inner: usize) -> Vec<f64> {
+fn former_flip_singleton_values(
+    src: &[f64],
+    outer: usize,
+    axis_len: usize,
+    inner: usize,
+) -> Vec<f64> {
     let n = outer * axis_len * inner;
     let mut out = vec![0.0f64; n];
     if n == 0 {
@@ -77,14 +82,7 @@ fn bench_flip_singleton_axis(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(2));
     group.throughput(Throughput::Elements(OUTER as u64));
     group.bench_function("former_axis_build_kernel", |bench| {
-        bench.iter(|| {
-            black_box(former_flip_singleton_values(
-                black_box(&data),
-                OUTER,
-                1,
-                1,
-            ))
-        })
+        bench.iter(|| black_box(former_flip_singleton_values(black_box(&data), OUTER, 1, 1)))
     });
     group.bench_function("candidate_identity_clone", |bench| {
         bench.iter(|| black_box(arr.flip(black_box(Some(1))).unwrap()))

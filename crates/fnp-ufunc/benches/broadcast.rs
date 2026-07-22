@@ -79,8 +79,16 @@ fn bench_equal_shape_clone(c: &mut Criterion) {
     assert_eq!(direct.shape(), &[n]);
     assert_eq!(general.shape(), &[1, n]);
     assert_eq!(
-        direct.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-        general.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        direct
+            .values()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>(),
+        general
+            .values()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>()
     );
 
     let mut group = c.benchmark_group("broadcast_equal_shape_clone");
@@ -91,11 +99,7 @@ fn bench_equal_shape_clone(c: &mut Criterion) {
         b.iter(|| black_box(&arr).broadcast_to(black_box(&[n])).unwrap())
     });
     group.bench_function("general_path_singleton_control", |b| {
-        b.iter(|| {
-            black_box(&arr)
-                .broadcast_to(black_box(&[1, n]))
-                .unwrap()
-        })
+        b.iter(|| black_box(&arr).broadcast_to(black_box(&[1, n])).unwrap())
     });
     group.finish();
 }

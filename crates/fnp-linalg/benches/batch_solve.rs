@@ -181,7 +181,11 @@ fn bench(c: &mut Criterion) {
             assert_eq!(lhs.to_bits(), rhs.to_bits(), "flat output {idx} diverged");
         }
         for (idx, (lhs, rhs)) in literal.iter().zip(&reload_store).enumerate() {
-            assert_eq!(lhs.to_bits(), rhs.to_bits(), "reload/store output {idx} diverged");
+            assert_eq!(
+                lhs.to_bits(),
+                rhs.to_bits(),
+                "reload/store output {idx} diverged"
+            );
         }
 
         let mut g = c.benchmark_group(format!(

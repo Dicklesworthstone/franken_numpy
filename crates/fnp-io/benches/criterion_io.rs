@@ -508,8 +508,7 @@ fn bench_fromfile_text_literal_bounded_prefix(c: &mut Criterion) {
         })
     });
     group.bench_function("public_bounded_count", |bench| {
-        bench
-            .iter(|| black_box(fromfile_text(black_box(&text), ",", Some(PREFIX_COUNT)).unwrap()))
+        bench.iter(|| black_box(fromfile_text(black_box(&text), ",", Some(PREFIX_COUNT)).unwrap()))
     });
     group.finish();
 }
@@ -634,8 +633,7 @@ fn bench_fromfile_text_wildcard_bounded_prefix(c: &mut Criterion) {
         })
     });
     group.bench_function("public_bounded_count", |bench| {
-        bench
-            .iter(|| black_box(fromfile_text(black_box(&text), ", ", Some(PREFIX_COUNT)).unwrap()))
+        bench.iter(|| black_box(fromfile_text(black_box(&text), ", ", Some(PREFIX_COUNT)).unwrap()))
     });
     group.finish();
 }
@@ -718,11 +716,7 @@ fn loadtxt_usecols_former(
 /// caller's ncols-before-budget checks, then a copy into the output - exactly
 /// production's per-row allocation shape.
 #[inline(never)]
-fn loadtxt_plain_former(
-    text: &str,
-    delimiter: char,
-    comments: char,
-) -> (Vec<f64>, usize, usize) {
+fn loadtxt_plain_former(text: &str, delimiter: char, comments: char) -> (Vec<f64>, usize, usize) {
     let mut values = Vec::new();
     let mut ncols: Option<usize> = None;
     let mut nrows = 0usize;
@@ -2637,8 +2631,8 @@ fn bench_read_npz_overlap_tracking(c: &mut Criterion) {
         .collect();
     let npz_bytes = write_npz_bytes(&entry_refs).expect("write metadata-heavy npz");
 
-    let linear = read_npz_bytes_linear_overlap_control(&npz_bytes, false)
-        .expect("linear overlap control");
+    let linear =
+        read_npz_bytes_linear_overlap_control(&npz_bytes, false).expect("linear overlap control");
     let ordered = read_npz_bytes(&npz_bytes, false).expect("ordered overlap candidate");
     assert_eq!(ordered, linear);
 
@@ -2648,9 +2642,7 @@ fn bench_read_npz_overlap_tracking(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(1));
     group.bench_function("linear_control_4096", |bench| {
         bench.iter(|| {
-            black_box(
-                read_npz_bytes_linear_overlap_control(black_box(&npz_bytes), false).unwrap(),
-            )
+            black_box(read_npz_bytes_linear_overlap_control(black_box(&npz_bytes), false).unwrap())
         })
     });
     group.bench_function("ordered_candidate_4096", |bench| {
