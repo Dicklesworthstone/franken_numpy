@@ -50,3 +50,7 @@ harness = false
 [[bench]]
 name = "gemm_microkernel"
 harness = false
+
+[[bench]]
+name = "tsqr"
+harness = false

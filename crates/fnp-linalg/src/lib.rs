@@ -2746,6 +2746,203 @@ pub fn qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f64>), Lin
     Ok((q, r))
 }
 
+/// Minimum rows per TSQR leaf block. Below this the per-leaf Householder pass
+/// is too short to amortize the reduction-tree work, so the block count is
+/// capped to keep every leaf at least this tall.
+const TSQR_MIN_LEAF_ROWS: usize = 4096;
+
+/// In-place Householder QR of a row-major `rows × n` block, keeping only R.
+///
+/// On return the leading `min(rows, n) × n` upper triangle of `block` holds R
+/// and everything strictly below the diagonal is exactly zero. Q is never
+/// formed - that is the entire point for tall-skinny inputs, where an explicit
+/// m×m Q (as `qr_mxn` builds) would be m² elements.
+fn householder_r_in_place(block: &mut [f64], rows: usize, n: usize) {
+    let steps = rows.min(n);
+    let mut v = vec![0.0f64; rows];
+    // Per-column reflector dot products, hoisted so the trailing update can
+    // stream the block row-major. The naive form recomputes one dot per
+    // trailing column, walking `block[i * n + j]` down `i` at stride n, which
+    // costs (n - col) cache-hostile passes over the block per reflector; this
+    // buffer collapses that to two sequential passes total. Each `dots[j]`
+    // still accumulates over `i` in ascending order, so the arithmetic is
+    // unchanged - this is a pure memory-traffic transform.
+    let mut dots = vec![0.0f64; n];
+    for col in 0..steps {
+        let mut norm_sq = 0.0;
+        for i in col..rows {
+            let x = block[i * n + col];
+            norm_sq += x * x;
+        }
+        if norm_sq == 0.0 {
+            continue;
+        }
+        // Sign chosen away from the pivot to avoid cancellation in v[col].
+        let norm = norm_sq.sqrt();
+        let pivot = block[col * n + col];
+        let alpha = if pivot > 0.0 { -norm } else { norm };
+
+        for i in col..rows {
+            v[i] = block[i * n + col];
+        }
+        v[col] -= alpha;
+
+        let mut v_norm_sq = 0.0;
+        for i in col..rows {
+            v_norm_sq += v[i] * v[i];
+        }
+        if v_norm_sq == 0.0 {
+            continue;
+        }
+
+        // Apply H = I - 2vvᵀ/(vᵀv) to the trailing columns, streaming the
+        // block row-major in two passes instead of two passes per column.
+        dots[col..n].fill(0.0);
+        for i in col..rows {
+            let vi = v[i];
+            if vi == 0.0 {
+                continue;
+            }
+            let row = &block[i * n + col..i * n + n];
+            for (acc, &value) in dots[col..n].iter_mut().zip(row) {
+                *acc += vi * value;
+            }
+        }
+        // Deliberately `2.0 * dot / v_norm_sq`, not `dot * (2.0 / v_norm_sq)`:
+        // the reciprocal form would change the rounding and break the claim
+        // that this rewrite is arithmetic-preserving.
+        for acc in dots[col..n].iter_mut() {
+            *acc = 2.0 * *acc / v_norm_sq;
+        }
+        for i in col..rows {
+            let vi = v[i];
+            if vi == 0.0 {
+                continue;
+            }
+            let row = &mut block[i * n + col..i * n + n];
+            for (value, &factor) in row.iter_mut().zip(dots[col..n].iter()) {
+                *value -= factor * vi;
+            }
+        }
+    }
+
+    for i in 0..rows {
+        let upper = n.min(i);
+        for j in 0..upper {
+            block[i * n + j] = 0.0;
+        }
+    }
+}
+
+/// R factor of a row-major `rows × n` block, returned as a dense `n × n`.
+fn leaf_r(block: &[f64], rows: usize, n: usize) -> Vec<f64> {
+    let mut work = block.to_vec();
+    householder_r_in_place(&mut work, rows, n);
+    let mut r = vec![0.0f64; n * n];
+    let copy_rows = rows.min(n);
+    for i in 0..copy_rows {
+        r[i * n..i * n + n].copy_from_slice(&work[i * n..i * n + n]);
+    }
+    r
+}
+
+/// Combine two n×n R factors into one by re-triangularizing their 2n×n stack.
+fn combine_r(top: &[f64], bottom: &[f64], n: usize) -> Vec<f64> {
+    let mut stacked = vec![0.0f64; 2 * n * n];
+    stacked[..n * n].copy_from_slice(top);
+    stacked[n * n..].copy_from_slice(bottom);
+    householder_r_in_place(&mut stacked, 2 * n, n);
+    stacked.truncate(n * n);
+    stacked
+}
+
+/// Tall-skinny QR (TSQR / communication-avoiding QR), R factor only.
+///
+/// Input `a` is row-major with shape (m, n) and m ≥ n. Returns the n×n upper
+/// triangular R such that A = QR for some orthonormal Q, with R's diagonal
+/// sign convention matching a standard Householder QR (LAPACK does not fix a
+/// sign either, so callers comparing against `numpy.linalg.qr` must normalize
+/// row signs).
+///
+/// Why this exists: LAPACK's `dgeqrf` on a tall-skinny matrix falls into an
+/// unblocked BLAS-2 path that makes n passes over the m×n data. TSQR makes a
+/// single streaming pass - each row block is reduced to an n×n R independently
+/// (embarrassingly parallel, each leaf's working set is cache-resident), then
+/// the R factors are folded pairwise up a binary tree. Communication rounds
+/// drop from O(n) to O(log P).
+///
+/// DETERMINISM: the leaves are computed in parallel but written to fixed index
+/// positions, and the fold is a *sequential* binary tree over that fixed order.
+/// The floating-point association order therefore does not depend on thread
+/// count or scheduling, so repeated runs are bit-identical to each other. It is
+/// NOT bit-identical to LAPACK's sequential Householder sweep - TSQR applies a
+/// different (still exactly orthogonal) sequence of reflections, so it is
+/// backward stable but only `allclose` to `dgeqrf`.
+pub fn tsqr_r(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
+    if Some(a.len()) != m.checked_mul(n) || m == 0 || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tsqr_r: input must be m*n with m,n > 0",
+        ));
+    }
+    if m < n {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tsqr_r: requires m >= n (tall-skinny)",
+        ));
+    }
+    if a.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "matrix entries must be finite for QR",
+        ));
+    }
+
+    // One block per worker (at least TSQR_MIN_LEAF_ROWS tall); a single block
+    // degenerates to a plain streaming Householder pass, which is correct.
+    let threads = rayon::current_num_threads().max(1);
+    let max_blocks = (m / TSQR_MIN_LEAF_ROWS).max(1);
+    let blocks = threads.min(max_blocks);
+
+    if blocks <= 1 {
+        let mut work = a.to_vec();
+        householder_r_in_place(&mut work, m, n);
+        let mut r = vec![0.0f64; n * n];
+        for i in 0..n.min(m) {
+            r[i * n..i * n + n].copy_from_slice(&work[i * n..i * n + n]);
+        }
+        return Ok(r);
+    }
+
+    let base = m / blocks;
+    let remainder = m % blocks;
+    let mut ranges = Vec::with_capacity(blocks);
+    let mut start = 0;
+    for b in 0..blocks {
+        let rows = base + usize::from(b < remainder);
+        ranges.push((start, rows));
+        start += rows;
+    }
+
+    let mut level: Vec<Vec<f64>> = ranges
+        .par_iter()
+        .map(|&(row_start, rows)| leaf_r(&a[row_start * n..(row_start + rows) * n], rows, n))
+        .collect();
+
+    // Deterministic sequential fold: pair adjacent factors, left to right.
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut idx = 0;
+        while idx + 1 < level.len() {
+            next.push(combine_r(&level[idx], &level[idx + 1], n));
+            idx += 2;
+        }
+        if idx < level.len() {
+            next.push(level[idx].clone());
+        }
+        level = next;
+    }
+
+    Ok(level.pop().unwrap_or_else(|| vec![0.0f64; n * n]))
+}
+
 /// SVD of an m×n rectangular matrix (singular values only).
 ///
 /// Input `a` is row-major with shape (m, n). Returns singular values in
@@ -10228,6 +10425,7 @@ mod tests {
         trace_nxn,
         tridiag_reduce,
         tridiag_reduce_values,
+        tsqr_r,
         validate_backend_bridge,
         validate_cholesky_diagonal,
         validate_matrix_shape,
@@ -19577,5 +19775,116 @@ except Exception as exc:
                 orig
             );
         }
+    }
+
+    /// Deterministic tall-skinny operand (SplitMix64; no RNG dep, no clock).
+    fn tsqr_test_matrix(rows: usize, cols: usize, seed: u64) -> Vec<f64> {
+        let mut state = seed | 1;
+        (0..rows * cols)
+            .map(|_| {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                (z >> 11) as f64 / (1u64 << 52) as f64 - 1.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tsqr_r_matches_qr_mxn_up_to_row_sign() {
+        // Neither LAPACK nor Householder pins R's row signs, so compare with a
+        // per-row sign normalization keyed off the diagonal.
+        for (m, n) in [(64usize, 8usize), (256, 16), (513, 7)] {
+            let a = tsqr_test_matrix(m, n, 0xA11C_E501);
+            let (_, reference) = qr_mxn(&a, m, n).expect("qr_mxn reference");
+            let r = tsqr_r(&a, m, n).expect("tsqr_r");
+            for i in 0..n {
+                let flip = if reference[i * n + i].signum() == r[i * n + i].signum() {
+                    1.0
+                } else {
+                    -1.0
+                };
+                for j in 0..n {
+                    let expected = reference[i * n + j];
+                    let actual = flip * r[i * n + j];
+                    assert!(
+                        (expected - actual).abs() < 1e-8,
+                        "tsqr_r({m}x{n}) row {i} col {j}: {actual} vs {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tsqr_r_is_upper_triangular_and_preserves_gram() {
+        // RᵀR == AᵀA determines R up to row signs for full-rank A and never
+        // forms Q, so it independently validates the whole reduction tree.
+        let (m, n) = (4096usize, 12usize);
+        let a = tsqr_test_matrix(m, n, 0xBEEF_0001);
+        let r = tsqr_r(&a, m, n).expect("tsqr_r");
+
+        for i in 0..n {
+            for j in 0..i {
+                assert_eq!(r[i * n + j], 0.0, "R not upper triangular at ({i},{j})");
+            }
+        }
+
+        let mut ata = vec![0.0f64; n * n];
+        for row in 0..m {
+            for i in 0..n {
+                let av = a[row * n + i];
+                for j in 0..n {
+                    ata[i * n + j] += av * a[row * n + j];
+                }
+            }
+        }
+        let mut rtr = vec![0.0f64; n * n];
+        for row in 0..n {
+            for i in 0..n {
+                let rv = r[row * n + i];
+                for j in 0..n {
+                    rtr[i * n + j] += rv * r[row * n + j];
+                }
+            }
+        }
+        let scale = ata.iter().fold(0.0f64, |acc, v| acc.max(v.abs())).max(1.0);
+        for idx in 0..n * n {
+            assert!(
+                (ata[idx] - rtr[idx]).abs() <= 1e-9 * scale,
+                "Gram mismatch at {idx}: {} vs {}",
+                ata[idx],
+                rtr[idx]
+            );
+        }
+    }
+
+    #[test]
+    fn tsqr_r_is_deterministic_across_repeated_runs() {
+        // The leaves are parallel but land at fixed indices and the fold is a
+        // sequential binary tree, so the association order - and therefore the
+        // exact bits - must not depend on scheduling.
+        let (m, n) = (20_000usize, 6usize);
+        let a = tsqr_test_matrix(m, n, 0x0D07_0D07);
+        let first = tsqr_r(&a, m, n).expect("tsqr_r");
+        for _ in 0..3 {
+            let again = tsqr_r(&a, m, n).expect("tsqr_r");
+            for (idx, (x, y)) in first.iter().zip(again.iter()).enumerate() {
+                assert_eq!(x.to_bits(), y.to_bits(), "tsqr_r nondeterministic at {idx}");
+            }
+        }
+    }
+
+    #[test]
+    fn tsqr_r_rejects_wide_and_malformed_shapes() {
+        assert!(tsqr_r(&[1.0, 2.0, 3.0, 4.0], 2, 2).is_ok());
+        // Wide (m < n) is not tall-skinny.
+        assert!(tsqr_r(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 2, 3).is_err());
+        // Length must equal m*n.
+        assert!(tsqr_r(&[1.0, 2.0, 3.0], 2, 2).is_err());
+        // Non-finite entries are rejected like the other QR entry points.
+        assert!(tsqr_r(&[1.0, f64::NAN, 3.0, 4.0], 2, 2).is_err());
     }
 }
