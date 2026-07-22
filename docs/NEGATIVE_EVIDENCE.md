@@ -4,6 +4,90 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-22 - REJECT (NO-SHIP): hoist Zipf batch-invariant rejection terms - apparent 1.26-1.31x direction is invalid under 20-105% CV
+
+`GoldSummit`, bead `franken_numpy-ixs5y.374`. The ledger and recent Git log
+were screened before editing. Gamma/Poisson parameter caches and the von Mises
+term-hoist retry are CLOSED. Generator Zipf had oracle coverage but no prior
+performance row, so this was a fresh distribution primitive rather than a
+retry of those families.
+
+PROFILE FIRST, with production untouched: Generator Zipf at `a=2.5`,
+`size=100,000` measured 6.8488 ms (`[6.8279, 6.8724]`, 14.60 Melem/s) on
+effective worker `ovh-a`. A strict-remote `perf record -F 499 -e cycles:u -g`
+run on `vmi1264463` captured 1,021 cycle samples with zero loss. The named Zipf
+closure held 12.93% self, `RngBackend::next_f64` 7.64%, and named libm
+`pow`/`exp2` frames 5.80%/1.69%; multiple additional internal libm pow offsets
+appeared beneath the Zipf caller. The stripped monolithic bench made those
+internal offsets unsafe to sum precisely, so they are routing evidence only.
+The profile did justify testing partial evaluation of the per-sample powers.
+
+ONE LEVER: compute `a - 1`, `2^(a - 1)`, the i64-bound power, and
+`-1/(a - 1)` once per public batch, then pass them to the otherwise unchanged
+rejection loop. The `a >= 1025` no-draw return was also lifted from each sample
+to the batch boundary. This was pure safe Rust. The exact rejected candidate is
+retained in `random_ops.rs` beside an exact former replica, while production
+was restored before closeout.
+
+The decisive exact-binary benchmark interleaved former/candidate ABBA/BAAB and
+ran a candidate A/A null on the same effective worker `vmi1264463`. Both runs
+are disclosed; neither is admissible because every required arm must be below
+5% CV and the null must remain near unity:
+
+| run | row | lhs mean | rhs mean | lhs CV | rhs CV | former/candidate or null ratio |
+|---|---|---:|---:|---:|---:|---:|
+| 1 | former / cached candidate | 19.324986 ms | 15.348569 ms | 36.200% | 59.811% | 1.2591x |
+| 1 | candidate A/A null | 12.234466 ms | 16.891086 ms | 20.626% | 105.127% | 0.7243x |
+| 2 | former / cached candidate | 15.451831 ms | 11.802734 ms | 24.134% | 38.010% | 1.3092x |
+| 2 | candidate A/A null | 14.099301 ms | 16.214926 ms | 38.119% | 52.870% | 0.8695x |
+
+The apparent effect has the same favorable direction twice, but its magnitude
+cannot be separated from the 13.1-27.6% null imbalance or 20-105% arm CV.
+It is therefore not a win and cannot ship. An `ovh-b` attempt died in the
+`zerocopy` build script with SIGILL before timing; three other worker attempts
+failed strict-remote target-alias preflight or were cancelled while queued.
+Those are infrastructure-only exclusions, not extra samples, and no local
+Cargo fallback was allowed.
+
+BEHAVIOR EVIDENCE, despite the performance rejection: before removal, the
+candidate passed all six focused release Zipf tests. The new proof compared
+64-value batches bit-for-bit with 64 singleton calls and compared the following
+RNG word at `a={1.000001, 2, 17, 1024, 1025, infinity}`, plus the empty-batch
+no-draw case. Existing golden and live-NumPy Zipf oracle tests also passed. The
+required strict-remote divergence ledger passed with zero entries. This proves
+the lever was rejected for measurement quality, not semantic drift.
+
+ALIEN RECOMMENDATION CONTRACT: this instantiated partial evaluation and
+multi-stage specialization from `alien_cs_graveyard.md` sections 6.7/6.17.
+EV was 18 (`impact=3 * confidence=4 * reuse=3 / effort=2`), tier A. The smallest
+wedge was one `Generator::zipf(a, size)` batch; expected loss was three
+batch-invariant powers/divisions per output. Risks were changed rejection
+arithmetic, large-`a` draw count, empty-batch draw count, and bitstream drift;
+the focused proof covered each. Source was internal safe Rust; legal review,
+external-paper reproduction, interference, and demo linkage were N/A.
+
+RETRY CONDITION PREDICATE: do not touch production Zipf caching again until a
+strict-remote benchmark resets both generators to the same seed outside every
+timed observation (thereby replaying a fixed rejection trace), measures at
+least 50 ms per arm per observation on an otherwise idle worker, and produces
+an interleaved former/candidate row plus candidate A/A null with all four CVs
+strictly below 5% and the null within 2% of unity. The candidate must then still
+win by at least 5% on two parameter regimes and re-pass bitstream/oracle and
+divergence gates. RandomState's separate legacy Zipf implementation is not
+closed by this Generator-only probe, but it requires its own profile and cannot
+inherit the apparent direction here.
+
+REPRODUCTION:
+
+```bash
+RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1264463 CARGO_PROFILE_RELEASE_LTO=false rch exec -- cargo bench -p fnp-random --bench random_ops --profile release -- zipf_parameter_cache --noplot
+```
+
+Measured atop parent `22335ca1`; retained benchmark SHA-256
+`1213b7f0353da5a1354ec598173da54a39922c2fafb75f12b119f98d1d04718f`.
+Verdict: **REJECT**. Production is unchanged; Generator Zipf batch-invariant
+term hoisting is CLOSED until the predicate above holds.
+
 ## 2026-07-22 - WIN (KEEP): parse plain integer `loadtxt` rows from borrowed tokens - 2.1875x
 
 `GoldSummit`, bead `franken_numpy-ixs5y.373`. The ledger and recent Git log
