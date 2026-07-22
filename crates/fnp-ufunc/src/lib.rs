@@ -17977,7 +17977,12 @@ impl UFuncArray {
     /// byte-exact by construction. An all-NaN input errs so the caller defers
     /// to numpy (which owns the "All-NaN slice encountered" RuntimeWarning).
     pub fn nan_fractions_axis_none(&self, qs: &[f64]) -> Result<Self, UFuncError> {
-        let filtered: Vec<f64> = self.values.iter().copied().filter(|v| !v.is_nan()).collect();
+        let filtered: Vec<f64> = self
+            .values
+            .iter()
+            .copied()
+            .filter(|v| !v.is_nan())
+            .collect();
         if filtered.is_empty() {
             return Err(UFuncError::Msg("nan_fractions: all-NaN input".into()));
         }
@@ -18485,7 +18490,9 @@ impl UFuncArray {
         let mut has_neg_zero = false;
         for &v in &self.values {
             if v.is_nan() {
-                return Err(UFuncError::Msg("weighted_quantile: NaN values defer".into()));
+                return Err(UFuncError::Msg(
+                    "weighted_quantile: NaN values defer".into(),
+                ));
             }
             if v == 0.0 {
                 if v.is_sign_negative() {
@@ -18782,7 +18789,9 @@ impl UFuncArray {
         method: QuantileInterp,
     ) -> Result<Self, UFuncError> {
         if !(0.0..=1.0).contains(&q) {
-            return Err(UFuncError::Msg(format!("quantile: q={q} must be in [0, 1]")));
+            return Err(UFuncError::Msg(format!(
+                "quantile: q={q} must be in [0, 1]"
+            )));
         }
         self.percentile_method_fraction(q, axis, method)
     }
@@ -19702,13 +19711,7 @@ impl UFuncArray {
                 // Preserve exact integers without building a temporary source-index
                 // vector: both bridge and sidecar payloads follow the same blocks.
                 let mut values = vec![0.0; out_count];
-                fill_meshgrid_blocks(
-                    &mut values,
-                    &arr.values,
-                    stride,
-                    alen,
-                    parallel,
-                );
+                fill_meshgrid_blocks(&mut values, &arr.values, stride, alen, parallel);
                 let integer_sidecar = match sidecar {
                     IntegerSidecar::I64(source) => {
                         let mut exact = vec![0_i64; out_count];
@@ -19746,9 +19749,10 @@ impl UFuncArray {
                     } else if alen.is_power_of_two() {
                         let mask = alen - 1;
                         if parallel {
-                            values.par_chunks_mut(stride).enumerate().for_each(
-                                |(block, chunk)| chunk.fill(arr.values[block & mask]),
-                            );
+                            values
+                                .par_chunks_mut(stride)
+                                .enumerate()
+                                .for_each(|(block, chunk)| chunk.fill(arr.values[block & mask]));
                         } else {
                             for (block, chunk) in values.chunks_mut(stride).enumerate() {
                                 chunk.fill(arr.values[block & mask]);
@@ -20661,7 +20665,9 @@ impl UFuncArray {
     /// Mimics `np.quantile(a, q)`. Like `percentile` but q is in [0, 1] instead of [0, 100].
     pub fn quantile(&self, q: f64, axis: Option<isize>) -> Result<Self, UFuncError> {
         if !(0.0..=1.0).contains(&q) {
-            return Err(UFuncError::Msg(format!("quantile: q={q} must be in [0, 1]")));
+            return Err(UFuncError::Msg(format!(
+                "quantile: q={q} must be in [0, 1]"
+            )));
         }
         self.percentile_fraction(q, axis)
     }
@@ -30140,7 +30146,11 @@ fn format_nd(
 #[inline]
 fn numpy_quantile_lerp(a: f64, b: f64, t: f64) -> f64 {
     let diff = b - a;
-    if t >= 0.5 { b - diff * (1.0 - t) } else { a + diff * t }
+    if t >= 0.5 {
+        b - diff * (1.0 - t)
+    } else {
+        a + diff * t
+    }
 }
 
 /// Linear interpolation for percentile on a sorted slice (NumPy default method).
@@ -33620,10 +33630,7 @@ fn cumulate_axis(
         // Every lane performs exactly one `fold(identity, value)`. Write that
         // result directly instead of zero-filling the output and dispatching
         // one-element scan lanes through Rayon.
-        return Ok(values
-            .iter()
-            .map(|&value| fold(identity, value))
-            .collect());
+        return Ok(values.iter().map(|&value| fold(identity, value)).collect());
     }
 
     let mut out = vec![0.0; total];
@@ -33706,10 +33713,7 @@ fn cumulate_axis_i64(
         return Ok(vec![0i64; total]);
     }
     if axis_len == 1 {
-        return Ok(values
-            .iter()
-            .map(|&value| fold(identity, value))
-            .collect());
+        return Ok(values.iter().map(|&value| fold(identity, value)).collect());
     }
 
     let mut out = vec![0i64; total];
@@ -45054,11 +45058,21 @@ print(json.dumps(payload))
         };
         let min_reference: Vec<u64> = values
             .chunks_exact(cols)
-            .map(|row| row[1..].iter().fold(row[0], |acc, &v| nan_min(acc, v)).to_bits())
+            .map(|row| {
+                row[1..]
+                    .iter()
+                    .fold(row[0], |acc, &v| nan_min(acc, v))
+                    .to_bits()
+            })
             .collect();
         let max_reference: Vec<u64> = values
             .chunks_exact(cols)
-            .map(|row| row[1..].iter().fold(row[0], |acc, &v| nan_max(acc, v)).to_bits())
+            .map(|row| {
+                row[1..]
+                    .iter()
+                    .fold(row[0], |acc, &v| nan_max(acc, v))
+                    .to_bits()
+            })
             .collect();
 
         let array = UFuncArray::new(vec![rows, cols], values, DType::F64).expect("array");
@@ -45071,7 +45085,10 @@ print(json.dumps(payload))
             let min = array.reduce_min(Some(1), false).expect("last-axis min");
             let max = array.reduce_max(Some(1), false).expect("last-axis max");
             (
-                prod.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                prod.values()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
                 min.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 max.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             )
@@ -49538,10 +49555,7 @@ print(json.dumps(payload))
             let expected_shape: Vec<usize> = perm.iter().map(|&a| dims[a]).collect();
             assert_eq!(out.shape(), expected_shape, "shape for {dims:?} {perm:?}");
             assert_eq!(
-                out.values()
-                    .iter()
-                    .map(|v| v.to_bits())
-                    .collect::<Vec<_>>(),
+                out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 naive_permute_bits(&data, dims, perm),
                 "bits for {dims:?} {perm:?}"
             );
@@ -49560,7 +49574,13 @@ print(json.dumps(payload))
         // Sidecar resize must reproduce the former modulo-gather path exactly:
         // f64 bridge bits AND exact integer payloads beyond 2^53, for expand
         // (non-multiple lengths), exact-multiple, and shrink cases.
-        let signed_values = vec![i64::MIN, -((1_i64 << 53) + 7), (1_i64 << 53) + 9, i64::MAX, 42];
+        let signed_values = vec![
+            i64::MIN,
+            -((1_i64 << 53) + 7),
+            (1_i64 << 53) + 9,
+            i64::MAX,
+            42,
+        ];
         let arr = UFuncArray::from_storage(vec![5], ArrayStorage::I64(signed_values.clone()))
             .expect("sidecar array");
         for &new_len in &[13usize, 10, 3, 5, 1] {
@@ -49570,8 +49590,7 @@ print(json.dumps(payload))
             let expected_bridge: Vec<u64> = (0..new_len)
                 .map(|i| arr.values()[i % 5].to_bits())
                 .collect();
-            let expected_sidecar: Vec<i64> =
-                (0..new_len).map(|i| signed_values[i % 5]).collect();
+            let expected_sidecar: Vec<i64> = (0..new_len).map(|i| signed_values[i % 5]).collect();
             assert_eq!(
                 out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 expected_bridge,
@@ -49589,7 +49608,10 @@ print(json.dumps(payload))
             .expect("unsigned array");
         let out = arr.resize(&[9]).expect("unsigned sidecar resize");
         let expected: Vec<u64> = (0..9).map(|i| unsigned_values[i % 4]).collect();
-        assert_eq!(out.to_storage().expect("storage"), ArrayStorage::U64(expected));
+        assert_eq!(
+            out.to_storage().expect("storage"),
+            ArrayStorage::U64(expected)
+        );
     }
 
     #[test]
@@ -49631,10 +49653,7 @@ print(json.dumps(payload))
             let expected_shape: Vec<usize> = perm.iter().map(|&a| dims[a]).collect();
             assert_eq!(out.shape(), expected_shape, "shape for {dims:?} {perm:?}");
             assert_eq!(
-                out.values()
-                    .iter()
-                    .map(|v| v.to_bits())
-                    .collect::<Vec<_>>(),
+                out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 naive_permute_bits(&data, dims, perm),
                 "bits for {dims:?} {perm:?}"
             );
@@ -55003,10 +55022,7 @@ print(json.dumps(payload))
             let out = arr.flip(Some(axis)).expect("singleton flip");
             assert_eq!(out.shape(), &[6, 1]);
             assert_eq!(
-                out.values()
-                    .iter()
-                    .map(|v| v.to_bits())
-                    .collect::<Vec<_>>(),
+                out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 bits.to_vec()
             );
             assert_ne!(out.values().as_ptr(), arr.values().as_ptr());
@@ -55019,9 +55035,8 @@ print(json.dumps(payload))
 
         // Exact integer sidecar beyond 2^53 preserved with fresh backing.
         let signed_values = vec![i64::MIN, -((1_i64 << 53) + 7), (1_i64 << 53) + 9, i64::MAX];
-        let signed =
-            UFuncArray::from_storage(vec![4, 1], ArrayStorage::I64(signed_values.clone()))
-                .expect("signed array");
+        let signed = UFuncArray::from_storage(vec![4, 1], ArrayStorage::I64(signed_values.clone()))
+            .expect("signed array");
         let signed_out = signed.flip(Some(1)).expect("signed singleton flip");
         assert_eq!(
             signed_out.to_storage().expect("signed storage"),
@@ -55033,8 +55048,8 @@ print(json.dumps(payload))
         assert_eq!(empty.flip(Some(1)).unwrap().shape(), &[3, 0]);
 
         // Non-singleton flips are untouched by the shortcut.
-        let dense = UFuncArray::new(vec![2, 3], (0..6).map(|i| i as f64).collect(), DType::F64)
-            .unwrap();
+        let dense =
+            UFuncArray::new(vec![2, 3], (0..6).map(|i| i as f64).collect(), DType::F64).unwrap();
         assert_eq!(
             dense.flip(Some(1)).unwrap().values(),
             &[2.0, 1.0, 0.0, 5.0, 4.0, 3.0]

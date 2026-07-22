@@ -1203,11 +1203,15 @@ impl ArrayStorage {
         }
 
         if let (Self::I64(values), DType::I32) = (self, target) {
-            return Ok(Self::I32(values.iter().map(|&value| value as i32).collect()));
+            return Ok(Self::I32(
+                values.iter().map(|&value| value as i32).collect(),
+            ));
         }
 
         if let (Self::U64(values), DType::U32) = (self, target) {
-            return Ok(Self::U32(values.iter().map(|&value| value as u32).collect()));
+            return Ok(Self::U32(
+                values.iter().map(|&value| value as u32).collect(),
+            ));
         }
 
         let mut result = Self::zeros(target, n);
@@ -1938,10 +1942,14 @@ impl ArrayStorage {
         // borrows, Complex64 widens inline (identical kernel expression tree;
         // the .360 unary sibling of the closed binary borrow/widen surface).
         if let Self::Complex128(v) = self {
-            return Self::Complex128(v.iter().map(|&(r, i)| {
-                let ea = r.exp();
-                (ea * i.cos(), ea * i.sin())
-            }).collect());
+            return Self::Complex128(
+                v.iter()
+                    .map(|&(r, i)| {
+                        let ea = r.exp();
+                        (ea * i.cos(), ea * i.sin())
+                    })
+                    .collect(),
+            );
         }
         if let Self::Complex64(v) = self {
             return Self::Complex128(
@@ -1973,11 +1981,15 @@ impl ArrayStorage {
         // borrows, Complex64 widens inline (identical kernel expression tree;
         // the .360 unary sibling of the closed binary borrow/widen surface).
         if let Self::Complex128(v) = self {
-            return Self::Complex128(v.iter().map(|&(r, i)| {
-                let mag = (r * r + i * i).sqrt();
-                let ang = i.atan2(r);
-                (mag.ln(), ang)
-            }).collect());
+            return Self::Complex128(
+                v.iter()
+                    .map(|&(r, i)| {
+                        let mag = (r * r + i * i).sqrt();
+                        let ang = i.atan2(r);
+                        (mag.ln(), ang)
+                    })
+                    .collect(),
+            );
         }
         if let Self::Complex64(v) = self {
             return Self::Complex128(
@@ -2011,12 +2023,16 @@ impl ArrayStorage {
         // borrows, Complex64 widens inline (identical kernel expression tree;
         // the .360 unary sibling of the closed binary borrow/widen surface).
         if let Self::Complex128(v) = self {
-            return Self::Complex128(v.iter().map(|&(r, i)| {
-                let mag = (r * r + i * i).sqrt();
-                let re = f64::midpoint(mag, r).sqrt();
-                let im = f64::midpoint(mag, -r).sqrt();
-                (re, if i >= 0.0 { im } else { -im })
-            }).collect());
+            return Self::Complex128(
+                v.iter()
+                    .map(|&(r, i)| {
+                        let mag = (r * r + i * i).sqrt();
+                        let re = f64::midpoint(mag, r).sqrt();
+                        let im = f64::midpoint(mag, -r).sqrt();
+                        (re, if i >= 0.0 { im } else { -im })
+                    })
+                    .collect(),
+            );
         }
         if let Self::Complex64(v) = self {
             return Self::Complex128(
@@ -2075,17 +2091,13 @@ impl ArrayStorage {
             (Self::Complex64(a), Self::Complex128(b)) => Self::Complex128(
                 a.iter()
                     .zip(b)
-                    .map(|(&(zr, zi), &w)| {
-                        complex_pow_kernel((f64::from(zr), f64::from(zi)), w)
-                    })
+                    .map(|(&(zr, zi), &w)| complex_pow_kernel((f64::from(zr), f64::from(zi)), w))
                     .collect(),
             ),
             (Self::Complex128(a), Self::Complex64(b)) => Self::Complex128(
                 a.iter()
                     .zip(b)
-                    .map(|(&z, &(wr, wi))| {
-                        complex_pow_kernel(z, (f64::from(wr), f64::from(wi)))
-                    })
+                    .map(|(&z, &(wr, wi))| complex_pow_kernel(z, (f64::from(wr), f64::from(wi))))
                     .collect(),
             ),
             _ => {
@@ -3780,11 +3792,7 @@ mod tests {
             (f64::MIN_POSITIVE, f64::from_bits(1)),
             (1.5, -2.75),
         ]);
-        let b = ArrayStorage::from_complex128_vec(vec![
-            (0.0, -0.0),
-            (0.5, -2.0),
-            (-4.25, 0.125),
-        ]);
+        let b = ArrayStorage::from_complex128_vec(vec![(0.0, -0.0), (0.5, -2.0), (-4.25, 0.125)]);
         let former_a = a.to_complex128_vec();
         let former_b = b.to_complex128_vec();
         let former: Vec<_> = former_a

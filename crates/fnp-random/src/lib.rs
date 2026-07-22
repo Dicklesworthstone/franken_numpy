@@ -2826,7 +2826,10 @@ enum GammaShapeCache {
     /// former per-call cost exactly).
     Degenerate,
     /// `shape < 1.0` (uniform + exponential rejection).
-    Small { one_minus_shape: f64, inv_shape: f64 },
+    Small {
+        one_minus_shape: f64,
+        inv_shape: f64,
+    },
     /// Finite `shape > 1.0` (Marsaglia-Tsang).
     MarsagliaTsang { d: f64, c: f64 },
 }
@@ -6083,10 +6086,7 @@ impl Generator {
         // parameter-only gamma terms once and reuse them across every draw
         // (.334/.335 sibling; caches consume no RNG draws, so the output
         // stream is bit-identical).
-        let caches: Vec<GammaShapeCache> = alpha
-            .iter()
-            .map(|&a| GammaShapeCache::new(a))
-            .collect();
+        let caches: Vec<GammaShapeCache> = alpha.iter().map(|&a| GammaShapeCache::new(a)).collect();
         Ok((0..size)
             .map(|_| {
                 let gamma_samples: Vec<f64> = alpha
