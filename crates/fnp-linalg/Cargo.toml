@@ -46,3 +46,7 @@ harness = false
 [[bench]]
 name = "batch_solve"
 harness = false
+
+[[bench]]
+name = "gemm_microkernel"
+harness = false
