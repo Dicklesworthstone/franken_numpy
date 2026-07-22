@@ -2,7 +2,7 @@
 //!
 //! These target Python-boundary costs that the Rust engine benches do not see.
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::Criterion;
 use fnp_python::fnp_python;
 use pyo3::Bound;
 use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyTuple};
@@ -18842,8 +18842,47 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
+/// Decides whether one group function runs at all.
+///
+/// Criterion's `--` filter is only consulted inside `bench_function`, i.e. after
+/// a group function has already built its inputs. Every group here calls
+/// `Python::initialize`, registers a fresh `fnp_python` module, and allocates
+/// multi-million-element NumPy inputs before its first `bench_function`, so a
+/// filtered run still pays that setup for all ~190 groups. Setting
+/// `FNP_BENCH_GROUPS` to a comma-separated list of substrings restricts the run
+/// to the group functions whose names contain one of them; leaving it unset
+/// preserves the previous run-everything behavior exactly.
+fn group_enabled(group_fn_name: &str) -> bool {
+    let Ok(spec) = std::env::var("FNP_BENCH_GROUPS") else {
+        return true;
+    };
+    spec.split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .any(|token| group_fn_name.contains(token))
+}
+
+/// `criterion_main!` over group functions that are skipped unless selected.
+///
+/// Mirrors the `criterion_group!` + `criterion_main!` pair it replaces: one
+/// `configure_from_args` Criterion drives the selected targets, then a second
+/// one emits the final summary, exactly as the upstream macros do.
+macro_rules! gated_benches {
+    ( $( $target:ident ),+ $(,)? ) => {
+        fn main() {
+            let mut criterion = Criterion::default().configure_from_args();
+            $(
+                if group_enabled(stringify!($target)) {
+                    $target(&mut criterion);
+                }
+            )+
+
+            Criterion::default().configure_from_args().final_summary();
+        }
+    };
+}
+
+gated_benches!(
     bench_wide_string_sort_median_gate,
     bench_accumulate_extremum_median_gate,
     bench_int_convolve_median_gate,
@@ -19044,4 +19083,3 @@ criterion_group!(
     bench_einsum_boundary,
     bench_linalg_boundary
 );
-criterion_main!(benches);

@@ -69,3 +69,16 @@ strip = false
 [profile.bench]
 debug = "line-tables-only"
 strip = false
+
+# Triage profile for Criterion probes. Identical optimization level to
+# `release-perf`, minus the two knobs that dominate a cold bench build of the
+# large crates: thin LTO and codegen-units = 1. Cross-crate inlining is lost, so
+# ship-grade fnp-vs-numpy ratios must still be confirmed under `release-perf`;
+# this profile exists to locate levers without paying the cold-build cliff.
+[profile.bench-fast]
+inherits = "release"
+opt-level = 3
+lto = false
+codegen-units = 16
+debug = "line-tables-only"
+strip = false
