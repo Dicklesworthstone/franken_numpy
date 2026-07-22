@@ -7850,7 +7850,28 @@ fn packed_gemm_sub_assign_strided_serial(
     row_stride: usize,
     target: &mut [f64],
 ) {
-    let m_full = m - m % PACKED_MR;
+    if packed_sub_assign_tile_rows(k) == PACKED_MR_NARROW {
+        packed_gemm_sub_assign_strided_serial_tiled::<PACKED_MR_NARROW>(
+            a, b, m, k, n, row_stride, target,
+        );
+    } else {
+        packed_gemm_sub_assign_strided_serial_tiled::<PACKED_MR>(a, b, m, k, n, row_stride, target);
+    }
+}
+
+/// Strided trailing-update kernel, generic over row-tile height. Same tiling
+/// invariance as the contiguous form - `MR` regroups tiles without reordering
+/// any element's ascending k-sum - so all instantiations are BIT-IDENTICAL.
+fn packed_gemm_sub_assign_strided_serial_tiled<const MR: usize>(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    row_stride: usize,
+    target: &mut [f64],
+) {
+    let m_full = m - m % MR;
     let n_full = n - n % PACKED_NR;
     let nc = {
         let cols = (256 * 1024) / (k.max(1) * core::mem::size_of::<f64>());
@@ -7868,7 +7889,7 @@ fn packed_gemm_sub_assign_strided_serial(
             }
             let mut i0 = 0;
             while i0 < m_full {
-                let mut acc = [[0.0f64; PACKED_NR]; PACKED_MR];
+                let mut acc = [[0.0f64; PACKED_NR]; MR];
                 for kk in 0..k {
                     let brow = &bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR];
                     for (ii, row) in acc.iter_mut().enumerate() {
@@ -7884,7 +7905,7 @@ fn packed_gemm_sub_assign_strided_serial(
                         *slot -= v;
                     }
                 }
-                i0 += PACKED_MR;
+                i0 += MR;
             }
             j0 += PACKED_NR;
         }

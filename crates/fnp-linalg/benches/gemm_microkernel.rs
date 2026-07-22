@@ -341,6 +341,179 @@ fn bench_sub_assign_tile(c: &mut Criterion) {
     group.finish();
 }
 
+/// `packed_gemm_sub_assign_strided_serial`'s tile loop, generic over row-tile
+/// height. Differs from the contiguous form only in that the writeback strides
+/// by `row_stride` (the full matrix width) rather than `n`, so the output rows
+/// touched by one tile are further apart. That worse writeback locality is
+/// exactly why this needed measuring separately rather than inheriting the
+/// contiguous verdict.
+fn gemm_sub_assign_strided_tiled<const MR: usize>(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    row_stride: usize,
+    target: &mut [f64],
+) {
+    let m_full = m - m % MR;
+    let n_full = n - n % PROD_NR;
+    let nc = panel_cols(k, PROD_NR);
+    let mut bp = vec![0.0f64; k * PROD_NR];
+    let mut jc = 0;
+    while jc < n_full {
+        let jc_end = (jc + nc).min(n_full);
+        let mut j0 = jc;
+        while j0 < jc_end {
+            for kk in 0..k {
+                bp[kk * PROD_NR..kk * PROD_NR + PROD_NR]
+                    .copy_from_slice(&b[kk * n + j0..kk * n + j0 + PROD_NR]);
+            }
+            let mut i0 = 0;
+            while i0 < m_full {
+                let mut acc = [[0.0f64; PROD_NR]; MR];
+                for kk in 0..k {
+                    let brow = &bp[kk * PROD_NR..kk * PROD_NR + PROD_NR];
+                    for (ii, row) in acc.iter_mut().enumerate() {
+                        let av = a[(i0 + ii) * k + kk];
+                        for (slot, &bv) in row.iter_mut().zip(brow) {
+                            *slot += av * bv;
+                        }
+                    }
+                }
+                for (ii, row) in acc.iter().enumerate() {
+                    let base = (i0 + ii) * row_stride + j0;
+                    for (slot, &v) in target[base..base + PROD_NR].iter_mut().zip(row) {
+                        *slot -= v;
+                    }
+                }
+                i0 += MR;
+            }
+            j0 += PROD_NR;
+        }
+        jc += nc;
+    }
+    for i in 0..m_full {
+        let a_base = i * k;
+        let o_base = i * row_stride;
+        for j in n_full..n {
+            let mut s = 0.0f64;
+            for kk in 0..k {
+                s += a[a_base + kk] * b[kk * n + j];
+            }
+            target[o_base + j] -= s;
+        }
+    }
+    for i in m_full..m {
+        let a_base = i * k;
+        let o_base = i * row_stride;
+        for j in 0..n {
+            let mut s = 0.0f64;
+            for kk in 0..k {
+                s += a[a_base + kk] * b[kk * n + j];
+            }
+            target[o_base + j] -= s;
+        }
+    }
+}
+
+/// (m, k, n, row_stride). Mirrors the blocked-LU trailing update at line 676,
+/// where `row_stride` is the full matrix width and k is `LU_PANEL_NB`.
+const STRIDED_SHAPES: [(usize, usize, usize, usize); 3] = [
+    (960, 64, 960, 1024),
+    (896, 128, 896, 1024),
+    (512, 64, 512, 640),
+];
+
+fn assert_strided_bit_identical() {
+    for (m, k, n, row_stride) in STRIDED_SHAPES {
+        let a = fill(m * k, 0x5D11_0001);
+        let b = fill(k * n, 0x5D11_0002);
+        let seed = fill(m * row_stride, 0x5D11_0003);
+
+        let mut four = seed.clone();
+        gemm_sub_assign_strided_tiled::<4>(&a, &b, m, k, n, row_stride, &mut four);
+        let mut two = seed;
+        gemm_sub_assign_strided_tiled::<2>(&a, &b, m, k, n, row_stride, &mut two);
+
+        for (idx, (x, y)) in four.iter().zip(two.iter()).enumerate() {
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "strided MR=2 diverged from MR=4 at {idx} ({m}x{k}x{n} stride {row_stride})"
+            );
+        }
+    }
+}
+
+fn bench_sub_assign_strided_tile(c: &mut Criterion) {
+    assert_strided_bit_identical();
+
+    let mut group = c.benchmark_group("gemm_sub_assign_strided_tile");
+    group.sample_size(20);
+    group.warm_up_time(std::time::Duration::from_secs(2));
+    group.measurement_time(std::time::Duration::from_secs(5));
+
+    for (m, k, n, row_stride) in STRIDED_SHAPES {
+        let a = fill(m * k, 0x5D11_0001);
+        let b = fill(k * n, 0x5D11_0002);
+        let mut target = vec![0.0f64; m * row_stride];
+        let label = format!("{m}x{k}x{n}s{row_stride}");
+
+        group.bench_with_input(BenchmarkId::new("prod_mr4", &label), &label, |bench, _| {
+            bench.iter(|| {
+                target.fill(1.0);
+                gemm_sub_assign_strided_tiled::<4>(
+                    black_box(&a),
+                    black_box(&b),
+                    m,
+                    k,
+                    n,
+                    row_stride,
+                    &mut target,
+                );
+                black_box(target[0]);
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("mr2", &label), &label, |bench, _| {
+            bench.iter(|| {
+                target.fill(1.0);
+                gemm_sub_assign_strided_tiled::<2>(
+                    black_box(&a),
+                    black_box(&b),
+                    m,
+                    k,
+                    n,
+                    row_stride,
+                    &mut target,
+                );
+                black_box(target[0]);
+            });
+        });
+        group.bench_with_input(
+            BenchmarkId::new("null_control_mr4", &label),
+            &label,
+            |bench, _| {
+                bench.iter(|| {
+                    target.fill(1.0);
+                    gemm_sub_assign_strided_tiled::<4>(
+                        black_box(&a),
+                        black_box(&b),
+                        m,
+                        k,
+                        n,
+                        row_stride,
+                        &mut target,
+                    );
+                    black_box(target[0]);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn bench_gemm_microkernel(c: &mut Criterion) {
     assert_all_shapes_bit_identical(256);
 
@@ -388,5 +561,10 @@ fn bench_gemm_microkernel(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_gemm_microkernel, bench_sub_assign_tile);
+criterion_group!(
+    benches,
+    bench_gemm_microkernel,
+    bench_sub_assign_tile,
+    bench_sub_assign_strided_tile
+);
 criterion_main!(benches);
