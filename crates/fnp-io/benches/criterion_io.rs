@@ -1220,6 +1220,10 @@ fn report_loadtxt_signed_pair(
     lhs_samples: &RefCell<Vec<f64>>,
     rhs_samples: &RefCell<Vec<f64>>,
 ) {
+    if lhs_samples.borrow().len() < 2 || rhs_samples.borrow().len() < 2 {
+        return;
+    }
+
     fn tail_stats(samples: &RefCell<Vec<f64>>) -> (usize, f64, f64) {
         let samples = samples.borrow();
         let count = samples.len().min(10);
@@ -1355,6 +1359,209 @@ fn bench_loadtxt_signed_nonnegative_staging(c: &mut Criterion) {
         });
     });
     report_loadtxt_signed_pair("null_candidate_aa", &null_a, &null_b);
+    group.finish();
+}
+
+#[inline(never)]
+fn loadtxt_signed_tail_candidate(
+    text: &str,
+    delimiter: char,
+    comments: char,
+    usecols: &[isize],
+) -> fnp_io::TextArrayData {
+    let offsets = usecols
+        .iter()
+        .map(|&column| {
+            assert!(column < 0, "tail candidate requires negative usecols");
+            usize::try_from(column.checked_neg().expect("representable tail offset"))
+                .expect("positive tail offset")
+        })
+        .collect::<Vec<_>>();
+    let max_tail = offsets.iter().copied().max().expect("nonempty usecols");
+
+    let mut values = Vec::new();
+    let mut ncols = None;
+    let mut nrows = 0usize;
+    for line in text.lines() {
+        let trimmed = line
+            .split_once(comments)
+            .map_or(line, |(prefix, _)| prefix)
+            .trim();
+        if trimmed.is_empty() || trimmed.starts_with(comments) {
+            continue;
+        }
+
+        let mut tail = vec![None; max_tail];
+        let mut width = 0usize;
+        if delimiter == ' ' {
+            for field in trimmed.split_whitespace() {
+                tail[width % max_tail] = Some(field);
+                width += 1;
+            }
+        } else {
+            for field in trimmed.split(delimiter) {
+                tail[width % max_tail] = Some(field);
+                width += 1;
+            }
+        }
+
+        let mut row_values = Vec::with_capacity(offsets.len());
+        for &offset in &offsets {
+            assert!(offset <= width, "tail candidate usecol in bounds");
+            let field = tail[(width - offset) % max_tail].expect("retained tail field");
+            row_values.push(field.trim().parse::<f64>().unwrap());
+        }
+        match ncols {
+            None => ncols = Some(row_values.len()),
+            Some(expected) => assert_eq!(row_values.len(), expected),
+        }
+        values.extend(row_values);
+        nrows += 1;
+    }
+
+    fnp_io::TextArrayData {
+        values,
+        nrows,
+        ncols: ncols.unwrap_or(0),
+    }
+}
+
+fn time_loadtxt_signed_tail(text: &str, usecols: &[isize], candidate: bool) -> Duration {
+    const REPETITIONS: u32 = 8;
+    let start = Instant::now();
+    for _ in 0..REPETITIONS {
+        let output = if candidate {
+            loadtxt_signed_tail_candidate(text, ',', '#', usecols)
+        } else {
+            fnp_io::loadtxt_usecols_signed(text, ',', '#', 0, usize::MAX, Some(usecols)).unwrap()
+        };
+        drop(black_box(output));
+    }
+    start.elapsed() / REPETITIONS
+}
+
+fn bench_loadtxt_signed_tail_staging(c: &mut Criterion) {
+    const ROWS: usize = 8_192;
+    const COLS: usize = 64;
+    const USECOLS: [isize; 4] = [-1, -8, -32, -1];
+
+    let mut text = String::new();
+    for row in 0..ROWS {
+        for col in 0..COLS {
+            if col > 0 {
+                text.push(',');
+            }
+            text.push_str(&format!("{}.{}", row % 977, col));
+        }
+        text.push('\n');
+    }
+
+    let output =
+        fnp_io::loadtxt_usecols_signed(&text, ',', '#', 0, usize::MAX, Some(&USECOLS)).unwrap();
+    assert_eq!(output.nrows, ROWS);
+    assert_eq!(output.ncols, USECOLS.len());
+    let candidate = loadtxt_signed_tail_candidate(&text, ',', '#', &USECOLS);
+    assert_eq!(output.nrows, candidate.nrows);
+    assert_eq!(output.ncols, candidate.ncols);
+    assert_eq!(output.values.len(), candidate.values.len());
+    assert!(
+        output
+            .values
+            .iter()
+            .zip(&candidate.values)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+
+    let mut group = c.benchmark_group("loadtxt_signed_tail_staging");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements((ROWS * COLS) as u64));
+    group.bench_function("current_width_relative", |bench| {
+        bench.iter(|| {
+            black_box(
+                fnp_io::loadtxt_usecols_signed(
+                    black_box(&text),
+                    ',',
+                    '#',
+                    0,
+                    usize::MAX,
+                    black_box(Some(&USECOLS)),
+                )
+                .unwrap(),
+            )
+        })
+    });
+
+    let former_samples = RefCell::new(Vec::new());
+    let candidate_samples = RefCell::new(Vec::new());
+    let order = Cell::new(0usize);
+    group.bench_function("former_vs_tail_ring_abba", |bench| {
+        bench.iter_custom(|iterations| {
+            let mut combined = Duration::ZERO;
+            for _ in 0..iterations {
+                let candidate_outer = order.get() & 1 == 1;
+                order.set(order.get().wrapping_add(1));
+                let (former_total, candidate_total) = if candidate_outer {
+                    let b1 = time_loadtxt_signed_tail(&text, &USECOLS, true);
+                    let a1 = time_loadtxt_signed_tail(&text, &USECOLS, false);
+                    let a2 = time_loadtxt_signed_tail(&text, &USECOLS, false);
+                    let b2 = time_loadtxt_signed_tail(&text, &USECOLS, true);
+                    (a1 + a2, b1 + b2)
+                } else {
+                    let a1 = time_loadtxt_signed_tail(&text, &USECOLS, false);
+                    let b1 = time_loadtxt_signed_tail(&text, &USECOLS, true);
+                    let b2 = time_loadtxt_signed_tail(&text, &USECOLS, true);
+                    let a2 = time_loadtxt_signed_tail(&text, &USECOLS, false);
+                    (a1 + a2, b1 + b2)
+                };
+                former_samples
+                    .borrow_mut()
+                    .push(former_total.as_secs_f64() * 0.5e9);
+                candidate_samples
+                    .borrow_mut()
+                    .push(candidate_total.as_secs_f64() * 0.5e9);
+                combined += former_total + candidate_total;
+            }
+            combined
+        });
+    });
+    report_loadtxt_signed_pair(
+        "effect_former_over_tail_ring",
+        &former_samples,
+        &candidate_samples,
+    );
+
+    let null_a = RefCell::new(Vec::new());
+    let null_b = RefCell::new(Vec::new());
+    let null_order = Cell::new(0usize);
+    group.bench_function("tail_ring_aa_null_abba", |bench| {
+        bench.iter_custom(|iterations| {
+            let mut combined = Duration::ZERO;
+            for _ in 0..iterations {
+                let b_outer = null_order.get() & 1 == 1;
+                null_order.set(null_order.get().wrapping_add(1));
+                let (a_total, b_total) = if b_outer {
+                    let b1 = time_loadtxt_signed_tail(&text, &USECOLS, true);
+                    let a1 = time_loadtxt_signed_tail(&text, &USECOLS, true);
+                    let a2 = time_loadtxt_signed_tail(&text, &USECOLS, true);
+                    let b2 = time_loadtxt_signed_tail(&text, &USECOLS, true);
+                    (a1 + a2, b1 + b2)
+                } else {
+                    let a1 = time_loadtxt_signed_tail(&text, &USECOLS, true);
+                    let b1 = time_loadtxt_signed_tail(&text, &USECOLS, true);
+                    let b2 = time_loadtxt_signed_tail(&text, &USECOLS, true);
+                    let a2 = time_loadtxt_signed_tail(&text, &USECOLS, true);
+                    (a1 + a2, b1 + b2)
+                };
+                null_a.borrow_mut().push(a_total.as_secs_f64() * 0.5e9);
+                null_b.borrow_mut().push(b_total.as_secs_f64() * 0.5e9);
+                combined += a_total + b_total;
+            }
+            combined
+        });
+    });
+    report_loadtxt_signed_pair("null_tail_ring_aa", &null_a, &null_b);
     group.finish();
 }
 
@@ -2480,6 +2687,7 @@ criterion_group!(
     bench_loadtxt_usecols_plan,
     bench_loadtxt_usecols_scatter,
     bench_loadtxt_signed_nonnegative_staging,
+    bench_loadtxt_signed_tail_staging,
     bench_loadtxt_plain_rows,
     bench_genfromtxt_full_plain_rows,
     bench_tofile_text_integral,

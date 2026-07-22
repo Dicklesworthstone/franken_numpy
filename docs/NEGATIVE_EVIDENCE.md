@@ -4,6 +4,81 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-22 - REJECT/HOLD (production untouched): bounded tail ring for all-negative signed `loadtxt` usecols - 1.82-1.98x directional, but no run cleared the CV/null gate
+
+`GoldSummit`, bead `franken_numpy-ixs5y.370`. Ledger and recent-history
+search preceded the candidate. The nonnegative signed-usecols delegation is
+closed by `.369`, the unsigned plan hoist is closed by `.342`, and direct
+scatter into the output is rejected by `.351`. Negative row-width-relative
+selection was explicitly left as a distinct unmeasured primitive, so this
+probe did not reopen any closed lever.
+
+PROFILE FIRST, with production untouched: an 8,192-row x 64-column comma
+fixture selected `[-1, -8, -32, -1]`, scanning 524,288 fields to return only
+32,768 values. The strict-remote release baseline on effective worker
+`vmi1227854` was 9.2989 ms (`[8.5194, 10.003]`). A three-second
+`perf record -F 199 -e cycles:u` run captured 726 samples with zero loss:
+`CharSearcher::next_match` held 26.76%, `memchr_aligned` 23.82%, and the
+full-row `Vec<&str>` collect alone held **10.67%**, with `finish_grow` /
+`realloc` adding several more percent. The retain-all-to-consume-four shape
+was therefore a measured allocation/token-selection hotspot rather than a
+source-reading guess.
+
+THE ONE PROTOTYPE, benchmark-only: for nonempty all-negative selections,
+convert offsets once, retain only the last `max(abs(usecol))` field slices in
+a circular tail buffer, then parse in original request order. The generic
+production resolver remained byte-for-byte untouched. The benchmark asserts
+dimensions, length, and every output `f64::to_bits()` before timing. It also
+fixes the existing paired reporter so unrelated Criterion filters skip an
+empty report instead of panicking.
+
+Four same-binary ABBA/BAAB attempts all showed a large directional effect,
+but every one failed the predeclared requirement that both effect arms and
+both A/A-null arms have CV below 5%:
+
+| effective worker / averaging | former mean | tail-ring mean | effect CVs | former/candidate | A/A null means | null CVs | null ratio |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `vmi1264463` / 1 parse | 28.030643 ms | 15.152525 ms | 22.352% / 38.446% | 1.8499x | 12.372944 / 11.385795 ms | 28.546% / 15.361% | 1.0867x |
+| `vmi1264463` / 4 parses | 23.085645 ms | 11.681743 ms | 4.698% / 9.713% | 1.9762x | 13.112080 / 16.821718 ms | 28.754% / 50.901% | 0.7795x |
+| `vmi1227854` / 8 parses | 10.050946 ms | 5.390503 ms | 12.481% / 7.986% | 1.8646x | 5.374633 / 5.227375 ms | 13.778% / 11.742% | 1.0282x |
+| `vmi1227854` / 64 parses | 10.110809 ms | 5.545166 ms | 7.780% / 19.552% | 1.8234x | 6.600492 / 6.118206 ms | 7.357% / 8.754% | 1.0788x |
+
+All four rows are excluded evidence. The persistent 1.82-1.98x direction is
+interesting, but neither repetition averaging nor a hard worker pin produced
+an admissible null. No production code was edited, so there is nothing to
+revert and no speedup is claimed.
+
+ALIEN RECOMMENDATION CONTRACT: the prototype maps the graveyard's selection
+vectors (§8.2) onto a text-token stream, then uses guarded multi-stage/runtime
+specialization (§6.7/§6.17). EV was 18.0
+(`impact=3 * confidence=4 * reuse=3 / effort=2 * friction=1`), tier A. The
+adoption wedge would be only nonempty all-negative `usecols`; all mixed,
+positive, empty, unrepresentable, or over-budget shapes would retain the
+generic path. Budgeted mode must cap the tail at 4,096 fields so an adversarial
+huge negative offset cannot induce a huge allocation; cap exhaustion falls
+back exactly. Expected loss compares one bounded tail allocation plus one scan
+against full-row materialization. Calibration is the A/B+null gate above.
+Ordering and parse-versus-bounds precedence would be preserved by retaining
+raw slices and parsing in request order; floating-point bits, RNG state, and
+dtype are unchanged. The primary risk is constants/noise, countered by the
+generic fallback and the mandatory same-worker null. Source is internal safe
+Rust, so legal review is N/A; primary-paper status is hypothesis only, no
+external system is claimed reproduced. Interference and demo linkage are N/A.
+Rollback would be one commit revert if a future admissible implementation
+lands. Baseline comparator is the current full-row `Vec<&str>` resolver.
+
+REPRODUCTION:
+
+```bash
+RCH_WORKER=vmi1227854 RCH_WORKERS=vmi1227854 RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 CARGO_PROFILE_RELEASE_LTO=false rch --no-self-healing exec -- cargo bench -p fnp-io --bench criterion_io --profile release -- loadtxt_signed_tail_staging --noplot
+```
+
+Verdict: **REJECT/HOLD**. Retry only on an isolated effective worker where the
+retained candidate A/A null is within 2% of unity and both null arms are below
+5% CV; then require both effect arms below 5% CV in the same exact-binary run.
+Until that predicate holds, this all-negative tail-ring lever is ledger-CLOSED.
+The strict-remote divergence gate passed on `vmi1227854` with zero entries.
+
 ## 2026-07-22 - WIN (KEEP): partially evaluate nonnegative signed `loadtxt` usecols into the unsigned call-level plan - 1.5125x
 
 `GoldSummit`, bead `franken_numpy-ixs5y.369`. Ledger and recent-history
@@ -82,6 +157,241 @@ benchmark SHA-256
 Verdict: **KEEP**. Do not re-probe nonnegative signed-usecols plan hoisting;
 negative-index planning is a different row-width-dependent primitive and must
 start from its own measured hotspot.
+
+## 2026-07-22 - WIN (SHIP): TSQR tall-skinny QR native kernel - 2.42x-5.13x vs same-host numpy; the dense-linalg lever was never the GEMM tile
+
+`BlackThrush`, bead `deadlock-audit-9d05r`, campaign `franken_numpy-ixs5y`.
+Alien-graveyard primitive: communication-avoiding QR (corpus §9.6,
+`alien_cs_graveyard.md` L3385-3405). Opened immediately after the GEMM-tile
+REJECT below, per "a rejected streak means dig a DIFFERENT alien primitive".
+
+WHY THIS SHAPE WAS UNCLAIMED: `qr_mxn` builds an explicit m x m Q. At m = 1e6
+that is 1e12 elements (8 TB), so the shipped native QR **cannot run tall-skinny
+inputs at all** - this is a missing capability, not merely a slow one. Meanwhile
+`fnp.linalg.qr`/`svd`/`pinv`/`matrix_rank`/`lstsq` all delegate unconditionally
+to numpy, and LAPACK's `dgeqrf` on tall-skinny falls into an unblocked BLAS-2
+path making n passes over the m x n data.
+
+THE LEVER (`crates/fnp-linalg/src/lib.rs`, new `pub fn tsqr_r`): split the rows
+into one block per Rayon worker (>= `TSQR_MIN_LEAF_ROWS` = 4096 each), reduce
+each block to its n x n R with a Q-free Householder pass, then fold the R
+factors pairwise up a binary tree. One streaming pass over the data instead of
+n; each leaf's working set is cache-resident.
+
+DETERMINISM: leaves are computed in parallel but written to fixed index
+positions and the fold is a SEQUENTIAL left-to-right binary tree, so FP
+association does not depend on thread count or scheduling. Locked by
+`tsqr_r_is_deterministic_across_repeated_runs` (bitwise `to_bits()` equality
+over repeated runs). It is NOT bit-identical to LAPACK - TSQR applies a
+different but exactly-orthogonal reflector sequence, so it is backward stable
+and only `allclose` to `dgeqrf`. Any future wiring to `fnp.linalg.qr` must
+therefore gate on `allclose` plus row-sign normalization, NOT bit-exactness.
+
+THE DECISIVE SUB-LEVER (this is the reusable lesson): the first working version
+LOST 1.72x at 1e6x16 while WINNING at n=8, and scaled 11.7x going from n=8 to
+n=16 when O(m*n^2) predicts 4.0x. Cause: the Householder trailing update
+recomputed one dot product per trailing column, walking `block[i * n + j]` down
+`i` at stride n - i.e. 2*(n-col) cache-hostile passes over the block per
+reflector. Hoisting the dots into a buffer collapses that to two sequential
+row-major passes total. Arithmetic is preserved exactly (each `dots[j]` still
+accumulates over `i` ascending; the scale is deliberately kept as
+`2.0 * dot / v_norm_sq` rather than `dot * (2.0 / v_norm_sq)`, which would
+change rounding). Effect at fixed correctness:
+
+| shape | before interchange | after | speedup |
+|---|---:|---:|---:|
+| 1e6 x 16 | 362,471,446 ns | 87,344,030 ns | **4.15x** |
+| 1e6 x 8 | 30,985,506 ns | 21,924,319 ns | 1.41x |
+| 2e6 x 8 | 128,239,949 ns | 65,330,606 ns | 1.96x |
+
+Scaling became textbook afterwards: n=8 -> n=16 now costs 3.99x vs the 4.00x
+that O(m*n^2) predicts.
+
+MEASURED vs numpy, SAME HOST (worker `vmi1227854`, 10 cores, numpy 2.4.6 via
+direct SSH; fnp side `bench-fast`, 20 samples / 2 s warm-up / 5 s measurement):
+
+| shape | numpy default | numpy 1-thread | fnp `tsqr_r` | vs default | vs 1-thread |
+|---|---:|---:|---:|---:|---:|
+| 1e6 x 16 | 210.94 ms | 248.77 ms | 87.34 ms | **2.42x** | 2.85x |
+| 1e6 x 8 | 98.52 ms | 98.78 ms | 21.92 ms | **4.49x** | 4.51x |
+| 2e6 x 8 | 335.13 ms | 198.42 ms | 65.33 ms | **5.13x** | 3.04x |
+
+Both threading configurations are reported because these workers are contended;
+the win holds either way. Criterion spread is 7.7-10.6%, above the 5% CV bar, but
+the margins are 2.4-5.1x - far outside noise. A sub-1.3x claim here would need
+the pinned-warm variance protocol; these do not.
+
+CORRECTNESS: 4 new unit tests, all green on `vmi1227854`
+(`cargo test -p fnp-linalg --release tsqr`, 4 passed / 0 failed) -
+agreement with `qr_mxn` up to row sign at (64,8)/(256,16)/(513,7);
+upper-triangularity plus the independent Gram identity RᵀR == AᵀA at 4096x12
+(which determines R up to row signs for full-rank A and never forms Q, so it
+validates the whole reduction tree); bitwise determinism; and shape/finiteness
+rejection. The bench `crates/fnp-linalg/benches/tsqr.rs` re-runs the same gates
+before timing.
+
+SCOPE, stated plainly: this ships the KERNEL, proven and tested. It is NOT yet
+wired into the `fnp.linalg.qr` Python surface, so there is no user-visible
+end-to-end win yet - that wiring (plus `mode='r'` / `lstsq` / `matrix_rank`,
+which never form Q and so have the weakest parity surface) is the clean next
+lever and is deliberately left as a separate commit.
+
+MEASUREMENT TRAP (cost me a false 34x on first scoping): these hosts run heavily
+contended. `np.linalg.solve(1024)` measures 930 ms at default threading and
+21 ms at `OPENBLAS_NUM_THREADS=1`. An unpinned "route symmetric solve to
+Cholesky" lever looks like a 45x win and is pure thread oversubscription. Also:
+the "34x/81x headroom" figure that motivated this dig was numpy measured against
+a same-flop-count `T.T@T` reference, which is an upper bound on an ideal kernel,
+NOT an achievable target. Real delivered margin is 2.4-5.1x. Quote the
+same-host head-to-head, never the flop-count reference.
+
+## 2026-07-22 - REJECT (NO-SHIP): explicit `std::simd` register tile in the packed f64 GEMM microkernel - NO effect, every delta inside the A/A null-control spread
+
+`BlackThrush`, follow-on to `deadlock-audit-9d05r`. FIRST, the scoping
+correction a future agent needs: **"register-tiled matmul micro-kernel with
+packed panels" is ALREADY SHIPPED and must not be re-opened as a fresh lane.**
+`crates/fnp-linalg/src/lib.rs` `packed_gemm_serial` is a cache-blocked,
+B-packed kernel with an MR=4 x NR=8 register tile, NC column-panel packing into
+a kk-major micropanel, and a band-parallel `packed_gemm` driver; bit-identity is
+locked by `packed_gemm_sub_assign_matches_materialized_product_sha256` and
+siblings. The int and f16 GEMM families are likewise closed (35.4x, fully
+tiled).
+
+The one genuinely un-measured sub-lever was that the shipped tile is a plain
+`[[f64; NR]; MR]` scalar array relying on LLVM autovectorization, never an
+explicit portable-SIMD tile. Prior `std::simd` ledger rows are NOT this: 19238
+is `matrix_norm` column sums (KEEP), 19477/19524 is `batch_cholesky` f64x4
+across-batch-lanes (REJECT). So this was probed, not assumed.
+
+THE PROBE (`crates/fnp-linalg/benches/gemm_microkernel.rs`, new crate-local
+bench, deliberately NOT a production edit - nothing shipped, so no production
+source changed): reproduces the shipped tile loop verbatim as `gemm_scalar`,
+adds `gemm_simd` whose tile is `[Simd<f64, 8>; 4]`, and benches them on
+identical data at n = 256/512/1024 with a `scalar_null_control` A/A arm.
+Vectorization is across the NR output COLUMNS, never across `k`, so lane `j`
+still sums ascending `k` and Rust does not contract mul+add into FMA - the
+variant is byte-exact, and `assert_bit_identical` (bitwise `to_bits()`
+comparison over every output element at all three sizes) PASSED with 0 panics.
+Exactness was never the problem; speed was.
+
+MEASURED, strict remote-only, worker `vmi1227854`, `bench-fast` profile, 20
+samples / 2 s warm-up / 5 s measurement, **total job 135.6 s**:
+
+| n | scalar | simd | A/A null control | simd/scalar | null/scalar |
+|---|---:|---:|---:|---:|---:|
+| 256 | 891,445 ns | 981,777 ns | 855,662 ns | 1.101x | 0.960x |
+| 512 | 8,784,008 ns | 8,684,285 ns | 9,584,553 ns | 0.989x | 1.091x |
+| 1024 | 62,014,649 ns | 66,781,006 ns | 65,406,320 ns | 1.077x | 1.055x |
+
+VERDICT: the null control - the SAME scalar kernel benched twice - lands at
+0.960x / 1.091x / 1.055x of the scalar arm. The simd-vs-scalar deltas
+(1.101x / 0.989x / 1.077x) are the same magnitude and do not even share a sign
+across sizes. There is no effect to extract: LLVM already vectorizes the
+NR=8 inner row, and an explicit `Simd<f64,8>` tile is emitting equivalent code.
+CV is far above the 5% bar on this contended host, so nothing finer than "no
+effect" is claimable here anyway.
+
+RETRY PREDICATE: only on a QUIET, pinned worker where the A/A null control
+holds under 2%, AND only for a tile shape the compiler cannot autovectorize -
+i.e. changing MR/NR itself, or an ISA-gated wider tile (f64x8 needs AVX-512 to
+be one register; on AVX2 it is already 2x f64x4, which is exactly what the
+scalar loop compiles to). Do NOT retry the same-shape same-order SIMD rewrite.
+
+NOTE FOR THE NEXT AGENT: the honest dense-linalg lever is not the GEMM tile at
+all - it is TALL-SKINNY QR. `fnp.linalg.qr`/`svd`/`pinv`/`matrix_rank`/`lstsq`
+all delegate unconditionally to numpy today and the native `qr_mxn`
+(`fnp-linalg/src/lib.rs:2670`) is UNWIRED, while LAPACK `dgeqrf` on tall-skinny
+falls into an unblocked BLAS-2 path making n passes over the m x n data. At
+m=1e6, n=16, `OPENBLAS_NUM_THREADS=1` (pinning is mandatory - see below):
+`qr(mode='r')` 488 ms and `qr(mode='reduced')` 1165 ms against a same-flop-count
+`T.T@T` reference of 14.3 ms, i.e. 34x / 81x of headroom; thread-count invariant
+and numpy-version invariant (1.26.4 and 2.4.3 agree). TSQR changes accumulation
+order, so it needs sign-normalized R and an `allclose` gate, NOT bit-exactness.
+
+MEASUREMENT TRAP recorded while scoping this: these workers run heavily
+contended. `np.linalg.solve(1024)` measures 930 ms at default threading and
+**21 ms** at `OPENBLAS_NUM_THREADS=1`. An unpinned "route symmetric solve to
+Cholesky" lever looks like a 45x win and is pure thread oversubscription. Pin
+BLAS threads before believing any dense-linalg gap.
+
+## 2026-07-22 - WIN (SHIP, ARCHITECTURAL) + embedded REJECT: the recurring BENCH-BLOCKED failure mode is TWO costs, not one; the runtime one is fixed in ~30 lines, the compile one is NOT what everyone assumed
+
+`BlackThrush`, bead `deadlock-audit-9d05r`, campaign `franken_numpy-ixs5y`.
+Pays the retry predicate in the 2026-07-14 BENCH-BLOCKED row ("Retry only with
+an already-compiled dedicated binary or a small non-LTO crate-local proof; do
+not reopen it through the monolithic `fnp-python` release-perf Criterion
+binary"). Result: the monolith is now usable directly, so that row's
+prohibition can be retired.
+
+KEY FINDING FIRST (this is the part that would otherwise be re-derived wrong):
+the blocker was recorded as ONE problem ("cold monolithic benchmark build took
+18m42s"). It is TWO independent costs, and the one everybody optimized for is
+the one that is NOT fixable by build flags.
+
+**REJECT (measured, negative): "cold bench builds are slow because of thin LTO
++ codegen-units=1" is FALSE.** Hypothesis was that `release-perf`'s
+`lto = "thin"` / `codegen-units = 1` caused the 18m42s. Built the identical
+monolith under a new non-LTO / 16-codegen-unit profile on a cold worker
+(`vmi1153651`, `--no-run`): it compiled 71 crates with 0 errors and was **still
+inside the `fnp-python` lib when a 29-minute timeout fired (EXIT=124)** - it
+never reached the bench binary at all. The cold cliff is the raw volume of the
+workspace (`fnp-python` 68,715 lines + `fnp-ufunc` 59,299 + pyo3), not the
+optimizer knobs. Do not file another "tune the profile to fix cold builds"
+lever. RETRY PREDICATE: only if someone measures a WARM incremental relink
+under both profiles and finds the LTO relink of the bench binary dominates -
+that specific comparison is still untested here, and is the only surviving
+form of the LTO hypothesis.
+
+**THE REAL, FIXABLE COST (runtime, and it was invisible):** Criterion consults
+its `--` filter only inside `bench_function`. All ~190 group functions in
+`criterion_python_surface.rs` call `Python::initialize()`, register a fresh
+`fnp_python` PyModule (the entire 499-name surface), and allocate
+multi-million-element NumPy inputs BEFORE their first `bench_function`. So a
+filtered run that measures one row still pays ~190 full setups. That is exactly
+the "additional minutes in unrelated unconditional startup work without ever
+reporting the requested timing" the blocked row observed, and no build flag
+touches it.
+
+THE LEVER (`crates/fnp-python/benches/criterion_python_surface.rs`): replaced
+`criterion_group!`/`criterion_main!` with `gated_benches!`, which wraps each
+target in `if group_enabled(stringify!($target))`. `FNP_BENCH_GROUPS` unset
+(the default, and what CI does) runs every group in the same order with the
+same Criterion config - the upstream expansion is mirrored line-for-line,
+including the second `configure_from_args().final_summary()`. Set it to a
+comma-separated substring list to run only those groups. The ~190-name target
+list is reused VERBATIM, so appending a bench is unchanged for every other
+agent. Supporting `[profile.bench-fast]` added to the workspace `Cargo.toml`
+(additive; existing profiles untouched); it is a TRIAGE profile only - it loses
+cross-crate inlining, so ship-grade fnp-vs-numpy ratios still confirm under
+`release-perf`.
+
+MEASURED (strict remote-only, `RCH_REQUIRE_REMOTE=1`): gated run on a COLD
+worker `vmi1227854` (different host from the build above, so no warm cache),
+`FNP_BENCH_GROUPS=bench_linalg_boundary` injected via the `--config` runner,
+filter `python_linalg_boundary`, 10 samples / 1 s warm-up / 3 s measurement.
+**Cold-to-result in 12m29s** (18:19:47 -> 18:32:16), `EXIT=0`, **48 measured
+rows, and `sort -u` over the emitted test ids confirms EXACTLY ONE group ran**
+(`python_linalg_boundary/`). Runner echoed `RUNNER_HOST=vmi1227854`
+`GATE=bench_linalg_boundary`, proving the env var reached the binary. Contrast
+with the 2026-07-14 blocked attempt on the same binary: killed after >24
+minutes having never reported a timing. Sample rows (bench-fast, triage
+numbers, NOT ship-grade): `fnp_inv_f64_batch8192_4x4` 1,136,375 ns vs
+`numpy_inv_f64_batch8192_4x4` 3,530,312 ns; `fnp_slogdet_f64_batch8192_4x4`
+890,845 ns vs numpy 1,523,487 ns.
+
+ISOMORPHISM: with `FNP_BENCH_GROUPS` unset `group_enabled` returns `true`
+before reading anything else, so every target is invoked exactly as
+`criterion_group!` invoked it. No group function, bench id, sample size, or
+measurement time changed. Compile-green is proven by the run itself (the gated
+invocation compiled the edited bench binary from cold with 0 errors). No CI
+gate or script references the bench target (`rg` over `.github/` and
+`scripts/` returns nothing), so removing the `benches` group symbol has no
+external consumer.
+
+OPEN (filed, not done): the same eager-setup pathology exists in
+`fnp-linalg/benches/criterion_linalg.rs` (34 groups) and the other per-crate
+monoliths, but it is far cheaper there (pure-Rust matrix generation, no
+PyModule registration), so it was left alone under one-lever-per-commit.
 
 ## 2026-07-17 - WIN (margin-widener, "no ceiling"): python-surface `genfromtxt` float path delegated to fnp_io - fnp already LED 4.19x, now 13.03x vs numpy (2.53x internal)
 
