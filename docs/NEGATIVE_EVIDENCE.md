@@ -4,6 +4,88 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-22 - REJECT (NO-SHIP): hoist RandomState legacy Zipf batch constants - apparent 1.27x direction is invalid under noisy fixed traces
+
+`GoldSummit`, bead `franken_numpy-ixs5y.375`. The ledger and recent Git log
+were screened before editing. Generator Zipf caching is CLOSED by `.374` until
+its fixed-trace predicate holds. That row explicitly left the separate
+`RandomState` legacy implementation open; it had no prior performance row.
+The complex borrow-or-widen family is also CLOSED, so this probe did not touch
+it.
+
+PROFILE FIRST, with production untouched: the ordinary release baseline for
+`RandomState::zipf(a=2.5, size=100,000)` measured 18.776 ms
+(`[17.660, 19.767]`, 5.326 Melem/s) on effective worker `vmi1264463`. A
+strict-remote `perf record -F 499 -e cycles:u -g` run on `vmi1227854` captured
+841 cycle samples with zero loss. The named legacy Zipf fold held 68.86% of
+children and 9.45% self; `Mt19937Rng::next_u32` held 11.58% self,
+`RngBackend::next_f64` 6.69%, named libm `pow` 8.65% self, and `exp2` 2.54%
+self. Multiple internal libm power offsets also appeared under the Zipf caller;
+they are routing evidence and are not summed. This admitted partial evaluation
+of repeated parameter powers in this distinct implementation.
+
+ONE LEVER: compute `a - 1`, `2^(a - 1)`, the i64-bound power, and
+`-1/(a - 1)` once per public legacy batch, then pass them into the otherwise
+unchanged rejection loop. The existing `a >= 1025` no-draw branch was lifted
+to the batch boundary. This was pure safe Rust. The exact rejected candidate
+is retained in `random_ops.rs` beside an exact former replica; production was
+restored before closeout.
+
+The decisive exact-binary benchmark reset both MT19937 states to seed 42
+outside every timed observation, executed six 100,000-value batches per arm,
+interleaved former/candidate ABBA/BAAB, and ran a candidate A/A null on the same
+effective worker `vmi1227854`. Both runs are disclosed and both are invalid:
+
+| run | row | lhs mean | rhs mean | lhs CV | rhs CV | former/candidate or null ratio |
+|---|---|---:|---:|---:|---:|---:|
+| 1 | former / cached candidate | 50.804309 ms | 39.856492 ms | 4.597% | 5.573% | 1.2747x |
+| 1 | candidate A/A null | 41.604997 ms | 40.190059 ms | 5.545% | 7.025% | 0.9660x |
+| 2 | former / cached candidate | 48.712344 ms | 38.415731 ms | 4.852% | 6.724% | 1.2680x |
+| 2 | candidate A/A null | 41.919685 ms | 43.253060 ms | 11.261% | 9.928% | 1.0318x |
+
+The apparent effect is favorable twice, but required arms exceed 5% CV and
+the nulls miss unity by 3.40% and 3.18%. It therefore cannot be separated from
+measurement noise and is not a win. An initial filtered invocation panicked
+before timing because a different ledger group's reporter expected samples;
+the reporter now ignores inactive groups. That harness-only failure is not a
+sample. No local Cargo fallback was allowed.
+
+BEHAVIOR EVIDENCE, despite the performance rejection: before removal, the
+candidate passed six focused release Zipf tests. The new proof compared a
+64-value batch exactly with 64 singleton calls and the following RNG word at
+`a={1.000001, 2, 17, 1024, 1025, infinity}`, plus the empty-batch no-draw case.
+Existing RandomState live-NumPy/golden tests and Generator boundary tests also
+passed. The strict-remote divergence ledger passed with zero entries after the
+same candidate source was synchronized to the worker. This proves the lever
+was rejected for measurement quality rather than semantic drift.
+
+ALIEN RECOMMENDATION CONTRACT: this instantiated partial evaluation and
+multi-stage specialization from `alien_cs_graveyard.md` sections 6.7/6.17.
+EV was 18 (`impact=3 * confidence=4 * reuse=3 / effort=2`), tier A. The
+smallest wedge was one legacy Zipf batch. Risks were arithmetic or rejection
+trace drift and changes to large-`a`/empty draw counts; the focused proof
+covered them. Source was internal safe Rust; legal review, external-paper
+reproduction, interference, and demo linkage were N/A.
+
+RETRY CONDITION PREDICATE: do not retry production RandomState Zipf caching
+until a strict-remote worker is demonstrably idle and CPU-pinned, the retained
+fixed-trace benchmark measures at least 250 ms per arm per observation with 20
+observations, and two independent runs produce all four CVs strictly below 5%
+with the candidate A/A null within 2% of unity. The candidate must then win by
+at least 5% at both `a=2.5` and `a=17` in each run and re-pass exact bitstream,
+live-oracle, and divergence gates.
+
+REPRODUCTION:
+
+```bash
+RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1227854 CARGO_PROFILE_RELEASE_LTO=false rch exec -- cargo bench -p fnp-random --bench random_ops --profile release -- random_state_zipf_parameter_cache/fixed_trace --noplot
+```
+
+Measured atop parent `41038594`; retained benchmark SHA-256
+`0d52f0944e6ac8e54d4496f8b8336de8ed89e59188523e5455bda44e2bf7b7fd`.
+Verdict: **REJECT**. Production is unchanged; RandomState legacy Zipf
+batch-constant hoisting is CLOSED until the predicate above holds.
+
 ## 2026-07-22 - REJECT (NO-SHIP): hoist Zipf batch-invariant rejection terms - apparent 1.26-1.31x direction is invalid under 20-105% CV
 
 `GoldSummit`, bead `franken_numpy-ixs5y.374`. The ledger and recent Git log

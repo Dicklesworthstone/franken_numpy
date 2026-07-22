@@ -8,7 +8,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fnp_random::{
     BitGenerator, BitGeneratorKind, Generator, Pcg64DxsmRng, Pcg64Rng, PhiloxRng, RandomError,
-    SeedSequence, Sfc64Rng,
+    RandomState, SeedMaterial, SeedSequence, Sfc64Rng,
 };
 use std::cell::{Cell, RefCell};
 use std::hint::black_box;
@@ -46,6 +46,9 @@ fn report_ledger_pair(
     candidate_samples: &RefCell<Vec<f64>>,
     former_samples: &RefCell<Vec<f64>>,
 ) {
+    if candidate_samples.borrow().len() < 2 || former_samples.borrow().len() < 2 {
+        return;
+    }
     let (candidate_n, candidate_ns, candidate_cv) = ledger_tail_stats(candidate_samples);
     let (former_n, former_ns, former_cv) = ledger_tail_stats(former_samples);
     assert_eq!(candidate_n, former_n);
@@ -1416,6 +1419,231 @@ fn bench_zipf_parameter_cache(c: &mut Criterion) {
     group.finish();
 }
 
+#[inline(never)]
+fn former_random_state_zipf_single(random_state: &mut RandomState, a: f64) -> i64 {
+    if a >= 1025.0 {
+        return 1;
+    }
+    let am1 = a - 1.0;
+    let b = 2.0_f64.powf(am1);
+    let umin = (i64::MAX as f64).powf(-am1);
+
+    loop {
+        let u01 = random_state.next_f64();
+        let u = u01 * umin + (1.0 - u01);
+        let v = random_state.next_f64();
+        let x = u.powf(-1.0 / am1).floor();
+        if x > i64::MAX as f64 || x < 1.0 {
+            continue;
+        }
+        let t = (1.0 + 1.0 / x).powf(am1);
+        if v * x * (t - 1.0) / (b - 1.0) <= t / b {
+            return x as i64;
+        }
+    }
+}
+
+fn former_random_state_zipf(
+    random_state: &mut RandomState,
+    a: f64,
+    size: usize,
+) -> Result<Vec<u64>, RandomError> {
+    if a.is_nan() || a <= 1.0 {
+        return Err(RandomError::InvalidParameter);
+    }
+    Ok((0..size)
+        .map(|_| former_random_state_zipf_single(random_state, a) as u64)
+        .collect())
+}
+
+#[inline(never)]
+fn rejected_cached_random_state_zipf_single(
+    random_state: &mut RandomState,
+    am1: f64,
+    b: f64,
+    umin: f64,
+    exponent: f64,
+) -> i64 {
+    loop {
+        let u01 = random_state.next_f64();
+        let u = u01 * umin + (1.0 - u01);
+        let v = random_state.next_f64();
+        let x = u.powf(exponent).floor();
+        if x > i64::MAX as f64 || x < 1.0 {
+            continue;
+        }
+        let t = (1.0 + 1.0 / x).powf(am1);
+        if v * x * (t - 1.0) / (b - 1.0) <= t / b {
+            return x as i64;
+        }
+    }
+}
+
+fn rejected_cached_random_state_zipf(
+    random_state: &mut RandomState,
+    a: f64,
+    size: usize,
+) -> Result<Vec<u64>, RandomError> {
+    if a.is_nan() || a <= 1.0 {
+        return Err(RandomError::InvalidParameter);
+    }
+    if size == 0 {
+        return Ok(Vec::new());
+    }
+    if a >= 1025.0 {
+        return Ok(vec![1; size]);
+    }
+    let am1 = a - 1.0;
+    let b = 2.0_f64.powf(am1);
+    let umin = (i64::MAX as f64).powf(-am1);
+    let exponent = -1.0 / am1;
+    Ok((0..size)
+        .map(|_| {
+            rejected_cached_random_state_zipf_single(random_state, am1, b, umin, exponent) as u64
+        })
+        .collect())
+}
+
+fn bench_random_state_zipf_parameter_cache(c: &mut Criterion) {
+    const SIZE: usize = 100_000;
+    const REPEATS: usize = 6;
+    const A: f64 = 2.5;
+
+    let mut former_proof = RandomState::new(SeedMaterial::U64(42)).unwrap();
+    let mut candidate_proof = RandomState::new(SeedMaterial::U64(42)).unwrap();
+    assert_eq!(
+        former_random_state_zipf(&mut former_proof, A, 4096).unwrap(),
+        rejected_cached_random_state_zipf(&mut candidate_proof, A, 4096).unwrap()
+    );
+    assert_eq!(former_proof.next_u64(), candidate_proof.next_u64());
+
+    let mut group = c.benchmark_group("random_state_zipf_parameter_cache");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements((SIZE * REPEATS) as u64));
+
+    let mut random_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
+    group.bench_function("baseline", |bench| {
+        bench.iter(|| black_box(random_state.zipf(black_box(A), black_box(SIZE)).unwrap()))
+    });
+
+    let candidate_samples = RefCell::new(Vec::new());
+    let former_samples = RefCell::new(Vec::new());
+    let effect_order = Cell::new(0u64);
+    group.bench_function("fixed_trace_paired_former_candidate", |bench| {
+        bench.iter_custom(|iterations| {
+            let mut candidate_total = Duration::ZERO;
+            let mut former_total = Duration::ZERO;
+            let time_candidate = || {
+                let mut random_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
+                let started = Instant::now();
+                for _ in 0..REPEATS {
+                    black_box(
+                        rejected_cached_random_state_zipf(
+                            &mut random_state,
+                            black_box(A),
+                            black_box(SIZE),
+                        )
+                        .unwrap(),
+                    );
+                }
+                started.elapsed()
+            };
+            let time_former = || {
+                let mut random_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
+                let started = Instant::now();
+                for _ in 0..REPEATS {
+                    black_box(
+                        former_random_state_zipf(&mut random_state, black_box(A), black_box(SIZE))
+                            .unwrap(),
+                    );
+                }
+                started.elapsed()
+            };
+            for _ in 0..iterations {
+                if effect_order.get() & 1 == 0 {
+                    former_total += time_former();
+                    candidate_total += time_candidate();
+                    candidate_total += time_candidate();
+                    former_total += time_former();
+                } else {
+                    candidate_total += time_candidate();
+                    former_total += time_former();
+                    former_total += time_former();
+                    candidate_total += time_candidate();
+                }
+                effect_order.set(effect_order.get().wrapping_add(1));
+            }
+            candidate_samples
+                .borrow_mut()
+                .push(candidate_total.as_secs_f64() * 0.5e9 / iterations as f64);
+            former_samples
+                .borrow_mut()
+                .push(former_total.as_secs_f64() * 0.5e9 / iterations as f64);
+            candidate_total + former_total
+        })
+    });
+    report_ledger_pair(
+        "random_state_zipf_parameter_cache_effect",
+        &candidate_samples,
+        &former_samples,
+    );
+
+    let null_lhs_samples = RefCell::new(Vec::new());
+    let null_rhs_samples = RefCell::new(Vec::new());
+    let null_order = Cell::new(0u64);
+    group.bench_function("fixed_trace_null_candidate_aa", |bench| {
+        bench.iter_custom(|iterations| {
+            let mut lhs_total = Duration::ZERO;
+            let mut rhs_total = Duration::ZERO;
+            let time_candidate = || {
+                let mut random_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
+                let started = Instant::now();
+                for _ in 0..REPEATS {
+                    black_box(
+                        rejected_cached_random_state_zipf(
+                            &mut random_state,
+                            black_box(A),
+                            black_box(SIZE),
+                        )
+                        .unwrap(),
+                    );
+                }
+                started.elapsed()
+            };
+            for _ in 0..iterations {
+                if null_order.get() & 1 == 0 {
+                    lhs_total += time_candidate();
+                    rhs_total += time_candidate();
+                    rhs_total += time_candidate();
+                    lhs_total += time_candidate();
+                } else {
+                    rhs_total += time_candidate();
+                    lhs_total += time_candidate();
+                    lhs_total += time_candidate();
+                    rhs_total += time_candidate();
+                }
+                null_order.set(null_order.get().wrapping_add(1));
+            }
+            null_lhs_samples
+                .borrow_mut()
+                .push(lhs_total.as_secs_f64() * 0.5e9 / iterations as f64);
+            null_rhs_samples
+                .borrow_mut()
+                .push(rhs_total.as_secs_f64() * 0.5e9 / iterations as f64);
+            lhs_total + rhs_total
+        })
+    });
+    report_ledger_pair(
+        "random_state_zipf_parameter_cache_null",
+        &null_lhs_samples,
+        &null_rhs_samples,
+    );
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_poisson_ptrs_cache,
@@ -1446,6 +1674,7 @@ criterion_group!(
     bench_pcg_fill_u64_large,
     bench_noncentral_f_fixed_shape_cache,
     bench_zipf_parameter_cache,
+    bench_random_state_zipf_parameter_cache,
 );
 
 criterion_main!(benches);
