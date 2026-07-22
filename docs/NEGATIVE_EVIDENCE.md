@@ -4,6 +4,97 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-22 - WIN (KEEP): parse plain integer `loadtxt` rows from borrowed tokens - 2.1875x
+
+`GoldSummit`, bead `franken_numpy-ixs5y.373`. The ledger and recent Git log
+were screened before editing. Float `loadtxt` delegation is CLOSED by `.367`;
+that entry explicitly left integer and bool text input open because routing
+through fnp-io's f64 storage loses exact integers above 2^53. This change uses
+the declared-open integer lane and does not retry the float delegation.
+
+PROFILE FIRST, with production untouched: on an 8,192 x 16 comma-separated
+int64 corpus, the former fnp-python path measured 7.9334 ms
+(`[7.8348, 7.9936]`) against NumPy's 2.5227 ms (`[2.4915, 2.5610]`) on
+effective worker `ovh-a`. A strict-remote three-second `perf record -F 499
+-e cycles:u -g` run on `vmi1227854` captured 1,460 cycle samples with zero
+loss. At least 18.48% of samples landed in the named `Vec<String>` collection
+frame plus its libc allocation subtree, another 6.93% landed in nested row
+vector destruction frames, and integer parsing itself held 4.38%. An earlier
+`ovh-a` profile captured zero samples because `perf_event_paranoid=4`; it is
+excluded as infrastructure evidence. The retained profile therefore supports
+eliminating token ownership and nested row staging, not changing the parser.
+
+ONE LEVER: for path-backed input with no `usecols`, `unpack=false`, a plain
+integer dtype, a one-character comment marker, and a whitespace or
+one-character delimiter, parse borrowed row tokens directly into the same
+`Vec<i64>` intermediate used by the former path. The exact former i64-first,
+then finite integral-f64 fallback and target-dtype narrowing are unchanged.
+Every unsupported delimiter/option, parse failure, ragged row, and empty input
+falls through to the same NumPy fallback. Float, bool, usecols, unpack, file-
+like, converter, encoding, max_rows, like, and nonzero-ndmin behavior is
+untouched. The implementation is pure safe Rust.
+
+The decisive run was one exact-binary interleaved ABBA/BAAB comparison on
+effective worker `ovh-a`, ordinary `--profile release` with LTO disabled and
+10 observations:
+
+| row | lhs mean | rhs mean | lhs CV | rhs CV | lhs/rhs |
+|---|---:|---:|---:|---:|---:|
+| exact former / direct candidate | 13.874753 ms | **6.342842 ms** | 1.806% | 2.439% | **2.1875x** |
+| candidate A/A null | 6.406826 ms | 6.412658 ms | 3.741% | 3.144% | 1.0009x |
+
+The null is within 0.09% of unity and every required arm is strictly below the
+mandatory 5% CV ceiling. Whole-host contention made both fnp and NumPy about
+2x slower in this repeat, but the paired effect and null stayed admissible. A
+cleaner earlier run on the same worker independently measured 7.098103 ms
+former versus 3.131415 ms candidate (2.2667x, 2.945%/2.109% CV) with a
+3.095492/3.107847 ms A/A null (1.0040x, 2.385%/2.595% CV). The final-binary
+transpose-adapter calibration was 6.248034/6.194005 ms (0.9914x), showing only
+0.86% directionally, but its 5.576%/6.027% CV exceeded the gate and is excluded
+from the decision. It exists only to disclose that forcing the retained former
+path through `unpack=true` and restoring `.T` adds two O(1) NumPy views; the
+2.19x result does not depend on treating that noisy calibration as evidence.
+
+BEHAVIOR ISOMORPHISM: the permanent benchmark compares the direct path with
+live NumPy and the exact retained generic tokenizer/parser before timing.
+`unpack=true` excludes the direct candidate, and a final transpose restores the
+same observable shape for the former control. The focused release test passed
+remotely and pins exact NumPy/former/candidate equality for comments, skiprows,
+i64 min/max, signed values beyond 2^53, zero, output shape, and the former
+integral-f64 retry with decimal and scientific notation. Integer
+dtype selection, narrowing expressions, output storage, C-order traversal,
+and fallback behavior are unchanged. The strict-remote divergence ledger
+passed with zero entries.
+
+ALIEN RECOMMENDATION CONTRACT: this instantiates deforestation and partial
+evaluation from `alien_cs_graveyard.md` section 6.7. The nested owned-token
+program is fused with its only consumer, while a guarded runtime shape keeps
+the generic path for every wider semantic surface. EV was 18.0
+(`impact=3 * confidence=4 * reuse=3 / effort=2`), tier A. The smallest wedge
+is plain integer, no-usecols, non-unpack path input. Memory falls from
+O(tokens + rows + output) to O(output). Expected loss is one String allocation
+per token plus nested row allocation/destruction; calibration is the A/B and
+null above. Risks were >2^53 precision loss, parse-order drift, narrowing
+drift, comments/skiprows drift, and shape drift; the exact former and live-
+NumPy proof covers each. Source is internal safe Rust; legal review, external-
+paper reproduction, interference, and demo linkage are N/A. Rollback is one
+commit revert. Comparator is the retained former implementation in the same
+binary.
+
+REPRODUCTION:
+
+```bash
+RCH_REQUIRE_REMOTE=1 RCH_WORKER=ovh-a CARGO_PROFILE_RELEASE_LTO=false rch exec -- cargo bench -p fnp-python --bench criterion_python_surface --profile release --config 'target.x86_64-unknown-linux-gnu.runner=["sh","-c","export FNP_BENCH_GROUPS=bench_loadtxt_integer_text_boundary; exec \"$@\"","fnp-runner"]' -- python_loadtxt_integer_text_boundary --noplot
+```
+
+Measured atop parent `faeb4454`; source SHA-256
+`b55f3f70ec36ca1aa0e11fcc587e46790838b787ed3e6db0d0e8ee969b5ea2c4`;
+benchmark SHA-256
+`e228b41d416c4f466bad783068b47028b4937908ef6bdf558ae0d1bc094df382`.
+Verdict: **KEEP**. Plain integer no-usecols/non-unpack owned-token staging is
+CLOSED. Bool parsing, selected columns, and unpacked integer input remain
+separate primitives and require their own ledger/history screen and profile.
+
 ## 2026-07-22 - WIN (KEEP): fuse masked `MaskedArray::count` validity materialization with axis reduction - 1.2582x
 
 `GoldSummit`, bead `franken_numpy-ixs5y.372`. The ledger and recent Git log
