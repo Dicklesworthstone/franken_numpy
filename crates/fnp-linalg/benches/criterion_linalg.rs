@@ -550,9 +550,7 @@ fn bench_qr_exact_upper_trapezoidal(c: &mut Criterion) {
         });
     });
     group.bench_function("scalar_active_row", |bench| {
-        bench.iter(|| {
-            black_box(qr_mxn(black_box(&a), black_box(m), black_box(n)).unwrap())
-        });
+        bench.iter(|| black_box(qr_mxn(black_box(&a), black_box(m), black_box(n)).unwrap()));
     });
     group.finish();
 }

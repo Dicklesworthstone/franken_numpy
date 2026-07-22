@@ -127,18 +127,19 @@ fn resize_sidecar_modulo_control(array: &UFuncArray, output_len: usize) -> UFunc
         .collect();
     let source_indices: Vec<usize> = (0..output_len).map(|index| index % src_len).collect();
     let gathered: Vec<i64> = match array.integer_sidecar() {
-        Some(fnp_ufunc::IntegerSidecar::I64(v)) => {
-            source_indices.iter().map(|&i| v[i]).collect()
-        }
+        Some(fnp_ufunc::IntegerSidecar::I64(v)) => source_indices.iter().map(|&i| v[i]).collect(),
         _ => panic!("benchmark requires an i64 sidecar"),
     };
-    UFuncArray::from_storage(vec![output_len], fnp_dtype::ArrayStorage::I64(gathered.clone()))
-        .map(|out| {
-            // Bridge equality is asserted by the caller against `values`.
-            black_box(&values);
-            out
-        })
-        .unwrap()
+    UFuncArray::from_storage(
+        vec![output_len],
+        fnp_dtype::ArrayStorage::I64(gathered.clone()),
+    )
+    .map(|out| {
+        // Bridge equality is asserted by the caller against `values`.
+        black_box(&values);
+        out
+    })
+    .unwrap()
 }
 
 fn bench_resize_sidecar(c: &mut Criterion) {

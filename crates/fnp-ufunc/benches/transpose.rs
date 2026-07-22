@@ -267,7 +267,11 @@ fn bench_transpose_identity(c: &mut Criterion) {
 /// Chunked parallel odometer gather — a frozen copy of the production general
 /// path (values, no sidecar) so the suffix-identity and block-rotation A/Bs
 /// isolate their levers inside one binary.
-fn former_general_odometer(values: &[f64], dims: &[usize], perm: &[usize]) -> (Vec<usize>, Vec<f64>) {
+fn former_general_odometer(
+    values: &[f64],
+    dims: &[usize],
+    perm: &[usize],
+) -> (Vec<usize>, Vec<f64>) {
     let ndim = dims.len();
     let new_shape: Vec<usize> = perm.iter().map(|&a| dims[a]).collect();
     let old_strides = c_strides(dims);

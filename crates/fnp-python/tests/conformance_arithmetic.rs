@@ -1181,8 +1181,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces FLOOR_DIVIDE_COARSE_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "f64 floor_divide zero-copy path must be bit-identical incl hazard warning parity: {result}"
     );
     Ok(())
@@ -1251,10 +1250,6 @@ print(verdicts if verdicts else True)
     let result = numpy_oracle(&script)?;
     println!("{result}"); // surfaces MEDIAN_GATE_20OBS rows under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
-    assert_eq!(
-        last,
-        "True",
-        "gate rows must stay byte-exact: {result}"
-    );
+    assert_eq!(last, "True", "gate rows must stay byte-exact: {result}");
     Ok(())
 }

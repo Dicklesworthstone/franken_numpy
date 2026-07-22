@@ -935,8 +935,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces INTERSECT/UNION_INT64_WIDE_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "wide int setops must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -1001,8 +1000,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces UNIQUE_INT64_WIDE_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "wide int unique must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -1122,8 +1120,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces LEXSORT_WIDE2_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "wide 2-key lexsort must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -1206,8 +1203,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces ARGSORT_STABLE_F64_NAN_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "NaN-bearing stable float argsort must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -1275,8 +1271,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces LEXSORT_WIDE3_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "wide 3/4-key lexsort must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -1335,8 +1330,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces LEXSORT_WIDEROWS3_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "wide 2-D row-keys lexsort must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -1426,8 +1420,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces SORT_F64_NAN_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "uniform-NaN f64 sort must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -1493,8 +1486,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces ARGSORT_AXISNONE_INT_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "axis=None flat-view sort/argsort must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -1561,8 +1553,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces UNIQUE_ND_C128_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "N-D flat-view unique must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -1626,8 +1617,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces SORT_COMPLEX_C128_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "complex sort_complex must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -1686,8 +1676,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces HISTOGRAM_ND_F64_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "N-D flat-view histogram must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -1748,8 +1737,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces ISIN_ND_STRING_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "N-D flat-view string/complex isin must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -1814,8 +1802,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces UNION1D_ND_STRING_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "N-D flat-view setops must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -1865,8 +1852,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces SORT_F64_FLAT_REGATE_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "regated flat f64 sort must stay bit-identical to numpy: {result}"
     );
     Ok(())
@@ -1920,8 +1906,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces SORT_I64_FLAT_AB etc. under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "int sort-class arms must stay bit-identical to numpy: {result}"
     );
     Ok(())
@@ -1982,8 +1967,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces PACKBITS_BOOL_64M_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "native packbits must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -2062,8 +2046,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces ADD_AT_I64_LARGE_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "parallel i64 add.at must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -2128,8 +2111,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces ADD_AT_U64_LARGE_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "int-dtype add.at arms must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -2196,8 +2178,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces SUBTRACT_AT_I64_LARGE_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "order-free scatter .at ops must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -2263,8 +2244,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces ADD_ACC_F64_AXIS0_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "accumulate float/complex routes must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -2330,8 +2310,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces SELECT_I64_3COND_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "int select must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -2416,8 +2395,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces SELECT_C128_3COND_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "complex select must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -2475,8 +2453,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces SELECT_F32_3COND_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "f32 select must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -2542,8 +2519,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces DIFF_PREPEND_F64_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "fused diff prepend/append must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -2603,8 +2579,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces RESIZE_F64_32X_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "parallel resize must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -2666,8 +2641,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces BLOCK_2X2_F64_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "parallel 2-D block must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -2726,8 +2700,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces DIGITIZE_DECREASING_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "decreasing-bins digitize must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -2785,8 +2758,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces SORT_U8_LASTAXIS_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "string lastaxis sort must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -2842,8 +2814,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces ARGSORT_U8_LASTAXIS_STABLE_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "string lastaxis stable argsort must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -2905,8 +2876,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces SORT_U8_AXIS0_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "string non-last-axis sort/argsort must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -2991,8 +2961,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces HIST_EDGES64_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "edges-array histogram must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -3038,8 +3007,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces UNIQUE_F64_DISTINCT_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "f64 unique must stay bit-identical to numpy: {result}"
     );
     Ok(())
@@ -3088,8 +3056,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces INTERSECT_F64_DISTINCT_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "f64 intersect1d must stay bit-identical to numpy: {result}"
     );
     Ok(())
@@ -3140,8 +3107,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces SETDIFF_F64_DISTINCT_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "f64 setdiff1d must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -3194,8 +3160,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces WIDEINT_INTERSECT_TIES_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "wide-int setops must stay bit-identical to numpy: {result}"
     );
     Ok(())

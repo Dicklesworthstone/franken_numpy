@@ -2593,11 +2593,7 @@ pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> 
     Ok((q, r))
 }
 
-fn qr_mxn_exact_upper_trapezoidal(
-    a: &[f64],
-    m: usize,
-    n: usize,
-) -> Option<(Vec<f64>, Vec<f64>)> {
+fn qr_mxn_exact_upper_trapezoidal(a: &[f64], m: usize, n: usize) -> Option<(Vec<f64>, Vec<f64>)> {
     for row in 1..m {
         let below_diagonal = row.min(n);
         if a[row * n..row * n + below_diagonal]
@@ -9615,11 +9611,7 @@ pub fn batch_matrix_rank(
     let (batch, n, mat_size) = parse_batch_matrix_rank_input(data, shape)?;
     batch_map_lanes(batch, mat_size, |b| {
         let lane = &data[b * mat_size..(b + 1) * mat_size];
-        if n > 0
-            && rcond.is_finite()
-            && rcond >= 0.0
-            && lane.iter().all(|&value| value == 0.0)
-        {
+        if n > 0 && rcond.is_finite() && rcond >= 0.0 && lane.iter().all(|&value| value == 0.0) {
             Ok(0)
         } else {
             matrix_rank_nxn(lane, n, rcond)
@@ -12705,8 +12697,8 @@ mod tests {
                 }
             }
 
-            let former = super::slogdet_nxn_general_control(&matrix, n)
-                .expect("general sign and logdet");
+            let former =
+                super::slogdet_nxn_general_control(&matrix, n).expect("general sign and logdet");
             let actual = slogdet_nxn(&matrix, n).expect("structured sign and logdet");
             assert_eq!(actual.0.to_bits(), former.0.to_bits(), "sign n={n}");
             assert_eq!(actual.1.to_bits(), former.1.to_bits(), "logdet n={n}");
@@ -18611,8 +18603,8 @@ mod tests {
             a[i * n + i] = 1.0;
         }
 
-        let x = batch_solve(&a, &[n, n], &[], &[batch, n, 0], false)
-            .expect("zero-column matrix rhs");
+        let x =
+            batch_solve(&a, &[n, n], &[], &[batch, n, 0], false).expect("zero-column matrix rhs");
         assert!(x.is_empty());
     }
 

@@ -64,11 +64,19 @@ fn bench_triangle_full_keep(c: &mut Criterion) {
     let lower = arr.tril(tril_k).unwrap();
     let former_bits: Vec<u64> = former.iter().map(|v| v.to_bits()).collect();
     assert_eq!(
-        upper.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        upper
+            .values()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>(),
         former_bits
     );
     assert_eq!(
-        lower.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        lower
+            .values()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>(),
         former_bits
     );
 

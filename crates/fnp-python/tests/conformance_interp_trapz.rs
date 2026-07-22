@@ -494,8 +494,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces TRAPEZOID_INT_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "int trapezoid via f64 conversion must match numpy: {result}"
     );
     Ok(())

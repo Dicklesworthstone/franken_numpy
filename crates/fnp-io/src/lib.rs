@@ -1775,8 +1775,8 @@ fn read_npz_bytes_impl(
     // archives need ordered predecessor/successor checks so adversarially large
     // valid member counts do not turn overlap validation into O(m^2) work.
     const ORDERED_RANGE_MIN_MEMBERS: usize = 128;
-    let use_ordered_ranges = range_policy == NpzRangePolicy::Adaptive
-        && entry_count >= ORDERED_RANGE_MIN_MEMBERS;
+    let use_ordered_ranges =
+        range_policy == NpzRangePolicy::Adaptive && entry_count >= ORDERED_RANGE_MIN_MEMBERS;
     let mut covered_ranges = if use_ordered_ranges {
         Vec::new()
     } else {
@@ -2094,7 +2094,7 @@ fn read_npz_bytes_impl(
             ));
         }
         if use_ordered_ranges {
-                let _ = ordered_ranges.insert(current_range.0, current_range.1);
+            let _ = ordered_ranges.insert(current_range.0, current_range.1);
         } else {
             covered_ranges.push(current_range);
         }
@@ -2488,15 +2488,18 @@ fn parse_loadtxt_row_into(
 ) -> Result<(), IOError> {
     if delimiter == ' ' {
         for s in trimmed.split_whitespace() {
-            out.push(s.parse::<f64>().map_err(|_| {
-                IOError::ReadPayloadIncomplete("loadtxt: parse error in row")
-            })?);
+            out.push(
+                s.parse::<f64>()
+                    .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?,
+            );
         }
     } else {
         for s in trimmed.split(delimiter) {
-            out.push(s.trim().parse::<f64>().map_err(|_| {
-                IOError::ReadPayloadIncomplete("loadtxt: parse error in row")
-            })?);
+            out.push(
+                s.trim()
+                    .parse::<f64>()
+                    .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?,
+            );
         }
     }
     Ok(())
@@ -7402,7 +7405,10 @@ mm.flush()
         assert_eq!(parse_err.to_string(), "loadtxt: parse error in row");
 
         let longer = loadtxt("1 2\n3 4 5\n", ' ', '#', 0, usize::MAX).unwrap_err();
-        assert_eq!(longer.to_string(), "loadtxt: inconsistent number of columns");
+        assert_eq!(
+            longer.to_string(),
+            "loadtxt: inconsistent number of columns"
+        );
         let shorter = loadtxt("1 2 3\n4\n", ' ', '#', 0, usize::MAX).unwrap_err();
         assert_eq!(
             shorter.to_string(),
@@ -8633,10 +8639,7 @@ mm.flush()
         let err = fromfile_text("1,,2", ",", Some(3)).expect_err("empty field should fail");
         assert_eq!(err.reason_code(), "io_read_payload_incomplete");
         // Trailing separator with count beyond available tokens.
-        assert_eq!(
-            fromfile_text("1,2,", ",", Some(5)).unwrap(),
-            vec![1.0, 2.0]
-        );
+        assert_eq!(fromfile_text("1,2,", ",", Some(5)).unwrap(), vec![1.0, 2.0]);
         // Count zero parses nothing, even from a malformed input.
         assert_eq!(
             fromfile_text("junk,junk", ",", Some(0)).unwrap(),

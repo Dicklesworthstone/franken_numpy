@@ -391,8 +391,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces MATPOW_BOOL_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "bool matrix_power must be bit-identical to numpy incl. delegates: {result}"
     );
     Ok(())
@@ -869,8 +868,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces MATPOW_INT_NC_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "non-contiguous-base matrix_power must be bit-identical to numpy: {result}"
     );
     Ok(())

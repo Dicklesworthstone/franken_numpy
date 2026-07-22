@@ -494,8 +494,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces ISIN_INT64_*_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "parallel int isin must be bit-identical to numpy: {result}"
     );
     Ok(())

@@ -107,9 +107,7 @@ fn per_cell_i64_sidecar_meshgrid(arrays: &[UFuncArray]) -> Vec<(Vec<f64>, Vec<i6
             source_indices
                 .par_iter_mut()
                 .enumerate()
-                .for_each(|(flat, source)| {
-                    *source = (flat / strides[axis]) % out_shape[axis]
-                });
+                .for_each(|(flat, source)| *source = (flat / strides[axis]) % out_shape[axis]);
             let values = source_indices
                 .iter()
                 .map(|&source| arr.values()[source])
@@ -153,18 +151,9 @@ fn bench(c: &mut Criterion) {
 
     {
         let (nx, ny) = (2048usize, 2000usize);
-        let x = UFuncArray::new(
-            vec![nx],
-            (0..nx).map(|i| i as f64).collect(),
-            DType::F64,
-        )
-        .unwrap();
-        let y = UFuncArray::new(
-            vec![ny],
-            (0..ny).map(|i| -(i as f64)).collect(),
-            DType::F64,
-        )
-        .unwrap();
+        let x = UFuncArray::new(vec![nx], (0..nx).map(|i| i as f64).collect(), DType::F64).unwrap();
+        let y =
+            UFuncArray::new(vec![ny], (0..ny).map(|i| -(i as f64)).collect(), DType::F64).unwrap();
         let arrs = vec![x, y];
         let control = full_divmod_parallel_meshgrid(&arrs);
         let candidate = UFuncArray::meshgrid_advanced(&arrs, "ij", false).unwrap();
@@ -184,12 +173,7 @@ fn bench(c: &mut Criterion) {
         });
         g.bench_function("partial_strength_reduce", |b| {
             b.iter(|| {
-                black_box(UFuncArray::meshgrid_advanced(
-                    black_box(&arrs),
-                    "ij",
-                    false,
-                )
-                .unwrap())
+                black_box(UFuncArray::meshgrid_advanced(black_box(&arrs), "ij", false).unwrap())
             })
         });
         g.finish();
@@ -197,12 +181,7 @@ fn bench(c: &mut Criterion) {
 
     {
         let (nx, ny) = (2048usize, 2000usize);
-        let x = UFuncArray::new(
-            vec![nx],
-            (0..nx).map(|i| i as f64).collect(),
-            DType::F64,
-        )
-        .unwrap();
+        let x = UFuncArray::new(vec![nx], (0..nx).map(|i| i as f64).collect(), DType::F64).unwrap();
         let y = UFuncArray::new(
             vec![ny],
             (0..ny).map(|i| -((i as f64) + 0.5)).collect(),
@@ -224,20 +203,11 @@ fn bench(c: &mut Criterion) {
         g.warm_up_time(Duration::from_millis(250));
         g.measurement_time(Duration::from_secs(1));
         g.bench_function("partial_strength_reduce_control", |b| {
-            b.iter(|| {
-                black_box(partial_strength_reduce_parallel_meshgrid(black_box(
-                    &arrs,
-                )))
-            })
+            b.iter(|| black_box(partial_strength_reduce_parallel_meshgrid(black_box(&arrs))))
         });
         g.bench_function("block_fill", |b| {
             b.iter(|| {
-                black_box(UFuncArray::meshgrid_advanced(
-                    black_box(&arrs),
-                    "ij",
-                    false,
-                )
-                .unwrap())
+                black_box(UFuncArray::meshgrid_advanced(black_box(&arrs), "ij", false).unwrap())
             })
         });
         g.finish();
@@ -279,12 +249,7 @@ fn bench(c: &mut Criterion) {
         });
         g.bench_function("sidecar_block_fill", |b| {
             b.iter(|| {
-                black_box(UFuncArray::meshgrid_advanced(
-                    black_box(&arrs),
-                    "ij",
-                    false,
-                )
-                .unwrap())
+                black_box(UFuncArray::meshgrid_advanced(black_box(&arrs), "ij", false).unwrap())
             })
         });
         g.finish();

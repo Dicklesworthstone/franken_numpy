@@ -951,8 +951,7 @@ fn bool_sort_counting_matches_numpy() {
                     "{name} kind={kind:?}: bool sort bytes diverged"
                 );
                 assert_eq!(
-                    ours
-                        .getattr("flags")?
+                    ours.getattr("flags")?
                         .getattr("owndata")?
                         .extract::<bool>()?,
                     theirs
@@ -966,4 +965,3 @@ fn bool_sort_counting_matches_numpy() {
         Ok(())
     });
 }
-

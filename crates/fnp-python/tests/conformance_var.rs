@@ -802,8 +802,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces VAR/STD_INT_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "int var/std via f64 conversion must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -854,8 +853,7 @@ print(verdicts if verdicts else True)
     println!("{result}"); // surfaces NANVAR_INT_AX1_AB under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "True",
+        last, "True",
         "int nanvar/nanstd routing must be bit-identical to numpy: {result}"
     );
     Ok(())
@@ -898,8 +896,7 @@ print([] if not bad else bad)
     println!("{result}");
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        last,
-        "[]",
+        last, "[]",
         "flat f64 var/std/nansum must be bit-identical to numpy: {result}"
     );
     Ok(())

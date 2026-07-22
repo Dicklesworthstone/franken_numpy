@@ -27,14 +27,7 @@ fn bench_result_type(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("bool_seed_control", name),
             dtypes,
-            |b, dtypes| {
-                b.iter(|| {
-                    black_box(dtypes)
-                        .iter()
-                        .copied()
-                        .fold(DType::Bool, promote)
-                })
-            },
+            |b, dtypes| b.iter(|| black_box(dtypes).iter().copied().fold(DType::Bool, promote)),
         );
     }
 
@@ -533,7 +526,11 @@ fn bench_complex64_div_direct(c: &mut Criterion) {
             .map(|index| {
                 // Includes one exact zero divisor to exercise the NaN arm.
                 let value = index as f32 * 0.125 - 6_250.0;
-                if index == 77 { (0.0, 0.0) } else { (-value, value * 0.75) }
+                if index == 77 {
+                    (0.0, 0.0)
+                } else {
+                    (-value, value * 0.75)
+                }
             })
             .collect(),
     );
@@ -639,7 +636,11 @@ fn bench_complex_mixed_ops_direct(c: &mut Criterion) {
         (0..100_000)
             .map(|index| {
                 let value = f64::from(index) * 0.125 - 6_250.0;
-                if index == 77 { (0.0, 0.0) } else { (-value, value * 0.75) }
+                if index == 77 {
+                    (0.0, 0.0)
+                } else {
+                    (-value, value * 0.75)
+                }
             })
             .collect(),
     );
@@ -690,10 +691,7 @@ fn bench_complex_mixed_ops_direct(c: &mut Criterion) {
 /// Faithful replicas of the CURRENT complex unary paths: the input fully
 /// materialized via `to_complex128_vec` (a whole-vector copy even for native
 /// Complex128) before the transcendental kernel.
-fn former_unary_op(
-    input: &ArrayStorage,
-    kernel: fn((f64, f64)) -> (f64, f64),
-) -> ArrayStorage {
+fn former_unary_op(input: &ArrayStorage, kernel: fn((f64, f64)) -> (f64, f64)) -> ArrayStorage {
     let pairs = input.to_complex128_vec();
     ArrayStorage::Complex128(pairs.iter().map(|&z| kernel(z)).collect())
 }
@@ -759,12 +757,10 @@ fn bench_complex_unary_borrow(c: &mut Criterion) {
             b.iter(|| former_unary_op(black_box(input), kernel))
         });
         group.bench_function(format!("direct_borrow_{name}"), |b| {
-            b.iter(|| {
-                match name {
-                    n if n.starts_with("exp") => black_box(input).complex_exp(),
-                    n if n.starts_with("log") => black_box(input).complex_log(),
-                    _ => black_box(input).complex_sqrt(),
-                }
+            b.iter(|| match name {
+                n if n.starts_with("exp") => black_box(input).complex_exp(),
+                n if n.starts_with("log") => black_box(input).complex_log(),
+                _ => black_box(input).complex_sqrt(),
             })
         });
     }
