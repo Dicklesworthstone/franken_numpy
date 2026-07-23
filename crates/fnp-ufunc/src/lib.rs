@@ -22860,7 +22860,25 @@ impl UFuncArray {
         // roundtrip + zero-padded cases): inverse two-for-one trick — one length-n/2
         // inverse complex FFT + O(n) re-tangle, ≈ half the work of the full path.
         // Spectrum-truncating (m > n/2+1) or odd n fall back to the full path below.
-        if n >= 2 && n.is_multiple_of(2) && m <= n / 2 + 1 {
+        //
+        // The two-for-one packing assumes the DC (index 0) and Nyquist (index n/2)
+        // coefficients are real, which they always are for a spectrum produced by
+        // rfft. `hfft` feeds an arbitrary Hermitian spectrum whose Nyquist can be
+        // complex (e.g. conj(a) with a non-real last coefficient); the packing then
+        // leaks that imaginary part into a uniform DC offset. When either terminal
+        // coefficient is complex, use the exact full-spectrum path below instead.
+        let dc_imag = self.values.get(1).copied().unwrap_or(0.0);
+        let nyquist_imag = if m == n / 2 + 1 {
+            self.values.get(n + 1).copied().unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        if n >= 2
+            && n.is_multiple_of(2)
+            && m <= n / 2 + 1
+            && dc_imag == 0.0
+            && nyquist_imag == 0.0
+        {
             let needed = n / 2 + 1;
             let mut half_re = vec![0.0f64; needed];
             let mut half_im = vec![0.0f64; needed];
