@@ -4,6 +4,91 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-23 - WIN (KEEP): parse plain bool `loadtxt` rows from borrowed tokens - 2.8634x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.376`. Ledger and recent Git log were
+screened before editing. Float `loadtxt` delegation is CLOSED by `.367`; plain
+integer direct parsing is CLOSED by `.373`, whose KEEP row explicitly left bool
+text input open as a separate primitive requiring its own profile and screen.
+This change uses that declared-open bool lane and does not retry the float
+delegation or the integer path.
+
+PROFILE, inherited then re-confirmed by the delta: the former bool arm shares
+the exact `Vec<Vec<String>>` tokenizer plus nested-row staging that `.373`
+profiled on `vmi1227854` (>=18.48% of `perf record` samples in the named
+`Vec<String>` collection frame plus its libc allocation subtree, 6.93% in nested
+row destruction). The bool parse body (i64 parse then a nonzero test) is even
+cheaper than the integer parse, so the eliminated token-ownership/nested-row
+work is at least as large a fraction of the former cost - and the measured
+2.8634x directly confirms that staging dominated the former path.
+
+ONE LEVER: for path-backed input with no `usecols`, `unpack=false`, dtype
+`bool`, a one-character comment marker, and a whitespace or one-character
+delimiter, transduce borrowed row tokens directly into `ArrayStorage::Bool`.
+The former Bool conversion is preserved EXACTLY: `i64` parse then `!= 0`, with
+NO integral-f64 retry. This matches NumPy's own dtype=bool contract, verified
+live on numpy 2.4.3: it accepts any integer token including negatives and values
+beyond 2^53, and raises on non-integer tokens such as `"1.0"` or `"True"`. Every
+unsupported delimiter/option, parse failure, ragged row, and empty input falls
+through to the same NumPy fallback the former arm reached. Float, integer,
+usecols, unpack, file-like, converter, encoding, max_rows, like, and nonzero-
+ndmin behavior is untouched. The implementation is pure safe Rust.
+
+The decisive run was one exact-binary fixed-work interleaved ABBA/BAAB
+comparison on worker `hz1`, `--profile release` with LTO disabled, 10
+observations, on an 8,192 x 16 comma-separated corpus:
+
+| row | lhs mean | rhs mean | lhs CV | rhs CV | lhs/rhs |
+|---|---:|---:|---:|---:|---:|
+| exact former / direct candidate | 17.254726 ms | **6.026047 ms** | 1.808% | 1.120% | **2.8634x** |
+| candidate A/A null | 5.942997 ms | 5.970529 ms | 2.395% | 2.434% | 1.0046x |
+| former view-adapter bias | 5.421786 ms | 5.409900 ms | 4.651% | 5.485% | 0.9978x |
+
+The null is within 0.46% of unity with both arms below the mandatory 5% CV
+ceiling, and the decisive former/candidate arm is well under it (1.808% /
+1.120%). The view-adapter calibration shows the transpose adapter adds only
+0.22%, but its rhs CV (5.485%) exceeds the gate, so it is disclosed and excluded
+from the decision exactly as `.373` excluded its own noisy calibration; the
+2.86x does not depend on it. It exists only to record that forcing the retained
+former path through `unpack=true` and restoring `.T` adds two O(1) NumPy views.
+
+BEHAVIOR ISOMORPHISM: the permanent benchmark compares the direct path against
+live NumPy AND the exact retained generic tokenizer/parser (via `unpack=true` +
+`.T`) before timing. The focused release test
+`loadtxt_plain_bool_direct_path_matches_former_and_numpy_exactly` passed
+remotely (1 passed, 0 failed) and pins exact NumPy/former/candidate equality for
+comments, skiprows, i64 min/max, negatives, values beyond 2^53, zero, 2-D output
+shape, single-column 1-D squeeze, and the matching error type when a float-form
+token `"1.0"` is fed to dtype=bool. Bool dtype selection, storage, C-order
+traversal, and fallback behavior are unchanged. The strict-remote divergence
+ledger passed with zero entries (`"status": "pass"`).
+
+ALIEN RECOMMENDATION CONTRACT: this instantiates deforestation and partial
+evaluation from `alien_cs_graveyard.md` section 6.7, the sibling of `.373`. The
+nested owned-token program is fused with its only consumer while a guarded
+runtime shape keeps the generic path for every wider semantic surface. The
+smallest wedge is plain bool, no-usecols, non-unpack path input. Memory falls
+from O(tokens + rows + output) to O(output). Expected loss is one String
+allocation per token plus nested row allocation/destruction; calibration is the
+A/B and null above. Risks were parse-order drift, the erroneous addition of an
+integral-f64 retry that would diverge from NumPy's dtype=bool error, zero/nonzero
+drift, comments/skiprows drift, and shape drift; the exact former and live-NumPy
+proof covers each. Source is internal safe Rust. Rollback is one commit revert.
+Comparator is the retained former implementation in the same binary.
+
+REPRODUCTION:
+
+```bash
+RCH_REQUIRE_REMOTE=1 RCH_WORKER=hz1 CARGO_PROFILE_RELEASE_LTO=false rch exec -- cargo bench -p fnp-python --bench criterion_python_surface --profile release --config 'target.x86_64-unknown-linux-gnu.runner=["sh","-c","export FNP_BENCH_GROUPS=bench_loadtxt_bool_text_boundary; exec \"$@\"","fnp-runner"]' -- python_loadtxt_bool_text_boundary --noplot
+```
+
+Measured atop parent `2091482f`; source SHA-256
+`75d59caca88c501b8d1fd87fd0177d342f88330a0d95e6d845c60f6daa097660`; benchmark
+SHA-256 `4fbbf8c57aa7819fbce1eba0bce954e98f24fee52f23f16011f5846e371f1307`.
+Verdict: **KEEP**. Plain bool no-usecols/non-unpack owned-token staging is
+CLOSED. Selected columns and unpacked bool input remain separate primitives and
+require their own ledger/history screen and profile.
+
 ## 2026-07-22 - REJECT (NO-SHIP): hoist RandomState legacy Zipf batch constants - apparent 1.27x direction is invalid under noisy fixed traces
 
 `GoldSummit`, bead `franken_numpy-ixs5y.375`. The ledger and recent Git log
