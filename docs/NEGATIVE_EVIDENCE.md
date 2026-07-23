@@ -569,6 +569,260 @@ Verdict: **KEEP**. Do not re-probe nonnegative signed-usecols plan hoisting;
 negative-index planning is a different row-width-dependent primitive and must
 start from its own measured hotspot.
 
+## 2026-07-22 - WIN (SHIP): the STRIDED trailing-update kernel takes the narrow tile too - 17.9-20.7% on AVX-512; the packed-GEMM tile lane is now closed end-to-end
+
+`BlackThrush`, bead `deadlock-audit-9d05r`. Discharges the "_strided siblings
+stay on MR=4 - different writeback stride, not measured" scope-out written into
+the row below. Measured rather than inherited, because the strided form writes
+back by `row_stride` (the full matrix width) instead of `n`, so the output rows
+one tile touches are further apart and the locality argument genuinely differs.
+
+MEASURED (`bench_sub_assign_strided_tile`, bench-fast, 20 samples, MR=2 vs
+production MR=4, A/A `null_control_mr4` arm):
+
+| shape (m x k x n, stride) | AVX-512 `hz2` | null | AVX2 `hz1` | null |
+|---|---:|---:|---:|---:|
+| 960 x 64 x 960, s1024 | **0.793x** | 0.977x | 0.858x | 1.071x |
+| 896 x 128 x 896, s1024 | **0.821x** | 1.002x | 0.791x | 1.196x |
+| 512 x 64 x 512, s640 | **0.796x** | 0.987x | 0.579x | 0.776x |
+
+`hz2` is the clean run (null spread 0.2-2.3%) and is what should be quoted:
+**17.9-20.7% faster**. The `hz1` AVX2 pass was NOISY - its null control is off by
+up to 22% (0.776x at the 512 row), so its raw ratios are NOT quotable. Read
+conservatively, MR=2 against the BETTER of {prod, null} on `hz1` still wins
+14.2% / 20.9% / 25.3%, which confirms direction without pretending to precision.
+Recording the noisy arm rather than dropping it: a future agent re-running this
+on `hz1` should expect that variance and not read a regression into it.
+
+THE SHIP: `packed_gemm_sub_assign_strided_serial` now dispatches through the
+same `packed_sub_assign_tile_rows(k)` gate as the contiguous kernel (MR=2 for
+`k <= 128`, else the ISA gate). Covers the blocked-LU trailing update (line 676)
+and the SVD right-panel update (line 5136).
+
+BIT-IDENTICAL: `assert_strided_bit_identical` compares MR=2 vs MR=4
+byte-for-byte at all three shapes including the stride; 406 tests pass on `hz2`
+and 406 on `hz1`, golden-sha256 locks included.
+
+LANE STATUS - the packed-GEMM register-tile surface is now closed end-to-end
+across four probes: explicit `std::simd` at production geometry (REJECT), tile
+geometry at square k (REJECT on AVX2, WIN on AVX-512), contiguous trailing
+update at panel k (WIN, both ISAs), strided trailing update at panel k (WIN).
+The only untested residue is an Intel native-512 host, which does not exist in
+this fleet. Do not reopen without one.
+
+## 2026-07-22 - WIN (SHIP): trailing-update tile narrows to MR=2 on BOTH ISAs - 19-27% on every blocked-factorization update; the governing variable is k, NOT the ISA
+
+`BlackThrush`, bead `deadlock-audit-9d05r`. Discharges the "until separately
+measured" scope-out written into the `packed_gemm_serial` ISA regate below.
+
+KEY CORRECTION TO THE ROW BELOW: that row concluded the tile choice was an ISA
+split. **It is not - it is a k split, and the ISA result was a special case.**
+Measuring `packed_gemm_sub_assign_serial` at the shapes it is ACTUALLY called
+with (skinny-k trailing updates) shows MR=2 winning on AVX2 as well, which the
+square-k sweep had said was 18.6% slower there. Both facts are true; they are
+different regimes.
+
+WHY THE SHAPE MATTERS: every in-tree `sub_assign` caller passes a panel width,
+not a full dimension - `LU_PANEL_NB` = 64 (lu blocked factorization, lines
+676/798/835), `TRSM_PANEL_NB` = 128, `SVD_RIGHT_VT_PANEL_NB` = 128 (line 5136).
+The square k = n sweep in the row below never covered this. With a short k-loop
+the accumulator tile is loaded and flushed far more often relative to the work
+it amortizes, so the smaller tile wins regardless of register width.
+
+MEASURED (`bench_sub_assign_tile` in `benches/gemm_microkernel.rs`, bench-fast,
+20 samples, MR=2 vs production MR=4, with an A/A `null_control_mr4` arm):
+
+| shape (m x k x n) | AVX-512 `hz2` | null | AVX2 `hz1` | null |
+|---|---:|---:|---:|---:|
+| 960 x 64 x 960 (LU) | **0.784x** | 1.001x | **0.782x** | 1.104x |
+| 896 x 128 x 896 (TRSM/SVD) | **0.810x** | 1.006x | **0.733x** | 0.936x |
+| 512 x 64 x 512 | **0.786x** | 0.986x | **0.732x** | 0.926x |
+
+19.0-21.6% faster on AVX-512 against a 0.1-1.4% null spread, and 21.8-26.8%
+faster on AVX2 against a 6-10% null spread. Same sign, same magnitude, every
+shape, both ISAs.
+
+THE SHIP: `packed_gemm_sub_assign_serial` now dispatches to
+`packed_gemm_sub_assign_serial_tiled<const MR>` via
+`packed_sub_assign_tile_rows(k)`, which returns MR=2 for `k <= 128`
+(`PACKED_NARROW_K_MAX`, the measured range covering every current call site) and
+otherwise falls back to the ISA gate rather than extrapolating past the
+measurement. The AVX-512 constant was renamed `PACKED_MR_NARROW` since it is no
+longer ISA-specific. This reaches det / inv / solve / slogdet / lstsq and the
+SVD right-panel update - every blocked factorization's trailing update.
+
+BIT-IDENTICAL: MR regroups which output elements share a tile but never reorders
+an element's k-sum, which stays ascending before the single subtracting
+writeback. `assert_sub_assign_bit_identical` compares MR=2 vs MR=4 byte-for-byte
+(`to_bits()`) at all three shapes. Validated on both regimes: **406 fnp-linalg
+tests pass on `hz2` and 406 on `hz1`, 0 failed**, golden-sha256 matmul locks
+included, so no golden regeneration was required.
+
+NOT DONE (deliberate, still scoped out): the `_strided` siblings
+(`packed_gemm_sub_assign_strided{,_serial}`, used at lines 676/1797/1857) keep
+MR=4. They have a different writeback stride and were not measured; the same
+k-regime argument probably applies, which makes them the obvious next lever
+rather than an assumed win.
+
+## 2026-07-22 - WIN (MEASURED, ready to ship): GEMM tile geometry is ISA-DIVERGENT - MR=2 x NR=8 is 19% FASTER on AVX-512 and 19% SLOWER on AVX2; the shipped MR=4 is right for only half the fleet
+
+`BlackThrush`, discharges the retry predicate written in the AVX2 tile REJECT
+below ("re-run this exact sweep on an AVX-512 host"). The prediction in that row
+was WRONG in direction and the row is corrected here: I expected a WIDER tile
+(8,16) to win on AVX-512 because 32 registers x 8 f64 would fit 16 accumulators.
+The opposite happened - the NARROWEST tile won.
+
+FLEET ISA CENSUS (worth recording, nobody had written it down): of 12 configured
+rch workers, 10 are reachable and **exactly one has AVX-512** - `hz2` (AMD EPYC
+Genoa / Zen 4, 16 cores, `avx512f`). Every other reachable worker
+(`vmi1149989/1152480/1153651/1156319/1167313/1227854/1264463/1293453`, `hz1`) is
+AVX2-only. So any ISA-gated linalg row can only be validated on `hz2`, and a
+sweep that lands anywhere else silently measures the AVX2 regime.
+
+MEASURED on `hz2` (EPYC Genoa, `avx512f`), same `gemm_microkernel` sweep binary,
+`bench-fast`, 20 samples, built and run directly over SSH in a private scratch
+tree (`/home/ubuntu/bt-gemm-sweep`) so the root-owned rch sync copy was left
+untouched:
+
+| tile | n=512 vs prod | n=1024 vs prod | same tile on AVX2 (n=1024) |
+|---|---:|---:|---:|
+| `null_control_4x8` | 0.987x | 1.027x | 1.0002x |
+| **`tile_2x8`** | **0.815x** | **0.808x** | 1.186x |
+| `tile_4x16` | 0.970x | 0.988x | 1.023x |
+| `tile_8x16` | 1.038x | 1.051x | 1.280x |
+| `tile_6x16` | 1.092x | 1.110x | 1.260x |
+| `tile_8x8` | 1.108x | 1.121x | 1.380x |
+| `tile_6x8` | 1.111x | 1.121x | 1.388x |
+| `simd_4x8` | 1.008x | 1.037x | 1.079x |
+
+(4,8) -> (2,8) is worth **18.5% at n=512 and 19.2% at n=1024** on AVX-512, against
+a null-control spread of 1.3-2.7%, and the effect has the same sign and
+magnitude at both sizes. The identical tile is 18.6% SLOWER on AVX2. This is a
+genuine regime split, not noise, and it fits the existing REGIME-GATING
+TAXONOMY (gate by what the loss VARIES WITH - here, ISA).
+
+Do NOT quote absolute times across the two hosts: `hz2` is slower in absolute
+terms (146 ms vs `hetzner1`'s 79 ms for production at n=1024). Only the
+within-run ratios are meaningful, which is exactly why the A/A null control is
+in the bench.
+
+BIT-IDENTITY: already established and re-confirmed here - changing MR/NR
+regroups which output elements share a tile but never reorders an element's
+k-sum. All 7 variants matched production byte-for-byte (`to_bits()`) at n=256 on
+this host too. **So this regate needs NO golden-sha256 regeneration**, which is
+what makes it cheap to ship.
+
+THE SHIP (not yet applied - this row is the evidence, the edit is the next
+commit): make `packed_gemm_serial` generic as
+`packed_gemm_serial_tiled<const MR: usize>` and dispatch once per call on
+`std::arch::is_x86_feature_detected!("avx512f")` -> MR=2, else MR=4. NR stays 8.
+`is_x86_feature_detected!` is safe and needs no `unsafe`, so the
+`#![forbid(unsafe_code)]` contract is preserved. Band alignment in `packed_gemm`
+rounds to PACKED_MR=4, which remains a whole multiple of 2, so the parallel
+driver needs no change. Blast radius is deliberately limited to
+`packed_gemm_serial`; the `packed_gemm_sub_assign*` siblings are left on MR=4
+until separately measured.
+
+RESIDUAL RISK to close before or with the ship: this is ONE AVX-512
+microarchitecture (Zen 4, where AVX-512 is double-pumped 256-bit). Intel's
+native-512 parts may land differently, and there is no Intel AVX-512 host in the
+fleet to check. Gate on `avx512f` as measured, but state the Zen-4 basis in the
+code comment so a future Intel datapoint can refine it rather than silently
+inherit a wrong assumption.
+
+## 2026-07-22 - BLOCKER (NO-SHIP, do not retry as written): TSQR CANNOT be wired behind `fnp.linalg.qr` - R's row signs are OBSERVABLE output and numpy does not canonicalize them
+
+`BlackThrush`, follow-on to the TSQR WIN below. Filed BEFORE writing any
+dispatch code, because the obvious next lever ("wire the 2.42x-5.13x kernel into
+the Python surface") is parity-fatal in its naive form and would have been
+caught only after a 25-minute `fnp-python` build.
+
+THE CONTRACT PROBLEM: `numpy.linalg.qr(a, mode="r")` returns a specific R whose
+row signs are part of the observable result. Verified directly on
+`vmi1227854` with numpy 2.4.6 - a (2000, 6) input returns diagonal signs
+`[-1 -1 1 1 -1 -1]`, i.e. numpy does NOT canonicalize R to a positive diagonal
+and inherits whatever LAPACK's Householder sequence produced. TSQR applies a
+DIFFERENT (still exactly orthogonal) reflector sequence, so its R legitimately
+carries different row signs. Corroborated in-tree: the shipped unit test
+`tsqr_r_matches_qr_mxn_up_to_row_sign` only passes after a per-row sign flip
+against the standard-Householder `qr_mxn`.
+
+So routing `qr(mode="r")` through `tsqr_r` would return a numerically valid
+factorization that DIVERGES from numpy element-wise. That violates the drop-in
+contract regardless of the speedup. Canonicalizing to a positive diagonal does
+not rescue it - numpy's own output is not canonical, so canonicalization
+diverges too, just differently.
+
+WHERE THE WIN IS STILL REACHABLE (the actual next lever): entry points whose
+result is INVARIANT to the Q/R sign choice.
+- `lstsq` is the prize: x = R⁻¹Qᵀb is unique for full-rank A, so a TSQR-based
+  solve matches numpy to `allclose` with no sign question at all. Cost: the
+  reduction tree must carry Qᵀb alongside R (apply each local reflector block to
+  b and fold it up the same tree), which `tsqr_r` deliberately discards today.
+  That is the implementation gap, and it is a real one - do not assume `tsqr_r`
+  can be reused unchanged.
+- `matrix_rank` / `cond` are NOT free wins either: numpy routes both through
+  SVD, not QR, so matching them means matching singular values, not R.
+
+RETRY PREDICATE: implement `tsqr_qtb` (R plus Qᵀb through the same deterministic
+tree), then gate `lstsq` on 2-D f64 full-rank tall-skinny inputs with an
+`allclose` parity test against numpy. Do NOT retry the `qr(mode="r")` wiring in
+any form; the sign divergence is a property of the algorithm, not a bug to fix.
+
+## 2026-07-22 - REJECT (NO-SHIP), CLEAN MEASUREMENT: the shipped MR=4 x NR=8 GEMM tile geometry is OPTIMAL on AVX2 - all 6 alternative shapes lose 2.3%-39%
+
+`BlackThrush`, follow-on to `deadlock-audit-9d05r`. Pays the retry predicate of
+the `std::simd` REJECT immediately below ("only for a tile shape the compiler
+cannot autovectorize - i.e. changing MR/NR itself"). **The GEMM microkernel lane
+is now closed on evidence rather than on assumption: the production geometry was
+never swept before today, and it wins.**
+
+THE PROBE (`crates/fnp-linalg/benches/gemm_microkernel.rs`, extended in place):
+`gemm_tiled<const MR, const NR>` makes the shipped kernel generic over tile
+geometry, so all shapes share one loop nest and differ only in MR/NR. Swept
+(2,8), (6,8), (8,8), (4,16), (6,16), (8,16) against production (4,8), plus the
+explicit-SIMD (4,8) arm and an A/A `null_control_4x8`.
+
+MEASUREMENT QUALITY - this is the part that makes the verdict trustworthy: at
+n=1024 the null control (production kernel benched twice) came in at
+**78,657,798 ns vs 78,644,637 ns = 1.0002x**, i.e. a 0.02% spread. That is far
+inside the 5% CV bar and means the run genuinely resolves the differences below.
+At n=512 the same control was 1.106x, so the n=512 column is noise-dominated and
+only the n=1024 column should be quoted.
+
+| tile | n=512 vs prod | n=1024 vs prod |
+|---|---:|---:|
+| `null_control_4x8` | 1.106x | **1.0002x** |
+| `tile_2x8` | 1.210x | 1.186x |
+| `tile_6x8` | 1.207x | 1.388x |
+| `tile_8x8` | 1.283x | 1.380x |
+| `tile_4x16` | 1.096x | 1.023x |
+| `tile_6x16` | 1.238x | 1.260x |
+| `tile_8x16` | 1.213x | 1.280x |
+| `simd_4x8` | 1.043x | 1.079x |
+
+Every alternative is SLOWER. Nearest is (4,16) at 1.023x; the rest lose
+18.6%-38.8%. Consistent with the register budget: worker `hetzner1` reports
+`avx2` and no `avx512f`, so 16 vector registers x 4 f64. The (4,8) tile needs 8
+accumulator registers, leaving room for the A splat and B panel operands;
+(6,8)/(8,8)/(6,16)/(8,16) need 12-32 and spill, which the 26-39% losses show
+directly. (2,8) under-uses the file and re-streams B per row pair.
+
+BIT-IDENTITY (useful independent of the perf verdict): changing MR/NR regroups
+which output elements share a tile but never reorders any element's k-sum, which
+stays ascending. `assert_all_shapes_bit_identical` compared all 7 variants
+byte-for-byte (`to_bits()`) against production at n=256 and every one matched.
+So the tiling-invariance argument is now empirically confirmed - a future agent
+retuning this tile does NOT need to regenerate the golden sha256 locks, only to
+keep the k-loop ascending.
+
+RETRY PREDICATE (narrow, and genuinely untested): re-run this exact sweep on an
+**AVX-512 host**. With 32 registers x 8 f64 the register-pressure argument
+inverts - (8,16) needs 16 accumulator registers there, which fits, and is the
+one shape with a physical reason to win. The sweep binary already exists and the
+whole job takes ~4 minutes, so this is cheap. Do NOT re-run it on AVX2, and do
+NOT reopen the (4,8) vs explicit-SIMD question at all.
+
 ## 2026-07-22 - WIN (SHIP): TSQR tall-skinny QR native kernel - 2.42x-5.13x vs same-host numpy; the dense-linalg lever was never the GEMM tile
 
 `BlackThrush`, bead `deadlock-audit-9d05r`, campaign `franken_numpy-ixs5y`.
