@@ -62,7 +62,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install --upgrade pip numpy
+      - run: python -m pip install --upgrade pip "numpy<2.5"
       # crates/fnp-conformance/tests/codebase_hygiene.rs shells out to ripgrep
       # (rg) to enforce the no-stubs / no-unsafe invariants; the runner image
       # does not ship it, so without this those 11 tests panic "rg should be
@@ -88,7 +88,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install --upgrade pip numpy
+      - run: python -m pip install --upgrade pip "numpy<2.5"
       - uses: Swatinem/rust-cache@v2
       - run: cargo run -p fnp-conformance --bin capture_numpy_oracle
       - name: Verify oracle uses real NumPy
