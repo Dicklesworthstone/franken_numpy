@@ -5,6 +5,10 @@
 //! --nocapture`) to answer "what do the workers build and support" without shipping perf code.
 //! Always passes; the output is the artifact.
 
+// The trailing assertions are on cfg! constants ON PURPOSE: a const block would fail the
+// COMPILE on a misconfigured host, but the probe must report a runtime test failure so
+// `rch exec` surfaces which worker drifted instead of dying mid-build.
+#[allow(clippy::assertions_on_constants)]
 #[test]
 fn worker_isa_probe() {
     let compiled = [

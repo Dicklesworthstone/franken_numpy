@@ -18507,7 +18507,7 @@ impl UFuncArray {
                 "weighted_quantile: mixed-sign zero tie representative is a sort artifact".into(),
             ));
         }
-        if weights.iter().any(|&w| !(w >= 0.0)) {
+        if weights.iter().any(|&w| w.is_nan() || w < 0.0) {
             return Err(UFuncError::Msg(
                 "weighted_quantile: negative/NaN weights defer to numpy's error".into(),
             ));
@@ -26453,23 +26453,6 @@ impl UFuncArray {
     }
 
     // ── NaN-aware reductions ────────────────────────────────────────────
-
-    /// Helper: produce a copy of `self` with NaN values removed (flattened).
-    fn nan_filtered(&self) -> Self {
-        let values: Vec<f64> = self
-            .values
-            .iter()
-            .copied()
-            .filter(|v| !v.is_nan())
-            .collect();
-        let n = values.len();
-        Self {
-            shape: vec![n],
-            values,
-            dtype: self.dtype,
-            integer_sidecar: None,
-        }
-    }
 
     /// Helper: produce a copy with NaN values removed along a specific axis
     /// by replacing NaN with `fill` before the reduction.

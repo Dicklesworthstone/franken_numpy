@@ -2784,8 +2784,8 @@ fn householder_r_in_place(block: &mut [f64], rows: usize, n: usize) {
         v[col] -= alpha;
 
         let mut v_norm_sq = 0.0;
-        for i in col..rows {
-            v_norm_sq += v[i] * v[i];
+        for &value in &v[col..rows] {
+            v_norm_sq += value * value;
         }
         if v_norm_sq == 0.0 {
             continue;

@@ -2546,15 +2546,6 @@ fn build_usecols_plan(cols: &[usize]) -> UsecolsPlan {
     }
 }
 
-fn parse_loadtxt_row_usecols(
-    trimmed: &str,
-    delimiter: char,
-    cols: &[usize],
-) -> Result<Vec<f64>, IOError> {
-    let plan = build_usecols_plan(cols);
-    parse_loadtxt_row_usecols_planned(trimmed, delimiter, &plan)
-}
-
 fn parse_loadtxt_row_usecols_planned(
     trimmed: &str,
     delimiter: char,
@@ -3794,12 +3785,12 @@ pub fn genfromtxt(
         // former code evaluated after collecting - and every error discards
         // `values`, so parsing before the ragged check is unobservable.
         let row_start = values.len();
-        if let Some(expected) = ncols {
-            if row_start + expected > MAX_TEXT_ELEMENTS {
-                return Err(IOError::ReadPayloadIncomplete(
-                    "genfromtxt: text exceeds MAX_TEXT_ELEMENTS budget",
-                ));
-            }
+        if let Some(expected) = ncols
+            && row_start + expected > MAX_TEXT_ELEMENTS
+        {
+            return Err(IOError::ReadPayloadIncomplete(
+                "genfromtxt: text exceeds MAX_TEXT_ELEMENTS budget",
+            ));
         }
         if delimiter == ' ' {
             values.extend(
@@ -9047,7 +9038,7 @@ mm.flush()
         roundtrip(
             IOSupportedDType::F64,
             vec![3],
-            [3.141_592_653_589_793_f64, -0.0, f64::NEG_INFINITY]
+            [std::f64::consts::PI, -0.0, f64::NEG_INFINITY]
                 .into_iter()
                 .flat_map(f64::to_le_bytes)
                 .collect(),

@@ -606,12 +606,15 @@ fn bench_complex_mixed_add_direct(c: &mut Criterion) {
     group.finish();
 }
 
+/// Complex128 pair kernel: (lhs, rhs) -> out, all as (re, im) tuples.
+type MixedComplexKernel = fn((f64, f64), (f64, f64)) -> (f64, f64);
+
 /// Faithful replicas of the CURRENT mixed-pair sub/mul/div paths: both
 /// inputs materialized via `to_complex128_vec` before the op kernel.
 fn former_mixed_op(
     lhs: &ArrayStorage,
     rhs: &ArrayStorage,
-    kernel: fn((f64, f64), (f64, f64)) -> (f64, f64),
+    kernel: MixedComplexKernel,
 ) -> ArrayStorage {
     let lhs = lhs.to_complex128_vec();
     let rhs = rhs.to_complex128_vec();

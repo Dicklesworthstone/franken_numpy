@@ -112,12 +112,11 @@ fn public_f_order_element_steps(plan: &NditerPlan) -> Vec<NditerStep> {
 /// iterator machinery in both arms, so the A/B isolates the removed work.
 fn former_model_f_order_element_steps(plan: &NditerPlan) -> Vec<NditerStep> {
     Nditer::from_plan(plan.clone())
-        .map(|step| {
+        .inspect(|step| {
             black_box(
                 plan.linear_index_to_multi_index(step.iterindex)
                     .expect("former-model second decode must resolve"),
             );
-            step
         })
         .collect()
 }

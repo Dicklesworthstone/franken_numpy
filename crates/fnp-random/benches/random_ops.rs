@@ -612,7 +612,7 @@ fn former_permuted_last_axis(
     let shape = [rows, axis_len];
     let strides = [axis_len, 1];
     for slice_index in 0..rows {
-        let mut multi_index = vec![0usize; 2];
+        let mut multi_index = [0usize; 2];
         let mut remainder = slice_index;
         for dimension in (0..2).rev() {
             if dimension == 1 {

@@ -20,7 +20,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  RUSTFLAGS: "-D warnings"
+  # RUSTFLAGS env REPLACES .cargo/config.toml's rustflags entirely, so the
+  # project's +avx2 ISA baseline must be restated here or CI builds a binary
+  # that violates the contract worker_isa_probe asserts (avx2 baked in, fma
+  # NOT baked in). All GitHub-hosted x86_64 runners support AVX2.
+  RUSTFLAGS: "-D warnings -C target-feature=+avx2"
   RUST_TOOLCHAIN: nightly-2026-02-20
   PHASE2C_PACKETS: "FNP-P2C-001 FNP-P2C-002 FNP-P2C-003 FNP-P2C-004 FNP-P2C-005 FNP-P2C-006 FNP-P2C-007 FNP-P2C-008 FNP-P2C-009"
 

@@ -134,10 +134,9 @@ fn resize_sidecar_modulo_control(array: &UFuncArray, output_len: usize) -> UFunc
         vec![output_len],
         fnp_dtype::ArrayStorage::I64(gathered.clone()),
     )
-    .map(|out| {
+    .inspect(|_out| {
         // Bridge equality is asserted by the caller against `values`.
         black_box(&values);
-        out
     })
     .unwrap()
 }

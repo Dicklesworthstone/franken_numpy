@@ -1673,7 +1673,9 @@ fn bench_fromfile_native_u64(c: &mut Criterion) {
 
     let mut padded = vec![0u8; bytes.len() + core::mem::align_of::<u64>()];
     let misaligned_offset = (0..core::mem::align_of::<u64>())
-        .find(|&offset| (padded.as_ptr() as usize + offset) % core::mem::align_of::<u64>() != 0)
+        .find(|&offset| {
+            !(padded.as_ptr() as usize + offset).is_multiple_of(core::mem::align_of::<u64>())
+        })
         .unwrap();
     padded[misaligned_offset..misaligned_offset + bytes.len()].copy_from_slice(bytes);
     let misaligned = &padded[misaligned_offset..misaligned_offset + bytes.len()];
@@ -1729,7 +1731,9 @@ fn bench_fromfile_non_native_u64(c: &mut Criterion) {
 
     let mut padded = vec![0u8; bytes.len() + core::mem::align_of::<u64>()];
     let misaligned_offset = (0..core::mem::align_of::<u64>())
-        .find(|&offset| (padded.as_ptr() as usize + offset) % core::mem::align_of::<u64>() != 0)
+        .find(|&offset| {
+            !(padded.as_ptr() as usize + offset).is_multiple_of(core::mem::align_of::<u64>())
+        })
         .unwrap();
     padded[misaligned_offset..misaligned_offset + bytes.len()].copy_from_slice(bytes);
     let misaligned = &padded[misaligned_offset..misaligned_offset + bytes.len()];
@@ -1784,7 +1788,9 @@ fn bench_fromfile_native_i64(c: &mut Criterion) {
 
     let mut padded = vec![0u8; bytes.len() + core::mem::align_of::<i64>()];
     let misaligned_offset = (0..core::mem::align_of::<i64>())
-        .find(|&offset| (padded.as_ptr() as usize + offset) % core::mem::align_of::<i64>() != 0)
+        .find(|&offset| {
+            !(padded.as_ptr() as usize + offset).is_multiple_of(core::mem::align_of::<i64>())
+        })
         .unwrap();
     padded[misaligned_offset..misaligned_offset + bytes.len()].copy_from_slice(bytes);
     let misaligned = &padded[misaligned_offset..misaligned_offset + bytes.len()];
@@ -1840,7 +1846,9 @@ fn bench_fromfile_non_native_i64(c: &mut Criterion) {
 
     let mut padded = vec![0u8; bytes.len() + core::mem::align_of::<i64>()];
     let misaligned_offset = (0..core::mem::align_of::<i64>())
-        .find(|&offset| (padded.as_ptr() as usize + offset) % core::mem::align_of::<i64>() != 0)
+        .find(|&offset| {
+            !(padded.as_ptr() as usize + offset).is_multiple_of(core::mem::align_of::<i64>())
+        })
         .unwrap();
     padded[misaligned_offset..misaligned_offset + bytes.len()].copy_from_slice(bytes);
     let misaligned = &padded[misaligned_offset..misaligned_offset + bytes.len()];
@@ -1896,7 +1904,9 @@ fn bench_fromfile_non_native_f64(c: &mut Criterion) {
 
     let mut padded = vec![0u8; bytes.len() + core::mem::align_of::<u64>()];
     let misaligned_offset = (0..core::mem::align_of::<u64>())
-        .find(|&offset| (padded.as_ptr() as usize + offset) % core::mem::align_of::<u64>() != 0)
+        .find(|&offset| {
+            !(padded.as_ptr() as usize + offset).is_multiple_of(core::mem::align_of::<u64>())
+        })
         .unwrap();
     padded[misaligned_offset..misaligned_offset + bytes.len()].copy_from_slice(bytes);
     let misaligned = &padded[misaligned_offset..misaligned_offset + bytes.len()];
@@ -1941,7 +1951,9 @@ fn bench_fromfile_native_i16(c: &mut Criterion) {
 
     let mut padded = vec![0u8; bytes.len() + core::mem::align_of::<i16>()];
     let misaligned_offset = (0..core::mem::align_of::<i16>())
-        .find(|&offset| (padded.as_ptr() as usize + offset) % core::mem::align_of::<i16>() != 0)
+        .find(|&offset| {
+            !(padded.as_ptr() as usize + offset).is_multiple_of(core::mem::align_of::<i16>())
+        })
         .unwrap();
     padded[misaligned_offset..misaligned_offset + bytes.len()].copy_from_slice(bytes);
     let misaligned = &padded[misaligned_offset..misaligned_offset + bytes.len()];
@@ -1982,7 +1994,9 @@ fn bench_fromfile_non_native_i16(c: &mut Criterion) {
 
     let mut padded = vec![0u8; bytes.len() + core::mem::align_of::<i16>()];
     let misaligned_offset = (0..core::mem::align_of::<i16>())
-        .find(|&offset| (padded.as_ptr() as usize + offset) % core::mem::align_of::<i16>() != 0)
+        .find(|&offset| {
+            !(padded.as_ptr() as usize + offset).is_multiple_of(core::mem::align_of::<i16>())
+        })
         .unwrap();
     padded[misaligned_offset..misaligned_offset + bytes.len()].copy_from_slice(bytes);
     let misaligned = &padded[misaligned_offset..misaligned_offset + bytes.len()];
@@ -2022,7 +2036,9 @@ fn bench_fromfile_native_u16(c: &mut Criterion) {
 
     let mut padded = vec![0u8; bytes.len() + core::mem::align_of::<u16>()];
     let misaligned_offset = (0..core::mem::align_of::<u16>())
-        .find(|&offset| (padded.as_ptr() as usize + offset) % core::mem::align_of::<u16>() != 0)
+        .find(|&offset| {
+            !(padded.as_ptr() as usize + offset).is_multiple_of(core::mem::align_of::<u16>())
+        })
         .unwrap();
     padded[misaligned_offset..misaligned_offset + bytes.len()].copy_from_slice(bytes);
     let misaligned = &padded[misaligned_offset..misaligned_offset + bytes.len()];
@@ -2063,7 +2079,9 @@ fn bench_fromfile_non_native_u16(c: &mut Criterion) {
 
     let mut padded = vec![0u8; bytes.len() + core::mem::align_of::<u16>()];
     let misaligned_offset = (0..core::mem::align_of::<u16>())
-        .find(|&offset| (padded.as_ptr() as usize + offset) % core::mem::align_of::<u16>() != 0)
+        .find(|&offset| {
+            !(padded.as_ptr() as usize + offset).is_multiple_of(core::mem::align_of::<u16>())
+        })
         .unwrap();
     padded[misaligned_offset..misaligned_offset + bytes.len()].copy_from_slice(bytes);
     let misaligned = &padded[misaligned_offset..misaligned_offset + bytes.len()];
@@ -2103,7 +2121,9 @@ fn bench_fromfile_native_u32(c: &mut Criterion) {
 
     let mut padded = vec![0u8; bytes.len() + core::mem::align_of::<u32>()];
     let misaligned_offset = (0..core::mem::align_of::<u32>())
-        .find(|&offset| (padded.as_ptr() as usize + offset) % core::mem::align_of::<u32>() != 0)
+        .find(|&offset| {
+            !(padded.as_ptr() as usize + offset).is_multiple_of(core::mem::align_of::<u32>())
+        })
         .unwrap();
     padded[misaligned_offset..misaligned_offset + bytes.len()].copy_from_slice(bytes);
     let misaligned = &padded[misaligned_offset..misaligned_offset + bytes.len()];
@@ -2144,7 +2164,9 @@ fn bench_fromfile_non_native_u32(c: &mut Criterion) {
 
     let mut padded = vec![0u8; bytes.len() + core::mem::align_of::<u32>()];
     let misaligned_offset = (0..core::mem::align_of::<u32>())
-        .find(|&offset| (padded.as_ptr() as usize + offset) % core::mem::align_of::<u32>() != 0)
+        .find(|&offset| {
+            !(padded.as_ptr() as usize + offset).is_multiple_of(core::mem::align_of::<u32>())
+        })
         .unwrap();
     padded[misaligned_offset..misaligned_offset + bytes.len()].copy_from_slice(bytes);
     let misaligned = &padded[misaligned_offset..misaligned_offset + bytes.len()];
@@ -2184,7 +2206,9 @@ fn bench_fromfile_native_i32(c: &mut Criterion) {
 
     let mut padded = vec![0u8; bytes.len() + core::mem::align_of::<i32>()];
     let misaligned_offset = (0..core::mem::align_of::<i32>())
-        .find(|&offset| (padded.as_ptr() as usize + offset) % core::mem::align_of::<i32>() != 0)
+        .find(|&offset| {
+            !(padded.as_ptr() as usize + offset).is_multiple_of(core::mem::align_of::<i32>())
+        })
         .unwrap();
     padded[misaligned_offset..misaligned_offset + bytes.len()].copy_from_slice(bytes);
     let misaligned = &padded[misaligned_offset..misaligned_offset + bytes.len()];
@@ -2225,7 +2249,9 @@ fn bench_fromfile_non_native_i32(c: &mut Criterion) {
 
     let mut padded = vec![0u8; bytes.len() + core::mem::align_of::<i32>()];
     let misaligned_offset = (0..core::mem::align_of::<i32>())
-        .find(|&offset| (padded.as_ptr() as usize + offset) % core::mem::align_of::<i32>() != 0)
+        .find(|&offset| {
+            !(padded.as_ptr() as usize + offset).is_multiple_of(core::mem::align_of::<i32>())
+        })
         .unwrap();
     padded[misaligned_offset..misaligned_offset + bytes.len()].copy_from_slice(bytes);
     let misaligned = &padded[misaligned_offset..misaligned_offset + bytes.len()];
@@ -2331,7 +2357,9 @@ fn bench_fromfile_non_native_f32(c: &mut Criterion) {
 
     let mut padded = vec![0u8; bytes.len() + core::mem::align_of::<u32>()];
     let misaligned_offset = (0..core::mem::align_of::<u32>())
-        .find(|&offset| (padded.as_ptr() as usize + offset) % core::mem::align_of::<u32>() != 0)
+        .find(|&offset| {
+            !(padded.as_ptr() as usize + offset).is_multiple_of(core::mem::align_of::<u32>())
+        })
         .unwrap();
     padded[misaligned_offset..misaligned_offset + bytes.len()].copy_from_slice(bytes);
     let misaligned = &padded[misaligned_offset..misaligned_offset + bytes.len()];
