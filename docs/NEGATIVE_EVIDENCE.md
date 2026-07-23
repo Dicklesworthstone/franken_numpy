@@ -4,6 +4,49 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-23 - WIN (SHIP, correctness + perf): genfromtxt float `skip_footer>0` delegates to `fnp_io::genfromtxt_full` - fixes a raw-vs-data footer-count parity bug AND removes the owned-token staging
+
+`BlackThrush`, bead `franken_numpy-ixs5y.6rr15` (deadlock-audit-6rr15). The
+declared-open `.368` leaf: that block routed float genfromtxt to
+`fnp_io::genfromtxt` (the direct-extend streaming reader, no footer support)
+only for `skip_footer==0`, so a nonzero skip_footer fell through to the generic
+`Vec<Vec<String>>` tokenizer.
+
+TWO findings during implementation:
+1. `fnp_io::genfromtxt` and `fnp_io::genfromtxt_full` are DIFFERENT algorithms
+   (streaming direct-extend vs collect-all-lines-then-footer-trim), not
+   wrapper/wrapped - so this is a SEPARATE additive block, NOT a unification of
+   the shipped `.368` path.
+2. PARITY BUG in the former generic path: it counts `skip_footer` on RAW lines
+   (`all_lines[skip_h..len-skip_f]` before comment/blank stripping), but numpy
+   counts it on DATA rows AFTER stripping. Verified on numpy 2.4.3:
+   `genfromtxt(StringIO("1,2\n3,4\n5,6\n\n"), skip_footer=1)` = `[[1,2],[3,4]]`
+   (data-count drops a real row), and `"...\n# comment\n"` likewise. The former
+   raw-count kept 3 rows there; `genfromtxt_full` data-counts and MATCHES numpy.
+
+THE LEVER: for path/file-like float input with no usecols, `skip_footer>0`, a
+one-char comment, and a whitespace/one-char delimiter, build
+`GenFromTxtConfig{skip_header, skip_footer, delimiter, comments, filling=NaN,
+usecols=None, max_rows=MAX}` and call `genfromtxt_full`, reusing the `.368`
+shape/storage/unpack/fallback tail. `.368`'s `skip_footer==0` path is untouched.
+max_rows is fallback-gated in the early guards, so skip_footer/max_rows never
+collide. Pure safe Rust; the parser reads rows directly into the value buffer
+with no owned per-row `Vec<String>` (the same staging `.373/.376` removed).
+
+VERIFIED: focused test
+`genfromtxt_float_skip_footer_delegates_to_genfromtxt_full_and_matches_numpy`
+passes on rch - a clean skip_header+skip_footer corpus AND the comment+blank
+footer case (the parity fix) both match live numpy. clippy pending (fleet under
+disk pressure); the block mirrors the clippy-clean `.368` block.
+
+Verdict: **SHIP**. This is a correctness fix (footer data-count parity) that also
+removes owned-token staging; no same-behavior A/B applies because the former
+path was divergent for comment/blank footers (there is no correct "former" to
+compare against on those inputs). Perf is inherited from `genfromtxt_full`, whose
+performance was established in `.368`. Remaining open: int/bool/complex
+skip_footer still use the generic raw-count path (same latent bug, but they need
+an int/typed genfromtxt_full which does not exist yet) - separate leaf.
+
 ## 2026-07-23 - WIN (KEEP): parse plain bool `loadtxt` rows from borrowed tokens - 2.8634x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.376`. Ledger and recent Git log were
