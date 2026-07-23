@@ -4,7 +4,7 @@
   <img src="franken_numpy_illustration.webp" alt="FrankenNumPy — memory-safe clean-room NumPy reimplementation in Rust" width="400">
 
   **A memory-safe, clean-room reimplementation of NumPy in Rust.**<br>
-  100% of `numpy.__all__` (499/499) is reachable as `fnp_python.<name>`, structurally locked by a conformance test that fails CI on regression. Zero hand-written `unsafe` blocks across all 10 implementation crates (9 declare `#![forbid(unsafe_code)]`; `fnp-python` is opt-out only because PyO3 macros may expand to unsafe). 6,392 tests. Bit-exact PCG64DXSM RNG parity for explicit seeds; no-seed constructors source OS entropy like NumPy.
+  100% of `numpy.__all__` (499/499) is reachable as `fnp_python.<name>`, structurally locked by a conformance test that fails CI on regression. The 9 numeric-core crates declare `#![forbid(unsafe_code)]` and hold zero hand-written `unsafe`; `fnp-python`, the PyO3 boundary, uses hand-written `unsafe` only for zero-copy reinterpretation of borrowed Python buffers. 6,392 tests. Bit-exact PCG64DXSM RNG parity for explicit seeds; no-seed constructors source OS entropy like NumPy.
 
   ![Rust](https://img.shields.io/badge/Rust-nightly%202026--02--20-orange)
   ![Edition](https://img.shields.io/badge/edition-2024-blue)
@@ -61,7 +61,7 @@ FrankenNumPy is not trying to replace NumPy for every workload tomorrow. It targ
 
 | Audience | Why FrankenNumPy is useful |
 |---|---|
-| **Rust applications that want numerical arrays** without taking on `unsafe` C dependencies, calling out to BLAS, or shelling to Python. The 10 implementation crates have **zero hand-written unsafe blocks** and **zero external runtime C dependencies** in the numeric core. |
+| **Rust applications that want numerical arrays** without taking on `unsafe` C dependencies, calling out to BLAS, or shelling to Python. The 9 numeric-core crates have **zero hand-written unsafe blocks** (`fnp-python`, the PyO3 layer, uses `unsafe` only for zero-copy buffer views) and **zero external runtime C dependencies** in the numeric core. |
 | **Reproducibility-critical pipelines** (regulatory ML, scientific publication, financial backtesting) that need **bit-exact RNG and dtype-deterministic promotion** across machines and across NumPy versions. PCG64DXSM streams are bit-exact vs upstream NumPy; the 324-pair promotion table is exhaustively explicit. |
 | **Security-conscious systems** that read untrusted `.npy` / `.npz` from third parties. NumPy's C parsers are an attack surface; the `fnp-io` parsers are bounded, fail-closed, and fuzzed. |
 | **Embedded / kiosk-style Rust deployments** that want NumPy-shaped APIs without dragging a Python interpreter into the build. |
@@ -75,7 +75,7 @@ This is the wrong tool if your bottleneck is large dense matmul on >2,000×2,000
 
 | | NumPy (C / Cython) | FrankenNumPy (Rust) |
 |---|---|---|
-| Memory safety | Buffer overflows possible | 9 of 10 implementation crates declare `#![forbid(unsafe_code)]`; the 10th (`fnp-python`) contains zero unsafe blocks in its own source. The lint is opt-out only because PyO3 macros may expand into unsafe |
+| Memory safety | Buffer overflows possible | 9 of 10 implementation crates declare `#![forbid(unsafe_code)]` (numeric core is unsafe-free); the 10th (`fnp-python`, the PyO3 boundary) uses hand-written `unsafe` for zero-copy reinterpretation of borrowed Python buffers |
 | `numpy.__all__` surface | Reference | 499/499 (100%), structurally locked by CI conformance test |
 | RNG parity | Reference | Bit-exact PCG64DXSM core stream, oracle-verified distributions |
 | NaN semantics | C-level behavior | Explicit propagation across reductions / sort / median / ptp |
@@ -365,7 +365,7 @@ See [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the complete live parity matrix
 
 ## Workspace and Crate Map
 
-10 implementation crates, all under `crates/fnp-*`. 9 of the 10 declare `#![forbid(unsafe_code)]`; `fnp-python` is the lone exception, because PyO3's procedural macros may expand into unsafe as part of generating the cdylib entry point. In practice, the current `fnp-python` source contains zero hand-written `unsafe` blocks (verified by ripgrep); the lint is opt-out, not invoked.
+10 implementation crates, all under `crates/fnp-*`. 9 of the 10 declare `#![forbid(unsafe_code)]` and stay entirely on the safe-Rust path (enforced by `no_unsafe_code_blocks_or_items` in `codebase_hygiene.rs`). `fnp-python` is the lone exception: PyO3's procedural macros may expand into unsafe, and its source additionally uses hand-written `unsafe` (chiefly `std::slice::from_raw_parts` on borrowed `PyBuffer` bytes) for the zero-copy fast paths — confined to `fnp-python` and excluded from the hygiene scan.
 
 External crate dependencies are pinned at the workspace root in `[workspace.dependencies]`: `serde 1.0.228` (3 consumer crates), `serde_json 1.0.149` (3 consumers), `criterion 0.6 with html_reports` (7 consumer bench crates), and `pyo3 0.28.3 with auto-initialize` (1 consumer — `fnp-python`). Each consumer references the pin via `.workspace = true`. Verified 2026-05-20 — no dead workspace deps.
 
@@ -1585,7 +1585,7 @@ For pipelines that need cryptographic non-repudiation, a serialized ledger snaps
 
 FrankenNumPy's security posture covers more than memory safety.
 
-- **Zero unsafe Rust in the workspace today.** 9 of the 10 implementation crates declare `#![forbid(unsafe_code)]`; the 10th (`fnp-python`) does not declare the lint because PyO3's procedural macros may expand to unsafe code as the cdylib entry point is generated. In practice, the current `fnp-python` source contains zero hand-written `unsafe` blocks (verified by ripgrep). The lint is opt-out, not invoked.
+- **Safe-Rust numeric core.** 9 of the 10 implementation crates declare `#![forbid(unsafe_code)]` and contain zero hand-written `unsafe`. The 10th (`fnp-python`) does not declare the lint — PyO3's procedural macros may expand to unsafe as the cdylib entry point is generated, and its source additionally uses hand-written `unsafe` (chiefly `std::slice::from_raw_parts` on borrowed `PyBuffer` bytes) for the zero-copy fast paths. That `unsafe` is confined to `fnp-python`; the `codebase_hygiene` tests enforce that the other 9 crates stay unsafe-free.
 - **Fail-closed by default.** Unknown wire formats, unrecognized dtype descriptors, future metadata-version markers, and metadata schema violations cause explicit errors, not silent fallbacks.
 - **Bounded resource consumption.** NPY header caps at 64 KB. NPZ archives cap at 4,096 members and 2 GiB uncompressed. Text I/O caps at 16,777,216 elements. Memmap validation retries cap at 64. These prevent denial of service via crafted inputs.
 - **Pickle rejection.** Object dtype arrays that could execute arbitrary code during deserialization require explicit `allow_pickle=true`, matching NumPy's security gate.
@@ -2376,7 +2376,7 @@ Oracle tests. We run the same operations with the same inputs in both NumPy and 
 Rust Edition 2024. The toolchain is pinned to `nightly-2026-02-20` for reproducibility; see `rust-toolchain.toml` and the `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`, which is the single source of truth for the CI gates.
 
 **Why zero unsafe code?**
-Memory safety is a core value. 9 of the 10 implementation crates declare `#![forbid(unsafe_code)]`. `fnp-python` is the one that doesn't, because PyO3 procedural macros may expand into unsafe as part of generating the cdylib entry point. In practice the current `fnp-python` source has zero hand-written unsafe blocks, so the workspace is unsafe-free today across all 10 crates. The lint is opt-out for `fnp-python`, not invoked.
+Memory safety is a core value. 9 of the 10 implementation crates declare `#![forbid(unsafe_code)]` and contain zero hand-written unsafe. `fnp-python` is the one that doesn't: PyO3 procedural macros may expand into unsafe as part of generating the cdylib entry point, and as the Python-buffer boundary it uses hand-written `unsafe` (chiefly `std::slice::from_raw_parts`) for zero-copy reinterpretation of borrowed buffers. That unsafe is confined to `fnp-python`; the `codebase_hygiene` tests enforce that the numeric core stays unsafe-free.
 
 **How fast is it?**
 Profile-driven. I/O, random, linalg, reductions, and sorting are at or near parity with NumPy. FFT is mixed (power-of-two fast, non-power-of-two slower). Large-scale elementwise/broadcast ufuncs are the main hotspot, with 10–30× ratios; the Phase 3 SIMD/BLAS work-streams target these. Small/medium array workloads are competitive across the board.

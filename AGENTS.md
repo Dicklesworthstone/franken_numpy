@@ -61,7 +61,7 @@ We only use **Cargo** in this project, NEVER any other package manager.
 - **Edition:** Rust 2024 (nightly required — pinned to `nightly-2026-02-20` in `rust-toolchain.toml`; CI mirrors the same via `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`)
 - **Dependency versions:** Explicit versions for stability
 - **Configuration:** Cargo.toml workspace with `workspace = true` pattern
-- **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`) on 9 of 10 crates. `fnp-python` is the lone opt-out because PyO3 procedural macros may expand into unsafe as part of generating the cdylib entry point — but its source still contains zero hand-written `unsafe` blocks (verified by ripgrep). If narrow unsafe usage ever becomes unavoidable in any other crate, isolate it behind audited interfaces and tests.
+- **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`) on 9 of 10 crates — the numeric core stays entirely on the safe-Rust path, enforced by `no_unsafe_code_blocks_or_items` in `crates/fnp-conformance/tests/codebase_hygiene.rs`. `fnp-python` is the lone opt-out: as the PyO3 boundary it uses hand-written `unsafe` (chiefly `std::slice::from_raw_parts` on borrowed `PyBuffer` bytes) to reinterpret Python-owned buffers as typed slices without copying — the zero-copy fast paths behind the performance work. Those blocks are confined to `fnp-python` and excluded from the hygiene scan; every other crate must stay unsafe-free. If narrow unsafe usage ever becomes unavoidable in one of the 9 core crates, isolate it behind audited interfaces and tests rather than relaxing the invariant.
 
 ### Key Dependencies
 
