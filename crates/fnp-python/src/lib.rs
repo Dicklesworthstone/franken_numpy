@@ -103749,7 +103749,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::{
         NarrowSetOp, PyFromPyFunc, PyVectorize, PythonNativeGemmOp, argwhere, bincount,
-        build_numpy_array_from_ufunc, ceil_native, choose, compress, copysign, count_nonzero,
+        blas_is_single_threaded, build_numpy_array_from_ufunc, ceil_native, choose, compress,
+        copysign, count_nonzero,
         degrees_native, diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize,
         extract, extract_numeric_array, extract_precise_numeric_array, fill_diagonal, flatnonzero,
         flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interp,
@@ -104141,6 +104142,16 @@ mod tests {
     fn native_matmul_dot_f64_gemm_gate_and_golden_sha256() {
         with_python(|py| {
             if !numpy_available(py) {
+                return Ok(());
+            }
+            // `python_native_gemm_f64_2d` delegates to numpy unconditionally
+            // when numpy's BLAS is multi-threaded — that check runs before the
+            // profile gate and is not bypassed by `require_profile_gate=false`.
+            // On such a host the helper returns None for every input, so the
+            // golden below is unreachable and the `.expect(...)` would fire on
+            // a correctly-behaving build. Skip the same way the test already
+            // skips a missing numpy.
+            if !blas_is_single_threaded() {
                 return Ok(());
             }
             let numpy = py.import("numpy")?;
