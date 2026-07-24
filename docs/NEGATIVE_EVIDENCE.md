@@ -4,6 +4,103 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-23 - WIN (KEEP): hoist the hypergeometric HRUA parameter plan per batch - 1.7938x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.378`. The ledger and recent Git log
+were screened before editing. They contained no prior hypergeometric
+performance attempt; gamma/Poisson caches, `noncentral_f`, both Zipf
+implementations, and von Mises terms were already closed or rejected. This
+change therefore takes a fresh random-distribution primitive rather than
+reopening one of those leaves. Agent Mail reservation writes were unavailable
+because its corruption circuit breaker reported a malformed SQLite image, so
+coordination fell back to exact-file Git status/log checks. The fnp-random
+source and benchmark were clean and remained disjoint from the peer-owned
+fnp-python bench split and TSQR work.
+
+PROFILE FIRST, with production untouched: the former
+`hypergeometric(20_000, 30_000, 10_000, 100_000)` HRUA path measured
+17.440 ms (`[17.332, 17.571]`) on effective worker `hz1`, with release LTO
+disabled. A strict-remote `perf record -F 499 -e cycles:u` run on the same
+worker captured 896 userspace cycle samples with zero loss.
+`Generator::sample_hypergeometric` held 37.33% self and
+`RngBackend::next_f64` held 6.41%; four leading libm sites held 5.38%, 3.85%,
+3.84%, and 3.73%. Source attribution then identified the exact invariant
+work inside the sampled function: every output rebuilt `p`, `q`, `mu`, `a`,
+`var`, `c`, `h`, `m`, `b`, and the four-term `g` log-factorial sum before
+entering the unchanged rejection loop.
+
+ONE LEVER: `HypergeometricHruaCache::new` now evaluates that parameter-only
+plan once in the public fixed-parameter batch and passes the copied plan to
+each HRUA draw. The low-sample direct-counting algorithm is untouched.
+`multivariate_hypergeometric` retains its former per-call dispatcher because
+its population and draw count change between colors. Validation order, the
+HRUA/direct threshold, proposal and acceptance expressions, draw order,
+integer corrections, output allocation/order, and error behavior are
+unchanged. The implementation is pure safe Rust and adds only O(1) batch
+state.
+
+The decisive run was one same-binary release test on effective worker `hz1`.
+Each of 10 observations averaged 32 fixed 100,000-output batches per arm.
+The effect used alternating ABBA/BAAB order; the null used the same ordering
+with candidate/candidate arms. The exact former composition rebuilt
+`HypergeometricHruaCache` immediately before every call to the same private
+HRUA sampler, so it retained the real lookup-table and rejection behavior
+without exposing a benchmark-only public API:
+
+| row | lhs mean | rhs mean | lhs CV | rhs CV | lhs/rhs |
+|---|---:|---:|---:|---:|---:|
+| exact former / cached candidate | 14.948241 ms | **8.333303 ms** | 1.752% | 1.404% | **1.7938x** |
+| candidate A/A null | 8.282928 ms | 8.255599 ms | 1.773% | 0.561% | 1.0033x |
+
+The null is within 0.33% of unity and every arm is strictly below the required
+5% CV ceiling. An earlier 16-repeat run measured a 1.6593x effect with
+1.857%/1.143% CV, but its A/A null was 8.257927/8.344471 ms with
+0.883%/**5.105%** CV. That whole run is excluded; doubling fixed work per
+observation produced the admissible result above. The retained Criterion
+candidate baseline also ran successfully (`[13.019, 14.866]` ms with release
+LTO disabled), but its absolute time shifted under fleet contention and it is
+only a smoke/trend baseline, not decision evidence.
+
+BEHAVIOR ISOMORPHISM: before timing, the exact former and candidate matched
+all 100,000 outputs and the next raw RNG word. The permanent
+`hypergeometric_batch_matches_singleton_stream` test pins batch-versus-former
+singleton output and post-batch state for small and large HRUA inputs plus
+both direct-counting sides. All 11 focused hypergeometric/multivariate tests
+passed remotely, including the fixed golden sequence and live NumPy oracle.
+The full fnp-random release suite passed: 439 unit tests (one manual perf audit
+ignored), 12 golden tests, and 16 metamorphic tests. The strict-remote
+`run_divergence_ledger --fail-on-missing` gate passed with status `pass`, zero
+entries, zero parity debt, and no diagnostics.
+
+STATIC GATES: workspace-wide clippy passed remotely with `-D warnings`;
+`cargo check -p fnp-random --all-targets` passed; and both owned Rust files
+pass rustfmt and `git diff --check`. Workspace-wide `cargo check --all-targets`
+was blocked outside this lane because the in-progress peer bench split
+referenced a not-yet-present `crates/fnp-ufunc/benches/cumminmax.rs`. Global
+rustfmt likewise reported only peer-owned fnp-python/fnp-ufunc changes. Those
+surfaces were not edited or staged. The mandated staged-file UBS scan also
+completed: its embedded fmt, clippy, check, test-build, audit, and deny gates
+were clean, while its overall status remained nonzero on pre-existing
+file-wide heuristics (including a false security-token finding on Criterion's
+`group.finish()`). Audit of the added hunks found no new actionable UBS issue.
+
+REPRODUCTION:
+
+```bash
+RCH_REQUIRE_REMOTE=1 RCH_WORKER=hz1 rch exec -- cargo test -j2 --profile release -p fnp-random hypergeometric_hrua_parameter_cache_perf_audit -- --ignored --nocapture --test-threads=1
+RCH_REQUIRE_REMOTE=1 RCH_WORKER=hz1 CARGO_PROFILE_RELEASE_LTO=false rch exec -- cargo bench -j2 -p fnp-random --bench random_ops --profile release -- hypergeometric_hrua_parameter_cache --noplot
+RCH_REQUIRE_REMOTE=1 rch exec -- cargo run -j2 -p fnp-conformance --bin run_divergence_ledger -- --fail-on-missing
+```
+
+Profiled from `d8bfac55` and retained atop non-overlapping peer HEAD
+`00580fd5`; source SHA-256
+`4507d89bdc19ddda4d91833c57af8f96a489240115e95811a06eec421723bd36`;
+benchmark SHA-256
+`c7ba7e3fdfae1275e90a9c285f4903d05cd62b6d9a5c70db7f5ee9123d02ccc1`.
+Verdict: **KEEP**. Hypergeometric HRUA batch-plan construction is CLOSED. A
+future lever in this distribution must change the rejection body or another
+independently profiled primitive; it must not re-hoist these fixed terms.
+
 ## 2026-07-23 - REJECT (NO-SHIP): parse selected bool `loadtxt(usecols=...)` tokens directly - consistent 3.09-3.69x direction never clears both effect and null CV gates
 
 `SnowyCliff` (fresh-auth continuation of `MistyPuma`), bead

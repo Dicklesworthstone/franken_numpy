@@ -3948,6 +3948,69 @@ impl PoissonPtrsCache {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct HypergeometricHruaCache {
+    good: i64,
+    bad: i64,
+    sample: i64,
+    computed_sample: i64,
+    mingoodbad: i64,
+    maxgoodbad: i64,
+    a: f64,
+    h: f64,
+    b: f64,
+    g: f64,
+}
+
+impl HypergeometricHruaCache {
+    #[expect(clippy::many_single_char_names)]
+    fn new(good: i64, bad: i64, sample: i64) -> Self {
+        // D1 = 2*sqrt(2/e), D2 = 3 - 2*sqrt(3/e)
+        const D1: f64 = 1.7155277699214135;
+        const D2: f64 = 0.8989161620588988;
+
+        let popsize = good + bad;
+        let computed_sample = sample.min(popsize - sample);
+        let mingoodbad = good.min(bad);
+        let maxgoodbad = good.max(bad);
+
+        let p = (mingoodbad as f64) / (popsize as f64);
+        let q = (maxgoodbad as f64) / (popsize as f64);
+
+        let mu = (computed_sample as f64) * p;
+        let a = mu + 0.5;
+
+        let var = ((popsize - computed_sample) as f64) * (computed_sample as f64) * p * q
+            / ((popsize - 1) as f64);
+        let c = (var + 0.5).sqrt();
+        let h = D1 * c + D2;
+
+        let m = (((computed_sample + 1) as f64) * ((mingoodbad + 1) as f64)
+            / ((popsize + 2) as f64))
+            .floor() as i64;
+
+        let g = logfactorial(m)
+            + logfactorial(mingoodbad - m)
+            + logfactorial(computed_sample - m)
+            + logfactorial(maxgoodbad - computed_sample + m);
+
+        let b = (((computed_sample.min(mingoodbad) + 1) as f64).min(a + 16.0 * c)).floor();
+
+        Self {
+            good,
+            bad,
+            sample,
+            computed_sample,
+            mingoodbad,
+            maxgoodbad,
+            a,
+            h,
+            b,
+            g,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Generator {
     bit_generator: BitGenerator,
@@ -6528,6 +6591,12 @@ impl Generator {
         let good = ngood as i64;
         let bad = nbad as i64;
         let sample = nsample as i64;
+        if sample >= 10 && sample <= good + bad - 10 {
+            let cache = HypergeometricHruaCache::new(good, bad, sample);
+            return Ok((0..size)
+                .map(|_| self.hypergeometric_hrua(cache) as u64)
+                .collect());
+        }
         Ok((0..size)
             .map(|_| self.sample_hypergeometric(good, bad, sample) as u64)
             .collect())
@@ -6537,7 +6606,7 @@ impl Generator {
     fn sample_hypergeometric(&mut self, good: i64, bad: i64, sample: i64) -> i64 {
         let total = good + bad;
         if sample >= 10 && sample <= total - 10 {
-            self.hypergeometric_hrua(good, bad, sample)
+            self.hypergeometric_hrua(HypergeometricHruaCache::new(good, bad, sample))
         } else {
             self.hypergeometric_sample(good, bad, sample)
         }
@@ -6579,56 +6648,25 @@ impl Generator {
     /// HRUA (ratio-of-uniforms) hypergeometric sampling.
     /// Matches `hypergeometric_hrua()` in NumPy's `random_hypergeometric.c`.
     #[expect(clippy::many_single_char_names)]
-    fn hypergeometric_hrua(&mut self, good: i64, bad: i64, sample: i64) -> i64 {
-        // D1 = 2*sqrt(2/e), D2 = 3 - 2*sqrt(3/e)
-        const D1: f64 = 1.7155277699214135;
-        const D2: f64 = 0.8989161620588988;
-
-        let popsize = good + bad;
-        let computed_sample = sample.min(popsize - sample);
-        let mingoodbad = good.min(bad);
-        let maxgoodbad = good.max(bad);
-
-        let p = (mingoodbad as f64) / (popsize as f64);
-        let q = (maxgoodbad as f64) / (popsize as f64);
-
-        let mu = (computed_sample as f64) * p;
-        let a = mu + 0.5;
-
-        let var = ((popsize - computed_sample) as f64) * (computed_sample as f64) * p * q
-            / ((popsize - 1) as f64);
-        let c = (var + 0.5).sqrt();
-        let h = D1 * c + D2;
-
-        let m = (((computed_sample + 1) as f64) * ((mingoodbad + 1) as f64)
-            / ((popsize + 2) as f64))
-            .floor() as i64;
-
-        let g = logfactorial(m)
-            + logfactorial(mingoodbad - m)
-            + logfactorial(computed_sample - m)
-            + logfactorial(maxgoodbad - computed_sample + m);
-
-        let b = (((computed_sample.min(mingoodbad) + 1) as f64).min(a + 16.0 * c)).floor();
-
+    fn hypergeometric_hrua(&mut self, cache: HypergeometricHruaCache) -> i64 {
         let mut k;
         loop {
             let u = self.next_f64();
             let v = self.next_f64();
-            let x = a + h * (v - 0.5) / u;
+            let x = cache.a + cache.h * (v - 0.5) / u;
 
-            if x < 0.0 || x >= b {
+            if x < 0.0 || x >= cache.b {
                 continue;
             }
 
             k = x.floor() as i64;
 
             let gp = logfactorial(k)
-                + logfactorial(mingoodbad - k)
-                + logfactorial(computed_sample - k)
-                + logfactorial(maxgoodbad - computed_sample + k);
+                + logfactorial(cache.mingoodbad - k)
+                + logfactorial(cache.computed_sample - k)
+                + logfactorial(cache.maxgoodbad - cache.computed_sample + k);
 
-            let t = g - gp;
+            let t = cache.g - gp;
 
             if u * (4.0 - u) - 3.0 <= t {
                 break;
@@ -6641,11 +6679,11 @@ impl Generator {
             }
         }
 
-        if good > bad {
-            k = computed_sample - k;
+        if cache.good > cache.bad {
+            k = cache.computed_sample - k;
         }
-        if computed_sample < sample {
-            k = good - k;
+        if cache.computed_sample < cache.sample {
+            k = cache.good - k;
         }
 
         k
@@ -13693,6 +13731,162 @@ for child in rng.spawn(n_children):
         assert!(rng.hypergeometric(10, 10, 25, 1).is_err());
         // valid parameters should succeed
         assert!(rng.hypergeometric(100, 100, 50, 1).is_ok());
+    }
+
+    #[test]
+    fn hypergeometric_batch_matches_singleton_stream() {
+        for &(good, bad, sample) in &[
+            (20_u64, 30_u64, 10_u64),
+            (20_000, 30_000, 10_000),
+            (5, 5, 3),
+            (5, 5, 8),
+        ] {
+            let mut batch = test_generator();
+            let mut singleton = test_generator();
+            let batch_values = batch.hypergeometric(good, bad, sample, 128).unwrap();
+            let singleton_values = (0..128)
+                .map(|_| singleton.hypergeometric(good, bad, sample, 1).unwrap()[0])
+                .collect::<Vec<_>>();
+            assert_eq!(
+                batch_values, singleton_values,
+                "batch/singleton divergence for ({good}, {bad}, {sample})"
+            );
+            assert_eq!(
+                batch.next_u64(),
+                singleton.next_u64(),
+                "post-batch stream divergence for ({good}, {bad}, {sample})"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual same-binary performance audit"]
+    fn hypergeometric_hrua_parameter_cache_perf_audit() {
+        const OBSERVATIONS: usize = 10;
+        const REPEATS: usize = 32;
+        const SIZE: usize = 100_000;
+        const GOOD: i64 = 20_000;
+        const BAD: i64 = 30_000;
+        const SAMPLE: i64 = 10_000;
+
+        fn former_batch(generator: &mut Generator) -> Vec<u64> {
+            (0..SIZE)
+                .map(|_| {
+                    generator
+                        .hypergeometric_hrua(super::HypergeometricHruaCache::new(GOOD, BAD, SAMPLE))
+                        as u64
+                })
+                .collect()
+        }
+
+        fn candidate_batch(generator: &mut Generator) -> Vec<u64> {
+            generator
+                .hypergeometric(GOOD as u64, BAD as u64, SAMPLE as u64, SIZE)
+                .unwrap()
+        }
+
+        fn stats(samples: &[f64]) -> (f64, f64) {
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            let variance = samples
+                .iter()
+                .map(|sample| {
+                    let delta = sample - mean;
+                    delta * delta
+                })
+                .sum::<f64>()
+                / (samples.len() - 1) as f64;
+            (mean, variance.sqrt() * 100.0 / mean)
+        }
+
+        let mut former_proof = test_generator();
+        let mut candidate_proof = test_generator();
+        assert_eq!(
+            former_batch(&mut former_proof),
+            candidate_batch(&mut candidate_proof)
+        );
+        assert_eq!(former_proof.next_u64(), candidate_proof.next_u64());
+
+        let time_former = || {
+            let mut generator = test_generator();
+            let started = std::time::Instant::now();
+            for _ in 0..REPEATS {
+                std::hint::black_box(former_batch(&mut generator));
+            }
+            started.elapsed()
+        };
+        let time_candidate = || {
+            let mut generator = test_generator();
+            let started = std::time::Instant::now();
+            for _ in 0..REPEATS {
+                std::hint::black_box(candidate_batch(&mut generator));
+            }
+            started.elapsed()
+        };
+
+        let mut effect_former = Vec::with_capacity(OBSERVATIONS);
+        let mut effect_candidate = Vec::with_capacity(OBSERVATIONS);
+        for observation in 0..OBSERVATIONS {
+            let (former, candidate) = if observation & 1 == 0 {
+                let former_first = time_former();
+                let candidate_first = time_candidate();
+                let candidate_second = time_candidate();
+                let former_second = time_former();
+                (
+                    former_first + former_second,
+                    candidate_first + candidate_second,
+                )
+            } else {
+                let candidate_first = time_candidate();
+                let former_first = time_former();
+                let former_second = time_former();
+                let candidate_second = time_candidate();
+                (
+                    former_first + former_second,
+                    candidate_first + candidate_second,
+                )
+            };
+            effect_former.push(former.as_secs_f64() * 500.0 / REPEATS as f64);
+            effect_candidate.push(candidate.as_secs_f64() * 500.0 / REPEATS as f64);
+        }
+
+        let mut null_lhs = Vec::with_capacity(OBSERVATIONS);
+        let mut null_rhs = Vec::with_capacity(OBSERVATIONS);
+        for observation in 0..OBSERVATIONS {
+            let (lhs, rhs) = if observation & 1 == 0 {
+                let lhs_first = time_candidate();
+                let rhs_first = time_candidate();
+                let rhs_second = time_candidate();
+                let lhs_second = time_candidate();
+                (lhs_first + lhs_second, rhs_first + rhs_second)
+            } else {
+                let rhs_first = time_candidate();
+                let lhs_first = time_candidate();
+                let lhs_second = time_candidate();
+                let rhs_second = time_candidate();
+                (lhs_first + lhs_second, rhs_first + rhs_second)
+            };
+            null_lhs.push(lhs.as_secs_f64() * 500.0 / REPEATS as f64);
+            null_rhs.push(rhs.as_secs_f64() * 500.0 / REPEATS as f64);
+        }
+
+        let (former_mean, former_cv) = stats(&effect_former);
+        let (candidate_mean, candidate_cv) = stats(&effect_candidate);
+        let (null_lhs_mean, null_lhs_cv) = stats(&null_lhs);
+        let (null_rhs_mean, null_rhs_cv) = stats(&null_rhs);
+        println!(
+            "LEDGER_AUDIT row=hypergeometric_hrua_parameter_cache_effect \
+             samples={OBSERVATIONS} candidate_mean_ms={candidate_mean:.6} \
+             candidate_cv_pct={candidate_cv:.3} orig_mean_ms={former_mean:.6} \
+             orig_cv_pct={former_cv:.3} orig_over_candidate={:.4}",
+            former_mean / candidate_mean,
+        );
+        println!(
+            "LEDGER_AUDIT row=hypergeometric_hrua_parameter_cache_null \
+             samples={OBSERVATIONS} candidate_mean_ms={null_lhs_mean:.6} \
+             candidate_cv_pct={null_lhs_cv:.3} orig_mean_ms={null_rhs_mean:.6} \
+             orig_cv_pct={null_rhs_cv:.3} orig_over_candidate={:.4}",
+            null_rhs_mean / null_lhs_mean,
+        );
     }
 
     #[test]
