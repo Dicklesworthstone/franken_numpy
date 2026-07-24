@@ -22873,11 +22873,7 @@ impl UFuncArray {
         } else {
             0.0
         };
-        if n >= 2
-            && n.is_multiple_of(2)
-            && m <= n / 2 + 1
-            && dc_imag == 0.0
-            && nyquist_imag == 0.0
+        if n >= 2 && n.is_multiple_of(2) && m <= n / 2 + 1 && dc_imag == 0.0 && nyquist_imag == 0.0
         {
             let needed = n / 2 + 1;
             let mut half_re = vec![0.0f64; needed];
