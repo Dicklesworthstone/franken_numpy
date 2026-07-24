@@ -71,3 +71,7 @@ harness = false
 [[bench]]
 name = "criterion_python_complex"
 harness = false
+
+[[bench]]
+name = "criterion_python_median_gate"
+harness = false
