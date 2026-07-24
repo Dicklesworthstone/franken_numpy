@@ -67,3 +67,7 @@ harness = false
 [[bench]]
 name = "criterion_python_linalg"
 harness = false
+
+[[bench]]
+name = "criterion_python_complex"
+harness = false
