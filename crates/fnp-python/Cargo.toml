@@ -107,3 +107,7 @@ harness = false
 [[bench]]
 name = "criterion_python_reductions"
 harness = false
+
+[[bench]]
+name = "criterion_python_gradnorm"
+harness = false
