@@ -63,3 +63,7 @@ harness = false
 [[bench]]
 name = "criterion_python_argsort"
 harness = false
+
+[[bench]]
+name = "criterion_python_linalg"
+harness = false
