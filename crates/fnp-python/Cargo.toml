@@ -87,3 +87,7 @@ harness = false
 [[bench]]
 name = "criterion_python_sortmisc"
 harness = false
+
+[[bench]]
+name = "criterion_python_misc1"
+harness = false
