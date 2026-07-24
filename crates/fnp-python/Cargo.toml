@@ -99,3 +99,7 @@ harness = false
 [[bench]]
 name = "criterion_python_unaryred"
 harness = false
+
+[[bench]]
+name = "criterion_python_elementwise"
+harness = false
