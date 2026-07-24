@@ -103,3 +103,7 @@ harness = false
 [[bench]]
 name = "criterion_python_elementwise"
 harness = false
+
+[[bench]]
+name = "criterion_python_reductions"
+harness = false
