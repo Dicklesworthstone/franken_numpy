@@ -1249,6 +1249,22 @@ fn bench_hypergeometric_hrua_cache(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_geometric_inversion_cache(c: &mut Criterion) {
+    const SIZE: usize = 100_000;
+    const P: f64 = 0.1;
+
+    let mut generator = pcg64_generator();
+    let mut group = c.benchmark_group("geometric_inversion_parameter_cache");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements(SIZE as u64));
+    group.bench_function("public_batch", |bench| {
+        bench.iter(|| black_box(generator.geometric(black_box(P), black_box(SIZE)).unwrap()))
+    });
+    group.finish();
+}
+
 #[inline(never)]
 fn former_zipf_single(generator: &mut Generator, a: f64) -> i64 {
     if a >= 1025.0 {
@@ -1703,6 +1719,7 @@ criterion_group!(
     bench_pcg_fill_u64_large,
     bench_noncentral_f_fixed_shape_cache,
     bench_hypergeometric_hrua_cache,
+    bench_geometric_inversion_cache,
     bench_zipf_parameter_cache,
     bench_random_state_zipf_parameter_cache,
 );

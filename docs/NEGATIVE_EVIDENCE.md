@@ -4,6 +4,95 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-24 - WIN (KEEP): hoist the geometric inversion log denominator per batch - 2.1633x fewer userspace cycles
+
+`IvoryIvy`, bead `franken_numpy-ixs5y.379`. The ledger and recent Git log were
+screened before any edit. The freshest random rows had already closed
+hypergeometric HRUA, gamma/Poisson, `noncentral_f`, and Dirichlet parameter
+caches; rejected Zipf and von Mises hoists were also excluded. The older random
+family sweep explicitly left the geometric/logseries-class body open behind a
+profile-first predicate, and neither the ledger nor Git history contained this
+geometric inversion attempt. Agent Mail reserved only the fnp-random source,
+retained benchmark, and this ledger. The peer-owned fnp-python bench-binary and
+matmul/TSQR architectural lanes were not touched.
+
+PROFILE FIRST, with production untouched: retained Criterion measured
+`Generator::geometric(0.1, 100_000)` at 1.1255 ms
+(`[1.0746, 1.2152]`) on effective worker `vmi1149989`, with release LTO
+disabled. A strict-remote userspace-cycle profile of that exact former binary
+captured 912 samples with zero loss. The geometric closure held 51.73% self;
+`__log1p_fma` held 29.84% and `__w_logp1` another 5.26%. Source attribution
+identified the repeated invariant: the `p < 1/3` inversion path recomputed
+`(-p).ln_1p()` for every output even though public `geometric` fixes `p` for the
+whole batch.
+
+ONE LEVER: `Generator::geometric` now evaluates `(-p).ln_1p()` once for the
+inversion branch and reuses that denominator for every output. Validation
+order, the `p == 1` draw behavior, the `p >= 1/3` search path and threshold,
+Ziggurat exponential draws, division/ceil/saturation arithmetic, allocation,
+output order, and error behavior are unchanged. The implementation remains
+safe Rust and adds one O(1) `f64` batch value.
+
+The decisive comparison used one release test binary on worker
+`vmi1227854`, pinned to CPU 6. Each arm performed 512 public 100,000-output
+batches after an exact former/candidate output-and-stream proof. `perf stat`
+measured userspace cycles over 10 whole-process repetitions, so fleet frequency
+changes could not be mistaken for an algorithmic win. Candidate B/C are
+identical code paths and form the null:
+
+| row | lhs cycles | rhs cycles | lhs CV | rhs CV | lhs/rhs |
+|---|---:|---:|---:|---:|---:|
+| exact former / cached candidate A | 2,611,650,560 | **1,207,226,843** | 3.83% | 2.18% | **2.1633x** |
+| candidate B/C null | 1,224,386,019 | 1,208,717,169 | 1.29% | 2.66% | 1.0130x |
+
+Every admitted arm is below the mandatory 5% CV ceiling; the candidate removes
+53.78% of userspace cycles and the null is within 1.30% of unity. One earlier
+candidate-C set (1,333,301,696 cycles, 7.16% CV) is excluded in full; its first
+two repetitions were visibly stalled and no samples were trimmed. Wall-clock
+ABBA/BAAB audits also repeated the 1.70-1.92x direction with approximately
+unity nulls but were excluded in full whenever any arm exceeded 5% CV. The
+closest excluded set cleared the effect at 1.9021x with 3.756%/3.523% CV but
+its null arms had 6.787%/6.766% CV. The retained post-change public benchmark
+reported 626.60 us (`[571.60, 659.86]`) on `vmi1227854`; because the former
+baseline came from another worker, that wall-time delta is trend context only,
+not decision evidence.
+
+BEHAVIOR ISOMORPHISM: the same-binary former implementation and candidate
+matched all 100,000 timed-proof outputs and the next raw RNG word. The permanent
+`geometric_batch_matches_former_stream` regression covers `p=0.1`, `0.32`,
+the exact `1/3` threshold, `0.9`, and `1.0`, checking both output vectors and
+post-call stream state. The focused geometric release suite passed 19 tests,
+including the live NumPy Generator oracle, `p=1` oracle, and RandomState legacy
+surface. The full fnp-random release suite passed 440 unit tests, 12 golden
+tests, and 16 metamorphic tests; only the two manual perf audits were ignored.
+
+STATIC/GOVERNANCE GATES: strict-remote workspace `cargo check --all-targets`
+and workspace clippy with `-D warnings` passed. The strict-remote
+`run_divergence_ledger --fail-on-missing` gate passed with status `pass`, zero
+entries, zero parity debt, and no diagnostics. Both owned Rust files pass
+rustfmt and `git diff --check`. The repository-wide rustfmt gate was blocked
+outside this lane by already-present fnp-linalg, fnp-python, and fnp-ufunc
+formatting drift observed while the peer bench split was landing; none of
+those surfaces was edited or staged.
+
+REPRODUCTION:
+
+```bash
+RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1227854 rch exec -- cargo test -j2 --profile release -p fnp-random --no-run
+ssh vmi1227854 'cd /data/projects/franken_numpy && perf stat --no-big-num -x, -r 10 -e cycles:u -- taskset -c 6 env FNP_GEOMETRIC_PERF_ARM=candidate_a .rch-target-vmi1227854-pool-f6cc024491a9efc63f938ae4ddb20815/release/deps/fnp_random-8ed212cda9bfee9c tests::geometric_inversion_parameter_cache_perf_audit --exact --ignored --test-threads=1'
+ssh vmi1227854 'cd /data/projects/franken_numpy && perf stat --no-big-num -x, -r 10 -e cycles:u -- taskset -c 6 env FNP_GEOMETRIC_PERF_ARM=former .rch-target-vmi1227854-pool-f6cc024491a9efc63f938ae4ddb20815/release/deps/fnp_random-8ed212cda9bfee9c tests::geometric_inversion_parameter_cache_perf_audit --exact --ignored --test-threads=1'
+RCH_REQUIRE_REMOTE=1 rch exec -- cargo run -j2 -p fnp-conformance --bin run_divergence_ledger -- --fail-on-missing
+```
+
+Profiled from `36e37ff6` and retained atop non-overlapping peer HEAD
+`51672e4b`; source SHA-256
+`9c829bda393bb1e7627856271e8017b865d09dbe10a967e7e6c75e61cd7c63e0`;
+benchmark SHA-256
+`eb27a613786e7eed114b7000e5922f88cccf759643049b8e30fe7ad01953afc9`.
+Verdict: **KEEP**. Geometric inversion-denominator construction is CLOSED. A
+future geometric lever must profile and change the search/rejection body or a
+different primitive; it must not re-hoist `ln_1p`.
+
 ## 2026-07-23 - WIN (KEEP): hoist the hypergeometric HRUA parameter plan per batch - 1.7938x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.378`. The ledger and recent Git log

@@ -5880,6 +5880,7 @@ impl Generator {
                 })
                 .collect());
         }
+        let inversion_log_q = if p < 1.0 / 3.0 { (-p).ln_1p() } else { 0.0 };
         Ok((0..size)
             .map(|_| {
                 if p >= 1.0 / 3.0 {
@@ -5897,6 +5898,46 @@ impl Generator {
                     x
                 } else {
                     // Inversion via standard exponential
+                    let z = (-self.sample_ziggurat_exponential() / inversion_log_q).ceil();
+                    if z >= 9.223_372_036_854_776e18 {
+                        i64::MAX as u64
+                    } else {
+                        z as u64
+                    }
+                }
+            })
+            .collect())
+    }
+
+    #[cfg(test)]
+    #[inline(never)]
+    fn geometric_former_recompute(&mut self, p: f64, size: usize) -> Result<Vec<u64>, RandomError> {
+        if p <= 0.0 || p > 1.0 || p.is_nan() {
+            return Err(RandomError::InvalidParameter);
+        }
+        if p == 1.0 {
+            return Ok((0..size)
+                .map(|_| {
+                    let _ = self.next_f64();
+                    1
+                })
+                .collect());
+        }
+        Ok((0..size)
+            .map(|_| {
+                if p >= 1.0 / 3.0 {
+                    let q = 1.0 - p;
+                    let u = self.next_f64();
+                    let mut x = 1u64;
+                    let mut sum = p;
+                    let mut prod = p;
+                    while u > sum {
+                        prod *= q;
+                        sum += prod;
+                        x += 1;
+                    }
+                    x
+                } else {
                     let z = (-self.sample_ziggurat_exponential() / (-p).ln_1p()).ceil();
                     if z >= 9.223_372_036_854_776e18 {
                         i64::MAX as u64
@@ -13162,6 +13203,162 @@ for child in rng.spawn(n_children):
         assert_eq!(samples, vec![1; 8]);
         let zero_samples = rng.geometric(1.0, 0).expect("size=0 should succeed");
         assert!(zero_samples.is_empty());
+    }
+
+    #[test]
+    fn geometric_batch_matches_former_stream() {
+        for &p in &[0.1, 0.32, 1.0 / 3.0, 0.9, 1.0] {
+            let mut batch = test_generator();
+            let mut former = test_generator();
+            assert_eq!(
+                batch.geometric(p, 128).unwrap(),
+                former.geometric_former_recompute(p, 128).unwrap(),
+                "geometric output divergence at p={p}"
+            );
+            assert_eq!(
+                batch.next_u64(),
+                former.next_u64(),
+                "post-geometric stream divergence at p={p}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual same-binary performance audit"]
+    fn geometric_inversion_parameter_cache_perf_audit() -> Result<(), String> {
+        const OBSERVATIONS: usize = 10;
+        const REPEATS: usize = 2_048;
+        const SIZE: usize = 100_000;
+        const P: f64 = 0.1;
+
+        fn former_batch(generator: &mut Generator) -> Vec<u64> {
+            generator.geometric_former_recompute(P, SIZE).unwrap()
+        }
+
+        fn candidate_batch(generator: &mut Generator) -> Vec<u64> {
+            generator.geometric(P, SIZE).unwrap()
+        }
+
+        fn stats(samples: &[f64]) -> (f64, f64) {
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            let variance = samples
+                .iter()
+                .map(|sample| {
+                    let delta = sample - mean;
+                    delta * delta
+                })
+                .sum::<f64>()
+                / (samples.len() - 1) as f64;
+            (mean, variance.sqrt() * 100.0 / mean)
+        }
+
+        let mut former_proof = test_generator();
+        let mut candidate_proof = test_generator();
+        assert_eq!(
+            former_batch(&mut former_proof),
+            candidate_batch(&mut candidate_proof)
+        );
+        assert_eq!(former_proof.next_u64(), candidate_proof.next_u64());
+
+        if let Ok(arm) = std::env::var("FNP_GEOMETRIC_PERF_ARM") {
+            const SINGLE_ARM_REPEATS: usize = 512;
+            let mut generator = test_generator();
+            let started = std::time::Instant::now();
+            for _ in 0..SINGLE_ARM_REPEATS {
+                match arm.as_str() {
+                    "former" => std::hint::black_box(former_batch(&mut generator)),
+                    "candidate_a" | "candidate_b" | "candidate_c" => {
+                        std::hint::black_box(candidate_batch(&mut generator))
+                    }
+                    _ => return Err(format!("unknown FNP_GEOMETRIC_PERF_ARM value: {arm}")),
+                };
+            }
+            println!(
+                "LEDGER_AUDIT row=geometric_inversion_parameter_cache_single_arm \
+                 arm={arm} repeats={SINGLE_ARM_REPEATS} elapsed_ms={:.6}",
+                started.elapsed().as_secs_f64() * 1_000.0,
+            );
+            return Ok(());
+        }
+
+        let time_former = |generator: &mut Generator| {
+            let started = std::time::Instant::now();
+            std::hint::black_box(former_batch(generator));
+            started.elapsed()
+        };
+        let time_candidate = |generator: &mut Generator| {
+            let started = std::time::Instant::now();
+            std::hint::black_box(candidate_batch(generator));
+            started.elapsed()
+        };
+
+        let mut effect_former = Vec::with_capacity(OBSERVATIONS);
+        let mut effect_candidate = Vec::with_capacity(OBSERVATIONS);
+        for observation in 0..OBSERVATIONS {
+            let mut former_generator = test_generator();
+            let mut candidate_generator = test_generator();
+            let mut former = std::time::Duration::ZERO;
+            let mut candidate = std::time::Duration::ZERO;
+            for repeat in 0..REPEATS {
+                if (observation + repeat) & 1 == 0 {
+                    former += time_former(&mut former_generator);
+                    candidate += time_candidate(&mut candidate_generator);
+                    candidate += time_candidate(&mut candidate_generator);
+                    former += time_former(&mut former_generator);
+                } else {
+                    candidate += time_candidate(&mut candidate_generator);
+                    former += time_former(&mut former_generator);
+                    former += time_former(&mut former_generator);
+                    candidate += time_candidate(&mut candidate_generator);
+                }
+            }
+            effect_former.push(former.as_secs_f64() * 500.0 / REPEATS as f64);
+            effect_candidate.push(candidate.as_secs_f64() * 500.0 / REPEATS as f64);
+        }
+
+        let mut null_lhs = Vec::with_capacity(OBSERVATIONS);
+        let mut null_rhs = Vec::with_capacity(OBSERVATIONS);
+        for observation in 0..OBSERVATIONS {
+            let mut lhs_generator = test_generator();
+            let mut rhs_generator = test_generator();
+            let mut lhs = std::time::Duration::ZERO;
+            let mut rhs = std::time::Duration::ZERO;
+            for repeat in 0..REPEATS {
+                if (observation + repeat) & 1 == 0 {
+                    lhs += time_candidate(&mut lhs_generator);
+                    rhs += time_candidate(&mut rhs_generator);
+                    rhs += time_candidate(&mut rhs_generator);
+                    lhs += time_candidate(&mut lhs_generator);
+                } else {
+                    rhs += time_candidate(&mut rhs_generator);
+                    lhs += time_candidate(&mut lhs_generator);
+                    lhs += time_candidate(&mut lhs_generator);
+                    rhs += time_candidate(&mut rhs_generator);
+                }
+            }
+            null_lhs.push(lhs.as_secs_f64() * 500.0 / REPEATS as f64);
+            null_rhs.push(rhs.as_secs_f64() * 500.0 / REPEATS as f64);
+        }
+
+        let (former_mean, former_cv) = stats(&effect_former);
+        let (candidate_mean, candidate_cv) = stats(&effect_candidate);
+        let (null_lhs_mean, null_lhs_cv) = stats(&null_lhs);
+        let (null_rhs_mean, null_rhs_cv) = stats(&null_rhs);
+        println!(
+            "LEDGER_AUDIT row=geometric_inversion_parameter_cache_effect \
+             samples={OBSERVATIONS} candidate_mean_ms={candidate_mean:.6} \
+             candidate_cv_pct={candidate_cv:.3} orig_mean_ms={former_mean:.6} \
+             orig_cv_pct={former_cv:.3} orig_over_candidate={:.4}",
+            former_mean / candidate_mean,
+        );
+        println!(
+            "LEDGER_AUDIT row=geometric_inversion_parameter_cache_null \
+             samples={OBSERVATIONS} candidate_mean_ms={null_lhs_mean:.6} \
+             candidate_cv_pct={null_lhs_cv:.3} orig_mean_ms={null_rhs_mean:.6} \
+             orig_cv_pct={null_rhs_cv:.3} orig_over_candidate={:.4}",
+            null_rhs_mean / null_lhs_mean,
+        );
+        Ok(())
     }
 
     #[test]
