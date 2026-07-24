@@ -83,3 +83,7 @@ harness = false
 [[bench]]
 name = "criterion_python_struct"
 harness = false
+
+[[bench]]
+name = "criterion_python_sortmisc"
+harness = false
