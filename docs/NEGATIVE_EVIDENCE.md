@@ -4,6 +4,80 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-23 - REJECT (NO-SHIP): parse selected bool `loadtxt(usecols=...)` tokens directly - consistent 3.09-3.69x direction never clears both effect and null CV gates
+
+`SnowyCliff` (fresh-auth continuation of `MistyPuma`), bead
+`franken_numpy-ixs5y.377`. The ledger and recent Git log were screened before
+editing. Plain bool input without `usecols` is CLOSED by `.376`; that KEEP row
+explicitly leaves selected columns open as a separate primitive. The complex
+borrow-or-widen family is CLOSED, and the Generator/RandomState Zipf constant
+hoists are separately rejected behind fixed-trace retry predicates, so neither
+family was retried.
+
+PROFILE FIRST, with production untouched: a strict-remote
+`perf record -F 499 -e cycles:u -g` run on `hz1` captured 4,560 userspace cycle
+samples with zero loss. Direct self-cost was 8.14% in `cfree`, 6.92% in
+`malloc`, 5.80% in the owned `Vec<String>` collection frame, 5.67% in
+`fnp_python::loadtxt`, 1.90% in `String::clone`, and another 1.27% across the
+named nested `Vec<Vec<String>>` destruction frames. This admitted one narrow
+deforestation lever: for bool dtype, positive nonempty `usecols`, path input,
+`unpack=false`, one-character comments, and a one-character delimiter, reuse a
+borrowed `Vec<&str>` row view and parse only selected tokens directly into
+`ArrayStorage::Bool`. Negative indices retained the exact former owned-token
+path for the same-binary comparator. Unsupported options, out-of-range
+selection, and parse failures fell through to NumPy. The candidate was safe
+Rust and did not touch the architectural bench-binary split or matmul lane.
+
+BEHAVIOR PROOF BEFORE TIMING: the candidate, equivalent negative-index former,
+and live NumPy arrays were checked for exact equality before every benchmark.
+The focused release test
+`loadtxt_selected_bool_direct_path_matches_former_and_numpy_exactly` passed
+remotely (1 passed, 0 failed) and covered reordered/duplicate columns, invalid
+unselected tokens, comments, skiprows, one-column squeeze, and the matching
+out-of-range error type.
+
+The baseline and all candidate measurements used one exact binary per run,
+fixed 8,192 x 16 comma-separated input, 10 observations, interleaved
+ABBA/BAAB former/candidate order, and a candidate/candidate A/A null. Release
+LTO was disabled. Candidate timing was retried across two workers, clean
+overlays, longer collection windows, and finally all-slot reservation; no
+local Cargo fallback was allowed:
+
+| worker / window | row | lhs mean | rhs mean | lhs CV | rhs CV | lhs/rhs |
+|---|---|---:|---:|---:|---:|---:|
+| `hz1` baseline / 4 s | former / unspecialized candidate | 17.094480 ms | 17.217064 ms | 10.884% | 7.244% | 0.9929x |
+| `hz1` baseline / 4 s | candidate A/A null | 18.474786 ms | 18.526832 ms | 4.056% | 3.385% | 1.0028x |
+| `vmi1264463` / 4 s, peer load entered | former / direct candidate | 27.280019 ms | 7.384307 ms | 15.116% | 31.153% | 3.6943x |
+| `vmi1264463` / 4 s, peer load entered | candidate A/A null | 6.708762 ms | 7.008434 ms | 12.653% | 17.036% | 1.0447x |
+| `vmi1227854` / 4 s | former / direct candidate | 11.716728 ms | 3.262147 ms | 10.406% | 10.349% | 3.5917x |
+| `vmi1227854` / 4 s | candidate A/A null | 3.339140 ms | 3.299915 ms | 11.697% | 9.045% | 0.9883x |
+| `vmi1227854` / 30 s | former / direct candidate | 11.742189 ms | 3.206379 ms | 6.934% | 4.701% | 3.6621x |
+| `vmi1227854` / 30 s | candidate A/A null | 3.091725 ms | 3.086830 ms | 4.247% | 4.091% | 0.9984x |
+| `vmi1227854` / 120 s | former / direct candidate | 11.484091 ms | 3.220108 ms | 4.202% | 4.831% | 3.5664x |
+| `vmi1227854` / 120 s | candidate A/A null | 3.043821 ms | 3.051542 ms | 5.721% | 5.917% | 1.0025x |
+| `hz1` / 120 s, all 6 slots reserved | former / direct candidate | 9.246326 ms | 2.995149 ms | 6.533% | 6.449% | 3.0871x |
+| `hz1` / 120 s, all 6 slots reserved | candidate A/A null | 2.959619 ms | 2.962549 ms | 6.808% | 6.885% | 1.0010x |
+
+The speed direction is large and repeats, while the long-window null ratios
+are close to unity. That is still insufficient: no single candidate run has
+all four required CVs below 5%. The 120-second `vmi1227854` run clears the
+effect but not the null; the fully reserved `hz1` run clears neither and has a
+Criterion-reported high outlier in both effect and null. Treating the favorable
+ratio as a win would violate the mandatory variance gate.
+
+The requested strict-remote
+`run_divergence_ledger --fail-on-missing` gate passed with status `pass`, zero
+entries, zero parity debt, and no diagnostics after the candidate was restored.
+
+Verdict: **REJECT / NO-SHIP**. Production and benchmark changes were manually
+restored; only this evidence row remains. Selected bool `usecols` direct parsing
+stays open only behind this retry predicate: run on a dedicated, CPU-pinned,
+thermally stable worker with no peer process transitions, and obtain two
+consecutive exact-binary interleaved runs where former, candidate, and both A/A
+null arms are each below 5% CV, the null ratio is within 1% of unity, and the
+focused NumPy/former conformance test plus divergence gate pass. A larger
+directional ratio alone is not a retry predicate.
+
 ## 2026-07-23 - WIN (SHIP, correctness + perf): genfromtxt float `skip_footer>0` delegates to `fnp_io::genfromtxt_full` - fixes a raw-vs-data footer-count parity bug AND removes the owned-token staging
 
 `BlackThrush`, bead `franken_numpy-ixs5y.6rr15` (deadlock-audit-6rr15). The
