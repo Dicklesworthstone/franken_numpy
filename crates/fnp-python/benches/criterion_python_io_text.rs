@@ -687,6 +687,9 @@ fn main() {
             "bench_loadtxt_bool_text_boundary",
             bench_loadtxt_bool_text_boundary,
         ),
-        ("bench_genfromtxt_text_boundary", bench_genfromtxt_text_boundary),
+        (
+            "bench_genfromtxt_text_boundary",
+            bench_genfromtxt_text_boundary,
+        ),
     ]);
 }

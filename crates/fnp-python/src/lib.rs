@@ -689,26 +689,26 @@ impl PyUFunc {
             && dtype.is_none()
             && out.is_none()
         {
-                let arr = array.bind(py);
-                let is_bool = arr
-                    .getattr("dtype")
-                    .ok()
-                    .and_then(|d| d.getattr("kind").ok())
-                    .and_then(|k| k.extract::<String>().ok())
-                    .map(|k| k == "b")
-                    .unwrap_or(false);
-                if is_bool {
-                    let op = match self.kind {
-                        UFuncKind::LogicalAnd => 0u8,
-                        UFuncKind::LogicalOr => 1u8,
-                        _ => 2u8,
-                    };
-                    if let Some(result) =
-                        try_zerocopy_accumulate_bitwise(py, arr, axis, None, None, op)?
-                    {
-                        return Ok(result);
-                    }
+            let arr = array.bind(py);
+            let is_bool = arr
+                .getattr("dtype")
+                .ok()
+                .and_then(|d| d.getattr("kind").ok())
+                .and_then(|k| k.extract::<String>().ok())
+                .map(|k| k == "b")
+                .unwrap_or(false);
+            if is_bool {
+                let op = match self.kind {
+                    UFuncKind::LogicalAnd => 0u8,
+                    UFuncKind::LogicalOr => 1u8,
+                    _ => 2u8,
+                };
+                if let Some(result) =
+                    try_zerocopy_accumulate_bitwise(py, arr, axis, None, None, op)?
+                {
+                    return Ok(result);
                 }
+            }
         }
         let numpy = py.import("numpy")?;
         let np_ufunc = numpy.getattr(self.kind.name())?;
@@ -16066,35 +16066,19 @@ fn try_zerocopy_f64_place(
 // maximum/minimum.accumulate is byte-identical to numpy.
 #[inline]
 fn np_fmax(a: f64, b: f64) -> f64 {
-    if a.is_nan() || a > b {
-        a
-    } else {
-        b
-    }
+    if a.is_nan() || a > b { a } else { b }
 }
 #[inline]
 fn np_fmin(a: f64, b: f64) -> f64 {
-    if a.is_nan() || a < b {
-        a
-    } else {
-        b
-    }
+    if a.is_nan() || a < b { a } else { b }
 }
 #[inline]
 fn np_fmax_f32(a: f32, b: f32) -> f32 {
-    if a.is_nan() || a > b {
-        a
-    } else {
-        b
-    }
+    if a.is_nan() || a > b { a } else { b }
 }
 #[inline]
 fn np_fmin_f32(a: f32, b: f32) -> f32 {
-    if a.is_nan() || a < b {
-        a
-    } else {
-        b
-    }
+    if a.is_nan() || a < b { a } else { b }
 }
 // Integer max/min: no NaN / signed zero, and equal values are bit-identical, so the
 // tie branch is irrelevant to the output bytes — matches numpy.maximum/minimum exactly.
@@ -23968,16 +23952,8 @@ fn float_clip_arrays_typed<T: pyo3::buffer::Element + Copy + PartialOrd + Send +
         let out_raw: &mut [T] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total) };
         let clamp = |av: T, lv: T, hv: T| -> T {
-            let t = if is_nan(av) || av > lv {
-                av
-            } else {
-                lv
-            };
-            if is_nan(t) || t < hv {
-                t
-            } else {
-                hv
-            }
+            let t = if is_nan(av) || av > lv { av } else { lv };
+            if is_nan(t) || t < hv { t } else { hv }
         };
         match form {
             ClipBoundsForm::Row => {
@@ -44989,22 +44965,22 @@ fn percentile(
         && qinterp == fnp_ufunc::QuantileInterp::Linear
         && let Ok(qs) = q.bind(py).extract::<Vec<f64>>()
     {
-            let result = match a.percentiles_axis_none(&qs) {
-                Ok(result) => result,
-                Err(_) => return fallback(),
+        let result = match a.percentiles_axis_none(&qs) {
+            Ok(result) => result,
+            Err(_) => return fallback(),
+        };
+        let output = build_numpy_array_from_ufunc(py, &result)?;
+        if keepdims {
+            // numpy keepdims for axis=None array-q: [k] ++ ones(input ndim).
+            let Some(ndim) = orig_ndim else {
+                return fallback();
             };
-            let output = build_numpy_array_from_ufunc(py, &result)?;
-            if keepdims {
-                // numpy keepdims for axis=None array-q: [k] ++ ones(input ndim).
-                let Some(ndim) = orig_ndim else {
-                    return fallback();
-                };
-                let mut tgt = vec![1usize; ndim + 1];
-                tgt[0] = qs.len();
-                let t = PyTuple::new(py, tgt)?;
-                return Ok(output.bind(py).call_method1("reshape", (&t,))?.unbind());
-            }
-            return Ok(output);
+            let mut tgt = vec![1usize; ndim + 1];
+            tgt[0] = qs.len();
+            let t = PyTuple::new(py, tgt)?;
+            return Ok(output.bind(py).call_method1("reshape", (&t,))?.unbind());
+        }
+        return Ok(output);
     }
     fallback()
 }
@@ -56718,9 +56694,8 @@ fn loadtxt(
                 | DType::U64
         )
         && comments.chars().count() == 1
-        && delimiter.is_none_or(|sep| {
-            sep.chars().all(char::is_whitespace) || sep.chars().count() == 1
-        })
+        && delimiter
+            .is_none_or(|sep| sep.chars().all(char::is_whitespace) || sep.chars().count() == 1)
     {
         let skip_count = skiprows.max(0) as usize;
         let mut longs = Vec::new();
@@ -56803,9 +56778,8 @@ fn loadtxt(
         && !unpack
         && parsed_dtype == DType::Bool
         && comments.chars().count() == 1
-        && delimiter.is_none_or(|sep| {
-            sep.chars().all(char::is_whitespace) || sep.chars().count() == 1
-        })
+        && delimiter
+            .is_none_or(|sep| sep.chars().all(char::is_whitespace) || sep.chars().count() == 1)
     {
         let skip_count = skiprows.max(0) as usize;
         let mut values = Vec::new();
@@ -58914,40 +58888,39 @@ fn linalg_matrix_norm(
     if let Some(mode) = svd_mode
         && let Ok(array) = extract_numeric_array(py, x.bind(py), "matrix_norm(x)")
     {
-            let shape = array.shape();
-            if shape.len() >= 3
-                && matches!(array.dtype(), DType::F64)
-                && !array.has_integer_sidecar()
-                && array.values().iter().all(|v| v.is_finite())
+        let shape = array.shape();
+        if shape.len() >= 3
+            && matches!(array.dtype(), DType::F64)
+            && !array.has_integer_sidecar()
+            && array.values().iter().all(|v| v.is_finite())
+        {
+            let m_dim = shape[shape.len() - 2];
+            let n_dim = shape[shape.len() - 1];
+            let k = m_dim.min(n_dim);
+            let owned_shape = shape.to_vec();
+            if k >= 1
+                && let Ok(sigmas) = fnp_linalg::batch_svd(array.values(), &owned_shape)
             {
-                let m_dim = shape[shape.len() - 2];
-                let n_dim = shape[shape.len() - 1];
-                let k = m_dim.min(n_dim);
-                let owned_shape = shape.to_vec();
-                if k >= 1
-                    && let Ok(sigmas) = fnp_linalg::batch_svd(array.values(), &owned_shape)
-                {
-                        let batch = sigmas.len() / k;
-                        let mut out = Vec::with_capacity(batch);
-                        for b in 0..batch {
-                            let lane = &sigmas[b * k..b * k + k];
-                            out.push(match mode {
-                                0 => lane[0],
-                                1 => lane[k - 1],
-                                _ => lane.iter().sum(),
-                            });
-                        }
-                        let mut out_shape: Vec<usize> =
-                            owned_shape[..owned_shape.len() - 2].to_vec();
-                        if keepdims {
-                            out_shape.push(1);
-                            out_shape.push(1);
-                        }
-                        let result =
-                            UFuncArray::new(out_shape, out, DType::F64).map_err(map_ufunc_error)?;
-                        return build_numpy_array_from_ufunc(py, &result);
+                let batch = sigmas.len() / k;
+                let mut out = Vec::with_capacity(batch);
+                for b in 0..batch {
+                    let lane = &sigmas[b * k..b * k + k];
+                    out.push(match mode {
+                        0 => lane[0],
+                        1 => lane[k - 1],
+                        _ => lane.iter().sum(),
+                    });
                 }
+                let mut out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
+                if keepdims {
+                    out_shape.push(1);
+                    out_shape.push(1);
+                }
+                let result =
+                    UFuncArray::new(out_shape, out, DType::F64).map_err(map_ufunc_error)?;
+                return build_numpy_array_from_ufunc(py, &result);
             }
+        }
     }
     let kwargs = PyDict::new(py);
     kwargs.set_item("keepdims", keepdims)?;
@@ -63020,23 +62993,23 @@ fn try_native_string_argsort_stable(
     if let Some(key_width) = packed_string_key_width(&kind, itemsize)
         && let Some(keys) = pack_fixed_width_string_keys(in_data, n, itemsize, key_width, is_bytes)
     {
-            let mut pairs: Vec<(u64, u32)> = (0..n as u32).map(|i| (keys[i as usize], i)).collect();
-            pairs.par_sort_unstable();
-            let out = numpy.call_method("empty", ((n,), "intp"), None)?;
-            let out_buf = PyBuffer::<i64>::get(&out)?;
-            let Some(out_cells) = out_buf.as_mut_slice(py) else {
-                return Ok(None);
-            };
-            if out_cells.len() != n {
-                return Ok(None);
-            }
-            // SAFETY: fresh numpy.empty intp output, no alias.
-            let o: &mut [i64] =
-                unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
-            o.par_iter_mut()
-                .zip(pairs.par_iter())
-                .for_each(|(dst, &(_, p))| *dst = p as i64);
-            return Ok(Some(out.unbind()));
+        let mut pairs: Vec<(u64, u32)> = (0..n as u32).map(|i| (keys[i as usize], i)).collect();
+        pairs.par_sort_unstable();
+        let out = numpy.call_method("empty", ((n,), "intp"), None)?;
+        let out_buf = PyBuffer::<i64>::get(&out)?;
+        let Some(out_cells) = out_buf.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        if out_cells.len() != n {
+            return Ok(None);
+        }
+        // SAFETY: fresh numpy.empty intp output, no alias.
+        let o: &mut [i64] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+        o.par_iter_mut()
+            .zip(pairs.par_iter())
+            .for_each(|(dst, &(_, p))| *dst = p as i64);
+        return Ok(Some(out.unbind()));
     }
     if !is_bytes
         && in_data
@@ -63073,7 +63046,9 @@ fn try_native_string_argsort_stable(
 fn packed_string_key_width(kind: &str, itemsize: usize) -> Option<usize> {
     match kind {
         "S" if (1..=8).contains(&itemsize) => Some(itemsize),
-        "U" if itemsize.is_multiple_of(4) && (1..=8).contains(&(itemsize / 4)) => Some(itemsize / 4),
+        "U" if itemsize.is_multiple_of(4) && (1..=8).contains(&(itemsize / 4)) => {
+            Some(itemsize / 4)
+        }
         _ => None,
     }
 }
@@ -63089,7 +63064,9 @@ struct PackedWideStringKey {
 fn packed_wide_string_key_width(kind: &str, itemsize: usize) -> Option<usize> {
     match kind {
         "S" if (9..=16).contains(&itemsize) => Some(itemsize),
-        "U" if itemsize.is_multiple_of(4) && (9..=16).contains(&(itemsize / 4)) => Some(itemsize / 4),
+        "U" if itemsize.is_multiple_of(4) && (9..=16).contains(&(itemsize / 4)) => {
+            Some(itemsize / 4)
+        }
         _ => None,
     }
 }
@@ -64724,7 +64701,7 @@ fn searchsorted_struct_typed<
         && let Some(out) =
             searchsorted_struct_pair_prefix_index(py, numpy, a_data, v_data, side, n, m)?
     {
-            return Ok(Some(out));
+        return Ok(Some(out));
     }
     let cmp_row = |row: &[T], q: &[T]| -> std::cmp::Ordering {
         for k in 0..nfields {
@@ -64981,44 +64958,43 @@ fn try_native_string_searchsorted(
     if m <= u32::MAX as usize
         && let Some(key_width) = packed_string_key_width(&a_kind, itemsize)
     {
-            let a_keys = pack_fixed_width_string_keys(a_data, n, itemsize, key_width, is_bytes);
-            let v_keys = pack_fixed_width_string_keys(v_data, m, itemsize, key_width, is_bytes);
-            if let (Some(a_keys), Some(v_keys)) = (a_keys, v_keys)
-                && a_keys.par_windows(2).all(|w| w[0] <= w[1])
-            {
-                    let mut pairs: Vec<(u64, u32)> =
-                        (0..m as u32).map(|i| (v_keys[i as usize], i)).collect();
-                    pairs.par_sort_unstable_by_key(|&(key, _)| key);
-                    let out = numpy.call_method("empty", ((m,), "int64"), None)?;
-                    let out_buf = PyBuffer::<i64>::get(&out)?;
-                    let Some(out_cells) = out_buf.as_mut_slice(py) else {
-                        return Ok(None);
-                    };
-                    if out_cells.len() != m {
-                        return Ok(None);
-                    }
-                    // SAFETY: fresh numpy.empty int64 output, no alias with inputs.
-                    let o: &mut [i64] = unsafe {
-                        std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, m)
-                    };
-                    let mut p = 0usize;
-                    if right {
-                        for &(key, idx) in &pairs {
-                            while p < n && a_keys[p] <= key {
-                                p += 1;
-                            }
-                            o[idx as usize] = p as i64;
-                        }
-                    } else {
-                        for &(key, idx) in &pairs {
-                            while p < n && a_keys[p] < key {
-                                p += 1;
-                            }
-                            o[idx as usize] = p as i64;
-                        }
-                    }
-                    return Ok(Some(out.unbind()));
+        let a_keys = pack_fixed_width_string_keys(a_data, n, itemsize, key_width, is_bytes);
+        let v_keys = pack_fixed_width_string_keys(v_data, m, itemsize, key_width, is_bytes);
+        if let (Some(a_keys), Some(v_keys)) = (a_keys, v_keys)
+            && a_keys.par_windows(2).all(|w| w[0] <= w[1])
+        {
+            let mut pairs: Vec<(u64, u32)> =
+                (0..m as u32).map(|i| (v_keys[i as usize], i)).collect();
+            pairs.par_sort_unstable_by_key(|&(key, _)| key);
+            let out = numpy.call_method("empty", ((m,), "int64"), None)?;
+            let out_buf = PyBuffer::<i64>::get(&out)?;
+            let Some(out_cells) = out_buf.as_mut_slice(py) else {
+                return Ok(None);
+            };
+            if out_cells.len() != m {
+                return Ok(None);
             }
+            // SAFETY: fresh numpy.empty int64 output, no alias with inputs.
+            let o: &mut [i64] =
+                unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, m) };
+            let mut p = 0usize;
+            if right {
+                for &(key, idx) in &pairs {
+                    while p < n && a_keys[p] <= key {
+                        p += 1;
+                    }
+                    o[idx as usize] = p as i64;
+                }
+            } else {
+                for &(key, idx) in &pairs {
+                    while p < n && a_keys[p] < key {
+                        p += 1;
+                    }
+                    o[idx as usize] = p as i64;
+                }
+            }
+            return Ok(Some(out.unbind()));
+        }
     }
     // 'U' only: wide codepoints break byte==codepoint order; 'S' bytes are always in byte order.
     let wide = |d: &[u8]| {
@@ -68046,7 +68022,8 @@ fn argsort_stable_typed<T: pyo3::buffer::Element + Copy + PartialOrd + Send + Sy
     let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
     // NaN detection via `v != v` (true only for NaN; always false for integer T). numpy orders NaN last, which
     // partial_cmp can't express -> defer.
-    #[allow(clippy::eq_op)] // v != v is the generic NaN probe (see comment above); T may be integer, so `.is_nan()` is unavailable
+    #[allow(clippy::eq_op)]
+    // v != v is the generic NaN probe (see comment above); T may be integer, so `.is_nan()` is unavailable
     if check_nan && data.par_iter().any(|v| v != v) {
         return Ok(None);
     }
@@ -68355,7 +68332,8 @@ fn complex_argsort_stable_typed<F: pyo3::buffer::Element + Copy + PartialOrd + S
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<F> is repr(transparent) over F; read-only under the GIL.
     let data: &[F] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<F>(), 2 * n) };
-    #[allow(clippy::eq_op)] // *v != *v is the generic NaN probe; F is only PartialOrd, so `.is_nan()` is unavailable
+    #[allow(clippy::eq_op)]
+    // *v != *v is the generic NaN probe; F is only PartialOrd, so `.is_nan()` is unavailable
     if data.par_iter().any(|v| *v != *v) {
         return Ok(None);
     }
@@ -68670,7 +68648,8 @@ fn argsort_stable_lastaxis_typed<T: pyo3::buffer::Element + Copy + PartialOrd + 
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
     let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
-    #[allow(clippy::eq_op)] // *v != *v is the generic NaN probe; T may be integer, so `.is_nan()` is unavailable
+    #[allow(clippy::eq_op)]
+    // *v != *v is the generic NaN probe; T may be integer, so `.is_nan()` is unavailable
     if check_nan && data.par_iter().any(|v| *v != *v) {
         return Ok(None); // NaN -> defer (numpy orders NaN last; partial_cmp can't)
     }
@@ -70964,22 +70943,22 @@ fn quantile(
         && qinterp == fnp_ufunc::QuantileInterp::Linear
         && let Ok(qs) = q.bind(py).extract::<Vec<f64>>()
     {
-            let result = match a.quantiles_axis_none(&qs) {
-                Ok(result) => result,
-                Err(_) => return fallback(),
+        let result = match a.quantiles_axis_none(&qs) {
+            Ok(result) => result,
+            Err(_) => return fallback(),
+        };
+        let output = build_numpy_array_from_ufunc(py, &result)?;
+        if keepdims {
+            // numpy keepdims for axis=None array-q: [k] ++ ones(input ndim).
+            let Some(ndim) = orig_ndim else {
+                return fallback();
             };
-            let output = build_numpy_array_from_ufunc(py, &result)?;
-            if keepdims {
-                // numpy keepdims for axis=None array-q: [k] ++ ones(input ndim).
-                let Some(ndim) = orig_ndim else {
-                    return fallback();
-                };
-                let mut tgt = vec![1usize; ndim + 1];
-                tgt[0] = qs.len();
-                let t = PyTuple::new(py, tgt)?;
-                return Ok(output.bind(py).call_method1("reshape", (&t,))?.unbind());
-            }
-            return Ok(output);
+            let mut tgt = vec![1usize; ndim + 1];
+            tgt[0] = qs.len();
+            let t = PyTuple::new(py, tgt)?;
+            return Ok(output.bind(py).call_method1("reshape", (&t,))?.unbind());
+        }
+        return Ok(output);
     }
     fallback()
 }
@@ -73766,37 +73745,37 @@ fn cond(py: Python<'_>, x: Py<PyAny>, p: Option<Py<PyAny>>) -> PyResult<Py<PyAny
     if let Some(mode) = p_mode
         && let Ok(array) = extract_numeric_array(py, x.bind(py), "cond(x)")
     {
-            let shape = array.shape();
-            if shape.len() >= 3
-                && matches!(array.dtype(), DType::F64)
-                && !array.has_integer_sidecar()
-                && array.values().iter().all(|v| v.is_finite())
+        let shape = array.shape();
+        if shape.len() >= 3
+            && matches!(array.dtype(), DType::F64)
+            && !array.has_integer_sidecar()
+            && array.values().iter().all(|v| v.is_finite())
+        {
+            let m = shape[shape.len() - 2];
+            let n = shape[shape.len() - 1];
+            let k = m.min(n);
+            let owned_shape = shape.to_vec();
+            if k >= 1
+                && let Ok(sigmas) = fnp_linalg::batch_svd(array.values(), &owned_shape)
             {
-                let m = shape[shape.len() - 2];
-                let n = shape[shape.len() - 1];
-                let k = m.min(n);
-                let owned_shape = shape.to_vec();
-                if k >= 1
-                    && let Ok(sigmas) = fnp_linalg::batch_svd(array.values(), &owned_shape)
-                {
-                        let batch = sigmas.len() / k;
-                        let mut out = Vec::with_capacity(batch);
-                        for b in 0..batch {
-                            let smax = sigmas[b * k];
-                            let smin = sigmas[b * k + k - 1];
-                            let ratio = if mode == 2 { smax / smin } else { smin / smax };
-                            // numpy.linalg.cond converts a NaN result (0/0 from an
-                            // all-zero / fully singular matrix) to +Inf whenever the
-                            // input had no NaN entries. Our gate already requires
-                            // all-finite input, so every NaN here becomes Inf.
-                            out.push(if ratio.is_nan() { f64::INFINITY } else { ratio });
-                        }
-                        let out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
-                        let result =
-                            UFuncArray::new(out_shape, out, DType::F64).map_err(map_ufunc_error)?;
-                        return build_numpy_array_from_ufunc(py, &result);
+                let batch = sigmas.len() / k;
+                let mut out = Vec::with_capacity(batch);
+                for b in 0..batch {
+                    let smax = sigmas[b * k];
+                    let smin = sigmas[b * k + k - 1];
+                    let ratio = if mode == 2 { smax / smin } else { smin / smax };
+                    // numpy.linalg.cond converts a NaN result (0/0 from an
+                    // all-zero / fully singular matrix) to +Inf whenever the
+                    // input had no NaN entries. Our gate already requires
+                    // all-finite input, so every NaN here becomes Inf.
+                    out.push(if ratio.is_nan() { f64::INFINITY } else { ratio });
                 }
+                let out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
+                let result =
+                    UFuncArray::new(out_shape, out, DType::F64).map_err(map_ufunc_error)?;
+                return build_numpy_array_from_ufunc(py, &result);
             }
+        }
     }
     let kwargs = PyDict::new(py);
     if let Some(value) = p {
@@ -73915,15 +73894,9 @@ fn norm(
         let (r0, r1) = (resolve(ax0), resolve(ax1));
         let mut pair = [r0, r1];
         pair.sort_unstable();
-        let trailing = nd >= 3
-            && r0 >= 0
-            && r1 >= 0
-            && r0 < nd
-            && r1 < nd
-            && pair == [nd - 2, nd - 1];
-        if trailing
-            && let Some(result) = try_batched_svd_matrix_norm(py, &array, mode, keepdims)?
-        {
+        let trailing =
+            nd >= 3 && r0 >= 0 && r1 >= 0 && r0 < nd && r1 < nd && pair == [nd - 2, nd - 1];
+        if trailing && let Some(result) = try_batched_svd_matrix_norm(py, &array, mode, keepdims)? {
             return Ok(result);
         }
     }
@@ -96469,7 +96442,8 @@ where
         return Ok(None);
     }
     // Build one {U|S}{width} output array from a per-element writer.
-    #[allow(clippy::type_complexity)] // the &dyn Fn writer borrows non-'static locals; a bare type alias would force a 'static object bound
+    #[allow(clippy::type_complexity)]
+    // the &dyn Fn writer borrows non-'static locals; a bare type alias would force a 'static object bound
     let build =
         |width: usize, writer: &(dyn Fn(usize, &[E], &mut [E]) + Sync)| -> PyResult<Py<PyAny>> {
             let kwargs = PyDict::new(py);
@@ -98022,8 +97996,10 @@ fn try_zerocopy_f64_ptp_axis(
             let group_plane = |obase: usize| -> (Vec<f64>, Vec<f64>, Vec<bool>) {
                 let mut mxv = data[obase..obase + inner].to_vec();
                 let mut mnv = mxv.clone();
-                let mut nanv: Vec<bool> =
-                    data[obase..obase + inner].iter().map(|&v| v.is_nan()).collect();
+                let mut nanv: Vec<bool> = data[obase..obase + inner]
+                    .iter()
+                    .map(|&v| v.is_nan())
+                    .collect();
                 for a_idx in 1..axis_len {
                     let slab = &data[obase + a_idx * inner..obase + a_idx * inner + inner];
                     for (((m, n), nf), &v) in mxv
@@ -98201,8 +98177,10 @@ fn try_zerocopy_f32_ptp_axis(
             let group_plane = |obase: usize| -> (Vec<f32>, Vec<f32>, Vec<bool>) {
                 let mut mxv = data[obase..obase + inner].to_vec();
                 let mut mnv = mxv.clone();
-                let mut nanv: Vec<bool> =
-                    data[obase..obase + inner].iter().map(|&v| v.is_nan()).collect();
+                let mut nanv: Vec<bool> = data[obase..obase + inner]
+                    .iter()
+                    .map(|&v| v.is_nan())
+                    .collect();
                 for a_idx in 1..axis_len {
                     let slab = &data[obase + a_idx * inner..obase + a_idx * inner + inner];
                     for (((m, n), nf), &v) in mxv
@@ -122787,8 +122765,7 @@ mod tests {
             let v = rng.getattr("standard_normal")?.call1((5000_i64,))?;
             // conditions and choices and the array default are all derived from v.
             let lt = |t: f64| -> PyResult<Bound<'_, PyAny>> { v.call_method1("__lt__", (t,)) };
-            let scaled =
-                |s: f64| -> PyResult<Bound<'_, PyAny>> { v.call_method1("__mul__", (s,)) };
+            let scaled = |s: f64| -> PyResult<Bound<'_, PyAny>> { v.call_method1("__mul__", (s,)) };
             let array_equal = numpy.getattr("array_equal")?;
             for (conds, choices) in [
                 (vec![lt(-1.0)?, lt(1.0)?], vec![scaled(2.0)?, scaled(3.0)?]),
@@ -147708,9 +147685,7 @@ mod tests {
             former_kwargs.set_item("dtype", numpy.getattr("int64")?)?;
             former_kwargs.set_item("skiprows", 1_i64)?;
             former_kwargs.set_item("unpack", true)?;
-            let former = loadtxt
-                .call((path,), Some(&former_kwargs))?
-                .getattr("T")?;
+            let former = loadtxt.call((path,), Some(&former_kwargs))?.getattr("T")?;
             assert_array_matches_numpy(&candidate, &former)?;
 
             let coercion_path = std::env::temp_dir().join(format!(
@@ -147778,9 +147753,7 @@ mod tests {
             former_kwargs.set_item("dtype", numpy.getattr("bool_")?)?;
             former_kwargs.set_item("skiprows", 1_i64)?;
             former_kwargs.set_item("unpack", true)?;
-            let former = loadtxt
-                .call((path,), Some(&former_kwargs))?
-                .getattr("T")?;
+            let former = loadtxt.call((path,), Some(&former_kwargs))?.getattr("T")?;
             assert_array_matches_numpy(&candidate, &former)?;
 
             // Single column squeezes to 1-D exactly like the former path.
@@ -147798,9 +147771,7 @@ mod tests {
             let column_oracle = numpy_loadtxt.call((column_path,), Some(&column_kwargs))?;
             assert_array_matches_numpy(&column_candidate, &column_oracle)?;
             assert_eq!(
-                column_candidate
-                    .getattr("shape")?
-                    .extract::<Vec<usize>>()?,
+                column_candidate.getattr("shape")?.extract::<Vec<usize>>()?,
                 [3]
             );
 
