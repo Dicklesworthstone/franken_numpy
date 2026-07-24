@@ -59,3 +59,7 @@ harness = false
 [[bench]]
 name = "criterion_python_unique_rows"
 harness = false
+
+[[bench]]
+name = "criterion_python_argsort"
+harness = false
