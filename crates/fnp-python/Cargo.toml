@@ -51,3 +51,59 @@ harness = false
 [[bench]]
 name = "criterion_python_io_text"
 harness = false
+
+[[bench]]
+name = "criterion_python_string"
+harness = false
+
+[[bench]]
+name = "criterion_python_unique_rows"
+harness = false
+
+[[bench]]
+name = "criterion_python_argsort"
+harness = false
+
+[[bench]]
+name = "criterion_python_linalg"
+harness = false
+
+[[bench]]
+name = "criterion_python_complex"
+harness = false
+
+[[bench]]
+name = "criterion_python_median_gate"
+harness = false
+
+[[bench]]
+name = "criterion_python_setops"
+harness = false
+
+[[bench]]
+name = "criterion_python_struct"
+harness = false
+
+[[bench]]
+name = "criterion_python_sortmisc"
+harness = false
+
+[[bench]]
+name = "criterion_python_misc1"
+harness = false
+
+[[bench]]
+name = "criterion_python_misc2"
+harness = false
+
+[[bench]]
+name = "criterion_python_unaryred"
+harness = false
+
+[[bench]]
+name = "criterion_python_elementwise"
+harness = false
+
+[[bench]]
+name = "criterion_python_reductions"
+harness = false

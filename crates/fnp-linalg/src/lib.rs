@@ -2939,6 +2939,228 @@ pub fn tsqr_r(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
     Ok(level.pop().unwrap_or_else(|| vec![0.0f64; n * n]))
 }
 
+/// In-place Householder QR of a row-major `rows × n` block that ALSO applies the
+/// same reflector sequence to a right-hand-side vector `b` of length `rows`.
+///
+/// This is [`householder_r_in_place`] extended to carry Qᵀb. The block arithmetic
+/// is byte-for-byte identical to that function (same reflector, same trailing
+/// update, same association order), so the R it leaves is bit-identical to the
+/// R-only path; the only addition is applying each reflector to `b` as well. On
+/// return the leading `min(rows, n)` entries of `b` hold the top of Qᵀb (the part
+/// that determines x), and the block's upper triangle holds R.
+fn householder_r_apply_b_in_place(block: &mut [f64], b: &mut [f64], rows: usize, n: usize) {
+    let steps = rows.min(n);
+    let mut v = vec![0.0f64; rows];
+    let mut dots = vec![0.0f64; n];
+    for col in 0..steps {
+        let mut norm_sq = 0.0;
+        for i in col..rows {
+            let x = block[i * n + col];
+            norm_sq += x * x;
+        }
+        if norm_sq == 0.0 {
+            continue;
+        }
+        let norm = norm_sq.sqrt();
+        let pivot = block[col * n + col];
+        let alpha = if pivot > 0.0 { -norm } else { norm };
+
+        for i in col..rows {
+            v[i] = block[i * n + col];
+        }
+        v[col] -= alpha;
+
+        let mut v_norm_sq = 0.0;
+        for &value in &v[col..rows] {
+            v_norm_sq += value * value;
+        }
+        if v_norm_sq == 0.0 {
+            continue;
+        }
+
+        // Trailing-column update of the block: byte-for-byte identical to
+        // householder_r_in_place, so carrying b leaves R unchanged.
+        dots[col..n].fill(0.0);
+        for i in col..rows {
+            let vi = v[i];
+            if vi == 0.0 {
+                continue;
+            }
+            let row = &block[i * n + col..i * n + n];
+            for (acc, &value) in dots[col..n].iter_mut().zip(row) {
+                *acc += vi * value;
+            }
+        }
+        for acc in dots[col..n].iter_mut() {
+            *acc = 2.0 * *acc / v_norm_sq;
+        }
+        for i in col..rows {
+            let vi = v[i];
+            if vi == 0.0 {
+                continue;
+            }
+            let row = &mut block[i * n + col..i * n + n];
+            for (value, &factor) in row.iter_mut().zip(dots[col..n].iter()) {
+                *value -= factor * vi;
+            }
+        }
+
+        // Apply the SAME reflector H = I - 2vvᵀ/(vᵀv) to b, using the identical
+        // `2.0 * dot / v_norm_sq` form as the block update for matching rounding.
+        let mut bdot = 0.0;
+        for i in col..rows {
+            bdot += v[i] * b[i];
+        }
+        let bfactor = 2.0 * bdot / v_norm_sq;
+        for i in col..rows {
+            b[i] -= bfactor * v[i];
+        }
+    }
+
+    for i in 0..rows {
+        let upper = n.min(i);
+        for j in 0..upper {
+            block[i * n + j] = 0.0;
+        }
+    }
+}
+
+/// Leaf reduction for [`tsqr_qtb`]: the n×n R factor plus the top `n` entries of
+/// Qᵀb for one row block.
+fn leaf_qtb(block: &[f64], b_block: &[f64], rows: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut work = block.to_vec();
+    let mut b_work = b_block.to_vec();
+    householder_r_apply_b_in_place(&mut work, &mut b_work, rows, n);
+    let mut r = vec![0.0f64; n * n];
+    let copy_rows = rows.min(n);
+    for i in 0..copy_rows {
+        r[i * n..i * n + n].copy_from_slice(&work[i * n..i * n + n]);
+    }
+    let mut c = vec![0.0f64; n];
+    c[..copy_rows].copy_from_slice(&b_work[..copy_rows]);
+    (r, c)
+}
+
+/// Combine two `(R, Qᵀb-top)` pairs by re-triangularizing their stacked 2n×n R
+/// and carrying the stacked 2n b-components through the same reflectors.
+fn combine_qtb(
+    r_top: &[f64],
+    c_top: &[f64],
+    r_bottom: &[f64],
+    c_bottom: &[f64],
+    n: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let mut stacked = vec![0.0f64; 2 * n * n];
+    stacked[..n * n].copy_from_slice(r_top);
+    stacked[n * n..].copy_from_slice(r_bottom);
+    let mut b_stacked = vec![0.0f64; 2 * n];
+    b_stacked[..n].copy_from_slice(c_top);
+    b_stacked[n..].copy_from_slice(c_bottom);
+    householder_r_apply_b_in_place(&mut stacked, &mut b_stacked, 2 * n, n);
+    stacked.truncate(n * n);
+    let c = b_stacked[..n].to_vec();
+    (stacked, c)
+}
+
+/// Tall-skinny QR reduction returning both R and the top `n` entries of Qᵀb.
+///
+/// This is [`tsqr_r`] extended to carry the transformed right-hand side needed
+/// for least squares. For full-rank tall-skinny A the least-squares solution is
+/// `x = R⁻¹ (Qᵀb)_top`, which is UNIQUE regardless of the (sign-ambiguous) Q/R
+/// choice TSQR makes - so callers get numpy-parity `x` without the sign
+/// divergence a bare R (or `qr(mode="r")`) would expose. The returned R is
+/// bit-identical to [`tsqr_r`] (same block ranges, same fold order, same
+/// arithmetic).
+///
+/// `b` has length m. Returns `(R, c)` with R the n×n upper-triangular factor and
+/// `c` the length-n top of Qᵀb.
+pub fn tsqr_qtb(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    n: usize,
+) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
+    if Some(a.len()) != m.checked_mul(n) || m == 0 || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tsqr_qtb: input must be m*n with m,n > 0",
+        ));
+    }
+    if b.len() != m {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tsqr_qtb: b must have length m",
+        ));
+    }
+    if m < n {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tsqr_qtb: requires m >= n (tall-skinny)",
+        ));
+    }
+    if a.iter().any(|v| !v.is_finite()) || b.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "matrix entries must be finite for QR",
+        ));
+    }
+
+    let threads = rayon::current_num_threads().max(1);
+    let max_blocks = (m / TSQR_MIN_LEAF_ROWS).max(1);
+    let blocks = threads.min(max_blocks);
+
+    if blocks <= 1 {
+        let mut work = a.to_vec();
+        let mut b_work = b.to_vec();
+        householder_r_apply_b_in_place(&mut work, &mut b_work, m, n);
+        let mut r = vec![0.0f64; n * n];
+        for i in 0..n.min(m) {
+            r[i * n..i * n + n].copy_from_slice(&work[i * n..i * n + n]);
+        }
+        let c = b_work[..n].to_vec();
+        return Ok((r, c));
+    }
+
+    let base = m / blocks;
+    let remainder = m % blocks;
+    let mut ranges = Vec::with_capacity(blocks);
+    let mut start = 0;
+    for b_idx in 0..blocks {
+        let rows = base + usize::from(b_idx < remainder);
+        ranges.push((start, rows));
+        start += rows;
+    }
+
+    let mut level: Vec<(Vec<f64>, Vec<f64>)> = ranges
+        .par_iter()
+        .map(|&(row_start, rows)| {
+            leaf_qtb(
+                &a[row_start * n..(row_start + rows) * n],
+                &b[row_start..row_start + rows],
+                rows,
+                n,
+            )
+        })
+        .collect();
+
+    // Deterministic sequential fold: pair adjacent factors, left to right - the
+    // same tree tsqr_r uses, so R stays bit-identical and c follows that tree.
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut idx = 0;
+        while idx + 1 < level.len() {
+            let (r_top, c_top) = &level[idx];
+            let (r_bottom, c_bottom) = &level[idx + 1];
+            next.push(combine_qtb(r_top, c_top, r_bottom, c_bottom, n));
+            idx += 2;
+        }
+        if idx < level.len() {
+            next.push(level[idx].clone());
+        }
+        level = next;
+    }
+
+    Ok(level
+        .pop()
+        .unwrap_or_else(|| (vec![0.0f64; n * n], vec![0.0f64; n])))
+}
+
 /// SVD of an m×n rectangular matrix (singular values only).
 ///
 /// Input `a` is row-major with shape (m, n). Returns singular values in
@@ -7326,6 +7548,91 @@ pub fn lstsq_svd(
     let mut residuals = Vec::new();
     if rank == n && m > n {
         let sum_sq: f64 = utb[n..m].iter().map(|v| v * v).sum();
+        residuals.push(sum_sq);
+    }
+
+    Ok((x, residuals, rank, s))
+}
+
+/// Least squares for a full-rank tall-skinny (m ≥ n) system via TSQR.
+///
+/// Matches `numpy.linalg.lstsq`'s `(x, residuals, rank, singular_values)` return.
+/// For the full-rank tall-skinny regime this avoids the O(mn·min(m,n)) SVD that
+/// [`lstsq_svd`] runs on the whole m×n matrix: TSQR reduces A to a tiny n×n R in
+/// one streaming, embarrassingly-parallel pass, `x = R⁻¹(Qᵀb)_top` by back
+/// substitution, and the singular values / rank come from an n×n SVD of R since
+/// σ(A) = σ(R). Every returned element is invariant to TSQR's Q/R sign choice, so
+/// this is `allclose` to numpy with no sign divergence.
+///
+/// Rank-deficient inputs (rank < n by the same singular-value threshold
+/// [`lstsq_svd`] uses) fall back to [`lstsq_svd`], which handles the minimum-norm
+/// solution and truncated pseudo-inverse.
+pub fn lstsq_tsqr(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    n: usize,
+    rcond: f64,
+) -> Result<LstsqResult, LinAlgError> {
+    if Some(a.len()) != m.checked_mul(n) || b.len() != m || m == 0 || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "lstsq_tsqr: a must be m*n, b must be m",
+        ));
+    }
+    if m < n {
+        return Err(LinAlgError::ShapeContractViolation(
+            "lstsq_tsqr: requires m >= n",
+        ));
+    }
+    if a.iter().any(|v| !v.is_finite()) || b.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "entries must be finite for lstsq",
+        ));
+    }
+
+    let (r, c) = tsqr_qtb(a, b, m, n)?;
+
+    // Singular values and rank from the tiny n×n R (σ(A) = σ(R)). Same threshold
+    // rule as lstsq_svd so the reported rank matches that path exactly.
+    let s = svd_mxn(&r, n, n)?;
+    let sigma_max = s.first().copied().unwrap_or(0.0);
+    let threshold = if rcond < 0.0 {
+        f64::EPSILON * (m.max(n) as f64) * sigma_max
+    } else {
+        rcond * sigma_max
+    };
+    let rank = s.iter().filter(|&&si| si > threshold).count();
+
+    // Rank-deficient: back substitution against a singular R is invalid; defer to
+    // the SVD minimum-norm path (which also matches numpy for rank < n).
+    if rank != n {
+        return lstsq_svd(a, b, m, n, rcond);
+    }
+
+    // x = R⁻¹ c by back substitution (R upper triangular, row-major).
+    let mut x = vec![0.0f64; n];
+    for i in (0..n).rev() {
+        let mut sum = c[i];
+        for j in (i + 1)..n {
+            sum -= r[i * n + j] * x[j];
+        }
+        x[i] = sum / r[i * n + i];
+    }
+
+    // Residuals: numpy reports the summed squared residual only when full rank and
+    // m > n. Computed directly as ‖b - Ax‖²; norm-preserving orthogonal transforms
+    // make this equal to the ‖(Qᵀb)_bottom‖² the SVD path accumulates.
+    let mut residuals = Vec::new();
+    if m > n {
+        let mut sum_sq = 0.0;
+        for row in 0..m {
+            let mut ax = 0.0;
+            for col in 0..n {
+                ax += a[row * n + col] * x[col];
+            }
+            let diff = b[row] - ax;
+            sum_sq += diff * diff;
+        }
         residuals.push(sum_sq);
     }
 
@@ -19987,5 +20294,181 @@ except Exception as exc:
         assert!(tsqr_r(&[1.0, 2.0, 3.0], 2, 2).is_err());
         // Non-finite entries are rejected like the other QR entry points.
         assert!(tsqr_r(&[1.0, f64::NAN, 3.0, 4.0], 2, 2).is_err());
+    }
+
+    #[test]
+    fn tsqr_qtb_r_is_bit_identical_to_tsqr_r() {
+        // Carrying Qᵀb must not perturb the R reduction by a single bit, across
+        // both the single-block and multi-block (folded) paths.
+        for (m, n, seed) in [
+            (64usize, 8usize, 0x11u64),
+            (4096, 12, 0x22),
+            (20_000, 6, 0x33),
+        ] {
+            let a = tsqr_test_matrix(m, n, seed);
+            let b = tsqr_test_matrix(m, 1, seed ^ 0xFF);
+            let r_only = tsqr_r(&a, m, n).expect("tsqr_r");
+            let (r_qtb, _c) = super::tsqr_qtb(&a, &b, m, n).expect("tsqr_qtb");
+            for (idx, (x, y)) in r_only.iter().zip(r_qtb.iter()).enumerate() {
+                assert_eq!(x.to_bits(), y.to_bits(), "R diverged at {idx} for {m}x{n}");
+            }
+        }
+    }
+
+    #[test]
+    fn lstsq_tsqr_matches_lstsq_svd_full_rank_tall_skinny() {
+        // The whole 4-tuple must be allclose to the SVD path on full-rank
+        // tall-skinny inputs (numpy's own path is SVD, so allclose here == allclose
+        // to numpy). Sizes stay modest here because the lstsq_svd reference builds
+        // a full m×m U (the very cost TSQR avoids); the multi-block TSQR path is
+        // validated cheaply by lstsq_tsqr_multiblock_satisfies_normal_equations.
+        for (m, n, seed) in [
+            (64usize, 8usize, 0xABCD_u64),
+            (300, 8, 0x1234),
+            (1000, 8, 0xBEEF),
+            (400, 12, 0xC0DE),
+            (513, 7, 0x0F0F),
+            (200, 16, 0x7777),
+        ] {
+            let a = tsqr_test_matrix(m, n, seed);
+            let b = tsqr_test_matrix(m, 1, seed ^ 0x5A5A);
+            let (x_svd, res_svd, rank_svd, s_svd) =
+                super::lstsq_svd(&a, &b, m, n, -1.0).expect("lstsq_svd");
+            let (x_t, res_t, rank_t, s_t) =
+                super::lstsq_tsqr(&a, &b, m, n, -1.0).expect("lstsq_tsqr");
+
+            assert_eq!(rank_t, n, "expected full rank for {m}x{n}");
+            assert_eq!(rank_t, rank_svd, "rank mismatch {m}x{n}");
+
+            let xscale = x_svd.iter().fold(0.0f64, |acc, v| acc.max(v.abs())).max(1.0);
+            for (i, (t, s)) in x_t.iter().zip(&x_svd).enumerate() {
+                assert!(
+                    (t - s).abs() <= 1e-7 * xscale,
+                    "x[{i}] {m}x{n}: {t} vs {s}"
+                );
+            }
+
+            assert_eq!(res_t.len(), res_svd.len(), "residual arity {m}x{n}");
+            if !res_svd.is_empty() {
+                let rscale = res_svd[0].abs().max(1.0);
+                assert!(
+                    (res_t[0] - res_svd[0]).abs() <= 1e-6 * rscale,
+                    "residual {m}x{n}: {} vs {}",
+                    res_t[0],
+                    res_svd[0]
+                );
+            }
+
+            assert_eq!(s_t.len(), s_svd.len(), "singular count {m}x{n}");
+            let sscale = s_svd.iter().fold(0.0f64, |acc, v| acc.max(v.abs())).max(1.0);
+            for (i, (t, s)) in s_t.iter().zip(&s_svd).enumerate() {
+                assert!(
+                    (t - s).abs() <= 1e-7 * sscale,
+                    "sigma[{i}] {m}x{n}: {t} vs {s}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lstsq_tsqr_multiblock_satisfies_normal_equations() {
+        // On a large multi-block (m >> TSQR_MIN_LEAF_ROWS) full-rank system the
+        // least-squares solution makes the residual orthogonal to A's columns:
+        // Aᵀ(b - Ax) ≈ 0. This validates the folded Qᵀb path without paying for a
+        // full m×m SVD reference.
+        let (m, n) = (16_384usize, 8usize);
+        let a = tsqr_test_matrix(m, n, 0x5EED_1234);
+        let b = tsqr_test_matrix(m, 1, 0x0B0B_0B0B);
+        let (x, res, rank, _s) = super::lstsq_tsqr(&a, &b, m, n, -1.0).expect("lstsq_tsqr");
+        assert_eq!(rank, n, "expected full rank");
+        assert_eq!(res.len(), 1);
+
+        // resid = b - A x
+        let mut resid = b.clone();
+        for row in 0..m {
+            let mut ax = 0.0;
+            for col in 0..n {
+                ax += a[row * n + col] * x[col];
+            }
+            resid[row] -= ax;
+        }
+        // g = Aᵀ resid should be ~0 at the least-squares solution.
+        let mut g = vec![0.0f64; n];
+        for row in 0..m {
+            let rv = resid[row];
+            for col in 0..n {
+                g[col] += a[row * n + col] * rv;
+            }
+        }
+        let a_norm = a.iter().fold(0.0f64, |acc, v| acc + v * v).sqrt();
+        let b_norm = b.iter().fold(0.0f64, |acc, v| acc + v * v).sqrt();
+        let scale = (a_norm * b_norm).max(1.0);
+        let g_inf = g.iter().fold(0.0f64, |acc, v| acc.max(v.abs()));
+        assert!(
+            g_inf <= 1e-8 * scale,
+            "normal-equations residual too large: {g_inf} (scale {scale})"
+        );
+        // Reported residual equals ‖b - Ax‖² directly.
+        let direct: f64 = resid.iter().map(|v| v * v).sum();
+        let rscale = direct.abs().max(1.0);
+        assert!(
+            (res[0] - direct).abs() <= 1e-9 * rscale,
+            "reported residual {} vs direct {}",
+            res[0],
+            direct
+        );
+    }
+
+    #[test]
+    fn lstsq_tsqr_solves_small_overdetermined_exactly() {
+        // Points (0,1),(1,2),(2,3) lie exactly on y = 1 + 1·x; design columns
+        // [1, x]. The fit is exact, so x = (1, 1) and the residual is ~0.
+        let a = [1.0, 0.0, 1.0, 1.0, 1.0, 2.0];
+        let b = [1.0, 2.0, 3.0];
+        let (x, res, rank, s) = super::lstsq_tsqr(&a, &b, 3, 2, -1.0).expect("lstsq_tsqr");
+        assert_eq!(rank, 2);
+        assert!((x[0] - 1.0).abs() < 1e-10, "intercept {}", x[0]);
+        assert!((x[1] - 1.0).abs() < 1e-10, "slope {}", x[1]);
+        assert_eq!(res.len(), 1);
+        assert!(res[0] < 1e-18, "residual {}", res[0]);
+        assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn lstsq_tsqr_rank_deficient_falls_back_to_svd() {
+        // Column 1 = 2·column 0 -> rank 1 < n = 2. With an explicit rcond that
+        // clearly separates the tiny second singular value, TSQR must defer to
+        // lstsq_svd and return its exact minimum-norm result and rank.
+        let a = [1.0, 2.0, 2.0, 4.0, 3.0, 6.0, 4.0, 8.0];
+        let b = [1.0, 2.0, 2.0, 5.0];
+        let (x_t, res_t, rank_t, s_t) =
+            super::lstsq_tsqr(&a, &b, 4, 2, 1e-6).expect("lstsq_tsqr");
+        let (x_svd, res_svd, rank_svd, s_svd) =
+            super::lstsq_svd(&a, &b, 4, 2, 1e-6).expect("lstsq_svd");
+        assert_eq!(rank_t, 1, "rank-deficient should report rank 1");
+        assert_eq!(rank_t, rank_svd);
+        for (t, s) in x_t.iter().zip(&x_svd) {
+            assert_eq!(
+                t.to_bits(),
+                s.to_bits(),
+                "fallback x must equal lstsq_svd bit for bit"
+            );
+        }
+        assert_eq!(res_t.len(), res_svd.len());
+        assert_eq!(s_t.len(), s_svd.len());
+    }
+
+    #[test]
+    fn tsqr_qtb_and_lstsq_tsqr_reject_malformed_shapes() {
+        // Wide (m < n).
+        assert!(super::tsqr_qtb(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1.0, 2.0], 2, 3).is_err());
+        // b length mismatch.
+        assert!(super::tsqr_qtb(&[1.0, 2.0, 3.0, 4.0], &[1.0], 2, 2).is_err());
+        // Non-finite entries.
+        assert!(
+            super::lstsq_tsqr(&[1.0, f64::INFINITY, 3.0, 4.0], &[1.0, 2.0], 2, 2, -1.0).is_err()
+        );
+        // a length must equal m*n.
+        assert!(super::lstsq_tsqr(&[1.0, 2.0, 3.0], &[1.0, 2.0], 2, 2, -1.0).is_err());
     }
 }

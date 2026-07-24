@@ -4,6 +4,309 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-24 - WIN (KEEP): hoist the geometric inversion log denominator per batch - 2.1633x fewer userspace cycles
+
+`IvoryIvy`, bead `franken_numpy-ixs5y.379`. The ledger and recent Git log were
+screened before any edit. The freshest random rows had already closed
+hypergeometric HRUA, gamma/Poisson, `noncentral_f`, and Dirichlet parameter
+caches; rejected Zipf and von Mises hoists were also excluded. The older random
+family sweep explicitly left the geometric/logseries-class body open behind a
+profile-first predicate, and neither the ledger nor Git history contained this
+geometric inversion attempt. Agent Mail reserved only the fnp-random source,
+retained benchmark, and this ledger. The peer-owned fnp-python bench-binary and
+matmul/TSQR architectural lanes were not touched.
+
+PROFILE FIRST, with production untouched: retained Criterion measured
+`Generator::geometric(0.1, 100_000)` at 1.1255 ms
+(`[1.0746, 1.2152]`) on effective worker `vmi1149989`, with release LTO
+disabled. A strict-remote userspace-cycle profile of that exact former binary
+captured 912 samples with zero loss. The geometric closure held 51.73% self;
+`__log1p_fma` held 29.84% and `__w_logp1` another 5.26%. Source attribution
+identified the repeated invariant: the `p < 1/3` inversion path recomputed
+`(-p).ln_1p()` for every output even though public `geometric` fixes `p` for the
+whole batch.
+
+ONE LEVER: `Generator::geometric` now evaluates `(-p).ln_1p()` once for the
+inversion branch and reuses that denominator for every output. Validation
+order, the `p == 1` draw behavior, the `p >= 1/3` search path and threshold,
+Ziggurat exponential draws, division/ceil/saturation arithmetic, allocation,
+output order, and error behavior are unchanged. The implementation remains
+safe Rust and adds one O(1) `f64` batch value.
+
+The decisive comparison used one release test binary on worker
+`vmi1227854`, pinned to CPU 6. Each arm performed 512 public 100,000-output
+batches after an exact former/candidate output-and-stream proof. `perf stat`
+measured userspace cycles over 10 whole-process repetitions, so fleet frequency
+changes could not be mistaken for an algorithmic win. Candidate B/C are
+identical code paths and form the null:
+
+| row | lhs cycles | rhs cycles | lhs CV | rhs CV | lhs/rhs |
+|---|---:|---:|---:|---:|---:|
+| exact former / cached candidate A | 2,611,650,560 | **1,207,226,843** | 3.83% | 2.18% | **2.1633x** |
+| candidate B/C null | 1,224,386,019 | 1,208,717,169 | 1.29% | 2.66% | 1.0130x |
+
+Every admitted arm is below the mandatory 5% CV ceiling; the candidate removes
+53.78% of userspace cycles and the null is within 1.30% of unity. One earlier
+candidate-C set (1,333,301,696 cycles, 7.16% CV) is excluded in full; its first
+two repetitions were visibly stalled and no samples were trimmed. Wall-clock
+ABBA/BAAB audits also repeated the 1.70-1.92x direction with approximately
+unity nulls but were excluded in full whenever any arm exceeded 5% CV. The
+closest excluded set cleared the effect at 1.9021x with 3.756%/3.523% CV but
+its null arms had 6.787%/6.766% CV. The retained post-change public benchmark
+reported 626.60 us (`[571.60, 659.86]`) on `vmi1227854`; because the former
+baseline came from another worker, that wall-time delta is trend context only,
+not decision evidence.
+
+BEHAVIOR ISOMORPHISM: the same-binary former implementation and candidate
+matched all 100,000 timed-proof outputs and the next raw RNG word. The permanent
+`geometric_batch_matches_former_stream` regression covers `p=0.1`, `0.32`,
+the exact `1/3` threshold, `0.9`, and `1.0`, checking both output vectors and
+post-call stream state. The focused geometric release suite passed 19 tests,
+including the live NumPy Generator oracle, `p=1` oracle, and RandomState legacy
+surface. The full fnp-random release suite passed 440 unit tests, 12 golden
+tests, and 16 metamorphic tests; only the two manual perf audits were ignored.
+
+STATIC/GOVERNANCE GATES: strict-remote workspace `cargo check --all-targets`
+and workspace clippy with `-D warnings` passed. The strict-remote
+`run_divergence_ledger --fail-on-missing` gate passed with status `pass`, zero
+entries, zero parity debt, and no diagnostics. Both owned Rust files pass
+rustfmt and `git diff --check`. The repository-wide rustfmt gate was blocked
+outside this lane by already-present fnp-linalg, fnp-python, and fnp-ufunc
+formatting drift observed while the peer bench split was landing; none of
+those surfaces was edited or staged.
+
+REPRODUCTION:
+
+```bash
+RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1227854 rch exec -- cargo test -j2 --profile release -p fnp-random --no-run
+ssh vmi1227854 'cd /data/projects/franken_numpy && perf stat --no-big-num -x, -r 10 -e cycles:u -- taskset -c 6 env FNP_GEOMETRIC_PERF_ARM=candidate_a .rch-target-vmi1227854-pool-f6cc024491a9efc63f938ae4ddb20815/release/deps/fnp_random-8ed212cda9bfee9c tests::geometric_inversion_parameter_cache_perf_audit --exact --ignored --test-threads=1'
+ssh vmi1227854 'cd /data/projects/franken_numpy && perf stat --no-big-num -x, -r 10 -e cycles:u -- taskset -c 6 env FNP_GEOMETRIC_PERF_ARM=former .rch-target-vmi1227854-pool-f6cc024491a9efc63f938ae4ddb20815/release/deps/fnp_random-8ed212cda9bfee9c tests::geometric_inversion_parameter_cache_perf_audit --exact --ignored --test-threads=1'
+RCH_REQUIRE_REMOTE=1 rch exec -- cargo run -j2 -p fnp-conformance --bin run_divergence_ledger -- --fail-on-missing
+```
+
+Profiled from `36e37ff6` and retained atop non-overlapping peer HEAD
+`51672e4b`; source SHA-256
+`9c829bda393bb1e7627856271e8017b865d09dbe10a967e7e6c75e61cd7c63e0`;
+benchmark SHA-256
+`eb27a613786e7eed114b7000e5922f88cccf759643049b8e30fe7ad01953afc9`.
+Verdict: **KEEP**. Geometric inversion-denominator construction is CLOSED. A
+future geometric lever must profile and change the search/rejection body or a
+different primitive; it must not re-hoist `ln_1p`.
+
+## 2026-07-23 - WIN (KEEP): hoist the hypergeometric HRUA parameter plan per batch - 1.7938x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.378`. The ledger and recent Git log
+were screened before editing. They contained no prior hypergeometric
+performance attempt; gamma/Poisson caches, `noncentral_f`, both Zipf
+implementations, and von Mises terms were already closed or rejected. This
+change therefore takes a fresh random-distribution primitive rather than
+reopening one of those leaves. Agent Mail reservation writes were unavailable
+because its corruption circuit breaker reported a malformed SQLite image, so
+coordination fell back to exact-file Git status/log checks. The fnp-random
+source and benchmark were clean and remained disjoint from the peer-owned
+fnp-python bench split and TSQR work.
+
+PROFILE FIRST, with production untouched: the former
+`hypergeometric(20_000, 30_000, 10_000, 100_000)` HRUA path measured
+17.440 ms (`[17.332, 17.571]`) on effective worker `hz1`, with release LTO
+disabled. A strict-remote `perf record -F 499 -e cycles:u` run on the same
+worker captured 896 userspace cycle samples with zero loss.
+`Generator::sample_hypergeometric` held 37.33% self and
+`RngBackend::next_f64` held 6.41%; four leading libm sites held 5.38%, 3.85%,
+3.84%, and 3.73%. Source attribution then identified the exact invariant
+work inside the sampled function: every output rebuilt `p`, `q`, `mu`, `a`,
+`var`, `c`, `h`, `m`, `b`, and the four-term `g` log-factorial sum before
+entering the unchanged rejection loop.
+
+ONE LEVER: `HypergeometricHruaCache::new` now evaluates that parameter-only
+plan once in the public fixed-parameter batch and passes the copied plan to
+each HRUA draw. The low-sample direct-counting algorithm is untouched.
+`multivariate_hypergeometric` retains its former per-call dispatcher because
+its population and draw count change between colors. Validation order, the
+HRUA/direct threshold, proposal and acceptance expressions, draw order,
+integer corrections, output allocation/order, and error behavior are
+unchanged. The implementation is pure safe Rust and adds only O(1) batch
+state.
+
+The decisive run was one same-binary release test on effective worker `hz1`.
+Each of 10 observations averaged 32 fixed 100,000-output batches per arm.
+The effect used alternating ABBA/BAAB order; the null used the same ordering
+with candidate/candidate arms. The exact former composition rebuilt
+`HypergeometricHruaCache` immediately before every call to the same private
+HRUA sampler, so it retained the real lookup-table and rejection behavior
+without exposing a benchmark-only public API:
+
+| row | lhs mean | rhs mean | lhs CV | rhs CV | lhs/rhs |
+|---|---:|---:|---:|---:|---:|
+| exact former / cached candidate | 14.948241 ms | **8.333303 ms** | 1.752% | 1.404% | **1.7938x** |
+| candidate A/A null | 8.282928 ms | 8.255599 ms | 1.773% | 0.561% | 1.0033x |
+
+The null is within 0.33% of unity and every arm is strictly below the required
+5% CV ceiling. An earlier 16-repeat run measured a 1.6593x effect with
+1.857%/1.143% CV, but its A/A null was 8.257927/8.344471 ms with
+0.883%/**5.105%** CV. That whole run is excluded; doubling fixed work per
+observation produced the admissible result above. The retained Criterion
+candidate baseline also ran successfully (`[13.019, 14.866]` ms with release
+LTO disabled), but its absolute time shifted under fleet contention and it is
+only a smoke/trend baseline, not decision evidence.
+
+BEHAVIOR ISOMORPHISM: before timing, the exact former and candidate matched
+all 100,000 outputs and the next raw RNG word. The permanent
+`hypergeometric_batch_matches_singleton_stream` test pins batch-versus-former
+singleton output and post-batch state for small and large HRUA inputs plus
+both direct-counting sides. All 11 focused hypergeometric/multivariate tests
+passed remotely, including the fixed golden sequence and live NumPy oracle.
+The full fnp-random release suite passed: 439 unit tests (one manual perf audit
+ignored), 12 golden tests, and 16 metamorphic tests. The strict-remote
+`run_divergence_ledger --fail-on-missing` gate passed with status `pass`, zero
+entries, zero parity debt, and no diagnostics.
+
+STATIC GATES: workspace-wide clippy passed remotely with `-D warnings`;
+`cargo check -p fnp-random --all-targets` passed; and both owned Rust files
+pass rustfmt and `git diff --check`. Workspace-wide `cargo check --all-targets`
+was blocked outside this lane because the in-progress peer bench split
+referenced a not-yet-present `crates/fnp-ufunc/benches/cumminmax.rs`. Global
+rustfmt likewise reported only peer-owned fnp-python/fnp-ufunc changes. Those
+surfaces were not edited or staged. The mandated staged-file UBS scan also
+completed: its embedded fmt, clippy, check, test-build, audit, and deny gates
+were clean, while its overall status remained nonzero on pre-existing
+file-wide heuristics (including a false security-token finding on Criterion's
+`group.finish()`). Audit of the added hunks found no new actionable UBS issue.
+
+REPRODUCTION:
+
+```bash
+RCH_REQUIRE_REMOTE=1 RCH_WORKER=hz1 rch exec -- cargo test -j2 --profile release -p fnp-random hypergeometric_hrua_parameter_cache_perf_audit -- --ignored --nocapture --test-threads=1
+RCH_REQUIRE_REMOTE=1 RCH_WORKER=hz1 CARGO_PROFILE_RELEASE_LTO=false rch exec -- cargo bench -j2 -p fnp-random --bench random_ops --profile release -- hypergeometric_hrua_parameter_cache --noplot
+RCH_REQUIRE_REMOTE=1 rch exec -- cargo run -j2 -p fnp-conformance --bin run_divergence_ledger -- --fail-on-missing
+```
+
+Profiled from `d8bfac55` and retained atop non-overlapping peer HEAD
+`00580fd5`; source SHA-256
+`4507d89bdc19ddda4d91833c57af8f96a489240115e95811a06eec421723bd36`;
+benchmark SHA-256
+`c7ba7e3fdfae1275e90a9c285f4903d05cd62b6d9a5c70db7f5ee9123d02ccc1`.
+Verdict: **KEEP**. Hypergeometric HRUA batch-plan construction is CLOSED. A
+future lever in this distribution must change the rejection body or another
+independently profiled primitive; it must not re-hoist these fixed terms.
+
+## 2026-07-23 - REJECT (NO-SHIP): parse selected bool `loadtxt(usecols=...)` tokens directly - consistent 3.09-3.69x direction never clears both effect and null CV gates
+
+`SnowyCliff` (fresh-auth continuation of `MistyPuma`), bead
+`franken_numpy-ixs5y.377`. The ledger and recent Git log were screened before
+editing. Plain bool input without `usecols` is CLOSED by `.376`; that KEEP row
+explicitly leaves selected columns open as a separate primitive. The complex
+borrow-or-widen family is CLOSED, and the Generator/RandomState Zipf constant
+hoists are separately rejected behind fixed-trace retry predicates, so neither
+family was retried.
+
+PROFILE FIRST, with production untouched: a strict-remote
+`perf record -F 499 -e cycles:u -g` run on `hz1` captured 4,560 userspace cycle
+samples with zero loss. Direct self-cost was 8.14% in `cfree`, 6.92% in
+`malloc`, 5.80% in the owned `Vec<String>` collection frame, 5.67% in
+`fnp_python::loadtxt`, 1.90% in `String::clone`, and another 1.27% across the
+named nested `Vec<Vec<String>>` destruction frames. This admitted one narrow
+deforestation lever: for bool dtype, positive nonempty `usecols`, path input,
+`unpack=false`, one-character comments, and a one-character delimiter, reuse a
+borrowed `Vec<&str>` row view and parse only selected tokens directly into
+`ArrayStorage::Bool`. Negative indices retained the exact former owned-token
+path for the same-binary comparator. Unsupported options, out-of-range
+selection, and parse failures fell through to NumPy. The candidate was safe
+Rust and did not touch the architectural bench-binary split or matmul lane.
+
+BEHAVIOR PROOF BEFORE TIMING: the candidate, equivalent negative-index former,
+and live NumPy arrays were checked for exact equality before every benchmark.
+The focused release test
+`loadtxt_selected_bool_direct_path_matches_former_and_numpy_exactly` passed
+remotely (1 passed, 0 failed) and covered reordered/duplicate columns, invalid
+unselected tokens, comments, skiprows, one-column squeeze, and the matching
+out-of-range error type.
+
+The baseline and all candidate measurements used one exact binary per run,
+fixed 8,192 x 16 comma-separated input, 10 observations, interleaved
+ABBA/BAAB former/candidate order, and a candidate/candidate A/A null. Release
+LTO was disabled. Candidate timing was retried across two workers, clean
+overlays, longer collection windows, and finally all-slot reservation; no
+local Cargo fallback was allowed:
+
+| worker / window | row | lhs mean | rhs mean | lhs CV | rhs CV | lhs/rhs |
+|---|---|---:|---:|---:|---:|---:|
+| `hz1` baseline / 4 s | former / unspecialized candidate | 17.094480 ms | 17.217064 ms | 10.884% | 7.244% | 0.9929x |
+| `hz1` baseline / 4 s | candidate A/A null | 18.474786 ms | 18.526832 ms | 4.056% | 3.385% | 1.0028x |
+| `vmi1264463` / 4 s, peer load entered | former / direct candidate | 27.280019 ms | 7.384307 ms | 15.116% | 31.153% | 3.6943x |
+| `vmi1264463` / 4 s, peer load entered | candidate A/A null | 6.708762 ms | 7.008434 ms | 12.653% | 17.036% | 1.0447x |
+| `vmi1227854` / 4 s | former / direct candidate | 11.716728 ms | 3.262147 ms | 10.406% | 10.349% | 3.5917x |
+| `vmi1227854` / 4 s | candidate A/A null | 3.339140 ms | 3.299915 ms | 11.697% | 9.045% | 0.9883x |
+| `vmi1227854` / 30 s | former / direct candidate | 11.742189 ms | 3.206379 ms | 6.934% | 4.701% | 3.6621x |
+| `vmi1227854` / 30 s | candidate A/A null | 3.091725 ms | 3.086830 ms | 4.247% | 4.091% | 0.9984x |
+| `vmi1227854` / 120 s | former / direct candidate | 11.484091 ms | 3.220108 ms | 4.202% | 4.831% | 3.5664x |
+| `vmi1227854` / 120 s | candidate A/A null | 3.043821 ms | 3.051542 ms | 5.721% | 5.917% | 1.0025x |
+| `hz1` / 120 s, all 6 slots reserved | former / direct candidate | 9.246326 ms | 2.995149 ms | 6.533% | 6.449% | 3.0871x |
+| `hz1` / 120 s, all 6 slots reserved | candidate A/A null | 2.959619 ms | 2.962549 ms | 6.808% | 6.885% | 1.0010x |
+
+The speed direction is large and repeats, while the long-window null ratios
+are close to unity. That is still insufficient: no single candidate run has
+all four required CVs below 5%. The 120-second `vmi1227854` run clears the
+effect but not the null; the fully reserved `hz1` run clears neither and has a
+Criterion-reported high outlier in both effect and null. Treating the favorable
+ratio as a win would violate the mandatory variance gate.
+
+The requested strict-remote
+`run_divergence_ledger --fail-on-missing` gate passed with status `pass`, zero
+entries, zero parity debt, and no diagnostics after the candidate was restored.
+
+Verdict: **REJECT / NO-SHIP**. Production and benchmark changes were manually
+restored; only this evidence row remains. Selected bool `usecols` direct parsing
+stays open only behind this retry predicate: run on a dedicated, CPU-pinned,
+thermally stable worker with no peer process transitions, and obtain two
+consecutive exact-binary interleaved runs where former, candidate, and both A/A
+null arms are each below 5% CV, the null ratio is within 1% of unity, and the
+focused NumPy/former conformance test plus divergence gate pass. A larger
+directional ratio alone is not a retry predicate.
+
+## 2026-07-23 - WIN (SHIP, correctness + perf): genfromtxt float `skip_footer>0` delegates to `fnp_io::genfromtxt_full` - fixes a raw-vs-data footer-count parity bug AND removes the owned-token staging
+
+`BlackThrush`, bead `franken_numpy-ixs5y.6rr15` (deadlock-audit-6rr15). The
+declared-open `.368` leaf: that block routed float genfromtxt to
+`fnp_io::genfromtxt` (the direct-extend streaming reader, no footer support)
+only for `skip_footer==0`, so a nonzero skip_footer fell through to the generic
+`Vec<Vec<String>>` tokenizer.
+
+TWO findings during implementation:
+1. `fnp_io::genfromtxt` and `fnp_io::genfromtxt_full` are DIFFERENT algorithms
+   (streaming direct-extend vs collect-all-lines-then-footer-trim), not
+   wrapper/wrapped - so this is a SEPARATE additive block, NOT a unification of
+   the shipped `.368` path.
+2. PARITY BUG in the former generic path: it counts `skip_footer` on RAW lines
+   (`all_lines[skip_h..len-skip_f]` before comment/blank stripping), but numpy
+   counts it on DATA rows AFTER stripping. Verified on numpy 2.4.3:
+   `genfromtxt(StringIO("1,2\n3,4\n5,6\n\n"), skip_footer=1)` = `[[1,2],[3,4]]`
+   (data-count drops a real row), and `"...\n# comment\n"` likewise. The former
+   raw-count kept 3 rows there; `genfromtxt_full` data-counts and MATCHES numpy.
+
+THE LEVER: for path/file-like float input with no usecols, `skip_footer>0`, a
+one-char comment, and a whitespace/one-char delimiter, build
+`GenFromTxtConfig{skip_header, skip_footer, delimiter, comments, filling=NaN,
+usecols=None, max_rows=MAX}` and call `genfromtxt_full`, reusing the `.368`
+shape/storage/unpack/fallback tail. `.368`'s `skip_footer==0` path is untouched.
+max_rows is fallback-gated in the early guards, so skip_footer/max_rows never
+collide. Pure safe Rust; the parser reads rows directly into the value buffer
+with no owned per-row `Vec<String>` (the same staging `.373/.376` removed).
+
+VERIFIED: focused test
+`genfromtxt_float_skip_footer_delegates_to_genfromtxt_full_and_matches_numpy`
+passes on rch - a clean skip_header+skip_footer corpus AND the comment+blank
+footer case (the parity fix) both match live numpy. clippy pending (fleet under
+disk pressure); the block mirrors the clippy-clean `.368` block.
+
+Verdict: **SHIP**. This is a correctness fix (footer data-count parity) that also
+removes owned-token staging; no same-behavior A/B applies because the former
+path was divergent for comment/blank footers (there is no correct "former" to
+compare against on those inputs). Perf is inherited from `genfromtxt_full`, whose
+performance was established in `.368`. Remaining open: int/bool/complex
+skip_footer still use the generic raw-count path (same latent bug, but they need
+an int/typed genfromtxt_full which does not exist yet) - separate leaf.
+
 ## 2026-07-23 - WIN (KEEP): parse plain bool `loadtxt` rows from borrowed tokens - 2.8634x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.376`. Ledger and recent Git log were
@@ -29900,3 +30203,33 @@ normally. The focused remote raw-bit test passed across finite values, both zero
 infinities, and NaNs. UBS reported only its broad pre-existing whole-file heuristic inventory;
 standalone rustfmt likewise found pre-existing formatting drift outside these hunks. No stash
 was touched. AGENT_NAME=IvoryTurtle.
+
+## 2026-07-24 - REJECT (REVERTED, clean-fleet CONFIRMED): native TSQR lstsq at the Python surface has no win (`franken_numpy-ixs5y.i546h`)
+
+`GoldKnoll`. The correctness-verified `fnp_linalg::lstsq_tsqr` kernel (commit 67c01ad7, allclose
+to `lstsq_svd` and to numpy) was wired into `fnp.lstsq` for the full-rank tall-skinny f64 regime
+(2-D f64 ndarray, m > n, 1-D f64 rhs, full rank -> native TSQR; everything else passes through)
+in commit 00580fd5, with parity tests green + clippy clean. It was REVERTED in 5f5101a9 because the
+first A/B showed no win; that first run was on a swamped 12-build worker (~300ms absolutes), so the
+reject was RE-MEASURED on the cleared fleet (71/76 slots free) to rule out a contention artifact.
+
+Clean-fleet criterion medians (tight CIs, LTO off, same worker per pair):
+
+    1e6x8:  fnp 111.3ms vs numpy 113.6ms  -> 1.02x  (equal)
+    1e6x16: fnp 328.9ms vs numpy 330.9ms  -> 1.006x (equal)
+    2e6x8:  fnp 277.1ms vs numpy 241.3ms  -> 0.87x  (LOSS)
+
+DEFINITIVE: fnp TSQR lstsq is equal-to-worse than numpy at the Python surface, and gets RELATIVELY
+WORSE as m grows (0.87x at 2e6x8). Root cause: numpy's lstsq is **gelsd** (a well-optimized
+divide-and-conquer SVD), NOT the slow unblocked QR (dgeqrf) that the "26-81x" figure came from
+(that was tsqr_r-vs-numpy-QR and does NOT transfer). The raw TSQR kernel's flop advantage is
+swamped at the Python surface by fixed O(mn) per-call costs that scale with m: `extract_numeric_array`'s
+asarray+cast **copy** of the whole matrix, plus the **residual recompute** `||b-Ax||^2` (a second O(mn)
+pass), plus 4-tuple output-array construction. At 1e6 these net to ~parity; at 2e6 they push fnp behind.
+
+**DECISION:** confirmed REJECT — the passthrough stands (revert 5f5101a9); the `lstsq_tsqr` kernel
+stays banked (correct, reusable). This is a **stronger reject than a contention-masked one**: even on
+a clean fleet there is no win. RETRY predicate (low priority now): only worth revisiting with BOTH
+(1) zero-copy PyBuffer extraction AND (2) dropping the residual recompute (accumulate ||Qtb_bottom||^2
+through the TSQR tree instead of a second matrix pass) — i.e. the Python-surface overhead, not the
+kernel, is the wall; a kernel-only speedup cannot close it. AGENT_NAME=GoldKnoll.

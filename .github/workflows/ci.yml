@@ -20,6 +20,13 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # Pin numpy's BLAS to a single thread. The native f64 GEMM / linalg fast paths
+  # only engage (and only beat numpy) when BLAS is serial — blas_is_single_threaded()
+  # gates on these vars — so several fnp-python tests that assert the native path
+  # engages require them; it also stops multi-threaded-BLAS contention from faking
+  # perf gaps on the runner.
+  OPENBLAS_NUM_THREADS: "1"
+  OMP_NUM_THREADS: "1"
   # RUSTFLAGS env REPLACES .cargo/config.toml's rustflags entirely, so the
   # project's +avx2 ISA baseline must be restated here or CI builds a binary
   # that violates the contract worker_isa_probe asserts (avx2 baked in, fma

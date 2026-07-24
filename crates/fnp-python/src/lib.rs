@@ -25927,8 +25927,22 @@ fn stack(
         None => true,
         Some(v) => v.is_none() || v.extract::<i64>().ok() == Some(0),
     };
+    // The concatenate+reshape fast path returns the inputs' own promoted dtype
+    // and a freshly allocated array; it does NOT honor an explicit `out=` buffer
+    // or a `dtype=`/`casting=` conversion. numpy writes into (and returns) the
+    // out buffer and casts to dtype, so when any of those is present, skip the
+    // fast path and let the numpy delegation below own the exact semantics.
+    let has_out_dtype_or_casting = kwargs.is_some_and(|kw| {
+        ["out", "dtype", "casting"].iter().any(|key| {
+            kw.get_item(key)
+                .ok()
+                .flatten()
+                .is_some_and(|value| !value.is_none())
+        })
+    });
     if args.len() == 1
         && axis0
+        && !has_out_dtype_or_casting
         && let Ok(ndarray_type) = numpy.getattr("ndarray")
         && let Ok(seq) = args.get_item(0)
         && let Ok(iter) = seq.try_iter()
@@ -57177,6 +57191,67 @@ fn genfromtxt(
                         DType::F16 => ArrayStorage::F16(
                             parsed.values.into_iter().map(f16::from_f64).collect(),
                         ),
+                        DType::F32 => {
+                            ArrayStorage::F32(parsed.values.into_iter().map(|v| v as f32).collect())
+                        }
+                        _ => ArrayStorage::F64(parsed.values),
+                    };
+                    let shape = if parsed.ncols == 1 {
+                        vec![parsed.nrows]
+                    } else {
+                        vec![parsed.nrows, parsed.ncols]
+                    };
+                    let arr = build_numpy_array_from_storage(py, &shape, flat_storage)?;
+                    if unpack == Some(true) {
+                        Ok(arr.bind(py).getattr("T")?.unbind())
+                    } else {
+                        Ok(arr)
+                    }
+                }
+                _ => fallback(py),
+            };
+        }
+    }
+
+    // skip_footer>0 float sibling of the .368 delegation above. That block uses
+    // fnp_io::genfromtxt (the direct-extend streaming reader, no footer
+    // support), so a nonzero skip_footer fell through to the generic
+    // Vec<Vec<String>> tokenizer below. fnp_io::genfromtxt_full is the
+    // collect-then-footer-trim reader that parses rows straight into the value
+    // buffer (no owned per-row token Vec), removing the same staging the
+    // .373/.376 loadtxt forks removed. It also fixes a latent parity gap: the
+    // generic path below counts skip_footer on RAW lines, but numpy (and
+    // genfromtxt_full) counts it on DATA rows after comment/blank stripping.
+    // Guards match the .368 block; max_rows is fallback-gated in the early
+    // guards, so skip_footer and max_rows can never collide here.
+    if use_columns.is_none()
+        && skip_footer.max(0) > 0
+        && matches!(parsed_dtype, DType::F16 | DType::F32 | DType::F64)
+        && comments.chars().count() == 1
+    {
+        let comment_char = comments.chars().next().expect("guarded single char");
+        let delimiter_char = match delimiter {
+            None => Some(' '),
+            Some(sep) if sep.chars().all(char::is_whitespace) => Some(' '),
+            Some(sep) if sep.chars().count() == 1 => sep.chars().next(),
+            Some(_) => None,
+        };
+        if let Some(delimiter_char) = delimiter_char {
+            let config = fnp_io::GenFromTxtConfig {
+                delimiter: delimiter_char,
+                comments: comment_char,
+                skip_header: skip_header.max(0) as usize,
+                skip_footer: skip_footer.max(0) as usize,
+                filling_values: f64::NAN,
+                usecols: None,
+                max_rows: usize::MAX,
+            };
+            return match fnp_io::genfromtxt_full(&text, &config) {
+                Ok(parsed) if parsed.nrows > 0 => {
+                    let flat_storage = match parsed_dtype {
+                        DType::F16 => {
+                            ArrayStorage::F16(parsed.values.into_iter().map(f16::from_f64).collect())
+                        }
                         DType::F32 => {
                             ArrayStorage::F32(parsed.values.into_iter().map(|v| v as f32).collect())
                         }
@@ -109759,9 +109834,18 @@ mod tests {
                 .call1((PyList::new(py, [3_i64, 1, 2, 1, 3])?,))?;
             let ours_uv = module.getattr("unique_values")?.call1((u_in.clone(),))?;
             let theirs_uv = numpy.getattr("unique_values")?.call1((u_in,))?;
+            // Array-API `unique_values` returns the unique set in NO specified
+            // order: numpy's order is unsorted ([2, 1, 3] here) and has varied
+            // across versions, while fnp's fast counting-sort path yields sorted
+            // values. Both are valid, so compare the sorted sets rather than the
+            // raw order.
+            let np_sort = numpy.getattr("sort")?;
             assert!(
                 array_equal
-                    .call1((&ours_uv, &theirs_uv))?
+                    .call1((
+                        &np_sort.call1((&ours_uv,))?,
+                        &np_sort.call1((&theirs_uv,))?,
+                    ))?
                     .extract::<bool>()?,
                 "unique_values diverged"
             );
@@ -116534,7 +116618,7 @@ mod tests {
     }
 
     #[test]
-    fn eigvals_supported_real_square_inputs_do_not_delegate_to_numpy() {
+    fn eigvals_delegates_to_numpy_for_real_square_inputs() {
         with_python(|py| {
             if !numpy_available(py) {
                 return Ok(());
@@ -116545,10 +116629,15 @@ mod tests {
             let eigvals_fn = module.getattr("eigvals")?;
             let numpy = py.import("numpy")?;
             let linalg = numpy.getattr("linalg")?;
-            let builtins = py.import("builtins")?;
+
+            // fnp routes ALL `eigvals` to numpy's LAPACK `geev`: the native
+            // Francis double-shift QR returns wrong eigenvalues for ~9% of real
+            // inputs (see `fn eigvals`), so delegation is the intended, correct
+            // behavior. Confirm it delegates by bombing numpy.linalg.eigvals and
+            // asserting the call surfaces the bomb rather than a native result.
             let bomb = py.eval(
                 pyo3::ffi::c_str!(
-                    "lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError('should not delegate'))"
+                    "lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError('delegated'))"
                 ),
                 None,
                 None,
@@ -116559,15 +116648,10 @@ mod tests {
 
             let matrix = numeric_array(py, vec![0.0_f64, -1.0, 1.0, 0.0], "float64")
                 .call_method1("reshape", ((2, 2),))?;
-            let actual = eigvals_fn.call1((matrix,))?;
-            let expected = numpy.getattr("array")?.call1((PyList::new(
-                py,
-                [
-                    builtins.getattr("complex")?.call1((0.0_f64, 1.0))?,
-                    builtins.getattr("complex")?.call1((0.0_f64, -1.0))?,
-                ],
-            )?,))?;
-            assert_array_matches_numpy(&actual, &expected)?;
+            assert!(
+                eigvals_fn.call1((matrix,)).is_err(),
+                "fnp.eigvals must delegate to numpy.linalg.eigvals (native Francis QR is a known-buggy no-ship)"
+            );
             Ok(())
         });
     }
@@ -147798,6 +147882,51 @@ mod tests {
                 oracle_err.unwrap_err().get_type(py).to_string()
             );
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn genfromtxt_float_skip_footer_delegates_to_genfromtxt_full_and_matches_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let gt = module.getattr("genfromtxt")?;
+            let numpy = py.import("numpy")?;
+            let numpy_gt = numpy.getattr("genfromtxt")?;
+            let float64 = numpy.getattr("float64")?;
+            let string_io = py.import("io")?.getattr("StringIO")?;
+            let sio = |text: &str| string_io.call1((text,));
+
+            // Clean float corpus with skip_header + skip_footer: the
+            // genfromtxt_full delegation must match numpy exactly.
+            let clean = PyDict::new(py);
+            clean.set_item("delimiter", ",")?;
+            clean.set_item("skip_header", 1_i64)?;
+            clean.set_item("skip_footer", 2_i64)?;
+            clean.set_item("dtype", &float64)?;
+            let corpus = "h\n1.5,2.5\n3.5,4.5\n5.5,6.5\n7.5,8.5\n";
+            assert_array_matches_numpy(
+                &gt.call((sio(corpus)?,), Some(&clean))?,
+                &numpy_gt.call((sio(corpus)?,), Some(&clean))?,
+            )?;
+
+            // Footer region with a comment line and a trailing blank: numpy
+            // counts skip_footer as DATA rows (after comment/blank stripping), so
+            // the last real row is dropped. The former generic path raw-counted
+            // and diverged here; genfromtxt_full data-counts and matches numpy.
+            let dirty = PyDict::new(py);
+            dirty.set_item("delimiter", ",")?;
+            dirty.set_item("skip_footer", 1_i64)?;
+            dirty.set_item("dtype", &float64)?;
+            let corpus2 = "1.0,2.0\n3.0,4.0\n5.0,6.0\n# trailing comment\n\n";
+            assert_array_matches_numpy(
+                &gt.call((sio(corpus2)?,), Some(&dirty))?,
+                &numpy_gt.call((sio(corpus2)?,), Some(&dirty))?,
+            )?;
             Ok(())
         });
     }
