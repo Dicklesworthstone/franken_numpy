@@ -30203,3 +30203,33 @@ normally. The focused remote raw-bit test passed across finite values, both zero
 infinities, and NaNs. UBS reported only its broad pre-existing whole-file heuristic inventory;
 standalone rustfmt likewise found pre-existing formatting drift outside these hunks. No stash
 was touched. AGENT_NAME=IvoryTurtle.
+
+## 2026-07-24 - REJECT (REVERTED, clean-fleet CONFIRMED): native TSQR lstsq at the Python surface has no win (`franken_numpy-ixs5y.i546h`)
+
+`GoldKnoll`. The correctness-verified `fnp_linalg::lstsq_tsqr` kernel (commit 67c01ad7, allclose
+to `lstsq_svd` and to numpy) was wired into `fnp.lstsq` for the full-rank tall-skinny f64 regime
+(2-D f64 ndarray, m > n, 1-D f64 rhs, full rank -> native TSQR; everything else passes through)
+in commit 00580fd5, with parity tests green + clippy clean. It was REVERTED in 5f5101a9 because the
+first A/B showed no win; that first run was on a swamped 12-build worker (~300ms absolutes), so the
+reject was RE-MEASURED on the cleared fleet (71/76 slots free) to rule out a contention artifact.
+
+Clean-fleet criterion medians (tight CIs, LTO off, same worker per pair):
+
+    1e6x8:  fnp 111.3ms vs numpy 113.6ms  -> 1.02x  (equal)
+    1e6x16: fnp 328.9ms vs numpy 330.9ms  -> 1.006x (equal)
+    2e6x8:  fnp 277.1ms vs numpy 241.3ms  -> 0.87x  (LOSS)
+
+DEFINITIVE: fnp TSQR lstsq is equal-to-worse than numpy at the Python surface, and gets RELATIVELY
+WORSE as m grows (0.87x at 2e6x8). Root cause: numpy's lstsq is **gelsd** (a well-optimized
+divide-and-conquer SVD), NOT the slow unblocked QR (dgeqrf) that the "26-81x" figure came from
+(that was tsqr_r-vs-numpy-QR and does NOT transfer). The raw TSQR kernel's flop advantage is
+swamped at the Python surface by fixed O(mn) per-call costs that scale with m: `extract_numeric_array`'s
+asarray+cast **copy** of the whole matrix, plus the **residual recompute** `||b-Ax||^2` (a second O(mn)
+pass), plus 4-tuple output-array construction. At 1e6 these net to ~parity; at 2e6 they push fnp behind.
+
+**DECISION:** confirmed REJECT — the passthrough stands (revert 5f5101a9); the `lstsq_tsqr` kernel
+stays banked (correct, reusable). This is a **stronger reject than a contention-masked one**: even on
+a clean fleet there is no win. RETRY predicate (low priority now): only worth revisiting with BOTH
+(1) zero-copy PyBuffer extraction AND (2) dropping the residual recompute (accumulate ||Qtb_bottom||^2
+through the TSQR tree instead of a second matrix pass) — i.e. the Python-surface overhead, not the
+kernel, is the wall; a kernel-only speedup cannot close it. AGENT_NAME=GoldKnoll.
