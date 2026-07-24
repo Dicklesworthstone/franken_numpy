@@ -6,15 +6,15 @@ use criterion::Criterion;
 use fnp_python::fnp_python;
 use pyo3::Bound;
 use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyTuple};
-use pyo3::{Py, PyAny, PyResult, Python};
+use pyo3::{PyAny, Python};
 use rayon::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-fn ensure_numpy_available(py: Python<'_>) -> PyResult<()> {
-    py.import("numpy").map(drop)
-}
+#[path = "common/mod.rs"]
+mod common;
+use common::*;
 
 fn bench_sqrt_input_extraction(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_buffer_extract");
@@ -14464,373 +14464,6 @@ A = rng.integers(0, 20, (500_000, 4)).astype(np.int64)\n",
     group.finish();
 }
 
-// Ledger-integrity retries for three historical REJECT rows. These helpers live only in the
-// benchmark binary: production dispatch is deliberately untouched. `inline(never)` gives perf
-// an exact execution marker for each reconstructed candidate and each NumPy ORIG reference.
-#[inline]
-fn ledger_f64_sortable_key(value: f64) -> u64 {
-    let bits = if value == 0.0 { 0 } else { value.to_bits() };
-    bits ^ ((((bits as i64) >> 63) as u64) | 0x8000_0000_0000_0000)
-}
-
-#[inline]
-fn ledger_f64_from_sortable_key(key: u64) -> f64 {
-    let bits = if key & 0x8000_0000_0000_0000 != 0 {
-        key ^ 0x8000_0000_0000_0000
-    } else {
-        !key
-    };
-    f64::from_bits(bits)
-}
-
-#[inline(never)]
-fn ledger_radix_select_key(mut current: Vec<u64>, mut rank: usize, start_byte: i32) -> u64 {
-    let mut byte = start_byte;
-    loop {
-        let len = current.len();
-        if len <= 1 || byte < 0 {
-            return current[rank];
-        }
-        let shift = (byte as u64) * 8;
-        let histogram: [usize; 256] = if len > (1 << 16) {
-            let chunk_size = (len / (rayon::current_num_threads() * 4).max(1)).max(1);
-            current
-                .par_chunks(chunk_size)
-                .map(|chunk| {
-                    let mut local = [0usize; 256];
-                    for &key in chunk {
-                        local[((key >> shift) & 0xff) as usize] += 1;
-                    }
-                    local
-                })
-                .reduce(
-                    || [0usize; 256],
-                    |mut left, right| {
-                        for digit in 0..256 {
-                            left[digit] += right[digit];
-                        }
-                        left
-                    },
-                )
-        } else {
-            let mut local = [0usize; 256];
-            for &key in &current {
-                local[((key >> shift) & 0xff) as usize] += 1;
-            }
-            local
-        };
-        let mut prefix = 0usize;
-        let mut selected = 255usize;
-        for (digit, &count) in histogram.iter().enumerate() {
-            if prefix + count > rank {
-                selected = digit;
-                break;
-            }
-            prefix += count;
-        }
-        current = if len > (1 << 16) {
-            current
-                .par_iter()
-                .copied()
-                .filter(|&key| ((key >> shift) & 0xff) as usize == selected)
-                .collect()
-        } else {
-            current
-                .iter()
-                .copied()
-                .filter(|&key| ((key >> shift) & 0xff) as usize == selected)
-                .collect()
-        };
-        rank -= prefix;
-        byte -= 1;
-    }
-}
-
-#[inline(never)]
-fn ledger_radix_median_f64(data: &[f64]) -> f64 {
-    assert!(!data.par_iter().any(|value| value.is_nan()));
-    let keys: Vec<u64> = data
-        .par_iter()
-        .map(|&value| ledger_f64_sortable_key(value))
-        .collect();
-    let n = keys.len();
-    if n % 2 == 1 {
-        ledger_f64_from_sortable_key(ledger_radix_select_key(keys, n / 2, 7))
-    } else {
-        let low = ledger_f64_from_sortable_key(ledger_radix_select_key(keys.clone(), n / 2 - 1, 7));
-        let high = ledger_f64_from_sortable_key(ledger_radix_select_key(keys, n / 2, 7));
-        (low + high) / 2.0
-    }
-}
-
-#[inline(never)]
-fn ledger_orig_median_reference(
-    numpy_median: &Bound<'_, PyAny>,
-    input: &Bound<'_, PyAny>,
-) -> PyResult<f64> {
-    numpy_median.call1((input,))?.extract()
-}
-
-#[inline(never)]
-fn ledger_try_native_f16_sort(
-    numpy_sort: &Bound<'_, PyAny>,
-    input: &Bound<'_, PyAny>,
-    input_bits: &[u16],
-) -> PyResult<Py<PyAny>> {
-    let must_defer = input_bits
-        .par_iter()
-        .any(|&bits| bits == 0x8000 || ((bits & 0x7c00) == 0x7c00 && (bits & 0x03ff) != 0));
-    assert!(
-        !must_defer,
-        "finite positive f16 audit input must stay on candidate route"
-    );
-    let widened = input.call_method1("astype", ("float32",))?;
-    let sorted = numpy_sort.call1((&widened,))?;
-    Ok(sorted.call_method1("astype", ("float16",))?.unbind())
-}
-
-#[inline(never)]
-fn ledger_orig_f16_sort_reference(
-    numpy_sort: &Bound<'_, PyAny>,
-    input: &Bound<'_, PyAny>,
-) -> PyResult<Py<PyAny>> {
-    Ok(numpy_sort.call1((input,))?.unbind())
-}
-
-#[inline(never)]
-fn ledger_f32_tie_argsort_candidate(
-    fnp_argsort: &Bound<'_, PyAny>,
-    input: &Bound<'_, PyAny>,
-) -> PyResult<Py<PyAny>> {
-    Ok(fnp_argsort.call1((input,))?.unbind())
-}
-
-#[inline(never)]
-fn ledger_orig_f32_argsort_reference(
-    numpy_argsort: &Bound<'_, PyAny>,
-    input: &Bound<'_, PyAny>,
-) -> PyResult<Py<PyAny>> {
-    Ok(numpy_argsort.call1((input,))?.unbind())
-}
-
-fn ledger_tail_stats(samples: &RefCell<Vec<f64>>) -> (usize, f64, f64) {
-    let samples = samples.borrow();
-    let count = samples.len().min(10);
-    assert!(
-        count >= 2,
-        "Criterion must retain at least two paired samples"
-    );
-    let tail = &samples[samples.len() - count..];
-    let mean = tail.iter().sum::<f64>() / count as f64;
-    let variance = tail
-        .iter()
-        .map(|sample| {
-            let delta = sample - mean;
-            delta * delta
-        })
-        .sum::<f64>()
-        / (count - 1) as f64;
-    (count, mean, variance.sqrt() * 100.0 / mean)
-}
-
-fn report_ledger_pair(
-    row: &str,
-    candidate_samples: &RefCell<Vec<f64>>,
-    orig_samples: &RefCell<Vec<f64>>,
-) {
-    if candidate_samples.borrow().is_empty() && orig_samples.borrow().is_empty() {
-        return;
-    }
-    let (candidate_n, candidate_ns, candidate_cv) = ledger_tail_stats(candidate_samples);
-    let (orig_n, orig_ns, orig_cv) = ledger_tail_stats(orig_samples);
-    assert_eq!(candidate_n, orig_n);
-    println!(
-        "LEDGER_AUDIT row={row} samples={candidate_n} candidate_mean_ms={:.6} \
-         candidate_cv_pct={candidate_cv:.3} orig_mean_ms={:.6} orig_cv_pct={orig_cv:.3} \
-         orig_over_candidate={:.4}",
-        candidate_ns / 1_000_000.0,
-        orig_ns / 1_000_000.0,
-        orig_ns / candidate_ns,
-    );
-}
-
-fn report_substrate_v2_pair(
-    row: &str,
-    candidate_samples: &RefCell<Vec<f64>>,
-    orig_samples: &RefCell<Vec<f64>>,
-) {
-    if candidate_samples.borrow().is_empty() && orig_samples.borrow().is_empty() {
-        return;
-    }
-    let (candidate_n, candidate_ns, candidate_cv) = ledger_tail_stats(candidate_samples);
-    let (orig_n, orig_ns, orig_cv) = ledger_tail_stats(orig_samples);
-    assert_eq!(candidate_n, orig_n);
-    println!(
-        "SUBSTRATE_V2 row={row} samples={candidate_n} candidate_mean_ms={:.6} \
-         candidate_cv_pct={candidate_cv:.3} orig_mean_ms={:.6} orig_cv_pct={orig_cv:.3} \
-         orig_over_candidate={:.4}",
-        candidate_ns / 1_000_000.0,
-        orig_ns / 1_000_000.0,
-        orig_ns / candidate_ns,
-    );
-}
-
-const MEDIAN_GATE_FINAL_BATCHES: usize = 10;
-const MEDIAN_GATE_OBSERVATIONS_PER_BATCH: usize = 2;
-
-#[derive(Clone, Copy)]
-struct MedianGateDistribution {
-    median: f64,
-    p10: f64,
-    p90: f64,
-    low: f64,
-    high: f64,
-    cv_pct: f64,
-    above_one: usize,
-}
-
-fn median_gate_quantile(sorted: &[f64], quantile: f64) -> f64 {
-    assert!(!sorted.is_empty());
-    let position = quantile * (sorted.len() - 1) as f64;
-    let lower = position.floor() as usize;
-    let upper = position.ceil() as usize;
-    if lower == upper {
-        sorted[lower]
-    } else {
-        let weight = position - lower as f64;
-        sorted[lower] * (1.0 - weight) + sorted[upper] * weight
-    }
-}
-
-fn median_gate_distribution(samples: &[f64]) -> MedianGateDistribution {
-    assert!(samples.len() >= 2);
-    let mut sorted = samples.to_vec();
-    sorted.sort_by(f64::total_cmp);
-    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-    let variance = samples
-        .iter()
-        .map(|sample| {
-            let delta = sample - mean;
-            delta * delta
-        })
-        .sum::<f64>()
-        / (samples.len() - 1) as f64;
-    MedianGateDistribution {
-        median: median_gate_quantile(&sorted, 0.5),
-        p10: median_gate_quantile(&sorted, 0.1),
-        p90: median_gate_quantile(&sorted, 0.9),
-        low: sorted[0],
-        high: sorted[sorted.len() - 1],
-        cv_pct: variance.sqrt() * 100.0 / mean,
-        above_one: samples.iter().filter(|&&ratio| ratio > 1.0).count(),
-    }
-}
-
-fn median_gate_tail(samples: &RefCell<Vec<f64>>) -> Vec<f64> {
-    let samples = samples.borrow();
-    let retained = MEDIAN_GATE_FINAL_BATCHES * MEDIAN_GATE_OBSERVATIONS_PER_BATCH;
-    assert!(
-        samples.len() >= retained,
-        "Criterion must retain {retained} median-gate observations"
-    );
-    samples[samples.len() - retained..].to_vec()
-}
-
-fn report_median_gate_pair(
-    row: &str,
-    null_base_ns: &RefCell<Vec<f64>>,
-    null_peer_ns: &RefCell<Vec<f64>>,
-    null_ratios: &RefCell<Vec<f64>>,
-    base_ns: &RefCell<Vec<f64>>,
-    candidate_ns: &RefCell<Vec<f64>>,
-    effect_ratios: &RefCell<Vec<f64>>,
-) {
-    if effect_ratios.borrow().is_empty() {
-        return;
-    }
-    let null_base = median_gate_tail(null_base_ns);
-    let null_peer = median_gate_tail(null_peer_ns);
-    let null = median_gate_distribution(&median_gate_tail(null_ratios));
-    let base = median_gate_distribution(&median_gate_tail(base_ns));
-    let candidate = median_gate_distribution(&median_gate_tail(candidate_ns));
-    let effect = median_gate_distribution(&median_gate_tail(effect_ratios));
-    let null_brackets_one = null.p10 <= 1.0 && null.p90 >= 1.0;
-    let verdict = if !null_brackets_one {
-        "BIASED_NULL"
-    } else if effect.median > null.p90 {
-        "WIN"
-    } else if effect.median < null.p10 {
-        "PROFILE_REQUIRED"
-    } else {
-        "UNDECIDED"
-    };
-    let null_base_cv = median_gate_distribution(&null_base).cv_pct;
-    let null_peer_cv = median_gate_distribution(&null_peer).cv_pct;
-    println!(
-        "NULL_MEDIAN_GATE row={row} observations={} base_median_ms={:.6} \
-         candidate_median_ms={:.6} base_cv_pct={:.3} candidate_cv_pct={:.3} \
-         effect_median={:.6} effect_p10={:.6} effect_p90={:.6} \
-         effect_low={:.6} effect_high={:.6} effect_cv_pct={:.3} effect_above_one={} \
-         null_median={:.6} null_p10={:.6} null_p90={:.6} null_low={:.6} \
-         null_high={:.6} null_cv_pct={:.3} null_base_cv_pct={:.3} \
-         null_peer_cv_pct={:.3} null_corrected_median={:.6} verdict={verdict}",
-        effect_ratios
-            .borrow()
-            .len()
-            .min(MEDIAN_GATE_FINAL_BATCHES * MEDIAN_GATE_OBSERVATIONS_PER_BATCH),
-        base.median / 1_000_000.0,
-        candidate.median / 1_000_000.0,
-        base.cv_pct,
-        candidate.cv_pct,
-        effect.median,
-        effect.p10,
-        effect.p90,
-        effect.low,
-        effect.high,
-        effect.cv_pct,
-        effect.above_one,
-        null.median,
-        null.p10,
-        null.p90,
-        null.low,
-        null.high,
-        null.cv_pct,
-        null_base_cv,
-        null_peer_cv,
-        effect.median / null.median,
-    );
-}
-
-fn time_python_binary_call<'py>(
-    function: &Bound<'py, PyAny>,
-    lhs: &Bound<'py, PyAny>,
-    rhs: &Bound<'py, PyAny>,
-) -> Duration {
-    let start = Instant::now();
-    let function = black_box(function);
-    let lhs = black_box(lhs);
-    let rhs = black_box(rhs);
-    let result = function
-        .call1((lhs, rhs))
-        .expect("median-gate binary Python call");
-    drop(black_box(result));
-    start.elapsed()
-}
-
-fn time_python_unary_call<'py>(
-    function: &Bound<'py, PyAny>,
-    input: &Bound<'py, PyAny>,
-) -> Duration {
-    let start = Instant::now();
-    let function = black_box(function);
-    let input = black_box(input);
-    let result = function
-        .call1((input,))
-        .expect("median-gate unary Python call");
-    drop(black_box(result));
-    start.elapsed()
-}
-
 fn bench_median_gate_python_binary<'py>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     bench_name: &'static str,
@@ -18724,242 +18357,208 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
     group.finish();
 }
 
-/// Decides whether one group function runs at all.
-///
-/// Criterion's `--` filter is only consulted inside `bench_function`, i.e. after
-/// a group function has already built its inputs. Every group here calls
-/// `Python::initialize`, registers a fresh `fnp_python` module, and allocates
-/// multi-million-element NumPy inputs before its first `bench_function`, so a
-/// filtered run still pays that setup for all ~190 groups. Setting
-/// `FNP_BENCH_GROUPS` to a comma-separated list of substrings restricts the run
-/// to the group functions whose names contain one of them; leaving it unset
-/// preserves the previous run-everything behavior exactly.
-fn group_enabled(group_fn_name: &str) -> bool {
-    let Ok(spec) = std::env::var("FNP_BENCH_GROUPS") else {
-        return true;
-    };
-    spec.split(',')
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .any(|token| group_fn_name.contains(token))
+/// Drives the selected bench group functions via [`common::gated_main`], which
+/// gates each on [`common::group_enabled`] (`FNP_BENCH_GROUPS`) and emits the
+/// final summary. Replaces the former `gated_benches!` macro; the target list is
+/// the same set of group functions in the same order.
+fn main() {
+    common::gated_main(&[
+        ("bench_wide_string_sort_median_gate", bench_wide_string_sort_median_gate),
+        ("bench_accumulate_extremum_median_gate", bench_accumulate_extremum_median_gate),
+        ("bench_int_convolve_median_gate", bench_int_convolve_median_gate),
+        ("bench_completion_median_gate", bench_completion_median_gate),
+        ("bench_f64_transcendental_median_gate", bench_f64_transcendental_median_gate),
+        ("bench_f64_exp_log_probe", bench_f64_exp_log_probe),
+        ("bench_f64_exp_log_median_gate", bench_f64_exp_log_median_gate),
+        ("bench_bool_sort_median_gate", bench_bool_sort_median_gate),
+        ("bench_int_matmul_median_gate", bench_int_matmul_median_gate),
+        ("bench_f16_matmul_median_gate", bench_f16_matmul_median_gate),
+        ("bench_multidot_median_gate", bench_multidot_median_gate),
+        ("bench_isclose_median_gate", bench_isclose_median_gate),
+        ("bench_f16_unique_median_gate", bench_f16_unique_median_gate),
+        ("bench_f16_around_median_gate", bench_f16_around_median_gate),
+        ("bench_f16_einsum_median_gate", bench_f16_einsum_median_gate),
+        ("bench_wide_string_substrate_v2", bench_wide_string_substrate_v2),
+        ("bench_ledger_integrity_rejects", bench_ledger_integrity_rejects),
+        ("bench_unique_rows_full_boundary", bench_unique_rows_full_boundary),
+        ("bench_unique_cols_boundary", bench_unique_cols_boundary),
+        ("bench_unique_rows_boundary", bench_unique_rows_boundary),
+        ("bench_lexsort_boundary", bench_lexsort_boundary),
+        ("bench_unique_rows_narrow_int_boundary", bench_unique_rows_narrow_int_boundary),
+        ("bench_nanarg_lastaxis_boundary", bench_nanarg_lastaxis_boundary),
+        ("bench_nanarg_nonlast_boundary", bench_nanarg_nonlast_boundary),
+        ("bench_argextreme_f32_axis_boundary", bench_argextreme_f32_axis_boundary),
+        ("bench_datetime_argextreme_boundary", bench_datetime_argextreme_boundary),
+        ("bench_datetime_ptp_boundary", bench_datetime_ptp_boundary),
+        ("bench_datetime_minmax_boundary", bench_datetime_minmax_boundary),
+        ("bench_timedelta_cumsum_boundary", bench_timedelta_cumsum_boundary),
+        ("bench_asarray_dtype_boundary", bench_asarray_dtype_boundary),
+        ("bench_char_add_boundary", bench_char_add_boundary),
+        ("bench_matmul_boundary", bench_matmul_boundary),
+        ("bench_sort_kind_boundary", bench_sort_kind_boundary),
+        ("bench_string_sort_boundary", bench_string_sort_boundary),
+        ("bench_string_unique_full_boundary", bench_string_unique_full_boundary),
+        ("bench_string_unique_boundary", bench_string_unique_boundary),
+        ("bench_string_searchsorted_boundary", bench_string_searchsorted_boundary),
+        ("bench_string_isin_boundary", bench_string_isin_boundary),
+        ("bench_string_union1d_boundary", bench_string_union1d_boundary),
+        ("bench_string_setops_boundary", bench_string_setops_boundary),
+        ("bench_string_setxor_boundary", bench_string_setxor_boundary),
+        ("bench_string_bytes_boundary", bench_string_bytes_boundary),
+        ("bench_string_bytes_ops2_boundary", bench_string_bytes_ops2_boundary),
+        ("bench_complex_unique_boundary", bench_complex_unique_boundary),
+        ("bench_complex64_unique_boundary", bench_complex64_unique_boundary),
+        ("bench_complex_searchsorted_boundary", bench_complex_searchsorted_boundary),
+        ("bench_complex_isin_boundary", bench_complex_isin_boundary),
+        ("bench_complex64_ops_boundary", bench_complex64_ops_boundary),
+        ("bench_datetime_unique_boundary", bench_datetime_unique_boundary),
+        ("bench_unique_struct_int_boundary", bench_unique_struct_int_boundary),
+        ("bench_unique_struct_mixed_boundary", bench_unique_struct_mixed_boundary),
+        ("bench_unique_rows_datetime_boundary", bench_unique_rows_datetime_boundary),
+        ("bench_unique_rows_f16_boundary", bench_unique_rows_f16_boundary),
+        ("bench_unique_struct_int_factorize_boundary", bench_unique_struct_int_factorize_boundary),
+        ("bench_unique_struct_mixed_factorize_boundary", bench_unique_struct_mixed_factorize_boundary),
+        ("bench_lexsort_float_boundary", bench_lexsort_float_boundary),
+        ("bench_sort_struct_mixed_boundary", bench_sort_struct_mixed_boundary),
+        ("bench_argsort_struct_stable_boundary", bench_argsort_struct_stable_boundary),
+        ("bench_argsort_string_stable_boundary", bench_argsort_string_stable_boundary),
+        ("bench_argsort_temporal_complex_stable_boundary", bench_argsort_temporal_complex_stable_boundary),
+        ("bench_argsort_numeric_stable_boundary", bench_argsort_numeric_stable_boundary),
+        ("bench_argsort_radix_stable_boundary", bench_argsort_radix_stable_boundary),
+        ("bench_argsort_radix_float_boundary", bench_argsort_radix_float_boundary),
+        ("bench_argsort_default_int_radix_boundary", bench_argsort_default_int_radix_boundary),
+        ("bench_argsort_default_float_radix_boundary", bench_argsort_default_float_radix_boundary),
+        ("bench_argsort_datetime_radix_boundary", bench_argsort_datetime_radix_boundary),
+        ("bench_median_int_histogram_boundary", bench_median_int_histogram_boundary),
+        ("bench_int_percentile_quantile_histogram_boundary", bench_int_percentile_quantile_histogram_boundary),
+        ("bench_argsort_lastaxis_stable_boundary", bench_argsort_lastaxis_stable_boundary),
+        ("bench_unique_arrayapi_boundary", bench_unique_arrayapi_boundary),
+        ("bench_isin_struct_boundary", bench_isin_struct_boundary),
+        ("bench_isin_struct_float_boundary", bench_isin_struct_float_boundary),
+        ("bench_searchsorted_struct_boundary", bench_searchsorted_struct_boundary),
+        ("bench_searchsorted_struct_mixed_boundary", bench_searchsorted_struct_mixed_boundary),
+        ("bench_struct_setops_boundary", bench_struct_setops_boundary),
+        ("bench_struct_mixed_setops_boundary", bench_struct_mixed_setops_boundary),
+        ("bench_c128_setops_boundary", bench_c128_setops_boundary),
+        ("bench_datetime_setops_boundary", bench_datetime_setops_boundary),
+        ("bench_datetime_searchsorted_isin_boundary", bench_datetime_searchsorted_isin_boundary),
+        ("bench_f16_ops_boundary", bench_f16_ops_boundary),
+        ("bench_f16_setops_boundary", bench_f16_setops_boundary),
+        ("bench_unique_rows_lexsort_boundary", bench_unique_rows_lexsort_boundary),
+        ("bench_unique_rows_factorize_boundary", bench_unique_rows_factorize_boundary),
+        ("bench_unique_rows_f64_boundary", bench_unique_rows_f64_boundary),
+        ("bench_unique_rows_f32_boundary", bench_unique_rows_f32_boundary),
+        ("bench_unique_rows_f64_factorize_boundary", bench_unique_rows_f64_factorize_boundary),
+        ("bench_unique_rows_f32_factorize_boundary", bench_unique_rows_f32_factorize_boundary),
+        ("bench_unique_rows_c128_boundary", bench_unique_rows_c128_boundary),
+        ("bench_unique_rows_c64_boundary", bench_unique_rows_c64_boundary),
+        ("bench_unique_rows_c128_factorize_boundary", bench_unique_rows_c128_factorize_boundary),
+        ("bench_unique_cols_axis1_boundary", bench_unique_cols_axis1_boundary),
+        ("bench_sort_axis_boundary", bench_sort_axis_boundary),
+        ("bench_parallel_binary_boundary", bench_parallel_binary_boundary),
+        ("bench_take_axis_boundary", bench_take_axis_boundary),
+        ("bench_take_along_axis_c64_boundary", bench_take_along_axis_c64_boundary),
+        ("bench_take_along_axis_boundary", bench_take_along_axis_boundary),
+        ("bench_take_dtype_boundary", bench_take_dtype_boundary),
+        ("bench_take_boundary", bench_take_boundary),
+        ("bench_repeat_array_boundary", bench_repeat_array_boundary),
+        ("bench_repeat_axis_boundary", bench_repeat_axis_boundary),
+        ("bench_searchsorted_boundary", bench_searchsorted_boundary),
+        ("bench_digitize_boundary", bench_digitize_boundary),
+        ("bench_bincount_boundary", bench_bincount_boundary),
+        ("bench_tile_boundary", bench_tile_boundary),
+        ("bench_pad_edge_boundary", bench_pad_edge_boundary),
+        ("bench_pad_wrap_boundary", bench_pad_wrap_boundary),
+        ("bench_pad_reflect_boundary", bench_pad_reflect_boundary),
+        ("bench_kron_boundary", bench_kron_boundary),
+        ("bench_nan_to_num_boundary", bench_nan_to_num_boundary),
+        ("bench_cross_boundary", bench_cross_boundary),
+        ("bench_sqrt_input_extraction", bench_sqrt_input_extraction),
+        ("bench_around_boundary", bench_around_boundary),
+        ("bench_where_boundary", bench_where_boundary),
+        ("bench_f64_convolve_boundary", bench_f64_convolve_boundary),
+        ("bench_int_convolve_boundary", bench_int_convolve_boundary),
+        ("bench_clip_boundary", bench_clip_boundary),
+        ("bench_unary_parallel_boundary", bench_unary_parallel_boundary),
+        ("bench_int32_unary_boundary", bench_int32_unary_boundary),
+        ("bench_narrow_int_unary_boundary", bench_narrow_int_unary_boundary),
+        ("bench_remainder_mod_boundary", bench_remainder_mod_boundary),
+        ("bench_timedelta_addsub_boundary", bench_timedelta_addsub_boundary),
+        ("bench_temporal_astype_boundary", bench_temporal_astype_boundary),
+        ("bench_max_min_reduction_boundary", bench_max_min_reduction_boundary),
+        ("bench_ptp_axis0_boundary", bench_ptp_axis0_boundary),
+        ("bench_ptp_f32_axis_boundary", bench_ptp_f32_axis_boundary),
+        ("bench_bool_minmax_reduction_boundary", bench_bool_minmax_reduction_boundary),
+        ("bench_prod_reduction_boundary", bench_prod_reduction_boundary),
+        ("bench_ediff1d_boundary", bench_ediff1d_boundary),
+        ("bench_diff_1d_boundary", bench_diff_1d_boundary),
+        ("bench_select_boundary", bench_select_boundary),
+        ("bench_ldexp_boundary", bench_ldexp_boundary),
+        ("bench_float_power_boundary", bench_float_power_boundary),
+        ("bench_logaddexp2_scalar_boundary", bench_logaddexp2_scalar_boundary),
+        ("bench_heaviside_scalar_boundary", bench_heaviside_scalar_boundary),
+        ("bench_frexp_boundary", bench_frexp_boundary),
+        ("bench_modf_boundary", bench_modf_boundary),
+        ("bench_putmask_boundary", bench_putmask_boundary),
+        ("bench_shift_boundary", bench_shift_boundary),
+        ("bench_concat_hstack_boundary", bench_concat_hstack_boundary),
+        ("bench_vstack_1d_boundary", bench_vstack_1d_boundary),
+        ("bench_column_interleave_boundary", bench_column_interleave_boundary),
+        ("bench_indices_construction_boundary", bench_indices_construction_boundary),
+        ("bench_char_ascii_boundary", bench_char_ascii_boundary),
+        ("bench_average_nansum_axis_boundary", bench_average_nansum_axis_boundary),
+        ("bench_histogram_boundary", bench_histogram_boundary),
+        ("bench_setops_boundary", bench_setops_boundary),
+        ("bench_float_isin_boundary", bench_float_isin_boundary),
+        ("bench_f16_binary_transcendental_boundary", bench_f16_binary_transcendental_boundary),
+        ("bench_unique_medium_boundary", bench_unique_medium_boundary),
+        ("bench_sort_complex_boundary", bench_sort_complex_boundary),
+        ("bench_complex_binary_boundary", bench_complex_binary_boundary),
+        ("bench_complex_exp_boundary", bench_complex_exp_boundary),
+        ("bench_f16_matmul_boundary", bench_f16_matmul_boundary),
+        ("bench_flat_sort_dtype_boundary", bench_flat_sort_dtype_boundary),
+        ("bench_int32_flat_sort_small_pool_regate", bench_int32_flat_sort_small_pool_regate),
+        ("bench_statistics_boundary", bench_statistics_boundary),
+        ("bench_cov_large_boundary", bench_cov_large_boundary),
+        ("bench_std_var_axis_boundary", bench_std_var_axis_boundary),
+        ("bench_var_multiaxis_boundary", bench_var_multiaxis_boundary),
+        ("bench_var_midaxis_boundary", bench_var_midaxis_boundary),
+        ("bench_var_f32_axis_boundary", bench_var_f32_axis_boundary),
+        ("bench_nanvar_f32_axis_boundary", bench_nanvar_f32_axis_boundary),
+        ("bench_nansum_f32_axis_boundary", bench_nansum_f32_axis_boundary),
+        ("bench_nanextreme_f32_axis_boundary", bench_nanextreme_f32_axis_boundary),
+        ("bench_nanvar_f32_last_axis_boundary", bench_nanvar_f32_last_axis_boundary),
+        ("bench_nanvar_midaxis_boundary", bench_nanvar_midaxis_boundary),
+        ("bench_var_axis0_boundary", bench_var_axis0_boundary),
+        ("bench_sum_lastaxis_boundary", bench_sum_lastaxis_boundary),
+        ("bench_prod_lastaxis_boundary", bench_prod_lastaxis_boundary),
+        ("bench_cumsum_lastaxis_boundary", bench_cumsum_lastaxis_boundary),
+        ("bench_complex_cumprod_lastaxis_boundary", bench_complex_cumprod_lastaxis_boundary),
+        ("bench_complex_nancumprod_lastaxis_boundary", bench_complex_nancumprod_lastaxis_boundary),
+        ("bench_complex_cumulative_midaxis_boundary", bench_complex_cumulative_midaxis_boundary),
+        ("bench_complex_cumulative_axis0_boundary", bench_complex_cumulative_axis0_boundary),
+        ("bench_cumsum_flat_boundary", bench_cumsum_flat_boundary),
+        ("bench_accumulate_extremum_boundary", bench_accumulate_extremum_boundary),
+        ("bench_cum_midaxis_boundary", bench_cum_midaxis_boundary),
+        ("bench_int_cum_boundary", bench_int_cum_boundary),
+        ("bench_vander_boundary", bench_vander_boundary),
+        ("bench_polyval_boundary", bench_polyval_boundary),
+        ("bench_gradient_axis_boundary", bench_gradient_axis_boundary),
+        ("bench_gradient_2d_coords_boundary", bench_gradient_2d_coords_boundary),
+        ("bench_gradient_coords_boundary", bench_gradient_coords_boundary),
+        ("bench_gradient_nd_coords_axis_boundary", bench_gradient_nd_coords_axis_boundary),
+        ("bench_gradient_f32_boundary", bench_gradient_f32_boundary),
+        ("bench_norm_axis_boundary", bench_norm_axis_boundary),
+        ("bench_norm_f32_orderfree_boundary", bench_norm_f32_orderfree_boundary),
+        ("bench_norm_nonlast_axis_boundary", bench_norm_nonlast_axis_boundary),
+        ("bench_norm_frobenius_boundary", bench_norm_frobenius_boundary),
+        ("bench_compress_boundary", bench_compress_boundary),
+        ("bench_compress_lastaxis_boundary", bench_compress_lastaxis_boundary),
+        ("bench_delete_mask_boundary", bench_delete_mask_boundary),
+        ("bench_insert_block_boundary", bench_insert_block_boundary),
+        ("bench_roll_2d_multi_dtype_boundary", bench_roll_2d_multi_dtype_boundary),
+        ("bench_roll_boundary", bench_roll_boundary),
+        ("bench_einsum_boundary", bench_einsum_boundary),
+        ("bench_linalg_boundary", bench_linalg_boundary),
+    ]);
 }
-
-/// `criterion_main!` over group functions that are skipped unless selected.
-///
-/// Mirrors the `criterion_group!` + `criterion_main!` pair it replaces: one
-/// `configure_from_args` Criterion drives the selected targets, then a second
-/// one emits the final summary, exactly as the upstream macros do.
-macro_rules! gated_benches {
-    ( $( $target:ident ),+ $(,)? ) => {
-        fn main() {
-            let mut criterion = Criterion::default().configure_from_args();
-            $(
-                if group_enabled(stringify!($target)) {
-                    $target(&mut criterion);
-                }
-            )+
-
-            Criterion::default().configure_from_args().final_summary();
-        }
-    };
-}
-
-gated_benches!(
-    bench_wide_string_sort_median_gate,
-    bench_accumulate_extremum_median_gate,
-    bench_int_convolve_median_gate,
-    bench_completion_median_gate,
-    bench_f64_transcendental_median_gate,
-    bench_f64_exp_log_probe,
-    bench_f64_exp_log_median_gate,
-    bench_bool_sort_median_gate,
-    bench_int_matmul_median_gate,
-    bench_f16_matmul_median_gate,
-    bench_multidot_median_gate,
-    bench_isclose_median_gate,
-    bench_f16_unique_median_gate,
-    bench_f16_around_median_gate,
-    bench_f16_einsum_median_gate,
-    bench_wide_string_substrate_v2,
-    bench_ledger_integrity_rejects,
-    bench_unique_rows_full_boundary,
-    bench_unique_cols_boundary,
-    bench_unique_rows_boundary,
-    bench_lexsort_boundary,
-    bench_unique_rows_narrow_int_boundary,
-    bench_nanarg_lastaxis_boundary,
-    bench_nanarg_nonlast_boundary,
-    bench_argextreme_f32_axis_boundary,
-    bench_datetime_argextreme_boundary,
-    bench_datetime_ptp_boundary,
-    bench_datetime_minmax_boundary,
-    bench_timedelta_cumsum_boundary,
-    bench_asarray_dtype_boundary,
-    bench_char_add_boundary,
-    bench_matmul_boundary,
-    bench_sort_kind_boundary,
-    bench_string_sort_boundary,
-    bench_string_unique_full_boundary,
-    bench_string_unique_boundary,
-    bench_string_searchsorted_boundary,
-    bench_string_isin_boundary,
-    bench_string_union1d_boundary,
-    bench_string_setops_boundary,
-    bench_string_setxor_boundary,
-    bench_string_bytes_boundary,
-    bench_string_bytes_ops2_boundary,
-    bench_complex_unique_boundary,
-    bench_complex64_unique_boundary,
-    bench_complex_searchsorted_boundary,
-    bench_complex_isin_boundary,
-    bench_complex64_ops_boundary,
-    bench_datetime_unique_boundary,
-    bench_unique_struct_int_boundary,
-    bench_unique_struct_mixed_boundary,
-    bench_unique_rows_datetime_boundary,
-    bench_unique_rows_f16_boundary,
-    bench_unique_struct_int_factorize_boundary,
-    bench_unique_struct_mixed_factorize_boundary,
-    bench_lexsort_float_boundary,
-    bench_sort_struct_mixed_boundary,
-    bench_argsort_struct_stable_boundary,
-    bench_argsort_string_stable_boundary,
-    bench_argsort_temporal_complex_stable_boundary,
-    bench_argsort_numeric_stable_boundary,
-    bench_argsort_radix_stable_boundary,
-    bench_argsort_radix_float_boundary,
-    bench_argsort_default_int_radix_boundary,
-    bench_argsort_default_float_radix_boundary,
-    bench_argsort_datetime_radix_boundary,
-    bench_median_int_histogram_boundary,
-    bench_int_percentile_quantile_histogram_boundary,
-    bench_argsort_lastaxis_stable_boundary,
-    bench_unique_arrayapi_boundary,
-    bench_isin_struct_boundary,
-    bench_isin_struct_float_boundary,
-    bench_searchsorted_struct_boundary,
-    bench_searchsorted_struct_mixed_boundary,
-    bench_struct_setops_boundary,
-    bench_struct_mixed_setops_boundary,
-    bench_c128_setops_boundary,
-    bench_datetime_setops_boundary,
-    bench_datetime_searchsorted_isin_boundary,
-    bench_f16_ops_boundary,
-    bench_f16_setops_boundary,
-    bench_unique_rows_lexsort_boundary,
-    bench_unique_rows_factorize_boundary,
-    bench_unique_rows_f64_boundary,
-    bench_unique_rows_f32_boundary,
-    bench_unique_rows_f64_factorize_boundary,
-    bench_unique_rows_f32_factorize_boundary,
-    bench_unique_rows_c128_boundary,
-    bench_unique_rows_c64_boundary,
-    bench_unique_rows_c128_factorize_boundary,
-    bench_unique_cols_axis1_boundary,
-    bench_sort_axis_boundary,
-    bench_parallel_binary_boundary,
-    bench_take_axis_boundary,
-    bench_take_along_axis_c64_boundary,
-    bench_take_along_axis_boundary,
-    bench_take_dtype_boundary,
-    bench_take_boundary,
-    bench_repeat_array_boundary,
-    bench_repeat_axis_boundary,
-    bench_searchsorted_boundary,
-    bench_digitize_boundary,
-    bench_bincount_boundary,
-    bench_tile_boundary,
-    bench_pad_edge_boundary,
-    bench_pad_wrap_boundary,
-    bench_pad_reflect_boundary,
-    bench_kron_boundary,
-    bench_nan_to_num_boundary,
-    bench_cross_boundary,
-    bench_sqrt_input_extraction,
-    bench_around_boundary,
-    bench_where_boundary,
-    bench_f64_convolve_boundary,
-    bench_int_convolve_boundary,
-    bench_clip_boundary,
-    bench_unary_parallel_boundary,
-    bench_int32_unary_boundary,
-    bench_narrow_int_unary_boundary,
-    bench_remainder_mod_boundary,
-    bench_timedelta_addsub_boundary,
-    bench_temporal_astype_boundary,
-    bench_max_min_reduction_boundary,
-    bench_ptp_axis0_boundary,
-    bench_ptp_f32_axis_boundary,
-    bench_bool_minmax_reduction_boundary,
-    bench_prod_reduction_boundary,
-    bench_ediff1d_boundary,
-    bench_diff_1d_boundary,
-    bench_select_boundary,
-    bench_ldexp_boundary,
-    bench_float_power_boundary,
-    bench_logaddexp2_scalar_boundary,
-    bench_heaviside_scalar_boundary,
-    bench_frexp_boundary,
-    bench_modf_boundary,
-    bench_putmask_boundary,
-    bench_shift_boundary,
-    bench_concat_hstack_boundary,
-    bench_vstack_1d_boundary,
-    bench_column_interleave_boundary,
-    bench_indices_construction_boundary,
-    bench_char_ascii_boundary,
-    bench_average_nansum_axis_boundary,
-    bench_histogram_boundary,
-    bench_setops_boundary,
-    bench_float_isin_boundary,
-    bench_f16_binary_transcendental_boundary,
-    bench_unique_medium_boundary,
-    bench_sort_complex_boundary,
-    bench_complex_binary_boundary,
-    bench_complex_exp_boundary,
-    bench_f16_matmul_boundary,
-    bench_flat_sort_dtype_boundary,
-    bench_int32_flat_sort_small_pool_regate,
-    bench_statistics_boundary,
-    bench_cov_large_boundary,
-    bench_std_var_axis_boundary,
-    bench_var_multiaxis_boundary,
-    bench_var_midaxis_boundary,
-    bench_var_f32_axis_boundary,
-    bench_nanvar_f32_axis_boundary,
-    bench_nansum_f32_axis_boundary,
-    bench_nanextreme_f32_axis_boundary,
-    bench_nanvar_f32_last_axis_boundary,
-    bench_nanvar_midaxis_boundary,
-    bench_var_axis0_boundary,
-    bench_sum_lastaxis_boundary,
-    bench_prod_lastaxis_boundary,
-    bench_cumsum_lastaxis_boundary,
-    bench_complex_cumprod_lastaxis_boundary,
-    bench_complex_nancumprod_lastaxis_boundary,
-    bench_complex_cumulative_midaxis_boundary,
-    bench_complex_cumulative_axis0_boundary,
-    bench_cumsum_flat_boundary,
-    bench_accumulate_extremum_boundary,
-    bench_cum_midaxis_boundary,
-    bench_int_cum_boundary,
-    bench_vander_boundary,
-    bench_polyval_boundary,
-    bench_gradient_axis_boundary,
-    bench_gradient_2d_coords_boundary,
-    bench_gradient_coords_boundary,
-    bench_gradient_nd_coords_axis_boundary,
-    bench_gradient_f32_boundary,
-    bench_norm_axis_boundary,
-    bench_norm_f32_orderfree_boundary,
-    bench_norm_nonlast_axis_boundary,
-    bench_norm_frobenius_boundary,
-    bench_compress_boundary,
-    bench_compress_lastaxis_boundary,
-    bench_delete_mask_boundary,
-    bench_insert_block_boundary,
-    bench_roll_2d_multi_dtype_boundary,
-    bench_roll_boundary,
-    bench_einsum_boundary,
-    bench_linalg_boundary
-);
