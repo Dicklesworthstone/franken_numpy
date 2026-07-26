@@ -1081,7 +1081,7 @@ No public function in the implementation crates returns `Result<T, Box<dyn Error
 
 ## Threading and Concurrency Model
 
-FrankenNumPy operations are single-threaded by default. The choice merits precise description. Two integration test files exercise the model: `crates/fnp-ufunc/tests/concurrency_safety.rs` (verifies `UFuncArray` `Send`/`Sync` and parallel reduce/elementwise variants) and `crates/fnp-conformance/tests/concurrency_safety.rs` (verifies fnp-conformance's 4+ static `Mutex`/`OnceLock` combinations are thread-safe + deadlock-free).
+FrankenNumPy parallelizes per operation rather than globally: an op runs `rayon`-parallel when measurement showed a win at that size and dtype, and serial otherwise (see §Limitations for the policy). The choice merits precise description. Two integration test files exercise the model: `crates/fnp-ufunc/tests/concurrency_safety.rs` (verifies `UFuncArray` `Send`/`Sync` and parallel reduce/elementwise variants) and `crates/fnp-conformance/tests/concurrency_safety.rs` (verifies fnp-conformance's 4+ static `Mutex`/`OnceLock` combinations are thread-safe + deadlock-free).
 
 **`Send` / `Sync` for the core types.** `UFuncArray` owns its `Vec<f64>` and is `Send + Sync`; you can move an array between threads or share it behind an `Arc` for concurrent reads. `MaskedArray` and `StringArray` follow the same pattern. Datetime/timedelta arrays are `UFuncArray` instances and inherit the same `Send + Sync`.
 
@@ -1853,9 +1853,10 @@ FrankenNumPy is profile-driven: every optimization is paired with a baseline, a 
 The `0.1.x` line reached full `numpy.__all__` parity but delegated most hot
 operations to the fallback NumPy oracle. `v0.2.0` is the payoff of a six-week
 profile-driven campaign — roughly **1,230 landed `perf(...)` commits** — that
-replaced delegation with native safe-Rust `rayon`-parallel kernels wherever NumPy
-leaves throughput on the table: single-threaded ufuncs, the entirely absent
-`float16`/integer BLAS, serial radix sorts, and compute-bound reductions. Every
+replaced delegation with native safe-Rust `rayon`-parallel and `core::simd` kernels
+wherever NumPy leaves throughput on the table: NumPy's single-threaded ufuncs, its
+entirely absent `float16`/integer BLAS, its serial radix sorts, and compute-bound
+reductions. Every
 ratio below is a measured vs-NumPy speedup from the negative-evidence ledger; see
 [`CHANGELOG.md`](CHANGELOG.md) for the per-capability breakdown and representative
 commits.
@@ -2096,9 +2097,9 @@ What doesn't work today.
 - **Complex elementwise arithmetic uses interleaved storage.** Complex64/Complex128 dtypes store real/imaginary parts as interleaved floats. Elementwise `multiply` and `divide` apply true complex arithmetic `(a+bi)(c+di) = (ac−bd)+(ad+bc)i`, but the interleaved representation adds overhead vs native complex types.
 - **`multivariate_normal` uses Cholesky.** NumPy defaults to SVD. Switching would pull `fnp-linalg` into `fnp-random`'s dependency graph (currently `fnp-random` keeps only intra-workspace `fnp-ndarray` plus `getrandom` for OS entropy).
 - **`multivariate_hypergeometric` uses sequential draws.** NumPy uses the `random_mvhg_marginals` algorithm.
-- **Single-threaded.** All array operations are single-threaded. The `asupersync` integration is optional and used only for conformance pipeline orchestration, not parallel array computation. Multi-threading is a Phase 3 work-stream.
+- **Parallelism is per-op, not blanket.** Array operations are `rayon`-parallel where measurement showed it pays and deliberately serial where it did not — the policy is explicit in `UFuncBinaryOp::is_parallel_worth` / `UFuncUnaryOp::is_parallel_worth` and in per-op size gates. Compute-heavy ops (`power`, `hypot`, `arctan2`, `logaddexp`, the transcendental unaries, reductions, sorts, set-ops, GEMM) parallelize; `add`/`sub`/`mul`/`div` stay serial because they are memory-bandwidth-bound, where extra threads buy nothing. The `asupersync` integration is separate and orchestrates conformance pipelines, not array computation.
 - **f64 internal representation for `UFuncArray`.** Numeric values are stored as `Vec<f64>` internally for arithmetic. For i64/u64 values > 2^53, `IntegerSidecar` preserves exact integer values through storage round-trips; arithmetic on such values still uses f64 approximation. Native i64/u64 paths are a Phase 3 work-stream.
-- **Large-scale ufunc-elementwise / ufunc-broadcast hotspots.** Without SIMD or BLAS, these workloads sit in the 10–30× range vs NumPy at large array sizes. Small/medium and contiguous workloads are at or near parity.
+- **Large dense matmul vs a tuned BLAS.** Square GEMM above roughly 2000×2000 remains slower than NumPy on OpenBLAS. That is the honest named residual, and it is a deliberate trade: no C BLAS/LAPACK linkage, ever. Where NumPy has no BLAS path — `float16`, integer matmul, batched small matrices — FrankenNumPy wins outright (see §Performance).
 - **`std`-only — no `no_std` support.** All 10 crates link to the Rust standard library; there are zero `#![no_std]` declarations and no `panic_handler` attributes in the workspace (verified via grep). The codebase uses `std::sync::{Arc, Mutex, RwLock, OnceLock}`, `std::time::SystemTime`, `std::fs`, `std::process::Command`, etc. throughout. Embedded / `no_std` targets are out of scope for this project.
 
 ---
