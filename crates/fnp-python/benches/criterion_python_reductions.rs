@@ -1,3 +1,5 @@
+#![feature(portable_simd)]
+
 //! statistics / variance / nan-reduction / cumulative criterion benches —
 //! statistics, cov, std and var across axes, nanvar/nansum/nanextreme (f32),
 //! var axis-0, sum/prod/cumsum last-axis, cumsum-flat, and accumulate-extremum —
@@ -12,8 +14,200 @@ use criterion::Criterion;
 use fnp_python::fnp_python;
 use pyo3::Python;
 use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyTuple};
+use rayon::prelude::*;
+use std::collections::VecDeque;
 use std::hint::black_box;
-use std::time::Duration;
+use std::simd::Simd;
+use std::time::{Duration, Instant};
+
+#[inline(never)]
+fn cov_gram_schedule(
+    centered: &[f64],
+    n_vars: usize,
+    n_obs: usize,
+    paired: bool,
+    result: &mut [f64],
+) {
+    type Lanes = Simd<f64, 8>;
+    const MR: usize = 4;
+
+    let inv_fact = 1.0_f64 / (n_obs - 1) as f64;
+    let n_chunks = n_obs / 8;
+    let tail = n_chunks * 8;
+    let dot8 = |ci: &[f64], cj: &[f64]| -> f64 {
+        let mut acc = [0.0_f64; 8];
+        let mut ca = ci.chunks_exact(8);
+        let mut cb = cj.chunks_exact(8);
+        for (ga, gb) in ca.by_ref().zip(cb.by_ref()) {
+            for lane in 0..8 {
+                acc[lane] += ga[lane] * gb[lane];
+            }
+        }
+        let mut sum =
+            ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+        for (&a, &b) in ca.remainder().iter().zip(cb.remainder()) {
+            sum += a * b;
+        }
+        sum
+    };
+    let finish = |acc: Lanes, tail_a: &[f64], tail_b: &[f64]| -> f64 {
+        let lanes = acc.to_array();
+        let mut sum = ((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]))
+            + ((lanes[4] + lanes[5]) + (lanes[6] + lanes[7]));
+        for (&a, &b) in tail_a.iter().zip(tail_b) {
+            sum += a * b;
+        }
+        sum
+    };
+    let block = |i0: usize, rows: &mut [f64]| {
+        let mr = rows.len() / n_vars;
+        let row = |i: usize| &centered[i * n_obs..(i + 1) * n_obs];
+        for j in 0..=i0 {
+            let j_row = row(j);
+            let mut acc = [Lanes::splat(0.0); MR];
+            if mr == MR {
+                let (r0, r1, r2, r3) = (row(i0), row(i0 + 1), row(i0 + 2), row(i0 + 3));
+                for ((((b, a0), a1), a2), a3) in j_row[..tail]
+                    .chunks_exact(8)
+                    .zip(r0[..tail].chunks_exact(8))
+                    .zip(r1[..tail].chunks_exact(8))
+                    .zip(r2[..tail].chunks_exact(8))
+                    .zip(r3[..tail].chunks_exact(8))
+                {
+                    let b = Lanes::from_slice(b);
+                    acc[0] += Lanes::from_slice(a0) * b;
+                    acc[1] += Lanes::from_slice(a1) * b;
+                    acc[2] += Lanes::from_slice(a2) * b;
+                    acc[3] += Lanes::from_slice(a3) * b;
+                }
+            } else {
+                for chunk in 0..n_chunks {
+                    let b = Lanes::from_slice(&j_row[chunk * 8..]);
+                    for (m, lane_acc) in acc.iter_mut().enumerate().take(mr) {
+                        *lane_acc +=
+                            Lanes::from_slice(&centered[(i0 + m) * n_obs + chunk * 8..]) * b;
+                    }
+                }
+            }
+            for (m, lane_acc) in acc.iter().enumerate().take(mr) {
+                let i = i0 + m;
+                rows[m * n_vars + j] = finish(
+                    *lane_acc,
+                    &centered[i * n_obs + tail..(i + 1) * n_obs],
+                    &j_row[tail..],
+                ) * inv_fact;
+            }
+        }
+        for m in 1..mr {
+            let i = i0 + m;
+            let i_row = row(i);
+            for j in (i0 + 1)..=i {
+                rows[m * n_vars + j] = dot8(i_row, row(j)) * inv_fact;
+            }
+        }
+    };
+
+    if paired {
+        let mut blocks: VecDeque<(usize, &mut [f64])> =
+            result.chunks_mut(n_vars * MR).enumerate().collect();
+        let mut tasks = Vec::with_capacity(blocks.len().div_ceil(2));
+        while let Some(heavy) = blocks.pop_back() {
+            tasks.push((heavy, blocks.pop_front()));
+        }
+        tasks.into_par_iter().for_each(|((heavy, rows), light)| {
+            block(heavy * MR, rows);
+            if let Some((light, rows)) = light {
+                block(light * MR, rows);
+            }
+        });
+    } else {
+        result
+            .par_chunks_mut(n_vars * MR)
+            .enumerate()
+            .for_each(|(block_index, rows)| block(block_index * MR, rows));
+    }
+    for i in 0..n_vars {
+        for j in (i + 1)..n_vars {
+            result[i * n_vars + j] = result[j * n_vars + i];
+        }
+    }
+}
+
+fn bench_cov_gram_pairing_contract(c: &mut Criterion) {
+    // Official ledger-resurrection rank 4. This reconstructs the archived
+    // candidate exactly at the scheduler seam while retaining today's MR=4
+    // strip kernel. No production dispatch changes: a decisive loss remains a
+    // durable no-ship and a win would only authorize a separate source patch.
+    const N_VARS: usize = 1_000;
+    const N_OBS: usize = 1_000;
+
+    let centered = (0..N_VARS * N_OBS)
+        .map(|index| {
+            let phase = (index % 8_191) as f64 * 0.000_976_562_5;
+            phase.sin() - 0.25 * phase.cos()
+        })
+        .collect::<Vec<_>>();
+    let mut former_result = vec![0.0; N_VARS * N_VARS];
+    let mut candidate_result = vec![0.0; N_VARS * N_VARS];
+    cov_gram_schedule(&centered, N_VARS, N_OBS, false, &mut former_result);
+    cov_gram_schedule(&centered, N_VARS, N_OBS, true, &mut candidate_result);
+    assert_eq!(
+        former_result, candidate_result,
+        "paired scheduling must preserve every covariance bit"
+    );
+    println!(
+        "PARITY row=python_cov_gram_paired_schedule kind=f64_to_bits_exact cells={}",
+        N_VARS * N_VARS
+    );
+
+    let time_former = || {
+        let started = Instant::now();
+        cov_gram_schedule(&centered, N_VARS, N_OBS, false, &mut former_result);
+        let elapsed = started.elapsed();
+        let checksum = former_result[0].to_bits()
+            ^ former_result[N_VARS * N_VARS / 2].to_bits().rotate_left(17)
+            ^ former_result[N_VARS * N_VARS - 1].to_bits().rotate_left(37);
+        black_box(&former_result);
+        common::ContractObservation { elapsed, checksum }
+    };
+    let time_candidate = || {
+        let started = Instant::now();
+        cov_gram_schedule(&centered, N_VARS, N_OBS, true, &mut candidate_result);
+        let elapsed = started.elapsed();
+        let checksum = candidate_result[0].to_bits()
+            ^ candidate_result[N_VARS * N_VARS / 2]
+                .to_bits()
+                .rotate_left(17)
+            ^ candidate_result[N_VARS * N_VARS - 1]
+                .to_bits()
+                .rotate_left(37);
+        black_box(&candidate_result);
+        common::ContractObservation { elapsed, checksum }
+    };
+    let _ = common::run_median_ci_contract(
+        "python_cov_gram_paired_schedule",
+        time_former,
+        time_candidate,
+    );
+
+    let mut group = c.benchmark_group("python_cov_gram_pairing_contract");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_millis(750));
+    group.warm_up_time(Duration::from_millis(250));
+    group.bench_function("former_contiguous_blocks_1000x1000", |bench| {
+        bench.iter(|| {
+            cov_gram_schedule(&centered, N_VARS, N_OBS, false, &mut former_result);
+            black_box(former_result[N_VARS * N_VARS - 1]);
+        });
+    });
+    group.bench_function("candidate_paired_blocks_1000x1000", |bench| {
+        bench.iter(|| {
+            cov_gram_schedule(&centered, N_VARS, N_OBS, true, &mut candidate_result);
+            black_box(candidate_result[N_VARS * N_VARS - 1]);
+        });
+    });
+    group.finish();
+}
 
 fn bench_statistics_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_statistics_boundary");
@@ -1510,6 +1704,10 @@ x = rng.standard_normal(8_000_000)\n";
 
 fn main() {
     common::gated_main(&[
+        (
+            "bench_cov_gram_pairing_contract",
+            bench_cov_gram_pairing_contract,
+        ),
         ("bench_statistics_boundary", bench_statistics_boundary),
         ("bench_cov_large_boundary", bench_cov_large_boundary),
         ("bench_std_var_axis_boundary", bench_std_var_axis_boundary),

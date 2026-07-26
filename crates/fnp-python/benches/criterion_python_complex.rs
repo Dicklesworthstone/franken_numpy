@@ -14,7 +14,7 @@ use fnp_python::fnp_python;
 use pyo3::Python;
 use pyo3::types::{PyAnyMethods, PyDict, PyModule};
 use std::hint::black_box;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn bench_complex_exp_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_complex_exp_boundary");
@@ -444,6 +444,137 @@ fn bench_complex_cumulative_axis0_boundary(c: &mut Criterion) {
 
     group.finish();
 }
+
+fn bench_complex_nancumprod_axis0_contract(c: &mut Criterion) {
+    // Official ledger-resurrection rank 3. Before this campaign the axis-0
+    // route delegated to NumPy; the candidate gathers independent columns,
+    // replaces NaN-complex inputs with 1+0j, scans each lane in the same scalar
+    // order, and scatters back. The former arm is therefore the exact NumPy
+    // delegate that served this shape before the candidate route existed.
+    let mut group = c.benchmark_group("python_complex_nancumprod_axis0_contract");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_millis(750));
+    group.warm_up_time(Duration::from_millis(250));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_nancumprod_axis0_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_nancumprod = module.getattr("nancumprod").expect("fnp nancumprod");
+        let numpy_nancumprod = numpy.getattr("nancumprod").expect("numpy nancumprod");
+
+        let setup = "import numpy as np\n\
+n = 1024\n\
+theta = np.linspace(0.0, 6.0, n*n, dtype=np.float64)\n\
+axis0_input = (np.cos(theta) + 1j*np.sin(theta)).reshape(n, n)\n\
+axis0_input[::127, ::113] = complex(float('nan'), 0.0)\n\
+axis0_input[::211, ::97] = complex(0.0, float('nan'))\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup)
+                .expect("setup contains no NUL")
+                .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("axis-0 nancumprod setup");
+        let input = ns.get_item("axis0_input").expect("axis0 input");
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("axis", 0_i64).expect("axis kwarg");
+
+        let candidate = fnp_nancumprod
+            .call((&input,), Some(&kwargs))
+            .expect("candidate axis-0 nancumprod");
+        let former = numpy_nancumprod
+            .call((&input,), Some(&kwargs))
+            .expect("former numpy axis-0 nancumprod");
+        let candidate_bits = candidate
+            .call_method1("view", ("uint64",))
+            .expect("candidate bit view");
+        let former_bits = former
+            .call_method1("view", ("uint64",))
+            .expect("former bit view");
+        let exact: bool = numpy
+            .call_method1("array_equal", (&candidate_bits, &former_bits))
+            .expect("bitwise array_equal")
+            .extract()
+            .expect("bool");
+        assert!(exact, "axis-0 complex nancumprod must be bit exact");
+        println!(
+            "PARITY row=python_complex_nancumprod_axis0 kind=uint64_view_exact elements=1048576"
+        );
+
+        let checksum_output = |output: &pyo3::Bound<'_, pyo3::PyAny>| {
+            [(0_i64, 0_i64), (-1_i64, -1_i64)]
+                .into_iter()
+                .fold(1_048_576_u64, |state, index| {
+                    let value = output.get_item(index).expect("complex endpoint");
+                    let real = value
+                        .getattr("real")
+                        .expect("endpoint real")
+                        .extract::<f64>()
+                        .expect("f64 real");
+                    let imag = value
+                        .getattr("imag")
+                        .expect("endpoint imag")
+                        .extract::<f64>()
+                        .expect("f64 imag");
+                    state.rotate_left(11)
+                        ^ real.to_bits().wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                        ^ imag.to_bits()
+                })
+        };
+        let time_former = || {
+            let started = Instant::now();
+            let output = numpy_nancumprod
+                .call((&input,), Some(&kwargs))
+                .expect("former numpy axis-0 nancumprod");
+            let elapsed = started.elapsed();
+            let checksum = checksum_output(&output);
+            black_box(output);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let time_candidate = || {
+            let started = Instant::now();
+            let output = fnp_nancumprod
+                .call((&input,), Some(&kwargs))
+                .expect("candidate axis-0 nancumprod");
+            let elapsed = started.elapsed();
+            let checksum = checksum_output(&output);
+            black_box(output);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let _ = common::run_median_ci_contract(
+            "python_complex_nancumprod_axis0",
+            time_former,
+            time_candidate,
+        );
+
+        group.bench_function("former_numpy_delegate_c128_1m", |bench| {
+            bench.iter(|| {
+                black_box(
+                    numpy_nancumprod
+                        .call((&input,), Some(&kwargs))
+                        .expect("former numpy axis-0 nancumprod"),
+                )
+            });
+        });
+        group.bench_function("candidate_gather_scan_scatter_c128_1m", |bench| {
+            bench.iter(|| {
+                black_box(
+                    fnp_nancumprod
+                        .call((&input,), Some(&kwargs))
+                        .expect("candidate axis-0 nancumprod"),
+                )
+            });
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_complex_unique_boundary(c: &mut Criterion) {
     // np.unique on a flat complex128 array. numpy sorts lexicographically (re, im) with a generic
     // introsort then dedups — ~2.8s @2M. fnp views as f64 pairs, parallel-sorts, dedups — bit-exact.
@@ -749,6 +880,10 @@ fn main() {
         (
             "bench_complex_cumulative_axis0_boundary",
             bench_complex_cumulative_axis0_boundary,
+        ),
+        (
+            "bench_complex_nancumprod_axis0_contract",
+            bench_complex_nancumprod_axis0_contract,
         ),
         (
             "bench_complex_unique_boundary",

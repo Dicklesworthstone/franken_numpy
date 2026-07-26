@@ -19,9 +19,260 @@ use criterion::Criterion;
 use pyo3::types::PyAnyMethods;
 use pyo3::{Bound, Py, PyAny, PyResult, Python};
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
+use std::fmt::Write as _;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
+
+pub const CONTRACT_ROUNDS: usize = 41;
+const CONTRACT_MIN_OF: usize = 3;
+const CONTRACT_BOOTSTRAP_RESAMPLES: usize = 4_096;
+
+#[derive(Clone, Copy)]
+pub struct ContractPairStats {
+    pub ratio_median: f64,
+    pub ratio_ci_low: f64,
+    pub ratio_ci_high: f64,
+    pub ratio_cv_pct: f64,
+    pub ratio_mad: f64,
+    pub arm_a_median_ns: f64,
+    pub arm_b_median_ns: f64,
+    pub checksum: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct ContractObservation {
+    pub elapsed: Duration,
+    pub checksum: u64,
+}
+
+fn self_identity() -> String {
+    let Ok(path) = std::env::current_exe() else {
+        return "unavailable".to_string();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return "unavailable".to_string();
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let digest = hasher.finalize();
+    let mut hash = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut hash, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("{} ({} bytes) {}", hash, bytes.len(), path.display())
+}
+
+fn report_bench_identity() {
+    println!("bench_elf_sha256={}", self_identity());
+    std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
+}
+
+fn median(values: &mut [f64]) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let mid = values.len() / 2;
+    if values.len() & 1 == 0 {
+        (values[mid - 1] + values[mid]) * 0.5
+    } else {
+        values[mid]
+    }
+}
+
+fn bootstrap_median_ci(values: &[f64]) -> (f64, f64) {
+    let mut state = 0x4d59_5df4_d0f3_3173u64 ^ values.len() as u64;
+    let mut resample = vec![0.0; values.len()];
+    let mut medians = Vec::with_capacity(CONTRACT_BOOTSTRAP_RESAMPLES);
+    for _ in 0..CONTRACT_BOOTSTRAP_RESAMPLES {
+        for slot in &mut resample {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *slot = values[(state as usize) % values.len()];
+        }
+        medians.push(median(&mut resample));
+    }
+    medians.sort_by(f64::total_cmp);
+    let low = CONTRACT_BOOTSTRAP_RESAMPLES * 25 / 1_000;
+    let high = (CONTRACT_BOOTSTRAP_RESAMPLES * 975 / 1_000).min(CONTRACT_BOOTSTRAP_RESAMPLES - 1);
+    (medians[low], medians[high])
+}
+
+fn mix_checksum(state: u64, value: u64) -> u64 {
+    state.rotate_left(11) ^ value.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0xa076_1d64_78bd_642f
+}
+
+fn min_observation<F>(operation: &mut F) -> ContractObservation
+where
+    F: FnMut() -> ContractObservation,
+{
+    let mut best = operation();
+    let mut checksum = best.checksum;
+    for _ in 1..CONTRACT_MIN_OF {
+        let observation = operation();
+        checksum = mix_checksum(checksum, observation.checksum);
+        if observation.elapsed < best.elapsed {
+            best.elapsed = observation.elapsed;
+        }
+    }
+    ContractObservation {
+        elapsed: best.elapsed,
+        checksum,
+    }
+}
+
+fn contract_pair_stats(arm_a: &[f64], arm_b: &[f64], checksum: u64) -> ContractPairStats {
+    let ratios = arm_a
+        .iter()
+        .zip(arm_b)
+        .map(|(a, b)| a / b)
+        .collect::<Vec<_>>();
+    let mut arm_a_sorted = arm_a.to_vec();
+    let mut arm_b_sorted = arm_b.to_vec();
+    let mut ratio_sorted = ratios.clone();
+    let arm_a_median_ns = median(&mut arm_a_sorted);
+    let arm_b_median_ns = median(&mut arm_b_sorted);
+    let ratio_median = median(&mut ratio_sorted);
+    let (ratio_ci_low, ratio_ci_high) = bootstrap_median_ci(&ratios);
+    let ratio_mean = ratios.iter().sum::<f64>() / ratios.len() as f64;
+    let ratio_variance = ratios
+        .iter()
+        .map(|ratio| {
+            let delta = ratio - ratio_mean;
+            delta * delta
+        })
+        .sum::<f64>()
+        / (ratios.len() - 1) as f64;
+    let mut deviations = ratios
+        .iter()
+        .map(|ratio| (ratio - ratio_median).abs())
+        .collect::<Vec<_>>();
+
+    ContractPairStats {
+        ratio_median,
+        ratio_ci_low,
+        ratio_ci_high,
+        ratio_cv_pct: ratio_variance.sqrt() * 100.0 / ratio_mean,
+        ratio_mad: median(&mut deviations),
+        arm_a_median_ns,
+        arm_b_median_ns,
+        checksum,
+    }
+}
+
+fn report_contract_pair(row: &str, stats: ContractPairStats) {
+    println!(
+        "PAIRED row={row} rounds={CONTRACT_ROUNDS} min_of={CONTRACT_MIN_OF} \
+         arm_a_median_ms={:.6} arm_b_median_ms={:.6} ratio_median={:.6} \
+         ratio_median_ci95=[{:.6},{:.6}] ratio_cv_pct={:.3} ratio_mad={:.6} checksum={:016x}",
+        stats.arm_a_median_ns / 1_000_000.0,
+        stats.arm_b_median_ns / 1_000_000.0,
+        stats.ratio_median,
+        stats.ratio_ci_low,
+        stats.ratio_ci_high,
+        stats.ratio_cv_pct,
+        stats.ratio_mad,
+        stats.checksum,
+    );
+}
+
+fn report_contract_gate(row: &str, effect: ContractPairStats, null: ContractPairStats) {
+    let null_half_width = (null.ratio_ci_low - 1.0)
+        .abs()
+        .max((null.ratio_ci_high - 1.0).abs());
+    let required_delta = (2.0 * null_half_width).max(0.01);
+    let effect_delta = effect.ratio_median - 1.0;
+    let outside_null_ci =
+        effect.ratio_median < null.ratio_ci_low || effect.ratio_median > null.ratio_ci_high;
+    let verdict = if outside_null_ci && effect_delta >= required_delta {
+        "DECIDABLE_WIN"
+    } else if outside_null_ci && effect_delta <= -required_delta {
+        "DECIDABLE_REGRESSION"
+    } else {
+        "UNDECIDED"
+    };
+    println!(
+        "MEDIAN_CI_GATE row={row} verdict={verdict} effect_ratio={:.6} \
+         null_ci95=[{:.6},{:.6}] null_half_width={:.6} required_2x_delta={required_delta:.6} \
+         cv_is_provenance_only=true",
+        effect.ratio_median, null.ratio_ci_low, null.ratio_ci_high, null_half_width,
+    );
+}
+
+/// Run a base/base null first, then an interleaved base/candidate effect in one
+/// process. Callers prove output parity before entering this timer.
+pub fn run_median_ci_contract<A, B>(
+    row: &str,
+    mut former: A,
+    mut candidate: B,
+) -> (ContractPairStats, ContractPairStats)
+where
+    A: FnMut() -> ContractObservation,
+    B: FnMut() -> ContractObservation,
+{
+    for _ in 0..4 {
+        black_box(min_observation(&mut former));
+        black_box(min_observation(&mut former));
+    }
+
+    // Contract order is deliberate: establish the base/base null before the
+    // candidate can perturb caches, allocator state, or worker scheduling.
+    let mut null_a_samples = Vec::with_capacity(CONTRACT_ROUNDS);
+    let mut null_b_samples = Vec::with_capacity(CONTRACT_ROUNDS);
+    let mut null_checksum = 0_u64;
+    for round in 0..CONTRACT_ROUNDS {
+        let (a, b) = if round & 1 == 0 {
+            (min_observation(&mut former), min_observation(&mut former))
+        } else {
+            let b = min_observation(&mut former);
+            (min_observation(&mut former), b)
+        };
+        assert_eq!(
+            a.checksum, b.checksum,
+            "base/base null arms produced different output checksums"
+        );
+        null_a_samples.push(a.elapsed.as_secs_f64() * 1.0e9);
+        null_b_samples.push(b.elapsed.as_secs_f64() * 1.0e9);
+        null_checksum = mix_checksum(null_checksum, a.checksum);
+    }
+    let null = contract_pair_stats(&null_a_samples, &null_b_samples, null_checksum);
+    report_contract_pair("null_base_aa", null);
+
+    for round in 0..4 {
+        if round & 1 == 0 {
+            black_box(min_observation(&mut former));
+            black_box(min_observation(&mut candidate));
+        } else {
+            black_box(min_observation(&mut candidate));
+            black_box(min_observation(&mut former));
+        }
+    }
+    let mut former_samples = Vec::with_capacity(CONTRACT_ROUNDS);
+    let mut candidate_samples = Vec::with_capacity(CONTRACT_ROUNDS);
+    let mut effect_checksum = 0_u64;
+    for round in 0..CONTRACT_ROUNDS {
+        let (former_elapsed, candidate_elapsed) = if round & 1 == 0 {
+            (
+                min_observation(&mut former),
+                min_observation(&mut candidate),
+            )
+        } else {
+            let candidate_elapsed = min_observation(&mut candidate);
+            (min_observation(&mut former), candidate_elapsed)
+        };
+        assert_eq!(
+            former_elapsed.checksum, candidate_elapsed.checksum,
+            "base/candidate arms produced different output checksums"
+        );
+        former_samples.push(former_elapsed.elapsed.as_secs_f64() * 1.0e9);
+        candidate_samples.push(candidate_elapsed.elapsed.as_secs_f64() * 1.0e9);
+        effect_checksum = mix_checksum(effect_checksum, former_elapsed.checksum);
+    }
+    let effect = contract_pair_stats(&former_samples, &candidate_samples, effect_checksum);
+    report_contract_pair("effect_former_over_candidate", effect);
+    report_contract_gate(row, effect, null);
+    (effect, null)
+}
 
 /// Import numpy on the interpreter, mapping the module handle away; every bench
 /// group calls this before allocating its inputs so a missing numpy fails loud.
@@ -96,6 +347,7 @@ pub type BenchGroup = (&'static str, fn(&mut Criterion));
 /// final summary. Mirrors the former `gated_benches!` macro's `main`: each entry
 /// is `(group_fn_name, group_fn)`, gated by [`group_enabled`].
 pub fn gated_main(targets: &[BenchGroup]) {
+    report_bench_identity();
     let mut criterion = Criterion::default().configure_from_args();
     for (name, target) in targets {
         if group_enabled(name) {
