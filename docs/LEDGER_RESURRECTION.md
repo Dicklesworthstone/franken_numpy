@@ -185,6 +185,29 @@ how, because the mistake is more instructive than the corrected number.
 A REJECT row is **VOID** when the measurement *could not have detected the
 lever* — as opposed to detecting it and finding it absent.
 
+> ## ⚠ SUPERSEDED — do not quote the counts below
+>
+> Everything from here down is the earlier `BlackThrush` pass. **The canonical
+> audit is the "Canonical six-class hand audit" section at the top of this
+> file**, and its counts are the ones to cite: **68 VOID / 122 classified
+> levers = 55.7%**, not the 99 / 146 = 67.8% below.
+>
+> The canonical pass is stricter in two ways and is right on both:
+>
+> 1. **It read all 145 rows in full by hand.** This pass hand-adjudicated only
+>    the queue head and the contestable classes, and screened the rest.
+> 2. **It uses exactly the six fleet classes** and declines the two this pass
+>    added. `VOID-UNMEASURED` is folded into `VOID-NONULL` — conservatively,
+>    since an interrupted run cannot establish negative evidence either way —
+>    and `VALID-MARGIN` is dropped entirely. Its `VALID-MECHANISM` count of 49
+>    against this pass's 18 shows the rescuing direction applied far more
+>    thoroughly, which is what the broadcast asked for.
+>
+> The sections below are retained as the working record of how the numbers were
+> derived, including §3.1's account of two screen bugs that are worth not
+> repeating. The **§6 enforcement gates and §5.1 rank-1 result remain current**
+> — those describe shipped code and a landed measurement, not counts.
+
 ---
 
 ## 1. Method
@@ -541,6 +564,19 @@ self-reported its own SHA-256 —
 **`verdict=WIN`** — `effect.median` clears `null.p90` by 3.3×, far outside the
 2× margin; `effect_above_one = 20/20`; the null brackets unity, so it is not a
 biased null.
+
+**Independently corroborated.** The cod lane implemented this lever separately
+and measured the production path at **3.496057× [3.405198, 3.715384]** (ELF
+`2377aeca…`). Each median sits inside the other's interval — two
+implementations, two harnesses, two runs on the same pinned worker, converging.
+The merge kept one live code path; the duplicate implementation is in history
+at `e4cad9a4` and is not in the tree.
+
+Do not confuse either figure with the **1.918783×** in the canonical section's
+Lane M table: that arm is a pure-Rust replica of the parse loop in
+`fnp-io/benches/criterion_io.rs`, which measures the kernel in isolation. The
+3.5–3.6× figures measure the real `fnp.loadtxt` public entry point. Different
+quantities, both sound; quote the one whose base matches the claim being made.
 
 **Every arm's `cv` is 9.6–16.5%. Under the predicate that originally rejected
 this row, it would have been rejected a second time.** That is the cleanest
