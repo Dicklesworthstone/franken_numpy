@@ -1599,6 +1599,313 @@ fn bench_geometric_inversion_cache(c: &mut Criterion) {
     group.finish();
 }
 
+#[derive(Clone, Copy)]
+enum LogseriesEnvelope {
+    Former,
+    LinearUpper,
+    Taylor,
+}
+
+#[inline(never)]
+fn counted_logseries_control(
+    generator: &mut Generator,
+    p: f64,
+    size: usize,
+    envelope: LogseriesEnvelope,
+) -> Result<(Vec<u64>, usize), RandomError> {
+    if p == 0.0 {
+        return Ok((
+            (0..size)
+                .map(|_| {
+                    let _ = generator.next_f64();
+                    1
+                })
+                .collect(),
+            0,
+        ));
+    }
+    if !(0.0..1.0).contains(&p) {
+        return Err(RandomError::InvalidParameter);
+    }
+    let r = (-p).ln_1p();
+    let mut expm1_calls = 0;
+    let output = (0..size)
+        .map(|_| {
+            loop {
+                let v = generator.next_f64();
+                if v >= p {
+                    return 1;
+                }
+                let u = generator.next_f64();
+                let exponent = r * u;
+                match envelope {
+                    LogseriesEnvelope::Former => {}
+                    LogseriesEnvelope::LinearUpper => {
+                        if v >= (-exponent).next_up() {
+                            return 1;
+                        }
+                    }
+                    LogseriesEnvelope::Taylor => {
+                        let x = -exponent;
+                        let x_squared = x * x;
+                        let q_lower = (-0.5_f64).mul_add(x_squared, x).next_down().next_down();
+                        let q_upper = x_squared
+                            .mul_add(x.mul_add(1.0 / 6.0, -0.5), x)
+                            .next_up()
+                            .next_up();
+                        if v >= q_upper {
+                            return 1;
+                        }
+                        let q_upper_squared = (q_upper * q_upper).next_up().next_up();
+                        if v < q_lower && v > q_upper_squared {
+                            return 2;
+                        }
+                    }
+                }
+                expm1_calls += 1;
+                let q = -exponent.exp_m1();
+                if v <= q * q {
+                    let result = (1.0 + v.ln() / q.ln()).floor() as i64;
+                    if result < 1 || v == 0.0 {
+                        continue;
+                    }
+                    return result as u64;
+                }
+                if v >= q {
+                    return 1;
+                }
+                return 2;
+            }
+        })
+        .collect();
+    Ok((output, expm1_calls))
+}
+
+fn time_logseries_fixed_trace(p: f64, size: usize, candidate: bool) -> TimedValue {
+    let mut generator = pcg64_generator();
+    let started = Instant::now();
+    let envelope = if candidate {
+        LogseriesEnvelope::Taylor
+    } else {
+        LogseriesEnvelope::Former
+    };
+    let output = counted_logseries_control(&mut generator, black_box(p), black_box(size), envelope)
+        .unwrap()
+        .0;
+    let mut elapsed = started.elapsed();
+    let checksum = mix_checksum(checksum_u64(&output), generator.next_u64());
+    let drop_started = Instant::now();
+    drop(black_box(output));
+    elapsed += drop_started.elapsed();
+    TimedValue { elapsed, checksum }
+}
+
+fn bench_logseries_taylor_envelope(c: &mut Criterion) {
+    const SIZE: usize = 100_000;
+    const P: f64 = 0.8;
+
+    for &p in &[
+        0.0,
+        f64::from_bits(1),
+        1.0e-12,
+        0.01,
+        0.25,
+        0.5,
+        0.8,
+        0.99,
+        1.0 - f64::EPSILON,
+    ] {
+        let mut former = pcg64_generator();
+        let mut linear = pcg64_generator();
+        let mut modeled = pcg64_generator();
+        let mut candidate = pcg64_generator();
+        let (former_output, _) =
+            counted_logseries_control(&mut former, p, 4_096, LogseriesEnvelope::Former).unwrap();
+        let (linear_output, _) =
+            counted_logseries_control(&mut linear, p, 4_096, LogseriesEnvelope::LinearUpper)
+                .unwrap();
+        let (modeled_output, _) =
+            counted_logseries_control(&mut modeled, p, 4_096, LogseriesEnvelope::Taylor).unwrap();
+        let candidate_output = candidate.logseries(p, 4_096).unwrap();
+        assert_eq!(former_output, linear_output, "linear output at p={p}");
+        assert_eq!(former_output, modeled_output, "modeled output at p={p}");
+        assert_eq!(former_output, candidate_output, "public output at p={p}");
+        let expected_after = former.next_u64();
+        assert_eq!(expected_after, linear.next_u64(), "linear stream at p={p}");
+        assert_eq!(
+            expected_after,
+            modeled.next_u64(),
+            "modeled stream at p={p}"
+        );
+        assert_eq!(
+            expected_after,
+            candidate.next_u64(),
+            "public stream at p={p}"
+        );
+    }
+
+    let mut former_count = pcg64_generator();
+    let mut linear_count = pcg64_generator();
+    let mut candidate_count = pcg64_generator();
+    let (former_output, former_expm1_calls) =
+        counted_logseries_control(&mut former_count, P, SIZE, LogseriesEnvelope::Former).unwrap();
+    let (linear_output, linear_expm1_calls) =
+        counted_logseries_control(&mut linear_count, P, SIZE, LogseriesEnvelope::LinearUpper)
+            .unwrap();
+    let (candidate_output, candidate_expm1_calls) =
+        counted_logseries_control(&mut candidate_count, P, SIZE, LogseriesEnvelope::Taylor)
+            .unwrap();
+    assert_eq!(former_output, linear_output);
+    assert_eq!(former_output, candidate_output);
+    let expected_after = former_count.next_u64();
+    assert_eq!(expected_after, linear_count.next_u64());
+    assert_eq!(expected_after, candidate_count.next_u64());
+    println!(
+        "COUNTED_MECHANISM row=logseries_taylor_envelope_expm1_elision \
+         outputs={SIZE} former_expm1_calls={former_expm1_calls} \
+         linear_expm1_calls={linear_expm1_calls} candidate_expm1_calls={candidate_expm1_calls} \
+         removed={} removed_pct={:.3}",
+        former_expm1_calls - candidate_expm1_calls,
+        (former_expm1_calls - candidate_expm1_calls) as f64 * 100.0 / former_expm1_calls as f64,
+    );
+
+    let _ = run_median_ci_contract(
+        "logseries_taylor_envelope_expm1_elision",
+        || time_logseries_fixed_trace(P, SIZE, false),
+        || time_logseries_fixed_trace(P, SIZE, false),
+        || time_logseries_fixed_trace(P, SIZE, false),
+        || time_logseries_fixed_trace(P, SIZE, true),
+    );
+
+    let mut rejected_model = pcg64_generator();
+    let mut group = c.benchmark_group("logseries_taylor_envelope_expm1_elision");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements(SIZE as u64));
+    group.bench_function("rejected_taylor_model", |bench| {
+        bench.iter(|| {
+            black_box(
+                counted_logseries_control(
+                    &mut rejected_model,
+                    black_box(P),
+                    black_box(SIZE),
+                    LogseriesEnvelope::Taylor,
+                )
+                .unwrap(),
+            )
+        })
+    });
+    group.finish();
+}
+
+fn checksum_f64_rows(rows: &[Vec<f64>]) -> u64 {
+    rows.iter().fold(rows.len() as u64, |state, row| {
+        mix_checksum(state, checksum_f64(row))
+    })
+}
+
+fn time_multivariate_normal_diag_fixed_trace(
+    mean: &[f64],
+    cov_diag: &[f64],
+    size: usize,
+    candidate: bool,
+) -> TimedValue {
+    let mut generator = pcg64_generator();
+    let started = Instant::now();
+    let output = if candidate {
+        generator
+            .multivariate_normal_diag_cached_sqrt_control(mean, cov_diag, size)
+            .unwrap()
+    } else {
+        generator
+            .multivariate_normal_diag(mean, cov_diag, size)
+            .unwrap()
+    };
+    let mut elapsed = started.elapsed();
+    let checksum = mix_checksum(checksum_f64_rows(&output), generator.next_u64());
+    let drop_started = Instant::now();
+    drop(black_box(output));
+    elapsed += drop_started.elapsed();
+    TimedValue { elapsed, checksum }
+}
+
+fn bench_multivariate_normal_diag_sqrt_cache(c: &mut Criterion) {
+    const DIMENSIONS: usize = 64;
+    const SIZE: usize = 4_096;
+
+    let mean = vec![0.25; DIMENSIONS];
+    let cov_diag = (0..DIMENSIONS)
+        .map(|index| 0.25 + (index + 1) as f64 / DIMENSIONS as f64)
+        .collect::<Vec<_>>();
+
+    let mut former_proof = pcg64_generator();
+    let mut candidate_proof = pcg64_generator();
+    let former_output = former_proof
+        .multivariate_normal_diag(&mean, &cov_diag, SIZE)
+        .unwrap();
+    let candidate_output = candidate_proof
+        .multivariate_normal_diag_cached_sqrt_control(&mean, &cov_diag, SIZE)
+        .unwrap();
+    assert_eq!(
+        checksum_f64_rows(&former_output),
+        checksum_f64_rows(&candidate_output)
+    );
+    for (former_row, candidate_row) in former_output.iter().zip(&candidate_output) {
+        assert_eq!(
+            former_row
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            candidate_row
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(former_proof.next_u64(), candidate_proof.next_u64());
+
+    let former_sqrt_calls = DIMENSIONS * SIZE;
+    let candidate_sqrt_calls = DIMENSIONS;
+    println!(
+        "COUNTED_MECHANISM row=multivariate_normal_diag_sqrt_cache \
+         outputs={} former_sqrt_calls={former_sqrt_calls} \
+         candidate_sqrt_calls={candidate_sqrt_calls} removed={} removed_pct={:.5}",
+        DIMENSIONS * SIZE,
+        former_sqrt_calls - candidate_sqrt_calls,
+        (former_sqrt_calls - candidate_sqrt_calls) as f64 * 100.0 / former_sqrt_calls as f64,
+    );
+
+    let _ = run_median_ci_contract(
+        "multivariate_normal_diag_sqrt_cache",
+        || time_multivariate_normal_diag_fixed_trace(&mean, &cov_diag, SIZE, false),
+        || time_multivariate_normal_diag_fixed_trace(&mean, &cov_diag, SIZE, false),
+        || time_multivariate_normal_diag_fixed_trace(&mean, &cov_diag, SIZE, false),
+        || time_multivariate_normal_diag_fixed_trace(&mean, &cov_diag, SIZE, true),
+    );
+
+    let mut generator = pcg64_generator();
+    let mut group = c.benchmark_group("multivariate_normal_diag_sqrt_cache");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements((DIMENSIONS * SIZE) as u64));
+    group.bench_function("rejected_cached_sqrt_control", |bench| {
+        bench.iter(|| {
+            black_box(
+                generator
+                    .multivariate_normal_diag_cached_sqrt_control(
+                        black_box(&mean),
+                        black_box(&cov_diag),
+                        black_box(SIZE),
+                    )
+                    .unwrap(),
+            )
+        })
+    });
+    group.finish();
+}
+
 #[inline(never)]
 fn former_zipf_single(generator: &mut Generator, a: f64) -> i64 {
     if a >= 1025.0 {
@@ -2140,6 +2447,8 @@ criterion_group!(
     bench_noncentral_chisquare_fixed_shape_cache,
     bench_hypergeometric_hrua_cache,
     bench_geometric_inversion_cache,
+    bench_logseries_taylor_envelope,
+    bench_multivariate_normal_diag_sqrt_cache,
     bench_zipf_parameter_cache,
     bench_random_state_zipf_parameter_cache,
     bench_random_state_gamma_shape_cache,
@@ -2147,6 +2456,18 @@ criterion_group!(
 
 fn main() {
     report_bench_identity();
+    if std::env::var_os("FNP_RANDOM_MVN_DIAG_PROFILE_ONLY").is_some() {
+        let mut criterion = Criterion::default().configure_from_args();
+        bench_multivariate_normal_diag_sqrt_cache(&mut criterion);
+        criterion.final_summary();
+        return;
+    }
+    if std::env::var_os("FNP_RANDOM_LOGSERIES_PROFILE_ONLY").is_some() {
+        let mut criterion = Criterion::default().configure_from_args();
+        bench_logseries_taylor_envelope(&mut criterion);
+        criterion.final_summary();
+        return;
+    }
     benches();
     Criterion::default().configure_from_args().final_summary();
 }

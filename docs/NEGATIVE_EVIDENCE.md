@@ -4,6 +4,194 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-26 - LANE M BANK CONFIRMATION (2 KEEP): tail ring 1.224x and selected-bool direct parse 3.465x under executed-ELF A/A median-CI
+
+`VioletOwl`, cod / Lane M, following the allocation addendum's two named
+directional redecisions. The ledger was screened first: both former CV-only
+REJECT rows are already superseded by the canonical resurrection closeout
+below. This pass re-confirmed the shipped paths on strict-remote
+`vmi1149989`, with all eight worker slots reserved and execution pinned to
+CPU 6. Release LTO was disabled. Every verdict used the bootstrap median-CI
+contract; CV was printed as provenance and never gated.
+
+The fnp-io invocation self-reported the executed binary as
+`bench_elf_sha256=ea36c70f0937454755aae8d77f1595da7bae921f49e9d038799d8047e8fb564e`
+(5,142,736 bytes). The all-negative signed-`usecols` gate compared the former
+full-row token retention with the shipped bounded tail ring:
+
+| row | median ratio | bootstrap median CI95 | CV (provenance only) |
+|---|---:|---:|---:|
+| A/A former/former | 0.940297 | [0.911045, 0.982334] | 12.546% |
+| A/B former/tail ring | **1.224245** | **[1.118812, 1.299153]** | 17.296% |
+
+The biased null widened, rather than relaxed, the gate: its maximum distance
+from unity was 0.088955, so the required two-null-width effect was 0.177910.
+The measured 0.224245 delta still cleared it. Exact dimensions, duplicate
+column order, and every output `f64::to_bits()` matched the former replica
+before timing; checksum `fe47f366bfb808d2` matched across all timed arms.
+Verdict: **KEEP CONFIRMED**. Retry predicate remains closed: reopen only a
+separately profiled scanner primitive, not another full-row/tail-ring
+comparison.
+
+The same fnp-io ELF independently re-confirmed the parser-only selected-bool
+mechanism at 2.637895x, but the banked production claim comes from the full
+Python entry point. That invocation self-reported
+`bench_elf_sha256=4527aadbd8e543310622ac9f737bef8963273b57ed1cb1877a8c82fb3284b4fd`
+(47,323,288 bytes), then asserted the negative-index former path, positive-index
+direct path, and live NumPy result byte-for-byte equal on the same file before
+timing:
+
+| row | median ratio | bootstrap median CI95 | CV (provenance only) |
+|---|---:|---:|---:|
+| A/A former/former | 1.001104 | [0.994382, 1.002883] | 5.344% |
+| A/B former/direct parse | **3.465137** | **[3.255616, 3.666974]** | 15.405% |
+
+The required two-null-width delta was 0.011236; all arms carried checksum
+`30fb6a0b5c0da785`. The requested group completed and emitted its verdict
+before the monolithic bench was interrupted when RCH failed to propagate the
+outer group filter and began unrelated groups. A clean-exit repeat was
+fail-closed rather than rerouted locally after the pinned worker returned
+`RCH-I001 queue_timeout`. The completed row agrees with the two earlier clean
+production-path runs (3.496057x and 3.636795x) and therefore confirms rather
+than replaces them. Verdict: **KEEP CONFIRMED**. Retry predicate remains
+closed: reopen only when a fresh profile attributes at least 5% exact
+self-time to a different remaining borrowed-slice primitive; never reopen on
+CV.
+
+PRIMITIVE BUS: the owned communication-avoiding/fusion design was published
+as Agent Mail message 3891 on thread
+`perf-campaign-20260725-primitives`. It records the AVX2 square-k closure
+(MR=4 x NR=8; six alternatives lose 2.3-38.8%; same-shape `std::simd` has no
+separable effect), the short-k exception (MR=2 x NR=8 wins for k <= 128), and
+the reusable ordered two-pass row-major Householder panel update. The new
+x86-64-v3 fleet floor makes genuinely SSE2-measured tile rows retryable, but
+does not reopen these rows: this repo measured them with `+avx2`. Full
+x86-64-v3 also enables FMA and is a correctness change here, so numerical
+consumers such as frankenscipy must prove their rounding contract separately.
+
+## 2026-07-26 - REJECT / VALID-AB: diagonal-normal sqrt cache removes 99.976% of square roots but stays inside A/A
+
+`VioletOwl`, bead `franken_numpy-ixs5y.381`, cod / Lane M. After two
+logseries rejects, the vein switched. Ledger screening found no prior
+`Generator::multivariate_normal_diag` performance row.
+
+PROFILE FIRST, production untouched: strict-remote `vmi1149989`, CPU 6, and
+the 4,096-by-64 workload measured 1.5220 ms (`[1.4150, 1.6483]`) in executing
+ELF `644030eeb18e8a5cd8b055665b942c8f943ea0e30f3eea5cbd94c409f260e584`.
+A 499 Hz userspace-cycle profile captured 674 samples with zero loss. The
+inner `Vec<f64>` collect frame held **22.04% self-time**, a 1.283× Amdahl
+ceiling if fully removed. Annotation placed `vsqrtsd` in that loop immediately
+before the dependency-chained multiply/add; normal sampling held 47.72% self
+and RNG `next_u64` held 13.82%.
+
+ONE LEVER: compute each fixed covariance-diagonal square root once per batch
+and reuse it across rows. The counted mechanism fell from 262,144 square roots
+to 64: **262,080 / 99.97559% removed**. The decisive same-invocation run used
+executing ELF
+`bench_elf_sha256=1aaa5a956405b3c11b8098b8e272b23aa41aa6a267644fd91c44b354e7591a30`
+(5,261,952 bytes):
+
+| row | median ratio | bootstrap median CI95 | CV (provenance only) |
+|---|---:|---:|---:|
+| A/A former/former | 1.002085 | [0.991465, 1.016567] | 17.628% |
+| A/B former/candidate | 1.015351 | [1.006503, 1.033002] | 14.047% |
+
+The 1.535% direction is inside its A/A interval and below the required
+1.033135 two-null-width boundary. CV was printed and never gated. Full
+element-bit and next-RNG-word equality passed for ordinary, zero, negative
+zero, NaN, infinity, unequal-length, empty-size, and invalid-negative
+covariance fixtures; the focused release suite passed 2 tests.
+
+Verdict: **REJECT / VALID-AB**. Production was restored; the retained rejected
+candidate control remains for reproduction. Retry predicate: do not retry this
+64-wide regime from wall direction alone. Reopen only if a different
+dimension/row geometry profiles the square-root dependency at at least 10%
+standalone self-time, or a pinned run first counts at least 3% fewer
+userspace cycles/instructions and has an A/A CI half-width no wider than 0.75%.
+
+## 2026-07-26 - REJECT / VALID-AB: logseries Taylor envelope removes 46.881% of `expm1` calls but regresses 14.8%
+
+`VioletOwl`, bead `franken_numpy-ixs5y.381`, cod / Lane M. This was the
+counted retry admitted by the immediately following linear-bound row. The
+profile was unchanged: `__expm1_fma` held 43.11% self-time in the exact
+`logseries(0.8, 100_000)` vehicle.
+
+ONE LEVER: use the analytic envelope
+`x - x^2/2 <= 1 - exp(-x) <= x - x^2/2 + x^3/6` to prove both existing
+constant-result branches (`1` and `2`) before the exact `expm1` fallback.
+Bounds were widened by two ulps. A counted same-stream run reduced exact
+`expm1` calls from 79,958 to 42,473: **37,485 calls / 46.881% removed**.
+All ambiguous cases retained the former expression.
+
+The decisive same-invocation run used strict-remote `vmi1149989`, CPU 6, and
+executing ELF
+`bench_elf_sha256=6bb1ab0be119c9bfed4a937dda18cd16507e6307aba92537277c1d80364e0e35`
+(5,228,984 bytes):
+
+| row | median ratio | bootstrap median CI95 | CV (provenance only) |
+|---|---:|---:|---:|
+| A/A former/former | 0.992158 | [0.984602, 1.007416] | 9.543% |
+| A/B former/candidate | **0.852178** | [0.841719, 0.859623] | 6.892% |
+
+The median-CI gate decisively classifies a regression: the extra polynomial,
+bound-widening, and branch work costs more than the eliminated libc calls.
+CV was never a gate. The same ELF proved exact output and next-RNG-word parity
+for the former, linear, Taylor-model, and public paths across nine probability
+regimes. The focused release logseries suite passed all 7 tests.
+
+Verdict: **REJECT / VALID-AB**. Production was restored and this vein was
+left after two rejects rather than spending a third attempt on another
+branch-heavy bound. Retry predicate: do not retry Taylor envelopes. Reopen
+only if a fresh profile on different hardware still attributes at least 40%
+self-time to `expm1` and a branchless, exact-output construction demonstrates
+at least 15% fewer userspace instructions before wall timing.
+
+## 2026-07-26 - REJECT / VALID-AB: logseries linear upper bound removes 24.871% of `expm1` calls but stays inside A/A
+
+`VioletOwl`, bead `franken_numpy-ixs5y.381`, cod / Lane M. The ledger was
+screened before editing. Geometric parameter construction is closed, while the
+older random-family sweep explicitly left the logseries-class rejection body
+open behind a profile-first predicate; no prior logseries performance row was
+found.
+
+PROFILE FIRST, production untouched: on strict-remote worker `vmi1149989`,
+pinned to CPU 6, `Generator::logseries(0.8, 100_000)` measured a 2.7050 ms
+median (`[2.6445, 2.7715]`). A userspace-cycle profile of the same retained
+vehicle captured 458 samples with zero loss. `__expm1_fma` held **43.11%**
+self-time, for a 1.758× Amdahl ceiling if fully eliminated; the logseries
+closure held 22.79%, `RngBackend::next_f64` 15.02%, and
+`__ieee754_log_fma` 13.05%.
+
+ONE LEVER: before evaluating `q = -expm1(r*u)`, use the identity
+`-expm1(x) <= -x` for `x <= 0` (widened upward by one ulp) to return the
+already-determined `1` outcome when `v` is above that upper bound. Ambiguous
+draws still execute the former formula. A counted same-stream model over
+100,000 outputs reduced exact `expm1` calls from 79,958 to 60,072: **19,886
+calls / 24.871% removed**.
+
+The decisive invocation used one release ELF on the same worker and CPU:
+`bench_elf_sha256=17c6099b5895a5f5fb5a049fbac5eed1acddc1ee6879459cb9091a9688d2fad3`
+(5,222,912 bytes). It ran the base/base A/A null and former/candidate effect
+back-to-back, each as 41 alternating paired rounds with min-of-3 observations:
+
+| row | median ratio | bootstrap median CI95 | CV (provenance only) |
+|---|---:|---:|---:|
+| A/A former/former | 0.999099 | [0.980800, 1.024205] | 8.508% |
+| A/B former/candidate | 1.009094 | [0.995441, 1.019366] | 9.040% |
+
+The effect is inside its own A/A interval and below the required 1.048410
+two-null-width boundary. CV was printed and never gated. The same invocation
+proved exact output and post-call RNG-state parity at nine probabilities from
+zero/subnormal through `1 - EPSILON`; the focused release logseries suite
+passed 7 tests including both live NumPy oracle cases.
+
+Verdict: **REJECT / VALID-AB**. The speculative production edit was restored;
+the retained same-binary vehicle remains. Retry predicate: do not retry the
+linear upper bound. Reopen this surface only for a different exact envelope
+that counts at least 50% fewer `expm1` calls at `p=0.8`, preserves the output
+and next RNG word, and is re-decided under the same pinned-worker A/A
+median-CI gate.
+
 ## 2026-07-26 - CANONICAL RESURRECTION CLOSEOUT (3 KEEP, 2 REJECT/VALID-AB): six-class hand audit and corrected profile-ranked top five
 
 `VioletOwl`, bead `franken_numpy-ixs5y.380`, cod / Lane M. This entry

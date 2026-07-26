@@ -6233,6 +6233,37 @@ impl Generator {
             .collect())
     }
 
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn multivariate_normal_diag_cached_sqrt_control(
+        &mut self,
+        mean: &[f64],
+        cov_diag: &[f64],
+        size: usize,
+    ) -> Result<Vec<Vec<f64>>, RandomError> {
+        if cov_diag.iter().any(|&v| v < 0.0) {
+            return Err(RandomError::InvalidParameter);
+        }
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        let standard_deviations = cov_diag
+            .iter()
+            .take(mean.len())
+            .map(|value| value.sqrt())
+            .collect::<Vec<_>>();
+        Ok((0..size)
+            .map(|_| {
+                mean.iter()
+                    .zip(&standard_deviations)
+                    .map(|(&m, &standard_deviation)| {
+                        m + self.sample_standard_normal_single() * standard_deviation
+                    })
+                    .collect()
+            })
+            .collect())
+    }
+
     /// Negative binomial distribution (np.random.negative_binomial).
     /// Number of failures before `n` successes, with success probability `p`.
     ///
@@ -13728,6 +13759,54 @@ for child in rng.spawn(n_children):
         let mean1: f64 = samples.iter().map(|s| s[1]).sum::<f64>() / 1000.0;
         assert!(mean0.abs() < 0.3);
         assert!((mean1 - 5.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn multivariate_normal_diag_hoisted_sqrt_matches_former_stream() {
+        let fixtures = [
+            (vec![0.0, 5.0, -2.0, 1.0], vec![1.0, 4.0, 0.25, 9.0], 4_096),
+            (
+                vec![1.0, 2.0, 3.0, 4.0],
+                vec![0.0, -0.0, f64::NAN, f64::INFINITY],
+                257,
+            ),
+            (vec![1.0, 2.0], vec![1.0, 4.0, 9.0], 31),
+            (vec![1.0, 2.0, 3.0], vec![1.0], 31),
+            (vec![1.0, 2.0], vec![1.0, 4.0], 0),
+        ];
+
+        for (mean, cov_diag, size) in fixtures {
+            let mut former = test_generator();
+            let mut candidate = test_generator();
+            let former_output = former
+                .multivariate_normal_diag(&mean, &cov_diag, size)
+                .unwrap();
+            let candidate_output = candidate
+                .multivariate_normal_diag_cached_sqrt_control(&mean, &cov_diag, size)
+                .unwrap();
+            assert_eq!(former_output.len(), candidate_output.len());
+            for (former_row, candidate_row) in former_output.iter().zip(&candidate_output) {
+                assert_eq!(
+                    former_row
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    candidate_row
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                );
+            }
+            assert_eq!(former.next_u64(), candidate.next_u64());
+        }
+
+        let mut former = test_generator();
+        let mut candidate = test_generator();
+        assert_eq!(
+            former.multivariate_normal_diag(&[0.0], &[-1.0], 1),
+            candidate.multivariate_normal_diag_cached_sqrt_control(&[0.0], &[-1.0], 1)
+        );
+        assert_eq!(former.next_u64(), candidate.next_u64());
     }
 
     #[test]
