@@ -105,4 +105,7 @@ fn bench_equal_shape_clone(c: &mut Criterion) {
 }
 
 criterion_group!(benches, bench_equal_shape_clone, bench_broadcast);
-criterion_main!(benches);
+#[path = "../../bench_identity.rs"]
+mod bench_identity;
+
+criterion_main!(bench_identity::report_bench_identity, benches);

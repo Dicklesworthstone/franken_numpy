@@ -1098,4 +1098,7 @@ criterion_group!(
     bench_batch_matrix_norm_column_sum,
 );
 
-criterion_main!(benches);
+#[path = "../../bench_identity.rs"]
+mod bench_identity;
+
+criterion_main!(bench_identity::report_bench_identity, benches);

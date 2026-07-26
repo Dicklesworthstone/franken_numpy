@@ -176,4 +176,7 @@ fn bench_kron(c: &mut Criterion) {
 }
 
 criterion_group!(benches, bench_kron);
-criterion_main!(benches);
+#[path = "../../bench_identity.rs"]
+mod bench_identity;
+
+criterion_main!(bench_identity::report_bench_identity, benches);

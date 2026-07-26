@@ -744,6 +744,7 @@ name = "fnp-ndarray"
 version = "0.2.0"
 dependencies = [
  "criterion",
+ "sha2 0.11.0",
 ]
 
 [[package]]

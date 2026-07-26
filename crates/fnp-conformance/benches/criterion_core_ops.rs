@@ -405,4 +405,7 @@ criterion_group! {
     config = criterion_config();
     targets = bench_core_ops, bench_reduce_prod_row_band_median_gate, bench_nditer_c_external_chunk
 }
-criterion_main!(benches);
+#[path = "../../bench_identity.rs"]
+mod bench_identity;
+
+criterion_main!(bench_identity::report_bench_identity, benches);

@@ -4,6 +4,125 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-26 - CANONICAL RESURRECTION CLOSEOUT (3 KEEP, 2 REJECT/VALID-AB): six-class hand audit and corrected profile-ranked top five
+
+`VioletOwl`, bead `franken_numpy-ixs5y.380`, cod / Lane M. This entry
+supersedes the provisional 4/5 queue farther below. The mechanical parser
+selected 146 possible negatives from the 1,005-entry `f4d70a5e` snapshot; one
+was a heading parse artifact. Every remaining row was read in full by hand.
+Twenty-three non-lever reports were excluded and 122 rejected levers were
+adjudicated with exactly the frankenfs six-class taxonomy:
+
+| class | count |
+|---|---:|
+| `VALID-PROFILE` | 0 |
+| `VALID-MECHANISM` | 49 |
+| `VALID-AB` | 5 |
+| `VOID-CV` | 5 |
+| `VOID-ZEROSELF` | 0 |
+| `VOID-NONULL` | 63 |
+
+VOID is 68/122 = **55.7%**; 63/68 VOID rows are `VOID-NONULL`. Executing-binary
+SHA-256 provenance existed in only 21/122 = **17.2%** of classified reject
+rows. `docs/LEDGER_RESURRECTION.md` contains the complete 145-row hand map.
+
+RERUN CONTRACT: all corrected top-five runs used strict-remote
+`vmi1227854`, pinned to CPU 6 with all eight worker slots held. The executing
+ELF emitted `bench_elf_sha256=...` as output line one. Each invocation ran its
+base/base A/A null before its interleaved base/candidate effect, bootstrapped a
+95% confidence interval for the median of per-round ratios, and gated on the
+effect clearing twice the A/A CI half-width. CV was printed only as provenance.
+Every timed pair checked an exact output checksum.
+
+| profile rank | target | A/A median CI95 | effect median CI95 | verdict |
+|---:|---|---|---|---|
+| 1 | L2447 C-order `Nditer` element-step odometer, decode 44.0% | 1.022770 [1.006650, 1.058581] | 1.016927 [1.002447, 1.051011] | **REJECT / VALID-AB** |
+| 2 | L2346 usecols direct scatter, fn + allocator approximately 21% | 1.002036 [0.980107, 1.019245] | 1.034835 [1.025527, 1.039039] | **REJECT / VALID-AB** |
+| 3 | L477 Generator Zipf invariant terms, 12.93% | 0.993360 [0.986830, 0.997768] | **1.364282 [1.348971, 1.396232]** | **KEEP** |
+| 4 | L2110 noncentral chi-square fixed gamma cache, 12.11% | 0.989887 [0.978433, 1.007559] | **1.108215 [1.076852, 1.132333]** | **KEEP** |
+| 5 | L806 negative-usecols tail ring, collect 10.67% | 1.014925 [0.983995, 1.056524] | **1.171830 [1.111937, 1.234068]** | **KEEP** |
+
+ELF AND CHECKSUM PROVENANCE:
+
+- Rank 1 run 1:
+  `bench_elf_sha256=2d8f85747cc703b899e54ec4fcb17125d07a3db9f1efb93f327701f74598ee8e`
+  (3,885,208 bytes), checksum `52a9418a7fd74354`.
+- Rank 1 repeat:
+  `bench_elf_sha256=12cf201485beb3152be2da628d1653532b5f4149e74ec3ad34af58005f222009`
+  (3,885,184 bytes), A/A 0.990316 [0.960183, 1.043890], effect 1.020997
+  [0.987467, 1.051449], same checksum.
+- Rank 2:
+  `bench_elf_sha256=05ca263ea39f01bdd3d68d62088555861a54060fc31273e4650c9a23c051cb47`
+  (5,143,048 bytes), checksum `a2e078ba6c280f6d`.
+- Rank 3:
+  `bench_elf_sha256=f25d6a15885cc81796958247664798850be17702934a2f44c77d04a98e29f9eb3`
+  (5,150,304 bytes), checksum `7530e1225533b088`.
+- Rank 4:
+  `bench_elf_sha256=08b0ceca45d80e88d19f170e0b76ef4de80d57b3e07b6ace2430c8ba8fb55508`
+  (5,192,840 bytes), checksum `983fa2c568e726e7`.
+- Rank 5:
+  `bench_elf_sha256=5b3e2e3cd3079ac8bcba841e01e4d4003cdf95d55c00442ad8f7e43f5f762a13`,
+  checksum `fe47f366bfb808d2`.
+
+RANK 1 ADJUDICATION: the candidate passed 29 focused iterator tests, but its
+direction sat inside the A/A band in two independently built ELFs and flipped
+relative to the null between runs. Production and benchmark source were
+restored manually; no speculative source remains. Retry predicate: only when
+performance counters on this exact production `Nditer::next` candidate show at
+least 10% fewer instructions or cycles and the pinned A/A CI half-width is at
+most 1%; do not retry from wall direction alone.
+
+RANK 2 ADJUDICATION: effect 1.034835 did not clear the required 1.039787
+median-CI boundary. Production was untouched; the exact bench vehicle remains.
+Retry predicate: rerun that vehicle only when the A/A half-width is below 1.74%
+or the effect reaches 1.039787. A changed vehicle first needs a fresh profile
+and counted work-removal proof.
+
+RANK 3 KEEP: fixed Generator Zipf terms are cached once per batch with exact
+stream parity. Retry predicate: closed for this fixed-parameter regime; reopen
+only a different Zipf regime with at least 5% newly profiled self-time.
+
+RANK 4 KEEP: the existing fixed `GammaShapeCache` is constructed once for the
+eligible central and normal-shift batch regimes while the draw-dependent
+mixture stays unchanged; focused stream tests passed. Retry predicate: closed
+for the measured regime; reopen only a distinct shape or dtype with at least 5%
+newly profiled self-time and an exact next-state proof.
+
+RANK 5 KEEP: the bounded negative-usecols tail ring eliminates full-row
+retention while preserving shape, order, duplicates, output bits, and error
+precedence. Retry predicate: reopen only a separately profiled scanner
+primitive, not another full-row/tail-ring comparison.
+
+ALLOCATION-ADDENDUM DIRECTIONAL REDECISIONS:
+
+- Selected-bool `loadtxt(usecols)` direct parse was re-won. The final production
+  binary self-reported
+  `bench_elf_sha256=2377aeca302c2dcdc2cfa167fb85032c2d8b015606ca8247ede0d437e2143a55`
+  (47,322,576 bytes). A/A was 1.034931 [0.983311, 1.096850]; effect was
+  **3.496057 [3.405198, 3.715384]**, checksum `30fb6a0b5c0da785`.
+  The required two-null-width delta was 0.193701, so the final implementation
+  is a decisive median-CI KEEP even though effect CV was 17.179%. Retry
+  predicate: reopen only if a fresh profile attributes over 5% exact self-time
+  to a different remaining borrowed-slice primitive; never reopen on CV.
+- The negative-usecols tail ring is rank 5 above and passed the same corrected
+  median-CI contract. Its old CV-only rejection is superseded.
+
+FRONTIER AFTER THE CORRECTED FIVE:
+
+- Legacy `RandomState` Zipf also kept:
+  `bench_elf_sha256=f25d6a15885cc81796958247664798850be17702934a2f44c77d04a98e29f9eb3`,
+  A/A 1.007235 [0.983586, 1.027082], effect
+  **1.262239 [1.222448, 1.307291]**. Retry predicate:
+  closed for the fixed-parameter legacy regime; profile a different sampler.
+- The adjacent legacy gamma cache stayed undecided: A/A 0.998865
+  [0.983144, 1.022052], effect 0.955953 [0.938618, 0.982687]. Retry predicate:
+  rerun only with a pinned A/A half-width below 1% or counted evidence that the
+  exact candidate removes at least 5% of cycles.
+
+Canonical yield is **3/5**, plus the two allocation-addendum directional
+levers re-won and one additional Zipf frontier KEEP. No three-REJECT streak
+occurred; the NO-CEILING vein switch was not triggered.
+
 ## 2026-07-26 - RESURRECTION WIN (KEEP): selected-bool `loadtxt(usecols)` direct token parse - 3.6368x under the median-CI gate, overturning the cv-gate REJECT of `.377`
 
 `BlackThrush`, bead `deadlock-audit-8mrfx`, resurrecting
@@ -201,6 +320,109 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MALLOC_MMAP_THRESHOLD_=1073741824 \
 ```
 
 Harness preserved at `tests/artifacts/perf/2026-07-25_elementwise_allocation_mechanism_BlackThrush/fusion_headroom.py`.
+
+## 2026-07-25 - SUPERSEDED PROVISIONAL RESURRECTION/HARNESS (4 KEEP, 1 REJECT): early queue before the canonical six-class hand audit
+
+`VioletOwl`, bead `franken_numpy-ixs5y.380`. The full 30,235-line ledger was
+audited before proposing any new lever. All 145 negative entries were read and
+classified in `docs/LEDGER_RESURRECTION.md`: 24 VOID, 31 SOUND, and 90
+SOUND-WEAK. The five highest-value VOID entries were then reconstructed in
+rank order. This row records every timed result; the two worker-admission
+failures described below never reached a benchmark and are not lever evidence.
+
+HARNESS FIRST: the active `fnp-io`, `fnp-iter`, `fnp-random`, and split
+`fnp-python` campaign targets now hash their executing `current_exe()` and
+self-report its SHA-256 as the binary's first output line. Each resurrection
+contract runs 41 rounds with three inner replicates, keeps the minimum, and
+alternates arm order. It executes `paired(base, base)` first and
+`paired(base, candidate)` second in the same process, checks an output checksum
+on every pair, bootstraps a 95% CI for the median of per-round ratios, and
+requires the effect's distance from unity to clear twice the A/A CI half-width
+(with a 1% minimum). CV and MAD are printed only as provenance; neither can
+change the verdict.
+
+The addendum's Lane M re-decision used one quiet worker for both named
+directional levers: `vmi1227854`, pinned to CPU 6 with all eight RCH slots
+reserved (`cargo -j8`, zero slots remaining), strict remote admission, and
+self-healing disabled so failure could not reroute or fall back locally. An
+earlier all-slot request to `hz2` ended in `RCH-I001 queue_timeout`; an idle
+request to `vmi1152480` failed preflight with
+`RCH-I004 alias_wrong_target:/data`. Neither produced a timing.
+
+| rank / resurrection | worker / ELF SHA-256 | A/A base ratio, median CI95 | base/candidate ratio, median CI95 | exact checksum | verdict |
+|---|---|---|---|---|---|
+| 1. selected-bool `loadtxt(usecols)` direct parse | exclusive `vmi1227854`, `1951dabb76d3a0215e22150a3c5144f495827e76062c5870ab0721e74d4c8fb1` | 0.998879, [0.996542, 1.004521] | **1.918783**, [1.805047, 2.016407] | `2fc7a01c2d73b13a` | **KEEP** |
+| 2. all-negative signed-`usecols` bounded tail ring | exclusive `vmi1227854`, `5b3e2e3cd3079ac8bcba841e01e4d4003cdf95d55c00442ad8f7e43f5f762a13` | 1.014925, [0.983995, 1.056524] | **1.171830**, [1.111937, 1.234068] | `fe47f366bfb808d2` | **KEEP** |
+| 3. complex `nancumprod` axis 0 gather/scan/scatter | `hz2`, `620ecdf52e4596878bcc15e4e778470c5fd4f5553a0b5f371a7f62bfde3305c6` | 0.998477, [0.997407, 1.000482] | **1.563101**, [1.419484, 1.913478] | `1819f70a99a20a42` | **KEEP** |
+| 4. cov/corrcoef paired triangular Gram blocks | `hz2`, `619146792b5159f06cf0468f1f60759cb39117af2e730cfb907a621889a63fa9` | 0.999706, [0.987268, 1.010215] | 0.996469, [0.986097, 1.005434] | `cb65cc753876c041` | **REJECT / UNDECIDED** |
+| 5. direct C-order `nditer` external chunk range | `hz2`, `e16072c1bb3117d797c3800ba6f46d1e3607a0e75950a7098568d23717797a34` | 0.987308, [0.979785, 1.001212] | **208.071281**, [206.335116, 210.587810] | `00e6ce14a5c4b942` | **KEEP (existing production path)** |
+
+For the two Lane M rows, the raw median arms were 10.897759/10.863297 ms
+(bool null), 7.812597/3.737160 ms (bool effect),
+7.003364/6.681493 ms (tail null), and 6.815269/5.747451 ms (tail effect).
+The bool effect's CV was 16.844% and the tail effect's was 12.892%; both
+decisions are examples of why the former `cv < 5%` rule was invalid. The same
+quiet tail-ring ELF also ran the frozen bool prototype at 2.468528x with null
+CI [0.940807, 1.001621], independently reproducing the mechanism before the
+full Python-path result.
+
+PROFILE/PARITY: rank 1 reuses the original 4,560-sample profile
+(8.14% `cfree`, 6.92% `malloc`, 5.80% owned-token collection, 5.67%
+`fnp_python::loadtxt`). Positive, nonempty bool `usecols` now parses requested
+borrowed tokens directly; negative indices retain the exact owned-token
+baseline. Candidate, retained former path, and NumPy match exactly for
+reordered/duplicate columns, invalid unselected fields, comments, `skiprows`,
+one-column squeeze, and out-of-range error type. Rank 2 reuses its profile
+(10.67% full-row `Vec<&str>` collection and 26.76% character search) and
+retains only the bounded suffix needed by all-negative indices; output shape,
+order, duplicate columns, bits, and error precedence match the former path.
+Rank 3 checks the complete 1,048,576-element output as a `u64` bit view before
+timing; gathering independent columns preserves NumPy's top-to-bottom
+arithmetic order. Rank 4 checks all one million f64 cells with `to_bits`;
+rank 5 compares the full `NditerStep`.
+
+VERDICTS AND RETRY PREDICATES:
+
+- **Rank 1 KEEP.** The former CV-only rejection is superseded. Direct selected
+  bool parsing is closed; revisit only when a fresh profile of this retained
+  path attributes at least 5% exact self-time to a different primitive. Do not
+  retry the owned-token-vs-borrowed-token decision.
+- **Rank 2 KEEP.** The former CV-only rejection is superseded. The bounded
+  negative tail ring is closed; retry only a separately profiled scanner
+  primitive, not another full-row/tail-ring comparison.
+- **Rank 3 KEEP.** Axis-0 complex NaN-cumulative gather/scan/scatter is closed
+  for the measured 1M-element complex128 regime. Any threshold or dtype
+  expansion requires its own bit-exact parity proof and same-worker A/A
+  median-CI result.
+- **Rank 4 REJECT / UNDECIDED.** The effect is inside its own A/A floor and the
+  older 66.1%-self sibling profile already explains the loss: block pairing
+  reduces steal frames but de-phases cache co-streaming while the drain tail is
+  off the critical path. Retry only if a fresh profile proves the drain tail is
+  on the critical path, the block count is at most twice the worker count, and
+  one heaviest block dominates; then split that block's `j` range while
+  preserving phase. Do not retry block pairing.
+- **Rank 5 KEEP.** The public direct-range path introduced by `6807f4df`
+  decisively supersedes the frozen index-round-trip implementation. Revisit
+  only a different iterator geometry with nonzero profiled self-time; do not
+  reconstruct per-element multi-index decoding for C-contiguous chunks.
+
+Resurrection yield for the ranked queue is **4/5 re-won**. The one reject does
+not form a three-reject streak; the NO-CEILING vein-switch rule was therefore
+not triggered.
+
+STATIC/GOVERNANCE GATES: strict-remote
+`cargo check --workspace --all-targets` passed on `vmi1149989`. The focused
+signed-`loadtxt` suite passed 10 tests; the selected-bool direct-path unit test
+passed; the expanded complex nancumulative conformance fixture passed with
+byte-exact c128/c64 axis-0 sum/product coverage; and
+`run_divergence_ledger --fail-on-missing` passed with zero entries and zero
+parity debt. All changed Rust files pass pinned-toolchain rustfmt and
+`git diff --check`. Workspace clippy remains blocked by nightly-2026-07-05
+promoting pre-existing default lints outside this campaign diff: the
+`chunks_exact_to_as_chunks` sweep is tracked by `deadlock-audit-snvtc`, and
+the subsequently exposed Python `needless_late_init`/`collapsible_match`
+sites are tracked by `deadlock-audit-msdd1`. Per campaign section 3c, those
+toolchain-drift cleanups were filed and not mixed into measured perf commits.
 
 ## 2026-07-24 - WIN (KEEP): hoist the geometric inversion log denominator per batch - 2.1633x fewer userspace cycles
 

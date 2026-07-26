@@ -1209,4 +1209,7 @@ criterion_group!(
     bench_array_storage_get_set,
 );
 
-criterion_main!(benches);
+#[path = "../../bench_identity.rs"]
+mod bench_identity;
+
+criterion_main!(bench_identity::report_bench_identity, benches);

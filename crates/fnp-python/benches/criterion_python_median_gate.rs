@@ -3916,8 +3916,9 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
 /// audit rank 1). The original measured 3.09-3.69x across five runs against A/A
 /// nulls of 0.988-1.045 and was rejected anyway, because a predeclared gate
 /// required all four arms to clear `cv < 5%` — a threshold campaign §2.3 shows is
-/// unreachable on this hardware. Re-decided here on the median-CI gate, where the
-/// verdict is `WIN` iff `effect.median > null.p90` and `cv` is provenance only.
+/// unreachable on this hardware. Re-decided here on the bootstrapped median-CI
+/// contract: the effect must clear twice the A/A CI half-width, and `cv` is
+/// provenance only.
 ///
 /// SAME-BINARY CONTROL, and this is the point of the arm: both sides are
 /// `fnp.loadtxt` on the identical file selecting the identical columns. The base
@@ -3931,12 +3932,7 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
 /// The corpus poisons an UNSELECTED column with a non-bool token. NumPy never
 /// parses unselected columns and neither may the direct path; if that ever
 /// regresses, this bench fails its parity assert before it times anything.
-fn bench_loadtxt_selected_bool_median_gate(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_loadtxt_selected_bool_median_gate");
-    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
-    group.measurement_time(Duration::from_secs(5));
-    group.warm_up_time(Duration::from_secs(1));
-
+fn bench_loadtxt_selected_bool_median_gate(_c: &mut Criterion) {
     Python::initialize();
     Python::attach(|py| {
         ensure_numpy_available(py).expect("numpy available");
@@ -4021,17 +4017,26 @@ fn bench_loadtxt_selected_bool_median_gate(c: &mut Criterion) {
             "selected-bool direct path must be byte-identical to numpy",
         );
 
-        bench_median_gate_python_unary(
-            &mut group,
-            "loadtxt_selected_bool_8192x16_null_then_effect",
+        let time_arm = |function: &Bound<'_, PyAny>| {
+            let started = Instant::now();
+            let output = function
+                .call1((&lt_path,))
+                .expect("selected-bool median-CI arm");
+            let elapsed = started.elapsed();
+            let checksum = bytes_of(&output)
+                .into_iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                });
+            black_box(output);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let _ = common::run_median_ci_contract(
             "loadtxt_selected_bool_8192x16",
-            &former,
-            &candidate,
-            &lt_path,
+            || time_arm(&former),
+            || time_arm(&candidate),
         );
     });
-
-    group.finish();
 }
 
 fn main() {
