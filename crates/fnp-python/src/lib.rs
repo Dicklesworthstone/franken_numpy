@@ -78944,8 +78944,8 @@ where
     Ok(Some(out.unbind()))
 }
 
-// Route a >=3-D C-contiguous complex ndarray nancum* along a MIDDLE axis (0 < axis < ndim-1, outer >= 2)
-// to the native per-block parallel nan-scan. axis-0 / last axis / below-crossover defer to numpy.
+// Route a >=2-D C-contiguous complex ndarray nancum* along a NON-last axis. Axis 0 uses the
+// gather/scan/scatter column path; a middle axis uses the per-outer-block slab scan.
 fn try_zerocopy_complex_nancumulative_nonlast(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -78963,7 +78963,7 @@ fn try_zerocopy_complex_nancumulative_nonlast(
     }
     let itemsize = dt.getattr("itemsize")?.extract::<usize>()?;
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
-    if ndim < 3
+    if ndim < 2
         || !a
             .getattr("flags")?
             .getattr("c_contiguous")?
@@ -78979,22 +78979,63 @@ fn try_zerocopy_complex_nancumulative_nonlast(
     } else {
         ax_raw
     };
-    if norm <= 0 || norm >= ndim as isize - 1 {
-        return Ok(None); // only MIDDLE axes (outer >= 2); axis-0 and last defer
+    if norm < 0 || norm >= ndim as isize {
+        return Ok(None);
     }
     let ax = norm as usize;
+    if ax == ndim - 1 {
+        return Ok(None); // the dedicated last-axis route handles this case
+    }
     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
     let axis_len = shape[ax];
     let outer: usize = shape[..ax].iter().product();
     let inner: usize = shape[ax + 1..].iter().product();
     if axis_len == 0
         || inner == 0
-        || outer < 2
         || outer * axis_len * inner < COMPLEX_NANCUM_NONLAST_PARALLEL_MIN
         || rayon::current_num_threads() < 2
     {
         return Ok(None);
     }
+    if ax == 0 {
+        // NumPy's axis-0 scan is contiguous a row at a time, so gathering the
+        // independent columns repays its extra traffic only at the same 1M
+        // complex-element floor as the plain cumulative sibling.
+        const COMPLEX_NANCUM_AXIS0_PARALLEL_MIN: usize = 1 << 20;
+        if inner < 2 || axis_len * inner < COMPLEX_NANCUM_AXIS0_PARALLEL_MIN {
+            return Ok(None);
+        }
+        return match itemsize {
+            16 => complex_nancumulative_axis0_typed::<f64>(
+                py,
+                &numpy,
+                a,
+                "float64",
+                "complex128",
+                &shape,
+                axis_len,
+                inner,
+                is_prod,
+                if is_prod { 1.0_f64 } else { 0.0_f64 },
+                f64::is_nan,
+            ),
+            8 => complex_nancumulative_axis0_typed::<f32>(
+                py,
+                &numpy,
+                a,
+                "float32",
+                "complex64",
+                &shape,
+                axis_len,
+                inner,
+                is_prod,
+                if is_prod { 1.0_f32 } else { 0.0_f32 },
+                f32::is_nan,
+            ),
+            _ => Ok(None),
+        };
+    }
+    debug_assert!(outer >= 2);
     match itemsize {
         16 => complex_nancumulative_nonlast_typed::<f64>(
             py,
@@ -79212,6 +79253,116 @@ where
                 let v = (j * rows + i) * 2;
                 orow[2 * j] = vals[v];
                 orow[2 * j + 1] = vals[v + 1];
+            }
+        });
+    Ok(Some(out.unbind()))
+}
+
+// NaN-aware sibling of `complex_cumulative_axis0_typed`: gather each
+// independent column, replace any complex value with a NaN component by the
+// operation identity, scan in NumPy's top-to-bottom arithmetic order, then
+// scatter. Memory reordering does not change any lane's floating-point order.
+#[allow(clippy::too_many_arguments)]
+fn complex_nancumulative_axis0_typed<T>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    real_name: &str,
+    complex_name: &str,
+    shape: &[usize],
+    rows: usize,
+    cols: usize,
+    is_prod: bool,
+    ident: T,
+    is_nan: fn(T) -> bool,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element
+        + Copy
+        + Default
+        + Send
+        + Sync
+        + std::ops::Mul<Output = T>
+        + std::ops::Sub<Output = T>
+        + std::ops::Add<Output = T>,
+{
+    let total = rows * cols * 2;
+    let Ok(rview) = a.call_method1("view", (real_name,)) else {
+        return Ok(None);
+    };
+    let Ok(in_buf) = PyBuffer::<T>::get(&rview) else {
+        return Ok(None);
+    };
+    let Some(cells) = in_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    if cells.len() != total {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T and remains
+    // read-only under the GIL for this call.
+    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
+    let zero = T::default();
+    let replace_nan = |re: T, im: T| {
+        if is_nan(re) || is_nan(im) {
+            (ident, zero)
+        } else {
+            (re, im)
+        }
+    };
+
+    use rayon::prelude::*;
+    let mut vals = vec![T::default(); total];
+    vals.par_chunks_mut(2 * rows)
+        .enumerate()
+        .for_each(|(column, lane)| {
+            for row in 0..rows {
+                let source = (row * cols + column) * 2;
+                let (re, im) = replace_nan(src[source], src[source + 1]);
+                lane[2 * row] = re;
+                lane[2 * row + 1] = im;
+            }
+            let mut re = lane[0];
+            let mut im = lane[1];
+            for row in 1..rows {
+                let xr = lane[2 * row];
+                let xi = lane[2 * row + 1];
+                if is_prod {
+                    let next_re = re * xr - im * xi;
+                    let next_im = re * xi + im * xr;
+                    re = next_re;
+                    im = next_im;
+                } else {
+                    re = re + xr;
+                    im = im + xi;
+                }
+                lane[2 * row] = re;
+                lane[2 * row + 1] = im;
+            }
+        });
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", complex_name)?;
+    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+    let out = numpy.call_method("empty", (shape_tuple,), Some(&kwargs))?;
+    let oview = out.call_method1("view", (real_name,))?;
+    let Ok(out_buf) = PyBuffer::<T>::get(&oview) else {
+        return Ok(None);
+    };
+    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: this is a fresh numpy.empty output viewed as its real type.
+    // Each parallel row writes a disjoint contiguous `2 * cols` range.
+    let dst: &mut [T] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, total) };
+    dst.par_chunks_mut(cols * 2)
+        .enumerate()
+        .for_each(|(row, output_row)| {
+            for column in 0..cols {
+                let value = (column * rows + row) * 2;
+                output_row[2 * column] = vals[value];
+                output_row[2 * column + 1] = vals[value + 1];
             }
         });
     Ok(Some(out.unbind()))

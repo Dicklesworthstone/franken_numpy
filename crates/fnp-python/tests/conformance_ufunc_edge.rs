@@ -2161,8 +2161,9 @@ print(ok)
 fn complex_nancumulative_lastaxis_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // numpy's complex nancumsum/nancumprod = cum* with every NaN-complex (re OR im NaN) replaced by the
     // identity (0+0j sum / 1+0j prod) on a single-threaded chain. The native per-lane parallel nan-scan
-    // must be byte-identical for c128/c64 on the last axis (2-D + 3-D), incl first-element-NaN, (nan,nan),
-    // (inf,nan); axis-0 (non-last) delegates to numpy.
+    // must be byte-identical for c128/c64 on the last axis (2-D + 3-D), incl first-element-NaN,
+    // (nan,nan), (inf,nan). The 1M-element axis-0 fixture crosses the native gather/scan/scatter
+    // threshold and locks both operations and widths byte-for-byte.
     let script = fnp_script(
         r#"
 import warnings
@@ -2188,11 +2189,15 @@ with warnings.catch_warnings():
         for fn_fnp, fn_np in [(fnp.nancumsum, np.nancumsum), (fnp.nancumprod, np.nancumprod)]:
             rm = fn_fnp(mm, axis=1); em = fn_np(mm, axis=1)
             ok = ok and bool(((rm.view(rname) == em.view(rname)) | (np.isnan(rm.view(rname)) & np.isnan(em.view(rname)))).all())
-    # axis-0 (non-last) -> delegate, still byte-identical
-    a0 = (rng.standard_normal((256, 4096)) + 1j * rng.standard_normal((256, 4096))).astype(np.complex128)
-    a0[7, 3] = complex(np.nan, 1.0)
-    r0 = fnp.nancumsum(a0, axis=0); e0 = np.nancumsum(a0, axis=0)
-    ok = ok and bool(((r0.view(np.float64) == e0.view(np.float64)) | (np.isnan(r0.view(np.float64)) & np.isnan(e0.view(np.float64)))).all())
+    # axis-0 (non-last) -> native gather/scan/scatter at exactly 1M elements
+    for dt, uname in [(np.complex128, np.uint64), (np.complex64, np.uint32)]:
+        a0 = (rng.standard_normal((256, 4096)) + 1j * rng.standard_normal((256, 4096))).astype(dt)
+        a0[0, 9] = complex(np.nan, 1.0)
+        a0[7, 3] = complex(np.inf, np.nan)
+        for fn_fnp, fn_np in [(fnp.nancumsum, np.nancumsum), (fnp.nancumprod, np.nancumprod)]:
+            r0 = fn_fnp(a0, axis=0); e0 = fn_np(a0, axis=0)
+            ok = ok and r0.dtype == e0.dtype and r0.shape == e0.shape
+            ok = ok and r0.view(uname).tobytes() == e0.view(uname).tobytes()
 print(ok)
 "#
         .into(),
@@ -2201,7 +2206,7 @@ print(ok)
     assert_eq!(
         result.trim(),
         "True",
-        "native complex last-axis nancumsum/nancumprod must be byte-identical to numpy (c128/c64 + 3-D + NaN + axis0 defer): {result}"
+        "native complex nancumsum/nancumprod must be byte-identical to numpy (c128/c64 + 3-D + NaN + axis0): {result}"
     );
     Ok(())
 }
