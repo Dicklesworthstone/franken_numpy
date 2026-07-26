@@ -5,14 +5,39 @@
 //! - Distribution sampling (normal, uniform, exponential, integers)
 //! - Array generation at various sizes
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
 use fnp_random::{
     BitGenerator, BitGeneratorKind, Generator, Pcg64DxsmRng, Pcg64Rng, PhiloxRng, RandomError,
     RandomState, SeedMaterial, SeedSequence, Sfc64Rng,
 };
+use sha2::{Digest, Sha256};
 use std::cell::{Cell, RefCell};
+use std::fmt::Write as _;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
+
+const CONTRACT_ROUNDS: usize = 41;
+const CONTRACT_MIN_OF: usize = 3;
+const CONTRACT_BOOTSTRAP_RESAMPLES: usize = 4_096;
+
+#[derive(Clone, Copy)]
+struct TimedValue {
+    elapsed: Duration,
+    checksum: u64,
+}
+
+#[derive(Clone, Copy)]
+struct PairStats {
+    rounds: usize,
+    arm_a_median_ns: f64,
+    arm_b_median_ns: f64,
+    ratio_median: f64,
+    ratio_ci_low: f64,
+    ratio_ci_high: f64,
+    ratio_cv_pct: f64,
+    ratio_mad: f64,
+    checksum: u64,
+}
 
 fn seed_sequence() -> SeedSequence {
     SeedSequence::new(&[42]).unwrap()
@@ -24,41 +49,210 @@ fn pcg64_generator() -> Generator {
     Generator::from_bit_generator(bit_generator)
 }
 
-fn ledger_tail_stats(samples: &RefCell<Vec<f64>>) -> (usize, f64, f64) {
-    let samples = samples.borrow();
-    let count = samples.len().min(10);
-    assert!(count >= 2, "Criterion must retain paired samples");
-    let tail = &samples[samples.len() - count..];
-    let mean = tail.iter().sum::<f64>() / count as f64;
-    let variance = tail
+fn self_identity() -> String {
+    let Ok(path) = std::env::current_exe() else {
+        return "unavailable".to_string();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return "unavailable".to_string();
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let digest = hasher.finalize();
+    let mut hash = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut hash, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("{} ({} bytes) {}", hash, bytes.len(), path.display())
+}
+
+fn report_bench_identity() {
+    println!("bench_elf_sha256={}", self_identity());
+    std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
+}
+
+fn mix_checksum(state: u64, value: u64) -> u64 {
+    state.rotate_left(11) ^ value.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0xa076_1d64_78bd_642f
+}
+
+fn checksum_f64(values: &[f64]) -> u64 {
+    values.iter().fold(values.len() as u64, |state, value| {
+        mix_checksum(state, value.to_bits())
+    })
+}
+
+fn checksum_u64(values: &[u64]) -> u64 {
+    values.iter().fold(values.len() as u64, |state, &value| {
+        mix_checksum(state, value)
+    })
+}
+
+fn min_of<F>(arm: &mut F) -> TimedValue
+where
+    F: FnMut() -> TimedValue,
+{
+    let mut best = arm();
+    let mut checksum = best.checksum;
+    for _ in 1..CONTRACT_MIN_OF {
+        let observation = arm();
+        checksum = mix_checksum(checksum, observation.checksum);
+        if observation.elapsed < best.elapsed {
+            best.elapsed = observation.elapsed;
+        }
+    }
+    TimedValue {
+        elapsed: best.elapsed,
+        checksum,
+    }
+}
+
+fn paired<A, B>(round: usize, arm_a: &mut A, arm_b: &mut B) -> (TimedValue, TimedValue)
+where
+    A: FnMut() -> TimedValue,
+    B: FnMut() -> TimedValue,
+{
+    let (a, b) = if round & 1 == 0 {
+        (min_of(arm_a), min_of(arm_b))
+    } else {
+        let b = min_of(arm_b);
+        (min_of(arm_a), b)
+    };
+    assert_eq!(
+        a.checksum, b.checksum,
+        "paired benchmark arms produced different output checksums"
+    );
+    (a, b)
+}
+
+fn median(values: &mut [f64]) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let mid = values.len() / 2;
+    if values.len() & 1 == 0 {
+        (values[mid - 1] + values[mid]) * 0.5
+    } else {
+        values[mid]
+    }
+}
+
+fn bootstrap_median_ci(values: &[f64]) -> (f64, f64) {
+    let mut state = 0x4d59_5df4_d0f3_3173u64 ^ values.len() as u64;
+    let mut resample = vec![0.0; values.len()];
+    let mut medians = Vec::with_capacity(CONTRACT_BOOTSTRAP_RESAMPLES);
+    for _ in 0..CONTRACT_BOOTSTRAP_RESAMPLES {
+        for slot in &mut resample {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *slot = values[(state as usize) % values.len()];
+        }
+        medians.push(median(&mut resample));
+    }
+    medians.sort_by(f64::total_cmp);
+    let low = CONTRACT_BOOTSTRAP_RESAMPLES * 25 / 1_000;
+    let high = (CONTRACT_BOOTSTRAP_RESAMPLES * 975 / 1_000).min(CONTRACT_BOOTSTRAP_RESAMPLES - 1);
+    (medians[low], medians[high])
+}
+
+fn pair_stats(
+    arm_a_samples: &RefCell<Vec<f64>>,
+    arm_b_samples: &RefCell<Vec<f64>>,
+    checksum: u64,
+) -> Option<PairStats> {
+    let arm_a_samples = arm_a_samples.borrow();
+    let arm_b_samples = arm_b_samples.borrow();
+    let count = arm_a_samples
+        .len()
+        .min(arm_b_samples.len())
+        .min(CONTRACT_ROUNDS);
+    if count < CONTRACT_ROUNDS {
+        return None;
+    }
+    let arm_a = &arm_a_samples[arm_a_samples.len() - count..];
+    let arm_b = &arm_b_samples[arm_b_samples.len() - count..];
+    let ratios = arm_a
         .iter()
-        .map(|sample| {
-            let delta = sample - mean;
+        .zip(arm_b)
+        .map(|(a, b)| a / b)
+        .collect::<Vec<_>>();
+
+    let mut arm_a_sorted = arm_a.to_vec();
+    let mut arm_b_sorted = arm_b.to_vec();
+    let mut ratio_sorted = ratios.clone();
+    let arm_a_median_ns = median(&mut arm_a_sorted);
+    let arm_b_median_ns = median(&mut arm_b_sorted);
+    let ratio_median = median(&mut ratio_sorted);
+    let (ratio_ci_low, ratio_ci_high) = bootstrap_median_ci(&ratios);
+    let ratio_mean = ratios.iter().sum::<f64>() / count as f64;
+    let ratio_variance = ratios
+        .iter()
+        .map(|ratio| {
+            let delta = ratio - ratio_mean;
             delta * delta
         })
         .sum::<f64>()
         / (count - 1) as f64;
-    (count, mean, variance.sqrt() * 100.0 / mean)
+    let mut deviations = ratios
+        .iter()
+        .map(|ratio| (ratio - ratio_median).abs())
+        .collect::<Vec<_>>();
+
+    Some(PairStats {
+        rounds: count,
+        arm_a_median_ns,
+        arm_b_median_ns,
+        ratio_median,
+        ratio_ci_low,
+        ratio_ci_high,
+        ratio_cv_pct: ratio_variance.sqrt() * 100.0 / ratio_mean,
+        ratio_mad: median(&mut deviations),
+        checksum,
+    })
 }
 
 fn report_ledger_pair(
     row: &str,
-    candidate_samples: &RefCell<Vec<f64>>,
-    former_samples: &RefCell<Vec<f64>>,
-) {
-    if candidate_samples.borrow().len() < 2 || former_samples.borrow().len() < 2 {
-        return;
-    }
-    let (candidate_n, candidate_ns, candidate_cv) = ledger_tail_stats(candidate_samples);
-    let (former_n, former_ns, former_cv) = ledger_tail_stats(former_samples);
-    assert_eq!(candidate_n, former_n);
+    arm_a_samples: &RefCell<Vec<f64>>,
+    arm_b_samples: &RefCell<Vec<f64>>,
+    checksum: u64,
+) -> Option<PairStats> {
+    let stats = pair_stats(arm_a_samples, arm_b_samples, checksum)?;
     println!(
-        "LEDGER_AUDIT row={row} samples={candidate_n} candidate_mean_ms={:.6} \
-         candidate_cv_pct={candidate_cv:.3} orig_mean_ms={:.6} orig_cv_pct={former_cv:.3} \
-         orig_over_candidate={:.4}",
-        candidate_ns / 1_000_000.0,
-        former_ns / 1_000_000.0,
-        former_ns / candidate_ns,
+        "PAIRED row={row} rounds={} min_of={CONTRACT_MIN_OF} arm_a_median_ms={:.6} \
+         arm_b_median_ms={:.6} ratio_median={:.6} ratio_median_ci95=[{:.6},{:.6}] \
+         ratio_cv_pct={:.3} ratio_mad={:.6} checksum={:016x}",
+        stats.rounds,
+        stats.arm_a_median_ns / 1_000_000.0,
+        stats.arm_b_median_ns / 1_000_000.0,
+        stats.ratio_median,
+        stats.ratio_ci_low,
+        stats.ratio_ci_high,
+        stats.ratio_cv_pct,
+        stats.ratio_mad,
+        stats.checksum,
+    );
+    Some(stats)
+}
+
+fn report_median_ci_gate(row: &str, effect: PairStats, null: PairStats) {
+    let null_half_width = (null.ratio_ci_low - 1.0)
+        .abs()
+        .max((null.ratio_ci_high - 1.0).abs());
+    let required_delta = (2.0 * null_half_width).max(0.01);
+    let effect_delta = effect.ratio_median - 1.0;
+    let outside_null_ci =
+        effect.ratio_median < null.ratio_ci_low || effect.ratio_median > null.ratio_ci_high;
+    let verdict = if outside_null_ci && effect_delta >= required_delta {
+        "DECIDABLE_WIN"
+    } else if outside_null_ci && effect_delta <= -required_delta {
+        "DECIDABLE_REGRESSION"
+    } else {
+        "UNDECIDED"
+    };
+    println!(
+        "MEDIAN_CI_GATE row={row} verdict={verdict} effect_ratio={:.6} \
+         null_ci95=[{:.6},{:.6}] null_half_width={:.6} required_2x_delta={required_delta:.6} \
+         cv_is_provenance_only=true",
+        effect.ratio_median, null.ratio_ci_low, null.ratio_ci_high, null_half_width,
     );
 }
 
@@ -1365,7 +1559,7 @@ fn bench_zipf_parameter_cache(c: &mut Criterion) {
     assert_eq!(former_proof.next_u64(), candidate_proof.next_u64());
 
     let mut group = c.benchmark_group("zipf_parameter_cache");
-    group.sample_size(10);
+    group.sample_size(CONTRACT_ROUNDS);
     group.warm_up_time(Duration::from_millis(250));
     group.measurement_time(Duration::from_millis(750));
     group.throughput(Throughput::Elements(SIZE as u64));
@@ -1375,47 +1569,57 @@ fn bench_zipf_parameter_cache(c: &mut Criterion) {
     let candidate_samples = RefCell::new(Vec::new());
     let former_samples = RefCell::new(Vec::new());
     let effect_order = Cell::new(0u64);
+    let effect_checksum = Cell::new(0u64);
     group.bench_function("paired_former_candidate", |bench| {
         bench.iter_custom(|iterations| {
             let mut candidate_total = Duration::ZERO;
             let mut former_total = Duration::ZERO;
             let time_candidate = |generator: &mut Generator| {
                 let started = Instant::now();
-                black_box(rejected_cached_zipf(generator, black_box(A), black_box(SIZE)).unwrap());
-                started.elapsed()
+                let output =
+                    rejected_cached_zipf(generator, black_box(A), black_box(SIZE)).unwrap();
+                let mut elapsed = started.elapsed();
+                let checksum = checksum_f64(&output);
+                let drop_started = Instant::now();
+                drop(black_box(output));
+                elapsed += drop_started.elapsed();
+                TimedValue { elapsed, checksum }
             };
             let time_former = |generator: &mut Generator| {
                 let started = Instant::now();
-                black_box(former_zipf(generator, black_box(A), black_box(SIZE)).unwrap());
-                started.elapsed()
+                let output = former_zipf(generator, black_box(A), black_box(SIZE)).unwrap();
+                let mut elapsed = started.elapsed();
+                let checksum = checksum_f64(&output);
+                let drop_started = Instant::now();
+                drop(black_box(output));
+                elapsed += drop_started.elapsed();
+                TimedValue { elapsed, checksum }
             };
             for _ in 0..iterations {
-                if effect_order.get() & 1 == 0 {
-                    former_total += time_former(&mut former_generator);
-                    candidate_total += time_candidate(&mut candidate_generator);
-                    candidate_total += time_candidate(&mut candidate_generator);
-                    former_total += time_former(&mut former_generator);
-                } else {
-                    candidate_total += time_candidate(&mut candidate_generator);
-                    former_total += time_former(&mut former_generator);
-                    former_total += time_former(&mut former_generator);
-                    candidate_total += time_candidate(&mut candidate_generator);
-                }
-                effect_order.set(effect_order.get().wrapping_add(1));
+                let round = effect_order.get();
+                let mut former_arm = || time_former(&mut former_generator);
+                let mut candidate_arm = || time_candidate(&mut candidate_generator);
+                let (former, candidate) =
+                    paired(round as usize, &mut former_arm, &mut candidate_arm);
+                effect_order.set(round.wrapping_add(1));
+                former_total += former.elapsed;
+                candidate_total += candidate.elapsed;
+                former_samples
+                    .borrow_mut()
+                    .push(former.elapsed.as_secs_f64() * 1.0e9);
+                candidate_samples
+                    .borrow_mut()
+                    .push(candidate.elapsed.as_secs_f64() * 1.0e9);
+                effect_checksum.set(mix_checksum(effect_checksum.get(), former.checksum));
             }
-            candidate_samples
-                .borrow_mut()
-                .push(candidate_total.as_secs_f64() * 0.5e9 / iterations as f64);
-            former_samples
-                .borrow_mut()
-                .push(former_total.as_secs_f64() * 0.5e9 / iterations as f64);
             candidate_total + former_total
         })
     });
-    report_ledger_pair(
+    let effect = report_ledger_pair(
         "zipf_parameter_cache_effect",
-        &candidate_samples,
         &former_samples,
+        &candidate_samples,
+        effect_checksum.get(),
     );
 
     let mut null_lhs_generator = pcg64_generator();
@@ -1423,43 +1627,50 @@ fn bench_zipf_parameter_cache(c: &mut Criterion) {
     let null_lhs_samples = RefCell::new(Vec::new());
     let null_rhs_samples = RefCell::new(Vec::new());
     let null_order = Cell::new(0u64);
+    let null_checksum = Cell::new(0u64);
     group.bench_function("null_candidate_aa", |bench| {
         bench.iter_custom(|iterations| {
             let mut lhs_total = Duration::ZERO;
             let mut rhs_total = Duration::ZERO;
             let time_candidate = |generator: &mut Generator| {
                 let started = Instant::now();
-                black_box(rejected_cached_zipf(generator, black_box(A), black_box(SIZE)).unwrap());
-                started.elapsed()
+                let output =
+                    rejected_cached_zipf(generator, black_box(A), black_box(SIZE)).unwrap();
+                let mut elapsed = started.elapsed();
+                let checksum = checksum_f64(&output);
+                let drop_started = Instant::now();
+                drop(black_box(output));
+                elapsed += drop_started.elapsed();
+                TimedValue { elapsed, checksum }
             };
             for _ in 0..iterations {
-                if null_order.get() & 1 == 0 {
-                    lhs_total += time_candidate(&mut null_lhs_generator);
-                    rhs_total += time_candidate(&mut null_rhs_generator);
-                    rhs_total += time_candidate(&mut null_rhs_generator);
-                    lhs_total += time_candidate(&mut null_lhs_generator);
-                } else {
-                    rhs_total += time_candidate(&mut null_rhs_generator);
-                    lhs_total += time_candidate(&mut null_lhs_generator);
-                    lhs_total += time_candidate(&mut null_lhs_generator);
-                    rhs_total += time_candidate(&mut null_rhs_generator);
-                }
-                null_order.set(null_order.get().wrapping_add(1));
+                let round = null_order.get();
+                let mut lhs_arm = || time_candidate(&mut null_lhs_generator);
+                let mut rhs_arm = || time_candidate(&mut null_rhs_generator);
+                let (lhs, rhs) = paired(round as usize, &mut lhs_arm, &mut rhs_arm);
+                null_order.set(round.wrapping_add(1));
+                lhs_total += lhs.elapsed;
+                rhs_total += rhs.elapsed;
+                null_lhs_samples
+                    .borrow_mut()
+                    .push(lhs.elapsed.as_secs_f64() * 1.0e9);
+                null_rhs_samples
+                    .borrow_mut()
+                    .push(rhs.elapsed.as_secs_f64() * 1.0e9);
+                null_checksum.set(mix_checksum(null_checksum.get(), lhs.checksum));
             }
-            null_lhs_samples
-                .borrow_mut()
-                .push(lhs_total.as_secs_f64() * 0.5e9 / iterations as f64);
-            null_rhs_samples
-                .borrow_mut()
-                .push(rhs_total.as_secs_f64() * 0.5e9 / iterations as f64);
             lhs_total + rhs_total
         })
     });
-    report_ledger_pair(
+    let null = report_ledger_pair(
         "zipf_parameter_cache_null",
         &null_lhs_samples,
         &null_rhs_samples,
+        null_checksum.get(),
     );
+    if let (Some(effect), Some(null)) = (effect, null) {
+        report_median_ci_gate("zipf_parameter_cache", effect, null);
+    }
 
     group.finish();
 }
@@ -1563,7 +1774,7 @@ fn bench_random_state_zipf_parameter_cache(c: &mut Criterion) {
     assert_eq!(former_proof.next_u64(), candidate_proof.next_u64());
 
     let mut group = c.benchmark_group("random_state_zipf_parameter_cache");
-    group.sample_size(10);
+    group.sample_size(CONTRACT_ROUNDS);
     group.warm_up_time(Duration::from_millis(250));
     group.measurement_time(Duration::from_millis(750));
     group.throughput(Throughput::Elements((SIZE * REPEATS) as u64));
@@ -1576,15 +1787,17 @@ fn bench_random_state_zipf_parameter_cache(c: &mut Criterion) {
     let candidate_samples = RefCell::new(Vec::new());
     let former_samples = RefCell::new(Vec::new());
     let effect_order = Cell::new(0u64);
+    let effect_checksum = Cell::new(0u64);
     group.bench_function("fixed_trace_paired_former_candidate", |bench| {
         bench.iter_custom(|iterations| {
             let mut candidate_total = Duration::ZERO;
             let mut former_total = Duration::ZERO;
-            let time_candidate = || {
+            let mut time_candidate = || {
                 let mut random_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
                 let started = Instant::now();
+                let mut outputs = Vec::with_capacity(REPEATS);
                 for _ in 0..REPEATS {
-                    black_box(
+                    outputs.push(
                         rejected_cached_random_state_zipf(
                             &mut random_state,
                             black_box(A),
@@ -1593,51 +1806,63 @@ fn bench_random_state_zipf_parameter_cache(c: &mut Criterion) {
                         .unwrap(),
                     );
                 }
-                started.elapsed()
+                let mut elapsed = started.elapsed();
+                let checksum = outputs.iter().fold(0u64, |state, output| {
+                    mix_checksum(state, checksum_u64(output))
+                });
+                let drop_started = Instant::now();
+                drop(black_box(outputs));
+                elapsed += drop_started.elapsed();
+                TimedValue { elapsed, checksum }
             };
-            let time_former = || {
+            let mut time_former = || {
                 let mut random_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
                 let started = Instant::now();
+                let mut outputs = Vec::with_capacity(REPEATS);
                 for _ in 0..REPEATS {
-                    black_box(
+                    outputs.push(
                         former_random_state_zipf(&mut random_state, black_box(A), black_box(SIZE))
                             .unwrap(),
                     );
                 }
-                started.elapsed()
+                let mut elapsed = started.elapsed();
+                let checksum = outputs.iter().fold(0u64, |state, output| {
+                    mix_checksum(state, checksum_u64(output))
+                });
+                let drop_started = Instant::now();
+                drop(black_box(outputs));
+                elapsed += drop_started.elapsed();
+                TimedValue { elapsed, checksum }
             };
             for _ in 0..iterations {
-                if effect_order.get() & 1 == 0 {
-                    former_total += time_former();
-                    candidate_total += time_candidate();
-                    candidate_total += time_candidate();
-                    former_total += time_former();
-                } else {
-                    candidate_total += time_candidate();
-                    former_total += time_former();
-                    former_total += time_former();
-                    candidate_total += time_candidate();
-                }
-                effect_order.set(effect_order.get().wrapping_add(1));
+                let round = effect_order.get();
+                let (former, candidate) =
+                    paired(round as usize, &mut time_former, &mut time_candidate);
+                effect_order.set(round.wrapping_add(1));
+                former_total += former.elapsed;
+                candidate_total += candidate.elapsed;
+                former_samples
+                    .borrow_mut()
+                    .push(former.elapsed.as_secs_f64() * 1.0e9);
+                candidate_samples
+                    .borrow_mut()
+                    .push(candidate.elapsed.as_secs_f64() * 1.0e9);
+                effect_checksum.set(mix_checksum(effect_checksum.get(), former.checksum));
             }
-            candidate_samples
-                .borrow_mut()
-                .push(candidate_total.as_secs_f64() * 0.5e9 / iterations as f64);
-            former_samples
-                .borrow_mut()
-                .push(former_total.as_secs_f64() * 0.5e9 / iterations as f64);
             candidate_total + former_total
         })
     });
-    report_ledger_pair(
+    let effect = report_ledger_pair(
         "random_state_zipf_parameter_cache_effect",
-        &candidate_samples,
         &former_samples,
+        &candidate_samples,
+        effect_checksum.get(),
     );
 
     let null_lhs_samples = RefCell::new(Vec::new());
     let null_rhs_samples = RefCell::new(Vec::new());
     let null_order = Cell::new(0u64);
+    let null_checksum = Cell::new(0u64);
     group.bench_function("fixed_trace_null_candidate_aa", |bench| {
         bench.iter_custom(|iterations| {
             let mut lhs_total = Duration::ZERO;
@@ -1645,8 +1870,9 @@ fn bench_random_state_zipf_parameter_cache(c: &mut Criterion) {
             let time_candidate = || {
                 let mut random_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
                 let started = Instant::now();
+                let mut outputs = Vec::with_capacity(REPEATS);
                 for _ in 0..REPEATS {
-                    black_box(
+                    outputs.push(
                         rejected_cached_random_state_zipf(
                             &mut random_state,
                             black_box(A),
@@ -1655,36 +1881,296 @@ fn bench_random_state_zipf_parameter_cache(c: &mut Criterion) {
                         .unwrap(),
                     );
                 }
-                started.elapsed()
+                let mut elapsed = started.elapsed();
+                let checksum = outputs.iter().fold(0u64, |state, output| {
+                    mix_checksum(state, checksum_u64(output))
+                });
+                let drop_started = Instant::now();
+                drop(black_box(outputs));
+                elapsed += drop_started.elapsed();
+                TimedValue { elapsed, checksum }
             };
             for _ in 0..iterations {
-                if null_order.get() & 1 == 0 {
-                    lhs_total += time_candidate();
-                    rhs_total += time_candidate();
-                    rhs_total += time_candidate();
-                    lhs_total += time_candidate();
-                } else {
-                    rhs_total += time_candidate();
-                    lhs_total += time_candidate();
-                    lhs_total += time_candidate();
-                    rhs_total += time_candidate();
-                }
-                null_order.set(null_order.get().wrapping_add(1));
+                let round = null_order.get();
+                let mut lhs_arm = || time_candidate();
+                let mut rhs_arm = || time_candidate();
+                let (lhs, rhs) = paired(round as usize, &mut lhs_arm, &mut rhs_arm);
+                null_order.set(round.wrapping_add(1));
+                lhs_total += lhs.elapsed;
+                rhs_total += rhs.elapsed;
+                null_lhs_samples
+                    .borrow_mut()
+                    .push(lhs.elapsed.as_secs_f64() * 1.0e9);
+                null_rhs_samples
+                    .borrow_mut()
+                    .push(rhs.elapsed.as_secs_f64() * 1.0e9);
+                null_checksum.set(mix_checksum(null_checksum.get(), lhs.checksum));
             }
-            null_lhs_samples
-                .borrow_mut()
-                .push(lhs_total.as_secs_f64() * 0.5e9 / iterations as f64);
-            null_rhs_samples
-                .borrow_mut()
-                .push(rhs_total.as_secs_f64() * 0.5e9 / iterations as f64);
             lhs_total + rhs_total
         })
     });
-    report_ledger_pair(
+    let null = report_ledger_pair(
         "random_state_zipf_parameter_cache_null",
         &null_lhs_samples,
         &null_rhs_samples,
+        null_checksum.get(),
     );
+    if let (Some(effect), Some(null)) = (effect, null) {
+        report_median_ci_gate("random_state_zipf_parameter_cache", effect, null);
+    }
+
+    group.finish();
+}
+
+#[derive(Clone, Copy)]
+enum LegacyGammaShapeCache {
+    Degenerate,
+    Small {
+        one_minus_shape: f64,
+        inv_shape: f64,
+    },
+    MarsagliaTsang {
+        d: f64,
+        c: f64,
+    },
+}
+
+impl LegacyGammaShapeCache {
+    fn new(shape: f64) -> Self {
+        if shape == 1.0 || shape == 0.0 || !shape.is_finite() {
+            Self::Degenerate
+        } else if shape < 1.0 {
+            Self::Small {
+                one_minus_shape: 1.0 - shape,
+                inv_shape: 1.0 / shape,
+            }
+        } else {
+            let d = shape - 1.0 / 3.0;
+            Self::MarsagliaTsang {
+                d,
+                c: 1.0 / (9.0 * d).sqrt(),
+            }
+        }
+    }
+}
+
+fn cached_random_state_standard_gamma_one(
+    random_state: &mut RandomState,
+    shape: f64,
+    cache: LegacyGammaShapeCache,
+) -> f64 {
+    if shape == 1.0 {
+        return -(1.0 - random_state.next_f64()).ln();
+    }
+    if shape == 0.0 {
+        return 0.0;
+    }
+    if !shape.is_finite() {
+        let _ = random_state.legacy_gauss();
+        let _ = random_state.next_f64();
+        return shape;
+    }
+    if shape < 1.0 {
+        let LegacyGammaShapeCache::Small {
+            one_minus_shape,
+            inv_shape,
+        } = cache
+        else {
+            unreachable!("shape < 1 must use the small-shape cache");
+        };
+        loop {
+            let u = random_state.next_f64();
+            let v = -(1.0 - random_state.next_f64()).ln();
+            if u <= one_minus_shape {
+                let x = u.powf(inv_shape);
+                if x <= v {
+                    return x;
+                }
+            } else {
+                let y = -((1.0 - u) / shape).ln();
+                let x = (one_minus_shape + shape * y).powf(inv_shape);
+                if x <= v + y {
+                    return x;
+                }
+            }
+        }
+    }
+
+    let LegacyGammaShapeCache::MarsagliaTsang { d, c } = cache else {
+        unreachable!("shape > 1 must use the Marsaglia-Tsang cache");
+    };
+    loop {
+        let mut x;
+        let mut v;
+        loop {
+            x = random_state.legacy_gauss();
+            v = 1.0 + c * x;
+            if v > 0.0 {
+                break;
+            }
+        }
+        v = v * v * v;
+        let u = random_state.next_f64();
+        if u < 1.0 - 0.0331 * x * x * x * x {
+            return d * v;
+        }
+        if u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
+            return d * v;
+        }
+    }
+}
+
+fn cached_random_state_standard_gamma(
+    random_state: &mut RandomState,
+    shape: f64,
+    size: usize,
+) -> Result<Vec<f64>, RandomError> {
+    if shape < 0.0 || (shape == 0.0 && shape.is_sign_negative()) {
+        return Err(RandomError::ShapeNegative);
+    }
+    let cache = LegacyGammaShapeCache::new(shape);
+    Ok((0..size)
+        .map(|_| cached_random_state_standard_gamma_one(random_state, shape, cache))
+        .collect())
+}
+
+fn time_random_state_gamma(
+    random_state: &mut RandomState,
+    shape: f64,
+    size: usize,
+    candidate: bool,
+) -> TimedValue {
+    let started = Instant::now();
+    let output = if candidate {
+        cached_random_state_standard_gamma(random_state, shape, size).unwrap()
+    } else {
+        random_state.standard_gamma(shape, size).unwrap()
+    };
+    let mut elapsed = started.elapsed();
+    let checksum = checksum_f64(&output);
+    let drop_started = Instant::now();
+    drop(black_box(output));
+    elapsed += drop_started.elapsed();
+    TimedValue { elapsed, checksum }
+}
+
+fn bench_random_state_gamma_shape_cache(c: &mut Criterion) {
+    const SIZE: usize = 100_000;
+    const SHAPE: f64 = 5.0;
+
+    for shape in [0.0, 0.25, 0.5, 1.0, 2.5, 5.0, f64::NAN, f64::INFINITY] {
+        let mut former = RandomState::new(SeedMaterial::U64(42)).unwrap();
+        let mut candidate = RandomState::new(SeedMaterial::U64(42)).unwrap();
+        let former_output = former.standard_gamma(shape, 256).unwrap();
+        let candidate_output =
+            cached_random_state_standard_gamma(&mut candidate, shape, 256).unwrap();
+        assert_eq!(
+            former_output
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            candidate_output
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "legacy gamma output diverged at shape {shape}"
+        );
+        assert_eq!(
+            former, candidate,
+            "legacy gamma RNG position diverged at shape {shape}"
+        );
+    }
+    assert!(matches!(
+        cached_random_state_standard_gamma(
+            &mut RandomState::new(SeedMaterial::U64(42)).unwrap(),
+            -0.0,
+            1,
+        ),
+        Err(RandomError::ShapeNegative)
+    ));
+
+    let mut group = c.benchmark_group("random_state_gamma_shape_cache");
+    group.sample_size(CONTRACT_ROUNDS);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements(SIZE as u64));
+
+    let mut former_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
+    let mut candidate_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
+    let former_samples = RefCell::new(Vec::new());
+    let candidate_samples = RefCell::new(Vec::new());
+    let effect_order = Cell::new(0usize);
+    let effect_checksum = Cell::new(0u64);
+    group.bench_function("paired_former_candidate", |bench| {
+        bench.iter_custom(|iterations| {
+            let mut former_total = Duration::ZERO;
+            let mut candidate_total = Duration::ZERO;
+            for _ in 0..iterations {
+                let round = effect_order.get();
+                let mut former_arm =
+                    || time_random_state_gamma(&mut former_state, SHAPE, SIZE, false);
+                let mut candidate_arm =
+                    || time_random_state_gamma(&mut candidate_state, SHAPE, SIZE, true);
+                let (former, candidate) = paired(round, &mut former_arm, &mut candidate_arm);
+                effect_order.set(round.wrapping_add(1));
+                former_samples
+                    .borrow_mut()
+                    .push(former.elapsed.as_secs_f64() * 1.0e9);
+                candidate_samples
+                    .borrow_mut()
+                    .push(candidate.elapsed.as_secs_f64() * 1.0e9);
+                effect_checksum.set(mix_checksum(effect_checksum.get(), former.checksum));
+                former_total += former.elapsed;
+                candidate_total += candidate.elapsed;
+            }
+            former_total + candidate_total
+        })
+    });
+    let effect = report_ledger_pair(
+        "random_state_gamma_shape_cache_effect",
+        &former_samples,
+        &candidate_samples,
+        effect_checksum.get(),
+    );
+
+    let mut null_lhs = RandomState::new(SeedMaterial::U64(42)).unwrap();
+    let mut null_rhs = RandomState::new(SeedMaterial::U64(42)).unwrap();
+    let null_lhs_samples = RefCell::new(Vec::new());
+    let null_rhs_samples = RefCell::new(Vec::new());
+    let null_order = Cell::new(0usize);
+    let null_checksum = Cell::new(0u64);
+    group.bench_function("null_candidate_aa", |bench| {
+        bench.iter_custom(|iterations| {
+            let mut lhs_total = Duration::ZERO;
+            let mut rhs_total = Duration::ZERO;
+            for _ in 0..iterations {
+                let round = null_order.get();
+                let mut lhs_arm = || time_random_state_gamma(&mut null_lhs, SHAPE, SIZE, true);
+                let mut rhs_arm = || time_random_state_gamma(&mut null_rhs, SHAPE, SIZE, true);
+                let (lhs, rhs) = paired(round, &mut lhs_arm, &mut rhs_arm);
+                null_order.set(round.wrapping_add(1));
+                null_lhs_samples
+                    .borrow_mut()
+                    .push(lhs.elapsed.as_secs_f64() * 1.0e9);
+                null_rhs_samples
+                    .borrow_mut()
+                    .push(rhs.elapsed.as_secs_f64() * 1.0e9);
+                null_checksum.set(mix_checksum(null_checksum.get(), lhs.checksum));
+                lhs_total += lhs.elapsed;
+                rhs_total += rhs.elapsed;
+            }
+            lhs_total + rhs_total
+        })
+    });
+    let null = report_ledger_pair(
+        "random_state_gamma_shape_cache_null",
+        &null_lhs_samples,
+        &null_rhs_samples,
+        null_checksum.get(),
+    );
+    if let (Some(effect), Some(null)) = (effect, null) {
+        report_median_ci_gate("random_state_gamma_shape_cache", effect, null);
+    }
 
     group.finish();
 }
@@ -1722,6 +2208,11 @@ criterion_group!(
     bench_geometric_inversion_cache,
     bench_zipf_parameter_cache,
     bench_random_state_zipf_parameter_cache,
+    bench_random_state_gamma_shape_cache,
 );
 
-criterion_main!(benches);
+fn main() {
+    report_bench_identity();
+    benches();
+    Criterion::default().configure_from_args().final_summary();
+}

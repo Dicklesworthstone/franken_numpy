@@ -8,15 +8,242 @@
 //!
 //! These operations are critical for data persistence workflows.
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
 use fnp_io::{
     IOSupportedDType, NpyHeader, StructuredIODescriptor, StructuredIOField, StructuredNpyData,
     fromfile, fromfile_structured, fromfile_text, load, read_npy_bytes, read_npz_bytes,
     read_npz_bytes_linear_overlap_control, write_npy_bytes, write_npz_bytes,
 };
+use sha2::{Digest, Sha256};
 use std::cell::{Cell, RefCell};
+use std::fmt::Write as _;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
+
+const CONTRACT_ROUNDS: usize = 41;
+const CONTRACT_MIN_OF: usize = 3;
+const CONTRACT_BOOTSTRAP_RESAMPLES: usize = 4_096;
+
+#[derive(Clone, Copy)]
+struct TimedValue {
+    elapsed: Duration,
+    checksum: u64,
+}
+
+#[derive(Clone, Copy)]
+struct PairStats {
+    rounds: usize,
+    arm_a_median_ns: f64,
+    arm_b_median_ns: f64,
+    ratio_median: f64,
+    ratio_ci_low: f64,
+    ratio_ci_high: f64,
+    ratio_cv_pct: f64,
+    ratio_mad: f64,
+    checksum: u64,
+}
+
+fn self_identity() -> String {
+    let Ok(path) = std::env::current_exe() else {
+        return "unavailable".to_string();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return "unavailable".to_string();
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let digest = hasher.finalize();
+    let mut hash = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut hash, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("{} ({} bytes) {}", hash, bytes.len(), path.display())
+}
+
+fn report_bench_identity() {
+    println!("bench_elf_sha256={}", self_identity());
+    std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
+}
+
+fn mix_checksum(state: u64, value: u64) -> u64 {
+    state.rotate_left(11) ^ value.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0xa076_1d64_78bd_642f
+}
+
+fn checksum_text_array(output: &fnp_io::TextArrayData) -> u64 {
+    output.values.iter().fold(
+        mix_checksum(output.nrows as u64, output.ncols as u64),
+        |state, value| mix_checksum(state, value.to_bits()),
+    )
+}
+
+fn min_of<F>(arm: &mut F) -> TimedValue
+where
+    F: FnMut() -> TimedValue,
+{
+    let mut best = arm();
+    let mut checksum = best.checksum;
+    for _ in 1..CONTRACT_MIN_OF {
+        let observation = arm();
+        checksum = mix_checksum(checksum, observation.checksum);
+        if observation.elapsed < best.elapsed {
+            best.elapsed = observation.elapsed;
+        }
+    }
+    TimedValue {
+        elapsed: best.elapsed,
+        checksum,
+    }
+}
+
+fn paired<A, B>(round: usize, arm_a: &mut A, arm_b: &mut B) -> (TimedValue, TimedValue)
+where
+    A: FnMut() -> TimedValue,
+    B: FnMut() -> TimedValue,
+{
+    let (a, b) = if round & 1 == 0 {
+        (min_of(arm_a), min_of(arm_b))
+    } else {
+        let b = min_of(arm_b);
+        (min_of(arm_a), b)
+    };
+    assert_eq!(
+        a.checksum, b.checksum,
+        "paired benchmark arms produced different output checksums"
+    );
+    (a, b)
+}
+
+fn median(values: &mut [f64]) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let mid = values.len() / 2;
+    if values.len() & 1 == 0 {
+        (values[mid - 1] + values[mid]) * 0.5
+    } else {
+        values[mid]
+    }
+}
+
+fn bootstrap_median_ci(values: &[f64]) -> (f64, f64) {
+    let mut state = 0x4d59_5df4_d0f3_3173u64 ^ values.len() as u64;
+    let mut resample = vec![0.0; values.len()];
+    let mut medians = Vec::with_capacity(CONTRACT_BOOTSTRAP_RESAMPLES);
+    for _ in 0..CONTRACT_BOOTSTRAP_RESAMPLES {
+        for slot in &mut resample {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *slot = values[(state as usize) % values.len()];
+        }
+        medians.push(median(&mut resample));
+    }
+    medians.sort_by(f64::total_cmp);
+    let low = CONTRACT_BOOTSTRAP_RESAMPLES * 25 / 1_000;
+    let high = (CONTRACT_BOOTSTRAP_RESAMPLES * 975 / 1_000).min(CONTRACT_BOOTSTRAP_RESAMPLES - 1);
+    (medians[low], medians[high])
+}
+
+fn pair_stats(
+    arm_a_samples: &RefCell<Vec<f64>>,
+    arm_b_samples: &RefCell<Vec<f64>>,
+    checksum: u64,
+) -> Option<PairStats> {
+    let arm_a_samples = arm_a_samples.borrow();
+    let arm_b_samples = arm_b_samples.borrow();
+    let count = arm_a_samples
+        .len()
+        .min(arm_b_samples.len())
+        .min(CONTRACT_ROUNDS);
+    if count < CONTRACT_ROUNDS {
+        return None;
+    }
+    let arm_a = &arm_a_samples[arm_a_samples.len() - count..];
+    let arm_b = &arm_b_samples[arm_b_samples.len() - count..];
+    let ratios = arm_a
+        .iter()
+        .zip(arm_b)
+        .map(|(a, b)| a / b)
+        .collect::<Vec<_>>();
+
+    let mut arm_a_sorted = arm_a.to_vec();
+    let mut arm_b_sorted = arm_b.to_vec();
+    let mut ratio_sorted = ratios.clone();
+    let arm_a_median_ns = median(&mut arm_a_sorted);
+    let arm_b_median_ns = median(&mut arm_b_sorted);
+    let ratio_median = median(&mut ratio_sorted);
+    let (ratio_ci_low, ratio_ci_high) = bootstrap_median_ci(&ratios);
+    let ratio_mean = ratios.iter().sum::<f64>() / count as f64;
+    let ratio_variance = ratios
+        .iter()
+        .map(|ratio| {
+            let delta = ratio - ratio_mean;
+            delta * delta
+        })
+        .sum::<f64>()
+        / (count - 1) as f64;
+    let mut deviations = ratios
+        .iter()
+        .map(|ratio| (ratio - ratio_median).abs())
+        .collect::<Vec<_>>();
+
+    Some(PairStats {
+        rounds: count,
+        arm_a_median_ns,
+        arm_b_median_ns,
+        ratio_median,
+        ratio_ci_low,
+        ratio_ci_high,
+        ratio_cv_pct: ratio_variance.sqrt() * 100.0 / ratio_mean,
+        ratio_mad: median(&mut deviations),
+        checksum,
+    })
+}
+
+fn report_pair(
+    row: &str,
+    arm_a_samples: &RefCell<Vec<f64>>,
+    arm_b_samples: &RefCell<Vec<f64>>,
+    checksum: u64,
+) -> Option<PairStats> {
+    let stats = pair_stats(arm_a_samples, arm_b_samples, checksum)?;
+    println!(
+        "PAIRED row={row} rounds={} min_of={CONTRACT_MIN_OF} arm_a_median_ms={:.6} \
+         arm_b_median_ms={:.6} ratio_median={:.6} ratio_median_ci95=[{:.6},{:.6}] \
+         ratio_cv_pct={:.3} ratio_mad={:.6} checksum={:016x}",
+        stats.rounds,
+        stats.arm_a_median_ns / 1_000_000.0,
+        stats.arm_b_median_ns / 1_000_000.0,
+        stats.ratio_median,
+        stats.ratio_ci_low,
+        stats.ratio_ci_high,
+        stats.ratio_cv_pct,
+        stats.ratio_mad,
+        stats.checksum,
+    );
+    Some(stats)
+}
+
+fn report_median_ci_gate(row: &str, effect: PairStats, null: PairStats) {
+    let null_half_width = (null.ratio_ci_low - 1.0)
+        .abs()
+        .max((null.ratio_ci_high - 1.0).abs());
+    let required_delta = (2.0 * null_half_width).max(0.01);
+    let effect_delta = effect.ratio_median - 1.0;
+    let outside_null_ci =
+        effect.ratio_median < null.ratio_ci_low || effect.ratio_median > null.ratio_ci_high;
+    let verdict = if outside_null_ci && effect_delta >= required_delta {
+        "DECIDABLE_WIN"
+    } else if outside_null_ci && effect_delta <= -required_delta {
+        "DECIDABLE_REGRESSION"
+    } else {
+        "UNDECIDED"
+    };
+    println!(
+        "MEDIAN_CI_GATE row={row} verdict={verdict} effect_ratio={:.6} \
+         null_ci95=[{:.6},{:.6}] null_half_width={:.6} required_2x_delta={required_delta:.6} \
+         cv_is_provenance_only=true",
+        effect.ratio_median, null.ratio_ci_low, null.ratio_ci_high, null_half_width,
+    );
+}
 
 fn generate_f64_data(n: usize) -> Vec<u8> {
     let data: Vec<f64> = (0..n).map(|i| i as f64 * 0.1).collect();
@@ -1195,57 +1422,268 @@ fn loadtxt_signed_nonnegative_staged(
     fnp_io::loadtxt_usecols(text, delimiter, comments, 0, usize::MAX, Some(&unsigned)).unwrap()
 }
 
-fn time_loadtxt_signed(text: &str, usecols: &[isize], staged: bool) -> Duration {
+fn time_text_array<F>(mut operation: F) -> TimedValue
+where
+    F: FnMut() -> fnp_io::TextArrayData,
+{
     const REPETITIONS: u32 = 8;
-    let start = Instant::now();
+    let mut elapsed = Duration::ZERO;
+    let mut checksum = 0u64;
     for _ in 0..REPETITIONS {
-        let output = if staged {
+        let started = Instant::now();
+        let output = operation();
+        elapsed += started.elapsed();
+        checksum = mix_checksum(checksum, checksum_text_array(&output));
+        let drop_started = Instant::now();
+        drop(black_box(output));
+        elapsed += drop_started.elapsed();
+    }
+    TimedValue {
+        elapsed: elapsed / REPETITIONS,
+        checksum,
+    }
+}
+
+fn time_loadtxt_signed(text: &str, usecols: &[isize], staged: bool) -> TimedValue {
+    time_text_array(|| {
+        if staged {
             fnp_io::loadtxt_usecols_signed(text, ',', '#', 0, usize::MAX, Some(usecols)).unwrap()
         } else {
             loadtxt_signed_nonnegative_former(text, usecols)
-        };
-        drop(black_box(output));
-    }
-    start.elapsed() / REPETITIONS
+        }
+    })
 }
 
-fn report_loadtxt_signed_pair(
-    row: &str,
-    lhs_samples: &RefCell<Vec<f64>>,
-    rhs_samples: &RefCell<Vec<f64>>,
-) {
-    if lhs_samples.borrow().len() < 2 || rhs_samples.borrow().len() < 2 {
-        return;
+#[derive(Debug, PartialEq, Eq)]
+struct SelectedBoolOutput {
+    values: Vec<bool>,
+    nrows: usize,
+    ncols: usize,
+}
+
+/// Frozen replica of the selected-bool `loadtxt` path rejected in `.377`:
+/// own every token, clone selected tokens into nested rows, then parse.
+#[inline(never)]
+fn selected_bool_former(
+    text: &str,
+    delimiter: char,
+    comments: char,
+    skiprows: usize,
+    usecols: &[usize],
+) -> Option<SelectedBoolOutput> {
+    let mut rows = Vec::new();
+    for (lineno, raw_line) in text.lines().enumerate() {
+        if lineno < skiprows {
+            continue;
+        }
+        let effective = match raw_line.split_once(comments) {
+            Some((lhs, _)) => lhs,
+            None => raw_line,
+        };
+        let trimmed = effective.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let tokens = trimmed
+            .split(delimiter)
+            .map(|token| token.trim().to_string())
+            .collect::<Vec<_>>();
+        let mut selected = Vec::with_capacity(usecols.len());
+        for &column in usecols {
+            selected.push(tokens.get(column)?.clone());
+        }
+        if !selected.is_empty() {
+            rows.push(selected);
+        }
+    }
+    let ncols = rows.first()?.len();
+    if rows.iter().any(|row| row.len() != ncols) {
+        return None;
+    }
+    let nrows = rows.len();
+    let mut values = Vec::with_capacity(nrows * ncols);
+    for row in rows {
+        for token in row {
+            values.push(token.parse::<i64>().ok()? != 0);
+        }
+    }
+    Some(SelectedBoolOutput {
+        values,
+        nrows,
+        ncols,
+    })
+}
+
+/// The `.377` candidate: retain borrowed row tokens and parse only requested
+/// positive columns directly into the final bool storage.
+#[inline(never)]
+fn selected_bool_candidate(
+    text: &str,
+    delimiter: char,
+    comments: char,
+    skiprows: usize,
+    usecols: &[usize],
+) -> Option<SelectedBoolOutput> {
+    let mut values = Vec::new();
+    let mut nrows = 0usize;
+    for (lineno, raw_line) in text.lines().enumerate() {
+        if lineno < skiprows {
+            continue;
+        }
+        let effective = match raw_line.split_once(comments) {
+            Some((lhs, _)) => lhs,
+            None => raw_line,
+        };
+        let trimmed = effective.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let tokens = trimmed.split(delimiter).map(str::trim).collect::<Vec<_>>();
+        for &column in usecols {
+            values.push(tokens.get(column)?.parse::<i64>().ok()? != 0);
+        }
+        nrows += 1;
+    }
+    if nrows == 0 || usecols.is_empty() {
+        return None;
+    }
+    Some(SelectedBoolOutput {
+        values,
+        nrows,
+        ncols: usecols.len(),
+    })
+}
+
+fn checksum_selected_bool(output: &SelectedBoolOutput) -> u64 {
+    output.values.iter().fold(
+        mix_checksum(output.nrows as u64, output.ncols as u64),
+        |state, &value| mix_checksum(state, value as u64),
+    )
+}
+
+fn time_selected_bool(text: &str, usecols: &[usize], candidate: bool) -> TimedValue {
+    const REPETITIONS: u32 = 8;
+    let mut elapsed = Duration::ZERO;
+    let mut checksum = 0u64;
+    for _ in 0..REPETITIONS {
+        let started = Instant::now();
+        let output = if candidate {
+            selected_bool_candidate(text, ',', '#', 1, usecols)
+        } else {
+            selected_bool_former(text, ',', '#', 1, usecols)
+        }
+        .expect("selected bool fixture must parse");
+        elapsed += started.elapsed();
+        checksum = mix_checksum(checksum, checksum_selected_bool(&output));
+        let drop_started = Instant::now();
+        drop(black_box(output));
+        elapsed += drop_started.elapsed();
+    }
+    TimedValue {
+        elapsed: elapsed / REPETITIONS,
+        checksum,
+    }
+}
+
+fn bench_loadtxt_selected_bool_direct_parse(c: &mut Criterion) {
+    const ROWS: usize = 8_192;
+    const COLS: usize = 16;
+    const USECOLS: [usize; 4] = [13, 1, 7, 13];
+
+    let mut text = String::from("ignored,header,row\n");
+    for row in 0..ROWS {
+        for col in 0..COLS {
+            if col > 0 {
+                text.push(',');
+            }
+            let value = ((row + col) % 5) as i64 - 2;
+            text.push_str(&value.to_string());
+        }
+        text.push('\n');
     }
 
-    fn tail_stats(samples: &RefCell<Vec<f64>>) -> (usize, f64, f64) {
-        let samples = samples.borrow();
-        let count = samples.len().min(10);
-        assert!(count >= 2, "paired loadtxt bench retained too few samples");
-        let tail = &samples[samples.len() - count..];
-        let mean = tail.iter().sum::<f64>() / count as f64;
-        let variance = tail
-            .iter()
-            .map(|sample| {
-                let delta = sample - mean;
-                delta * delta
-            })
-            .sum::<f64>()
-            / (count - 1) as f64;
-        (count, mean, variance.sqrt() * 100.0 / mean)
-    }
+    let former = selected_bool_former(&text, ',', '#', 1, &USECOLS).expect("former bool fixture");
+    let candidate =
+        selected_bool_candidate(&text, ',', '#', 1, &USECOLS).expect("candidate bool fixture");
+    assert_eq!(candidate, former);
 
-    let (lhs_n, lhs_ns, lhs_cv) = tail_stats(lhs_samples);
-    let (rhs_n, rhs_ns, rhs_cv) = tail_stats(rhs_samples);
-    assert_eq!(lhs_n, rhs_n);
-    println!(
-        "LOADTXT_SIGNED_PAIR row={row} samples={lhs_n} lhs_mean_ms={:.6} \
-         lhs_cv_pct={lhs_cv:.3} rhs_mean_ms={:.6} rhs_cv_pct={rhs_cv:.3} \
-         lhs_over_rhs={:.4}",
-        lhs_ns / 1_000_000.0,
-        rhs_ns / 1_000_000.0,
-        lhs_ns / rhs_ns,
+    let invalid_unselected = "1,invalid,0 # comment\n0,also-invalid,1\n";
+    assert_eq!(
+        selected_bool_candidate(invalid_unselected, ',', '#', 0, &[2, 0]),
+        selected_bool_former(invalid_unselected, ',', '#', 0, &[2, 0])
     );
+    assert!(selected_bool_candidate("1,0\n", ',', '#', 0, &[2]).is_none());
+    assert!(selected_bool_former("1,0\n", ',', '#', 0, &[2]).is_none());
+
+    let mut group = c.benchmark_group("loadtxt_selected_bool_direct_parse");
+    group.sample_size(CONTRACT_ROUNDS);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements((ROWS * USECOLS.len()) as u64));
+
+    let former_samples = RefCell::new(Vec::new());
+    let candidate_samples = RefCell::new(Vec::new());
+    let order = Cell::new(0usize);
+    let effect_checksum = Cell::new(0u64);
+    group.bench_function("former_vs_direct_borrowed_abba", |bench| {
+        bench.iter_custom(|iterations| {
+            let mut combined = Duration::ZERO;
+            for _ in 0..iterations {
+                let round = order.get();
+                let mut former_arm = || time_selected_bool(&text, &USECOLS, false);
+                let mut candidate_arm = || time_selected_bool(&text, &USECOLS, true);
+                let (former, candidate) = paired(round, &mut former_arm, &mut candidate_arm);
+                order.set(round.wrapping_add(1));
+                former_samples
+                    .borrow_mut()
+                    .push(former.elapsed.as_secs_f64() * 1.0e9);
+                candidate_samples
+                    .borrow_mut()
+                    .push(candidate.elapsed.as_secs_f64() * 1.0e9);
+                effect_checksum.set(mix_checksum(effect_checksum.get(), former.checksum));
+                combined += former.elapsed + candidate.elapsed;
+            }
+            combined
+        });
+    });
+    let effect = report_pair(
+        "effect_former_over_direct_borrowed",
+        &former_samples,
+        &candidate_samples,
+        effect_checksum.get(),
+    );
+
+    let null_a = RefCell::new(Vec::new());
+    let null_b = RefCell::new(Vec::new());
+    let null_order = Cell::new(0usize);
+    let null_checksum = Cell::new(0u64);
+    group.bench_function("direct_borrowed_aa_null_abba", |bench| {
+        bench.iter_custom(|iterations| {
+            let mut combined = Duration::ZERO;
+            for _ in 0..iterations {
+                let round = null_order.get();
+                let mut arm_a = || time_selected_bool(&text, &USECOLS, true);
+                let mut arm_b = || time_selected_bool(&text, &USECOLS, true);
+                let (a, b) = paired(round, &mut arm_a, &mut arm_b);
+                null_order.set(round.wrapping_add(1));
+                null_a.borrow_mut().push(a.elapsed.as_secs_f64() * 1.0e9);
+                null_b.borrow_mut().push(b.elapsed.as_secs_f64() * 1.0e9);
+                null_checksum.set(mix_checksum(null_checksum.get(), a.checksum));
+                combined += a.elapsed + b.elapsed;
+            }
+            combined
+        });
+    });
+    let null = report_pair(
+        "null_direct_borrowed_aa",
+        &null_a,
+        &null_b,
+        null_checksum.get(),
+    );
+    if let (Some(effect), Some(null)) = (effect, null) {
+        report_median_ci_gate("loadtxt_selected_bool_direct_parse", effect, null);
+    }
+    group.finish();
 }
 
 fn bench_loadtxt_signed_nonnegative_staging(c: &mut Criterion) {
@@ -1279,7 +1717,7 @@ fn bench_loadtxt_signed_nonnegative_staging(c: &mut Criterion) {
     );
 
     let mut group = c.benchmark_group("loadtxt_signed_nonnegative_staging");
-    group.sample_size(10);
+    group.sample_size(CONTRACT_ROUNDS);
     group.warm_up_time(Duration::from_millis(250));
     group.measurement_time(Duration::from_millis(750));
     group.throughput(Throughput::Elements((ROWS * USECOLS.len()) as u64));
@@ -1287,73 +1725,112 @@ fn bench_loadtxt_signed_nonnegative_staging(c: &mut Criterion) {
     let base_samples = RefCell::new(Vec::new());
     let staged_samples = RefCell::new(Vec::new());
     let order = Cell::new(0usize);
+    let effect_checksum = Cell::new(0u64);
     group.bench_function("former_vs_candidate_abba", |bench| {
         bench.iter_custom(|iterations| {
             let mut combined = Duration::ZERO;
             for _ in 0..iterations {
-                let staged_outer = order.get() & 1 == 1;
-                order.set(order.get().wrapping_add(1));
-                let (base_total, staged_total) = if staged_outer {
-                    let b1 = time_loadtxt_signed(&text, &USECOLS, true);
-                    let a1 = time_loadtxt_signed(&text, &USECOLS, false);
-                    let a2 = time_loadtxt_signed(&text, &USECOLS, false);
-                    let b2 = time_loadtxt_signed(&text, &USECOLS, true);
-                    (a1 + a2, b1 + b2)
-                } else {
-                    let a1 = time_loadtxt_signed(&text, &USECOLS, false);
-                    let b1 = time_loadtxt_signed(&text, &USECOLS, true);
-                    let b2 = time_loadtxt_signed(&text, &USECOLS, true);
-                    let a2 = time_loadtxt_signed(&text, &USECOLS, false);
-                    (a1 + a2, b1 + b2)
-                };
+                let round = order.get();
+                let mut base_arm = || time_loadtxt_signed(&text, &USECOLS, false);
+                let mut staged_arm = || time_loadtxt_signed(&text, &USECOLS, true);
+                let (base, staged) = paired(round, &mut base_arm, &mut staged_arm);
+                order.set(round.wrapping_add(1));
                 base_samples
                     .borrow_mut()
-                    .push(base_total.as_secs_f64() * 0.5e9);
+                    .push(base.elapsed.as_secs_f64() * 1.0e9);
                 staged_samples
                     .borrow_mut()
-                    .push(staged_total.as_secs_f64() * 0.5e9);
-                combined += base_total + staged_total;
+                    .push(staged.elapsed.as_secs_f64() * 1.0e9);
+                effect_checksum.set(mix_checksum(effect_checksum.get(), base.checksum));
+                combined += base.elapsed + staged.elapsed;
             }
             combined
         });
     });
-    report_loadtxt_signed_pair(
+    let effect = report_pair(
         "effect_former_over_candidate",
         &base_samples,
         &staged_samples,
+        effect_checksum.get(),
     );
 
     let null_a = RefCell::new(Vec::new());
     let null_b = RefCell::new(Vec::new());
     let null_order = Cell::new(0usize);
+    let null_checksum = Cell::new(0u64);
     group.bench_function("candidate_aa_null_abba", |bench| {
         bench.iter_custom(|iterations| {
             let mut combined = Duration::ZERO;
             for _ in 0..iterations {
-                let b_outer = null_order.get() & 1 == 1;
-                null_order.set(null_order.get().wrapping_add(1));
-                let (a_total, b_total) = if b_outer {
-                    let b1 = time_loadtxt_signed(&text, &USECOLS, true);
-                    let a1 = time_loadtxt_signed(&text, &USECOLS, true);
-                    let a2 = time_loadtxt_signed(&text, &USECOLS, true);
-                    let b2 = time_loadtxt_signed(&text, &USECOLS, true);
-                    (a1 + a2, b1 + b2)
-                } else {
-                    let a1 = time_loadtxt_signed(&text, &USECOLS, true);
-                    let b1 = time_loadtxt_signed(&text, &USECOLS, true);
-                    let b2 = time_loadtxt_signed(&text, &USECOLS, true);
-                    let a2 = time_loadtxt_signed(&text, &USECOLS, true);
-                    (a1 + a2, b1 + b2)
-                };
-                null_a.borrow_mut().push(a_total.as_secs_f64() * 0.5e9);
-                null_b.borrow_mut().push(b_total.as_secs_f64() * 0.5e9);
-                combined += a_total + b_total;
+                let round = null_order.get();
+                let mut arm_a = || time_loadtxt_signed(&text, &USECOLS, true);
+                let mut arm_b = || time_loadtxt_signed(&text, &USECOLS, true);
+                let (a, b) = paired(round, &mut arm_a, &mut arm_b);
+                null_order.set(round.wrapping_add(1));
+                null_a.borrow_mut().push(a.elapsed.as_secs_f64() * 1.0e9);
+                null_b.borrow_mut().push(b.elapsed.as_secs_f64() * 1.0e9);
+                null_checksum.set(mix_checksum(null_checksum.get(), a.checksum));
+                combined += a.elapsed + b.elapsed;
             }
             combined
         });
     });
-    report_loadtxt_signed_pair("null_candidate_aa", &null_a, &null_b);
+    let null = report_pair("null_candidate_aa", &null_a, &null_b, null_checksum.get());
+    if let (Some(effect), Some(null)) = (effect, null) {
+        report_median_ci_gate("loadtxt_signed_nonnegative_staging", effect, null);
+    }
     group.finish();
+}
+
+#[inline(never)]
+fn loadtxt_signed_tail_former(
+    text: &str,
+    delimiter: char,
+    comments: char,
+    usecols: &[isize],
+) -> fnp_io::TextArrayData {
+    let mut values = Vec::new();
+    let mut ncols = None;
+    let mut nrows = 0usize;
+    for line in text.lines() {
+        let trimmed = line
+            .split_once(comments)
+            .map_or(line, |(prefix, _)| prefix)
+            .trim();
+        if trimmed.is_empty() || trimmed.starts_with(comments) {
+            continue;
+        }
+        let fields = if delimiter == ' ' {
+            trimmed.split_whitespace().collect::<Vec<_>>()
+        } else {
+            trimmed.split(delimiter).collect::<Vec<_>>()
+        };
+        let mut row_values = Vec::with_capacity(usecols.len());
+        for &column in usecols {
+            let offset = usize::try_from(
+                column
+                    .checked_neg()
+                    .expect("former fixture uses negative columns"),
+            )
+            .expect("former fixture tail offset must fit");
+            let index = fields
+                .len()
+                .checked_sub(offset)
+                .expect("former fixture usecol in bounds");
+            row_values.push(fields[index].trim().parse::<f64>().unwrap());
+        }
+        match ncols {
+            None => ncols = Some(row_values.len()),
+            Some(expected) => assert_eq!(row_values.len(), expected),
+        }
+        values.extend(row_values);
+        nrows += 1;
+    }
+    fnp_io::TextArrayData {
+        values,
+        nrows,
+        ncols: ncols.unwrap_or(0),
+    }
 }
 
 #[inline(never)]
@@ -1420,18 +1897,14 @@ fn loadtxt_signed_tail_candidate(
     }
 }
 
-fn time_loadtxt_signed_tail(text: &str, usecols: &[isize], candidate: bool) -> Duration {
-    const REPETITIONS: u32 = 8;
-    let start = Instant::now();
-    for _ in 0..REPETITIONS {
-        let output = if candidate {
-            loadtxt_signed_tail_candidate(text, ',', '#', usecols)
-        } else {
+fn time_loadtxt_signed_tail(text: &str, usecols: &[isize], candidate: bool) -> TimedValue {
+    time_text_array(|| {
+        if candidate {
             fnp_io::loadtxt_usecols_signed(text, ',', '#', 0, usize::MAX, Some(usecols)).unwrap()
-        };
-        drop(black_box(output));
-    }
-    start.elapsed() / REPETITIONS
+        } else {
+            loadtxt_signed_tail_former(text, ',', '#', usecols)
+        }
+    })
 }
 
 fn bench_loadtxt_signed_tail_staging(c: &mut Criterion) {
@@ -1455,6 +1928,7 @@ fn bench_loadtxt_signed_tail_staging(c: &mut Criterion) {
     assert_eq!(output.nrows, ROWS);
     assert_eq!(output.ncols, USECOLS.len());
     let candidate = loadtxt_signed_tail_candidate(&text, ',', '#', &USECOLS);
+    let former = loadtxt_signed_tail_former(&text, ',', '#', &USECOLS);
     assert_eq!(output.nrows, candidate.nrows);
     assert_eq!(output.ncols, candidate.ncols);
     assert_eq!(output.values.len(), candidate.values.len());
@@ -1465,9 +1939,19 @@ fn bench_loadtxt_signed_tail_staging(c: &mut Criterion) {
             .zip(&candidate.values)
             .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
     );
+    assert_eq!(output.nrows, former.nrows);
+    assert_eq!(output.ncols, former.ncols);
+    assert_eq!(output.values.len(), former.values.len());
+    assert!(
+        output
+            .values
+            .iter()
+            .zip(&former.values)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
 
     let mut group = c.benchmark_group("loadtxt_signed_tail_staging");
-    group.sample_size(10);
+    group.sample_size(CONTRACT_ROUNDS);
     group.warm_up_time(Duration::from_millis(250));
     group.measurement_time(Duration::from_millis(750));
     group.throughput(Throughput::Elements((ROWS * COLS) as u64));
@@ -1490,72 +1974,60 @@ fn bench_loadtxt_signed_tail_staging(c: &mut Criterion) {
     let former_samples = RefCell::new(Vec::new());
     let candidate_samples = RefCell::new(Vec::new());
     let order = Cell::new(0usize);
+    let effect_checksum = Cell::new(0u64);
     group.bench_function("former_vs_tail_ring_abba", |bench| {
         bench.iter_custom(|iterations| {
             let mut combined = Duration::ZERO;
             for _ in 0..iterations {
-                let candidate_outer = order.get() & 1 == 1;
-                order.set(order.get().wrapping_add(1));
-                let (former_total, candidate_total) = if candidate_outer {
-                    let b1 = time_loadtxt_signed_tail(&text, &USECOLS, true);
-                    let a1 = time_loadtxt_signed_tail(&text, &USECOLS, false);
-                    let a2 = time_loadtxt_signed_tail(&text, &USECOLS, false);
-                    let b2 = time_loadtxt_signed_tail(&text, &USECOLS, true);
-                    (a1 + a2, b1 + b2)
-                } else {
-                    let a1 = time_loadtxt_signed_tail(&text, &USECOLS, false);
-                    let b1 = time_loadtxt_signed_tail(&text, &USECOLS, true);
-                    let b2 = time_loadtxt_signed_tail(&text, &USECOLS, true);
-                    let a2 = time_loadtxt_signed_tail(&text, &USECOLS, false);
-                    (a1 + a2, b1 + b2)
-                };
+                let round = order.get();
+                let mut former_arm = || time_loadtxt_signed_tail(&text, &USECOLS, false);
+                let mut candidate_arm = || time_loadtxt_signed_tail(&text, &USECOLS, true);
+                let (former, candidate) = paired(round, &mut former_arm, &mut candidate_arm);
+                order.set(round.wrapping_add(1));
                 former_samples
                     .borrow_mut()
-                    .push(former_total.as_secs_f64() * 0.5e9);
+                    .push(former.elapsed.as_secs_f64() * 1.0e9);
                 candidate_samples
                     .borrow_mut()
-                    .push(candidate_total.as_secs_f64() * 0.5e9);
-                combined += former_total + candidate_total;
+                    .push(candidate.elapsed.as_secs_f64() * 1.0e9);
+                effect_checksum.set(mix_checksum(effect_checksum.get(), former.checksum));
+                combined += former.elapsed + candidate.elapsed;
             }
             combined
         });
     });
-    report_loadtxt_signed_pair(
+    let effect = report_pair(
         "effect_former_over_tail_ring",
         &former_samples,
         &candidate_samples,
+        effect_checksum.get(),
     );
 
     let null_a = RefCell::new(Vec::new());
     let null_b = RefCell::new(Vec::new());
     let null_order = Cell::new(0usize);
+    let null_checksum = Cell::new(0u64);
     group.bench_function("tail_ring_aa_null_abba", |bench| {
         bench.iter_custom(|iterations| {
             let mut combined = Duration::ZERO;
             for _ in 0..iterations {
-                let b_outer = null_order.get() & 1 == 1;
-                null_order.set(null_order.get().wrapping_add(1));
-                let (a_total, b_total) = if b_outer {
-                    let b1 = time_loadtxt_signed_tail(&text, &USECOLS, true);
-                    let a1 = time_loadtxt_signed_tail(&text, &USECOLS, true);
-                    let a2 = time_loadtxt_signed_tail(&text, &USECOLS, true);
-                    let b2 = time_loadtxt_signed_tail(&text, &USECOLS, true);
-                    (a1 + a2, b1 + b2)
-                } else {
-                    let a1 = time_loadtxt_signed_tail(&text, &USECOLS, true);
-                    let b1 = time_loadtxt_signed_tail(&text, &USECOLS, true);
-                    let b2 = time_loadtxt_signed_tail(&text, &USECOLS, true);
-                    let a2 = time_loadtxt_signed_tail(&text, &USECOLS, true);
-                    (a1 + a2, b1 + b2)
-                };
-                null_a.borrow_mut().push(a_total.as_secs_f64() * 0.5e9);
-                null_b.borrow_mut().push(b_total.as_secs_f64() * 0.5e9);
-                combined += a_total + b_total;
+                let round = null_order.get();
+                let mut arm_a = || time_loadtxt_signed_tail(&text, &USECOLS, true);
+                let mut arm_b = || time_loadtxt_signed_tail(&text, &USECOLS, true);
+                let (a, b) = paired(round, &mut arm_a, &mut arm_b);
+                null_order.set(round.wrapping_add(1));
+                null_a.borrow_mut().push(a.elapsed.as_secs_f64() * 1.0e9);
+                null_b.borrow_mut().push(b.elapsed.as_secs_f64() * 1.0e9);
+                null_checksum.set(mix_checksum(null_checksum.get(), a.checksum));
+                combined += a.elapsed + b.elapsed;
             }
             combined
         });
     });
-    report_loadtxt_signed_pair("null_tail_ring_aa", &null_a, &null_b);
+    let null = report_pair("null_tail_ring_aa", &null_a, &null_b, null_checksum.get());
+    if let (Some(effect), Some(null)) = (effect, null) {
+        report_median_ci_gate("loadtxt_signed_tail_staging", effect, null);
+    }
     group.finish();
 }
 
@@ -2706,6 +3178,7 @@ criterion_group!(
     bench_fromfile_text_wildcard_bounded_prefix,
     bench_loadtxt_usecols_plan,
     bench_loadtxt_usecols_scatter,
+    bench_loadtxt_selected_bool_direct_parse,
     bench_loadtxt_signed_nonnegative_staging,
     bench_loadtxt_signed_tail_staging,
     bench_loadtxt_plain_rows,
@@ -2737,4 +3210,8 @@ criterion_group!(
     bench_npy_roundtrip,
 );
 
-criterion_main!(benches);
+fn main() {
+    report_bench_identity();
+    benches();
+    Criterion::default().configure_from_args().final_summary();
+}
