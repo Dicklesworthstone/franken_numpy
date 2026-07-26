@@ -1300,6 +1300,82 @@ fn loadtxt_usecols_hoisted_former(
     (values, nrows, ncols.unwrap_or(0))
 }
 
+#[inline(never)]
+fn loadtxt_usecols_scatter_candidate(
+    text: &str,
+    delimiter: char,
+    comments: char,
+    cols: &[usize],
+) -> (Vec<f64>, usize, usize) {
+    use std::collections::BTreeMap;
+    let mut positions: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let mut max_col = 0usize;
+    for (pos, &col) in cols.iter().enumerate() {
+        positions.entry(col).or_default().push(pos);
+        max_col = max_col.max(col);
+    }
+
+    let mut values = Vec::new();
+    let mut nrows = 0usize;
+    for line in text.lines() {
+        let trimmed = match line.find(comments) {
+            Some(pos) => &line[..pos],
+            None => line,
+        }
+        .trim();
+        if trimmed.is_empty() || trimmed.starts_with(comments) {
+            continue;
+        }
+
+        let row_start = values.len();
+        values.resize(row_start + cols.len(), 0.0);
+        let mut col_idx = 0usize;
+        for token in trimmed.split(delimiter) {
+            if col_idx > max_col {
+                break;
+            }
+            if let Some(pos_list) = positions.get(&col_idx) {
+                let value = token.trim().parse::<f64>().unwrap();
+                for &pos in pos_list {
+                    values[row_start + pos] = value;
+                }
+            }
+            col_idx += 1;
+        }
+        assert!(col_idx > max_col, "usecols index out of bounds");
+        nrows += 1;
+    }
+    (values, nrows, cols.len())
+}
+
+fn checksum_loadtxt_tuple(output: &(Vec<f64>, usize, usize)) -> u64 {
+    output.0.iter().fold(
+        mix_checksum(output.1 as u64, output.2 as u64),
+        |state, value| mix_checksum(state, value.to_bits()),
+    )
+}
+
+fn time_loadtxt_usecols(
+    text: &str,
+    delimiter: char,
+    comments: char,
+    cols: &[usize],
+    candidate: bool,
+) -> TimedValue {
+    let started = Instant::now();
+    let output = if candidate {
+        loadtxt_usecols_scatter_candidate(text, delimiter, comments, cols)
+    } else {
+        loadtxt_usecols_hoisted_former(text, delimiter, comments, cols)
+    };
+    let mut elapsed = started.elapsed();
+    let checksum = checksum_loadtxt_tuple(&output);
+    let drop_started = Instant::now();
+    drop(black_box(output));
+    elapsed += drop_started.elapsed();
+    TimedValue { elapsed, checksum }
+}
+
 fn bench_loadtxt_usecols_scatter(c: &mut Criterion) {
     const ROWS: usize = 8_192;
     const COLS: usize = 16;
@@ -1318,6 +1394,16 @@ fn bench_loadtxt_usecols_scatter(c: &mut Criterion) {
 
     let (former_values, former_rows, former_cols) =
         loadtxt_usecols_hoisted_former(&text, ',', '#', &USECOLS);
+    let candidate = loadtxt_usecols_scatter_candidate(&text, ',', '#', &USECOLS);
+    assert_eq!(candidate.1, former_rows);
+    assert_eq!(candidate.2, former_cols);
+    assert!(
+        candidate
+            .0
+            .iter()
+            .zip(&former_values)
+            .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
     let current = fnp_io::loadtxt_usecols(&text, ',', '#', 0, usize::MAX, Some(&USECOLS)).unwrap();
     assert_eq!(current.nrows, former_rows);
     assert_eq!(current.ncols, former_cols);
@@ -1327,6 +1413,12 @@ fn bench_loadtxt_usecols_scatter(c: &mut Criterion) {
             .iter()
             .zip(&former_values)
             .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+
+    let _ = run_median_ci_contract(
+        "loadtxt_usecols_scatter_resurrection",
+        || time_loadtxt_usecols(&text, ',', '#', &USECOLS, false),
+        || time_loadtxt_usecols(&text, ',', '#', &USECOLS, true),
     );
 
     // Variance protocol: 20 samples, 2 s window, quiet worker; floor
@@ -1348,17 +1440,12 @@ fn bench_loadtxt_usecols_scatter(c: &mut Criterion) {
     });
     group.bench_function("candidate_scatter_into", |bench| {
         bench.iter(|| {
-            black_box(
-                fnp_io::loadtxt_usecols(
-                    black_box(&text),
-                    ',',
-                    '#',
-                    0,
-                    usize::MAX,
-                    black_box(Some(&USECOLS)),
-                )
-                .unwrap(),
-            )
+            black_box(loadtxt_usecols_scatter_candidate(
+                black_box(&text),
+                ',',
+                '#',
+                black_box(&USECOLS),
+            ))
         })
     });
     group.finish();
