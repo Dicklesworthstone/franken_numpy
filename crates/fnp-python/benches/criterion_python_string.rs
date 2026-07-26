@@ -841,7 +841,10 @@ fn main() {
             bench_string_searchsorted_boundary,
         ),
         ("bench_string_isin_boundary", bench_string_isin_boundary),
-        ("bench_string_union1d_boundary", bench_string_union1d_boundary),
+        (
+            "bench_string_union1d_boundary",
+            bench_string_union1d_boundary,
+        ),
         ("bench_string_setops_boundary", bench_string_setops_boundary),
         ("bench_string_setxor_boundary", bench_string_setxor_boundary),
         ("bench_string_bytes_boundary", bench_string_bytes_boundary),

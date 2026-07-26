@@ -544,13 +544,31 @@ ib = rng.integers(0, 100000, 1_000_000).astype('datetime64[s]')\n";
 fn main() {
     common::gated_main(&[
         ("bench_isin_struct_boundary", bench_isin_struct_boundary),
-        ("bench_isin_struct_float_boundary", bench_isin_struct_float_boundary),
-        ("bench_searchsorted_struct_boundary", bench_searchsorted_struct_boundary),
-        ("bench_searchsorted_struct_mixed_boundary", bench_searchsorted_struct_mixed_boundary),
+        (
+            "bench_isin_struct_float_boundary",
+            bench_isin_struct_float_boundary,
+        ),
+        (
+            "bench_searchsorted_struct_boundary",
+            bench_searchsorted_struct_boundary,
+        ),
+        (
+            "bench_searchsorted_struct_mixed_boundary",
+            bench_searchsorted_struct_mixed_boundary,
+        ),
         ("bench_struct_setops_boundary", bench_struct_setops_boundary),
-        ("bench_struct_mixed_setops_boundary", bench_struct_mixed_setops_boundary),
+        (
+            "bench_struct_mixed_setops_boundary",
+            bench_struct_mixed_setops_boundary,
+        ),
         ("bench_c128_setops_boundary", bench_c128_setops_boundary),
-        ("bench_datetime_setops_boundary", bench_datetime_setops_boundary),
-        ("bench_datetime_searchsorted_isin_boundary", bench_datetime_searchsorted_isin_boundary),
+        (
+            "bench_datetime_setops_boundary",
+            bench_datetime_setops_boundary,
+        ),
+        (
+            "bench_datetime_searchsorted_isin_boundary",
+            bench_datetime_searchsorted_isin_boundary,
+        ),
     ]);
 }

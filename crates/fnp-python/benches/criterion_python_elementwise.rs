@@ -1206,18 +1206,33 @@ fn main() {
         ("bench_select_boundary", bench_select_boundary),
         ("bench_ldexp_boundary", bench_ldexp_boundary),
         ("bench_float_power_boundary", bench_float_power_boundary),
-        ("bench_logaddexp2_scalar_boundary", bench_logaddexp2_scalar_boundary),
-        ("bench_heaviside_scalar_boundary", bench_heaviside_scalar_boundary),
+        (
+            "bench_logaddexp2_scalar_boundary",
+            bench_logaddexp2_scalar_boundary,
+        ),
+        (
+            "bench_heaviside_scalar_boundary",
+            bench_heaviside_scalar_boundary,
+        ),
         ("bench_frexp_boundary", bench_frexp_boundary),
         ("bench_modf_boundary", bench_modf_boundary),
         ("bench_putmask_boundary", bench_putmask_boundary),
         ("bench_shift_boundary", bench_shift_boundary),
-        ("bench_column_interleave_boundary", bench_column_interleave_boundary),
+        (
+            "bench_column_interleave_boundary",
+            bench_column_interleave_boundary,
+        ),
         ("bench_vstack_1d_boundary", bench_vstack_1d_boundary),
         ("bench_concat_hstack_boundary", bench_concat_hstack_boundary),
-        ("bench_indices_construction_boundary", bench_indices_construction_boundary),
+        (
+            "bench_indices_construction_boundary",
+            bench_indices_construction_boundary,
+        ),
         ("bench_char_ascii_boundary", bench_char_ascii_boundary),
-        ("bench_average_nansum_axis_boundary", bench_average_nansum_axis_boundary),
+        (
+            "bench_average_nansum_axis_boundary",
+            bench_average_nansum_axis_boundary,
+        ),
         ("bench_histogram_boundary", bench_histogram_boundary),
         ("bench_setops_boundary", bench_setops_boundary),
     ]);

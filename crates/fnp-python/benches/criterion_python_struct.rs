@@ -575,17 +575,38 @@ a_argsort = np.zeros(1_000_000, dtype=dt); a_argsort['id'] = rng.permutation(1_0
 
 fn main() {
     common::gated_main(&[
-        ("bench_datetime_unique_boundary", bench_datetime_unique_boundary),
-        ("bench_unique_struct_int_boundary", bench_unique_struct_int_boundary),
-        ("bench_unique_struct_mixed_boundary", bench_unique_struct_mixed_boundary),
-        ("bench_unique_rows_datetime_boundary", bench_unique_rows_datetime_boundary),
-        ("bench_unique_rows_f16_boundary", bench_unique_rows_f16_boundary),
-        ("bench_unique_struct_int_factorize_boundary", bench_unique_struct_int_factorize_boundary),
+        (
+            "bench_datetime_unique_boundary",
+            bench_datetime_unique_boundary,
+        ),
+        (
+            "bench_unique_struct_int_boundary",
+            bench_unique_struct_int_boundary,
+        ),
+        (
+            "bench_unique_struct_mixed_boundary",
+            bench_unique_struct_mixed_boundary,
+        ),
+        (
+            "bench_unique_rows_datetime_boundary",
+            bench_unique_rows_datetime_boundary,
+        ),
+        (
+            "bench_unique_rows_f16_boundary",
+            bench_unique_rows_f16_boundary,
+        ),
+        (
+            "bench_unique_struct_int_factorize_boundary",
+            bench_unique_struct_int_factorize_boundary,
+        ),
         (
             "bench_unique_struct_mixed_factorize_boundary",
             bench_unique_struct_mixed_factorize_boundary,
         ),
         ("bench_lexsort_float_boundary", bench_lexsort_float_boundary),
-        ("bench_sort_struct_mixed_boundary", bench_sort_struct_mixed_boundary),
+        (
+            "bench_sort_struct_mixed_boundary",
+            bench_sort_struct_mixed_boundary,
+        ),
     ]);
 }

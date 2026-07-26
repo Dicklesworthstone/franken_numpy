@@ -3914,13 +3914,28 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
 
 fn main() {
     common::gated_main(&[
-        ("bench_wide_string_sort_median_gate", bench_wide_string_sort_median_gate),
-        ("bench_accumulate_extremum_median_gate", bench_accumulate_extremum_median_gate),
-        ("bench_int_convolve_median_gate", bench_int_convolve_median_gate),
+        (
+            "bench_wide_string_sort_median_gate",
+            bench_wide_string_sort_median_gate,
+        ),
+        (
+            "bench_accumulate_extremum_median_gate",
+            bench_accumulate_extremum_median_gate,
+        ),
+        (
+            "bench_int_convolve_median_gate",
+            bench_int_convolve_median_gate,
+        ),
         ("bench_completion_median_gate", bench_completion_median_gate),
-        ("bench_f64_transcendental_median_gate", bench_f64_transcendental_median_gate),
+        (
+            "bench_f64_transcendental_median_gate",
+            bench_f64_transcendental_median_gate,
+        ),
         ("bench_f64_exp_log_probe", bench_f64_exp_log_probe),
-        ("bench_f64_exp_log_median_gate", bench_f64_exp_log_median_gate),
+        (
+            "bench_f64_exp_log_median_gate",
+            bench_f64_exp_log_median_gate,
+        ),
         ("bench_bool_sort_median_gate", bench_bool_sort_median_gate),
         ("bench_int_matmul_median_gate", bench_int_matmul_median_gate),
         ("bench_f16_matmul_median_gate", bench_f16_matmul_median_gate),
@@ -3929,7 +3944,13 @@ fn main() {
         ("bench_f16_unique_median_gate", bench_f16_unique_median_gate),
         ("bench_f16_around_median_gate", bench_f16_around_median_gate),
         ("bench_f16_einsum_median_gate", bench_f16_einsum_median_gate),
-        ("bench_wide_string_substrate_v2", bench_wide_string_substrate_v2),
-        ("bench_ledger_integrity_rejects", bench_ledger_integrity_rejects),
+        (
+            "bench_wide_string_substrate_v2",
+            bench_wide_string_substrate_v2,
+        ),
+        (
+            "bench_ledger_integrity_rejects",
+            bench_ledger_integrity_rejects,
+        ),
     ]);
 }

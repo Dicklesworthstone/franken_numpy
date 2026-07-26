@@ -845,8 +845,14 @@ fn main() {
         ("bench_repeat_array_boundary", bench_repeat_array_boundary),
         ("bench_take_dtype_boundary", bench_take_dtype_boundary),
         ("bench_take_boundary", bench_take_boundary),
-        ("bench_take_along_axis_c64_boundary", bench_take_along_axis_c64_boundary),
-        ("bench_take_along_axis_boundary", bench_take_along_axis_boundary),
+        (
+            "bench_take_along_axis_c64_boundary",
+            bench_take_along_axis_c64_boundary,
+        ),
+        (
+            "bench_take_along_axis_boundary",
+            bench_take_along_axis_boundary,
+        ),
         ("bench_take_axis_boundary", bench_take_axis_boundary),
     ]);
 }

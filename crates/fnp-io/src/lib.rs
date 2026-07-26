@@ -6348,7 +6348,7 @@ fn decode_bytes_element(chunk: &[u8]) -> String {
 /// null-padded. Little-endian if `is_le`, big-endian otherwise.
 fn decode_unicode_element(chunk: &[u8], is_le: bool) -> Result<String, IOError> {
     let mut chars = Vec::with_capacity(chunk.len() / 4);
-    for code_unit in chunk.chunks_exact(4) {
+    for code_unit in chunk.as_chunks::<4>().0 {
         let cp = if is_le {
             u32::from_le_bytes([code_unit[0], code_unit[1], code_unit[2], code_unit[3]])
         } else {

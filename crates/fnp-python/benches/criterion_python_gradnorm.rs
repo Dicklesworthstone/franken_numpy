@@ -888,14 +888,32 @@ fn main() {
         ("bench_int_cum_boundary", bench_int_cum_boundary),
         ("bench_vander_boundary", bench_vander_boundary),
         ("bench_polyval_boundary", bench_polyval_boundary),
-        ("bench_gradient_2d_coords_boundary", bench_gradient_2d_coords_boundary),
-        ("bench_gradient_coords_boundary", bench_gradient_coords_boundary),
-        ("bench_gradient_nd_coords_axis_boundary", bench_gradient_nd_coords_axis_boundary),
+        (
+            "bench_gradient_2d_coords_boundary",
+            bench_gradient_2d_coords_boundary,
+        ),
+        (
+            "bench_gradient_coords_boundary",
+            bench_gradient_coords_boundary,
+        ),
+        (
+            "bench_gradient_nd_coords_axis_boundary",
+            bench_gradient_nd_coords_axis_boundary,
+        ),
         ("bench_gradient_f32_boundary", bench_gradient_f32_boundary),
         ("bench_gradient_axis_boundary", bench_gradient_axis_boundary),
         ("bench_norm_axis_boundary", bench_norm_axis_boundary),
-        ("bench_norm_f32_orderfree_boundary", bench_norm_f32_orderfree_boundary),
-        ("bench_norm_nonlast_axis_boundary", bench_norm_nonlast_axis_boundary),
-        ("bench_norm_frobenius_boundary", bench_norm_frobenius_boundary),
+        (
+            "bench_norm_f32_orderfree_boundary",
+            bench_norm_f32_orderfree_boundary,
+        ),
+        (
+            "bench_norm_nonlast_axis_boundary",
+            bench_norm_nonlast_axis_boundary,
+        ),
+        (
+            "bench_norm_frobenius_boundary",
+            bench_norm_frobenius_boundary,
+        ),
     ]);
 }

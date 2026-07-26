@@ -1918,22 +1918,46 @@ A = rng.integers(0, 20, (500_000, 4)).astype(np.int64)\n",
 
 fn main() {
     common::gated_main(&[
-        ("bench_parallel_binary_boundary", bench_parallel_binary_boundary),
+        (
+            "bench_parallel_binary_boundary",
+            bench_parallel_binary_boundary,
+        ),
         ("bench_sort_axis_boundary", bench_sort_axis_boundary),
         ("bench_sort_kind_boundary", bench_sort_kind_boundary),
         ("bench_matmul_boundary", bench_matmul_boundary),
         ("bench_char_add_boundary", bench_char_add_boundary),
         ("bench_asarray_dtype_boundary", bench_asarray_dtype_boundary),
-        ("bench_timedelta_cumsum_boundary", bench_timedelta_cumsum_boundary),
-        ("bench_datetime_minmax_boundary", bench_datetime_minmax_boundary),
+        (
+            "bench_timedelta_cumsum_boundary",
+            bench_timedelta_cumsum_boundary,
+        ),
+        (
+            "bench_datetime_minmax_boundary",
+            bench_datetime_minmax_boundary,
+        ),
         ("bench_datetime_ptp_boundary", bench_datetime_ptp_boundary),
-        ("bench_datetime_argextreme_boundary", bench_datetime_argextreme_boundary),
-        ("bench_argextreme_f32_axis_boundary", bench_argextreme_f32_axis_boundary),
-        ("bench_nanarg_nonlast_boundary", bench_nanarg_nonlast_boundary),
-        ("bench_nanarg_lastaxis_boundary", bench_nanarg_lastaxis_boundary),
+        (
+            "bench_datetime_argextreme_boundary",
+            bench_datetime_argextreme_boundary,
+        ),
+        (
+            "bench_argextreme_f32_axis_boundary",
+            bench_argextreme_f32_axis_boundary,
+        ),
+        (
+            "bench_nanarg_nonlast_boundary",
+            bench_nanarg_nonlast_boundary,
+        ),
+        (
+            "bench_nanarg_lastaxis_boundary",
+            bench_nanarg_lastaxis_boundary,
+        ),
         ("bench_lexsort_boundary", bench_lexsort_boundary),
         ("bench_unique_rows_boundary", bench_unique_rows_boundary),
         ("bench_unique_cols_boundary", bench_unique_cols_boundary),
-        ("bench_unique_rows_full_boundary", bench_unique_rows_full_boundary),
+        (
+            "bench_unique_rows_full_boundary",
+            bench_unique_rows_full_boundary,
+        ),
     ]);
 }

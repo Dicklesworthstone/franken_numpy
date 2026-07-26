@@ -10010,7 +10010,9 @@ fn complex_lu_decompose(
     }
 
     let matrix_max_abs = a
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| cabs2(c[0], c[1]).sqrt())
         .fold(0.0_f64, f64::max);
     let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
@@ -10366,7 +10368,7 @@ pub fn complex_qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f6
 /// Frobenius norm of a complex matrix (2·m·n interleaved).
 pub fn complex_matrix_norm_frobenius(a: &[f64]) -> f64 {
     let mut sum = 0.0;
-    for chunk in a.chunks_exact(2) {
+    for chunk in a.as_chunks::<2>().0 {
         sum += cabs2(chunk[0], chunk[1]);
     }
     sum.sqrt()
@@ -20340,12 +20342,12 @@ except Exception as exc:
             assert_eq!(rank_t, n, "expected full rank for {m}x{n}");
             assert_eq!(rank_t, rank_svd, "rank mismatch {m}x{n}");
 
-            let xscale = x_svd.iter().fold(0.0f64, |acc, v| acc.max(v.abs())).max(1.0);
+            let xscale = x_svd
+                .iter()
+                .fold(0.0f64, |acc, v| acc.max(v.abs()))
+                .max(1.0);
             for (i, (t, s)) in x_t.iter().zip(&x_svd).enumerate() {
-                assert!(
-                    (t - s).abs() <= 1e-7 * xscale,
-                    "x[{i}] {m}x{n}: {t} vs {s}"
-                );
+                assert!((t - s).abs() <= 1e-7 * xscale, "x[{i}] {m}x{n}: {t} vs {s}");
             }
 
             assert_eq!(res_t.len(), res_svd.len(), "residual arity {m}x{n}");
@@ -20360,7 +20362,10 @@ except Exception as exc:
             }
 
             assert_eq!(s_t.len(), s_svd.len(), "singular count {m}x{n}");
-            let sscale = s_svd.iter().fold(0.0f64, |acc, v| acc.max(v.abs())).max(1.0);
+            let sscale = s_svd
+                .iter()
+                .fold(0.0f64, |acc, v| acc.max(v.abs()))
+                .max(1.0);
             for (i, (t, s)) in s_t.iter().zip(&s_svd).enumerate() {
                 assert!(
                     (t - s).abs() <= 1e-7 * sscale,
@@ -20441,8 +20446,7 @@ except Exception as exc:
         // lstsq_svd and return its exact minimum-norm result and rank.
         let a = [1.0, 2.0, 2.0, 4.0, 3.0, 6.0, 4.0, 8.0];
         let b = [1.0, 2.0, 2.0, 5.0];
-        let (x_t, res_t, rank_t, s_t) =
-            super::lstsq_tsqr(&a, &b, 4, 2, 1e-6).expect("lstsq_tsqr");
+        let (x_t, res_t, rank_t, s_t) = super::lstsq_tsqr(&a, &b, 4, 2, 1e-6).expect("lstsq_tsqr");
         let (x_svd, res_svd, rank_svd, s_svd) =
             super::lstsq_svd(&a, &b, 4, 2, 1e-6).expect("lstsq_svd");
         assert_eq!(rank_t, 1, "rank-deficient should report rank 1");

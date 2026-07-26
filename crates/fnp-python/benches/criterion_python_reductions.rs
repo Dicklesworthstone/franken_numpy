@@ -1516,16 +1516,37 @@ fn main() {
         ("bench_var_multiaxis_boundary", bench_var_multiaxis_boundary),
         ("bench_var_midaxis_boundary", bench_var_midaxis_boundary),
         ("bench_var_f32_axis_boundary", bench_var_f32_axis_boundary),
-        ("bench_nanextreme_f32_axis_boundary", bench_nanextreme_f32_axis_boundary),
-        ("bench_nansum_f32_axis_boundary", bench_nansum_f32_axis_boundary),
-        ("bench_nanvar_f32_axis_boundary", bench_nanvar_f32_axis_boundary),
-        ("bench_nanvar_f32_last_axis_boundary", bench_nanvar_f32_last_axis_boundary),
-        ("bench_nanvar_midaxis_boundary", bench_nanvar_midaxis_boundary),
+        (
+            "bench_nanextreme_f32_axis_boundary",
+            bench_nanextreme_f32_axis_boundary,
+        ),
+        (
+            "bench_nansum_f32_axis_boundary",
+            bench_nansum_f32_axis_boundary,
+        ),
+        (
+            "bench_nanvar_f32_axis_boundary",
+            bench_nanvar_f32_axis_boundary,
+        ),
+        (
+            "bench_nanvar_f32_last_axis_boundary",
+            bench_nanvar_f32_last_axis_boundary,
+        ),
+        (
+            "bench_nanvar_midaxis_boundary",
+            bench_nanvar_midaxis_boundary,
+        ),
         ("bench_var_axis0_boundary", bench_var_axis0_boundary),
         ("bench_sum_lastaxis_boundary", bench_sum_lastaxis_boundary),
         ("bench_prod_lastaxis_boundary", bench_prod_lastaxis_boundary),
-        ("bench_cumsum_lastaxis_boundary", bench_cumsum_lastaxis_boundary),
+        (
+            "bench_cumsum_lastaxis_boundary",
+            bench_cumsum_lastaxis_boundary,
+        ),
         ("bench_cumsum_flat_boundary", bench_cumsum_flat_boundary),
-        ("bench_accumulate_extremum_boundary", bench_accumulate_extremum_boundary),
+        (
+            "bench_accumulate_extremum_boundary",
+            bench_accumulate_extremum_boundary,
+        ),
     ]);
 }

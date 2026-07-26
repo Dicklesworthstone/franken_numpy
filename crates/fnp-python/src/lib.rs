@@ -57249,9 +57249,9 @@ fn genfromtxt(
             return match fnp_io::genfromtxt_full(&text, &config) {
                 Ok(parsed) if parsed.nrows > 0 => {
                     let flat_storage = match parsed_dtype {
-                        DType::F16 => {
-                            ArrayStorage::F16(parsed.values.into_iter().map(f16::from_f64).collect())
-                        }
+                        DType::F16 => ArrayStorage::F16(
+                            parsed.values.into_iter().map(f16::from_f64).collect(),
+                        ),
                         DType::F32 => {
                             ArrayStorage::F32(parsed.values.into_iter().map(|v| v as f32).collect())
                         }
@@ -103750,19 +103750,18 @@ mod tests {
     use super::{
         NarrowSetOp, PyFromPyFunc, PyVectorize, PythonNativeGemmOp, argwhere, bincount,
         blas_is_single_threaded, build_numpy_array_from_ufunc, ceil_native, choose, compress,
-        copysign, count_nonzero,
-        degrees_native, diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize,
-        extract, extract_numeric_array, extract_precise_numeric_array, fill_diagonal, flatnonzero,
-        flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interp,
-        isfinite_native, isinf_native, isnan_native, isneginf_native, isposinf_native, ix_, ldexp,
-        logaddexp, logaddexp2, meshgrid, modf, nan_to_num, narrow_bitmap_setop, nextafter, place,
-        put, put_along_axis, putmask, python_native_gemm_f64_2d,
-        python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate,
-        radians_native, ravel_multi_index, required_dict_item, rfftfreq, rint_native, searchsorted,
-        select, sign, signbit_native, sinc, solve_triangular, spacing, take, take_along_axis,
-        tensorinv, tensorsolve, trapezoid, trapz, tri, tril_indices, tril_indices_from,
-        triu_indices, triu_indices_from, trunc_native, unravel_index, where_py,
-        wide_int_table_bounds,
+        copysign, count_nonzero, degrees_native, diag, diag_indices, diag_indices_from, diagflat,
+        diagonal, digitize, extract, extract_numeric_array, extract_precise_numeric_array,
+        fill_diagonal, flatnonzero, flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot,
+        indices, interp, isfinite_native, isinf_native, isnan_native, isneginf_native,
+        isposinf_native, ix_, ldexp, logaddexp, logaddexp2, meshgrid, modf, nan_to_num,
+        narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
+        python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
+        python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
+        required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
+        sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
+        trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc_native,
+        unravel_index, where_py, wide_int_table_bounds,
     };
     use fnp_dtype::{ArrayStorage, DType};
     use fnp_ufunc::UFuncArray;
@@ -109853,10 +109852,7 @@ mod tests {
             let np_sort = numpy.getattr("sort")?;
             assert!(
                 array_equal
-                    .call1((
-                        &np_sort.call1((&ours_uv,))?,
-                        &np_sort.call1((&theirs_uv,))?,
-                    ))?
+                    .call1((&np_sort.call1((&ours_uv,))?, &np_sort.call1((&theirs_uv,))?,))?
                     .extract::<bool>()?,
                 "unique_values diverged"
             );

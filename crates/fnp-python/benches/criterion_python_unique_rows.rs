@@ -739,16 +739,49 @@ a = np.concatenate([base, base], axis=1)\n";
 
 fn main() {
     common::gated_main(&[
-        ("bench_unique_rows_lexsort_boundary", bench_unique_rows_lexsort_boundary),
-        ("bench_unique_rows_narrow_int_boundary", bench_unique_rows_narrow_int_boundary),
-        ("bench_unique_rows_factorize_boundary", bench_unique_rows_factorize_boundary),
-        ("bench_unique_rows_f64_boundary", bench_unique_rows_f64_boundary),
-        ("bench_unique_rows_f32_boundary", bench_unique_rows_f32_boundary),
-        ("bench_unique_rows_f64_factorize_boundary", bench_unique_rows_f64_factorize_boundary),
-        ("bench_unique_rows_f32_factorize_boundary", bench_unique_rows_f32_factorize_boundary),
-        ("bench_unique_rows_c128_boundary", bench_unique_rows_c128_boundary),
-        ("bench_unique_rows_c64_boundary", bench_unique_rows_c64_boundary),
-        ("bench_unique_rows_c128_factorize_boundary", bench_unique_rows_c128_factorize_boundary),
-        ("bench_unique_cols_axis1_boundary", bench_unique_cols_axis1_boundary),
+        (
+            "bench_unique_rows_lexsort_boundary",
+            bench_unique_rows_lexsort_boundary,
+        ),
+        (
+            "bench_unique_rows_narrow_int_boundary",
+            bench_unique_rows_narrow_int_boundary,
+        ),
+        (
+            "bench_unique_rows_factorize_boundary",
+            bench_unique_rows_factorize_boundary,
+        ),
+        (
+            "bench_unique_rows_f64_boundary",
+            bench_unique_rows_f64_boundary,
+        ),
+        (
+            "bench_unique_rows_f32_boundary",
+            bench_unique_rows_f32_boundary,
+        ),
+        (
+            "bench_unique_rows_f64_factorize_boundary",
+            bench_unique_rows_f64_factorize_boundary,
+        ),
+        (
+            "bench_unique_rows_f32_factorize_boundary",
+            bench_unique_rows_f32_factorize_boundary,
+        ),
+        (
+            "bench_unique_rows_c128_boundary",
+            bench_unique_rows_c128_boundary,
+        ),
+        (
+            "bench_unique_rows_c64_boundary",
+            bench_unique_rows_c64_boundary,
+        ),
+        (
+            "bench_unique_rows_c128_factorize_boundary",
+            bench_unique_rows_c128_factorize_boundary,
+        ),
+        (
+            "bench_unique_cols_axis1_boundary",
+            bench_unique_cols_axis1_boundary,
+        ),
     ]);
 }

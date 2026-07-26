@@ -407,7 +407,10 @@ s = rng.integers(97, 123, (2_000_000, 8), dtype=np.uint32).reshape(-1).view('U8'
 
 fn main() {
     common::gated_main(&[
-        ("bench_median_int_histogram_boundary", bench_median_int_histogram_boundary),
+        (
+            "bench_median_int_histogram_boundary",
+            bench_median_int_histogram_boundary,
+        ),
         (
             "bench_int_percentile_quantile_histogram_boundary",
             bench_int_percentile_quantile_histogram_boundary,
@@ -416,8 +419,17 @@ fn main() {
             "bench_argsort_temporal_complex_stable_boundary",
             bench_argsort_temporal_complex_stable_boundary,
         ),
-        ("bench_argsort_string_stable_boundary", bench_argsort_string_stable_boundary),
-        ("bench_argsort_struct_stable_boundary", bench_argsort_struct_stable_boundary),
-        ("bench_unique_arrayapi_boundary", bench_unique_arrayapi_boundary),
+        (
+            "bench_argsort_string_stable_boundary",
+            bench_argsort_string_stable_boundary,
+        ),
+        (
+            "bench_argsort_struct_stable_boundary",
+            bench_argsort_struct_stable_boundary,
+        ),
+        (
+            "bench_unique_arrayapi_boundary",
+            bench_unique_arrayapi_boundary,
+        ),
     ]);
 }

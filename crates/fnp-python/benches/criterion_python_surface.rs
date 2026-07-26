@@ -5,7 +5,7 @@
 use criterion::Criterion;
 use fnp_python::fnp_python;
 use pyo3::Python;
-use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyTuple};
+use pyo3::types::{PyAnyMethods, PyDict, PyModule};
 use rayon::prelude::*;
 use std::hint::black_box;
 use std::time::Duration;
@@ -3217,19 +3217,37 @@ fn main() {
         ("bench_f64_convolve_boundary", bench_f64_convolve_boundary),
         ("bench_int_convolve_boundary", bench_int_convolve_boundary),
         ("bench_clip_boundary", bench_clip_boundary),
-        ("bench_unary_parallel_boundary", bench_unary_parallel_boundary),
+        (
+            "bench_unary_parallel_boundary",
+            bench_unary_parallel_boundary,
+        ),
         ("bench_float_isin_boundary", bench_float_isin_boundary),
-        ("bench_f16_binary_transcendental_boundary", bench_f16_binary_transcendental_boundary),
+        (
+            "bench_f16_binary_transcendental_boundary",
+            bench_f16_binary_transcendental_boundary,
+        ),
         ("bench_unique_medium_boundary", bench_unique_medium_boundary),
         ("bench_sort_complex_boundary", bench_sort_complex_boundary),
         ("bench_f16_matmul_boundary", bench_f16_matmul_boundary),
-        ("bench_flat_sort_dtype_boundary", bench_flat_sort_dtype_boundary),
-        ("bench_int32_flat_sort_small_pool_regate", bench_int32_flat_sort_small_pool_regate),
+        (
+            "bench_flat_sort_dtype_boundary",
+            bench_flat_sort_dtype_boundary,
+        ),
+        (
+            "bench_int32_flat_sort_small_pool_regate",
+            bench_int32_flat_sort_small_pool_regate,
+        ),
         ("bench_compress_boundary", bench_compress_boundary),
-        ("bench_compress_lastaxis_boundary", bench_compress_lastaxis_boundary),
+        (
+            "bench_compress_lastaxis_boundary",
+            bench_compress_lastaxis_boundary,
+        ),
         ("bench_delete_mask_boundary", bench_delete_mask_boundary),
         ("bench_insert_block_boundary", bench_insert_block_boundary),
-        ("bench_roll_2d_multi_dtype_boundary", bench_roll_2d_multi_dtype_boundary),
+        (
+            "bench_roll_2d_multi_dtype_boundary",
+            bench_roll_2d_multi_dtype_boundary,
+        ),
         ("bench_roll_boundary", bench_roll_boundary),
         ("bench_einsum_boundary", bench_einsum_boundary),
         ("bench_linalg_boundary", bench_linalg_boundary),

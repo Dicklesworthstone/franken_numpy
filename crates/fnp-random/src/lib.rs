@@ -1632,7 +1632,7 @@ impl SeedSequence {
 
         let u32_words = self.generate_state_u32(doubled_words)?;
         let mut generated = Vec::with_capacity(words);
-        for pair in u32_words.chunks_exact(2) {
+        for pair in u32_words.as_chunks::<2>().0 {
             generated.push(u64::from(pair[0]) | (u64::from(pair[1]) << 32));
         }
         Ok(generated)
@@ -7107,12 +7107,10 @@ fn os_entropy_u32_words(words: usize) -> Result<Vec<u32>, SeedSequenceError> {
     getrandom::fill(&mut bytes).map_err(|_| SeedSequenceError::GenerateStateContractViolation)?;
 
     Ok(bytes
-        .chunks_exact(std::mem::size_of::<u32>())
-        .map(|chunk| {
-            let mut word = [0_u8; std::mem::size_of::<u32>()];
-            word.copy_from_slice(chunk);
-            u32::from_ne_bytes(word)
-        })
+        .as_chunks::<{ std::mem::size_of::<u32>() }>()
+        .0
+        .iter()
+        .map(|word| u32::from_ne_bytes(*word))
         .collect())
 }
 

@@ -730,14 +730,38 @@ test = np.concatenate([a[:100_000], trand])\n";
 fn main() {
     common::gated_main(&[
         ("bench_complex_exp_boundary", bench_complex_exp_boundary),
-        ("bench_complex_binary_boundary", bench_complex_binary_boundary),
-        ("bench_complex_cumprod_lastaxis_boundary", bench_complex_cumprod_lastaxis_boundary),
-        ("bench_complex_nancumprod_lastaxis_boundary", bench_complex_nancumprod_lastaxis_boundary),
-        ("bench_complex_cumulative_midaxis_boundary", bench_complex_cumulative_midaxis_boundary),
-        ("bench_complex_cumulative_axis0_boundary", bench_complex_cumulative_axis0_boundary),
-        ("bench_complex_unique_boundary", bench_complex_unique_boundary),
-        ("bench_complex64_unique_boundary", bench_complex64_unique_boundary),
-        ("bench_complex_searchsorted_boundary", bench_complex_searchsorted_boundary),
+        (
+            "bench_complex_binary_boundary",
+            bench_complex_binary_boundary,
+        ),
+        (
+            "bench_complex_cumprod_lastaxis_boundary",
+            bench_complex_cumprod_lastaxis_boundary,
+        ),
+        (
+            "bench_complex_nancumprod_lastaxis_boundary",
+            bench_complex_nancumprod_lastaxis_boundary,
+        ),
+        (
+            "bench_complex_cumulative_midaxis_boundary",
+            bench_complex_cumulative_midaxis_boundary,
+        ),
+        (
+            "bench_complex_cumulative_axis0_boundary",
+            bench_complex_cumulative_axis0_boundary,
+        ),
+        (
+            "bench_complex_unique_boundary",
+            bench_complex_unique_boundary,
+        ),
+        (
+            "bench_complex64_unique_boundary",
+            bench_complex64_unique_boundary,
+        ),
+        (
+            "bench_complex_searchsorted_boundary",
+            bench_complex_searchsorted_boundary,
+        ),
         ("bench_complex_isin_boundary", bench_complex_isin_boundary),
         ("bench_complex64_ops_boundary", bench_complex64_ops_boundary),
     ]);

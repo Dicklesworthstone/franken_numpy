@@ -473,12 +473,33 @@ dt_tied = rng.integers(0, 1000, 16_000_000).astype('datetime64[s]')\n"; // disti
 
 fn main() {
     common::gated_main(&[
-        ("bench_argsort_numeric_stable_boundary", bench_argsort_numeric_stable_boundary),
-        ("bench_argsort_lastaxis_stable_boundary", bench_argsort_lastaxis_stable_boundary),
-        ("bench_argsort_radix_stable_boundary", bench_argsort_radix_stable_boundary),
-        ("bench_argsort_radix_float_boundary", bench_argsort_radix_float_boundary),
-        ("bench_argsort_default_int_radix_boundary", bench_argsort_default_int_radix_boundary),
-        ("bench_argsort_default_float_radix_boundary", bench_argsort_default_float_radix_boundary),
-        ("bench_argsort_datetime_radix_boundary", bench_argsort_datetime_radix_boundary),
+        (
+            "bench_argsort_numeric_stable_boundary",
+            bench_argsort_numeric_stable_boundary,
+        ),
+        (
+            "bench_argsort_lastaxis_stable_boundary",
+            bench_argsort_lastaxis_stable_boundary,
+        ),
+        (
+            "bench_argsort_radix_stable_boundary",
+            bench_argsort_radix_stable_boundary,
+        ),
+        (
+            "bench_argsort_radix_float_boundary",
+            bench_argsort_radix_float_boundary,
+        ),
+        (
+            "bench_argsort_default_int_radix_boundary",
+            bench_argsort_default_int_radix_boundary,
+        ),
+        (
+            "bench_argsort_default_float_radix_boundary",
+            bench_argsort_default_float_radix_boundary,
+        ),
+        (
+            "bench_argsort_datetime_radix_boundary",
+            bench_argsort_datetime_radix_boundary,
+        ),
     ]);
 }
