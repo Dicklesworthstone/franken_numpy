@@ -4,6 +4,97 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-26 - RESURRECTION WIN (KEEP): selected-bool `loadtxt(usecols)` direct token parse - 3.6368x under the median-CI gate, overturning the cv-gate REJECT of `.377`
+
+`BlackThrush`, bead `deadlock-audit-8mrfx`, resurrecting
+`franken_numpy-ixs5y.377`. This is the rank-1 VOID row of
+`docs/LEDGER_RESURRECTION.md` and the first named target of the campaign
+allocation addendum's Lane M.
+
+WHY IT WAS VOID, NOT DEAD: the 2026-07-23 row (below) measured a consistent
+3.09-3.69x direction across five runs on three workers, against A/A nulls of
+0.988-1.045, and rejected it anyway because a predeclared gate required all
+four arms to clear `cv < 5%`. Campaign 2.3 shows that threshold is unreachable
+on this hardware. The lever was never the problem; the gate was. Note the
+`report_median_gate_pair` harness that decides it correctly ALREADY existed in
+this repo, in `benches/common/mod.rs`, with fourteen arms running through it -
+none of them a text-parser arm. The row was adjudicated against an older
+ABBA harness one module away from the right one.
+
+PROFILE (from the original row, unchanged and re-confirmed as the mechanism):
+a strict-remote `perf record -F 499 -e cycles:u -g` run captured 4,560
+userspace samples with zero loss. Direct self-cost was 8.14% `cfree`, 6.92%
+`malloc`, 5.80% the owned `Vec<String>` collection frame, 5.67%
+`fnp_python::loadtxt`, 1.90% `String::clone`.
+
+MECHANISM CORRECTION to the original row's framing: the win is **not** from
+skipping the parse of unselected tokens. The former path did not parse them
+either - it collected every token as an owned `String`, cloned only the
+selected ones into `selected`, and its dtype loop walked only that narrowed
+set. The win is that those `String`s are never **allocated**: for an 8192x16
+corpus that is ~131k allocations per call, which is exactly the ~22.8% of
+self-time the profile attributes to malloc/cfree/collect/clone. This is
+ordinary small-allocation churn, distinct from and composable with the >128 KiB
+mmap tax in the `deadlock-audit-tztko` row below.
+
+THE ONE LEVER: for `DType::Bool` with positive nonempty `usecols`, path input,
+`unpack=false`, a one-character comment marker, and a whitespace or
+one-character delimiter, read each row as borrowed `&str` slices into a
+`Vec<&str>` reused across rows and parse only the selected columns directly
+into `ArrayStorage::Bool`. Negative indices deliberately keep the former path:
+they resolve against the row width, which the borrowed view does not hoist.
+Every unsupported option, out-of-range selection, ragged row, and parse failure
+falls through to the same NumPy fallback the former arm reached. Safe Rust.
+
+BEHAVIOR PROOF BEFORE TIMING:
+`loadtxt_selected_bool_direct_path_matches_former_and_numpy_exactly` passed
+(1 passed, 0 failed) covering reordered columns, duplicate columns, comments,
+`skiprows`, a blank line, one-column squeeze, negative-index equivalence, the
+selected-bad-token error type, and the out-of-range error type. The decisive
+case is an **invalid token in an UNSELECTED column**, which must succeed:
+NumPy never looks at unselected columns, so neither may the direct path. That
+is a correctness requirement, not only a speed opportunity. The bench asserts
+former == candidate == numpy byte-for-byte before it times anything.
+
+SAME-BINARY CONTROL: both arms are `fnp.loadtxt` on one 8192x16 file under one
+ELF, selecting the identical four columns - the base via NEGATIVE `usecols`
+`[-16,-15,-13,-12]` (which the direct path declines, so it walks the former
+owned-token path) and the candidate via `[0,1,3,4]`. Column 7 is poisoned with
+a non-bool token and is selected by neither. The only difference between the
+arms is the code path.
+
+MEASURED on pinned worker `vmi1227854`, release with LTO disabled, 20 retained
+observations, arms interleaved ABBA/BAAB inside each round, A/A null and A/B
+in the same invocation. Executing binary self-reported its own SHA-256:
+`1050fcc0abc52b7f6221cbfd82751a8235581d0bc21a819e7b59b90f1ad78135`
+(47,241,304 bytes).
+
+| arm | median | p10 | p90 | low | high | cv |
+|---|---:|---:|---:|---:|---:|---:|
+| former (negative usecols) | 8.227393 ms | | | | | 15.690% |
+| candidate (direct path) | 2.317728 ms | | | | | 16.525% |
+| **A/B effect ratio** | **3.636795x** | 3.235359 | 4.205890 | 2.888908 | 4.459778 | 11.241% |
+| A/A null ratio | 0.979394 | 0.882273 | **1.102141** | 0.783656 | 1.142053 | 9.600% |
+
+**Verdict: WIN.** `effect.median 3.636795 > null.p90 1.102141` by a factor of
+3.3, far outside the mandatory 2x margin, with all 20 per-round ratios above
+one (`effect_above_one=20`). The null brackets unity, so it is not a biased
+null.
+
+Note every arm's `cv` (9.6% / 11.2% / 15.7% / 16.5%) is above 5%. **Under the
+old predicate this row would have been rejected a second time.** `cv` is
+recorded here as provenance only, per campaign 2.3.
+
+The measured 3.6368x sits squarely inside the original row's 3.09-3.69x
+directional range, so this reproduces the earlier observation rather than
+replacing it.
+
+Retry predicate for anyone narrowing this further: reopen only if a profile
+attributes over 5% exact self-time to the remaining borrowed-slice scan itself
+(not to malloc/cfree, which this removes), measured on a pinned worker that is
+not `ovh-b`, with the A/A null and the executing-ELF sha recorded in the same
+invocation. Do not reopen it on `cv` grounds in either direction.
+
 ## 2026-07-25 - MECHANISM PROOF (RECON, production untouched): the large-elementwise-chain cost is the TEMPORARY'S ALLOCATION, not the memory round-trip - 2.81-2.86x, and glibc's mmap threshold is the whole of it
 
 `BlackThrush`, bead `franken_numpy-ixs5y`, fleet perf campaign 2026-07-25,

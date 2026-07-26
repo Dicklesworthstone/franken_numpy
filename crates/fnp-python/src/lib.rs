@@ -56853,6 +56853,81 @@ fn loadtxt(
         return build_numpy_array_from_storage(py, &shape, ArrayStorage::Bool(values));
     }
 
+    // Selected-bool files take the same borrowed-token transduction as the plain
+    // bool arm above, narrowed to positive `usecols`. The former path below
+    // materializes EVERY token as an owned String and then clones only the
+    // selected ones; this reads the row as borrowed slices and parses just the
+    // selection, so the unselected tokens are never allocated. They are still
+    // never *parsed* either -- the former dtype loop only walks the selected
+    // columns -- so an invalid token outside the selection keeps working exactly
+    // as NumPy does. Negative indices stay on the former path: they resolve
+    // against the row width, which this view deliberately does not hoist.
+    if let Some(cols) = use_columns.as_ref()
+        && !cols.is_empty()
+        && cols.iter().all(|&col| col >= 0)
+        && !unpack
+        && parsed_dtype == DType::Bool
+        && comments.chars().count() == 1
+        && delimiter
+            .is_none_or(|sep| sep.chars().all(char::is_whitespace) || sep.chars().count() == 1)
+    {
+        let skip_count = skiprows.max(0) as usize;
+        let ncols = cols.len();
+        let mut values: Vec<bool> = Vec::new();
+        let mut nrows = 0usize;
+        let mut tokens: Vec<&str> = Vec::new();
+
+        for (lineno, raw_line) in text.lines().enumerate() {
+            if lineno < skip_count {
+                continue;
+            }
+            let effective = match raw_line.split_once(comments) {
+                Some((lhs, _)) => lhs,
+                None => raw_line,
+            };
+            let trimmed = effective.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            tokens.clear();
+            match delimiter {
+                None => tokens.extend(trimmed.split_whitespace()),
+                Some(sep) if sep.chars().all(char::is_whitespace) => {
+                    tokens.extend(trimmed.split_whitespace());
+                }
+                Some(sep) => tokens.extend(trimmed.split(sep).map(str::trim)),
+            }
+
+            for &col in cols {
+                // Matches the former `idx >= tokens.len()` bail exactly.
+                let Some(token) = tokens.get(col as usize) else {
+                    return fallback(py);
+                };
+                // Former Bool conversion, preserved exactly: i64 parse then
+                // nonzero, with NO integral-f64 retry (numpy raises on "1.0"
+                // and "True" for dtype=bool, and the former arm reached that
+                // error through the fallback, which any parse failure here
+                // still does).
+                match token.parse::<i64>() {
+                    Ok(value) => values.push(value != 0),
+                    Err(_) => return fallback(py),
+                }
+            }
+            nrows += 1;
+        }
+
+        if nrows == 0 {
+            return fallback(py);
+        }
+        let shape = if ncols == 1 {
+            vec![nrows]
+        } else {
+            vec![nrows, ncols]
+        };
+        return build_numpy_array_from_storage(py, &shape, ArrayStorage::Bool(values));
+    }
+
     // Parse rows of tokens.
     let skip_count = skiprows.max(0) as usize;
     let mut rows: Vec<Vec<String>> = Vec::new();
@@ -147887,6 +147962,112 @@ mod tests {
             assert_eq!(
                 candidate_err.unwrap_err().get_type(py).to_string(),
                 oracle_err.unwrap_err().get_type(py).to_string()
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn loadtxt_selected_bool_direct_path_matches_former_and_numpy_exactly() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let loadtxt = module.getattr("loadtxt")?;
+            let numpy = py.import("numpy")?;
+            let numpy_loadtxt = numpy.getattr("loadtxt")?;
+            let bool_dtype = numpy.getattr("bool_")?;
+
+            // Column 2 carries tokens the bool parser would REJECT. numpy never
+            // looks at unselected columns, and neither may the direct path --
+            // this is the case that proves the selection is honoured rather
+            // than the whole row being validated.
+            let path = std::env::temp_dir().join(format!(
+                "fnp_loadtxt_bool_selected_{}.csv",
+                std::process::id()
+            ));
+            std::fs::write(
+                &path,
+                concat!(
+                    "# ignored header\n",
+                    "1,0,not_a_bool,-2,9223372036854775807\n",
+                    "0,5,also_bad,-9223372036854775808,0 # tail\n",
+                    "\n",
+                    "7,0,,1,1\n"
+                ),
+            )?;
+            let path = path.to_str().expect("temporary path is UTF-8");
+
+            // Reordered AND duplicated columns, skipping the poisoned column 2.
+            for cols in [vec![3_i64, 0], vec![0_i64, 0, 4], vec![4_i64, 3, 1, 0]] {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("delimiter", ",")?;
+                kwargs.set_item("dtype", &bool_dtype)?;
+                kwargs.set_item("skiprows", 1_i64)?;
+                kwargs.set_item("usecols", cols.clone())?;
+                let candidate = loadtxt.call((path,), Some(&kwargs))?;
+                let oracle = numpy_loadtxt.call((path,), Some(&kwargs))?;
+                assert_array_matches_numpy(&candidate, &oracle)?;
+                assert_eq!(
+                    candidate.getattr("shape")?.extract::<Vec<usize>>()?,
+                    [3, cols.len()],
+                    "selected-bool shape for usecols={cols:?}"
+                );
+            }
+
+            // Single selected column squeezes to 1-D, like the former path.
+            let one_kwargs = PyDict::new(py);
+            one_kwargs.set_item("delimiter", ",")?;
+            one_kwargs.set_item("dtype", &bool_dtype)?;
+            one_kwargs.set_item("skiprows", 1_i64)?;
+            one_kwargs.set_item("usecols", vec![3_i64])?;
+            let one = loadtxt.call((path,), Some(&one_kwargs))?;
+            let one_oracle = numpy_loadtxt.call((path,), Some(&one_kwargs))?;
+            assert_array_matches_numpy(&one, &one_oracle)?;
+            assert_eq!(one.getattr("shape")?.extract::<Vec<usize>>()?, [3]);
+
+            // Negative indices keep the former owned-token path; both agree.
+            let neg_kwargs = PyDict::new(py);
+            neg_kwargs.set_item("delimiter", ",")?;
+            neg_kwargs.set_item("dtype", &bool_dtype)?;
+            neg_kwargs.set_item("skiprows", 1_i64)?;
+            neg_kwargs.set_item("usecols", vec![-1_i64, 0])?;
+            let neg = loadtxt.call((path,), Some(&neg_kwargs))?;
+            let neg_oracle = numpy_loadtxt.call((path,), Some(&neg_kwargs))?;
+            assert_array_matches_numpy(&neg, &neg_oracle)?;
+
+            // A SELECTED non-integer token must error, with numpy's own type.
+            let bad_kwargs = PyDict::new(py);
+            bad_kwargs.set_item("delimiter", ",")?;
+            bad_kwargs.set_item("dtype", &bool_dtype)?;
+            bad_kwargs.set_item("skiprows", 1_i64)?;
+            bad_kwargs.set_item("usecols", vec![2_i64])?;
+            let candidate_err = loadtxt.call((path,), Some(&bad_kwargs));
+            let oracle_err = numpy_loadtxt.call((path,), Some(&bad_kwargs));
+            assert!(candidate_err.is_err(), "selected non-bool token must error");
+            assert!(oracle_err.is_err(), "numpy rejects the selected token too");
+            assert_eq!(
+                candidate_err.unwrap_err().get_type(py).to_string(),
+                oracle_err.unwrap_err().get_type(py).to_string()
+            );
+
+            // Out-of-range selection falls through to numpy's own error type.
+            let oor_kwargs = PyDict::new(py);
+            oor_kwargs.set_item("delimiter", ",")?;
+            oor_kwargs.set_item("dtype", &bool_dtype)?;
+            oor_kwargs.set_item("skiprows", 1_i64)?;
+            oor_kwargs.set_item("usecols", vec![99_i64])?;
+            let oor_candidate = loadtxt.call((path,), Some(&oor_kwargs));
+            let oor_oracle = numpy_loadtxt.call((path,), Some(&oor_kwargs));
+            assert!(oor_candidate.is_err(), "out-of-range usecols must error");
+            assert!(oor_oracle.is_err(), "numpy rejects out-of-range usecols");
+            assert_eq!(
+                oor_candidate.unwrap_err().get_type(py).to_string(),
+                oor_oracle.unwrap_err().get_type(py).to_string()
             );
 
             Ok(())

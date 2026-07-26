@@ -3912,8 +3912,134 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
     group.finish();
 }
 
+/// Resurrection of `franken_numpy-ixs5y.377` (ledger row `NEGATIVE_EVIDENCE.md:300`,
+/// audit rank 1). The original measured 3.09-3.69x across five runs against A/A
+/// nulls of 0.988-1.045 and was rejected anyway, because a predeclared gate
+/// required all four arms to clear `cv < 5%` — a threshold campaign §2.3 shows is
+/// unreachable on this hardware. Re-decided here on the median-CI gate, where the
+/// verdict is `WIN` iff `effect.median > null.p90` and `cv` is provenance only.
+///
+/// SAME-BINARY CONTROL, and this is the point of the arm: both sides are
+/// `fnp.loadtxt` on the identical file selecting the identical columns. The base
+/// uses NEGATIVE `usecols`, which the direct path deliberately declines (negative
+/// indices resolve against the row width, which the borrowed view does not
+/// hoist), so it walks the former `Vec<Vec<String>>` owned-token path. The
+/// candidate uses the equivalent non-negative indices and takes the new path.
+/// One ELF, one file, one selection — the only difference is the code path, so
+/// this isolates the lever rather than measuring fnp against NumPy.
+///
+/// The corpus poisons an UNSELECTED column with a non-bool token. NumPy never
+/// parses unselected columns and neither may the direct path; if that ever
+/// regresses, this bench fails its parity assert before it times anything.
+fn bench_loadtxt_selected_bool_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_loadtxt_selected_bool_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_loadtxt_selected_bool")
+            .expect("loadtxt selected-bool bench module");
+        fnp_python(&module).expect("initialize fnp_python loadtxt bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np, os, tempfile\n\
+                 rng = np.random.default_rng(20260726)\n\
+                 rows, cols = 8192, 16\n\
+                 vals = rng.integers(0, 2, size=(rows, cols))\n\
+                 lines = []\n\
+                 for r in range(rows):\n\
+                 \x20   cells = [str(v) for v in vals[r]]\n\
+                 \x20   cells[7] = 'not_a_bool'\n\
+                 \x20   lines.append(','.join(cells))\n\
+                 lt_path = os.path.join(tempfile.gettempdir(),\n\
+                 \x20   'fnp_loadtxt_selected_bool_%d.csv' % os.getpid())\n\
+                 with open(lt_path, 'w') as fh:\n\
+                 \x20   fh.write('\\n'.join(lines) + '\\n')\n",
+            )
+            .expect("loadtxt corpus CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("loadtxt corpus setup");
+        let lt_path = namespace.get_item("lt_path").expect("lt_path present");
+
+        let functools = py.import("functools").expect("functools");
+        let partial = functools.getattr("partial").expect("functools.partial");
+        let fnp_loadtxt = module.getattr("loadtxt").expect("fnp loadtxt");
+        let bool_dtype = numpy.getattr("bool_").expect("numpy bool_");
+
+        // 16 columns: -16 == 0, -15 == 1, -13 == 3, -12 == 4. Same four columns,
+        // and column 7 (the poisoned one) is selected by neither.
+        let make_arm = |cols: Vec<i64>| {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("delimiter", ",").expect("delimiter kwarg");
+            kwargs.set_item("dtype", &bool_dtype).expect("dtype kwarg");
+            kwargs.set_item("usecols", cols).expect("usecols kwarg");
+            partial
+                .call((&fnp_loadtxt,), Some(&kwargs))
+                .expect("partial-bound loadtxt arm")
+        };
+        let former = make_arm(vec![-16, -15, -13, -12]);
+        let candidate = make_arm(vec![0, 1, 3, 4]);
+
+        // BEHAVIOR BEFORE TIMING: the two paths must be byte-identical, and both
+        // must match the live NumPy oracle.
+        let former_out = former.call1((&lt_path,)).expect("former path parity");
+        let candidate_out = candidate.call1((&lt_path,)).expect("direct path parity");
+        let np_kwargs = PyDict::new(py);
+        np_kwargs.set_item("delimiter", ",").expect("np delimiter");
+        np_kwargs.set_item("dtype", &bool_dtype).expect("np dtype");
+        np_kwargs
+            .set_item("usecols", vec![0_i64, 1, 3, 4])
+            .expect("np usecols");
+        let oracle = numpy
+            .getattr("loadtxt")
+            .expect("numpy loadtxt")
+            .call((&lt_path,), Some(&np_kwargs))
+            .expect("numpy oracle parity");
+        let bytes_of = |value: &Bound<'_, PyAny>| {
+            value
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec")
+        };
+        assert_eq!(
+            bytes_of(&former_out),
+            bytes_of(&candidate_out),
+            "selected-bool direct path must be byte-identical to the former owned-token path",
+        );
+        assert_eq!(
+            bytes_of(&candidate_out),
+            bytes_of(&oracle),
+            "selected-bool direct path must be byte-identical to numpy",
+        );
+
+        bench_median_gate_python_unary(
+            &mut group,
+            "loadtxt_selected_bool_8192x16_null_then_effect",
+            "loadtxt_selected_bool_8192x16",
+            &former,
+            &candidate,
+            &lt_path,
+        );
+    });
+
+    group.finish();
+}
+
 fn main() {
     common::gated_main(&[
+        (
+            "bench_loadtxt_selected_bool_median_gate",
+            bench_loadtxt_selected_bool_median_gate,
+        ),
         (
             "bench_wide_string_sort_median_gate",
             bench_wide_string_sort_median_gate,
