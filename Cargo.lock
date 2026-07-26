@@ -759,6 +759,7 @@ dependencies = [
  "fnp-ufunc",
  "pyo3",
  "rayon",
+ "sha2 0.11.0",
 ]
 
 [[package]]
