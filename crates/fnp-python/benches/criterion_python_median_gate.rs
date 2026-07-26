@@ -4039,8 +4039,109 @@ fn bench_loadtxt_selected_bool_median_gate(_c: &mut Criterion) {
     });
 }
 
+/// Isolates the two byte-producing shapes in `build_numpy_array_from_storage`'s
+/// `ArrayStorage::Bool` arm, which every boolean result in the library goes
+/// through (`isin`, comparisons, logical ops, `loadtxt(dtype=bool)`).
+///
+/// The former arm collected a second full-size `Vec<u8>` from the `Vec<bool>`
+/// before copying it into the NumPy buffer. Rust guarantees `bool` is size 1,
+/// align 1, and only ever the bit patterns 0x00/0x01 — exactly what
+/// `u8::from(b)` produced — so that collect walked every element to rebuild
+/// bytes it already had, and above glibc's 128 KiB threshold (131,072 bools)
+/// its allocation was an `mmap`/`munmap` pair plus kernel page-zeroing.
+///
+/// Both arms below perform the *identical* NumPy tail — `numpy.empty(n, uint8)`
+/// then `PyBuffer::copy_from_slice` — so the only difference measured is the
+/// redundant allocation and pass. This is not a replica of production logic;
+/// it is production's exact two lines with a shared, real tail.
+///
+/// `run_median_ci_contract` asserts the two arms' output checksums are equal on
+/// every round, so byte-identity is enforced continuously during timing rather
+/// than once beforehand.
+fn bench_bool_storage_bytes_median_gate(c: &mut Criterion) {
+    let _ = c;
+    const N: usize = 8_000_000;
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+
+        // Deterministic mixed pattern; the byte content is what gets copied, so
+        // an all-true or all-false buffer would not be representative.
+        let values: Vec<bool> = (0..N).map(|index| index % 3 == 0).collect();
+
+        let checksum_of = |array: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let bytes = array
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec");
+            bytes
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        let build_from = |bytes: &[u8]| -> pyo3::Bound<'_, pyo3::PyAny> {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", "uint8").expect("dtype kwarg");
+            let array = numpy
+                .call_method("empty", (bytes.len(),), Some(&kwargs))
+                .expect("numpy.empty");
+            let buffer = pyo3::buffer::PyBuffer::<u8>::get(&array).expect("uint8 buffer");
+            buffer.copy_from_slice(py, bytes).expect("buffer copy");
+            array
+        };
+
+        let mut time_former = || {
+            let started = Instant::now();
+            let bytes: Vec<u8> = values.iter().map(|&b| u8::from(b)).collect();
+            let array = build_from(black_box(&bytes));
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&array),
+            }
+        };
+        let mut time_candidate = || {
+            let started = Instant::now();
+            // SAFETY: `bool` and `u8` share size 1 and align 1, and every valid
+            // `bool` is a valid `u8`, so the `Vec<bool>` allocation is a valid
+            // `[u8]` of the same length for as long as `values` lives.
+            let bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), values.len()) };
+            let array = build_from(black_box(bytes));
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&array),
+            }
+        };
+
+        // Byte-identity before any timing, over and above the per-round checksum
+        // equality the contract harness enforces.
+        assert_eq!(
+            time_former().checksum,
+            time_candidate().checksum,
+            "bool storage arms must produce byte-identical NumPy output",
+        );
+
+        let _ = common::run_median_ci_contract(
+            "python_bool_storage_bytes_8m",
+            &mut time_former,
+            &mut time_candidate,
+        );
+    });
+}
+
 fn main() {
     common::gated_main(&[
+        (
+            "bench_bool_storage_bytes_median_gate",
+            bench_bool_storage_bytes_median_gate,
+        ),
         (
             "bench_loadtxt_selected_bool_median_gate",
             bench_loadtxt_selected_bool_median_gate,

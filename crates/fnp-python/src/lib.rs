@@ -18896,8 +18896,24 @@ fn build_numpy_array_from_storage(
         // PyList construction, but without boxing each element into a Python bool.
         // Matters a lot for large boolean results (isin, comparisons, logical ops).
         ArrayStorage::Bool(values) => {
-            let bytes: Vec<u8> = values.iter().map(|&b| u8::from(b)).collect();
-            let u8_arr = numpy_array_from_slice(py, &numpy, &bytes, "uint8")?;
+            // The `u8` bytes this needs are the `Vec<bool>`'s own bytes. Rust
+            // guarantees `bool` is size 1, align 1, and only ever the bit patterns
+            // 0x00 and 0x01 — exactly what `u8::from(b)` was producing — so the
+            // former `.collect()` allocated a second full-size buffer and walked
+            // every element to reproduce bytes it already had. Reinterpret instead.
+            // Above glibc's 128 KiB mmap threshold (131,072 bools) that redundant
+            // allocation was an mmap/munmap pair plus kernel page-zeroing, which the
+            // 2026-07-25 mechanism-proof row below prices at ~2.8x on the
+            // allocation itself. Byte-identity is structural, not empirical: the
+            // bytes are the same bytes.
+            //
+            // SAFETY: `bool` and `u8` share size 1 and align 1, and every valid
+            // `bool` is a valid `u8`, so `values`' allocation is a valid `[u8]` of
+            // the same length. The slice borrows `values`, which outlives the copy
+            // performed by `numpy_array_from_slice`.
+            let bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), values.len()) };
+            let u8_arr = numpy_array_from_slice(py, &numpy, bytes, "uint8")?;
             let bool_dtype = numpy.getattr("bool_")?;
             u8_arr.call_method1("view", (bool_dtype,))?
         }

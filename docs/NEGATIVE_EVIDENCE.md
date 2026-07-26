@@ -4,6 +4,85 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-26 - WIN (KEEP): the bool return path allocated a second full-size buffer to rebuild bytes it already had - 4.310770x, DECIDABLE_WIN
+
+`BlackThrush`, bead `deadlock-audit-rsa13`, campaign ROLE 2 (communication-
+avoiding / data-movement-minimizing execution). `scripts/ledger_preflight.sh
+bool storage` and `... bool build array` both returned CLEAR before any edit;
+no prior rejection of this shape exists.
+
+PROFILE-FIRST, BY READING THE PATH: `build_numpy_array_from_storage`'s
+`ArrayStorage::Bool` arm is the funnel for **every** boolean result in the
+library - `isin`, all comparison ufuncs, the logical ops, `loadtxt(dtype=bool)`,
+masked predicates. It held three full-size buffers per call: the producer's
+`Vec<bool>`, a `Vec<u8>` collected from it, and NumPy's own array, plus two
+full passes over the data.
+
+The middle buffer is provably redundant. Rust guarantees `bool` is size 1,
+align 1, and only ever the bit patterns 0x00 and 0x01 - precisely what
+`u8::from(b)` was emitting - so the `.collect()` allocated a second full-size
+buffer and walked every element to reproduce bytes that were already sitting in
+the first one. Above glibc's 128 KiB threshold (131,072 bools) that allocation
+is an `mmap`/`munmap` pair plus kernel page-zeroing, the mechanism the
+2026-07-25 row below prices at ~2.8x on the allocation itself.
+
+THE ONE LEVER: reinterpret the `Vec<bool>` as `&[u8]` and hand that straight to
+`numpy_array_from_slice`. SAFETY is recorded inline at the site: `bool` and `u8`
+share size 1 and align 1, every valid `bool` is a valid `u8`, and the borrow
+outlives the copy. `fnp-python` is the sanctioned unsafe crate for exactly this
+class of reinterpretation.
+
+BEHAVIOR: byte-identity here is **structural, not empirical** - the bytes are
+the same bytes, because `u8::from(true) == 0x01` is the `bool`'s own
+representation. Confirmed anyway: 10 bool lib tests pass, and the timing
+harness asserts checksum equality between the arms on **every round**, so
+identity is enforced continuously during measurement rather than once
+beforehand. Both the null and effect rows report the same checksum
+`deb3140c56705978`.
+
+MEASURED on pinned worker `vmi1227854`, release with LTO off, 41 rounds,
+`min_of=3`, base/base null established before the interleaved effect, order
+alternating per round, via `common::run_median_ci_contract`. The arm isolates
+the two byte-producing shapes against an *identical real* NumPy tail
+(`numpy.empty(n, uint8)` then `PyBuffer::copy_from_slice`), so the only
+difference timed is the redundant allocation and pass. Executing binary
+self-reported:
+`bench_elf_sha256=717084a956bddb37d4553e0b2c48bbc0d3fd36a92563255602779ff74e0df93c`
+(47,345,144 bytes).
+
+| row | arm A median | arm B median | ratio median | ratio CI95 | cv |
+|---|---:|---:|---:|---:|---:|
+| A/A null (former/former) | 3.183969 ms | 3.204701 ms | 0.996707 | `[0.963054, 1.045918]` | 11.525% |
+| effect (former/candidate) | 3.082147 ms | **0.677666 ms** | **4.310770** | **`[3.104535, 5.277847]`** | 35.140% |
+
+**Verdict: DECIDABLE_WIN.** `null_half_width=0.045918`, so the contract's
+`required_2x_delta` is 0.091837; the effect delta is 3.310770, some 36x the
+requirement. The effect CI floor (3.104535) sits above the null CI ceiling
+(1.045918) with no overlap. The effect arm's `cv` of 35.140% is recorded as
+provenance only - the decision is the CI separation, per campaign 2.3. That cv
+is itself expected here: the former arm's cost is dominated by an 8 MB
+`mmap`/page-fault sequence whose latency is inherently bursty, which is the
+mechanism under test.
+
+WHY THE RATIO IS THIS LARGE, since 4.3x for "one fewer allocation" deserves
+justification: the former arm pays an 8 MB allocation, an 8-million-iteration
+`bool`-to-`u8` map-and-push, and then the same NumPy `empty` + 8 MB memcpy the
+candidate pays. The candidate pays only the shared tail. So the removed work is
+most of the former arm's total, not a fraction of it - the measurement is
+consistent with the mechanism rather than surprising given it.
+
+SCOPE: this is sub-128 KiB free-list churn only below 131,072 elements, where
+the win narrows; the measured shape is 8,000,000 bools. It is independent of
+and composes with the >128 KiB result-buffer arena in `deadlock-audit-tztko`,
+which attacks the *remaining* two allocations.
+
+Retry predicate: reopen only if a profile attributes over 5% exact self-time to
+the surviving `numpy.empty` + `copy_from_slice` tail on a bool-returning op,
+measured on a pinned worker that is not `ovh-b`, with the A/A null and the
+executing-ELF sha in the same invocation. Do not reopen on `cv` grounds in
+either direction. The `Vec<bool>` -> `&[u8]` reinterpretation itself is closed:
+there is no allocation left in it to remove.
+
 ## 2026-07-26 - CANONICAL RESURRECTION CLOSEOUT (3 KEEP, 2 REJECT/VALID-AB): six-class hand audit and corrected profile-ranked top five
 
 `VioletOwl`, bead `franken_numpy-ixs5y.380`, cod / Lane M. This entry
