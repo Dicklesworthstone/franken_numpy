@@ -92,10 +92,43 @@ pub fn group_enabled(group_fn_name: &str) -> bool {
 /// gating) paired with the function itself.
 pub type BenchGroup = (&'static str, fn(&mut Criterion));
 
+/// SHA-256 of the ELF that is *actually executing*, plus its size and path.
+///
+/// Campaign `perf-campaign-20260725` §2.1. A hash computed by a shell step next
+/// to the run proves nothing about which binary ran: `rch` compiles into an
+/// opaque per-worker pool target dir the caller cannot predict, and concurrent
+/// agents in this fleet have edited crates mid-benchmark at least three times.
+/// The binary must identify itself.
+///
+/// Cost is one read of a ~1 MB file (~1 ms) strictly outside every measured
+/// region — `gated_main` calls this before any `Criterion` exists.
+pub fn self_identity() -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+
+    let Ok(path) = std::env::current_exe() else {
+        return "unavailable (current_exe failed)".to_string();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return format!("unavailable (unreadable) {}", path.display());
+    };
+    let digest = Sha256::digest(&bytes);
+    let mut sha256 = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(sha256, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    format!("{sha256} ({} bytes) {}", bytes.len(), path.display())
+}
+
 /// Drive the selected bench group functions under one `Criterion`, then emit the
 /// final summary. Mirrors the former `gated_benches!` macro's `main`: each entry
 /// is `(group_fn_name, group_fn)`, gated by [`group_enabled`].
 pub fn gated_main(targets: &[BenchGroup]) {
+    // LINE ONE, before Criterion is constructed. Criterion emits a backend notice
+    // on construction; printing after it would bury the provenance line and cost a
+    // rerun (frankenmermaid lost one exactly this way).
+    println!("bench_elf_sha256={}", self_identity());
+
     let mut criterion = Criterion::default().configure_from_args();
     for (name, target) in targets {
         if group_enabled(name) {

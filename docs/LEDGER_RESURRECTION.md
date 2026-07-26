@@ -1,237 +1,260 @@
 # Ledger Resurrection Audit — `docs/NEGATIVE_EVIDENCE.md`
 
 Campaign: FrankenSuite Performance Domination, 2026-07-25, Meta-Lever #1.
-Auditor: `BlackThrush` (cc / STRUCTURAL lane). Ledger snapshot: 30,235 lines,
-1,005 `##` entries, as of commit `f4d70a5e`.
+Auditor: `BlackThrush` (cc / Lane M). Ledger snapshot: 1,005 `##` entries at
+commit `38f8acf3`.
+
+**Taxonomy: frankenfs's six classes, adopted verbatim per the 2026-07-25 fleet
+broadcast.** This document is a rewrite. The first version of this audit, landed
+in `a65315a5`, used a taxonomy of my own and reported **16.6% void**. That number
+was wrong, and it was wrong in the flattering direction. §3.1 explains exactly
+how, because the mistake is more instructive than the corrected number.
 
 A REJECT row is **VOID** when the measurement *could not have detected the
-lever* — not when the lever was measured and lost. A void row is a harness
-verdict wearing a lever's clothes; the design work behind it is already paid
-for and only needs a re-measurement.
+lever* — as opposed to detecting it and finding it absent.
 
 ---
 
 ## 1. Method
 
-Entries were split on `##` headings and the verdict token read from the text
-before the first colon (`REJECT`, `NO-SHIP`, `LOSS (DROPPED)`, `REVERTED`,
-`BENCH-BLOCKED`, `BLOCKER`, `HOLD` → negative; `WIN`, `SHIP`, `KEEP`,
-`LANDED`, `FIX` → positive). Regex classification produced a candidate void
-set; **every candidate was then read by hand and re-adjudicated**, because the
-first pass mis-ranked several rows in both directions (see §4).
+Entries split on `##` headings; the verdict token is the text before the first
+colon. `KEEP`/`WIN`/`SHIP`/`LANDED` rows and `SURVEY`/`RECON`/`PROBE` rows are
+excluded — the latter are measurements, not rejected levers, following
+frankenfs's exclusion of the same class.
 
-Void criteria, applied in order (campaign §1):
+The screen is **triage, not a verdict**. Its output is in
+`tests/artifacts/perf/2026-07-25_ledger_resurrection_audit_BlackThrush/`
+(`audit_v2.py` + `audit_v2.json` + the per-row appendix). Every row in the §4
+queue and every row where the screen's class was contestable was read in full
+and adjudicated by hand; the `HAND` table in `audit_v2.py` records each override
+next to the screen's original verdict, so the triage error itself is auditable.
 
-1. Never measured — the bench, control, or worker failed before any timing ran.
-2. Target frame ~0% self-time in the profile the bench actually exercised.
-3. Killed by a `cv < 5%` gate on an unpinned shared worker — a gate the
-   fleet's own calibration (frankenmermaid) proves is unreachable on this
-   hardware, so rejects on it carry no information.
-4. Claimed ratio lies inside the fleet A/A null band (0.905–1.105) with no
-   null control of its own recorded.
-5. No ratio recorded at all.
+### Classes
 
-A row is **SOUND** when the effect is decidably outside the null band, or when
-the entry supplies a *mechanism* for the loss (profile-confirmed), or when the
-blocker is behavioral rather than statistical.
+| Class | Meaning | Sound? |
+|---|---|:--:|
+| `VALID-PROFILE` | Rejected before any source edit, on a named frame with non-zero self-time and a computed Amdahl ceiling. | ✅ |
+| `VALID-MECHANISM` | No A/A null, but refuted on a **counted** mechanism — instructions, cycles, syscalls, allocations, faults, bandwidth. A null cannot change the fact that no work was removed. | ✅ |
+| `VALID-AB` | A/B with a recorded A/A null; the effect sits inside it. | ✅ |
+| `VOID-CV` | An A/B ran and was killed **only** by a `cv<5%` gate. | ❌ |
+| `VOID-ZEROSELF` | Target frame ~0% self-time in the profile the bench actually ran. | ❌ |
+| `VOID-NONULL` | A/B rejected on a near-1.0 ratio, with **no** A/A null and no counted mechanism. Cannot distinguish lever from harness. | ❌ |
 
----
+Two additions, **declared rather than smuggled** (frankenfs added `VOID-ISA` the
+same way):
 
-## 2. Population
+- **`VOID-UNMEASURED`** — no timing was ever obtained; the bench, control, or
+  worker died first. frankenfs treated this as "the strongest form of void" for
+  their rank 1 but did not name it. It does not belong in `VOID-NONULL`, which is
+  defined around a ratio these rows never produced.
+- **`VALID-MARGIN`** — a regression whose magnitude is far outside any A/A null
+  this hardware has produced. `VOID-NONULL` is defined on a **near-1.0** ratio; a
+  0.33× is not near 1.0 and a missing null cannot manufacture one. Threshold set
+  from this repo's own observed worst A/A null spread (0.78–1.10), widened to
+  [0.70, 1.43]. **A row qualifies only if the ratio is attributable** — see §3.1.
 
-| Class | Count | Share |
-|---|---:|---:|
-| Total ledger entries | 1,005 | — |
-| Positive verdicts (WIN / SHIP / KEEP / LANDED / FIX) | 718 | 71.4% |
-| Negative verdicts (the audited population) | 146 | 14.5% |
-| Neutral / survey / recon | 141 | 14.0% |
-
-Provenance hygiene across the 146 negative rows:
-
-| Property recorded | Count | Share |
-|---|---:|---:|
-| A/A null control of any kind | 17 | 11.6% |
-| Binary sha256 | 22 | 15.1% |
-| Both null control **and** binary sha | 9 | 6.2% |
-| Profile / self-time attribution | 61 | 41.8% |
-| Pinned or reserved worker | 17 | 11.6% |
-
-**6.2% of rejects carry the two provenance artifacts the campaign's §2 harness
-contract makes mandatory.** That is the headline number: for 93.8% of this
-repo's negative evidence, we cannot currently distinguish "the lever lost"
-from "the harness could not see it".
+Three exclusions carry rows out of the audited population rather than into a
+verdict: `EXCLUDED-BEHAVIOR` (bit-exactness or observable-output blockers, which
+no measurement can overturn), `EXCLUDED-SUPERSEDED` (dropped as a duplicate of a
+path that already landed), and `EXCLUDED-PARSE`/`-SURVEY`.
 
 ---
 
-## 3. Audit result
+## 2. Counts
 
-One heading (line 1370) is a WIN row with an embedded REJECT clause and is
-excluded as a parse artifact, leaving **145 adjudicated negative rows**.
+| Metric | Count |
+|---|---:|
+| Ledger entries parsed | 1,005 |
+| — KEEP verdict | 713 |
+| — SURVEY / recon | 38 |
+| — UNKNOWN (unparsable verdict token) | 108 |
+| **REJECT verdict — audited** | **146** |
+| `VOID-NONULL` | **81** |
+| `VOID-UNMEASURED` | 15 |
+| `VOID-CV` | 2 |
+| `VOID-ZEROSELF` | 1 |
+| **VOID total** | **99 / 146 = 67.8%** |
+| `VALID-MECHANISM` | 18 |
+| `VALID-AB` | 12 |
+| `VALID-MARGIN` | 4 |
+| `EXCLUDED-*` | 13 |
+| Rows carrying a binary sha256 | 21 / 146 = **14.4%** |
 
-| Verdict | Count | Share of 145 |
-|---|---:|---:|
-| **VOID** — measurement could not have detected the lever | **24** | **16.6%** |
-| SOUND — decidable margin, mechanism-confirmed, or behavior-blocked | 31 | 21.4% |
-| SOUND-WEAK — decidable margin, but no null control *and* no binary sha | 90 | 62.1% |
+**Read this honestly, as frankenfs insists.** 67.8% void is *not* 99 buried
+wins. `VOID-NONULL` overwhelmingly means "the row measured ~1.0× and never wrote
+down what ~1.0× means on that bench" — most of those levers really are dead, and
+the class exists because the row cannot *prove* it. The actionable yield is a
+small head, ranked in §4.
 
-**Resurrection yield: 24 of 145 negative rows (16.6%) are re-measurable.**
-Lower than frankenlibc's 39/93 (41.9%), and the reason is worth recording: this
-ledger's rejects skew toward *large* margins (0.5×, 0.7×, 1.5–3× slower) where
-the verdict survives a bad gate. The exposure here is not the void rate but the
-**SOUND-WEAK** class: 90 rows whose effect is decidable but whose provenance
-would not survive a hostile re-reading.
+The fleet-wide prediction holds here: **`VOID-CV` is 2 rows; the epidemic is
+`VOID-NONULL` at 81.**
 
-### 3.1 VOID — never measured (9 rows)
+---
 
-These rows record a *harness or worker failure*, and several say so in their
-own verdict line. Nothing about the lever was learned.
+## 3. What the first version of this audit got wrong
 
-| Line | Entry | Failure |
-|---:|---|---|
-| 5559 | duplicate-active-stride overlap proof | control did not compile |
-| 5666 | direct C-order `nditer` chunk range | cold conformance target hit the 5-min cap |
-| 5959 | F-order identity broadcast overlap proof | bench-blocked |
-| 6319 | singleton-source multi-axis `broadcast_to` direct fill | compile failure |
-| 6375 | complex `nancumprod` axis-0 proof | bench-cost prohibitive |
-| 30156 | cov/corrcoef paired triangular Gram blocks | bench-cost prohibitive |
-| 15055 | BLAS-backed-op gates | rch workers unavailable |
-| 7624 | direct I64→I32 cast construction | unpaired one-shot budget |
-| 8980 | `accumulate_extremum_typed` static dispatch | rch degradation mid-run |
+### 3.1 The `SOUND-WEAK` rationalization, and the ratio-attribution bug
 
-Five of these nine were blocked by *the monolithic `criterion_python_surface`
-bench binary's compile cost* — the exact failure mode closed by bead
-`deadlock-audit-x7nnf` (17 per-domain bench binaries; the monolith went from
-19.6k lines / 205 bench fns to 3.2k / 28). **The instrument that voided them
-has since been fixed**, which makes this sub-group cheap to re-run.
+The first version had a class called `SOUND-WEAK`: 90 rows with a decidable
+margin but no null control **and** no binary sha. I called them sound on the
+reasoning that a large ratio is self-evidently outside any null, so the missing
+null was a provenance blemish rather than a verdict problem. That is precisely
+the `VOID-NONULL` epidemic, renamed so it read as acceptable.
 
-One more, line 9986 (f16 union/setxor), is void under criterion 2 — a profile
-blocker meant the target frame's self-time was never established.
+Re-screening under the six classes exposed a second, mechanical error that had
+inflated the same class. The first mechanical pass under the new taxonomy put
+**71 rows** in `VALID-MARGIN`. Hand-reading the sample found the ratio regex was
+scraping numbers that were not the candidate's effect at all:
 
-### 3.2 VOID — killed by an unreachable CV gate (2 rows, both high-value)
+| Row | Scraped | What that number actually was |
+|---|---|---|
+| `element_count` rank specialization | 1.50× | nothing to do with the candidate — the heading says "**is flat**" |
+| f64 `frexp` overhead trims | 2.703× | the *vs-numpy residual gap* (1.187×), not the candidate's effect; the row says the trims "do not move" it |
+| narrow ASCII `U8` union helper | 96.3× | the **upstream primitive's** win, which superseded this candidate as a duplicate |
 
-| Line | Entry | Effect | A/A null | Why void |
-|---:|---|---|---|---|
-| 193 | selected bool `loadtxt(usecols=…)` direct token parse | **3.09–3.69×**, 5 independent runs | **0.988, 0.998, 1.001, 1.003, 1.045** | rejected only because not all four arms cleared `cv<5%` simultaneously |
-| 806 | bounded tail ring, all-negative signed `loadtxt` usecols | **1.82–1.98×**, 4 independent runs | 1.029, 1.079, 1.087, 0.780 | same dual-CV gate; nulls noisy, effect never was |
+Two corrections followed. First, **the row's own outcome words override any
+scraped number** — a heading that says "flat", "~0-gain", "neutral", "parity" or
+"do not move" is a near-1.0 row regardless of what digits appear in its prose.
+Second, **`VALID-MARGIN` now requires the ratio to be *attributable*** — phrased
+as this candidate's measured effect, not merely present somewhere in the body.
+Unattributable ratios fall through to `VOID-NONULL`, the conservative direction.
 
-Row 193 is the clearest void in the ledger. The effect is **3.5×** and the A/A
-nulls sit within 0.2–4.5% of unity across five runs on three workers. Under the
-campaign §2.3 median-CI gate — decidable iff the claimed ratio lies outside the
-arm's A/A null 95% CI with 2× margin — this clears by more than an order of
-magnitude. It was rejected by a gate that measures the hardware, not the lever.
-Its own profile is sound: 8.14% `cfree`, 6.92% `malloc`, 5.80% owned
-`Vec<String>` collection, 5.67% `fnp_python::loadtxt` over 4,560 samples.
+That moved 67 of the 71 out of `VALID-MARGIN`, taking the void rate from 28.8%
+to 67.8%. **Any screen that rescues rows on a bare scraped ratio is under-counting
+void the same way.**
 
-Row 806 has the same shape with a smaller margin and noisier nulls (one null
-arm at 0.78 is itself undecidable), so it ranks below 193 but well above the
-rest.
+### 3.2 Hand adjudication overturned the screen in both directions
 
-### 3.3 VOID — inside the null band with no null control (12 rows)
+Six rows, recorded in `audit_v2.py`'s `HAND` table with the screen's original
+verdict beside each:
 
-Lines 2110, 2248, 2392, 2447, 3937, 4002, 4509, 5706, 6427, 22553, 23601,
-25481. All claim 0.91×–1.18× with no A/A control recorded:
-`noncentral_chisquare` gamma-shape cache (1.085×), legacy `RandomState` gamma
-cache (0.973×), `tofile_text` integer formatting (1.00–1.10×), C-order odometer
-(1.009×), singleton-axis `flip` clone (1.18×), Exact-U64 singleton cumulative
-fold (1.03×), I8 `fromfile` byte-slice decode (−1.17%), hoisted
-`loadtxt(usecols)` row plan (1.10×), int32 flat-sort small-pool regate
-(1.017×), batch-Cholesky ordered-dot helper (0.914×), `ptp` int64 gate retune
-(1.09×), `np.char.add` UCS4 concat (1.10×).
-
-These are **not** promising resurrections. Each is a micro-lever whose entire
-claimed effect is smaller than this hardware's noise floor; re-running them
-under a correct gate will most likely produce an honest *undecidable*, not a
-win. They are void in the strict sense — the verdict carries no information —
-but their EV is low and they are ranked last.
-
-### 3.4 SOUND — corrections the hand pass made against the regex
-
-The automated first pass is recorded here because its errors are instructive.
-
-| Line | Regex said | Hand verdict | Why |
+| Line | Screen said | Hand verdict | Why |
 |---:|---|---|---|
-| 10440 | VOID (0.91× inside band) | **SOUND** | 66.1% self-time frame, bit-identical proof, 7 interleaved rounds, and a *profile-confirmed mechanism*: pairing equalized task cost but the crossbeam steal share barely moved (8.29%→7.64%), because the idle cycles are drain-tail off the critical path. A mechanism that explains the loss is stronger evidence than a ratio. |
-| 27096 | VOID (no ratio) | **SOUND (behavior)** | f16 `hypot` — numpy's `hypotf` path is not bit-reproducible. No harness fixes this. |
-| 27108 | VOID (no ratio) | **SOUND (behavior)** | f16 sort — numpy's signed-zero order is non-deterministic. |
-| 28562 | VOID (1.0×) | **SOUND (behavior)** | `unique_values` is order-unspecified; not byte-reproducible. |
-| 29615 | VOID (no ratio) | **SOUND (behavior)** | complex128 `sqrt` — last-ULP divergence. |
-| 14250 | VOID (no ratio) | **SOUND (behavior)** | f32/f16 `sinc` — fused narrow transcendentals are not bit-exact. |
-| 1160 | VOID (CV language) | **SOUND** | GEMM tile geometry sweep is a *clean* measurement; all six alternatives lose 2.3–39%. The campaign brief independently marks it SETTLED. |
-| 14217, 27578, 27925 | VOID (inside band) | **SOUND (mechanism)** | bandwidth-saturation is a mechanism: numpy already saturates memory bandwidth on cheap fixed-affix string compares and f16 `spacing`, so parity is the physical answer, not a harness artifact. |
+| 1301 | `VOID-CV` | **`VALID-AB`** | Heading: "every delta inside the A/A null-control spread". A null *was* recorded and the effect sits inside it. Voiding it would have reopened the `std::simd` GEMM register tile — a lane the campaign's own dead-end list marks settled. |
+| 806 | `VOID-UNMEASURED` | **`VOID-CV`** | It *was* measured — four runs, 1.82–1.98× — and the heading says "no run cleared the CV/null gate". |
+| 6427 | `VALID-MECHANISM` | **`VOID-UNMEASURED`** | The requested Rayon pool "was not admitted", so the arm never ran under the configuration it claimed. |
+| 1121 | `VOID-NONULL` | **`EXCLUDED-BEHAVIOR`** | TSQR behind `fnp.linalg.qr`: R's row signs are observable output NumPy does not canonicalize. Filed *before* any dispatch code. A correctness blocker, not a perf rejection. |
+| 1562 | `VOID-NONULL` | **`EXCLUDED-SURVEY`** | "LOSS BASELINE (LEDGERED) … production untouched" is a baseline opening a frontier. Subsequently fixed by `.367` (1.445× shipped). |
+| 1370 | — | **`EXCLUDED-PARSE`** | A WIN (SHIP) row with an embedded REJECT clause. |
 
-**Rule extracted:** a ratio inside the null band is void *unless the entry
-supplies a mechanism*. Five behavior/bit-exactness rejections and four
-bandwidth-bound rejections are permanently sound regardless of harness quality,
-because no gate change can make a non-reproducible result reproducible.
+`VALID-MECHANISM` was audited in the rescuing direction too, as the broadcast
+requires. The `packbits` rejection (1.040×, no null) records "~17 GB/s at 64M
+bools, memory-bound" — a counted bandwidth measurement establishing saturation.
+That refutes the lever regardless of any null: you cannot beat a memory-bound
+kernel with threads. Kept `VALID-MECHANISM`.
 
 ---
 
-## 4. Ranked re-run queue
+## 4. Ranked rehabilitation queue
 
-Ranked by target-frame self-time in the profile the bench actually exercised,
-per campaign §1.
+Ranked by target-frame self-time, per the campaign rule.
 
-| # | Entry | Line | Target frame self-time | Effect on record | Re-run cost |
-|---:|---|---:|---|---|---|
-| 1 | selected bool `loadtxt(usecols)` direct parse | 193 | 5.80% owned-`Vec<String>` collect + 15.06% malloc/cfree | 3.09–3.69× | low — prototype recorded, `fnp-io` bench |
-| 2 | all-negative signed `loadtxt` usecols tail ring | 806 | 10.67% full-row `Vec<&str>` collect (+26.76% `CharSearcher::next_match`) | 1.82–1.98× | low — same crate, prototype recorded |
-| 3 | complex `nancumprod` axis-0 | 6375 | never profiled | unmeasured | now low — the bench-binary split removed the blocker |
-| 4 | cov/corrcoef paired triangular Gram blocks | 30156 | 66.1% kernel closure (from the sibling row) | unmeasured | now low — same reason |
-| 5 | direct C-order `nditer` chunk range | 5666 | never profiled | unmeasured | low — wants a dedicated `fnp-iter` target, not `fnp-conformance` |
+| # | Entry | Line | Class | Self-time | Effect on record | Status |
+|---:|---|---:|---|---|---|---|
+| 1 | selected-bool `loadtxt(usecols)` direct parse | 300 | `VOID-CV` | 8.14% `cfree` + 6.92% `malloc` + 5.80% owned-`Vec<String>` collect | **3.09–3.69×**, A/A nulls **0.988–1.045** | patch ready (`deadlock-audit-8mrfx`) |
+| 2 | all-negative usecols bounded tail ring | 806 | `VOID-CV` | 10.67% full-row `Vec<&str>` collect | **1.82–1.98×** | **re-won** by the cod lane at 1.661938×, CI [1.632, 1.716], null CI [0.956, 1.023] |
+| 3 | complex `nancumprod` axis-0 | 6375 | `VOID-UNMEASURED` | never profiled | — | cod lane |
+| 4 | cov/corrcoef paired triangular Gram | 30156 | `VOID-UNMEASURED` | 66.1% kernel closure (sibling row) | — | cod lane |
+| 5 | direct C-order `nditer` chunk range | 5666 | `VOID-UNMEASURED` | never profiled | — | open; wants a dedicated `fnp-iter` target |
 
-Ranks 1–2 are the campaign brief's own named candidates for this repo
-("two of your levers are real effects that only the gate is blocking… you need
-a quiet host, not a new idea"). This audit confirms that framing from the
-ledger side and adds the decisive detail: **row 193's nulls are already at
-unity.** It does not need a quieter host so much as a correct gate.
+Ranks 1–2 are the two levers the allocation addendum named for this repo. Both
+are `VOID-CV`, and neither needed a quieter host so much as a correct gate:
+**rank 1's nulls were already at unity while it was being rejected.**
 
-Ranks 3–5 are the bench-blocked cluster whose instrument has since been
-repaired by `deadlock-audit-x7nnf`.
+Five of the 15 `VOID-UNMEASURED` rows were blocked by the monolithic
+`criterion_python_surface` bench binary's compile cost — the failure mode closed
+by `deadlock-audit-x7nnf` (17 per-domain binaries; 19.6k lines / 205 fns → 3.2k /
+28). **The instrument that voided them has since been repaired.**
 
 ---
 
 ## 5. Yield
 
-| Metric | Value |
+| Metric | Count |
 |---|---:|
-| Entries audited | 1,005 |
-| Negative rows in scope | 146 (145 after one parse-artifact exclusion) |
-| VOID (re-measurable) | 24 (16.6%) |
-| — high-EV: decidable effect already on record, killed by the CV gate | 2 |
-| — unmeasured, and the blocking instrument has since been fixed | 5 |
-| — unmeasured, other blocker | 5 |
-| — sub-noise micro-levers (void but low-EV) | 12 |
-| SOUND-WEAK: decidable margin, provenance incomplete | 90 |
-| Re-run under the corrected harness | see §6 |
-| Re-won | see §6 |
+| Entries parsed | 1,005 |
+| REJECT audited | 146 |
+| VOID | 99 (67.8%) |
+| Re-run under the corrected harness | 5 |
+| **Re-won** | **4** |
+| Best re-won ratio | 167.610955× |
+
+Scoreboard line: `franken_numpy | 1005 | 146 | 99 | 67.8 | 5 | 4 | 167.610955x`
+
+**Provenance caveat:** the reruns are the cod lane's (`VioletOwl`) and were
+measured but not yet pushed to `origin/main` at the time of writing — Generator
+Zipf 1.296191×, RandomState Zipf 1.249485×, the tail ring 1.661938×, and rank 5
+at 167.610955×. They are relayed, not verified against a landed commit.
 
 ---
 
-## 6. Re-run status
+## 6. Institutionalized — ledger integrity decays
 
-Pending. Ranks 1–2 require the §2 harness contract (self-reporting ELF sha,
-paired A/A in the same invocation, median-CI gate) in `fnp-io`'s Criterion
-target, and a worker that is not `ovh-b`.
+The fleet result is unambiguous: the repo that audited once *and enforced the
+check* sits at 1.7% void; repos that never did sit at 25–91%. Banking the wins is
+not the deliverable. Two gates landed with this audit.
 
-**Blocker surfaced during this audit (campaign §3b, ISA-heterogeneity tax):**
+### 6.1 `crates/fnp-conformance/tests/ledger_hygiene.rs` — CI-enforced
+
+Runs in G2 alongside the existing hygiene suite.
+
+- `new_reject_rows_record_a_null_control_or_counted_mechanism` — a REJECT row
+  dated on or after **2026-07-26** must record an A/A null **or** a counted
+  mechanism, else CI fails with the offending `file:line`. Writing a bare
+  near-1.0 rejection is now impossible, not merely discouraged.
+- `historical_void_nonull_debt_does_not_grow` — the 81 historical rows are
+  grandfathered behind an explicit budget that may shrink but never grow, so
+  backdating a row to dodge the gate above trips this one instead.
+- `new_reject_rows_carry_a_retry_predicate` — a rejection nobody can reopen is
+  how a void row becomes permanent.
+- `reject_headings_are_unique` — two agents cannot silently write the same
+  rejection twice.
+
+### 6.2 `scripts/ledger_preflight.sh <keywords>` — exit 2 = BLOCKED
+
+frankensqlite's preflight, with one deliberate difference: it does **not** block
+on every prior rejection. It classifies each match and blocks only on `SOUND`
+ones. Blocking on all of them would entomb the 99 void rows. On a void match it
+exits 0 and tells the agent it is running a *resurrection*, naming the row to
+cite.
+
+Building it caught a bug in itself worth recording: v1 returned BLOCKED for the
+rank-1 bool-`loadtxt(usecols)` row, because that row *does* record a clean A/A
+null and was killed by the cv gate anyway. Precedence is now (1) effect sits
+inside its own null → SOUND, (2) cv-killed → VOID, (3) null recorded → SOUND.
+
+### 6.3 ELF sha-256 self-report
+
+`benches/common/mod.rs::self_identity()`, called from `gated_main`, which fronts
+**all 17** fnp-python bench binaries. Printed as line one **before `Criterion` is
+constructed** — Criterion emits a backend notice on construction, and printing
+after it buries the provenance line and costs a rerun.
+
+This repo was the only one in the fleet at zero benches emitting an executing-ELF
+hash. A hash computed by a shell step next to the run proves nothing: `rch`
+compiles into an opaque per-worker pool target dir the caller cannot predict, and
+concurrent agents in this fleet have edited crates mid-benchmark at least three
+times.
+
+### 6.4 Standing rules this audit adds
+
+1. **A near-1.0 rejection without a null or a counted mechanism is void.** Not
+   "weakly sound", not "provenance debt". Void.
+2. **A ratio in the prose is not the candidate's effect** unless it is phrased as
+   such. Screens that rescue rows on scraped numbers under-count void.
+3. **The row's own outcome words beat any number in it.** "Flat" means flat.
+4. **A behavioral blocker is permanently sound** — bit-exactness and
+   observable-output rejections are not resurrection candidates at any gate.
+5. **A bench-blocked row is not negative evidence about its lever.** File it
+   against the instrument and re-queue when the instrument is fixed.
+
+---
+
+## 7. Environment blocker, still open
+
 rch worker `ovh-b` **SIGILLs on the workspace `+avx2` baseline** — the
-`zerocopy v0.8.48` build script died with `signal: 4, SIGILL` under
-`cargo clippy --workspace`. This is an independent franken_numpy reproduction
-of frankenscipy `hhr7j` and franken_networkx's global-AVX2 rejection. Any
-franken_numpy measurement that landed on `ovh-b` is suspect, and every
-ISA-sensitive run must pin away from it until the fleet fixes worker
-capability detection.
-
----
-
-## 7. Standing rules this audit adds
-
-1. **A ratio inside 0.905–1.105 is void unless the entry supplies a mechanism.**
-   Bandwidth saturation, critical-path analysis, and bit-exactness blockers are
-   mechanisms; "we measured 1.03× and moved on" is not.
-2. **Behavior/bit-exactness rejections are permanently sound.** Do not queue
-   them for resurrection; no gate change can rescue a non-reproducible result.
-3. **A bench-blocked row is not negative evidence about its lever.** File it
-   against the instrument, and re-queue it the moment the instrument is fixed.
-4. **Record the null and the binary sha or the row is unfalsifiable later.**
-   93.8% of this ledger's negative rows are missing at least one.
+`zerocopy v0.8.48` build script dies with `signal: 4` under
+`cargo clippy --workspace`. This is an independent franken_numpy reproduction of
+frankenscipy `hhr7j` and franken_networkx's global-AVX2 rejection (campaign
+§3b). Any franken_numpy measurement that landed on `ovh-b` is suspect; pin away
+from it for anything ISA-sensitive.

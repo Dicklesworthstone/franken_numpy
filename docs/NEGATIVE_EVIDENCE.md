@@ -4,6 +4,113 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-25 - MECHANISM PROOF (RECON, production untouched): the large-elementwise-chain cost is the TEMPORARY'S ALLOCATION, not the memory round-trip - 2.81-2.86x, and glibc's mmap threshold is the whole of it
+
+`BlackThrush`, bead `franken_numpy-ixs5y`, fleet perf campaign 2026-07-25,
+cc/STRUCTURAL lane. The ledger was screened first: the composite single-call
+fusion targets are already mined (`allclose`/`isclose` have native zero-copy
+early-exit paths via `allclose_pair`; weighted `average` shipped at 3.91x;
+`hypot`/`logaddexp`/`arctan2` are already fused single-call ops in
+`is_parallel_worth`). No closed lever was reopened.
+
+THE ASSIGNED PREMISE, AND WHY IT NEEDED CHECKING FIRST: the campaign brief
+names "large-scale ufunc-elementwise/broadcast 10-30x slower" as this repo's
+residual and prescribes traversal fusion, on the reasoning that "NumPy
+materializes every temporary too, so a fused multi-op traversal that never
+round-trips to memory should beat it outright". That 10-30x figure traces to
+this repo's own `README.md` Limitations section, which carried it with no
+measurement behind it; the number has now been removed (commit `68efa0de`).
+The prior standing measurement (`elementwise-surface-memory-bound`, 2026-06-08)
+put equal-shape f64 add at ~34 GB/s single-core, i.e. the memory floor. The
+premise was therefore measured before any source was touched.
+
+MEASUREMENT (NumPy alone, so the result does not depend on any FrankenNumPy
+build): host `csd` at load average 10.59, `taskset -c 6`,
+`OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1`, numpy 2.4.3 / python 3.13.7.
+Harness follows campaign section 2: arms interleaved inside one round with the
+order alternating per round, `min_of=3` inner replicates, statistic = median of
+41 per-round ratios, and an A/A null control printed in the same invocation.
+Arms proven `tobytes()`-identical before any timing.
+
+  - `chained` = `d = a*b + c` (2 kernel passes, 1 fresh full-size temporary)
+  - `out=`    = `multiply(a,b,out=t); add(t,c,out=t)` (2 passes, temporary reused)
+  - `1-pass`  = `np.add(a,b)` (traffic proxy for the fused ideal)
+
+| N | arrays | A/A null (chained) | A/A null (out=) | chained / out= | chained / 1-pass |
+|---|---|---:|---:|---:|---:|
+| 1,048,576 | 8 MiB | 1.0048x | 0.9955x | 0.9957x | 1.9509x |
+| 8,388,608 | 64 MiB | 1.0021x | 1.0015x | **2.8110x** `[2.665, 2.964]` | 1.1588x |
+| 33,554,432 | 256 MiB | 0.9979x | 0.9973x | **2.8581x** `[2.624, 3.066]` | 1.1685x |
+
+Both nulls sit at unity with 95% intervals of `[0.964,1.230]` and
+`[0.956,1.027]`; the 2.81x/2.86x effects are outside them by more than the
+required 2x margin, so they are decidable under the median-CI gate. The 8 MiB
+row shows no effect at all - the temporary is small enough to come off the
+allocator's free list.
+
+MECHANISM, PROVEN BY A SECOND CONTROLLED RUN: re-running the identical harness
+with `MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=1073741824`
+collapses the effect to **1.0150x** at 64 MiB and **1.0090x** at 256 MiB - both
+inside their own A/A null bands (0.9989/1.0012 and 0.9905/1.0022). glibc serves
+allocations above `M_MMAP_THRESHOLD` (128 KiB by default) with `mmap` and
+returns them with `munmap` on free, so every large temporary pays fresh
+kernel page-zeroing and soft faults on the next call. **That churn is the
+entire 2.8x.** It is not arithmetic, not memory round-trips, not SIMD, not
+threading.
+
+The corollary matters more than the headline: with allocation fixed, the
+`chained / 1-pass` ratio *rises* from 1.16x to 1.68-1.79x, because the
+single-pass proxy was paying the same mmap tax and got faster too. So the true
+decomposition of the large elementwise chain is:
+
+  - large-temporary allocation lifecycle: **~2.8x**
+  - genuine traversal fusion, once allocation is fixed: **~1.7x**
+
+The campaign's prescribed lever is the smaller half of the prize, and it is
+gated behind the larger half.
+
+WHY THIS BINDS FrankenNumPy AND NOT JUST NumPy: fnp-python returns results as
+Rust `Vec` buffers through the same system allocator, so every op that returns
+a large array pays the identical tax on every call. This is a repo-wide
+allocation-policy lever, not an elementwise-kernel lever - it applies to
+reductions, sorts, set-ops, and GEMM outputs alike, anywhere the result exceeds
+128 KiB (16,384 f64 elements).
+
+THE ONE LEVER (named, not yet implemented): a size-classed recycling arena for
+large result buffers in `fnp-python`, so a freed large buffer is retained for
+the next same-class request instead of being returned to the kernel. The
+minimal form is a single `mallopt(M_MMAP_THRESHOLD, ...)` /
+`mallopt(M_TRIM_THRESHOLD, ...)` call at module init; the portable form is a
+pure-safe-Rust pool behind the existing buffer constructors. Allocation policy
+only: computed values, ordering, dtype, error paths, and FP bits are untouched
+by construction, so byte-identity is structural rather than empirical. Rollback
+is one commit. Graveyard: section 7.9 modern allocators (TLSF / slab / sharded
+free lists), the same primitive frankenlibc's cc lane is pointed at.
+
+RISK TO PRICE BEFORE SHIPPING: retaining large blocks raises steady-state RSS,
+which is a real cost on a shared box and interacts with the repo's existing
+STORM-mode fault-equalisation benching convention. The arena needs a cap and a
+release path, and the win must be re-measured against RSS, not only wall time.
+
+Verdict: **RECON / OPEN - production untouched, no speedup claimed.** No fnp
+source was edited and nothing is reverted; this row exists to redirect the lane
+and to stop the next agent from building traversal fusion on top of an
+unfixed allocator. Retry predicate for the *fusion* lever specifically: do not
+implement traversal fusion until the allocation arena has landed and a fresh
+profile shows the fused-traversal frame above 5% exact self-time with the
+arena active - measuring fusion against an mmap-churn baseline will attribute
+the allocator's 2.8x to the fusion and ship a false win.
+
+REPRODUCTION:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 taskset -c 6 python3 fusion_headroom.py
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MALLOC_MMAP_THRESHOLD_=1073741824 \
+  MALLOC_TRIM_THRESHOLD_=1073741824 taskset -c 6 python3 fusion_headroom.py
+```
+
+Harness preserved at `tests/artifacts/perf/2026-07-25_elementwise_allocation_mechanism_BlackThrush/fusion_headroom.py`.
+
 ## 2026-07-24 - WIN (KEEP): hoist the geometric inversion log denominator per batch - 2.1633x fewer userspace cycles
 
 `IvoryIvy`, bead `franken_numpy-ixs5y.379`. The ledger and recent Git log were
