@@ -1478,6 +1478,82 @@ fn bench_noncentral_f_fixed_shape_cache(c: &mut Criterion) {
     group.finish();
 }
 
+fn time_noncentral_chisquare_fixed_trace(
+    df: f64,
+    nonc: f64,
+    size: usize,
+    candidate: bool,
+) -> TimedValue {
+    let mut generator = pcg64_generator();
+    let started = Instant::now();
+    let output = if candidate {
+        generator.noncentral_chisquare(df, nonc, size).unwrap()
+    } else {
+        generator
+            .noncentral_chisquare_recomputed_control(df, nonc, size)
+            .unwrap()
+    };
+    let mut elapsed = started.elapsed();
+    let checksum = mix_checksum(checksum_f64(&output), generator.next_u64());
+    let drop_started = Instant::now();
+    drop(black_box(output));
+    elapsed += drop_started.elapsed();
+    TimedValue { elapsed, checksum }
+}
+
+fn bench_noncentral_chisquare_fixed_shape_cache(c: &mut Criterion) {
+    const SIZE: usize = 100_000;
+    const DF: f64 = 5.0;
+    const NONC: f64 = 1.0;
+
+    for &(df, nonc, size) in &[
+        (5.0, 0.0, 4_096),
+        (5.0, 1.0, 4_096),
+        (0.5, 1.0, 4_096),
+        (5.0, f64::NAN, 4_096),
+        (5.0, 1.0, 0),
+    ] {
+        let mut former = pcg64_generator();
+        let mut candidate = pcg64_generator();
+        let former_output = former
+            .noncentral_chisquare_recomputed_control(df, nonc, size)
+            .unwrap();
+        let candidate_output = candidate.noncentral_chisquare(df, nonc, size).unwrap();
+        assert_eq!(
+            former_output
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            candidate_output
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(former.next_u64(), candidate.next_u64());
+    }
+
+    let _ = run_median_ci_contract(
+        "noncentral_chisquare_fixed_shape_cache_resurrection",
+        || time_noncentral_chisquare_fixed_trace(DF, NONC, SIZE, false),
+        || time_noncentral_chisquare_fixed_trace(DF, NONC, SIZE, false),
+        || time_noncentral_chisquare_fixed_trace(DF, NONC, SIZE, false),
+        || time_noncentral_chisquare_fixed_trace(DF, NONC, SIZE, true),
+    );
+
+    let mut group = c.benchmark_group("noncentral_chisquare_fixed_shape_cache");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements(SIZE as u64));
+    group.bench_function("former_recomputed_shape_terms", |bench| {
+        bench.iter(|| black_box(time_noncentral_chisquare_fixed_trace(DF, NONC, SIZE, false)))
+    });
+    group.bench_function("candidate_hoisted_shape_terms", |bench| {
+        bench.iter(|| black_box(time_noncentral_chisquare_fixed_trace(DF, NONC, SIZE, true)))
+    });
+    group.finish();
+}
+
 fn bench_hypergeometric_hrua_cache(c: &mut Criterion) {
     const SIZE: usize = 100_000;
     const NGOOD: u64 = 20_000;
@@ -2061,6 +2137,7 @@ criterion_group!(
     bench_bitgen_comparison,
     bench_pcg_fill_u64_large,
     bench_noncentral_f_fixed_shape_cache,
+    bench_noncentral_chisquare_fixed_shape_cache,
     bench_hypergeometric_hrua_cache,
     bench_geometric_inversion_cache,
     bench_zipf_parameter_cache,

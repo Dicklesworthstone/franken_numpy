@@ -6421,6 +6421,43 @@ impl Generator {
         if df <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
+
+        let central = nonc == 0.0;
+        let fixed_shape = if central {
+            Some(df / 2.0)
+        } else if !nonc.is_nan() && df > 1.0 {
+            Some((df - 1.0) / 2.0)
+        } else {
+            None
+        };
+        let fixed_cache = fixed_shape.map(GammaShapeCache::new);
+        Ok((0..size)
+            .map(|_| {
+                let Some((shape, cache)) = fixed_shape.zip(fixed_cache) else {
+                    return self.sample_noncentral_chisquare(df, nonc);
+                };
+                let chi2_part = self.sample_gamma_cached(shape, cache) * 2.0;
+                if central {
+                    chi2_part
+                } else {
+                    let z = self.sample_standard_normal_single() + nonc.sqrt();
+                    chi2_part + z * z
+                }
+            })
+            .collect())
+    }
+
+    /// Exact pre-cache implementation retained as a benchmark control.
+    #[doc(hidden)]
+    pub fn noncentral_chisquare_recomputed_control(
+        &mut self,
+        df: f64,
+        nonc: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if df <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
         Ok((0..size)
             .map(|_| self.sample_noncentral_chisquare(df, nonc))
             .collect())
@@ -14250,6 +14287,35 @@ for child in rng.spawn(n_children):
         let actual = noncentral.noncentral_chisquare(5.0, 0.0, 8).unwrap();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn noncentral_chisquare_fixed_cache_matches_recomputed_stream() {
+        for &(df, nonc, size) in &[
+            (5.0, 0.0, 64),
+            (5.0, 1.0, 64),
+            (0.5, 1.0, 64),
+            (5.0, f64::NAN, 64),
+            (5.0, 1.0, 0),
+        ] {
+            let mut former = test_generator();
+            let mut candidate = test_generator();
+            let former_output = former
+                .noncentral_chisquare_recomputed_control(df, nonc, size)
+                .unwrap();
+            let candidate_output = candidate.noncentral_chisquare(df, nonc, size).unwrap();
+            assert_eq!(
+                former_output
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                candidate_output
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(former.next_u64(), candidate.next_u64());
+        }
     }
 
     #[test]
