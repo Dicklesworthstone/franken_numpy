@@ -43,6 +43,11 @@ rayon.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+# sha2: the bench binary hashes its OWN `env::current_exe()` and prints that
+# digest as line one of every run (see benches/common/mod.rs `self_identity`).
+# A hash computed by a shell step next to the run proves nothing about which ELF
+# actually executed: rch compiles into an opaque per-worker pool target dir that
+# the caller cannot predict, and concurrent agents have edited crates mid-run.
 sha2 = "0.11.0"
 
 [[bench]]
