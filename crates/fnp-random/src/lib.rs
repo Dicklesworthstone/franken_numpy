@@ -3731,24 +3731,27 @@ impl RandomState {
         if a.is_nan() || a <= 1.0 {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| self.legacy_zipf_single(a) as u64)
-            .collect())
-    }
-
-    fn legacy_zipf_single(&mut self, a: f64) -> i64 {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
         if a >= 1025.0 {
-            return 1;
+            return Ok(vec![1; size]);
         }
         let am1 = a - 1.0;
         let b = 2.0_f64.powf(am1);
         let umin = (i64::MAX as f64).powf(-am1);
+        let exponent = -1.0 / am1;
+        Ok((0..size)
+            .map(|_| self.legacy_zipf_single(am1, b, umin, exponent) as u64)
+            .collect())
+    }
 
+    fn legacy_zipf_single(&mut self, am1: f64, b: f64, umin: f64, exponent: f64) -> i64 {
         loop {
             let u01 = self.next_f64();
             let u = u01 * umin + (1.0 - u01);
             let v = self.next_f64();
-            let x = u.powf(-1.0 / am1).floor();
+            let x = u.powf(exponent).floor();
 
             if x > (i64::MAX as f64) || x < 1.0 {
                 continue;
