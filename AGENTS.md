@@ -506,6 +506,72 @@ bv --robot-insights | jq '.Cycles'                         # Circular deps (must
 
 ---
 
+## Performance Ledger — preflight before you optimize, evidence before you reject
+
+`docs/NEGATIVE_EVIDENCE.md` is the append-only record of every performance
+hypothesis: wins, losses, and the retry predicate for each. It is 1,000+ entries
+and it is the authoritative record — not `cass`, not memory, not the commit log.
+
+**Ledger integrity decays.** A 2026-07-25 fleet audit measured 67.8% of this
+repo's rejected levers (99 of 146) as **VOID** — the measurement could not have
+detected the lever, so the row proves nothing. The dominant class was an A/B
+rejected on a near-1.0 ratio with no A/A null control and no counted mechanism
+recorded. Two gates now exist so that class cannot grow. Use them.
+
+### Before you touch source for a perf candidate
+
+```bash
+scripts/ledger_preflight.sh <keyword> [keyword ...]     # e.g. loadtxt usecols bool
+```
+
+| Exit | Meaning |
+|---|---|
+| `0` CLEAR | No prior rejection, **or** every match is VOID — you are running a *resurrection*, so cite the row you are overturning. |
+| `2` BLOCKED | A prior rejection is SOUND (it recorded an A/A null, refuted the lever on a counted mechanism, or is behaviorally blocked). **Do not re-derive it.** |
+| `3` | usage |
+
+It deliberately does not block on every prior rejection — that would entomb the
+99 VOID rows. It blocks only on the sound ones.
+
+### When you write a REJECT row
+
+`crates/fnp-conformance/tests/ledger_hygiene.rs` fails CI unless a REJECT row
+dated on/after its `ENFORCEMENT_DATE` records **either**:
+
+- an **A/A null control** measured in the *same invocation* as the A/B, or
+- a **counted mechanism** — instructions, cycles, syscalls, allocations, faults,
+  bandwidth — unchanged. A null cannot change the fact that no work was removed.
+
+It also requires a concrete retry predicate and a unique heading, and it caps
+the grandfathered historical debt so backdating a row to dodge the gate trips a
+second test instead.
+
+### How to decide a perf claim
+
+**Gate on the median-CI, never on `cv`.** `cv < 5%` is unreachable on this
+hardware and rejects levers rather than measurements — it is what voided this
+repo's two highest-value rows, one of which later re-won at 3.64×. Report `cv`
+as provenance only.
+
+The harness already exists — **do not build another one**:
+
+- `crates/fnp-python/benches/common/mod.rs` → `report_median_gate_pair` measures
+  the A/A null in the same invocation, retains 20 observations, and returns
+  `WIN` iff `effect.median > null.p90` (`BIASED_NULL` if the null fails to
+  bracket unity). `criterion_python_median_gate.rs` has 15 worked examples.
+- `common::gated_main` prints `bench_elf_sha256=…` as line one of every bench,
+  hashing `current_exe()`. A hash computed by a shell step next to the run
+  proves nothing: rch builds into an opaque per-worker target dir you cannot
+  predict. Never move that print after `Criterion` is constructed — its backend
+  notice will bury it.
+- Prefer a **same-binary control** (both arms in one ELF) over comparing two
+  builds. Cross-worker and cross-binary A/Bs are invalid.
+
+Full taxonomy, the per-row audit, and the standing rules are in
+[`docs/LEDGER_RESURRECTION.md`](docs/LEDGER_RESURRECTION.md).
+
+---
+
 ## UBS — Ultimate Bug Scanner
 
 **Golden Rule:** `ubs <changed-files>` before every commit. Exit 0 = safe. Exit >0 = fix & re-run.

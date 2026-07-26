@@ -487,7 +487,7 @@ Ranked by target-frame self-time, per the campaign rule.
 
 | # | Entry | Line | Class | Self-time | Effect on record | Status |
 |---:|---|---:|---|---|---|---|
-| 1 | selected-bool `loadtxt(usecols)` direct parse | 300 | `VOID-CV` | 8.14% `cfree` + 6.92% `malloc` + 5.80% owned-`Vec<String>` collect | **3.09–3.69×**, A/A nulls **0.988–1.045** | patch ready (`deadlock-audit-8mrfx`) |
+| 1 | selected-bool `loadtxt(usecols)` direct parse | 300 | `VOID-CV` | 8.14% `cfree` + 6.92% `malloc` + 5.80% owned-`Vec<String>` collect | **3.09–3.69×**, A/A nulls **0.988–1.045** | **RE-WON at 3.636795×, shipped `c828e871`** — see §5.1 |
 | 2 | all-negative usecols bounded tail ring | 806 | `VOID-CV` | 10.67% full-row `Vec<&str>` collect | **1.82–1.98×** | **re-won** by the cod lane at 1.661938×, CI [1.632, 1.716], null CI [0.956, 1.023] |
 | 3 | complex `nancumprod` axis-0 | 6375 | `VOID-UNMEASURED` | never profiled | — | cod lane |
 | 4 | cov/corrcoef paired triangular Gram | 30156 | `VOID-UNMEASURED` | 66.1% kernel closure (sibling row) | — | cod lane |
@@ -511,16 +511,57 @@ by `deadlock-audit-x7nnf` (17 per-domain binaries; 19.6k lines / 205 fns → 3.2
 | Entries parsed | 1,005 |
 | REJECT audited | 146 |
 | VOID | 99 (67.8%) |
-| Re-run under the corrected harness | 5 |
-| **Re-won** | **4** |
+| Re-run under the corrected harness | 6 |
+| **Re-won** | **5** |
 | Best re-won ratio | 167.610955× |
 
-Scoreboard line: `franken_numpy | 1005 | 146 | 99 | 67.8 | 5 | 4 | 167.610955x`
+Scoreboard line: `franken_numpy | 1005 | 146 | 99 | 67.8 | 6 | 5 | 167.610955x`
 
-**Provenance caveat:** the reruns are the cod lane's (`VioletOwl`) and were
-measured but not yet pushed to `origin/main` at the time of writing — Generator
-Zipf 1.296191×, RandomState Zipf 1.249485×, the tail ring 1.661938×, and rank 5
-at 167.610955×. They are relayed, not verified against a landed commit.
+**Provenance caveat:** four of the five re-wins are the cod lane's
+(`VioletOwl`) and were measured but not yet pushed to `origin/main` at the time
+of writing — Generator Zipf 1.296191×, RandomState Zipf 1.249485×, the tail
+ring 1.661938×, and rank 5 at 167.610955×. Those are relayed, not verified
+against a landed commit. Rank 1 below is landed and verifiable.
+
+### 5.1 Rank 1 — RE-WON and shipped (`c828e871`)
+
+Pinned worker `vmi1227854`, release with LTO off, 20 retained observations,
+arms interleaved ABBA/BAAB, A/A null and A/B in the same invocation. The binary
+self-reported its own SHA-256 —
+`1050fcc0abc52b7f6221cbfd82751a8235581d0bc21a819e7b59b90f1ad78135`
+(47,241,304 bytes) — via the `gated_main` hook from §6.3, on its first real use.
+
+| arm | median | p10 | p90 | cv |
+|---|---:|---:|---:|---:|
+| former (negative `usecols`, owned-token path) | 8.227393 ms | | | 15.690% |
+| candidate (direct path) | 2.317728 ms | | | 16.525% |
+| **A/B effect** | **3.636795×** | 3.235359 | 4.205890 | 11.241% |
+| A/A null | 0.979394 | 0.882273 | **1.102141** | 9.600% |
+
+**`verdict=WIN`** — `effect.median` clears `null.p90` by 3.3×, far outside the
+2× margin; `effect_above_one = 20/20`; the null brackets unity, so it is not a
+biased null.
+
+**Every arm's `cv` is 9.6–16.5%. Under the predicate that originally rejected
+this row, it would have been rejected a second time.** That is the cleanest
+demonstration in this repo that the gate was the problem rather than the lever.
+The measured 3.6368× sits inside the original row's 3.09–3.69× range, so this
+reproduces the earlier observation rather than replacing it.
+
+Same-binary control: both arms are `fnp.loadtxt` on one 8192×16 file under one
+ELF selecting identical columns — the base via negative `usecols`, which the
+direct path deliberately declines. Column 7 is poisoned with a non-bool token
+selected by neither arm, which also pins the correctness requirement that NumPy
+never parses unselected columns. Byte-identity former == candidate == NumPy was
+asserted before any timing.
+
+**Mechanism correction to the original row:** the win is *not* skipping the
+parse of unselected tokens — the former path never parsed them either, since
+its dtype loop walked only the already-narrowed selection. The win is ~131k
+`String` allocations never made per call, matching the profile's ~22.8% of
+self-time in malloc/cfree/collect/clone. That is sub-128 KiB free-list churn,
+so it is independent of and composable with the >128 KiB `mmap` tax recorded in
+`deadlock-audit-tztko`.
 
 ---
 
