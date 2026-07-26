@@ -317,12 +317,30 @@ fn run_c_order_contract() {
         former_c_order_external_chunk(plan.clone())
     );
 
+    for _ in 0..4 {
+        black_box(time_step(|| former_c_order_external_chunk(plan.clone())));
+        black_box(time_step(|| former_c_order_external_chunk(plan.clone())));
+    }
+
+    let mut null_a_samples = Vec::with_capacity(CONTRACT_ROUNDS);
+    let mut null_b_samples = Vec::with_capacity(CONTRACT_ROUNDS);
+    let mut null_checksum = 0u64;
+    for round in 0..CONTRACT_ROUNDS {
+        let mut base_a = || time_step(|| former_c_order_external_chunk(plan.clone()));
+        let mut base_b = || time_step(|| former_c_order_external_chunk(plan.clone()));
+        let (base_a, base_b) = paired(round, &mut base_a, &mut base_b);
+        null_a_samples.push(base_a.elapsed.as_secs_f64() * 1.0e9);
+        null_b_samples.push(base_b.elapsed.as_secs_f64() * 1.0e9);
+        null_checksum = mix_checksum(null_checksum, base_a.checksum);
+    }
+    let null = pair_stats(&null_a_samples, &null_b_samples, null_checksum);
+    report_pair("null_base_aa", null);
+
     for round in 0..4 {
         let mut former = || time_step(|| former_c_order_external_chunk(plan.clone()));
         let mut candidate = || time_step(|| public_c_order_external_chunk(plan.clone()));
         let _ = paired(round, &mut former, &mut candidate);
     }
-
     let mut former_samples = Vec::with_capacity(CONTRACT_ROUNDS);
     let mut candidate_samples = Vec::with_capacity(CONTRACT_ROUNDS);
     let mut effect_checksum = 0u64;
@@ -336,20 +354,6 @@ fn run_c_order_contract() {
     }
     let effect = pair_stats(&former_samples, &candidate_samples, effect_checksum);
     report_pair("effect_former_over_direct_range", effect);
-
-    let mut null_a_samples = Vec::with_capacity(CONTRACT_ROUNDS);
-    let mut null_b_samples = Vec::with_capacity(CONTRACT_ROUNDS);
-    let mut null_checksum = 0u64;
-    for round in 0..CONTRACT_ROUNDS {
-        let mut candidate_a = || time_step(|| public_c_order_external_chunk(plan.clone()));
-        let mut candidate_b = || time_step(|| public_c_order_external_chunk(plan.clone()));
-        let (candidate_a, candidate_b) = paired(round, &mut candidate_a, &mut candidate_b);
-        null_a_samples.push(candidate_a.elapsed.as_secs_f64() * 1.0e9);
-        null_b_samples.push(candidate_b.elapsed.as_secs_f64() * 1.0e9);
-        null_checksum = mix_checksum(null_checksum, candidate_a.checksum);
-    }
-    let null = pair_stats(&null_a_samples, &null_b_samples, null_checksum);
-    report_pair("null_direct_range_aa", null);
     report_median_ci_gate("nditer_c_external_chunk", effect, null);
 }
 

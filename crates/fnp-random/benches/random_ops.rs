@@ -11,7 +11,7 @@ use fnp_random::{
     RandomState, SeedMaterial, SeedSequence, Sfc64Rng,
 };
 use sha2::{Digest, Sha256};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -254,6 +254,70 @@ fn report_median_ci_gate(row: &str, effect: PairStats, null: PairStats) {
          cv_is_provenance_only=true",
         effect.ratio_median, null.ratio_ci_low, null.ratio_ci_high, null_half_width,
     );
+}
+
+fn run_median_ci_contract<NA, NB, BA, CA>(
+    row: &str,
+    mut null_base_a: NA,
+    mut null_base_b: NB,
+    mut effect_base: BA,
+    mut effect_candidate: CA,
+) -> (PairStats, PairStats)
+where
+    NA: FnMut() -> TimedValue,
+    NB: FnMut() -> TimedValue,
+    BA: FnMut() -> TimedValue,
+    CA: FnMut() -> TimedValue,
+{
+    for round in 0..4 {
+        let _ = paired(round, &mut null_base_a, &mut null_base_b);
+    }
+    let null_a_samples = RefCell::new(Vec::with_capacity(CONTRACT_ROUNDS));
+    let null_b_samples = RefCell::new(Vec::with_capacity(CONTRACT_ROUNDS));
+    let mut null_checksum = 0_u64;
+    for round in 0..CONTRACT_ROUNDS {
+        let (a, b) = paired(round, &mut null_base_a, &mut null_base_b);
+        null_a_samples
+            .borrow_mut()
+            .push(a.elapsed.as_secs_f64() * 1.0e9);
+        null_b_samples
+            .borrow_mut()
+            .push(b.elapsed.as_secs_f64() * 1.0e9);
+        null_checksum = mix_checksum(null_checksum, a.checksum);
+    }
+    let null = report_ledger_pair(
+        "null_base_aa",
+        &null_a_samples,
+        &null_b_samples,
+        null_checksum,
+    )
+    .expect("the explicit contract always supplies 41 null rounds");
+
+    for round in 0..4 {
+        let _ = paired(round, &mut effect_base, &mut effect_candidate);
+    }
+    let base_samples = RefCell::new(Vec::with_capacity(CONTRACT_ROUNDS));
+    let candidate_samples = RefCell::new(Vec::with_capacity(CONTRACT_ROUNDS));
+    let mut effect_checksum = 0_u64;
+    for round in 0..CONTRACT_ROUNDS {
+        let (base, candidate) = paired(round, &mut effect_base, &mut effect_candidate);
+        base_samples
+            .borrow_mut()
+            .push(base.elapsed.as_secs_f64() * 1.0e9);
+        candidate_samples
+            .borrow_mut()
+            .push(candidate.elapsed.as_secs_f64() * 1.0e9);
+        effect_checksum = mix_checksum(effect_checksum, base.checksum);
+    }
+    let effect = report_ledger_pair(
+        "effect_base_over_candidate",
+        &base_samples,
+        &candidate_samples,
+        effect_checksum,
+    )
+    .expect("the explicit contract always supplies 41 effect rounds");
+    report_median_ci_gate(row, effect, null);
+    (effect, null)
 }
 
 #[allow(clippy::excessive_precision)]
@@ -1538,6 +1602,26 @@ fn rejected_cached_zipf(
         .collect())
 }
 
+fn time_generator_zipf(
+    generator: &mut Generator,
+    a: f64,
+    size: usize,
+    candidate: bool,
+) -> TimedValue {
+    let started = Instant::now();
+    let output = if candidate {
+        rejected_cached_zipf(generator, black_box(a), black_box(size)).unwrap()
+    } else {
+        former_zipf(generator, black_box(a), black_box(size)).unwrap()
+    };
+    let mut elapsed = started.elapsed();
+    let checksum = checksum_f64(&output);
+    let drop_started = Instant::now();
+    drop(black_box(output));
+    elapsed += drop_started.elapsed();
+    TimedValue { elapsed, checksum }
+}
+
 fn bench_zipf_parameter_cache(c: &mut Criterion) {
     const SIZE: usize = 100_000;
     const A: f64 = 2.5;
@@ -1564,113 +1648,25 @@ fn bench_zipf_parameter_cache(c: &mut Criterion) {
     group.measurement_time(Duration::from_millis(750));
     group.throughput(Throughput::Elements(SIZE as u64));
 
-    let mut former_generator = pcg64_generator();
-    let mut candidate_generator = pcg64_generator();
-    let candidate_samples = RefCell::new(Vec::new());
-    let former_samples = RefCell::new(Vec::new());
-    let effect_order = Cell::new(0u64);
-    let effect_checksum = Cell::new(0u64);
-    group.bench_function("paired_former_candidate", |bench| {
-        bench.iter_custom(|iterations| {
-            let mut candidate_total = Duration::ZERO;
-            let mut former_total = Duration::ZERO;
-            let time_candidate = |generator: &mut Generator| {
-                let started = Instant::now();
-                let output =
-                    rejected_cached_zipf(generator, black_box(A), black_box(SIZE)).unwrap();
-                let mut elapsed = started.elapsed();
-                let checksum = checksum_f64(&output);
-                let drop_started = Instant::now();
-                drop(black_box(output));
-                elapsed += drop_started.elapsed();
-                TimedValue { elapsed, checksum }
-            };
-            let time_former = |generator: &mut Generator| {
-                let started = Instant::now();
-                let output = former_zipf(generator, black_box(A), black_box(SIZE)).unwrap();
-                let mut elapsed = started.elapsed();
-                let checksum = checksum_f64(&output);
-                let drop_started = Instant::now();
-                drop(black_box(output));
-                elapsed += drop_started.elapsed();
-                TimedValue { elapsed, checksum }
-            };
-            for _ in 0..iterations {
-                let round = effect_order.get();
-                let mut former_arm = || time_former(&mut former_generator);
-                let mut candidate_arm = || time_candidate(&mut candidate_generator);
-                let (former, candidate) =
-                    paired(round as usize, &mut former_arm, &mut candidate_arm);
-                effect_order.set(round.wrapping_add(1));
-                former_total += former.elapsed;
-                candidate_total += candidate.elapsed;
-                former_samples
-                    .borrow_mut()
-                    .push(former.elapsed.as_secs_f64() * 1.0e9);
-                candidate_samples
-                    .borrow_mut()
-                    .push(candidate.elapsed.as_secs_f64() * 1.0e9);
-                effect_checksum.set(mix_checksum(effect_checksum.get(), former.checksum));
-            }
-            candidate_total + former_total
-        })
-    });
-    let effect = report_ledger_pair(
-        "zipf_parameter_cache_effect",
-        &former_samples,
-        &candidate_samples,
-        effect_checksum.get(),
+    let mut null_base_a = pcg64_generator();
+    let mut null_base_b = pcg64_generator();
+    let mut effect_base = pcg64_generator();
+    let mut effect_candidate = pcg64_generator();
+    let _ = run_median_ci_contract(
+        "zipf_parameter_cache",
+        || time_generator_zipf(&mut null_base_a, A, SIZE, false),
+        || time_generator_zipf(&mut null_base_b, A, SIZE, false),
+        || time_generator_zipf(&mut effect_base, A, SIZE, false),
+        || time_generator_zipf(&mut effect_candidate, A, SIZE, true),
     );
-
-    let mut null_lhs_generator = pcg64_generator();
-    let mut null_rhs_generator = pcg64_generator();
-    let null_lhs_samples = RefCell::new(Vec::new());
-    let null_rhs_samples = RefCell::new(Vec::new());
-    let null_order = Cell::new(0u64);
-    let null_checksum = Cell::new(0u64);
-    group.bench_function("null_candidate_aa", |bench| {
-        bench.iter_custom(|iterations| {
-            let mut lhs_total = Duration::ZERO;
-            let mut rhs_total = Duration::ZERO;
-            let time_candidate = |generator: &mut Generator| {
-                let started = Instant::now();
-                let output =
-                    rejected_cached_zipf(generator, black_box(A), black_box(SIZE)).unwrap();
-                let mut elapsed = started.elapsed();
-                let checksum = checksum_f64(&output);
-                let drop_started = Instant::now();
-                drop(black_box(output));
-                elapsed += drop_started.elapsed();
-                TimedValue { elapsed, checksum }
-            };
-            for _ in 0..iterations {
-                let round = null_order.get();
-                let mut lhs_arm = || time_candidate(&mut null_lhs_generator);
-                let mut rhs_arm = || time_candidate(&mut null_rhs_generator);
-                let (lhs, rhs) = paired(round as usize, &mut lhs_arm, &mut rhs_arm);
-                null_order.set(round.wrapping_add(1));
-                lhs_total += lhs.elapsed;
-                rhs_total += rhs.elapsed;
-                null_lhs_samples
-                    .borrow_mut()
-                    .push(lhs.elapsed.as_secs_f64() * 1.0e9);
-                null_rhs_samples
-                    .borrow_mut()
-                    .push(rhs.elapsed.as_secs_f64() * 1.0e9);
-                null_checksum.set(mix_checksum(null_checksum.get(), lhs.checksum));
-            }
-            lhs_total + rhs_total
-        })
+    group.bench_function("base_recomputed_parameters", |bench| {
+        let mut generator = pcg64_generator();
+        bench.iter(|| black_box(former_zipf(&mut generator, A, SIZE).unwrap()))
     });
-    let null = report_ledger_pair(
-        "zipf_parameter_cache_null",
-        &null_lhs_samples,
-        &null_rhs_samples,
-        null_checksum.get(),
-    );
-    if let (Some(effect), Some(null)) = (effect, null) {
-        report_median_ci_gate("zipf_parameter_cache", effect, null);
-    }
+    group.bench_function("candidate_cached_parameters", |bench| {
+        let mut generator = pcg64_generator();
+        bench.iter(|| black_box(rejected_cached_zipf(&mut generator, A, SIZE).unwrap()))
+    });
 
     group.finish();
 }
@@ -1760,6 +1756,34 @@ fn rejected_cached_random_state_zipf(
         .collect())
 }
 
+fn time_random_state_zipf_fixed_trace(
+    a: f64,
+    size: usize,
+    repeats: usize,
+    candidate: bool,
+) -> TimedValue {
+    let mut random_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
+    let started = Instant::now();
+    let mut outputs = Vec::with_capacity(repeats);
+    for _ in 0..repeats {
+        let output = if candidate {
+            rejected_cached_random_state_zipf(&mut random_state, black_box(a), black_box(size))
+        } else {
+            former_random_state_zipf(&mut random_state, black_box(a), black_box(size))
+        }
+        .unwrap();
+        outputs.push(output);
+    }
+    let mut elapsed = started.elapsed();
+    let checksum = outputs.iter().fold(0_u64, |state, output| {
+        mix_checksum(state, checksum_u64(output))
+    });
+    let drop_started = Instant::now();
+    drop(black_box(outputs));
+    elapsed += drop_started.elapsed();
+    TimedValue { elapsed, checksum }
+}
+
 fn bench_random_state_zipf_parameter_cache(c: &mut Criterion) {
     const SIZE: usize = 100_000;
     const REPEATS: usize = 6;
@@ -1784,140 +1808,19 @@ fn bench_random_state_zipf_parameter_cache(c: &mut Criterion) {
         bench.iter(|| black_box(random_state.zipf(black_box(A), black_box(SIZE)).unwrap()))
     });
 
-    let candidate_samples = RefCell::new(Vec::new());
-    let former_samples = RefCell::new(Vec::new());
-    let effect_order = Cell::new(0u64);
-    let effect_checksum = Cell::new(0u64);
-    group.bench_function("fixed_trace_paired_former_candidate", |bench| {
-        bench.iter_custom(|iterations| {
-            let mut candidate_total = Duration::ZERO;
-            let mut former_total = Duration::ZERO;
-            let mut time_candidate = || {
-                let mut random_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
-                let started = Instant::now();
-                let mut outputs = Vec::with_capacity(REPEATS);
-                for _ in 0..REPEATS {
-                    outputs.push(
-                        rejected_cached_random_state_zipf(
-                            &mut random_state,
-                            black_box(A),
-                            black_box(SIZE),
-                        )
-                        .unwrap(),
-                    );
-                }
-                let mut elapsed = started.elapsed();
-                let checksum = outputs.iter().fold(0u64, |state, output| {
-                    mix_checksum(state, checksum_u64(output))
-                });
-                let drop_started = Instant::now();
-                drop(black_box(outputs));
-                elapsed += drop_started.elapsed();
-                TimedValue { elapsed, checksum }
-            };
-            let mut time_former = || {
-                let mut random_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
-                let started = Instant::now();
-                let mut outputs = Vec::with_capacity(REPEATS);
-                for _ in 0..REPEATS {
-                    outputs.push(
-                        former_random_state_zipf(&mut random_state, black_box(A), black_box(SIZE))
-                            .unwrap(),
-                    );
-                }
-                let mut elapsed = started.elapsed();
-                let checksum = outputs.iter().fold(0u64, |state, output| {
-                    mix_checksum(state, checksum_u64(output))
-                });
-                let drop_started = Instant::now();
-                drop(black_box(outputs));
-                elapsed += drop_started.elapsed();
-                TimedValue { elapsed, checksum }
-            };
-            for _ in 0..iterations {
-                let round = effect_order.get();
-                let (former, candidate) =
-                    paired(round as usize, &mut time_former, &mut time_candidate);
-                effect_order.set(round.wrapping_add(1));
-                former_total += former.elapsed;
-                candidate_total += candidate.elapsed;
-                former_samples
-                    .borrow_mut()
-                    .push(former.elapsed.as_secs_f64() * 1.0e9);
-                candidate_samples
-                    .borrow_mut()
-                    .push(candidate.elapsed.as_secs_f64() * 1.0e9);
-                effect_checksum.set(mix_checksum(effect_checksum.get(), former.checksum));
-            }
-            candidate_total + former_total
-        })
-    });
-    let effect = report_ledger_pair(
-        "random_state_zipf_parameter_cache_effect",
-        &former_samples,
-        &candidate_samples,
-        effect_checksum.get(),
+    let _ = run_median_ci_contract(
+        "random_state_zipf_parameter_cache",
+        || time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, false),
+        || time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, false),
+        || time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, false),
+        || time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, true),
     );
-
-    let null_lhs_samples = RefCell::new(Vec::new());
-    let null_rhs_samples = RefCell::new(Vec::new());
-    let null_order = Cell::new(0u64);
-    let null_checksum = Cell::new(0u64);
-    group.bench_function("fixed_trace_null_candidate_aa", |bench| {
-        bench.iter_custom(|iterations| {
-            let mut lhs_total = Duration::ZERO;
-            let mut rhs_total = Duration::ZERO;
-            let time_candidate = || {
-                let mut random_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
-                let started = Instant::now();
-                let mut outputs = Vec::with_capacity(REPEATS);
-                for _ in 0..REPEATS {
-                    outputs.push(
-                        rejected_cached_random_state_zipf(
-                            &mut random_state,
-                            black_box(A),
-                            black_box(SIZE),
-                        )
-                        .unwrap(),
-                    );
-                }
-                let mut elapsed = started.elapsed();
-                let checksum = outputs.iter().fold(0u64, |state, output| {
-                    mix_checksum(state, checksum_u64(output))
-                });
-                let drop_started = Instant::now();
-                drop(black_box(outputs));
-                elapsed += drop_started.elapsed();
-                TimedValue { elapsed, checksum }
-            };
-            for _ in 0..iterations {
-                let round = null_order.get();
-                let mut lhs_arm = || time_candidate();
-                let mut rhs_arm = || time_candidate();
-                let (lhs, rhs) = paired(round as usize, &mut lhs_arm, &mut rhs_arm);
-                null_order.set(round.wrapping_add(1));
-                lhs_total += lhs.elapsed;
-                rhs_total += rhs.elapsed;
-                null_lhs_samples
-                    .borrow_mut()
-                    .push(lhs.elapsed.as_secs_f64() * 1.0e9);
-                null_rhs_samples
-                    .borrow_mut()
-                    .push(rhs.elapsed.as_secs_f64() * 1.0e9);
-                null_checksum.set(mix_checksum(null_checksum.get(), lhs.checksum));
-            }
-            lhs_total + rhs_total
-        })
+    group.bench_function("fixed_trace_base", |bench| {
+        bench.iter(|| black_box(time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, false)))
     });
-    let null = report_ledger_pair(
-        "random_state_zipf_parameter_cache_null",
-        &null_lhs_samples,
-        &null_rhs_samples,
-        null_checksum.get(),
-    );
-    if let (Some(effect), Some(null)) = (effect, null) {
-        report_median_ci_gate("random_state_zipf_parameter_cache", effect, null);
-    }
+    group.bench_function("fixed_trace_candidate", |bench| {
+        bench.iter(|| black_box(time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, true)))
+    });
 
     group.finish();
 }
@@ -2095,82 +1998,36 @@ fn bench_random_state_gamma_shape_cache(c: &mut Criterion) {
     group.measurement_time(Duration::from_millis(750));
     group.throughput(Throughput::Elements(SIZE as u64));
 
-    let mut former_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
-    let mut candidate_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
-    let former_samples = RefCell::new(Vec::new());
-    let candidate_samples = RefCell::new(Vec::new());
-    let effect_order = Cell::new(0usize);
-    let effect_checksum = Cell::new(0u64);
-    group.bench_function("paired_former_candidate", |bench| {
-        bench.iter_custom(|iterations| {
-            let mut former_total = Duration::ZERO;
-            let mut candidate_total = Duration::ZERO;
-            for _ in 0..iterations {
-                let round = effect_order.get();
-                let mut former_arm =
-                    || time_random_state_gamma(&mut former_state, SHAPE, SIZE, false);
-                let mut candidate_arm =
-                    || time_random_state_gamma(&mut candidate_state, SHAPE, SIZE, true);
-                let (former, candidate) = paired(round, &mut former_arm, &mut candidate_arm);
-                effect_order.set(round.wrapping_add(1));
-                former_samples
-                    .borrow_mut()
-                    .push(former.elapsed.as_secs_f64() * 1.0e9);
-                candidate_samples
-                    .borrow_mut()
-                    .push(candidate.elapsed.as_secs_f64() * 1.0e9);
-                effect_checksum.set(mix_checksum(effect_checksum.get(), former.checksum));
-                former_total += former.elapsed;
-                candidate_total += candidate.elapsed;
-            }
-            former_total + candidate_total
+    let mut null_base_a = RandomState::new(SeedMaterial::U64(42)).unwrap();
+    let mut null_base_b = RandomState::new(SeedMaterial::U64(42)).unwrap();
+    let mut effect_base = RandomState::new(SeedMaterial::U64(42)).unwrap();
+    let mut effect_candidate = RandomState::new(SeedMaterial::U64(42)).unwrap();
+    let _ = run_median_ci_contract(
+        "random_state_gamma_shape_cache",
+        || time_random_state_gamma(&mut null_base_a, SHAPE, SIZE, false),
+        || time_random_state_gamma(&mut null_base_b, SHAPE, SIZE, false),
+        || time_random_state_gamma(&mut effect_base, SHAPE, SIZE, false),
+        || time_random_state_gamma(&mut effect_candidate, SHAPE, SIZE, true),
+    );
+    group.bench_function("base_recomputed_shape", |bench| {
+        let mut state = RandomState::new(SeedMaterial::U64(42)).unwrap();
+        bench.iter(|| {
+            black_box(
+                state
+                    .standard_gamma(black_box(SHAPE), black_box(SIZE))
+                    .unwrap(),
+            )
         })
     });
-    let effect = report_ledger_pair(
-        "random_state_gamma_shape_cache_effect",
-        &former_samples,
-        &candidate_samples,
-        effect_checksum.get(),
-    );
-
-    let mut null_lhs = RandomState::new(SeedMaterial::U64(42)).unwrap();
-    let mut null_rhs = RandomState::new(SeedMaterial::U64(42)).unwrap();
-    let null_lhs_samples = RefCell::new(Vec::new());
-    let null_rhs_samples = RefCell::new(Vec::new());
-    let null_order = Cell::new(0usize);
-    let null_checksum = Cell::new(0u64);
-    group.bench_function("null_candidate_aa", |bench| {
-        bench.iter_custom(|iterations| {
-            let mut lhs_total = Duration::ZERO;
-            let mut rhs_total = Duration::ZERO;
-            for _ in 0..iterations {
-                let round = null_order.get();
-                let mut lhs_arm = || time_random_state_gamma(&mut null_lhs, SHAPE, SIZE, true);
-                let mut rhs_arm = || time_random_state_gamma(&mut null_rhs, SHAPE, SIZE, true);
-                let (lhs, rhs) = paired(round, &mut lhs_arm, &mut rhs_arm);
-                null_order.set(round.wrapping_add(1));
-                null_lhs_samples
-                    .borrow_mut()
-                    .push(lhs.elapsed.as_secs_f64() * 1.0e9);
-                null_rhs_samples
-                    .borrow_mut()
-                    .push(rhs.elapsed.as_secs_f64() * 1.0e9);
-                null_checksum.set(mix_checksum(null_checksum.get(), lhs.checksum));
-                lhs_total += lhs.elapsed;
-                rhs_total += rhs.elapsed;
-            }
-            lhs_total + rhs_total
+    group.bench_function("candidate_cached_shape", |bench| {
+        let mut state = RandomState::new(SeedMaterial::U64(42)).unwrap();
+        bench.iter(|| {
+            black_box(
+                cached_random_state_standard_gamma(&mut state, black_box(SHAPE), black_box(SIZE))
+                    .unwrap(),
+            )
         })
     });
-    let null = report_ledger_pair(
-        "random_state_gamma_shape_cache_null",
-        &null_lhs_samples,
-        &null_rhs_samples,
-        null_checksum.get(),
-    );
-    if let (Some(effect), Some(null)) = (effect, null) {
-        report_median_ci_gate("random_state_gamma_shape_cache", effect, null);
-    }
 
     group.finish();
 }
