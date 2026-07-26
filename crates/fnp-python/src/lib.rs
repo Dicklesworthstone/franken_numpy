@@ -56783,6 +56783,76 @@ fn loadtxt(
         return build_numpy_array_from_storage(py, &shape, flat_storage);
     }
 
+    // Selected bool files can likewise bypass the generic owned
+    // `Vec<Vec<String>>` staging when every requested column is nonnegative.
+    // The borrowed row view still resolves duplicate/out-of-order selections
+    // in request order, and only selected tokens are parsed (so an invalid
+    // unselected field remains unobservable exactly as in the former path).
+    let selected_bool_columns = use_columns.as_ref().and_then(|columns| {
+        if columns.is_empty() {
+            return None;
+        }
+        columns
+            .iter()
+            .copied()
+            .map(usize::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()
+    });
+    if !unpack
+        && parsed_dtype == DType::Bool
+        && comments.chars().count() == 1
+        && delimiter
+            .is_none_or(|sep| sep.chars().all(char::is_whitespace) || sep.chars().count() == 1)
+        && let Some(columns) = selected_bool_columns.as_ref()
+    {
+        let skip_count = skiprows.max(0) as usize;
+        let mut values = Vec::new();
+        let mut nrows = 0usize;
+
+        for (lineno, raw_line) in text.lines().enumerate() {
+            if lineno < skip_count {
+                continue;
+            }
+            let effective = match raw_line.split_once(comments) {
+                Some((lhs, _)) => lhs,
+                None => raw_line,
+            };
+            let trimmed = effective.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let tokens = match delimiter {
+                None => trimmed.split_whitespace().collect::<Vec<_>>(),
+                Some(sep) if sep.chars().all(char::is_whitespace) => {
+                    trimmed.split_whitespace().collect()
+                }
+                Some(sep) => trimmed.split(sep).map(str::trim).collect(),
+            };
+            for &column in columns {
+                let Some(token) = tokens.get(column) else {
+                    return fallback(py);
+                };
+                let Ok(value) = token.parse::<i64>() else {
+                    return fallback(py);
+                };
+                values.push(value != 0);
+            }
+            nrows += 1;
+        }
+
+        if nrows == 0 {
+            return fallback(py);
+        }
+        let shape = if columns.len() == 1 {
+            vec![nrows]
+        } else {
+            vec![nrows, columns.len()]
+        };
+        return build_numpy_array_from_storage(py, &shape, ArrayStorage::Bool(values));
+    }
+
     // Plain bool files take the same borrowed-token transduction as the
     // integer arm above, but with the former Bool conversion kept exactly:
     // i64 parse then nonzero test, with NO integral-f64 retry (numpy raises
@@ -147884,6 +147954,81 @@ mod tests {
             let oracle_err = numpy_loadtxt.call((reject_path,), Some(&reject_kwargs));
             assert!(candidate_err.is_err(), "float-form bool token must error");
             assert!(oracle_err.is_err(), "numpy oracle rejects float-form bool");
+            assert_eq!(
+                candidate_err.unwrap_err().get_type(py).to_string(),
+                oracle_err.unwrap_err().get_type(py).to_string()
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn loadtxt_selected_bool_direct_path_matches_former_and_numpy_exactly() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let loadtxt = module.getattr("loadtxt")?;
+            let numpy = py.import("numpy")?;
+            let numpy_loadtxt = numpy.getattr("loadtxt")?;
+            let path = std::env::temp_dir().join(format!(
+                "fnp_loadtxt_selected_bool_{}.csv",
+                std::process::id()
+            ));
+            std::fs::write(
+                &path,
+                concat!(
+                    "# ignored header\n",
+                    "1,invalid,also-invalid,-2 # comment\n",
+                    "0,nope,unused,5\n",
+                    "-7,ignored,still-ignored,0\n"
+                ),
+            )?;
+            let path = path.to_str().expect("temporary path is UTF-8");
+
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("delimiter", ",")?;
+            kwargs.set_item("dtype", numpy.getattr("bool_")?)?;
+            kwargs.set_item("skiprows", 1_i64)?;
+            kwargs.set_item("usecols", [3_i64, 0, 3])?;
+            let candidate = loadtxt.call((path,), Some(&kwargs))?;
+            let oracle = numpy_loadtxt.call((path,), Some(&kwargs))?;
+            assert_array_matches_numpy(&candidate, &oracle)?;
+            assert_eq!(candidate.getattr("shape")?.extract::<Vec<usize>>()?, [3, 3]);
+
+            // Negative equivalents force the retained generic path while
+            // selecting the exact same columns in the same order.
+            let former_kwargs = PyDict::new(py);
+            former_kwargs.set_item("delimiter", ",")?;
+            former_kwargs.set_item("dtype", numpy.getattr("bool_")?)?;
+            former_kwargs.set_item("skiprows", 1_i64)?;
+            former_kwargs.set_item("usecols", [-1_i64, -4, -1])?;
+            let former = loadtxt.call((path,), Some(&former_kwargs))?;
+            assert_array_matches_numpy(&candidate, &former)?;
+
+            let column_kwargs = PyDict::new(py);
+            column_kwargs.set_item("delimiter", ",")?;
+            column_kwargs.set_item("dtype", numpy.getattr("bool_")?)?;
+            column_kwargs.set_item("skiprows", 1_i64)?;
+            column_kwargs.set_item("usecols", [0_i64])?;
+            let column = loadtxt.call((path,), Some(&column_kwargs))?;
+            let column_oracle = numpy_loadtxt.call((path,), Some(&column_kwargs))?;
+            assert_array_matches_numpy(&column, &column_oracle)?;
+            assert_eq!(column.getattr("shape")?.extract::<Vec<usize>>()?, [3]);
+
+            let out_of_range = PyDict::new(py);
+            out_of_range.set_item("delimiter", ",")?;
+            out_of_range.set_item("dtype", numpy.getattr("bool_")?)?;
+            out_of_range.set_item("skiprows", 1_i64)?;
+            out_of_range.set_item("usecols", [4_i64])?;
+            let candidate_err = loadtxt.call((path,), Some(&out_of_range));
+            let oracle_err = numpy_loadtxt.call((path,), Some(&out_of_range));
+            assert!(candidate_err.is_err());
+            assert!(oracle_err.is_err());
             assert_eq!(
                 candidate_err.unwrap_err().get_type(py).to_string(),
                 oracle_err.unwrap_err().get_type(py).to_string()
