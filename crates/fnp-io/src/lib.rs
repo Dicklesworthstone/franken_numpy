@@ -2346,6 +2346,28 @@ pub fn loadtxt_usecols_signed(
     max_rows: usize,
     usecols: Option<&[isize]>,
 ) -> Result<TextArrayData, IOError> {
+    const SIGNED_TAIL_RING_MAX_FIELDS: usize = 4_096;
+
+    let negative_offsets = usecols.and_then(|cols| {
+        if cols.is_empty() || cols.iter().any(|&column| column >= 0) {
+            return None;
+        }
+        let offsets = cols
+            .iter()
+            .map(|&column| {
+                column
+                    .checked_neg()
+                    .and_then(|value| usize::try_from(value).ok())
+            })
+            .collect::<Option<Vec<_>>>()?;
+        offsets
+            .iter()
+            .copied()
+            .max()
+            .filter(|&max_tail| max_tail <= SIGNED_TAIL_RING_MAX_FIELDS)
+            .map(|_| offsets)
+    });
+
     if let Some(cols) = usecols {
         // Positive signed selections are row-invariant. Partially evaluate
         // that case once, then reuse the unsigned call-level plan instead of
@@ -2389,7 +2411,11 @@ pub fn loadtxt_usecols_signed(
             break;
         }
         let row_vals = if let Some(cols) = usecols {
-            parse_loadtxt_row_usecols_signed(trimmed, delimiter, cols)?
+            if let Some(offsets) = &negative_offsets {
+                parse_loadtxt_row_negative_tail(trimmed, delimiter, offsets)?
+            } else {
+                parse_loadtxt_row_usecols_signed(trimmed, delimiter, cols)?
+            }
         } else {
             parse_loadtxt_row(trimmed, delimiter)?
         };
@@ -2769,6 +2795,50 @@ fn parse_loadtxt_row_usecols_signed(
         selected.push(value);
     }
 
+    Ok(selected)
+}
+
+/// Resolve an all-negative signed selection while retaining only the bounded
+/// suffix that can be addressed. Parsing remains in request order after the
+/// full width is known, preserving the generic resolver's bounds/parse error
+/// precedence and duplicate-column behavior.
+fn parse_loadtxt_row_negative_tail(
+    trimmed: &str,
+    delimiter: char,
+    offsets: &[usize],
+) -> Result<Vec<f64>, IOError> {
+    let Some(max_tail) = offsets.iter().copied().max() else {
+        return Ok(Vec::new());
+    };
+
+    let mut tail = vec![""; max_tail];
+    let mut row_width = 0usize;
+    if delimiter == ' ' {
+        for field in trimmed.split_whitespace() {
+            tail[row_width % max_tail] = field;
+            row_width += 1;
+        }
+    } else {
+        for field in trimmed.split(delimiter) {
+            tail[row_width % max_tail] = field;
+            row_width += 1;
+        }
+    }
+
+    let mut selected = Vec::with_capacity(offsets.len());
+    for &offset in offsets {
+        if offset == 0 || offset > row_width {
+            return Err(IOError::ReadPayloadIncomplete(
+                "loadtxt: usecols index out of bounds",
+            ));
+        }
+        let index = row_width - offset;
+        let value = tail[index % max_tail]
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?;
+        selected.push(value);
+    }
     Ok(selected)
 }
 
@@ -8844,6 +8914,56 @@ mm.flush()
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 2);
         assert_eq!(result.values, vec![3.0, 1.0, 6.0, 4.0]);
+    }
+
+    #[test]
+    fn loadtxt_signed_all_negative_tail_ring_preserves_order_duplicates_and_bits() {
+        let text = "header\n1,-0,3,4.5 # comment\ninf,6,7,-8.25\n";
+        let result =
+            loadtxt_usecols_signed(text, ',', '#', 1, usize::MAX, Some(&[-1, -3, -1])).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 3);
+        let expected = [4.5_f64, -0.0, 4.5, -8.25, 6.0, -8.25];
+        assert!(
+            result
+                .values
+                .iter()
+                .zip(expected)
+                .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+        );
+    }
+
+    #[test]
+    fn loadtxt_signed_all_negative_tail_ring_preserves_error_precedence() {
+        let parse_first =
+            loadtxt_usecols_signed("1,2,bad\n", ',', '#', 0, usize::MAX, Some(&[-1, -5]))
+                .unwrap_err();
+        assert_eq!(parse_first.to_string(), "loadtxt: parse error in row");
+
+        let bounds_first =
+            loadtxt_usecols_signed("1,2,bad\n", ',', '#', 0, usize::MAX, Some(&[-5, -1]))
+                .unwrap_err();
+        assert_eq!(
+            bounds_first.to_string(),
+            "loadtxt: usecols index out of bounds"
+        );
+    }
+
+    #[test]
+    fn loadtxt_signed_large_negative_offset_uses_generic_fallback() {
+        let mut text = String::new();
+        for column in 0..4_097 {
+            if column > 0 {
+                text.push(' ');
+            }
+            text.push_str(&column.to_string());
+        }
+        text.push('\n');
+        let result =
+            loadtxt_usecols_signed(&text, ' ', '#', 0, usize::MAX, Some(&[-4_097, -1])).unwrap();
+        assert_eq!(result.nrows, 1);
+        assert_eq!(result.ncols, 2);
+        assert_eq!(result.values, vec![0.0, 4_096.0]);
     }
 
     #[test]
