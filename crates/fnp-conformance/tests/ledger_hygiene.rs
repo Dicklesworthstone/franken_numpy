@@ -375,58 +375,65 @@ fn new_keep_rows_carry_an_executing_elf_sha256() {
     );
 }
 
-/// Read a `LABEL: value` field from a row, matching only the label's own line.
-/// Mirrors `perf_ledger_preflight`'s `field_value` so both gates agree on what
-/// counts as a field — a continuation line is not part of the value.
-fn ledger_field<'a>(body: &'a str, expected_label: &str) -> Option<&'a str> {
-    body.lines().find_map(|line| {
-        let (label, value) = line.split_once(':')?;
-        label
-            .trim()
-            .eq_ignore_ascii_case(expected_label)
-            .then_some(value.trim())
-    })
+// The win-class schema is owned by `crates/fnp-conformance/src/bin/
+// perf_ledger_preflight.rs`, which enforces it at pre-commit. These constants
+// are duplicated here on purpose: the preflight only runs on the committing
+// machine, so CI needs its own copy as a backstop. They must not drift — if the
+// preflight changes a marker, change it here too.
+//
+// This gate deliberately checks *less* than the preflight. Two gates checking
+// the same claim by different rules is worse than one, because whichever is
+// looser silently becomes the real standard. So CI asserts the claim exists and
+// is well-formed; the preflight owns the full token contract.
+const RESULT_CLASS_MARKER: &str = "**Campaign result class:**";
+const INCUMBENT_ARM_MARKER: &str = "**Legacy incumbent arm (same invocation):**";
+const MAINTENANCE_SELF_SPEEDUP: &str = "maintenance-self-speedup";
+const INCUMBENT_WIN: &str = "incumbent-win";
+
+/// Value following a bold marker on the marker's own line. A continuation line
+/// is not part of the value — the preflight parses the same way, and a row that
+/// wrapped its tokens across lines is what first blocked the isin win.
+fn marker_value<'a>(body: &'a str, marker: &str) -> Option<&'a str> {
+    body.lines()
+        .find_map(|line| line.trim().strip_prefix(marker).map(str::trim))
 }
 
-/// The incumbent must be named, versioned, and proven at runtime — not assumed.
-fn records_runtime_incumbent_identity(body: &str) -> bool {
-    ledger_field(body, "INCUMBENT_IDENTITY").is_some_and(|value| {
-        let lower = value.to_ascii_lowercase();
-        lower.contains("numpy")
-            && lower.bytes().any(|byte| byte.is_ascii_digit())
-            && !lower.contains("unavailable")
-            && (lower.contains("runtime_asserted") || lower.contains("runtime_verified"))
-    })
+/// A token such as `name=numpy` from within a marker's value.
+fn token_value<'a>(value: &'a str, token: &str) -> Option<&'a str> {
+    value
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix(token))
 }
 
-/// The incumbent's own timing, so the comparison can be re-derived rather than
-/// taken on trust from a ratio alone.
-fn records_incumbent_arm_median(body: &str) -> bool {
-    ledger_field(body, "INCUMBENT_ARM_MEDIAN").is_some_and(|value| {
-        let lower = value.to_ascii_lowercase();
-        let has_decimal = value.as_bytes().windows(3).any(|window| {
-            window[0].is_ascii_digit() && window[1] == b'.' && window[2].is_ascii_digit()
+/// An `incumbent-win` must name NumPy as the base arm and pin the exact artifact
+/// that produced the ratio. Without both, the claim cannot be re-derived and the
+/// dispatch trap cannot be ruled out.
+fn records_incumbent_arm(body: &str) -> bool {
+    marker_value(body, INCUMBENT_ARM_MARKER).is_some_and(|value| {
+        let names_numpy =
+            token_value(value, "name=").is_some_and(|name| name.eq_ignore_ascii_case("numpy"));
+        let pins_version = token_value(value, "version=").is_some_and(|version| {
+            !version.is_empty() && !version.eq_ignore_ascii_case("unavailable")
         });
-        let has_time_unit = [" ns", " us", " µs", " ms", " sec", " second"]
-            .iter()
-            .any(|unit| lower.contains(unit));
-        has_decimal && has_time_unit
+        let pins_artifact = token_value(value, "artifact_sha256=")
+            .is_some_and(|sha| sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()));
+        names_numpy && pins_version && pins_artifact
     })
-}
-
-/// Two arms across two invocations is not a vs-incumbent measurement.
-fn records_same_comparison_invocation(body: &str) -> bool {
-    ledger_field(body, "COMPARISON_INVOCATION")
-        .is_some_and(|value| value.eq_ignore_ascii_case("SAME"))
 }
 
 /// The two win classes. A `SELF-SPEEDUP` measures our own former code as the
 /// base; a `VS-INCUMBENT` measures the real NumPy call, timed side-by-side in
 /// the same invocation. They are not interchangeable and an unlabelled win is
 /// read as competitive by whoever quotes it next.
-fn declares_win_class(heading: &str) -> bool {
-    let upper = heading.to_uppercase();
-    upper.contains("SELF-SPEEDUP") || upper.contains("VS-INCUMBENT")
+/// The class lives in a body marker, not the heading — that is where the
+/// preflight reads it, and a heading token is easy to write without the
+/// supporting evidence underneath it.
+fn declares_win_class(body: &str) -> bool {
+    marker_value(body, RESULT_CLASS_MARKER).is_some_and(|value| {
+        let value = value.trim_matches('`');
+        value.eq_ignore_ascii_case(MAINTENANCE_SELF_SPEEDUP)
+            || value.eq_ignore_ascii_case(INCUMBENT_WIN)
+    })
 }
 
 /// THE WIN-CLASS GATE. Across 369 campaign commits the fleet produced roughly 60
@@ -444,7 +451,7 @@ fn new_win_rows_declare_self_speedup_or_vs_incumbent() {
         .into_iter()
         .filter(|e| !e.date.is_empty() && e.date.as_str() >= WIN_CLASS_ENFORCEMENT_DATE)
         .filter(|e| is_keep(&e.heading))
-        .filter(|e| !declares_win_class(&e.heading))
+        .filter(|e| !declares_win_class(&e.body))
         .filter(|e| !is_aggregate_row(&e.heading))
         .filter(|e| {
             !WIN_CLASS_PENDING_AUTHOR_CLASSIFICATION
@@ -478,16 +485,11 @@ fn vs_incumbent_rows_record_the_incumbent_arm() {
     let offenders: Vec<String> = parse_entries()
         .into_iter()
         .filter(|e| !e.date.is_empty() && e.date.as_str() >= WIN_CLASS_ENFORCEMENT_DATE)
-        .filter(|e| e.heading.to_uppercase().contains("VS-INCUMBENT"))
-        // Same three explicit fields the pre-commit preflight requires. Kept
-        // deliberately identical: two gates checking the same claim by different
-        // rules is worse than one, because whichever is looser becomes the real
-        // standard. Prose matching was the first cut here and was too loose.
         .filter(|e| {
-            !(records_runtime_incumbent_identity(&e.body)
-                && records_incumbent_arm_median(&e.body)
-                && records_same_comparison_invocation(&e.body))
+            marker_value(&e.body, RESULT_CLASS_MARKER)
+                .is_some_and(|value| value.trim_matches('`').eq_ignore_ascii_case(INCUMBENT_WIN))
         })
+        .filter(|e| !records_incumbent_arm(&e.body))
         .map(|e| format!("  docs/NEGATIVE_EVIDENCE.md:{} — {}", e.line, e.heading))
         .collect();
 
@@ -589,51 +591,64 @@ fn aggregate_rows_are_not_treated_as_single_win_claims() {
 }
 
 #[test]
-fn win_class_labels_are_recognised() {
-    assert!(declares_win_class("WIN (KEEP, VS-INCUMBENT): f64 isin"));
+fn win_class_marker_must_be_exact() {
+    // Only the two canonical values count. A near-miss is not a declaration —
+    // it is an unclassified win wearing a label, which is worse than none
+    // because it reads as deliberate.
     assert!(declares_win_class(
-        "RESURRECTION WIN (KEEP, SELF-SPEEDUP): loadtxt"
+        "**Campaign result class:** incumbent-win"
     ));
-    assert!(!declares_win_class("WIN (KEEP): unlabelled"));
+    assert!(declares_win_class(
+        "**Campaign result class:** maintenance-self-speedup"
+    ));
+    assert!(!declares_win_class(
+        "**Campaign result class:** self-speedup"
+    ));
+    assert!(!declares_win_class(
+        "**Campaign result class:** vs-incumbent"
+    ));
+    assert!(!declares_win_class("**Campaign result class:**"));
+    assert!(!declares_win_class("Campaign result class: incumbent-win"));
 }
 
 #[test]
-fn incumbent_identity_must_be_runtime_asserted_on_its_own_line() {
-    // A continuation line is not part of the field value; the required token has
-    // to sit on the label's own line. This exact mistake blocked the first
-    // VS-INCUMBENT row at pre-commit.
-    assert!(!records_runtime_incumbent_identity(
-        "INCUMBENT_IDENTITY: numpy.isin, numpy.__version__=2.4.6,\nruntime_asserted"
+fn incumbent_arm_tokens_must_share_the_marker_line() {
+    // A continuation line is not part of the marker value. This exact mistake
+    // blocked the first incumbent-win row at pre-commit.
+    assert!(!records_incumbent_arm(
+        "**Legacy incumbent arm (same invocation):** name=numpy version=2.4.6\nartifact_sha256=43760732fe0ec60ac5e2d4d020b253ea720cf0d3996a362204c4d94934ebaabd"
     ));
-    assert!(records_runtime_incumbent_identity(
-        "INCUMBENT_IDENTITY: numpy.isin numpy.__version__=2.4.6 runtime_asserted=true"
-    ));
-    // Naming numpy without proving it at runtime is the dispatch trap.
-    assert!(!records_runtime_incumbent_identity(
-        "INCUMBENT_IDENTITY: numpy.isin numpy.__version__=2.4.6"
-    ));
-    assert!(!records_runtime_incumbent_identity(
-        "INCUMBENT_IDENTITY: unavailable, numpy 2.4.6 runtime_asserted"
-    ));
-}
-
-#[test]
-fn incumbent_arm_median_needs_a_time_unit() {
-    assert!(records_incumbent_arm_median(
-        "INCUMBENT_ARM_MEDIAN: 67.243286 ms (numpy.isin)"
-    ));
-    // A bare ratio is not the incumbent's timing.
-    assert!(!records_incumbent_arm_median(
-        "INCUMBENT_ARM_MEDIAN: 19.947108"
+    assert!(records_incumbent_arm(
+        "**Legacy incumbent arm (same invocation):** name=numpy version=2.4.6 artifact_sha256=43760732fe0ec60ac5e2d4d020b253ea720cf0d3996a362204c4d94934ebaabd"
     ));
 }
 
 #[test]
-fn comparison_invocation_must_be_same() {
-    assert!(records_same_comparison_invocation(
-        "COMPARISON_INVOCATION: SAME"
+fn incumbent_arm_must_actually_name_numpy_and_pin_an_artifact() {
+    // Naming something else as the base is the dispatch trap in written form.
+    assert!(!records_incumbent_arm(
+        "**Legacy incumbent arm (same invocation):** name=fnp version=0.2.0 artifact_sha256=43760732fe0ec60ac5e2d4d020b253ea720cf0d3996a362204c4d94934ebaabd"
     ));
-    assert!(!records_same_comparison_invocation(
-        "COMPARISON_INVOCATION: separate runs"
+    // An unpinned artifact cannot be re-derived.
+    assert!(!records_incumbent_arm(
+        "**Legacy incumbent arm (same invocation):** name=numpy version=2.4.6"
+    ));
+    assert!(!records_incumbent_arm(
+        "**Legacy incumbent arm (same invocation):** name=numpy version=unavailable artifact_sha256=43760732fe0ec60ac5e2d4d020b253ea720cf0d3996a362204c4d94934ebaabd"
+    ));
+}
+
+#[test]
+fn win_class_marker_is_read_from_the_body_not_the_heading() {
+    assert!(declares_win_class(
+        "**Campaign result class:** incumbent-win"
+    ));
+    assert!(declares_win_class(
+        "**Campaign result class:** maintenance-self-speedup"
+    ));
+    // A heading token without the body marker is not a declaration.
+    assert!(!declares_win_class("WIN (KEEP, VS-INCUMBENT): f64 isin"));
+    assert!(!declares_win_class(
+        "**Campaign result class:** fastest-ever"
     ));
 }
