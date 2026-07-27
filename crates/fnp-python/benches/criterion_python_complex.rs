@@ -446,8 +446,8 @@ fn bench_complex_cumulative_axis0_boundary(c: &mut Criterion) {
 }
 
 fn bench_complex_nancumprod_axis0_contract(c: &mut Criterion) {
-    // Official ledger-resurrection rank 3. Before this campaign the axis-0
-    // route delegated to NumPy; the candidate gathers independent columns,
+    // Model-integrity-reviewed complex128 production contract. Before this
+    // campaign the axis-0 route delegated to NumPy; the candidate gathers independent columns,
     // replaces NaN-complex inputs with 1+0j, scans each lane in the same scalar
     // order, and scatters back. The former arm is therefore the exact NumPy
     // delegate that served this shape before the candidate route existed.

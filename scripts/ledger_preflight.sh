@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# ledger_preflight.sh — refuse a perf lever that the ledger has already settled.
+# ledger_preflight.sh — fast heading-only triage for prior perf evidence.
+#
+# This regex screen is not the authoritative gate. Use the Rust
+# perf_ledger_preflight query for a concrete lever + surface; it prints matching
+# retry predicates and the pre-commit hook uses it to audit new rows.
 #
 # Run this BEFORE mutating any source for a performance candidate.
 #
@@ -14,10 +18,10 @@
 #                 the blocker is behavioral. Do not re-derive it.
 #   3  USAGE
 #
-# Why not block on every prior rejection: the 2026-07-25 fleet audit measured
-# 67.8% of this repo's rejected levers as VOID — rejected by a harness that
-# could not have seen the effect. Blocking on those would entomb them. The
-# taxonomy is in docs/LEDGER_RESURRECTION.md.
+# Why not block on every prior rejection in this quick screen: the corrected
+# 2026-07-27 hand audit found 71 of 109 rejected levers (65.1%) VOID. Blocking
+# on those would entomb them. The authoritative map and taxonomy are in
+# docs/LEDGER_RESURRECTION.md.
 
 set -uo pipefail
 
@@ -156,7 +160,7 @@ if (( void_matches > 0 )); then
 
 CLEAR (exit 0): prior rejections exist but every one is VOID — the measurement
 could not have detected the lever. This is a RESURRECTION, not a fresh idea.
-Re-run under the median-CI gate (common::report_median_gate_pair), record an A/A
+Re-run under the median-CI gate (common::run_median_ci_contract), record an A/A
 null in the same invocation, and cite the void row you are overturning.
 CLEAR
 else

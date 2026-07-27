@@ -61,7 +61,7 @@ We only use **Cargo** in this project, NEVER any other package manager.
 - **Edition:** Rust 2024 (nightly required — pinned to `nightly-2026-07-05` in `rust-toolchain.toml`; CI mirrors the same via `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`)
 - **Dependency versions:** Explicit versions for stability
 - **Configuration:** Cargo.toml workspace with `workspace = true` pattern
-- **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`) on 9 of 10 crates — the numeric core stays entirely on the safe-Rust path, enforced by `no_unsafe_code_blocks_or_items` in `crates/fnp-conformance/tests/codebase_hygiene.rs`. `fnp-python` is the lone opt-out: as the PyO3 boundary it uses hand-written `unsafe` (chiefly `std::slice::from_raw_parts` on borrowed `PyBuffer` bytes) to reinterpret Python-owned buffers as typed slices without copying — the zero-copy fast paths behind the performance work. Those blocks are confined to `fnp-python` and excluded from the hygiene scan; every other crate must stay unsafe-free. If narrow unsafe usage ever becomes unavoidable in one of the 9 core crates, isolate it behind audited interfaces and tests rather than relaxing the invariant.
+- **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`) on 9 of 10 crates — the numeric core stays entirely on the safe-Rust path, enforced by `no_unsafe_code_blocks_or_items` in `crates/fnp-conformance/tests/codebase_hygiene.rs`. `fnp-python` is the lone opt-out: as the PyO3 boundary it uses hand-written `unsafe` (chiefly `std::slice::from_raw_parts` on borrowed `PyBuffer` bytes, plus narrow layout-checked views of native result buffers) for zero-copy fast paths. Those blocks are confined to `fnp-python` and excluded from the hygiene scan; every other crate must stay unsafe-free. If narrow unsafe usage ever becomes unavoidable in one of the 9 core crates, isolate it behind audited interfaces and tests rather than relaxing the invariant.
 
 ### Key Dependencies
 
@@ -512,26 +512,28 @@ bv --robot-insights | jq '.Cycles'                         # Circular deps (must
 hypothesis: wins, losses, and the retry predicate for each. It is 1,000+ entries
 and it is the authoritative record — not `cass`, not memory, not the commit log.
 
-**Ledger integrity decays.** A 2026-07-25 fleet audit measured 67.8% of this
-repo's rejected levers (99 of 146) as **VOID** — the measurement could not have
-detected the lever, so the row proves nothing. The dominant class was an A/B
-rejected on a near-1.0 ratio with no A/A null control and no counted mechanism
-recorded. Two gates now exist so that class cannot grow. Use them.
+**Ledger integrity decays.** The corrected 2026-07-27 hand audit classified 109
+actual rejected levers and found 71 (65.1%) **VOID**. Sixty-six of those 71 were
+an A/B rejected on a near-1.0 ratio with no A/A null control and no counted
+mechanism recorded. Two gates now exist so that class cannot grow. Use them.
 
 ### Before you touch source for a perf candidate
 
 ```bash
-scripts/ledger_preflight.sh <keyword> [keyword ...]     # e.g. loadtxt usecols bool
+RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- \
+  cargo run -q -p fnp-conformance --bin perf_ledger_preflight -- \
+  --lever "selected bool parse" --surface "loadtxt usecols"
 ```
 
 | Exit | Meaning |
 |---|---|
-| `0` CLEAR | No prior rejection, **or** every match is VOID — you are running a *resurrection*, so cite the row you are overturning. |
-| `2` BLOCKED | A prior rejection is SOUND (it recorded an A/A null, refuted the lever on a counted mechanism, or is behaviorally blocked). **Do not re-derive it.** |
-| `3` | usage |
+| `0` CLEAR | No prior ledger row matched. |
+| `2` BLOCKED | Prior evidence matched; the command prints each row and its retry predicate. Satisfy that predicate before reopening it. |
+| `64` | usage or tool error |
 
-It deliberately does not block on every prior rejection — that would entomb the
-99 VOID rows. It blocks only on the sound ones.
+`scripts/ledger_preflight.sh <keyword> ...` remains a fast heading-only triage
+helper, but its regex classification is not authoritative. Use the Rust
+preflight above for a real proposal and rely on its staged audit in pre-commit.
 
 ### When you write a REJECT row
 
@@ -555,10 +557,10 @@ as provenance only.
 
 The harness already exists — **do not build another one**:
 
-- `crates/fnp-python/benches/common/mod.rs` → `report_median_gate_pair` measures
-  the A/A null in the same invocation, retains 20 observations, and returns
-  `WIN` iff `effect.median > null.p90` (`BIASED_NULL` if the null fails to
-  bracket unity). `criterion_python_median_gate.rs` has 15 worked examples.
+- `crates/fnp-python/benches/common/mod.rs` → `run_median_ci_contract` runs the
+  A/A null before the effect in the same invocation, retains 41 interleaved
+  min-of-three rounds, bootstraps the median-ratio CI, and gates on twice the
+  null-CI half-width. `cv` is provenance only.
 - `common::gated_main` prints `bench_elf_sha256=…` as line one of every bench,
   hashing `current_exe()`. A hash computed by a shell step next to the run
   proves nothing: rch builds into an opaque per-worker target dir you cannot

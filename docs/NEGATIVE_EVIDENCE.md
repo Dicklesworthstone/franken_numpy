@@ -4,6 +4,101 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-27 - MODEL-INTEGRITY RE-AUDIT: 27-commit exposure window
+
+`BeigeDog`, cod / Lane M. This is a judgment-layer review of every commit from
+2026-07-25 20:40 through `f30a528c`. Existing timings were not rerun merely
+because the model serving tier changed: same-invocation A/A controls,
+self-reported executing-ELF hashes, and byte/stream identity proofs remain
+evidence. The review instead rechecked that each workload reached the claimed
+production path, each behavior-preservation proof was sufficient, each shipped
+claim cleared its own gate, and surrounding ungated code and prose were sound.
+
+Outcome: **11 SOUND, 16 CORRECTED, 0 RETRACTED**. “CORRECTED” means the measured
+core result remains valid but a route, map, gate, harness detail, or claim was
+too broad and is fixed by the re-audit commit.
+
+| Commit | Status | One-line judgment |
+|---|---|---|
+| `a65315a5` | CORRECTED | The initial resurrection screen used non-fleet classes and undercounted VOID; the corrected hand map below supersedes it. |
+| `68efa0de` | CORRECTED | Removing the unsupported 10-30x claim was right, but adjacent README statements still denied landed Rayon/SIMD and boundary byte views; those statements are now current. |
+| `1b61e1d5` | CORRECTED | The NumPy allocation control measured a real directional mechanism, but raw ratio order statistics were mislabeled as a median confidence interval and the allocator conclusion was generalized beyond the measured configuration. |
+| `966fbf58` | SOUND | Tracker-only state change; it made no performance or behavior claim. |
+| `9d228ef4` | CORRECTED | ELF identity and same-invocation A/A existed, but the first harness ordered the effect before the null; `7f6f06ee` fixed the contract to null-first. |
+| `a3011134` | SOUND | The negative-usecols tail ring reaches the real all-negative production path, preserves order/duplicates/error precedence and exact bits, and clears its own median-CI gate. |
+| `38f8acf3` | CORRECTED | The per-row appendix was useful triage but its provisional classifications were not hand-verdict truth; the corrected six-class map supersedes it. |
+| `7f6f06ee` | SOUND | It moved base/base before the effect in the same invocation without changing the measured arms. |
+| `e4cad9a4` | CORRECTED | The first selected-bool branch proved the direction but was superseded by the narrower production route and stronger exact-path proof in `c828e871`/`c688af4b`. |
+| `7da2c26a` | CORRECTED | Institutionalizing the six-class audit was right, but the canonical counts, ELF-provenance predicate, and top-five queue were too permissive; all three are corrected here. |
+| `4b31fe7b` | CORRECTED | The 1.563101x evidence covered complex128 axis-0 nancumprod only; production routing is now narrowed from four dtype/operation combinations to that measured combination. |
+| `b841699e` | SOUND | Dependency-lock provenance only; no independent performance judgment was introduced. |
+| `84e10e85` | CORRECTED | The bootstrap median-CI replay contract is sound, but `gated_main` finalized a fresh empty Criterion instance; it now finalizes the instance that ran the selected groups. |
+| `c828e871` | CORRECTED | The production route and byte proof are sound, but this first decision used p10/p90 rather than a bootstrapped median CI; later ELF-identified reruns independently clear the required gate. |
+| `88995b67` | SOUND | Generator Zipf caches only fixed batch invariants, preserves output plus next RNG state, targets a 12.93% profile frame, and clears A/A at 1.364282x. |
+| `0a5f9d66` | SOUND | RandomState Zipf preserves expression order and stream state and clears its own null at 1.262239x. |
+| `e73886c9` | SOUND | The noncentral-chi-square cache is gated to eligible fixed-shape regimes, preserves output plus next state, targets a 12.11% frame, and clears A/A at 1.108215x. |
+| `795c1db8` | CORRECTED | The pre-commit idea was right, but prose with a digit could masquerade as a measured null and an unrelated source hash could satisfy the ELF gate; both loopholes and the uncounted-mechanism loophole are closed. |
+| `650dd9e8` | SOUND | The retained usecols-scatter vehicle exercises the intended production-equivalent work and its 1.034835x effect correctly failed the required 1.039787 boundary. |
+| `c688af4b` | SOUND | Merge-only integration retained the narrower selected-bool implementation and its conformance coverage. |
+| `da53a805` | CORRECTED | ELF self-reporting across benches is sound, but the hand map misclassified behavior/survey rows, conflated source hashes with executed ELFs, and skipped true rank-2 L2392. |
+| `c5995ff1` | CORRECTED | Discoverability was useful, but it published stale audit counts and the legacy p10/p90 helper as the current contract; docs now point to `run_median_ci_contract`. |
+| `cfc451ea` | CORRECTED | It correctly yielded to peer review but endorsed a still-wrong canonical map; the 2026-07-27 map supersedes both passes. |
+| `c41f9141` | CORRECTED | The immutable `Vec<bool>` byte view is layout-sound and wins 4.310770x, but “every bool result” and a universal 128 KiB mmap boundary were too broad; scope is the common materialization funnel under the measured allocator configuration. |
+| `b1b28169` | CORRECTED | Coordination preservation was right, but its queued handoff repeated the same over-broad funnel and allocator claims; a correction banner now travels with it. |
+| `18b5a17f` | SOUND | The final directional banks use the real production paths, exact output checks, executed-ELF identity, null-first same-invocation A/A, and bootstrap median-CI decisions; the random reject cycle also carried concrete predicates. |
+| `f30a528c` | SOUND | Merge-only integration introduced no new measurement or behavior judgment. |
+
+PRIORITY RESULTS RECHECKED:
+
+- Negative-usecols tail ring: production routing is all-negative, nonempty
+  `usecols`; mixed, nonnegative, and oversized-tail cases fall back. The exact
+  benchmark includes order and duplicate selection and checks every output bit.
+  Final ELF `ea36c70f0937454755aae8d77f1595da7bae921f49e9d038799d8047e8fb564e`
+  reported A/A 0.940297 [0.911045, 0.982334] and effect
+  **1.224245 [1.118812, 1.299153]**. Result stands.
+- Selected-bool direct parse: the positive-usecols production branch and
+  negative-usecols former arm read the same file and columns, including a
+  poisoned unselected token; both match live NumPy byte-for-byte. Final ELF
+  `4527aadbd8e543310622ac9f737bef8963273b57ed1cb1877a8c82fb3284b4fd`
+  reported A/A 1.001104 [0.994382, 1.002883] and effect
+  **3.465137 [3.255616, 3.666974]**. Result stands.
+- Bool-result materialization: an immutable `Vec<bool>` has one-byte,
+  one-alignment elements whose valid representations are 0 and 1; the borrowed
+  byte view lives through the immediate NumPy copy. The code proof is sound.
+  The claim is limited to `ArrayStorage::Bool` materialization paths rather than
+  direct/passthrough bool results.
+
+LEDGER CORRECTION: on snapshot `f4d70a5e`, 145 possible negative rows were
+read. Thirty-six are non-lever exclusions and 109 are actual rejected levers:
+35 `VALID-MECHANISM`, 3 `VALID-AB`, 5 `VOID-CV`, 0 `VOID-ZEROSELF`, and
+66 `VOID-NONULL`. Thus **71 / 109 = 65.1% are VOID**. None of the 109 rejected
+lever rows self-reported the executing ELF SHA-256; the former 21-row count
+mistook source/bench hashes and mixed reports for executing-binary identity.
+`docs/LEDGER_RESURRECTION.md` carries the complete corrected line map.
+
+QUEUE CORRECTION: L2392 (`tofile_text` manual integer formatting) named about
+42% of profile frames but had neither a same-invocation A/A nor a counted
+removal mechanism. It is corrected from `VALID-MECHANISM` to `VOID-NONULL` and
+is the true rank 2. Four of the corrected top five have valid reruns; L2392
+does not. The tail-ring rerun remains valid but is corrected to rank 6 and
+cannot be counted as completing the five-row resurrection assignment.
+
+Concrete retry predicates:
+
+- L2392: rebuild the same manual formatter only with an executing-ELF
+  self-report and null-first A/A in the same invocation; retain it only if the
+  bootstrap median-CI effect clears twice the null half-width. Profile share is
+  not a counted removal mechanism.
+- Complex axis-0 nancumulative: reopen complex64 or either nancumsum route only
+  after that exact production path has at least 5% named self-time, byte-identity
+  coverage, and its own executed-ELF/A/A median-CI win.
+- Allocation-mechanism generalization: extend the NumPy-only directional result
+  to FrankenNumPy only after the exact current result path records allocation or
+  fault counts under the allocator configuration being claimed.
+- Audit-map provenance: never reuse the superseded 68/122 or 21/122 figures.
+  Recount only from a named ledger snapshot, hand-adjudicate every screened row,
+  and count an executed ELF only when the row self-reports that ELF's full hash.
+
 ## 2026-07-26 - LANE M BANK CONFIRMATION (2 KEEP): tail ring 1.224x and selected-bool direct parse 3.465x under executed-ELF A/A median-CI
 
 `VioletOwl`, cod / Lane M, following the allocation addendum's two named

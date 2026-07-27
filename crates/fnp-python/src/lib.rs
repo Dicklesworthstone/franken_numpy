@@ -18901,10 +18901,11 @@ fn build_numpy_array_from_storage(
             // 0x00 and 0x01 — exactly what `u8::from(b)` was producing — so the
             // former `.collect()` allocated a second full-size buffer and walked
             // every element to reproduce bytes it already had. Reinterpret instead.
-            // Above glibc's 128 KiB mmap threshold (131,072 bools) that redundant
-            // allocation was an mmap/munmap pair plus kernel page-zeroing, which the
-            // 2026-07-25 mechanism-proof row below prices at ~2.8x on the
-            // allocation itself. Byte-identity is structural, not empirical: the
+            // At the measured 8M-element shape, the worker's allocator served that
+            // redundant allocation through mmap/munmap plus kernel page-zeroing.
+            // glibc's initial/default mmap threshold is 128 KiB, but it can adapt at
+            // runtime, so the threshold is measurement context rather than a
+            // universal size law. Byte-identity is structural, not empirical: the
             // bytes are the same bytes.
             //
             // SAFETY: `bool` and `u8` share size 1 and align 1, and every valid
@@ -78965,8 +78966,9 @@ where
     Ok(Some(out.unbind()))
 }
 
-// Route a >=2-D C-contiguous complex ndarray nancum* along a NON-last axis. Axis 0 uses the
-// gather/scan/scatter column path; a middle axis uses the per-outer-block slab scan.
+// Route a >=2-D C-contiguous complex ndarray nancum* along a NON-last axis. The measured
+// complex128 nancumprod axis-0 case uses gather/scan/scatter; middle axes use the
+// per-outer-block slab scan for both widths and operations.
 fn try_zerocopy_complex_nancumulative_nonlast(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -79019,42 +79021,32 @@ fn try_zerocopy_complex_nancumulative_nonlast(
         return Ok(None);
     }
     if ax == 0 {
+        // The measured KEEP covered complex128 nancumprod only. Keep nancumsum
+        // and complex64 on NumPy until each earns this gather/scan/scatter route
+        // with its own hot-path profile and median-CI result.
+        if !is_prod || itemsize != 16 {
+            return Ok(None);
+        }
         // NumPy's axis-0 scan is contiguous a row at a time, so gathering the
-        // independent columns repays its extra traffic only at the same 1M
-        // complex-element floor as the plain cumulative sibling.
+        // independent columns repays its extra traffic at the measured 1M
+        // complex-element floor.
         const COMPLEX_NANCUM_AXIS0_PARALLEL_MIN: usize = 1 << 20;
         if inner < 2 || axis_len * inner < COMPLEX_NANCUM_AXIS0_PARALLEL_MIN {
             return Ok(None);
         }
-        return match itemsize {
-            16 => complex_nancumulative_axis0_typed::<f64>(
-                py,
-                &numpy,
-                a,
-                "float64",
-                "complex128",
-                &shape,
-                axis_len,
-                inner,
-                is_prod,
-                if is_prod { 1.0_f64 } else { 0.0_f64 },
-                f64::is_nan,
-            ),
-            8 => complex_nancumulative_axis0_typed::<f32>(
-                py,
-                &numpy,
-                a,
-                "float32",
-                "complex64",
-                &shape,
-                axis_len,
-                inner,
-                is_prod,
-                if is_prod { 1.0_f32 } else { 0.0_f32 },
-                f32::is_nan,
-            ),
-            _ => Ok(None),
-        };
+        return complex_nancumulative_axis0_typed::<f64>(
+            py,
+            &numpy,
+            a,
+            "float64",
+            "complex128",
+            &shape,
+            axis_len,
+            inner,
+            true,
+            1.0_f64,
+            f64::is_nan,
+        );
     }
     debug_assert!(outer >= 2);
     match itemsize {
@@ -100642,8 +100634,8 @@ fn nancumprod(
         {
             return Ok(out);
         }
-        // complex middle-axis nancumprod: numpy non-last nancum* is strided + serial + per-elem isnan;
-        // per-outer-block parallel slab nan-scan is bit-exact.
+        // Complex non-last nancumprod: middle axes use the per-outer-block slab
+        // scan; only the measured complex128 axis-0 case uses gather/scan/scatter.
         if let Some(ax) = axis_val
             && let Some(out) = try_zerocopy_complex_nancumulative_nonlast(py, &a, Some(ax), true)?
         {
@@ -100695,8 +100687,8 @@ fn nancumsum(
         {
             return Ok(out);
         }
-        // complex middle-axis nancumsum: numpy non-last nancum* is strided + serial + per-elem isnan;
-        // per-outer-block parallel slab nan-scan is bit-exact.
+        // Complex middle-axis nancumsum uses the per-outer-block slab scan.
+        // Axis 0 deliberately delegates until separately measured.
         if let Some(ax) = axis_val
             && let Some(out) = try_zerocopy_complex_nancumulative_nonlast(py, &a, Some(ax), false)?
         {

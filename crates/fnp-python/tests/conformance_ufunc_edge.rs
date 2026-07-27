@@ -2162,8 +2162,9 @@ fn complex_nancumulative_lastaxis_parallel_bit_exact_matches_numpy() -> Result<(
     // numpy's complex nancumsum/nancumprod = cum* with every NaN-complex (re OR im NaN) replaced by the
     // identity (0+0j sum / 1+0j prod) on a single-threaded chain. The native per-lane parallel nan-scan
     // must be byte-identical for c128/c64 on the last axis (2-D + 3-D), incl first-element-NaN,
-    // (nan,nan), (inf,nan). The 1M-element axis-0 fixture crosses the native gather/scan/scatter
-    // threshold and locks both operations and widths byte-for-byte.
+    // (nan,nan), (inf,nan). The 1M-element axis-0 fixture crosses the native
+    // gather/scan/scatter threshold for complex128 nancumprod and locks the
+    // delegated combinations to the same byte-level behavior.
     let script = fnp_script(
         r#"
 import warnings
@@ -2189,7 +2190,7 @@ with warnings.catch_warnings():
         for fn_fnp, fn_np in [(fnp.nancumsum, np.nancumsum), (fnp.nancumprod, np.nancumprod)]:
             rm = fn_fnp(mm, axis=1); em = fn_np(mm, axis=1)
             ok = ok and bool(((rm.view(rname) == em.view(rname)) | (np.isnan(rm.view(rname)) & np.isnan(em.view(rname)))).all())
-    # axis-0 (non-last) -> native gather/scan/scatter at exactly 1M elements
+    # axis-0 (non-last): c128 nancumprod is native at 1M; other combinations delegate
     for dt, uname in [(np.complex128, np.uint64), (np.complex64, np.uint32)]:
         a0 = (rng.standard_normal((256, 4096)) + 1j * rng.standard_normal((256, 4096))).astype(dt)
         a0[0, 9] = complex(np.nan, 1.0)
@@ -2206,7 +2207,7 @@ print(ok)
     assert_eq!(
         result.trim(),
         "True",
-        "native complex nancumsum/nancumprod must be byte-identical to numpy (c128/c64 + 3-D + NaN + axis0): {result}"
+        "complex nancumsum/nancumprod boundary must be byte-identical to numpy (c128/c64 + 3-D + NaN + axis0): {result}"
     );
     Ok(())
 }

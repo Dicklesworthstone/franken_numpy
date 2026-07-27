@@ -356,7 +356,7 @@ pub fn gated_main(targets: &[BenchGroup]) {
             target(&mut criterion);
         }
     }
-    Criterion::default().configure_from_args().final_summary();
+    criterion.final_summary();
 }
 
 // Ledger-integrity retries for three historical REJECT rows. These helpers live only in the

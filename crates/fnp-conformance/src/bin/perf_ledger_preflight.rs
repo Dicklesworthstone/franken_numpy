@@ -240,8 +240,20 @@ fn is_keep(entry: &LedgerEntry) -> bool {
     })
 }
 
-fn line_has_digit(line: &str) -> bool {
-    line.bytes().any(|byte| byte.is_ascii_digit())
+fn line_has_decimal_measurement(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    let has_decimal = line.as_bytes().windows(3).any(|window| {
+        window[0].is_ascii_digit() && window[1] == b'.' && window[2].is_ascii_digit()
+    });
+    let has_measurement_shape = lower.contains("null_base_aa")
+        || lower.contains("ratio")
+        || lower.contains("median=")
+        || lower.contains("median:")
+        || (lower.contains('[') && lower.contains(']'))
+        || lower
+            .split_once(':')
+            .is_some_and(|(_, value)| value.bytes().any(|byte| byte.is_ascii_digit()));
+    has_decimal && has_measurement_shape
 }
 
 fn has_measured_null(entry: &LedgerEntry) -> bool {
@@ -256,7 +268,7 @@ fn has_measured_null(entry: &LedgerEntry) -> bool {
             || lower.contains("no null")
             || lower.contains("without null")
             || lower.contains("lacks null");
-        positive_marker && !negative_marker && line_has_digit(line)
+        positive_marker && !negative_marker && line_has_decimal_measurement(line)
     })
 }
 
@@ -265,7 +277,8 @@ fn has_counted_mechanism(entry: &LedgerEntry) -> bool {
         let Some((label, evidence)) = line.split_once(':') else {
             return false;
         };
-        label.trim().eq_ignore_ascii_case("COUNTED_MECHANISM") && !evidence.trim().is_empty()
+        label.trim().eq_ignore_ascii_case("COUNTED_MECHANISM")
+            && evidence.bytes().any(|byte| byte.is_ascii_digit())
     })
 }
 
@@ -285,15 +298,16 @@ fn contains_sha256(text: &str) -> bool {
 }
 
 fn has_elf_sha256(entry: &LedgerEntry) -> bool {
-    let has_marker = entry.body.lines().any(|line| {
+    entry.body.lines().any(|line| {
         let lower = line.to_ascii_lowercase();
-        lower.contains("bench_elf_sha256")
-            || lower.contains("elf sha")
-            || lower.contains("binary sha")
+        let executing_marker = lower.contains("bench_elf_sha256")
+            || lower.contains("executing elf sha")
+            || lower.contains("executing-elf sha")
+            || lower.contains("executing binary sha")
             || lower.contains("executable sha")
-            || lower.contains("executable hash")
-    });
-    has_marker && contains_sha256(&entry.body)
+            || lower.contains("executable hash");
+        executing_marker && !lower.contains("unavailable") && contains_sha256(line)
+    })
 }
 
 fn audit_entries(entries: &[LedgerEntry]) -> Vec<Violation> {
@@ -443,6 +457,19 @@ Retry only after a focused harness exists.
     }
 
     #[test]
+    fn null_policy_without_a_numeric_measurement_is_refused() {
+        let entries = split_entries(
+            "\
+## 2026-07-01 - REJECT: policy text only
+
+A/A null must follow the median-CI policy in campaign section 2.3 for 41 rounds.
+Retry only after a focused harness exists.
+",
+        );
+        assert_eq!(audit_entries(&entries).len(), 1);
+    }
+
+    #[test]
     fn counted_mechanism_rescues_reject_without_null() {
         let entries = split_entries(
             "\
@@ -453,6 +480,19 @@ Retry only if the algorithm removes an independently counted pass.
 ",
         );
         assert!(audit_entries(&entries).is_empty());
+    }
+
+    #[test]
+    fn uncounted_mechanism_label_does_not_rescue_reject() {
+        let entries = split_entries(
+            "\
+## 2026-07-01 - REJECT: prose mechanism
+
+COUNTED_MECHANISM: allocation traffic unchanged.
+Retry only if the algorithm removes an independently counted pass.
+",
+        );
+        assert_eq!(audit_entries(&entries).len(), 1);
     }
 
     #[test]
@@ -477,5 +517,18 @@ bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde
 ",
         );
         assert!(audit_entries(&entries).is_empty());
+    }
+
+    #[test]
+    fn elf_marker_cannot_borrow_an_unrelated_source_sha256() {
+        let entries = split_entries(
+            "\
+## 2026-07-01 - KEEP: candidate
+
+Executing ELF SHA-256: unavailable.
+source_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.
+",
+        );
+        assert_eq!(audit_entries(&entries).len(), 1);
     }
 }

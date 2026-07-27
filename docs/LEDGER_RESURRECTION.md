@@ -1,9 +1,9 @@
 # Ledger Resurrection Audit — `docs/NEGATIVE_EVIDENCE.md`
 
-## Canonical six-class hand audit (VioletOwl, Lane M)
+## Corrected six-class hand audit (2026-07-27 model-integrity review)
 
-This section supersedes every preliminary count, queue, taxonomy extension,
-and rerun table retained below it. The audit follows
+This section supersedes both the earlier VioletOwl map and every preliminary
+count, queue, taxonomy extension, and rerun table retained below it. The audit follows
 `/data/projects/frankenfs/docs/LEDGER_RESURRECTION.md` and the fleet broadcast
 verbatim: there are exactly six verdict classes. Regexes only built the review
 queue; they did not assign a final verdict.
@@ -11,9 +11,9 @@ queue; they did not assign a final verdict.
 Snapshot `f4d70a5e` contains 1,005 `##` entries. The mechanical screen selected
 146 possible negative rows. L1370 was a KEEP heading containing the word
 REJECT, leaving 145 rows; every one of those 145 rows was then read in full by
-hand. Twenty-three were surveys, behavior-only blockers, superseded reports,
+hand. Thirty-six were surveys, behavior-only blockers, superseded reports,
 or other non-lever rows and are listed separately rather than forced into a
-verdict. The remaining 122 rejected levers received one of the six allowed
+verdict. The remaining 109 rejected levers received one of the six allowed
 classes.
 
 ### Taxonomy
@@ -41,22 +41,30 @@ the rejection.
 | Mechanical negative candidates | 146 |
 | Heading parse artifact | 1 |
 | Rows read and adjudicated by hand | 145 |
-| Non-lever exclusions | 23 |
-| **Rejected levers classified** | **122** |
+| Non-lever exclusions | 36 |
+| **Rejected levers classified** | **109** |
 | `VALID-PROFILE` | 0 |
-| `VALID-MECHANISM` | 49 |
-| `VALID-AB` | 5 |
+| `VALID-MECHANISM` | 35 |
+| `VALID-AB` | 3 |
 | `VOID-CV` | 5 |
 | `VOID-ZEROSELF` | 0 |
-| `VOID-NONULL` | 63 |
-| **VOID total** | **68 / 122 = 55.7%** |
-| Rows carrying an executing-binary SHA-256 | **21 / 122 = 17.2%** |
+| `VOID-NONULL` | 66 |
+| **VOID total** | **71 / 109 = 65.1%** |
+| Rejected levers carrying a self-reported executing-ELF SHA-256 | **0 / 109 = 0.0%** |
 
-The epidemic is therefore `VOID-NONULL`, not the CV gate: 63 of the 68 VOID
+The epidemic is therefore `VOID-NONULL`, not the CV gate: 66 of the 71 VOID
 rows are undecidable near-unity A/B reports with neither a null nor a counted
-mechanism. `VALID-MECHANISM` was applied in both directions and rescued 49
+mechanism. `VALID-MECHANISM` was applied in both directions and rescued 35
 rows; a null cannot change a counter proving that the proposed work was not
 removed.
+
+The previous `21 / 122` binary-provenance count was not an executing-ELF
+count. Its regex accepted source hashes, benchmark-source hashes, truncated
+runner notes, and hashes in mixed KEEP/blocker reports. In the classified
+rejected-lever population, no row self-reported the hash of the ELF that
+actually executed. This distinction is now enforced by the preflight on one
+line: an ELF marker cannot borrow an unrelated 64-hex source hash elsewhere in
+the row.
 
 ### Complete hand-verdict map
 
@@ -66,53 +74,57 @@ auditable record of all 145 hand decisions.
 ```text
 VALID-PROFILE (0): none
 
-VALID-MECHANISM (49):
-L1121 L2392 L3451 L5752 L6916 L6935 L7161 L7247 L10440 L10664
-L10788 L11361 L11516 L12055 L12415 L12594 L13009 L13322 L14217
-L14250 L14554 L14778 L15292 L17360 L18606 L19644 L19853 L20012
-L20171 L20622 L22419 L22899 L23298 L23495 L23601 L23611 L23865
-L24771 L26269 L27096 L27108 L27190 L27567 L27851 L28175 L28562
-L29615 L29731 L30207
+VALID-MECHANISM (35):
+L3451 L6916 L6935 L7161 L10440 L10664 L10788 L11361 L11516
+L12055 L12415 L12594 L13009 L13322 L14217 L14554 L14778 L15292
+L15734 L17360 L18606 L19644 L20171 L20622 L22419 L22899 L23298
+L23495 L23601 L23611 L23865 L24771 L26269 L27851 L30207
 
-VALID-AB (5):
-L1160 L1301 L8980 L9986 L15734
+VALID-AB (3):
+L1160 L1301 L8980
 
 VOID-CV (5):
 L193 L395 L477 L806 L10313
 
 VOID-ZEROSELF (0): none
 
-VOID-NONULL (63):
-L2110 L2248 L2346 L2447 L3158 L3937 L4002 L4509 L5256 L5559
-L5666 L5706 L5888 L5959 L6190 L6319 L6375 L6427 L7353 L7375
-L7395 L7415 L7510 L7569 L7624 L7664 L7766 L7851 L7892 L8108
-L9292 L12395 L14671 L14708 L15055 L15124 L15609 L15929 L16074
-L16118 L17190 L18719 L19307 L19462 L20285 L20571 L20761 L20868
-L21279 L22496 L22553 L22773 L23630 L23648 L24670 L24706 L25156
-L25433 L25481 L27578 L27925 L28081 L30156
+VOID-NONULL (66):
+L2110 L2248 L2346 L2392 L2447 L3158 L3937 L4002 L4509 L5256
+L5559 L5666 L5706 L5888 L5959 L6190 L6319 L6375 L6427 L6985
+L7353 L7375 L7395 L7415 L7510 L7569 L7624 L7664 L7766 L7851
+L7892 L8108 L9292 L12395 L14671 L14708 L15124 L15609 L15929
+L16074 L16118 L17190 L18719 L19307 L19462 L20012 L20285 L20571
+L20761 L20868 L21279 L22496 L22553 L22773 L23630 L23648 L24670
+L24706 L25156 L25433 L25481 L27567 L27578 L27925 L28081 L30156
 
-NON-LEVER EXCLUSIONS (23):
-L1562 L6985 L7876 L9201 L11286 L13168 L15527 L15564 L15888
-L16842 L16952 L17137 L17561 L19718 L24916 L25406 L28428 L28455
-L28486 L28509 L28524 L28542 L28634
+NON-LEVER EXCLUSIONS (36):
+L1121 L1562 L5752 L7247 L7876 L9201 L9986 L11286 L13168 L14250
+L15055 L15527 L15564 L15888 L16842 L16952 L17137 L17561 L19718
+L19853 L24916 L25406 L27096 L27108 L27190 L28175 L28428 L28455
+L28486 L28509 L28524 L28542 L28562 L28634 L29615 L29731
 ```
 
-### Corrected top-five VOID reruns
+### Resurrection reruns and the corrected rank gap
 
 VOID rows were ranked by the target frame's self-time in the profile attached
-to that row, not by a scraped ratio. All five were rerun on quiet
-`vmi1227854`, pinned to CPU 6, with all eight worker slots held. Each timed
-invocation printed the executing ELF hash first, ran base/base before
-base/candidate in the same process, and gated only on the bootstrapped 95%
-median-ratio CI. CV was provenance only.
+to that row, not by a scraped ratio. The prior map wrongly treated L2392's
+42%-profiled manual integer formatter as `VALID-MECHANISM`, even though it
+recorded neither an A/A null nor a counted removal mechanism. That row is the
+true rank 2. Four of the corrected top five were rerun on quiet `vmi1227854`,
+pinned to CPU 6, with all eight worker slots held; the assigned negative-usecols
+directional lever, now rank 6, was also rerun. Each completed invocation printed
+the executing ELF hash first, ran base/base before base/candidate in the same
+process, and gated only on the bootstrapped 95% median-ratio CI. CV was
+provenance only.
 
-| Rank | Row and profiled target | Executing ELF SHA-256 | A/A median, CI95 | Effect median, CI95 | Hand rerun verdict |
+| Corrected rank | Row and profiled target | Executing ELF SHA-256 | A/A median, CI95 | Effect median, CI95 | Re-audit status |
 |---:|---|---|---|---|---|
 | 1 | L2447 C-order element-step odometer; decode = 44.0% | `2d8f85747cc703b899e54ec4fcb17125d07a3db9f1efb93f327701f74598ee8e` | 1.022770 [1.006650, 1.058581] | 1.016927 [1.002447, 1.051011] | `VALID-AB`; repeat below also inside null |
-| 2 | L2346 usecols scatter; fn + allocator approximately 21% | `05ca263ea39f01bdd3d68d62088555861a54060fc31273e4650c9a23c051cb47` | 1.002036 [0.980107, 1.019245] | 1.034835 [1.025527, 1.039039] | `VALID-AB`; below required 1.039787 |
-| 3 | L477 Generator Zipf invariant terms; 12.93% | `f25d6a15885cc81796958247664798850be17702934a2f44c77d04a98e29f9eb3` | 0.993360 [0.986830, 0.997768] | **1.364282 [1.348971, 1.396232]** | **KEEP** |
-| 4 | L2110 noncentral chi-square fixed gamma cache; 12.11% | `08b0ceca45d80e88d19f170e0b76ef4de80d57b3e07b6ace2430c8ba8fb55508` | 0.989887 [0.978433, 1.007559] | **1.108215 [1.076852, 1.132333]** | **KEEP** |
-| 5 | L806 negative-usecols tail ring; collect = 10.67% | `5b3e2e3cd3079ac8bcba841e01e4d4003cdf95d55c00442ad8f7e43f5f762a13` | 1.014925 [0.983995, 1.056524] | **1.171830 [1.111937, 1.234068]** | **KEEP** |
+| 2 | L2392 `tofile_text` integer formatting; named fmt frames approximately 42% | — | prior row had no A/A | prior A/B 1.00-1.10x overlapping | **PENDING: still `VOID-NONULL`** |
+| 3 | L2346 usecols scatter; fn + allocator approximately 21% | `05ca263ea39f01bdd3d68d62088555861a54060fc31273e4650c9a23c051cb47` | 1.002036 [0.980107, 1.019245] | 1.034835 [1.025527, 1.039039] | `VALID-AB`; below required 1.039787 |
+| 4 | L477 Generator Zipf invariant terms; 12.93% | `f25d6a15885cc81796958247664798850be17702934a2f44c77d04a98e29f9eb3` | 0.993360 [0.986830, 0.997768] | **1.364282 [1.348971, 1.396232]** | **KEEP** |
+| 5 | L2110 noncentral chi-square fixed gamma cache; 12.11% | `08b0ceca45d80e88d19f170e0b76ef4de80d57b3e07b6ace2430c8ba8fb55508` | 0.989887 [0.978433, 1.007559] | **1.108215 [1.076852, 1.132333]** | **KEEP** |
+| 6, assigned directional lever | L806 negative-usecols tail ring; collect = 10.67% | `5b3e2e3cd3079ac8bcba841e01e4d4003cdf95d55c00442ad8f7e43f5f762a13` | 1.014925 [0.983995, 1.056524] | **1.171830 [1.111937, 1.234068]** | **KEEP** |
 
 Rank 1 was repeated from a freshly built second ELF,
 `12cf201485beb3152be2da628d1653532b5f4149e74ec3ad34af58005f222009`:
@@ -121,18 +133,23 @@ A/A 0.990316 [0.960183, 1.043890], effect 1.020997
 two runs, so the production trial was reverted. Exact checksum on both runs:
 `52a9418a7fd74354`.
 
-Rank 2 exact checksum was `a2e078ba6c280f6d`; no production source was
-changed. Rank 3 checksum was `7530e1225533b088`, rank 4
-`983fa2c568e726e7`, and rank 5 `fe47f366bfb808d2`.
+Rank 3 exact checksum was `a2e078ba6c280f6d`; no production source was
+changed. Rank 4 checksum was `7530e1225533b088`, rank 5
+`983fa2c568e726e7`, and rank 6 `fe47f366bfb808d2`.
 
-Canonical resurrection yield: **3 KEEP / 5 reruns**. Both undecided rows now
-have valid A/A evidence rather than an undecidable reject.
+Corrected top-five status: **2 KEEP, 2 VALID-AB, 1 pending**. The fifth
+completed rerun was rank 6 and remains a valid directional KEEP; it cannot be
+counted as completion of the top-five assignment.
 
 Concrete retry predicates:
 
 - L2447: retry only after counters on the exact production `Nditer::next`
   candidate prove at least 10% fewer instructions or cycles and a pinned A/A
   half-width at most 1%; do not retry from wall direction alone.
+- L2392: reconstruct the same manual integer formatter only in a harness that
+  self-reports its executing ELF and runs an A/A null before the effect in the
+  same invocation. Keep it closed unless the median-CI effect clears twice the
+  null half-width; frame percentage alone is not a removal count.
 - L2346: retry the exact retained scatter vehicle only when the A/A half-width
   is below 1.74% or the effect reaches 1.039787; a different vehicle first
   needs a fresh profile and counted work-removal proof.
@@ -187,26 +204,23 @@ lever* — as opposed to detecting it and finding it absent.
 
 > ## ⚠ SUPERSEDED — do not quote the counts below
 >
-> Everything from here down is the earlier `BlackThrush` pass. **The canonical
-> audit is the "Canonical six-class hand audit" section at the top of this
-> file**, and its counts are the ones to cite: **68 VOID / 122 classified
-> levers = 55.7%**, not the 99 / 146 = 67.8% below.
+> Everything from here down is earlier audit provenance. **The corrected audit
+> at the top of this file is the only count/map to cite: 71 VOID / 109
+> classified levers = 65.1%.** Both the intermediate 68/122 map and the
+> preliminary 99/146 screen are superseded.
 >
-> The canonical pass is stricter in two ways and is right on both:
+> The 2026-07-27 review corrected three judgment errors:
 >
-> 1. **It read all 145 rows in full by hand.** This pass hand-adjudicated only
->    the queue head and the contestable classes, and screened the rest.
-> 2. **It uses exactly the six fleet classes** and declines the two this pass
->    added. `VOID-UNMEASURED` is folded into `VOID-NONULL` — conservatively,
->    since an interrupted run cannot establish negative evidence either way —
->    and `VALID-MARGIN` is dropped entirely. Its `VALID-MECHANISM` count of 49
->    against this pass's 18 shows the rescuing direction applied far more
->    thoroughly, which is what the broadcast asked for.
+> 1. Behavior-only and survey/blocker reports are exclusions, not performance
+>    mechanism evidence.
+> 2. A near-unity A/B with mechanism prose but no counted work and no A/A null
+>    remains `VOID-NONULL`.
+> 3. A source or benchmark hash is not an executing-ELF self-report.
 >
 > The sections below are retained as the working record of how the numbers were
-> derived, including §3.1's account of two screen bugs that are worth not
-> repeating. The **§6 enforcement gates and §5.1 rank-1 result remain current**
-> — those describe shipped code and a landed measurement, not counts.
+> derived, including §3.1's screen-bug account. Shipped measurements carrying
+> their own A/A, executing-ELF hash, and identity proof remain valid; only the
+> classification and queue claims above were corrected.
 
 ---
 

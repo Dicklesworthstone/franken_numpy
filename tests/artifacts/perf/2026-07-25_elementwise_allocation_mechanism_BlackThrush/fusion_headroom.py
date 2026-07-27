@@ -16,10 +16,12 @@ so the answer does not depend on any FrankenNumPy build:
   fused   : the unreachable ideal - modelled by a single-pass op of the same
             traffic shape (3 reads + 1 write), measured as np.add(a, b) scaled
 
-Method follows campaign section 2: arms interleaved inside one round, order
-alternating per round, statistic = median of per-round ratios, and an A/A null
-control (same arm against itself) reported in the same invocation. Gate on the
-null, never on cv.
+Arms are interleaved inside one round with order alternating per round;
+statistic = median of per-round ratios, and an A/A null control (same arm
+against itself) is reported in the same invocation. The printed range is the
+central 95% of raw ratios, not a confidence interval for the median, so this is
+directional mechanism reconnaissance rather than the production median-CI
+decision harness. Interpret effects against the null and never gate on cv.
 """
 import gc
 import statistics
@@ -59,8 +61,8 @@ def paired(arm_a, arm_b, rounds=ROUNDS):
     return ratios, a_times, b_times
 
 
-def ci95(xs):
-    """Bootstrap-free 95% interval on the median via order statistics."""
+def central_ratio_range_95(xs):
+    """Central 95% of raw per-round ratios; not a confidence interval."""
     s = sorted(xs)
     n = len(s)
     lo = s[max(0, int(0.025 * n))]
@@ -75,9 +77,9 @@ def cv(xs):
 
 def report(name, ratios, a_times, b_times):
     med = statistics.median(ratios)
-    lo, hi = ci95(ratios)
+    lo, hi = central_ratio_range_95(ratios)
     print(
-        f"  {name:34s} median={med:6.4f}x  ci95=[{lo:6.4f},{hi:6.4f}]  "
+        f"  {name:34s} median={med:6.4f}x  ratio_range95=[{lo:6.4f},{hi:6.4f}]  "
         f"cvA={cv(a_times):5.2f}%  cvB={cv(b_times):5.2f}%"
     )
     return med, lo, hi

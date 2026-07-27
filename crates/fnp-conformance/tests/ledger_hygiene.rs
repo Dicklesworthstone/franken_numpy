@@ -3,11 +3,11 @@
 //! Ledger integrity DECAYS. The 2026-07-25 fleet campaign audited eleven repos
 //! and the spread was decided by exactly one thing: whether the repo had ever
 //! institutionalized the check. Repos that audited once and then enforced it sit
-//! at 1.7% void; repos that never did sit at 25-91%. This repo measured 67.8%
-//! (99 of 146 rejected levers), with the dominant class being `VOID-NONULL` -
-//! an A/B ran, the row was rejected on a near-1.0 wall ratio, and neither an A/A
-//! null control nor a counted mechanism was written down, so the lever cannot be
-//! distinguished from the harness.
+//! at 1.7% void; repos that never did sit at 25-91%. The corrected hand audit
+//! classified 109 actual rejected levers and found 71 (65.1%) VOID, including
+//! 66 `VOID-NONULL`: an A/B ran, the row was rejected on a near-1.0 wall ratio,
+//! and neither an A/A null control nor a counted mechanism was written down, so
+//! the lever cannot be distinguished from the harness.
 //!
 //! These tests exist so that class cannot grow. A REJECT row dated on or after
 //! [`ENFORCEMENT_DATE`] must record either an A/A null control or a counted
@@ -29,7 +29,7 @@ const ENFORCEMENT_DATE: &str = "2026-07-26";
 /// introduced this gate. The count may shrink (a row gains a null, or is re-run
 /// and re-decided) but must never grow.
 ///
-/// This is deliberately NOT the audit's `VOID-NONULL` count of 81 in
+/// This is deliberately NOT the audit's canonical `VOID-NONULL` count of 66 in
 /// `docs/LEDGER_RESURRECTION.md`. That figure additionally requires the claimed
 /// ratio to be attributable to the candidate and excludes superseded/parse/survey
 /// rows — judgements a CI gate should not be making. The gate measures only what
