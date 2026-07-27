@@ -4,6 +4,64 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-27 - RESURRECTION WIN (KEEP): `tofile_text` manual integer formatting - 1.215448x under production-path executed-ELF A/A median-CI
+
+`BeigeDog`, bead `franken_numpy-ixs5y.350`, cod / Lane M. This closes corrected
+rank 2 / L2392 of the six-class ledger resurrection queue. The mandatory
+preflight found the 2026-07-16 NO-SHIP and printed its retry predicate before
+any source edit. That row was `VOID-NONULL`: its two ordinary A/Bs had no
+same-invocation A/A and no counted mechanism, so their overlap could not
+distinguish the lever from the harness.
+
+ONE LEVER: preserve every `tofile_text` branch predicate, separator write,
+element order, float formatter, and output allocation policy, but replace the
+integral arm's `fmt::Arguments`/`Formatter` path with a 20-byte stack decimal
+buffer. The magnitude uses `i64::unsigned_abs`, digits are generated in base 10
+from the end of the buffer, and the sign is appended separately. This prints
+the same minimal decimal representation as `i64::Display`; zero produces one
+digit, and the helper remains defined even for `i64::MIN`.
+
+BEHAVIOR PROOF: before timing, the benchmark compared the helper with
+`i64::Display` at both extrema and other boundaries plus every integer from
+-10,000 through 10,000. It then asserted whole-output equality among the
+frozen former replica, the reconstructed candidate, and the production
+`fnp_io::tofile_text` path on the 131,072-element mixed fixture. The production
+test additionally pins the eligible range boundary, negative zero, and the
+unchanged fractional branch. Integral eligibility, cast, formatting order,
+floating-point behavior, separators, RNG/ties, and error behavior are
+unchanged.
+
+DECISIVE INVOCATION: strict-remote `vmi1227854`, all eight worker slots held
+with zero remaining, CPU 6, release LTO disabled, null-first 41-round
+base/base followed by 41-round interleaved base/production, min-of-3 per arm.
+The executing binary self-reported
+`bench_elf_sha256=c51ac92dfd74d2cc5d34a4d8e76dbd651ff29ca7eca090399ce322f68cf9dc10`
+(5,155,944 bytes) before any proof or timing:
+
+| row | arm medians | median ratio | bootstrap median CI95 | CV (provenance only) |
+|---|---|---:|---:|---:|
+| A/A former/former | 3.517239 / 3.675437 ms | 1.007425 | [0.972637, 1.022832] | 15.333% |
+| A/B former/production | 3.463259 / 2.828888 ms | **1.215448** | **[1.189254, 1.288287]** | 19.869% |
+
+The null half-width was 0.027363, so the gate required an effect delta of
+0.054726. The measured delta was 0.215448 and cleared that requirement by
+3.94x. Every timed arm emitted checksum `d23d51160dc7773a`. Verdict:
+**DECIDABLE_WIN / KEEP**. CV was recorded and never gated. A candidate-only
+preflight on `vmi1149989` independently pointed the same direction at
+1.185857 [1.131067, 1.270728], but it is not the bank; the table above is the
+real production-path decision.
+
+VALIDATION: `cargo test -p fnp-io --test golden_text_io tofile_text` passed
+1/1 under strict remote. The broader unit-test binary remains blocked by the
+pre-existing ambiguous `bytemuck::cast_slice` call at `src/lib.rs:10487`; no
+local fallback or unrelated source edit was made.
+
+Retry predicate: do not rerun the same single-digit manual formatter. Reopen
+this surface only if a fresh production profile attributes at least 10% self
+time to a different formatting primitive (for example a two-digits-at-a-time
+table) and that design is separately proven byte-identical before receiving
+its own executed-ELF, null-first median-CI decision.
+
 ## 2026-07-27 - MODEL-INTEGRITY REMEDIATION CLOSEOUT: 27/27 verdicts reconciled, live-ledger gate mutation-tested
 
 `BeigeDog`, cod / Lane M. Final reconciliation of the 27-commit exposure
@@ -23,7 +81,7 @@ commit was `RETRACTED`.
 | `84e10e85` | `02ec3fed` finalizes the Criterion instance that actually ran the selected groups. |
 | `c828e871` | `18b5a17f` supplies the independent executed-ELF bootstrap median-CI bank; `02ec3fed` stops treating the first p10/p90 decision as that proof. |
 | `795c1db8` | `02ec3fed` closes the policy-prose, uncounted-mechanism, and unrelated-hash parser loopholes; this closeout aligns the CI gate and adds a live-ledger mutation self-check. |
-| `da53a805` | `02ec3fed` distinguishes source hashes from executed ELFs and restores L2392 as pending rank 2. |
+| `da53a805` | `02ec3fed` distinguishes source hashes from executed ELFs and restores L2392 as pending rank 2; the resurrection KEEP above subsequently closes it. |
 | `c5995ff1` | `02ec3fed` updates discoverability text to `run_median_ci_contract` and the corrected counts. |
 | `cfc451ea` | `02ec3fed` supersedes both earlier maps with the 71/109 map. |
 | `c41f9141` | `02ec3fed` narrows the route and allocator claim; the old ledger row, source comment, outbox, and bead now carry that correction locally. |
@@ -425,9 +483,11 @@ there is no allocation left in it to remove.
 
 > **MODEL-INTEGRITY CORRECTION (2026-07-27):** this historical closeout is
 > superseded by the hand map at the top of this file. The correct population is
-> 109 rejected levers with 71 VOID; L2392 is pending rank 2, the tail ring is
-> rank 6, and corrected top-five status is 2 KEEP, 2 VALID-AB, 1 pending. Do not
-> cite the 68/122, 21/122, 3/5, or rank-5-tail-ring claims below.
+> 109 rejected levers with 71 VOID; at remediation closeout L2392 was pending
+> rank 2, the tail ring was rank 6, and top-five status was 2 KEEP, 2 VALID-AB,
+> 1 pending. The resurrection entry at the top of this file subsequently closed
+> L2392, so current status is 3 KEEP, 2 VALID-AB, 0 pending. Do not cite the
+> 68/122, 21/122, 3/5, or rank-5-tail-ring claims below.
 
 `VioletOwl`, bead `franken_numpy-ixs5y.380`, cod / Lane M. This entry
 supersedes the provisional 4/5 queue farther below. The mechanical parser

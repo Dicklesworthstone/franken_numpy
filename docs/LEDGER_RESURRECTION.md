@@ -115,12 +115,13 @@ pinned to CPU 6, with all eight worker slots held; the assigned negative-usecols
 directional lever, now rank 6, was also rerun. Each completed invocation printed
 the executing ELF hash first, ran base/base before base/candidate in the same
 process, and gated only on the bootstrapped 95% median-ratio CI. CV was
-provenance only.
+provenance only. On 2026-07-27, rank 2 was reconstructed and re-decided under
+that same contract on `vmi1227854`, completing the corrected queue.
 
 | Corrected rank | Row and profiled target | Executing ELF SHA-256 | A/A median, CI95 | Effect median, CI95 | Re-audit status |
 |---:|---|---|---|---|---|
 | 1 | L2447 C-order element-step odometer; decode = 44.0% | `2d8f85747cc703b899e54ec4fcb17125d07a3db9f1efb93f327701f74598ee8e` | 1.022770 [1.006650, 1.058581] | 1.016927 [1.002447, 1.051011] | `VALID-AB`; repeat below also inside null |
-| 2 | L2392 `tofile_text` integer formatting; named fmt frames approximately 42% | — | prior row had no A/A | prior A/B 1.00-1.10x overlapping | **PENDING: still `VOID-NONULL`** |
+| 2 | L2392 `tofile_text` integer formatting; named fmt frames approximately 42% | `c51ac92dfd74d2cc5d34a4d8e76dbd651ff29ca7eca090399ce322f68cf9dc10` | 1.007425 [0.972637, 1.022832] | **1.215448 [1.189254, 1.288287]** | **KEEP; production path shipped by the 2026-07-27 resurrection** |
 | 3 | L2346 usecols scatter; fn + allocator approximately 21% | `05ca263ea39f01bdd3d68d62088555861a54060fc31273e4650c9a23c051cb47` | 1.002036 [0.980107, 1.019245] | 1.034835 [1.025527, 1.039039] | `VALID-AB`; below required 1.039787 |
 | 4 | L477 Generator Zipf invariant terms; 12.93% | `f25d6a15885cc81796958247664798850be17702934a2f44c77d04a98e29f9eb3` | 0.993360 [0.986830, 0.997768] | **1.364282 [1.348971, 1.396232]** | **KEEP** |
 | 5 | L2110 noncentral chi-square fixed gamma cache; 12.11% | `08b0ceca45d80e88d19f170e0b76ef4de80d57b3e07b6ace2430c8ba8fb55508` | 0.989887 [0.978433, 1.007559] | **1.108215 [1.076852, 1.132333]** | **KEEP** |
@@ -133,23 +134,29 @@ A/A 0.990316 [0.960183, 1.043890], effect 1.020997
 two runs, so the production trial was reverted. Exact checksum on both runs:
 `52a9418a7fd74354`.
 
-Rank 3 exact checksum was `a2e078ba6c280f6d`; no production source was
-changed. Rank 4 checksum was `7530e1225533b088`, rank 5
+Rank 2 exact checksum was `d23d51160dc7773a`. The null half-width was
+0.027363, so its 0.215448 effect delta cleared the required 0.054726 delta by
+3.94x. The final ELF timed the real production function; before timing it
+proved the stack formatter against `i64::Display` at extrema and across
+-10,000 through 10,000, then asserted whole-output identity against both the
+former replica and production on the mixed fixture. Rank 3 exact checksum was
+`a2e078ba6c280f6d`; no production source was changed. Rank 4 checksum was
+`7530e1225533b088`, rank 5
 `983fa2c568e726e7`, and rank 6 `fe47f366bfb808d2`.
 
-Corrected top-five status: **2 KEEP, 2 VALID-AB, 1 pending**. The fifth
-completed rerun was rank 6 and remains a valid directional KEEP; it cannot be
-counted as completion of the top-five assignment.
+Corrected top-five status: **3 KEEP, 2 VALID-AB, 0 pending**. The earlier fifth
+completed rerun was rank 6 and remains a valid directional KEEP, but rank 2's
+production-path decision is what completes the actual top-five assignment.
 
 Concrete retry predicates:
 
 - L2447: retry only after counters on the exact production `Nditer::next`
   candidate prove at least 10% fewer instructions or cycles and a pinned A/A
   half-width at most 1%; do not retry from wall direction alone.
-- L2392: reconstruct the same manual integer formatter only in a harness that
-  self-reports its executing ELF and runs an A/A null before the effect in the
-  same invocation. Keep it closed unless the median-CI effect clears twice the
-  null half-width; frame percentage alone is not a removal count.
+- L2392: fulfilled and closed. Do not rerun the same single-digit formatter;
+  reopen only if a fresh production profile attributes at least 10% self-time
+  to a different byte-identical formatter primitive, such as a
+  two-digits-at-a-time table.
 - L2346: retry the exact retained scatter vehicle only when the A/A half-width
   is below 1.74% or the effect reaches 1.039787; a different vehicle first
   needs a fresh profile and counted work-removal proof.
@@ -705,9 +712,10 @@ times.
 ## 7. Superseded re-run status
 
 > The “complete top five” table below used the preliminary queue. The corrected
-> queue has L2392 pending at rank 2 and the tail ring at rank 6; corrected
-> top-five status is 2 KEEP, 2 VALID-AB, 1 pending. This table is retained only
-> as provenance for the runs it actually lists.
+> queue places the tail ring at rank 6. L2392 rank 2 was subsequently re-won at
+> 1.215448x under the production-path executed-ELF median-CI gate, so corrected
+> top-five status is now 3 KEEP, 2 VALID-AB, 0 pending. This table is retained
+> only as provenance for the runs it actually lists.
 
 Complete for the ranked top five. The active campaign targets self-report the
 executing ELF SHA-256, run base/base before base/candidate in the same

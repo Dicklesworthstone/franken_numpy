@@ -1103,21 +1103,131 @@ fn tofile_text_former(values: &[f64], sep: &str) -> String {
     out
 }
 
-fn bench_tofile_text_integral(c: &mut Criterion) {
+fn push_i64_decimal_manual(out: &mut String, value: i64) {
+    let negative = value.is_negative();
+    let mut magnitude = value.unsigned_abs();
+    let mut digits = [0_u8; 20];
+    let mut cursor = digits.len();
+    loop {
+        cursor -= 1;
+        digits[cursor] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if negative {
+        out.push('-');
+    }
+    out.push_str(
+        std::str::from_utf8(&digits[cursor..]).expect("decimal digits are valid ASCII UTF-8"),
+    );
+}
+
+/// Reconstructs the byte-identical stack-buffer candidate formerly rejected in
+/// `franken_numpy-ixs5y.350`. The resurrection contract retains this independent
+/// replica so future runs can compare the shipped production path with both the
+/// former implementation and the exact candidate that received the KEEP.
+#[inline(never)]
+fn tofile_text_manual_int_candidate(values: &[f64], sep: &str) -> String {
+    let mut out = String::new();
+    for (idx, v) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(sep);
+        }
+        if v.fract() == 0.0
+            && v.is_finite()
+            && v.abs() < 1e15
+            && !(*v == 0.0 && v.is_sign_negative())
+        {
+            push_i64_decimal_manual(&mut out, *v as i64);
+        } else {
+            write!(&mut out, "{v}").expect("writing to String cannot fail");
+        }
+    }
+    out
+}
+
+fn tofile_text_integral_fixture() -> Vec<f64> {
     const ELEMENTS: usize = 131_072;
-    // Integral-heavy with a sprinkle of true floats and specials, mirroring
-    // typical integer-valued exports.
-    let values: Vec<f64> = (0..ELEMENTS)
+    (0..ELEMENTS)
         .map(|i| match i % 19 {
             17 => (i as f64) * 0.25 + 0.5,
             18 => -(i as f64) * 1.75,
             _ => ((i as i64 * 7919) % 2_000_003 - 1_000_001) as f64,
         })
-        .collect();
+        .collect()
+}
+
+fn checksum_string(output: &str) -> u64 {
+    output
+        .as_bytes()
+        .iter()
+        .fold(output.len() as u64, |state, byte| {
+            mix_checksum(state, u64::from(*byte))
+        })
+}
+
+fn time_tofile_text_integral(values: &[f64], candidate: bool) -> TimedValue {
+    let started = Instant::now();
+    let output = if candidate {
+        fnp_io::tofile_text(values, ",")
+    } else {
+        tofile_text_former(values, ",")
+    };
+    let mut elapsed = started.elapsed();
+    let checksum = checksum_string(&output);
+    let drop_started = Instant::now();
+    drop(black_box(output));
+    elapsed += drop_started.elapsed();
+    TimedValue { elapsed, checksum }
+}
+
+fn run_tofile_text_integral_contract() {
+    for value in [
+        i64::MIN,
+        i64::MIN + 1,
+        -1_000_000_000_000_000,
+        -10,
+        -1,
+        0,
+        1,
+        10,
+        1_000_000_000_000_000,
+        i64::MAX - 1,
+        i64::MAX,
+    ] {
+        let mut actual = String::new();
+        push_i64_decimal_manual(&mut actual, value);
+        assert_eq!(actual, value.to_string());
+    }
+    for value in -10_000_i64..=10_000 {
+        let mut actual = String::new();
+        push_i64_decimal_manual(&mut actual, value);
+        assert_eq!(actual, value.to_string());
+    }
+
+    let values = tofile_text_integral_fixture();
+    let former = tofile_text_former(&values, ",");
+    let candidate = tofile_text_manual_int_candidate(&values, ",");
+    let current = fnp_io::tofile_text(&values, ",");
+    assert_eq!(candidate, former);
+    assert_eq!(current, former);
+
+    let _ = run_median_ci_contract(
+        "tofile_text_manual_int_resurrection",
+        || time_tofile_text_integral(&values, false),
+        || time_tofile_text_integral(&values, true),
+    );
+}
+
+fn bench_tofile_text_integral(c: &mut Criterion) {
+    const ELEMENTS: usize = 131_072;
+    let values = tofile_text_integral_fixture();
 
     let former = tofile_text_former(&values, ",");
-    let current = fnp_io::tofile_text(&values, ",");
-    assert_eq!(current, former);
+    let candidate = tofile_text_manual_int_candidate(&values, ",");
+    assert_eq!(candidate, former);
 
     // Variance protocol: 20 samples, 2 s window; floor predeclared in the
     // bead (disjoint AND >= 1.05x).
@@ -3224,6 +3334,10 @@ criterion_group!(
 
 fn main() {
     report_bench_identity();
+    if std::env::var_os("FNP_IO_TOFILE_RESURRECTION_ONLY").is_some() {
+        run_tofile_text_integral_contract();
+        return;
+    }
     benches();
     Criterion::default().configure_from_args().final_summary();
 }

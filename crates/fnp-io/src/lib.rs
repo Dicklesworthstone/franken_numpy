@@ -4400,6 +4400,27 @@ fn fromfile_text_with_budget(
 /// Write array values as text with a separator (np.ndarray.tofile with sep parameter).
 ///
 /// When `sep` is non-empty, `tofile` writes elements as text separated by `sep`.
+fn push_i64_decimal(out: &mut String, value: i64) {
+    let negative = value.is_negative();
+    let mut magnitude = value.unsigned_abs();
+    let mut digits = [0_u8; 20];
+    let mut cursor = digits.len();
+    loop {
+        cursor -= 1;
+        digits[cursor] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if negative {
+        out.push('-');
+    }
+    out.push_str(
+        std::str::from_utf8(&digits[cursor..]).expect("decimal digits are valid ASCII UTF-8"),
+    );
+}
+
 pub fn tofile_text(values: &[f64], sep: &str) -> String {
     use std::fmt::Write;
 
@@ -4413,12 +4434,9 @@ pub fn tofile_text(values: &[f64], sep: &str) -> String {
             && v.abs() < 1e15
             && !(*v == 0.0 && v.is_sign_negative())
         {
-            // NOTE (2026-07-16 NO-SHIP, ledger + bench tofile_text_integral):
-            // replacing this write! with a manual digit loop measured
-            // 1.00-1.10x overlapping - Display's cost IS the digit loop, and
-            // a reimplementation removes only dispatch. Do not retry without
-            // a design that does structurally less work per element.
-            let _ = write!(&mut out, "{}", *v as i64);
+            // Re-decided under the executed-ELF A/A median-CI contract after
+            // the 2026-07-16 rejection was classified VOID-NONULL.
+            push_i64_decimal(&mut out, *v as i64);
         } else {
             let _ = write!(&mut out, "{v}");
         }
@@ -8835,6 +8853,48 @@ mm.flush()
     fn tofile_text_comma_sep() {
         let result = tofile_text(&[10.0, 20.0, 30.0], ",");
         assert_eq!(result, "10,20,30");
+    }
+
+    #[test]
+    fn tofile_text_manual_integer_formatter_matches_display() {
+        for value in [
+            i64::MIN,
+            i64::MIN + 1,
+            -1_000_000_000_000_000,
+            -10,
+            -1,
+            0,
+            1,
+            10,
+            1_000_000_000_000_000,
+            i64::MAX - 1,
+            i64::MAX,
+        ] {
+            let mut actual = String::new();
+            super::push_i64_decimal(&mut actual, value);
+            assert_eq!(actual, value.to_string());
+        }
+        for value in -10_000_i64..=10_000 {
+            let mut actual = String::new();
+            super::push_i64_decimal(&mut actual, value);
+            assert_eq!(actual, value.to_string());
+        }
+
+        let values = [
+            -999_999_999_999_999.0,
+            -10.0,
+            -1.0,
+            0.0,
+            1.0,
+            10.0,
+            999_999_999_999_999.0,
+            -0.0,
+            3.5,
+        ];
+        assert_eq!(
+            tofile_text(&values, ","),
+            "-999999999999999,-10,-1,0,1,10,999999999999999,-0,3.5"
+        );
     }
 
     #[test]
