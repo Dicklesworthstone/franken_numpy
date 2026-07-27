@@ -1899,7 +1899,7 @@ as the parity-era snapshot of the delegated engine.
 
 The G7 budget gate (`run_performance_budget_gate`) measures p50/p95/p99 latencies for ufunc and reduction sentinel workloads and rejects regressions. The cross-engine benchmark (`run_cross_engine_benchmark`) compares directly against NumPy. A complementary per-crate Criterion layer also exists — 7 bench files (alphabetical by crate: `fnp-conformance/benches/criterion_core_ops.rs`, `fnp-dtype/benches/dtype_ops.rs`, `fnp-io/benches/criterion_io.rs`, `fnp-linalg/benches/criterion_linalg.rs`, `fnp-ndarray/benches/criterion_ndarray.rs`, `fnp-random/benches/random_ops.rs`, `fnp-ufunc/benches/elementwise.rs`) runnable via `cargo bench -p <crate>` for tracking within-FrankenNumPy regressions without going through NumPy. The naming is bimodal for historical reasons (4 `criterion_*` files vs 3 area-named like `elementwise`/`dtype_ops`/`random_ops`); when adding a new bench, prefer the `criterion_<area>` form to match the more recent files. HTML reports (Criterion's `html_reports` feature, lifted to `[workspace.dependencies]`) are emitted under `target/criterion/<bench>/report/index.html` for every benched operation — verified 2026-05-20 against `fnp-dtype/benches/dtype_ops.rs`.
 
-**Current cross-engine picture** (2026-05-25 baseline, 13 workloads at 1M-element scale, 10 runs each, p50 ratios):
+**2026-05-25 cross-engine snapshot** (13 workloads at 1M-element scale, 10 runs each, p50 ratios):
 
 | Op family | Ratio (FNP / NumPy) | Verdict |
 |---|---|---|
@@ -1930,7 +1930,7 @@ The cross-engine benchmark (`run_cross_engine_benchmark.sh`) is pedantic by desi
 - **No NumPy fallback for the FNP side.** When we benchmark a tier-1 wrapper (see Python attribute resolution model), the benchmark forces the fast path: a fast-path-skipped run would be silently measuring numpy, not FrankenNumPy, and would be discarded.
 - **Acceptable-degradation gates.** The G7 performance budget gate (`run_performance_budget_gate`) doesn't gate the ratio against NumPy; it gates the ratio against our *previous* baseline. A 5% regression on a sentinel workload fails the gate; new improvements are recorded as a new baseline. The proof bundle (`artifacts/optimization/<commit>.json`) is checked in.
 
-The 2026-04-10 cross-engine baseline currently published is the one ADR-001 quotes when discussing the case for Phase 3. A refresh after each major performance lever lands is part of the optimization governance pattern: baseline → profile → single lever → conformance check → re-baseline.
+The published cross-engine baseline is dated 2026-05-25. A refresh after each major performance lever lands is part of the optimization governance pattern: baseline → profile → single lever → conformance check → re-baseline.
 
 ---
 
@@ -1973,7 +1973,7 @@ Behavioral differences vs upstream NumPy that we accept either intentionally or 
 | ID | Disposition | Surface | Behavior |
 |---|---|---|---|
 
-Resolved note: `franken_numpy-iqo31` closed the prior `SeedMaterial::None` parity debt by sourcing no-seed constructors from OS entropy via `getrandom`.
+No-seed RNG constructors source OS entropy via `getrandom`, matching NumPy.
 
 The ledger gate is enforced by:
 
@@ -2092,7 +2092,7 @@ franken_numpy/
 
 What doesn't work today.
 
-- **No `pip install frankennumpy` packaging story yet.** The Python surface is reached today by building the `fnp-python` PyO3 extension and putting the renamed cdylib on `PYTHONPATH`. The pyproject.toml + wheel + PyPI publishing flow is future work. *Surface coverage itself is no longer a limitation*: the `fnp_python` module reaches **100% of `numpy.__all__`** (499/499 names), structurally locked.
+- **No `pip install frankennumpy` packaging story yet.** The Python surface is reached today by building the `fnp-python` PyO3 extension and putting the renamed cdylib on `PYTHONPATH`. The pyproject.toml + wheel + PyPI publishing flow is future work. The `fnp_python` module reaches **100% of `numpy.__all__`** (499/499 names), structurally locked.
 - **No BLAS/LAPACK backend.** Linear algebra uses pure-Rust implementations (Householder QR, Golub–Kahan SVD, implicit shifted QR for eigenvalues). Competitive with BLAS for small matrices; slower for large ones. Optional BLAS linkage is a Phase 3 work-stream (ADR-001).
 - **Complex elementwise arithmetic uses interleaved storage.** Complex64/Complex128 dtypes store real/imaginary parts as interleaved floats. Elementwise `multiply` and `divide` apply true complex arithmetic `(a+bi)(c+di) = (ac−bd)+(ad+bc)i`, but the interleaved representation adds overhead vs native complex types.
 - **`multivariate_normal` uses Cholesky.** NumPy defaults to SVD. Switching would pull `fnp-linalg` into `fnp-random`'s dependency graph (currently `fnp-random` keeps only intra-workspace `fnp-ndarray` plus `getrandom` for OS entropy).
@@ -2380,7 +2380,7 @@ Rust Edition 2024. The toolchain is pinned to `nightly-2026-07-05` for reproduci
 Memory safety is a core value. 9 of the 10 implementation crates declare `#![forbid(unsafe_code)]` and contain zero hand-written unsafe. `fnp-python` is the one that doesn't: PyO3 procedural macros may expand into unsafe as part of generating the cdylib entry point, and the boundary crate uses hand-written `unsafe` (chiefly `std::slice::from_raw_parts`) for layout-checked zero-copy views of borrowed Python buffers and a few native result buffers. That unsafe is confined to `fnp-python`; the `codebase_hygiene` tests enforce that the numeric core stays unsafe-free.
 
 **How fast is it?**
-Profile-driven. I/O, random, linalg, reductions, and sorting are at or near parity with NumPy. FFT is mixed (power-of-two fast, non-power-of-two slower). Large-scale elementwise/broadcast ufuncs are the main hotspot, with 10–30× ratios; the Phase 3 SIMD/BLAS work-streams target these. Small/medium array workloads are competitive across the board.
+The published 2026-05-25 cross-engine snapshot averages **1.06× FNP/NumPy latency** across 13 workloads, with rows ranging from **0.89× to 1.58×**. Large dense square GEMM above roughly 2,000×2,000 remains slower than NumPy linked to OpenBLAS. Campaign wins require NumPy and FrankenNumPy end-to-end in the same invocation; within-FrankenNumPy self-speedups are maintenance results.
 
 **Can I use just the RNG crate?**
 Yes. `fnp-random` keeps dependencies minimal (`fnp-ndarray` plus `getrandom` for no-seed OS entropy) and produces bit-exact NumPy-compatible random sequences from a given explicit seed.
@@ -2389,7 +2389,7 @@ Yes. `fnp-random` keeps dependencies minimal (`fnp-ndarray` plus `getrandom` for
 `fnp_python` is the parity oracle surface. Hot operations execute on the Rust engine for native speed; everything else falls back to numpy verbatim so behavior is identical (including version-gated and deprecation paths). You get one drop-in module, with Rust under the hood where it matters.
 
 **Is anything intentionally divergent from NumPy?**
-[`docs/DIVERGENCES.md`](docs/DIVERGENCES.md) is the machine-readable ledger. As of 2026-05-22 there are zero active rows; the prior `fnp-random` no-seed default parity debt is resolved. The ledger gate is enforced in CI.
+[`docs/DIVERGENCES.md`](docs/DIVERGENCES.md) is the machine-readable ledger. As of 2026-05-22 there are zero active rows. No-seed RNG constructors source OS entropy via `getrandom`, matching NumPy. The ledger gate is enforced in CI.
 
 **Are there any stubs, TODOs, or mock code in production?**
 No. The [`audit_numpy_mocks.md`](audit_numpy_mocks.md) automated audit shows zero `TODO` / `FIXME` / `HACK` / `STUB` / `unimplemented!()` / `todo!()` across the 10 production crates, and zero production `.unwrap()` outside `fnp-conformance` fixture-harness code.

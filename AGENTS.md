@@ -548,14 +548,14 @@ It also requires a concrete retry predicate and a unique heading, and it caps
 the grandfathered historical debt so backdating a row to dodge the gate trips a
 second test instead.
 
-### What counts as a win — SELF-SPEEDUP vs vs-INCUMBENT
+### What counts as a win
 
 These are different things and the ledger must say which one a row is.
 
 | Class | Base arm | Status |
 |---|---|---|
-| **SELF-SPEEDUP** | our own former code | **Maintenance.** Land it, ledger it, label it. **Never quote it as a competitive claim.** |
-| **VS-INCUMBENT** | the real NumPy call, timed **side-by-side in the same invocation** | Campaign output. |
+| **`maintenance-self-speedup`** | our own former code | **Maintenance.** Land it and ledger it, but never quote it as a competitive claim. |
+| **`incumbent-win`** | the real NumPy call, timed **side-by-side in the same invocation** | Campaign output. |
 
 A same-binary former/candidate A/B is the right way to *isolate a lever* — it is
 the cleanest control we have — but it measures how much we improved on
@@ -565,20 +565,24 @@ be quoted against NumPy.
 
 Rules:
 
-- **Put the class in the row heading**: `WIN (KEEP, SELF-SPEEDUP)` or
-  `WIN (KEEP, VS-INCUMBENT)`. `ledger_hygiene.rs` fails CI on a `WIN`/`KEEP`
-  heading dated on/after its enforcement date that carries neither.
-- A `VS-INCUMBENT` row must record the incumbent arm's own median, not just a
-  ratio, so the comparison can be re-derived.
+- **Put the exact class in the row body**:
+  `**Campaign result class:** maintenance-self-speedup` or
+  `**Campaign result class:** incumbent-win`. A heading alias does not count.
+- An `incumbent-win` must carry a numeric same-invocation A/A marker and one
+  same-line incumbent marker:
+  `**Legacy incumbent arm (same invocation):** name=NumPy version=<pin>
+  artifact_sha256=<64 lowercase hex> invocation_id=<shared id>
+  measured_ratio=<number>x`.
+- The incumbent artifact hash must identify NumPy and must not equal the
+  candidate process's `bench_elf_sha256`; equality is provenance substitution.
 - Two arms across two invocations, two binaries, or two workers is **not** a
-  vs-incumbent measurement. Cross-worker and cross-binary A/Bs are invalid.
+  campaign result. Cross-worker and cross-binary A/Bs are invalid.
 - Beating our own former path by 4× while still losing to NumPy is a
-  self-speedup. Say so plainly in the row rather than letting the ratio imply
-  otherwise.
+  `maintenance-self-speedup`.
 
 ### The six traps — all have already produced false wins in this fleet
 
-Check every one before you quote a vs-incumbent ratio.
+Check every one before you quote an `incumbent-win` ratio.
 
 1. **Dispatch trap.** Assert the incumbent arm's type and identity **at
    runtime**, inside the measured binary. franken_networkx published a "2.6×"
@@ -603,15 +607,16 @@ Check every one before you quote a vs-incumbent ratio.
    incumbent code, you are measuring yourself. This repo produced exactly that:
    a bool-return arm where the *identical real NumPy allocation tail* ran in
    both arms, so the 4.31× was fnp-old vs fnp-new — a self-speedup, not a
-   NumPy comparison. A vs-incumbent arm must be **end-to-end**: our whole call
-   against their whole call.
+   NumPy comparison. An `incumbent-win` arm must be **end-to-end**: our whole
+   call against their whole call.
 
 ### Where domination actually lives
 
-Our largest verified margins are all **missing-capability** surfaces — places
-NumPy has no fast path at all: `isin` on floats (its `table` method is
-int-only), `float16` ordering and GEMM (no f16 BLAS), integer matmul (no
-integer BLAS), ASCII `translate`, wide-key string set-ops. Hunt there.
+The best frontier candidates are **missing-capability** surfaces — places NumPy
+has no fast path at all: `isin` on floats (its `table` method is int-only),
+`float16` ordering and GEMM (no f16 BLAS), integer matmul (no integer BLAS),
+ASCII `translate`, wide-key string set-ops. Hunt there, then earn any
+competitive claim through the `incumbent-win` contract.
 
 Do **not** open square compute-bound f64 GEMM against OpenBLAS. That is its
 strength, our kernel is bit-exactness-constrained to no-FMA and already at the
@@ -622,8 +627,8 @@ no-FMA AVX2 peak, and the remaining gap is the price of reproducibility.
 **Gate on the median-CI, never on `cv`.** `cv < 5%` is unreachable on this
 hardware and rejects levers rather than measurements — it is what voided this
 repo's two highest-value rows, one of which later re-decided at 3.64× as a
-**self-speedup** (own former path as base, not NumPy). Report `cv` as
-provenance only.
+`maintenance-self-speedup` (own former path as base, not NumPy). Report `cv`
+as provenance only.
 
 The harness already exists — **do not build another one**:
 

@@ -4,7 +4,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 const DEFAULT_LEDGER: &str = "docs/NEGATIVE_EVIDENCE.md";
+const VERDICT_LEDGERS: [&str; 1] = [DEFAULT_LEDGER];
 const ENFORCEMENT_DATE: &str = "2026-07-26";
+const RESULT_CLASS_MARKER: &str = "**Campaign result class:**";
+const NULL_CONTROL_MARKER: &str = "**A/A null control (same invocation):**";
+const INCUMBENT_ARM_MARKER: &str = "**Legacy incumbent arm (same invocation):**";
+const MAINTENANCE_SELF_SPEEDUP: &str = "maintenance-self-speedup";
+const INCUMBENT_WIN: &str = "incumbent-win";
 
 #[derive(Debug)]
 enum Mode {
@@ -103,10 +109,32 @@ struct LedgerEntry {
     body: String,
 }
 
+#[derive(Debug)]
+struct PositionedEntry {
+    entry: LedgerEntry,
+    first_line: usize,
+    last_line: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ChangedLineRange {
+    first_line: usize,
+    last_line: usize,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct Violation {
     heading: String,
     reason: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResultClass {
+    MaintenanceSelfSpeedup,
+    IncumbentWin,
+    Missing,
+    Ambiguous,
+    Invalid,
 }
 
 fn required_value(args: &[String], index: usize, flag: &str) -> Result<String, String> {
@@ -130,42 +158,67 @@ OPTIONS:
   --ledger <PATH>       Negative-evidence ledger (default: {DEFAULT_LEDGER})
   --lever <TEXT>        Proposed optimization lever
   --surface <TEXT>      Target function, module, file, or benchmark surface
-  --audit-staged        Validate newly staged ledger entries
+  --audit-staged        Validate added or modified staged ledger entries
   --audit-file <PATH>   Validate entries in a standalone fixture
   --self-check          Audit the enforced live ledger, then mutation-test its
-                        own valid rows against the three hardened predicates
+                        own valid rows against all hardened predicates
   -h, --help            Show this help
 
 Exit 0 means clear. Exit 2 means blocked. Query mode prints matching prior
 entries and their retry predicates. Audit mode refuses a REJECT without either
 a measured A/A null or a COUNTED_MECHANISM field, refuses a REJECT without a
-retry predicate, and refuses a KEEP without an executing-ELF SHA-256.
+retry predicate, and refuses a KEEP without an executing-ELF SHA-256 or an
+explicit Campaign result class of maintenance-self-speedup or incumbent-win.
+An incumbent-win additionally requires the actual NumPy name/version/artifact
+SHA-256, a shared invocation ID, measured ratio, and a measured A/A null from
+that invocation.
 "
     );
 }
 
 fn split_entries(text: &str) -> Vec<LedgerEntry> {
+    split_positioned_entries(text)
+        .into_iter()
+        .map(|positioned| positioned.entry)
+        .collect()
+}
+
+fn split_positioned_entries(text: &str) -> Vec<PositionedEntry> {
     let mut entries = Vec::new();
     let mut heading = None::<String>;
     let mut body = String::new();
+    let mut first_line = 0usize;
+    let line_count = text.lines().count();
 
-    for line in text.lines() {
+    for (line_index, line) in text.lines().enumerate() {
+        let line_number = line_index + 1;
         if line.starts_with("## ") {
             if let Some(previous_heading) = heading.replace(line.to_owned()) {
-                entries.push(LedgerEntry {
-                    heading: previous_heading,
-                    body: std::mem::take(&mut body),
+                entries.push(PositionedEntry {
+                    entry: LedgerEntry {
+                        heading: previous_heading,
+                        body: std::mem::take(&mut body),
+                    },
+                    first_line,
+                    last_line: line_number - 1,
                 });
+            } else {
+                heading = Some(line.to_owned());
             }
+            first_line = line_number;
         } else if heading.is_some() {
             body.push_str(line);
             body.push('\n');
         }
     }
     if let Some(last_heading) = heading {
-        entries.push(LedgerEntry {
-            heading: last_heading,
-            body,
+        entries.push(PositionedEntry {
+            entry: LedgerEntry {
+                heading: last_heading,
+                body,
+            },
+            first_line,
+            last_line: line_count,
         });
     }
     entries
@@ -246,13 +299,26 @@ fn query_ledger(ledger: &str, lever: &str, surface: &str) -> bool {
 
 fn is_reject(entry: &LedgerEntry) -> bool {
     let heading = entry.heading.to_ascii_uppercase();
-    if heading.contains("REJECT") || heading.contains("NO-SHIP") || heading.contains("NO SHIP") {
+    if [
+        "REJECT",
+        "NO-SHIP",
+        "NO SHIP",
+        "HOLD",
+        "BLOCKER",
+        "DROPPED",
+        "BENCH-BLOCKED",
+    ]
+    .iter()
+    .any(|verdict| heading.contains(verdict))
+    {
         return true;
     }
     entry.body.lines().any(|line| {
         let upper = line.trim().to_ascii_uppercase();
         upper.starts_with("VERDICT:")
-            && (upper.contains("REJECT") || upper.contains("NO-SHIP") || upper.contains("NO SHIP"))
+            && ["REJECT", "NO-SHIP", "NO SHIP", "HOLD", "DROPPED"]
+                .iter()
+                .any(|verdict| upper.contains(verdict))
     })
 }
 
@@ -265,6 +331,89 @@ fn is_keep(entry: &LedgerEntry) -> bool {
         let upper = line.trim().to_ascii_uppercase();
         upper.starts_with("VERDICT:") && (upper.contains("KEEP") || upper.contains("SHIP"))
     })
+}
+
+fn result_class(entry: &LedgerEntry) -> ResultClass {
+    let mut values = entry
+        .body
+        .lines()
+        .filter_map(|line| marker_value(line, RESULT_CLASS_MARKER));
+    let Some(value) = values.next() else {
+        return ResultClass::Missing;
+    };
+    if values.next().is_some() {
+        return ResultClass::Ambiguous;
+    }
+    match value.trim_matches('`') {
+        MAINTENANCE_SELF_SPEEDUP => ResultClass::MaintenanceSelfSpeedup,
+        INCUMBENT_WIN => ResultClass::IncumbentWin,
+        _ => ResultClass::Invalid,
+    }
+}
+
+fn marker_value<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+    line.trim().strip_prefix(marker).map(str::trim)
+}
+
+fn marker_entry_value<'a>(entry: &'a LedgerEntry, marker: &str) -> Option<&'a str> {
+    entry
+        .body
+        .lines()
+        .find_map(|line| marker_value(line, marker))
+}
+
+fn token_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let mut values = text
+        .split_whitespace()
+        .filter_map(|token| token.strip_prefix(key))
+        .map(|value| value.trim_matches(|character| matches!(character, '`' | ',' | ';')));
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
+}
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn has_incumbent_win_contract(entry: &LedgerEntry) -> bool {
+    let measured_null =
+        marker_entry_value(entry, NULL_CONTROL_MARKER).is_some_and(line_has_decimal_measurement);
+    let Some(incumbent) = marker_entry_value(entry, INCUMBENT_ARM_MARKER) else {
+        return false;
+    };
+    let actual_numpy =
+        token_value(incumbent, "name=").is_some_and(|name| name.eq_ignore_ascii_case("numpy"));
+    let pinned_version = token_value(incumbent, "version=").is_some_and(|version| {
+        !version.is_empty()
+            && !version.eq_ignore_ascii_case("unavailable")
+            && version.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'_' | b'-')
+            })
+    });
+    let pinned_artifact = token_value(incumbent, "artifact_sha256=").is_some_and(|artifact| {
+        is_lowercase_sha256(artifact)
+            && executing_elf_sha256(entry)
+                .is_none_or(|candidate| !candidate.eq_ignore_ascii_case(artifact))
+    });
+    let shared_invocation = token_value(incumbent, "invocation_id=").is_some_and(|identifier| {
+        !identifier.is_empty()
+            && identifier.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+            })
+    });
+    let measured_ratio = token_value(incumbent, "measured_ratio=")
+        .and_then(|ratio| ratio.strip_suffix('x'))
+        .and_then(|ratio| ratio.parse::<f64>().ok())
+        .is_some_and(|ratio| ratio.is_finite() && ratio > 0.0);
+    measured_null
+        && actual_numpy
+        && pinned_version
+        && pinned_artifact
+        && shared_invocation
+        && measured_ratio
 }
 
 fn line_has_decimal_measurement(line: &str) -> bool {
@@ -309,21 +458,6 @@ fn has_counted_mechanism(entry: &LedgerEntry) -> bool {
     })
 }
 
-fn contains_sha256(text: &str) -> bool {
-    let mut run = 0usize;
-    for byte in text.bytes() {
-        if byte.is_ascii_hexdigit() {
-            run += 1;
-            if run == 64 {
-                return true;
-            }
-        } else {
-            run = 0;
-        }
-    }
-    false
-}
-
 fn first_sha256(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let mut run_start = 0usize;
@@ -344,8 +478,8 @@ fn first_sha256(text: &str) -> Option<String> {
     None
 }
 
-fn has_elf_sha256(entry: &LedgerEntry) -> bool {
-    entry.body.lines().any(|line| {
+fn executing_elf_sha256(entry: &LedgerEntry) -> Option<String> {
+    entry.body.lines().find_map(|line| {
         let lower = line.to_ascii_lowercase();
         let executing_marker = lower.contains("bench_elf_sha256")
             || lower.contains("executing elf sha")
@@ -353,8 +487,14 @@ fn has_elf_sha256(entry: &LedgerEntry) -> bool {
             || lower.contains("executing binary sha")
             || lower.contains("executable sha")
             || lower.contains("executable hash");
-        executing_marker && !lower.contains("unavailable") && contains_sha256(line)
+        (executing_marker && !lower.contains("unavailable"))
+            .then(|| first_sha256(line))
+            .flatten()
     })
+}
+
+fn has_elf_sha256(entry: &LedgerEntry) -> bool {
+    executing_elf_sha256(entry).is_some()
 }
 
 fn audit_entries(entries: &[LedgerEntry]) -> Vec<Violation> {
@@ -380,11 +520,36 @@ fn audit_entries(entries: &[LedgerEntry]) -> Vec<Violation> {
                 reason: "KEEP lacks executing-ELF SHA-256",
             });
         }
+        if is_keep(entry) {
+            match result_class(entry) {
+                ResultClass::MaintenanceSelfSpeedup => {}
+                ResultClass::IncumbentWin => {
+                    if !has_incumbent_win_contract(entry) {
+                        violations.push(Violation {
+                            heading: entry.heading.clone(),
+                            reason: "incumbent-win lacks complete same-invocation NumPy evidence",
+                        });
+                    }
+                }
+                ResultClass::Missing => violations.push(Violation {
+                    heading: entry.heading.clone(),
+                    reason: "KEEP lacks exact campaign result class",
+                }),
+                ResultClass::Ambiguous => violations.push(Violation {
+                    heading: entry.heading.clone(),
+                    reason: "KEEP declares multiple campaign result classes",
+                }),
+                ResultClass::Invalid => violations.push(Violation {
+                    heading: entry.heading.clone(),
+                    reason: "KEEP declares an invalid campaign result class",
+                }),
+            }
+        }
     }
     violations
 }
 
-fn staged_added_text(ledger_path: &Path) -> Result<String, String> {
+fn staged_diff(ledger_path: &Path) -> Result<String, String> {
     let output = Command::new("git")
         .args(["diff", "--cached", "--unified=0", "--"])
         .arg(ledger_path)
@@ -397,34 +562,97 @@ fn staged_added_text(ledger_path: &Path) -> Result<String, String> {
         ));
     }
 
-    let diff = String::from_utf8(output.stdout)
-        .map_err(|error| format!("staged ledger diff was not UTF-8: {error}"))?;
-    let mut additions = String::new();
-    for line in diff.lines() {
-        if line.starts_with("+++") {
-            continue;
-        }
-        if let Some(added) = line.strip_prefix('+') {
-            additions.push_str(added);
-            additions.push('\n');
-        }
-    }
-    Ok(additions)
+    String::from_utf8(output.stdout)
+        .map_err(|error| format!("staged ledger diff was not UTF-8: {error}"))
 }
 
-fn audit_text(text: &str) -> bool {
-    if text.trim().is_empty() {
-        println!("CLEAR no new ledger entries");
+fn staged_file_text(ledger_path: &Path) -> Result<String, String> {
+    let index_path = format!(":{}", ledger_path.display());
+    let output = Command::new("git")
+        .args(["show", &index_path])
+        .output()
+        .map_err(|error| format!("failed to read staged ledger: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "reading staged ledger failed with status {}",
+            output.status
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| format!("staged ledger was not UTF-8: {error}"))
+}
+
+fn parse_new_line_range(hunk_header: &str) -> Result<ChangedLineRange, String> {
+    let new_range = hunk_header
+        .split_whitespace()
+        .find(|token| token.starts_with('+'))
+        .ok_or_else(|| format!("malformed staged ledger hunk: {hunk_header}"))?
+        .trim_start_matches('+');
+    let (first, count) = match new_range.split_once(',') {
+        Some((first, count)) => (first, count),
+        None => (new_range, "1"),
+    };
+    let first_line = first
+        .parse::<usize>()
+        .map_err(|_| format!("invalid staged ledger hunk start: {hunk_header}"))?;
+    let line_count = count
+        .parse::<usize>()
+        .map_err(|_| format!("invalid staged ledger hunk count: {hunk_header}"))?;
+    if line_count == 0 {
+        return Err(
+            "staged ledger removes an entire line range; the verdict ledger is append-only"
+                .to_owned(),
+        );
+    }
+    Ok(ChangedLineRange {
+        first_line,
+        last_line: first_line + line_count - 1,
+    })
+}
+
+fn changed_line_ranges(diff: &str) -> Result<Vec<ChangedLineRange>, String> {
+    diff.lines()
+        .filter(|line| line.starts_with("@@ "))
+        .map(parse_new_line_range)
+        .collect()
+}
+
+fn touched_entries(staged_text: &str, diff: &str) -> Result<Vec<LedgerEntry>, String> {
+    let ranges = changed_line_ranges(diff)?;
+    let touched = split_positioned_entries(staged_text)
+        .into_iter()
+        .filter(|entry| {
+            ranges.iter().any(|range| {
+                range.first_line <= entry.last_line && range.last_line >= entry.first_line
+            })
+        })
+        .map(|entry| entry.entry)
+        .collect::<Vec<_>>();
+    if !ranges.is_empty() && touched.is_empty() {
+        return Err("staged ledger change did not reach a recognized ## verdict entry".to_owned());
+    }
+    Ok(touched)
+}
+
+fn staged_touched_entries(ledger_path: &Path) -> Result<Vec<LedgerEntry>, String> {
+    let diff = staged_diff(ledger_path)?;
+    if diff.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let staged_text = staged_file_text(ledger_path)?;
+    touched_entries(&staged_text, &diff)
+}
+
+fn audit_entries_with_output(entries: &[LedgerEntry]) -> bool {
+    if entries.is_empty() {
+        println!("CLEAR no added or modified ledger entries");
         return true;
     }
-    let entries = split_entries(text);
-    if entries.is_empty() {
-        println!("BLOCKED staged ledger additions contain no new ## entry");
-        return false;
-    }
-    let violations = audit_entries(&entries);
+    let violations = audit_entries(entries);
     if violations.is_empty() {
-        println!("CLEAR ledger additions satisfy null/mechanism, retry, and ELF gates");
+        println!(
+            "CLEAR ledger additions and modifications satisfy null/mechanism, retry, ELF, and result-class gates"
+        );
         return true;
     }
     println!("BLOCKED ledger_integrity violations={}", violations.len());
@@ -435,6 +663,19 @@ fn audit_text(text: &str) -> bool {
         );
     }
     false
+}
+
+fn audit_text(text: &str) -> bool {
+    if text.trim().is_empty() {
+        println!("CLEAR empty audit fixture");
+        return true;
+    }
+    let entries = split_entries(text);
+    if entries.is_empty() {
+        println!("BLOCKED audit fixture contains no recognized ## verdict entry");
+        return false;
+    }
+    audit_entries_with_output(&entries)
 }
 
 fn strip_null_evidence(entry: &LedgerEntry) -> LedgerEntry {
@@ -459,6 +700,31 @@ fn strip_null_evidence(entry: &LedgerEntry) -> LedgerEntry {
             "{body}\nA/A null must follow the median-CI policy in campaign section 2.3 for 41 rounds.\nRetry only after a quiet pinned rerun.\n"
         ),
     }
+}
+
+fn with_campaign_class(entry: &LedgerEntry, class: Option<&str>) -> LedgerEntry {
+    let mut body = entry
+        .body
+        .lines()
+        .filter(|line| marker_value(line, RESULT_CLASS_MARKER).is_none())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if let Some(class) = class {
+        body.push_str(&format!("\n{RESULT_CLASS_MARKER} {class}\n"));
+    }
+    LedgerEntry {
+        heading: entry.heading.clone(),
+        body,
+    }
+}
+
+fn incumbent_claim_mutation(entry: &LedgerEntry, incumbent_fields: &str) -> LedgerEntry {
+    let mut mutation = with_campaign_class(entry, Some(INCUMBENT_WIN));
+    mutation.body.push_str(&format!(
+        "\n{NULL_CONTROL_MARKER} baseline/null median ratio 1.001x, CI [0.99, 1.01].\n\
+         {INCUMBENT_ARM_MARKER} {incumbent_fields}\n"
+    ));
+    mutation
 }
 
 fn mutation_has_violation(entry: &LedgerEntry, reason: &'static str) -> bool {
@@ -520,9 +786,16 @@ fn self_check_ledger(ledger: &str) -> bool {
         println!("BLOCKED self-check found no valid live KEEP seed");
         return false;
     };
-    let Some(seed_sha256) = first_sha256(&entry_text(keep_seed)) else {
-        println!("BLOCKED self-check KEEP seed carried no extractable SHA-256");
+    let Some(candidate_elf_sha256) = executing_elf_sha256(keep_seed) else {
+        println!("BLOCKED self-check KEEP seed carried no executing-ELF SHA-256");
         return false;
+    };
+    let incumbent_fixture_sha256 = if candidate_elf_sha256
+        == "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+    {
+        "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    } else {
+        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
     };
     let mut unavailable_elf = keep_seed.clone();
     unavailable_elf.body = keep_seed
@@ -540,28 +813,108 @@ fn self_check_ledger(ledger: &str) -> bool {
         .collect::<Vec<_>>()
         .join("\n");
     unavailable_elf.body.push_str(&format!(
-        "\nExecuting ELF SHA-256: unavailable.\nsource_sha256={seed_sha256}\n"
+        "\nExecuting ELF SHA-256: unavailable.\nsource_sha256={incumbent_fixture_sha256}\n"
     ));
     let caught_unavailable_elf =
         mutation_has_violation(&unavailable_elf, "KEEP lacks executing-ELF SHA-256");
+
+    let unclassified_keep = with_campaign_class(keep_seed, None);
+    let caught_unclassified_keep =
+        mutation_has_violation(&unclassified_keep, "KEEP lacks exact campaign result class");
+
+    let mut ambiguous_keep = keep_seed.clone();
+    ambiguous_keep.body.push_str(&format!(
+        "\n{RESULT_CLASS_MARKER} {MAINTENANCE_SELF_SPEEDUP}\n"
+    ));
+    let caught_ambiguous_keep = mutation_has_violation(
+        &ambiguous_keep,
+        "KEEP declares multiple campaign result classes",
+    );
+
+    let invalid_class_alias = with_campaign_class(keep_seed, Some("self-speedup"));
+    let caught_invalid_class_alias = mutation_has_violation(
+        &invalid_class_alias,
+        "KEEP declares an invalid campaign result class",
+    );
+
+    let self_as_incumbent = incumbent_claim_mutation(
+        keep_seed,
+        &format!(
+            "name=self-baseline version=2.4.6 artifact_sha256={incumbent_fixture_sha256} invocation_id=run-42 measured_ratio=1.2x"
+        ),
+    );
+    let caught_self_as_incumbent = mutation_has_violation(
+        &self_as_incumbent,
+        "incumbent-win lacks complete same-invocation NumPy evidence",
+    );
+
+    let unpinned_incumbent = incumbent_claim_mutation(
+        keep_seed,
+        "name=NumPy version=2.4.6 artifact_sha256=unavailable invocation_id=run-42 measured_ratio=1.2x",
+    );
+    let caught_unpinned_incumbent = mutation_has_violation(
+        &unpinned_incumbent,
+        "incumbent-win lacks complete same-invocation NumPy evidence",
+    );
+
+    let substituted_candidate_elf = incumbent_claim_mutation(
+        keep_seed,
+        &format!(
+            "name=NumPy version=2.4.6 artifact_sha256={candidate_elf_sha256} invocation_id=run-42 measured_ratio=1.2x"
+        ),
+    );
+    let caught_substituted_candidate_elf = mutation_has_violation(
+        &substituted_candidate_elf,
+        "incumbent-win lacks complete same-invocation NumPy evidence",
+    );
+
+    let missing_invocation = incumbent_claim_mutation(
+        keep_seed,
+        &format!(
+            "name=NumPy version=2.4.6 artifact_sha256={incumbent_fixture_sha256} measured_ratio=1.2x"
+        ),
+    );
+    let caught_missing_invocation = mutation_has_violation(
+        &missing_invocation,
+        "incumbent-win lacks complete same-invocation NumPy evidence",
+    );
+
+    let missing_ratio = incumbent_claim_mutation(
+        keep_seed,
+        &format!(
+            "name=NumPy version=2.4.6 artifact_sha256={incumbent_fixture_sha256} invocation_id=run-42"
+        ),
+    );
+    let caught_missing_ratio = mutation_has_violation(
+        &missing_ratio,
+        "incumbent-win lacks complete same-invocation NumPy evidence",
+    );
 
     let defects_caught = [
         caught_policy_only_null,
         caught_uncounted_mechanism,
         caught_unavailable_elf,
+        caught_unclassified_keep,
+        caught_ambiguous_keep,
+        caught_invalid_class_alias,
+        caught_self_as_incumbent,
+        caught_unpinned_incumbent,
+        caught_substituted_candidate_elf,
+        caught_missing_invocation,
+        caught_missing_ratio,
     ]
     .into_iter()
     .filter(|caught| *caught)
     .count();
-    if defects_caught != 3 {
+    if defects_caught != 11 {
         println!(
-            "BLOCKED self-check defects_caught={defects_caught}/3 policy_only_null={caught_policy_only_null} uncounted_mechanism={caught_uncounted_mechanism} unavailable_elf_with_source_hash={caught_unavailable_elf}"
+            "BLOCKED self-check defects_caught={defects_caught}/11 policy_only_null={caught_policy_only_null} uncounted_mechanism={caught_uncounted_mechanism} unavailable_elf_with_source_hash={caught_unavailable_elf} unclassified_keep={caught_unclassified_keep} ambiguous_keep={caught_ambiguous_keep} invalid_class_alias={caught_invalid_class_alias} self_as_incumbent={caught_self_as_incumbent} unpinned_incumbent={caught_unpinned_incumbent} substituted_candidate_elf={caught_substituted_candidate_elf} missing_invocation={caught_missing_invocation} missing_ratio={caught_missing_ratio}"
         );
         return false;
     }
 
     println!(
-        "SELF_CHECK PASS own_ledger_entries={} defects_caught=3/3 reject_seed={} keep_seed={}",
+        "SELF_CHECK PASS own_ledger_entries={} defects_caught=11/11 reject_seed={} keep_seed={}",
         enforced.len(),
         reject_seed.heading,
         keep_seed.heading
@@ -581,7 +934,19 @@ fn run() -> Result<ExitCode, String> {
             })?;
             query_ledger(&ledger, &lever, &surface)
         }
-        Mode::AuditStaged => audit_text(&staged_added_text(&config.ledger_path)?),
+        Mode::AuditStaged => {
+            if !VERDICT_LEDGERS
+                .iter()
+                .any(|ledger| config.ledger_path == Path::new(ledger))
+            {
+                return Err(format!(
+                    "unsupported verdict ledger {}; known paths: {}",
+                    config.ledger_path.display(),
+                    VERDICT_LEDGERS.join(", ")
+                ));
+            }
+            audit_entries_with_output(&staged_touched_entries(&config.ledger_path)?)
+        }
         Mode::AuditFile(path) => {
             let text = fs::read_to_string(&path).map_err(|error| {
                 format!("failed to read audit file {}: {error}", path.display())
@@ -690,6 +1055,7 @@ Retry only if the algorithm removes an independently counted pass.
 ## 2026-07-01 - KEEP: candidate
 
 Effect ratio: 1.5.
+**Campaign result class:** maintenance-self-speedup
 ",
         );
         assert_eq!(audit_entries(&entries).len(), 1);
@@ -702,9 +1068,186 @@ Effect ratio: 1.5.
 ## 2026-07-01 - KEEP: candidate
 
 bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.
+**Campaign result class:** maintenance-self-speedup
 ",
         );
         assert!(audit_entries(&entries).is_empty());
+    }
+
+    #[test]
+    fn unclassified_keep_is_refused() {
+        let entries = split_entries(
+            "\
+## 2026-07-01 - KEEP: candidate
+
+bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.
+",
+        );
+        assert_eq!(
+            audit_entries(&entries),
+            [Violation {
+                heading: "## 2026-07-01 - KEEP: candidate".to_owned(),
+                reason: "KEEP lacks exact campaign result class",
+            }]
+        );
+    }
+
+    #[test]
+    fn keep_cannot_declare_both_win_classes() {
+        let entries = split_entries(
+            "\
+## 2026-07-01 - KEEP: candidate
+
+bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.
+**Campaign result class:** maintenance-self-speedup
+**Campaign result class:** incumbent-win
+",
+        );
+        assert_eq!(
+            audit_entries(&entries),
+            [Violation {
+                heading: "## 2026-07-01 - KEEP: candidate".to_owned(),
+                reason: "KEEP declares multiple campaign result classes",
+            }]
+        );
+    }
+
+    #[test]
+    fn invalid_campaign_class_is_refused() {
+        let entries = split_entries(
+            "\
+## 2026-07-01 - KEEP: candidate
+
+bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.
+**Campaign result class:** self-speedup
+",
+        );
+        assert_eq!(
+            audit_entries(&entries),
+            [Violation {
+                heading: "## 2026-07-01 - KEEP: candidate".to_owned(),
+                reason: "KEEP declares an invalid campaign result class",
+            }]
+        );
+    }
+
+    #[test]
+    fn campaign_class_value_is_case_sensitive() {
+        let entries = split_entries(
+            "\
+## 2026-07-01 - KEEP: candidate
+
+bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.
+**Campaign result class:** INCUMBENT-WIN
+",
+        );
+        assert_eq!(
+            audit_entries(&entries),
+            [Violation {
+                heading: "## 2026-07-01 - KEEP: candidate".to_owned(),
+                reason: "KEEP declares an invalid campaign result class",
+            }]
+        );
+    }
+
+    #[test]
+    fn incumbent_win_requires_explicit_same_invocation_fields() {
+        let entries = split_entries(
+            "\
+## 2026-07-01 - KEEP: candidate
+
+A/A null: 1.001 [0.995, 1.006].
+NumPy was discussed and the harness should run it in the same invocation.
+bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.
+**Campaign result class:** incumbent-win
+",
+        );
+        assert_eq!(
+            audit_entries(&entries),
+            [Violation {
+                heading: "## 2026-07-01 - KEEP: candidate".to_owned(),
+                reason: "incumbent-win lacks complete same-invocation NumPy evidence",
+            }]
+        );
+    }
+
+    #[test]
+    fn incumbent_win_with_complete_contract_is_allowed() {
+        let entries = split_entries(
+            "\
+## 2026-07-01 - KEEP: candidate
+
+bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.
+**Campaign result class:** incumbent-win
+**A/A null control (same invocation):** baseline/null median ratio 1.001x, CI [0.995, 1.006].
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.3.1 artifact_sha256=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 invocation_id=run-42 measured_ratio=3.250x
+",
+        );
+        assert!(audit_entries(&entries).is_empty());
+    }
+
+    #[test]
+    fn incumbent_artifact_cannot_reuse_candidate_elf_sha256() {
+        let entries = split_entries(
+            "\
+## 2026-07-01 - KEEP: candidate
+
+bench_elf_sha256=0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF.
+**Campaign result class:** incumbent-win
+**A/A null control (same invocation):** baseline/null median ratio 1.001x, CI [0.995, 1.006].
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.3.1 artifact_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef invocation_id=run-42 measured_ratio=3.250x
+",
+        );
+        assert_eq!(
+            audit_entries(&entries),
+            [Violation {
+                heading: "## 2026-07-01 - KEEP: candidate".to_owned(),
+                reason: "incumbent-win lacks complete same-invocation NumPy evidence",
+            }]
+        );
+    }
+
+    #[test]
+    fn negative_evidence_staged_heading_boundary_fails_then_passes() {
+        assert_eq!(VERDICT_LEDGERS, ["docs/NEGATIVE_EVIDENCE.md"]);
+        let diff = "\
+diff --git a/docs/NEGATIVE_EVIDENCE.md b/docs/NEGATIVE_EVIDENCE.md
+index 00000000..11111111 100644
+--- a/docs/NEGATIVE_EVIDENCE.md
++++ b/docs/NEGATIVE_EVIDENCE.md
+@@ -1,0 +2,3 @@
+";
+        let missing_class = "\
+# Ledger
+## 2026-07-27 - WIN (KEEP): candidate
+
+bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.
+";
+        let touched = touched_entries(missing_class, diff).expect("select staged entry");
+        assert_eq!(touched.len(), 1);
+        assert!(!audit_entries_with_output(&touched));
+
+        let classified =
+            format!("{missing_class}**Campaign result class:** maintenance-self-speedup\n");
+        let touched = touched_entries(&classified, diff).expect("select staged entry");
+        assert!(audit_entries_with_output(&touched));
+    }
+
+    #[test]
+    fn staged_body_edit_audits_the_whole_entry() {
+        let staged = "\
+# Ledger
+## 2026-07-27 - WIN (KEEP): candidate
+
+bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.
+**Campaign result class:** maintenance-self-speedup
+";
+        let diff = "\
+@@ -4 +4 @@
+";
+        let touched = touched_entries(staged, diff).expect("select staged entry");
+        assert_eq!(touched.len(), 1);
+        assert!(audit_entries(&touched).is_empty());
     }
 
     #[test]
@@ -715,6 +1258,7 @@ bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde
 
 Executing ELF SHA-256: unavailable.
 source_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.
+**Campaign result class:** maintenance-self-speedup
 ",
         );
         assert_eq!(audit_entries(&entries).len(), 1);

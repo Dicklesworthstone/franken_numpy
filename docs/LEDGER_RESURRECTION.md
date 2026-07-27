@@ -33,6 +33,45 @@ where such a report nevertheless carried a lever rejection, it is
 conservatively `VOID-NONULL` unless a counted mechanism independently proves
 the rejection.
 
+### Positive-result classes
+
+Every positive row must distinguish maintenance evidence from a competitive
+claim in its body:
+
+| Class | Required comparison |
+|---|---|
+| `maintenance-self-speedup` | FrankenNumPy former path versus FrankenNumPy candidate. This is maintenance: landable and ledgerable, but excluded from campaign-win totals and never quoted as a competitive ratio. |
+| `incumbent-win` | The real NumPy incumbent versus FrankenNumPy end-to-end, interleaved side-by-side in the same invocation. This is the only class counted as campaign output. |
+
+Every kept row must carry the exact result-class marker. An `incumbent-win`
+must also carry the executing-ELF hash, a measured A/A null, and the exact
+NumPy arm marker:
+
+```markdown
+**Campaign result class:** maintenance-self-speedup
+```
+
+or:
+
+```markdown
+**Campaign result class:** incumbent-win
+**A/A null control (same invocation):** baseline/null median ratio <number>x, CI [<lo>, <hi>].
+**Legacy incumbent arm (same invocation):** name=NumPy version=<pin> artifact_sha256=<64 lowercase hex> invocation_id=<shared id> measured_ratio=<number>x
+```
+
+The runtime assertion must prove that the incumbent callable and pinned
+artifact are NumPy rather than a wrapper dispatched back into FrankenNumPy. If
+the incumbent artifact hash equals the candidate bench ELF hash, the row is
+blocked as provenance substitution. If both arms share the same expensive
+NumPy tail, the comparison remains
+`maintenance-self-speedup` because it does not measure either implementation
+end-to-end.
+
+Public documentation is a current-state spec sheet: publish only the presently
+supported, properly classified figure and its scope. Retraction and correction
+history remains in this ledger, `docs/NEGATIVE_EVIDENCE.md`, and bead bodies,
+where it can prevent a dead lever or invalid claim from being rediscovered.
+
 ### Counts
 
 | Metric | Count |
@@ -121,11 +160,11 @@ that same contract on `vmi1227854`, completing the corrected queue.
 | Corrected rank | Row and profiled target | Executing ELF SHA-256 | A/A median, CI95 | Effect median, CI95 | Re-audit status |
 |---:|---|---|---|---|---|
 | 1 | L2447 C-order element-step odometer; decode = 44.0% | `2d8f85747cc703b899e54ec4fcb17125d07a3db9f1efb93f327701f74598ee8e` | 1.022770 [1.006650, 1.058581] | 1.016927 [1.002447, 1.051011] | `VALID-AB`; repeat below also inside null |
-| 2 | L2392 `tofile_text` integer formatting; named fmt frames approximately 42% | `c51ac92dfd74d2cc5d34a4d8e76dbd651ff29ca7eca090399ce322f68cf9dc10` | 1.007425 [0.972637, 1.022832] | **1.215448 [1.189254, 1.288287]** | **KEEP; production path shipped by the 2026-07-27 resurrection** |
+| 2 | L2392 `tofile_text` integer formatting; named fmt frames approximately 42% | `c51ac92dfd74d2cc5d34a4d8e76dbd651ff29ca7eca090399ce322f68cf9dc10` | 1.007425 [0.972637, 1.022832] | **1.215448 [1.189254, 1.288287]** | **`maintenance-self-speedup` KEEP; production path shipped** |
 | 3 | L2346 usecols scatter; fn + allocator approximately 21% | `05ca263ea39f01bdd3d68d62088555861a54060fc31273e4650c9a23c051cb47` | 1.002036 [0.980107, 1.019245] | 1.034835 [1.025527, 1.039039] | `VALID-AB`; below required 1.039787 |
-| 4 | L477 Generator Zipf invariant terms; 12.93% | `f25d6a15885cc81796958247664798850be17702934a2f44c77d04a98e29f9eb3` | 0.993360 [0.986830, 0.997768] | **1.364282 [1.348971, 1.396232]** | **KEEP** |
-| 5 | L2110 noncentral chi-square fixed gamma cache; 12.11% | `08b0ceca45d80e88d19f170e0b76ef4de80d57b3e07b6ace2430c8ba8fb55508` | 0.989887 [0.978433, 1.007559] | **1.108215 [1.076852, 1.132333]** | **KEEP** |
-| 6, assigned directional lever | L806 negative-usecols tail ring; collect = 10.67% | `5b3e2e3cd3079ac8bcba841e01e4d4003cdf95d55c00442ad8f7e43f5f762a13` | 1.014925 [0.983995, 1.056524] | **1.171830 [1.111937, 1.234068]** | **KEEP** |
+| 4 | L477 Generator Zipf invariant terms; 12.93% | `f25d6a15885cc81796958247664798850be17702934a2f44c77d04a98e29f9eb3` | 0.993360 [0.986830, 0.997768] | **1.364282 [1.348971, 1.396232]** | **`maintenance-self-speedup` KEEP** |
+| 5 | L2110 noncentral chi-square fixed gamma cache; 12.11% | `08b0ceca45d80e88d19f170e0b76ef4de80d57b3e07b6ace2430c8ba8fb55508` | 0.989887 [0.978433, 1.007559] | **1.108215 [1.076852, 1.132333]** | **`maintenance-self-speedup` KEEP** |
+| 6, assigned directional lever | L806 negative-usecols tail ring; collect = 10.67% | `5b3e2e3cd3079ac8bcba841e01e4d4003cdf95d55c00442ad8f7e43f5f762a13` | 1.014925 [0.983995, 1.056524] | **1.171830 [1.111937, 1.234068]** | **`maintenance-self-speedup` KEEP** |
 
 Rank 1 was repeated from a freshly built second ELF,
 `12cf201485beb3152be2da628d1653532b5f4149e74ec3ad34af58005f222009`:
@@ -144,8 +183,9 @@ former replica and production on the mixed fixture. Rank 3 exact checksum was
 `7530e1225533b088`, rank 5
 `983fa2c568e726e7`, and rank 6 `fe47f366bfb808d2`.
 
-Corrected top-five status: **3 KEEP, 2 VALID-AB, 0 pending**. The earlier fifth
-completed rerun was rank 6 and remains a valid directional KEEP, but rank 2's
+Corrected top-five status: **3 `maintenance-self-speedup` KEEPs, 2 VALID-AB,
+0 pending, and 0 `incumbent-win` campaign results**. The earlier fifth completed
+rerun was rank 6 and remains a valid maintenance self-speedup, but rank 2's
 production-path decision is what completes the actual top-five assignment.
 
 Concrete retry predicates:
@@ -175,18 +215,21 @@ The final production path reported ELF
 `2377aeca302c2dcdc2cfa167fb85032c2d8b015606ca8247ede0d437e2143a55`
 (47,322,576 bytes): A/A 1.034931 [0.983311, 1.096850], effect
 **3.496057 [3.405198, 3.715384]**, checksum `30fb6a0b5c0da785`.
-The required two-null-width delta was 0.193701, so this is a decisive KEEP
-under the bootstrapped median-CI gate despite effect CV 17.179%. The old
-CV-only rejection is superseded.
+The required two-null-width delta was 0.193701, so this is a decisive
+`maintenance-self-speedup` KEEP under the bootstrapped median-CI gate despite
+effect CV 17.179%. The old CV-only rejection is superseded.
 
 ### Institutional gate
 
 Ledger integrity is now enforced twice. The Rust preflight can query a proposed
-surface and prints any prior retry predicate; staged audit exits 2 for a new
-REJECT lacking either A/A evidence or a counted mechanism, and for a KEEP
-lacking an executing-ELF SHA-256. The tracked pre-commit hook runs that staged
-audit. The independent conformance test and shell preflight merged from the
-peer lane provide a second CI path.
+surface and prints any prior retry predicate. Its staged audit reconstructs
+every added or modified full entry in the repo's sole verdict-bearing path,
+`docs/NEGATIVE_EVIDENCE.md`, then exits 2 for a REJECT lacking either A/A
+evidence or a counted mechanism, a KEEP lacking an executing-ELF SHA-256, an
+unclassified or ambiguously classified KEEP, or an `incumbent-win` row lacking
+the exact NumPy name/version/artifact, shared invocation, ratio, and A/A fields.
+The tracked pre-commit hook runs that staged audit. The independent conformance
+test and shell preflight merged from the peer lane provide a second CI path.
 
 ---
 
@@ -713,9 +756,11 @@ times.
 
 > The “complete top five” table below used the preliminary queue. The corrected
 > queue places the tail ring at rank 6. L2392 rank 2 was subsequently re-won at
-> 1.215448x under the production-path executed-ELF median-CI gate, so corrected
-> top-five status is now 3 KEEP, 2 VALID-AB, 0 pending. This table is retained
-> only as provenance for the runs it actually lists.
+> 1.215448x under the production-path executed-ELF median-CI gate. That ratio is
+> a self-speedup against FrankenNumPy's former path. Corrected top-five status is
+> now 3 `maintenance-self-speedup` KEEPs, 2 VALID-AB, 0 pending, and 0
+> `incumbent-win` campaign results. This table is retained only as provenance for the
+> runs it actually lists.
 
 Complete for the ranked top five. The active campaign targets self-report the
 executing ELF SHA-256, run base/base before base/candidate in the same
@@ -724,11 +769,11 @@ margin. CV remains provenance only.
 
 | Rank | Result | Effect ratio / CI95 | A/A ratio / CI95 | Disposition |
 |---:|---|---|---|---|
-| 1 | selected-bool `loadtxt` direct parse | 1.918783 / [1.805047, 2.016407] | 0.998879 / [0.996542, 1.004521] | **KEEP** |
-| 2 | all-negative signed-`usecols` tail ring | 1.171830 / [1.111937, 1.234068] | 1.014925 / [0.983995, 1.056524] | **KEEP** |
-| 3 | complex `nancumprod` axis 0 | 1.563101 / [1.419484, 1.913478] | 0.998477 / [0.997407, 1.000482] | **KEEP** |
+| 1 | selected-bool `loadtxt` direct parse | 1.918783 / [1.805047, 2.016407] | 0.998879 / [0.996542, 1.004521] | **`maintenance-self-speedup` KEEP** |
+| 2 | all-negative signed-`usecols` tail ring | 1.171830 / [1.111937, 1.234068] | 1.014925 / [0.983995, 1.056524] | **`maintenance-self-speedup` KEEP** |
+| 3 | complex `nancumprod` axis 0 | 1.563101 / [1.419484, 1.913478] | 0.998477 / [0.997407, 1.000482] | **`maintenance-self-speedup` KEEP** |
 | 4 | paired cov/corrcoef Gram blocks | 0.996469 / [0.986097, 1.005434] | 0.999706 / [0.987268, 1.010215] | **REJECT / UNDECIDED** |
-| 5 | direct C-order `nditer` chunk | 208.071281 / [206.335116, 210.587810] | 0.987308 / [0.979785, 1.001212] | **KEEP** |
+| 5 | direct C-order `nditer` chunk | 208.071281 / [206.335116, 210.587810] | 0.987308 / [0.979785, 1.001212] | **`maintenance-self-speedup` KEEP** |
 
 Ranks 1-2 were re-decided under the allocation addendum's Lane M contract on
 the same quiet, CPU-pinned worker: `vmi1227854`, all eight RCH slots reserved
@@ -739,8 +784,9 @@ and
 The full per-row evidence, checksums, and retry predicates are in
 `docs/NEGATIVE_EVIDENCE.md`.
 
-**Yield: 4 of 5 ranked VOID rows re-won.** The fifth produced a real null,
-not another harness verdict.
+**Maintenance yield: 4 of 5 ranked VOID rows became `maintenance-self-speedup`
+KEEPs.** The
+fifth produced a real null, not another harness verdict.
 
 rch worker `ovh-b` **SIGILLs on the workspace `+avx2` baseline** — the
 `zerocopy v0.8.48` build script dies with `signal: 4` under

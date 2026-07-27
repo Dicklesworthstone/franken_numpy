@@ -4,11 +4,17 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
-## 2026-07-27 - WIN (KEEP, VS-INCUMBENT): f64 `isin` end-to-end vs NumPy - 19.947108x on a missing-capability surface
+## 2026-07-27 - HOLD / UNBANKED INCUMBENT COMPARISON: f64 `isin` end-to-end vs NumPy - repeat requires incumbent artifact provenance
 
-`BlackThrush`. The first row in this ledger measured under the vs-incumbent
-contract: our whole call against NumPy's whole call, in one invocation, with no
-expensive component shared by the two arms.
+`BlackThrush`. The timing compared our whole call against NumPy's whole call in
+one invocation, with no expensive component shared by the two arms.
+
+**EVIDENCE CORRECTION (2026-07-27):** the attempted incumbent artifact field
+copied the candidate bench ELF hash, and the invocation ID was constructed
+afterward rather than emitted by the measured invocation. Neither value proves
+the NumPy artifact that ran. The A/A, effect timing, checksum, and runtime
+dispatch assertion remain useful directional evidence, but the finalized
+`incumbent-win` contract does not admit this row as campaign output.
 
 WHY THIS SURFACE: NumPy's `isin` has a fast `table` method that is **integer
 only**; float input falls back to a sort-based path. This is a
@@ -27,12 +33,12 @@ unchanged.
 `bench_elf_sha256=43760732fe0ec60ac5e2d4d020b253ea720cf0d3996a362204c4d94934ebaabd`
 (47,330,008 bytes)
 
-**Campaign result class:** incumbent-win
+**Superseded attempted class:** incumbent-win
 
 **A/A null control (same invocation):** numpy/numpy ratio median 0.988449, CI95
 [0.962628, 1.042274], 41 rounds, min_of=3
 
-**Legacy incumbent arm (same invocation):** name=numpy version=2.4.6 artifact_sha256=43760732fe0ec60ac5e2d4d020b253ea720cf0d3996a362204c4d94934ebaabd invocation_id=isin-f64-1m-vmi1227854-20260727 measured_ratio=19.947108x median=67.243286ms
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=unavailable invocation_id=unavailable measured_ratio=19.947108x median=67.243286ms
 
 The identity assertion runs inside the measured binary before timing and checks
 three things: the module's `__name__` is `numpy`, `numpy.isin.__module__` is
@@ -45,11 +51,13 @@ callable_module=numpy dispatch_assert=passed` before the first round.
 | A/A null (numpy/numpy) | 63.261940 ms | 63.424353 ms | 0.988449 | `[0.962628, 1.042274]` | 15.492% |
 | effect (numpy/fnp) | 67.243286 ms | **3.605672 ms** | **19.947108** | **`[18.450596, 21.796353]`** | 17.635% |
 
-**Verdict: DECIDABLE_WIN.** `null_half_width=0.042274`, so `required_2x_delta`
-is 0.084548; the effect delta of 18.947108 exceeds it by more than two orders of
-magnitude, and the CIs are disjoint by a wide margin. Both the null and effect
-rows report checksum `fd5d32a822fe307b`, so every round produced byte-identical
-output from the two arms.
+**Verdict: HOLD / UNBANKED INCUMBENT COMPARISON.** The statistical direction is
+decidable under the median-CI rule: `null_half_width=0.042274`, so
+`required_2x_delta` is 0.084548; the effect delta of 18.947108 exceeds it by
+more than two orders of magnitude, and the CIs are disjoint by a wide margin.
+Both the null and effect rows report checksum `fd5d32a822fe307b`, so every
+round produced byte-identical output from the two arms. Provenance, not the
+statistic, blocks campaign status.
 
 ALL SIX FLEET TRAPS, guarded and evidenced:
 
@@ -73,21 +81,22 @@ ALL SIX FLEET TRAPS, guarded and evidenced:
    result; `numpy.isin` allocates and computes its own. This is the trap the
    2026-07-26 bool-return arm fell into, which is why this arm exists.
 
-SCOPE, stated so it is not over-quoted: 19.947108x is **this shape** —
+SCOPE: the observed 19.947108x direction is **this shape** —
 1M f64 haystack, 1,000-element needle, on this worker under numpy 2.4.6. The
 ratio depends on both operand sizes, because what we beat is NumPy's sort-based
 fallback whose cost scales with the needle. The historical 530x `isin` row in
 this ledger is a different shape and neither number generalises to the other.
-Quote the shape with the ratio, always.
+Do not quote this ratio as campaign output until the provenance-complete repeat.
 
 COUNTED_MECHANISM: 1 fewer algorithmic class - NumPy performs a sort-based
 membership test on float input because its O(1) `table` path admits integers
 only; we do not sort.
 
-Retry predicate: reopen only to widen the measured shape grid (needle and
-haystack sizes), not to re-decide this point. Re-measure if numpy gains a
-non-integer `table` path, which would remove the capability gap entirely - watch
-`numpy/lib/_arraysetops_impl.py` for a float-admitting `kind="table"`.
+Retry predicate: rerun this exact point only after the harness emits a genuine
+NumPy artifact SHA-256 and a shared invocation ID alongside the candidate's
+self-reported ELF, A/A null, and effect. The NumPy artifact hash must differ
+from the candidate ELF hash. After that proof, widen the measured shape grid
+only if useful; re-measure if NumPy gains a non-integer `table` path.
 
 ## 2026-07-27 - RESURRECTION WIN (KEEP): `tofile_text` manual integer formatting - 1.215448x under production-path executed-ELF A/A median-CI
 
@@ -122,6 +131,8 @@ base/base followed by 41-round interleaved base/production, min-of-3 per arm.
 The executing binary self-reported
 `bench_elf_sha256=c51ac92dfd74d2cc5d34a4d8e76dbd651ff29ca7eca090399ce322f68cf9dc10`
 (5,155,944 bytes) before any proof or timing:
+
+**Campaign result class:** maintenance-self-speedup
 
 | row | arm medians | median ratio | bootstrap median CI95 | CV (provenance only) |
 |---|---|---:|---:|---:|
@@ -299,6 +310,8 @@ below. This pass re-confirmed the shipped paths on strict-remote
 `vmi1149989`, with all eight worker slots reserved and execution pinned to
 CPU 6. Release LTO was disabled. Every verdict used the bootstrap median-CI
 contract; CV was printed as provenance and never gated.
+
+**Campaign result class:** maintenance-self-speedup
 
 The fnp-io invocation self-reported the executed binary as
 `bench_elf_sha256=ea36c70f0937454755aae8d77f1595da7bae921f49e9d038799d8047e8fb564e`
@@ -608,6 +621,8 @@ there is no allocation left in it to remove.
 > 1 pending. The resurrection entry at the top of this file subsequently closed
 > L2392, so current status is 3 KEEP, 2 VALID-AB, 0 pending. Do not cite the
 > 68/122, 21/122, 3/5, or rank-5-tail-ring claims below.
+
+**Campaign result class:** maintenance-self-speedup
 
 `VioletOwl`, bead `franken_numpy-ixs5y.380`, cod / Lane M. This entry
 supersedes the provisional 4/5 queue farther below. The mechanical parser
