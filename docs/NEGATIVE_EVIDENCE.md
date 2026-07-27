@@ -4,6 +4,132 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-27 - INCUMBENT WIN (KEEP): bounded negative-`usecols` tail ring through `fnp.loadtxt` - 1.195768x vs NumPy
+
+`BeigeDog`, bead `deadlock-audit-s17g0`, cod / Lane M. The mandatory preflight
+found L806's former `VOID-CV` row and its corrected maintenance redecision
+before this work began. The core tail ring had already cleared the median-CI
+gate against FrankenNumPy's former full-row token collection, but that
+`maintenance-self-speedup` was not campaign output. This row applies the
+incumbent-only policy to the compatible public surface.
+
+ONE LEVER: for native-f64 path inputs with at least two accepted rows,
+`unpack=false`, a single-character delimiter/comment grammar, and a nonempty
+all-negative `usecols` selection whose farthest offset is at most 4,096
+fields, `fnp.loadtxt` now calls the already-proven
+`fnp_io::loadtxt_usecols_signed` bounded tail-ring parser. Mixed, nonnegative,
+empty, oversized-tail, one-row, unpacked, non-native-f64, and unusual text
+configurations retain the former or incumbent fallback path. The measured
+8,192 x 64 comma corpus selects `[-1, -8, -32, -1]`, preserving both requested
+order and a duplicate column.
+
+BEHAVIOR AND DISPATCH PROOF: the focused test compares the public candidate,
+the retained generic FNP path forced by `unpack=true` and transposed back, and
+live NumPy byte-for-byte. It includes an invalid unselected token, comments,
+`skiprows`, duplicates, and matching out-of-range exception types. While
+`numpy.loadtxt` is replaced with a callable that always raises, the compatible
+FNP call still succeeds and retains the oracle bytes. The benchmark repeats
+that poison proof before timing and prints
+`delegated_to_numpy=false native_route=fnp_io::loadtxt_usecols_signed`.
+
+DECISIVE INVOCATION: strict-remote `vmi1227854`, all eight RCH slots held with
+zero remaining, self-healing disabled, `release-perf` (thin LTO,
+codegen-units=1), null-first 41-round base/base followed by 41-round
+interleaved NumPy/FNP effect, min-of-3 per arm. The executing process reported:
+
+`bench_elf_sha256=8f4918acbb92315b287515409651d479b22e14c36f6dcaa0237edeb5d0ac3ae9`
+(213,929,504 bytes)
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 0.944120x, CI [0.907716, 1.044311].
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c644f1655540aa-001bd67f measured_ratio=1.195768x
+
+The incumbent artifact is the executing package's compiled
+`numpy._core._multiarray_umath` parser shared object (10,452,641 bytes), hashed
+by the bench process itself. The runtime also asserts the callable module is
+NumPy and that the incumbent callable is not the FNP callable.
+
+| row | arm A | arm B | ratio median | bootstrap median CI95 | CV (provenance only) |
+|---|---:|---:|---:|---:|---:|
+| A/A null (NumPy/NumPy) | 7.230866 ms | 7.762663 ms | 0.944120 | `[0.907716, 1.044311]` | 18.930% |
+| effect (NumPy/FNP) | 7.799920 ms | **6.604748 ms** | **1.195768** | **`[1.121389, 1.244349]`** | 26.004% |
+
+The null half-width is 0.092284, so the gate required an effect delta of
+0.184569. The measured delta was 0.195768, the effect median lies above the
+null CI, and the gate emitted `DECIDABLE_WIN`. Both rows report checksum
+`3f2ed2b8bbf9c682`, continuously enforcing byte-identical output. CV is
+provenance only and never changes the verdict.
+
+PROFILE ATTRIBUTION: the resurrected core profile attributed 10.67% self-time
+to full-row `Vec<&str>` collection plus 26.76% to character search. The public
+route removes the same full-row materialization and keeps only the bounded
+suffix needed to resolve the selected negative indices.
+
+Verdict: **INCUMBENT WIN / KEEP** for exactly this f64 8,192 x 64,
+four-column all-negative selection under NumPy 2.4.6 and the recorded
+artifacts. The historical 1.82-1.98x and final 1.224245x figures remain
+maintenance self-speedups and are not competitive claims.
+
+Retry predicate: do not rerun this exact shape against the same NumPy artifact.
+Reopen only if the NumPy parser artifact hash changes, the public routing guard
+changes, or a fresh profile attributes at least 5% self-time to a different
+negative-`usecols` primitive; every repeat still needs executing-ELF and
+incumbent-artifact hashes, the shared invocation ID, exact parity, and the
+null-first median-CI contract.
+
+GATE SELFCHECK: after this row became the live incumbent-win seed, the
+preflight caught 11/11 hardened defect mutations. Its incumbent mutations now
+replace the seed's valid null/incumbent markers instead of appending shadowed
+invalid markers; a unit regression test locks that behavior.
+
+## 2026-07-27 - MAINTENANCE KEEP / INCUMBENT REJECT: selected-bool `loadtxt(usecols)` is 3.676778x internally but 0.671524x vs NumPy
+
+`BeigeDog`, bead `deadlock-audit-s17g0`, cod / Lane M. The selected-bool
+positive-`usecols` branch was re-decided in the same provenance-complete
+`release-perf` invocation as the tail-ring row above. This separates the
+already-landed internal improvement from the campaign's actual competitive
+question.
+
+The maintenance control calls `fnp.loadtxt` on the same 8,192 x 16 bool file
+and selects the same four columns. Negative equivalents force the retained
+owned-token path; positive indices take the borrowed direct parser. The
+incumbent comparison instead gives the positive selection and every other
+argument unchanged to actual `numpy.loadtxt` and `fnp.loadtxt`. Exact output
+bytes match on every round, and poisoning `numpy.loadtxt` proves the FNP arm
+does not delegate.
+
+`bench_elf_sha256=8f4918acbb92315b287515409651d479b22e14c36f6dcaa0237edeb5d0ac3ae9`
+(213,929,504 bytes)
+
+**Campaign result class:** maintenance-self-speedup
+
+**A/A null control (same invocation):** FNP-former/FNP-former median ratio 0.984686x, CI [0.945628, 1.010720].
+
+| decision | A/A median CI95 | effect arms | effect median CI95 | gate |
+|---|---:|---:|---:|---|
+| maintenance former/candidate | `[0.945628, 1.010720]` | 6.437178 / 1.696703 ms | **3.676778 `[3.449654, 4.139403]`** | `DECIDABLE_WIN` |
+| incumbent NumPy/FNP | `[0.981409, 1.009105]` | 1.604775 / 2.442931 ms | **0.671524 `[0.634984, 0.685818]`** | `DECIDABLE_REGRESSION` |
+
+The maintenance gate required a 0.108743 delta and the internal effect cleared
+it by more than twentyfold. For the competitive row, the NumPy/NumPy A/A
+median was 0.996251 with CI `[0.981409, 1.009105]`; the required delta was
+0.037182 and the 0.328476 regression cleared it decisively in the losing
+direction. Both decisions use checksum `30fb6a0b5c0da785`.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c644f1655540aa-001bd67f measured_ratio=0.671524x
+
+Verdict: **KEEP as maintenance; REJECT as campaign output.** The direct parser
+remains worthwhile relative to the former FNP implementation, but it must
+never be quoted as a NumPy-relative win.
+
+Retry predicate: do not retry the owned-token/direct-parser comparison. Reopen
+the competitive surface only after a profile of this exact public workload
+names non-shared FNP work with an Amdahl ceiling of at least 1.45x, or after
+the NumPy parser artifact hash changes; then repeat the actual NumPy/FNP
+same-invocation contract.
+
 ## 2026-07-27 - HOLD / UNBANKED INCUMBENT COMPARISON: f64 `isin` end-to-end vs NumPy - repeat requires incumbent artifact provenance
 
 `BlackThrush`. The timing compared our whole call against NumPy's whole call in

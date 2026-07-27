@@ -23,7 +23,9 @@ use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::hint::black_box;
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const CONTRACT_ROUNDS: usize = 41;
 const CONTRACT_MIN_OF: usize = 3;
@@ -47,12 +49,9 @@ pub struct ContractObservation {
     pub checksum: u64,
 }
 
-fn self_identity() -> String {
-    let Ok(path) = std::env::current_exe() else {
-        return "unavailable".to_string();
-    };
-    let Ok(bytes) = std::fs::read(&path) else {
-        return "unavailable".to_string();
+fn file_identity(path: &Path) -> Option<(String, usize)> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return None;
     };
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
@@ -61,11 +60,84 @@ fn self_identity() -> String {
     for byte in digest {
         write!(&mut hash, "{byte:02x}").expect("writing to String cannot fail");
     }
-    format!("{} ({} bytes) {}", hash, bytes.len(), path.display())
+    Some((hash, bytes.len()))
+}
+
+fn self_identity() -> String {
+    let Ok(path) = std::env::current_exe() else {
+        return "unavailable".to_string();
+    };
+    let Some((hash, byte_len)) = file_identity(&path) else {
+        return "unavailable".to_string();
+    };
+    format!("{} ({} bytes) {}", hash, byte_len, path.display())
+}
+
+pub fn bench_invocation_id() -> &'static str {
+    static INVOCATION_ID: OnceLock<String> = OnceLock::new();
+    INVOCATION_ID.get_or_init(|| {
+        let unix_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("bench clock must be after Unix epoch")
+            .as_nanos();
+        format!("{unix_nanos:032x}-{:08x}", std::process::id())
+    })
+}
+
+/// Prove that a Python benchmark's incumbent arm resolves to live NumPy and
+/// bind it to the compiled extension that performs `loadtxt`'s parsing work.
+/// The hash is computed by the executing bench process, not by an adjacent
+/// shell step, and the invocation id is shared with every row in this process.
+pub fn report_numpy_loadtxt_incumbent_identity(py: Python<'_>, numpy_loadtxt: &Bound<'_, PyAny>) {
+    let numpy = py.import("numpy").expect("numpy incumbent");
+    let numpy_name = numpy
+        .getattr("__name__")
+        .expect("numpy __name__")
+        .extract::<String>()
+        .expect("numpy __name__ string");
+    assert_eq!(numpy_name, "numpy", "incumbent module is not numpy");
+    let numpy_version = numpy
+        .getattr("__version__")
+        .expect("numpy __version__")
+        .extract::<String>()
+        .expect("numpy __version__ string");
+    let callable_module = numpy_loadtxt
+        .getattr("__module__")
+        .expect("numpy.loadtxt __module__")
+        .extract::<String>()
+        .expect("numpy.loadtxt __module__ string");
+    assert!(
+        callable_module.starts_with("numpy"),
+        "incumbent loadtxt is not defined under numpy: {callable_module}"
+    );
+
+    // `numpy.loadtxt`'s Python dispatcher calls this compiled parser. Hash the
+    // ELF shared object rather than a package __init__.py or wrapper source.
+    let parser_module = py
+        .import("numpy._core._multiarray_umath")
+        .expect("numpy compiled parser module");
+    let artifact_path = parser_module
+        .getattr("__file__")
+        .expect("numpy parser __file__")
+        .extract::<String>()
+        .expect("numpy parser path string");
+    let artifact_path = Path::new(&artifact_path);
+    let (artifact_sha256, artifact_bytes) =
+        file_identity(artifact_path).expect("hash numpy parser artifact");
+    println!(
+        "INCUMBENT_IDENTITY arm=numpy.loadtxt numpy_version={numpy_version} \
+         callable_module={callable_module} invocation_id={} \
+         artifact_sha256={artifact_sha256} artifact_bytes={artifact_bytes} \
+         artifact_path={} dispatch_assert=passed",
+        bench_invocation_id(),
+        artifact_path.display(),
+    );
+    std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
 }
 
 fn report_bench_identity() {
     println!("bench_elf_sha256={}", self_identity());
+    println!("bench_invocation_id={}", bench_invocation_id());
     std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
 }
 
@@ -327,10 +399,17 @@ pub fn report_ledger_pair(
 
 /// `FNP_BENCH_GROUPS`, when set to a comma-separated substring list, restricts a
 /// run to the group functions whose names contain one of the tokens; unset
-/// preserves run-everything behavior. Identical semantics to the former
-/// monolith gate, so existing reproduction commands keep working.
+/// preserves run-everything behavior. A `fnp-group=<same list>` positional
+/// Criterion filter is the fail-closed remote equivalent: RCH intentionally
+/// does not forward arbitrary caller environment variables, while the argument
+/// is part of the exact remotely executed command.
 pub fn group_enabled(group_fn_name: &str) -> bool {
-    let Ok(spec) = std::env::var("FNP_BENCH_GROUPS") else {
+    let spec = std::env::var("FNP_BENCH_GROUPS").ok().or_else(|| {
+        std::env::args()
+            .skip(1)
+            .find_map(|argument| argument.strip_prefix("fnp-group=").map(str::to_owned))
+    });
+    let Some(spec) = spec else {
         return true;
     };
     spec.split(',')

@@ -3920,14 +3920,16 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
 /// contract: the effect must clear twice the A/A CI half-width, and `cv` is
 /// provenance only.
 ///
-/// SAME-BINARY CONTROL, and this is the point of the arm: both sides are
+/// SAME-BINARY MAINTENANCE CONTROL: both sides are
 /// `fnp.loadtxt` on the identical file selecting the identical columns. The base
 /// uses NEGATIVE `usecols`, which the direct path deliberately declines (negative
 /// indices resolve against the row width, which the borrowed view does not
 /// hoist), so it walks the former `Vec<Vec<String>>` owned-token path. The
 /// candidate uses the equivalent non-negative indices and takes the new path.
 /// One ELF, one file, one selection — the only difference is the code path, so
-/// this isolates the lever rather than measuring fnp against NumPy.
+/// this isolates the lever. Under the campaign's incumbent-only win policy that
+/// first ratio is `maintenance-self-speedup`; the second contract below compares
+/// the candidate with the actual `numpy.loadtxt` incumbent.
 ///
 /// The corpus poisons an UNSELECTED column with a non-bool token. NumPy never
 /// parses unselected columns and neither may the direct path; if that ever
@@ -3968,11 +3970,17 @@ fn bench_loadtxt_selected_bool_median_gate(_c: &mut Criterion) {
         let functools = py.import("functools").expect("functools");
         let partial = functools.getattr("partial").expect("functools.partial");
         let fnp_loadtxt = module.getattr("loadtxt").expect("fnp loadtxt");
+        let numpy_loadtxt = numpy.getattr("loadtxt").expect("numpy loadtxt");
+        assert!(
+            !numpy_loadtxt.is(&fnp_loadtxt),
+            "dispatch trap: incumbent loadtxt resolved to the FNP callable"
+        );
+        common::report_numpy_loadtxt_incumbent_identity(py, &numpy_loadtxt);
         let bool_dtype = numpy.getattr("bool_").expect("numpy bool_");
 
         // 16 columns: -16 == 0, -15 == 1, -13 == 3, -12 == 4. Same four columns,
         // and column 7 (the poisoned one) is selected by neither.
-        let make_arm = |cols: Vec<i64>| {
+        let make_fnp_arm = |cols: Vec<i64>| {
             let kwargs = PyDict::new(py);
             kwargs.set_item("delimiter", ",").expect("delimiter kwarg");
             kwargs.set_item("dtype", &bool_dtype).expect("dtype kwarg");
@@ -3981,24 +3989,27 @@ fn bench_loadtxt_selected_bool_median_gate(_c: &mut Criterion) {
                 .call((&fnp_loadtxt,), Some(&kwargs))
                 .expect("partial-bound loadtxt arm")
         };
-        let former = make_arm(vec![-16, -15, -13, -12]);
-        let candidate = make_arm(vec![0, 1, 3, 4]);
+        let former = make_fnp_arm(vec![-16, -15, -13, -12]);
+        let candidate = make_fnp_arm(vec![0, 1, 3, 4]);
+        let incumbent_kwargs = PyDict::new(py);
+        incumbent_kwargs
+            .set_item("delimiter", ",")
+            .expect("incumbent delimiter");
+        incumbent_kwargs
+            .set_item("dtype", &bool_dtype)
+            .expect("incumbent dtype");
+        incumbent_kwargs
+            .set_item("usecols", vec![0_i64, 1, 3, 4])
+            .expect("incumbent usecols");
+        let incumbent = partial
+            .call((&numpy_loadtxt,), Some(&incumbent_kwargs))
+            .expect("partial-bound numpy loadtxt arm");
 
         // BEHAVIOR BEFORE TIMING: the two paths must be byte-identical, and both
         // must match the live NumPy oracle.
         let former_out = former.call1((&lt_path,)).expect("former path parity");
         let candidate_out = candidate.call1((&lt_path,)).expect("direct path parity");
-        let np_kwargs = PyDict::new(py);
-        np_kwargs.set_item("delimiter", ",").expect("np delimiter");
-        np_kwargs.set_item("dtype", &bool_dtype).expect("np dtype");
-        np_kwargs
-            .set_item("usecols", vec![0_i64, 1, 3, 4])
-            .expect("np usecols");
-        let oracle = numpy
-            .getattr("loadtxt")
-            .expect("numpy loadtxt")
-            .call((&lt_path,), Some(&np_kwargs))
-            .expect("numpy oracle parity");
+        let oracle = incumbent.call1((&lt_path,)).expect("numpy oracle parity");
         let bytes_of = |value: &Bound<'_, PyAny>| {
             value
                 .call_method0("tobytes")
@@ -4015,6 +4026,36 @@ fn bench_loadtxt_selected_bool_median_gate(_c: &mut Criterion) {
             bytes_of(&candidate_out),
             bytes_of(&oracle),
             "selected-bool direct path must be byte-identical to numpy",
+        );
+
+        // Prove this valid compatible workload cannot be silently delegated to
+        // the incumbent. Restore NumPy before any timed call.
+        let poison = PyModule::from_code(
+            py,
+            pyo3::ffi::c_str!(
+                "def fail(*args, **kwargs):\n    raise RuntimeError('numpy.loadtxt passthrough called')\n"
+            ),
+            pyo3::ffi::c_str!("poison_loadtxt_bench.py"),
+            pyo3::ffi::c_str!("poison_loadtxt_bench"),
+        )
+        .expect("loadtxt poison module");
+        numpy
+            .setattr("loadtxt", poison.getattr("fail").expect("poison callable"))
+            .expect("install loadtxt poison");
+        let native_out = candidate
+            .call1((&lt_path,))
+            .expect("selected-bool path must not delegate");
+        numpy
+            .setattr("loadtxt", &numpy_loadtxt)
+            .expect("restore numpy.loadtxt");
+        assert_eq!(
+            bytes_of(&native_out),
+            bytes_of(&oracle),
+            "native selected-bool path must retain NumPy bytes",
+        );
+        println!(
+            "DISPATCH_PROOF row=python_loadtxt_selected_bool_8192x16_vs_numpy \
+             fnp_callable=fnp_python.loadtxt delegated_to_numpy=false"
         );
 
         let time_arm = |function: &Bound<'_, PyAny>| {
@@ -4034,6 +4075,148 @@ fn bench_loadtxt_selected_bool_median_gate(_c: &mut Criterion) {
         let _ = common::run_median_ci_contract(
             "loadtxt_selected_bool_8192x16",
             || time_arm(&former),
+            || time_arm(&candidate),
+        );
+        let _ = common::run_median_ci_contract(
+            "python_loadtxt_selected_bool_8192x16_vs_numpy",
+            || time_arm(&incumbent),
+            || time_arm(&candidate),
+        );
+    });
+}
+
+/// End-to-end incumbent decision for the bounded all-negative `usecols`
+/// tail-ring. Both arms call the compatible Python surface with the identical
+/// path, dtype, delimiter, and duplicate/order-preserving selection. The FNP
+/// binding routes this measured f64 shape into `fnp_io::loadtxt_usecols_signed`;
+/// mixed, positive, empty, oversized, and unpacked cases stay on their former
+/// paths and are outside this row.
+fn bench_loadtxt_negative_tail_vs_numpy_median_gate(_c: &mut Criterion) {
+    const ROWS: usize = 8_192;
+    const COLS: usize = 64;
+    const USECOLS: [i64; 4] = [-1, -8, -32, -1];
+
+    let mut text = String::new();
+    for row in 0..ROWS {
+        for column in 0..COLS {
+            if column > 0 {
+                text.push(',');
+            }
+            text.push_str(&format!("{}.{}", row % 977, column));
+        }
+        text.push('\n');
+    }
+    let path = std::env::temp_dir().join(format!(
+        "fnp_loadtxt_negative_tail_bench_{}.csv",
+        std::process::id()
+    ));
+    std::fs::write(&path, text).expect("write negative-tail bench corpus");
+    let path = path.to_str().expect("temporary path is UTF-8").to_owned();
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_loadtxt_negative_tail")
+            .expect("negative-tail bench module");
+        fnp_python(&module).expect("initialize fnp_python loadtxt bench module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+        let fnp_loadtxt = module.getattr("loadtxt").expect("fnp loadtxt");
+        let numpy_loadtxt = numpy.getattr("loadtxt").expect("numpy loadtxt");
+        assert!(
+            !numpy_loadtxt.is(&fnp_loadtxt),
+            "dispatch trap: incumbent loadtxt resolved to the FNP callable"
+        );
+        common::report_numpy_loadtxt_incumbent_identity(py, &numpy_loadtxt);
+
+        let float64 = numpy.getattr("float64").expect("numpy float64");
+        let functools = py.import("functools").expect("functools");
+        let partial = functools.getattr("partial").expect("functools.partial");
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("delimiter", ",").expect("delimiter kwarg");
+        kwargs.set_item("dtype", &float64).expect("dtype kwarg");
+        kwargs
+            .set_item("usecols", USECOLS)
+            .expect("negative usecols kwarg");
+        let candidate = partial
+            .call((&fnp_loadtxt,), Some(&kwargs))
+            .expect("partial-bound FNP loadtxt arm");
+        let incumbent = partial
+            .call((&numpy_loadtxt,), Some(&kwargs))
+            .expect("partial-bound NumPy loadtxt arm");
+
+        let bytes_of = |value: &Bound<'_, PyAny>| {
+            value
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec")
+        };
+        let oracle = incumbent
+            .call1((&path,))
+            .expect("negative-tail NumPy parity");
+        let candidate_out = candidate.call1((&path,)).expect("negative-tail FNP parity");
+        assert_eq!(
+            bytes_of(&candidate_out),
+            bytes_of(&oracle),
+            "negative-tail FNP path must be byte-identical to NumPy",
+        );
+        assert_eq!(
+            candidate_out
+                .getattr("shape")
+                .expect("candidate shape")
+                .extract::<Vec<usize>>()
+                .expect("candidate shape vector"),
+            [ROWS, USECOLS.len()],
+        );
+
+        // A valid all-negative bounded selection must stay native. If the
+        // binding accidentally falls back to NumPy, this call fails loudly.
+        let poison = PyModule::from_code(
+            py,
+            pyo3::ffi::c_str!(
+                "def fail(*args, **kwargs):\n    raise RuntimeError('numpy.loadtxt passthrough called')\n"
+            ),
+            pyo3::ffi::c_str!("poison_loadtxt_tail_bench.py"),
+            pyo3::ffi::c_str!("poison_loadtxt_tail_bench"),
+        )
+        .expect("loadtxt poison module");
+        numpy
+            .setattr("loadtxt", poison.getattr("fail").expect("poison callable"))
+            .expect("install loadtxt poison");
+        let native_out = candidate
+            .call1((&path,))
+            .expect("negative-tail path must not delegate");
+        numpy
+            .setattr("loadtxt", &numpy_loadtxt)
+            .expect("restore numpy.loadtxt");
+        assert_eq!(
+            bytes_of(&native_out),
+            bytes_of(&oracle),
+            "native negative-tail path must retain NumPy bytes",
+        );
+        println!(
+            "DISPATCH_PROOF row=python_loadtxt_negative_tail_8192x64_vs_numpy \
+             fnp_callable=fnp_python.loadtxt \
+             native_route=fnp_io::loadtxt_usecols_signed delegated_to_numpy=false"
+        );
+
+        let time_arm = |function: &Bound<'_, PyAny>| {
+            let started = Instant::now();
+            let output = function
+                .call1((black_box(&path),))
+                .expect("negative-tail median-CI arm");
+            let elapsed = started.elapsed();
+            let checksum = bytes_of(&output)
+                .into_iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                });
+            black_box(output);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let _ = common::run_median_ci_contract(
+            "python_loadtxt_negative_tail_8192x64_vs_numpy",
+            || time_arm(&incumbent),
             || time_arm(&candidate),
         );
     });
@@ -4298,6 +4481,10 @@ fn main() {
         (
             "bench_loadtxt_selected_bool_median_gate",
             bench_loadtxt_selected_bool_median_gate,
+        ),
+        (
+            "bench_loadtxt_negative_tail_vs_numpy_median_gate",
+            bench_loadtxt_negative_tail_vs_numpy_median_gate,
         ),
         (
             "bench_wide_string_sort_median_gate",

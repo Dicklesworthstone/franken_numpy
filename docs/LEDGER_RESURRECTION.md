@@ -72,6 +72,35 @@ supported, properly classified figure and its scope. Retraction and correction
 history remains in this ledger, `docs/NEGATIVE_EVIDENCE.md`, and bead bodies,
 where it can prevent a dead lever or invalid claim from being rediscovered.
 
+### Incumbent-policy redecision (2026-07-27, Lane M)
+
+The two assigned directional `loadtxt` levers were re-decided against the
+actual NumPy incumbent after the result-class policy changed. Both comparisons
+ran from one `release-perf` ELF on exclusive `vmi1227854`, with the NumPy/NumPy
+A/A first and NumPy/FNP interleaved afterward. The executing process emitted
+ELF SHA-256
+`8f4918acbb92315b287515409651d479b22e14c36f6dcaa0237edeb5d0ac3ae9`,
+shared invocation id
+`000000000000000018c644f1655540aa-001bd67f`, NumPy 2.4.6, and compiled parser
+artifact SHA-256
+`d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa`.
+Each FNP arm also passed an in-process poison proof that it did not delegate to
+`numpy.loadtxt`.
+
+| lever | maintenance FNP-former/FNP-current | incumbent NumPy/FNP | incumbent A/A CI95 | campaign decision |
+|---|---:|---:|---:|---|
+| selected-bool positive `usecols` direct parse | 3.676778 `[3.449654, 4.139403]` | 0.671524 `[0.634984, 0.685818]` | `[0.981409, 1.009105]` | **maintenance KEEP; incumbent REJECT** |
+| bounded all-negative f64 tail ring through public `fnp.loadtxt` | historical maintenance KEEP (final 1.224245x) | **1.195768 `[1.121389, 1.244349]`** | `[0.907716, 1.044311]` | **`incumbent-win` KEEP** |
+
+The tail ring was first carried through the compatible Python surface; an
+internal Rust parser versus Python API comparison would not have been a
+like-for-like incumbent result. The selected-bool branch remains landed
+because it is a decisive maintenance improvement, but its 3.09-3.69x
+historical ratios and the new 3.676778x ratio are not competitive claims.
+`docs/NEGATIVE_EVIDENCE.md` contains the full arms, checksums, dispatch proof,
+scope, and concrete retry predicates. The hardened preflight then used these
+live rows as its seeds and caught all 11/11 injected defect classes.
+
 ### Counts
 
 | Metric | Count |

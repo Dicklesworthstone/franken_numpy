@@ -720,6 +720,15 @@ fn with_campaign_class(entry: &LedgerEntry, class: Option<&str>) -> LedgerEntry 
 
 fn incumbent_claim_mutation(entry: &LedgerEntry, incumbent_fields: &str) -> LedgerEntry {
     let mut mutation = with_campaign_class(entry, Some(INCUMBENT_WIN));
+    mutation.body = mutation
+        .body
+        .lines()
+        .filter(|line| {
+            marker_value(line, NULL_CONTROL_MARKER).is_none()
+                && marker_value(line, INCUMBENT_ARM_MARKER).is_none()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     mutation.body.push_str(&format!(
         "\n{NULL_CONTROL_MARKER} baseline/null median ratio 1.001x, CI [0.99, 1.01].\n\
          {INCUMBENT_ARM_MARKER} {incumbent_fields}\n"
@@ -1205,6 +1214,35 @@ bench_elf_sha256=0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDE
                 reason: "incumbent-win lacks complete same-invocation NumPy evidence",
             }]
         );
+    }
+
+    #[test]
+    fn incumbent_mutation_replaces_an_existing_valid_contract() {
+        let seed = split_entries(
+            "\
+## 2026-07-01 - KEEP: incumbent candidate
+
+bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.
+**Campaign result class:** incumbent-win
+**A/A null control (same invocation):** baseline/null median ratio 1.001x, CI [0.995, 1.006].
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.3.1 artifact_sha256=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 invocation_id=run-42 measured_ratio=3.250x
+",
+        )
+        .pop()
+        .expect("incumbent seed");
+        let mutation = incumbent_claim_mutation(
+            &seed,
+            "name=self-baseline version=2.3.1 artifact_sha256=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 invocation_id=run-42 measured_ratio=3.250x",
+        );
+        assert_eq!(
+            mutation.body.matches(INCUMBENT_ARM_MARKER).count(),
+            1,
+            "mutation must replace, not shadow, the seed's valid incumbent marker"
+        );
+        assert!(mutation_has_violation(
+            &mutation,
+            "incumbent-win lacks complete same-invocation NumPy evidence",
+        ));
     }
 
     #[test]

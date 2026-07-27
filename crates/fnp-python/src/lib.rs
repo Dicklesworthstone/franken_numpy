@@ -56630,6 +56630,10 @@ fn loadtxt(
         Ok(value) if dtype_supported_by_numpy_export_bridge(value) => value,
         _ => return fallback(py),
     };
+    let native_f64_request = match dtype.as_ref() {
+        None => true,
+        Some(value) => value.bind(py).is(&numpy.getattr("float64")?),
+    };
 
     // Resolve usecols. None → all columns. Int → single col. List<int>.
     let use_columns: Option<Vec<i64>> = match usecols.as_ref() {
@@ -56647,6 +56651,76 @@ fn loadtxt(
             }
         }
     };
+
+    // Carry fnp_io's proven bounded tail-ring parser through the public
+    // compatibility surface. Keep the route deliberately narrow: measured
+    // native-f64 files, nonempty all-negative usecols whose farthest offset
+    // fits the core's 4,096-field budget, no unpack, and the same
+    // single-character delimiter/comment grammar. Mixed, nonnegative,
+    // oversized, non-native-endian, and unusual text configurations retain
+    // the generic parser below.
+    let bounded_negative_usecols = use_columns.as_ref().and_then(|cols| {
+        if cols.is_empty() || cols.iter().any(|&column| column >= 0) {
+            return None;
+        }
+        let signed = cols
+            .iter()
+            .copied()
+            .map(isize::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        let max_tail = signed
+            .iter()
+            .copied()
+            .map(|column| {
+                column
+                    .checked_neg()
+                    .and_then(|value| usize::try_from(value).ok())
+            })
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .max()?;
+        (max_tail <= 4_096).then_some(signed)
+    });
+    if let Some(cols) = bounded_negative_usecols.as_ref()
+        && !unpack
+        && parsed_dtype == DType::F64
+        && native_f64_request
+        && comments.chars().count() == 1
+    {
+        let comment_char = comments.chars().next().expect("guarded single char");
+        let delimiter_char = match delimiter {
+            None => Some(' '),
+            Some(sep) if sep.chars().all(char::is_whitespace) => Some(' '),
+            Some(sep) if sep.chars().count() == 1 => sep.chars().next(),
+            Some(_) => None,
+        };
+        if let Some(delimiter_char) = delimiter_char {
+            let skip_count = skiprows.max(0) as usize;
+            return match fnp_io::loadtxt_usecols_signed(
+                &text,
+                delimiter_char,
+                comment_char,
+                skip_count,
+                usize::MAX,
+                Some(cols),
+            ) {
+                // NumPy squeezes a one-row multi-column result to 1-D and a
+                // one-row single-column result to 0-D. The generic binding
+                // does not yet encode that distinction, so leave this narrow
+                // fast path only when its existing shape proof applies.
+                Ok(parsed) if parsed.nrows > 1 => {
+                    let shape = if parsed.ncols == 1 {
+                        vec![parsed.nrows]
+                    } else {
+                        vec![parsed.nrows, parsed.ncols]
+                    };
+                    build_numpy_array_from_storage(py, &shape, ArrayStorage::F64(parsed.values))
+                }
+                _ => fallback(py),
+            };
+        }
+    }
 
     // Float dtypes with no column selection delegate tokenize+parse to
     // fnp_io's single-pass reader instead of the Vec<Vec<String>> loop below
@@ -148244,6 +148318,119 @@ mod tests {
             assert_eq!(
                 oor_candidate.unwrap_err().get_type(py).to_string(),
                 oor_oracle.unwrap_err().get_type(py).to_string()
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn loadtxt_negative_f64_tail_ring_matches_former_and_numpy_exactly() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let loadtxt = module.getattr("loadtxt")?;
+            let numpy = py.import("numpy")?;
+            let numpy_loadtxt = numpy.getattr("loadtxt")?;
+            let float64 = numpy.getattr("float64")?;
+
+            let mut text = String::from("# ignored header\n");
+            for row in 0..4_usize {
+                for column in 0..64_usize {
+                    if column > 0 {
+                        text.push(',');
+                    }
+                    if column == 2 {
+                        text.push_str("not_selected");
+                    } else {
+                        text.push_str(&format!("{row}.{column}"));
+                    }
+                }
+                text.push_str(" # tail\n");
+            }
+            let path = std::env::temp_dir().join(format!(
+                "fnp_loadtxt_negative_tail_{}.csv",
+                std::process::id()
+            ));
+            std::fs::write(&path, text)?;
+            let path = path.to_str().expect("temporary path is UTF-8");
+
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("delimiter", ",")?;
+            kwargs.set_item("dtype", &float64)?;
+            kwargs.set_item("skiprows", 1_i64)?;
+            kwargs.set_item("usecols", vec![-1_i64, -8, -32, -1])?;
+            let oracle = numpy_loadtxt.call((path,), Some(&kwargs))?;
+
+            // Prove the compatible call is native rather than a fast-looking
+            // round trip back into the incumbent.
+            let poison = PyModule::from_code(
+                py,
+                pyo3::ffi::c_str!(
+                    "def fail(*args, **kwargs):\n    raise RuntimeError('numpy.loadtxt passthrough called')\n"
+                ),
+                pyo3::ffi::c_str!("poison_loadtxt.py"),
+                pyo3::ffi::c_str!("poison_loadtxt"),
+            )?;
+            let guard = AttrGuard::new(&numpy, "loadtxt")?;
+            numpy.setattr("loadtxt", poison.getattr("fail")?)?;
+            let candidate = loadtxt.call((path,), Some(&kwargs))?;
+            assert_array_matches_numpy(&candidate, &oracle)?;
+            assert_eq!(candidate.getattr("shape")?.extract::<Vec<usize>>()?, [4, 4]);
+
+            // `unpack=true` deliberately stays on the retained generic route;
+            // transpose its result back to the candidate's shape and compare
+            // every output byte.
+            let former_kwargs = PyDict::new(py);
+            former_kwargs.set_item("delimiter", ",")?;
+            former_kwargs.set_item("dtype", &float64)?;
+            former_kwargs.set_item("skiprows", 1_i64)?;
+            former_kwargs.set_item("usecols", vec![-1_i64, -8, -32, -1])?;
+            former_kwargs.set_item("unpack", true)?;
+            let former = loadtxt.call((path,), Some(&former_kwargs))?.getattr("T")?;
+            assert_array_matches_numpy(&candidate, &former)?;
+            drop(guard);
+
+            // A selected out-of-range tail offset still reaches NumPy's own
+            // error path and preserves its exception type.
+            let out_of_range = PyDict::new(py);
+            out_of_range.set_item("delimiter", ",")?;
+            out_of_range.set_item("dtype", &float64)?;
+            out_of_range.set_item("skiprows", 1_i64)?;
+            out_of_range.set_item("usecols", vec![-65_i64])?;
+            let candidate_error = loadtxt.call((path,), Some(&out_of_range));
+            let oracle_error = numpy_loadtxt.call((path,), Some(&out_of_range));
+            assert!(candidate_error.is_err(), "out-of-range tail must error");
+            assert!(oracle_error.is_err(), "numpy rejects out-of-range tail");
+            assert_eq!(
+                candidate_error.unwrap_err().get_type(py).to_string(),
+                oracle_error.unwrap_err().get_type(py).to_string()
+            );
+
+            // One accepted row deliberately falls back because NumPy squeezes
+            // its shape differently from the retained generic FNP path.
+            let one_row_path = std::env::temp_dir().join(format!(
+                "fnp_loadtxt_negative_tail_one_row_{}.csv",
+                std::process::id()
+            ));
+            std::fs::write(&one_row_path, "1,2,3,4\n")?;
+            let one_row_path = one_row_path.to_str().expect("temporary path is UTF-8");
+            let one_row_kwargs = PyDict::new(py);
+            one_row_kwargs.set_item("delimiter", ",")?;
+            one_row_kwargs.set_item("dtype", &float64)?;
+            one_row_kwargs.set_item("usecols", vec![-1_i64, -2])?;
+            let one_row_candidate = loadtxt.call((one_row_path,), Some(&one_row_kwargs))?;
+            let one_row_oracle = numpy_loadtxt.call((one_row_path,), Some(&one_row_kwargs))?;
+            assert_array_matches_numpy(&one_row_candidate, &one_row_oracle)?;
+            assert_eq!(
+                one_row_candidate
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
+                [2]
             );
 
             Ok(())
