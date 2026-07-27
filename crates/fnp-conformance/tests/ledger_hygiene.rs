@@ -24,6 +24,52 @@ use std::path::PathBuf;
 /// Set to the date this gate landed; do not move it backwards to silence a row.
 const ENFORCEMENT_DATE: &str = "2026-07-26";
 
+/// Win rows dated on or after this must declare `SELF-SPEEDUP` or `VS-INCUMBENT`
+/// in the heading.
+const WIN_CLASS_ENFORCEMENT_DATE: &str = "2026-07-26";
+
+/// Win rows that predate the win-class policy and whose measurement base only
+/// their author can state authoritatively. This one looks like a `SELF-SPEEDUP`
+/// from the outside — the base arm appears to be our own former formatter — but
+/// inferring and silently relabelling someone else's measurement is exactly the
+/// kind of guess this gate exists to prevent.
+///
+/// This list may only shrink. Remove an entry by adding the class to its
+/// heading, never by broadening the match.
+const WIN_CLASS_PENDING_AUTHOR_CLASSIFICATION: [&str; 1] =
+    ["`tofile_text` manual integer formatting"];
+
+/// An aggregate row — an audit closeout, bank confirmation, or roll-up that
+/// reports several results at once — is not a single competitive claim, so the
+/// win class belongs on the individual rows it summarises rather than on it.
+///
+/// This is a correction to this gate's own first cut, which flagged
+/// `CANONICAL RESURRECTION CLOSEOUT (3 KEEP, 2 REJECT/VALID-AB)` as an
+/// unlabelled win. It is not a win row at all; `is_keep` matched the word KEEP
+/// inside a tally. Excluding aggregates here is the right fix; adding them to
+/// the pending list above would have recorded a false positive as real debt.
+fn is_aggregate_row(heading: &str) -> bool {
+    let upper = heading.to_uppercase();
+    upper.contains("CLOSEOUT")
+        || upper.contains("BANK CONFIRMATION")
+        || upper.contains("ROLL-UP")
+        || upper.contains("SUMMARY")
+        // A tally such as "(3 KEEP, 2 REJECT...)" counts results rather than
+        // asserting one.
+        || regex_like_tally(&upper)
+}
+
+/// True when the heading contains a digit immediately followed by ` KEEP`, which
+/// is how the tally form reads. Hand-rolled rather than pulling in a regex crate
+/// for one pattern in a test.
+fn regex_like_tally(upper: &str) -> bool {
+    upper.match_indices(" KEEP").any(|(index, _)| {
+        upper[..index]
+            .trim_end()
+            .ends_with(|c: char| c.is_ascii_digit())
+    })
+}
+
 /// Pre-[`ENFORCEMENT_DATE`] REJECT rows that record neither a null control nor a
 /// counted mechanism, as measured by *these predicates* at the commit that
 /// introduced this gate. The count may shrink (a row gains a null, or is re-run
@@ -329,6 +375,134 @@ fn new_keep_rows_carry_an_executing_elf_sha256() {
     );
 }
 
+/// Read a `LABEL: value` field from a row, matching only the label's own line.
+/// Mirrors `perf_ledger_preflight`'s `field_value` so both gates agree on what
+/// counts as a field — a continuation line is not part of the value.
+fn ledger_field<'a>(body: &'a str, expected_label: &str) -> Option<&'a str> {
+    body.lines().find_map(|line| {
+        let (label, value) = line.split_once(':')?;
+        label
+            .trim()
+            .eq_ignore_ascii_case(expected_label)
+            .then_some(value.trim())
+    })
+}
+
+/// The incumbent must be named, versioned, and proven at runtime — not assumed.
+fn records_runtime_incumbent_identity(body: &str) -> bool {
+    ledger_field(body, "INCUMBENT_IDENTITY").is_some_and(|value| {
+        let lower = value.to_ascii_lowercase();
+        lower.contains("numpy")
+            && lower.bytes().any(|byte| byte.is_ascii_digit())
+            && !lower.contains("unavailable")
+            && (lower.contains("runtime_asserted") || lower.contains("runtime_verified"))
+    })
+}
+
+/// The incumbent's own timing, so the comparison can be re-derived rather than
+/// taken on trust from a ratio alone.
+fn records_incumbent_arm_median(body: &str) -> bool {
+    ledger_field(body, "INCUMBENT_ARM_MEDIAN").is_some_and(|value| {
+        let lower = value.to_ascii_lowercase();
+        let has_decimal = value.as_bytes().windows(3).any(|window| {
+            window[0].is_ascii_digit() && window[1] == b'.' && window[2].is_ascii_digit()
+        });
+        let has_time_unit = [" ns", " us", " µs", " ms", " sec", " second"]
+            .iter()
+            .any(|unit| lower.contains(unit));
+        has_decimal && has_time_unit
+    })
+}
+
+/// Two arms across two invocations is not a vs-incumbent measurement.
+fn records_same_comparison_invocation(body: &str) -> bool {
+    ledger_field(body, "COMPARISON_INVOCATION")
+        .is_some_and(|value| value.eq_ignore_ascii_case("SAME"))
+}
+
+/// The two win classes. A `SELF-SPEEDUP` measures our own former code as the
+/// base; a `VS-INCUMBENT` measures the real NumPy call, timed side-by-side in
+/// the same invocation. They are not interchangeable and an unlabelled win is
+/// read as competitive by whoever quotes it next.
+fn declares_win_class(heading: &str) -> bool {
+    let upper = heading.to_uppercase();
+    upper.contains("SELF-SPEEDUP") || upper.contains("VS-INCUMBENT")
+}
+
+/// THE WIN-CLASS GATE. Across 369 campaign commits the fleet produced roughly 60
+/// self-speedups and 3 vs-incumbent wins, and the two were quoted alike. They
+/// are different claims: beating our own former path by 4x while still losing to
+/// NumPy is maintenance, not domination. Every new win must say which it is.
+///
+/// The failure mode this exists to stop is a *shared component in the baseline*:
+/// if both arms call the same expensive incumbent code, the ratio measures us
+/// against ourselves. This repo shipped exactly that — a bool-return arm whose
+/// identical real-NumPy allocation tail ran on both sides.
+#[test]
+fn new_win_rows_declare_self_speedup_or_vs_incumbent() {
+    let offenders: Vec<String> = parse_entries()
+        .into_iter()
+        .filter(|e| !e.date.is_empty() && e.date.as_str() >= WIN_CLASS_ENFORCEMENT_DATE)
+        .filter(|e| is_keep(&e.heading))
+        .filter(|e| !declares_win_class(&e.heading))
+        .filter(|e| !is_aggregate_row(&e.heading))
+        .filter(|e| {
+            !WIN_CLASS_PENDING_AUTHOR_CLASSIFICATION
+                .iter()
+                .any(|pending| e.heading.contains(pending))
+        })
+        .map(|e| format!("  docs/NEGATIVE_EVIDENCE.md:{} — {}", e.line, e.heading))
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "{} win row(s) dated on/after {WIN_CLASS_ENFORCEMENT_DATE} do not declare a win \
+         class in the heading:\n{}\n\n\
+         Add one of:\n  \
+         WIN (KEEP, SELF-SPEEDUP)   — base arm is our own former code. Maintenance. \
+         Landable and ledgerable, but never quotable as a competitive claim.\n  \
+         WIN (KEEP, VS-INCUMBENT)   — base arm is the real NumPy call, timed \
+         side-by-side in the SAME invocation, end-to-end, with no expensive \
+         component shared by both arms.\n\n\
+         If both arms run the same incumbent code, it is a SELF-SPEEDUP no matter \
+         how large the ratio.",
+        offenders.len(),
+        offenders.join("\n")
+    );
+}
+
+/// A `VS-INCUMBENT` row must record the incumbent arm's own timing, not just a
+/// ratio, so the comparison can be re-derived rather than taken on trust.
+#[test]
+fn vs_incumbent_rows_record_the_incumbent_arm() {
+    let offenders: Vec<String> = parse_entries()
+        .into_iter()
+        .filter(|e| !e.date.is_empty() && e.date.as_str() >= WIN_CLASS_ENFORCEMENT_DATE)
+        .filter(|e| e.heading.to_uppercase().contains("VS-INCUMBENT"))
+        // Same three explicit fields the pre-commit preflight requires. Kept
+        // deliberately identical: two gates checking the same claim by different
+        // rules is worse than one, because whichever is looser becomes the real
+        // standard. Prose matching was the first cut here and was too loose.
+        .filter(|e| {
+            !(records_runtime_incumbent_identity(&e.body)
+                && records_incumbent_arm_median(&e.body)
+                && records_same_comparison_invocation(&e.body))
+        })
+        .map(|e| format!("  docs/NEGATIVE_EVIDENCE.md:{} — {}", e.line, e.heading))
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "{} VS-INCUMBENT row(s) do not evidence the incumbent arm:\n{}\n\n\
+         A vs-incumbent row must name NumPy and record that the incumbent's identity \
+         and version were asserted AT RUNTIME inside the measured binary. \
+         franken_networkx published a 2.6x whose baseline was already dispatched to \
+         their own code; genuine NetworkX was 1.88x SLOWER.",
+        offenders.len(),
+        offenders.join("\n")
+    );
+}
+
 /// Every REJECT row must carry a retry predicate. A rejection without one is a
 /// dead end nobody can reopen, which is how a void row becomes permanent.
 #[test]
@@ -397,5 +571,69 @@ fn unavailable_elf_cannot_borrow_a_source_hash() {
     assert!(!records_executing_elf_sha256(
         "Executing ELF SHA-256: unavailable.\n\
          source_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    ));
+}
+
+#[test]
+fn aggregate_rows_are_not_treated_as_single_win_claims() {
+    assert!(is_aggregate_row(
+        "CANONICAL RESURRECTION CLOSEOUT (3 KEEP, 2 REJECT/VALID-AB): six-class hand audit"
+    ));
+    assert!(is_aggregate_row(
+        "LANE M BANK CONFIRMATION (2 KEEP): tail ring"
+    ));
+    // A real single-lever win must still be caught.
+    assert!(!is_aggregate_row(
+        "WIN (KEEP): f64 isin end-to-end vs NumPy - 19.947108x"
+    ));
+}
+
+#[test]
+fn win_class_labels_are_recognised() {
+    assert!(declares_win_class("WIN (KEEP, VS-INCUMBENT): f64 isin"));
+    assert!(declares_win_class(
+        "RESURRECTION WIN (KEEP, SELF-SPEEDUP): loadtxt"
+    ));
+    assert!(!declares_win_class("WIN (KEEP): unlabelled"));
+}
+
+#[test]
+fn incumbent_identity_must_be_runtime_asserted_on_its_own_line() {
+    // A continuation line is not part of the field value; the required token has
+    // to sit on the label's own line. This exact mistake blocked the first
+    // VS-INCUMBENT row at pre-commit.
+    assert!(!records_runtime_incumbent_identity(
+        "INCUMBENT_IDENTITY: numpy.isin, numpy.__version__=2.4.6,\nruntime_asserted"
+    ));
+    assert!(records_runtime_incumbent_identity(
+        "INCUMBENT_IDENTITY: numpy.isin numpy.__version__=2.4.6 runtime_asserted=true"
+    ));
+    // Naming numpy without proving it at runtime is the dispatch trap.
+    assert!(!records_runtime_incumbent_identity(
+        "INCUMBENT_IDENTITY: numpy.isin numpy.__version__=2.4.6"
+    ));
+    assert!(!records_runtime_incumbent_identity(
+        "INCUMBENT_IDENTITY: unavailable, numpy 2.4.6 runtime_asserted"
+    ));
+}
+
+#[test]
+fn incumbent_arm_median_needs_a_time_unit() {
+    assert!(records_incumbent_arm_median(
+        "INCUMBENT_ARM_MEDIAN: 67.243286 ms (numpy.isin)"
+    ));
+    // A bare ratio is not the incumbent's timing.
+    assert!(!records_incumbent_arm_median(
+        "INCUMBENT_ARM_MEDIAN: 19.947108"
+    ));
+}
+
+#[test]
+fn comparison_invocation_must_be_same() {
+    assert!(records_same_comparison_invocation(
+        "COMPARISON_INVOCATION: SAME"
+    ));
+    assert!(!records_same_comparison_invocation(
+        "COMPARISON_INVOCATION: separate runs"
     ));
 }

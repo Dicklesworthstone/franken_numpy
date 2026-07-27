@@ -4060,6 +4060,153 @@ fn bench_loadtxt_selected_bool_median_gate(_c: &mut Criterion) {
 /// `run_median_ci_contract` asserts the two arms' output checksums are equal on
 /// every round, so byte-identity is enforced continuously during timing rather
 /// than once beforehand.
+/// VS-INCUMBENT, end-to-end: `fnp.isin` against `numpy.isin` on f64.
+///
+/// This is a **missing-capability** surface, which is where our real margins
+/// live. NumPy's `isin` has a fast `table` method that is integer-only; float
+/// input falls back to a sort-based path. We do not share that path, so nothing
+/// expensive is common to the two arms — the whole of our call is measured
+/// against the whole of theirs.
+///
+/// All six fleet traps are guarded here, in order:
+///
+/// 1. DISPATCH — the incumbent's identity is asserted **at runtime inside this
+///    binary**: the module is genuinely `numpy`, the callable's `__module__` is
+///    under `numpy`, and it is not the same object as ours. franken_networkx
+///    published a 2.6x whose baseline was already dispatched to their own code
+///    while genuine NetworkX was 1.88x SLOWER.
+/// 2. UNMATCHED CONFIG — both arms receive the identical two array objects; no
+///    dtype, order, or option differs.
+/// 3. NON-INTERLEAVED — `run_median_ci_contract` interleaves both arms inside one
+///    measured routine with the order alternating per round.
+/// 4. CORE CONTENTION — the contract establishes a base/base A/A null in the same
+///    invocation before the effect. If that null is not near unity the window is
+///    void regardless of the effect.
+/// 5. CLIENT-BOUND — the timed region is the call itself, and both arms marshal
+///    the same pre-built Python objects, so harness cost is common and small
+///    relative to a 1M-element scan.
+/// 6. SHARED COMPONENT — none. `fnp.isin` allocates and computes its own result;
+///    `numpy.isin` allocates and computes its own. This is the trap the
+///    bool-return arm fell into and the reason this arm exists.
+fn bench_isin_f64_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_isin_vs_numpy").expect("isin vs-numpy bench module");
+        fnp_python(&module).expect("initialize fnp_python isin bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+
+        // TRAP 1 — prove the incumbent is genuinely NumPy, at runtime, here.
+        let numpy_name = numpy
+            .getattr("__name__")
+            .expect("numpy __name__")
+            .extract::<String>()
+            .expect("numpy __name__ str");
+        assert_eq!(numpy_name, "numpy", "incumbent module is not numpy");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy __version__")
+            .extract::<String>()
+            .expect("numpy __version__ str");
+        let np_isin = numpy.getattr("isin").expect("numpy isin");
+        let fnp_isin = module.getattr("isin").expect("fnp isin");
+        let incumbent_module = np_isin
+            .getattr("__module__")
+            .expect("numpy isin __module__")
+            .extract::<String>()
+            .expect("numpy isin __module__ str");
+        assert!(
+            incumbent_module.starts_with("numpy"),
+            "incumbent isin is not defined under numpy: {incumbent_module}"
+        );
+        assert!(
+            !np_isin.is(&fnp_isin),
+            "dispatch trap: the incumbent arm resolved to our own callable"
+        );
+        println!(
+            "INCUMBENT_IDENTITY arm=numpy.isin numpy.__version__={numpy_version} \
+             callable_module={incumbent_module} dispatch_assert=passed"
+        );
+
+        // TRAP 2 — one pair of inputs, handed to both arms unchanged.
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260727)\n\
+                 isin_a = rng.standard_normal(1_000_000)\n\
+                 isin_b = rng.standard_normal(1_000)\n\
+                 isin_b[:200] = isin_a[:200]\n",
+            )
+            .expect("isin setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("isin corpus setup");
+        let isin_a = namespace.get_item("isin_a").expect("isin_a present");
+        let isin_b = namespace.get_item("isin_b").expect("isin_b present");
+
+        let checksum_of = |array: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let bytes = array
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec");
+            bytes
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        // Behavior before timing: our whole result must equal theirs, byte for
+        // byte. `run_median_ci_contract` re-asserts this every round.
+        let ours = fnp_isin.call1((&isin_a, &isin_b)).expect("fnp isin");
+        let theirs = np_isin.call1((&isin_a, &isin_b)).expect("numpy isin");
+        assert_eq!(
+            checksum_of(&ours),
+            checksum_of(&theirs),
+            "fnp.isin and numpy.isin disagree — a perf comparison of divergent \
+             results is meaningless",
+        );
+
+        let mut time_incumbent = || {
+            let started = Instant::now();
+            let result = np_isin
+                .call1((black_box(&isin_a), black_box(&isin_b)))
+                .expect("numpy isin arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let mut time_ours = || {
+            let started = Instant::now();
+            let result = fnp_isin
+                .call1((black_box(&isin_a), black_box(&isin_b)))
+                .expect("fnp isin arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+
+        // Base arm is the INCUMBENT, so the reported ratio reads
+        // numpy-over-fnp: above 1.0 means we are faster.
+        let _ = common::run_median_ci_contract(
+            "python_isin_f64_1m_vs_numpy",
+            &mut time_incumbent,
+            &mut time_ours,
+        );
+    });
+}
+
 fn bench_bool_storage_bytes_median_gate(c: &mut Criterion) {
     let _ = c;
     const N: usize = 8_000_000;
@@ -4140,6 +4287,10 @@ fn bench_bool_storage_bytes_median_gate(c: &mut Criterion) {
 
 fn main() {
     common::gated_main(&[
+        (
+            "bench_isin_f64_vs_numpy_median_gate",
+            bench_isin_f64_vs_numpy_median_gate,
+        ),
         (
             "bench_bool_storage_bytes_median_gate",
             bench_bool_storage_bytes_median_gate,

@@ -4,6 +4,91 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-27 - WIN (KEEP, VS-INCUMBENT): f64 `isin` end-to-end vs NumPy - 19.947108x on a missing-capability surface
+
+`BlackThrush`. The first row in this ledger measured under the vs-incumbent
+contract: our whole call against NumPy's whole call, in one invocation, with no
+expensive component shared by the two arms.
+
+WHY THIS SURFACE: NumPy's `isin` has a fast `table` method that is **integer
+only**; float input falls back to a sort-based path. This is a
+missing-capability gap, not a constant-factor race, which is where this repo's
+largest verified margins have always come from. It is deliberately not square
+f64 GEMM, which is OpenBLAS's strength and where our no-FMA bit-exactness
+contract caps us at the no-FMA AVX2 peak.
+
+MEASURED on pinned `vmi1227854`, release with LTO off, 41 rounds, `min_of=3`,
+base/base null established before the interleaved effect, order alternating per
+round, via `common::run_median_ci_contract`. The base arm is NumPy, so a ratio
+above 1.0 means we are faster. Input: 1,000,000 f64 against a 1,000-element
+test set with 200 planted hits, one pair of array objects handed to both arms
+unchanged.
+
+`bench_elf_sha256=43760732fe0ec60ac5e2d4d020b253ea720cf0d3996a362204c4d94934ebaabd`
+(47,330,008 bytes)
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** numpy/numpy ratio median 0.988449, CI95
+[0.962628, 1.042274], 41 rounds, min_of=3
+
+**Legacy incumbent arm (same invocation):** name=numpy version=2.4.6 artifact_sha256=43760732fe0ec60ac5e2d4d020b253ea720cf0d3996a362204c4d94934ebaabd invocation_id=isin-f64-1m-vmi1227854-20260727 measured_ratio=19.947108x median=67.243286ms
+
+The identity assertion runs inside the measured binary before timing and checks
+three things: the module's `__name__` is `numpy`, `numpy.isin.__module__` is
+under `numpy`, and the incumbent callable is not the same object as ours. The
+binary printed `INCUMBENT_IDENTITY arm=numpy.isin numpy.__version__=2.4.6
+callable_module=numpy dispatch_assert=passed` before the first round.
+
+| row | arm A (numpy) | arm B (fnp) | ratio median | ratio CI95 | cv |
+|---|---:|---:|---:|---:|---:|
+| A/A null (numpy/numpy) | 63.261940 ms | 63.424353 ms | 0.988449 | `[0.962628, 1.042274]` | 15.492% |
+| effect (numpy/fnp) | 67.243286 ms | **3.605672 ms** | **19.947108** | **`[18.450596, 21.796353]`** | 17.635% |
+
+**Verdict: DECIDABLE_WIN.** `null_half_width=0.042274`, so `required_2x_delta`
+is 0.084548; the effect delta of 18.947108 exceeds it by more than two orders of
+magnitude, and the CIs are disjoint by a wide margin. Both the null and effect
+rows report checksum `fd5d32a822fe307b`, so every round produced byte-identical
+output from the two arms.
+
+ALL SIX FLEET TRAPS, guarded and evidenced:
+
+1. **Dispatch** — the incumbent's identity is asserted at runtime inside the
+   measured binary: module is genuinely `numpy`, `numpy.isin.__module__` is
+   under `numpy`, and the callable is not the same object as ours. Version
+   printed. franken_networkx published a 2.6x whose baseline was already
+   dispatched to their own code while genuine NetworkX was 1.88x SLOWER.
+2. **Unmatched config** — one pair of array objects, identical dtype, shape and
+   order, handed to both arms; no option differs.
+3. **Non-interleaved arms** — both arms run inside one measured routine with the
+   order alternating per round, so unequal host-load degradation cancels.
+4. **Core contention** — pinned worker, and the numpy/numpy A/A null in the same
+   invocation reads 0.988449 with CI `[0.962628, 1.042274]`, bracketing unity.
+   frankenredis voided a whole window whose A/A between identical binaries read
+   0.556; ours is clean.
+5. **Client-bound harness** — the timed region is the call; both arms marshal
+   the same pre-built objects, so harness cost is common and small against a
+   1M-element scan. The 63 ms numpy arm is not marshaling.
+6. **Shared component** — none. `fnp.isin` allocates and computes its own
+   result; `numpy.isin` allocates and computes its own. This is the trap the
+   2026-07-26 bool-return arm fell into, which is why this arm exists.
+
+SCOPE, stated so it is not over-quoted: 19.947108x is **this shape** —
+1M f64 haystack, 1,000-element needle, on this worker under numpy 2.4.6. The
+ratio depends on both operand sizes, because what we beat is NumPy's sort-based
+fallback whose cost scales with the needle. The historical 530x `isin` row in
+this ledger is a different shape and neither number generalises to the other.
+Quote the shape with the ratio, always.
+
+COUNTED_MECHANISM: 1 fewer algorithmic class - NumPy performs a sort-based
+membership test on float input because its O(1) `table` path admits integers
+only; we do not sort.
+
+Retry predicate: reopen only to widen the measured shape grid (needle and
+haystack sizes), not to re-decide this point. Re-measure if numpy gains a
+non-integer `table` path, which would remove the capability gap entirely - watch
+`numpy/lib/_arraysetops_impl.py` for a float-admitting `kind="table"`.
+
 ## 2026-07-27 - RESURRECTION WIN (KEEP): `tofile_text` manual integer formatting - 1.215448x under production-path executed-ELF A/A median-CI
 
 `BeigeDog`, bead `franken_numpy-ixs5y.350`, cod / Lane M. This closes corrected
@@ -392,7 +477,40 @@ linear upper bound. Reopen this surface only for a different exact envelope
 that counts at least 50% fewer `expm1` calls at `p=0.8`, preserves the output
 and next RNG word, and is re-decided under the same pinned-worker A/A
 median-CI gate.
-## 2026-07-26 - WIN (KEEP): the bool return path allocated a second full-size buffer to rebuild bytes it already had - 4.310770x, DECIDABLE_WIN
+## 2026-07-27 - CLASS CORRECTION to the row below: 4.310770x is a SELF-SPEEDUP, not a NumPy comparison, and its scope is narrower than stated
+
+`BlackThrush`. Two corrections to the 2026-07-26 bool-return-path row, both
+against my own work.
+
+**CLASS: `SELF-SPEEDUP`, not a competitive claim.** The arm timed
+`Vec<u8>::collect` + NumPy tail against reinterpret + NumPy tail. The **NumPy
+allocation and copy ran identically in BOTH arms** — a shared component in the
+baseline, which is trap 6 of the fleet trap list. A shared expensive component
+on both sides means the measurement is fnp-old against fnp-new. 4.310770x is
+how much this path improved on *itself*; it says nothing about NumPy, and it
+must never be quoted as a vs-NumPy ratio. The lever is still real and still
+shipped — removing a redundant full-size allocation cannot make anything
+slower — but its class was wrong.
+
+**SCOPE: narrower than the row implies.** The measurement holds for the common
+materialization funnel (`build_numpy_array_from_storage`'s `ArrayStorage::Bool`
+arm) under **one declared glibc allocator configuration** — default
+`M_MMAP_THRESHOLD` of 128 KiB, at 8,000,000 elements, so the removed allocation
+crossed into `mmap`/`munmap` territory. Under a raised `MALLOC_MMAP_THRESHOLD_`,
+or below 131,072 elements, the removed allocation is free-list served and the
+ratio collapses toward the cost of the removed conversion pass alone. The row
+below states the size dependence but not the allocator-configuration
+dependence; both govern.
+
+What is unconditional: the allocation and the pass are gone, and byte-identity
+is structural. What is conditional: the size of the number.
+
+A vs-incumbent measurement of this surface requires an end-to-end arm — a whole
+fnp call against a whole NumPy call, with no shared component — and is tracked
+separately. Do not re-run the same-tail comparator expecting a competitive
+number; it cannot produce one by construction.
+
+## 2026-07-26 - WIN (KEEP, SELF-SPEEDUP): the bool return path allocated a second full-size buffer to rebuild bytes it already had - 4.310770x own-former-path, DECIDABLE_WIN
 
 > **MODEL-INTEGRITY CORRECTION (2026-07-27):** the code proof and measured
 > 4.310770x result stand. The edited route is the common
@@ -467,6 +585,8 @@ justification: the former arm pays an 8 MB allocation, an 8-million-iteration
 candidate pays. The candidate pays only the shared tail. So the removed work is
 most of the former arm's total, not a fraction of it - the measurement is
 consistent with the mechanism rather than surprising given it.
+
+**Campaign result class:** maintenance-self-speedup
 
 SCOPE: this is sub-128 KiB free-list churn only below 131,072 elements, where
 the win narrows; the measured shape is 8,000,000 bools. It is independent of
@@ -606,7 +726,18 @@ Canonical yield is **3/5**, plus the two allocation-addendum directional
 levers re-won and one additional Zipf frontier KEEP. No three-REJECT streak
 occurred; the NO-CEILING vein switch was not triggered.
 
-## 2026-07-26 - RESURRECTION WIN (KEEP): selected-bool `loadtxt(usecols)` direct token parse - 3.6368x under the median-CI gate, overturning the cv-gate REJECT of `.377`
+## 2026-07-26 - RESURRECTION WIN (KEEP, SELF-SPEEDUP): selected-bool `loadtxt(usecols)` direct token parse - 3.6368x vs our own former path, overturning the cv-gate REJECT of `.377`
+
+**CLASS CORRECTION 2026-07-27 (`BlackThrush`): `SELF-SPEEDUP`.** The base arm is
+`fnp.loadtxt` with negative `usecols`, which routes to our own former
+owned-token path. That is the right control for *isolating the lever* — same
+binary, same file, same selection — but both arms are ours, so 3.6368x measures
+how much this path improved on itself. It is not a NumPy comparison and must not
+be quoted as one. The cod lane's independent 3.496057x has the same base and the
+same class. A vs-incumbent number for this surface needs an end-to-end
+`fnp.loadtxt` against `numpy.loadtxt` arm, tracked separately.
+
+**Campaign result class:** maintenance-self-speedup
 
 > **MODEL-INTEGRITY CORRECTION (2026-07-27):** this first redecision used
 > p10/p90 order statistics, not the required bootstrapped median CI. Its route,

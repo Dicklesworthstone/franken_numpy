@@ -548,12 +548,82 @@ It also requires a concrete retry predicate and a unique heading, and it caps
 the grandfathered historical debt so backdating a row to dodge the gate trips a
 second test instead.
 
+### What counts as a win — SELF-SPEEDUP vs vs-INCUMBENT
+
+These are different things and the ledger must say which one a row is.
+
+| Class | Base arm | Status |
+|---|---|---|
+| **SELF-SPEEDUP** | our own former code | **Maintenance.** Land it, ledger it, label it. **Never quote it as a competitive claim.** |
+| **VS-INCUMBENT** | the real NumPy call, timed **side-by-side in the same invocation** | Campaign output. |
+
+A same-binary former/candidate A/B is the right way to *isolate a lever* — it is
+the cleanest control we have — but it measures how much we improved on
+ourselves, which says nothing about NumPy. Only an arm that runs the incumbent
+in the same process, same round, alternating order, produces a number that may
+be quoted against NumPy.
+
+Rules:
+
+- **Put the class in the row heading**: `WIN (KEEP, SELF-SPEEDUP)` or
+  `WIN (KEEP, VS-INCUMBENT)`. `ledger_hygiene.rs` fails CI on a `WIN`/`KEEP`
+  heading dated on/after its enforcement date that carries neither.
+- A `VS-INCUMBENT` row must record the incumbent arm's own median, not just a
+  ratio, so the comparison can be re-derived.
+- Two arms across two invocations, two binaries, or two workers is **not** a
+  vs-incumbent measurement. Cross-worker and cross-binary A/Bs are invalid.
+- Beating our own former path by 4× while still losing to NumPy is a
+  self-speedup. Say so plainly in the row rather than letting the ratio imply
+  otherwise.
+
+### The six traps — all have already produced false wins in this fleet
+
+Check every one before you quote a vs-incumbent ratio.
+
+1. **Dispatch trap.** Assert the incumbent arm's type and identity **at
+   runtime**, inside the measured binary. franken_networkx published a "2.6×"
+   whose baseline was already dispatched to their own code; genuine NetworkX was
+   **1.88× slower**. For us: assert `numpy.__name__ == "numpy"`, that the
+   callable is not one of ours, and print the incumbent's version.
+2. **Unmatched config.** frankensqlite compared `synchronous=FULL` against
+   `NORMAL`; franken_whisper compared its greedy decode against a default
+   beam-5. Both arms must receive identical dtype, shape, order, and options.
+3. **Non-interleaved arms.** Interleave both arms inside **one** measured
+   routine with alternating order. Host load degrades arms unequally —
+   frankenfs measured the C arm degrading ~3× harder, which biased the ratio
+   *in their own favour*.
+4. **Core contention.** Pin, and keep an A/A null between identical arms in the
+   same invocation. frankenredis invalidated an entire window after a peer
+   pinned 53% to one arm's core; their A/A between identical binaries read
+   **0.556**. If the null is not near unity the window is void, whatever the
+   effect says.
+5. **Client-bound harness.** Confirm the measured cost is the thing under test
+   and not harness/marshaling overhead shared by both arms.
+6. **Shared component as baseline.** If both arms call the same expensive
+   incumbent code, you are measuring yourself. This repo produced exactly that:
+   a bool-return arm where the *identical real NumPy allocation tail* ran in
+   both arms, so the 4.31× was fnp-old vs fnp-new — a self-speedup, not a
+   NumPy comparison. A vs-incumbent arm must be **end-to-end**: our whole call
+   against their whole call.
+
+### Where domination actually lives
+
+Our largest verified margins are all **missing-capability** surfaces — places
+NumPy has no fast path at all: `isin` on floats (its `table` method is
+int-only), `float16` ordering and GEMM (no f16 BLAS), integer matmul (no
+integer BLAS), ASCII `translate`, wide-key string set-ops. Hunt there.
+
+Do **not** open square compute-bound f64 GEMM against OpenBLAS. That is its
+strength, our kernel is bit-exactness-constrained to no-FMA and already at the
+no-FMA AVX2 peak, and the remaining gap is the price of reproducibility.
+
 ### How to decide a perf claim
 
 **Gate on the median-CI, never on `cv`.** `cv < 5%` is unreachable on this
 hardware and rejects levers rather than measurements — it is what voided this
-repo's two highest-value rows, one of which later re-won at 3.64×. Report `cv`
-as provenance only.
+repo's two highest-value rows, one of which later re-decided at 3.64× as a
+**self-speedup** (own former path as base, not NumPy). Report `cv` as
+provenance only.
 
 The harness already exists — **do not build another one**:
 
