@@ -4,12 +4,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 const DEFAULT_LEDGER: &str = "docs/NEGATIVE_EVIDENCE.md";
+const ENFORCEMENT_DATE: &str = "2026-07-26";
 
 #[derive(Debug)]
 enum Mode {
     Query { lever: String, surface: String },
     AuditStaged,
     AuditFile(PathBuf),
+    SelfCheck,
 }
 
 #[derive(Debug)]
@@ -26,6 +28,7 @@ impl Config {
         let mut surface = None;
         let mut audit_staged = false;
         let mut audit_file = None;
+        let mut self_check = false;
         let mut index = 0usize;
 
         while let Some(argument) = args.get(index) {
@@ -47,6 +50,7 @@ impl Config {
                     index += 1;
                     audit_file = Some(PathBuf::from(required_value(&args, index, "--audit-file")?));
                 }
+                "--self-check" => self_check = true,
                 "-h" | "--help" => {
                     print_help();
                     std::process::exit(0);
@@ -58,15 +62,21 @@ impl Config {
 
         let selected_modes = usize::from(audit_staged)
             + usize::from(audit_file.is_some())
+            + usize::from(self_check)
             + usize::from(lever.is_some());
         if selected_modes != 1 {
             return Err(
-                "select exactly one mode: --lever/--surface, --audit-staged, or --audit-file"
+                "select exactly one mode: --lever/--surface, --audit-staged, --audit-file, or --self-check"
                     .to_owned(),
             );
         }
 
-        let mode = if audit_staged {
+        let mode = if self_check {
+            if surface.is_some() {
+                return Err("--surface is only valid with --lever".to_owned());
+            }
+            Mode::SelfCheck
+        } else if audit_staged {
             if surface.is_some() {
                 return Err("--surface is only valid with --lever".to_owned());
             }
@@ -87,7 +97,7 @@ impl Config {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct LedgerEntry {
     heading: String,
     body: String,
@@ -114,6 +124,7 @@ USAGE:
   perf_ledger_preflight --lever <DESCRIPTION> --surface <TARGET>
   perf_ledger_preflight --audit-staged
   perf_ledger_preflight --audit-file <PATH>
+  perf_ledger_preflight --self-check
 
 OPTIONS:
   --ledger <PATH>       Negative-evidence ledger (default: {DEFAULT_LEDGER})
@@ -121,6 +132,8 @@ OPTIONS:
   --surface <TEXT>      Target function, module, file, or benchmark surface
   --audit-staged        Validate newly staged ledger entries
   --audit-file <PATH>   Validate entries in a standalone fixture
+  --self-check          Audit the enforced live ledger, then mutation-test its
+                        own valid rows against the three hardened predicates
   -h, --help            Show this help
 
 Exit 0 means clear. Exit 2 means blocked. Query mode prints matching prior
@@ -160,6 +173,20 @@ fn split_entries(text: &str) -> Vec<LedgerEntry> {
 
 fn entry_text(entry: &LedgerEntry) -> String {
     format!("{}\n{}", entry.heading, entry.body)
+}
+
+fn entry_date(entry: &LedgerEntry) -> Option<&str> {
+    let date = entry
+        .heading
+        .strip_prefix("## ")?
+        .split_whitespace()
+        .next()?;
+    let looks_like_date = date.len() == 10
+        && date.bytes().filter(|byte| *byte == b'-').count() == 2
+        && date
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'-');
+    looks_like_date.then_some(date)
 }
 
 fn normalized_contains(haystack: &str, needle: &str) -> bool {
@@ -297,6 +324,26 @@ fn contains_sha256(text: &str) -> bool {
     false
 }
 
+fn first_sha256(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut run_start = 0usize;
+    let mut run = 0usize;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if byte.is_ascii_hexdigit() {
+            if run == 0 {
+                run_start = index;
+            }
+            run += 1;
+            if run == 64 {
+                return Some(text[run_start..=index].to_owned());
+            }
+        } else {
+            run = 0;
+        }
+    }
+    None
+}
+
 fn has_elf_sha256(entry: &LedgerEntry) -> bool {
     entry.body.lines().any(|line| {
         let lower = line.to_ascii_lowercase();
@@ -390,6 +437,138 @@ fn audit_text(text: &str) -> bool {
     false
 }
 
+fn strip_null_evidence(entry: &LedgerEntry) -> LedgerEntry {
+    let body = entry
+        .body
+        .lines()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            !lower.contains("null_base_aa")
+                && !lower.contains("a/a")
+                && !lower.contains("null control")
+                && !lower.contains("null arm")
+                && !lower.contains("null floor")
+                && !lower.contains("null ratio")
+                && !lower.contains("null median")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    LedgerEntry {
+        heading: entry.heading.clone(),
+        body: format!(
+            "{body}\nA/A null must follow the median-CI policy in campaign section 2.3 for 41 rounds.\nRetry only after a quiet pinned rerun.\n"
+        ),
+    }
+}
+
+fn mutation_has_violation(entry: &LedgerEntry, reason: &'static str) -> bool {
+    audit_entries(std::slice::from_ref(entry))
+        .iter()
+        .any(|violation| violation.reason == reason)
+}
+
+fn self_check_ledger(ledger: &str) -> bool {
+    let entries = split_entries(ledger);
+    let enforced = entries
+        .iter()
+        .filter(|entry| entry_date(entry).is_some_and(|date| date >= ENFORCEMENT_DATE))
+        .cloned()
+        .collect::<Vec<_>>();
+    let live_violations = audit_entries(&enforced);
+    if !live_violations.is_empty() {
+        println!(
+            "BLOCKED live_ledger_integrity violations={}",
+            live_violations.len()
+        );
+        for violation in live_violations {
+            println!(
+                "violation heading={} reason={}",
+                violation.heading, violation.reason
+            );
+        }
+        return false;
+    }
+
+    let Some(reject_seed) = enforced.iter().find(|entry| {
+        is_reject(entry)
+            && has_measured_null(entry)
+            && !has_counted_mechanism(entry)
+            && retry_predicate(entry).is_some()
+    }) else {
+        println!("BLOCKED self-check found no valid live REJECT seed");
+        return false;
+    };
+    let policy_only_null = strip_null_evidence(reject_seed);
+    let caught_policy_only_null = mutation_has_violation(
+        &policy_only_null,
+        "REJECT lacks measured A/A null or COUNTED_MECHANISM",
+    );
+
+    let mut uncounted_mechanism = strip_null_evidence(reject_seed);
+    uncounted_mechanism
+        .body
+        .push_str("COUNTED_MECHANISM: allocation traffic unchanged.\n");
+    let caught_uncounted_mechanism = mutation_has_violation(
+        &uncounted_mechanism,
+        "REJECT lacks measured A/A null or COUNTED_MECHANISM",
+    );
+
+    let Some(keep_seed) = enforced
+        .iter()
+        .find(|entry| is_keep(entry) && has_elf_sha256(entry))
+    else {
+        println!("BLOCKED self-check found no valid live KEEP seed");
+        return false;
+    };
+    let Some(seed_sha256) = first_sha256(&entry_text(keep_seed)) else {
+        println!("BLOCKED self-check KEEP seed carried no extractable SHA-256");
+        return false;
+    };
+    let mut unavailable_elf = keep_seed.clone();
+    unavailable_elf.body = keep_seed
+        .body
+        .lines()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            !lower.contains("bench_elf_sha256")
+                && !lower.contains("executing elf sha")
+                && !lower.contains("executing-elf sha")
+                && !lower.contains("executing binary sha")
+                && !lower.contains("executable sha")
+                && !lower.contains("executable hash")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    unavailable_elf.body.push_str(&format!(
+        "\nExecuting ELF SHA-256: unavailable.\nsource_sha256={seed_sha256}\n"
+    ));
+    let caught_unavailable_elf =
+        mutation_has_violation(&unavailable_elf, "KEEP lacks executing-ELF SHA-256");
+
+    let defects_caught = [
+        caught_policy_only_null,
+        caught_uncounted_mechanism,
+        caught_unavailable_elf,
+    ]
+    .into_iter()
+    .filter(|caught| *caught)
+    .count();
+    if defects_caught != 3 {
+        println!(
+            "BLOCKED self-check defects_caught={defects_caught}/3 policy_only_null={caught_policy_only_null} uncounted_mechanism={caught_uncounted_mechanism} unavailable_elf_with_source_hash={caught_unavailable_elf}"
+        );
+        return false;
+    }
+
+    println!(
+        "SELF_CHECK PASS own_ledger_entries={} defects_caught=3/3 reject_seed={} keep_seed={}",
+        enforced.len(),
+        reject_seed.heading,
+        keep_seed.heading
+    );
+    true
+}
+
 fn run() -> Result<ExitCode, String> {
     let config = Config::parse()?;
     let clear = match config.mode {
@@ -408,6 +587,15 @@ fn run() -> Result<ExitCode, String> {
                 format!("failed to read audit file {}: {error}", path.display())
             })?;
             audit_text(&text)
+        }
+        Mode::SelfCheck => {
+            let ledger = fs::read_to_string(&config.ledger_path).map_err(|error| {
+                format!(
+                    "failed to read ledger {}: {error}",
+                    config.ledger_path.display()
+                )
+            })?;
+            self_check_ledger(&ledger)
         }
     };
     Ok(if clear {
@@ -530,5 +718,14 @@ source_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.
 ",
         );
         assert_eq!(audit_entries(&entries).len(), 1);
+    }
+
+    #[test]
+    fn live_ledger_self_check_catches_all_hardened_defect_classes() {
+        let ledger_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(DEFAULT_LEDGER);
+        let ledger = fs::read_to_string(ledger_path).expect("live ledger should be readable");
+        assert!(self_check_ledger(&ledger));
     }
 }

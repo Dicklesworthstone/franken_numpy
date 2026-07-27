@@ -562,6 +562,14 @@ against a landed commit. Rank 1 below is landed and verifiable.
 
 ### 5.1 Rank 1 — RE-WON and shipped (`c828e871`)
 
+> **MODEL-INTEGRITY CORRECTION (2026-07-27):** the `c828e871` p10/p90 decision
+> below was not a bootstrapped median-CI gate. The production route and byte
+> proof stand; the decisive bank is the later executed-ELF invocation
+> `4527aadbd8e543310622ac9f737bef8963273b57ed1cb1877a8c82fb3284b4fd`,
+> with A/A 1.001104 [0.994382, 1.002883] and effect
+> 3.465137 [3.255616, 3.666974]. The allocator-composability claim below is also
+> withdrawn: no exact FrankenNumPy allocation/fault counts were recorded.
+
 Pinned worker `vmi1227854`, release with LTO off, 20 retained observations,
 arms interleaved ABBA/BAAB, A/A null and A/B in the same invocation. The binary
 self-reported its own SHA-256 —
@@ -694,7 +702,12 @@ times.
 
 ---
 
-## 7. Re-run status
+## 7. Superseded re-run status
+
+> The “complete top five” table below used the preliminary queue. The corrected
+> queue has L2392 pending at rank 2 and the tail ring at rank 6; corrected
+> top-five status is 2 KEEP, 2 VALID-AB, 1 pending. This table is retained only
+> as provenance for the runs it actually lists.
 
 Complete for the ranked top five. The active campaign targets self-report the
 executing ELF SHA-256, run base/base before base/candidate in the same

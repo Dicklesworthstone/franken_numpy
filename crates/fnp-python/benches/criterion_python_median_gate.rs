@@ -4040,15 +4040,17 @@ fn bench_loadtxt_selected_bool_median_gate(_c: &mut Criterion) {
 }
 
 /// Isolates the two byte-producing shapes in `build_numpy_array_from_storage`'s
-/// `ArrayStorage::Bool` arm, which every boolean result in the library goes
-/// through (`isin`, comparisons, logical ops, `loadtxt(dtype=bool)`).
+/// `ArrayStorage::Bool` materialization arm. This is a common funnel for owned
+/// bool storage, but direct and passthrough bool-returning paths can bypass it.
 ///
 /// The former arm collected a second full-size `Vec<u8>` from the `Vec<bool>`
 /// before copying it into the NumPy buffer. Rust guarantees `bool` is size 1,
 /// align 1, and only ever the bit patterns 0x00/0x01 — exactly what
 /// `u8::from(b)` produced — so that collect walked every element to rebuild
-/// bytes it already had, and above glibc's 128 KiB threshold (131,072 bools)
-/// its allocation was an `mmap`/`munmap` pair plus kernel page-zeroing.
+/// bytes it already had. The 8,000,000-element measured configuration showed
+/// allocation-sensitive variance, but this harness did not count allocator
+/// calls or faults. Glibc's 128 KiB mmap threshold is only its initial/default
+/// setting and may adapt, so it is not a universal boundary.
 ///
 /// Both arms below perform the *identical* NumPy tail — `numpy.empty(n, uint8)`
 /// then `PyBuffer::copy_from_slice` — so the only difference measured is the

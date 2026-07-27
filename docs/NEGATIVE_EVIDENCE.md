@@ -4,6 +4,54 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-27 - MODEL-INTEGRITY REMEDIATION CLOSEOUT: 27/27 verdicts reconciled, live-ledger gate mutation-tested
+
+`BeigeDog`, cod / Lane M. Final reconciliation of the 27-commit exposure
+window below. Every `CORRECTED` verdict has a concrete landed correction; no
+commit was `RETRACTED`.
+
+| Corrected commit | Landed correction |
+|---|---|
+| `a65315a5` | `02ec3fed` replaces the provisional taxonomy and counts with the hand-adjudicated six-class map. |
+| `68efa0de` | `02ec3fed` corrects the adjacent README claims about Rayon/SIMD and Python boundary views. |
+| `1b61e1d5` | `02ec3fed` relabels raw ratio order statistics and narrows the allocator proxy; the live `deadlock-audit-tztko` body now carries the same scope. |
+| `9d228ef4` | `7f6f06ee` makes the same-invocation A/A run before the effect arms. |
+| `38f8acf3` | `02ec3fed` explicitly demotes the generated appendix to triage and publishes the corrected hand map. |
+| `e4cad9a4` | `c828e871`/`c688af4b` retain the narrower selected-bool route and stronger path proof; `02ec3fed` records that scope. |
+| `7da2c26a` | `02ec3fed` corrects the population, ELF predicate, and top-five queue. |
+| `4b31fe7b` | `02ec3fed` narrows production routing to the measured complex128 axis-0 `nancumprod` case. |
+| `84e10e85` | `02ec3fed` finalizes the Criterion instance that actually ran the selected groups. |
+| `c828e871` | `18b5a17f` supplies the independent executed-ELF bootstrap median-CI bank; `02ec3fed` stops treating the first p10/p90 decision as that proof. |
+| `795c1db8` | `02ec3fed` closes the policy-prose, uncounted-mechanism, and unrelated-hash parser loopholes; this closeout aligns the CI gate and adds a live-ledger mutation self-check. |
+| `da53a805` | `02ec3fed` distinguishes source hashes from executed ELFs and restores L2392 as pending rank 2. |
+| `c5995ff1` | `02ec3fed` updates discoverability text to `run_median_ci_contract` and the corrected counts. |
+| `cfc451ea` | `02ec3fed` supersedes both earlier maps with the 71/109 map. |
+| `c41f9141` | `02ec3fed` narrows the route and allocator claim; the old ledger row, source comment, outbox, and bead now carry that correction locally. |
+| `b1b28169` | `02ec3fed` adds a correction banner to the queued handoff. |
+
+DOWNSTREAM SWEEP: `README.md` and every tracked scorecard contain no dependent
+stale claim; this repo has no `PERF_LEDGER` file. Six live bead records, six
+local ledger/resurrection claim sites, and one benchmark source comment
+required correction: **13 downstream citations total**. Historical rows remain
+visible as provenance but now carry local correction banners rather than
+relying on a distant superseding entry.
+
+GATE SELF-CHECK CONTRACT: `perf_ledger_preflight --self-check` first audits
+every ledger entry dated on or after 2026-07-26, then derives three controlled
+mutations from valid rows in this ledger: policy-only A/A prose, an uncounted
+`COUNTED_MECHANISM` field, and an unavailable executing ELF accompanied by an
+unrelated source SHA-256. Success requires all three to be refused. The CI
+ledger hygiene test uses the same strict predicates, including one-line
+executing-ELF binding for every new KEEP. Applying those predicates to
+grandfathered rows exposes 87 mechanically under-evidenced rows instead of the
+former loose-parser budget of 64; the 23-row increase is a predicate correction,
+not new ledger debt, and is separate from the 66 hand-adjudicated
+`VOID-NONULL` levers.
+
+CLOSEOUT COUNTERS: `verdicts_total=27`, `fixes_landed=16`,
+`downstream_citations_corrected=13`, `gate_selfcheck_pass=true`
+(`own_ledger_entries=9`, `defects_caught=3/3`).
+
 ## 2026-07-27 - MODEL-INTEGRITY RE-AUDIT: 27-commit exposure window
 
 `BeigeDog`, cod / Lane M. This is a judgment-layer review of every commit from
@@ -288,6 +336,15 @@ and next RNG word, and is re-decided under the same pinned-worker A/A
 median-CI gate.
 ## 2026-07-26 - WIN (KEEP): the bool return path allocated a second full-size buffer to rebuild bytes it already had - 4.310770x, DECIDABLE_WIN
 
+> **MODEL-INTEGRITY CORRECTION (2026-07-27):** the code proof and measured
+> 4.310770x result stand. The edited route is the common
+> `ArrayStorage::Bool` materialization funnel, not every bool-returning path;
+> direct and passthrough routes can bypass it. The 128 KiB glibc threshold is
+> initial/default and adaptive, not universal. No allocation/fault counter was
+> recorded in this run, so the wall variance does not prove an mmap-dominated
+> mechanism or composability with an arena. The bead and benchmark comment now
+> carry this same scope.
+
 `BlackThrush`, bead `deadlock-audit-rsa13`, campaign ROLE 2 (communication-
 avoiding / data-movement-minimizing execution). `scripts/ledger_preflight.sh
 bool storage` and `... bool build array` both returned CLEAR before any edit;
@@ -365,6 +422,12 @@ executing-ELF sha in the same invocation. Do not reopen on `cv` grounds in
 either direction. The `Vec<bool>` -> `&[u8]` reinterpretation itself is closed:
 there is no allocation left in it to remove.
 ## 2026-07-26 - CANONICAL RESURRECTION CLOSEOUT (3 KEEP, 2 REJECT/VALID-AB): six-class hand audit and corrected profile-ranked top five
+
+> **MODEL-INTEGRITY CORRECTION (2026-07-27):** this historical closeout is
+> superseded by the hand map at the top of this file. The correct population is
+> 109 rejected levers with 71 VOID; L2392 is pending rank 2, the tail ring is
+> rank 6, and corrected top-five status is 2 KEEP, 2 VALID-AB, 1 pending. Do not
+> cite the 68/122, 21/122, 3/5, or rank-5-tail-ring claims below.
 
 `VioletOwl`, bead `franken_numpy-ixs5y.380`, cod / Lane M. This entry
 supersedes the provisional 4/5 queue farther below. The mechanical parser
@@ -485,6 +548,14 @@ occurred; the NO-CEILING vein switch was not triggered.
 
 ## 2026-07-26 - RESURRECTION WIN (KEEP): selected-bool `loadtxt(usecols)` direct token parse - 3.6368x under the median-CI gate, overturning the cv-gate REJECT of `.377`
 
+> **MODEL-INTEGRITY CORRECTION (2026-07-27):** this first redecision used
+> p10/p90 order statistics, not the required bootstrapped median CI. Its route,
+> byte-identity proof, and direction remain useful, but the KEEP stands on the
+> later final-bank invocation:
+> `bench_elf_sha256=4527aadbd8e543310622ac9f737bef8963273b57ed1cb1877a8c82fb3284b4fd`,
+> A/A 1.001104 [0.994382, 1.002883], effect
+> 3.465137 [3.255616, 3.666974]. The bead now cites that evidence.
+
 `BlackThrush`, bead `deadlock-audit-8mrfx`, resurrecting
 `franken_numpy-ixs5y.377`. This is the rank-1 VOID row of
 `docs/LEDGER_RESURRECTION.md` and the first named target of the campaign
@@ -575,6 +646,13 @@ not `ovh-b`, with the A/A null and the executing-ELF sha recorded in the same
 invocation. Do not reopen it on `cv` grounds in either direction.
 
 ## 2026-07-25 - MECHANISM PROOF (RECON, production untouched): the large-elementwise-chain cost is the TEMPORARY'S ALLOCATION, not the memory round-trip - 2.81-2.86x, and glibc's mmap threshold is the whole of it
+
+> **MODEL-INTEGRITY CORRECTION (2026-07-27):** this is a NumPy-only directional
+> proxy under one declared glibc configuration. It does not establish that every
+> FrankenNumPy result follows the same lifecycle, a universal 128 KiB boundary,
+> or a 2.8x expected arena win. Reopen the arena only after the exact current
+> FrankenNumPy path records profile attribution plus allocation/fault counts
+> under the allocator configuration being claimed.
 
 `BlackThrush`, bead `franken_numpy-ixs5y`, fleet perf campaign 2026-07-25,
 cc/STRUCTURAL lane. The ledger was screened first: the composite single-call

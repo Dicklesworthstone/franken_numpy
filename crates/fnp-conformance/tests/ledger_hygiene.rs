@@ -33,9 +33,13 @@ const ENFORCEMENT_DATE: &str = "2026-07-26";
 /// `docs/LEDGER_RESURRECTION.md`. That figure additionally requires the claimed
 /// ratio to be attributable to the candidate and excludes superseded/parse/survey
 /// rows — judgements a CI gate should not be making. The gate measures only what
-/// it can check mechanically, which is a strictly broader filter and yields 64.
-/// Two numbers, two definitions; do not reconcile them by loosening this one.
-const HISTORICAL_VOID_NONULL_BUDGET: usize = 64;
+/// it can check mechanically, which is a strictly broader filter and yields 87
+/// under the hardened predicates. The original loose predicates yielded 64
+/// because a bare mention of A/A, cycles, faults, or allocations counted as
+/// evidence; the 2026-07-27 model-integrity remediation closed that loophole and
+/// exposed 23 additional historical rows. No row was added. Two numbers, two
+/// definitions; do not reconcile them by loosening this one.
+const HISTORICAL_VOID_NONULL_BUDGET: usize = 87;
 
 fn ledger_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -70,7 +74,10 @@ fn parse_entries() -> Vec<Entry> {
         let date = heading
             .split_whitespace()
             .next()
-            .filter(|token| token.len() == 10 && token.chars().filter(|c| *c == '-').count() == 2)
+            .filter(|candidate_date| {
+                candidate_date.len() == 10
+                    && candidate_date.chars().filter(|c| *c == '-').count() == 2
+            })
             .unwrap_or("")
             .to_string();
         out.push(Entry {
@@ -109,44 +116,88 @@ fn is_reject(heading: &str) -> bool {
     NEGATIVE.iter().any(|n| label.contains(n))
 }
 
-/// An A/A null control of any recorded form.
+/// A measured A/A null control. Policy prose or a statement that a null is
+/// absent is not evidence.
 fn records_null_control(body: &str) -> bool {
-    let lower = body.to_lowercase();
-    [
-        "a/a",
-        "null control",
-        "null arm",
-        "null floor",
-        "null ratio",
-        "null median",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+    body.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        let positive_marker = lower.contains("null_base_aa")
+            || lower.contains("a/a")
+            || lower.contains("null control");
+        let negative_marker = lower.contains("no a/a")
+            || lower.contains("without a/a")
+            || lower.contains("lacks a/a")
+            || lower.contains("no null")
+            || lower.contains("without null")
+            || lower.contains("lacks null");
+        positive_marker && !negative_marker && line_has_decimal_measurement(line)
+    })
 }
 
-/// A *counted* mechanism: a hardware or OS counter, not a wall clock. A null
-/// control cannot change the fact that no work was removed, so a row that counts
-/// instructions/cycles/syscalls/allocations/faults and finds them unchanged is a
-/// sound rejection even without a null.
+fn line_has_decimal_measurement(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    let has_decimal = line.as_bytes().windows(3).any(|window| {
+        window[0].is_ascii_digit() && window[1] == b'.' && window[2].is_ascii_digit()
+    });
+    let has_measurement_shape = lower.contains("null_base_aa")
+        || lower.contains("ratio")
+        || lower.contains("median=")
+        || lower.contains("median:")
+        || (lower.contains('[') && lower.contains(']'))
+        || lower
+            .split_once(':')
+            .is_some_and(|(_, value)| value.bytes().any(|byte| byte.is_ascii_digit()));
+    has_decimal && has_measurement_shape
+}
+
+/// A *counted* mechanism must use the explicit field and include a count.
+/// Merely mentioning cycles, faults, or allocations is mechanism prose, not a
+/// refutation.
 fn records_counted_mechanism(body: &str) -> bool {
-    let lower = body.to_lowercase();
-    [
-        "cycles",
-        "instruction",
-        "perf stat",
-        "ru_minflt",
-        "fault",
-        "syscall",
-        "allocation count",
-        "gb/s",
-        "gflop",
-        "bandwidth-bound",
-        "bandwidth-saturat",
-        "cache miss",
-        "ipc",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+    body.lines().any(|line| {
+        let Some((label, evidence)) = line.split_once(':') else {
+            return false;
+        };
+        label.trim().eq_ignore_ascii_case("COUNTED_MECHANISM")
+            && evidence.bytes().any(|byte| byte.is_ascii_digit())
+    })
+}
+
+fn contains_sha256(text: &str) -> bool {
+    let mut run = 0usize;
+    for byte in text.bytes() {
+        if byte.is_ascii_hexdigit() {
+            run += 1;
+            if run == 64 {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
+
+fn records_executing_elf_sha256(body: &str) -> bool {
+    body.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        let executing_marker = lower.contains("bench_elf_sha256")
+            || lower.contains("executing elf sha")
+            || lower.contains("executing-elf sha")
+            || lower.contains("executing binary sha")
+            || lower.contains("executable sha")
+            || lower.contains("executable hash");
+        executing_marker && !lower.contains("unavailable") && contains_sha256(line)
+    })
+}
+
+fn is_keep(heading: &str) -> bool {
+    let tail = match heading.split_once(" - ") {
+        Some((_, rest)) => rest,
+        None => heading,
+    };
+    let label = tail.split(':').next().unwrap_or(tail).to_uppercase();
+    label.contains("KEEP") || label.contains("WIN") || label.contains("SHIP")
 }
 
 /// A rejection that no measurement could overturn - bit-exactness, observable
@@ -254,6 +305,30 @@ fn historical_void_nonull_debt_does_not_grow() {
     );
 }
 
+/// A KEEP without the exact executing ELF is not reproducible evidence. The
+/// marker and its full hash must share one line so an unavailable marker cannot
+/// borrow an unrelated source hash elsewhere in the row.
+#[test]
+fn new_keep_rows_carry_an_executing_elf_sha256() {
+    let offenders: Vec<String> = parse_entries()
+        .into_iter()
+        .filter(|e| !e.date.is_empty() && e.date.as_str() >= ENFORCEMENT_DATE)
+        .filter(|e| is_keep(&e.heading))
+        .filter(|e| !records_executing_elf_sha256(&e.body))
+        .map(|e| format!("  docs/NEGATIVE_EVIDENCE.md:{} — {}", e.line, e.heading))
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "{} KEEP row(s) dated on/after {ENFORCEMENT_DATE} lack a self-reported \
+         executing-ELF SHA-256 on one line:\n{}\n\
+         Add the benchmark output line `bench_elf_sha256=<64 hex>` from the \
+         invocation that produced the verdict. A source or bench hash does not count.",
+        offenders.len(),
+        offenders.join("\n")
+    );
+}
+
 /// Every REJECT row must carry a retry predicate. A rejection without one is a
 /// dead end nobody can reopen, which is how a void row becomes permanent.
 #[test]
@@ -301,4 +376,26 @@ fn reject_headings_are_unique() {
         "duplicate REJECT headings — the same rejection was written twice:\n{}",
         duplicates.join("\n")
     );
+}
+
+#[test]
+fn policy_prose_does_not_count_as_a_measured_null() {
+    assert!(!records_null_control(
+        "A/A null must follow campaign section 2.3 for 41 rounds."
+    ));
+}
+
+#[test]
+fn uncounted_mechanism_prose_does_not_count() {
+    assert!(!records_counted_mechanism(
+        "COUNTED_MECHANISM: allocation traffic unchanged."
+    ));
+}
+
+#[test]
+fn unavailable_elf_cannot_borrow_a_source_hash() {
+    assert!(!records_executing_elf_sha256(
+        "Executing ELF SHA-256: unavailable.\n\
+         source_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    ));
 }
