@@ -340,6 +340,7 @@ fn new_keep_rows_carry_an_executing_elf_sha256() {
 const RESULT_CLASS_MARKER: &str = "**Campaign result class:**";
 const NULL_CONTROL_MARKER: &str = "**A/A null control (same invocation):**";
 const INCUMBENT_ARM_MARKER: &str = "**Legacy incumbent arm (same invocation):**";
+const INCUMBENT_ISOLATION_MARKER: &str = "**Incumbent isolation proof:**";
 const MAINTENANCE_SELF_SPEEDUP: &str = "maintenance-self-speedup";
 const INCUMBENT_WIN: &str = "incumbent-win";
 
@@ -462,12 +463,22 @@ fn has_incumbent_win_contract(body: &str) -> bool {
         .and_then(|ratio| ratio.strip_suffix('x'))
         .and_then(|ratio| ratio.parse::<f64>().ok())
         .is_some_and(|ratio| ratio.is_finite() && ratio > 0.0);
+    let independent_end_to_end =
+        marker_entry_value(body, INCUMBENT_ISOLATION_MARKER).is_some_and(|isolation| {
+            let candidate = token_value(isolation, "candidate=");
+            let incumbent = token_value(isolation, "incumbent=");
+            candidate.is_some_and(|name| name.starts_with("fnp.") && name.len() > 4)
+                && incumbent.is_some_and(|name| name.starts_with("numpy.") && name.len() > 6)
+                && candidate != incumbent
+                && token_value(isolation, "shared_timed_component=") == Some("none")
+        });
     measured_null
         && actual_numpy
         && pinned_version
         && pinned_artifact
         && shared_invocation
         && measured_ratio
+        && independent_end_to_end
 }
 
 /// THE RESULT-CLASS GATE. Beating our own former path is maintenance, not
@@ -518,7 +529,8 @@ fn incumbent_win_rows_carry_the_complete_same_invocation_contract() {
          Required in one invocation: exact A/A marker with a numeric measurement; \
          `name=NumPy`; pinned `version`; lowercase incumbent `artifact_sha256` distinct \
          from the candidate executing ELF; shared `invocation_id`; and numeric \
-         `measured_ratio=<value>x`.",
+         `measured_ratio=<value>x`. The isolation marker must name distinct `fnp.*` \
+         and `numpy.*` public arms and declare `shared_timed_component=none`.",
         offenders.len(),
         offenders.join("\n")
     );
@@ -640,12 +652,14 @@ fn incumbent_arm_tokens_must_share_the_marker_line() {
     let body = "**A/A null control (same invocation):** ratio 1.001x.\n\
                 bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
                 **Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6\n\
-                artifact_sha256=43760732fe0ec60ac5e2d4d020b253ea720cf0d3996a362204c4d94934ebaabd invocation_id=run-42 measured_ratio=19.9x";
+                artifact_sha256=43760732fe0ec60ac5e2d4d020b253ea720cf0d3996a362204c4d94934ebaabd invocation_id=run-42 measured_ratio=19.9x\n\
+                **Incumbent isolation proof:** candidate=fnp.isin incumbent=numpy.isin shared_timed_component=none";
     assert!(!has_incumbent_win_contract(body));
 
     let body = "**A/A null control (same invocation):** ratio 1.001x.\n\
                 bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
-                **Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=43760732fe0ec60ac5e2d4d020b253ea720cf0d3996a362204c4d94934ebaabd invocation_id=run-42 measured_ratio=19.9x";
+                **Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=43760732fe0ec60ac5e2d4d020b253ea720cf0d3996a362204c4d94934ebaabd invocation_id=run-42 measured_ratio=19.9x\n\
+                **Incumbent isolation proof:** candidate=fnp.isin incumbent=numpy.isin shared_timed_component=none";
     assert!(has_incumbent_win_contract(body));
 }
 
@@ -655,7 +669,20 @@ fn candidate_elf_cannot_masquerade_as_the_incumbent_artifact() {
                 bench_elf_sha256=0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF\n\
                 **Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 \
                 artifact_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
-                invocation_id=run-42 measured_ratio=19.9x";
+                invocation_id=run-42 measured_ratio=19.9x\n\
+                **Incumbent isolation proof:** candidate=fnp.isin incumbent=numpy.isin shared_timed_component=none";
+    assert!(!has_incumbent_win_contract(body));
+}
+
+#[test]
+fn incumbent_win_rejects_shared_timed_components() {
+    let body = "**A/A null control (same invocation):** ratio 1.001x.\n\
+                bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
+                **Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 \
+                artifact_sha256=43760732fe0ec60ac5e2d4d020b253ea720cf0d3996a362204c4d94934ebaabd \
+                invocation_id=run-42 measured_ratio=19.9x\n\
+                **Incumbent isolation proof:** candidate=fnp.isin incumbent=numpy.isin \
+                shared_timed_component=numpy.empty";
     assert!(!has_incumbent_win_contract(body));
 }
 

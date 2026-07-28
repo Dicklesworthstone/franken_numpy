@@ -84,11 +84,18 @@ pub fn bench_invocation_id() -> &'static str {
     })
 }
 
-/// Prove that a Python benchmark's incumbent arm resolves to live NumPy and
-/// bind it to the compiled extension that performs `loadtxt`'s parsing work.
+/// Prove that a Python benchmark's incumbent arm is the named live NumPy
+/// callable and bind it to NumPy's executing compiled core.
+///
 /// The hash is computed by the executing bench process, not by an adjacent
 /// shell step, and the invocation id is shared with every row in this process.
-pub fn report_numpy_loadtxt_incumbent_identity(py: Python<'_>, numpy_loadtxt: &Bound<'_, PyAny>) {
+/// Checking object identity against `numpy.<callable_name>` also covers ufuncs,
+/// which do not consistently expose a Python `__module__` attribute.
+pub fn report_numpy_incumbent_identity(
+    py: Python<'_>,
+    callable_name: &str,
+    numpy_callable: &Bound<'_, PyAny>,
+) {
     let numpy = py.import("numpy").expect("numpy incumbent");
     let numpy_name = numpy
         .getattr("__name__")
@@ -101,36 +108,67 @@ pub fn report_numpy_loadtxt_incumbent_identity(py: Python<'_>, numpy_loadtxt: &B
         .expect("numpy __version__")
         .extract::<String>()
         .expect("numpy __version__ string");
-    let callable_module = numpy_loadtxt
+    let expected_callable = numpy
+        .getattr(callable_name)
+        .expect("named NumPy incumbent callable");
+    assert!(
+        expected_callable.is(numpy_callable),
+        "incumbent callable is not numpy.{callable_name}"
+    );
+    let callable_module = numpy_callable
         .getattr("__module__")
-        .expect("numpy.loadtxt __module__")
-        .extract::<String>()
-        .expect("numpy.loadtxt __module__ string");
+        .and_then(|module| module.extract::<String>())
+        .unwrap_or_else(|_| "numpy.<compiled-ufunc>".to_owned());
     assert!(
         callable_module.starts_with("numpy"),
-        "incumbent loadtxt is not defined under numpy: {callable_module}"
+        "incumbent callable is not defined under numpy: {callable_module}"
     );
 
-    // `numpy.loadtxt`'s Python dispatcher calls this compiled parser. Hash the
-    // ELF shared object rather than a package __init__.py or wrapper source.
-    let parser_module = py
+    // Public NumPy dispatchers and ufuncs ultimately execute through this
+    // compiled core. Hash the ELF shared object rather than a package
+    // __init__.py or Python wrapper source.
+    let core_module = py
         .import("numpy._core._multiarray_umath")
-        .expect("numpy compiled parser module");
-    let artifact_path = parser_module
+        .expect("numpy compiled core module");
+    let artifact_path = core_module
         .getattr("__file__")
-        .expect("numpy parser __file__")
+        .expect("numpy core __file__")
         .extract::<String>()
-        .expect("numpy parser path string");
+        .expect("numpy core path string");
     let artifact_path = Path::new(&artifact_path);
     let (artifact_sha256, artifact_bytes) =
-        file_identity(artifact_path).expect("hash numpy parser artifact");
+        file_identity(artifact_path).expect("hash numpy core artifact");
     println!(
-        "INCUMBENT_IDENTITY arm=numpy.loadtxt numpy_version={numpy_version} \
+        "INCUMBENT_IDENTITY arm=numpy.{callable_name} numpy_version={numpy_version} \
          callable_module={callable_module} invocation_id={} \
          artifact_sha256={artifact_sha256} artifact_bytes={artifact_bytes} \
          artifact_path={} dispatch_assert=passed",
         bench_invocation_id(),
         artifact_path.display(),
+    );
+    std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
+}
+
+/// Loadtxt-specific compatibility wrapper retained for the existing benches.
+pub fn report_numpy_loadtxt_incumbent_identity(py: Python<'_>, numpy_loadtxt: &Bound<'_, PyAny>) {
+    report_numpy_incumbent_identity(py, "loadtxt", numpy_loadtxt);
+}
+
+/// State the measured topology before an end-to-end incumbent comparison.
+/// Both call paths must be independently complete; a shared timed component is
+/// a maintenance self-comparison, not campaign output.
+pub fn report_incumbent_topology(candidate: &str, incumbent: &str) {
+    assert!(
+        candidate.starts_with("fnp.") && incumbent.starts_with("numpy."),
+        "incumbent topology must name public fnp and numpy entry points"
+    );
+    assert_ne!(
+        candidate, incumbent,
+        "candidate and incumbent entry points must be distinct"
+    );
+    println!(
+        "INCUMBENT_TOPOLOGY candidate={candidate} incumbent={incumbent} \
+         shared_timed_component=none"
     );
     std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
 }

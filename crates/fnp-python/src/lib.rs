@@ -38826,6 +38826,112 @@ fn try_zerocopy_f16_sum_lastaxis(
     Ok(Some(reshaped.unbind()))
 }
 
+// Native parallel unweighted f16 average along the LAST (contiguous) axis. With
+// no weights, numpy.average delegates to ndarray.mean. Each lane is therefore
+// float16(f32_pairwise_sum / float32(cols)): the same f32 tree reproduced by
+// pairwise_sum_f16_widen, followed by one f32 division and one final narrowing.
+// Lanes are independent, so parallelizing across them preserves the arithmetic
+// order exactly. Non-finite input defers so NumPy remains responsible for its
+// warning behavior.
+fn try_zerocopy_f16_average_lastaxis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: isize,
+) -> PyResult<Option<Py<PyAny>>> {
+    const F16_AVERAGE_AXIS_PARALLEL_MIN: usize = 1 << 20;
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 2
+        || !dtype.getattr("isnative")?.extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    if !a
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len();
+    if ndim < 2 {
+        return Ok(None);
+    }
+    let Some(normalized_axis) = (if axis < 0 {
+        axis.checked_add(ndim as isize)
+    } else {
+        Some(axis)
+    }) else {
+        return Ok(None);
+    };
+    if normalized_axis < 0 || normalized_axis as usize != ndim - 1 {
+        return Ok(None);
+    }
+    let cols = shape[ndim - 1];
+    let Some(outer) = shape[..ndim - 1]
+        .iter()
+        .try_fold(1usize, |product, &length| product.checked_mul(length))
+    else {
+        return Ok(None);
+    };
+    let Some(total) = outer.checked_mul(cols) else {
+        return Ok(None);
+    };
+    if !(2..=65_504).contains(&cols)
+        || outer < 2
+        || total < F16_AVERAGE_AXIS_PARALLEL_MIN
+        || rayon::current_num_threads() < 2
+    {
+        return Ok(None);
+    }
+
+    let Ok(raw_u16) = a.call_method1("view", (numpy.getattr("uint16")?,)) else {
+        return Ok(None);
+    };
+    let Ok(buffer) = PyBuffer::<u16>::get(&raw_u16) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if cells.len() != total {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<u16> is repr(transparent) over u16, the borrowed
+    // NumPy buffer is immutable for this call, and `buffer` lives until every
+    // parallel reader has joined.
+    let data: &[u16] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), total) };
+    use rayon::prelude::*;
+    if data.par_iter().any(|&bits| bits & 0x7c00 == 0x7c00) {
+        return Ok(None);
+    }
+
+    let denominator = cols as f32;
+    let mut output_bits = vec![0u16; outer];
+    output_bits
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(lane, output)| {
+            let mut buffer = [0.0f32; 128];
+            let sum = pairwise_sum_f16_widen(data, lane * cols, cols, &mut buffer);
+            *output = f16::from_f32(sum / denominator).to_bits();
+        });
+
+    let raw_output = numpy_array_from_slice(py, &numpy, &output_bits, "uint16")?;
+    let output = raw_output.call_method1("view", (numpy.getattr("float16")?,))?;
+    let output_shape = PyTuple::new(py, shape[..ndim - 1].iter().copied())?;
+    Ok(Some(
+        output.call_method1("reshape", (&output_shape,))?.unbind(),
+    ))
+}
+
 // Native parallel f16 nanmean along the LAST (contiguous) axis -> f16 array. numpy's per-lane f16 nanmean
 // is temp-heavy (mask + where + sum + count + divide per lane): 4000x4000 ~170ms, 8000x8000 ~694ms. Per
 // lane = float16( float32(float16(f32_nansum)) / count ) (same narrow-first semantics as the flat nanmean;
@@ -59373,6 +59479,23 @@ fn average(
             .call((a_for_fallback.bind(py),), Some(&kwargs))?
             .unbind())
     };
+
+    // NumPy has no f16 ALU. For a large, finite, C-contiguous last-axis
+    // reduction with no weights, reproduce ndarray.mean's exact per-lane f32
+    // pairwise tree and divide, then narrow once. Flat average deliberately
+    // remains delegated: NumPy casts the full element count through f16 there,
+    // including its overflow warning behavior for very large inputs.
+    if !keepdims
+        && !returned
+        && weights
+            .as_ref()
+            .is_none_or(|value| value.bind(py).is_none())
+        && let Some(axis_value) = axis.as_ref().filter(|value| !value.bind(py).is_none())
+        && let Ok(axis_value) = axis_value.bind(py).extract::<isize>()
+        && let Some(output) = try_zerocopy_f16_average_lastaxis(py, a.bind(py), axis_value)?
+    {
+        return Ok(output);
+    }
 
     if keepdims {
         return fallback();
@@ -141690,6 +141813,82 @@ mod tests {
                 }
             }
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn average_f16_last_axis_fast_path_is_byte_exact() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let namespace = PyDict::new(py);
+            namespace.set_item("np", &numpy)?;
+            py.run(
+                c"rng = np.random.default_rng(20260727)\na = rng.uniform(-3.0, 3.0, size=(512, 2048)).astype(np.float16)",
+                Some(&namespace),
+                Some(&namespace),
+            )?;
+            let input = namespace
+                .get_item("a")?
+                .expect("test namespace must contain input");
+            let axis = PyDict::new(py);
+            axis.set_item("axis", -1_i64)?;
+
+            let ours = module
+                .getattr("average")?
+                .call((input.clone(),), Some(&axis))?;
+            let expected = numpy
+                .getattr("average")?
+                .call((input.clone(),), Some(&axis))?;
+            let ours_bytes = ours.call_method0("tobytes")?.extract::<Vec<u8>>()?;
+            let expected_bytes = expected.call_method0("tobytes")?.extract::<Vec<u8>>()?;
+
+            assert_eq!(
+                ours.getattr("dtype")?.str()?.extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?,
+                "f16 last-axis average dtype diverged"
+            );
+            assert_eq!(
+                ours.getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?,
+                "f16 last-axis average shape diverged"
+            );
+            assert_eq!(
+                ours_bytes, expected_bytes,
+                "f16 last-axis average bytes diverged"
+            );
+
+            // The raw-u16 path is native-endian only. A byte-swapped f16
+            // ndarray must retain NumPy's interpretation rather than treating
+            // its storage bytes as native half bits.
+            let swapped =
+                numpy.call_method1("ones", (PyTuple::new(py, [512_usize, 2_048_usize])?, ">f2"))?;
+            assert!(
+                !swapped
+                    .getattr("dtype")?
+                    .getattr("isnative")?
+                    .extract::<bool>()?,
+                "test corpus must be non-native-endian"
+            );
+            let ours_swapped = module
+                .getattr("average")?
+                .call((swapped.clone(),), Some(&axis))?;
+            let expected_swapped = numpy
+                .getattr("average")?
+                .call((swapped.clone(),), Some(&axis))?;
+            assert_eq!(
+                ours_swapped.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                expected_swapped
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                "non-native f16 average must retain NumPy semantics"
+            );
             Ok(())
         });
     }

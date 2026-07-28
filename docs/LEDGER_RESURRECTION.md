@@ -57,6 +57,7 @@ or:
 **Campaign result class:** incumbent-win
 **A/A null control (same invocation):** baseline/null median ratio <number>x, CI [<lo>, <hi>].
 **Legacy incumbent arm (same invocation):** name=NumPy version=<pin> artifact_sha256=<64 lowercase hex> invocation_id=<shared id> measured_ratio=<number>x
+**Incumbent isolation proof:** candidate=fnp.<public-call> incumbent=numpy.<public-call> shared_timed_component=none
 ```
 
 The runtime assertion must prove that the incumbent callable and pinned
@@ -65,7 +66,9 @@ the incumbent artifact hash equals the candidate bench ELF hash, the row is
 blocked as provenance substitution. If both arms share the same expensive
 NumPy tail, the comparison remains
 `maintenance-self-speedup` because it does not measure either implementation
-end-to-end.
+end-to-end. The isolation marker is mandatory and machine-checked: it names
+both independently complete public calls and must state
+`shared_timed_component=none`.
 
 Public documentation is a current-state spec sheet: publish only the presently
 supported, properly classified figure and its scope. Retraction and correction
@@ -99,7 +102,7 @@ because it is a decisive maintenance improvement, but its 3.09-3.69x
 historical ratios and the new 3.676778x ratio are not competitive claims.
 `docs/NEGATIVE_EVIDENCE.md` contains the full arms, checksums, dispatch proof,
 scope, and concrete retry predicates. The hardened preflight then used these
-live rows as its seeds and caught all 11/11 injected defect classes.
+live rows as its seeds and caught all 12/12 injected defect classes.
 
 ### Counts
 

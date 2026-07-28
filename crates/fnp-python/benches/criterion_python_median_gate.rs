@@ -4296,6 +4296,7 @@ fn bench_isin_f64_vs_numpy_median_gate(c: &mut Criterion) {
             .expect("numpy __version__ str");
         let np_isin = numpy.getattr("isin").expect("numpy isin");
         let fnp_isin = module.getattr("isin").expect("fnp isin");
+        common::report_numpy_incumbent_identity(py, "isin", &np_isin);
         let incumbent_module = np_isin
             .getattr("__module__")
             .expect("numpy isin __module__")
@@ -4313,6 +4314,7 @@ fn bench_isin_f64_vs_numpy_median_gate(c: &mut Criterion) {
             "INCUMBENT_IDENTITY arm=numpy.isin numpy.__version__={numpy_version} \
              callable_module={incumbent_module} dispatch_assert=passed"
         );
+        common::report_incumbent_topology("fnp.isin", "numpy.isin");
 
         // TRAP 2 — one pair of inputs, handed to both arms unchanged.
         let namespace = PyDict::new(py);
@@ -4384,6 +4386,227 @@ fn bench_isin_f64_vs_numpy_median_gate(c: &mut Criterion) {
         // numpy-over-fnp: above 1.0 means we are faster.
         let _ = common::run_median_ci_contract(
             "python_isin_f64_1m_vs_numpy",
+            &mut time_incumbent,
+            &mut time_ours,
+        );
+    });
+}
+
+/// End-to-end redecision for the public bool-return surface fed by the
+/// `ArrayStorage::Bool` materialization funnel. The internal funnel remains a
+/// maintenance-only result; this row times `fnp.greater` as a whole against
+/// `numpy.greater` as a whole, with no shared measured component.
+fn bench_bool_public_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bool_public").expect("bool-public bench module");
+        fnp_python(&module).expect("initialize fnp_python bool-public module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let np_greater = numpy.getattr("greater").expect("numpy greater");
+        let fnp_greater = module.getattr("greater").expect("fnp greater");
+        common::report_numpy_incumbent_identity(py, "greater", &np_greater);
+        assert!(
+            !np_greater.is(&fnp_greater),
+            "dispatch trap: incumbent greater resolved to our callable"
+        );
+        common::report_incumbent_topology("fnp.greater", "numpy.greater");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260727)\n\
+                 cmp_a = rng.standard_normal(8_000_000)\n\
+                 cmp_b = rng.standard_normal(8_000_000)\n",
+            )
+            .expect("bool-public setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("bool-public corpus setup");
+
+        let checksum_of = |array: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let bytes = array
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec");
+            bytes
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        let lhs = namespace.get_item("cmp_a").expect("cmp_a present");
+        let rhs = namespace.get_item("cmp_b").expect("cmp_b present");
+        let ours = fnp_greater.call1((&lhs, &rhs)).expect("fnp greater parity");
+        let theirs = np_greater
+            .call1((&lhs, &rhs))
+            .expect("numpy greater parity");
+        assert_eq!(
+            checksum_of(&ours),
+            checksum_of(&theirs),
+            "fnp.greater and numpy.greater disagree",
+        );
+
+        let mut time_incumbent = || {
+            let started = Instant::now();
+            let result = np_greater
+                .call1((black_box(&lhs), black_box(&rhs)))
+                .expect("numpy greater arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let mut time_ours = || {
+            let started = Instant::now();
+            let result = fnp_greater
+                .call1((black_box(&lhs), black_box(&rhs)))
+                .expect("fnp greater arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let _ = common::run_median_ci_contract(
+            "python_greater_f64_8m_bool_out_vs_numpy",
+            &mut time_incumbent,
+            &mut time_ours,
+        );
+    });
+}
+
+/// Class-3 missing-capability candidate: NumPy has no f16 ALU. For a large
+/// finite C-contiguous last-axis reduction, its unweighted `average` is one f32
+/// pairwise sum and division per lane. FrankenNumPy reproduces that exact tree
+/// while parallelizing across independent lanes.
+fn bench_average_f16_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_average_f16").expect("average-f16 bench module");
+        fnp_python(&module).expect("initialize fnp_python average-f16 module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let np_average = numpy.getattr("average").expect("numpy average");
+        let fnp_average = module.getattr("average").expect("fnp average");
+        common::report_numpy_incumbent_identity(py, "average", &np_average);
+        assert!(
+            !np_average.is(&fnp_average),
+            "dispatch trap: incumbent average resolved to our callable"
+        );
+        common::report_incumbent_topology("fnp.average", "numpy.average");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260727)\n\
+                 avg_f16 = rng.uniform(-3.0, 3.0, size=(2048, 4096)).astype(np.float16)\n",
+            )
+            .expect("average-f16 setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("average-f16 corpus setup");
+        let input = namespace.get_item("avg_f16").expect("avg_f16 present");
+
+        // Profile the actual incumbent workload before timing the proposed
+        // routing change. This names the Python frames and supplies the
+        // cumulative-time denominator used for the Amdahl ceiling; the C ufunc
+        // body is charged to NumPy's `_methods._mean` call.
+        let profile_namespace = PyDict::new(py);
+        profile_namespace
+            .set_item("np_average", &np_average)
+            .expect("profile average callable");
+        profile_namespace
+            .set_item("avg_f16", &input)
+            .expect("profile average input");
+        py.run(
+            std::ffi::CString::new(
+                "import cProfile, io, pstats\n\
+                 profiler = cProfile.Profile()\n\
+                 profiler.enable()\n\
+                 profile_results = [np_average(avg_f16, axis=-1) for _ in range(8)]\n\
+                 profiler.disable()\n\
+                 profile_stream = io.StringIO()\n\
+                 pstats.Stats(profiler, stream=profile_stream).sort_stats('cumulative').print_stats(8)\n\
+                 profile_report = profile_stream.getvalue()\n",
+            )
+            .expect("average-f16 profile CString")
+            .as_c_str(),
+            Some(&profile_namespace),
+            Some(&profile_namespace),
+        )
+        .expect("profile NumPy average");
+        println!(
+            "PROFILE_ATTRIBUTION surface=numpy.average(float16,2048x4096,axis=-1) repeats=8\n{}",
+            profile_namespace
+                .get_item("profile_report")
+                .expect("profile report present")
+                .extract::<String>()
+                .expect("profile report string")
+        );
+
+        let checksum_of = |value: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let bytes = value
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec");
+            bytes
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        let ours = fnp_average
+            .call1((&input, -1_i64))
+            .expect("fnp average parity");
+        let theirs = np_average
+            .call1((&input, -1_i64))
+            .expect("numpy average parity");
+        assert_eq!(
+            checksum_of(&ours),
+            checksum_of(&theirs),
+            "fnp.average and numpy.average disagree",
+        );
+
+        let mut time_incumbent = || {
+            let started = Instant::now();
+            let result = np_average
+                .call1((black_box(&input), -1_i64))
+                .expect("numpy average arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let mut time_ours = || {
+            let started = Instant::now();
+            let result = fnp_average
+                .call1((black_box(&input), -1_i64))
+                .expect("fnp average arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let _ = common::run_median_ci_contract(
+            "python_average_f16_2048x4096_axis_last_vs_numpy",
             &mut time_incumbent,
             &mut time_ours,
         );
@@ -4470,6 +4693,14 @@ fn bench_bool_storage_bytes_median_gate(c: &mut Criterion) {
 
 fn main() {
     common::gated_main(&[
+        (
+            "bench_average_f16_vs_numpy_median_gate",
+            bench_average_f16_vs_numpy_median_gate,
+        ),
+        (
+            "bench_bool_public_vs_numpy_median_gate",
+            bench_bool_public_vs_numpy_median_gate,
+        ),
         (
             "bench_isin_f64_vs_numpy_median_gate",
             bench_isin_f64_vs_numpy_median_gate,

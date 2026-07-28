@@ -9,6 +9,7 @@ const ENFORCEMENT_DATE: &str = "2026-07-26";
 const RESULT_CLASS_MARKER: &str = "**Campaign result class:**";
 const NULL_CONTROL_MARKER: &str = "**A/A null control (same invocation):**";
 const INCUMBENT_ARM_MARKER: &str = "**Legacy incumbent arm (same invocation):**";
+const INCUMBENT_ISOLATION_MARKER: &str = "**Incumbent isolation proof:**";
 const MAINTENANCE_SELF_SPEEDUP: &str = "maintenance-self-speedup";
 const INCUMBENT_WIN: &str = "incumbent-win";
 
@@ -170,8 +171,9 @@ a measured A/A null or a COUNTED_MECHANISM field, refuses a REJECT without a
 retry predicate, and refuses a KEEP without an executing-ELF SHA-256 or an
 explicit Campaign result class of maintenance-self-speedup or incumbent-win.
 An incumbent-win additionally requires the actual NumPy name/version/artifact
-SHA-256, a shared invocation ID, measured ratio, and a measured A/A null from
-that invocation.
+SHA-256, a shared invocation ID, measured ratio, a measured A/A null from that
+invocation, and an isolation marker naming independent end-to-end fnp and numpy
+arms with shared_timed_component=none.
 "
     );
 }
@@ -408,12 +410,22 @@ fn has_incumbent_win_contract(entry: &LedgerEntry) -> bool {
         .and_then(|ratio| ratio.strip_suffix('x'))
         .and_then(|ratio| ratio.parse::<f64>().ok())
         .is_some_and(|ratio| ratio.is_finite() && ratio > 0.0);
+    let independent_end_to_end =
+        marker_entry_value(entry, INCUMBENT_ISOLATION_MARKER).is_some_and(|isolation| {
+            let candidate = token_value(isolation, "candidate=");
+            let incumbent = token_value(isolation, "incumbent=");
+            candidate.is_some_and(|name| name.starts_with("fnp.") && name.len() > 4)
+                && incumbent.is_some_and(|name| name.starts_with("numpy.") && name.len() > 6)
+                && candidate != incumbent
+                && token_value(isolation, "shared_timed_component=") == Some("none")
+        });
     measured_null
         && actual_numpy
         && pinned_version
         && pinned_artifact
         && shared_invocation
         && measured_ratio
+        && independent_end_to_end
 }
 
 fn line_has_decimal_measurement(line: &str) -> bool {
@@ -726,12 +738,14 @@ fn incumbent_claim_mutation(entry: &LedgerEntry, incumbent_fields: &str) -> Ledg
         .filter(|line| {
             marker_value(line, NULL_CONTROL_MARKER).is_none()
                 && marker_value(line, INCUMBENT_ARM_MARKER).is_none()
+                && marker_value(line, INCUMBENT_ISOLATION_MARKER).is_none()
         })
         .collect::<Vec<_>>()
         .join("\n");
     mutation.body.push_str(&format!(
         "\n{NULL_CONTROL_MARKER} baseline/null median ratio 1.001x, CI [0.99, 1.01].\n\
-         {INCUMBENT_ARM_MARKER} {incumbent_fields}\n"
+         {INCUMBENT_ARM_MARKER} {incumbent_fields}\n\
+         {INCUMBENT_ISOLATION_MARKER} candidate=fnp.test incumbent=numpy.test shared_timed_component=none\n"
     ));
     mutation
 }
@@ -899,6 +913,23 @@ fn self_check_ledger(ledger: &str) -> bool {
         "incumbent-win lacks complete same-invocation NumPy evidence",
     );
 
+    let mut missing_isolation = incumbent_claim_mutation(
+        keep_seed,
+        &format!(
+            "name=NumPy version=2.4.6 artifact_sha256={incumbent_fixture_sha256} invocation_id=run-42 measured_ratio=1.2x"
+        ),
+    );
+    missing_isolation.body = missing_isolation
+        .body
+        .lines()
+        .filter(|line| marker_value(line, INCUMBENT_ISOLATION_MARKER).is_none())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let caught_missing_isolation = mutation_has_violation(
+        &missing_isolation,
+        "incumbent-win lacks complete same-invocation NumPy evidence",
+    );
+
     let defects_caught = [
         caught_policy_only_null,
         caught_uncounted_mechanism,
@@ -911,19 +942,20 @@ fn self_check_ledger(ledger: &str) -> bool {
         caught_substituted_candidate_elf,
         caught_missing_invocation,
         caught_missing_ratio,
+        caught_missing_isolation,
     ]
     .into_iter()
     .filter(|caught| *caught)
     .count();
-    if defects_caught != 11 {
+    if defects_caught != 12 {
         println!(
-            "BLOCKED self-check defects_caught={defects_caught}/11 policy_only_null={caught_policy_only_null} uncounted_mechanism={caught_uncounted_mechanism} unavailable_elf_with_source_hash={caught_unavailable_elf} unclassified_keep={caught_unclassified_keep} ambiguous_keep={caught_ambiguous_keep} invalid_class_alias={caught_invalid_class_alias} self_as_incumbent={caught_self_as_incumbent} unpinned_incumbent={caught_unpinned_incumbent} substituted_candidate_elf={caught_substituted_candidate_elf} missing_invocation={caught_missing_invocation} missing_ratio={caught_missing_ratio}"
+            "BLOCKED self-check defects_caught={defects_caught}/12 policy_only_null={caught_policy_only_null} uncounted_mechanism={caught_uncounted_mechanism} unavailable_elf_with_source_hash={caught_unavailable_elf} unclassified_keep={caught_unclassified_keep} ambiguous_keep={caught_ambiguous_keep} invalid_class_alias={caught_invalid_class_alias} self_as_incumbent={caught_self_as_incumbent} unpinned_incumbent={caught_unpinned_incumbent} substituted_candidate_elf={caught_substituted_candidate_elf} missing_invocation={caught_missing_invocation} missing_ratio={caught_missing_ratio} missing_isolation={caught_missing_isolation}"
         );
         return false;
     }
 
     println!(
-        "SELF_CHECK PASS own_ledger_entries={} defects_caught=11/11 reject_seed={} keep_seed={}",
+        "SELF_CHECK PASS own_ledger_entries={} defects_caught=12/12 reject_seed={} keep_seed={}",
         enforced.len(),
         reject_seed.heading,
         keep_seed.heading
@@ -1190,6 +1222,7 @@ bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde
 **Campaign result class:** incumbent-win
 **A/A null control (same invocation):** baseline/null median ratio 1.001x, CI [0.995, 1.006].
 **Legacy incumbent arm (same invocation):** name=NumPy version=2.3.1 artifact_sha256=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 invocation_id=run-42 measured_ratio=3.250x
+**Incumbent isolation proof:** candidate=fnp.test incumbent=numpy.test shared_timed_component=none
 ",
         );
         assert!(audit_entries(&entries).is_empty());
@@ -1205,6 +1238,7 @@ bench_elf_sha256=0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDE
 **Campaign result class:** incumbent-win
 **A/A null control (same invocation):** baseline/null median ratio 1.001x, CI [0.995, 1.006].
 **Legacy incumbent arm (same invocation):** name=NumPy version=2.3.1 artifact_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef invocation_id=run-42 measured_ratio=3.250x
+**Incumbent isolation proof:** candidate=fnp.test incumbent=numpy.test shared_timed_component=none
 ",
         );
         assert_eq!(
@@ -1226,6 +1260,7 @@ bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde
 **Campaign result class:** incumbent-win
 **A/A null control (same invocation):** baseline/null median ratio 1.001x, CI [0.995, 1.006].
 **Legacy incumbent arm (same invocation):** name=NumPy version=2.3.1 artifact_sha256=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 invocation_id=run-42 measured_ratio=3.250x
+**Incumbent isolation proof:** candidate=fnp.test incumbent=numpy.test shared_timed_component=none
 ",
         )
         .pop()
@@ -1243,6 +1278,28 @@ bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde
             &mutation,
             "incumbent-win lacks complete same-invocation NumPy evidence",
         ));
+    }
+
+    #[test]
+    fn incumbent_win_refuses_a_shared_timed_component() {
+        let entries = split_entries(
+            "\
+## 2026-07-01 - KEEP: shared tail
+
+bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.
+**Campaign result class:** incumbent-win
+**A/A null control (same invocation):** baseline/null median ratio 1.001x, CI [0.995, 1.006].
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.3.1 artifact_sha256=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 invocation_id=run-42 measured_ratio=3.250x
+**Incumbent isolation proof:** candidate=fnp.test incumbent=numpy.test shared_timed_component=numpy.empty
+",
+        );
+        assert_eq!(
+            audit_entries(&entries),
+            [Violation {
+                heading: "## 2026-07-01 - KEEP: shared tail".to_owned(),
+                reason: "incumbent-win lacks complete same-invocation NumPy evidence",
+            }]
+        );
     }
 
     #[test]
