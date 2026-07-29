@@ -11,10 +11,10 @@ mod common;
 use common::ensure_numpy_available;
 use criterion::Criterion;
 use fnp_python::fnp_python;
-use pyo3::Python;
-use pyo3::types::{PyAnyMethods, PyDict, PyModule};
+use pyo3::types::{PyAny, PyAnyMethods, PyBytes, PyDict, PyModule};
+use pyo3::{Bound, PyResult, Python};
 use std::hint::black_box;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn bench_string_sort_boundary(c: &mut Criterion) {
     // np.sort on a 1-D fixed-width unicode ('U') array. numpy sorts with a slow single-threaded
@@ -828,6 +828,452 @@ b16 = np.concatenate([a16[:500_000], brand16])\n";
     group.finish();
 }
 
+fn run_audit_log_job<'py>(
+    strings_mod: &Bound<'py, PyAny>,
+    strings_add: &Bound<'py, PyAny>,
+    unique: &Bound<'py, PyAny>,
+    endpoint_format: &Bound<'py, PyBytes>,
+    status_format: &Bound<'py, PyBytes>,
+    endpoint_ids: &Bound<'py, PyAny>,
+    status_codes: &Bound<'py, PyAny>,
+    unique_kwargs: &Bound<'py, PyDict>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let endpoint_text = strings_mod.call1((endpoint_format, endpoint_ids))?;
+    let status_text = strings_mod.call1((status_format, status_codes))?;
+    let labels = strings_add.call1((&endpoint_text, &status_text))?;
+    unique.call((&labels,), Some(unique_kwargs))
+}
+
+fn run_audit_log_job_profiled<'py>(
+    strings_mod: &Bound<'py, PyAny>,
+    strings_add: &Bound<'py, PyAny>,
+    unique: &Bound<'py, PyAny>,
+    endpoint_format: &Bound<'py, PyBytes>,
+    status_format: &Bound<'py, PyBytes>,
+    endpoint_ids: &Bound<'py, PyAny>,
+    status_codes: &Bound<'py, PyAny>,
+    unique_kwargs: &Bound<'py, PyDict>,
+) -> PyResult<(Bound<'py, PyAny>, [Duration; 4])> {
+    let started = Instant::now();
+    let endpoint_text = strings_mod.call1((endpoint_format, endpoint_ids))?;
+    let endpoint_format_elapsed = started.elapsed();
+
+    let started = Instant::now();
+    let status_text = strings_mod.call1((status_format, status_codes))?;
+    let status_format_elapsed = started.elapsed();
+
+    let started = Instant::now();
+    let labels = strings_add.call1((&endpoint_text, &status_text))?;
+    let label_concat_elapsed = started.elapsed();
+
+    let started = Instant::now();
+    let result = unique.call((&labels,), Some(unique_kwargs))?;
+    let aggregate_elapsed = started.elapsed();
+
+    Ok((
+        result,
+        [
+            endpoint_format_elapsed,
+            status_format_elapsed,
+            label_concat_elapsed,
+            aggregate_elapsed,
+        ],
+    ))
+}
+
+fn audit_log_job_checksum(result: &Bound<'_, PyAny>) -> PyResult<u64> {
+    let mut state = 0xcbf2_9ce4_8422_2325_u64;
+    for index in 0..2 {
+        let array = result.get_item(index)?;
+        let bytes = array.call_method0("tobytes")?.extract::<Vec<u8>>()?;
+        state ^= bytes.len() as u64;
+        state = state.wrapping_mul(0x0000_0100_0000_01b3);
+        for byte in bytes {
+            state = (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    Ok(state)
+}
+
+fn assert_audit_log_job_parity(
+    candidate: &Bound<'_, PyAny>,
+    incumbent: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    for index in 0..2 {
+        let candidate_array = candidate.get_item(index)?;
+        let incumbent_array = incumbent.get_item(index)?;
+        let candidate_dtype = candidate_array
+            .getattr("dtype")?
+            .getattr("str")?
+            .extract::<String>()?;
+        let incumbent_dtype = incumbent_array
+            .getattr("dtype")?
+            .getattr("str")?
+            .extract::<String>()?;
+        let candidate_shape = candidate_array.getattr("shape")?.extract::<Vec<usize>>()?;
+        let incumbent_shape = incumbent_array.getattr("shape")?.extract::<Vec<usize>>()?;
+        let candidate_bytes = candidate_array
+            .call_method0("tobytes")?
+            .extract::<Vec<u8>>()?;
+        let incumbent_bytes = incumbent_array
+            .call_method0("tobytes")?
+            .extract::<Vec<u8>>()?;
+        assert_eq!(
+            candidate_dtype, incumbent_dtype,
+            "audit-log output {index} dtype differs"
+        );
+        assert_eq!(
+            candidate_shape, incumbent_shape,
+            "audit-log output {index} shape differs"
+        );
+        assert_eq!(
+            candidate_bytes, incumbent_bytes,
+            "audit-log output {index} bytes differ"
+        );
+    }
+    Ok(())
+}
+
+fn profile_median_ms(samples: &mut [f64]) -> f64 {
+    samples.sort_by(f64::total_cmp);
+    samples[samples.len() / 2]
+}
+
+/// Class-3 missing-capability workload: render and aggregate API-gateway audit
+/// labels. NumPy has no vectorized integer printf engine, so `strings.mod`
+/// performs constant per-element formatting work. FrankenNumPy uses its native
+/// fixed-width integer formatter, then its own fixed-width concat and
+/// `unique(return_counts=True)` factorization paths.
+///
+/// Three realistic batch sizes expose the gap's shape. A flat NumPy/FNP ratio
+/// points to constant per-record work; narrowing points to candidate-side
+/// scaling/coordination cost; widening points to fixed-cost amortization or an
+/// incumbent stage whose complexity grows with the batch.
+fn bench_realistic_audit_log_format_aggregate_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    for variable in [
+        "RAYON_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ] {
+        let value = std::env::var(variable)
+            .unwrap_or_else(|_| panic!("{variable} must be pinned for the workload gate"));
+        assert_eq!(value, "4", "{variable} must equal 4");
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        4,
+        "Rayon pool must match the declared four-thread configuration"
+    );
+    println!(
+        "RUNTIME_CONFIG workload=audit_log_format_aggregate rayon_threads=4 \
+         openblas_threads=4 omp_threads=4 mkl_threads=4"
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_audit_log_workload").expect("audit-log module");
+        fnp_python(&module).expect("initialize fnp_python audit-log module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+        let fnp_strings = module.getattr("strings").expect("fnp strings");
+        let numpy_strings = numpy.getattr("strings").expect("numpy strings");
+        let fnp_mod = fnp_strings.getattr("mod").expect("fnp strings.mod");
+        let numpy_mod = numpy_strings.getattr("mod").expect("numpy strings.mod");
+        let fnp_add = fnp_strings.getattr("add").expect("fnp strings.add");
+        let numpy_add = numpy_strings.getattr("add").expect("numpy strings.add");
+        let fnp_unique = module.getattr("unique").expect("fnp unique");
+        let numpy_unique = numpy.getattr("unique").expect("numpy unique");
+
+        assert!(
+            !fnp_mod.is(&numpy_mod),
+            "dispatch trap: FNP strings.mod resolved to NumPy"
+        );
+        assert!(
+            !fnp_add.is(&numpy_add),
+            "dispatch trap: FNP strings.add resolved to NumPy"
+        );
+        assert!(
+            !fnp_unique.is(&numpy_unique),
+            "dispatch trap: FNP unique resolved to NumPy"
+        );
+        common::report_numpy_incumbent_identity(py, "unique", &numpy_unique);
+        common::report_incumbent_topology(
+            "fnp.workload.audit_log_format_aggregate",
+            "numpy.workload.audit_log_format_aggregate",
+        );
+        println!(
+            "INCUMBENT_PIPELINE workload=audit_log_format_aggregate \
+             candidate=fnp.strings.mod+fnp.strings.add+fnp.unique \
+             incumbent=numpy.strings.mod+numpy.strings.add+numpy.unique \
+             shared_timed_component=none"
+        );
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260729)\n\
+                 n_max = 1_800_000\n\
+                 endpoint_all = np.minimum(rng.zipf(1.17, n_max) - 1, 4095).astype(np.int32)\n\
+                 status_values = np.array([200, 201, 204, 400, 401, 403, 404, 409, 429, 500, 502, 503], dtype=np.int16)\n\
+                 status_prob = np.array([0.61, 0.05, 0.08, 0.04, 0.025, 0.025, 0.07, 0.01, 0.035, 0.025, 0.015, 0.015])\n\
+                 status_all = rng.choice(status_values, size=n_max, p=status_prob)\n\
+                 endpoint_200000 = endpoint_all[:200_000]\n\
+                 status_200000 = status_all[:200_000]\n\
+                 endpoint_600000 = endpoint_all[:600_000]\n\
+                 status_600000 = status_all[:600_000]\n\
+                 endpoint_1800000 = endpoint_all\n\
+                 status_1800000 = status_all\n",
+            )
+            .expect("audit-log setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("audit-log corpus setup");
+
+        let endpoint_format = PyBytes::new(py, b"ep=%04d");
+        let status_format = PyBytes::new(py, b"|st=%03d");
+        let unique_kwargs = PyDict::new(py);
+        unique_kwargs
+            .set_item("return_counts", true)
+            .expect("return_counts kwarg");
+        let mut scaling = Vec::with_capacity(3);
+
+        for size in [200_000_usize, 600_000, 1_800_000] {
+            let endpoint_key = format!("endpoint_{size}");
+            let status_key = format!("status_{size}");
+            let endpoint_ids = namespace
+                .get_item(endpoint_key.as_str())
+                .unwrap_or_else(|_| panic!("missing {endpoint_key}"));
+            let status_codes = namespace
+                .get_item(status_key.as_str())
+                .unwrap_or_else(|_| panic!("missing {status_key}"));
+
+            let candidate = run_audit_log_job(
+                &fnp_mod,
+                &fnp_add,
+                &fnp_unique,
+                &endpoint_format,
+                &status_format,
+                &endpoint_ids,
+                &status_codes,
+                &unique_kwargs,
+            )
+            .expect("candidate parity job");
+            let incumbent = run_audit_log_job(
+                &numpy_mod,
+                &numpy_add,
+                &numpy_unique,
+                &endpoint_format,
+                &status_format,
+                &endpoint_ids,
+                &status_codes,
+                &unique_kwargs,
+            )
+            .expect("incumbent parity job");
+            assert_audit_log_job_parity(&candidate, &incumbent).expect("audit-log exact parity");
+            let expected_checksum =
+                audit_log_job_checksum(&candidate).expect("candidate parity checksum");
+            assert_eq!(
+                expected_checksum,
+                audit_log_job_checksum(&incumbent).expect("incumbent parity checksum"),
+                "audit-log whole-job checksum mismatch at size {size}"
+            );
+            println!(
+                "PARITY workload=audit_log_format_aggregate size={size} \
+                 kind=dtype_shape_bytes_exact checksum={expected_checksum:016x}"
+            );
+
+            let mut incumbent_stage_ms: [Vec<f64>; 4] =
+                std::array::from_fn(|_| Vec::with_capacity(7));
+            let mut candidate_stage_ms: [Vec<f64>; 4] =
+                std::array::from_fn(|_| Vec::with_capacity(7));
+            for profile_round in 0..7 {
+                let (incumbent_result, incumbent_stages, candidate_result, candidate_stages) =
+                    if profile_round & 1 == 0 {
+                        let (incumbent_result, incumbent_stages) = run_audit_log_job_profiled(
+                            &numpy_mod,
+                            &numpy_add,
+                            &numpy_unique,
+                            &endpoint_format,
+                            &status_format,
+                            &endpoint_ids,
+                            &status_codes,
+                            &unique_kwargs,
+                        )
+                        .expect("profile incumbent job");
+                        let (candidate_result, candidate_stages) = run_audit_log_job_profiled(
+                            &fnp_mod,
+                            &fnp_add,
+                            &fnp_unique,
+                            &endpoint_format,
+                            &status_format,
+                            &endpoint_ids,
+                            &status_codes,
+                            &unique_kwargs,
+                        )
+                        .expect("profile candidate job");
+                        (
+                            incumbent_result,
+                            incumbent_stages,
+                            candidate_result,
+                            candidate_stages,
+                        )
+                    } else {
+                        let (candidate_result, candidate_stages) = run_audit_log_job_profiled(
+                            &fnp_mod,
+                            &fnp_add,
+                            &fnp_unique,
+                            &endpoint_format,
+                            &status_format,
+                            &endpoint_ids,
+                            &status_codes,
+                            &unique_kwargs,
+                        )
+                        .expect("profile candidate job");
+                        let (incumbent_result, incumbent_stages) = run_audit_log_job_profiled(
+                            &numpy_mod,
+                            &numpy_add,
+                            &numpy_unique,
+                            &endpoint_format,
+                            &status_format,
+                            &endpoint_ids,
+                            &status_codes,
+                            &unique_kwargs,
+                        )
+                        .expect("profile incumbent job");
+                        (
+                            incumbent_result,
+                            incumbent_stages,
+                            candidate_result,
+                            candidate_stages,
+                        )
+                    };
+                assert_eq!(
+                    audit_log_job_checksum(&incumbent_result).expect("profile incumbent checksum"),
+                    audit_log_job_checksum(&candidate_result).expect("profile candidate checksum"),
+                    "profiled jobs diverged at size {size}"
+                );
+                for stage in 0..4 {
+                    incumbent_stage_ms[stage].push(incumbent_stages[stage].as_secs_f64() * 1_000.0);
+                    candidate_stage_ms[stage].push(candidate_stages[stage].as_secs_f64() * 1_000.0);
+                }
+            }
+            for (stage, name) in [
+                "format_endpoint",
+                "format_status",
+                "concat_label",
+                "aggregate_unique_counts",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let incumbent_median = profile_median_ms(&mut incumbent_stage_ms[stage]);
+                let candidate_median = profile_median_ms(&mut candidate_stage_ms[stage]);
+                println!(
+                    "PROFILE_STAGE workload=audit_log_format_aggregate size={size} \
+                     stage={name} samples=7 incumbent_median_ms={incumbent_median:.6} \
+                     candidate_median_ms={candidate_median:.6} \
+                     incumbent_over_candidate={:.6}",
+                    incumbent_median / candidate_median
+                );
+            }
+
+            let mut time_incumbent = || {
+                let started = Instant::now();
+                let result = run_audit_log_job(
+                    &numpy_mod,
+                    &numpy_add,
+                    &numpy_unique,
+                    &endpoint_format,
+                    &status_format,
+                    &endpoint_ids,
+                    &status_codes,
+                    &unique_kwargs,
+                )
+                .expect("timed incumbent audit-log job");
+                let elapsed = started.elapsed();
+                let checksum =
+                    audit_log_job_checksum(&result).expect("timed incumbent job checksum");
+                common::ContractObservation { elapsed, checksum }
+            };
+            let mut time_candidate = || {
+                let started = Instant::now();
+                let result = run_audit_log_job(
+                    &fnp_mod,
+                    &fnp_add,
+                    &fnp_unique,
+                    &endpoint_format,
+                    &status_format,
+                    &endpoint_ids,
+                    &status_codes,
+                    &unique_kwargs,
+                )
+                .expect("timed candidate audit-log job");
+                let elapsed = started.elapsed();
+                let checksum =
+                    audit_log_job_checksum(&result).expect("timed candidate job checksum");
+                common::ContractObservation { elapsed, checksum }
+            };
+            let row = format!("audit_log_format_aggregate_{size}_vs_numpy");
+            let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+                &row,
+                &mut time_incumbent,
+                &mut time_candidate,
+            );
+            println!(
+                "WORKLOAD_SIZE_POINT workload=audit_log_format_aggregate size={size} \
+                 effect_ratio={:.6} incumbent_ns_per_record={:.3} \
+                 candidate_ns_per_record={:.3} incumbent_null_ratio={:.6} \
+                 candidate_null_ratio={:.6}",
+                effect.ratio_median,
+                effect.arm_a_median_ns / size as f64,
+                effect.arm_b_median_ns / size as f64,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+            scaling.push((size, effect));
+        }
+
+        let first_ratio = scaling.first().expect("first scaling point").1.ratio_median;
+        let last_ratio = scaling.last().expect("last scaling point").1.ratio_median;
+        let ratio_min = scaling
+            .iter()
+            .map(|(_, stats)| stats.ratio_median)
+            .fold(f64::INFINITY, f64::min);
+        let ratio_max = scaling
+            .iter()
+            .map(|(_, stats)| stats.ratio_median)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let ratio_spread = ratio_max / ratio_min - 1.0;
+        let monotonic_up = scaling
+            .windows(2)
+            .all(|points| points[1].1.ratio_median >= points[0].1.ratio_median);
+        let monotonic_down = scaling
+            .windows(2)
+            .all(|points| points[1].1.ratio_median <= points[0].1.ratio_median);
+        let shape = if ratio_spread <= 0.15 {
+            "FLAT_PER_RECORD_COST"
+        } else if monotonic_up && last_ratio >= first_ratio * 1.15 {
+            "WIDENING_WITH_BATCH"
+        } else if monotonic_down && last_ratio <= first_ratio * 0.85 {
+            "NARROWING_WITH_BATCH"
+        } else {
+            "MIXED_OR_NOISE"
+        };
+        println!(
+            "SCALING_SHAPE workload=audit_log_format_aggregate dimension=batch_size \
+             sizes=[200000,600000,1800000] ratios=[{:.6},{:.6},{:.6}] \
+             ratio_spread={ratio_spread:.6} classification={shape}",
+            scaling[0].1.ratio_median, scaling[1].1.ratio_median, scaling[2].1.ratio_median,
+        );
+    });
+}
+
 fn main() {
     common::gated_main(&[
         ("bench_string_sort_boundary", bench_string_sort_boundary),
@@ -851,6 +1297,10 @@ fn main() {
         (
             "bench_string_bytes_ops2_boundary",
             bench_string_bytes_ops2_boundary,
+        ),
+        (
+            "bench_realistic_audit_log_format_aggregate_vs_numpy_median_gate",
+            bench_realistic_audit_log_format_aggregate_vs_numpy_median_gate,
         ),
     ]);
 }

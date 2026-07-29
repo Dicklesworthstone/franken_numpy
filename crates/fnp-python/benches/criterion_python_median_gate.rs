@@ -4507,6 +4507,171 @@ fn bench_isin_f64_vs_numpy_median_gate(c: &mut Criterion) {
 /// `ArrayStorage::Bool` materialization funnel. The internal funnel remains a
 /// maintenance-only result; this row times `fnp.greater` as a whole against
 /// `numpy.greater` as a whole, with no shared measured component.
+/// CLASS-3 MISSING CAPABILITY, end-to-end vs NumPy. Two surfaces NumPy has no
+/// fast path for at all, which is where every historical monster in this repo
+/// came from. Deliberately not square f64 GEMM.
+///
+/// 1. `matmul` on int64 — **NumPy has no integer BLAS**, so it falls to a
+///    generic loop while we route to the native tiled integer kernel.
+/// 2. `char.upper` on a fixed-width ASCII array — **NumPy has no vectorized
+///    string case kernel**; it loops per element through the Python-level
+///    `numpy.char` layer.
+///
+/// Both are exactly reproducible (integer arithmetic; byte-wise ASCII mapping),
+/// so the arms are byte-identical by construction and the contract's per-round
+/// checksum equality holds without tolerance.
+///
+/// This function also restores measurement for the int64 matmul row: a
+/// concurrent edit dropped the original arm, which left a banked incumbent-win
+/// whose evidence could not be regenerated from the tree. An unreproducible
+/// claim is the frankensearch failure mode in miniature.
+fn bench_class3_missing_capability_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_class3_gaps").expect("class3 missing-capability module");
+        fnp_python(&module).expect("initialize fnp_python class3 module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260728)\n\
+                 mm_a = rng.integers(-64, 64, size=(256, 256), dtype=np.int64)\n\
+                 mm_b = rng.integers(-64, 64, size=(256, 256), dtype=np.int64)\n\
+                 alphabet = np.array(list('abcdefghijklmnopqrstuvwxyz'))\n\
+                 idx = rng.integers(0, 26, size=(400_000, 16))\n\
+                 up_a = np.array([''.join(row) for row in alphabet[idx]], dtype='U16')\n",
+            )
+            .expect("class3 setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("class3 corpus setup");
+
+        let checksum_of = |array: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let bytes = array
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec");
+            bytes
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        // --- surface 1: int64 matmul, no integer BLAS ---
+        {
+            let np_matmul = numpy.getattr("matmul").expect("numpy matmul");
+            let fnp_matmul = module.getattr("matmul").expect("fnp matmul");
+            common::report_numpy_incumbent_identity(py, "matmul", &np_matmul);
+            assert!(
+                !np_matmul.is(&fnp_matmul),
+                "dispatch trap: incumbent matmul resolved to our callable"
+            );
+            common::report_incumbent_topology("fnp.matmul", "numpy.matmul");
+
+            let lhs = namespace.get_item("mm_a").expect("mm_a present");
+            let rhs = namespace.get_item("mm_b").expect("mm_b present");
+            let ours = fnp_matmul.call1((&lhs, &rhs)).expect("fnp matmul parity");
+            let theirs = np_matmul.call1((&lhs, &rhs)).expect("numpy matmul parity");
+            assert_eq!(
+                checksum_of(&ours),
+                checksum_of(&theirs),
+                "int64 matmul: fnp and numpy disagree"
+            );
+
+            let mut time_incumbent = || {
+                let started = Instant::now();
+                let result = np_matmul
+                    .call1((black_box(&lhs), black_box(&rhs)))
+                    .expect("numpy matmul arm");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let mut time_ours = || {
+                let started = Instant::now();
+                let result = fnp_matmul
+                    .call1((black_box(&lhs), black_box(&rhs)))
+                    .expect("fnp matmul arm");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let _ = common::run_median_ci_contract(
+                "python_int64_matmul_256_vs_numpy",
+                &mut time_incumbent,
+                &mut time_ours,
+            );
+        }
+
+        // --- surface 2: ASCII case mapping, no vectorized string kernel ---
+        {
+            let np_char = numpy.getattr("char").expect("numpy char namespace");
+            let np_upper = np_char.getattr("upper").expect("numpy char.upper");
+            let fnp_upper = module
+                .getattr("char")
+                .expect("fnp char namespace")
+                .getattr("upper")
+                .expect("fnp char.upper");
+            assert!(
+                !np_upper.is(&fnp_upper),
+                "dispatch trap: incumbent char.upper resolved to our callable"
+            );
+            common::report_incumbent_topology("fnp.char.upper", "numpy.char.upper");
+
+            let text = namespace.get_item("up_a").expect("up_a present");
+            let ours = fnp_upper.call1((&text,)).expect("fnp char.upper parity");
+            let theirs = np_upper.call1((&text,)).expect("numpy char.upper parity");
+            assert_eq!(
+                checksum_of(&ours),
+                checksum_of(&theirs),
+                "char.upper: fnp and numpy disagree"
+            );
+
+            let mut time_incumbent = || {
+                let started = Instant::now();
+                let result = np_upper
+                    .call1((black_box(&text),))
+                    .expect("numpy char.upper arm");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let mut time_ours = || {
+                let started = Instant::now();
+                let result = fnp_upper
+                    .call1((black_box(&text),))
+                    .expect("fnp char.upper arm");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let _ = common::run_median_ci_contract(
+                "python_char_upper_ascii_400k_vs_numpy",
+                &mut time_incumbent,
+                &mut time_ours,
+            );
+        }
+    });
+}
+
 fn bench_bool_public_vs_numpy_median_gate(c: &mut Criterion) {
     let _ = c;
 
@@ -5568,6 +5733,10 @@ fn main() {
         (
             "bench_bool_public_vs_numpy_median_gate",
             bench_bool_public_vs_numpy_median_gate,
+        ),
+        (
+            "bench_class3_missing_capability_vs_numpy_median_gate",
+            bench_class3_missing_capability_vs_numpy_median_gate,
         ),
         (
             "bench_isin_f64_vs_numpy_median_gate",
