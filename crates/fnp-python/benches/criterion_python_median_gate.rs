@@ -332,6 +332,77 @@ impl<'py> EntitlementReconciliationArm<'py> {
     }
 }
 
+struct TelemetryDistributionArm<'py> {
+    histogram: Bound<'py, PyAny>,
+    cumsum: Bound<'py, PyAny>,
+    argmax: Bound<'py, PyAny>,
+}
+
+impl<'py> TelemetryDistributionArm<'py> {
+    fn run(&self, samples: &Bound<'py, PyAny>) -> (Duration, [Bound<'py, PyAny>; 4]) {
+        let started = Instant::now();
+        let histogram = self
+            .histogram
+            .call1((black_box(samples), 256_i64))
+            .expect("telemetry latency histogram");
+        let counts = histogram.get_item(0).expect("telemetry histogram counts");
+        let edges = histogram.get_item(1).expect("telemetry histogram edges");
+        let cumulative = self
+            .cumsum
+            .call1((black_box(&counts),))
+            .expect("telemetry cumulative counts");
+        let peak_bin = self
+            .argmax
+            .call1((black_box(&counts),))
+            .expect("telemetry peak bin");
+        let elapsed = started.elapsed();
+        (elapsed, [counts, edges, cumulative, peak_bin])
+    }
+
+    fn profile(&self, samples: &Bound<'py, PyAny>) -> [f64; 3] {
+        const PROFILE_ROUNDS: usize = 7;
+        let mut histogram_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut cumulative_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut peak_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        for _ in 0..PROFILE_ROUNDS {
+            let started = Instant::now();
+            let histogram = self
+                .histogram
+                .call1((samples, 256_i64))
+                .expect("profile telemetry histogram");
+            histogram_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+            let counts = histogram
+                .get_item(0)
+                .expect("profile telemetry histogram counts");
+
+            let started = Instant::now();
+            black_box(
+                self.cumsum
+                    .call1((&counts,))
+                    .expect("profile telemetry cumulative counts"),
+            );
+            cumulative_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            black_box(
+                self.argmax
+                    .call1((&counts,))
+                    .expect("profile telemetry peak bin"),
+            );
+            peak_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+        }
+        let median = |samples: &mut Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        [
+            median(&mut histogram_ms),
+            median(&mut cumulative_ms),
+            median(&mut peak_ms),
+        ]
+    }
+}
+
 fn bench_median_gate_python_binary<'py>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     bench_name: &'static str,
@@ -6516,6 +6587,287 @@ for snapshot in previous_by_size + current_by_size:
     });
 }
 
+/// Phase-2 Class-3 workload: turn a large half-precision latency stream into
+/// the distribution report used by telemetry dashboards. NumPy has no native
+/// f16 histogram kernel; its equal-width path performs half arithmetic over
+/// every sample. FrankenNumPy counts the bounded 65,536-pattern half domain,
+/// then classifies occupied patterns against byte-identical f16 edges.
+///
+/// The job returns the histogram, cumulative counts, and modal bin. Three
+/// stream sizes distinguish fixed bounded-domain setup from per-sample work.
+fn bench_realistic_f16_telemetry_distribution_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const SAMPLE_SIZES: [usize; 3] = [2_000_000, 4_000_000, 8_000_000];
+    const WORKLOAD_CONTRACT_ROUNDS: usize = 21;
+    const WORKLOAD_CONTRACT_MIN_OF: usize = 2;
+    const THREADS: &str = "4";
+
+    for variable in [
+        "RAYON_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(THREADS),
+            "{variable} must be explicitly pinned before workload timing"
+        );
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        THREADS
+            .parse::<usize>()
+            .expect("thread count constant is numeric"),
+        "Rayon pool width does not match the pinned workload configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME host={} rayon_threads={} RAYON_NUM_THREADS={} \
+         OPENBLAS_NUM_THREADS={} OMP_NUM_THREADS={} MKL_NUM_THREADS={} trj_used=false",
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "unavailable".to_owned()),
+        rayon::current_num_threads(),
+        THREADS,
+        THREADS,
+        THREADS,
+        THREADS,
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_f16_telemetry_distribution_workload")
+            .expect("f16 telemetry-distribution module");
+        fnp_python(&module).expect("initialize fnp_python telemetry-distribution module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(format!(
+                r#"
+import numpy as np
+rng = np.random.default_rng(20260729)
+sample_sizes = {SAMPLE_SIZES:?}
+max_samples = sample_sizes[-1]
+
+# Positive request latencies: a lognormal body plus a 4% burst tail. Values
+# are clipped to the practical dashboard range before f16 storage.
+latency_ms = rng.lognormal(mean=3.1, sigma=0.62, size=max_samples)
+burst_mask = rng.random(max_samples) < 0.04
+latency_ms[burst_mask] *= rng.uniform(2.0, 7.0, size=int(burst_mask.sum()))
+latency_ms = np.clip(latency_ms, 0.0625, 4096.0).astype(np.float16)
+latency_by_size = [
+    np.ascontiguousarray(latency_ms[:size]) for size in sample_sizes
+]
+
+assert latency_ms.dtype == np.float16
+assert latency_ms.flags.c_contiguous
+assert np.isfinite(latency_ms).all()
+assert (latency_ms > np.float16(0.0)).all()
+"#
+            ))
+            .expect("f16 telemetry-distribution setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("f16 telemetry-distribution corpus setup");
+
+        let fnp_histogram = module.getattr("histogram").expect("fnp histogram");
+        let np_histogram = numpy.getattr("histogram").expect("numpy histogram");
+        let fnp_cumsum = module.getattr("cumsum").expect("fnp cumsum");
+        let np_cumsum = numpy.getattr("cumsum").expect("numpy cumsum");
+        let fnp_argmax = module.getattr("argmax").expect("fnp argmax");
+        let np_argmax = numpy.getattr("argmax").expect("numpy argmax");
+        for (candidate, incumbent, surface) in [
+            (&fnp_histogram, &np_histogram, "histogram"),
+            (&fnp_cumsum, &np_cumsum, "cumsum"),
+            (&fnp_argmax, &np_argmax, "argmax"),
+        ] {
+            assert!(
+                !candidate.is(incumbent),
+                "{surface}: candidate callable aliases NumPy"
+            );
+            common::report_numpy_incumbent_identity(py, surface, incumbent);
+        }
+        common::report_incumbent_topology(
+            "fnp.workload.f16_telemetry_distribution",
+            "numpy.workload.f16_telemetry_distribution",
+        );
+        println!(
+            "INCUMBENT_PIPELINE workload=f16_telemetry_distribution \
+             candidate=fnp.histogram+fnp.cumsum+fnp.argmax \
+             incumbent=numpy.histogram+numpy.cumsum+numpy.argmax \
+             shared_timed_component=none inputs_shared_read_only=true"
+        );
+        println!(
+            "ROUTE_PRECONDITIONS workload=f16_telemetry_distribution \
+             dtype=float16 ndim=1 c_contiguous=true native_endian=true \
+             finite=true negative_zero=false bins=256 range=none weights=none \
+             density=none bounded_pattern_domain=65536 \
+             contract_rounds={WORKLOAD_CONTRACT_ROUNDS} \
+             contract_min_of={WORKLOAD_CONTRACT_MIN_OF}"
+        );
+
+        let incumbent = TelemetryDistributionArm {
+            histogram: np_histogram,
+            cumsum: np_cumsum,
+            argmax: np_argmax,
+        };
+        let candidate = TelemetryDistributionArm {
+            histogram: fnp_histogram,
+            cumsum: fnp_cumsum,
+            argmax: fnp_argmax,
+        };
+        let latency_by_size = namespace
+            .get_item("latency_by_size")
+            .expect("latency streams by size");
+
+        let mut scaling = Vec::with_capacity(SAMPLE_SIZES.len());
+        for (size_index, size) in SAMPLE_SIZES.into_iter().enumerate() {
+            let row = format!("workload_f16_telemetry_distribution_256bins_{size}");
+            println!(
+                "WORKLOAD_CONFIG row={row} user_job=latency_distribution_report \
+                 samples={size} dtype=float16 bins=256 \
+                 distribution=lognormal_body_plus_4pct_burst_tail_clipped_positive \
+                 stages=histogram_uniform_256,cumulative_counts,modal_bin \
+                 output=counts_edges_cdf_peak_bin \
+                 matched_config=same_process_same_inputs target_regime=large_finite_f16 \
+                 square_gemm_excluded=true"
+            );
+            let samples = latency_by_size
+                .get_item(size_index)
+                .expect("latency stream for size");
+
+            let (_, incumbent_output) = incumbent.run(&samples);
+            let (_, candidate_output) = candidate.run(&samples);
+            assert_workload_outputs_equal(&numpy, &row, &candidate_output, &incumbent_output);
+            println!(
+                "PARITY row={row} dtype=float16_input outputs=4 \
+                 byte_identity=passed checksum={:016x}",
+                workload_checksum(&numpy, &candidate_output),
+            );
+
+            let incumbent_profile = incumbent.profile(&samples);
+            let candidate_profile = candidate.profile(&samples);
+            let candidate_total = candidate_profile.iter().sum::<f64>();
+            let (target_stage, target_ms) = [
+                ("histogram_uniform_256", candidate_profile[0]),
+                ("cumulative_counts", candidate_profile[1]),
+                ("modal_bin", candidate_profile[2]),
+            ]
+            .into_iter()
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .expect("three telemetry profile stages");
+            for (stage, incumbent_ms, candidate_ms) in [
+                (
+                    "histogram_uniform_256",
+                    incumbent_profile[0],
+                    candidate_profile[0],
+                ),
+                (
+                    "cumulative_counts",
+                    incumbent_profile[1],
+                    candidate_profile[1],
+                ),
+                ("modal_bin", incumbent_profile[2], candidate_profile[2]),
+            ] {
+                println!(
+                    "PROFILE_STAGE row={row} arm_pair=numpy_fnp stage={stage} \
+                     incumbent_median_ms={incumbent_ms:.6} \
+                     candidate_median_ms={candidate_ms:.6}"
+                );
+            }
+            let target_fraction = target_ms / candidate_total;
+            println!(
+                "PROFILE_SUMMARY row={row} target_stage={target_stage} \
+                 target_candidate_ms={target_ms:.6} candidate_stage_sum_ms={candidate_total:.6} \
+                 target_self_fraction_pct={:.3} amdahl_remove_ceiling={:.6}",
+                target_fraction * 100.0,
+                1.0 / (1.0 - target_fraction),
+            );
+
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = incumbent.run(&samples);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = candidate.run(&samples);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &row,
+                    &mut observe_incumbent,
+                    &mut observe_candidate,
+                    WORKLOAD_CONTRACT_ROUNDS,
+                    WORKLOAD_CONTRACT_MIN_OF,
+                );
+            println!(
+                "WORKLOAD_SIZE_POINT workload=f16_telemetry_distribution size={size} \
+                 incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ratio={:.6} candidate_null_ratio={:.6} \
+                 incumbent_ns_per_sample={:.3} candidate_ns_per_sample={:.3}",
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+                effect.arm_a_median_ns / size as f64,
+                effect.arm_b_median_ns / size as f64,
+            );
+            scaling.push(effect);
+        }
+
+        let first_ratio = scaling.first().expect("first scaling point").ratio_median;
+        let last_ratio = scaling.last().expect("last scaling point").ratio_median;
+        let ratio_min = scaling
+            .iter()
+            .map(|stats| stats.ratio_median)
+            .fold(f64::INFINITY, f64::min);
+        let ratio_max = scaling
+            .iter()
+            .map(|stats| stats.ratio_median)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let ratio_spread = ratio_max / ratio_min - 1.0;
+        let monotonic_up = scaling
+            .windows(2)
+            .all(|points| points[1].ratio_median >= points[0].ratio_median);
+        let monotonic_down = scaling
+            .windows(2)
+            .all(|points| points[1].ratio_median <= points[0].ratio_median);
+        let shape = if ratio_spread <= 0.15 {
+            "FLAT_PER_SAMPLE_COST"
+        } else if monotonic_up && last_ratio >= first_ratio * 1.15 {
+            "WIDENING_WITH_STREAM"
+        } else if monotonic_down && last_ratio <= first_ratio * 0.85 {
+            "NARROWING_WITH_STREAM"
+        } else {
+            "MIXED_OR_NOISE"
+        };
+        println!(
+            "SCALING_SHAPE workload=f16_telemetry_distribution dimension=sample_count \
+             sizes=[{},{},{}] ratios=[{:.6},{:.6},{:.6}] \
+             ratio_spread={ratio_spread:.6} classification={shape}",
+            SAMPLE_SIZES[0],
+            SAMPLE_SIZES[1],
+            SAMPLE_SIZES[2],
+            scaling[0].ratio_median,
+            scaling[1].ratio_median,
+            scaling[2].ratio_median,
+        );
+    });
+}
+
 fn bench_bool_storage_bytes_median_gate(c: &mut Criterion) {
     let _ = c;
     const N: usize = 8_000_000;
@@ -6627,6 +6979,10 @@ fn main() {
         (
             "bench_realistic_entitlement_reconciliation_vs_numpy_median_gate",
             bench_realistic_entitlement_reconciliation_vs_numpy_median_gate,
+        ),
+        (
+            "bench_realistic_f16_telemetry_distribution_vs_numpy_median_gate",
+            bench_realistic_f16_telemetry_distribution_vs_numpy_median_gate,
         ),
         (
             "bench_bool_storage_bytes_median_gate",

@@ -32304,3 +32304,141 @@ a clean fleet there is no win. RETRY predicate (low priority now): only worth re
 (1) zero-copy PyBuffer extraction AND (2) dropping the residual recompute (accumulate ||Qtb_bottom||^2
 through the TSQR tree instead of a second matrix pass) — i.e. the Python-surface overhead, not the
 kernel, is the wall; a kernel-only speedup cannot close it. AGENT_NAME=GoldKnoll.
+## 2026-07-29 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): f16 telemetry distribution report - 37.25-99.49x vs NumPy with a widening stream-size curve
+
+`BeigeDog`, bead `deadlock-audit-1ij7i`, cod / Lane M. The negative-evidence
+preflight was clear for
+`fnp.histogram float16 1-D contiguous int bins range=None weights=None density=None`
+before source editing. This Phase-2 whole job turns a large half-precision
+request-latency stream into the distribution report consumed by a telemetry
+dashboard: a 256-bin histogram with returned edges, cumulative counts, and the
+modal bin. Each arm independently executes its own public `histogram`, `cumsum`,
+and `argmax` callables end to end.
+
+The corpus contains 2,000,000, 4,000,000, and 8,000,000 positive f16 request
+latencies. A seeded lognormal body models ordinary requests; a 4% burst mask
+multiplies selected values by a uniform 2-7x tail factor, then values are clipped
+to 0.0625-4096 ms before f16 storage. This is one directional lever: exploit
+the finite 65,536-pattern f16 domain in the histogram stage. It does not touch
+GEMM.
+
+`bench_elf_sha256=40b1db87fe0bc9c3f5102b12e3cba8ca839566dea2f377c1c37f6fb721158313`
+(295,956,872 bytes)
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 1.016228x,
+CI95 [0.997877, 1.029216], 21 rounds, min_of=2 at the 8,000,000-sample
+headline size; the table records all three sizes.
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio
+0.998460x, CI95 [0.870830, 1.106924], 21 rounds, min_of=2 at the
+8,000,000-sample headline size.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c6dcad6e32ea2a-002943ab measured_ratio=37.248076x median=136.455019ms
+
+**Incumbent isolation proof:** candidate=fnp.workload.f16_telemetry_distribution incumbent=numpy.workload.f16_telemetry_distribution shared_timed_component=none
+
+The NumPy artifact was
+`d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa`
+(10,452,641 bytes,
+`numpy/_core/_multiarray_umath.cpython-313-x86_64-linux-gnu.so`). The benchmark
+ran on pinned RCH worker `vmi1156319`, not TRJ, with Rayon, OpenBLAS, OMP, and
+MKL all fixed at four threads. The harness asserted that every FNP callable was
+distinct from its NumPy counterpart. Both call graphs received the same
+read-only latency array but shared no explicit timed component or postprocessing
+tail.
+
+HOST-WIDE EXCLUSIVITY PROOF: the executable required its allowed affinity mask
+to equal the complete online CPU set and required every CPU to remain at or
+below 20% busy for two consecutive 300 ms `/proc/stat` samples before any
+warmup or timing. The process-level check cleared CPUs 0-7 only after nine
+samples and 2,720 ms of settling, with 3.4% maximum busy in the final sample.
+The same fail-closed check ran again immediately before each of the three
+size-specific contracts. Sustained co-tenancy, a partial affinity mask, or a
+disappearing CPU exits 2; the harness does not merely print a convention.
+
+ROUTE PROOF: the workload arrays are exact NumPy ndarrays with native-endian
+f16 dtype, one dimension, C contiguity, at least `1 << 20` elements, finite
+values, and no negative zero. The call uses an integer bin count of 256 with
+`range=None`, `weights=None`, and `density=None`. The bounded-pattern route
+therefore counts raw half patterns in parallel, derives the f16 extrema in
+half total order, reproduces NumPy's returned f16 linspace edges, and
+classifies each occupied pattern against those exact edges. Non-native or
+non-contiguous input, fewer than `1 << 20` elements, negative zero, non-finite
+values, more than 2,048 bins, a non-finite or zero f16 step, or non-increasing
+rounded edges retain the NumPy fallback.
+
+BEHAVIOR-PRESERVATION PROOF: for a native-endian f16 ndarray, each raw `u16`
+pattern names exactly one half value. Counting identical patterns first cannot
+change a histogram because all occurrences compare identically to every edge.
+The helper performs f16 rounding after the same subtract, divide, multiply, and
+add stages used to construct NumPy's returned f16 linspace; it overwrites the
+last edge with the exact maximum and applies left-closed/right-open bins with a
+right-closed final bin. Counts are accumulated as int64. The focused
+differential test executed every non-negative finite f16 bit pattern and every
+negative finite pattern except deliberately deferred negative zero, across bin
+counts 1, 3, 10, 64, 257, and 512. It also covered mixed-sign, positive,
+constant, non-finite, swapped-endian, and negative-zero inputs. All admitted
+count and edge bytes matched NumPy; every ambiguous case took the fallback.
+The exact named strict-remote test ran one test and passed.
+
+Before timing, dtype, shape, and every output byte matched for histogram counts,
+f16 edges, cumulative counts, and modal bin at all three sizes. Pre-timing
+checksums were `228f5ec70ef2b6b3`, `dbda24b11c5b1f32`, and
+`061f9bea66b045bf`; every timed observation reproduced its size-specific
+checksum.
+
+| samples | NumPy/NumPy null ratio (CI95) | FNP/FNP null ratio (CI95) | NumPy median | FNP median | NumPy/FNP ratio (CI95) | required 2x null delta | verdict |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 2,000,000 | 1.001770 `[0.950150,1.051994]` | 0.997987 `[0.878746,1.119274]` | 136.455019 ms | 3.716350 ms | **37.248076x** `[29.344003,44.218396]` | 0.242508 | DECIDABLE_WIN |
+| 4,000,000 | 1.015162 `[0.993071,1.053811]` | 1.080850 `[0.829269,1.443499]` | 281.432353 ms | 4.931308 ms | **54.949847x** `[21.142659,65.201139]` | 0.886998 | DECIDABLE_WIN |
+| 8,000,000 | 1.016228 `[0.997877,1.029216]` | 0.998460 `[0.870830,1.106924]` | 536.796657 ms | 5.212400 ms | **99.488057x** `[90.629536,116.181891]` | 0.258340 | DECIDABLE_WIN |
+
+Every effect median clears twice the wider same-invocation null half-width, and
+every effect CI remains wholly above that widened null margin. CV was emitted
+by the harness as provenance only and did not admit or reject any row. The
+whole-job sweep uses 21 rounds with min-of-2 so all three dual-null contracts
+fit the remote execution ceiling; it retains interleaved arm order,
+4,096-resample bootstrap median CIs, checksum enforcement, and the wider-null
+2x decision rule.
+
+SCALING SHAPE: ratios `[37.248076, 54.949847, 99.488057]` have 167.0958%
+spread and rise monotonically, so the harness classifies the gap
+`WIDENING_WITH_STREAM`. NumPy remains near 67-70 ns per sample while FNP falls
+from 1.858 to 0.652 ns per sample over the measured range. The widening curve
+localizes the gap to NumPy's per-sample f16 histogram work versus the
+candidate's bounded pattern-domain classification, not a fixed harness tail.
+
+PROFILE ATTRIBUTION: at 2M samples, NumPy/FNP histogram medians were
+133.818872/4.671787 ms; histogram was 97.883% of FNP's summed stage time, for
+an all-of-that-stage removal ceiling of 47.237920x. At 4M they were
+322.838623/3.795587 ms, 97.399%, and 38.453987x. At 8M they were
+558.031778/4.875283 ms, 98.006%, and 50.138072x. Thus the workload actually
+routed through the optimized `fnp.histogram` stage, and that named stage—not
+`cumsum`, `argmax`, or harness postprocessing—remained the candidate hot path.
+
+COUNTED_MECHANISM: the incumbent performs uniform-bin f16 arithmetic and
+classification for every sample. The candidate still makes one parallel
+pattern-count increment per sample, but expensive edge classification is
+bounded by the 65,536 raw half patterns instead of the stream length; repeated
+latencies collapse before classification. This removes an algorithmic class
+of per-sample work while preserving exact returned edges and counts.
+
+CHOOSER STATEMENT: for this route-qualified 2M-to-8M-sample f16 telemetry
+distribution job on the recorded artifacts, choose FrankenNumPy when completion
+time is decisive. The conservative measured point is 37.248076x, and all three
+effect CIs clear both same-invocation null envelopes.
+
+**Decision: KEEP, INCUMBENT-WIN.** Bank the implementation and the realistic
+workload harness.
+
+Retry predicate: do not rerun this exact corpus on these artifacts. Reopen if
+the NumPy artifact changes; if the route admits data outside finite
+native-endian contiguous f16 with integer bins at most 2,048 and no explicit
+range, weights, or density; if the sample-count curve stops widening or the
+conservative ratio falls below 20x; or only after an exact byte proof exists
+for newly admitted semantics. Any extension must retain executable and NumPy
+artifact hashes, independent end-to-end arms with
+`shared_timed_component=none`, both same-invocation A/A nulls, exact output
+parity, host-wide fail-closed exclusivity, and the median-CI 2x wider-null gate.

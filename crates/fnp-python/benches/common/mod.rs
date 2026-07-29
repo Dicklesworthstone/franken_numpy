@@ -34,6 +34,8 @@ const CONTRACT_MIN_OF: usize = 3;
 const CONTRACT_BOOTSTRAP_RESAMPLES: usize = 4_096;
 const HOST_WIDE_CPU_SAMPLE_INTERVAL: Duration = Duration::from_millis(300);
 const HOST_WIDE_MAX_BUSY_FRACTION: f64 = 0.20;
+const HOST_WIDE_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
+const HOST_WIDE_REQUIRED_QUIET_SAMPLES: usize = 2;
 
 #[derive(Clone, Copy)]
 pub struct ContractPairStats {
@@ -195,56 +197,84 @@ fn block_benchmark(reason: &str) -> ! {
 }
 
 /// Refuse to measure unless this process owns a full-host affinity mask and
-/// every online CPU is quiet. This makes benchmark exclusivity a checked
-/// harness contract instead of an operator convention.
+/// every online CPU is quiet for two consecutive samples. The bounded settling
+/// window lets a just-finished RCH release link drain out of `/proc/stat`
+/// without weakening the contract: sustained co-tenancy still exits 2 before
+/// any warmup or timed sample begins.
 fn require_host_wide_benchmark_exclusivity(phase: &str) {
     let allowed = self_allowed_cpus()
         .unwrap_or_else(|error| block_benchmark(&format!("affinity_check:{error}")));
-    let busy = sample_cpu_busy()
-        .unwrap_or_else(|error| block_benchmark(&format!("quiescence_check:{error}")));
-    let online = busy.keys().copied().collect::<BTreeSet<_>>();
-    if allowed != online {
-        block_benchmark(&format!(
-            "affinity_not_host_wide:allowed={}:online={}",
-            format_cpu_set(&allowed),
-            format_cpu_set(&online),
-        ));
-    }
+    let started = Instant::now();
+    let mut sample_count = 0_usize;
+    let mut quiet_streak = 0_usize;
 
-    let busy_cpus = allowed
-        .iter()
-        .filter_map(|cpu| {
-            let fraction = busy
-                .get(cpu)
-                .copied()
-                .unwrap_or_else(|| block_benchmark(&format!("allowed_cpu_disappeared:cpu{cpu}")));
-            (fraction > HOST_WIDE_MAX_BUSY_FRACTION)
-                .then_some(format!("cpu{cpu}={:.1}%", fraction * 100.0))
-        })
-        .collect::<Vec<_>>();
-    if !busy_cpus.is_empty() {
-        block_benchmark(&format!(
-            "host_not_quiet:maximum_allowed_busy_pct={:.1}:busy_cpus={}",
-            HOST_WIDE_MAX_BUSY_FRACTION * 100.0,
-            busy_cpus.join(","),
-        ));
+    loop {
+        let busy = sample_cpu_busy()
+            .unwrap_or_else(|error| block_benchmark(&format!("quiescence_check:{error}")));
+        sample_count += 1;
+        let online = busy.keys().copied().collect::<BTreeSet<_>>();
+        if allowed != online {
+            block_benchmark(&format!(
+                "affinity_not_host_wide:allowed={}:online={}",
+                format_cpu_set(&allowed),
+                format_cpu_set(&online),
+            ));
+        }
+
+        let maximum_observed_busy = allowed
+            .iter()
+            .filter_map(|cpu| busy.get(cpu))
+            .copied()
+            .fold(0.0_f64, f64::max);
+        let busy_cpus = allowed
+            .iter()
+            .filter_map(|cpu| {
+                let fraction = busy.get(cpu).copied().unwrap_or_else(|| {
+                    block_benchmark(&format!("allowed_cpu_disappeared:cpu{cpu}"))
+                });
+                (fraction > HOST_WIDE_MAX_BUSY_FRACTION)
+                    .then_some(format!("cpu{cpu}={:.1}%", fraction * 100.0))
+            })
+            .collect::<Vec<_>>();
+
+        if busy_cpus.is_empty() {
+            quiet_streak += 1;
+            if quiet_streak == HOST_WIDE_REQUIRED_QUIET_SAMPLES {
+                println!(
+                    "HOST_WIDE_QUIESCENCE phase={phase} allowed_cpu_count={} affinity={} \
+                     sample_ms={} maximum_allowed_busy_fraction={:.3} \
+                     maximum_observed_busy_fraction={maximum_observed_busy:.3} \
+                     busy_cpu_count_above_limit=0 quiet_samples_required={} \
+                     settle_samples={sample_count} settle_elapsed_ms={} verdict=clear",
+                    allowed.len(),
+                    format_cpu_set(&allowed),
+                    HOST_WIDE_CPU_SAMPLE_INTERVAL.as_millis(),
+                    HOST_WIDE_MAX_BUSY_FRACTION,
+                    HOST_WIDE_REQUIRED_QUIET_SAMPLES,
+                    started.elapsed().as_millis(),
+                );
+                std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
+                return;
+            }
+        } else {
+            quiet_streak = 0;
+        }
+
+        if started.elapsed() >= HOST_WIDE_SETTLE_TIMEOUT {
+            block_benchmark(&format!(
+                "host_not_quiet_after_settle:timeout_ms={}:samples={sample_count}:\
+                 quiet_streak={quiet_streak}/{}:maximum_allowed_busy_pct={:.1}:busy_cpus={}",
+                HOST_WIDE_SETTLE_TIMEOUT.as_millis(),
+                HOST_WIDE_REQUIRED_QUIET_SAMPLES,
+                HOST_WIDE_MAX_BUSY_FRACTION * 100.0,
+                if busy_cpus.is_empty() {
+                    "none".to_owned()
+                } else {
+                    busy_cpus.join(",")
+                },
+            ));
+        }
     }
-    let maximum_observed_busy = allowed
-        .iter()
-        .filter_map(|cpu| busy.get(cpu))
-        .copied()
-        .fold(0.0_f64, f64::max);
-    println!(
-        "HOST_WIDE_QUIESCENCE phase={phase} allowed_cpu_count={} affinity={} \
-         sample_ms={} maximum_allowed_busy_fraction={:.3} \
-         maximum_observed_busy_fraction={maximum_observed_busy:.3} \
-         busy_cpu_count_above_limit=0 verdict=clear",
-        allowed.len(),
-        format_cpu_set(&allowed),
-        HOST_WIDE_CPU_SAMPLE_INTERVAL.as_millis(),
-        HOST_WIDE_MAX_BUSY_FRACTION,
-    );
-    std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
 }
 
 pub fn bench_invocation_id() -> &'static str {

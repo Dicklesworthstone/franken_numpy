@@ -31674,7 +31674,7 @@ fn histogram(
     if a_bound.is_exact_instance(&ndarray_type) {
         let dtype = a_bound.getattr("dtype")?;
         if dtype.getattr("kind")?.extract::<String>()? == "f"
-            && dtype.getattr("itemsize")?.extract::<usize>()? == 4
+            && matches!(dtype.getattr("itemsize")?.extract::<usize>()?, 2 | 4)
         {
             return fallback(py);
         }
@@ -32119,6 +32119,193 @@ fn histogram_f32(
     Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()))
 }
 
+// NumPy has no half-precision histogram kernel: its uniform-bin path performs
+// f16 subtraction/division/multiplication over every input element before a
+// bincount. A finite half array has only 65,536 possible bit patterns, so count
+// those patterns once in parallel, reproduce NumPy's f16 linspace, classify
+// each occupied pattern against those exact returned edges, and accumulate the
+// pattern multiplicities. The returned counts and edges are byte-identical
+// while the expensive classification cost is bounded by the half domain
+// rather than N.
+//
+// Ambiguous or uncommon cases deliberately defer: non-native/non-contiguous
+// arrays, non-finite values, negative zero (NumPy's reduction can preserve its
+// sign according to encounter order), tiny inputs, and bin counts beyond the
+// exactly represented f16 integer range.
+fn try_zerocopy_histogram_f16(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    nbins: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    const MIN_N: usize = 1 << 20;
+    const MAX_EXACT_F16_BINS: usize = 1 << 11;
+
+    let dtype = a.getattr("dtype")?;
+    if !dtype.getattr("isnative")?.extract::<bool>()?
+        || !a
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+        || a.getattr("ndim")?.extract::<usize>()? != 1
+        || nbins == 0
+        || nbins > MAX_EXACT_F16_BINS
+    {
+        return Ok(None);
+    }
+    let n = a.getattr("size")?.extract::<usize>()?;
+    if n < MIN_N || n > i64::MAX as usize {
+        return Ok(None);
+    }
+
+    let bits_view = a.call_method1("view", (numpy.getattr("uint16")?,))?;
+    let Ok(bits_buffer) = PyBuffer::<u16>::get(&bits_view) else {
+        return Ok(None);
+    };
+    let Some(bits_cells) = bits_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if bits_cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<u16> is repr(transparent), the array is native-endian
+    // C-contiguous, and it remains read-only under the GIL for this call.
+    let bits: &[u16] = unsafe { std::slice::from_raw_parts(bits_cells.as_ptr().cast::<u16>(), n) };
+
+    use rayon::prelude::*;
+    let threads = rayon::current_num_threads().max(1);
+    let chunk = n.div_ceil(threads * 4).max(1);
+    let pattern_counts = bits
+        .par_chunks(chunk)
+        .map(|values| {
+            let mut local = vec![0_usize; 1 << 16];
+            for &value in values {
+                local[value as usize] += 1;
+            }
+            local
+        })
+        .reduce(
+            || vec![0_usize; 1 << 16],
+            |mut left, right| {
+                for (slot, count) in left.iter_mut().zip(right) {
+                    *slot += count;
+                }
+                left
+            },
+        );
+
+    // NumPy rejects non-finite autoranges. Negative zero is finite, but the
+    // sign of a min/max reduction over equal signed zeros is encounter-order
+    // sensitive, which a value-count table intentionally discards.
+    if pattern_counts[0x8000] != 0
+        || pattern_counts
+            .iter()
+            .enumerate()
+            .any(|(raw, &count)| count != 0 && ((raw as u16) & 0x7c00) == 0x7c00)
+    {
+        return Ok(None);
+    }
+
+    let raw_from_ordered_key = |key: u32| -> u16 {
+        if key < 0x8000 {
+            (0xffff - key) as u16
+        } else {
+            (key & 0x7fff) as u16
+        }
+    };
+    let first_raw = (0_u32..=u16::MAX as u32)
+        .map(raw_from_ordered_key)
+        .find(|&raw| pattern_counts[raw as usize] != 0)
+        .expect("non-empty f16 input must have a first pattern");
+    let last_raw = (0_u32..=u16::MAX as u32)
+        .rev()
+        .map(raw_from_ordered_key)
+        .find(|&raw| pattern_counts[raw as usize] != 0)
+        .expect("non-empty f16 input must have a last pattern");
+
+    let round_f16 = |value: f32| f16::from_f32(value);
+    let subtract_f16 = |left: f16, right: f16| round_f16(left.to_f32() - right.to_f32());
+    let add_f16 = |left: f16, right: f16| round_f16(left.to_f32() + right.to_f32());
+    let multiply_f16 = |left: f16, right: f16| round_f16(left.to_f32() * right.to_f32());
+    let divide_f16 = |left: f16, right: f16| round_f16(left.to_f32() / right.to_f32());
+
+    let mut first = f16::from_bits(first_raw);
+    let mut last = f16::from_bits(last_raw);
+    if first == last {
+        let half = f16::from_f32(0.5);
+        first = subtract_f16(first, half);
+        last = add_f16(last, half);
+    }
+    let denominator = subtract_f16(last, first);
+    let bin_count_f16 = f16::from_f32(nbins as f32);
+    if !denominator.is_finite() || denominator == f16::ZERO || !bin_count_f16.is_finite() {
+        return Ok(None);
+    }
+    let step = divide_f16(denominator, bin_count_f16);
+    if !step.is_finite() || step == f16::ZERO {
+        return Ok(None);
+    }
+
+    // np.linspace(start, stop, nbins + 1, dtype=float16) computes a float16
+    // arange, multiplies it in-place by the float16 step, adds start in-place,
+    // then overwrites the final element with stop.
+    let mut edge_values = Vec::with_capacity(nbins + 1);
+    for index in 0..=nbins {
+        let edge = if index == nbins {
+            last
+        } else {
+            let index_f16 = f16::from_f32(index as f32);
+            add_f16(first, multiply_f16(index_f16, step))
+        };
+        edge_values.push(edge);
+    }
+    if edge_values
+        .windows(2)
+        .any(|pair| pair[0].to_f32() >= pair[1].to_f32())
+    {
+        return Ok(None);
+    }
+
+    let mut histogram = vec![0_i64; nbins];
+    for (raw, &count) in pattern_counts.iter().enumerate() {
+        if count == 0 {
+            continue;
+        }
+        let value = f16::from_bits(raw as u16);
+        let value = value.to_f32();
+        // Histogram bins are [left, right), except for the final right-closed
+        // bin. Find the first edge strictly greater than the value, then use
+        // its predecessor; cap last-edge equality into the final bin. This is
+        // the semantic result NumPy's affine estimate plus ULP corrections is
+        // designed to produce, without depending on a worker's f16 ufunc loop.
+        let mut low = 0_usize;
+        let mut high = edge_values.len();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if edge_values[middle].to_f32() <= value {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        let index = low.saturating_sub(1).min(nbins - 1);
+        histogram[index] += count as i64;
+    }
+
+    let counts = numpy_array_from_slice(py, numpy, &histogram, "int64")?;
+    let edge_bits = edge_values
+        .iter()
+        .map(|value| value.to_bits())
+        .collect::<Vec<_>>();
+    let edges_u16 = numpy_array_from_slice(py, numpy, &edge_bits, "uint16")?;
+    let edges = edges_u16.call_method1("view", (numpy.getattr("float16")?,))?;
+    Ok(Some(
+        PyTuple::new(py, [counts.as_any(), edges.as_any()])?
+            .into_any()
+            .unbind(),
+    ))
+}
+
 // O(n) uniform-bin np.histogram for exact 1-D f64/f32/integer ndarrays with
 // bins=int and no range/weights/density. The f64/integer path mirrors NumPy's
 // uniform-bin affine index calculation and edge corrections; the f32 path bins
@@ -32305,6 +32492,7 @@ fn try_zerocopy_histogram(
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
     match (kind.as_str(), itemsize) {
+        ("f", 2) => try_zerocopy_histogram_f16(py, &numpy, a, nbins),
         ("f", 4) => histogram_f32(py, &numpy, a, nbins),
         ("f", 8) => histogram_typed::<f64>(py, &numpy, a, nbins, |x| x, true, |_| true),
         ("i", 1) => histogram_typed::<i8>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
@@ -136201,6 +136389,85 @@ mod tests {
                 )?,
             )?;
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn f16_histogram_pattern_table_is_byte_exact_and_defers_ambiguous_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let histogram_fn = module.getattr("histogram")?;
+            let numpy = py.import("numpy")?;
+            let numpy_histogram = numpy.getattr("histogram")?;
+            let namespace = PyDict::new(py);
+            py.run(
+                c"import numpy as np\nn = 1 << 20\nraw = (np.arange(n, dtype=np.uint32) * 37) % 60001\nmixed = ((raw.astype(np.float32) - 30000.0) / 64.0).astype(np.float16)\npositive = (raw.astype(np.float32) / 128.0 + 0.125).astype(np.float16)\npositive_patterns = np.arange(0x7c00, dtype=np.uint16).view(np.float16)\npositive_domain = np.resize(positive_patterns, n).copy()\nnegative_patterns = np.arange(0x8001, 0xfc00, dtype=np.uint16).view(np.float16)\nnegative_domain = np.resize(negative_patterns, n).copy()\nconstant = np.full(n, np.float16(7.25), dtype=np.float16)\nwith_inf = mixed.copy(); with_inf[0] = np.float16(np.inf)\nwith_negative_zero = mixed.copy(); with_negative_zero[0] = np.float16(-0.0)\nswapped = mixed.astype('>f2')",
+                Some(&namespace),
+                Some(&namespace),
+            )?;
+
+            // The two domain corpora together exhaust every finite f16 pattern
+            // except negative zero, which deliberately takes the fallback.
+            for name in ["mixed", "positive", "positive_domain", "negative_domain"] {
+                let input = namespace.get_item(name)?.expect("f16 input present");
+                for bins in [1_usize, 3, 10, 64, 257, 512] {
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("bins", bins)?;
+                    let actual = histogram_fn.call((&input,), Some(&kwargs))?;
+                    let expected = numpy_histogram.call((&input,), Some(&kwargs))?;
+                    let actual_edges = actual.get_item(1)?;
+                    let expected_edges = expected.get_item(1)?;
+                    assert_eq!(
+                        actual_edges.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        expected_edges
+                            .call_method0("tobytes")?
+                            .extract::<Vec<u8>>()?,
+                        "{name} with {bins} bins produced different edge bytes"
+                    );
+                    assert_index_tuple_matches_numpy(&actual, &expected)?;
+                    assert!(
+                        crate::try_zerocopy_histogram_f16(py, &numpy, &input, bins)?.is_some(),
+                        "{name} with {bins} bins must take the bounded-pattern path"
+                    );
+                }
+            }
+
+            let constant = namespace
+                .get_item("constant")?
+                .expect("constant input present");
+            let constant_kwargs = PyDict::new(py);
+            constant_kwargs.set_item("bins", 10_usize)?;
+            assert_index_tuple_matches_numpy(
+                &histogram_fn.call((&constant,), Some(&constant_kwargs))?,
+                &numpy_histogram.call((&constant,), Some(&constant_kwargs))?,
+            )?;
+            assert!(
+                crate::try_zerocopy_histogram_f16(py, &numpy, &constant, 10)?.is_some(),
+                "constant finite f16 input must take the bounded-pattern path"
+            );
+
+            for name in ["with_inf", "with_negative_zero", "swapped"] {
+                let ambiguous = namespace.get_item(name)?.expect("ambiguous input present");
+                assert!(
+                    crate::try_zerocopy_histogram_f16(py, &numpy, &ambiguous, 64)?.is_none(),
+                    "{name} must defer to NumPy"
+                );
+            }
+            let negative_zero = namespace
+                .get_item("with_negative_zero")?
+                .expect("negative-zero input present");
+            let negative_zero_kwargs = PyDict::new(py);
+            negative_zero_kwargs.set_item("bins", 64_usize)?;
+            assert_index_tuple_matches_numpy(
+                &histogram_fn.call((&negative_zero,), Some(&negative_zero_kwargs))?,
+                &numpy_histogram.call((&negative_zero,), Some(&negative_zero_kwargs))?,
+            )?;
             Ok(())
         });
     }
