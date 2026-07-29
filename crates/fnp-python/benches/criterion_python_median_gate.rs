@@ -130,6 +130,113 @@ fn assert_workload_outputs_equal<const N: usize>(
     );
 }
 
+struct EventAttributionArm<'py> {
+    add_at: Bound<'py, PyAny>,
+    maximum_at: Bound<'py, PyAny>,
+    minimum_at: Bound<'py, PyAny>,
+    spend_state: Bound<'py, PyAny>,
+    first_seen_state: Bound<'py, PyAny>,
+    last_seen_state: Bound<'py, PyAny>,
+}
+
+impl<'py> EventAttributionArm<'py> {
+    fn reset(&self) {
+        self.spend_state
+            .call_method1("fill", (0_i64,))
+            .expect("reset spend state");
+        self.first_seen_state
+            .call_method1("fill", (i64::MAX,))
+            .expect("reset first-seen state");
+        self.last_seen_state
+            .call_method1("fill", (i64::MIN,))
+            .expect("reset last-seen state");
+    }
+
+    fn run(
+        &self,
+        account_ids: &Bound<'py, PyAny>,
+        spend_deltas: &Bound<'py, PyAny>,
+        event_timestamps: &Bound<'py, PyAny>,
+    ) -> (Duration, [Bound<'py, PyAny>; 3]) {
+        // Reset is harness preparation, not part of the persistent-state update
+        // job. Keeping it outside the interval also prevents a shared ndarray
+        // fill from contaminating the independent public FNP/NumPy call graphs.
+        self.reset();
+        let started = Instant::now();
+        self.add_at
+            .call1((
+                black_box(&self.spend_state),
+                black_box(account_ids),
+                black_box(spend_deltas),
+            ))
+            .expect("event spend scatter-add");
+        self.maximum_at
+            .call1((
+                black_box(&self.last_seen_state),
+                black_box(account_ids),
+                black_box(event_timestamps),
+            ))
+            .expect("event last-seen scatter-maximum");
+        self.minimum_at
+            .call1((
+                black_box(&self.first_seen_state),
+                black_box(account_ids),
+                black_box(event_timestamps),
+            ))
+            .expect("event first-seen scatter-minimum");
+        let elapsed = started.elapsed();
+        (
+            elapsed,
+            [
+                self.spend_state.clone(),
+                self.first_seen_state.clone(),
+                self.last_seen_state.clone(),
+            ],
+        )
+    }
+
+    fn profile(
+        &self,
+        account_ids: &Bound<'py, PyAny>,
+        spend_deltas: &Bound<'py, PyAny>,
+        event_timestamps: &Bound<'py, PyAny>,
+    ) -> [f64; 3] {
+        const PROFILE_ROUNDS: usize = 7;
+        let mut add_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut maximum_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut minimum_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        for _ in 0..PROFILE_ROUNDS {
+            self.reset();
+            let started = Instant::now();
+            self.add_at
+                .call1((&self.spend_state, account_ids, spend_deltas))
+                .expect("profile event spend scatter-add");
+            add_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            self.maximum_at
+                .call1((&self.last_seen_state, account_ids, event_timestamps))
+                .expect("profile event last-seen scatter-maximum");
+            maximum_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            self.minimum_at
+                .call1((&self.first_seen_state, account_ids, event_timestamps))
+                .expect("profile event first-seen scatter-minimum");
+            minimum_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+        }
+        let median = |samples: &mut Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        [
+            median(&mut add_ms),
+            median(&mut maximum_ms),
+            median(&mut minimum_ms),
+        ]
+    }
+}
+
 fn bench_median_gate_python_binary<'py>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     bench_name: &'static str,
@@ -5646,6 +5753,332 @@ translate_table = str.maketrans("-ERR", "_err")
     });
 }
 
+/// Phase-2 Class-3 workload: apply a batch of financial events to a
+/// large-cardinality account state. NumPy owns the public `ufunc.at` API but
+/// has no order-free parallel scatter engine for its cache-exceeding target
+/// regime; FrankenNumPy's integer add/min/max arms use atomic RMWs.
+///
+/// The mixed uniform/Zipf account distribution supplies both cold random
+/// targets and duplicate hot accounts. Three event counts distinguish a flat
+/// per-event gap from fixed overhead or coordination effects. The 3,000,000
+/// account target deliberately excludes the ledger-rejected 1,024-bin
+/// histogram regime where NumPy's own specialized loop is already saturated.
+fn bench_realistic_event_attribution_scatter_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const ACCOUNT_COUNT: usize = 3_000_000;
+    const EVENT_SIZES: [usize; 3] = [2_200_000, 4_400_000, 8_800_000];
+    const THREADS: &str = "4";
+
+    for variable in [
+        "RAYON_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(THREADS),
+            "{variable} must be explicitly pinned before workload timing"
+        );
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        THREADS
+            .parse::<usize>()
+            .expect("thread count constant is numeric"),
+        "Rayon pool width does not match the pinned workload configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME host={} rayon_threads={} RAYON_NUM_THREADS={} \
+         OPENBLAS_NUM_THREADS={} OMP_NUM_THREADS={} MKL_NUM_THREADS={} trj_used=false",
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "unavailable".to_owned()),
+        rayon::current_num_threads(),
+        THREADS,
+        THREADS,
+        THREADS,
+        THREADS,
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_event_attribution_workload")
+            .expect("event-attribution module");
+        fnp_python(&module).expect("initialize fnp_python event-attribution module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(format!(
+                r#"
+import numpy as np
+rng = np.random.default_rng(20260729)
+account_count = {ACCOUNT_COUNT}
+event_sizes = {EVENT_SIZES:?}
+max_events = event_sizes[-1]
+
+# Most events touch the long tail, while 35% land on a 100k-account hot set.
+# This models payment/accounting streams without collapsing into the rejected
+# tiny-histogram regime.
+event_accounts = rng.integers(0, account_count, size=max_events, dtype=np.int64)
+hot_mask = rng.random(max_events) < 0.35
+hot_count = int(hot_mask.sum())
+event_accounts[hot_mask] = (
+    (rng.zipf(1.18, size=hot_count) - 1) % 100_000
+).astype(np.int64)
+spend_deltas = rng.integers(-25_000, 50_001, size=max_events, dtype=np.int64)
+event_timestamps = (
+    np.arange(max_events, dtype=np.int64) + np.int64(1_800_000_000_000_000)
+)
+
+event_accounts_by_size = [
+    np.ascontiguousarray(event_accounts[:size]) for size in event_sizes
+]
+spend_deltas_by_size = [
+    np.ascontiguousarray(spend_deltas[:size]) for size in event_sizes
+]
+event_timestamps_by_size = [
+    np.ascontiguousarray(event_timestamps[:size]) for size in event_sizes
+]
+
+np_spend_state = np.empty(account_count, dtype=np.int64)
+np_first_seen_state = np.empty(account_count, dtype=np.int64)
+np_last_seen_state = np.empty(account_count, dtype=np.int64)
+fnp_spend_state = np.empty(account_count, dtype=np.int64)
+fnp_first_seen_state = np.empty(account_count, dtype=np.int64)
+fnp_last_seen_state = np.empty(account_count, dtype=np.int64)
+"#
+            ))
+            .expect("event-attribution setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("event-attribution corpus setup");
+
+        let fnp_add = module.getattr("add").expect("fnp add");
+        let np_add = numpy.getattr("add").expect("numpy add");
+        let fnp_maximum = module.getattr("maximum").expect("fnp maximum");
+        let np_maximum = numpy.getattr("maximum").expect("numpy maximum");
+        let fnp_minimum = module.getattr("minimum").expect("fnp minimum");
+        let np_minimum = numpy.getattr("minimum").expect("numpy minimum");
+        for (candidate, incumbent, surface) in [
+            (&fnp_add, &np_add, "add"),
+            (&fnp_maximum, &np_maximum, "maximum"),
+            (&fnp_minimum, &np_minimum, "minimum"),
+        ] {
+            assert!(
+                !candidate.is(incumbent),
+                "{surface}: candidate callable aliases NumPy"
+            );
+            common::report_numpy_incumbent_identity(py, surface, incumbent);
+        }
+        common::report_incumbent_topology(
+            "fnp.workload.event_attribution_scatter",
+            "numpy.workload.event_attribution_scatter",
+        );
+        println!(
+            "INCUMBENT_PIPELINE workload=event_attribution_scatter \
+             candidate=fnp.add.at+fnp.maximum.at+fnp.minimum.at \
+             incumbent=numpy.add.at+numpy.maximum.at+numpy.minimum.at \
+             shared_timed_component=none reset_outside_timed_region=true \
+             inputs_shared_read_only=true"
+        );
+
+        let incumbent = EventAttributionArm {
+            add_at: np_add.getattr("at").expect("numpy add.at"),
+            maximum_at: np_maximum.getattr("at").expect("numpy maximum.at"),
+            minimum_at: np_minimum.getattr("at").expect("numpy minimum.at"),
+            spend_state: namespace
+                .get_item("np_spend_state")
+                .expect("numpy spend state"),
+            first_seen_state: namespace
+                .get_item("np_first_seen_state")
+                .expect("numpy first-seen state"),
+            last_seen_state: namespace
+                .get_item("np_last_seen_state")
+                .expect("numpy last-seen state"),
+        };
+        let candidate = EventAttributionArm {
+            add_at: fnp_add.getattr("at").expect("fnp add.at"),
+            maximum_at: fnp_maximum.getattr("at").expect("fnp maximum.at"),
+            minimum_at: fnp_minimum.getattr("at").expect("fnp minimum.at"),
+            spend_state: namespace
+                .get_item("fnp_spend_state")
+                .expect("fnp spend state"),
+            first_seen_state: namespace
+                .get_item("fnp_first_seen_state")
+                .expect("fnp first-seen state"),
+            last_seen_state: namespace
+                .get_item("fnp_last_seen_state")
+                .expect("fnp last-seen state"),
+        };
+
+        let account_ids_by_size = namespace
+            .get_item("event_accounts_by_size")
+            .expect("event accounts by size");
+        let spend_deltas_by_size = namespace
+            .get_item("spend_deltas_by_size")
+            .expect("spend deltas by size");
+        let timestamps_by_size = namespace
+            .get_item("event_timestamps_by_size")
+            .expect("event timestamps by size");
+
+        let mut scaling = Vec::with_capacity(EVENT_SIZES.len());
+        for (size_index, size) in EVENT_SIZES.into_iter().enumerate() {
+            let row = format!("workload_event_attribution_scatter_i64_{size}");
+            println!(
+                "WORKLOAD_CONFIG row={row} user_job=event_attribution_state_update \
+                 accounts={ACCOUNT_COUNT} events={size} \
+                 distribution=65pct_uniform_plus_35pct_zipf_hot100k \
+                 stages=add_at_spend,maximum_at_last_seen,minimum_at_first_seen \
+                 output=int64_spend_first_seen_last_seen_state \
+                 matched_config=same_process_same_inputs target_regime=large \
+                 rejected_histogram_regime_excluded=true"
+            );
+            let account_ids = account_ids_by_size
+                .get_item(size_index)
+                .expect("event account slice");
+            let spend_deltas = spend_deltas_by_size
+                .get_item(size_index)
+                .expect("event spend slice");
+            let event_timestamps = timestamps_by_size
+                .get_item(size_index)
+                .expect("event timestamp slice");
+
+            let (_, incumbent_output) =
+                incumbent.run(&account_ids, &spend_deltas, &event_timestamps);
+            let (_, candidate_output) =
+                candidate.run(&account_ids, &spend_deltas, &event_timestamps);
+            assert_workload_outputs_equal(&numpy, &row, &candidate_output, &incumbent_output);
+            println!(
+                "PARITY row={row} dtype=int64 shape=[{ACCOUNT_COUNT}] outputs=3 \
+                 byte_identity=passed checksum={:016x}",
+                workload_checksum(&numpy, &candidate_output),
+            );
+
+            let incumbent_profile =
+                incumbent.profile(&account_ids, &spend_deltas, &event_timestamps);
+            let candidate_profile =
+                candidate.profile(&account_ids, &spend_deltas, &event_timestamps);
+            let candidate_total = candidate_profile.iter().sum::<f64>();
+            let (target_stage, target_ms) = [
+                ("add_at_spend", candidate_profile[0]),
+                ("maximum_at_last_seen", candidate_profile[1]),
+                ("minimum_at_first_seen", candidate_profile[2]),
+            ]
+            .into_iter()
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .expect("three profile stages");
+            for (stage, incumbent_ms, candidate_ms) in [
+                ("add_at_spend", incumbent_profile[0], candidate_profile[0]),
+                (
+                    "maximum_at_last_seen",
+                    incumbent_profile[1],
+                    candidate_profile[1],
+                ),
+                (
+                    "minimum_at_first_seen",
+                    incumbent_profile[2],
+                    candidate_profile[2],
+                ),
+            ] {
+                println!(
+                    "PROFILE_STAGE row={row} arm_pair=numpy_fnp stage={stage} \
+                     incumbent_median_ms={incumbent_ms:.6} \
+                     candidate_median_ms={candidate_ms:.6}"
+                );
+            }
+            let target_fraction = target_ms / candidate_total;
+            println!(
+                "PROFILE_SUMMARY row={row} target_stage={target_stage} \
+                 target_candidate_ms={target_ms:.6} candidate_stage_sum_ms={candidate_total:.6} \
+                 target_self_fraction_pct={:.3} amdahl_remove_ceiling={:.6}",
+                target_fraction * 100.0,
+                1.0 / (1.0 - target_fraction),
+            );
+
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) =
+                    incumbent.run(&account_ids, &spend_deltas, &event_timestamps);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) =
+                    candidate.run(&account_ids, &spend_deltas, &event_timestamps);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+                &row,
+                &mut observe_incumbent,
+                &mut observe_candidate,
+            );
+            println!(
+                "WORKLOAD_SIZE_POINT workload=event_attribution_scatter size={size} \
+                 incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ratio={:.6} candidate_null_ratio={:.6} \
+                 incumbent_ns_per_event={:.3} candidate_ns_per_event={:.3}",
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+                effect.arm_a_median_ns / size as f64,
+                effect.arm_b_median_ns / size as f64,
+            );
+            scaling.push(effect);
+        }
+
+        let first_ratio = scaling.first().expect("first scaling point").ratio_median;
+        let last_ratio = scaling.last().expect("last scaling point").ratio_median;
+        let ratio_min = scaling
+            .iter()
+            .map(|stats| stats.ratio_median)
+            .fold(f64::INFINITY, f64::min);
+        let ratio_max = scaling
+            .iter()
+            .map(|stats| stats.ratio_median)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let ratio_spread = ratio_max / ratio_min - 1.0;
+        let monotonic_up = scaling
+            .windows(2)
+            .all(|points| points[1].ratio_median >= points[0].ratio_median);
+        let monotonic_down = scaling
+            .windows(2)
+            .all(|points| points[1].ratio_median <= points[0].ratio_median);
+        let shape = if ratio_spread <= 0.15 {
+            "FLAT_PER_EVENT_COST"
+        } else if monotonic_up && last_ratio >= first_ratio * 1.15 {
+            "WIDENING_WITH_BATCH"
+        } else if monotonic_down && last_ratio <= first_ratio * 0.85 {
+            "NARROWING_WITH_BATCH"
+        } else {
+            "MIXED_OR_NOISE"
+        };
+        println!(
+            "SCALING_SHAPE workload=event_attribution_scatter dimension=batch_size \
+             sizes=[{},{},{}] ratios=[{:.6},{:.6},{:.6}] \
+             ratio_spread={ratio_spread:.6} classification={shape}",
+            EVENT_SIZES[0],
+            EVENT_SIZES[1],
+            EVENT_SIZES[2],
+            scaling[0].ratio_median,
+            scaling[1].ratio_median,
+            scaling[2].ratio_median,
+        );
+    });
+}
+
 fn bench_bool_storage_bytes_median_gate(c: &mut Criterion) {
     let _ = c;
     const N: usize = 8_000_000;
@@ -5749,6 +6182,10 @@ fn main() {
         (
             "bench_realistic_end_to_end_workloads_vs_numpy_median_gate",
             bench_realistic_end_to_end_workloads_vs_numpy_median_gate,
+        ),
+        (
+            "bench_realistic_event_attribution_scatter_vs_numpy_median_gate",
+            bench_realistic_event_attribution_scatter_vs_numpy_median_gate,
         ),
         (
             "bench_bool_storage_bytes_median_gate",

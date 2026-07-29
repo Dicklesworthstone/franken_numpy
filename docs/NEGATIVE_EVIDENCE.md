@@ -4,6 +4,109 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-29 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): large-cardinality integer event attribution - 1.419-1.452x vs NumPy with a flat batch curve
+
+`BeigeDog`, bead `franken_numpy-ixs5y.386`, cod / Lane M. This whole
+event-attribution job applies a batch of account events to three persistent
+integer state arrays: wrapping spend totals through `add.at`, last-seen
+timestamps through `maximum.at`, and first-seen timestamps through
+`minimum.at`. NumPy owns the same public APIs but has no order-free parallel
+integer scatter engine for the cache-exceeding target regime.
+
+The corpus uses 3,000,000 accounts and 2,200,000, 4,400,000, and 8,800,000
+events. Sixty-five percent of account IDs are uniform across the full target;
+35% follow Zipf(1.18) over a 100,000-account hot set, so the job combines cold
+random writes with duplicate hot-account updates. The target and update
+lengths deliberately exceed the `2^21` large-target route thresholds and
+exclude the ledger-rejected 1,024-bin histogram regime.
+
+`bench_elf_sha256=260bf32d27ccabbc2df2ff4169c65cbd87cdb861ccbc4d44712374a604bdf1e4`
+(295,231,256 bytes)
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 0.973166x, CI95 [0.958837, 1.005430], 41 rounds, min_of=3 at the 8,800,000-event headline size; the table records all three sizes.
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio 0.983224x, CI95 [0.923239, 1.014211], 41 rounds, min_of=3 at the 8,800,000-event headline size.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c6ca605d47b689-0020dbd7 measured_ratio=1.419365x median=590.818105ms
+
+**Incumbent isolation proof:** candidate=fnp.workload.event_attribution_scatter incumbent=numpy.workload.event_attribution_scatter shared_timed_component=none
+
+The NumPy artifact was
+`d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa`
+(10,452,641 bytes,
+`numpy/_core/_multiarray_umath.cpython-313-x86_64-linux-gnu.so`). The benchmark
+ran on pinned RCH worker `vmi1156319`, not TRJ, with Rayon, OpenBLAS, OMP, and
+MKL all fixed at four threads. Each arm independently invoked its own public
+`add.at`, `maximum.at`, and `minimum.at` callables. The harness asserted that
+every FNP callable was distinct from its NumPy counterpart; target reset used
+separate state arrays outside the persistent-update interval, and the only
+shared timed objects were read-only inputs.
+
+ROUTE PROOF: every target and value array is an exact, writable,
+C-contiguous, one-dimensional NumPy `int64` array; indices are exact,
+C-contiguous `int64`; target and update lengths exceed `2^21`; buffers do not
+alias; indices are in bounds; and the observed Rayon width is four. Those are
+exactly the exhaustive gates preceding `try_parallel_int_scatter_at`'s atomic
+arms, so none of the three FNP calls can take the NumPy-delegate fallback for
+this corpus.
+
+Exact dtype, shape, and every output byte matched for all three 3,000,000-item
+state arrays at every size. Pre-timing checksums were `d54c159b9b0c4fde`,
+`b5521a563cda893b`, and `4c4d63e830f7cfae`; every timed observation reproduced
+its size-specific contract checksum.
+
+| events | NumPy/NumPy null ratio (CI95) | FNP/FNP null ratio (CI95) | NumPy median | FNP median | NumPy/FNP ratio (CI95) | verdict |
+|---:|---:|---:|---:|---:|---:|---|
+| 2,200,000 | 0.995563 `[0.967859,1.011908]` | 0.994264 `[0.959422,1.037567]` | 151.989424 ms | 104.120660 ms | **1.437495x** `[1.413895,1.506826]` | DECIDABLE_WIN |
+| 4,400,000 | 0.998259 `[0.983557,1.015324]` | 1.010611 `[0.966708,1.059384]` | 289.919628 ms | 201.239797 ms | **1.452066x** `[1.384527,1.491219]` | DECIDABLE_WIN |
+| 8,800,000 | 0.973166 `[0.958837,1.005430]` | 0.983224 `[0.923239,1.014211]` | 590.818105 ms | 413.819833 ms | **1.419365x** `[1.373661,1.469013]` | DECIDABLE_WIN |
+
+Each point clears twice the wider same-invocation null half-width; required
+ratio deltas were 0.081155, 0.118768, and 0.153521. Effect CVs of 9.609%,
+10.170%, and 10.335% are provenance only and did not admit or reject a row.
+
+SCALING SHAPE: ratios `[1.437495, 1.452066, 1.419365]` have only 2.3039%
+spread, so the harness classifies the gap `FLAT_PER_EVENT_COST`. Candidate
+costs are likewise flat at 47.328, 45.736, and 47.025 ns/event. The deficit is
+therefore constant per-update work in NumPy's serial scatter path, not fixed
+setup or a batch-coordination curve.
+
+PROFILE ATTRIBUTION: at 8,800,000 events, NumPy/FNP stage medians were
+192.950189/87.122277 ms for `add.at`, 215.074521/201.826387 ms for
+`maximum.at`, and 214.566163/159.448147 ms for `minimum.at`. FNP's largest
+stage is `maximum.at` at 45.011% of its summed stage time, for an
+all-of-that-stage removal ceiling of 1.818534x. No new production lever was
+introduced: this row banks an existing missing-capability implementation
+under the current real-incumbent contract rather than relabeling a self-speedup.
+
+ISOMORPHISM PROOF: integer wrapping add/subtract are commutative and
+associative modulo the dtype width; integer min/max are commutative,
+associative, and idempotent. Each atomic RMW therefore produces the same final
+state for duplicate indices regardless of parallel visitation order. Negative
+and out-of-bounds handling, dtype conversion, aliasing, scalar values, floats,
+read-only targets, and small regimes all remain on NumPy's path.
+
+CHOOSER STATEMENT: for this exact 3,000,000-account mixed-skew attribution job
+on the recorded artifacts, choose FrankenNumPy when update completion time is
+decisive; the conservative measured median is 1.419365x and every effect CI
+clears both same-invocation null envelopes.
+
+An earlier launch executed ELF
+`ab0e701544dbd432220016a6a0918f4575c3e4997b31daba4c0754a018891159`
+but stopped before corpus construction or timing because shell-side thread
+variables were not forwarded through RCH. It is an incomplete harness attempt
+and contributes no measurement.
+
+Retry predicate: do not repeat this corpus against the same FNP and NumPy
+artifacts at four threads. Reopen if the NumPy artifact changes, operational
+targets or batches cross below the `2^21` route thresholds, account skew
+changes enough to move collision behavior, or a new size breaks the 15% flat
+batch-curve envelope. A separately booked TRJ thread sweep may test worker
+scaling, but it must retain exact byte parity, both same-invocation nulls,
+actual observed threads, both engine hashes, and the median-CI gate.
+
 ## 2026-07-29 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): API audit-log formatting and aggregation - 16.36-18.54x vs NumPy with a flat batch curve
 
 `BeigeDog`, bead `franken_numpy-ixs5y.385`, cod / Lane M. This whole
