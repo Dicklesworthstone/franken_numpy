@@ -309,6 +309,51 @@ fn report_contract_gate(row: &str, effect: ContractPairStats, null: ContractPair
     );
 }
 
+fn null_half_width(null: ContractPairStats) -> f64 {
+    (null.ratio_ci_low - 1.0)
+        .abs()
+        .max((null.ratio_ci_high - 1.0).abs())
+}
+
+fn report_dual_null_contract_gate(
+    row: &str,
+    effect: ContractPairStats,
+    incumbent_null: ContractPairStats,
+    candidate_null: ContractPairStats,
+) {
+    let incumbent_half_width = null_half_width(incumbent_null);
+    let candidate_half_width = null_half_width(candidate_null);
+    let controlling_half_width = incumbent_half_width.max(candidate_half_width);
+    let required_delta = (2.0 * controlling_half_width).max(0.01);
+    let effect_delta = effect.ratio_median - 1.0;
+    let above_both_nulls = effect.ratio_median
+        > incumbent_null
+            .ratio_ci_high
+            .max(candidate_null.ratio_ci_high);
+    let below_both_nulls =
+        effect.ratio_median < incumbent_null.ratio_ci_low.min(candidate_null.ratio_ci_low);
+    let verdict = if above_both_nulls && effect_delta >= required_delta {
+        "DECIDABLE_WIN"
+    } else if below_both_nulls && effect_delta <= -required_delta {
+        "DECIDABLE_REGRESSION"
+    } else {
+        "UNDECIDED"
+    };
+    println!(
+        "MEDIAN_CI_GATE row={row} verdict={verdict} effect_ratio={:.6} \
+         incumbent_null_ci95=[{:.6},{:.6}] candidate_null_ci95=[{:.6},{:.6}] \
+         incumbent_null_half_width={incumbent_half_width:.6} \
+         candidate_null_half_width={candidate_half_width:.6} \
+         controlling_null_half_width={controlling_half_width:.6} \
+         required_2x_delta={required_delta:.6} both_nulls=true cv_is_provenance_only=true",
+        effect.ratio_median,
+        incumbent_null.ratio_ci_low,
+        incumbent_null.ratio_ci_high,
+        candidate_null.ratio_ci_low,
+        candidate_null.ratio_ci_high,
+    );
+}
+
 /// Run a base/base null first, then an interleaved base/candidate effect in one
 /// process. Callers prove output parity before entering this timer.
 pub fn run_median_ci_contract<A, B>(
@@ -382,6 +427,122 @@ where
     report_contract_pair("effect_former_over_candidate", effect);
     report_contract_gate(row, effect, null);
     (effect, null)
+}
+
+/// Run incumbent/incumbent and candidate/candidate nulls before the interleaved
+/// incumbent/candidate effect. This is the realistic-workload contract: a quiet
+/// incumbent cannot conceal an unstable candidate, and the wider A/A interval
+/// controls the median-CI verdict.
+pub fn run_dual_null_median_ci_contract<A, B>(
+    row: &str,
+    mut incumbent: A,
+    mut candidate: B,
+) -> (ContractPairStats, ContractPairStats, ContractPairStats)
+where
+    A: FnMut() -> ContractObservation,
+    B: FnMut() -> ContractObservation,
+{
+    for _ in 0..4 {
+        black_box(min_observation(&mut incumbent));
+        black_box(min_observation(&mut incumbent));
+    }
+
+    let mut incumbent_null_a = Vec::with_capacity(CONTRACT_ROUNDS);
+    let mut incumbent_null_b = Vec::with_capacity(CONTRACT_ROUNDS);
+    let mut incumbent_null_checksum = 0_u64;
+    for round in 0..CONTRACT_ROUNDS {
+        let (a, b) = if round & 1 == 0 {
+            (
+                min_observation(&mut incumbent),
+                min_observation(&mut incumbent),
+            )
+        } else {
+            let b = min_observation(&mut incumbent);
+            (min_observation(&mut incumbent), b)
+        };
+        assert_eq!(
+            a.checksum, b.checksum,
+            "incumbent/incumbent null arms produced different output checksums"
+        );
+        incumbent_null_a.push(a.elapsed.as_secs_f64() * 1.0e9);
+        incumbent_null_b.push(b.elapsed.as_secs_f64() * 1.0e9);
+        incumbent_null_checksum = mix_checksum(incumbent_null_checksum, a.checksum);
+    }
+    let incumbent_null = contract_pair_stats(
+        &incumbent_null_a,
+        &incumbent_null_b,
+        incumbent_null_checksum,
+    );
+    report_contract_pair(&format!("{row}_null_incumbent_aa"), incumbent_null);
+
+    for _ in 0..4 {
+        black_box(min_observation(&mut candidate));
+        black_box(min_observation(&mut candidate));
+    }
+
+    let mut candidate_null_a = Vec::with_capacity(CONTRACT_ROUNDS);
+    let mut candidate_null_b = Vec::with_capacity(CONTRACT_ROUNDS);
+    let mut candidate_null_checksum = 0_u64;
+    for round in 0..CONTRACT_ROUNDS {
+        let (a, b) = if round & 1 == 0 {
+            (
+                min_observation(&mut candidate),
+                min_observation(&mut candidate),
+            )
+        } else {
+            let b = min_observation(&mut candidate);
+            (min_observation(&mut candidate), b)
+        };
+        assert_eq!(
+            a.checksum, b.checksum,
+            "candidate/candidate null arms produced different output checksums"
+        );
+        candidate_null_a.push(a.elapsed.as_secs_f64() * 1.0e9);
+        candidate_null_b.push(b.elapsed.as_secs_f64() * 1.0e9);
+        candidate_null_checksum = mix_checksum(candidate_null_checksum, a.checksum);
+    }
+    let candidate_null = contract_pair_stats(
+        &candidate_null_a,
+        &candidate_null_b,
+        candidate_null_checksum,
+    );
+    report_contract_pair(&format!("{row}_null_candidate_aa"), candidate_null);
+
+    for round in 0..4 {
+        if round & 1 == 0 {
+            black_box(min_observation(&mut incumbent));
+            black_box(min_observation(&mut candidate));
+        } else {
+            black_box(min_observation(&mut candidate));
+            black_box(min_observation(&mut incumbent));
+        }
+    }
+
+    let mut incumbent_samples = Vec::with_capacity(CONTRACT_ROUNDS);
+    let mut candidate_samples = Vec::with_capacity(CONTRACT_ROUNDS);
+    let mut effect_checksum = 0_u64;
+    for round in 0..CONTRACT_ROUNDS {
+        let (incumbent_observation, candidate_observation) = if round & 1 == 0 {
+            (
+                min_observation(&mut incumbent),
+                min_observation(&mut candidate),
+            )
+        } else {
+            let candidate_observation = min_observation(&mut candidate);
+            (min_observation(&mut incumbent), candidate_observation)
+        };
+        assert_eq!(
+            incumbent_observation.checksum, candidate_observation.checksum,
+            "incumbent/candidate arms produced different output checksums"
+        );
+        incumbent_samples.push(incumbent_observation.elapsed.as_secs_f64() * 1.0e9);
+        candidate_samples.push(candidate_observation.elapsed.as_secs_f64() * 1.0e9);
+        effect_checksum = mix_checksum(effect_checksum, incumbent_observation.checksum);
+    }
+    let effect = contract_pair_stats(&incumbent_samples, &candidate_samples, effect_checksum);
+    report_contract_pair(&format!("{row}_effect_incumbent_over_candidate"), effect);
+    report_dual_null_contract_gate(row, effect, incumbent_null, candidate_null);
+    (effect, incumbent_null, candidate_null)
 }
 
 /// Import numpy on the interpreter, mapping the module handle away; every bench

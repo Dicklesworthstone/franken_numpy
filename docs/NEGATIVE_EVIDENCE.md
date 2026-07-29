@@ -4,6 +4,242 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-28 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): f16 telemetry health report - 4.848358x vs NumPy
+
+`BeigeDog`, bead `franken_numpy-ixs5y.384`, cod / Lane M. This is a whole
+device-health job over 4,096 sensors with 512 finite f16 readings each. The
+corpus combines lognormal device levels, seasonal variation, per-device drift,
+and measurement noise. Each independent public-library arm produces per-device
+last-axis averages and standard deviations plus fleet quantiles at
+`[0.01, 0.10, 0.50, 0.90, 0.99]`.
+
+`bench_elf_sha256=7b36ae392ebc7e2378ca45936e5a795468731150eb190cd730b7b5da81aac8c6`
+(215,120,056 bytes)
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 0.984737x, CI95 [0.951351, 1.014064], 41 rounds, min_of=3
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio 1.129564x, CI95 [1.069905, 1.179077], 41 rounds, min_of=3
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c6a137b4745d89-00146baa measured_ratio=4.848358x
+
+**Incumbent isolation proof:** candidate=fnp.workload.telemetry_health_report incumbent=numpy.workload.telemetry_health_report shared_timed_component=none
+
+Both arms consumed the same prebuilt input but independently called their own
+`average(axis=-1)`, `std(axis=-1)`, and five-quantile public surfaces and
+allocated their own outputs. Before timing, the harness asserted that every
+output was finite and that dtype, shape, and every output byte matched. Every
+timed observation reproduced checksum `d7f4c043a76bf7bb`.
+
+| row | arm A (NumPy) | arm B | ratio median | ratio CI95 | CV (provenance only) |
+|---|---:|---:|---:|---:|---:|
+| incumbent A/A | 96.687281 ms | 97.597427 ms | 0.984737 | `[0.951351, 1.014064]` | 6.994% |
+| candidate A/A | 21.949942 ms | 19.053196 ms | 1.129564 | `[1.069905, 1.179077]` | 47.641% |
+| effect (NumPy/FNP) | 98.921505 ms | **19.703679 ms** | **4.848358** | **`[4.618914, 5.272105]`** | 19.364% |
+
+**Verdict: DECIDABLE_WIN.** `both_nulls=true`; the wider null half-width is
+0.179077, so the gate required a 0.358153 effect delta. The measured 3.848358
+delta and its complete CI sit far outside both null envelopes. CV is provenance
+only and did not decide the result.
+
+CHOOSER STATEMENT: for this exact finite f16 device-health report on the
+recorded artifacts, choose FrankenNumPy when completion time is the deciding
+factor: its complete report took a median 19.70 ms versus NumPy's 98.92 ms.
+
+Retry predicate: do not repeat this exact corpus against the same artifacts.
+Reopen for a different operational shape only if the report has at least 1 Mi
+f16 readings and still requests two axis reductions plus multiple fleet
+quantiles, or after the NumPy artifact changes; retain exact output-byte parity,
+both same-invocation nulls, and the median-CI gate.
+
+## 2026-07-28 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): transaction-risk report - 2.851403x vs NumPy
+
+`BeigeDog`, bead `franken_numpy-ixs5y.384`, cod / Lane M. This whole
+transaction-risk job screens 2,000,000 heavy-tailed merchant IDs against a
+roughly 45,000-ID watchlist, counts the hits, builds merchant value/count
+columns, and emits a 64-channel frequency report. Merchant IDs follow a Zipf
+distribution while channel IDs are uniform, matching the skew and compact
+categoricals found in fraud-screening logs.
+
+`bench_elf_sha256=7b36ae392ebc7e2378ca45936e5a795468731150eb190cd730b7b5da81aac8c6`
+(215,120,056 bytes)
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 1.006954x, CI95 [0.993205, 1.035058], 41 rounds, min_of=3
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio 0.987005x, CI95 [0.946919, 1.055970], 41 rounds, min_of=3
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c6a137b4745d89-00146baa measured_ratio=2.851403x
+
+**Incumbent isolation proof:** candidate=fnp.workload.transaction_risk_report incumbent=numpy.workload.transaction_risk_report shared_timed_component=none
+
+Each arm independently executed its public `isin`, `count_nonzero`,
+`unique(return_counts=True)`, and `bincount` pipeline. Dtype, shape, and bytes
+matched for the hit count, merchant dictionary, merchant frequencies, and
+channel frequencies; every timed observation reproduced checksum
+`95bd7c6a648a8549`.
+
+| row | arm A (NumPy) | arm B | ratio median | ratio CI95 | CV (provenance only) |
+|---|---:|---:|---:|---:|---:|
+| incumbent A/A | 69.487464 ms | 68.263154 ms | 1.006954 | `[0.993205, 1.035058]` | 10.227% |
+| candidate A/A | 24.025039 ms | 24.153457 ms | 0.987005 | `[0.946919, 1.055970]` | 17.270% |
+| effect (NumPy/FNP) | 68.086656 ms | **23.868528 ms** | **2.851403** | **`[2.721451, 2.987710]`** | 15.034% |
+
+**Verdict: DECIDABLE_WIN.** `both_nulls=true`; the controlling null
+half-width is 0.055970 and the required two-null delta is 0.111940. The
+measured 1.851403 delta and full effect CI clear both null envelopes.
+
+CHOOSER STATEMENT: for this exact risk-screening and categorical-report job,
+choose FrankenNumPy on completion time: the end-to-end median was 23.87 ms
+versus NumPy's 68.09 ms.
+
+Retry predicate: do not repeat the same Zipf corpus and artifacts. Reopen only
+for a materially different watchlist density (below 1% or above 50% of the
+merchant domain), a transaction batch below 250,000 rows where fixed costs may
+dominate, or a changed NumPy artifact; preserve independent end-to-end arms,
+exact output-byte parity, both nulls, and median-CI adjudication.
+
+## 2026-07-28 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): quantized batch inference report - 9.456255x vs NumPy
+
+`BeigeDog`, bead `franken_numpy-ixs5y.384`, cod / Lane M. This whole inference
+job multiplies a 72%-zero, small-integer `int64[4096,256]` activation batch by
+rectangular `int64[256,64]` weights, chooses the highest-scoring class per row,
+and tallies the 64 predicted classes. It deliberately does not test square
+floating-point GEMM, where OpenBLAS is the incumbent strength.
+
+`bench_elf_sha256=7b36ae392ebc7e2378ca45936e5a795468731150eb190cd730b7b5da81aac8c6`
+(215,120,056 bytes)
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 0.995375x, CI95 [0.991271, 1.003861], 41 rounds, min_of=3
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio 1.013250x, CI95 [0.978901, 1.142485], 41 rounds, min_of=3
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c6a137b4745d89-00146baa measured_ratio=9.456255x
+
+**Incumbent isolation proof:** candidate=fnp.workload.quantized_batch_inference incumbent=numpy.workload.quantized_batch_inference shared_timed_component=none
+
+Each arm independently ran its public rectangular integer `matmul`,
+`argmax(axis=1)`, and `bincount` surfaces. Predicted classes and class
+frequencies matched in dtype, shape, and every byte; all observations reproduced
+checksum `2958d1ed8eb0f30b`.
+
+| row | arm A (NumPy) | arm B | ratio median | ratio CI95 | CV (provenance only) |
+|---|---:|---:|---:|---:|---:|
+| incumbent A/A | 92.463182 ms | 93.889978 ms | 0.995375 | `[0.991271, 1.003861]` | 3.470% |
+| candidate A/A | 10.335229 ms | 9.670723 ms | 1.013250 | `[0.978901, 1.142485]` | 29.425% |
+| effect (NumPy/FNP) | 93.903575 ms | **9.858623 ms** | **9.456255** | **`[8.666679, 10.250314]`** | 23.629% |
+
+**Verdict: DECIDABLE_WIN.** `both_nulls=true`; the controlling null
+half-width is 0.142485, requiring a 0.284970 delta. The measured 8.456255 delta
+and complete effect interval clear both nulls. NumPy has no integer BLAS arm,
+so this is the class-3 capability gap surviving downstream prediction work.
+
+CHOOSER STATEMENT: for this exact rectangular integer inference and class-tally
+job, choose FrankenNumPy on completion time: 9.86 ms median versus NumPy's
+93.90 ms.
+
+Retry predicate: do not repeat this density and shape against the same
+artifacts. Reopen only for a different rectangular aspect ratio, an activation
+zero density outside 50%-90%, another integer width, or after NumPy gains or
+changes an integer matrix-multiplication path; retain exact prediction parity
+and the complete provenance contract.
+
+## 2026-07-28 - REALISTIC WORKLOAD MEASURED PARITY (UNDECIDED, VALID-AB): wide-CSV sensor ETL - 1.028752x vs NumPy is inside the null envelope
+
+`BeigeDog`, bead `franken_numpy-ixs5y.384`, cod / Lane M. This whole ETL job
+reads an on-disk 25,000 x 48 bounded-decimal CSV, selects eight alternating
+columns from the negative tail, builds a 64-bin global histogram, and computes
+per-selected-column standard deviations. Both arms read the same path from the
+warm page cache but independently parse and summarize the file.
+
+`bench_elf_sha256=7b36ae392ebc7e2378ca45936e5a795468731150eb190cd730b7b5da81aac8c6`
+(215,120,056 bytes)
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 1.033928x, CI95 [0.995931, 1.058228], 41 rounds, min_of=3
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio 0.983449x, CI95 [0.953878, 0.996901], 41 rounds, min_of=3
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c6a137b4745d89-00146baa measured_ratio=1.028752x
+
+**Incumbent isolation proof:** candidate=fnp.workload.wide_csv_sensor_etl incumbent=numpy.workload.wide_csv_sensor_etl shared_timed_component=none
+
+Each arm independently ran its public `loadtxt`, `histogram`, and `std`
+pipeline. Histogram counts, edges, and per-column standard deviations matched
+in dtype, shape, and every byte; all observations reproduced checksum
+`a972c0bbbb51875d`.
+
+| row | arm A (NumPy) | arm B | ratio median | ratio CI95 | CV (provenance only) |
+|---|---:|---:|---:|---:|---:|
+| incumbent A/A | 59.479037 ms | 57.853268 ms | 1.033928 | `[0.995931, 1.058228]` | 11.358% |
+| candidate A/A | 54.284252 ms | 55.240001 ms | 0.983449 | `[0.953878, 0.996901]` | 10.762% |
+| effect (NumPy/FNP) | 59.311827 ms | 56.561795 ms | 1.028752 | `[1.017907, 1.096139]` | 10.087% |
+
+**Verdict: UNDECIDED.** `both_nulls=true`; the controlling null half-width is
+0.058228 and the gate therefore requires a 0.116455 effect delta. The measured
+0.028752 delta remains inside the incumbent null envelope, irrespective of its
+directional effect CI. CV is provenance only.
+
+CHOOSER STATEMENT: this measurement gives a user no performance basis to choose
+either implementation for the complete 25,000-row ETL job. The selected-column
+parser microbenchmark does not translate into a decisive whole-job advantage
+once file parsing and both summaries are included.
+
+Retry predicate: reopen only with at least 100,000 rows while retaining 48 or
+more columns and selecting no more than one quarter of them from the tail, or
+if a whole-job profile attributes at least 20% self-time to the bounded-tail
+selection path, or after the NumPy artifact changes. A retry must keep the same
+on-disk path per pair, warm-cache policy, exact outputs, both nulls, and
+median-CI gate.
+
+## 2026-07-28 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): ASCII log normalization and aggregation - 10.413913x vs NumPy
+
+`BeigeDog`, bead `franken_numpy-ixs5y.384`, cod / Lane M. This whole log job
+normalizes 500,000 fixed-width `U16` service tags drawn from a Zipfian
+4,096-tag vocabulary, then emits the normalized tag dictionary and frequency
+column. The translation changes the punctuation and ASCII case markers found
+in values such as `svc-0042-ERR`; aggregation is inside the timed job.
+
+`bench_elf_sha256=7b36ae392ebc7e2378ca45936e5a795468731150eb190cd730b7b5da81aac8c6`
+(215,120,056 bytes)
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 0.995763x, CI95 [0.967950, 1.039826], 41 rounds, min_of=3
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio 1.002053x, CI95 [0.934164, 1.104823], 41 rounds, min_of=3
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c6a137b4745d89-00146baa measured_ratio=10.413913x
+
+**Incumbent isolation proof:** candidate=fnp.workload.ascii_log_normalization incumbent=numpy.workload.ascii_log_normalization shared_timed_component=none
+
+Each arm independently ran its own public `char.translate` and
+`unique(return_counts=True)` surfaces. Normalized tag values and counts matched
+in dtype, shape, and every byte; every timed observation reproduced checksum
+`c47d4a7102832f94`.
+
+| row | arm A (NumPy) | arm B | ratio median | ratio CI95 | CV (provenance only) |
+|---|---:|---:|---:|---:|---:|
+| incumbent A/A | 1,690.396290 ms | 1,690.503665 ms | 0.995763 | `[0.967950, 1.039826]` | 8.016% |
+| candidate A/A | 173.475759 ms | 170.265750 ms | 1.002053 | `[0.934164, 1.104823]` | 17.111% |
+| effect (NumPy/FNP) | 1,620.433700 ms | **153.604286 ms** | **10.413913** | **`[10.179005, 10.756940]`** | 10.023% |
+
+**Verdict: DECIDABLE_WIN.** `both_nulls=true`; the controlling null
+half-width is 0.104823, so the gate required a 0.209645 delta. The measured
+9.413913 delta and its full effect CI clear both null envelopes.
+
+CHOOSER STATEMENT: for this exact ASCII-tag normalization and aggregation job,
+choose FrankenNumPy on completion time: its 153.60 ms median is about one tenth
+of NumPy's 1,620.43 ms.
+
+Retry predicate: do not repeat this exact vocabulary and artifact. Reopen for
+non-ASCII content, variable-width strings, a vocabulary above 65,536 tags, a
+batch below 50,000 rows, or after the NumPy artifact changes; preserve exact
+normalized values/counts, both same-invocation nulls, and the median-CI gate.
+
 ## 2026-07-28 - WIN (KEEP, INCUMBENT-WIN): finite f16 multi-quantile via bounded-domain histogram - 35.988131x vs NumPy
 
 `BeigeDog`, bead `deadlock-audit-5695l`, cod / Lane M. The mandatory

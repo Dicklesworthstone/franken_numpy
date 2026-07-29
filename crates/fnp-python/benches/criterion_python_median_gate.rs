@@ -16,8 +16,119 @@ use pyo3::types::{PyAnyMethods, PyDict, PyModule};
 use pyo3::{Bound, PyAny, Python};
 use rayon::prelude::*;
 use std::cell::{Cell, RefCell};
+use std::fmt::Write as _;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
+
+fn workload_checksum<const N: usize>(
+    numpy: &Bound<'_, PyModule>,
+    outputs: &[Bound<'_, PyAny>; N],
+) -> u64 {
+    fn mix_bytes(mut state: u64, bytes: &[u8]) -> u64 {
+        for byte in (bytes.len() as u64)
+            .to_le_bytes()
+            .iter()
+            .chain(bytes.iter())
+        {
+            state = (state ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        state
+    }
+
+    let mut state = 0xcbf2_9ce4_8422_2325_u64;
+    for output in outputs {
+        let array = numpy
+            .call_method1("asarray", (output,))
+            .expect("workload output converts to ndarray");
+        let dtype = array
+            .getattr("dtype")
+            .expect("workload output dtype")
+            .str()
+            .expect("workload output dtype string")
+            .to_string();
+        let shape = array
+            .getattr("shape")
+            .expect("workload output shape")
+            .str()
+            .expect("workload output shape string")
+            .to_string();
+        let bytes = array
+            .call_method0("tobytes")
+            .expect("workload output bytes")
+            .extract::<Vec<u8>>()
+            .expect("workload output byte vector");
+        state = mix_bytes(state, dtype.as_bytes());
+        state = mix_bytes(state, shape.as_bytes());
+        state = mix_bytes(state, &bytes);
+    }
+    state
+}
+
+fn assert_workload_outputs_equal<const N: usize>(
+    numpy: &Bound<'_, PyModule>,
+    row: &str,
+    candidate: &[Bound<'_, PyAny>; N],
+    incumbent: &[Bound<'_, PyAny>; N],
+) {
+    for (index, (candidate_output, incumbent_output)) in candidate.iter().zip(incumbent).enumerate()
+    {
+        let candidate_array = numpy
+            .call_method1("asarray", (candidate_output,))
+            .expect("candidate workload output converts to ndarray");
+        let incumbent_array = numpy
+            .call_method1("asarray", (incumbent_output,))
+            .expect("incumbent workload output converts to ndarray");
+        let candidate_dtype = candidate_array
+            .getattr("dtype")
+            .expect("candidate output dtype")
+            .str()
+            .expect("candidate output dtype string")
+            .to_string();
+        let incumbent_dtype = incumbent_array
+            .getattr("dtype")
+            .expect("incumbent output dtype")
+            .str()
+            .expect("incumbent output dtype string")
+            .to_string();
+        assert_eq!(
+            candidate_dtype, incumbent_dtype,
+            "{row}: output {index} dtype differs"
+        );
+        let candidate_shape = candidate_array
+            .getattr("shape")
+            .expect("candidate output shape")
+            .extract::<Vec<usize>>()
+            .expect("candidate output shape vector");
+        let incumbent_shape = incumbent_array
+            .getattr("shape")
+            .expect("incumbent output shape")
+            .extract::<Vec<usize>>()
+            .expect("incumbent output shape vector");
+        assert_eq!(
+            candidate_shape, incumbent_shape,
+            "{row}: output {index} shape differs"
+        );
+        let candidate_bytes = candidate_array
+            .call_method0("tobytes")
+            .expect("candidate output bytes")
+            .extract::<Vec<u8>>()
+            .expect("candidate output byte vector");
+        let incumbent_bytes = incumbent_array
+            .call_method0("tobytes")
+            .expect("incumbent output bytes")
+            .extract::<Vec<u8>>()
+            .expect("incumbent output byte vector");
+        assert_eq!(
+            candidate_bytes, incumbent_bytes,
+            "{row}: output {index} bytes differ"
+        );
+    }
+    assert_eq!(
+        workload_checksum(numpy, candidate),
+        workload_checksum(numpy, incumbent),
+        "{row}: aggregate output checksum differs"
+    );
+}
 
 fn bench_median_gate_python_binary<'py>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
@@ -4763,6 +4874,613 @@ fn bench_quantile_f16_histogram_vs_numpy_median_gate(c: &mut Criterion) {
     });
 }
 
+/// Phase-2 incumbent suite: complete jobs rather than accessor-level kernels.
+/// Every job consumes realistic, skewed data; crosses multiple public
+/// subsystems; returns the report a user asked for; and runs the live NumPy job
+/// side-by-side in the same process. Output hashing is deliberately outside the
+/// timed interval, so the timed arms share no checksum or serialization tail.
+fn bench_realistic_end_to_end_workloads_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const CSV_ROWS: usize = 25_000;
+    const CSV_COLUMNS: usize = 48;
+    const CSV_USECOLS: [i64; 8] = [-1, -3, -5, -7, -9, -11, -13, -15];
+    const THREADS: &str = "4";
+
+    for variable in [
+        "RAYON_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(THREADS),
+            "{variable} must be explicitly pinned before workload timing"
+        );
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        THREADS
+            .parse::<usize>()
+            .expect("thread count constant is numeric"),
+        "Rayon pool width does not match the pinned workload configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME host={} rayon_threads={} RAYON_NUM_THREADS={} \
+         OPENBLAS_NUM_THREADS={} OMP_NUM_THREADS={} MKL_NUM_THREADS={}",
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "unavailable".to_owned()),
+        rayon::current_num_threads(),
+        THREADS,
+        THREADS,
+        THREADS,
+        THREADS,
+    );
+
+    let csv_path = std::env::temp_dir().join(format!(
+        "fnp_phase2_wide_sensor_batch_{}.csv",
+        std::process::id()
+    ));
+    let mut csv = String::with_capacity(CSV_ROWS * CSV_COLUMNS * 10);
+    for row in 0..CSV_ROWS {
+        for column in 0..CSV_COLUMNS {
+            if column > 0 {
+                csv.push(',');
+            }
+            let raw = ((row * 7_919 + column * 104_729) % 1_000_000) as i64 - 500_000;
+            write!(&mut csv, "{:.3}", raw as f64 / 1_000.0)
+                .expect("writing the CSV corpus to a String cannot fail");
+        }
+        csv.push('\n');
+    }
+    std::fs::write(&csv_path, csv).expect("write Phase-2 wide CSV corpus");
+    let csv_path = csv_path
+        .to_str()
+        .expect("temporary CSV path is UTF-8")
+        .to_owned();
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_realistic_workloads")
+            .expect("realistic-workload bench module");
+        fnp_python(&module).expect("initialize fnp_python realistic-workload module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                r#"
+import numpy as np
+rng = np.random.default_rng(20260728)
+
+# 4,096 normalized sensors, each reporting a 512-sample finite half-precision window.
+device_level = rng.lognormal(mean=0.5, sigma=0.45, size=(4096, 1))
+phase = rng.uniform(0.0, 2.0 * np.pi, size=(4096, 1))
+t = np.linspace(0.0, 4.0 * np.pi, 512, dtype=np.float32)[None, :]
+seasonal = 0.08 * device_level * np.sin(t + phase)
+drift = rng.normal(0.0, 0.0015, size=(4096, 1)) * np.arange(512)[None, :]
+noise = rng.normal(0.0, 0.15, size=(4096, 512))
+telemetry = np.clip(device_level + seasonal + drift + noise, -8.0, 8.0).astype(np.float16)
+telemetry_q = np.array([0.01, 0.10, 0.50, 0.90, 0.99], dtype=np.float64)
+
+# Two million transactions with the heavy-tailed merchant skew seen in fraud logs.
+merchant_ids = ((rng.zipf(1.25, size=2_000_000) - 1) % 250_000).astype(np.int64)
+watchlist = np.unique(rng.integers(0, 250_000, size=50_000, dtype=np.int64))
+channel_ids = rng.integers(0, 64, size=2_000_000, dtype=np.int16)
+
+# A zero-inflated quantized inference batch with rectangular integer GEMM.
+activations = rng.integers(-8, 9, size=(4096, 256), dtype=np.int64)
+activations[rng.random(size=activations.shape) < 0.72] = 0
+weights = rng.integers(-6, 7, size=(256, 64), dtype=np.int64)
+
+# Five hundred thousand service tags drawn from a Zipfian 4,096-tag vocabulary.
+tag_vocabulary = np.array(
+    [f"svc-{index:04d}-ERR" for index in range(4096)],
+    dtype="U16",
+)
+tag_indices = ((rng.zipf(1.22, size=500_000) - 1) % len(tag_vocabulary)).astype(np.int64)
+log_tags = tag_vocabulary[tag_indices]
+translate_table = str.maketrans("-ERR", "_err")
+"#,
+            )
+            .expect("realistic-workload setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("realistic-workload corpus setup");
+
+        let telemetry = namespace.get_item("telemetry").expect("telemetry present");
+        let telemetry_q = namespace
+            .get_item("telemetry_q")
+            .expect("telemetry quantiles present");
+        let merchant_ids = namespace
+            .get_item("merchant_ids")
+            .expect("merchant ids present");
+        let watchlist = namespace.get_item("watchlist").expect("watchlist present");
+        let channel_ids = namespace
+            .get_item("channel_ids")
+            .expect("channel ids present");
+        let activations = namespace
+            .get_item("activations")
+            .expect("activations present");
+        let weights = namespace.get_item("weights").expect("weights present");
+        let log_tags = namespace.get_item("log_tags").expect("log tags present");
+        let translate_table = namespace
+            .get_item("translate_table")
+            .expect("translation table present");
+
+        let fnp_average = module.getattr("average").expect("fnp average");
+        let np_average = numpy.getattr("average").expect("numpy average");
+        let fnp_std = module.getattr("std").expect("fnp std");
+        let np_std = numpy.getattr("std").expect("numpy std");
+        let fnp_quantile = module.getattr("quantile").expect("fnp quantile");
+        let np_quantile = numpy.getattr("quantile").expect("numpy quantile");
+        let fnp_isin = module.getattr("isin").expect("fnp isin");
+        let np_isin = numpy.getattr("isin").expect("numpy isin");
+        let fnp_count_nonzero = module.getattr("count_nonzero").expect("fnp count_nonzero");
+        let np_count_nonzero = numpy.getattr("count_nonzero").expect("numpy count_nonzero");
+        let fnp_unique = module.getattr("unique").expect("fnp unique");
+        let np_unique = numpy.getattr("unique").expect("numpy unique");
+        let fnp_bincount = module.getattr("bincount").expect("fnp bincount");
+        let np_bincount = numpy.getattr("bincount").expect("numpy bincount");
+        let fnp_matmul = module.getattr("matmul").expect("fnp matmul");
+        let np_matmul = numpy.getattr("matmul").expect("numpy matmul");
+        let fnp_argmax = module.getattr("argmax").expect("fnp argmax");
+        let np_argmax = numpy.getattr("argmax").expect("numpy argmax");
+        let fnp_loadtxt = module.getattr("loadtxt").expect("fnp loadtxt");
+        let np_loadtxt = numpy.getattr("loadtxt").expect("numpy loadtxt");
+        let fnp_histogram = module.getattr("histogram").expect("fnp histogram");
+        let np_histogram = numpy.getattr("histogram").expect("numpy histogram");
+        let fnp_char_translate = module
+            .getattr("char")
+            .expect("fnp char namespace")
+            .getattr("translate")
+            .expect("fnp char.translate");
+        let np_char_translate = numpy
+            .getattr("char")
+            .expect("numpy char namespace")
+            .getattr("translate")
+            .expect("numpy char.translate");
+
+        for (candidate, incumbent, surface) in [
+            (&fnp_average, &np_average, "average"),
+            (&fnp_std, &np_std, "std"),
+            (&fnp_quantile, &np_quantile, "quantile"),
+            (&fnp_isin, &np_isin, "isin"),
+            (&fnp_count_nonzero, &np_count_nonzero, "count_nonzero"),
+            (&fnp_unique, &np_unique, "unique"),
+            (&fnp_bincount, &np_bincount, "bincount"),
+            (&fnp_matmul, &np_matmul, "matmul"),
+            (&fnp_argmax, &np_argmax, "argmax"),
+            (&fnp_loadtxt, &np_loadtxt, "loadtxt"),
+            (&fnp_histogram, &np_histogram, "histogram"),
+            (&fnp_char_translate, &np_char_translate, "char.translate"),
+        ] {
+            assert!(
+                !candidate.is(incumbent),
+                "dispatch trap: {surface} incumbent resolved to the FNP callable"
+            );
+        }
+
+        // Workload 1: a device-health report over an in-memory telemetry window.
+        {
+            const ROW: &str = "workload_telemetry_health_report_f16_4096x512";
+            common::report_numpy_incumbent_identity(py, "average", &np_average);
+            common::report_incumbent_topology(
+                "fnp.workload.telemetry_health_report",
+                "numpy.workload.telemetry_health_report",
+            );
+            println!(
+                "WORKLOAD_CONFIG row={ROW} user_job=device_health_report \
+                 input=float16[4096,512] distribution=lognormal_baseline_plus_seasonality_drift_noise \
+                 stages=average_axis_last,std_axis_last,quantile_q5 \
+                 output=per_device_mean_std_plus_fleet_quantiles matched_config=same_process_same_inputs"
+            );
+
+            let run_incumbent = || {
+                let started = Instant::now();
+                let mean = np_average
+                    .call1((black_box(&telemetry), -1_i64))
+                    .expect("numpy telemetry average");
+                let std = np_std
+                    .call1((black_box(&telemetry), -1_i64))
+                    .expect("numpy telemetry std");
+                let quantiles = np_quantile
+                    .call1((black_box(&telemetry), black_box(&telemetry_q)))
+                    .expect("numpy telemetry quantiles");
+                let elapsed = started.elapsed();
+                (elapsed, [mean, std, quantiles])
+            };
+            let run_candidate = || {
+                let started = Instant::now();
+                let mean = fnp_average
+                    .call1((black_box(&telemetry), -1_i64))
+                    .expect("fnp telemetry average");
+                let std = fnp_std
+                    .call1((black_box(&telemetry), -1_i64))
+                    .expect("fnp telemetry std");
+                let quantiles = fnp_quantile
+                    .call1((black_box(&telemetry), black_box(&telemetry_q)))
+                    .expect("fnp telemetry quantiles");
+                let elapsed = started.elapsed();
+                (elapsed, [mean, std, quantiles])
+            };
+
+            let (_, incumbent_output) = run_incumbent();
+            let (_, candidate_output) = run_candidate();
+            let isfinite = numpy.getattr("isfinite").expect("numpy isfinite");
+            for (arm, outputs) in [
+                ("candidate", &candidate_output),
+                ("incumbent", &incumbent_output),
+            ] {
+                for (index, output) in outputs.iter().enumerate() {
+                    let finite = isfinite
+                        .call1((output,))
+                        .expect("telemetry output finiteness")
+                        .call_method0("all")
+                        .expect("all telemetry outputs finite")
+                        .extract::<bool>()
+                        .expect("telemetry finite verdict");
+                    assert!(
+                        finite,
+                        "{ROW}: {arm} output {index} must be finite for a useful report"
+                    );
+                }
+            }
+            assert_workload_outputs_equal(&numpy, ROW, &candidate_output, &incumbent_output);
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = run_incumbent();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = run_candidate();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let _ = common::run_dual_null_median_ci_contract(
+                ROW,
+                &mut observe_incumbent,
+                &mut observe_candidate,
+            );
+        }
+
+        // Workload 2: transaction-risk screening and a compact categorical report.
+        {
+            const ROW: &str = "workload_transaction_risk_report_zipf_2m";
+            common::report_numpy_incumbent_identity(py, "isin", &np_isin);
+            common::report_incumbent_topology(
+                "fnp.workload.transaction_risk_report",
+                "numpy.workload.transaction_risk_report",
+            );
+            println!(
+                "WORKLOAD_CONFIG row={ROW} user_job=transaction_risk_report \
+                 input=int64_transactions[2000000]_watchlist[~45000]_int16_channels[2000000] \
+                 distribution=zipf_merchants_plus_uniform_channels \
+                 stages=isin,count_nonzero,unique_return_counts,bincount \
+                 output=risk_hits_merchant_frequency_channel_frequency \
+                 matched_config=same_process_same_inputs"
+            );
+            let unique_kwargs = PyDict::new(py);
+            unique_kwargs
+                .set_item("return_counts", true)
+                .expect("unique return_counts kwarg");
+
+            let run_incumbent = || {
+                let started = Instant::now();
+                let risk_mask = np_isin
+                    .call1((black_box(&merchant_ids), black_box(&watchlist)))
+                    .expect("numpy transaction isin");
+                let risk_hits = np_count_nonzero
+                    .call1((black_box(&risk_mask),))
+                    .expect("numpy risk hit count");
+                let merchant_frequency = np_unique
+                    .call((black_box(&merchant_ids),), Some(&unique_kwargs))
+                    .expect("numpy merchant frequency");
+                let channel_frequency = np_bincount
+                    .call1((black_box(&channel_ids),))
+                    .expect("numpy channel frequency");
+                let elapsed = started.elapsed();
+                let merchant_values = merchant_frequency
+                    .get_item(0)
+                    .expect("numpy merchant values");
+                let merchant_counts = merchant_frequency
+                    .get_item(1)
+                    .expect("numpy merchant counts");
+                (
+                    elapsed,
+                    [
+                        risk_hits,
+                        merchant_values,
+                        merchant_counts,
+                        channel_frequency,
+                    ],
+                )
+            };
+            let run_candidate = || {
+                let started = Instant::now();
+                let risk_mask = fnp_isin
+                    .call1((black_box(&merchant_ids), black_box(&watchlist)))
+                    .expect("fnp transaction isin");
+                let risk_hits = fnp_count_nonzero
+                    .call1((black_box(&risk_mask),))
+                    .expect("fnp risk hit count");
+                let merchant_frequency = fnp_unique
+                    .call((black_box(&merchant_ids),), Some(&unique_kwargs))
+                    .expect("fnp merchant frequency");
+                let channel_frequency = fnp_bincount
+                    .call1((black_box(&channel_ids),))
+                    .expect("fnp channel frequency");
+                let elapsed = started.elapsed();
+                let merchant_values = merchant_frequency.get_item(0).expect("fnp merchant values");
+                let merchant_counts = merchant_frequency.get_item(1).expect("fnp merchant counts");
+                (
+                    elapsed,
+                    [
+                        risk_hits,
+                        merchant_values,
+                        merchant_counts,
+                        channel_frequency,
+                    ],
+                )
+            };
+
+            let (_, incumbent_output) = run_incumbent();
+            let (_, candidate_output) = run_candidate();
+            assert_workload_outputs_equal(&numpy, ROW, &candidate_output, &incumbent_output);
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = run_incumbent();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = run_candidate();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let _ = common::run_dual_null_median_ci_contract(
+                ROW,
+                &mut observe_incumbent,
+                &mut observe_candidate,
+            );
+        }
+
+        // Workload 3: rectangular integer inference followed by prediction tallying.
+        {
+            const ROW: &str = "workload_quantized_batch_inference_i64_4096x256x64";
+            common::report_numpy_incumbent_identity(py, "matmul", &np_matmul);
+            common::report_incumbent_topology(
+                "fnp.workload.quantized_batch_inference",
+                "numpy.workload.quantized_batch_inference",
+            );
+            println!(
+                "WORKLOAD_CONFIG row={ROW} user_job=quantized_batch_inference \
+                 input=int64_activations[4096,256]_weights[256,64] \
+                 distribution=72pct_zero_inflated_small_integers \
+                 stages=rectangular_matmul,argmax_axis1,bincount \
+                 output=predicted_class_per_row_plus_class_frequency \
+                 matched_config=same_process_same_inputs no_square_float_gemm=true"
+            );
+
+            let run_incumbent = || {
+                let started = Instant::now();
+                let scores = np_matmul
+                    .call1((black_box(&activations), black_box(&weights)))
+                    .expect("numpy inference matmul");
+                let predictions = np_argmax
+                    .call1((black_box(&scores), 1_i64))
+                    .expect("numpy inference argmax");
+                let class_frequency = np_bincount
+                    .call1((black_box(&predictions),))
+                    .expect("numpy inference bincount");
+                let elapsed = started.elapsed();
+                (elapsed, [predictions, class_frequency])
+            };
+            let run_candidate = || {
+                let started = Instant::now();
+                let scores = fnp_matmul
+                    .call1((black_box(&activations), black_box(&weights)))
+                    .expect("fnp inference matmul");
+                let predictions = fnp_argmax
+                    .call1((black_box(&scores), 1_i64))
+                    .expect("fnp inference argmax");
+                let class_frequency = fnp_bincount
+                    .call1((black_box(&predictions),))
+                    .expect("fnp inference bincount");
+                let elapsed = started.elapsed();
+                (elapsed, [predictions, class_frequency])
+            };
+
+            let (_, incumbent_output) = run_incumbent();
+            let (_, candidate_output) = run_candidate();
+            assert_workload_outputs_equal(&numpy, ROW, &candidate_output, &incumbent_output);
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = run_incumbent();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = run_candidate();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let _ = common::run_dual_null_median_ci_contract(
+                ROW,
+                &mut observe_incumbent,
+                &mut observe_candidate,
+            );
+        }
+
+        // Workload 4: parse a wide on-disk sensor batch and immediately summarize it.
+        {
+            const ROW: &str = "workload_wide_csv_sensor_etl_25000x48_use8";
+            common::report_numpy_loadtxt_incumbent_identity(py, &np_loadtxt);
+            common::report_incumbent_topology(
+                "fnp.workload.wide_csv_sensor_etl",
+                "numpy.workload.wide_csv_sensor_etl",
+            );
+            println!(
+                "WORKLOAD_CONFIG row={ROW} user_job=wide_csv_sensor_etl \
+                 input=csv[25000,48]_selected_tail_columns[8] distribution=bounded_signed_decimal \
+                 stages=loadtxt_negative_usecols,histogram_64,std_axis0 \
+                 output=global_histogram_edges_plus_per_column_std \
+                 matched_config=same_process_same_path_warm_page_cache"
+            );
+            let loadtxt_kwargs = PyDict::new(py);
+            loadtxt_kwargs
+                .set_item("delimiter", ",")
+                .expect("CSV delimiter kwarg");
+            loadtxt_kwargs
+                .set_item("dtype", numpy.getattr("float64").expect("numpy float64"))
+                .expect("CSV dtype kwarg");
+            loadtxt_kwargs
+                .set_item("usecols", CSV_USECOLS)
+                .expect("CSV usecols kwarg");
+
+            let run_incumbent = || {
+                let started = Instant::now();
+                let parsed = np_loadtxt
+                    .call((black_box(&csv_path),), Some(&loadtxt_kwargs))
+                    .expect("numpy CSV parse");
+                let histogram = np_histogram
+                    .call1((black_box(&parsed), 64_i64))
+                    .expect("numpy CSV histogram");
+                let std = np_std
+                    .call1((black_box(&parsed), 0_i64))
+                    .expect("numpy CSV std");
+                let elapsed = started.elapsed();
+                let counts = histogram.get_item(0).expect("numpy histogram counts");
+                let edges = histogram.get_item(1).expect("numpy histogram edges");
+                (elapsed, [counts, edges, std])
+            };
+            let run_candidate = || {
+                let started = Instant::now();
+                let parsed = fnp_loadtxt
+                    .call((black_box(&csv_path),), Some(&loadtxt_kwargs))
+                    .expect("fnp CSV parse");
+                let histogram = fnp_histogram
+                    .call1((black_box(&parsed), 64_i64))
+                    .expect("fnp CSV histogram");
+                let std = fnp_std
+                    .call1((black_box(&parsed), 0_i64))
+                    .expect("fnp CSV std");
+                let elapsed = started.elapsed();
+                let counts = histogram.get_item(0).expect("fnp histogram counts");
+                let edges = histogram.get_item(1).expect("fnp histogram edges");
+                (elapsed, [counts, edges, std])
+            };
+
+            let (_, incumbent_output) = run_incumbent();
+            let (_, candidate_output) = run_candidate();
+            assert_workload_outputs_equal(&numpy, ROW, &candidate_output, &incumbent_output);
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = run_incumbent();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = run_candidate();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let _ = common::run_dual_null_median_ci_contract(
+                ROW,
+                &mut observe_incumbent,
+                &mut observe_candidate,
+            );
+        }
+
+        // Workload 5: normalize fixed-width ASCII service tags, then aggregate them.
+        {
+            const ROW: &str = "workload_ascii_log_normalization_zipf_500k";
+            common::report_numpy_incumbent_identity(py, "unique", &np_unique);
+            common::report_incumbent_topology(
+                "fnp.workload.ascii_log_normalization",
+                "numpy.workload.ascii_log_normalization",
+            );
+            println!(
+                "WORKLOAD_CONFIG row={ROW} user_job=ascii_log_normalization \
+                 input=unicode16_tags[500000]_vocabulary[4096] distribution=zipf \
+                 stages=char_translate,unique_return_counts \
+                 output=normalized_tag_dictionary_plus_frequency \
+                 matched_config=same_process_same_inputs"
+            );
+            let unique_kwargs = PyDict::new(py);
+            unique_kwargs
+                .set_item("return_counts", true)
+                .expect("log unique return_counts kwarg");
+
+            let run_incumbent = || {
+                let started = Instant::now();
+                let normalized = np_char_translate
+                    .call1((black_box(&log_tags), black_box(&translate_table)))
+                    .expect("numpy log normalization");
+                let frequency = np_unique
+                    .call((black_box(&normalized),), Some(&unique_kwargs))
+                    .expect("numpy normalized tag frequency");
+                let elapsed = started.elapsed();
+                let values = frequency.get_item(0).expect("numpy normalized tags");
+                let counts = frequency.get_item(1).expect("numpy normalized counts");
+                (elapsed, [values, counts])
+            };
+            let run_candidate = || {
+                let started = Instant::now();
+                let normalized = fnp_char_translate
+                    .call1((black_box(&log_tags), black_box(&translate_table)))
+                    .expect("fnp log normalization");
+                let frequency = fnp_unique
+                    .call((black_box(&normalized),), Some(&unique_kwargs))
+                    .expect("fnp normalized tag frequency");
+                let elapsed = started.elapsed();
+                let values = frequency.get_item(0).expect("fnp normalized tags");
+                let counts = frequency.get_item(1).expect("fnp normalized counts");
+                (elapsed, [values, counts])
+            };
+
+            let (_, incumbent_output) = run_incumbent();
+            let (_, candidate_output) = run_candidate();
+            assert_workload_outputs_equal(&numpy, ROW, &candidate_output, &incumbent_output);
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = run_incumbent();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = run_candidate();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let _ = common::run_dual_null_median_ci_contract(
+                ROW,
+                &mut observe_incumbent,
+                &mut observe_candidate,
+            );
+        }
+    });
+}
+
 fn bench_bool_storage_bytes_median_gate(c: &mut Criterion) {
     let _ = c;
     const N: usize = 8_000_000;
@@ -4858,6 +5576,10 @@ fn main() {
         (
             "bench_quantile_f16_histogram_vs_numpy_median_gate",
             bench_quantile_f16_histogram_vs_numpy_median_gate,
+        ),
+        (
+            "bench_realistic_end_to_end_workloads_vs_numpy_median_gate",
+            bench_realistic_end_to_end_workloads_vs_numpy_median_gate,
         ),
         (
             "bench_bool_storage_bytes_median_gate",
