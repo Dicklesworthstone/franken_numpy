@@ -4,6 +4,129 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-29 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): API audit-log formatting and aggregation - 16.36-18.54x vs NumPy with a flat batch curve
+
+`BeigeDog`, bead `franken_numpy-ixs5y.385`, cod / Lane M. This whole
+API-gateway job formats endpoint and status integers into fixed-width audit
+labels, concatenates the two fields, and emits sorted label frequencies. It
+measures the Class-3 substrate gap behind the public surface: NumPy exposes
+`strings.mod`, but has no specialized parallel fixed-width integer formatting
+engine; FrankenNumPy uses its native integer formatter.
+
+The corpus models 200,000, 600,000, and 1,800,000 request batches. Endpoint IDs
+follow Zipf(1.17), capped at 4,095. Status codes use a production-like skew over
+200/201/204/400/401/403/404/409/429/500/502/503. Each arm independently runs
+its own public `strings.mod(b"ep=%04d", ...)`,
+`strings.mod(b"|st=%03d", ...)`, `strings.add`, and
+`unique(return_counts=True)` pipeline.
+
+`bench_elf_sha256=39d7e8cdf912e5a553c06c66c657d4a484244be36779cc2639ce26dac80619f2`
+(213,860,456 bytes)
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 0.997217x, CI95 [0.985781, 1.007306], 41 rounds, min_of=3 at the 1,800,000-row headline size; the table records all three sizes.
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio 1.000197x, CI95 [0.964989, 1.021095], 41 rounds, min_of=3 at the 1,800,000-row headline size.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c6b7d3be189e1b-001b2352 measured_ratio=16.731489x median=4266.882667ms
+
+**Incumbent isolation proof:** candidate=fnp.workload.audit_log_format_aggregate incumbent=numpy.workload.audit_log_format_aggregate shared_timed_component=none
+
+The NumPy artifact was
+`d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa`
+(10,452,641 bytes,
+`numpy/_core/_multiarray_umath.cpython-313-x86_64-linux-gnu.so`). The benchmark
+ran on pinned worker `vmi1156319` with Rayon, OpenBLAS, OMP, and MKL all fixed
+at four threads. The harness asserted that FNP callables were not NumPy
+callables and printed the independent pipeline topology above before timing.
+
+Exact dtype, shape, and every output byte matched at every size. The pre-timing
+checksums were `98f9847f7f25a8f4`, `7ac0caef94690c9e`, and
+`7263ef2084c4d84d`; every timed observation also reproduced its size-specific
+contract checksum.
+
+| records | NumPy/NumPy null ratio (CI95) | FNP/FNP null ratio (CI95) | NumPy median | FNP median | NumPy/FNP ratio (CI95) | verdict |
+|---:|---:|---:|---:|---:|---:|---|
+| 200,000 | 0.995074 `[0.973112,1.024782]` | 0.995920 `[0.922100,1.072772]` | 451.535981 ms | 27.377269 ms | **16.356036x** `[14.932633,17.437113]` | DECIDABLE_WIN |
+| 600,000 | 1.007041 `[0.988515,1.018591]` | 1.018694 `[0.955213,1.062451]` | 1384.001843 ms | 74.660777 ms | **18.540956x** `[17.384283,19.451761]` | DECIDABLE_WIN |
+| 1,800,000 | 0.997217 `[0.985781,1.007306]` | 1.000197 `[0.964989,1.021095]` | 4266.882667 ms | 254.017671 ms | **16.731489x** `[16.269815,17.014263]` | DECIDABLE_WIN |
+
+Each point clears twice the wider same-invocation null half-width. CV
+(25.723%, 15.634%, and 11.726% for the effect rows) is recorded provenance
+only and did not admit or reject a result.
+
+SCALING SHAPE: final ratios `[16.356036, 18.540956, 16.731489]` have 13.3585%
+spread, so the harness classifies the job `FLAT_PER_RECORD_COST`. Candidate
+cost per record is correspondingly flat at 136.886, 124.435, and 141.121 ns.
+The remaining gap is the constant per-record formatter capability difference,
+not a thread-coordination curve.
+
+PROFILE-ATTRIBUTED MAINTENANCE LEVER (not a second campaign win): the complete
+pre-edit baseline used executing ELF
+`d18ade21f586ecc5708296b36722882f1d93df06915d866a98a1ebb4bfc37d3c`
+(213,852,384 bytes), invocation
+`000000000000000018c6b3dc75ffb060-0019fb63`, on the same pinned worker and
+same NumPy artifact. Its valid incumbent ratios were 12.082580x
+`[11.338871,12.651359]`, 11.276753x `[10.852399,11.638963]`, and 9.142706x
+`[8.843720,9.414289]`: 32.1554% spread and
+`NARROWING_WITH_BATCH`.
+
+At 1,800,000 rows, the baseline stage profile assigned 401.744475 ms of
+487.739874 ms candidate stage time (82.37%, 5.67x Amdahl ceiling) to
+`unique(return_counts=True)`. The S14 labels missed the one-word key route and
+`try_native_string_unique_full` had no two-word route, so it executed the
+cache-cold record comparator even though the proven `PackedWideStringKey`
+primitive already served default unique and set operations.
+
+The one production lever reuses that two-word key for S9..S16 and Latin-1
+U9..U16 in the full-output factorizer. For this S14 corpus,
+`packed_string_key_width` is structurally `None` and
+`packed_wide_string_key_width` is `Some(14)`, so the new route must execute.
+The key contains every record byte in lexicographic order, and sorting
+`(key, original_index)` is isomorphic to the old
+`(record, original_index)` comparison, including first-occurrence tie
+breaking. Downstream record gather, run grouping, index, inverse, counts, and
+all fallback gates are unchanged.
+
+| records | baseline FNP aggregate stage | candidate FNP aggregate stage | maintenance attribution |
+|---:|---:|---:|---:|
+| 200,000 | 36.100905 ms | 17.350875 ms | 2.081x |
+| 600,000 | 98.988897 ms | 51.600414 ms | 1.918x |
+| 1,800,000 | 401.744475 ms | 218.101038 ms | 1.842x |
+
+Those cross-ELF before/after movements are maintenance evidence, not
+competitive claims. The campaign result is the candidate ELF against its live
+NumPy arm in the same invocation. The maintenance lever removes the monotonic
+batch narrowing and exposes the formatter's flat per-record gap.
+
+Correctness is also locked outside the benchmark:
+`unique_string_return_flags_large_match_numpy` passed remotely with U4, S8,
+U16, and full-range S14 inputs, checking unique values, first indices, inverse
+maps, and counts against NumPy. Focused compile/parity, workspace all-target
+check, workspace Clippy (with only three unrelated pre-existing lint classes
+allowed), rustfmt, and diff checks passed.
+
+CHOOSER STATEMENT: for this exact 200,000-to-1,800,000-row audit-label
+format-and-frequency job on the recorded artifacts, choose FrankenNumPy when
+completion time is decisive; the conservative measured point is 16.356036x
+and all three effect CIs are disjoint from both null envelopes.
+
+An earlier complete-source attempt with ELF
+`df4e39c6489a0541a870791a8b8cce7c6ad006b304769d9d269a9d1e30807613`
+hit the 3,600-second SSH timeout after valid 200,000/600,000 rows but before the
+largest candidate null/effect. It is an incomplete harness run and contributes
+no point to either curve.
+
+Retry predicate: do not repeat this exact corpus against the same artifacts.
+Reopen only if the NumPy artifact changes, the operational label width leaves
+S9..S16, endpoint/status cardinality changes enough to move aggregation above
+70% of candidate wall again, or batches beyond 1,800,000 records break the
+15% flat-curve envelope. Retain independent public arms, exact output-byte
+parity, both same-invocation nulls, executable/artifact identities, and the
+median-CI gate. Consider S17+ multiword keys only if a new profile ranks that
+width family; do not extrapolate this two-word result.
+
 ## 2026-07-28 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): f16 telemetry health report - 4.848358x vs NumPy
 
 `BeigeDog`, bead `franken_numpy-ixs5y.384`, cod / Lane M. This is a whole

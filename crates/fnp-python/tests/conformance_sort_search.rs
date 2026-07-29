@@ -644,9 +644,11 @@ rng = np.random.default_rng(725)
 n = (1 << 17) + 333
 u = rng.integers(97, 103, (n, 4), dtype=np.uint32).reshape(-1).view("U4")
 s = rng.integers(97, 103, (n, 8), dtype=np.uint8).view("S8").reshape(-1)
+uw = rng.integers(97, 103, (n, 16), dtype=np.uint32).reshape(-1).view("U16")
+sw = rng.integers(0, 256, (n, 14), dtype=np.uint8).view("S14").reshape(-1)
 
 ok = True
-for label, arr in [("U4", u), ("S8", s)]:
+for label, arr in [("U4", u), ("S8", s), ("U16", uw), ("S14", sw)]:
     got = fnp.unique(arr, return_index=True, return_inverse=True, return_counts=True)
     exp = np.unique(arr, return_index=True, return_inverse=True, return_counts=True)
     if not isinstance(got, tuple) or len(got) != 4:

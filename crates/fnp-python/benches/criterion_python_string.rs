@@ -828,6 +828,9 @@ b16 = np.concatenate([a16[:500_000], brand16])\n";
     group.finish();
 }
 
+// Keep every callable and input explicit so incumbent/candidate topology stays
+// auditable at each call site; bundling them would hide accidental arm sharing.
+#[allow(clippy::too_many_arguments)]
 fn run_audit_log_job<'py>(
     strings_mod: &Bound<'py, PyAny>,
     strings_add: &Bound<'py, PyAny>,
@@ -844,6 +847,9 @@ fn run_audit_log_job<'py>(
     unique.call((&labels,), Some(unique_kwargs))
 }
 
+// Mirrors run_audit_log_job exactly so stage attribution measures the same
+// public pipeline without an opaque configuration object.
+#[allow(clippy::too_many_arguments)]
 fn run_audit_log_job_profiled<'py>(
     strings_mod: &Bound<'py, PyAny>,
     strings_add: &Bound<'py, PyAny>,

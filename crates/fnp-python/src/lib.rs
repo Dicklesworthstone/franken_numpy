@@ -64397,10 +64397,12 @@ fn try_native_string_unique_full(
         let b = k as usize * itemsize;
         &in_data[b..b + itemsize]
     };
-    // Narrow Latin-1 records pack order-preservingly into a big-endian u64, so a gather-free (key, index)
-    // pair sort reproduces (record, orig-index) order exactly - preserving the first-occurrence (min original
-    // index per equal-record run) tie-break that return_index/inverse/counts depend on. Wider records keep the
-    // memcmp comparator. Downstream run-grouping/gather is unchanged.
+    // Latin-1 records up to 16 codepoints/bytes pack order-preservingly into one or two
+    // big-endian u64 words, so a (key, index) pair sort reproduces (record, orig-index)
+    // order exactly. That preserves the first-occurrence (minimum original index per
+    // equal-record run) tie-break that return_index/inverse/counts depend on. Records
+    // wider than two words keep the memcmp comparator. Downstream grouping/gather is
+    // unchanged.
     let perm: Vec<u32> = match packed_string_key_width(&kind, itemsize)
         .and_then(|kw| pack_fixed_width_string_keys(in_data, n, itemsize, kw, is_bytes))
     {
@@ -64409,18 +64411,28 @@ fn try_native_string_unique_full(
             pairs.par_sort_unstable();
             pairs.iter().map(|&(_, i)| i).collect()
         }
-        None => {
-            let mut p: Vec<u32> = (0..n as u32).collect();
-            p.par_sort_unstable_by(|&i, &j| {
-                let ord = rec(i).cmp(rec(j));
-                if ord == std::cmp::Ordering::Equal {
-                    i.cmp(&j)
-                } else {
-                    ord
-                }
-            });
-            p
-        }
+        None => match packed_wide_string_key_width(&kind, itemsize)
+            .and_then(|kw| pack_fixed_width_wide_string_keys(in_data, n, itemsize, kw, is_bytes))
+        {
+            Some(keys) => {
+                let mut pairs: Vec<(PackedWideStringKey, u32)> =
+                    (0..n as u32).map(|i| (keys[i as usize], i)).collect();
+                pairs.par_sort_unstable();
+                pairs.iter().map(|&(_, i)| i).collect()
+            }
+            None => {
+                let mut p: Vec<u32> = (0..n as u32).collect();
+                p.par_sort_unstable_by(|&i, &j| {
+                    let ord = rec(i).cmp(rec(j));
+                    if ord == std::cmp::Ordering::Equal {
+                        i.cmp(&j)
+                    } else {
+                        ord
+                    }
+                });
+                p
+            }
+        },
     };
     let mut srt = vec![0u8; nbytes];
     let mut orig = vec![0u32; n];
