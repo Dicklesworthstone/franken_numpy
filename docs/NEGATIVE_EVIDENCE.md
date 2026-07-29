@@ -4,6 +4,97 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-28 - WIN (KEEP, INCUMBENT-WIN): finite f16 multi-quantile via bounded-domain histogram - 35.988131x vs NumPy
+
+`BeigeDog`, bead `deadlock-audit-5695l`, cod / Lane M. The mandatory
+negative-evidence preflight found no prior rejected row matching the
+`quantile`/float16 surface. This is a class-3 missing-capability lever: NumPy
+has no bounded-domain float16 order-statistics path, so a nine-quantile request
+copies and partitions the 8M-element input. FrankenNumPy counts the complete
+65,536-pattern half domain once, then answers all requested ranks from that
+histogram.
+
+PROFILE ATTRIBUTION: on the exact finite 8,000,000-element f16 corpus and
+nine-element native f64 `q` array used below, five live `numpy.quantile` calls
+took 1.736 s. The named `ndarray.partition` frame carried 1.718 s self-time
+(98.96% of the profile), for an approximately 96x rounded-time Amdahl removal
+ceiling. Before the source edit, the same profile took 1.725 s total with
+1.706 s in `partition` (98.9%, approximately 91x ceiling), and a complete
+NumPy/FNP effect run was indistinguishable from its null at 1.009935x, CI95
+[0.977168, 1.029942]. The workload therefore routes through the targeted
+partition rather than setup or a shared tail.
+
+ONE LEVER: for a finite, native-endian, C-contiguous f16 ndarray of at least
+1 Mi elements, `axis=None`, `out=None`, `overwrite_input=false`,
+`keepdims=false`, no weights, default/linear method, and a non-empty
+one-dimensional native f64 `q` array in [0, 1], build one parallel histogram
+over the raw half patterns. Walk the IEEE float/ordered-integer bijection to
+locate the lower and upper rank for each q, then apply NumPy's exact two-sided
+f64 lerp. NaN, infinity, both signed-zero encodings in one input,
+non-native-endian, non-contiguous, small, weak/scalar q, non-f64 q, and
+unsupported argument forms retain the NumPy path.
+
+BEHAVIOR PROOF: the focused Rust test compares dtype, shape, and every output
+byte against live NumPy for a 1 Mi-element finite f16 corpus and ten difficult
+quantiles, including both endpoints and fractions immediately around one-half.
+It directly asserts that the eligible corpus enters the histogram path and
+that NaN, mixed signed zero, byte-swapped f16, and weak scalar q do not. The
+public delegated result is also byte-compared for every fallback corpus. The
+benchmark repeats dtype and byte parity before timing and checks the identical
+`0233b22687a1af24` result checksum on every null and effect round.
+
+`bench_elf_sha256=389ecb2b3fcf8b95c13adbefdd929c8c3362fd51acfef60642d5ca48de81d677`
+(294,549,736 bytes)
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 1.003093x, CI95 [0.971912, 1.031105], 41 rounds, min_of=3
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c6998b2107c432-001262b8 measured_ratio=35.988131x
+
+**Incumbent isolation proof:** candidate=fnp.quantile incumbent=numpy.quantile shared_timed_component=none
+
+The executing benchmark process asserted that the incumbent object is exactly
+`numpy.quantile`, hashed NumPy's compiled
+`_multiarray_umath.cpython-313-x86_64-linux-gnu.so` (10,452,641 bytes), and
+printed the shared invocation ID before timing. Each arm is a complete public
+call that independently computes and allocates its result.
+
+| row | arm A (NumPy) | arm B | ratio median | ratio CI95 | CV (provenance only) |
+|---|---:|---:|---:|---:|---:|
+| A/A null (NumPy/NumPy) | 330.409286 ms | 328.759047 ms | 1.003093 | `[0.971912, 1.031105]` | 11.117% |
+| effect (NumPy/FNP) | 337.999799 ms | **9.419106 ms** | **35.988131** | **`[30.263728, 43.832013]`** | 39.919% |
+
+**Verdict: DECIDABLE_WIN.** The null half-width is 0.031105, so the gate
+required an effect delta of 0.062209. The measured delta is 34.988131 and the
+effect CI is disjoint from the A/A interval by more than 29x. CV is recorded
+only as provenance and never participates in the decision.
+
+COUNTED_MECHANISM: 1 algorithmic class - NumPy copies and partitions 8M f16
+values for the multi-quantile request; FrankenNumPy replaces that work with one
+bounded 65,536-bin count pass and nine rank lookups.
+
+HARNESS NOTE: an earlier post-change ELF printed its identity and then ran no
+benchmark group because an inherited empty `FNP_BENCH_GROUPS` overrode the
+explicit RCH positional group selector. That no-op emitted no null, effect,
+invocation, or incumbent artifact and is discarded rather than treated as
+evidence. The harness now gives the explicit positional selector priority; the
+complete result above came from the subsequent self-reporting ELF.
+
+SCOPE: 35.988131x is the end-to-end ratio for nine linear quantiles over one
+finite, native-endian, C-contiguous 8,000,000-element f16 array on pinned
+`vmi1156319`, with `RAYON_NUM_THREADS=4`, NumPy 2.4.6, and the recorded
+artifacts. It is not a scalar-q, axis-wise, NaN/Inf, non-contiguous, weighted,
+other-method, or general quantile claim.
+
+Retry predicate: do not rerun this exact point against the same artifacts.
+Reopen only for a materially different realistic quantile workload, after the
+NumPy artifact changes, or if a profile attributes at least 5% self-time to
+another eligible order-statistics path. Any wider fast path must first prove
+exact dtype/shape/byte parity for the newly admitted semantic class and must
+retain process-self identities, same-invocation A/A, independent end-to-end
+arms, and the median-CI gate.
+
 ## 2026-07-27 - WIN (KEEP, INCUMBENT-WIN): f16 `average(axis=-1)` end-to-end vs NumPy - 2.201920x
 
 `BeigeDog`, bead `franken_numpy-ixs5y.383`, cod / Lane M. The mandatory

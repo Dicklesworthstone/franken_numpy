@@ -4613,6 +4613,156 @@ fn bench_average_f16_vs_numpy_median_gate(c: &mut Criterion) {
     });
 }
 
+/// Class-3 missing-capability gate for the bounded float16 domain. NumPy has no
+/// half-precision order-statistics kernel: its exact public arm copies the input
+/// and partitions it, while the candidate uses one 65,536-bin histogram.
+fn bench_quantile_f16_histogram_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_quantile_f16").expect("quantile-f16 bench module");
+        fnp_python(&module).expect("initialize fnp_python quantile-f16 module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let np_quantile = numpy.getattr("quantile").expect("numpy quantile");
+        let fnp_quantile = module.getattr("quantile").expect("fnp quantile");
+        common::report_numpy_incumbent_identity(py, "quantile", &np_quantile);
+        assert!(
+            !np_quantile.is(&fnp_quantile),
+            "dispatch trap: incumbent quantile resolved to our callable"
+        );
+        common::report_incumbent_topology("fnp.quantile", "numpy.quantile");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260728)\n\
+                 quantile_f16 = rng.uniform(-200.0, 200.0, size=8_000_000).astype(np.float16)\n\
+                 quantile_qs = np.array([0.01, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 0.999], dtype=np.float64)\n",
+            )
+            .expect("quantile-f16 setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("quantile-f16 corpus setup");
+        let input = namespace
+            .get_item("quantile_f16")
+            .expect("quantile_f16 present");
+        let qs = namespace
+            .get_item("quantile_qs")
+            .expect("quantile_qs present");
+
+        let profile_namespace = PyDict::new(py);
+        profile_namespace
+            .set_item("np_quantile", &np_quantile)
+            .expect("profile quantile callable");
+        profile_namespace
+            .set_item("quantile_f16", &input)
+            .expect("profile quantile input");
+        profile_namespace
+            .set_item("quantile_qs", &qs)
+            .expect("profile quantiles");
+        py.run(
+            std::ffi::CString::new(
+                "import cProfile, io, pstats\n\
+                 profiler = cProfile.Profile()\n\
+                 profiler.enable()\n\
+                 profile_results = [np_quantile(quantile_f16, quantile_qs) for _ in range(5)]\n\
+                 profiler.disable()\n\
+                 profile_stream = io.StringIO()\n\
+                 pstats.Stats(profiler, stream=profile_stream).strip_dirs().sort_stats('tottime').print_stats(8)\n\
+                 profile_report = profile_stream.getvalue()\n",
+            )
+            .expect("quantile-f16 profile CString")
+            .as_c_str(),
+            Some(&profile_namespace),
+            Some(&profile_namespace),
+        )
+        .expect("profile NumPy quantile");
+        println!(
+            "PROFILE_ATTRIBUTION surface=numpy.quantile(float16[8m],float64[9]) repeats=5 \
+             target_frame=ndarray.partition self_time_fraction=profile_report \
+             amdahl_ceiling=total_time/(total_time-partition_self_time)\n{}",
+            profile_namespace
+                .get_item("profile_report")
+                .expect("profile report present")
+                .extract::<String>()
+                .expect("profile report string")
+        );
+
+        let checksum_of = |value: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let bytes = value
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec");
+            bytes
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        let ours = fnp_quantile
+            .call1((&input, &qs))
+            .expect("fnp quantile parity");
+        let theirs = np_quantile
+            .call1((&input, &qs))
+            .expect("numpy quantile parity");
+        assert_eq!(
+            ours.getattr("dtype")
+                .expect("fnp dtype")
+                .str()
+                .expect("fnp dtype string")
+                .to_string(),
+            theirs
+                .getattr("dtype")
+                .expect("numpy dtype")
+                .str()
+                .expect("numpy dtype string")
+                .to_string(),
+            "f16 multi-quantile dtype mismatch"
+        );
+        assert_eq!(
+            checksum_of(&ours),
+            checksum_of(&theirs),
+            "f16 multi-quantile byte mismatch"
+        );
+
+        let mut time_incumbent = || {
+            let started = Instant::now();
+            let result = np_quantile
+                .call1((black_box(&input), black_box(&qs)))
+                .expect("numpy quantile arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let mut time_ours = || {
+            let started = Instant::now();
+            let result = fnp_quantile
+                .call1((black_box(&input), black_box(&qs)))
+                .expect("fnp quantile arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let _ = common::run_median_ci_contract(
+            "python_quantile_f16_8m_q9_vs_numpy",
+            &mut time_incumbent,
+            &mut time_ours,
+        );
+    });
+}
+
 fn bench_bool_storage_bytes_median_gate(c: &mut Criterion) {
     let _ = c;
     const N: usize = 8_000_000;
@@ -4704,6 +4854,10 @@ fn main() {
         (
             "bench_isin_f64_vs_numpy_median_gate",
             bench_isin_f64_vs_numpy_median_gate,
+        ),
+        (
+            "bench_quantile_f16_histogram_vs_numpy_median_gate",
+            bench_quantile_f16_histogram_vs_numpy_median_gate,
         ),
         (
             "bench_bool_storage_bytes_median_gate",

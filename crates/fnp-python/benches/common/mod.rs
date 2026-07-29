@@ -442,11 +442,14 @@ pub fn report_ledger_pair(
 /// does not forward arbitrary caller environment variables, while the argument
 /// is part of the exact remotely executed command.
 pub fn group_enabled(group_fn_name: &str) -> bool {
-    let spec = std::env::var("FNP_BENCH_GROUPS").ok().or_else(|| {
-        std::env::args()
-            .skip(1)
-            .find_map(|argument| argument.strip_prefix("fnp-group=").map(str::to_owned))
-    });
+    // The explicit command-line selector is the remote, auditable source of
+    // truth. It must override any inherited worker environment (including an
+    // accidentally present empty FNP_BENCH_GROUPS), otherwise a correctly
+    // filtered RCH invocation can build the ELF and silently execute no group.
+    let spec = std::env::args()
+        .skip(1)
+        .find_map(|argument| argument.strip_prefix("fnp-group=").map(str::to_owned))
+        .or_else(|| std::env::var("FNP_BENCH_GROUPS").ok());
     let Some(spec) = spec else {
         return true;
     };

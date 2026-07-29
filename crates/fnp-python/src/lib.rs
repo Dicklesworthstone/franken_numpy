@@ -71036,6 +71036,158 @@ fn iscomplexobj(x: Py<PyAny>) -> PyResult<bool> {
     Python::attach(|py| python_is_complex_obj(x.bind(py)))
 }
 
+// Flat float16 multi-quantile over the complete 65,536-pattern half domain.
+// NumPy partitions the whole input for strong (float64 array) q, even though
+// half values occupy a bounded domain. Count raw half patterns once, walk the
+// IEEE float/ordered-int bijection for the two required ranks per q, then use
+// NumPy's exact two-sided f64 lerp. This removes the profiled O(n) partition
+// while preserving the public float64 result. NaN/Inf and mixed-sign zero
+// inputs defer because NumPy's partition/tie behavior is not a value-only
+// contract for those classes.
+fn try_native_f16_multi_quantile_histogram(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    q: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    const MIN_N: usize = 1 << 20;
+
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !f16_dtype_ok(a, &ndarray_type)? {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if !dtype.getattr("isnative")?.extract::<bool>()?
+        || !a
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let n = a.getattr("size")?.extract::<usize>()?;
+    if n < MIN_N || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+
+    // A Python float is a weak scalar in NumPy 2.x and preserves the input
+    // float width. This path is deliberately strong-q only: a 1-D native f64
+    // q array (including np.asarray(list[float])) has an unambiguous f64 result.
+    let q_array = numpy.call_method1("asarray", (q,))?;
+    let q_dtype = q_array.getattr("dtype")?;
+    if q_array.getattr("ndim")?.extract::<usize>()? != 1
+        || q_dtype.getattr("kind")?.extract::<String>()? != "f"
+        || q_dtype.getattr("itemsize")?.extract::<usize>()? != 8
+        || !q_dtype.getattr("isnative")?.extract::<bool>()?
+        || !q_array
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let q_buffer = PyBuffer::<f64>::get(&q_array)?;
+    let Some(q_cells) = q_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if q_cells.is_empty() {
+        return Ok(None);
+    }
+    let qs = q_cells.iter().map(|cell| cell.get()).collect::<Vec<_>>();
+    if !qs
+        .iter()
+        .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+    {
+        return Ok(None);
+    }
+
+    let u16_dtype = numpy.getattr("uint16")?;
+    let bits_view = a.call_method1("view", (&u16_dtype,))?;
+    let bits_buffer = PyBuffer::<u16>::get(&bits_view)?;
+    let Some(bits_cells) = bits_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if bits_cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<u16> is repr(transparent), the array is native-endian
+    // C-contiguous, and it remains read-only under the GIL for this call.
+    let bits: &[u16] =
+        unsafe { std::slice::from_raw_parts(bits_cells.as_ptr().cast::<u16>(), bits_cells.len()) };
+
+    use rayon::prelude::*;
+    let threads = rayon::current_num_threads().max(1);
+    let chunk = n.div_ceil(threads * 4).max(1);
+    let counts = bits
+        .par_chunks(chunk)
+        .map(|values| {
+            let mut local = vec![0_usize; 1 << 16];
+            for &value in values {
+                local[value as usize] += 1;
+            }
+            local
+        })
+        .reduce(
+            || vec![0_usize; 1 << 16],
+            |mut left, right| {
+                for (slot, count) in left.iter_mut().zip(right) {
+                    *slot += count;
+                }
+                left
+            },
+        );
+
+    // Any non-finite value or both signed-zero encodings keep NumPy's path.
+    if counts[0x0000] != 0 && counts[0x8000] != 0 {
+        return Ok(None);
+    }
+    if counts
+        .iter()
+        .enumerate()
+        .any(|(raw, &count)| count != 0 && ((raw as u16) & 0x7c00) == 0x7c00)
+    {
+        return Ok(None);
+    }
+
+    let value_at_rank = |rank: usize| -> Option<f64> {
+        let mut remaining = rank;
+        for key in 0_u32..=u16::MAX as u32 {
+            let raw = if key < 0x8000 {
+                (0xffff - key) as u16
+            } else {
+                (key & 0x7fff) as u16
+            };
+            let count = counts[raw as usize];
+            if remaining < count {
+                return Some(f64::from(f16::from_bits(raw).to_f32()));
+            }
+            remaining -= count;
+        }
+        None
+    };
+
+    let mut result = Vec::with_capacity(qs.len());
+    for fraction in qs {
+        let virtual_index = fraction * (n - 1) as f64;
+        let lower_rank = virtual_index.floor() as usize;
+        let upper_rank = virtual_index.ceil() as usize;
+        let lower = value_at_rank(lower_rank).expect("lower quantile rank must exist");
+        let upper = value_at_rank(upper_rank).expect("upper quantile rank must exist");
+        let gamma = virtual_index - lower_rank as f64;
+        let difference = upper - lower;
+        let interpolated = if gamma >= 0.5 {
+            upper - difference * (1.0 - gamma)
+        } else {
+            lower + difference * gamma
+        };
+        result.push(interpolated);
+    }
+
+    Ok(Some(
+        numpy_array_from_slice(py, numpy, &result, "float64")?.unbind(),
+    ))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=None, keepdims=false, weights=None))]
 #[allow(clippy::too_many_arguments)]
@@ -71078,6 +71230,17 @@ fn quantile(
     // order-statistics primitive as percentile, with q already in [0, 1].
     let axis_is_flatten = axis.as_ref().is_none_or(|v| v.bind(py).is_none());
     let out_is_none = out.as_ref().is_none_or(|v| v.bind(py).is_none());
+    if axis_is_flatten
+        && out_is_none
+        && !overwrite_input
+        && !keepdims
+        && weights.is_none()
+        && matches!(method.as_deref(), None | Some("linear"))
+        && let Some(result) =
+            try_native_f16_multi_quantile_histogram(py, &numpy, a.bind(py), q.bind(py))?
+    {
+        return Ok(result);
+    }
     if axis_is_flatten
         && out_is_none
         && !overwrite_input
@@ -133034,6 +133197,75 @@ mod tests {
                 "nanargmin tie handling mismatch",
             );
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn f16_multi_quantile_histogram_is_byte_exact_and_defers_ambiguous_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let namespace = PyDict::new(py);
+            py.run(
+                c"import numpy as np\nn = 1 << 20\nraw = (np.arange(n, dtype=np.uint32) * 37) % 60001\na = (raw.astype(np.float32) / 64.0 - 400.0).astype(np.float16)\nqs = np.array([0.0, 1e-7, 0.01, 0.123456789, 0.4999999, 0.5, 0.5000001, 0.9, 0.999999, 1.0], dtype=np.float64)\nwith_nan = a.copy(); with_nan[0] = np.nan\nmixed_zero = a.copy(); mixed_zero[0] = np.float16(0.0); mixed_zero[1] = np.float16(-0.0)\nswapped = np.ones(n, dtype='>f2')",
+                Some(&namespace),
+                Some(&namespace),
+            )?;
+            let input = namespace.get_item("a")?.expect("a present");
+            let qs = namespace.get_item("qs")?.expect("qs present");
+            let quantile = module.getattr("quantile")?;
+            let numpy_quantile = numpy.getattr("quantile")?;
+
+            let ours = quantile.call1((&input, &qs))?;
+            let expected = numpy_quantile.call1((&input, &qs))?;
+            assert_eq!(
+                ours.getattr("dtype")?.str()?.extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?,
+                "f16 multi-quantile dtype diverged"
+            );
+            assert_eq!(
+                ours.getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?,
+                "f16 multi-quantile shape diverged"
+            );
+            assert_eq!(
+                ours.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                expected.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                "f16 multi-quantile bytes diverged"
+            );
+            assert!(
+                crate::try_native_f16_multi_quantile_histogram(py, &numpy, &input, &qs)?.is_some(),
+                "finite native-endian f16 + strong f64 q must take the histogram path"
+            );
+
+            for name in ["with_nan", "mixed_zero", "swapped"] {
+                let ambiguous = namespace.get_item(name)?.expect("ambiguous input present");
+                assert!(
+                    crate::try_native_f16_multi_quantile_histogram(py, &numpy, &ambiguous, &qs,)?
+                        .is_none(),
+                    "{name} must defer to NumPy"
+                );
+                let ours = quantile.call1((&ambiguous, &qs))?;
+                let expected = numpy_quantile.call1((&ambiguous, &qs))?;
+                assert_eq!(
+                    ours.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    expected.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "{name} delegated bytes diverged"
+                );
+            }
+
+            let weak_q = 0.37_f64.into_pyobject(py)?;
+            assert!(
+                crate::try_native_f16_multi_quantile_histogram(py, &numpy, &input, &weak_q)?
+                    .is_none(),
+                "weak scalar q must preserve NumPy's narrow-float path"
+            );
             Ok(())
         });
     }
