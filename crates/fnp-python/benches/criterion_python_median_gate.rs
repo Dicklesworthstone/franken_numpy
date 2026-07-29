@@ -237,6 +237,101 @@ impl<'py> EventAttributionArm<'py> {
     }
 }
 
+struct EntitlementReconciliationArm<'py> {
+    unique: Bound<'py, PyAny>,
+    intersect1d: Bound<'py, PyAny>,
+    setdiff1d: Bound<'py, PyAny>,
+    unique_kwargs: Bound<'py, PyDict>,
+}
+
+impl<'py> EntitlementReconciliationArm<'py> {
+    fn run(
+        &self,
+        previous: &Bound<'py, PyAny>,
+        current: &Bound<'py, PyAny>,
+    ) -> (Duration, [Bound<'py, PyAny>; 5]) {
+        let started = Instant::now();
+        let canonical = self
+            .unique
+            .call((black_box(current),), Some(&self.unique_kwargs))
+            .expect("canonicalize current entitlement grants");
+        let current_unique = canonical
+            .get_item(0)
+            .expect("canonical current entitlement keys");
+        let current_counts = canonical
+            .get_item(1)
+            .expect("current entitlement duplicate counts");
+        let unchanged = self
+            .intersect1d
+            .call1((black_box(previous), black_box(current)))
+            .expect("unchanged entitlement grants");
+        let added = self
+            .setdiff1d
+            .call1((black_box(current), black_box(previous)))
+            .expect("added entitlement grants");
+        let revoked = self
+            .setdiff1d
+            .call1((black_box(previous), black_box(current)))
+            .expect("revoked entitlement grants");
+        let elapsed = started.elapsed();
+        (
+            elapsed,
+            [current_unique, current_counts, unchanged, added, revoked],
+        )
+    }
+
+    fn profile(&self, previous: &Bound<'py, PyAny>, current: &Bound<'py, PyAny>) -> [f64; 4] {
+        const PROFILE_ROUNDS: usize = 7;
+        let mut canonicalize_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut unchanged_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut added_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut revoked_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        for _ in 0..PROFILE_ROUNDS {
+            let started = Instant::now();
+            black_box(
+                self.unique
+                    .call((current,), Some(&self.unique_kwargs))
+                    .expect("profile canonical entitlement grants"),
+            );
+            canonicalize_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            black_box(
+                self.intersect1d
+                    .call1((previous, current))
+                    .expect("profile unchanged entitlement grants"),
+            );
+            unchanged_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            black_box(
+                self.setdiff1d
+                    .call1((current, previous))
+                    .expect("profile added entitlement grants"),
+            );
+            added_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            black_box(
+                self.setdiff1d
+                    .call1((previous, current))
+                    .expect("profile revoked entitlement grants"),
+            );
+            revoked_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+        }
+        let median = |samples: &mut Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        [
+            median(&mut canonicalize_ms),
+            median(&mut unchanged_ms),
+            median(&mut added_ms),
+            median(&mut revoked_ms),
+        ]
+    }
+}
+
 fn bench_median_gate_python_binary<'py>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     bench_name: &'static str,
@@ -6079,6 +6174,348 @@ fnp_last_seen_state = np.empty(account_count, dtype=np.int64)
     });
 }
 
+/// Phase-2 Class-3 workload: reconcile two entitlement snapshots whose keys
+/// are packed `(tenant, principal, entitlement)` records. NumPy has no hashed
+/// structured-record set algebra; its public operations sort through the
+/// generic per-field void comparator. FrankenNumPy value-lex canonicalizes the
+/// records and uses fixed-record hash membership for intersection/difference.
+///
+/// Three snapshot sizes distinguish fixed setup from per-record comparator
+/// cost. Each current snapshot deliberately contains repeated carry-forward
+/// grants plus genuinely new keys, producing meaningful canonical counts and
+/// unchanged/added/revoked outputs.
+fn bench_realistic_entitlement_reconciliation_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    // Keep all three points on the >=65,536-record structured-hash route while
+    // fitting the complete explicit dual-null sweep inside RCH's 1,800-second
+    // remote-execution ceiling.
+    const SNAPSHOT_SIZES: [usize; 3] = [65_536, 72_000, 80_000];
+    const WORKLOAD_CONTRACT_ROUNDS: usize = 21;
+    const WORKLOAD_CONTRACT_MIN_OF: usize = 2;
+    const THREADS: &str = "4";
+
+    for variable in [
+        "RAYON_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(THREADS),
+            "{variable} must be explicitly pinned before workload timing"
+        );
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        THREADS
+            .parse::<usize>()
+            .expect("thread count constant is numeric"),
+        "Rayon pool width does not match the pinned workload configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME host={} rayon_threads={} RAYON_NUM_THREADS={} \
+         OPENBLAS_NUM_THREADS={} OMP_NUM_THREADS={} MKL_NUM_THREADS={} trj_used=false",
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "unavailable".to_owned()),
+        rayon::current_num_threads(),
+        THREADS,
+        THREADS,
+        THREADS,
+        THREADS,
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_entitlement_reconciliation_workload")
+            .expect("entitlement-reconciliation module");
+        fnp_python(&module).expect("initialize fnp_python entitlement-reconciliation module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(format!(
+                r#"
+import numpy as np
+rng = np.random.default_rng(20260729)
+snapshot_sizes = {SNAPSHOT_SIZES:?}
+grant_dtype = np.dtype([
+    ("tenant_id", "<i8"),
+    ("principal_id", "<i8"),
+    ("entitlement_id", "<i8"),
+], align=False)
+
+previous_by_size = []
+current_by_size = []
+for size in snapshot_sizes:
+    previous = np.empty(size, dtype=grant_dtype)
+    previous["tenant_id"] = (rng.zipf(1.19, size=size) - 1) % 2_048
+    previous["principal_id"] = (
+        previous["tenant_id"] * np.int64(1_000_000)
+        + rng.integers(0, 200_000, size=size, dtype=np.int64)
+    )
+    previous["entitlement_id"] = (
+        (rng.zipf(1.31, size=size) - 1) % 512
+    ).astype(np.int64)
+
+    carry_count = int(size * 0.72)
+    carry = previous[
+        rng.integers(0, size, size=carry_count, dtype=np.int64)
+    ].copy()
+    new_count = size - carry_count
+    new = np.empty(new_count, dtype=grant_dtype)
+    new["tenant_id"] = (rng.zipf(1.19, size=new_count) - 1) % 2_048
+    new["principal_id"] = (
+        new["tenant_id"] * np.int64(1_000_000)
+        + rng.integers(200_000, 450_000, size=new_count, dtype=np.int64)
+    )
+    new["entitlement_id"] = (
+        (rng.zipf(1.31, size=new_count) - 1) % 512
+    ).astype(np.int64)
+
+    current = np.concatenate((carry, new))
+    rng.shuffle(current)
+    previous_by_size.append(np.ascontiguousarray(previous))
+    current_by_size.append(np.ascontiguousarray(current))
+
+assert grant_dtype.names == (
+    "tenant_id", "principal_id", "entitlement_id",
+)
+assert grant_dtype.itemsize == 24
+for snapshot in previous_by_size + current_by_size:
+    assert snapshot.ndim == 1
+    assert snapshot.flags.c_contiguous
+    assert snapshot.dtype == grant_dtype
+"#
+            ))
+            .expect("entitlement-reconciliation setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("entitlement-reconciliation corpus setup");
+
+        let fnp_unique = module.getattr("unique").expect("fnp unique");
+        let np_unique = numpy.getattr("unique").expect("numpy unique");
+        let fnp_intersect1d = module.getattr("intersect1d").expect("fnp intersect1d");
+        let np_intersect1d = numpy.getattr("intersect1d").expect("numpy intersect1d");
+        let fnp_setdiff1d = module.getattr("setdiff1d").expect("fnp setdiff1d");
+        let np_setdiff1d = numpy.getattr("setdiff1d").expect("numpy setdiff1d");
+        for (candidate, incumbent, surface) in [
+            (&fnp_unique, &np_unique, "unique"),
+            (&fnp_intersect1d, &np_intersect1d, "intersect1d"),
+            (&fnp_setdiff1d, &np_setdiff1d, "setdiff1d"),
+        ] {
+            assert!(
+                !candidate.is(incumbent),
+                "{surface}: candidate callable aliases NumPy"
+            );
+            common::report_numpy_incumbent_identity(py, surface, incumbent);
+        }
+        common::report_incumbent_topology(
+            "fnp.workload.entitlement_reconciliation",
+            "numpy.workload.entitlement_reconciliation",
+        );
+        println!(
+            "INCUMBENT_PIPELINE workload=entitlement_reconciliation \
+             candidate=fnp.unique+fnp.intersect1d+fnp.setdiff1d \
+             incumbent=numpy.unique+numpy.intersect1d+numpy.setdiff1d \
+             shared_timed_component=none inputs_shared_read_only=true"
+        );
+        println!(
+            "ROUTE_PRECONDITIONS workload=entitlement_reconciliation \
+             dtype=packed_native_3xi64 itemsize=24 ndim=1 c_contiguous=true \
+             no_padding=true no_float_fields=true min_snapshot_size={} \
+             structured_hash_min=65536 route_gates_satisfied=true \
+             contract_rounds={WORKLOAD_CONTRACT_ROUNDS} \
+             contract_min_of={WORKLOAD_CONTRACT_MIN_OF}",
+            SNAPSHOT_SIZES[0],
+        );
+
+        let fnp_unique_kwargs = PyDict::new(py);
+        fnp_unique_kwargs
+            .set_item("return_counts", true)
+            .expect("fnp unique return_counts kwarg");
+        let np_unique_kwargs = PyDict::new(py);
+        np_unique_kwargs
+            .set_item("return_counts", true)
+            .expect("numpy unique return_counts kwarg");
+        let candidate = EntitlementReconciliationArm {
+            unique: fnp_unique,
+            intersect1d: fnp_intersect1d,
+            setdiff1d: fnp_setdiff1d,
+            unique_kwargs: fnp_unique_kwargs,
+        };
+        let incumbent = EntitlementReconciliationArm {
+            unique: np_unique,
+            intersect1d: np_intersect1d,
+            setdiff1d: np_setdiff1d,
+            unique_kwargs: np_unique_kwargs,
+        };
+
+        let previous_by_size = namespace
+            .get_item("previous_by_size")
+            .expect("previous entitlement snapshots");
+        let current_by_size = namespace
+            .get_item("current_by_size")
+            .expect("current entitlement snapshots");
+
+        let mut scaling = Vec::with_capacity(SNAPSHOT_SIZES.len());
+        for (size_index, size) in SNAPSHOT_SIZES.into_iter().enumerate() {
+            let row = format!("workload_entitlement_reconciliation_struct_3xi64_{size}");
+            println!(
+                "WORKLOAD_CONFIG row={row} user_job=entitlement_snapshot_reconciliation \
+                 previous_records={size} current_records={size} \
+                 distribution=zipf_tenants_and_entitlements_72pct_carry_forward \
+                 stages=unique_return_counts_current,intersect_unchanged,\
+                 setdiff_added,setdiff_revoked \
+                 output=canonical_counts_unchanged_added_revoked \
+                 matched_config=same_process_same_inputs target_regime=large_structured"
+            );
+            let previous = previous_by_size
+                .get_item(size_index)
+                .expect("previous entitlement snapshot");
+            let current = current_by_size
+                .get_item(size_index)
+                .expect("current entitlement snapshot");
+
+            let (_, incumbent_output) = incumbent.run(&previous, &current);
+            let (_, candidate_output) = candidate.run(&previous, &current);
+            assert_workload_outputs_equal(&numpy, &row, &candidate_output, &incumbent_output);
+            println!(
+                "PARITY row={row} dtype=packed_struct_3xi64 input_shape=[{size}] outputs=5 \
+                 byte_identity=passed checksum={:016x}",
+                workload_checksum(&numpy, &candidate_output),
+            );
+
+            let incumbent_profile = incumbent.profile(&previous, &current);
+            let candidate_profile = candidate.profile(&previous, &current);
+            let candidate_total = candidate_profile.iter().sum::<f64>();
+            let (target_stage, target_ms) = [
+                ("unique_return_counts_current", candidate_profile[0]),
+                ("intersect_unchanged", candidate_profile[1]),
+                ("setdiff_added", candidate_profile[2]),
+                ("setdiff_revoked", candidate_profile[3]),
+            ]
+            .into_iter()
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .expect("four profile stages");
+            for (stage, incumbent_ms, candidate_ms) in [
+                (
+                    "unique_return_counts_current",
+                    incumbent_profile[0],
+                    candidate_profile[0],
+                ),
+                (
+                    "intersect_unchanged",
+                    incumbent_profile[1],
+                    candidate_profile[1],
+                ),
+                ("setdiff_added", incumbent_profile[2], candidate_profile[2]),
+                (
+                    "setdiff_revoked",
+                    incumbent_profile[3],
+                    candidate_profile[3],
+                ),
+            ] {
+                println!(
+                    "PROFILE_STAGE row={row} arm_pair=numpy_fnp stage={stage} \
+                     incumbent_median_ms={incumbent_ms:.6} \
+                     candidate_median_ms={candidate_ms:.6}"
+                );
+            }
+            let target_fraction = target_ms / candidate_total;
+            println!(
+                "PROFILE_SUMMARY row={row} target_stage={target_stage} \
+                 target_candidate_ms={target_ms:.6} candidate_stage_sum_ms={candidate_total:.6} \
+                 target_self_fraction_pct={:.3} amdahl_remove_ceiling={:.6}",
+                target_fraction * 100.0,
+                1.0 / (1.0 - target_fraction),
+            );
+
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = incumbent.run(&previous, &current);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = candidate.run(&previous, &current);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &row,
+                    &mut observe_incumbent,
+                    &mut observe_candidate,
+                    WORKLOAD_CONTRACT_ROUNDS,
+                    WORKLOAD_CONTRACT_MIN_OF,
+                );
+            println!(
+                "WORKLOAD_SIZE_POINT workload=entitlement_reconciliation size={size} \
+                 incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ratio={:.6} candidate_null_ratio={:.6} \
+                 incumbent_ns_per_input_record={:.3} \
+                 candidate_ns_per_input_record={:.3}",
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+                effect.arm_a_median_ns / (2 * size) as f64,
+                effect.arm_b_median_ns / (2 * size) as f64,
+            );
+            scaling.push(effect);
+        }
+
+        let first_ratio = scaling.first().expect("first scaling point").ratio_median;
+        let last_ratio = scaling.last().expect("last scaling point").ratio_median;
+        let ratio_min = scaling
+            .iter()
+            .map(|stats| stats.ratio_median)
+            .fold(f64::INFINITY, f64::min);
+        let ratio_max = scaling
+            .iter()
+            .map(|stats| stats.ratio_median)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let ratio_spread = ratio_max / ratio_min - 1.0;
+        let monotonic_up = scaling
+            .windows(2)
+            .all(|points| points[1].ratio_median >= points[0].ratio_median);
+        let monotonic_down = scaling
+            .windows(2)
+            .all(|points| points[1].ratio_median <= points[0].ratio_median);
+        let shape = if ratio_spread <= 0.15 {
+            "FLAT_PER_RECORD_COST"
+        } else if monotonic_up && last_ratio >= first_ratio * 1.15 {
+            "WIDENING_WITH_SNAPSHOT"
+        } else if monotonic_down && last_ratio <= first_ratio * 0.85 {
+            "NARROWING_WITH_SNAPSHOT"
+        } else {
+            "MIXED_OR_NOISE"
+        };
+        println!(
+            "SCALING_SHAPE workload=entitlement_reconciliation dimension=snapshot_size \
+             sizes=[{},{},{}] ratios=[{:.6},{:.6},{:.6}] \
+             ratio_spread={ratio_spread:.6} classification={shape}",
+            SNAPSHOT_SIZES[0],
+            SNAPSHOT_SIZES[1],
+            SNAPSHOT_SIZES[2],
+            scaling[0].ratio_median,
+            scaling[1].ratio_median,
+            scaling[2].ratio_median,
+        );
+    });
+}
+
 fn bench_bool_storage_bytes_median_gate(c: &mut Criterion) {
     let _ = c;
     const N: usize = 8_000_000;
@@ -6186,6 +6623,10 @@ fn main() {
         (
             "bench_realistic_event_attribution_scatter_vs_numpy_median_gate",
             bench_realistic_event_attribution_scatter_vs_numpy_median_gate,
+        ),
+        (
+            "bench_realistic_entitlement_reconciliation_vs_numpy_median_gate",
+            bench_realistic_entitlement_reconciliation_vs_numpy_median_gate,
         ),
         (
             "bench_bool_storage_bytes_median_gate",

@@ -4,6 +4,144 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-29 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): structured entitlement reconciliation - 12.98-14.50x vs NumPy with a flat snapshot curve
+
+`BeigeDog`, bead `franken_numpy-ixs5y.387`, cod / Lane M. This whole
+entitlement-reconciliation job canonicalizes the current grant snapshot with
+counts, computes unchanged grants, and computes added and revoked grants.
+Each arm independently executes its own public `unique(return_counts=True)`,
+`intersect1d`, and two `setdiff1d` calls. NumPy owns all three public APIs but
+has no fixed-record hash set operations or parallel integer-row factorizer for
+this packed structured-record regime.
+
+The corpus uses 65,536, 72,000, and 80,000 records in each previous/current
+snapshot. Records are packed `(tenant_id, principal_id, entitlement_id)`
+native/little-endian `int64` triples with no padding. Tenants and entitlements
+follow Zipf(1.19) and Zipf(1.31); 72% of the current snapshot is sampled
+carry-forward data, deliberately retaining duplicate grants, while 28% uses a
+disjoint principal range to model genuinely new grants. The job emits the
+canonical current keys and duplicate counts plus sorted unchanged, added, and
+revoked records.
+
+`bench_elf_sha256=bbd94e6f43a2aaf30f3b5f6982333f889dac6fb68c56b460ffadbd8f08ec09cc`
+(295,406,864 bytes)
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 0.994877x,
+CI95 [0.976054, 1.006758], 21 rounds, min_of=2 at the 80,000-record headline
+size; the table records all three sizes.
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio
+1.046183x, CI95 [0.922229, 1.186928], 21 rounds, min_of=2 at the 80,000-record
+headline size.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c6d27e22ea562e-00238bcb measured_ratio=14.500556x median=1325.214408ms
+
+**Incumbent isolation proof:** candidate=fnp.workload.entitlement_reconciliation incumbent=numpy.workload.entitlement_reconciliation shared_timed_component=none
+
+The NumPy artifact was
+`d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa`
+(10,452,641 bytes,
+`numpy/_core/_multiarray_umath.cpython-313-x86_64-linux-gnu.so`). The benchmark
+ran on pinned RCH worker `vmi1156319`, not TRJ, with Rayon, OpenBLAS, OMP, and
+MKL all fixed at four threads. The harness asserted that every FNP callable
+was distinct from its NumPy counterpart. The two public call graphs received
+the same read-only input snapshots but shared no explicit timed harness tail;
+FNP's normal PyO3 boundary still allocates NumPy-compatible output arrays
+inside its own timed calls.
+
+ROUTE PROOF: every snapshot is an exact one-dimensional C-contiguous NumPy
+array with three contiguous native/little-endian `int64` fields at offsets
+0/8/16 and itemsize 24. Every row count is at least `1 << 16`, and the observed
+Rayon width is four. `unique(return_counts=True)` therefore re-views the
+records as `(n,3)` int64 rows and takes
+`try_native_unique_rows_lexsort_int_full`; the set operations take
+`try_native_struct_intersect_setdiff`, canonicalize with the corresponding
+integer-row unique path, and membership-filter through fixed-record byte
+hashes. Non-i64 fields, padding, big-endian fields, non-contiguous snapshots,
+and sub-threshold unique workloads retain their existing fallback behavior.
+
+Exact dtype, shape, and every output byte matched for all five outputs at all
+three sizes. Pre-timing checksums were `1a2f624e8a736abf`,
+`6e667aee46ca1514`, and `42b62e258a12a766`; every timed observation reproduced
+its size-specific contract checksum.
+
+| records per snapshot | NumPy/NumPy null ratio (CI95) | FNP/FNP null ratio (CI95) | NumPy median | FNP median | NumPy/FNP ratio (CI95) | required 2x null delta | verdict |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 65,536 | 1.017005 `[0.978853,1.035671]` | 0.972572 `[0.850573,1.107204]` | 1062.111191 ms | 81.575565 ms | **12.982355x** `[11.206482,14.628545]` | 0.298854 | DECIDABLE_WIN |
+| 72,000 | 0.983508 `[0.969466,1.004624]` | 1.044435 `[0.912997,1.142000]` | 1154.071741 ms | 90.341920 ms | **13.063256x** `[11.080696,14.943384]` | 0.284001 | DECIDABLE_WIN |
+| 80,000 | 0.994877 `[0.976054,1.006758]` | 1.046183 `[0.922229,1.186928]` | 1325.214408 ms | 91.390592 ms | **14.500556x** `[12.681053,16.161997]` | 0.373855 | DECIDABLE_WIN |
+
+Each effect median clears twice the wider same-invocation null half-width.
+Effect CVs of 30.900%, 26.642%, and 21.160% are retained as provenance only;
+they neither admitted nor rejected a row. This multi-second workload uses an
+explicit 21-round, min-of-2 contract so the complete three-point dual-null
+sweep fits RCH's 1,800-second execution ceiling. The helper preserves odd
+paired sampling, alternating arm order, both A/A controls, 4,096-resample
+bootstrap median CIs, and the wider-null 2x decision rule. Existing
+microbenchmarks retain their 41-round, min-of-3 default.
+
+SCALING SHAPE: ratios `[12.982355, 13.063256, 14.500556]` have 11.6943%
+spread, so the harness classifies the gap `FLAT_PER_RECORD_COST`. Candidate
+costs are 622.372, 627.374, and 571.191 ns per input record versus NumPy's
+8,103.265, 8,014.387, and 8,282.590 ns. The gap is constant per structured
+record over this route-qualified range, not a fixed setup or coordination
+curve.
+
+PROFILE ATTRIBUTION: at 80,000 records, NumPy/FNP stage medians were
+125.125052/10.047300 ms for current `unique(return_counts=True)`,
+526.672306/25.604935 ms for unchanged `intersect1d`,
+308.499409/23.122220 ms for added `setdiff1d`, and
+308.549757/23.726123 ms for revoked `setdiff1d`. FNP's largest stage is
+intersection at 31.036% of its summed stage time, for an all-of-that-stage
+removal ceiling of 1.450033x. No production kernel changed: this row banks an
+existing missing-capability implementation under the current real-incumbent
+contract.
+
+ISOMORPHISM PROOF: for packed all-int64 records, viewing one record as one
+three-column row preserves field boundaries and values exactly. Comparing
+those rows left-to-right by signed integer value is NumPy's structured
+field-value lexicographic order. The full unique route breaks equal-row ties by
+original index, so the first occurrence and count for every group match.
+Intersection and difference first produce that same sorted unique domain,
+then test complete 24-byte records in a hash set; because every field byte is
+part of the key and integer records have no NaN or signed-zero equivalence
+classes, byte equality is exactly record-value equality. Filtering cannot
+change order, so all five outputs are behavior-preserving.
+
+CHOOSER STATEMENT: for this exact route-qualified 65,536-to-80,000-record
+entitlement reconciliation job on the recorded artifacts, choose FrankenNumPy
+when completion time is decisive; the conservative measured point is
+12.982355x and every effect CI clears both same-invocation null envelopes.
+
+ATTEMPT HISTORY: invocation
+`000000000000000018c6ce4cd14914d1-00224c4e`, ELF
+`fb920d4f8e3a6b9300abef6c632b8d9322cada4075c3bfb06cea9f9d01c44591`,
+used 80,000/160,000/320,000 records at 41 rounds, min_of=3. Its 80,000 row was
+a valid 13.824284x `[12.742613,14.870845]` decisive win, but RCH timed out
+during the 160,000 NumPy A/A row. Retry predicate satisfied: keep every point
+on the native route and reduce the scale range.
+
+The route-qualified 65,536/72,000/80,000 retry, invocation
+`000000000000000018c6d0b4de640877-00230429`, ELF
+`1e17a36837df3d6b1aa3fd52af231c20493d21d2bc7fba8bb143abbaaa454f16`,
+still used 41 rounds, min_of=3. It completed valid 14.813785x
+`[13.508716,15.753329]` and 14.115495x `[13.151138,14.709212]` wins at the
+first two sizes, then timed out during the 80,000 NumPy A/A row. Retry
+predicate satisfied: make the long-workload sampling budget explicit while
+retaining both nulls and the median-CI rule. A separate `--no-run` prebuild
+also proved RCH does not preserve this target cache across commands and is not
+a viable retry.
+
+Retry predicate: do not repeat this exact corpus against the same FNP and
+NumPy artifacts at four threads. Reopen if either binary hash changes, a real
+snapshot uses a different structured layout or falls below 65,536 rows, the
+ratio spread crosses the 15% flat-curve threshold, or an integration workload
+adds a stage that changes the end-to-end topology. Profile a production lever
+only if one FNP stage rises above 50% self-time or a counted mechanism removes
+work; do not infer another campaign win from a self-speedup.
+
 ## 2026-07-29 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): large-cardinality integer event attribution - 1.419-1.452x vs NumPy with a flat batch curve
 
 `BeigeDog`, bead `franken_numpy-ixs5y.386`, cod / Lane M. This whole

@@ -216,9 +216,17 @@ fn min_observation<F>(operation: &mut F) -> ContractObservation
 where
     F: FnMut() -> ContractObservation,
 {
+    min_observation_with(operation, CONTRACT_MIN_OF)
+}
+
+fn min_observation_with<F>(operation: &mut F, min_of: usize) -> ContractObservation
+where
+    F: FnMut() -> ContractObservation,
+{
+    assert!(min_of >= 1, "contract min-of count must be non-zero");
     let mut best = operation();
     let mut checksum = best.checksum;
-    for _ in 1..CONTRACT_MIN_OF {
+    for _ in 1..min_of {
         let observation = operation();
         checksum = mix_checksum(checksum, observation.checksum);
         if observation.elapsed < best.elapsed {
@@ -271,8 +279,17 @@ fn contract_pair_stats(arm_a: &[f64], arm_b: &[f64], checksum: u64) -> ContractP
 }
 
 fn report_contract_pair(row: &str, stats: ContractPairStats) {
+    report_contract_pair_with_sampling(row, stats, CONTRACT_ROUNDS, CONTRACT_MIN_OF);
+}
+
+fn report_contract_pair_with_sampling(
+    row: &str,
+    stats: ContractPairStats,
+    rounds: usize,
+    min_of: usize,
+) {
     println!(
-        "PAIRED row={row} rounds={CONTRACT_ROUNDS} min_of={CONTRACT_MIN_OF} \
+        "PAIRED row={row} rounds={rounds} min_of={min_of} \
          arm_a_median_ms={:.6} arm_b_median_ms={:.6} ratio_median={:.6} \
          ratio_median_ci95=[{:.6},{:.6}] ratio_cv_pct={:.3} ratio_mad={:.6} checksum={:016x}",
         stats.arm_a_median_ns / 1_000_000.0,
@@ -435,30 +452,61 @@ where
 /// controls the median-CI verdict.
 pub fn run_dual_null_median_ci_contract<A, B>(
     row: &str,
-    mut incumbent: A,
-    mut candidate: B,
+    incumbent: A,
+    candidate: B,
 ) -> (ContractPairStats, ContractPairStats, ContractPairStats)
 where
     A: FnMut() -> ContractObservation,
     B: FnMut() -> ContractObservation,
 {
+    run_dual_null_median_ci_contract_with_sampling(
+        row,
+        incumbent,
+        candidate,
+        CONTRACT_ROUNDS,
+        CONTRACT_MIN_OF,
+    )
+}
+
+/// Run the dual-null contract with an explicit sampling budget for realistic
+/// workloads whose multi-second incumbent arm cannot fit the microbenchmark
+/// default inside the worker's execution ceiling. Sampling remains odd-sized,
+/// interleaved, bootstrap-median-CI gated, and controlled by the wider A/A
+/// envelope.
+pub fn run_dual_null_median_ci_contract_with_sampling<A, B>(
+    row: &str,
+    mut incumbent: A,
+    mut candidate: B,
+    rounds: usize,
+    min_of: usize,
+) -> (ContractPairStats, ContractPairStats, ContractPairStats)
+where
+    A: FnMut() -> ContractObservation,
+    B: FnMut() -> ContractObservation,
+{
+    assert!(
+        rounds >= 9 && rounds & 1 == 1,
+        "contract rounds must be an odd count of at least nine"
+    );
+    assert!(min_of >= 1, "contract min-of count must be non-zero");
+
     for _ in 0..4 {
-        black_box(min_observation(&mut incumbent));
-        black_box(min_observation(&mut incumbent));
+        black_box(min_observation_with(&mut incumbent, min_of));
+        black_box(min_observation_with(&mut incumbent, min_of));
     }
 
-    let mut incumbent_null_a = Vec::with_capacity(CONTRACT_ROUNDS);
-    let mut incumbent_null_b = Vec::with_capacity(CONTRACT_ROUNDS);
+    let mut incumbent_null_a = Vec::with_capacity(rounds);
+    let mut incumbent_null_b = Vec::with_capacity(rounds);
     let mut incumbent_null_checksum = 0_u64;
-    for round in 0..CONTRACT_ROUNDS {
+    for round in 0..rounds {
         let (a, b) = if round & 1 == 0 {
             (
-                min_observation(&mut incumbent),
-                min_observation(&mut incumbent),
+                min_observation_with(&mut incumbent, min_of),
+                min_observation_with(&mut incumbent, min_of),
             )
         } else {
-            let b = min_observation(&mut incumbent);
-            (min_observation(&mut incumbent), b)
+            let b = min_observation_with(&mut incumbent, min_of);
+            (min_observation_with(&mut incumbent, min_of), b)
         };
         assert_eq!(
             a.checksum, b.checksum,
@@ -473,25 +521,30 @@ where
         &incumbent_null_b,
         incumbent_null_checksum,
     );
-    report_contract_pair(&format!("{row}_null_incumbent_aa"), incumbent_null);
+    report_contract_pair_with_sampling(
+        &format!("{row}_null_incumbent_aa"),
+        incumbent_null,
+        rounds,
+        min_of,
+    );
 
     for _ in 0..4 {
-        black_box(min_observation(&mut candidate));
-        black_box(min_observation(&mut candidate));
+        black_box(min_observation_with(&mut candidate, min_of));
+        black_box(min_observation_with(&mut candidate, min_of));
     }
 
-    let mut candidate_null_a = Vec::with_capacity(CONTRACT_ROUNDS);
-    let mut candidate_null_b = Vec::with_capacity(CONTRACT_ROUNDS);
+    let mut candidate_null_a = Vec::with_capacity(rounds);
+    let mut candidate_null_b = Vec::with_capacity(rounds);
     let mut candidate_null_checksum = 0_u64;
-    for round in 0..CONTRACT_ROUNDS {
+    for round in 0..rounds {
         let (a, b) = if round & 1 == 0 {
             (
-                min_observation(&mut candidate),
-                min_observation(&mut candidate),
+                min_observation_with(&mut candidate, min_of),
+                min_observation_with(&mut candidate, min_of),
             )
         } else {
-            let b = min_observation(&mut candidate);
-            (min_observation(&mut candidate), b)
+            let b = min_observation_with(&mut candidate, min_of);
+            (min_observation_with(&mut candidate, min_of), b)
         };
         assert_eq!(
             a.checksum, b.checksum,
@@ -506,30 +559,38 @@ where
         &candidate_null_b,
         candidate_null_checksum,
     );
-    report_contract_pair(&format!("{row}_null_candidate_aa"), candidate_null);
+    report_contract_pair_with_sampling(
+        &format!("{row}_null_candidate_aa"),
+        candidate_null,
+        rounds,
+        min_of,
+    );
 
     for round in 0..4 {
         if round & 1 == 0 {
-            black_box(min_observation(&mut incumbent));
-            black_box(min_observation(&mut candidate));
+            black_box(min_observation_with(&mut incumbent, min_of));
+            black_box(min_observation_with(&mut candidate, min_of));
         } else {
-            black_box(min_observation(&mut candidate));
-            black_box(min_observation(&mut incumbent));
+            black_box(min_observation_with(&mut candidate, min_of));
+            black_box(min_observation_with(&mut incumbent, min_of));
         }
     }
 
-    let mut incumbent_samples = Vec::with_capacity(CONTRACT_ROUNDS);
-    let mut candidate_samples = Vec::with_capacity(CONTRACT_ROUNDS);
+    let mut incumbent_samples = Vec::with_capacity(rounds);
+    let mut candidate_samples = Vec::with_capacity(rounds);
     let mut effect_checksum = 0_u64;
-    for round in 0..CONTRACT_ROUNDS {
+    for round in 0..rounds {
         let (incumbent_observation, candidate_observation) = if round & 1 == 0 {
             (
-                min_observation(&mut incumbent),
-                min_observation(&mut candidate),
+                min_observation_with(&mut incumbent, min_of),
+                min_observation_with(&mut candidate, min_of),
             )
         } else {
-            let candidate_observation = min_observation(&mut candidate);
-            (min_observation(&mut incumbent), candidate_observation)
+            let candidate_observation = min_observation_with(&mut candidate, min_of);
+            (
+                min_observation_with(&mut incumbent, min_of),
+                candidate_observation,
+            )
         };
         assert_eq!(
             incumbent_observation.checksum, candidate_observation.checksum,
@@ -540,7 +601,12 @@ where
         effect_checksum = mix_checksum(effect_checksum, incumbent_observation.checksum);
     }
     let effect = contract_pair_stats(&incumbent_samples, &candidate_samples, effect_checksum);
-    report_contract_pair(&format!("{row}_effect_incumbent_over_candidate"), effect);
+    report_contract_pair_with_sampling(
+        &format!("{row}_effect_incumbent_over_candidate"),
+        effect,
+        rounds,
+        min_of,
+    );
     report_dual_null_contract_gate(row, effect, incumbent_null, candidate_null);
     (effect, incumbent_null, candidate_null)
 }
