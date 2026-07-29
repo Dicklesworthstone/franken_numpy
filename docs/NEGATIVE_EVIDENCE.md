@@ -32442,3 +32442,124 @@ for newly admitted semantics. Any extension must retain executable and NumPy
 artifact hashes, independent end-to-end arms with
 `shared_timed_component=none`, both same-invocation A/A nulls, exact output
 parity, host-wide fail-closed exclusivity, and the median-CI 2x wider-null gate.
+## 2026-07-29 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): f16 dynamic-range audit and exact reconstruction - 3.75-4.83x vs NumPy
+
+`BeigeDog`, bead `franken_numpy-ixs5y.389`, cod / Lane M. The negative-evidence
+preflight was clear for
+`fnp.workload.block_float_codec_report` before editing the harness. This
+Phase-2 whole job audits a large half-precision vibration/power stream by
+decomposing every sample into its mantissa and exponent, counting exponent
+occupancy, and reconstructing the original stream exactly. Each arm
+independently executes its own public `frexp`, `bincount`, and `ldexp` callables
+end to end. It does not exercise square GEMM.
+
+The seeded corpus contains 2,000,000, 4,000,000, and 8,000,000 signed finite
+f16 samples. A lognormal body models ordinary amplitudes, 2.5% of samples
+receive a 4-16x burst multiplier, polarity is symmetric, values are clipped to
+0.5-32768, and 0.8% sensor dropouts include both positive and negative zero.
+Observed exponents are in 0..=16 and are counted into 17 int64 buckets.
+
+`bench_elf_sha256=0f50e015de7e8f3cc0f738c082d1e400937f0c802bc27e3402f280c7a8894d51`
+(47,927,368 bytes)
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 0.997427x,
+CI95 [0.934251, 1.093063], 21 rounds, min_of=2 at 8,000,000 samples; the table
+records every size.
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio
+0.896170x, CI95 [0.695748, 1.447832], 21 rounds, min_of=2 at 8,000,000
+samples.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c6e3444b728966-0033c1d4 measured_ratio=3.749619x median=68.021475ms
+
+**Incumbent isolation proof:** candidate=fnp.workload.f16_dynamic_range_audit incumbent=numpy.workload.f16_dynamic_range_audit shared_timed_component=none
+
+The NumPy artifact was
+`d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa`
+(10,452,641 bytes,
+`numpy/_core/_multiarray_umath.cpython-313-x86_64-linux-gnu.so`). The harness
+asserted that all three FNP callables were distinct from their NumPy
+counterparts. The arms shared only the same read-only input arrays; neither
+called into the other arm or shared a timed postprocessing tail.
+
+HOST-WIDE EXCLUSIVITY PROOF: the byte-identical ELF ran on non-TRJ worker
+`vmi1293453` only after the worker was drained from RCH admission, and the
+worker was re-enabled immediately after the invocation. The executable
+required its affinity mask to equal every online CPU and sampled every CPU
+before the process and each size contract. CPUs 0-7 cleared the process
+preflight at 16.7% maximum observed busy and the three contract preflights at
+0.0%, 16.1%, and 6.7%; all were below the 20% fail-closed threshold. Rayon,
+OpenBLAS, OMP, and MKL were each pinned to four threads.
+
+The exclusivity requirement also produced useful NO-RESULT evidence rather
+than contaminated timings. Two cold-build attempts and one byte-identical
+replay on `vmi1264463` refused before timing because CPUs remained 20.7-100%
+busy. Invocation `000000000000000018c6e2e5123956db-00157803` on
+`vmi1156319` completed valid 2M and 4M contracts, then refused the 8M contract
+when an RCH job entered the host; that partial sweep was not banked. Draining
+the worker prevented new RCH admission, but a subsequent replay still refused
+because lingering `npm` and disk-scan processes saturated two CPUs. Retry
+predicate for these NO-RESULT attempts: do not retry either contaminated host
+until it is drained and a full-host process scan confirms that no lingering
+work remains; a merely empty RCH queue is insufficient.
+
+BEHAVIOR-PRESERVATION PROOF: `frexp` is an exact f16 bit/exponent
+decomposition, exponent counting is an order-independent integer tally, and
+`ldexp(mantissa, exponent)` reconstructs every finite input bit pattern,
+including the sign bit of negative zero. Before timing, dtype, shape, and every
+output byte matched for mantissas, int32 exponents, int64 exponent counts, and
+reconstructed f16 samples. Each arm's reconstruction was also compared
+directly with the input bytes. Pre-timing checksums were
+`9629c51e1baccb59`, `fbcb1709ff387823`, and `3eaaf6233e8a4c62`; every timed
+observation reproduced its size-specific checksum.
+
+| samples | NumPy/NumPy null ratio (CI95) | FNP/FNP null ratio (CI95) | NumPy median | FNP median | NumPy/FNP ratio (CI95) | required 2x null delta | verdict |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 2,000,000 | 0.985162 `[0.916251,1.074493]` | 0.968452 `[0.908345,1.102935]` | 35.359184 ms | 9.276704 ms | **3.872568x** `[3.473223,4.316748]` | 0.205869 | DECIDABLE_WIN |
+| 4,000,000 | 1.030585 `[0.988114,1.065095]` | 1.108492 `[0.921017,1.226184]` | 68.021475 ms | 17.331992 ms | **3.749619x** `[3.479687,4.043931]` | 0.452368 | DECIDABLE_WIN |
+| 8,000,000 | 0.997427 `[0.934251,1.093063]` | 0.896170 `[0.695748,1.447832]` | 179.704131 ms | 40.123140 ms | **4.827240x** `[4.626308,5.149617]` | 0.895664 | DECIDABLE_WIN |
+
+Every effect median clears twice the wider same-invocation null half-width.
+The candidate null is visibly wider at 8M, but the effect delta of 3.827240
+still exceeds its required 0.895664 margin. CV was recorded as provenance only
+and did not admit or reject a row.
+
+SCALING SHAPE: ratios `[3.872568, 3.749619, 4.827240]` have 28.7395% spread
+and are not monotonic, so the harness classifies the size curve
+`MIXED_OR_NOISE`. The honest result is the measured 3.75-4.83x range; this row
+does not turn the 8M point into a claim of monotonic widening.
+
+PROFILE ATTRIBUTION: at 2M samples, FNP stage medians were 3.981866 ms
+`frexp`, 1.621895 ms `bincount`, and 4.080993 ms `ldexp`; `ldexp` was the
+largest stage at 42.138% self-time, for a 1.728260x all-of-stage removal
+ceiling. At 4M, the corresponding values were 11.194594, 4.112882, and
+13.929673 ms; `ldexp` was 47.644%, ceiling 1.909991x. At 8M they were
+9.361080, 5.786053, and 10.439263 ms; `ldexp` was 40.800%, ceiling 1.689191x.
+The workload therefore routed through all three intended native stages, but no
+single candidate stage crossed the 50% threshold for a new production lever.
+
+COUNTED MECHANISM: NumPy has no f16 ALU, so its `frexp` and `ldexp` loops
+widen half values for computation and narrow their f16 outputs. FrankenNumPy's
+landed half-domain paths decompose and reconstruct exact half values in
+parallel, while the narrow int32 `bincount` path tallies exponents directly
+without an int64 widening copy.
+
+CHOOSER STATEMENT: for this route-qualified 2M-to-8M-sample dynamic-range audit
+on the recorded artifacts, choose FrankenNumPy when completion time is
+decisive. The conservative measured point is 3.749619x and all three effect
+CIs clear both same-invocation null envelopes.
+
+**Decision: KEEP, INCUMBENT-WIN.** Bank the realistic workload harness; this
+commit changes no production kernel.
+
+Retry predicate: do not rerun this exact corpus on these artifacts. Reopen if
+the executing ELF or NumPy artifact changes; if inputs leave the finite,
+native-endian, contiguous f16 route at at least 2M samples; if the exponent
+dtype or 17-bucket distribution topology changes; or if a single stable
+headline rather than the measured range is required. For that last case,
+repeat on a drained full-host-exclusive worker and require size-ratio spread
+at or below 15% before replacing the range. Do not propose a new kernel lever
+unless a fresh profile names a stage above 50% candidate self-time or supplies
+a counted work-removal mechanism.

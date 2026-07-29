@@ -403,6 +403,84 @@ impl<'py> TelemetryDistributionArm<'py> {
     }
 }
 
+struct DynamicRangeAuditArm<'py> {
+    frexp: Bound<'py, PyAny>,
+    bincount: Bound<'py, PyAny>,
+    ldexp: Bound<'py, PyAny>,
+    bincount_kwargs: Bound<'py, PyDict>,
+}
+
+impl<'py> DynamicRangeAuditArm<'py> {
+    fn run(&self, samples: &Bound<'py, PyAny>) -> (Duration, [Bound<'py, PyAny>; 4]) {
+        let started = Instant::now();
+        let decomposition = self
+            .frexp
+            .call1((black_box(samples),))
+            .expect("dynamic-range frexp decomposition");
+        let mantissa = decomposition.get_item(0).expect("dynamic-range mantissa");
+        let exponent = decomposition.get_item(1).expect("dynamic-range exponent");
+        let exponent_counts = self
+            .bincount
+            .call((black_box(&exponent),), Some(&self.bincount_kwargs))
+            .expect("dynamic-range exponent distribution");
+        let reconstructed = self
+            .ldexp
+            .call1((black_box(&mantissa), black_box(&exponent)))
+            .expect("dynamic-range exact reconstruction");
+        let elapsed = started.elapsed();
+        (
+            elapsed,
+            [mantissa, exponent, exponent_counts, reconstructed],
+        )
+    }
+
+    fn profile(&self, samples: &Bound<'py, PyAny>) -> [f64; 3] {
+        const PROFILE_ROUNDS: usize = 7;
+        let mut decompose_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut distribution_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut reconstruct_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        for _ in 0..PROFILE_ROUNDS {
+            let started = Instant::now();
+            let decomposition = self
+                .frexp
+                .call1((samples,))
+                .expect("profile dynamic-range decomposition");
+            decompose_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+            let mantissa = decomposition
+                .get_item(0)
+                .expect("profile dynamic-range mantissa");
+            let exponent = decomposition
+                .get_item(1)
+                .expect("profile dynamic-range exponent");
+
+            let started = Instant::now();
+            black_box(
+                self.bincount
+                    .call((&exponent,), Some(&self.bincount_kwargs))
+                    .expect("profile dynamic-range exponent distribution"),
+            );
+            distribution_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            black_box(
+                self.ldexp
+                    .call1((&mantissa, &exponent))
+                    .expect("profile dynamic-range reconstruction"),
+            );
+            reconstruct_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+        }
+        let median = |samples: &mut Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        [
+            median(&mut decompose_ms),
+            median(&mut distribution_ms),
+            median(&mut reconstruct_ms),
+        ]
+    }
+}
+
 fn bench_median_gate_python_binary<'py>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     bench_name: &'static str,
@@ -6868,6 +6946,328 @@ assert (latency_ms > np.float16(0.0)).all()
     });
 }
 
+/// Phase-2 Class-3 workload: audit the dynamic range of a large f16 sensor
+/// stream, retain its exact mantissa/exponent representation, count exponent
+/// occupancy, and reconstruct the original stream byte for byte. NumPy has no
+/// f16 ALU, so both frexp and ldexp widen every element through a scalar loop;
+/// FrankenNumPy uses the landed exact parallel half-domain paths.
+fn bench_realistic_f16_dynamic_range_audit_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const SAMPLE_SIZES: [usize; 3] = [2_000_000, 4_000_000, 8_000_000];
+    const EXPONENT_BUCKETS: i64 = 17;
+    const WORKLOAD_CONTRACT_ROUNDS: usize = 21;
+    const WORKLOAD_CONTRACT_MIN_OF: usize = 2;
+    const THREADS: &str = "4";
+
+    for variable in [
+        "RAYON_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(THREADS),
+            "{variable} must be explicitly pinned before workload timing"
+        );
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        THREADS
+            .parse::<usize>()
+            .expect("thread count constant is numeric"),
+        "Rayon pool width does not match the pinned workload configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME host={} rayon_threads={} RAYON_NUM_THREADS={} \
+         OPENBLAS_NUM_THREADS={} OMP_NUM_THREADS={} MKL_NUM_THREADS={} trj_used=false",
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "unavailable".to_owned()),
+        rayon::current_num_threads(),
+        THREADS,
+        THREADS,
+        THREADS,
+        THREADS,
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_f16_dynamic_range_audit_workload")
+            .expect("f16 dynamic-range module");
+        fnp_python(&module).expect("initialize fnp_python dynamic-range module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(format!(
+                r#"
+import numpy as np
+rng = np.random.default_rng(20260730)
+sample_sizes = {SAMPLE_SIZES:?}
+max_samples = sample_sizes[-1]
+
+# Signed vibration/power amplitudes: a lognormal body, a 2.5% burst tail,
+# symmetric polarity, and 0.8% sensor dropouts including negative zero.
+magnitude = rng.lognormal(mean=4.1, sigma=1.35, size=max_samples)
+burst_mask = rng.random(max_samples) < 0.025
+magnitude[burst_mask] *= rng.uniform(4.0, 16.0, size=int(burst_mask.sum()))
+magnitude = np.clip(magnitude, 0.5, 32768.0)
+polarity = np.where(rng.random(max_samples) < 0.5, -1.0, 1.0)
+signal = (magnitude * polarity).astype(np.float16)
+dropout = rng.random(max_samples) < 0.008
+signal[dropout] = np.float16(0.0)
+negative_zero_indices = np.flatnonzero(dropout)[::2]
+signal[negative_zero_indices] = np.float16(-0.0)
+signal_by_size = [
+    np.ascontiguousarray(signal[:size]) for size in sample_sizes
+]
+
+assert signal.dtype == np.float16
+assert signal.flags.c_contiguous
+assert np.isfinite(signal).all()
+_, route_exponents = np.frexp(signal)
+assert route_exponents.min() >= 0
+assert route_exponents.max() < {EXPONENT_BUCKETS}
+"#
+            ))
+            .expect("f16 dynamic-range setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("f16 dynamic-range corpus setup");
+
+        let fnp_frexp = module.getattr("frexp").expect("fnp frexp");
+        let np_frexp = numpy.getattr("frexp").expect("numpy frexp");
+        let fnp_bincount = module.getattr("bincount").expect("fnp bincount");
+        let np_bincount = numpy.getattr("bincount").expect("numpy bincount");
+        let fnp_ldexp = module.getattr("ldexp").expect("fnp ldexp");
+        let np_ldexp = numpy.getattr("ldexp").expect("numpy ldexp");
+        for (candidate, incumbent, surface) in [
+            (&fnp_frexp, &np_frexp, "frexp"),
+            (&fnp_bincount, &np_bincount, "bincount"),
+            (&fnp_ldexp, &np_ldexp, "ldexp"),
+        ] {
+            assert!(
+                !candidate.is(incumbent),
+                "{surface}: candidate callable aliases NumPy"
+            );
+            common::report_numpy_incumbent_identity(py, surface, incumbent);
+        }
+        common::report_incumbent_topology(
+            "fnp.workload.f16_dynamic_range_audit",
+            "numpy.workload.f16_dynamic_range_audit",
+        );
+        println!(
+            "INCUMBENT_PIPELINE workload=f16_dynamic_range_audit \
+             candidate=fnp.frexp+fnp.bincount+fnp.ldexp \
+             incumbent=numpy.frexp+numpy.bincount+numpy.ldexp \
+             shared_timed_component=none inputs_shared_read_only=true"
+        );
+        println!(
+            "ROUTE_PRECONDITIONS workload=f16_dynamic_range_audit \
+             dtype=float16 ndim=1 c_contiguous=true native_endian=true \
+             finite=true elements_min={} exponent_dtype=int32 exponent_range=0..{} \
+             bincount_weights=none bincount_minlength={EXPONENT_BUCKETS} \
+             contract_rounds={WORKLOAD_CONTRACT_ROUNDS} \
+             contract_min_of={WORKLOAD_CONTRACT_MIN_OF}",
+            1 << 20,
+            EXPONENT_BUCKETS - 1,
+        );
+
+        let incumbent_bincount_kwargs = PyDict::new(py);
+        incumbent_bincount_kwargs
+            .set_item("minlength", EXPONENT_BUCKETS)
+            .expect("incumbent exponent minlength");
+        let candidate_bincount_kwargs = PyDict::new(py);
+        candidate_bincount_kwargs
+            .set_item("minlength", EXPONENT_BUCKETS)
+            .expect("candidate exponent minlength");
+        let incumbent = DynamicRangeAuditArm {
+            frexp: np_frexp,
+            bincount: np_bincount,
+            ldexp: np_ldexp,
+            bincount_kwargs: incumbent_bincount_kwargs,
+        };
+        let candidate = DynamicRangeAuditArm {
+            frexp: fnp_frexp,
+            bincount: fnp_bincount,
+            ldexp: fnp_ldexp,
+            bincount_kwargs: candidate_bincount_kwargs,
+        };
+        let signal_by_size = namespace
+            .get_item("signal_by_size")
+            .expect("dynamic-range streams by size");
+
+        let mut scaling = Vec::with_capacity(SAMPLE_SIZES.len());
+        for (size_index, size) in SAMPLE_SIZES.into_iter().enumerate() {
+            let row = format!("workload_f16_dynamic_range_audit_{size}");
+            println!(
+                "WORKLOAD_CONFIG row={row} user_job=f16_dynamic_range_audit \
+                 samples={size} dtype=float16 exponent_buckets={EXPONENT_BUCKETS} \
+                 distribution=signed_lognormal_plus_2_5pct_bursts_and_0_8pct_dropouts \
+                 stages=frexp_decompose,bincount_exponents,ldexp_reconstruct \
+                 output=mantissa_exponent_distribution_reconstruction \
+                 matched_config=same_process_same_inputs target_regime=large_finite_f16 \
+                 square_gemm_excluded=true"
+            );
+            let samples = signal_by_size
+                .get_item(size_index)
+                .expect("dynamic-range stream for size");
+
+            let (_, incumbent_output) = incumbent.run(&samples);
+            let (_, candidate_output) = candidate.run(&samples);
+            assert_workload_outputs_equal(&numpy, &row, &candidate_output, &incumbent_output);
+            let input_bytes = samples
+                .call_method0("tobytes")
+                .expect("dynamic-range input bytes")
+                .extract::<Vec<u8>>()
+                .expect("dynamic-range input byte vector");
+            for (arm, output) in [
+                ("numpy", &incumbent_output[3]),
+                ("fnp", &candidate_output[3]),
+            ] {
+                assert_eq!(
+                    output
+                        .call_method0("tobytes")
+                        .expect("dynamic-range reconstruction bytes")
+                        .extract::<Vec<u8>>()
+                        .expect("dynamic-range reconstruction byte vector"),
+                    input_bytes,
+                    "{row}: {arm} reconstruction must preserve every f16 bit"
+                );
+            }
+            println!(
+                "PARITY row={row} dtype=float16_input outputs=4 \
+                 byte_identity=passed reconstruction_identity=passed checksum={:016x}",
+                workload_checksum(&numpy, &candidate_output),
+            );
+
+            let incumbent_profile = incumbent.profile(&samples);
+            let candidate_profile = candidate.profile(&samples);
+            let candidate_total = candidate_profile.iter().sum::<f64>();
+            let (target_stage, target_ms) = [
+                ("frexp_decompose", candidate_profile[0]),
+                ("bincount_exponents", candidate_profile[1]),
+                ("ldexp_reconstruct", candidate_profile[2]),
+            ]
+            .into_iter()
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .expect("three dynamic-range profile stages");
+            for (stage, incumbent_ms, candidate_ms) in [
+                (
+                    "frexp_decompose",
+                    incumbent_profile[0],
+                    candidate_profile[0],
+                ),
+                (
+                    "bincount_exponents",
+                    incumbent_profile[1],
+                    candidate_profile[1],
+                ),
+                (
+                    "ldexp_reconstruct",
+                    incumbent_profile[2],
+                    candidate_profile[2],
+                ),
+            ] {
+                println!(
+                    "PROFILE_STAGE row={row} arm_pair=numpy_fnp stage={stage} \
+                     incumbent_median_ms={incumbent_ms:.6} \
+                     candidate_median_ms={candidate_ms:.6}"
+                );
+            }
+            let target_fraction = target_ms / candidate_total;
+            println!(
+                "PROFILE_SUMMARY row={row} target_stage={target_stage} \
+                 target_candidate_ms={target_ms:.6} candidate_stage_sum_ms={candidate_total:.6} \
+                 target_self_fraction_pct={:.3} amdahl_remove_ceiling={:.6}",
+                target_fraction * 100.0,
+                1.0 / (1.0 - target_fraction),
+            );
+
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = incumbent.run(&samples);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = candidate.run(&samples);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &row,
+                    &mut observe_incumbent,
+                    &mut observe_candidate,
+                    WORKLOAD_CONTRACT_ROUNDS,
+                    WORKLOAD_CONTRACT_MIN_OF,
+                );
+            println!(
+                "WORKLOAD_SIZE_POINT workload=f16_dynamic_range_audit size={size} \
+                 incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ratio={:.6} candidate_null_ratio={:.6} \
+                 incumbent_ns_per_sample={:.3} candidate_ns_per_sample={:.3}",
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+                effect.arm_a_median_ns / size as f64,
+                effect.arm_b_median_ns / size as f64,
+            );
+            scaling.push(effect);
+        }
+
+        let first_ratio = scaling.first().expect("first scaling point").ratio_median;
+        let last_ratio = scaling.last().expect("last scaling point").ratio_median;
+        let ratio_min = scaling
+            .iter()
+            .map(|stats| stats.ratio_median)
+            .fold(f64::INFINITY, f64::min);
+        let ratio_max = scaling
+            .iter()
+            .map(|stats| stats.ratio_median)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let ratio_spread = ratio_max / ratio_min - 1.0;
+        let monotonic_up = scaling
+            .windows(2)
+            .all(|points| points[1].ratio_median >= points[0].ratio_median);
+        let monotonic_down = scaling
+            .windows(2)
+            .all(|points| points[1].ratio_median <= points[0].ratio_median);
+        let shape = if ratio_spread <= 0.15 {
+            "FLAT_PER_SAMPLE_COST"
+        } else if monotonic_up && last_ratio >= first_ratio * 1.15 {
+            "WIDENING_WITH_STREAM"
+        } else if monotonic_down && last_ratio <= first_ratio * 0.85 {
+            "NARROWING_WITH_STREAM"
+        } else {
+            "MIXED_OR_NOISE"
+        };
+        println!(
+            "SCALING_SHAPE workload=f16_dynamic_range_audit dimension=sample_count \
+             sizes=[{},{},{}] ratios=[{:.6},{:.6},{:.6}] \
+             ratio_spread={ratio_spread:.6} classification={shape}",
+            SAMPLE_SIZES[0],
+            SAMPLE_SIZES[1],
+            SAMPLE_SIZES[2],
+            scaling[0].ratio_median,
+            scaling[1].ratio_median,
+            scaling[2].ratio_median,
+        );
+    });
+}
+
 fn bench_bool_storage_bytes_median_gate(c: &mut Criterion) {
     let _ = c;
     const N: usize = 8_000_000;
@@ -6983,6 +7383,10 @@ fn main() {
         (
             "bench_realistic_f16_telemetry_distribution_vs_numpy_median_gate",
             bench_realistic_f16_telemetry_distribution_vs_numpy_median_gate,
+        ),
+        (
+            "bench_realistic_f16_dynamic_range_audit_vs_numpy_median_gate",
+            bench_realistic_f16_dynamic_range_audit_vs_numpy_median_gate,
         ),
         (
             "bench_bool_storage_bytes_median_gate",
