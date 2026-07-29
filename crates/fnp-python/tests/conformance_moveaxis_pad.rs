@@ -344,6 +344,33 @@ print(np.array_equal(result, expected))
     Ok(())
 }
 
+#[test]
+fn pad_wrap_multitile_numeric() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+cases = [
+    np.arange(5, dtype=np.int32),
+    np.linspace(-2.5, 3.5, 7, dtype=np.float64),
+    (np.arange(6, dtype=np.float32) + 1j * np.arange(6, dtype=np.float32)).astype(np.complex64),
+]
+ok = True
+for a in cases:
+    result = fnp.pad(a, (17, 23), mode='wrap')
+    expected = np.pad(a, (17, 23), mode='wrap')
+    ok = ok and result.dtype == expected.dtype and np.array_equal(result, expected)
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "pad wrap multi-tile numeric should match numpy"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Relationship tests
 // ─────────────────────────────────────────────────────────────────────────────

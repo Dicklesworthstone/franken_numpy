@@ -1,0 +1,8 @@
+python_lexsort_boundary/fnp_lexsort_3int_2m
+                        time:   [117.58 ms 222.36 ms 367.41 ms]
+python_lexsort_boundary/numpy_lexsort_3int_2m
+                        time:   [475.21 ms 497.36 ms 517.95 ms]
+python_lexsort_boundary/fnp_lexsort_3f64_intvalued_2m
+                        time:   [143.81 ms 195.69 ms 259.40 ms]
+python_lexsort_boundary/numpy_lexsort_3f64_intvalued_2m
+                        time:   [987.61 ms 1.0133 s 1.0423 s]

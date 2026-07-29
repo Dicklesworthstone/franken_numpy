@@ -337,3 +337,57 @@ print(np.array_equal(fnp_X, np_X) and np.array_equal(fnp_Y, np_Y))
     assert_eq!(result.trim(), "True", "meshgrid complex should match numpy");
     Ok(())
 }
+
+// The native 2-input meshgrid (parallel tile + repeat-each halves) must be byte-identical to numpy across
+// dtype pairs (each output keeps its own input dtype) and both indexing modes, at sizes that trip the gate.
+// sparse / copy=False / >2 inputs / small all defer to numpy.
+#[test]
+fn meshgrid_2d_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import numpy as np
+ok = True
+rng = np.random.default_rng(20260701)
+def same(a, b):
+    a = np.asarray(a); b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.ascontiguousarray(a).tobytes() == np.ascontiguousarray(b).tobytes()
+def mk(nn, dt):
+    if np.dtype(dt).kind == "b":
+        return rng.integers(0, 2, nn).astype(dt)
+    if np.dtype(dt).kind in "f":
+        return (rng.standard_normal(nn) * 1.5).astype(dt)
+    info = np.iinfo(dt)
+    return rng.integers(info.min // 2, info.max // 2, nn).astype(dt)
+pairs = [(np.float64, np.float64), (np.float32, np.int32), (np.int8, np.int64),
+         (np.uint16, np.float64), (np.bool_, np.float32)]
+for dtx, dty in pairs:
+    x = mk(1500, dtx); y = mk(1600, dty)
+    for indexing in ("xy", "ij"):
+        FX, FY = fnp.meshgrid(x, y, indexing=indexing)
+        NX, NY = np.meshgrid(x, y, indexing=indexing)
+        if not same(FX, NX) or not same(FY, NY):
+            ok = False
+# tile 1-D (shares the parallelized helper)
+for dt in (np.float64, np.int32, np.int8):
+    v = mk(1_500_000, dt)
+    if not same(fnp.tile(v, 9), np.tile(v, 9)):
+        ok = False
+    if not same(fnp.tile(v, (3, 3)), np.tile(v, (3, 3))):
+        ok = False
+# defer paths
+x = mk(500, np.float64); y = mk(300, np.float64)
+fs = fnp.meshgrid(x, y, sparse=True); ns = np.meshgrid(x, y, sparse=True)
+if not same(fs[0], ns[0]) or not same(fs[1], ns[1]):
+    ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native parallel 2-D meshgrid must be byte-identical to numpy: {result}"
+    );
+    Ok(())
+}

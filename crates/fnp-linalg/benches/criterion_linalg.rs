@@ -16,11 +16,14 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_linalg::{
     batch_cholesky, batch_det, batch_eigvalsh, batch_inv, batch_matrix_norm, batch_slogdet,
-    batch_trace, cholesky_nxn, complex_matmul, cond_nxn, det_nxn, eigvalsh_nxn, inv_nxn,
-    kron_nxn, matrix_norm_frobenius, matrix_norm_nxn, matrix_power_nxn, multi_dot, qr_nxn,
-    sbr_stage1_dense_to_band_lower_nxn, solve_nxn, svd_mxn_full, svd_nxn,
+    batch_trace, cholesky_nxn, cholesky_nxn_general_control, complex_matmul, cond_nxn, det_nxn,
+    det_nxn_general_control, eigvalsh_nxn, inv_nxn, kron_nxn, matrix_norm_frobenius,
+    matrix_norm_nxn, matrix_power_nxn, multi_dot, qr_mxn, qr_nxn,
+    sbr_stage1_dense_to_band_lower_nxn, slogdet_nxn, slogdet_nxn_general_control, solve_nxn,
+    svd_mxn_full, svd_nxn,
 };
 use std::hint::black_box;
+use std::time::Duration;
 
 fn generate_spd_matrix(n: usize) -> Vec<f64> {
     let mut a = vec![0.0; n * n];
@@ -64,6 +67,34 @@ fn generate_random_matrix(n: usize, seed: u64) -> Vec<f64> {
             ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
         })
         .collect()
+}
+
+fn generate_upper_triangular_matrix(n: usize) -> Vec<f64> {
+    let mut a = vec![0.0; n * n];
+    for row in 0..n {
+        for col in row..n {
+            a[row * n + col] = if row == col {
+                (row % 17 + 1) as f64 * 0.25
+            } else {
+                ((row * 31 + col * 17) % 23) as f64 * 0.125 - 1.25
+            };
+        }
+    }
+    a
+}
+
+fn generate_upper_trapezoidal_matrix(m: usize, n: usize) -> Vec<f64> {
+    let mut a = vec![0.0; m * n];
+    for row in 0..m.min(n) {
+        for col in row..n {
+            a[row * n + col] = if row == col {
+                (row % 19 + 1) as f64 * 0.25
+            } else {
+                ((row * 29 + col * 13) % 29) as f64 * 0.125 - 1.5
+            };
+        }
+    }
+    a
 }
 
 fn generate_invertible_matrix(n: usize) -> Vec<f64> {
@@ -119,6 +150,108 @@ fn bench_det(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_det_exact_upper_triangular(c: &mut Criterion) {
+    let n = 256usize;
+    let mut matrix = vec![0.0; n * n];
+    for row in 0..n {
+        let magnitude = 1.0 + (row % 7) as f64 * 0.001;
+        matrix[row * n + row] = if row % 2 == 0 { magnitude } else { -magnitude };
+        for col in (row + 1)..n {
+            matrix[row * n + col] = ((row * 17 + col * 13) % 97) as f64 / 101.0 - 0.4;
+        }
+    }
+
+    let former = det_nxn_general_control(&matrix, n).expect("general determinant");
+    let candidate = det_nxn(&matrix, n).expect("structured determinant");
+    assert_eq!(candidate.to_bits(), former.to_bits());
+
+    let mut group = c.benchmark_group("det_exact_upper_triangular_256");
+    group.bench_function("former_partial_pivot_lu", |bench| {
+        bench.iter(|| black_box(det_nxn_general_control(black_box(&matrix), n).unwrap()))
+    });
+    group.bench_function("structured_diagonal_product", |bench| {
+        bench.iter(|| black_box(det_nxn(black_box(&matrix), n).unwrap()))
+    });
+    group.finish();
+}
+
+fn bench_det_exact_lower_triangular_no_pivot(c: &mut Criterion) {
+    let n = 256usize;
+    let mut matrix = vec![0.0; n * n];
+    for row in 0..n {
+        let magnitude = 2.0 + (row % 7) as f64 * 0.001;
+        matrix[row * n + row] = if row % 2 == 0 { magnitude } else { -magnitude };
+        for col in 0..row {
+            matrix[row * n + col] = ((row * 17 + col * 13) % 97) as f64 / 101.0 - 0.4;
+        }
+    }
+
+    let former = det_nxn_general_control(&matrix, n).expect("general determinant");
+    let candidate = det_nxn(&matrix, n).expect("structured determinant");
+    assert_eq!(candidate.to_bits(), former.to_bits());
+
+    let mut group = c.benchmark_group("det_exact_lower_triangular_no_pivot_256");
+    group.bench_function("former_partial_pivot_lu", |bench| {
+        bench.iter(|| black_box(det_nxn_general_control(black_box(&matrix), n).unwrap()))
+    });
+    group.bench_function("structured_diagonal_product", |bench| {
+        bench.iter(|| black_box(det_nxn(black_box(&matrix), n).unwrap()))
+    });
+    group.finish();
+}
+
+fn bench_slogdet_exact_upper_triangular(c: &mut Criterion) {
+    let n = 256usize;
+    let mut matrix = vec![0.0; n * n];
+    for row in 0..n {
+        let magnitude = 1.0 + (row % 7) as f64 * 0.001;
+        matrix[row * n + row] = if row % 2 == 0 { magnitude } else { -magnitude };
+        for col in (row + 1)..n {
+            matrix[row * n + col] = ((row * 17 + col * 13) % 97) as f64 / 101.0 - 0.4;
+        }
+    }
+
+    let former = slogdet_nxn_general_control(&matrix, n).expect("general sign and log determinant");
+    let candidate = slogdet_nxn(&matrix, n).expect("structured sign and log determinant");
+    assert_eq!(candidate.0.to_bits(), former.0.to_bits());
+    assert_eq!(candidate.1.to_bits(), former.1.to_bits());
+
+    let mut group = c.benchmark_group("slogdet_exact_upper_triangular_256");
+    group.bench_function("former_partial_pivot_lu", |bench| {
+        bench.iter(|| black_box(slogdet_nxn_general_control(black_box(&matrix), n).unwrap()))
+    });
+    group.bench_function("structured_diagonal_log_fold", |bench| {
+        bench.iter(|| black_box(slogdet_nxn(black_box(&matrix), n).unwrap()))
+    });
+    group.finish();
+}
+
+fn bench_slogdet_exact_lower_triangular_no_pivot(c: &mut Criterion) {
+    let n = 256usize;
+    let mut matrix = vec![0.0; n * n];
+    for row in 0..n {
+        let magnitude = 2.0 + (row % 7) as f64 * 0.001;
+        matrix[row * n + row] = if row % 2 == 0 { magnitude } else { -magnitude };
+        for col in 0..row {
+            matrix[row * n + col] = ((row * 17 + col * 13) % 97) as f64 / 101.0 - 0.4;
+        }
+    }
+
+    let former = slogdet_nxn_general_control(&matrix, n).expect("general sign and log determinant");
+    let candidate = slogdet_nxn(&matrix, n).expect("structured sign and log determinant");
+    assert_eq!(candidate.0.to_bits(), former.0.to_bits());
+    assert_eq!(candidate.1.to_bits(), former.1.to_bits());
+
+    let mut group = c.benchmark_group("slogdet_exact_lower_triangular_no_pivot_256");
+    group.bench_function("former_partial_pivot_lu", |bench| {
+        bench.iter(|| black_box(slogdet_nxn_general_control(black_box(&matrix), n).unwrap()))
+    });
+    group.bench_function("structured_diagonal_log_fold", |bench| {
+        bench.iter(|| black_box(slogdet_nxn(black_box(&matrix), n).unwrap()))
+    });
+    group.finish();
+}
+
 fn bench_inv(c: &mut Criterion) {
     let mut group = c.benchmark_group("inv_nxn");
 
@@ -156,6 +289,60 @@ fn bench_cholesky(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_cholesky_exact_diagonal(c: &mut Criterion) {
+    let n = 256usize;
+    let a = generate_descending_diagonal_matrix(n);
+    let former = cholesky_nxn_general_control(&a, n).expect("former Cholesky control");
+    let candidate = cholesky_nxn(&a, n).expect("diagonal Cholesky candidate");
+    assert_eq!(former.len(), candidate.len());
+    for (index, (&lhs, &rhs)) in former.iter().zip(&candidate).enumerate() {
+        assert_eq!(
+            lhs.to_bits(),
+            rhs.to_bits(),
+            "diagonal Cholesky output {index} changed bits"
+        );
+    }
+
+    let mut group = c.benchmark_group("cholesky_exact_diagonal_256");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    group.bench_function("former_general_control", |bench| {
+        bench.iter(|| black_box(cholesky_nxn_general_control(black_box(&a), n).unwrap()));
+    });
+    group.bench_function("exact_diagonal_candidate", |bench| {
+        bench.iter(|| black_box(cholesky_nxn(black_box(&a), n).unwrap()));
+    });
+    group.finish();
+}
+
+fn bench_cholesky_exact_tridiagonal(c: &mut Criterion) {
+    let n = 256usize;
+    let a = generate_spd_tridiagonal_matrix(n);
+    let former = cholesky_nxn_general_control(&a, n).expect("former Cholesky control");
+    let candidate = cholesky_nxn(&a, n).expect("tridiagonal Cholesky candidate");
+    assert_eq!(former.len(), candidate.len());
+    for (index, (&lhs, &rhs)) in former.iter().zip(&candidate).enumerate() {
+        assert_eq!(
+            lhs.to_bits(),
+            rhs.to_bits(),
+            "tridiagonal Cholesky output {index} changed bits"
+        );
+    }
+
+    let mut group = c.benchmark_group("cholesky_exact_tridiagonal_256");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.bench_function("former_general_control", |bench| {
+        bench.iter(|| black_box(cholesky_nxn_general_control(black_box(&a), n).unwrap()));
+    });
+    group.bench_function("exact_tridiagonal_candidate", |bench| {
+        bench.iter(|| black_box(cholesky_nxn(black_box(&a), n).unwrap()));
+    });
+    group.finish();
+}
+
 fn bench_qr(c: &mut Criterion) {
     let mut group = c.benchmark_group("qr_nxn");
 
@@ -170,6 +357,201 @@ fn bench_qr(c: &mut Criterion) {
         });
     }
 
+    group.finish();
+}
+
+fn qr_upper_triangular_former(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut q = vec![0.0; n * n];
+    for i in 0..n {
+        q[i * n + i] = 1.0;
+    }
+    let mut r = a.to_vec();
+    let mut v = vec![0.0; n];
+    let mut d = vec![0.0; n];
+    let mut f_vec = vec![0.0; n];
+
+    for k in 0..n {
+        let mut col_norm_sq = 0.0;
+        for i in k..n {
+            col_norm_sq += r[i * n + k] * r[i * n + k];
+        }
+        let col_norm = col_norm_sq.sqrt();
+        if col_norm == 0.0 {
+            continue;
+        }
+
+        let sign = if r[k * n + k] >= 0.0 { 1.0 } else { -1.0 };
+        for i in k..n {
+            v[i] = r[i * n + k];
+        }
+        v[k] += sign * col_norm;
+        let v_norm_sq: f64 = v[k..].iter().map(|x| x * x).sum();
+        if v_norm_sq == 0.0 {
+            continue;
+        }
+
+        let scale = 2.0 / v_norm_sq;
+        for dj in d[k..n].iter_mut() {
+            *dj = 0.0;
+        }
+        for i in k..n {
+            let vi = v[i];
+            let row = &r[i * n + k..i * n + n];
+            for (dj, &rij) in d[k..n].iter_mut().zip(row.iter()) {
+                *dj += vi * rij;
+            }
+        }
+        for (fj, &dj) in f_vec[k..n].iter_mut().zip(d[k..n].iter()) {
+            *fj = scale * dj;
+        }
+        for i in k..n {
+            let vi = v[i];
+            let row = &mut r[i * n + k..i * n + n];
+            for (rij, &fj) in row.iter_mut().zip(f_vec[k..n].iter()) {
+                *rij -= fj * vi;
+            }
+        }
+
+        for i in 0..n {
+            let mut dot = 0.0;
+            for j in k..n {
+                dot += q[i * n + j] * v[j];
+            }
+            let factor = scale * dot;
+            for j in k..n {
+                q[i * n + j] -= factor * v[j];
+            }
+        }
+    }
+
+    (q, r)
+}
+
+fn bench_qr_exact_upper_triangular(c: &mut Criterion) {
+    let n = 256usize;
+    let a = generate_upper_triangular_matrix(n);
+    let former = qr_upper_triangular_former(&a, n);
+    let candidate = qr_nxn(&a, n).expect("upper-triangular QR candidate");
+    for (name, lhs, rhs) in [
+        ("Q", former.0.as_slice(), candidate.0.as_slice()),
+        ("R", former.1.as_slice(), candidate.1.as_slice()),
+    ] {
+        assert_eq!(lhs.len(), rhs.len());
+        for (index, (&old, &new)) in lhs.iter().zip(rhs).enumerate() {
+            assert_eq!(
+                old.to_bits(),
+                new.to_bits(),
+                "upper-triangular QR {name}[{index}] changed bits"
+            );
+        }
+    }
+
+    let mut group = c.benchmark_group("qr_exact_upper_triangular_256");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.bench_function("former_unblocked", |bench| {
+        bench.iter(|| black_box(qr_upper_triangular_former(black_box(&a), n)));
+    });
+    group.bench_function("scalar_active_row", |bench| {
+        bench.iter(|| black_box(qr_nxn(black_box(&a), n).unwrap()));
+    });
+    group.finish();
+}
+
+fn qr_upper_trapezoidal_former(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut q = vec![0.0; m * m];
+    for i in 0..m {
+        q[i * m + i] = 1.0;
+    }
+    let mut r = a.to_vec();
+    let mut v = vec![0.0; m];
+
+    for col in 0..m.min(n) {
+        let mut col_norm_sq = 0.0;
+        for i in col..m {
+            col_norm_sq += r[i * n + col] * r[i * n + col];
+        }
+        let col_norm = col_norm_sq.sqrt();
+        if col_norm == 0.0 {
+            continue;
+        }
+
+        let sign = if r[col * n + col] >= 0.0 { 1.0 } else { -1.0 };
+        for vi in &mut v[..col] {
+            *vi = 0.0;
+        }
+        for (i, vi) in v[col..m].iter_mut().enumerate() {
+            *vi = r[(i + col) * n + col];
+        }
+        v[col] += sign * col_norm;
+        let v_norm_sq: f64 = v[col..].iter().map(|x| x * x).sum();
+        if v_norm_sq == 0.0 {
+            continue;
+        }
+
+        let scale = 2.0 / v_norm_sq;
+        for j in col..n {
+            let mut dot = 0.0;
+            for i in col..m {
+                dot += v[i] * r[i * n + j];
+            }
+            let factor = scale * dot;
+            for i in col..m {
+                r[i * n + j] -= factor * v[i];
+            }
+        }
+
+        for i in 0..m {
+            let mut dot = 0.0;
+            for j in col..m {
+                dot += q[i * m + j] * v[j];
+            }
+            let factor = scale * dot;
+            for j in col..m {
+                q[i * m + j] -= factor * v[j];
+            }
+        }
+    }
+
+    (q, r)
+}
+
+fn bench_qr_exact_upper_trapezoidal(c: &mut Criterion) {
+    let (m, n) = (256usize, 128usize);
+    let a = generate_upper_trapezoidal_matrix(m, n);
+    let former = qr_upper_trapezoidal_former(&a, m, n);
+    let candidate = qr_mxn(&a, m, n).expect("upper-trapezoidal QR candidate");
+    for (name, lhs, rhs) in [
+        ("Q", former.0.as_slice(), candidate.0.as_slice()),
+        ("R", former.1.as_slice(), candidate.1.as_slice()),
+    ] {
+        assert_eq!(lhs.len(), rhs.len());
+        for (index, (&old, &new)) in lhs.iter().zip(rhs).enumerate() {
+            assert_eq!(
+                old.to_bits(),
+                new.to_bits(),
+                "upper-trapezoidal QR {name}[{index}] changed bits"
+            );
+        }
+    }
+
+    let mut group = c.benchmark_group("qr_exact_upper_trapezoidal_256x128");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.bench_function("former_rectangular", |bench| {
+        bench.iter(|| {
+            black_box(qr_upper_trapezoidal_former(
+                black_box(&a),
+                black_box(m),
+                black_box(n),
+            ))
+        });
+    });
+    group.bench_function("scalar_active_row", |bench| {
+        bench.iter(|| black_box(qr_mxn(black_box(&a), black_box(m), black_box(n)).unwrap()));
+    });
     group.finish();
 }
 
@@ -587,12 +969,16 @@ fn bench_batch_det_slogdet(c: &mut Criterion) {
     for (batch, n) in [(8192usize, 4usize), (2048, 8)] {
         let (data, shape) = generate_batch_invertible(batch, n);
         let id = format!("{batch}x{n}x{n}");
-        group.bench_with_input(BenchmarkId::new("det", id.clone()), &shape, |bench, shape| {
-            bench.iter(|| {
-                let result = batch_det(black_box(&data), black_box(shape));
-                black_box(result)
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("det", id.clone()),
+            &shape,
+            |bench, shape| {
+                bench.iter(|| {
+                    let result = batch_det(black_box(&data), black_box(shape));
+                    black_box(result)
+                });
+            },
+        );
         group.bench_with_input(BenchmarkId::new("slogdet", id), &shape, |bench, shape| {
             bench.iter(|| {
                 let result = batch_slogdet(black_box(&data), black_box(shape));
@@ -616,7 +1002,8 @@ fn bench_batch_matrix_norm_fro(c: &mut Criterion) {
         let id = format!("{batch}x{m}x{n}");
         group.bench_with_input(BenchmarkId::new("shape", id), &shape, |bench, shape| {
             bench.iter(|| {
-                let result = batch_matrix_norm(black_box(&data), black_box(shape), black_box("fro"));
+                let result =
+                    batch_matrix_norm(black_box(&data), black_box(shape), black_box("fro"));
                 black_box(result)
             });
         });
@@ -681,9 +1068,17 @@ criterion_group!(
     bench_kron,
     bench_solve,
     bench_det,
+    bench_det_exact_upper_triangular,
+    bench_det_exact_lower_triangular_no_pivot,
+    bench_slogdet_exact_upper_triangular,
+    bench_slogdet_exact_lower_triangular_no_pivot,
     bench_inv,
     bench_cholesky,
+    bench_cholesky_exact_diagonal,
+    bench_cholesky_exact_tridiagonal,
     bench_qr,
+    bench_qr_exact_upper_triangular,
+    bench_qr_exact_upper_trapezoidal,
     bench_svd,
     bench_svd_full,
     bench_eigvalsh,
@@ -703,4 +1098,7 @@ criterion_group!(
     bench_batch_matrix_norm_column_sum,
 );
 
-criterion_main!(benches);
+#[path = "../../bench_identity.rs"]
+mod bench_identity;
+
+criterion_main!(bench_identity::report_bench_identity, benches);

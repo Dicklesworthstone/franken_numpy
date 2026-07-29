@@ -50,6 +50,7 @@ const ARGWHERE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const COUNT_NONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 19;
 const COUNT_NONZERO_PARALLEL_CHUNK_ELEMS: usize = 1 << 12;
 const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 20;
+const REDUCE_SUM_LAST_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 18;
 const DELETE_FLAT_SPAN_COPY_MIN_ELEMS: usize = 1 << 14;
 const INSERT_FLAT_SPLICE_MIN_WORK: usize = 1 << 14;
 const PLACE_PARALLEL_MIN_ELEMS: usize = 1 << 20;
@@ -1106,6 +1107,47 @@ pub enum QuantileInterp {
     Nearest,
     /// Average of Lower and Higher.
     Midpoint,
+    /// Hazen plotting positions (alpha = beta = 0.5).
+    Hazen,
+    /// Weibull plotting positions (alpha = beta = 0).
+    Weibull,
+    /// Median-unbiased (alpha = beta = 1/3).
+    MedianUnbiased,
+    /// Normal-unbiased (alpha = beta = 3/8).
+    NormalUnbiased,
+}
+
+impl QuantileInterp {
+    /// (alpha, beta) for the continuous Hyndman-Fan methods; None for the
+    /// discontinuous/linear methods that use the plain (n-1)*q virtual index.
+    fn hf_params(self) -> Option<(f64, f64)> {
+        match self {
+            QuantileInterp::Hazen => Some((0.5, 0.5)),
+            QuantileInterp::Weibull => Some((0.0, 0.0)),
+            QuantileInterp::MedianUnbiased => Some((1.0 / 3.0, 1.0 / 3.0)),
+            QuantileInterp::NormalUnbiased => Some((3.0 / 8.0, 3.0 / 8.0)),
+            _ => None,
+        }
+    }
+}
+
+/// numpy `_compute_virtual_index` + `_get_indexes` clamping for the continuous
+/// Hyndman-Fan methods: vi = n*q + (alpha + q*(1 - alpha - beta)) - 1 (the exact
+/// numpy expression order), then vi < 0 -> both indexes 0, vi >= n-1 -> both
+/// n-1; gamma = vi - CLAMPED lo, fed to the two-sided numpy _lerp (gamma may be
+/// negative or > 1 at the clamps; the lerp degenerates to a or b exactly like
+/// numpy's). Contract pinned 8100/8100 cases x 4 methods x 5 sizes vs 2.4.3
+/// (H&F recon 2026-07-12).
+fn percentile_hf_plan(n: usize, fraction: f64, alpha: f64, beta: f64) -> (usize, usize, f64) {
+    let vi = n as f64 * fraction + (alpha + fraction * (1.0 - alpha - beta)) - 1.0;
+    if vi < 0.0 {
+        (0, 0, vi)
+    } else if vi >= (n - 1) as f64 {
+        (n - 1, n - 1, vi - (n - 1) as f64)
+    } else {
+        let lo = vi.floor() as usize;
+        (lo, lo + 1, vi - lo as f64)
+    }
 }
 
 /// Specification for a single axis of `mgrid`/`ogrid`, matching NumPy's dual semantics.
@@ -6045,6 +6087,12 @@ impl UFuncArray {
             return Err(UFuncError::Msg("triu requires 2-D input".to_string()));
         }
         let (rows, cols) = (self.shape[0], self.shape[1]);
+        // The smallest `c - r` occurs at the lower-left corner. Once `k` is
+        // at or below that diagonal, every element is retained; cloning avoids
+        // zero-filling the output only to overwrite the entire buffer.
+        if (k as i128) <= 1 - rows as i128 {
+            return Ok(self.clone());
+        }
         let values = triangle_build(&self.values, rows, cols, k, /*upper=*/ true);
         let sidecar_vals = match &self.integer_sidecar {
             Some(IntegerSidecar::I64(v)) => {
@@ -6069,6 +6117,11 @@ impl UFuncArray {
             return Err(UFuncError::Msg("tril requires 2-D input".to_string()));
         }
         let (rows, cols) = (self.shape[0], self.shape[1]);
+        // The largest `c - r` occurs at the upper-right corner. At or above
+        // that diagonal the lower-triangle mask retains the complete array.
+        if (k as i128) >= cols as i128 - 1 {
+            return Ok(self.clone());
+        }
         let values = triangle_build(&self.values, rows, cols, k, /*upper=*/ false);
         let sidecar_vals = match &self.integer_sidecar {
             Some(IntegerSidecar::I64(v)) => {
@@ -10047,6 +10100,13 @@ impl UFuncArray {
             None => (0..ndim).rev().collect(),
         };
 
+        // Validation above must run before this shortcut so malformed axis lists
+        // retain their existing errors. An identity permutation is already in
+        // output order, but the API still returns an independently owned array.
+        if perm.iter().copied().eq(0..ndim) {
+            return Ok(self.clone());
+        }
+
         let new_shape: Vec<usize> = perm.iter().map(|&a| self.shape[a]).collect();
         let total = self.values.len();
 
@@ -10057,8 +10117,8 @@ impl UFuncArray {
         // strided through cache). Each `r×c` plane becomes `c×r`; a stack of planes
         // parallelizes across planes, a lone matrix parallelizes across row bands.
         // Pure relocation, so bit-for-bit identical — values and the i64/u64 sidecar
-        // are moved by the same kernel. Identity and other permutations fall through
-        // to the generic copy path.
+        // are moved by the same kernel. Other permutations fall through to the
+        // generic copy path.
         let is_last2_swap = ndim >= 2
             && perm[ndim - 2] == ndim - 1
             && perm[ndim - 1] == ndim - 2
@@ -10102,6 +10162,64 @@ impl UFuncArray {
         let new_strides = c_strides_elems(&new_shape);
         // Source-offset increment when output axis `d` advances by one element.
         let src_step: Vec<usize> = (0..ndim).map(|d| old_strides[perm[d]]).collect();
+
+        // Suffix-identity permutation fast path (moves among the LEADING axes
+        // only, e.g. swapaxes(0,1) on a stack, perm [1,0,2]): every axis at or
+        // beyond `suffix_start` keeps its position, so source and destination
+        // agree on the trailing block layout and each output block of `block`
+        // elements is one contiguous source run. The odometer gather below
+        // would still walk those runs element by element. Pure relocation,
+        // bit-for-bit identical — values and the i64/u64 sidecar move through
+        // the same kernel. Identity (handled above) and last-two-swap
+        // (`perm[ndim-1] == ndim-2`) can never reach this branch.
+        let mut suffix_start = ndim;
+        while suffix_start > 0 && perm[suffix_start - 1] == suffix_start - 1 {
+            suffix_start -= 1;
+        }
+        if suffix_start < ndim && total > 0 {
+            let block: usize = self.shape[suffix_start..].iter().product();
+            if block >= 2 {
+                let prefix_shape = &new_shape[..suffix_start];
+                let prefix_step = &src_step[..suffix_start];
+                let mut new_values = vec![0.0f64; total];
+                transpose_suffix_blocks_par(
+                    &self.values,
+                    &mut new_values,
+                    prefix_shape,
+                    prefix_step,
+                    block,
+                );
+                let new_sidecar = match &self.integer_sidecar {
+                    Some(IntegerSidecar::I64(v)) => {
+                        let mut out = vec![0i64; total];
+                        transpose_suffix_blocks_par(v, &mut out, prefix_shape, prefix_step, block);
+                        Some(IntegerSidecar::I64(out))
+                    }
+                    Some(IntegerSidecar::U64(v)) => {
+                        let mut out = vec![0u64; total];
+                        transpose_suffix_blocks_par(v, &mut out, prefix_shape, prefix_step, block);
+                        Some(IntegerSidecar::U64(out))
+                    }
+                    None => None,
+                };
+                return Ok(Self {
+                    shape: new_shape,
+                    values: new_values,
+                    dtype: self.dtype,
+                    integer_sidecar: new_sidecar,
+                });
+            }
+        }
+
+        // NOTE (2026-07-16 REJECT, ledger + bench transpose_rotation_*): block
+        // rotations (`perm[d] == (g + d) % ndim`, e.g. [2,0,1]/[1,2,0]) ARE
+        // exactly the 2-D transpose of the (prod(shape[..g]), prod(shape[g..]))
+        // view, but routing them to `transpose_2d_par` measured 0.33x-0.88x on
+        // three of four regimes (band parallelism collapses when the second
+        // group is narrow; strided-write tiles thrash when the first group
+        // dominates). Only P<<Q at DRAM scale won (1.21x). Do not re-add the
+        // unconditional reroute; a retry needs an aspect-ratio-aware plane
+        // kernel or a measured narrow P<<Q gate.
         const TRANSPOSE_CHUNK: usize = 1 << 14;
         const TRANSPOSE_PAR_MIN: usize = 1 << 15;
         let parallel = total >= TRANSPOSE_PAR_MIN && rayon::current_num_threads() >= 2;
@@ -10885,6 +11003,27 @@ impl UFuncArray {
         match k {
             0 => Ok(self.clone()),
             1 => self.swapaxes(ax0, ax1).and_then(|t| t.flip(Some(ax0))),
+            // A rank-2 half-turn reverses both axes, which is exactly one
+            // reverse traversal of the contiguous value plane. The generic
+            // path below materializes two full flip intermediates.
+            2 if self.shape.len() == 2 => {
+                let values = self.values.iter().rev().copied().collect();
+                let integer_sidecar = match &self.integer_sidecar {
+                    Some(IntegerSidecar::I64(v)) => {
+                        Some(IntegerSidecar::I64(v.iter().rev().copied().collect()))
+                    }
+                    Some(IntegerSidecar::U64(v)) => {
+                        Some(IntegerSidecar::U64(v.iter().rev().copied().collect()))
+                    }
+                    None => None,
+                };
+                Ok(Self {
+                    shape: self.shape.clone(),
+                    values,
+                    dtype: self.dtype,
+                    integer_sidecar,
+                })
+            }
             2 => self.flip(Some(ax0)).and_then(|f| f.flip(Some(ax1))),
             3 => self.flip(Some(ax0)).and_then(|f| f.swapaxes(ax0, ax1)),
             _ => Err(UFuncError::Msg("rot90 modulo math failed".to_string())),
@@ -11053,15 +11192,27 @@ impl UFuncArray {
                 integer_sidecar: None,
             });
         }
-        let values: Vec<f64> = (0..new_count)
-            .map(|i| self.values[i % self.values.len()])
-            .collect();
-        let source_indices: Vec<usize> = (0..new_count).map(|i| i % self.values.len()).collect();
+        // Both payload classes ride one seed-and-double kernel (the .359
+        // lever, extended to sidecars in .362): a cyclic repeat of the flat
+        // source is exactly seed-then-double, so the former per-cell modulo,
+        // the materialized source-index vector, and the sidecar gather all
+        // disappear. Pure relocation, bit-for-bit identical; sharing the
+        // helper means the sidecar and non-sidecar branches cannot diverge.
+        let values = resize_seed_double(&self.values, new_count);
+        let integer_sidecar = match &self.integer_sidecar {
+            Some(IntegerSidecar::I64(v)) => {
+                Some(IntegerSidecar::I64(resize_seed_double(v, new_count)))
+            }
+            Some(IntegerSidecar::U64(v)) => {
+                Some(IntegerSidecar::U64(resize_seed_double(v, new_count)))
+            }
+            None => None,
+        };
         Ok(Self {
             shape: new_shape.to_vec(),
             values,
             dtype: self.dtype,
-            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+            integer_sidecar,
         })
     }
 
@@ -13114,6 +13265,16 @@ impl UFuncArray {
                 }
             };
         }
+        if repeats == 1 {
+            let mut out = self.clone();
+            match axis {
+                None => out.shape = vec![out.values.len()],
+                Some(ax) => {
+                    normalize_axis(ax, self.shape.len())?;
+                }
+            }
+            return Ok(out);
+        }
         match axis {
             None => {
                 let values: Vec<f64> = self
@@ -13438,6 +13599,16 @@ impl UFuncArray {
             }
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
+                // Reversing a singleton (or empty) axis is the identity
+                // relocation: return an independently owned copy instead of
+                // zero-filling an output and running the block-copy kernel,
+                // which degenerates to per-element parallel chunks here
+                // (.319 retry under its quiet-worker low-variance predicate;
+                // profile: the degenerate rayon consumer held 46% of cycles
+                // on [131071, 1] axis 1).
+                if self.shape[ax] <= 1 {
+                    return Ok(self.clone());
+                }
                 let inner: usize =
                     fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
                 let outer: usize =
@@ -13467,6 +13638,17 @@ impl UFuncArray {
     ///
     /// Applies flip sequentially along each specified axis.
     pub fn flip_axes(&self, axes: &[isize]) -> Result<Self, UFuncError> {
+        // On a rank-2 array, flipping both distinct axes is exactly the
+        // contiguous half-turn handled by rot90(2). Avoid materializing two
+        // full flip intermediates; duplicate-axis semantics still fall through
+        // to the sequential path (and therefore cancel as before).
+        if self.shape.len() == 2 && axes.len() == 2 {
+            let first = normalize_axis(axes[0], 2)?;
+            let second = normalize_axis(axes[1], 2)?;
+            if first != second {
+                return self.rot90(2);
+            }
+        }
         // Flip the first axis straight from self rather than cloning to seed the
         // loop. Bit-identical (each flip is read-only; same sequence of flips).
         let mut axes_iter = axes.iter();
@@ -14440,34 +14622,37 @@ impl UFuncArray {
         if out_batch_count >= CROSS_PARALLEL_MIN_BATCHES && rayon::current_num_threads() >= 2 {
             if vector_output {
                 let mut values = vec![0.0; out_len];
-                values.par_chunks_mut(3).enumerate().for_each(|(flat, out)| {
-                    let (a_base, b_base) = cross_bases(
-                        flat,
-                        &out_batch,
-                        &out_strides,
-                        &a_steps,
-                        &b_steps,
-                        a_len,
-                        b_len,
-                    );
-                    let ax = self.values[a_base];
-                    let ay = self.values[a_base + 1];
-                    let az = if a_len == 3 {
-                        self.values[a_base + 2]
-                    } else {
-                        0.0
-                    };
-                    let bx = other.values[b_base];
-                    let by = other.values[b_base + 1];
-                    let bz = if b_len == 3 {
-                        other.values[b_base + 2]
-                    } else {
-                        0.0
-                    };
-                    out[0] = ay * bz - az * by;
-                    out[1] = az * bx - ax * bz;
-                    out[2] = ax * by - ay * bx;
-                });
+                values
+                    .par_chunks_mut(3)
+                    .enumerate()
+                    .for_each(|(flat, out)| {
+                        let (a_base, b_base) = cross_bases(
+                            flat,
+                            &out_batch,
+                            &out_strides,
+                            &a_steps,
+                            &b_steps,
+                            a_len,
+                            b_len,
+                        );
+                        let ax = self.values[a_base];
+                        let ay = self.values[a_base + 1];
+                        let az = if a_len == 3 {
+                            self.values[a_base + 2]
+                        } else {
+                            0.0
+                        };
+                        let bx = other.values[b_base];
+                        let by = other.values[b_base + 1];
+                        let bz = if b_len == 3 {
+                            other.values[b_base + 2]
+                        } else {
+                            0.0
+                        };
+                        out[0] = ay * bz - az * by;
+                        out[1] = az * bx - ax * bz;
+                        out[2] = ax * by - ay * bx;
+                    });
                 return Self::from_values_with_dtype(out_shape, values, dtype);
             }
 
@@ -15845,6 +16030,64 @@ impl UFuncArray {
         }
         let src_stride = src_axis_len * inner;
         let out_block = num_idx * inner;
+        // A constant index list broadcasts the same source lane throughout
+        // each output block. Seed one lane, then double the initialized prefix
+        // in-place instead of re-reading the same source lane `num_idx` times.
+        if resolved.len() >= 2
+            && let Some(&repeated_index) = resolved.first()
+            && resolved.iter().all(|&index| index == repeated_index)
+        {
+            let src_offset = repeated_index * inner;
+            let copy_block = |out_blk: &mut [T], o: usize| {
+                let base = o * src_stride + src_offset;
+                out_blk[..inner].copy_from_slice(&src[base..base + inner]);
+                let mut initialized = inner;
+                while initialized < out_block {
+                    let copy_len = initialized.min(out_block - initialized);
+                    out_blk.copy_within(..copy_len, initialized);
+                    initialized += copy_len;
+                }
+            };
+            const TAKE_PAR_MIN: usize = 1 << 15;
+            if outer >= 2 && n >= TAKE_PAR_MIN && rayon::current_num_threads() >= 2 {
+                out.par_chunks_mut(out_block)
+                    .enumerate()
+                    .for_each(|(o, out_blk)| copy_block(out_blk, o));
+            } else {
+                out.chunks_mut(out_block)
+                    .enumerate()
+                    .for_each(|(o, out_blk)| copy_block(out_blk, o));
+            }
+            return out;
+        }
+        // A proper consecutive subrange is contiguous within every outer
+        // block. Copy that span once instead of issuing one tiny copy per
+        // selected axis lane. The full-axis identity case is handled earlier
+        // by `take`; this also covers interior and prefix/suffix ranges while
+        // retaining the same generic path for exact integer sidecars.
+        if let Some(&start) = resolved.first()
+            && resolved
+                .iter()
+                .enumerate()
+                .all(|(offset, &index)| start.checked_add(offset) == Some(index))
+        {
+            let src_offset = start * inner;
+            let copy_block = |out_blk: &mut [T], o: usize| {
+                let base = o * src_stride + src_offset;
+                out_blk.copy_from_slice(&src[base..base + out_block]);
+            };
+            const TAKE_PAR_MIN: usize = 1 << 15;
+            if outer >= 2 && n >= TAKE_PAR_MIN && rayon::current_num_threads() >= 2 {
+                out.par_chunks_mut(out_block)
+                    .enumerate()
+                    .for_each(|(o, out_blk)| copy_block(out_blk, o));
+            } else {
+                out.chunks_mut(out_block)
+                    .enumerate()
+                    .for_each(|(o, out_blk)| copy_block(out_blk, o));
+            }
+            return out;
+        }
         let do_block = |out_blk: &mut [T], o: usize| {
             let src_base = o * src_stride;
             for (j, &ri) in resolved.iter().enumerate() {
@@ -15958,6 +16201,17 @@ impl UFuncArray {
                         }
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+
+                // A full axis selected once in source order is exactly a deep
+                // copy of the input. Validation above still preserves NumPy's
+                // first-error behavior; `Clone` copies values and any exact
+                // integer sidecar contiguously instead of zero-filling and
+                // gathering the same lanes back into their original positions.
+                if resolved.len() == self.shape[ax]
+                    && resolved.iter().copied().eq(0..resolved.len())
+                {
+                    return Ok(self.clone());
+                }
 
                 let mut out_shape = self.shape.clone();
                 out_shape[ax] = resolved.len();
@@ -16541,6 +16795,36 @@ impl UFuncArray {
             return Err(UFuncError::Msg("put: vals must not be empty".to_string()));
         }
         let n = self.values.len() as i64;
+        // Consecutive duplicate indices are last-write-wins. On the exact F64
+        // path there is no integer-sidecar validation or other observable work
+        // between stores, so apply only the final value from each run. Resolve
+        // runs in their original order so a later invalid index still leaves
+        // every preceding destination at exactly the former final value.
+        if indices.len() >= 8
+            && self.dtype == DType::F64
+            && self.integer_sidecar.is_none()
+            && vals.dtype == DType::F64
+            && vals.integer_sidecar.is_none()
+        {
+            let mut run_start = 0usize;
+            while run_start < indices.len() {
+                let idx = indices[run_start];
+                let mut run_end = run_start + 1;
+                while run_end < indices.len() && indices[run_end] == idx {
+                    run_end += 1;
+                }
+
+                let resolved = if idx < 0 { idx + n } else { idx };
+                if resolved < 0 || resolved >= n {
+                    return Err(UFuncError::Msg(format!(
+                        "put: index {idx} out of bounds for size {n}"
+                    )));
+                }
+                self.values[resolved as usize] = vals.values[(run_end - 1) % vals.values.len()];
+                run_start = run_end;
+            }
+            return Ok(());
+        }
         for (i, &idx) in indices.iter().enumerate() {
             let resolved = if idx < 0 { idx + n } else { idx };
             if resolved < 0 || resolved >= n {
@@ -17462,7 +17746,14 @@ impl UFuncArray {
                 "percentile: q={q} must be in [0, 100]"
             )));
         }
-        let fraction = q / 100.0;
+        self.percentile_fraction(q / 100.0, axis)
+    }
+
+    /// Shared percentile core on the [0, 1] fraction scale. `quantile` enters here
+    /// DIRECTLY: the old q*100 -> /100 round trip perturbed non-binary fractions
+    /// (0.1*100/100 != 0.1 in f64), shifting the virtual index by an ULP and the
+    /// interpolated output with it (bead deadlock-audit-19jv4).
+    fn percentile_fraction(&self, fraction: f64, axis: Option<isize>) -> Result<Self, UFuncError> {
         match axis {
             None => {
                 let n = self.values.len();
@@ -17602,6 +17893,677 @@ impl UFuncArray {
                 )));
             }
         }
+        let fractions: Vec<f64> = qs.iter().map(|&q| q / 100.0).collect();
+        self.fractions_axis_none(&fractions)
+    }
+
+    /// Multi-q percentile/quantile over the LAST axis (fraction scale), numpy
+    /// layout: output shape = [k] ++ shape[..ndim-1] (the q axis comes FIRST).
+    /// Per lane: one sort, then numpy_quantile_lerp per q via the shared
+    /// fraction-based percentile_linear_plan - order statistics are value-exact
+    /// and the lerp matches numpy's _lerp, so this is byte-identical to numpy's
+    /// delegate (which partitions per call, single-threaded, ~200-265ms at
+    /// 2896^2 x 3..9 qs on hz1). A NaN lane yields NaN for every q (numpy
+    /// propagates silently). Lanes are independent -> parallel across lanes.
+    pub fn fractions_last_axis(&self, qs: &[f64]) -> Result<Self, UFuncError> {
+        let ndim = self.shape.len();
+        if ndim < 2 || qs.is_empty() {
+            return Err(UFuncError::Msg(
+                "fractions_last_axis: need ndim >= 2 and at least one q".into(),
+            ));
+        }
+        for &q in qs {
+            if !(0.0..=1.0).contains(&q) {
+                return Err(UFuncError::Msg(format!(
+                    "quantile: q={q} must be in [0, 1]"
+                )));
+            }
+        }
+        let lane_len = self.shape[ndim - 1];
+        if lane_len == 0 {
+            return Err(UFuncError::Msg(
+                "fractions_last_axis: empty reduction lane".into(),
+            ));
+        }
+        let nlanes = self.values.len() / lane_len;
+        let k = qs.len();
+        let compute_lane = |lane: &[f64]| -> Vec<f64> {
+            if lane.iter().any(|v| v.is_nan()) {
+                return vec![f64::NAN; k];
+            }
+            let mut buf = lane.to_vec();
+            buf.sort_unstable_by(f64::total_cmp);
+            qs.iter()
+                .map(|&q| {
+                    let (lo, hi, frac) = percentile_linear_plan(lane_len, q);
+                    if lo == hi {
+                        buf[lo]
+                    } else {
+                        numpy_quantile_lerp(buf[lo], buf[hi], frac)
+                    }
+                })
+                .collect()
+        };
+        const FRACTIONS_AXIS_PARALLEL_MIN: usize = 1 << 14;
+        let per_lane: Vec<Vec<f64>> = if nlanes >= 2
+            && self.values.len() >= FRACTIONS_AXIS_PARALLEL_MIN
+            && rayon::current_num_threads() >= 2
+        {
+            self.values.par_chunks(lane_len).map(compute_lane).collect()
+        } else {
+            self.values.chunks(lane_len).map(compute_lane).collect()
+        };
+        // Transpose lane-major [nlanes][k] into numpy's q-major [k][nlanes] layout.
+        let mut values = vec![0.0f64; k * nlanes];
+        for (lane_idx, lane_vals) in per_lane.iter().enumerate() {
+            for (qi, &v) in lane_vals.iter().enumerate() {
+                values[qi * nlanes + lane_idx] = v;
+            }
+        }
+        let mut out_shape = Vec::with_capacity(ndim);
+        out_shape.push(k);
+        out_shape.extend_from_slice(&self.shape[..ndim - 1]);
+        Ok(Self {
+            shape: out_shape,
+            values,
+            dtype: DType::F64,
+            integer_sidecar: None,
+        })
+    }
+
+    /// NaN-aware multi-q over the flattened array (fraction scale): numpy's
+    /// _nanquantile compacts the NaNs out and runs the plain quantile on the
+    /// remainder, so filtering (order-preserving) + fractions_axis_none is
+    /// byte-exact by construction. An all-NaN input errs so the caller defers
+    /// to numpy (which owns the "All-NaN slice encountered" RuntimeWarning).
+    pub fn nan_fractions_axis_none(&self, qs: &[f64]) -> Result<Self, UFuncError> {
+        let filtered: Vec<f64> = self
+            .values
+            .iter()
+            .copied()
+            .filter(|v| !v.is_nan())
+            .collect();
+        if filtered.is_empty() {
+            return Err(UFuncError::Msg("nan_fractions: all-NaN input".into()));
+        }
+        let n = filtered.len();
+        let compact = Self {
+            shape: vec![n],
+            values: filtered,
+            dtype: DType::F64,
+            integer_sidecar: None,
+        };
+        compact.fractions_axis_none(qs)
+    }
+
+    /// NaN-aware multi-q over the LAST axis (fraction scale), numpy layout
+    /// [k] ++ shape[..ndim-1]. Per lane: compact NaNs out, sort, and read all k
+    /// order-stat pairs through the shared fraction plan + numpy_quantile_lerp
+    /// with the lane's COMPACTED length - exactly numpy's _nanquantile_1d, so
+    /// byte-exact by construction. Any all-NaN lane errs so the caller defers
+    /// (numpy owns the "All-NaN slice" warning). Lanes are independent ->
+    /// parallel across lanes.
+    pub fn nan_fractions_last_axis(&self, qs: &[f64]) -> Result<Self, UFuncError> {
+        let ndim = self.shape.len();
+        if ndim < 2 || qs.is_empty() {
+            return Err(UFuncError::Msg(
+                "nan_fractions_last_axis: need ndim >= 2 and at least one q".into(),
+            ));
+        }
+        for &q in qs {
+            if !(0.0..=1.0).contains(&q) {
+                return Err(UFuncError::Msg(format!(
+                    "quantile: q={q} must be in [0, 1]"
+                )));
+            }
+        }
+        let lane_len = self.shape[ndim - 1];
+        if lane_len == 0 {
+            return Err(UFuncError::Msg(
+                "nan_fractions_last_axis: empty reduction lane".into(),
+            ));
+        }
+        let nlanes = self.values.len() / lane_len;
+        let k = qs.len();
+        let compute_lane = |lane: &[f64]| -> Result<Vec<f64>, UFuncError> {
+            let mut buf: Vec<f64> = lane.iter().copied().filter(|v| !v.is_nan()).collect();
+            if buf.is_empty() {
+                return Err(UFuncError::Msg("nan_fractions: all-NaN lane".into()));
+            }
+            let m = buf.len();
+            buf.sort_unstable_by(f64::total_cmp);
+            Ok(qs
+                .iter()
+                .map(|&q| {
+                    let (lo, hi, frac) = percentile_linear_plan(m, q);
+                    if lo == hi {
+                        buf[lo]
+                    } else {
+                        numpy_quantile_lerp(buf[lo], buf[hi], frac)
+                    }
+                })
+                .collect())
+        };
+        const FRACTIONS_AXIS_PARALLEL_MIN: usize = 1 << 14;
+        let per_lane: Result<Vec<Vec<f64>>, UFuncError> = if nlanes >= 2
+            && self.values.len() >= FRACTIONS_AXIS_PARALLEL_MIN
+            && rayon::current_num_threads() >= 2
+        {
+            self.values.par_chunks(lane_len).map(compute_lane).collect()
+        } else {
+            self.values.chunks(lane_len).map(compute_lane).collect()
+        };
+        let per_lane = per_lane?;
+        let mut values = vec![0.0f64; k * nlanes];
+        for (lane_idx, lane_vals) in per_lane.iter().enumerate() {
+            for (qi, &v) in lane_vals.iter().enumerate() {
+                values[qi * nlanes + lane_idx] = v;
+            }
+        }
+        let mut out_shape = Vec::with_capacity(ndim);
+        out_shape.push(k);
+        out_shape.extend_from_slice(&self.shape[..ndim - 1]);
+        Ok(Self {
+            shape: out_shape,
+            values,
+            dtype: DType::F64,
+            integer_sidecar: None,
+        })
+    }
+
+    /// Multi-q percentile/quantile over AXIS 0 of a 2-D array (fraction scale),
+    /// numpy layout [k, cols]. Column lanes are gathered in 8-wide blocks so each
+    /// row read touches one cache line (the naive per-column gather is a miss per
+    /// element); each gathered lane then runs the same sort + shared fraction
+    /// plan + numpy_quantile_lerp as the last-axis kernel - byte-exact by
+    /// construction (order stats value-exact, numpy's own _lerp). A NaN lane
+    /// yields NaN for every q (numpy propagates silently). numpy's delegate
+    /// partitions per call single-threaded (~272ms at 2896^2 x 3 qs on hz1).
+    pub fn fractions_axis0_2d(&self, qs: &[f64]) -> Result<Self, UFuncError> {
+        if self.shape.len() != 2 || qs.is_empty() {
+            return Err(UFuncError::Msg(
+                "fractions_axis0_2d: need ndim == 2 and at least one q".into(),
+            ));
+        }
+        for &q in qs {
+            if !(0.0..=1.0).contains(&q) {
+                return Err(UFuncError::Msg(format!(
+                    "quantile: q={q} must be in [0, 1]"
+                )));
+            }
+        }
+        let rows = self.shape[0];
+        let cols = self.shape[1];
+        if rows == 0 {
+            return Err(UFuncError::Msg(
+                "fractions_axis0_2d: empty reduction lane".into(),
+            ));
+        }
+        let k = qs.len();
+        let values_in = &self.values;
+        let lane_outputs = |buf: &mut Vec<f64>| -> Vec<f64> {
+            if buf.iter().any(|v| v.is_nan()) {
+                return vec![f64::NAN; k];
+            }
+            buf.sort_unstable_by(f64::total_cmp);
+            qs.iter()
+                .map(|&q| {
+                    let (lo, hi, frac) = percentile_linear_plan(rows, q);
+                    if lo == hi {
+                        buf[lo]
+                    } else {
+                        numpy_quantile_lerp(buf[lo], buf[hi], frac)
+                    }
+                })
+                .collect()
+        };
+        const COL_BLOCK: usize = 8;
+        let nblocks = cols.div_ceil(COL_BLOCK);
+        let compute_block = |b: usize| -> Vec<Vec<f64>> {
+            let c0 = b * COL_BLOCK;
+            let blk = COL_BLOCK.min(cols - c0);
+            let mut bufs: Vec<Vec<f64>> = (0..blk).map(|_| vec![0.0f64; rows]).collect();
+            for r in 0..rows {
+                let base = r * cols + c0;
+                for (j, buf) in bufs.iter_mut().enumerate() {
+                    buf[r] = values_in[base + j];
+                }
+            }
+            bufs.iter_mut().map(&lane_outputs).collect()
+        };
+        const FRACTIONS_AXIS_PARALLEL_MIN: usize = 1 << 14;
+        let per_block: Vec<Vec<Vec<f64>>> = if nblocks >= 2
+            && self.values.len() >= FRACTIONS_AXIS_PARALLEL_MIN
+            && rayon::current_num_threads() >= 2
+        {
+            (0..nblocks).into_par_iter().map(compute_block).collect()
+        } else {
+            (0..nblocks).map(compute_block).collect()
+        };
+        let mut values = vec![0.0f64; k * cols];
+        for (b, block) in per_block.iter().enumerate() {
+            for (j, lane_vals) in block.iter().enumerate() {
+                let c = b * COL_BLOCK + j;
+                for (qi, &v) in lane_vals.iter().enumerate() {
+                    values[qi * cols + c] = v;
+                }
+            }
+        }
+        Ok(Self {
+            shape: vec![k, cols],
+            values,
+            dtype: DType::F64,
+            integer_sidecar: None,
+        })
+    }
+
+    /// NaN-aware multi-q over AXIS 0 of a 2-D array (fraction scale), numpy
+    /// layout [k, cols]: the 8-wide block column gather of fractions_axis0_2d
+    /// composed with the per-lane NaN compaction of nan_fractions_last_axis -
+    /// byte-exact by construction (numpy's _nanquantile is compact-then-quantile
+    /// on the moved axis). Any all-NaN column errs so the caller defers (numpy
+    /// owns the "All-NaN slice" warning). numpy's delegate: ~396ms at 2896^2 x
+    /// 3 qs on hz1.
+    pub fn nan_fractions_axis0_2d(&self, qs: &[f64]) -> Result<Self, UFuncError> {
+        if self.shape.len() != 2 || qs.is_empty() {
+            return Err(UFuncError::Msg(
+                "nan_fractions_axis0_2d: need ndim == 2 and at least one q".into(),
+            ));
+        }
+        for &q in qs {
+            if !(0.0..=1.0).contains(&q) {
+                return Err(UFuncError::Msg(format!(
+                    "quantile: q={q} must be in [0, 1]"
+                )));
+            }
+        }
+        let rows = self.shape[0];
+        let cols = self.shape[1];
+        if rows == 0 {
+            return Err(UFuncError::Msg(
+                "nan_fractions_axis0_2d: empty reduction lane".into(),
+            ));
+        }
+        let k = qs.len();
+        let values_in = &self.values;
+        let lane_outputs = |buf: &mut Vec<f64>| -> Result<Vec<f64>, UFuncError> {
+            buf.retain(|v| !v.is_nan());
+            if buf.is_empty() {
+                return Err(UFuncError::Msg("nan_fractions: all-NaN lane".into()));
+            }
+            let m = buf.len();
+            buf.sort_unstable_by(f64::total_cmp);
+            Ok(qs
+                .iter()
+                .map(|&q| {
+                    let (lo, hi, frac) = percentile_linear_plan(m, q);
+                    if lo == hi {
+                        buf[lo]
+                    } else {
+                        numpy_quantile_lerp(buf[lo], buf[hi], frac)
+                    }
+                })
+                .collect())
+        };
+        const COL_BLOCK: usize = 8;
+        let nblocks = cols.div_ceil(COL_BLOCK);
+        let compute_block = |b: usize| -> Result<Vec<Vec<f64>>, UFuncError> {
+            let c0 = b * COL_BLOCK;
+            let blk = COL_BLOCK.min(cols - c0);
+            let mut bufs: Vec<Vec<f64>> = (0..blk).map(|_| vec![0.0f64; rows]).collect();
+            for r in 0..rows {
+                let base = r * cols + c0;
+                for (j, buf) in bufs.iter_mut().enumerate() {
+                    buf[r] = values_in[base + j];
+                }
+            }
+            bufs.iter_mut().map(&lane_outputs).collect()
+        };
+        const FRACTIONS_AXIS_PARALLEL_MIN: usize = 1 << 14;
+        let per_block: Result<Vec<Vec<Vec<f64>>>, UFuncError> = if nblocks >= 2
+            && self.values.len() >= FRACTIONS_AXIS_PARALLEL_MIN
+            && rayon::current_num_threads() >= 2
+        {
+            (0..nblocks).into_par_iter().map(compute_block).collect()
+        } else {
+            (0..nblocks).map(compute_block).collect()
+        };
+        let per_block = per_block?;
+        let mut values = vec![0.0f64; k * cols];
+        for (b, block) in per_block.iter().enumerate() {
+            for (j, lane_vals) in block.iter().enumerate() {
+                let c = b * COL_BLOCK + j;
+                for (qi, &v) in lane_vals.iter().enumerate() {
+                    values[qi * cols + c] = v;
+                }
+            }
+        }
+        Ok(Self {
+            shape: vec![k, cols],
+            values,
+            dtype: DType::F64,
+            integer_sidecar: None,
+        })
+    }
+
+    /// Multi-q percentile/quantile over any NON-LAST axis of an N-D array
+    /// (fraction scale), numpy layout [k] ++ shape-without-axis. Lanes are the
+    /// (outer, inner) pairs reading stride-`inner` elements; gathered in 8-wide
+    /// INNER blocks so each axis step reads one cache line (the fractions_axis0_2d
+    /// trick generalized: axis0-2-D is the outer==1 special case). Each gathered
+    /// lane runs the same sort + shared fraction plan + numpy_quantile_lerp -
+    /// byte-exact by construction. NaN lanes yield NaN per q (numpy propagates
+    /// silently). numpy's delegate: 297-360ms at 8.39M 3-D x 3..9 qs on hz1.
+    pub fn fractions_strided_axis(&self, qs: &[f64], ax: usize) -> Result<Self, UFuncError> {
+        let ndim = self.shape.len();
+        if ndim < 2 || ax + 1 >= ndim || qs.is_empty() {
+            return Err(UFuncError::Msg(
+                "fractions_strided_axis: need ndim >= 2, a non-last axis, and >= 1 q".into(),
+            ));
+        }
+        for &q in qs {
+            if !(0.0..=1.0).contains(&q) {
+                return Err(UFuncError::Msg(format!(
+                    "quantile: q={q} must be in [0, 1]"
+                )));
+            }
+        }
+        let axis_len = self.shape[ax];
+        if axis_len == 0 {
+            return Err(UFuncError::Msg(
+                "fractions_strided_axis: empty reduction lane".into(),
+            ));
+        }
+        let inner: usize = self.shape[ax + 1..].iter().product();
+        let outer: usize = self.shape[..ax].iter().product();
+        if inner == 0 || outer == 0 {
+            return Err(UFuncError::Msg(
+                "fractions_strided_axis: empty outer/inner extent".into(),
+            ));
+        }
+        let k = qs.len();
+        let values_in = &self.values;
+        let lane_outputs = |buf: &mut Vec<f64>| -> Vec<f64> {
+            if buf.iter().any(|v| v.is_nan()) {
+                return vec![f64::NAN; k];
+            }
+            buf.sort_unstable_by(f64::total_cmp);
+            qs.iter()
+                .map(|&q| {
+                    let (lo, hi, frac) = percentile_linear_plan(axis_len, q);
+                    if lo == hi {
+                        buf[lo]
+                    } else {
+                        numpy_quantile_lerp(buf[lo], buf[hi], frac)
+                    }
+                })
+                .collect()
+        };
+        const INNER_BLOCK: usize = 8;
+        let iblocks = inner.div_ceil(INNER_BLOCK);
+        let tasks = outer * iblocks;
+        let compute_task = |t: usize| -> Vec<Vec<f64>> {
+            let o = t / iblocks;
+            let ib = t % iblocks;
+            let i0 = ib * INNER_BLOCK;
+            let blk = INNER_BLOCK.min(inner - i0);
+            let mut bufs: Vec<Vec<f64>> = (0..blk).map(|_| vec![0.0f64; axis_len]).collect();
+            for r in 0..axis_len {
+                let base = (o * axis_len + r) * inner + i0;
+                for (j, buf) in bufs.iter_mut().enumerate() {
+                    buf[r] = values_in[base + j];
+                }
+            }
+            bufs.iter_mut().map(&lane_outputs).collect()
+        };
+        const FRACTIONS_AXIS_PARALLEL_MIN: usize = 1 << 14;
+        let per_task: Vec<Vec<Vec<f64>>> = if tasks >= 2
+            && self.values.len() >= FRACTIONS_AXIS_PARALLEL_MIN
+            && rayon::current_num_threads() >= 2
+        {
+            (0..tasks).into_par_iter().map(compute_task).collect()
+        } else {
+            (0..tasks).map(compute_task).collect()
+        };
+        let lanes = outer * inner;
+        let mut values = vec![0.0f64; k * lanes];
+        for (t, task_vals) in per_task.iter().enumerate() {
+            let o = t / iblocks;
+            let i0 = (t % iblocks) * INNER_BLOCK;
+            for (j, lane_vals) in task_vals.iter().enumerate() {
+                let lane = o * inner + i0 + j;
+                for (qi, &v) in lane_vals.iter().enumerate() {
+                    values[qi * lanes + lane] = v;
+                }
+            }
+        }
+        let mut out_shape = Vec::with_capacity(ndim);
+        out_shape.push(k);
+        out_shape.extend_from_slice(&self.shape[..ax]);
+        out_shape.extend_from_slice(&self.shape[ax + 1..]);
+        Ok(Self {
+            shape: out_shape,
+            values,
+            dtype: DType::F64,
+            integer_sidecar: None,
+        })
+    }
+
+    /// NaN-aware multi-q over any NON-LAST axis of an N-D array: the strided
+    /// 8-wide inner-block gather of fractions_strided_axis composed with the
+    /// per-lane NaN compaction of nan_fractions_last_axis - byte-exact by
+    /// construction (numpy's _nanquantile compacts then quantiles per moved
+    /// lane). Any all-NaN lane errs so the caller defers (numpy owns the
+    /// "All-NaN slice" warning). numpy's delegate DEGRADES CATASTROPHICALLY
+    /// here: 1122ms (3-D ax1 x 3 qs) / 6846ms (3-D ax0 x 9 qs) at 8.39M on hz1.
+    pub fn nan_fractions_strided_axis(&self, qs: &[f64], ax: usize) -> Result<Self, UFuncError> {
+        let ndim = self.shape.len();
+        if ndim < 2 || ax + 1 >= ndim || qs.is_empty() {
+            return Err(UFuncError::Msg(
+                "nan_fractions_strided_axis: need ndim >= 2, a non-last axis, and >= 1 q".into(),
+            ));
+        }
+        for &q in qs {
+            if !(0.0..=1.0).contains(&q) {
+                return Err(UFuncError::Msg(format!(
+                    "quantile: q={q} must be in [0, 1]"
+                )));
+            }
+        }
+        let axis_len = self.shape[ax];
+        if axis_len == 0 {
+            return Err(UFuncError::Msg(
+                "nan_fractions_strided_axis: empty reduction lane".into(),
+            ));
+        }
+        let inner: usize = self.shape[ax + 1..].iter().product();
+        let outer: usize = self.shape[..ax].iter().product();
+        if inner == 0 || outer == 0 {
+            return Err(UFuncError::Msg(
+                "nan_fractions_strided_axis: empty outer/inner extent".into(),
+            ));
+        }
+        let k = qs.len();
+        let values_in = &self.values;
+        let lane_outputs = |buf: &mut Vec<f64>| -> Result<Vec<f64>, UFuncError> {
+            buf.retain(|v| !v.is_nan());
+            if buf.is_empty() {
+                return Err(UFuncError::Msg("nan_fractions: all-NaN lane".into()));
+            }
+            let m = buf.len();
+            buf.sort_unstable_by(f64::total_cmp);
+            Ok(qs
+                .iter()
+                .map(|&q| {
+                    let (lo, hi, frac) = percentile_linear_plan(m, q);
+                    if lo == hi {
+                        buf[lo]
+                    } else {
+                        numpy_quantile_lerp(buf[lo], buf[hi], frac)
+                    }
+                })
+                .collect())
+        };
+        const INNER_BLOCK: usize = 8;
+        let iblocks = inner.div_ceil(INNER_BLOCK);
+        let tasks = outer * iblocks;
+        let compute_task = |t: usize| -> Result<Vec<Vec<f64>>, UFuncError> {
+            let o = t / iblocks;
+            let ib = t % iblocks;
+            let i0 = ib * INNER_BLOCK;
+            let blk = INNER_BLOCK.min(inner - i0);
+            let mut bufs: Vec<Vec<f64>> = (0..blk).map(|_| vec![0.0f64; axis_len]).collect();
+            for r in 0..axis_len {
+                let base = (o * axis_len + r) * inner + i0;
+                for (j, buf) in bufs.iter_mut().enumerate() {
+                    buf[r] = values_in[base + j];
+                }
+            }
+            bufs.iter_mut().map(&lane_outputs).collect()
+        };
+        const FRACTIONS_AXIS_PARALLEL_MIN: usize = 1 << 14;
+        let per_task: Result<Vec<Vec<Vec<f64>>>, UFuncError> = if tasks >= 2
+            && self.values.len() >= FRACTIONS_AXIS_PARALLEL_MIN
+            && rayon::current_num_threads() >= 2
+        {
+            (0..tasks).into_par_iter().map(compute_task).collect()
+        } else {
+            (0..tasks).map(compute_task).collect()
+        };
+        let per_task = per_task?;
+        let lanes = outer * inner;
+        let mut values = vec![0.0f64; k * lanes];
+        for (t, task_vals) in per_task.iter().enumerate() {
+            let o = t / iblocks;
+            let i0 = (t % iblocks) * INNER_BLOCK;
+            for (j, lane_vals) in task_vals.iter().enumerate() {
+                let lane = o * inner + i0 + j;
+                for (qi, &v) in lane_vals.iter().enumerate() {
+                    values[qi * lanes + lane] = v;
+                }
+            }
+        }
+        let mut out_shape = Vec::with_capacity(ndim);
+        out_shape.push(k);
+        out_shape.extend_from_slice(&self.shape[..ax]);
+        out_shape.extend_from_slice(&self.shape[ax + 1..]);
+        Ok(Self {
+            shape: out_shape,
+            values,
+            dtype: DType::F64,
+            integer_sidecar: None,
+        })
+    }
+
+    /// Weighted flat quantile, numpy method='inverted_cdf' (the only weighted
+    /// method numpy allows). Source-exact replication (numpy 2.x _quantile
+    /// weighted branch): argsort values (UNSTABLE ties are safe - the selected
+    /// value is tie-equal; +-0 mixes defer below), gather weights, cdf =
+    /// sequential cumsum normalized by the total, the cdf==0 -> -1 zero-weight
+    /// prefix fix (applied only when cdf[0] == 0), searchsorted side='left'
+    /// clipped to n-1. Pure SELECTION (no interpolation) -> byte-exact with the
+    /// operand-copy guarantee (pinned 11136/11136 cases incl dense ties,
+    /// zero-weight prefixes, exact-boundary qs vs 2.4.3). Defers (Err) so numpy
+    /// owns errors/ambiguity: NaN values, mixed-sign zero values (tie
+    /// representative is an introsort artifact), negative/NaN weights,
+    /// non-finite or zero weight total. numpy's delegate: 2685ms @8M x 3 qs on
+    /// hz1 (python-level sort + take chain).
+    pub fn weighted_quantile_inverted_cdf(
+        &self,
+        weights: &[f64],
+        qs: &[f64],
+    ) -> Result<Self, UFuncError> {
+        let n = self.values.len();
+        if n == 0 || weights.len() != n || qs.is_empty() {
+            return Err(UFuncError::Msg(
+                "weighted_quantile: need non-empty values, matching weights, >= 1 q".into(),
+            ));
+        }
+        for &q in qs {
+            if !(0.0..=1.0).contains(&q) {
+                return Err(UFuncError::Msg(format!(
+                    "quantile: q={q} must be in [0, 1]"
+                )));
+            }
+        }
+        let mut has_pos_zero = false;
+        let mut has_neg_zero = false;
+        for &v in &self.values {
+            if v.is_nan() {
+                return Err(UFuncError::Msg(
+                    "weighted_quantile: NaN values defer".into(),
+                ));
+            }
+            if v == 0.0 {
+                if v.is_sign_negative() {
+                    has_neg_zero = true;
+                } else {
+                    has_pos_zero = true;
+                }
+            }
+        }
+        if has_pos_zero && has_neg_zero {
+            return Err(UFuncError::Msg(
+                "weighted_quantile: mixed-sign zero tie representative is a sort artifact".into(),
+            ));
+        }
+        if weights.iter().any(|&w| w.is_nan() || w < 0.0) {
+            return Err(UFuncError::Msg(
+                "weighted_quantile: negative/NaN weights defer to numpy's error".into(),
+            ));
+        }
+        let mut pairs: Vec<(f64, f64)> = self
+            .values
+            .iter()
+            .copied()
+            .zip(weights.iter().copied())
+            .collect();
+        const WEIGHTED_QUANTILE_PARALLEL_MIN: usize = 1 << 16;
+        if n >= WEIGHTED_QUANTILE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            pairs.par_sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        } else {
+            pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        }
+        // Sequential cumsum in sorted order = numpy's exact fold; then normalize.
+        let mut cdf: Vec<f64> = Vec::with_capacity(n);
+        let mut acc = 0.0f64;
+        for &(_, w) in &pairs {
+            acc += w;
+            cdf.push(acc);
+        }
+        let total = acc;
+        if !total.is_finite() || total == 0.0 {
+            return Err(UFuncError::Msg(
+                "weighted_quantile: non-finite or zero weight total defers".into(),
+            ));
+        }
+        for c in cdf.iter_mut() {
+            *c /= total;
+        }
+        if cdf[0] == 0.0 {
+            for c in cdf.iter_mut() {
+                if *c == 0.0 {
+                    *c = -1.0;
+                }
+            }
+        }
+        let values: Vec<f64> = qs
+            .iter()
+            .map(|&q| {
+                let idx = cdf.partition_point(|&c| c < q).min(n - 1);
+                pairs[idx].0
+            })
+            .collect();
+        Ok(Self {
+            shape: vec![qs.len()],
+            values,
+            dtype: DType::F64,
+            integer_sidecar: None,
+        })
+    }
+
+    /// Fraction-scale multi-q core (same round-trip fix; quantiles enter directly).
+    fn fractions_axis_none(&self, qs: &[f64]) -> Result<Self, UFuncError> {
         let n = self.values.len();
         if n == 0 {
             return Ok(Self {
@@ -17644,7 +18606,7 @@ impl UFuncArray {
             qs.iter()
                 .map(|&q| {
                     let mut buf = self.values.clone();
-                    select_percentile_method(&mut buf, q / 100.0, QuantileInterp::Linear)
+                    select_percentile_method(&mut buf, q, QuantileInterp::Linear)
                 })
                 .collect()
         };
@@ -17731,7 +18693,17 @@ impl UFuncArray {
                 "percentile: q={q} must be in [0, 100]"
             )));
         }
-        let fraction = q / 100.0;
+        self.percentile_method_fraction(q / 100.0, axis, method)
+    }
+
+    /// Fraction-scale core for percentile_method (same round-trip fix as
+    /// percentile_fraction; quantile_method enters directly).
+    fn percentile_method_fraction(
+        &self,
+        fraction: f64,
+        axis: Option<isize>,
+        method: QuantileInterp,
+    ) -> Result<Self, UFuncError> {
         match axis {
             None => {
                 if self.values.is_empty() {
@@ -17816,7 +18788,12 @@ impl UFuncArray {
         axis: Option<isize>,
         method: QuantileInterp,
     ) -> Result<Self, UFuncError> {
-        self.percentile_method(q * 100.0, axis, method)
+        if !(0.0..=1.0).contains(&q) {
+            return Err(UFuncError::Msg(format!(
+                "quantile: q={q} must be in [0, 1]"
+            )));
+        }
+        self.percentile_method_fraction(q, axis, method)
     }
 
     /// Central moment of order `order` over the flattened array
@@ -18035,6 +19012,19 @@ impl UFuncArray {
                 let axis_len = self.shape[ax];
                 if axis_len == 0 {
                     return Ok(self.clone());
+                }
+                if axis_len == 1 {
+                    // Each extrema lane initializes its accumulator from its
+                    // only input, so the output value is bit-for-bit the input
+                    // value. Preserve cumulative_op's existing sidecar-dropping
+                    // result contract while skipping zero-fill and one-element
+                    // Rayon scans.
+                    return Ok(Self {
+                        shape: self.shape.clone(),
+                        values: self.values.clone(),
+                        dtype: self.dtype,
+                        integer_sidecar: None,
+                    });
                 }
                 let outer: usize =
                     fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
@@ -18653,6 +19643,47 @@ impl UFuncArray {
         let out_count: usize = fnp_ndarray::element_count(&out_shape).map_err(UFuncError::Shape)?;
         let out_strides = c_strides_elems(&out_shape);
 
+        fn fill_meshgrid_blocks<T: Copy + Send + Sync>(
+            out: &mut [T],
+            source: &[T],
+            stride: usize,
+            alen: usize,
+            parallel: bool,
+        ) {
+            if out.is_empty() {
+                return;
+            }
+            if stride == 1 {
+                if parallel {
+                    out.par_chunks_mut(alen)
+                        .for_each(|cycle| cycle.copy_from_slice(source));
+                } else {
+                    for cycle in out.chunks_mut(alen) {
+                        cycle.copy_from_slice(source);
+                    }
+                }
+            } else if alen.is_power_of_two() {
+                let mask = alen - 1;
+                if parallel {
+                    out.par_chunks_mut(stride)
+                        .enumerate()
+                        .for_each(|(block, chunk)| chunk.fill(source[block & mask]));
+                } else {
+                    for (block, chunk) in out.chunks_mut(stride).enumerate() {
+                        chunk.fill(source[block & mask]);
+                    }
+                }
+            } else if parallel {
+                out.par_chunks_mut(stride)
+                    .enumerate()
+                    .for_each(|(block, chunk)| chunk.fill(source[block % alen]));
+            } else {
+                for (block, chunk) in out.chunks_mut(stride).enumerate() {
+                    chunk.fill(source[block % alen]);
+                }
+            }
+        }
+
         let mut results = Vec::with_capacity(ndim);
         for (dim, arr) in arrays.iter().enumerate() {
             // Which output axis does this input correspond to?
@@ -18676,35 +19707,68 @@ impl UFuncArray {
             const MESHGRID_PARALLEL_MIN_ELEMS: usize = 1 << 14;
             let parallel =
                 out_count >= MESHGRID_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2;
-            let result = if arr.integer_sidecar.is_some() {
-                // Sidecar present: materialize the source indices (reused to both
-                // gather f64 values and reindex the integer sidecar identically).
-                let mut source_indices = vec![0usize; out_count];
-                if parallel {
-                    source_indices
-                        .par_iter_mut()
-                        .enumerate()
-                        .for_each(|(flat, s)| *s = (flat / stride) % alen);
-                } else {
-                    for (flat, s) in source_indices.iter_mut().enumerate() {
-                        *s = (flat / stride) % alen;
+            let result = if let Some(sidecar) = &arr.integer_sidecar {
+                // Preserve exact integers without building a temporary source-index
+                // vector: both bridge and sidecar payloads follow the same blocks.
+                let mut values = vec![0.0; out_count];
+                fill_meshgrid_blocks(&mut values, &arr.values, stride, alen, parallel);
+                let integer_sidecar = match sidecar {
+                    IntegerSidecar::I64(source) => {
+                        let mut exact = vec![0_i64; out_count];
+                        fill_meshgrid_blocks(&mut exact, source, stride, alen, parallel);
+                        Some(IntegerSidecar::I64(exact))
                     }
-                }
-                let values: Vec<f64> = source_indices.iter().map(|&i| arr.values[i]).collect();
+                    IntegerSidecar::U64(source) => {
+                        let mut exact = vec![0_u64; out_count];
+                        fill_meshgrid_blocks(&mut exact, source, stride, alen, parallel);
+                        Some(IntegerSidecar::U64(exact))
+                    }
+                };
                 Self {
                     shape: out_shape.clone(),
                     values,
                     dtype,
-                    integer_sidecar: arr.reindexed_integer_sidecar(&source_indices),
+                    integer_sidecar,
                 }
             } else {
-                // Common no-sidecar case: gather directly, skipping the index Vec.
-                let compute = |flat: usize| arr.values[(flat / stride) % alen];
-                let values: Vec<f64> = if parallel {
-                    (0..out_count).into_par_iter().map(compute).collect()
-                } else {
-                    (0..out_count).map(compute).collect()
-                };
+                // Common no-sidecar case: the flat broadcast is a sequence of
+                // repeated-value blocks. Fill those blocks directly instead of
+                // recovering the source index separately for every output cell.
+                let mut values = vec![0.0; out_count];
+                if out_count != 0 {
+                    if stride == 1 {
+                        if parallel {
+                            values
+                                .par_chunks_mut(alen)
+                                .for_each(|cycle| cycle.copy_from_slice(&arr.values));
+                        } else {
+                            for cycle in values.chunks_mut(alen) {
+                                cycle.copy_from_slice(&arr.values);
+                            }
+                        }
+                    } else if alen.is_power_of_two() {
+                        let mask = alen - 1;
+                        if parallel {
+                            values
+                                .par_chunks_mut(stride)
+                                .enumerate()
+                                .for_each(|(block, chunk)| chunk.fill(arr.values[block & mask]));
+                        } else {
+                            for (block, chunk) in values.chunks_mut(stride).enumerate() {
+                                chunk.fill(arr.values[block & mask]);
+                            }
+                        }
+                    } else if parallel {
+                        values
+                            .par_chunks_mut(stride)
+                            .enumerate()
+                            .for_each(|(block, chunk)| chunk.fill(arr.values[block % alen]));
+                    } else {
+                        for (block, chunk) in values.chunks_mut(stride).enumerate() {
+                            chunk.fill(arr.values[block % alen]);
+                        }
+                    }
+                }
                 Self {
                     shape: out_shape.clone(),
                     values,
@@ -19600,7 +20664,12 @@ impl UFuncArray {
     ///
     /// Mimics `np.quantile(a, q)`. Like `percentile` but q is in [0, 1] instead of [0, 100].
     pub fn quantile(&self, q: f64, axis: Option<isize>) -> Result<Self, UFuncError> {
-        self.percentile(q * 100.0, axis)
+        if !(0.0..=1.0).contains(&q) {
+            return Err(UFuncError::Msg(format!(
+                "quantile: q={q} must be in [0, 1]"
+            )));
+        }
+        self.percentile_fraction(q, axis)
     }
 
     /// Compute multiple quantiles over the flattened array.
@@ -19612,8 +20681,8 @@ impl UFuncArray {
                 )));
             }
         }
-        let percentiles: Vec<f64> = qs.iter().map(|&q| q * 100.0).collect();
-        self.percentiles_axis_none(&percentiles)
+        let fractions: Vec<f64> = qs.to_vec();
+        self.fractions_axis_none(&fractions)
     }
 
     /// Weighted average of array elements.
@@ -20374,7 +21443,21 @@ impl UFuncArray {
         // kernels: for long kernels the scatter's autovectorized SAXPY wins and is
         // kept below. Threshold chosen empirically at the scatter/gather crossover.
         const CONVOLVE_GATHER_MAX_M: usize = 96;
-        let full: Vec<f64> = if n.min(m) >= CONVOLVE_FFT_MIN_MINDIM
+        let full: Vec<f64> = if m == 1 {
+            // The generic short-kernel gather allocates a reversed one-element
+            // kernel, zero-fills `full`, then performs exactly one multiply-add
+            // per output. Collect that identical expression directly so signed
+            // zero and NaN behavior stay bit-for-bit unchanged while removing
+            // the temporary and redundant full-buffer write.
+            let scalar = k[0];
+            a.iter()
+                .map(|&value| {
+                    let mut acc = 0.0f64;
+                    acc += value * scalar;
+                    acc
+                })
+                .collect()
+        } else if n.min(m) >= CONVOLVE_FFT_MIN_MINDIM
             && n.saturating_mul(m) >= CONVOLVE_FFT_COST_FACTOR.saturating_mul(fft_work)
         {
             fft_linear_convolve(a, k, full_len)
@@ -20736,7 +21819,12 @@ impl UFuncArray {
             result
         };
         const POLYVAL_PARALLEL_MIN_ELEMS: usize = 1 << 12;
-        let values: Vec<f64> = if x.values.len() >= POLYVAL_PARALLEL_MIN_ELEMS
+        let values: Vec<f64> = if let [coefficient] = coeffs_ref.as_slice() {
+            // Preserve the former one-step Horner expression exactly rather than
+            // filling with `coefficient`: 0*x intentionally propagates NaN/Inf
+            // and participates in signed-zero arithmetic.
+            x.values.iter().map(|&xi| 0.0 * xi + *coefficient).collect()
+        } else if x.values.len() >= POLYVAL_PARALLEL_MIN_ELEMS
             && coeffs_ref.len() >= 2
             && rayon::current_num_threads() >= 2
         {
@@ -20855,12 +21943,8 @@ impl UFuncArray {
             ));
         }
         let roots_values = &roots.values;
-        let eval_point =
-            |&x: &f64| roots_values.iter().fold(1.0, |acc, &r| acc * (x - r));
-        let result_vals: Vec<f64> = if self
-            .values
-            .len()
-            .saturating_mul(roots_values.len())
+        let eval_point = |&x: &f64| roots_values.iter().fold(1.0, |acc, &r| acc * (x - r));
+        let result_vals: Vec<f64> = if self.values.len().saturating_mul(roots_values.len())
             >= POLYVALFROMROOTS_PARALLEL_MIN_WORK
             && roots_values.len() >= 2
             && rayon::current_num_threads() >= 2
@@ -20917,7 +22001,10 @@ impl UFuncArray {
             && deg_x.saturating_mul(deg_y) >= 4
             && rayon::current_num_threads() >= 2
         {
-            (0..x.values.len()).into_par_iter().map(eval_point).collect()
+            (0..x.values.len())
+                .into_par_iter()
+                .map(eval_point)
+                .collect()
         } else {
             (0..x.values.len()).map(eval_point).collect()
         };
@@ -20975,7 +22062,10 @@ impl UFuncArray {
             && deg_x.saturating_mul(deg_y).saturating_mul(deg_z) >= 4
             && rayon::current_num_threads() >= 2
         {
-            (0..x.values.len()).into_par_iter().map(eval_point).collect()
+            (0..x.values.len())
+                .into_par_iter()
+                .map(eval_point)
+                .collect()
         } else {
             (0..x.values.len()).map(eval_point).collect()
         };
@@ -21493,8 +22583,9 @@ impl UFuncArray {
         // vectorized cos edges out our serial cos at cache-resident sizes (1.1x@100K) while we
         // already win at 4M; multi-threaded chunks win across the board. Bit-identical (same
         // per-point formula; collect from a parallel map preserves index order).
-        let point =
-            |i: usize| 0.54 - 0.46 * (2.0 * std::f64::consts::PI * i as f64 / (m as f64 - 1.0)).cos();
+        let point = |i: usize| {
+            0.54 - 0.46 * (2.0 * std::f64::consts::PI * i as f64 / (m as f64 - 1.0)).cos()
+        };
         // Serial cos-map is par-or-WIN vs numpy at ALL practical sizes (BlackThrush 2026-06-22:
         // 100K-4M = 0.80-1.06x, load-independent); the rayon path gave NO benefit and was a
         // swarm-contention LANDMINE (8-11x at 100K under load). Keep serial for practical M.
@@ -21769,7 +22860,21 @@ impl UFuncArray {
         // roundtrip + zero-padded cases): inverse two-for-one trick — one length-n/2
         // inverse complex FFT + O(n) re-tangle, ≈ half the work of the full path.
         // Spectrum-truncating (m > n/2+1) or odd n fall back to the full path below.
-        if n >= 2 && n.is_multiple_of(2) && m <= n / 2 + 1 {
+        //
+        // The two-for-one packing assumes the DC (index 0) and Nyquist (index n/2)
+        // coefficients are real, which they always are for a spectrum produced by
+        // rfft. `hfft` feeds an arbitrary Hermitian spectrum whose Nyquist can be
+        // complex (e.g. conj(a) with a non-real last coefficient); the packing then
+        // leaks that imaginary part into a uniform DC offset. When either terminal
+        // coefficient is complex, use the exact full-spectrum path below instead.
+        let dc_imag = self.values.get(1).copied().unwrap_or(0.0);
+        let nyquist_imag = if m == n / 2 + 1 {
+            self.values.get(n + 1).copied().unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        if n >= 2 && n.is_multiple_of(2) && m <= n / 2 + 1 && dc_imag == 0.0 && nyquist_imag == 0.0
+        {
             let needed = n / 2 + 1;
             let mut half_re = vec![0.0f64; needed];
             let mut half_im = vec![0.0f64; needed];
@@ -22295,6 +23400,9 @@ impl UFuncArray {
                 continue;
             }
             let shift = (len / 2) as isize;
+            if shift == 0 {
+                continue;
+            }
             let shift = if inverse { -shift } else { shift };
             shifted = shifted.roll(shift, Some(axis as isize))?;
         }
@@ -25360,23 +26468,6 @@ impl UFuncArray {
 
     // ── NaN-aware reductions ────────────────────────────────────────────
 
-    /// Helper: produce a copy of `self` with NaN values removed (flattened).
-    fn nan_filtered(&self) -> Self {
-        let values: Vec<f64> = self
-            .values
-            .iter()
-            .copied()
-            .filter(|v| !v.is_nan())
-            .collect();
-        let n = values.len();
-        Self {
-            shape: vec![n],
-            values,
-            dtype: self.dtype,
-            integer_sidecar: None,
-        }
-    }
-
     /// Helper: produce a copy with NaN values removed along a specific axis
     /// by replacing NaN with `fill` before the reduction.
     /// Returns (filled array, per-lane NaN counts).
@@ -25852,8 +26943,12 @@ impl UFuncArray {
                 // (no nan_filtered() UFuncArray + no median(None) re-clone -> single alloc
                 // instead of two). Mirrors median(None): serial select_median for medium N,
                 // par_select_median >=1<<19. all-NaN -> NaN (matches median of an empty array).
-                let filtered: Vec<f64> =
-                    self.values.iter().copied().filter(|v| !v.is_nan()).collect();
+                let filtered: Vec<f64> = self
+                    .values
+                    .iter()
+                    .copied()
+                    .filter(|v| !v.is_nan())
+                    .collect();
                 if filtered.is_empty() {
                     return Ok(Self::scalar(f64::NAN, DType::F64));
                 }
@@ -25912,10 +27007,19 @@ impl UFuncArray {
                         .map(|k| values_ref[base_flat + k * strides_ref[ax]])
                         .filter(|v| !v.is_nan())
                         .collect();
-                    // O(L) quickselect instead of an O(L log L) sort of the
-                    // NaN-filtered lane; the 0.5 linear quantile reads only
-                    // sorted[lo]/sorted[lo+1], so this is bit-identical.
-                    select_percentile_method(&mut lane, 0.5, QuantileInterp::Linear)
+                    // MEDIAN semantics, not quantile(0.5): numpy's _nanmedian1d is
+                    // np.median(compacted) = MEAN of the two middles ((a+b)/2), which
+                    // differs bitwise from the two-sided _lerp(0.5) in ~29% of pairs.
+                    // The old symmetric lerp at t=0.5 happened to equal the mean form,
+                    // so routing through select_percentile_method(Linear) was byte-OK
+                    // until the 2026-07-12 numpy_quantile_lerp fix silently broke it
+                    // (regression window 9d5d83ac..this commit). select_median is the
+                    // proven median contract.
+                    if lane.is_empty() {
+                        f64::NAN
+                    } else {
+                        select_median(&mut lane)
+                    }
                 };
                 const NANMEDIAN_PARALLEL_MIN_ELEMS: usize = 1 << 14;
                 let out_values: Vec<f64> = if outer_count >= 2
@@ -27084,6 +28188,9 @@ impl UFuncArray {
                 "broadcast_to: cannot broadcast shape {:?} to {:?}",
                 self.shape, target_shape
             )));
+        }
+        if self.shape == target_shape {
+            return Ok(self.clone());
         }
         // Left-pad shape with 1s
         let mut padded = vec![1usize; ndim - self.shape.len()];
@@ -29028,6 +30135,21 @@ fn format_nd(
     format!("[{}]", parts.join(&sep))
 }
 
+/// numpy `_lerp` replication (numpy/lib/_function_base_impl.py): computes
+/// `a + (b-a)*t`, overwritten with `b - (b-a)*(1-t)` where `t >= 0.5`. The
+/// two-sided form is what np.quantile/percentile's linear method executes, so
+/// it is byte-identical where the symmetric `a*(1-t) + b*t` form drifted by
+/// 1-2 ULP (bead deadlock-audit-19jv4, probe 2026-07-12).
+#[inline]
+fn numpy_quantile_lerp(a: f64, b: f64, t: f64) -> f64 {
+    let diff = b - a;
+    if t >= 0.5 {
+        b - diff * (1.0 - t)
+    } else {
+        a + diff * t
+    }
+}
+
 /// Linear interpolation for percentile on a sorted slice (NumPy default method).
 #[cfg(test)]
 fn interpolate_percentile(sorted: &[f64], fraction: f64) -> f64 {
@@ -29043,6 +30165,10 @@ fn interpolate_percentile_method(sorted: &[f64], fraction: f64, method: Quantile
     if n == 1 {
         return sorted[0];
     }
+    if let Some((alpha, beta)) = method.hf_params() {
+        let (lo, hi, gamma) = percentile_hf_plan(n, fraction, alpha, beta);
+        return numpy_quantile_lerp(sorted[lo], sorted[hi], gamma);
+    }
     let idx = fraction * (n - 1) as f64;
     let lo = idx.floor() as usize;
     let frac = idx - lo as f64;
@@ -29052,7 +30178,7 @@ fn interpolate_percentile_method(sorted: &[f64], fraction: f64, method: Quantile
     }
     let hi = lo + 1;
     match method {
-        QuantileInterp::Linear => sorted[lo] * (1.0 - frac) + sorted[hi] * frac,
+        QuantileInterp::Linear => numpy_quantile_lerp(sorted[lo], sorted[hi], frac),
         QuantileInterp::Lower => sorted[lo],
         QuantileInterp::Higher => sorted[hi],
         QuantileInterp::Nearest => {
@@ -29062,7 +30188,15 @@ fn interpolate_percentile_method(sorted: &[f64], fraction: f64, method: Quantile
                 sorted[hi]
             }
         }
-        QuantileInterp::Midpoint => (sorted[lo] + sorted[hi]) / 2.0,
+        // numpy 'midpoint' is _lerp(a, b, 0.5) = b - (b-a)*0.5, NOT (a+b)/2
+        // (pinned 2025/2025 cases vs 2.4.3; midpoint recon 2026-07-12).
+        QuantileInterp::Midpoint => numpy_quantile_lerp(sorted[lo], sorted[hi], 0.5),
+        QuantileInterp::Hazen
+        | QuantileInterp::Weibull
+        | QuantileInterp::MedianUnbiased
+        | QuantileInterp::NormalUnbiased => {
+            unreachable!("H&F methods return via the dedicated clamped-plan block above")
+        }
     }
 }
 
@@ -29081,6 +30215,20 @@ fn select_percentile_method(data: &mut [f64], fraction: f64, method: QuantileInt
     if n == 1 {
         return data[0];
     }
+    // Continuous H&F methods: dedicated clamped plan + two-sided lerp; the
+    // linear/discontinuous paths below stay byte-untouched (shared-helper
+    // two-contract lesson, 2026-07-12).
+    if let Some((alpha, beta)) = method.hf_params() {
+        let (lo, hi, gamma) = percentile_hf_plan(n, fraction, alpha, beta);
+        if lo == hi {
+            let (_, kth, _) = data.select_nth_unstable_by(lo, |a, b| a.total_cmp(b));
+            return numpy_quantile_lerp(*kth, *kth, gamma);
+        }
+        let (left, kth_hi, _) = data.select_nth_unstable_by(hi, |a, b| a.total_cmp(b));
+        let v_hi = *kth_hi;
+        let v_lo = left.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        return numpy_quantile_lerp(v_lo, v_hi, gamma);
+    }
     let idx = fraction * (n - 1) as f64;
     let lo = idx.floor() as usize;
     let frac = idx - lo as f64;
@@ -29096,7 +30244,7 @@ fn select_percentile_method(data: &mut [f64], fraction: f64, method: QuantileInt
     let v_hi = *kth_hi;
     let v_lo = left.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     match method {
-        QuantileInterp::Linear => v_lo * (1.0 - frac) + v_hi * frac,
+        QuantileInterp::Linear => numpy_quantile_lerp(v_lo, v_hi, frac),
         QuantileInterp::Lower => v_lo,
         QuantileInterp::Higher => v_hi,
         QuantileInterp::Nearest => {
@@ -29106,7 +30254,13 @@ fn select_percentile_method(data: &mut [f64], fraction: f64, method: QuantileInt
                 v_hi
             }
         }
-        QuantileInterp::Midpoint => (v_lo + v_hi) / 2.0,
+        QuantileInterp::Midpoint => numpy_quantile_lerp(v_lo, v_hi, 0.5),
+        QuantileInterp::Hazen
+        | QuantileInterp::Weibull
+        | QuantileInterp::MedianUnbiased
+        | QuantileInterp::NormalUnbiased => {
+            unreachable!("H&F methods return via the dedicated clamped-plan block above")
+        }
     }
 }
 
@@ -29329,6 +30483,12 @@ fn par_select_percentile(data: &[f64], fraction: f64, method: QuantileInterp) ->
     if n == 1 {
         return data[0];
     }
+    // Continuous H&F methods: dedicated clamped plan (see select_percentile_method).
+    if let Some((alpha, beta)) = method.hf_params() {
+        let (lo, hi, gamma) = percentile_hf_plan(n, fraction, alpha, beta);
+        let (v_lo, v_hi) = par_select_two(data, lo, hi);
+        return numpy_quantile_lerp(v_lo, v_hi, gamma);
+    }
     let idx = fraction * (n - 1) as f64;
     let lo = idx.floor() as usize;
     let frac = idx - lo as f64;
@@ -29340,7 +30500,7 @@ fn par_select_percentile(data: &[f64], fraction: f64, method: QuantileInterp) ->
     let hi = lo + 1;
     let (v_lo, v_hi) = par_select_two(data, lo, hi);
     match method {
-        QuantileInterp::Linear => v_lo * (1.0 - frac) + v_hi * frac,
+        QuantileInterp::Linear => numpy_quantile_lerp(v_lo, v_hi, frac),
         QuantileInterp::Lower => v_lo,
         QuantileInterp::Higher => v_hi,
         QuantileInterp::Nearest => {
@@ -29350,7 +30510,13 @@ fn par_select_percentile(data: &[f64], fraction: f64, method: QuantileInterp) ->
                 v_hi
             }
         }
-        QuantileInterp::Midpoint => (v_lo + v_hi) / 2.0,
+        QuantileInterp::Midpoint => numpy_quantile_lerp(v_lo, v_hi, 0.5),
+        QuantileInterp::Hazen
+        | QuantileInterp::Weibull
+        | QuantileInterp::MedianUnbiased
+        | QuantileInterp::NormalUnbiased => {
+            unreachable!("H&F methods return via the dedicated clamped-plan block above")
+        }
     }
 }
 
@@ -29368,8 +30534,8 @@ fn key_matches_prefix(key: u64, prefix: u64, fixed: u32) -> bool {
     fixed == 0 || (key >> (64 - fixed)) == prefix
 }
 
-fn percentile_linear_plan(n: usize, q: f64) -> (usize, usize, f64) {
-    let idx = (q / 100.0) * (n - 1) as f64;
+fn percentile_linear_plan(n: usize, fraction: f64) -> (usize, usize, f64) {
+    let idx = fraction * (n - 1) as f64;
     let lo = idx.floor() as usize;
     let frac = idx - lo as f64;
     if frac == 0.0 || lo >= n - 1 {
@@ -29402,7 +30568,7 @@ fn par_select_percentiles_linear(data: &[f64], qs: &[f64]) -> Vec<f64> {
                 v_lo
             } else {
                 let v_hi = selected[ranks.binary_search(&hi).expect("planned hi rank")];
-                v_lo * (1.0 - frac) + v_hi * frac
+                numpy_quantile_lerp(v_lo, v_hi, frac)
             }
         })
         .collect()
@@ -31463,8 +32629,27 @@ fn reduce_sum_axis_contiguous(
     let outer = shape[..axis].iter().copied().product::<usize>();
 
     if inner == 1 {
-        for (slot, chunk) in out_values.iter_mut().zip(values.chunks_exact(axis_len)) {
-            *slot = reduce_sum_values(chunk);
+        if out_values.len() >= 2
+            && values.len() >= REDUCE_SUM_LAST_AXIS_PARALLEL_MIN_ELEMS
+            && rayon::current_num_threads() >= 2
+        {
+            // Rows are independent; keep each row's reduction serial so its bit pattern is
+            // identical to the original serial path.
+            let row_band = out_values
+                .len()
+                .div_ceil(rayon::current_num_threads().saturating_mul(2));
+            out_values
+                .par_chunks_mut(row_band)
+                .zip(values.par_chunks(axis_len * row_band))
+                .for_each(|(slots, value_band)| {
+                    for (slot, row) in slots.iter_mut().zip(value_band.chunks_exact(axis_len)) {
+                        *slot = reduce_sum_values(row);
+                    }
+                });
+        } else {
+            for (slot, chunk) in out_values.iter_mut().zip(values.chunks_exact(axis_len)) {
+                *slot = reduce_sum_values(chunk);
+            }
         }
         return;
     }
@@ -32256,7 +33441,7 @@ fn reduce_fold_axis_contiguous(
     shape: &[usize],
     axis: usize,
     out_values: &mut [f64],
-    fold: impl Fn(f64, f64) -> f64,
+    fold: impl Fn(f64, f64) -> f64 + Sync,
 ) {
     debug_assert!(axis < shape.len());
     if out_values.is_empty() {
@@ -32270,6 +33455,48 @@ fn reduce_fold_axis_contiguous(
 
     let inner = shape[axis + 1..].iter().copied().product::<usize>();
     let outer = shape[..axis].iter().copied().product::<usize>();
+
+    if inner == 1 {
+        // Last axis: rows are independent, so assign coarse row bands per
+        // Rayon worker (the shipped reduce_sum row-band structure). Each row
+        // keeps the exact element-0 seed and left-to-right fold order, so
+        // every output bit is identical to the serial walk for ANY fold —
+        // including the order-dependent min/max signed-zero folds, whose
+        // "do not parallelize" warnings concern reordering WITHIN a row's
+        // fold; banding parallelizes across rows only (the same argument as
+        // reduce_minmax_axis_simd's across-columns SIMD). This retries the
+        // 2026-07-11 row-band no-ship UNDER its retry predicate (one-binary
+        // ABBA serial-arm harness, pinned RAYON_NUM_THREADS, same worker).
+        if out_values.len() >= 2
+            && values.len() >= REDUCE_SUM_LAST_AXIS_PARALLEL_MIN_ELEMS
+            && rayon::current_num_threads() >= 2
+        {
+            let row_band = out_values
+                .len()
+                .div_ceil(rayon::current_num_threads().saturating_mul(2));
+            out_values
+                .par_chunks_mut(row_band)
+                .zip(values.par_chunks(axis_len * row_band))
+                .for_each(|(slots, value_band)| {
+                    for (slot, row) in slots.iter_mut().zip(value_band.chunks_exact(axis_len)) {
+                        let mut acc = row[0];
+                        for &value in &row[1..] {
+                            acc = fold(acc, value);
+                        }
+                        *slot = acc;
+                    }
+                });
+        } else {
+            for (slot, row) in out_values.iter_mut().zip(values.chunks_exact(axis_len)) {
+                let mut acc = row[0];
+                for &value in &row[1..] {
+                    acc = fold(acc, value);
+                }
+                *slot = acc;
+            }
+        }
+        return;
+    }
 
     let mut out_flat = 0usize;
     for outer_idx in 0..outer {
@@ -32392,13 +33619,18 @@ fn cumulate_axis(
 ) -> Result<Vec<f64>, UFuncError> {
     debug_assert!(axis < shape.len());
     let total = element_count(shape).map_err(UFuncError::Shape)?;
-    let mut out = vec![0.0; total];
-
     let axis_len = shape[axis];
     if axis_len == 0 || total == 0 {
-        return Ok(out);
+        return Ok(vec![0.0; total]);
+    }
+    if axis_len == 1 {
+        // Every lane performs exactly one `fold(identity, value)`. Write that
+        // result directly instead of zero-filling the output and dispatching
+        // one-element scan lanes through Rayon.
+        return Ok(values.iter().map(|&value| fold(identity, value)).collect());
     }
 
+    let mut out = vec![0.0; total];
     let inner: usize = fnp_ndarray::element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?;
     let outer: usize = fnp_ndarray::element_count(&shape[..axis]).map_err(UFuncError::Shape)?;
 
@@ -32473,13 +33705,15 @@ fn cumulate_axis_i64(
 ) -> Result<Vec<i64>, UFuncError> {
     debug_assert!(axis < shape.len());
     let total = element_count(shape).map_err(UFuncError::Shape)?;
-    let mut out = vec![0i64; total];
-
     let axis_len = shape[axis];
     if axis_len == 0 || total == 0 {
-        return Ok(out);
+        return Ok(vec![0i64; total]);
+    }
+    if axis_len == 1 {
+        return Ok(values.iter().map(|&value| fold(identity, value)).collect());
     }
 
+    let mut out = vec![0i64; total];
     let inner: usize = fnp_ndarray::element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?;
     let outer: usize = fnp_ndarray::element_count(&shape[..axis]).map_err(UFuncError::Shape)?;
 
@@ -33528,6 +34762,84 @@ fn transpose_last2_par<T: Copy + Send + Sync>(
         src.chunks(plane)
             .zip(dst.chunks_mut(plane))
             .for_each(do_plane);
+    }
+}
+
+/// Fill `new_count` elements by cyclically repeating `src`: seed with the
+/// prefix, then double via `extend_from_within` (the .359 resize kernel,
+/// generic over the f64 bridge and the i64/u64 sidecar payloads). Produces
+/// exactly `src[i % src.len()]` at every position - a pure relocation.
+fn resize_seed_double<T: Copy>(src: &[T], new_count: usize) -> Vec<T> {
+    let mut out = Vec::with_capacity(new_count);
+    let seed_len = src.len().min(new_count);
+    out.extend_from_slice(&src[..seed_len]);
+    while out.len() < new_count {
+        let copy_len = out.len().min(new_count - out.len());
+        out.extend_from_within(..copy_len);
+    }
+    out
+}
+
+/// Transpose for a suffix-identity permutation (`perm[d] == d` for every
+/// `d >= k`): the trailing axes keep identical C-strides in source and
+/// destination, so each destination block of `block = prod(shape[k..])`
+/// elements is one contiguous source run. Copies whole blocks, advancing the
+/// run start with a prefix-only odometer (one amortized-O(1) step per block
+/// instead of per element). `prefix_shape` is the permuted leading shape
+/// (`new_shape[..k]`) and `prefix_step` the source-offset increment per leading
+/// output axis (`old_strides[perm[d]]`). A pure data move, so bit-for-bit
+/// identical to the per-element gather.
+fn transpose_suffix_blocks_par<T: Copy + Send + Sync>(
+    src: &[T],
+    dst: &mut [T],
+    prefix_shape: &[usize],
+    prefix_step: &[usize],
+    block: usize,
+) {
+    const TRANSPOSE_CHUNK: usize = 1 << 14;
+    const TRANSPOSE_PAR_MIN: usize = 1 << 15;
+    let k = prefix_shape.len();
+    // Parallel chunks hold a whole number of blocks near the odometer chunk size.
+    let blocks_per_chunk = (TRANSPOSE_CHUNK / block).max(1);
+    let chunk_elems = blocks_per_chunk * block;
+    // C-strides over the permuted leading shape, in units of blocks.
+    let mut prefix_strides = vec![1usize; k];
+    for d in (0..k.saturating_sub(1)).rev() {
+        prefix_strides[d] = prefix_strides[d + 1] * prefix_shape[d + 1];
+    }
+    let fill = |(ci, chunk): (usize, &mut [T])| {
+        if chunk.is_empty() {
+            return;
+        }
+        // Decompose the chunk's first block index into leading coordinates.
+        let mut coord = vec![0usize; k];
+        let mut rem = ci * blocks_per_chunk;
+        for d in 0..k {
+            coord[d] = rem / prefix_strides[d];
+            rem %= prefix_strides[d];
+        }
+        let mut off: usize = (0..k).map(|d| coord[d] * prefix_step[d]).sum();
+        for out in chunk.chunks_mut(block) {
+            out.copy_from_slice(&src[off..off + block]);
+            // Odometer increment over the leading axes (least-significant last).
+            let mut d = k;
+            while d > 0 {
+                d -= 1;
+                coord[d] += 1;
+                off += prefix_step[d];
+                if coord[d] < prefix_shape[d] {
+                    break;
+                }
+                coord[d] = 0;
+                off -= prefix_shape[d] * prefix_step[d];
+            }
+        }
+    };
+    let parallel = dst.len() >= TRANSPOSE_PAR_MIN && rayon::current_num_threads() >= 2;
+    if parallel {
+        dst.par_chunks_mut(chunk_elems).enumerate().for_each(fill);
+    } else {
+        dst.chunks_mut(chunk_elems).enumerate().for_each(fill);
     }
 }
 
@@ -35692,32 +37004,62 @@ impl MaskedArray {
                         let total = self.data.values().len() as f64;
                         Ok(UFuncArray::scalar(total, DType::I64))
                     }
-                    Some(_) => {
-                        // All valid: sum of ones along axis gives dimension size
-                        let ones = UFuncArray {
-                            shape: self.data.shape().to_vec(),
-                            values: vec![1.0; self.data.values().len()],
+                    Some(axis) => {
+                        let axis = normalize_axis(axis, self.data.shape().len())?;
+                        let axis_len = self.data.shape()[axis] as f64;
+                        let shape = reduced_shape(self.data.shape(), axis, false);
+                        let output_len = element_count(&shape).map_err(UFuncError::Shape)?;
+                        Ok(UFuncArray {
+                            shape,
+                            values: vec![axis_len; output_len],
                             dtype: DType::F64,
                             integer_sidecar: None,
-                        };
-                        Ok(ones.reduce_sum(axis, false)?)
+                        })
                     }
                 }
             }
             Some(mask) => {
-                // Count where mask == 0 (valid): invert mask, then sum
-                let inverted: Vec<f64> = mask
-                    .values()
-                    .iter()
-                    .map(|&m| if m == 0.0 { 1.0 } else { 0.0 })
-                    .collect();
-                let inv = UFuncArray {
-                    shape: mask.shape().to_vec(),
-                    values: inverted,
-                    dtype: DType::F64,
-                    integer_sidecar: None,
-                };
-                Ok(inv.reduce_sum(axis, false)?)
+                // Count validity directly into the final result. The former path
+                // materialized an input-sized f64 inverse mask and immediately
+                // reduced it; these loops visit the same C-order mask cells and
+                // add the same exact 0.0/1.0 values in increasing axis order.
+                match axis {
+                    None => {
+                        let valid = mask.values().iter().fold(0.0, |count, &value| {
+                            count + if value == 0.0 { 1.0 } else { 0.0 }
+                        });
+                        Ok(UFuncArray::scalar(valid, DType::F64))
+                    }
+                    Some(axis) => {
+                        let axis = normalize_axis(axis, mask.shape().len())?;
+                        let axis_len = mask.shape()[axis];
+                        let inner: usize = mask.shape()[axis + 1..].iter().product();
+                        let outer: usize = mask.shape()[..axis].iter().product();
+                        let shape = reduced_shape(mask.shape(), axis, false);
+                        let output_len = element_count(&shape).map_err(UFuncError::Shape)?;
+                        let mut values = vec![0.0; output_len];
+
+                        for outer_index in 0..outer {
+                            let input_base = outer_index * axis_len * inner;
+                            let output_base = outer_index * inner;
+                            let counts = &mut values[output_base..output_base + inner];
+                            for axis_index in 0..axis_len {
+                                let row_base = input_base + axis_index * inner;
+                                let row = &mask.values()[row_base..row_base + inner];
+                                for (count, &value) in counts.iter_mut().zip(row) {
+                                    *count += if value == 0.0 { 1.0 } else { 0.0 };
+                                }
+                            }
+                        }
+
+                        Ok(UFuncArray {
+                            shape,
+                            values,
+                            dtype: DType::F64,
+                            integer_sidecar: None,
+                        })
+                    }
+                }
             }
         }
     }
@@ -41874,23 +43216,23 @@ mod tests {
         frompyfunc_python_import_with_interpreter, frompyfunc_python_with_interpreter, gcd_arrays,
         geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermeder, hermediv,
         hermefit, hermefromroots, hermeint, hermemul, hermeroots, hermesub, hermeval, hermfit,
-        hermfromroots, hermint,
-        hermmul, hermroots, hermsub, hermval, hypot, interpolate_percentile, is_busday, isnat,
-        isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv, lagfit, lagfromroots, lagint, lagmul,
-        lagroots, lagsub, lagval, lcm_arrays, ldexp, leg2poly, legadd, legder, legdiv, legfit,
-        legfromroots, legint, legmul, legroots, legsub, legval, logaddexp, logaddexp2, ma_is_mask,
-        ma_is_masked, ma_make_mask, ma_mask_or, ma_maximum_fill_value,
-        ma_maximum_fill_value_for_dtype, ma_minimum_fill_value, ma_minimum_fill_value_for_dtype,
-        matmul_accumulate_serial, mediate_ufunc_runtime_policy, modf, nextafter,
-        normalize_fixed_signature_keywords, normalize_signature_keywords, note_unary_float_errors,
-        pad_empty, pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
-        plan_binary_dispatch, plan_binary_dispatch_with_registry,
-        plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
-        reduce_frompyfunc_values, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
-        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_logn, scimath_power,
-        scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex, spacing,
-        take_float_error_events, transpose_tiled, unique_all, unique_counts, unique_inverse,
-        unique_values, validate_override_payload_class, where_nonzero,
+        hermfromroots, hermint, hermmul, hermroots, hermsub, hermval, hypot,
+        interpolate_percentile, is_busday, isnat, isneginf, isposinf, lag2poly, lagadd, lagder,
+        lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays, ldexp,
+        leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub,
+        legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or,
+        ma_maximum_fill_value, ma_maximum_fill_value_for_dtype, ma_minimum_fill_value,
+        ma_minimum_fill_value_for_dtype, matmul_accumulate_serial, mediate_ufunc_runtime_policy,
+        modf, nextafter, normalize_fixed_signature_keywords, normalize_signature_keywords,
+        note_unary_float_errors, pad_empty, pad_linear_ramp, pad_stat,
+        parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
+        plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
+        poly2herm, poly2herme, poly2lag, poly2leg, reduce_frompyfunc_values,
+        resolve_override_dispatch, scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log,
+        scimath_log2, scimath_log10, scimath_logn, scimath_power, scimath_sqrt, seterr,
+        seterr_state, seterrcall, signbit, sort_complex, spacing, take_float_error_events,
+        transpose_tiled, unique_all, unique_counts, unique_inverse, unique_values,
+        validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -43618,6 +44960,140 @@ print(json.dumps(payload))
 
         let out = arr.reduce_sum(Some(1), false).expect("sum axis=1");
         assert_eq!(out.values(), &[1.0]);
+    }
+
+    #[test]
+    fn reduce_sum_last_axis_parallel_matches_serial_row_bits() {
+        let rows = 257usize;
+        let cols = 1024usize;
+        let mut values = Vec::with_capacity(rows * cols);
+        for row in 0..rows {
+            for col in 0..cols {
+                let value = match row {
+                    0 => [1.0e16, 1.0, -1.0e16, 1.0][col % 4],
+                    1 => -0.0,
+                    2 if col == 17 => f64::NAN,
+                    3 if col == 29 => f64::INFINITY,
+                    4 if col == 31 => f64::INFINITY,
+                    4 if col == 37 => f64::NEG_INFINITY,
+                    _ => (((row * 131 + col * 17 + 11) % 4093) as f64 - 2046.0) / 8.0,
+                };
+                values.push(value);
+            }
+        }
+
+        let reference_bits = values
+            .chunks_exact(cols)
+            .map(|row| crate::reduce_sum_values(row).to_bits())
+            .collect::<Vec<_>>();
+        let array = UFuncArray::new(vec![rows, cols], values, DType::F64).expect("array");
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("parallel proof pool");
+        let output = pool
+            .install(|| array.reduce_sum(Some(1), false))
+            .expect("last-axis sum");
+        let output_bits = output
+            .values()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>();
+
+        assert_eq!(output.shape(), &[rows]);
+        assert_eq!(output_bits, reference_bits);
+    }
+
+    #[test]
+    fn reduce_fold_last_axis_parallel_matches_serial_row_bits() {
+        // The shared reduce_fold_axis_contiguous last-axis row-band lever must
+        // be bit-identical to the serial per-row fold for EVERY caller: prod
+        // (overflow-then-zero, signed zero, NaN payload, infinities, near-one
+        // rows) and the order-dependent min/max signed-zero folds (banding
+        // parallelizes across rows only; each row keeps its left-to-right
+        // order and element-0 seed).
+        let rows = 512usize;
+        let cols = 1024usize;
+        assert!(rows * cols >= crate::REDUCE_SUM_LAST_AXIS_PARALLEL_MIN_ELEMS);
+        let mut values = Vec::with_capacity(rows * cols);
+        for row in 0..rows {
+            for col in 0..cols {
+                let value = match row {
+                    0 => [1.0e200, 1.0e200, 0.0, 1.0][col % 4], // overflow then zero
+                    1 => [-0.0, 0.0][col % 2],                  // signed-zero tie order
+                    2 if col == 17 => f64::from_bits(0x7ff8_0000_dead_beef), // NaN payload
+                    3 if col == 29 => f64::INFINITY,
+                    4 if col == 31 => f64::NEG_INFINITY,
+                    5 => 1.0 + ((col as f64) - 512.0) * 1.0e-9, // finite near-one
+                    _ => (((row * 131 + col * 17 + 11) % 4093) as f64 - 2046.0) / 8.0,
+                };
+                values.push(value);
+            }
+        }
+
+        let prod_reference: Vec<u64> = values
+            .chunks_exact(cols)
+            .map(|row| row[1..].iter().fold(row[0], |acc, &v| acc * v).to_bits())
+            .collect();
+        let nan_min = |a: f64, b: f64| {
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else if a < b {
+                a
+            } else {
+                b
+            }
+        };
+        let nan_max = |a: f64, b: f64| {
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else if a > b {
+                a
+            } else {
+                b
+            }
+        };
+        let min_reference: Vec<u64> = values
+            .chunks_exact(cols)
+            .map(|row| {
+                row[1..]
+                    .iter()
+                    .fold(row[0], |acc, &v| nan_min(acc, v))
+                    .to_bits()
+            })
+            .collect();
+        let max_reference: Vec<u64> = values
+            .chunks_exact(cols)
+            .map(|row| {
+                row[1..]
+                    .iter()
+                    .fold(row[0], |acc, &v| nan_max(acc, v))
+                    .to_bits()
+            })
+            .collect();
+
+        let array = UFuncArray::new(vec![rows, cols], values, DType::F64).expect("array");
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("parallel proof pool");
+        let (prod_bits, min_bits, max_bits) = pool.install(|| {
+            let prod = array.reduce_prod(Some(1), false).expect("last-axis prod");
+            let min = array.reduce_min(Some(1), false).expect("last-axis min");
+            let max = array.reduce_max(Some(1), false).expect("last-axis max");
+            (
+                prod.values()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                min.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                max.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            )
+        });
+
+        assert_eq!(prod_bits, prod_reference, "prod row bits diverged");
+        assert_eq!(min_bits, min_reference, "min row bits diverged");
+        assert_eq!(max_bits, max_reference, "max row bits diverged");
     }
 
     fn large_cancellation_values() -> Vec<f64> {
@@ -46904,6 +48380,44 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn cumulate_axis_i64_singleton_matches_former_lane_bits() {
+        let values = vec![
+            i64::MIN,
+            -((1_i64 << 53) + 7),
+            -1,
+            0,
+            1,
+            (1_i64 << 53) + 7,
+            i64::MAX,
+        ];
+        let shape = [values.len(), 1];
+
+        let sum = super::cumulate_axis_i64(&values, &shape, 1, 0, i64::wrapping_add)
+            .expect("singleton i64 cumsum helper");
+        let prod = super::cumulate_axis_i64(&values, &shape, 1, 1, i64::wrapping_mul)
+            .expect("singleton i64 cumprod helper");
+        assert_eq!(sum, values);
+        assert_eq!(prod, values);
+
+        let arr = UFuncArray::from_storage(shape.to_vec(), ArrayStorage::I64(values.clone()))
+            .expect("exact i64 array");
+        let cumsum = arr.cumsum(Some(1)).expect("singleton i64 cumsum");
+        let cumprod = arr.cumprod(Some(1)).expect("singleton i64 cumprod");
+        assert_eq!(cumsum.shape(), shape);
+        assert_eq!(cumprod.shape(), shape);
+        assert_eq!(cumsum.dtype(), DType::I64);
+        assert_eq!(cumprod.dtype(), DType::I64);
+        assert_eq!(
+            cumsum.to_storage().expect("exact cumsum storage"),
+            ArrayStorage::I64(values.clone())
+        );
+        assert_eq!(
+            cumprod.to_storage().expect("exact cumprod storage"),
+            ArrayStorage::I64(values)
+        );
+    }
+
+    #[test]
     fn cumulate_axis_int_rowwise_matches_strided_reference() {
         // Integer cumsum/cumprod along non-last axes use the same row-wise rewrite;
         // verify i64 and u64 (add and mul) match the old stride-`inner` column scan
@@ -47877,11 +49391,432 @@ print(json.dumps(payload))
 
     #[test]
     fn transpose_identity() {
-        let arr = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
-            .expect("arr");
+        let expected_bits = [
+            (-0.0_f64).to_bits(),
+            0.0_f64.to_bits(),
+            1,
+            f64::INFINITY.to_bits(),
+            f64::NEG_INFINITY.to_bits(),
+            0x7ff8_0000_0000_0042,
+        ];
+        let arr = UFuncArray::new(
+            vec![2, 3],
+            expected_bits.map(f64::from_bits).to_vec(),
+            DType::F64,
+        )
+        .expect("arr");
         let out = arr.transpose(Some(&[0, 1])).expect("identity transpose");
         assert_eq!(out.shape(), &[2, 3]);
-        assert_eq!(out.values(), arr.values());
+        assert_eq!(out.dtype(), DType::F64);
+        assert_eq!(
+            out.values()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected_bits
+        );
+        assert_ne!(out.values().as_ptr(), arr.values().as_ptr());
+
+        assert!(matches!(
+            arr.transpose(Some(&[0])),
+            Err(UFuncError::AxisOutOfBounds { axis: 1, ndim: 2 })
+        ));
+        assert!(matches!(
+            arr.transpose(Some(&[0, 2])),
+            Err(UFuncError::AxisOutOfBounds { axis: 2, ndim: 2 })
+        ));
+        assert!(matches!(
+            arr.transpose(Some(&[0, 0])),
+            Err(UFuncError::AxisOutOfBounds { axis: -1, ndim: 2 })
+        ));
+
+        let scalar = UFuncArray::new(vec![], vec![f64::from_bits(expected_bits[5])], DType::F64)
+            .expect("scalar");
+        assert_eq!(
+            scalar.transpose(None).expect("scalar transpose").values()[0].to_bits(),
+            expected_bits[5]
+        );
+        let empty = UFuncArray::new(vec![0, 3], vec![], DType::F64).expect("empty array");
+        assert_eq!(
+            empty
+                .transpose(Some(&[0, 1]))
+                .expect("empty identity transpose")
+                .shape(),
+            &[0, 3]
+        );
+    }
+
+    #[test]
+    fn transpose_identity_preserves_exact_integer_sidecars() {
+        let signed_values = vec![i64::MIN, -((1_i64 << 53) + 7), 0, (1_i64 << 53) + 9];
+        let signed = UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(signed_values.clone()))
+            .expect("signed array");
+        let signed_out = signed
+            .transpose(Some(&[0, 1]))
+            .expect("signed identity transpose");
+        assert_eq!(
+            signed_out.to_storage().expect("signed storage"),
+            ArrayStorage::I64(signed_values)
+        );
+        match (signed.integer_sidecar(), signed_out.integer_sidecar()) {
+            (Some(IntegerSidecar::I64(input)), Some(IntegerSidecar::I64(output))) => {
+                assert_eq!(output, input);
+                assert_ne!(output.as_ptr(), input.as_ptr());
+            }
+            _ => panic!("identity transpose must preserve the i64 sidecar"),
+        }
+
+        let unsigned_values = vec![0, 1_u64 << 63, (1_u64 << 53) + 11, u64::MAX];
+        let unsigned =
+            UFuncArray::from_storage(vec![2, 2], ArrayStorage::U64(unsigned_values.clone()))
+                .expect("unsigned array");
+        let unsigned_out = unsigned
+            .transpose(Some(&[0, 1]))
+            .expect("unsigned identity transpose");
+        assert_eq!(
+            unsigned_out.to_storage().expect("unsigned storage"),
+            ArrayStorage::U64(unsigned_values)
+        );
+        match (unsigned.integer_sidecar(), unsigned_out.integer_sidecar()) {
+            (Some(IntegerSidecar::U64(input)), Some(IntegerSidecar::U64(output))) => {
+                assert_eq!(output, input);
+                assert_ne!(output.as_ptr(), input.as_ptr());
+            }
+            _ => panic!("identity transpose must preserve the u64 sidecar"),
+        }
+    }
+
+    /// Naive reference permutation: per-element coordinate decomposition with
+    /// `ndim` divisions — the obviously-correct gather every fast path must
+    /// reproduce bit-for-bit.
+    fn naive_permute_bits(values: &[f64], dims: &[usize], perm: &[usize]) -> Vec<u64> {
+        let ndim = dims.len();
+        let new_shape: Vec<usize> = perm.iter().map(|&a| dims[a]).collect();
+        let mut old_strides = vec![1usize; ndim];
+        for d in (0..ndim.saturating_sub(1)).rev() {
+            old_strides[d] = old_strides[d + 1] * dims[d + 1];
+        }
+        let mut new_strides = vec![1usize; ndim];
+        for d in (0..ndim.saturating_sub(1)).rev() {
+            new_strides[d] = new_strides[d + 1] * new_shape[d + 1];
+        }
+        let total: usize = dims.iter().product();
+        (0..total)
+            .map(|flat_new| {
+                let mut rem = flat_new;
+                let mut flat_old = 0usize;
+                for (na, &ns) in new_strides.iter().enumerate() {
+                    flat_old += (rem / ns) * old_strides[perm[na]];
+                    rem %= ns;
+                }
+                values[flat_old].to_bits()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn transpose_suffix_identity_blocks_match_naive_gather() {
+        // Leading-axes permutations that keep a trailing run of axes in place
+        // ride the block-copy fast path; size-1 trailing axes (block == 1) and
+        // the parallel-threshold crossing stay covered too.
+        let cases: &[(&[usize], &[usize])] = &[
+            (&[5, 4, 3], &[1, 0, 2]),
+            (&[3, 4, 2, 5], &[2, 0, 1, 3]),
+            (&[3, 4, 2, 5], &[1, 0, 2, 3]),
+            (&[4, 3, 1], &[1, 0, 2]),
+            (&[7, 5, 2, 3], &[2, 1, 0, 3]),
+            (&[64, 32, 32], &[1, 0, 2]),
+        ];
+        for &(dims, perm) in cases {
+            let total: usize = dims.iter().product();
+            // Exercise payload-carrying bit patterns, not just ordinary values.
+            let special = [
+                (-0.0_f64).to_bits(),
+                0x0000_0000_0000_0001, // subnormal
+                f64::INFINITY.to_bits(),
+                f64::NEG_INFINITY.to_bits(),
+                0x7ff8_0000_0000_0042, // NaN payload
+            ];
+            let data: Vec<f64> = (0..total)
+                .map(|i| {
+                    if i % 97 == 0 {
+                        f64::from_bits(special[i % special.len()])
+                    } else {
+                        f64::from_bits(0x3ff0_0000_0000_0000 ^ (i as u64).wrapping_mul(0x9e37))
+                    }
+                })
+                .collect();
+            let arr =
+                UFuncArray::new(dims.to_vec(), data.clone(), DType::F64).expect("suffix input");
+            let out = arr.transpose(Some(perm)).expect("suffix transpose");
+            let expected_shape: Vec<usize> = perm.iter().map(|&a| dims[a]).collect();
+            assert_eq!(out.shape(), expected_shape, "shape for {dims:?} {perm:?}");
+            assert_eq!(
+                out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                naive_permute_bits(&data, dims, perm),
+                "bits for {dims:?} {perm:?}"
+            );
+            assert_ne!(out.values().as_ptr(), arr.values().as_ptr());
+        }
+
+        let empty = UFuncArray::new(vec![0, 3, 2], vec![], DType::F64).expect("empty array");
+        let out = empty
+            .transpose(Some(&[1, 0, 2]))
+            .expect("empty suffix transpose");
+        assert_eq!(out.shape(), &[3, 0, 2]);
+    }
+
+    #[test]
+    fn resize_sidecar_seed_double_matches_modulo_gather() {
+        // Sidecar resize must reproduce the former modulo-gather path exactly:
+        // f64 bridge bits AND exact integer payloads beyond 2^53, for expand
+        // (non-multiple lengths), exact-multiple, and shrink cases.
+        let signed_values = vec![
+            i64::MIN,
+            -((1_i64 << 53) + 7),
+            (1_i64 << 53) + 9,
+            i64::MAX,
+            42,
+        ];
+        let arr = UFuncArray::from_storage(vec![5], ArrayStorage::I64(signed_values.clone()))
+            .expect("sidecar array");
+        for &new_len in &[13usize, 10, 3, 5, 1] {
+            let out = arr.resize(&[new_len]).expect("sidecar resize");
+            assert_eq!(out.shape(), &[new_len]);
+            // Former reference: bridge and sidecar gathered via i % len.
+            let expected_bridge: Vec<u64> = (0..new_len)
+                .map(|i| arr.values()[i % 5].to_bits())
+                .collect();
+            let expected_sidecar: Vec<i64> = (0..new_len).map(|i| signed_values[i % 5]).collect();
+            assert_eq!(
+                out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                expected_bridge,
+                "bridge at len {new_len}"
+            );
+            assert_eq!(
+                out.to_storage().expect("storage"),
+                ArrayStorage::I64(expected_sidecar),
+                "sidecar at len {new_len}"
+            );
+        }
+
+        let unsigned_values = vec![0u64, 1_u64 << 63, (1_u64 << 53) + 11, u64::MAX];
+        let arr = UFuncArray::from_storage(vec![4], ArrayStorage::U64(unsigned_values.clone()))
+            .expect("unsigned array");
+        let out = arr.resize(&[9]).expect("unsigned sidecar resize");
+        let expected: Vec<u64> = (0..9).map(|i| unsigned_values[i % 4]).collect();
+        assert_eq!(
+            out.to_storage().expect("storage"),
+            ArrayStorage::U64(expected)
+        );
+    }
+
+    #[test]
+    fn transpose_block_rotation_matches_naive_gather() {
+        // Block rotations (perm[d] == (g+d) % ndim) route to the tiled 2-D
+        // plane kernel; 3-D rotations are golden-covered elsewhere, so this
+        // pins the 4-D group rotations, size-1 groups, non-tile-multiple dims,
+        // and the parallel-threshold crossing.
+        let cases: &[(&[usize], &[usize])] = &[
+            (&[3, 4, 2, 5], &[2, 3, 0, 1]),
+            (&[3, 4, 2, 5], &[3, 0, 1, 2]),
+            (&[3, 4, 2, 5], &[1, 2, 3, 0]),
+            (&[1, 4, 5], &[1, 2, 0]),
+            (&[4, 1, 5], &[2, 0, 1]),
+            (&[33, 17, 19], &[2, 0, 1]),
+            (&[64, 32, 32], &[1, 2, 0]),
+        ];
+        for &(dims, perm) in cases {
+            let total: usize = dims.iter().product();
+            let special = [
+                (-0.0_f64).to_bits(),
+                0x0000_0000_0000_0001,
+                f64::INFINITY.to_bits(),
+                f64::NEG_INFINITY.to_bits(),
+                0x7ff8_0000_0000_0042,
+            ];
+            let data: Vec<f64> = (0..total)
+                .map(|i| {
+                    if i % 89 == 0 {
+                        f64::from_bits(special[i % special.len()])
+                    } else {
+                        f64::from_bits(0x3ff0_0000_0000_0000 ^ (i as u64).wrapping_mul(0x9e37))
+                    }
+                })
+                .collect();
+            let arr =
+                UFuncArray::new(dims.to_vec(), data.clone(), DType::F64).expect("rotation input");
+            let out = arr.transpose(Some(perm)).expect("rotation transpose");
+            let expected_shape: Vec<usize> = perm.iter().map(|&a| dims[a]).collect();
+            assert_eq!(out.shape(), expected_shape, "shape for {dims:?} {perm:?}");
+            assert_eq!(
+                out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                naive_permute_bits(&data, dims, perm),
+                "bits for {dims:?} {perm:?}"
+            );
+        }
+
+        let empty = UFuncArray::new(vec![3, 0, 2], vec![], DType::F64).expect("empty array");
+        let out = empty
+            .transpose(Some(&[2, 0, 1]))
+            .expect("empty rotation transpose");
+        assert_eq!(out.shape(), &[2, 3, 0]);
+    }
+
+    #[test]
+    fn transpose_block_rotation_preserves_exact_integer_sidecars() {
+        // dims [2, 3, 2], perm [2, 0, 1] (g == 2): output[c, a, b] = input[a, b, c].
+        let dims = vec![2usize, 3, 2];
+        let perm = [2usize, 0, 1];
+        let signed_values: Vec<i64> = vec![
+            i64::MIN,
+            -((1_i64 << 53) + 7),
+            -1,
+            0,
+            1,
+            (1_i64 << 53) + 9,
+            i64::MAX,
+            42,
+            -(1_i64 << 62),
+            (1_i64 << 61) + 3,
+            -3,
+            5,
+        ];
+        let signed =
+            UFuncArray::from_storage(dims.clone(), ArrayStorage::I64(signed_values.clone()))
+                .expect("signed array");
+        let signed_out = signed
+            .transpose(Some(&perm))
+            .expect("signed rotation transpose");
+        let expected_signed: Vec<i64> = {
+            let mut out = Vec::with_capacity(12);
+            for l in 0..2 {
+                for i in 0..2 {
+                    for j in 0..3 {
+                        out.push(signed_values[i * 6 + j * 2 + l]);
+                    }
+                }
+            }
+            out
+        };
+        assert_eq!(
+            signed_out.to_storage().expect("signed storage"),
+            ArrayStorage::I64(expected_signed)
+        );
+
+        let unsigned_values: Vec<u64> = vec![
+            0,
+            1_u64 << 63,
+            (1_u64 << 53) + 11,
+            u64::MAX,
+            7,
+            (1_u64 << 62) + 1,
+            13,
+            1,
+            (1_u64 << 60) + 5,
+            2,
+            (1_u64 << 59) + 9,
+            3,
+        ];
+        let unsigned =
+            UFuncArray::from_storage(dims.clone(), ArrayStorage::U64(unsigned_values.clone()))
+                .expect("unsigned array");
+        let unsigned_out = unsigned
+            .transpose(Some(&perm))
+            .expect("unsigned rotation transpose");
+        let expected_unsigned: Vec<u64> = {
+            let mut out = Vec::with_capacity(12);
+            for l in 0..2 {
+                for i in 0..2 {
+                    for j in 0..3 {
+                        out.push(unsigned_values[i * 6 + j * 2 + l]);
+                    }
+                }
+            }
+            out
+        };
+        assert_eq!(
+            unsigned_out.to_storage().expect("unsigned storage"),
+            ArrayStorage::U64(expected_unsigned)
+        );
+    }
+
+    #[test]
+    fn transpose_suffix_identity_preserves_exact_integer_sidecars() {
+        let dims = vec![2usize, 3, 2];
+        let perm = [1usize, 0, 2];
+        let signed_values: Vec<i64> = vec![
+            i64::MIN,
+            -((1_i64 << 53) + 7),
+            -1,
+            0,
+            1,
+            (1_i64 << 53) + 9,
+            i64::MAX,
+            42,
+            -(1_i64 << 62),
+            (1_i64 << 61) + 3,
+            -3,
+            5,
+        ];
+        let signed =
+            UFuncArray::from_storage(dims.clone(), ArrayStorage::I64(signed_values.clone()))
+                .expect("signed array");
+        let signed_out = signed
+            .transpose(Some(&perm))
+            .expect("signed suffix transpose");
+        // Reference order from the naive gather over the sidecar itself.
+        let expected_signed: Vec<i64> = {
+            let mut out = Vec::with_capacity(12);
+            for j in 0..3 {
+                for i in 0..2 {
+                    for l in 0..2 {
+                        out.push(signed_values[i * 6 + j * 2 + l]);
+                    }
+                }
+            }
+            out
+        };
+        assert_eq!(
+            signed_out.to_storage().expect("signed storage"),
+            ArrayStorage::I64(expected_signed)
+        );
+
+        let unsigned_values: Vec<u64> = vec![
+            0,
+            1_u64 << 63,
+            (1_u64 << 53) + 11,
+            u64::MAX,
+            7,
+            (1_u64 << 62) + 1,
+            13,
+            1,
+            (1_u64 << 60) + 5,
+            2,
+            (1_u64 << 59) + 9,
+            3,
+        ];
+        let unsigned =
+            UFuncArray::from_storage(dims.clone(), ArrayStorage::U64(unsigned_values.clone()))
+                .expect("unsigned array");
+        let unsigned_out = unsigned
+            .transpose(Some(&perm))
+            .expect("unsigned suffix transpose");
+        let expected_unsigned: Vec<u64> = {
+            let mut out = Vec::with_capacity(12);
+            for j in 0..3 {
+                for i in 0..2 {
+                    for l in 0..2 {
+                        out.push(unsigned_values[i * 6 + j * 2 + l]);
+                    }
+                }
+            }
+            out
+        };
+        assert_eq!(
+            unsigned_out.to_storage().expect("unsigned storage"),
+            ArrayStorage::U64(expected_unsigned)
+        );
     }
 
     #[test]
@@ -50939,7 +52874,15 @@ print(json.dumps(payload))
                     .filter(|v| !v.is_nan())
                     .collect();
                 lane.sort_by(|a, b| a.total_cmp(b));
-                let exp = interpolate_percentile(&lane, 0.5);
+                // MEDIAN oracle (mean of middles), matching numpy _nanmedian1d - NOT
+                // the quantile(0.5) lerp (they differ bitwise; see the kernel comment).
+                let exp = if lane.is_empty() {
+                    f64::NAN
+                } else if lane.len() % 2 == 1 {
+                    lane[lane.len() / 2]
+                } else {
+                    (lane[lane.len() / 2 - 1] + lane[lane.len() / 2]) / 2.0
+                };
                 let got = out.values()[outer];
                 if exp.is_nan() {
                     assert!(
@@ -53056,6 +54999,61 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn flip_singleton_axis_identity_clone() {
+        // Reversing a singleton axis is the identity: the clone shortcut must
+        // preserve raw bits (signed zero, NaN payload, infinities), shape,
+        // exact integer sidecars, and independent backing, and must not
+        // disturb empty axes, axis-0 singletons, negative axis indexing, or
+        // non-singleton flips.
+        let bits = [
+            (-0.0_f64).to_bits(),
+            0x0000_0000_0000_0001,
+            f64::INFINITY.to_bits(),
+            f64::NEG_INFINITY.to_bits(),
+            0x7ff8_0000_0000_0042,
+            0x3ff0_0000_0000_0000,
+        ];
+        let arr = UFuncArray::new(vec![6, 1], bits.map(f64::from_bits).to_vec(), DType::F64)
+            .expect("singleton input");
+        for &axis in &[1isize, -1] {
+            let out = arr.flip(Some(axis)).expect("singleton flip");
+            assert_eq!(out.shape(), &[6, 1]);
+            assert_eq!(
+                out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                bits.to_vec()
+            );
+            assert_ne!(out.values().as_ptr(), arr.values().as_ptr());
+        }
+
+        // Axis-0 singleton.
+        let row = UFuncArray::new(vec![1, 4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let out = row.flip(Some(0)).unwrap();
+        assert_eq!(out.values(), &[1.0, 2.0, 3.0, 4.0]);
+
+        // Exact integer sidecar beyond 2^53 preserved with fresh backing.
+        let signed_values = vec![i64::MIN, -((1_i64 << 53) + 7), (1_i64 << 53) + 9, i64::MAX];
+        let signed = UFuncArray::from_storage(vec![4, 1], ArrayStorage::I64(signed_values.clone()))
+            .expect("signed array");
+        let signed_out = signed.flip(Some(1)).expect("signed singleton flip");
+        assert_eq!(
+            signed_out.to_storage().expect("signed storage"),
+            ArrayStorage::I64(signed_values)
+        );
+
+        // Empty axis stays empty.
+        let empty = UFuncArray::new(vec![3, 0], vec![], DType::F64).unwrap();
+        assert_eq!(empty.flip(Some(1)).unwrap().shape(), &[3, 0]);
+
+        // Non-singleton flips are untouched by the shortcut.
+        let dense =
+            UFuncArray::new(vec![2, 3], (0..6).map(|i| i as f64).collect(), DType::F64).unwrap();
+        assert_eq!(
+            dense.flip(Some(1)).unwrap().values(),
+            &[2.0, 1.0, 0.0, 5.0, 4.0, 3.0]
+        );
+    }
+
+    #[test]
     fn flip_axis_build_matches_naive_and_golden() {
         use sha2::{Digest, Sha256};
         // The parallel copy_from_slice flip must be BIT-IDENTICAL to the old
@@ -54023,6 +56021,50 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn take_axis_repeated_lane_preserves_bits_and_integer_sidecar() {
+        let bits = [
+            0x8000_0000_0000_0000,
+            0x7ff8_0000_0000_1234,
+            f64::INFINITY.to_bits(),
+            f64::NEG_INFINITY.to_bits(),
+            1.25f64.to_bits(),
+            (-2.5f64).to_bits(),
+        ];
+        let values: Vec<f64> = bits.into_iter().map(f64::from_bits).collect();
+        let array = UFuncArray::new(vec![2, 3], values, DType::F64).unwrap();
+        let taken = array.take(&[1, 1, 1, 1], Some(1)).unwrap();
+        assert_eq!(taken.shape(), &[2, 4]);
+        assert_eq!(
+            taken
+                .values()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            vec![
+                bits[1], bits[1], bits[1], bits[1], bits[4], bits[4], bits[4], bits[4]
+            ]
+        );
+
+        let exact = vec![
+            (1_u64 << 53) + 1,
+            (1_u64 << 53) + 3,
+            (1_u64 << 53) + 5,
+            (1_u64 << 53) + 7,
+            (1_u64 << 53) + 9,
+            (1_u64 << 53) + 11,
+        ];
+        let array = UFuncArray::from_storage(vec![2, 3], ArrayStorage::U64(exact.clone())).unwrap();
+        let taken = array.take(&[1, 1, 1, 1], Some(1)).unwrap();
+        assert_eq!(taken.shape(), &[2, 4]);
+        assert_eq!(
+            taken.to_storage().unwrap(),
+            ArrayStorage::U64(vec![
+                exact[1], exact[1], exact[1], exact[1], exact[4], exact[4], exact[4], exact[4],
+            ])
+        );
+    }
+
+    #[test]
     fn take_duplicate_indices() {
         let a = UFuncArray::new(vec![3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
         let r = a.take(&[1, 1, 1], None).unwrap();
@@ -54395,13 +56437,11 @@ print(json.dumps(payload))
         let expected: Vec<f64> = original
             .iter()
             .zip(&mask_values)
-            .map(|(&current, &mask_value)| {
-                if mask_value != 0.0 {
-                    value
-                } else {
-                    current
-                }
-            })
+            .map(
+                |(&current, &mask_value)| {
+                    if mask_value != 0.0 { value } else { current }
+                },
+            )
             .collect();
 
         let mut actual = UFuncArray::new(vec![n], original, DType::F64).unwrap();
@@ -55927,6 +57967,37 @@ print(json.dumps(payload))
         let x = UFuncArray::new(vec![3], vec![0.0, 1.0, 100.0], DType::F64).unwrap();
         let r = UFuncArray::polyval(&c, &x).unwrap();
         assert_eq!(r.values(), &[42.0, 42.0, 42.0]);
+    }
+
+    #[test]
+    fn polyval_constant_preserves_former_horner_edge_bits() {
+        let x_values = vec![
+            0.0,
+            -0.0,
+            2.0,
+            -3.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ];
+        let x = UFuncArray::new(vec![x_values.len()], x_values.clone(), DType::F64).unwrap();
+
+        for coefficient in [42.0, 0.0, -0.0, f64::INFINITY, f64::NAN] {
+            let c = UFuncArray::new(vec![1], vec![coefficient], DType::F64).unwrap();
+            let actual = UFuncArray::polyval(&c, &x).unwrap();
+            let expected: Vec<u64> = x_values
+                .iter()
+                .map(|&xi| (0.0 * xi + coefficient).to_bits())
+                .collect();
+            assert_eq!(
+                actual
+                    .values()
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -58172,6 +60243,42 @@ print(json.dumps(payload))
         );
     }
 
+    #[test]
+    fn resize_non_integer_fast_path_matches_modulo_control_bits() {
+        let source = vec![
+            0.0,
+            -0.0,
+            f64::from_bits(0x7ff8_0000_0000_1234),
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1.25,
+            -3.5,
+        ];
+        let array = UFuncArray::new(vec![source.len()], source, DType::F64).unwrap();
+
+        for new_count in [0, 1, 2, 5, 7, 8, 19, 64] {
+            let former_values: Vec<f64> = (0..new_count)
+                .map(|index| array.values[index % array.values.len()])
+                .collect();
+            let candidate = array.resize(&[new_count]).unwrap();
+            assert_eq!(candidate.shape, vec![new_count]);
+            assert_eq!(candidate.dtype, DType::F64);
+            assert_eq!(candidate.integer_sidecar, None);
+            assert_eq!(
+                candidate
+                    .values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                former_values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "resize bit mismatch at output length {new_count}"
+            );
+        }
+    }
+
     // ── polynomial: polyfit, polyder, polyint, roots ──
 
     #[test]
@@ -58518,7 +60625,11 @@ print(json.dumps(payload))
     fn polynomial_2poly_matches_numpy_golden() {
         // numpy.polynomial.*.{X}2poly([1,2,3,4,5]) — basis -> power-series conversion.
         let c = [1.0, 2.0, 3.0, 4.0, 5.0];
-        poly_close_vec(&cheb2poly(&c), &[3.0, -10.0, -34.0, 16.0, 40.0], "cheb2poly");
+        poly_close_vec(
+            &cheb2poly(&c),
+            &[3.0, -10.0, -34.0, 16.0, 40.0],
+            "cheb2poly",
+        );
         poly_close_vec(
             &leg2poly(&c),
             &[1.375, -4.0, -14.25, 10.0, 21.875],
@@ -58618,15 +60729,7 @@ print(json.dumps(payload))
         );
         poly_close_vec(
             &hermint(&c, 2),
-            &[
-                4.5,
-                -2.5,
-                0.125,
-                0.083_333_33,
-                0.0625,
-                0.05,
-                0.041_666_67,
-            ],
+            &[4.5, -2.5, 0.125, 0.083_333_33, 0.0625, 0.05, 0.041_666_67],
             "hermint2",
         );
         poly_close_vec(
@@ -58640,7 +60743,11 @@ print(json.dumps(payload))
     fn polynomial_fromroots_matches_numpy_golden() {
         // numpy.polynomial.*.{X}fromroots([-1.5, 0.5, 2.0]).
         let r = [-1.5, 0.5, 2.0];
-        poly_close_vec(&chebfromroots(&r), &[1.0, -2.0, -0.5, 0.25], "chebfromroots");
+        poly_close_vec(
+            &chebfromroots(&r),
+            &[1.0, -2.0, -0.5, 0.25],
+            "chebfromroots",
+        );
         poly_close_vec(
             &legfromroots(&r),
             &[1.166_666_67, -2.15, -0.666_666_67, 0.4],
@@ -58780,15 +60887,7 @@ print(json.dumps(payload))
         );
         poly_close_vec(
             &hermeint(&c, 2),
-            &[
-                2.25,
-                -2.0,
-                0.5,
-                0.333_333_33,
-                0.25,
-                0.2,
-                0.166_666_67,
-            ],
+            &[2.25, -2.0, 0.5, 0.333_333_33, 0.25, 0.2, 0.166_666_67],
             "hermeint2",
         );
         // der undoes int (the constant is removed by differentiation).
@@ -59757,18 +61856,17 @@ print(json.dumps(payload))
         let sidecar_values: Vec<i64> = (0..sidecar_n)
             .map(|i| (1_i64 << 53) + i as i64 * 17 - 9)
             .collect();
-        let sidecar = UFuncArray::from_storage(
-            vec![sidecar_n],
-            ArrayStorage::I64(sidecar_values.clone()),
-        )
-        .unwrap();
-        let sidecar_out = sidecar.delete(&[0, sidecar_n / 2, sidecar_n - 1, 0], None).unwrap();
+        let sidecar =
+            UFuncArray::from_storage(vec![sidecar_n], ArrayStorage::I64(sidecar_values.clone()))
+                .unwrap();
+        let sidecar_out = sidecar
+            .delete(&[0, sidecar_n / 2, sidecar_n - 1, 0], None)
+            .unwrap();
         let expected_sidecar: Vec<i64> = sidecar_values
             .iter()
             .enumerate()
             .filter_map(|(idx, &value)| {
-                (idx != 0 && idx != sidecar_n / 2 && idx != sidecar_n - 1)
-                    .then_some(value)
+                (idx != 0 && idx != sidecar_n / 2 && idx != sidecar_n - 1).then_some(value)
             })
             .collect();
         assert_eq!(
@@ -61036,13 +63134,11 @@ print(json.dumps(payload))
         let expected: Vec<f64> = condition_values
             .iter()
             .zip(&arr_values)
-            .filter_map(|(&condition, &value)| {
-                if condition != 0.0 {
-                    Some(value)
-                } else {
-                    None
-                }
-            })
+            .filter_map(
+                |(&condition, &value)| {
+                    if condition != 0.0 { Some(value) } else { None }
+                },
+            )
             .collect();
 
         let condition = UFuncArray::new(vec![n], condition_values, DType::Bool).unwrap();
@@ -61172,8 +63268,7 @@ print(json.dumps(payload))
         let large = (1_i64 << 53) + 17;
         let mut sidecar_dst =
             UFuncArray::from_storage(vec![4], ArrayStorage::I64(vec![1, 2, 3, 4])).unwrap();
-        let sidecar_mask =
-            UFuncArray::new(vec![4], vec![1.0, 0.0, 1.0, 1.0], DType::Bool).unwrap();
+        let sidecar_mask = UFuncArray::new(vec![4], vec![1.0, 0.0, 1.0, 1.0], DType::Bool).unwrap();
         let sidecar_vals =
             UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![large, large + 1])).unwrap();
         sidecar_dst.place(&sidecar_mask, &sidecar_vals).unwrap();
@@ -61189,6 +63284,64 @@ print(json.dumps(payload))
         let vals = UFuncArray::new(vec![3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
         a.put(&[0, 2, 4], &vals).unwrap();
         assert_eq!(a.values(), &[10.0, 0.0, 20.0, 0.0, 30.0]);
+    }
+
+    #[test]
+    fn put_duplicate_runs_preserve_bits_errors_and_integer_sidecars() {
+        let original = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let values = vec![
+            f64::from_bits(0x7ff8_0000_0000_1234),
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::from_bits(0x7ff8_0000_0000_5678),
+        ];
+        let indices = [2, 2, 2, -1, -1, 1, 1, 2];
+        let mut expected = original.clone();
+        for (position, &index) in indices.iter().enumerate() {
+            let resolved = if index < 0 {
+                index + expected.len() as i64
+            } else {
+                index
+            };
+            expected[resolved as usize] = values[position % values.len()];
+        }
+
+        let mut actual = UFuncArray::new(vec![original.len()], original, DType::F64).unwrap();
+        let values = UFuncArray::new(vec![values.len()], values, DType::F64).unwrap();
+        actual.put(&indices, &values).unwrap();
+        assert!(
+            actual
+                .values()
+                .iter()
+                .zip(&expected)
+                .all(|(got, want)| got.to_bits() == want.to_bits())
+        );
+
+        let mut partial = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let partial_values = UFuncArray::new(
+            vec![8],
+            vec![10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0],
+            DType::F64,
+        )
+        .unwrap();
+        let error = partial
+            .put(&[1, 1, 1, 1, 1, 1, 1, 9], &partial_values)
+            .expect_err("the final invalid run must still fail");
+        assert!(matches!(error, UFuncError::Msg(message) if message.contains("out of bounds")));
+        assert_eq!(partial.values()[1].to_bits(), 16.0_f64.to_bits());
+
+        let large = (1_u64 << 63) + 8195;
+        let mut exact =
+            UFuncArray::from_storage(vec![4], ArrayStorage::U64(vec![1, 2, 3, 4])).unwrap();
+        let exact_values =
+            UFuncArray::from_storage(vec![3], ArrayStorage::U64(vec![large, large + 1, u64::MAX]))
+                .unwrap();
+        exact.put(&[1, 1, 3, 3, 1, 1, 1, 1], &exact_values).unwrap();
+        assert_eq!(
+            exact.to_storage().unwrap(),
+            ArrayStorage::U64(vec![1, large + 1, 3, large])
+        );
     }
 
     #[test]
@@ -63684,7 +65837,10 @@ print(json.dumps(payload))
             // Parseval.
             let energy_time: f64 = x.iter().map(|v| v * v).sum();
             let energy_freq: f64 = (0..n)
-                .map(|k| fx.values[2 * k] * fx.values[2 * k] + fx.values[2 * k + 1] * fx.values[2 * k + 1])
+                .map(|k| {
+                    fx.values[2 * k] * fx.values[2 * k]
+                        + fx.values[2 * k + 1] * fx.values[2 * k + 1]
+                })
                 .sum();
             assert!(
                 (n as f64 * energy_time - energy_freq).abs() <= 1e-8 * (1.0 + energy_freq.abs()),
@@ -66539,9 +68695,7 @@ print(json.dumps(payload))
         let cond2_vals: Vec<f64> = (0..n)
             .map(|i| if ((i * 7 + 5) % 13) < 4 { 1.0 } else { 0.0 })
             .collect();
-        let cond3_vals: Vec<f64> = (0..n)
-            .map(|i| if i % 5 == 0 { 1.0 } else { 0.0 })
-            .collect();
+        let cond3_vals: Vec<f64> = (0..n).map(|i| if i % 5 == 0 { 1.0 } else { 0.0 }).collect();
         let choice1_vals: Vec<f64> = (0..n)
             .map(|i| {
                 if i % 101 == 0 {
@@ -68026,6 +70180,166 @@ print(json.dumps(payload))
         let ma = MaskedArray::new(data, Some(mask), None).unwrap();
         let c = ma.count(None).unwrap();
         assert_eq!(c.values(), &[2.0]); // 2 valid elements
+    }
+
+    #[test]
+    fn masked_array_count_no_mask_axis_uses_shape() {
+        let data = UFuncArray::new(vec![2, 3, 4], vec![7.0; 24], DType::F64).unwrap();
+        let ma = MaskedArray::new(data, None, None).unwrap();
+
+        let first = ma.count(Some(0)).unwrap();
+        assert_eq!(first.shape(), &[3, 4]);
+        assert_eq!(first.values(), &[2.0; 12]);
+        assert_eq!(first.dtype(), DType::F64);
+        assert_eq!(first.integer_sidecar(), None);
+
+        let last = ma.count(Some(-1)).unwrap();
+        assert_eq!(last.shape(), &[2, 3]);
+        assert_eq!(last.values(), &[4.0; 6]);
+        assert_eq!(last.dtype(), DType::F64);
+        assert_eq!(last.integer_sidecar(), None);
+    }
+
+    #[test]
+    fn masked_array_count_no_mask_axis_preserves_empty_and_error_semantics() {
+        let data = UFuncArray::new(vec![3, 0, 4], vec![], DType::F64).unwrap();
+        let ma = MaskedArray::new(data, None, None).unwrap();
+
+        let empty_axis = ma.count(Some(1)).unwrap();
+        assert_eq!(empty_axis.shape(), &[3, 4]);
+        assert_eq!(empty_axis.values(), &[0.0; 12]);
+
+        let empty_output = ma.count(Some(0)).unwrap();
+        assert_eq!(empty_output.shape(), &[0, 4]);
+        assert!(empty_output.values().is_empty());
+
+        assert!(matches!(
+            ma.count(Some(3)),
+            Err(MAError::UFunc(UFuncError::AxisOutOfBounds {
+                axis: 3,
+                ndim: 3
+            }))
+        ));
+        assert!(matches!(
+            ma.count(Some(-4)),
+            Err(MAError::UFunc(UFuncError::AxisOutOfBounds {
+                axis: -4,
+                ndim: 3
+            }))
+        ));
+    }
+
+    #[test]
+    fn masked_array_count_masked_axes_preserve_validity_and_shape() {
+        let data = UFuncArray::new(vec![2, 3, 4], vec![7.0; 24], DType::F64).unwrap();
+        let mask = UFuncArray::new(
+            vec![2, 3, 4],
+            vec![
+                0.0,
+                1.0,
+                -0.0,
+                f64::NAN,
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                1.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+            ],
+            DType::Bool,
+        )
+        .unwrap();
+        let masked = MaskedArray::new(data, Some(mask), None).unwrap();
+
+        for axis in [None, Some(0), Some(1), Some(-1)] {
+            let mask = masked.mask().expect("fixture has an explicit mask");
+            let inverted = mask
+                .values()
+                .iter()
+                .map(|&value| if value == 0.0 { 1.0 } else { 0.0 })
+                .collect();
+            let former = UFuncArray::new(mask.shape().to_vec(), inverted, DType::F64)
+                .unwrap()
+                .reduce_sum(axis, false)
+                .unwrap();
+            let candidate = masked.count(axis).unwrap();
+            assert_eq!(candidate.shape(), former.shape());
+            assert_eq!(candidate.dtype(), former.dtype());
+            assert_eq!(candidate.integer_sidecar(), former.integer_sidecar());
+            assert!(
+                candidate
+                    .values()
+                    .iter()
+                    .zip(former.values())
+                    .all(|(&left, &right)| left.to_bits() == right.to_bits())
+            );
+        }
+
+        let total = masked.count(None).unwrap();
+        assert!(total.shape().is_empty());
+        assert_eq!(total.values(), &[14.0]);
+        assert_eq!(total.dtype(), DType::F64);
+
+        let first = masked.count(Some(0)).unwrap();
+        assert_eq!(first.shape(), &[3, 4]);
+        assert_eq!(
+            first.values(),
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 2.0]
+        );
+
+        let middle = masked.count(Some(1)).unwrap();
+        assert_eq!(middle.shape(), &[2, 4]);
+        assert_eq!(middle.values(), &[2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 2.0, 3.0]);
+
+        let last = masked.count(Some(-1)).unwrap();
+        assert_eq!(last.shape(), &[2, 3]);
+        assert_eq!(last.values(), &[2.0, 2.0, 3.0, 2.0, 3.0, 2.0]);
+        assert_eq!(last.dtype(), DType::F64);
+        assert_eq!(last.integer_sidecar(), None);
+    }
+
+    #[test]
+    fn masked_array_count_masked_axis_preserves_empty_and_error_semantics() {
+        let data = UFuncArray::new(vec![3, 0, 4], vec![], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![3, 0, 4], vec![], DType::Bool).unwrap();
+        let masked = MaskedArray::new(data, Some(mask), None).unwrap();
+
+        let empty_axis = masked.count(Some(1)).unwrap();
+        assert_eq!(empty_axis.shape(), &[3, 4]);
+        assert_eq!(empty_axis.values(), &[0.0; 12]);
+
+        let empty_output = masked.count(Some(0)).unwrap();
+        assert_eq!(empty_output.shape(), &[0, 4]);
+        assert!(empty_output.values().is_empty());
+
+        assert!(matches!(
+            masked.count(Some(3)),
+            Err(MAError::UFunc(UFuncError::AxisOutOfBounds {
+                axis: 3,
+                ndim: 3
+            }))
+        ));
+        assert!(matches!(
+            masked.count(Some(-4)),
+            Err(MAError::UFunc(UFuncError::AxisOutOfBounds {
+                axis: -4,
+                ndim: 3
+            }))
+        ));
     }
 
     #[test]

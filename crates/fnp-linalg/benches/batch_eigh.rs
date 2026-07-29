@@ -26,7 +26,9 @@ fn make_sym_stack(batch: usize, n: usize) -> Vec<f64> {
         let base = b * ms;
         for i in 0..n {
             for j in i..n {
-                s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
                 let v = (s >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
                 data[base + i * n + j] = v;
                 data[base + j * n + i] = v;
@@ -53,4 +55,7 @@ fn bench(c: &mut Criterion) {
     }
 }
 criterion_group!(benches, bench);
-criterion_main!(benches);
+#[path = "../../bench_identity.rs"]
+mod bench_identity;
+
+criterion_main!(bench_identity::report_bench_identity, benches);

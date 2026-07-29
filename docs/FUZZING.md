@@ -6,11 +6,11 @@ The workspace ships **7 fuzz crates** with **27 fuzz targets** and **200 curated
 
 ```bash
 # Order matters: sync the pinned nightly first, then install cargo-fuzz with it.
-rustup toolchain install nightly-2026-02-20
-cargo +nightly-2026-02-20 install cargo-fuzz
+rustup toolchain install nightly-2026-07-05
+cargo +nightly-2026-07-05 install cargo-fuzz
 ```
 
-The fuzz crates require nightly Rust pinned to `nightly-2026-02-20` (matching `rust-toolchain.toml` / `env.RUST_TOOLCHAIN` in `.github/workflows/ci.yml`). Each fuzz crate ships its own `rust-toolchain.toml` mirroring that pin (see "Why each fuzz crate's `Cargo.toml` repeats fields literally" below), so once cargo-fuzz is installed, `cargo fuzz run` from any fuzz dir picks the right toolchain automatically — if you see a `libfuzzer-sys` compile error after changing toolchains, re-pin via `rustup toolchain install` and rebuild.
+The fuzz crates require nightly Rust pinned to `nightly-2026-07-05` (matching `rust-toolchain.toml` / `env.RUST_TOOLCHAIN` in `.github/workflows/ci.yml`). Each fuzz crate ships its own `rust-toolchain.toml` mirroring that pin (see "Why each fuzz crate's `Cargo.toml` repeats fields literally" below), so once cargo-fuzz is installed, `cargo fuzz run` from any fuzz dir picks the right toolchain automatically — if you see a `libfuzzer-sys` compile error after changing toolchains, re-pin via `rustup toolchain install` and rebuild.
 
 ## Fuzz crate inventory
 
@@ -31,7 +31,7 @@ cd crates/fnp-io/fuzz
 cargo fuzz run fuzz_npy
 ```
 
-Each fuzz crate ships its own `rust-toolchain.toml` mirroring `/rust-toolchain.toml`, so the workspace nightly pin (`nightly-2026-02-20`) applies automatically — no `+nightly` suffix needed. Add `-- -max_total_time=300` to bound the run (5 minutes). Crashes land in `artifacts/<target>/crash-*` and can be reproduced via:
+Each fuzz crate ships its own `rust-toolchain.toml` mirroring `/rust-toolchain.toml`, so the workspace nightly pin (`nightly-2026-07-05`) applies automatically — no `+nightly` suffix needed. Add `-- -max_total_time=300` to bound the run (5 minutes). Crashes land in `artifacts/<target>/crash-*` and can be reproduced via:
 
 ```bash
 cargo fuzz run fuzz_npy artifacts/fuzz_npy/crash-<hash>

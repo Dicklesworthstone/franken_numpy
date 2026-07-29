@@ -436,7 +436,10 @@ pub const fn can_cast_lossless(src: DType, dst: DType) -> bool {
 /// (np.result_type).
 #[must_use]
 pub fn result_type(dtypes: &[DType]) -> DType {
-    dtypes.iter().copied().fold(DType::Bool, promote)
+    let Some((&first, rest)) = dtypes.split_first() else {
+        return DType::Bool;
+    };
+    rest.iter().copied().fold(first, promote)
 }
 
 /// Check whether a cast is allowed under the given casting rule
@@ -689,6 +692,9 @@ pub fn common_type(dtypes: &[DType]) -> DType {
     let Some(first) = iter.next() else {
         return DType::F64;
     };
+    if first == DType::Complex128 {
+        return DType::Complex128;
+    }
     let mut result = if first.is_float() || first.is_complex() {
         first
     } else {
@@ -913,6 +919,20 @@ impl std::fmt::Display for StorageError {
             }
         }
     }
+}
+
+/// z^w = exp(w * log(z)) - the single kernel shared by every `complex_pow`
+/// path (borrowed, widened, and converted), preserving the exact former
+/// expression order.
+fn complex_pow_kernel((zr, zi): (f64, f64), (wr, wi): (f64, f64)) -> (f64, f64) {
+    let mag = (zr * zr + zi * zi).sqrt();
+    let ang = zi.atan2(zr);
+    let log_r = mag.ln();
+    let log_i = ang;
+    let prod_r = wr * log_r - wi * log_i;
+    let prod_i = wr * log_i + wi * log_r;
+    let ea = prod_r.exp();
+    (ea * prod_i.cos(), ea * prod_i.sin())
 }
 
 impl ArrayStorage {
@@ -1178,6 +1198,21 @@ impl ArrayStorage {
                 to: target,
             });
         }
+        if target == DType::F64 {
+            return Ok(Self::F64(self.to_f64_vec()));
+        }
+
+        if let (Self::I64(values), DType::I32) = (self, target) {
+            return Ok(Self::I32(
+                values.iter().map(|&value| value as i32).collect(),
+            ));
+        }
+
+        if let (Self::U64(values), DType::U32) = (self, target) {
+            return Ok(Self::U32(
+                values.iter().map(|&value| value as u32).collect(),
+            ));
+        }
 
         let mut result = Self::zeros(target, n);
         let src_is_int = self.dtype().is_integer() || self.dtype() == DType::Bool;
@@ -1314,10 +1349,7 @@ impl ArrayStorage {
                 .iter_mut()
                 .zip(vals)
                 .for_each(|(o, &v)| *o = (v as f32, 0.0)),
-            Self::Complex128(out) => out
-                .iter_mut()
-                .zip(vals)
-                .for_each(|(o, &v)| *o = (v, 0.0)),
+            Self::Complex128(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = (v, 0.0)),
             Self::String(out) => out
                 .iter_mut()
                 .zip(vals)
@@ -1449,6 +1481,68 @@ impl ArrayStorage {
 
     /// Element-wise complex addition.
     pub fn complex_add(&self, other: &Self) -> Result<Self, StorageError> {
+        if let (Self::Complex128(a), Self::Complex128(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| (ar + br, ai + bi))
+                    .collect(),
+            ));
+        }
+        if let (Self::Complex64(a), Self::Complex64(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| {
+                        (f64::from(ar) + f64::from(br), f64::from(ai) + f64::from(bi))
+                    })
+                    .collect(),
+            ));
+        }
+        // Mixed pairs borrow the Complex128 operand and widen the Complex64
+        // one inline instead of materializing both via `to_complex128_vec`
+        // (the .343 family lever; identical f64::from-then-add order and
+        // operand order, so results are bit-for-bit the former path's).
+        if let (Self::Complex64(a), Self::Complex128(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| (f64::from(ar) + br, f64::from(ai) + bi))
+                    .collect(),
+            ));
+        }
+        if let (Self::Complex128(a), Self::Complex64(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| (ar + f64::from(br), ai + f64::from(bi)))
+                    .collect(),
+            ));
+        }
         let a = self.to_complex128_vec();
         let b = other.to_complex128_vec();
         if a.len() != b.len() {
@@ -1467,6 +1561,70 @@ impl ArrayStorage {
 
     /// Element-wise complex subtraction.
     pub fn complex_sub(&self, other: &Self) -> Result<Self, StorageError> {
+        if let (Self::Complex128(a), Self::Complex128(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| (ar - br, ai - bi))
+                    .collect(),
+            ));
+        }
+        // Complex64 pairs widen inline into the Complex128 output instead of
+        // materializing both inputs via `to_complex128_vec` (the .343
+        // complex_add shape; identical f64::from-then-subtract order, so the
+        // result is bit-for-bit the former path's).
+        if let (Self::Complex64(a), Self::Complex64(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| {
+                        (f64::from(ar) - f64::from(br), f64::from(ai) - f64::from(bi))
+                    })
+                    .collect(),
+            ));
+        }
+        // Mixed pairs borrow the Complex128 operand and widen the Complex64
+        // one inline (the .357 shape; identical operand order, bit-for-bit).
+        if let (Self::Complex64(a), Self::Complex128(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| (f64::from(ar) - br, f64::from(ai) - bi))
+                    .collect(),
+            ));
+        }
+        if let (Self::Complex128(a), Self::Complex64(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| (ar - f64::from(br), ai - f64::from(bi)))
+                    .collect(),
+            ));
+        }
         let a = self.to_complex128_vec();
         let b = other.to_complex128_vec();
         if a.len() != b.len() {
@@ -1485,6 +1643,78 @@ impl ArrayStorage {
 
     /// Element-wise complex multiplication: (a+bi)(c+di) = (ac-bd) + (ad+bc)i.
     pub fn complex_mul(&self, other: &Self) -> Result<Self, StorageError> {
+        if let (Self::Complex128(a), Self::Complex128(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| (ar * br - ai * bi, ar * bi + ai * br))
+                    .collect(),
+            ));
+        }
+        // Complex64 pairs widen inline into the Complex128 output instead of
+        // materializing both inputs via `to_complex128_vec` (the .343/.353
+        // shape; identical f64::from-then-multiply order and expression tree,
+        // so the result is bit-for-bit the former path's).
+        if let (Self::Complex64(a), Self::Complex64(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| {
+                        let (ar, ai) = (f64::from(ar), f64::from(ai));
+                        let (br, bi) = (f64::from(br), f64::from(bi));
+                        (ar * br - ai * bi, ar * bi + ai * br)
+                    })
+                    .collect(),
+            ));
+        }
+        // Mixed pairs borrow the Complex128 operand and widen the Complex64
+        // one inline (the .357 shape; identical kernel expression tree).
+        if let (Self::Complex64(a), Self::Complex128(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| {
+                        let (ar, ai) = (f64::from(ar), f64::from(ai));
+                        (ar * br - ai * bi, ar * bi + ai * br)
+                    })
+                    .collect(),
+            ));
+        }
+        if let (Self::Complex128(a), Self::Complex64(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| {
+                        let (br, bi) = (f64::from(br), f64::from(bi));
+                        (ar * br - ai * bi, ar * bi + ai * br)
+                    })
+                    .collect(),
+            ));
+        }
         let a = self.to_complex128_vec();
         let b = other.to_complex128_vec();
         if a.len() != b.len() {
@@ -1503,6 +1733,102 @@ impl ArrayStorage {
 
     /// Element-wise complex division: (a+bi)/(c+di).
     pub fn complex_div(&self, other: &Self) -> Result<Self, StorageError> {
+        if let (Self::Complex128(a), Self::Complex128(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| {
+                        let denom = br * br + bi * bi;
+                        if denom == 0.0 {
+                            (f64::NAN, f64::NAN)
+                        } else {
+                            ((ar * br + ai * bi) / denom, (ai * br - ar * bi) / denom)
+                        }
+                    })
+                    .collect(),
+            ));
+        }
+        // Complex64 pairs widen inline into the Complex128 output instead of
+        // materializing both inputs via `to_complex128_vec` (the .343/.353/
+        // .354 shape; the identical division kernel runs on identically
+        // widened components - including the zero-divisor NaN arm - so the
+        // result is bit-for-bit the former path's).
+        if let (Self::Complex64(a), Self::Complex64(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| {
+                        let (ar, ai) = (f64::from(ar), f64::from(ai));
+                        let (br, bi) = (f64::from(br), f64::from(bi));
+                        let denom = br * br + bi * bi;
+                        if denom == 0.0 {
+                            (f64::NAN, f64::NAN)
+                        } else {
+                            ((ar * br + ai * bi) / denom, (ai * br - ar * bi) / denom)
+                        }
+                    })
+                    .collect(),
+            ));
+        }
+        // Mixed pairs borrow the Complex128 operand and widen the Complex64
+        // one inline (the .357 shape; identical division kernel including the
+        // zero-divisor NaN arm on identically widened components).
+        if let (Self::Complex64(a), Self::Complex128(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| {
+                        let (ar, ai) = (f64::from(ar), f64::from(ai));
+                        let denom = br * br + bi * bi;
+                        if denom == 0.0 {
+                            (f64::NAN, f64::NAN)
+                        } else {
+                            ((ar * br + ai * bi) / denom, (ai * br - ar * bi) / denom)
+                        }
+                    })
+                    .collect(),
+            ));
+        }
+        if let (Self::Complex128(a), Self::Complex64(b)) = (self, other) {
+            if a.len() != b.len() {
+                return Err(StorageError::UnsupportedCast {
+                    from: self.dtype(),
+                    to: other.dtype(),
+                });
+            }
+            return Ok(Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(ar, ai), &(br, bi))| {
+                        let (br, bi) = (f64::from(br), f64::from(bi));
+                        let denom = br * br + bi * bi;
+                        if denom == 0.0 {
+                            (f64::NAN, f64::NAN)
+                        } else {
+                            ((ar * br + ai * bi) / denom, (ai * br - ar * bi) / denom)
+                        }
+                    })
+                    .collect(),
+            ));
+        }
         let a = self.to_complex128_vec();
         let b = other.to_complex128_vec();
         if a.len() != b.len() {
@@ -1612,6 +1938,30 @@ impl ArrayStorage {
     /// Element-wise complex exponential: exp(a+bi) = exp(a) * (cos(b) + i*sin(b)).
     #[must_use]
     pub fn complex_exp(&self) -> Self {
+        // Complex inputs avoid the whole-vector materialization: Complex128
+        // borrows, Complex64 widens inline (identical kernel expression tree;
+        // the .360 unary sibling of the closed binary borrow/widen surface).
+        if let Self::Complex128(v) = self {
+            return Self::Complex128(
+                v.iter()
+                    .map(|&(r, i)| {
+                        let ea = r.exp();
+                        (ea * i.cos(), ea * i.sin())
+                    })
+                    .collect(),
+            );
+        }
+        if let Self::Complex64(v) = self {
+            return Self::Complex128(
+                v.iter()
+                    .map(|&(r, i)| {
+                        let (r, i) = (f64::from(r), f64::from(i));
+                        let ea = r.exp();
+                        (ea * i.cos(), ea * i.sin())
+                    })
+                    .collect(),
+            );
+        }
         let pairs = self.to_complex128_vec();
         Self::Complex128(
             pairs
@@ -1627,6 +1977,32 @@ impl ArrayStorage {
     /// Element-wise complex natural logarithm: log(a+bi) = log|z| + i*arg(z).
     #[must_use]
     pub fn complex_log(&self) -> Self {
+        // Complex inputs avoid the whole-vector materialization: Complex128
+        // borrows, Complex64 widens inline (identical kernel expression tree;
+        // the .360 unary sibling of the closed binary borrow/widen surface).
+        if let Self::Complex128(v) = self {
+            return Self::Complex128(
+                v.iter()
+                    .map(|&(r, i)| {
+                        let mag = (r * r + i * i).sqrt();
+                        let ang = i.atan2(r);
+                        (mag.ln(), ang)
+                    })
+                    .collect(),
+            );
+        }
+        if let Self::Complex64(v) = self {
+            return Self::Complex128(
+                v.iter()
+                    .map(|&(r, i)| {
+                        let (r, i) = (f64::from(r), f64::from(i));
+                        let mag = (r * r + i * i).sqrt();
+                        let ang = i.atan2(r);
+                        (mag.ln(), ang)
+                    })
+                    .collect(),
+            );
+        }
         let pairs = self.to_complex128_vec();
         Self::Complex128(
             pairs
@@ -1643,6 +2019,34 @@ impl ArrayStorage {
     /// Element-wise complex square root.
     #[must_use]
     pub fn complex_sqrt(&self) -> Self {
+        // Complex inputs avoid the whole-vector materialization: Complex128
+        // borrows, Complex64 widens inline (identical kernel expression tree;
+        // the .360 unary sibling of the closed binary borrow/widen surface).
+        if let Self::Complex128(v) = self {
+            return Self::Complex128(
+                v.iter()
+                    .map(|&(r, i)| {
+                        let mag = (r * r + i * i).sqrt();
+                        let re = f64::midpoint(mag, r).sqrt();
+                        let im = f64::midpoint(mag, -r).sqrt();
+                        (re, if i >= 0.0 { im } else { -im })
+                    })
+                    .collect(),
+            );
+        }
+        if let Self::Complex64(v) = self {
+            return Self::Complex128(
+                v.iter()
+                    .map(|&(r, i)| {
+                        let (r, i) = (f64::from(r), f64::from(i));
+                        let mag = (r * r + i * i).sqrt();
+                        let re = f64::midpoint(mag, r).sqrt();
+                        let im = f64::midpoint(mag, -r).sqrt();
+                        (re, if i >= 0.0 { im } else { -im })
+                    })
+                    .collect(),
+            );
+        }
         let pairs = self.to_complex128_vec();
         Self::Complex128(
             pairs
@@ -1660,28 +2064,53 @@ impl ArrayStorage {
     /// Element-wise complex power: z^w = exp(w * log(z)).
     #[must_use]
     pub fn complex_pow(&self, exponent: &Self) -> Self {
-        let bases = self.to_complex128_vec();
-        let exps = exponent.to_complex128_vec();
-        let n = bases.len().min(exps.len());
-        Self::Complex128(
-            (0..n)
-                .map(|idx| {
-                    let (zr, zi) = bases[idx];
-                    let (wr, wi) = exps[idx];
-                    // z^w = exp(w * log(z))
-                    let mag = (zr * zr + zi * zi).sqrt();
-                    let ang = zi.atan2(zr);
-                    let log_r = mag.ln();
-                    let log_i = ang;
-                    // w * log(z)
-                    let prod_r = wr * log_r - wi * log_i;
-                    let prod_i = wr * log_i + wi * log_r;
-                    // exp(prod)
-                    let ea = prod_r.exp();
-                    (ea * prod_i.cos(), ea * prod_i.sin())
-                })
-                .collect(),
-        )
+        // Complex pairs avoid input materialization: Complex128 borrows,
+        // Complex64 widens inline (the .360 family). `.zip()` truncates to
+        // the shorter operand, preserving the existing min-length semantics
+        // verbatim (deadlock-audit-ljt7c tracks whether that contract should
+        // instead error like the other binary complex ops). All paths share
+        // one kernel fn, so bit divergence between them is impossible.
+        match (self, exponent) {
+            (Self::Complex128(a), Self::Complex128(b)) => Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&z, &w)| complex_pow_kernel(z, w))
+                    .collect(),
+            ),
+            (Self::Complex64(a), Self::Complex64(b)) => Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(zr, zi), &(wr, wi))| {
+                        complex_pow_kernel(
+                            (f64::from(zr), f64::from(zi)),
+                            (f64::from(wr), f64::from(wi)),
+                        )
+                    })
+                    .collect(),
+            ),
+            (Self::Complex64(a), Self::Complex128(b)) => Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&(zr, zi), &w)| complex_pow_kernel((f64::from(zr), f64::from(zi)), w))
+                    .collect(),
+            ),
+            (Self::Complex128(a), Self::Complex64(b)) => Self::Complex128(
+                a.iter()
+                    .zip(b)
+                    .map(|(&z, &(wr, wi))| complex_pow_kernel(z, (f64::from(wr), f64::from(wi))))
+                    .collect(),
+            ),
+            _ => {
+                let bases = self.to_complex128_vec();
+                let exps = exponent.to_complex128_vec();
+                let n = bases.len().min(exps.len());
+                Self::Complex128(
+                    (0..n)
+                        .map(|idx| complex_pow_kernel(bases[idx], exps[idx]))
+                        .collect(),
+                )
+            }
+        }
     }
 
     /// Element-wise complex sin: sin(a+bi) = sin(a)*cosh(b) + i*cos(a)*sinh(b).
@@ -1711,6 +2140,11 @@ impl ArrayStorage {
     /// Element-wise complex sum reduction.
     #[must_use]
     pub fn complex_sum(&self) -> (f64, f64) {
+        if let Self::Complex128(pairs) = self {
+            return pairs
+                .iter()
+                .fold((0.0, 0.0), |(sr, si), &(r, i)| (sr + r, si + i));
+        }
         let pairs = self.to_complex128_vec();
         pairs
             .iter()
@@ -1720,6 +2154,11 @@ impl ArrayStorage {
     /// Element-wise complex product reduction.
     #[must_use]
     pub fn complex_prod(&self) -> (f64, f64) {
+        if let Self::Complex128(pairs) = self {
+            return pairs.iter().fold((1.0, 0.0), |(pr, pi), &(r, i)| {
+                (pr * r - pi * i, pr * i + pi * r)
+            });
+        }
         let pairs = self.to_complex128_vec();
         pairs.iter().fold((1.0, 0.0), |(pr, pi), &(r, i)| {
             (pr * r - pi * i, pr * i + pi * r)
@@ -2867,11 +3306,438 @@ mod tests {
     }
 
     #[test]
+    fn storage_complex_add_complex128_matches_clone_path_bits() {
+        let a = ArrayStorage::from_complex128_vec(vec![
+            (-0.0, f64::from_bits(0x7ff8_0000_0000_0123)),
+            (f64::INFINITY, f64::MIN_POSITIVE),
+            (f64::from_bits(1), -f64::INFINITY),
+        ]);
+        let b = ArrayStorage::from_complex128_vec(vec![
+            (0.0, 2.0),
+            (-f64::INFINITY, -f64::MIN_POSITIVE),
+            (f64::from_bits(2), f64::INFINITY),
+        ]);
+        let former_a = a.to_complex128_vec();
+        let former_b = b.to_complex128_vec();
+        let former: Vec<_> = former_a
+            .iter()
+            .zip(&former_b)
+            .map(|(&(ar, ai), &(br, bi))| (ar + br, ai + bi))
+            .collect();
+        let direct = a.complex_add(&b).unwrap().to_complex128_vec();
+
+        for (actual, expected) in direct.iter().zip(&former) {
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+        }
+    }
+
+    #[test]
+    fn storage_complex_add_complex64_matches_widened_clone_path_bits() {
+        let a = ArrayStorage::from_complex64_vec(vec![
+            (-0.0, f32::from_bits(0x7fc0_0123)),
+            (f32::INFINITY, f32::MIN_POSITIVE),
+            (f32::from_bits(1), -f32::INFINITY),
+        ]);
+        let b = ArrayStorage::from_complex64_vec(vec![
+            (0.0, 2.0),
+            (-f32::INFINITY, -f32::MIN_POSITIVE),
+            (f32::from_bits(2), f32::INFINITY),
+        ]);
+        let former_a = a.to_complex128_vec();
+        let former_b = b.to_complex128_vec();
+        let former: Vec<_> = former_a
+            .iter()
+            .zip(&former_b)
+            .map(|(&(ar, ai), &(br, bi))| (ar + br, ai + bi))
+            .collect();
+        let direct = a.complex_add(&b).unwrap().to_complex128_vec();
+
+        for (actual, expected) in direct.iter().zip(&former) {
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+        }
+
+        let short = ArrayStorage::from_complex64_vec(vec![(1.0, 2.0)]);
+        let long = ArrayStorage::from_complex64_vec(vec![(3.0, 4.0), (5.0, 6.0)]);
+        assert!(matches!(
+            short.complex_add(&long),
+            Err(StorageError::UnsupportedCast {
+                from: DType::Complex64,
+                to: DType::Complex64,
+            })
+        ));
+    }
+
+    #[test]
+    fn storage_complex_pow_pairs_match_converted_path_bits() {
+        // All four complex pair combinations must be bit-for-bit the former
+        // convert-both path, and the min-length truncation semantics must be
+        // preserved exactly (zip == min) for complex pairs and the fallback.
+        let c128 = ArrayStorage::Complex128(vec![
+            (0.0, -0.0),
+            (f64::NEG_INFINITY, 4.5e-300),
+            (f64::from_bits(0x7ff8_0000_0000_0042), 1.5),
+            (-2.5, 3.25),
+        ]);
+        let c64 = ArrayStorage::from_complex64_vec(vec![
+            (-0.0, f32::from_bits(0x7fc0_0123)),
+            (f32::INFINITY, f32::MIN_POSITIVE),
+            (1.5, -0.0),
+            (-2.5, 3.25),
+        ]);
+        for (lhs, rhs) in [(&c128, &c128), (&c64, &c64), (&c64, &c128), (&c128, &c64)] {
+            let bases = lhs.to_complex128_vec();
+            let exps = rhs.to_complex128_vec();
+            let n = bases.len().min(exps.len());
+            let former: Vec<_> = (0..n)
+                .map(|idx| crate::complex_pow_kernel(bases[idx], exps[idx]))
+                .collect();
+            let direct = lhs.complex_pow(rhs).to_complex128_vec();
+            assert_eq!(direct.len(), former.len());
+            for (actual, expected) in direct.iter().zip(&former) {
+                assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+                assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+            }
+        }
+
+        // Min-length truncation preserved for complex pairs and the fallback.
+        let short = ArrayStorage::Complex128(vec![(2.0, 0.0)]);
+        let long = ArrayStorage::Complex128(vec![(3.0, 0.0), (4.0, 0.0)]);
+        assert_eq!(short.complex_pow(&long).len(), 1);
+        assert_eq!(long.complex_pow(&short).len(), 1);
+        let real = ArrayStorage::F64(vec![2.0, 3.0, 4.0]);
+        assert_eq!(real.complex_pow(&short).len(), 1);
+    }
+
+    #[test]
+    fn storage_complex_unary_borrow_matches_converted_path_bits() {
+        // exp/log/sqrt on Complex128 (borrow) and Complex64 (widen) inputs
+        // must be bit-for-bit the former convert-then-op path, including NaN
+        // payloads, signed zero, infinities, and the sqrt sign-of-imaginary
+        // branch on negative-zero imaginaries.
+        let c128 = ArrayStorage::Complex128(vec![
+            (0.0, -0.0),
+            (f64::NEG_INFINITY, 4.5e-300),
+            (f64::from_bits(0x7ff8_0000_0000_0042), 1.5),
+            (-2.5, 3.25),
+        ]);
+        let c64 = ArrayStorage::from_complex64_vec(vec![
+            (-0.0, f32::from_bits(0x7fc0_0123)),
+            (f32::INFINITY, f32::MIN_POSITIVE),
+            (1.5, -0.0),
+            (-2.5, 3.25),
+        ]);
+        for input in [&c128, &c64] {
+            let pairs = input.to_complex128_vec();
+            let former_exp: Vec<_> = pairs
+                .iter()
+                .map(|&(r, i)| {
+                    let ea = r.exp();
+                    (ea * i.cos(), ea * i.sin())
+                })
+                .collect();
+            let former_log: Vec<_> = pairs
+                .iter()
+                .map(|&(r, i)| {
+                    let mag = (r * r + i * i).sqrt();
+                    (mag.ln(), i.atan2(r))
+                })
+                .collect();
+            let former_sqrt: Vec<_> = pairs
+                .iter()
+                .map(|&(r, i)| {
+                    let mag = (r * r + i * i).sqrt();
+                    let re = f64::midpoint(mag, r).sqrt();
+                    let im = f64::midpoint(mag, -r).sqrt();
+                    (re, if i >= 0.0 { im } else { -im })
+                })
+                .collect();
+            for (former, direct) in [
+                (former_exp, input.complex_exp().to_complex128_vec()),
+                (former_log, input.complex_log().to_complex128_vec()),
+                (former_sqrt, input.complex_sqrt().to_complex128_vec()),
+            ] {
+                for (actual, expected) in direct.iter().zip(&former) {
+                    assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+                    assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+                }
+            }
+        }
+
+        // Real-dtype inputs keep the conversion fallback.
+        let real = ArrayStorage::F64(vec![1.0, -4.0]);
+        let via_convert = real.to_complex128_vec();
+        let expected: Vec<_> = via_convert
+            .iter()
+            .map(|&(r, i)| {
+                let ea = r.exp();
+                (ea * i.cos(), ea * i.sin())
+            })
+            .collect();
+        let direct = real.complex_exp().to_complex128_vec();
+        for (actual, exp) in direct.iter().zip(&expected) {
+            assert_eq!(actual.0.to_bits(), exp.0.to_bits());
+            assert_eq!(actual.1.to_bits(), exp.1.to_bits());
+        }
+    }
+
+    #[test]
+    fn storage_complex_sub_mul_div_mixed_pairs_match_widened_clone_path_bits() {
+        // Every mixed orientation of sub/mul/div must be bit-for-bit the
+        // former convert-both path, including operand order and the division
+        // zero-divisor/subnormal-divisor classes.
+        let c64 = ArrayStorage::from_complex64_vec(vec![
+            (-0.0, f32::from_bits(0x7fc0_0123)),
+            (f32::INFINITY, f32::MIN_POSITIVE),
+            (f32::from_bits(1), -f32::INFINITY),
+            (3.5, -2.25),
+            (1.0, 1.0),
+        ]);
+        let c128 = ArrayStorage::Complex128(vec![
+            (0.0, 2.0),
+            (f64::NEG_INFINITY, -4.5e-300),
+            (f64::from_bits(3), f64::INFINITY),
+            (-1.5, 0.75),
+            (0.0, -0.0),
+        ]);
+        type Kernel = fn((f64, f64), (f64, f64)) -> (f64, f64);
+        let sub: Kernel = |(ar, ai), (br, bi)| (ar - br, ai - bi);
+        let mul: Kernel = |(ar, ai), (br, bi)| (ar * br - ai * bi, ar * bi + ai * br);
+        let div: Kernel = |(ar, ai), (br, bi)| {
+            let denom = br * br + bi * bi;
+            if denom == 0.0 {
+                (f64::NAN, f64::NAN)
+            } else {
+                ((ar * br + ai * bi) / denom, (ai * br - ar * bi) / denom)
+            }
+        };
+        let ops: [(&str, Kernel); 3] = [("sub", sub), ("mul", mul), ("div", div)];
+        for (name, kernel) in ops {
+            for (lhs, rhs) in [(&c64, &c128), (&c128, &c64)] {
+                let former_a = lhs.to_complex128_vec();
+                let former_b = rhs.to_complex128_vec();
+                let former: Vec<_> = former_a
+                    .iter()
+                    .zip(&former_b)
+                    .map(|(&a, &b)| kernel(a, b))
+                    .collect();
+                let direct = match name {
+                    "sub" => lhs.complex_sub(rhs),
+                    "mul" => lhs.complex_mul(rhs),
+                    _ => lhs.complex_div(rhs),
+                }
+                .unwrap()
+                .to_complex128_vec();
+                for (actual, expected) in direct.iter().zip(&former) {
+                    assert_eq!(actual.0.to_bits(), expected.0.to_bits(), "op {name}");
+                    assert_eq!(actual.1.to_bits(), expected.1.to_bits(), "op {name}");
+                }
+            }
+        }
+
+        let short = ArrayStorage::from_complex64_vec(vec![(1.0, 2.0)]);
+        let long = ArrayStorage::Complex128(vec![(3.0, 4.0), (5.0, 6.0)]);
+        assert!(short.complex_sub(&long).is_err());
+        assert!(long.complex_mul(&short).is_err());
+        assert!(short.complex_div(&long).is_err());
+    }
+
+    #[test]
+    fn storage_complex_add_mixed_pairs_match_widened_clone_path_bits() {
+        // Both mixed orientations must be bit-for-bit the former
+        // convert-both path, including operand order (self + other).
+        let c64 = ArrayStorage::from_complex64_vec(vec![
+            (-0.0, f32::from_bits(0x7fc0_0123)),
+            (f32::INFINITY, f32::MIN_POSITIVE),
+            (f32::from_bits(1), -f32::INFINITY),
+        ]);
+        let c128 = ArrayStorage::Complex128(vec![
+            (0.0, 2.0),
+            (f64::NEG_INFINITY, -4.5e-300),
+            (f64::from_bits(3), f64::INFINITY),
+        ]);
+        for (lhs, rhs) in [(&c64, &c128), (&c128, &c64)] {
+            let former_a = lhs.to_complex128_vec();
+            let former_b = rhs.to_complex128_vec();
+            let former: Vec<_> = former_a
+                .iter()
+                .zip(&former_b)
+                .map(|(&(ar, ai), &(br, bi))| (ar + br, ai + bi))
+                .collect();
+            let direct = lhs.complex_add(rhs).unwrap().to_complex128_vec();
+            for (actual, expected) in direct.iter().zip(&former) {
+                assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+                assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+            }
+        }
+
+        let short = ArrayStorage::from_complex64_vec(vec![(1.0, 2.0)]);
+        let long = ArrayStorage::Complex128(vec![(3.0, 4.0), (5.0, 6.0)]);
+        assert!(short.complex_add(&long).is_err());
+        assert!(long.complex_add(&short).is_err());
+    }
+
+    #[test]
+    fn storage_complex_div_complex64_matches_widened_clone_path_bits() {
+        let a = ArrayStorage::from_complex64_vec(vec![
+            (-0.0, f32::from_bits(0x7fc0_0123)),
+            (f32::INFINITY, f32::MIN_POSITIVE),
+            (f32::from_bits(1), -f32::INFINITY),
+            (3.5, -2.25),
+            (1.0, 1.0),
+        ]);
+        let b = ArrayStorage::from_complex64_vec(vec![
+            (0.0, 2.0),
+            (-f32::INFINITY, -f32::MIN_POSITIVE),
+            // Subnormal divisor: widens to a nonzero f64, so BOTH paths take
+            // the quotient arm from identically widened components.
+            (f32::from_bits(2), 0.0),
+            (-1.5, 0.75),
+            // Exact zero divisor: both paths take the (NaN, NaN) arm.
+            (0.0, -0.0),
+        ]);
+        let former_a = a.to_complex128_vec();
+        let former_b = b.to_complex128_vec();
+        let former: Vec<_> = former_a
+            .iter()
+            .zip(&former_b)
+            .map(|(&(ar, ai), &(br, bi))| {
+                let denom = br * br + bi * bi;
+                if denom == 0.0 {
+                    (f64::NAN, f64::NAN)
+                } else {
+                    ((ar * br + ai * bi) / denom, (ai * br - ar * bi) / denom)
+                }
+            })
+            .collect();
+        let direct = a.complex_div(&b).unwrap().to_complex128_vec();
+
+        for (actual, expected) in direct.iter().zip(&former) {
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+        }
+
+        let short = ArrayStorage::from_complex64_vec(vec![(1.0, 2.0)]);
+        let long = ArrayStorage::from_complex64_vec(vec![(3.0, 4.0), (5.0, 6.0)]);
+        assert!(matches!(
+            short.complex_div(&long),
+            Err(StorageError::UnsupportedCast {
+                from: DType::Complex64,
+                to: DType::Complex64,
+            })
+        ));
+    }
+
+    #[test]
+    fn storage_complex_mul_complex64_matches_widened_clone_path_bits() {
+        let a = ArrayStorage::from_complex64_vec(vec![
+            (-0.0, f32::from_bits(0x7fc0_0123)),
+            (f32::INFINITY, f32::MIN_POSITIVE),
+            (f32::from_bits(1), -f32::INFINITY),
+            (3.5, -2.25),
+        ]);
+        let b = ArrayStorage::from_complex64_vec(vec![
+            (0.0, 2.0),
+            (-f32::INFINITY, -f32::MIN_POSITIVE),
+            (f32::from_bits(2), f32::INFINITY),
+            (-1.5, 0.75),
+        ]);
+        let former_a = a.to_complex128_vec();
+        let former_b = b.to_complex128_vec();
+        let former: Vec<_> = former_a
+            .iter()
+            .zip(&former_b)
+            .map(|(&(ar, ai), &(br, bi))| (ar * br - ai * bi, ar * bi + ai * br))
+            .collect();
+        let direct = a.complex_mul(&b).unwrap().to_complex128_vec();
+
+        for (actual, expected) in direct.iter().zip(&former) {
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+        }
+
+        let short = ArrayStorage::from_complex64_vec(vec![(1.0, 2.0)]);
+        let long = ArrayStorage::from_complex64_vec(vec![(3.0, 4.0), (5.0, 6.0)]);
+        assert!(matches!(
+            short.complex_mul(&long),
+            Err(StorageError::UnsupportedCast {
+                from: DType::Complex64,
+                to: DType::Complex64,
+            })
+        ));
+    }
+
+    #[test]
+    fn storage_complex_sub_complex64_matches_widened_clone_path_bits() {
+        let a = ArrayStorage::from_complex64_vec(vec![
+            (-0.0, f32::from_bits(0x7fc0_0123)),
+            (f32::INFINITY, f32::MIN_POSITIVE),
+            (f32::from_bits(1), -f32::INFINITY),
+        ]);
+        let b = ArrayStorage::from_complex64_vec(vec![
+            (0.0, 2.0),
+            (-f32::INFINITY, -f32::MIN_POSITIVE),
+            (f32::from_bits(2), f32::INFINITY),
+        ]);
+        let former_a = a.to_complex128_vec();
+        let former_b = b.to_complex128_vec();
+        let former: Vec<_> = former_a
+            .iter()
+            .zip(&former_b)
+            .map(|(&(ar, ai), &(br, bi))| (ar - br, ai - bi))
+            .collect();
+        let direct = a.complex_sub(&b).unwrap().to_complex128_vec();
+
+        for (actual, expected) in direct.iter().zip(&former) {
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+        }
+
+        let short = ArrayStorage::from_complex64_vec(vec![(1.0, 2.0)]);
+        let long = ArrayStorage::from_complex64_vec(vec![(3.0, 4.0), (5.0, 6.0)]);
+        assert!(matches!(
+            short.complex_sub(&long),
+            Err(StorageError::UnsupportedCast {
+                from: DType::Complex64,
+                to: DType::Complex64,
+            })
+        ));
+    }
+
+    #[test]
     fn storage_complex_sub() {
         let a = ArrayStorage::from_complex128_vec(vec![(5.0, 6.0), (7.0, 8.0)]);
         let b = ArrayStorage::from_complex128_vec(vec![(1.0, 2.0), (3.0, 4.0)]);
         let c = a.complex_sub(&b).unwrap();
         assert_eq!(c.to_complex128_vec(), vec![(4.0, 4.0), (4.0, 4.0)]);
+    }
+
+    #[test]
+    fn storage_complex_sub_complex128_matches_clone_path_bits() {
+        let a = ArrayStorage::from_complex128_vec(vec![
+            (-0.0, f64::from_bits(0x7ff8_0000_0000_0456)),
+            (f64::INFINITY, f64::MIN_POSITIVE),
+            (f64::from_bits(2), -f64::INFINITY),
+        ]);
+        let b = ArrayStorage::from_complex128_vec(vec![
+            (0.0, 2.0),
+            (-f64::INFINITY, -f64::MIN_POSITIVE),
+            (f64::from_bits(1), f64::INFINITY),
+        ]);
+        let former_a = a.to_complex128_vec();
+        let former_b = b.to_complex128_vec();
+        let former: Vec<_> = former_a
+            .iter()
+            .zip(&former_b)
+            .map(|(&(ar, ai), &(br, bi))| (ar - br, ai - bi))
+            .collect();
+        let direct = a.complex_sub(&b).unwrap().to_complex128_vec();
+
+        for (actual, expected) in direct.iter().zip(&former) {
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+        }
     }
 
     #[test]
@@ -2886,6 +3752,29 @@ mod tests {
     }
 
     #[test]
+    fn storage_complex_mul_complex128_matches_clone_path_bits() {
+        let a = ArrayStorage::from_complex128_vec(vec![
+            (-0.0, f64::from_bits(0x7ff8_0000_0000_0789)),
+            (f64::MIN_POSITIVE, f64::from_bits(1)),
+            (1.5, -2.75),
+        ]);
+        let b = ArrayStorage::from_complex128_vec(vec![(0.0, 2.0), (0.5, -2.0), (-4.25, 0.125)]);
+        let former_a = a.to_complex128_vec();
+        let former_b = b.to_complex128_vec();
+        let former: Vec<_> = former_a
+            .iter()
+            .zip(&former_b)
+            .map(|(&(ar, ai), &(br, bi))| (ar * br - ai * bi, ar * bi + ai * br))
+            .collect();
+        let direct = a.complex_mul(&b).unwrap().to_complex128_vec();
+
+        for (actual, expected) in direct.iter().zip(&former) {
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+        }
+    }
+
+    #[test]
     fn storage_complex_div() {
         // (1+2i)/(3+4i) = (1*3+2*4)/(9+16) + (2*3-1*4)/(9+16)i = 11/25 + 2/25 i
         let a = ArrayStorage::from_complex128_vec(vec![(1.0, 2.0)]);
@@ -2894,6 +3783,36 @@ mod tests {
         let v = c.to_complex128_vec();
         assert!((v[0].0 - 11.0 / 25.0).abs() < 1e-10);
         assert!((v[0].1 - 2.0 / 25.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn storage_complex_div_complex128_matches_clone_path_bits() {
+        let a = ArrayStorage::from_complex128_vec(vec![
+            (-0.0, f64::from_bits(0x7ff8_0000_0000_0abc)),
+            (f64::MIN_POSITIVE, f64::from_bits(1)),
+            (1.5, -2.75),
+        ]);
+        let b = ArrayStorage::from_complex128_vec(vec![(0.0, -0.0), (0.5, -2.0), (-4.25, 0.125)]);
+        let former_a = a.to_complex128_vec();
+        let former_b = b.to_complex128_vec();
+        let former: Vec<_> = former_a
+            .iter()
+            .zip(&former_b)
+            .map(|(&(ar, ai), &(br, bi))| {
+                let denom = br * br + bi * bi;
+                if denom == 0.0 {
+                    (f64::NAN, f64::NAN)
+                } else {
+                    ((ar * br + ai * bi) / denom, (ai * br - ar * bi) / denom)
+                }
+            })
+            .collect();
+        let direct = a.complex_div(&b).unwrap().to_complex128_vec();
+
+        for (actual, expected) in direct.iter().zip(&former) {
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+        }
     }
 
     #[test]

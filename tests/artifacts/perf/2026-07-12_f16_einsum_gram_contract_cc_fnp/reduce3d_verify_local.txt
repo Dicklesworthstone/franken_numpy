@@ -1,0 +1,8 @@
+REDUCE3D_VERIFY numpy=2.4.3 total=32 fails=0
+VERIFY_OK
+REDUCE3D_VERIFY numpy=2.4.6 total=32 fails=0
+VERIFY_OK
+REDUCE3D_VERIFY numpy=2.2.4 total=32 fails=0
+VERIFY_OK
+REDUCE3D_VERIFY numpy=2.3.5 total=32 fails=0
+VERIFY_OK

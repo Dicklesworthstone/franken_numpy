@@ -458,3 +458,143 @@ print(sign_match and value_match)
     assert_eq!(result.trim(), "True", "positive should preserve sign");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// f64 transcendental zero-copy route (sin/cos/tan/arctan/arcsinh/tanh/cbrt +
+// fused-defer expm1/log1p/sinh/cosh/arcsin/arccos/arctanh/arccosh)
+//
+// The C-contiguous exact-ndarray f64 route computes straight off the borrowed
+// numpy buffer; a Python-list input still takes the extract -> UFuncArray
+// route. Byte-equality between the two routes proves the zero-copy path is
+// bit-identical to the native path on the same data.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn f64_transcendental_zerocopy_route_matches_native_route_and_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20260710)
+verdicts = []
+for n in (257, 100_001):
+    base = rng.standard_normal(n)
+    unit = rng.uniform(-0.999, 0.999, n)
+    geq1 = 1.0 + np.abs(rng.standard_normal(n))
+    ops = [
+        ("sin", base), ("cos", base), ("tan", base), ("arctan", base),
+        ("arcsinh", base), ("tanh", base), ("cbrt", base),
+        ("expm1", base), ("log1p", np.abs(base)),
+        ("sinh", base), ("cosh", base),
+        ("arcsin", unit), ("arccos", unit), ("arctanh", unit), ("arccosh", geq1),
+    ]
+    for name, data in ops:
+        arr = np.ascontiguousarray(data, dtype=np.float64)
+        via_array = getattr(fnp, name)(arr)
+        via_list = getattr(fnp, name)(list(arr))
+        route_ok = (
+            via_array.tobytes() == via_list.tobytes()
+            and via_array.dtype == via_list.dtype
+            and via_array.shape == via_list.shape
+        )
+        oracle_ok = np.allclose(via_array, getattr(np, name)(arr), equal_nan=True)
+        if not (route_ok and oracle_ok):
+            verdicts.append(f"FAIL {name} n={n} route_ok={route_ok} oracle_ok={oracle_ok}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f64 transcendental zero-copy route should be byte-identical to the native route and match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn f64_transcendental_error_inputs_defer_byte_exactly() -> Result<(), String> {
+    // Planted values that would record a NumPy float-error event on the
+    // UFuncArray path (invalid domain / divide / overflow / underflow) must
+    // defer the whole call to that path: outputs stay byte-identical to the
+    // list-route reference, and values still agree with numpy (nan/inf shape).
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(42)
+n = 40_000
+bulk = rng.uniform(-0.9, 0.9, n)
+cases = [
+    ("arcsin", 2.0), ("arccos", -3.0),
+    ("arctanh", 1.0), ("arctanh", -1.0), ("arctanh", -5.0),
+    ("arccosh", 0.5),
+    ("log1p", -1.0), ("log1p", -2.5),
+    ("expm1", 800.0), ("sinh", -800.0), ("cosh", 750.0),
+]
+verdicts = []
+for name, bad in cases:
+    if name == "arccosh":
+        data = 1.0 + np.abs(bulk)
+    else:
+        data = bulk.copy()
+    data = np.ascontiguousarray(data, dtype=np.float64)
+    data[n // 3] = bad
+    via_array = getattr(fnp, name)(data)
+    via_list = getattr(fnp, name)(list(data))
+    route_ok = via_array.tobytes() == via_list.tobytes()
+    oracle_ok = np.allclose(via_array, getattr(np, name)(data), equal_nan=True)
+    if not (route_ok and oracle_ok):
+        verdicts.append(f"FAIL {name} bad={bad} route_ok={route_ok} oracle_ok={oracle_ok}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f64 transcendental error-carrying inputs should defer byte-exactly: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn f64_transcendental_special_values_and_layouts_match() -> Result<(), String> {
+    // NaN / +-inf / +-0.0 never defer (they record no float-error event on the
+    // native path either) and must agree byte-for-byte across routes; 0-d and
+    // non-contiguous inputs keep their existing handling.
+    let script = fnp_script(
+        r#"
+ops = ["sin", "cos", "tan", "arctan", "arcsinh", "tanh", "cbrt",
+       "expm1", "log1p", "sinh", "cosh",
+       "arcsin", "arccos", "arctanh", "arccosh"]
+specials = np.array([np.nan, np.inf, -np.inf, 0.0, -0.0, 0.5, -0.5], dtype=np.float64)
+verdicts = []
+for name in ops:
+    via_array = getattr(fnp, name)(specials)
+    via_list = getattr(fnp, name)(list(specials))
+    if via_array.tobytes() != via_list.tobytes():
+        verdicts.append(f"FAIL specials {name}")
+for name in ("sin", "expm1", "arcsin"):
+    zero_d = np.array(0.25, dtype=np.float64)
+    fnp_scalar = getattr(fnp, name)(zero_d)
+    np_scalar = getattr(np, name)(zero_d)
+    if not np.isclose(float(fnp_scalar), float(np_scalar)):
+        verdicts.append(f"FAIL 0d {name}")
+    if np.ndim(fnp_scalar) != np.ndim(np_scalar):
+        verdicts.append(f"FAIL 0d-ndim {name}")
+    strided = np.linspace(-0.8, 0.8, 20_000)[::2]
+    fnp_strided = getattr(fnp, name)(strided)
+    np_strided = getattr(np, name)(strided)
+    if not np.allclose(fnp_strided, np_strided, equal_nan=True):
+        verdicts.append(f"FAIL strided {name}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f64 transcendental special values / layouts should match: {result}"
+    );
+    Ok(())
+}

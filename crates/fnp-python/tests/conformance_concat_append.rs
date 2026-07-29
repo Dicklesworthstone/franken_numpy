@@ -809,3 +809,340 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+// The native parallel concatenate block copy (large output, >= gate) must be byte-identical to numpy
+// across dtypes, axes, input counts, and call forms (positional axis, axis kwarg, no axis). concatenate
+// moves whole elements verbatim, so the parallel disjoint-block byte copy is exact.
+#[test]
+fn concatenate_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260701)
+chunks = []
+for dtn in ["float64", "float32", "int64", "int32", "int16", "int8", "uint32", "complex128", "complex64", "bool"]:
+    dt = np.dtype(dtn)
+    def mk(shp):
+        if dt.kind == "f":
+            return (rng.standard_normal(shp) * 1.5).astype(dt)
+        if dt.kind == "c":
+            return (rng.standard_normal(shp) + 1j * rng.standard_normal(shp)).astype(dt)
+        if dt.kind == "b":
+            return rng.integers(0, 2, shp).astype(dt)
+        info = np.iinfo(dt)
+        return rng.integers(info.min // 2, info.max // 2, shp).astype(dt)
+    a = mk((1200, 1200)); b = mk((1200, 1200)); c = mk((600, 1200))
+    chunks.append(np.ascontiguousarray(mod.concatenate([a, b])).tobytes())           # no axis (0)
+    chunks.append(np.ascontiguousarray(mod.concatenate([a, b, c], 0)).tobytes())      # positional axis
+    chunks.append(np.ascontiguousarray(mod.concatenate([a, b], axis=1)).tobytes())    # axis kwarg
+    chunks.append(np.ascontiguousarray(mod.concatenate([a, b], axis=-1)).tobytes())
+    chunks.append(np.ascontiguousarray(mod.vstack([a, b])).tobytes())
+    chunks.append(np.ascontiguousarray(mod.hstack([a, b])).tobytes())
+    t = mk((60, 400, 60)); u = mk((60, 250, 60))
+    chunks.append(np.ascontiguousarray(mod.concatenate([t, u], axis=1)).tobytes())    # 3-D non-trivial outer
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "native parallel concatenate must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
+
+#[test]
+fn insert_nd_axis_none_flat_view_matches_numpy() -> Result<(), String> {
+    // np.insert(..., axis=None) flattens the input in C order before inserting.
+    // This locks the N-D input-form fast path to byte-exact parity while keeping
+    // explicit-axis and non-C-contiguous inputs on NumPy's existing semantics.
+    let script = fnp_script(
+        r#"
+import time
+
+verdicts = []
+
+def outcome(fn, *args, **kwargs):
+    try:
+        out = np.asarray(fn(*args, **kwargs))
+        return ("ok", str(out.dtype), tuple(out.shape), out.tobytes())
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+def ab(name, arr, obj, value, **kwargs):
+    ours = outcome(fnp.insert, arr, obj, value, **kwargs)
+    theirs = outcome(np.insert, arr, obj, value, **kwargs)
+    if ours != theirs:
+        verdicts.append(f"FAIL {name}")
+
+base = np.array(
+    [[0.0, -0.0, 1.5], [np.inf, -np.inf, np.nan]],
+    dtype=np.float64,
+)
+for idx in (0, 3, base.size, -1, -base.size):
+    ab(f"2-D index {idx}", base, idx, -0.0)
+ab("3-D", np.arange(60, dtype=np.float64).reshape(3, 4, 5), 17, 99.25)
+ab("0-D", np.array(7.0, dtype=np.float64), 1, 8.0)
+ab("F-contiguous defer", np.asfortranarray(np.arange(24.0).reshape(4, 6)), 7, 2.5)
+ab("axis 0 unchanged", np.arange(24.0).reshape(4, 6), 2, 2.5, axis=0)
+ab("axis -1 unchanged", np.arange(24.0).reshape(4, 6), 2, 2.5, axis=-1)
+ab("out of bounds", base, base.size + 1, 2.5)
+
+large = np.arange(8_000_000, dtype=np.float64).reshape(2000, 4000)
+
+def best(fn, reps=3):
+    samples = []
+    for _ in range(reps):
+        start = time.perf_counter()
+        fn()
+        samples.append((time.perf_counter() - start) * 1e3)
+    return min(samples)
+
+numpy_ms = best(lambda: np.insert(large, large.size // 2, -3.25))
+fnp_ms = best(lambda: fnp.insert(large, large.size // 2, -3.25))
+print(f"INSERT_ND_AXIS_NONE_AB numpy_ms={numpy_ms:.3f} fnp_ms={fnp_ms:.3f} ratio={numpy_ms / fnp_ms:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}");
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "N-D axis=None scalar insert must be byte-identical to NumPy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn delete_nd_axis_none_flat_view_matches_numpy() -> Result<(), String> {
+    // np.delete(..., axis=None) ravels the input in C order before deleting.
+    // This locks the N-D input-form candidate to raw-byte parity while keeping
+    // explicit-axis and non-C-contiguous inputs on NumPy's existing semantics.
+    let script = fnp_script(
+        r#"
+import time
+
+verdicts = []
+
+def outcome(fn, *args, **kwargs):
+    try:
+        out = np.asarray(fn(*args, **kwargs))
+        return ("ok", str(out.dtype), tuple(out.shape), out.tobytes())
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+def ab(name, arr, obj, **kwargs):
+    ours = outcome(fnp.delete, arr, obj, **kwargs)
+    theirs = outcome(np.delete, arr, obj, **kwargs)
+    if ours != theirs:
+        verdicts.append(f"FAIL {name}")
+
+base = np.array(
+    [[0.0, -0.0, 1.5], [np.inf, -np.inf, np.nan]],
+    dtype=np.float64,
+)
+for idx in (0, 3, base.size - 1, -1, -base.size):
+    ab(f"2-D index {idx}", base, idx)
+ab("3-D", np.arange(60, dtype=np.float64).reshape(3, 4, 5), 17)
+ab("0-D", np.array(7.0, dtype=np.float64), 0)
+ab("F-contiguous defer", np.asfortranarray(np.arange(24.0).reshape(4, 6)), 7)
+ab("axis 0 unchanged", np.arange(24.0).reshape(4, 6), 2, axis=0)
+ab("axis -1 unchanged", np.arange(24.0).reshape(4, 6), 2, axis=-1)
+ab("out of bounds", base, base.size)
+
+large = np.arange(8_000_000, dtype=np.float64).reshape(2000, 4000)
+
+def best(fn, reps=3):
+    samples = []
+    for _ in range(reps):
+        start = time.perf_counter()
+        fn()
+        samples.append((time.perf_counter() - start) * 1e3)
+    return min(samples)
+
+numpy_ms = best(lambda: np.delete(large, large.size // 2))
+fnp_ms = best(lambda: fnp.delete(large, large.size // 2))
+print(f"DELETE_ND_AXIS_NONE_AB numpy_ms={numpy_ms:.3f} fnp_ms={fnp_ms:.3f} ratio={numpy_ms / fnp_ms:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}");
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "N-D axis=None scalar delete must be byte-identical to NumPy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn delete_strided_slice_parallel_matches_numpy() -> Result<(), String> {
+    // Locked parity, native-route, and foreground coverage for the dense
+    // strided-slice delete fast path.
+    let script = fnp_script(
+        r#"
+import time
+
+verdicts = []
+numpy_delete = np.delete
+
+def outcome(fn, *args, **kwargs):
+    try:
+        out = np.asarray(fn(*args, **kwargs))
+        return ("ok", str(out.dtype), tuple(out.shape), out.tobytes())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+def ab(name, arr, obj, **kwargs):
+    ours = outcome(fnp.delete, arr, obj, **kwargs)
+    theirs = outcome(numpy_delete, arr, obj, **kwargs)
+    if ours != theirs:
+        verdicts.append(f"FAIL {name}: {ours[:3]} != {theirs[:3]}")
+
+# Keep the parity rows above the candidate's size gate so they exercise the
+# native route when admitted.  Every supported fixed-width scalar storage
+# width is represented; delete is a byte-preserving stable filter.
+n = 1 << 19
+for dtype in (
+    np.bool_, np.int8, np.uint8, np.int16, np.uint16, np.int32, np.uint32,
+    np.int64, np.uint64, np.float16, np.float32, np.float64,
+):
+    dtype = np.dtype(dtype)
+    dtype_n = max(n, (1 << 22) // dtype.itemsize)
+    if dtype == np.dtype(np.bool_):
+        arr = (np.arange(dtype_n, dtype=np.uint32) & 1).astype(dtype)
+    else:
+        arr = np.arange(dtype_n, dtype=np.uint64).astype(dtype)
+    ab(f"dtype {np.dtype(dtype)} positive step", arr, slice(7, None, 3))
+    ab(f"dtype {np.dtype(dtype)} negative step", arr, slice(-2, -dtype_n, -5))
+
+special = np.arange(n, dtype=np.float64)
+special[:8] = [0.0, -0.0, np.inf, -np.inf, np.nan, 5e-324, -5e-324, 1.5]
+for name, obj in (
+    ("omitted bounds positive", slice(None, None, 2)),
+    ("omitted bounds negative", slice(None, None, -3)),
+    ("clamped bounds", slice(-10 * n, 10 * n, 7)),
+    ("empty positive", slice(19, 19, 2)),
+    ("empty negative", slice(19, 19, -2)),
+):
+    ab(name, special, obj)
+
+# Unsupported forms retain NumPy's behavior, including the exact step-zero
+# ValueError.  These rows also guard the step +/-1 exclusion.
+ab("step one delegate", special, slice(11, n - 11, 1))
+ab("step negative one delegate", special, slice(None, None, -1))
+ab("step zero error", special, slice(None, None, 0))
+ab("below gate", np.arange(1024, dtype=np.float64), slice(None, None, 2))
+ab("complex delegate", np.arange(n, dtype=np.float64).astype(np.complex128), slice(1, None, 2))
+ab("explicit axis zero", special, slice(1, None, 2), axis=0)
+ab("explicit axis negative one", special, slice(-2, None, -3), axis=-1)
+ab("invalid explicit axis delegate", special, slice(1, None, 2), axis=1)
+ab("negative invalid explicit axis delegate", special, slice(1, None, 2), axis=-2)
+ab("bool explicit axis delegate", special, slice(1, None, 2), axis=False)
+ab("numpy int explicit axis delegate", special, slice(1, None, 2), axis=np.int64(0))
+class AxisInt(int):
+    pass
+ab("int subclass explicit axis delegate", special, slice(1, None, 2), axis=AxisInt(0))
+ab("huge explicit axis delegate", special, slice(1, None, 2), axis=1 << 100)
+ab("2-D explicit axis delegate", special.reshape(512, -1), slice(1, None, 2), axis=0)
+class ArraySub(np.ndarray):
+    pass
+ab("array subclass explicit axis delegate", special.view(ArraySub), slice(1, None, 2), axis=0)
+
+class CountingAxis:
+    def __init__(self, value):
+        self.value = value
+        self.calls = 0
+    def __index__(self):
+        self.calls += 1
+        return self.value
+
+ours_axis = CountingAxis(0)
+numpy_axis = CountingAxis(0)
+ours_custom = outcome(fnp.delete, special, slice(1, None, 2), axis=ours_axis)
+numpy_custom = outcome(numpy_delete, special, slice(1, None, 2), axis=numpy_axis)
+if ours_custom != numpy_custom or ours_axis.calls != 1 or numpy_axis.calls != 1:
+    verdicts.append(
+        f"FAIL custom axis evaluation: outcomes={ours_custom[:3] == numpy_custom[:3]} "
+        f"calls={ours_axis.calls}/{numpy_axis.calls}"
+    )
+
+ours_bound = CountingAxis(3)
+numpy_bound = CountingAxis(3)
+ours_custom_bound = outcome(fnp.delete, special, slice(ours_bound, 19, 3), axis=0)
+numpy_custom_bound = outcome(numpy_delete, special, slice(numpy_bound, 19, 3), axis=0)
+if ours_custom_bound != numpy_custom_bound or ours_bound.calls != 1 or numpy_bound.calls != 1:
+    verdicts.append(
+        f"FAIL custom slice-bound evaluation: outcomes={ours_custom_bound[:3] == numpy_custom_bound[:3]} "
+        f"calls={ours_bound.calls}/{numpy_bound.calls}"
+    )
+
+def best(fn, reps=5):
+    samples = []
+    for _ in range(reps):
+        start = time.perf_counter()
+        fn()
+        samples.append((time.perf_counter() - start) * 1e3)
+    return min(samples)
+
+large = np.arange(8_000_000, dtype=np.float64)
+spec = slice(1, None, 3)
+numpy_ms = best(lambda: numpy_delete(large, spec))
+fnp_ms = best(lambda: fnp.delete(large, spec))
+print(f"DELETE_STRIDED_SLICE_AB numpy_ms={numpy_ms:.3f} fnp_ms={fnp_ms:.3f} ratio={numpy_ms / fnp_ms:.3f}")
+numpy_axis_ms = best(lambda: numpy_delete(large, spec, axis=0))
+fnp_axis_ms = best(lambda: fnp.delete(large, spec, axis=0))
+print(f"DELETE_STRIDED_SLICE_AXIS0_AB numpy_ms={numpy_axis_ms:.3f} fnp_ms={fnp_axis_ms:.3f} ratio={numpy_axis_ms / fnp_axis_ms:.3f}")
+
+# Prove eligible inputs avoid the NumPy delete fallback while excluded forms
+# still reach it.  The saved original remains the parity/timing oracle.
+fallback_calls = 0
+def counted_delete(*args, **kwargs):
+    global fallback_calls
+    fallback_calls += 1
+    return numpy_delete(*args, **kwargs)
+np.delete = counted_delete
+def fallback_delta(call):
+    before = fallback_calls
+    call()
+    return fallback_calls - before
+
+route_checks = (
+    ("axis none positive", lambda: fnp.delete(large, spec), 0),
+    ("axis none negative", lambda: fnp.delete(large, slice(-2, None, -3)), 0),
+    ("axis zero", lambda: fnp.delete(large, spec, axis=0), 0),
+    ("axis negative one", lambda: fnp.delete(large, slice(-2, None, -3), axis=-1), 0),
+    ("step one", lambda: fnp.delete(large, slice(1, None, 1)), 1),
+    ("bool axis", lambda: fnp.delete(large, spec, axis=False), 1),
+    ("2-D axis", lambda: fnp.delete(large.reshape(2000, 4000), spec, axis=0), 1),
+    ("array subclass", lambda: fnp.delete(large.view(ArraySub), spec, axis=0), 1),
+    ("int-index array axis", lambda: fnp.delete(large, np.array([1, 7, 19]), axis=0), 1),
+)
+for name, call, expected in route_checks:
+    observed = fallback_delta(call)
+    if observed != expected:
+        verdicts.append(f"FAIL {name} fallback count {observed} != {expected}")
+np.delete = numpy_delete
+
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}");
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "strided-slice delete must be byte-identical to NumPy: {result}"
+    );
+    Ok(())
+}

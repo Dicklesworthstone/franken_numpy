@@ -2,16 +2,17 @@
 //!
 //! These target Python-boundary costs that the Rust engine benches do not see.
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::Criterion;
 use fnp_python::fnp_python;
-use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyTuple};
-use pyo3::{PyResult, Python};
+use pyo3::Python;
+use pyo3::types::{PyAnyMethods, PyDict, PyModule};
+use rayon::prelude::*;
 use std::hint::black_box;
 use std::time::Duration;
 
-fn ensure_numpy_available(py: Python<'_>) -> PyResult<()> {
-    py.import("numpy").map(drop)
-}
+#[path = "common/mod.rs"]
+mod common;
+use common::*;
 
 fn bench_sqrt_input_extraction(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_buffer_extract");
@@ -33,1539 +34,6 @@ fn bench_sqrt_input_extraction(c: &mut Criterion) {
         group.bench_function("sqrt_f64_1m", |bench| {
             bench.iter(|| {
                 let result = sqrt.call1((&input,)).expect("sqrt benchmark call");
-                black_box(result);
-            });
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_int32_unary_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_int32_unary_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let input = numpy
-            .call_method1("arange", (2_000_000_i64,))
-            .expect("2M int32 input")
-            .call_method1("astype", ("int32",))
-            .expect("int32 input dtype")
-            .call_method1("__sub__", (1_000_000_i64,))
-            .expect("centered int32 range");
-        let fnp_square = module.getattr("square").expect("fnp_python.square");
-        let fnp_negative = module.getattr("negative").expect("fnp_python.negative");
-        let numpy_square = numpy.getattr("square").expect("numpy.square");
-
-        group.bench_function("fnp_square_i32_2m", |bench| {
-            bench.iter(|| {
-                let result = fnp_square
-                    .call1((&input,))
-                    .expect("fnp square int32 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("fnp_negative_i32_2m", |bench| {
-            bench.iter(|| {
-                let result = fnp_negative
-                    .call1((&input,))
-                    .expect("fnp negative int32 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_square_i32_2m", |bench| {
-            bench.iter(|| {
-                let result = numpy_square
-                    .call1((&input,))
-                    .expect("numpy square int32 benchmark call");
-                black_box(result);
-            });
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_narrow_int_unary_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_narrow_int_unary_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let base = numpy
-            .call_method1("arange", (2_000_000_i64,))
-            .expect("2M integer input");
-        let input_i16 = base
-            .call_method1("astype", ("int16",))
-            .expect("int16 input");
-        let input_u8 = base
-            .call_method1("astype", ("uint8",))
-            .expect("uint8 input");
-        let input_u64 = base
-            .call_method1("astype", ("uint64",))
-            .expect("uint64 input");
-        let fnp_square = module.getattr("square").expect("fnp_python.square");
-        let fnp_negative = module.getattr("negative").expect("fnp_python.negative");
-        let numpy_square = numpy.getattr("square").expect("numpy.square");
-        let numpy_negative = numpy.getattr("negative").expect("numpy.negative");
-
-        group.bench_function("fnp_square_i16_2m", |bench| {
-            bench.iter(|| {
-                let result = fnp_square
-                    .call1((&input_i16,))
-                    .expect("fnp square int16 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_square_i16_2m", |bench| {
-            bench.iter(|| {
-                let result = numpy_square
-                    .call1((&input_i16,))
-                    .expect("numpy square int16 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("fnp_negative_u8_2m", |bench| {
-            bench.iter(|| {
-                let result = fnp_negative
-                    .call1((&input_u8,))
-                    .expect("fnp negative uint8 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_negative_u8_2m", |bench| {
-            bench.iter(|| {
-                let result = numpy_negative
-                    .call1((&input_u8,))
-                    .expect("numpy negative uint8 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("fnp_square_u64_2m", |bench| {
-            bench.iter(|| {
-                let result = fnp_square
-                    .call1((&input_u64,))
-                    .expect("fnp square uint64 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_square_u64_2m", |bench| {
-            bench.iter(|| {
-                let result = numpy_square
-                    .call1((&input_u64,))
-                    .expect("numpy square uint64 benchmark call");
-                black_box(result);
-            });
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_remainder_mod_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_remainder_mod_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_mod = module.getattr("mod").expect("fnp_python.mod");
-        let fnp_remainder = module.getattr("remainder").expect("fnp_python.remainder");
-        let numpy_remainder = numpy.getattr("remainder").expect("numpy.remainder");
-
-        for (label, len) in [("1m", 1_000_000_usize), ("8m", 8_000_000_usize)] {
-            let x1 = numpy
-                .call_method1("linspace", (-1_000_000.0_f64, 1_000_000.0_f64, len))
-                .expect("f64 remainder dividend input");
-            let x2 = numpy
-                .call_method1("full", ((len,), 7.25_f64))
-                .expect("f64 remainder divisor input");
-
-            group.bench_function(format!("fnp_mod_f64_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_mod
-                        .call1((&x1, &x2))
-                        .expect("fnp mod f64 benchmark call");
-                    black_box(result);
-                });
-            });
-
-            group.bench_function(format!("fnp_remainder_f64_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_remainder
-                        .call1((&x1, &x2))
-                        .expect("fnp remainder f64 benchmark call");
-                    black_box(result);
-                });
-            });
-
-            group.bench_function(format!("numpy_remainder_f64_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_remainder
-                        .call1((&x1, &x2))
-                        .expect("numpy remainder f64 benchmark call");
-                    black_box(result);
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
-fn bench_max_min_reduction_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_max_min_reduction_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let input = numpy
-            .call_method1("linspace", (-1.0_f64, 1.0_f64, 2048_usize * 2048_usize))
-            .expect("4M f64 input")
-            .call_method1("reshape", ((2048_usize, 2048_usize),))
-            .expect("2048x2048 f64 input");
-        let fnp_max = module.getattr("max").expect("fnp_python.max");
-        let fnp_min = module.getattr("min").expect("fnp_python.min");
-        let numpy_max = numpy.getattr("max").expect("numpy.max");
-        let numpy_min = numpy.getattr("min").expect("numpy.min");
-
-        group.bench_function("fnp_max_axis1_f64_2048x2048", |bench| {
-            bench.iter(|| {
-                let result = fnp_max
-                    .call1((&input, 1_i64))
-                    .expect("fnp max axis=1 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_max_axis1_f64_2048x2048", |bench| {
-            bench.iter(|| {
-                let result = numpy_max
-                    .call1((&input, 1_i64))
-                    .expect("numpy max axis=1 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("fnp_max_flat_f64_4m", |bench| {
-            bench.iter(|| {
-                let result = fnp_max
-                    .call1((&input,))
-                    .expect("fnp max flat benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_max_flat_f64_4m", |bench| {
-            bench.iter(|| {
-                let result = numpy_max
-                    .call1((&input,))
-                    .expect("numpy max flat benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("fnp_min_flat_f64_4m", |bench| {
-            bench.iter(|| {
-                let result = fnp_min
-                    .call1((&input,))
-                    .expect("fnp min flat benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_min_flat_f64_4m", |bench| {
-            bench.iter(|| {
-                let result = numpy_min
-                    .call1((&input,))
-                    .expect("numpy min flat benchmark call");
-                black_box(result);
-            });
-        });
-
-        // axis=0 (non-last, strided for numpy): the parallel native fold's biggest win.
-        group.bench_function("fnp_max_axis0_f64_2048x2048", |bench| {
-            bench.iter(|| {
-                let result = fnp_max
-                    .call1((&input, 0_i64))
-                    .expect("fnp max axis=0 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_max_axis0_f64_2048x2048", |bench| {
-            bench.iter(|| {
-                let result = numpy_max
-                    .call1((&input, 0_i64))
-                    .expect("numpy max axis=0 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("fnp_min_axis0_f64_2048x2048", |bench| {
-            bench.iter(|| {
-                let result = fnp_min
-                    .call1((&input, 0_i64))
-                    .expect("fnp min axis=0 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_min_axis0_f64_2048x2048", |bench| {
-            bench.iter(|| {
-                let result = numpy_min
-                    .call1((&input, 0_i64))
-                    .expect("numpy min axis=0 benchmark call");
-                black_box(result);
-            });
-        });
-
-        // 3-D middle axis (axis=1): block-parallel non-last path.
-        let input3d = numpy
-            .call_method1("linspace", (-1.0_f64, 1.0_f64, 256_usize * 256_usize * 64_usize))
-            .expect("4M f64 3d source")
-            .call_method1("reshape", ((256_usize, 256_usize, 64_usize),))
-            .expect("256x256x64 reshape");
-        group.bench_function("fnp_max_axis1_f64_256x256x64", |bench| {
-            bench.iter(|| {
-                let result = fnp_max
-                    .call1((&input3d, 1_i64))
-                    .expect("fnp max 3d axis=1 call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_max_axis1_f64_256x256x64", |bench| {
-            bench.iter(|| {
-                let result = numpy_max
-                    .call1((&input3d, 1_i64))
-                    .expect("numpy max 3d axis=1 call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("fnp_min_axis1_f64_256x256x64", |bench| {
-            bench.iter(|| {
-                let result = fnp_min
-                    .call1((&input3d, 1_i64))
-                    .expect("fnp min 3d axis=1 call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_min_axis1_f64_256x256x64", |bench| {
-            bench.iter(|| {
-                let result = numpy_min
-                    .call1((&input3d, 1_i64))
-                    .expect("numpy min 3d axis=1 call");
-                black_box(result);
-            });
-        });
-    });
-
-    group.finish();
-}
-
-// ptp (max-min) over a reduction axis. numpy computes ptp as two strided passes
-// (max then min) plus a subtract temp; fnp fuses min+max into one streaming pass.
-// The axis=0 single-outer-group case used to fold over rows allocating an
-// inner-wide plane per fold segment (~2.6x slower than numpy at large inner); the
-// column-block parallel rewrite makes it a single pass. axis=1 (middle) is the
-// already-fast block-parallel non-last path, kept here as a regression guard.
-fn bench_ptp_axis0_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_ptp_axis0_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_ptp = module.getattr("ptp").expect("fnp_python.ptp");
-        let numpy_ptp = numpy.getattr("ptp").expect("numpy.ptp");
-
-        // 3-D axis=0: outer==1, inner=128*256=32768 — the fixed single-group path.
-        let input3d = numpy
-            .call_method1("linspace", (-1.0_f64, 1.0_f64, 256_usize * 128_usize * 256_usize))
-            .expect("8M f64 3d source")
-            .call_method1("reshape", ((256_usize, 128_usize, 256_usize),))
-            .expect("256x128x256 reshape");
-        group.bench_function("fnp_ptp_axis0_f64_256x128x256", |bench| {
-            bench.iter(|| {
-                let result = fnp_ptp
-                    .call1((&input3d, 0_i64))
-                    .expect("fnp ptp 3d axis=0 call");
-                black_box(result);
-            });
-        });
-        group.bench_function("numpy_ptp_axis0_f64_256x128x256", |bench| {
-            bench.iter(|| {
-                let result = numpy_ptp
-                    .call1((&input3d, 0_i64))
-                    .expect("numpy ptp 3d axis=0 call");
-                black_box(result);
-            });
-        });
-
-        // 2-D axis=0 (2048x2048): outer==1, inner=2048.
-        let input2d = numpy
-            .call_method1("linspace", (-1.0_f64, 1.0_f64, 2048_usize * 2048_usize))
-            .expect("4M f64 source")
-            .call_method1("reshape", ((2048_usize, 2048_usize),))
-            .expect("2048x2048 reshape");
-        group.bench_function("fnp_ptp_axis0_f64_2048x2048", |bench| {
-            bench.iter(|| {
-                let result = fnp_ptp
-                    .call1((&input2d, 0_i64))
-                    .expect("fnp ptp 2d axis=0 call");
-                black_box(result);
-            });
-        });
-        group.bench_function("numpy_ptp_axis0_f64_2048x2048", |bench| {
-            bench.iter(|| {
-                let result = numpy_ptp
-                    .call1((&input2d, 0_i64))
-                    .expect("numpy ptp 2d axis=0 call");
-                black_box(result);
-            });
-        });
-
-        // axis=1 (middle) regression guard: already-fast block-parallel non-last path.
-        group.bench_function("fnp_ptp_axis1_f64_256x128x256", |bench| {
-            bench.iter(|| {
-                let result = fnp_ptp
-                    .call1((&input3d, 1_i64))
-                    .expect("fnp ptp 3d axis=1 call");
-                black_box(result);
-            });
-        });
-        group.bench_function("numpy_ptp_axis1_f64_256x128x256", |bench| {
-            bench.iter(|| {
-                let result = numpy_ptp
-                    .call1((&input3d, 1_i64))
-                    .expect("numpy ptp 3d axis=1 call");
-                black_box(result);
-            });
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_bool_minmax_reduction_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_bool_minmax_reduction_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let input = numpy
-            .call_method1("arange", (2048_usize * 2048_usize,))
-            .expect("4M bool source")
-            .call_method1("__mod__", (3_i64,))
-            .expect("periodic bool source")
-            .call_method1("__eq__", (0_i64,))
-            .expect("periodic bool input")
-            .call_method1("reshape", ((2048_usize, 2048_usize),))
-            .expect("2048x2048 bool input");
-        let fnp_max = module.getattr("max").expect("fnp_python.max");
-        let fnp_min = module.getattr("min").expect("fnp_python.min");
-        let numpy_max = numpy.getattr("max").expect("numpy.max");
-        let numpy_min = numpy.getattr("min").expect("numpy.min");
-
-        group.bench_function("fnp_max_flat_bool_4m", |bench| {
-            bench.iter(|| {
-                let result = fnp_max.call1((&input,)).expect("fnp max bool flat");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_max_flat_bool_4m", |bench| {
-            bench.iter(|| {
-                let result = numpy_max.call1((&input,)).expect("numpy max bool flat");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("fnp_min_flat_bool_4m", |bench| {
-            bench.iter(|| {
-                let result = fnp_min.call1((&input,)).expect("fnp min bool flat");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_min_flat_bool_4m", |bench| {
-            bench.iter(|| {
-                let result = numpy_min.call1((&input,)).expect("numpy min bool flat");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("fnp_max_axis1_bool_2048x2048", |bench| {
-            bench.iter(|| {
-                let result = fnp_max.call1((&input, 1_i64)).expect("fnp max bool axis=1");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_max_axis1_bool_2048x2048", |bench| {
-            bench.iter(|| {
-                let result = numpy_max
-                    .call1((&input, 1_i64))
-                    .expect("numpy max bool axis=1");
-                black_box(result);
-            });
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_prod_reduction_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_prod_reduction_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", "int64").expect("dtype kwarg");
-        let input_i64 = numpy
-            .call_method("full", ((2_000_000_usize,), 3_i64), Some(&kwargs))
-            .expect("2M int64 input");
-        let fnp_prod = module.getattr("prod").expect("fnp_python.prod");
-        let numpy_prod = numpy.getattr("prod").expect("numpy.prod");
-
-        group.bench_function("fnp_prod_i64_2m", |bench| {
-            bench.iter(|| {
-                let result = fnp_prod
-                    .call1((&input_i64,))
-                    .expect("fnp prod int64 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_prod_i64_2m", |bench| {
-            bench.iter(|| {
-                let result = numpy_prod
-                    .call1((&input_i64,))
-                    .expect("numpy prod int64 benchmark call");
-                black_box(result);
-            });
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_ediff1d_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_ediff1d_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(5));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let input = numpy
-            .call_method1(
-                "linspace",
-                (-1_000_000.0_f64, 1_000_000.0_f64, 2_000_000_usize),
-            )
-            .expect("2M f64 input");
-        let ediff1d = module.getattr("ediff1d").expect("fnp_python.ediff1d");
-
-        group.bench_function("ediff1d_f64_2m", |bench| {
-            bench.iter(|| {
-                let result = ediff1d.call1((&input,)).expect("ediff1d benchmark call");
-                black_box(result);
-            });
-        });
-
-        // 8M fnp-vs-numpy comparison (parallel consecutive-diff vs single-threaded numpy).
-        let big = numpy
-            .call_method1(
-                "linspace",
-                (-1_000_000.0_f64, 1_000_000.0_f64, 8_000_000_usize),
-            )
-            .expect("8M f64 input");
-        let numpy_ediff1d = numpy.getattr("ediff1d").expect("numpy ediff1d");
-        group.bench_function("fnp_ediff1d_f64_8m", |bench| {
-            bench.iter(|| black_box(ediff1d.call1((&big,)).expect("fnp ediff1d 8m")));
-        });
-        group.bench_function("numpy_ediff1d_f64_8m", |bench| {
-            bench.iter(|| black_box(numpy_ediff1d.call1((&big,)).expect("numpy ediff1d 8m")));
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_select_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_select_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(5));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let base = numpy
-            .call_method1("linspace", (-1.0_f64, 1.0_f64, 2_000_000_usize))
-            .expect("2M f64 input");
-        let cond_low = numpy
-            .getattr("less")
-            .expect("numpy.less")
-            .call1((&base, -0.25_f64))
-            .expect("low condition");
-        let cond_high = numpy
-            .getattr("greater")
-            .expect("numpy.greater")
-            .call1((&base, 0.25_f64))
-            .expect("high condition");
-        let choice_low = numpy
-            .getattr("multiply")
-            .expect("numpy.multiply")
-            .call1((&base, -3.0_f64))
-            .expect("low choice");
-        let choice_high = numpy
-            .getattr("add")
-            .expect("numpy.add")
-            .call1((&base, 7.0_f64))
-            .expect("high choice");
-        let condlist = PyTuple::new(py, [&cond_low, &cond_high]).expect("condlist");
-        let choicelist = PyTuple::new(py, [&choice_low, &choice_high]).expect("choicelist");
-        let select = module.getattr("select").expect("fnp_python.select");
-
-        group.bench_function("select_2conds_f64_2m", |bench| {
-            bench.iter(|| {
-                let result = select
-                    .call1((&condlist, &choicelist))
-                    .expect("select benchmark call");
-                black_box(result);
-            });
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_ldexp_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_ldexp_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(5));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let x1 = numpy
-            .call_method1(
-                "linspace",
-                (-1_000_000.0_f64, 1_000_000.0_f64, 2_000_000_usize),
-            )
-            .expect("2M f64 input");
-        let x2 = numpy
-            .call_method("full", ((2_000_000_usize,), 3_i32), None)
-            .expect("2M int32 exponent")
-            .call_method1("astype", ("int32",))
-            .expect("int32 exponent dtype");
-        let ldexp = module.getattr("ldexp").expect("fnp_python.ldexp");
-
-        group.bench_function("ldexp_f64_i32_2m", |bench| {
-            bench.iter(|| {
-                let result = ldexp
-                    .call1((&x1, &x2))
-                    .expect("ldexp f64/int32 benchmark call");
-                black_box(result);
-            });
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_float_power_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_float_power_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(5));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let x1 = numpy
-            .call_method1("linspace", (0.5_f64, 4.5_f64, 2_000_000_usize))
-            .expect("2M f64 base input");
-        let x2 = numpy
-            .call_method1("linspace", (0.25_f64, 2.25_f64, 2_000_000_usize))
-            .expect("2M f64 exponent input");
-        let fnp_float_power = module
-            .getattr("float_power")
-            .expect("fnp_python.float_power");
-        let numpy_float_power = numpy.getattr("float_power").expect("numpy.float_power");
-
-        group.bench_function("fnp_float_power_f64_2m", |bench| {
-            bench.iter(|| {
-                let result = fnp_float_power
-                    .call1((&x1, &x2))
-                    .expect("fnp float_power f64/f64 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_float_power_f64_2m", |bench| {
-            bench.iter(|| {
-                let result = numpy_float_power
-                    .call1((&x1, &x2))
-                    .expect("numpy float_power f64/f64 benchmark call");
-                black_box(result);
-            });
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_frexp_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_frexp_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let input = numpy
-            .call_method1(
-                "linspace",
-                (-1_000_000.0_f64, 1_000_000.0_f64, 1_000_000_usize),
-            )
-            .expect("1M f64 input");
-        let fnp_frexp = module.getattr("frexp").expect("fnp_python.frexp");
-        let numpy_frexp = numpy.getattr("frexp").expect("numpy.frexp");
-
-        group.bench_function("frexp_f64_1m", |bench| {
-            bench.iter(|| {
-                let result = fnp_frexp.call1((&input,)).expect("frexp benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_frexp_f64_1m", |bench| {
-            bench.iter(|| {
-                let result = numpy_frexp
-                    .call1((&input,))
-                    .expect("numpy frexp benchmark call");
-                black_box(result);
-            });
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_modf_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_modf_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let input = numpy
-            .call_method1(
-                "linspace",
-                (-1_000_000.75_f64, 1_000_000.75_f64, 1_000_000_usize),
-            )
-            .expect("1M f64 input");
-        let fnp_modf = module.getattr("modf").expect("fnp_python.modf");
-        let numpy_modf = numpy.getattr("modf").expect("numpy.modf");
-
-        group.bench_function("fnp_modf_f64_1m", |bench| {
-            bench.iter(|| {
-                let result = fnp_modf.call1((&input,)).expect("fnp modf benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_modf_f64_1m", |bench| {
-            bench.iter(|| {
-                let result = numpy_modf
-                    .call1((&input,))
-                    .expect("numpy modf benchmark call");
-                black_box(result);
-            });
-        });
-
-        // 8M case: above the 1<<21 parallel gate (the 1M case stays serial).
-        let input8 = numpy
-            .call_method1(
-                "linspace",
-                (-1_000_000.75_f64, 1_000_000.75_f64, 8_000_000_usize),
-            )
-            .expect("8M f64 input");
-        group.bench_function("fnp_modf_f64_8m", |bench| {
-            bench.iter(|| black_box(fnp_modf.call1((&input8,)).expect("fnp modf 8m")));
-        });
-        group.bench_function("numpy_modf_f64_8m", |bench| {
-            bench.iter(|| black_box(numpy_modf.call1((&input8,)).expect("numpy modf 8m")));
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_putmask_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_putmask_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let n = 1_000_000_i64;
-        let index = numpy.call_method1("arange", (n,)).expect("1M index");
-        let mask = index
-            .call_method1("__mod__", (3_i64,))
-            .expect("periodic mask index")
-            .call_method1("__eq__", (0_i64,))
-            .expect("periodic bool mask");
-        let base_u8 = index
-            .call_method1("astype", ("uint8",))
-            .expect("uint8 putmask base");
-        let base_i32 = index
-            .call_method1("astype", ("int32",))
-            .expect("int32 putmask base");
-        let base_f32 = numpy
-            .call_method1("linspace", (-1.0_f64, 1.0_f64, n as usize))
-            .expect("f32 putmask linspace")
-            .call_method1("astype", ("float32",))
-            .expect("float32 putmask base");
-        let vals_u8 = numpy
-            .call_method1("array", (vec![7_i64, 255_i64, 1_i64, 128_i64],))
-            .expect("uint8 values")
-            .call_method1("astype", ("uint8",))
-            .expect("uint8 values dtype");
-        let vals_i32 = numpy
-            .call_method1(
-                "array",
-                (vec![-2_000_000_000_i64, 0_i64, 1_234_567_i64, 99_i64],),
-            )
-            .expect("int32 values")
-            .call_method1("astype", ("int32",))
-            .expect("int32 values dtype");
-        let vals_f32 = numpy
-            .call_method1("array", (vec![-0.0_f32, 0.0_f32, f32::INFINITY, f32::NAN],))
-            .expect("float32 values")
-            .call_method1("astype", ("float32",))
-            .expect("float32 values dtype");
-        let fnp_putmask = module.getattr("putmask").expect("fnp_python.putmask");
-        let numpy_putmask = numpy.getattr("putmask").expect("numpy.putmask");
-
-        group.bench_function("fnp_putmask_u8_1m", |bench| {
-            bench.iter(|| {
-                let a = base_u8.call_method0("copy").expect("copy uint8 base");
-                fnp_putmask
-                    .call1((&a, &mask, &vals_u8))
-                    .expect("fnp uint8 putmask benchmark call");
-                black_box(a);
-            });
-        });
-
-        group.bench_function("numpy_putmask_u8_1m", |bench| {
-            bench.iter(|| {
-                let a = base_u8.call_method0("copy").expect("copy uint8 base");
-                numpy_putmask
-                    .call1((&a, &mask, &vals_u8))
-                    .expect("numpy uint8 putmask benchmark call");
-                black_box(a);
-            });
-        });
-
-        group.bench_function("fnp_putmask_i32_1m", |bench| {
-            bench.iter(|| {
-                let a = base_i32.call_method0("copy").expect("copy int32 base");
-                fnp_putmask
-                    .call1((&a, &mask, &vals_i32))
-                    .expect("fnp int32 putmask benchmark call");
-                black_box(a);
-            });
-        });
-
-        group.bench_function("fnp_putmask_f32_1m", |bench| {
-            bench.iter(|| {
-                let a = base_f32.call_method0("copy").expect("copy float32 base");
-                fnp_putmask
-                    .call1((&a, &mask, &vals_f32))
-                    .expect("fnp float32 putmask benchmark call");
-                black_box(a);
-            });
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_shift_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_shift_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let a = numpy
-            .call_method1("arange", (1_000_000_i64,))
-            .expect("1M int64 input")
-            .call_method1("astype", ("int64",))
-            .expect("int64 input dtype");
-        let shifts = numpy
-            .call_method1("arange", (1_000_000_i64,))
-            .expect("1M int64 shifts")
-            .call_method1("astype", ("int64",))
-            .expect("int64 shift dtype")
-            .call_method1("__mod__", (70_i64,))
-            .expect("bounded shifts")
-            .call_method1("__sub__", (3_i64,))
-            .expect("signed shifts");
-        let fnp_left_shift = module.getattr("left_shift").expect("fnp_python.left_shift");
-        let fnp_right_shift = module
-            .getattr("right_shift")
-            .expect("fnp_python.right_shift");
-        let numpy_left_shift = numpy.getattr("left_shift").expect("numpy.left_shift");
-
-        group.bench_function("left_shift_i64_scalar_1m", |bench| {
-            bench.iter(|| {
-                let result = fnp_left_shift
-                    .call1((&a, 7_i64))
-                    .expect("left_shift scalar benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("right_shift_i64_array_1m", |bench| {
-            bench.iter(|| {
-                let result = fnp_right_shift
-                    .call1((&a, &shifts))
-                    .expect("right_shift array benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_left_shift_i64_scalar_1m", |bench| {
-            bench.iter(|| {
-                let result = numpy_left_shift
-                    .call1((&a, 7_i64))
-                    .expect("numpy left_shift scalar benchmark call");
-                black_box(result);
-            });
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_concat_hstack_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_concat_hstack_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let left = numpy
-            .call_method1("linspace", (-1.0_f64, 1.0_f64, 1024_usize * 512_usize))
-            .expect("left f64 input")
-            .call_method1("reshape", ((1024_usize, 512_usize),))
-            .expect("left 2-D input");
-        let right = numpy
-            .call_method1("linspace", (2.0_f64, 3.0_f64, 1024_usize * 256_usize))
-            .expect("right f64 input")
-            .call_method1("reshape", ((1024_usize, 256_usize),))
-            .expect("right 2-D input");
-        let arrays = PyTuple::new(py, [&left, &right]).expect("array tuple");
-        let concatenate = module
-            .getattr("concatenate")
-            .expect("fnp_python.concatenate");
-        let hstack = module.getattr("hstack").expect("fnp_python.hstack");
-
-        group.bench_function("concatenate_axis1_f64_1024x512_256", |bench| {
-            bench.iter(|| {
-                let result = concatenate
-                    .call1((&arrays, 1_i64))
-                    .expect("concatenate axis=1 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("hstack_2d_f64_1024x512_256", |bench| {
-            bench.iter(|| {
-                let result = hstack.call1((&arrays,)).expect("hstack benchmark call");
-                black_box(result);
-            });
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_indices_construction_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_indices_construction_boundary");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(2));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_diag_indices = module
-            .getattr("diag_indices")
-            .expect("fnp_python.diag_indices");
-        let numpy_diag_indices = numpy.getattr("diag_indices").expect("numpy.diag_indices");
-
-        for n in [64_i64, 4096_i64] {
-            group.bench_function(format!("fnp_diag_indices_{n}_2d"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_diag_indices
-                        .call1((n,))
-                        .expect("fnp diag_indices benchmark call");
-                    black_box(result);
-                });
-            });
-
-            group.bench_function(format!("numpy_diag_indices_{n}_2d"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_diag_indices
-                        .call1((n,))
-                        .expect("numpy diag_indices benchmark call");
-                    black_box(result);
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
-fn bench_char_ascii_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_char_ascii_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", "<U20").expect("dtype kwarg");
-        let input = numpy
-            .call_method("full", ((1_000_000_usize,), "azByCxD0123_"), Some(&kwargs))
-            .expect("1M U20 ASCII input");
-        let fnp_char = module.getattr("char").expect("fnp_python.char");
-        let numpy_char = numpy.getattr("char").expect("numpy.char");
-        let fnp_upper = fnp_char.getattr("upper").expect("fnp.char.upper");
-        let fnp_lower = fnp_char.getattr("lower").expect("fnp.char.lower");
-        let numpy_upper = numpy_char.getattr("upper").expect("numpy.char.upper");
-        let numpy_lower = numpy_char.getattr("lower").expect("numpy.char.lower");
-
-        group.bench_function("fnp_char_upper_u20_ascii_1m", |bench| {
-            bench.iter(|| {
-                let result = fnp_upper
-                    .call1((&input,))
-                    .expect("fnp char.upper benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_char_upper_u20_ascii_1m", |bench| {
-            bench.iter(|| {
-                let result = numpy_upper
-                    .call1((&input,))
-                    .expect("numpy char.upper benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("fnp_char_lower_u20_ascii_1m", |bench| {
-            bench.iter(|| {
-                let result = fnp_lower
-                    .call1((&input,))
-                    .expect("fnp char.lower benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_char_lower_u20_ascii_1m", |bench| {
-            bench.iter(|| {
-                let result = numpy_lower
-                    .call1((&input,))
-                    .expect("numpy char.lower benchmark call");
-                black_box(result);
-            });
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_average_nansum_axis_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_average_nansum_axis_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let rows = 2048_usize;
-        let cols = 512_usize;
-        let total = rows * cols;
-        let input = numpy
-            .call_method1("linspace", (-1.0_f64, 1.0_f64, total))
-            .expect("f64 input")
-            .call_method1("reshape", ((rows, cols),))
-            .expect("2-D f64 input");
-        let weights = numpy
-            .call_method1("linspace", (0.5_f64, 1.5_f64, cols))
-            .expect("axis weights");
-        let flat_index = numpy
-            .call_method1("arange", (total,))
-            .expect("flat index")
-            .call_method1("reshape", ((rows, cols),))
-            .expect("2-D index");
-        let nan_mask = numpy
-            .getattr("equal")
-            .expect("numpy.equal")
-            .call1((
-                flat_index
-                    .call_method1("__mod__", (17_i64,))
-                    .expect("mod index"),
-                0_i64,
-            ))
-            .expect("periodic nan mask");
-        let nan_value = numpy.getattr("nan").expect("numpy.nan");
-        let nan_input = numpy
-            .getattr("where")
-            .expect("numpy.where")
-            .call1((&nan_mask, &nan_value, &input))
-            .expect("input with periodic NaNs");
-
-        let average_unweighted_kwargs = PyDict::new(py);
-        average_unweighted_kwargs
-            .set_item("axis", 1_i64)
-            .expect("axis kwarg");
-        let average_weighted_kwargs = PyDict::new(py);
-        average_weighted_kwargs
-            .set_item("axis", 1_i64)
-            .expect("axis kwarg");
-        average_weighted_kwargs
-            .set_item("weights", &weights)
-            .expect("weights kwarg");
-        let nansum_kwargs = PyDict::new(py);
-        nansum_kwargs.set_item("axis", 1_i64).expect("axis kwarg");
-
-        let fnp_average = module.getattr("average").expect("fnp_python.average");
-        let numpy_average = numpy.getattr("average").expect("numpy.average");
-        let fnp_nansum = module.getattr("nansum").expect("fnp_python.nansum");
-        let numpy_nansum = numpy.getattr("nansum").expect("numpy.nansum");
-
-        group.bench_function("fnp_average_axis1_unweighted_f64_2048x512", |bench| {
-            bench.iter(|| {
-                let result = fnp_average
-                    .call((&input,), Some(&average_unweighted_kwargs))
-                    .expect("fnp average unweighted axis=1 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_average_axis1_unweighted_f64_2048x512", |bench| {
-            bench.iter(|| {
-                let result = numpy_average
-                    .call((&input,), Some(&average_unweighted_kwargs))
-                    .expect("numpy average unweighted axis=1 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("fnp_average_axis1_weighted_f64_2048x512", |bench| {
-            bench.iter(|| {
-                let result = fnp_average
-                    .call((&input,), Some(&average_weighted_kwargs))
-                    .expect("fnp average axis=1 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_average_axis1_weighted_f64_2048x512", |bench| {
-            bench.iter(|| {
-                let result = numpy_average
-                    .call((&input,), Some(&average_weighted_kwargs))
-                    .expect("numpy average axis=1 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("fnp_nansum_axis1_f64_2048x512", |bench| {
-            bench.iter(|| {
-                let result = fnp_nansum
-                    .call((&nan_input,), Some(&nansum_kwargs))
-                    .expect("fnp nansum axis=1 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_nansum_axis1_f64_2048x512", |bench| {
-            bench.iter(|| {
-                let result = numpy_nansum
-                    .call((&nan_input,), Some(&nansum_kwargs))
-                    .expect("numpy nansum axis=1 benchmark call");
-                black_box(result);
-            });
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_histogram_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_histogram_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let hist = module.getattr("histogram").expect("fnp_python.histogram");
-        let numpy_hist = numpy.getattr("histogram").expect("numpy.histogram");
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("bins", 50_i64).expect("bins kwarg");
-        let int_input = numpy
-            .call_method1("arange", (100_000_i64,))
-            .expect("100k int input")
-            .call_method1("__mod__", (5000_i64,))
-            .expect("bounded int range")
-            .call_method1("astype", ("int64",))
-            .expect("int64 input");
-        let float32_input = numpy
-            .call_method1("linspace", (-1000.0_f64, 1000.0_f64, 100_000_usize))
-            .expect("100k f32 input")
-            .call_method1("astype", ("float32",))
-            .expect("float32 input");
-
-        group.bench_function("fnp_histogram_i64_100k_50", |bench| {
-            bench.iter(|| {
-                let result = hist
-                    .call((&int_input,), Some(&kwargs))
-                    .expect("fnp int histogram benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_histogram_i64_100k_50", |bench| {
-            bench.iter(|| {
-                let result = numpy_hist
-                    .call((&int_input,), Some(&kwargs))
-                    .expect("numpy int histogram benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("fnp_histogram_f32_100k_50", |bench| {
-            bench.iter(|| {
-                let result = hist
-                    .call((&float32_input,), Some(&kwargs))
-                    .expect("fnp f32 histogram benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_histogram_f32_100k_50", |bench| {
-            bench.iter(|| {
-                let result = numpy_hist
-                    .call((&float32_input,), Some(&kwargs))
-                    .expect("numpy f32 histogram benchmark call");
-                black_box(result);
-            });
-        });
-
-        // Large f64 inputs (256 bins): >= the 2M parallel gate, where the privatized
-        // par_chunks tally (fold-trap fixed) beats numpy's single-threaded reduce 4-8x.
-        let big_kwargs = PyDict::new(py);
-        big_kwargs.set_item("bins", 256_i64).expect("bins kwarg");
-        let setup = "import numpy as np\n\
-rng = np.random.default_rng(0)\n\
-x4 = rng.standard_normal(4_000_000)\n\
-x8 = rng.standard_normal(8_000_000)\n";
-        let ns = PyDict::new(py);
-        py.run(
-            std::ffi::CString::new(setup).unwrap().as_c_str(),
-            Some(&ns),
-            Some(&ns),
-        )
-        .expect("histogram big setup");
-        let x4 = ns.get_item("x4").expect("x4");
-        let x8 = ns.get_item("x8").expect("x8");
-        for (label, x) in [("f64_4m_256", &x4), ("f64_8m_256", &x8)] {
-            group.bench_function(format!("fnp_histogram_{label}"), |bench| {
-                bench.iter(|| black_box(hist.call((x,), Some(&big_kwargs)).expect("fnp hist big")));
-            });
-            group.bench_function(format!("numpy_histogram_{label}"), |bench| {
-                bench.iter(|| {
-                    black_box(numpy_hist.call((x,), Some(&big_kwargs)).expect("numpy hist big"))
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
-fn bench_setops_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_setops_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-
-        let n = 1_000_000_i64;
-        let raw = numpy.call_method1("arange", (n,)).expect("raw arange");
-        let left_i32 = raw
-            .call_method1("__mod__", (4096_i64,))
-            .expect("left i32 modulo")
-            .call_method1("__sub__", (2048_i64,))
-            .expect("left i32 center")
-            .call_method1("astype", ("int32",))
-            .expect("left int32");
-        let right_i32 = raw
-            .call_method1("__mul__", (3_i64,))
-            .expect("right i32 mul")
-            .call_method1("__mod__", (4096_i64,))
-            .expect("right i32 modulo")
-            .call_method1("__sub__", (1024_i64,))
-            .expect("right i32 center")
-            .call_method1("astype", ("int32",))
-            .expect("right int32");
-        let left_i64 = raw
-            .call_method1("__mod__", (8192_i64,))
-            .expect("left i64 modulo")
-            .call_method1("__sub__", (4096_i64,))
-            .expect("left i64 center")
-            .call_method1("astype", ("int64",))
-            .expect("left int64");
-        let right_i64 = raw
-            .call_method1("__mul__", (5_i64,))
-            .expect("right i64 mul")
-            .call_method1("__mod__", (8192_i64,))
-            .expect("right i64 modulo")
-            .call_method1("__sub__", (2048_i64,))
-            .expect("right i64 center")
-            .call_method1("astype", ("int64",))
-            .expect("right int64");
-        let left_f64 = raw
-            .call_method1("__mod__", (65536_i64,))
-            .expect("left f64 modulo")
-            .call_method1("__truediv__", (16.0_f64,))
-            .expect("left f64 scale")
-            .call_method1("astype", ("float64",))
-            .expect("left float64");
-        let right_f64 = raw
-            .call_method1("__mul__", (7_i64,))
-            .expect("right f64 mul")
-            .call_method1("__mod__", (65536_i64,))
-            .expect("right f64 modulo")
-            .call_method1("__truediv__", (16.0_f64,))
-            .expect("right f64 scale")
-            .call_method1("astype", ("float64",))
-            .expect("right float64");
-        let left_f32 = raw
-            .call_method1("__mod__", (32768_i64,))
-            .expect("left f32 modulo")
-            .call_method1("__truediv__", (8.0_f64,))
-            .expect("left f32 scale")
-            .call_method1("astype", ("float32",))
-            .expect("left float32");
-        let right_f32 = raw
-            .call_method1("__mul__", (11_i64,))
-            .expect("right f32 mul")
-            .call_method1("__mod__", (32768_i64,))
-            .expect("right f32 modulo")
-            .call_method1("__truediv__", (8.0_f64,))
-            .expect("right f32 scale")
-            .call_method1("astype", ("float32",))
-            .expect("right float32");
-
-        let fnp_setdiff1d = module.getattr("setdiff1d").expect("fnp setdiff1d");
-        let numpy_setdiff1d = numpy.getattr("setdiff1d").expect("numpy setdiff1d");
-        let fnp_intersect1d = module.getattr("intersect1d").expect("fnp intersect1d");
-        let numpy_intersect1d = numpy.getattr("intersect1d").expect("numpy intersect1d");
-
-        group.bench_function("fnp_setdiff1d_i32_smallrange_1m", |bench| {
-            bench.iter(|| {
-                let result = fnp_setdiff1d
-                    .call1((&left_i32, &right_i32))
-                    .expect("fnp setdiff1d i32 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_setdiff1d_i32_smallrange_1m", |bench| {
-            bench.iter(|| {
-                let result = numpy_setdiff1d
-                    .call1((&left_i32, &right_i32))
-                    .expect("numpy setdiff1d i32 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("fnp_intersect1d_i64_smallrange_1m", |bench| {
-            bench.iter(|| {
-                let result = fnp_intersect1d
-                    .call1((&left_i64, &right_i64))
-                    .expect("fnp intersect1d i64 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_intersect1d_i64_smallrange_1m", |bench| {
-            bench.iter(|| {
-                let result = numpy_intersect1d
-                    .call1((&left_i64, &right_i64))
-                    .expect("numpy intersect1d i64 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("fnp_intersect1d_f64_repeated_1m", |bench| {
-            bench.iter(|| {
-                let result = fnp_intersect1d
-                    .call1((&left_f64, &right_f64))
-                    .expect("fnp intersect1d f64 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_intersect1d_f64_repeated_1m", |bench| {
-            bench.iter(|| {
-                let result = numpy_intersect1d
-                    .call1((&left_f64, &right_f64))
-                    .expect("numpy intersect1d f64 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("fnp_setxor1d_f32_repeated_1m", |bench| {
-            bench.iter(|| {
-                let result = module
-                    .getattr("setxor1d")
-                    .expect("fnp setxor1d")
-                    .call1((&left_f32, &right_f32))
-                    .expect("fnp setxor1d f32 benchmark call");
-                black_box(result);
-            });
-        });
-
-        group.bench_function("numpy_setxor1d_f32_repeated_1m", |bench| {
-            bench.iter(|| {
-                let result = numpy
-                    .getattr("setxor1d")
-                    .expect("numpy setxor1d")
-                    .call1((&left_f32, &right_f32))
-                    .expect("numpy setxor1d f32 benchmark call");
                 black_box(result);
             });
         });
@@ -1706,10 +174,14 @@ fn bench_sort_complex_boundary(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_statistics_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_statistics_boundary");
+// complex128 exp/sin/cos/sinh/cosh/sign: numpy computes these per-element single-threaded
+// (~180-420ms@8M). The native parallel real-libm composition is bit-exact (system libm ==
+// numpy's npy_c*) and wins on core count. RAYON_NUM_THREADS=1 vs default isolates the
+// parallel gain (the serial kernels are ~parity — the win is entirely parallelism).
+fn bench_f16_matmul_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_f16_matmul_boundary");
     group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
+    group.measurement_time(Duration::from_secs(5));
     group.warm_up_time(Duration::from_secs(1));
 
     Python::initialize();
@@ -1718,464 +190,104 @@ fn bench_statistics_boundary(c: &mut Criterion) {
         let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
         fnp_python(&module).expect("initialize fnp_python bench module");
         let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_cov = module.getattr("cov").expect("fnp_python.cov");
-        let numpy_cov = numpy.getattr("cov").expect("numpy.cov");
-        let fnp_corrcoef = module.getattr("corrcoef").expect("fnp_python.corrcoef");
-        let numpy_corrcoef = numpy.getattr("corrcoef").expect("numpy.corrcoef");
+        let fnp_matmul = module.getattr("matmul").expect("fnp matmul");
+        let numpy_matmul = numpy.getattr("matmul").expect("numpy matmul");
 
-        let make_input = |rows: usize, cols: usize| {
-            let total = rows * cols;
-            numpy
-                .call_method1("linspace", (-2.0_f64, 3.0_f64, total))
-                .expect("cov f64 input")
-                .call_method1("reshape", ((rows, cols),))
-                .expect("2-D cov input")
+        let default_rng = numpy
+            .getattr("random")
+            .expect("numpy.random")
+            .getattr("default_rng")
+            .expect("default_rng");
+        let make = |sz: usize| {
+            let rng = default_rng.call1((sz as i64,)).expect("rng");
+            let a = rng
+                .call_method1("standard_normal", ((sz, sz),))
+                .expect("a")
+                .call_method1("__mul__", (0.3_f64,))
+                .expect("scale a")
+                .call_method1("astype", ("float16",))
+                .expect("a f16");
+            let b = rng
+                .call_method1("standard_normal", ((sz, sz),))
+                .expect("b")
+                .call_method1("__mul__", (0.3_f64,))
+                .expect("scale b")
+                .call_method1("astype", ("float16",))
+                .expect("b f16");
+            (a, b)
         };
-        let inputs = [
-            ("50x1000", make_input(50, 1000)),
-            ("200x500", make_input(200, 500)),
-            ("500x500", make_input(500, 500)),
-            ("50x10000", make_input(50, 10_000)),
-        ];
-
-        for (shape, input) in inputs {
-            group.bench_function(format!("fnp_cov_rowvar_f64_{shape}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_cov.call1((&input,)).expect("fnp cov benchmark call");
-                    black_box(result);
-                });
+        for sz in [256_usize, 512, 1024] {
+            let (a, b) = make(sz);
+            group.bench_function(format!("fnp_matmul_f16_{sz}"), |bch| {
+                bch.iter(|| black_box(fnp_matmul.call1((&a, &b)).expect("fnp f16 matmul")));
             });
-
-            group.bench_function(format!("numpy_cov_rowvar_f64_{shape}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_cov
-                        .call1((&input,))
-                        .expect("numpy cov benchmark call");
-                    black_box(result);
-                });
-            });
-
-            group.bench_function(format!("fnp_corrcoef_rowvar_f64_{shape}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_corrcoef
-                        .call1((&input,))
-                        .expect("fnp corrcoef benchmark call");
-                    black_box(result);
-                });
-            });
-
-            group.bench_function(format!("numpy_corrcoef_rowvar_f64_{shape}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_corrcoef
-                        .call1((&input,))
-                        .expect("numpy corrcoef benchmark call");
-                    black_box(result);
-                });
+            group.bench_function(format!("numpy_matmul_f16_{sz}"), |bch| {
+                bch.iter(|| black_box(numpy_matmul.call1((&a, &b)).expect("np f16 matmul")));
             });
         }
-    });
-
-    group.finish();
-}
-
-fn bench_std_var_axis_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_std_var_axis_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_std = module.getattr("std").expect("fnp_python.std");
-        let numpy_std = numpy.getattr("std").expect("numpy.std");
-        let fnp_var = module.getattr("var").expect("fnp_python.var");
-        let numpy_var = numpy.getattr("var").expect("numpy.var");
-
-        for (label, rows, cols) in [
-            ("4096x512", 4096_i64, 512_i64),
-            ("8192x1024", 8192_i64, 1024_i64),
-        ] {
-            let size = rows * cols;
-            let input = numpy
-                .call_method1("linspace", (-4.0_f64, 6.0_f64, size))
-                .expect("std/var axis f64 input")
-                .call_method1("reshape", ((rows, cols),))
-                .expect("std/var axis 2-D shape");
-
-            group.bench_function(format!("fnp_var_f64_axis_last_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_var
-                        .call1((&input, -1_i64))
-                        .expect("fnp var axis benchmark call");
-                    black_box(result);
-                });
-            });
-
-            group.bench_function(format!("numpy_var_f64_axis_last_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_var
-                        .call1((&input, -1_i64))
-                        .expect("numpy var axis benchmark call");
-                    black_box(result);
-                });
-            });
-
-            group.bench_function(format!("fnp_std_f64_axis_last_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_std
-                        .call1((&input, -1_i64))
-                        .expect("fnp std axis benchmark call");
-                    black_box(result);
-                });
-            });
-
-            group.bench_function(format!("numpy_std_f64_axis_last_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_std
-                        .call1((&input, -1_i64))
-                        .expect("numpy std axis benchmark call");
-                    black_box(result);
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
-fn bench_var_multiaxis_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_var_multiaxis_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_var = module.getattr("var").expect("fnp_python.var");
-        let numpy_var = numpy.getattr("var").expect("numpy.var");
-        let fnp_std = module.getattr("std").expect("fnp_python.std");
-        let numpy_std = numpy.getattr("std").expect("numpy.std");
-        let fnp_nanvar = module.getattr("nanvar").expect("fnp_python.nanvar");
-        let numpy_nanvar = numpy.getattr("nanvar").expect("numpy.nanvar");
-        let fnp_nanstd = module.getattr("nanstd").expect("fnp_python.nanstd");
-        let numpy_nanstd = numpy.getattr("nanstd").expect("numpy.nanstd");
-
-        for (label, b, m, n) in [
-            ("4096x16x16", 4096_i64, 16_i64, 16_i64),
-            ("2048x32x32", 2048_i64, 32_i64, 32_i64),
-        ] {
-            let size = b * m * n;
-            let input = numpy
-                .call_method1("linspace", (-4.0_f64, 6.0_f64, size))
-                .expect("var multiaxis f64 input")
-                .call_method1("reshape", ((b, m, n),))
-                .expect("var multiaxis 3-D shape");
-
-            let fnp_kwargs = PyDict::new(py);
-            fnp_kwargs
-                .set_item("axis", (-2_i64, -1_i64))
-                .expect("fnp axis kwarg");
-            let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs
-                .set_item("axis", (-2_i64, -1_i64))
-                .expect("numpy axis kwarg");
-
-            group.bench_function(format!("fnp_var_f64_axis_m2m1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_var
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp var multiaxis call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_var_f64_axis_m2m1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_var
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy var multiaxis call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("fnp_std_f64_axis_m2m1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_std
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp std multiaxis call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("fnp_nanvar_f64_axis_m2m1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_nanvar
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp nanvar multiaxis call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_nanvar_f64_axis_m2m1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_nanvar
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy nanvar multiaxis call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("fnp_nanstd_f64_axis_m2m1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_nanstd
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp nanstd multiaxis call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_nanstd_f64_axis_m2m1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_nanstd
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy nanstd multiaxis call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_std_f64_axis_m2m1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_std
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy std multiaxis call");
-                    black_box(result);
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
-// var/std along a MIDDLE axis (0 < ax < ndim-1) of a 3-D f64 stack. numpy reduces a
-// non-last axis with a strided, two-temp-materializing pass; the native block-parallel
-// streaming two-pass (try_zerocopy_f64_var_nonlast_axis) is bit-exact and much faster.
-fn bench_var_midaxis_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_var_midaxis_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_var = module.getattr("var").expect("fnp_python.var");
-        let numpy_var = numpy.getattr("var").expect("numpy.var");
-        let fnp_std = module.getattr("std").expect("fnp_python.std");
-        let numpy_std = numpy.getattr("std").expect("numpy.std");
-
-        for (label, d0, d1, d2) in [
-            ("256x256x64", 256_usize, 256_usize, 64_usize),
-            ("128x512x64", 128_usize, 512_usize, 64_usize),
-        ] {
-            let size = (d0 * d1 * d2) as i64;
-            let input = numpy
-                .call_method1("linspace", (-4.0_f64, 6.0_f64, size))
-                .expect("var midaxis f64 input")
-                .call_method1("reshape", ((d0, d1, d2),))
-                .expect("var midaxis 3-D shape");
-            let fnp_kwargs = PyDict::new(py);
-            fnp_kwargs.set_item("axis", 1_i64).expect("fnp axis kwarg");
-            let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("axis", 1_i64).expect("numpy axis kwarg");
-
-            group.bench_function(format!("fnp_var_f64_axis1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_var
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp var axis1 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_var_f64_axis1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_var
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy var axis1 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("fnp_std_f64_axis1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_std
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp std axis1 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_std_f64_axis1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_std
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy std axis1 call");
-                    black_box(result);
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
-// FLOAT32 var/std along a non-last axis (middle ax=1 + axis 0). numpy keeps the float32
-// accumulator and on a non-last axis reduces SEQUENTIALLY while materializing the (a-mean)
-// and (a-mean)^2 whole-array f32 temps (~28ms@8M middle); try_zerocopy_f32_var_nonlast_axis
-// runs a per-block sequential f32 two-pass (block-parallel for a middle axis, serial for
-// axis 0) with no temp -> bit-identical and 3-33x faster. The f32 sibling of the f64
-// midaxis/axis0 paths above.
-fn bench_var_f32_axis_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_var_f32_axis_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let f32_dtype = numpy.getattr("float32").expect("numpy.float32");
-        let fnp_var = module.getattr("var").expect("fnp_python.var");
-        let numpy_var = numpy.getattr("var").expect("numpy.var");
-        let fnp_std = module.getattr("std").expect("fnp_python.std");
-        let numpy_std = numpy.getattr("std").expect("numpy.std");
-
-        // (label, shape, reduce-axis): a middle axis (block-parallel) and axis 0 (serial).
-        let mid = numpy
-            .call_method1("linspace", (-4.0_f64, 6.0_f64, 256_i64 * 128 * 256))
-            .expect("f32 mid source")
-            .call_method1("reshape", ((256_usize, 128_usize, 256_usize),))
-            .expect("256x128x256 reshape")
-            .call_method1("astype", (&f32_dtype,))
-            .expect("astype f32");
-        let ax0 = numpy
-            .call_method1("linspace", (-4.0_f64, 6.0_f64, 4000_i64 * 2000))
-            .expect("f32 ax0 source")
-            .call_method1("reshape", ((4000_usize, 2000_usize),))
-            .expect("4000x2000 reshape")
-            .call_method1("astype", (&f32_dtype,))
-            .expect("astype f32");
-
-        for (label, input, axis) in [("mid_256x128x256", &mid, 1_i64), ("axis0_4000x2000", &ax0, 0_i64)] {
-            let fkw = PyDict::new(py);
-            fkw.set_item("axis", axis).expect("axis");
-            let nkw = PyDict::new(py);
-            nkw.set_item("axis", axis).expect("axis");
-            group.bench_function(format!("fnp_var_f32_{label}"), |bench| {
-                bench.iter(|| black_box(fnp_var.call((input,), Some(&fkw)).expect("fnp var f32")));
-            });
-            group.bench_function(format!("numpy_var_f32_{label}"), |bench| {
-                bench.iter(|| black_box(numpy_var.call((input,), Some(&nkw)).expect("numpy var f32")));
-            });
-            group.bench_function(format!("fnp_std_f32_{label}"), |bench| {
-                bench.iter(|| black_box(fnp_std.call((input,), Some(&fkw)).expect("fnp std f32")));
-            });
-            group.bench_function(format!("numpy_std_f32_{label}"), |bench| {
-                bench.iter(|| black_box(numpy_std.call((input,), Some(&nkw)).expect("numpy std f32")));
-            });
-        }
-    });
-
-    group.finish();
-}
-
-// FLOAT32 nanvar/nanstd along a non-last axis (middle ax=1 + axis 0) of a 3-D/2-D stack
-// with ~10% NaN. numpy.nanvar on float32 keeps the f32 accumulator and materializes a
-// NaN->0 copy, an isnan mask, a count, and the (a-mean)/squared f32 temps before two
-// sequential strided reduces (~70-77ms@8M middle); try_zerocopy_f32_nanvar_nonlast_axis
-// runs a per-block sequential f32 NaN-skip two-pass (block-parallel middle / serial axis0)
-// with no temp -> bit-identical and 5-35x faster. f32 sibling of the f64 nanvar paths.
-fn bench_nanvar_f32_axis_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_nanvar_f32_axis_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let f32_dtype = numpy.getattr("float32").expect("numpy.float32");
-        let nan = numpy.getattr("nan").expect("np.nan");
-        let fnp_nanvar = module.getattr("nanvar").expect("fnp_python.nanvar");
-        let numpy_nanvar = numpy.getattr("nanvar").expect("numpy.nanvar");
-        let fnp_nanstd = module.getattr("nanstd").expect("fnp_python.nanstd");
-        let numpy_nanstd = numpy.getattr("nanstd").expect("numpy.nanstd");
-        let fnp_nanmean = module.getattr("nanmean").expect("fnp_python.nanmean");
-        let numpy_nanmean = numpy.getattr("nanmean").expect("numpy.nanmean");
-
-        // Build an f32 array with ~10% NaN (deterministic stride), reshape to target.
-        let build = |dims: &[usize], total: i64| {
-            let arr = numpy
-                .call_method1("linspace", (-4.0_f64, 6.0_f64, total))
-                .expect("f32 nan source")
-                .call_method1("astype", (&f32_dtype,))
-                .expect("astype f32");
-            let idx = numpy
-                .call_method1("arange", (0_i64, total, 10_i64))
-                .expect("nan stride");
-            arr.call_method1("__setitem__", (idx, &nan)).expect("inject NaN");
-            arr.call_method1("reshape", (PyTuple::new(py, dims.iter().copied()).unwrap(),))
-                .expect("reshape")
+        // batched (3-D) f16 matmul
+        let make3 = |b: usize, sz: usize| {
+            let rng = default_rng.call1(((b + sz) as i64,)).expect("rng3");
+            let a = rng
+                .call_method1("standard_normal", ((b, sz, sz),))
+                .expect("a3")
+                .call_method1("__mul__", (0.3_f64,))
+                .expect("scale a3")
+                .call_method1("astype", ("float16",))
+                .expect("a3 f16");
+            let bb = rng
+                .call_method1("standard_normal", ((b, sz, sz),))
+                .expect("b3")
+                .call_method1("__mul__", (0.3_f64,))
+                .expect("scale b3")
+                .call_method1("astype", ("float16",))
+                .expect("b3 f16");
+            (a, bb)
         };
-        let mid = build(&[256, 128, 256], 256 * 128 * 256);
-        let ax0 = build(&[4000, 2000], 4000 * 2000);
-
-        for (label, input, axis) in [("mid_256x128x256", &mid, 1_i64), ("axis0_4000x2000", &ax0, 0_i64)] {
-            let fkw = PyDict::new(py);
-            fkw.set_item("axis", axis).expect("axis");
-            let nkw = PyDict::new(py);
-            nkw.set_item("axis", axis).expect("axis");
-            group.bench_function(format!("fnp_nanvar_f32_{label}"), |b| {
-                b.iter(|| black_box(fnp_nanvar.call((input,), Some(&fkw)).expect("fnp nanvar f32")));
-            });
-            group.bench_function(format!("numpy_nanvar_f32_{label}"), |b| {
-                b.iter(|| black_box(numpy_nanvar.call((input,), Some(&nkw)).expect("numpy nanvar f32")));
-            });
-            group.bench_function(format!("fnp_nanstd_f32_{label}"), |b| {
-                b.iter(|| black_box(fnp_nanstd.call((input,), Some(&fkw)).expect("fnp nanstd f32")));
-            });
-            group.bench_function(format!("numpy_nanstd_f32_{label}"), |b| {
-                b.iter(|| black_box(numpy_nanstd.call((input,), Some(&nkw)).expect("numpy nanstd f32")));
-            });
-            group.bench_function(format!("fnp_nanmean_f32_{label}"), |b| {
-                b.iter(|| black_box(fnp_nanmean.call((input,), Some(&fkw)).expect("fnp nanmean f32")));
-            });
-            group.bench_function(format!("numpy_nanmean_f32_{label}"), |b| {
-                b.iter(|| black_box(numpy_nanmean.call((input,), Some(&nkw)).expect("numpy nanmean f32")));
-            });
-        }
+        let (a3, b3) = make3(64, 128);
+        group.bench_function("fnp_matmul_f16_batched_64x128", |bch| {
+            bch.iter(|| black_box(fnp_matmul.call1((&a3, &b3)).expect("fnp f16 batched")));
+        });
+        group.bench_function("numpy_matmul_f16_batched_64x128", |bch| {
+            bch.iter(|| black_box(numpy_matmul.call1((&a3, &b3)).expect("np f16 batched")));
+        });
+        // broadcast batched: (B,m,k) @ (k,n) with b shared across the batch
+        let (ab, _) = make3(64, 128);
+        let (bb2d, _) = make(128);
+        group.bench_function("fnp_matmul_f16_bcast_64x128", |bch| {
+            bch.iter(|| black_box(fnp_matmul.call1((&ab, &bb2d)).expect("fnp f16 bcast")));
+        });
+        group.bench_function("numpy_matmul_f16_bcast_64x128", |bch| {
+            bch.iter(|| black_box(numpy_matmul.call1((&ab, &bb2d)).expect("np f16 bcast")));
+        });
+        // f16 tensordot(axes=1) + inner at 512 (route to the f16 GEMM kernel)
+        let (at, bt) = make(512);
+        let fnp_td = module.getattr("tensordot").expect("fnp tensordot");
+        let numpy_td = numpy.getattr("tensordot").expect("numpy tensordot");
+        let fnp_inner = module.getattr("inner").expect("fnp inner");
+        let numpy_inner = numpy.getattr("inner").expect("numpy inner");
+        let one = 1_i64;
+        group.bench_function("fnp_tensordot_f16_512", |bch| {
+            bch.iter(|| black_box(fnp_td.call1((&at, &bt, one)).expect("fnp f16 tensordot")));
+        });
+        group.bench_function("numpy_tensordot_f16_512", |bch| {
+            bch.iter(|| black_box(numpy_td.call1((&at, &bt, one)).expect("np f16 tensordot")));
+        });
+        group.bench_function("fnp_inner_f16_512", |bch| {
+            bch.iter(|| black_box(fnp_inner.call1((&at, &bt)).expect("fnp f16 inner")));
+        });
+        group.bench_function("numpy_inner_f16_512", |bch| {
+            bch.iter(|| black_box(numpy_inner.call1((&at, &bt)).expect("np f16 inner")));
+        });
     });
 
     group.finish();
 }
 
-// nanvar/nanstd/nanmean along the CONTIGUOUS LAST axis (and a trailing tuple) of an f32
-// stack with ~10% NaN. numpy.nanmean/nanvar on float32 materializes a NaN->0 copy + isnan
-// mask then PAIRWISE-reduces the last axis (~3-7ms/2M unloaded, far worse loaded); the
-// native per-lane bit-exact f32 pairwise paths (try_zerocopy_f32_nanmean_last_axis /
-// try_zerocopy_f32_nanvar_last_axis) parallelize across the independent lanes.
-fn bench_nanvar_f32_last_axis_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_nanvar_f32_last_axis_boundary");
+fn bench_flat_sort_dtype_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_flat_sort_dtype_boundary");
     group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
+    group.measurement_time(Duration::from_secs(5));
     group.warm_up_time(Duration::from_secs(1));
 
     Python::initialize();
@@ -2184,491 +296,689 @@ fn bench_nanvar_f32_last_axis_boundary(c: &mut Criterion) {
         let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
         fnp_python(&module).expect("initialize fnp_python bench module");
         let numpy = py.import("numpy").expect("numpy oracle");
-        let f32_dtype = numpy.getattr("float32").expect("numpy.float32");
-        let nan = numpy.getattr("nan").expect("np.nan");
-        let fnp_nanvar = module.getattr("nanvar").expect("fnp_python.nanvar");
-        let numpy_nanvar = numpy.getattr("nanvar").expect("numpy.nanvar");
-        let fnp_nanstd = module.getattr("nanstd").expect("fnp_python.nanstd");
-        let numpy_nanstd = numpy.getattr("nanstd").expect("numpy.nanstd");
-        let fnp_nanmean = module.getattr("nanmean").expect("fnp_python.nanmean");
-        let numpy_nanmean = numpy.getattr("nanmean").expect("numpy.nanmean");
-
-        let build = |dims: &[usize], total: i64| {
-            let arr = numpy
-                .call_method1("linspace", (-4.0_f64, 6.0_f64, total))
-                .expect("f32 nan source")
-                .call_method1("astype", (&f32_dtype,))
-                .expect("astype f32");
-            let idx = numpy
-                .call_method1("arange", (0_i64, total, 10_i64))
-                .expect("nan stride");
-            arr.call_method1("__setitem__", (idx, &nan)).expect("inject NaN");
-            arr.call_method1("reshape", (PyTuple::new(py, dims.iter().copied()).unwrap(),))
-                .expect("reshape")
-        };
-        let last2d = build(&[1000, 2048], 1000 * 2048);
-        let trail3d = build(&[512, 64, 64], 512 * 64 * 64);
-
-        // Per-case kwargs dicts (axis=-1 for the single last axis; axis=(-2,-1) for the
-        // contiguous trailing tuple). Built up front so the case loop is homogeneous.
-        let fkw_last = PyDict::new(py);
-        fkw_last.set_item("axis", -1_i64).expect("axis");
-        let fkw_trail = PyDict::new(py);
-        fkw_trail.set_item("axis", (-2_i64, -1_i64)).expect("axis");
-        let cases = [
-            ("last_1000x2048", &last2d, &fkw_last),
-            ("trail_512x64x64", &trail3d, &fkw_trail),
-        ];
-        for (label, input, kw) in cases {
-            let fkw = kw;
-            let nkw = kw;
-            group.bench_function(format!("fnp_nanvar_f32_{label}"), |b| {
-                b.iter(|| black_box(fnp_nanvar.call((input,), Some(&fkw)).expect("fnp nanvar f32")));
+        let fnp_sort = module.getattr("sort").expect("fnp sort");
+        let numpy_sort = numpy.getattr("sort").expect("numpy sort");
+        let default_rng = numpy
+            .getattr("random")
+            .expect("numpy.random")
+            .getattr("default_rng")
+            .expect("default_rng");
+        let rng = default_rng.call1((7_i64,)).expect("rng");
+        let n = 16_000_000_usize;
+        // int64, int32, float32 flat-sort inputs
+        let i64a = rng
+            .call_method1("integers", (i64::MIN, i64::MAX, n))
+            .expect("int64 input");
+        let i32a = rng
+            .call_method1("integers", (-2_000_000_000_i64, 2_000_000_000_i64, n))
+            .expect("int32 raw")
+            .call_method1("astype", ("int32",))
+            .expect("int32 input");
+        let f32a = rng
+            .call_method1("standard_normal", (n,))
+            .expect("f32 raw")
+            .call_method1("astype", ("float32",))
+            .expect("f32 input");
+        for (label, arr) in [("int64", &i64a), ("int32", &i32a), ("float32", &f32a)] {
+            group.bench_function(format!("fnp_sort_{label}_16m"), |bch| {
+                bch.iter(|| black_box(fnp_sort.call1((arr,)).expect("fnp sort call")));
             });
-            group.bench_function(format!("numpy_nanvar_f32_{label}"), |b| {
-                b.iter(|| black_box(numpy_nanvar.call((input,), Some(&nkw)).expect("numpy nanvar f32")));
-            });
-            group.bench_function(format!("fnp_nanstd_f32_{label}"), |b| {
-                b.iter(|| black_box(fnp_nanstd.call((input,), Some(&fkw)).expect("fnp nanstd f32")));
-            });
-            group.bench_function(format!("numpy_nanstd_f32_{label}"), |b| {
-                b.iter(|| black_box(numpy_nanstd.call((input,), Some(&nkw)).expect("numpy nanstd f32")));
-            });
-            group.bench_function(format!("fnp_nanmean_f32_{label}"), |b| {
-                b.iter(|| black_box(fnp_nanmean.call((input,), Some(&fkw)).expect("fnp nanmean f32")));
-            });
-            group.bench_function(format!("numpy_nanmean_f32_{label}"), |b| {
-                b.iter(|| black_box(numpy_nanmean.call((input,), Some(&nkw)).expect("numpy nanmean f32")));
+            group.bench_function(format!("numpy_sort_{label}_16m"), |bch| {
+                bch.iter(|| black_box(numpy_sort.call1((arr,)).expect("numpy sort call")));
             });
         }
+        // int64 2-D last-axis sort (many wide lanes): 16384 x 1024
+        let m2 = rng
+            .call_method1("integers", (i64::MIN, i64::MAX, (16384_usize, 1024_usize)))
+            .expect("int64 2-D input");
+        group.bench_function("fnp_sort_int64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_sort.call1((&m2,)).expect("fnp lastaxis sort")));
+        });
+        group.bench_function("numpy_sort_int64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(numpy_sort.call1((&m2,)).expect("numpy lastaxis sort")));
+        });
+        // int64 2-D AXIS-0 (column) sort: 1024 x 16384 (axis passed as kwarg so fnp's native
+        // single-positional-arg fast path engages).
+        let c2 = rng
+            .call_method1("integers", (i64::MIN, i64::MAX, (1024_usize, 16384_usize)))
+            .expect("int64 axis0 input");
+        let axis0_kw = PyDict::new(py);
+        axis0_kw.set_item("axis", 0_i64).expect("axis kw");
+        group.bench_function("fnp_sort_int64_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_sort
+                        .call((&c2,), Some(&axis0_kw))
+                        .expect("fnp axis0 sort"),
+                )
+            });
+        });
+        group.bench_function("numpy_sort_int64_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_sort
+                        .call((&c2,), Some(&axis0_kw))
+                        .expect("numpy axis0 sort"),
+                )
+            });
+        });
+        // int64 flat argsort on DISTINCT data (shuffled permutation) -> native path
+        let perm = rng
+            .call_method1("permutation", (16_000_000_i64,))
+            .expect("perm 16M");
+        let fnp_argsort = module.getattr("argsort").expect("fnp argsort");
+        let numpy_argsort = numpy.getattr("argsort").expect("numpy argsort");
+        group.bench_function("fnp_argsort_int64_16m", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&perm,)).expect("fnp argsort")));
+        });
+        group.bench_function("numpy_argsort_int64_16m", |bch| {
+            bch.iter(|| black_box(numpy_argsort.call1((&perm,)).expect("numpy argsort")));
+        });
+        // f32 flat argsort on DISTINCT data (permutation 0..16M-1 < 2^24 = exact f32, no ties)
+        let permf32 = perm.call_method1("astype", ("float32",)).expect("perm f32");
+        group.bench_function("fnp_argsort_f32_16m", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&permf32,)).expect("fnp argsort f32")));
+        });
+        group.bench_function("numpy_argsort_f32_16m", |bch| {
+            bch.iter(|| black_box(numpy_argsort.call1((&permf32,)).expect("numpy argsort f32")));
+        });
+        // datetime64 flat argsort on DISTINCT ticks (int64-backed; numpy non-simd introsort)
+        let permdt = perm
+            .call_method1("astype", ("datetime64[s]",))
+            .expect("perm datetime64");
+        group.bench_function("fnp_argsort_datetime64_16m", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&permdt,)).expect("fnp argsort dt64")));
+        });
+        group.bench_function("numpy_argsort_datetime64_16m", |bch| {
+            bch.iter(|| black_box(numpy_argsort.call1((&permdt,)).expect("numpy argsort dt64")));
+        });
+        group.bench_function("fnp_sort_datetime64_16m", |bch| {
+            bch.iter(|| black_box(fnp_sort.call1((&permdt,)).expect("fnp sort dt64")));
+        });
+        group.bench_function("numpy_sort_datetime64_16m", |bch| {
+            bch.iter(|| black_box(numpy_sort.call1((&permdt,)).expect("numpy sort dt64")));
+        });
+        // complex128 flat argsort on DISTINCT real parts (permutation) -> tie-free lexicographic
+        let cim = rng
+            .call_method1("standard_normal", (16_000_000_usize,))
+            .expect("c imag");
+        let permc = perm
+            .call_method1(
+                "__add__",
+                (cim.call_method1(
+                    "__mul__",
+                    (pyo3::types::PyComplex::from_doubles(py, 0.0, 1.0),),
+                )
+                .expect("1j*im"),),
+            )
+            .expect("re+1j*im")
+            .call_method1("astype", ("complex128",))
+            .expect("perm c128");
+        group.bench_function("fnp_argsort_c128_16m", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&permc,)).expect("fnp argsort c128")));
+        });
+        group.bench_function("numpy_argsort_c128_16m", |bch| {
+            bch.iter(|| black_box(numpy_argsort.call1((&permc,)).expect("numpy argsort c128")));
+        });
+        // int64 last-axis argsort, 2-D distinct-per-lane: 16384 x 1024 (each lane a shuffled range)
+        let la_randn = rng
+            .call_method1("standard_normal", ((16384_usize, 1024_usize),))
+            .expect("la randn");
+        let la = numpy
+            .call_method1("argsort", (la_randn,))
+            .expect("la base")
+            .call_method1("astype", ("int64",))
+            .expect("la int64");
+        group.bench_function("fnp_argsort_int64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&la,)).expect("fnp argsort la")));
+        });
+        group.bench_function("numpy_argsort_int64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(numpy_argsort.call1((&la,)).expect("numpy argsort la")));
+        });
+        // int64 AXIS-0 argsort, 2-D distinct-per-column: 1024 x 16384 (each column a shuffled range)
+        let a0_randn = rng
+            .call_method1("standard_normal", ((1024_usize, 16384_usize),))
+            .expect("a0 randn");
+        let axis0_kwargs = PyDict::new(py);
+        axis0_kwargs.set_item("axis", 0_i64).expect("axis kw");
+        let a0 = numpy
+            .call_method("argsort", (a0_randn,), Some(&axis0_kwargs))
+            .expect("a0 base")
+            .call_method1("astype", ("int64",))
+            .expect("a0 int64");
+        group.bench_function("fnp_argsort_int64_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_argsort
+                        .call((&a0,), Some(&axis0_kwargs))
+                        .expect("fnp argsort a0"),
+                )
+            });
+        });
+        group.bench_function("numpy_argsort_int64_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call((&a0,), Some(&axis0_kwargs))
+                        .expect("numpy argsort a0"),
+                )
+            });
+        });
+        // int64 MIDDLE-axis argsort, 3-D distinct-per-lane: (256, 256, 256) along axis=1
+        let am_randn = rng
+            .call_method1("standard_normal", ((256_usize, 256_usize, 256_usize),))
+            .expect("am randn");
+        let axis1_kwargs = PyDict::new(py);
+        axis1_kwargs.set_item("axis", 1_i64).expect("axis1 kw");
+        let am = numpy
+            .call_method("argsort", (am_randn,), Some(&axis1_kwargs))
+            .expect("am base")
+            .call_method1("astype", ("int64",))
+            .expect("am int64");
+        group.bench_function("fnp_argsort_int64_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_argsort
+                        .call((&am,), Some(&axis1_kwargs))
+                        .expect("fnp argsort am"),
+                )
+            });
+        });
+        group.bench_function("numpy_argsort_int64_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call((&am,), Some(&axis1_kwargs))
+                        .expect("numpy argsort am"),
+                )
+            });
+        });
+        // FLOAT32 axis argsort: reuse the distinct int arrays cast to f32 (values < 2^24 = exact, no ties)
+        let la_f32 = la.call_method1("astype", ("float32",)).expect("la f32");
+        group.bench_function("fnp_argsort_f32_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&la_f32,)).expect("fnp argsort la f32")));
+        });
+        group.bench_function("numpy_argsort_f32_lastaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call1((&la_f32,))
+                        .expect("numpy argsort la f32"),
+                )
+            });
+        });
+        let a0_f32 = a0.call_method1("astype", ("float32",)).expect("a0 f32");
+        group.bench_function("fnp_argsort_f32_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_argsort
+                        .call((&a0_f32,), Some(&axis0_kwargs))
+                        .expect("fnp argsort a0 f32"),
+                )
+            });
+        });
+        group.bench_function("numpy_argsort_f32_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call((&a0_f32,), Some(&axis0_kwargs))
+                        .expect("numpy argsort a0 f32"),
+                )
+            });
+        });
+        let am_f32 = am.call_method1("astype", ("float32",)).expect("am f32");
+        group.bench_function("fnp_argsort_f32_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_argsort
+                        .call((&am_f32,), Some(&axis1_kwargs))
+                        .expect("fnp argsort am f32"),
+                )
+            });
+        });
+        group.bench_function("numpy_argsort_f32_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call((&am_f32,), Some(&axis1_kwargs))
+                        .expect("numpy argsort am f32"),
+                )
+            });
+        });
+        // COMPLEX128 axis argsort: distinct-real lane arrays (la/a0/am) + 1j*randn -> tie-free lexicographic
+        let onej = pyo3::types::PyComplex::from_doubles(py, 0.0, 1.0);
+        let la_c = la
+            .call_method1(
+                "__add__",
+                (
+                    rng.call_method1("standard_normal", (la.getattr("shape").expect("la shape"),))
+                        .expect("la imag")
+                        .call_method1("__mul__", (&onej,))
+                        .expect("1j*la_im"),
+                ),
+            )
+            .expect("la re+im")
+            .call_method1("astype", ("complex128",))
+            .expect("la c128");
+        group.bench_function("fnp_argsort_c128_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&la_c,)).expect("fnp argsort la c128")));
+        });
+        group.bench_function("numpy_argsort_c128_lastaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call1((&la_c,))
+                        .expect("numpy argsort la c128"),
+                )
+            });
+        });
+        let a0_c = a0
+            .call_method1(
+                "__add__",
+                (
+                    rng.call_method1("standard_normal", (a0.getattr("shape").expect("a0 shape"),))
+                        .expect("a0 imag")
+                        .call_method1("__mul__", (&onej,))
+                        .expect("1j*a0_im"),
+                ),
+            )
+            .expect("a0 re+im")
+            .call_method1("astype", ("complex128",))
+            .expect("a0 c128");
+        group.bench_function("fnp_argsort_c128_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_argsort
+                        .call((&a0_c,), Some(&axis0_kwargs))
+                        .expect("fnp argsort a0 c128"),
+                )
+            });
+        });
+        group.bench_function("numpy_argsort_c128_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call((&a0_c,), Some(&axis0_kwargs))
+                        .expect("numpy argsort a0 c128"),
+                )
+            });
+        });
+        let am_c = am
+            .call_method1(
+                "__add__",
+                (
+                    rng.call_method1("standard_normal", (am.getattr("shape").expect("am shape"),))
+                        .expect("am imag")
+                        .call_method1("__mul__", (&onej,))
+                        .expect("1j*am_im"),
+                ),
+            )
+            .expect("am re+im")
+            .call_method1("astype", ("complex128",))
+            .expect("am c128");
+        group.bench_function("fnp_argsort_c128_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_argsort
+                        .call((&am_c,), Some(&axis1_kwargs))
+                        .expect("fnp argsort am c128"),
+                )
+            });
+        });
+        group.bench_function("numpy_argsort_c128_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call((&am_c,), Some(&axis1_kwargs))
+                        .expect("numpy argsort am c128"),
+                )
+            });
+        });
+        // COMPLEX128 VALUE sort (np.sort): flat (permc, 16M distinct-real) + last-axis (la_c, distinct-per-lane)
+        group.bench_function("fnp_sort_c128_16m", |bch| {
+            bch.iter(|| black_box(fnp_sort.call1((&permc,)).expect("fnp sort c128")));
+        });
+        group.bench_function("numpy_sort_c128_16m", |bch| {
+            bch.iter(|| black_box(numpy_sort.call1((&permc,)).expect("numpy sort c128")));
+        });
+        group.bench_function("fnp_sort_c128_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_sort.call1((&la_c,)).expect("fnp sort la c128")));
+        });
+        group.bench_function("numpy_sort_c128_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(numpy_sort.call1((&la_c,)).expect("numpy sort la c128")));
+        });
+        // COMPLEX128 VALUE sort AXIS0 + MIDAXIS: reuse a0_c (distinct-per-column) + am_c (distinct-per-lane)
+        group.bench_function("fnp_sort_c128_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_sort
+                        .call((&a0_c,), Some(&axis0_kwargs))
+                        .expect("fnp sort a0 c128"),
+                )
+            });
+        });
+        group.bench_function("numpy_sort_c128_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_sort
+                        .call((&a0_c,), Some(&axis0_kwargs))
+                        .expect("numpy sort a0 c128"),
+                )
+            });
+        });
+        group.bench_function("fnp_sort_c128_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_sort
+                        .call((&am_c,), Some(&axis1_kwargs))
+                        .expect("fnp sort am c128"),
+                )
+            });
+        });
+        group.bench_function("numpy_sort_c128_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_sort
+                        .call((&am_c,), Some(&axis1_kwargs))
+                        .expect("numpy sort am c128"),
+                )
+            });
+        });
+        // COMPLEX64 VALUE sort (np.sort): permc/la_c cast to complex64 (distinct-real -> tie-free)
+        let permc64 = permc
+            .call_method1("astype", ("complex64",))
+            .expect("permc64");
+        group.bench_function("fnp_sort_c64_16m", |bch| {
+            bch.iter(|| black_box(fnp_sort.call1((&permc64,)).expect("fnp sort c64")));
+        });
+        group.bench_function("numpy_sort_c64_16m", |bch| {
+            bch.iter(|| black_box(numpy_sort.call1((&permc64,)).expect("numpy sort c64")));
+        });
+        let la_c64 = la_c.call_method1("astype", ("complex64",)).expect("la_c64");
+        group.bench_function("fnp_sort_c64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_sort.call1((&la_c64,)).expect("fnp sort la c64")));
+        });
+        group.bench_function("numpy_sort_c64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(numpy_sort.call1((&la_c64,)).expect("numpy sort la c64")));
+        });
+        // COMPLEX64 argsort: reuse permc64 (flat distinct-real) + la_c64 (last-axis distinct-per-lane)
+        group.bench_function("fnp_argsort_c64_16m", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&permc64,)).expect("fnp argsort c64")));
+        });
+        group.bench_function("numpy_argsort_c64_16m", |bch| {
+            bch.iter(|| black_box(numpy_argsort.call1((&permc64,)).expect("numpy argsort c64")));
+        });
+        group.bench_function("fnp_argsort_c64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&la_c64,)).expect("fnp argsort la c64")));
+        });
+        group.bench_function("numpy_argsort_c64_lastaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call1((&la_c64,))
+                        .expect("numpy argsort la c64"),
+                )
+            });
+        });
+        // COMPLEX64 argsort AXIS0 + MIDAXIS: reuse a0_c/am_c (distinct-real) cast to complex64
+        let a0_c64 = a0_c.call_method1("astype", ("complex64",)).expect("a0_c64");
+        group.bench_function("fnp_argsort_c64_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_argsort
+                        .call((&a0_c64,), Some(&axis0_kwargs))
+                        .expect("fnp argsort a0 c64"),
+                )
+            });
+        });
+        group.bench_function("numpy_argsort_c64_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call((&a0_c64,), Some(&axis0_kwargs))
+                        .expect("numpy argsort a0 c64"),
+                )
+            });
+        });
+        let am_c64 = am_c.call_method1("astype", ("complex64",)).expect("am_c64");
+        group.bench_function("fnp_argsort_c64_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_argsort
+                        .call((&am_c64,), Some(&axis1_kwargs))
+                        .expect("fnp argsort am c64"),
+                )
+            });
+        });
+        group.bench_function("numpy_argsort_c64_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call((&am_c64,), Some(&axis1_kwargs))
+                        .expect("numpy argsort am c64"),
+                )
+            });
+        });
+        // COMPLEX64 VALUE sort AXIS0 + MIDAXIS: reuse a0_c64 (distinct-per-column) + am_c64 (distinct-per-lane)
+        group.bench_function("fnp_sort_c64_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_sort
+                        .call((&a0_c64,), Some(&axis0_kwargs))
+                        .expect("fnp sort a0 c64"),
+                )
+            });
+        });
+        group.bench_function("numpy_sort_c64_axis0_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_sort
+                        .call((&a0_c64,), Some(&axis0_kwargs))
+                        .expect("numpy sort a0 c64"),
+                )
+            });
+        });
+        group.bench_function("fnp_sort_c64_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_sort
+                        .call((&am_c64,), Some(&axis1_kwargs))
+                        .expect("fnp sort am c64"),
+                )
+            });
+        });
+        group.bench_function("numpy_sort_c64_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_sort
+                        .call((&am_c64,), Some(&axis1_kwargs))
+                        .expect("numpy sort am c64"),
+                )
+            });
+        });
+        // datetime64 last-axis argsort: la (16384x1024 distinct-per-lane int64) cast to datetime64[s]
+        let la_dt = la
+            .call_method1("astype", ("datetime64[s]",))
+            .expect("la dt64");
+        group.bench_function("fnp_argsort_datetime64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_argsort.call1((&la_dt,)).expect("fnp argsort la dt64")));
+        });
+        group.bench_function("numpy_argsort_datetime64_lastaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_argsort
+                        .call1((&la_dt,))
+                        .expect("numpy argsort la dt64"),
+                )
+            });
+        });
+        // datetime64 last-axis VALUE sort (np.sort) on the same 16384x1024 distinct-per-lane dt64.
+        group.bench_function("fnp_sort_datetime64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(fnp_sort.call1((&la_dt,)).expect("fnp sort la dt64")));
+        });
+        group.bench_function("numpy_sort_datetime64_lastaxis_16Mx", |bch| {
+            bch.iter(|| black_box(numpy_sort.call1((&la_dt,)).expect("numpy sort la dt64")));
+        });
+        // MIDDLE-axis sort: 3-D 64x4096x64 (=16M), int64 distinct-per-lane (argsort perm) + dt64 cast.
+        let m3_randn = rng
+            .call_method1("standard_normal", ((64_usize, 4096_usize, 64_usize),))
+            .expect("m3 randn");
+        let m3_kwargs = PyDict::new(py);
+        m3_kwargs.set_item("axis", 1_i64).expect("axis kw");
+        let m3 = numpy
+            .call_method("argsort", (m3_randn,), Some(&m3_kwargs))
+            .expect("m3 base")
+            .call_method1("astype", ("int64",))
+            .expect("m3 int64");
+        group.bench_function("fnp_sort_int64_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_sort
+                        .call((&m3,), Some(&m3_kwargs))
+                        .expect("fnp sort m3"),
+                )
+            });
+        });
+        group.bench_function("numpy_sort_int64_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_sort
+                        .call((&m3,), Some(&m3_kwargs))
+                        .expect("numpy sort m3"),
+                )
+            });
+        });
+        let m3_dt = m3
+            .call_method1("astype", ("datetime64[s]",))
+            .expect("m3 dt64");
+        group.bench_function("fnp_sort_datetime64_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    fnp_sort
+                        .call((&m3_dt,), Some(&m3_kwargs))
+                        .expect("fnp sort m3 dt"),
+                )
+            });
+        });
+        group.bench_function("numpy_sort_datetime64_midaxis_16Mx", |bch| {
+            bch.iter(|| {
+                black_box(
+                    numpy_sort
+                        .call((&m3_dt,), Some(&m3_kwargs))
+                        .expect("numpy sort m3 dt"),
+                )
+            });
+        });
     });
 
     group.finish();
 }
 
-// nanvar/nanstd along a MIDDLE axis (0 < ax < ndim-1) of a 3-D f64 stack with scattered
-// NaN. numpy.nanvar on a non-last axis materializes a NaN->0 copy, an isnan mask, a count,
-// and the (a-mean)/squared temps then strided-reduces; the native block-parallel NaN-skip
-// two-pass (try_zerocopy_f64_nanvar_nonlast_axis) is bit-exact and far faster.
-fn bench_nanvar_midaxis_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_nanvar_midaxis_boundary");
+fn bench_int32_flat_sort_small_pool_regate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_int32_flat_sort_small_pool_regate");
     group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(1));
+    group.warm_up_time(Duration::from_millis(250));
 
     Python::initialize();
     Python::attach(|py| {
         ensure_numpy_available(py).expect("numpy available");
+        let threads = rayon::current_num_threads();
+        assert_eq!(threads, 8, "proof row requires RAYON_NUM_THREADS=8");
+        #[cfg(target_arch = "x86_64")]
+        let avx2 = std::arch::is_x86_feature_detected!("avx2");
+        #[cfg(not(target_arch = "x86_64"))]
+        let avx2 = false;
+        assert!(avx2, "proof row requires NumPy's AVX2 int32 qsort basis");
+        eprintln!(
+            "INT32_SORT_REGATE host={} rayon_threads={threads} avx2={}",
+            std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_owned()),
+            avx2
+        );
+
         let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
         fnp_python(&module).expect("initialize fnp_python bench module");
         let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_nanvar = module.getattr("nanvar").expect("fnp_python.nanvar");
-        let numpy_nanvar = numpy.getattr("nanvar").expect("numpy.nanvar");
-        let fnp_nanstd = module.getattr("nanstd").expect("fnp_python.nanstd");
-        let numpy_nanstd = numpy.getattr("nanstd").expect("numpy.nanstd");
-        let fnp_nanmean = module.getattr("nanmean").expect("fnp_python.nanmean");
-        let numpy_nanmean = numpy.getattr("nanmean").expect("numpy.nanmean");
+        let fnp_sort = module.getattr("sort").expect("fnp sort");
+        let numpy_sort = numpy.getattr("sort").expect("numpy sort");
+        let rng = numpy
+            .getattr("random")
+            .expect("numpy.random")
+            .getattr("default_rng")
+            .expect("default_rng")
+            .call1((7_i64,))
+            .expect("rng");
+        let n = 8_000_000_usize;
+        let input = rng
+            .call_method1("integers", (-2_000_000_000_i64, 2_000_000_000_i64, n))
+            .expect("int32 raw")
+            .call_method1("astype", ("int32",))
+            .expect("int32 input");
 
-        for (label, d0, d1, d2) in [
-            ("256x256x64", 256_usize, 256_usize, 64_usize),
-            ("128x512x64", 128_usize, 512_usize, 64_usize),
-        ] {
-            let size = (d0 * d1 * d2) as i64;
-            // Build a 3-D f64 array, then poke ~10% NaN into it (deterministic stride).
-            let input = numpy
-                .call_method1("linspace", (-4.0_f64, 6.0_f64, size))
-                .expect("nanvar midaxis f64 input")
-                .call_method1("reshape", ((d0, d1, d2),))
-                .expect("nanvar midaxis 3-D shape");
-            let flat = input.call_method1("reshape", ((size,),)).expect("flat view");
-            let idx = numpy
-                .call_method1("arange", (0_i64, size, 10_i64))
-                .expect("nan index stride");
-            let nan = numpy.getattr("nan").expect("np.nan");
-            flat.call_method1("__setitem__", (idx, nan))
-                .expect("inject NaN");
+        // Exact same-data reconstruction of the former production primitive:
+        // allocate/copy, then Rayon comparison-sort. It is intentionally a
+        // favorable control (Vec clone rather than numpy.empty export), so a
+        // loss here is decisive evidence for delegating the small-pool basis.
+        let input_bytes: Vec<u8> = input
+            .call_method0("tobytes")
+            .expect("input bytes")
+            .extract()
+            .expect("extract input bytes");
+        let native_input: Vec<i32> = input_bytes
+            .chunks_exact(std::mem::size_of::<i32>())
+            .map(|bytes| i32::from_ne_bytes(bytes.try_into().expect("i32 bytes")))
+            .collect();
+        assert_eq!(native_input.len(), n);
 
-            let fnp_kwargs = PyDict::new(py);
-            fnp_kwargs.set_item("axis", 1_i64).expect("fnp axis kwarg");
-            let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("axis", 1_i64).expect("numpy axis kwarg");
+        // Correctness is outside the timed loop: candidate, NumPy, and the old
+        // native primitive must produce identical value-sort bytes.
+        let fnp_sorted = fnp_sort.call1((&input,)).expect("fnp sort parity");
+        let numpy_sorted = numpy_sort.call1((&input,)).expect("numpy sort parity");
+        let fnp_bytes: Vec<u8> = fnp_sorted
+            .call_method0("tobytes")
+            .expect("fnp bytes")
+            .extract()
+            .expect("extract fnp bytes");
+        let numpy_bytes: Vec<u8> = numpy_sorted
+            .call_method0("tobytes")
+            .expect("numpy bytes")
+            .extract()
+            .expect("extract numpy bytes");
+        assert_eq!(fnp_bytes, numpy_bytes, "regated int32 sort byte mismatch");
+        let mut native_sorted = native_input.clone();
+        native_sorted.par_sort_unstable();
+        assert!(
+            native_sorted
+                .iter()
+                .flat_map(|value| value.to_ne_bytes())
+                .eq(numpy_bytes.iter().copied()),
+            "native int32 control byte mismatch"
+        );
 
-            group.bench_function(format!("fnp_nanvar_f64_axis1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_nanvar
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp nanvar axis1 call");
-                    black_box(result);
-                });
+        group.bench_function("control_native_int32_8m", |bench| {
+            bench.iter(|| {
+                let mut output = native_input.clone();
+                output.par_sort_unstable();
+                black_box(output)
             });
-            group.bench_function(format!("numpy_nanvar_f64_axis1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_nanvar
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy nanvar axis1 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("fnp_nanstd_f64_axis1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_nanstd
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp nanstd axis1 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_nanstd_f64_axis1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_nanstd
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy nanstd axis1 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("fnp_nanmean_f64_axis1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_nanmean
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp nanmean axis1 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_nanmean_f64_axis1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_nanmean
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy nanmean axis1 call");
-                    black_box(result);
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
-fn bench_var_axis0_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_var_axis0_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_var = module.getattr("var").expect("fnp_python.var");
-        let numpy_var = numpy.getattr("var").expect("numpy.var");
-        let fnp_std = module.getattr("std").expect("fnp_python.std");
-        let numpy_std = numpy.getattr("std").expect("numpy.std");
-        let fnp_nanvar = module.getattr("nanvar").expect("fnp_python.nanvar");
-        let numpy_nanvar = numpy.getattr("nanvar").expect("numpy.nanvar");
-        let fnp_nanstd = module.getattr("nanstd").expect("fnp_python.nanstd");
-        let numpy_nanstd = numpy.getattr("nanstd").expect("numpy.nanstd");
-        let fnp_nanmean = module.getattr("nanmean").expect("fnp_python.nanmean");
-        let numpy_nanmean = numpy.getattr("nanmean").expect("numpy.nanmean");
-
-        for (label, rows, cols) in [
-            ("4096x512", 4096_i64, 512_i64),
-            ("50000x64", 50000_i64, 64_i64),
-        ] {
-            let size = rows * cols;
-            let input = numpy
-                .call_method1("linspace", (-4.0_f64, 6.0_f64, size))
-                .expect("var axis0 f64 input")
-                .call_method1("reshape", ((rows, cols),))
-                .expect("var axis0 2-D shape");
-
-            let fnp_kwargs = PyDict::new(py);
-            fnp_kwargs.set_item("axis", 0_i64).expect("fnp axis kwarg");
-            let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("axis", 0_i64).expect("numpy axis kwarg");
-
-            group.bench_function(format!("fnp_var_f64_axis0_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_var
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp var axis0 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_var_f64_axis0_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_var
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy var axis0 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("fnp_std_f64_axis0_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_std
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp std axis0 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_std_f64_axis0_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_std
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy std axis0 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("fnp_nanvar_f64_axis0_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_nanvar
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp nanvar axis0 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_nanvar_f64_axis0_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_nanvar
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy nanvar axis0 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("fnp_nanstd_f64_axis0_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_nanstd
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp nanstd axis0 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_nanstd_f64_axis0_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_nanstd
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy nanstd axis0 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("fnp_nanmean_f64_axis0_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_nanmean
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp nanmean axis0 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_nanmean_f64_axis0_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_nanmean
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy nanmean axis0 call");
-                    black_box(result);
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
-fn bench_sum_lastaxis_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_sum_lastaxis_boundary");
-    group.sample_size(15);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_sum = module.getattr("sum").expect("fnp_python.sum");
-        let numpy_sum = numpy.getattr("sum").expect("numpy.sum");
-
-        for (label, rows, cols) in [
-            ("8192x1024", 8192_i64, 1024_i64),
-            ("65536x256", 65536_i64, 256_i64),
-        ] {
-            let size = rows * cols;
-            let input = numpy
-                .call_method1("linspace", (-2.0_f64, 3.0_f64, size))
-                .expect("sum input")
-                .call_method1("reshape", ((rows, cols),))
-                .expect("sum 2-D shape");
-            let fnp_kwargs = PyDict::new(py);
-            fnp_kwargs.set_item("axis", -1_i64).expect("fnp axis kwarg");
-            let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs
-                .set_item("axis", -1_i64)
-                .expect("numpy axis kwarg");
-
-            group.bench_function(format!("fnp_sum_f64_axis_last_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_sum
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp sum call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_sum_f64_axis_last_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_sum
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy sum call");
-                    black_box(result);
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
-fn bench_prod_lastaxis_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_prod_lastaxis_boundary");
-    group.sample_size(15);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_prod = module.getattr("prod").expect("fnp_python.prod");
-        let numpy_prod = numpy.getattr("prod").expect("numpy.prod");
-
-        for (label, rows, cols) in [("8192x1024", 8192_i64, 1024_i64), ("65536x256", 65536_i64, 256_i64)]
-        {
-            let size = rows * cols;
-            // values near 1.0 so the product stays finite across the axis.
-            let input = numpy
-                .call_method1("linspace", (0.9999_f64, 1.0001_f64, size))
-                .expect("prod input")
-                .call_method1("reshape", ((rows, cols),))
-                .expect("prod 2-D shape");
-            let fnp_kwargs = PyDict::new(py);
-            fnp_kwargs.set_item("axis", -1_i64).expect("fnp axis kwarg");
-            let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("axis", -1_i64).expect("numpy axis kwarg");
-
-            group.bench_function(format!("fnp_prod_f64_axis_last_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_prod
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp prod call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_prod_f64_axis_last_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_prod
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy prod call");
-                    black_box(result);
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
-fn bench_cumsum_lastaxis_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_cumsum_lastaxis_boundary");
-    group.sample_size(15);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_cumsum = module.getattr("cumsum").expect("fnp_python.cumsum");
-        let numpy_cumsum = numpy.getattr("cumsum").expect("numpy.cumsum");
-
-        for (label, rows, cols) in [("8192x1024", 8192_i64, 1024_i64), ("65536x256", 65536_i64, 256_i64)]
-        {
-            let size = rows * cols;
-            let input = numpy
-                .call_method1("linspace", (-1.0_f64, 1.0_f64, size))
-                .expect("cumsum input")
-                .call_method1("reshape", ((rows, cols),))
-                .expect("cumsum 2-D shape");
-            let fnp_kwargs = PyDict::new(py);
-            fnp_kwargs.set_item("axis", -1_i64).expect("fnp axis kwarg");
-            let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("axis", -1_i64).expect("numpy axis kwarg");
-
-            group.bench_function(format!("fnp_cumsum_f64_axis_last_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_cumsum
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp cumsum call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_cumsum_f64_axis_last_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_cumsum
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy cumsum call");
-                    black_box(result);
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
-fn bench_cumsum_flat_boundary(c: &mut Criterion) {
-    // FLAT 1-D integer np.cumsum(8M) — a single-lane prefix sum. numpy's 1-D cumsum is
-    // a serial dependency chain; the native two-pass block scan breaks it across cores
-    // (bit-exact for wrapping integer add). Was serial (parity with numpy).
-    let mut group = c.benchmark_group("python_cumsum_flat_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_cumsum = module.getattr("cumsum").expect("fnp cumsum");
-        let numpy_cumsum = numpy.getattr("cumsum").expect("numpy cumsum");
-        let i64_in = numpy
-            .call_method1("arange", (8_000_000_i64,))
-            .expect("8M i64");
-        let i32_in = i64_in.call_method1("astype", ("int32",)).expect("i32");
-        group.bench_function("fnp_cumsum_i64_flat_8m", |b| {
-            b.iter(|| black_box(fnp_cumsum.call1((&i64_in,)).expect("fnp cumsum i64")));
         });
-        group.bench_function("numpy_cumsum_i64_flat_8m", |b| {
-            b.iter(|| black_box(numpy_cumsum.call1((&i64_in,)).expect("numpy cumsum i64")));
+        group.bench_function("fnp_regated_int32_8m", |bench| {
+            bench.iter(|| black_box(fnp_sort.call1((&input,)).expect("fnp sort")));
         });
-        group.bench_function("fnp_cumsum_i32_flat_8m", |b| {
-            b.iter(|| black_box(fnp_cumsum.call1((&i32_in,)).expect("fnp cumsum i32")));
-        });
-        group.bench_function("numpy_cumsum_i32_flat_8m", |b| {
-            b.iter(|| black_box(numpy_cumsum.call1((&i32_in,)).expect("numpy cumsum i32")));
+        group.bench_function("numpy_int32_8m", |bench| {
+            bench.iter(|| black_box(numpy_sort.call1((&input,)).expect("numpy sort")));
         });
     });
 
     group.finish();
 }
 
-fn bench_accumulate_extremum_boundary(c: &mut Criterion) {
-    // FLAT 1-D f64 np.maximum.accumulate(8M) — running max. numpy delegates to a serial
-    // prefix scan (dependency chain); the native two-pass parallel prefix breaks it.
-    let mut group = c.benchmark_group("python_accumulate_extremum_boundary");
+// f16 arctan2/hypot/logaddexp/logaddexp2: numpy has no f16 ALU, so it widens f16->f32, applies
+// the f32 transcendental single-threaded, and narrows (~290/~170/~350/~276ms @16M). The
+// native parallel widen-op-narrow is bit-exact for the finite fast-path domains and wins big.
+// RAYON_NUM_THREADS=1 vs default isolates the parallel gain.
+fn bench_f16_binary_transcendental_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_f16_binary_transcendental_boundary");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(4));
     group.warm_up_time(Duration::from_secs(2));
@@ -2681,653 +991,232 @@ fn bench_accumulate_extremum_boundary(c: &mut Criterion) {
         let numpy = py.import("numpy").expect("numpy oracle");
         let setup = "import numpy as np\n\
 rng = np.random.default_rng(0)\n\
-x = rng.standard_normal(8_000_000)\n";
+x = rng.standard_normal(16_000_000).astype(np.float16)\n\
+y = rng.standard_normal(16_000_000).astype(np.float16)\n\
+pbase = (np.abs(rng.standard_normal(16_000_000)) + 0.5).astype(np.float16)\n\
+pexp = (rng.standard_normal(16_000_000) * 0.5).astype(np.float16)\n";
         let ns = PyDict::new(py);
         py.run(
             std::ffi::CString::new(setup).unwrap().as_c_str(),
             Some(&ns),
             Some(&ns),
         )
-        .expect("accumulate setup");
+        .expect("f16 binary setup");
         let x = ns.get_item("x").expect("x");
-        let fnp_max = module.getattr("maximum").expect("fnp maximum");
-        let numpy_max = numpy.getattr("maximum").expect("numpy maximum");
-        group.bench_function("fnp_maximum_accumulate_f64_8m", |b| {
-            b.iter(|| black_box(fnp_max.call_method1("accumulate", (&x,)).expect("fnp max.accum")));
+        let y = ns.get_item("y").expect("y");
+        for name in ["arctan2", "hypot", "logaddexp", "logaddexp2"] {
+            let fnp_fn = module.getattr(name).expect("fnp fn");
+            let numpy_fn = numpy.getattr(name).expect("numpy fn");
+            group.bench_function(format!("fnp_{name}_f16_16m"), |b| {
+                b.iter(|| black_box(fnp_fn.call1((&x, &y)).expect("fnp f16 binary")));
+            });
+            group.bench_function(format!("numpy_{name}_f16_16m"), |b| {
+                b.iter(|| black_box(numpy_fn.call1((&x, &y)).expect("np f16 binary")));
+            });
+        }
+        // power uses positive bases + bounded exponents so it engages the native path
+        // (negative base / overflow cases defer to numpy by design).
+        let pbase = ns.get_item("pbase").expect("pbase");
+        let pexp = ns.get_item("pexp").expect("pexp");
+        let fnp_pow = module.getattr("power").expect("fnp power");
+        let numpy_pow = numpy.getattr("power").expect("numpy power");
+        group.bench_function("fnp_power_f16_16m", |b| {
+            b.iter(|| black_box(fnp_pow.call1((&pbase, &pexp)).expect("fnp f16 power")));
         });
-        group.bench_function("numpy_maximum_accumulate_f64_8m", |b| {
+        group.bench_function("numpy_power_f16_16m", |b| {
+            b.iter(|| black_box(numpy_pow.call1((&pbase, &pexp)).expect("np f16 power")));
+        });
+    });
+
+    group.finish();
+}
+
+// np.isin over matched real-float dtypes (f64/f32). numpy can't use its fast
+// integer 'table' method for floats, so it falls back to a serial sort of
+// |element|+|test| (~3 s for 16M f64). The native zero-copy parallel hashed-set
+// path is O(n+m). RAYON_NUM_THREADS=1 vs default isolates the parallel gain (the
+// serial hash already crushes numpy's sort ~45x; parallel adds ~10x more).
+fn bench_float_isin_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_float_isin_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_isin = module.getattr("isin").expect("fnp isin");
+        let numpy_isin = numpy.getattr("isin").expect("numpy isin");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+A64 = rng.standard_normal(8_000_000)\n\
+B64 = rng.standard_normal(65_536)\n\
+A32 = A64.astype(np.float32)\n\
+B32 = B64.astype(np.float32)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("isin setup");
+        for (a_key, b_key, label) in [("A64", "B64", "f64"), ("A32", "B32", "f32")] {
+            let a = ns.get_item(a_key).expect("a");
+            let b = ns.get_item(b_key).expect("b");
+            group.bench_function(format!("fnp_isin_{label}_8m"), |bench| {
+                bench.iter(|| black_box(fnp_isin.call1((&a, &b)).expect("fnp isin")));
+            });
+            group.bench_function(format!("numpy_isin_{label}_8m"), |bench| {
+                bench.iter(|| black_box(numpy_isin.call1((&a, &b)).expect("np isin")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
+// np.insert(1-D, scalar idx, values block): numpy runs a serial page-fault-bound copy (~44ms@8M).
+// The native parallel three-run byte copy (arr[:idx] | values | arr[idx:]) wins ~3x.
+fn bench_insert_block_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_insert_block_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+x = rng.standard_normal(8_000_000)\n\
+block = rng.standard_normal(1000)\n\
+mid = 4_000_000\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("insert setup");
+        let x = ns.get_item("x").expect("x");
+        let block = ns.get_item("block").expect("block");
+        let mid = ns.get_item("mid").expect("mid");
+        let fnp_insert = module.getattr("insert").expect("fnp insert");
+        let numpy_insert = numpy.getattr("insert").expect("numpy insert");
+        group.bench_function("fnp_insert_block_f64_8m", |b| {
+            b.iter(|| black_box(fnp_insert.call1((&x, &mid, &block)).expect("fnp insert")));
+        });
+        group.bench_function("numpy_insert_block_f64_8m", |b| {
+            b.iter(|| black_box(numpy_insert.call1((&x, &mid, &block)).expect("np insert")));
+        });
+    });
+
+    group.finish();
+}
+
+// np.delete(1-D, bool mask / int index array): numpy builds a keep-mask then runs its serial
+// compress (~50ms@8M). Routing the keep-mask through fnp's parallel compress wins (bool-mask
+// ~1.9x; int-index ~1.3x, dragged by numpy's fancy-assign mask build).
+fn bench_delete_mask_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_delete_mask_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+x = rng.standard_normal(8_000_000)\n\
+mask = rng.random(8_000_000) < 0.5\n\
+idx = np.sort(rng.choice(8_000_000, size=2_000_000, replace=False))\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("delete setup");
+        let x = ns.get_item("x").expect("x");
+        let mask = ns.get_item("mask").expect("mask");
+        let idx = ns.get_item("idx").expect("idx");
+        let fnp_delete = module.getattr("delete").expect("fnp delete");
+        let numpy_delete = numpy.getattr("delete").expect("numpy delete");
+        for (label, obj) in [("boolmask", &mask), ("intidx", &idx)] {
+            group.bench_function(format!("fnp_delete_{label}_8m"), |b| {
+                b.iter(|| black_box(fnp_delete.call1((&x, obj)).expect("fnp delete")));
+            });
+            group.bench_function(format!("numpy_delete_{label}_8m"), |b| {
+                b.iter(|| black_box(numpy_delete.call1((&x, obj)).expect("np delete")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
+// np.compress(cond, 2-D, axis=1): the native f64 compress-axis path did a scalar per-element column
+// gather for the last axis (inner==1) and LOST 0.4-0.8x to numpy's SIMD strided gather. Now delegates
+// the inner==1 case -> parity (regression guard: this should track numpy, not the old native loss).
+fn bench_compress_lastaxis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_compress_lastaxis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+x = rng.standard_normal((2048, 2048))\ncond = rng.random(2048) < 0.5\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("compress lastaxis setup");
+        let x = ns.get_item("x").expect("x");
+        let cond = ns.get_item("cond").expect("cond");
+        let fnp_compress = module.getattr("compress").expect("fnp compress");
+        let numpy_compress = numpy.getattr("compress").expect("numpy compress");
+        let kw = PyDict::new(py);
+        kw.set_item("axis", 1_i64).unwrap();
+        let kw2 = kw.clone();
+        group.bench_function("fnp_compress_2d_axis1", |b| {
             b.iter(|| {
                 black_box(
-                    numpy_max
-                        .call_method1("accumulate", (&x,))
-                        .expect("numpy max.accum"),
+                    fnp_compress
+                        .call((&cond, &x), Some(&kw))
+                        .expect("fnp compress"),
                 )
             });
         });
-
-        // f32 + i64 running max share the generic two-pass (bit-exact: max/min
-        // associative for float, no NaN/promotion for int).
-        let x32 = x.call_method1("astype", ("float32",)).expect("x32");
-        let xi = numpy
-            .call_method1("arange", (8_000_000_i64,))
-            .expect("8M i64 base")
-            .call_method1("__mod__", (1_000_003_i64,))
-            .expect("xi");
-        group.bench_function("fnp_maximum_accumulate_f32_8m", |b| {
-            b.iter(|| black_box(fnp_max.call_method1("accumulate", (&x32,)).expect("fnp max.accum f32")));
+        group.bench_function("numpy_compress_2d_axis1", |b| {
+            b.iter(|| {
+                black_box(
+                    numpy_compress
+                        .call((&cond, &x), Some(&kw2))
+                        .expect("np compress"),
+                )
+            });
         });
-        group.bench_function("numpy_maximum_accumulate_f32_8m", |b| {
-            b.iter(|| black_box(numpy_max.call_method1("accumulate", (&x32,)).expect("np max.accum f32")));
-        });
-        group.bench_function("fnp_maximum_accumulate_i64_8m", |b| {
-            b.iter(|| black_box(fnp_max.call_method1("accumulate", (&xi,)).expect("fnp max.accum i64")));
-        });
-        group.bench_function("numpy_maximum_accumulate_i64_8m", |b| {
-            b.iter(|| black_box(numpy_max.call_method1("accumulate", (&xi,)).expect("np max.accum i64")));
-        });
-    });
-
-    group.finish();
-}
-
-// cumsum/cumprod along a MIDDLE axis (0 < ax < ndim-1) of a 3-D f64 stack. numpy runs a
-// non-last cumulative STRIDED + single-threaded; the native block-parallel slab-by-slab
-// scan (try_zerocopy_f64_cumulative_axis inner>1 path) fans independent contiguous outer
-// blocks across the pool. RAYON_NUM_THREADS=1 vs default isolates the parallelism gain.
-fn bench_cum_midaxis_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_cum_midaxis_boundary");
-    group.sample_size(15);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_cumsum = module.getattr("cumsum").expect("fnp_python.cumsum");
-        let numpy_cumsum = numpy.getattr("cumsum").expect("numpy.cumsum");
-        let fnp_cumprod = module.getattr("cumprod").expect("fnp_python.cumprod");
-        let numpy_cumprod = numpy.getattr("cumprod").expect("numpy.cumprod");
-
-        for (label, d0, d1, d2) in [
-            ("256x256x64", 256_usize, 256_usize, 64_usize),
-            ("128x512x64", 128_usize, 512_usize, 64_usize),
-        ] {
-            let size = (d0 * d1 * d2) as i64;
-            let input = numpy
-                .call_method1("linspace", (-1.0_f64, 1.0_f64, size))
-                .expect("cum midaxis input")
-                .call_method1("reshape", ((d0, d1, d2),))
-                .expect("cum midaxis 3-D shape");
-            let fnp_kwargs = PyDict::new(py);
-            fnp_kwargs.set_item("axis", 1_i64).expect("fnp axis kwarg");
-            let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("axis", 1_i64).expect("numpy axis kwarg");
-
-            group.bench_function(format!("fnp_cumsum_f64_axis1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_cumsum
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp cumsum axis1 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_cumsum_f64_axis1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_cumsum
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy cumsum axis1 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("fnp_cumprod_f64_axis1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_cumprod
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp cumprod axis1 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_cumprod_f64_axis1_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_cumprod
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy cumprod axis1 call");
-                    black_box(result);
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
-// int64 cumsum along the LAST axis and a MIDDLE axis. numpy runs int cumsum
-// single-threaded (strided on a non-last axis); the native cumsum_axis_typed path now
-// fans independent contiguous lanes (last) / outer blocks (non-last) across the pool.
-// RAYON_NUM_THREADS=1 vs default isolates the parallelism gain.
-fn bench_int_cum_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_int_cum_boundary");
-    group.sample_size(15);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_cumsum = module.getattr("cumsum").expect("fnp_python.cumsum");
-        let numpy_cumsum = numpy.getattr("cumsum").expect("numpy.cumsum");
-
-        // last axis: 2-D (8192, 1024)
-        let last2d = numpy
-            .call_method1("arange", (8192_i64 * 1024_i64,))
-            .expect("int last input")
-            .call_method1("reshape", ((8192_usize, 1024_usize),))
-            .expect("int last reshape");
-        // middle axis: 3-D (256, 256, 64)
-        let mid3d = numpy
-            .call_method1("arange", (256_i64 * 256_i64 * 64_i64,))
-            .expect("int mid input")
-            .call_method1("reshape", ((256_usize, 256_usize, 64_usize),))
-            .expect("int mid reshape");
-        for (label, arr, ax) in [
-            ("last_8192x1024", &last2d, -1_i64),
-            ("mid_256x256x64", &mid3d, 1_i64),
-        ] {
-            let fk = PyDict::new(py);
-            fk.set_item("axis", ax).expect("fnp axis");
-            let nk = PyDict::new(py);
-            nk.set_item("axis", ax).expect("np axis");
-            group.bench_function(format!("fnp_cumsum_i64_{label}"), |bench| {
-                bench.iter(|| {
-                    let r = fnp_cumsum.call((arr,), Some(&fk)).expect("fnp int cumsum");
-                    black_box(r);
-                });
-            });
-            group.bench_function(format!("numpy_cumsum_i64_{label}"), |bench| {
-                bench.iter(|| {
-                    let r = numpy_cumsum.call((arr,), Some(&nk)).expect("numpy int cumsum");
-                    black_box(r);
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
-fn bench_vander_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_vander_boundary");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_vander = module.getattr("vander").expect("fnp_python.vander");
-        let numpy_vander = numpy.getattr("vander").expect("numpy.vander");
-
-        for (label, n, cols) in [("200k_x8", 200_000_i64, 8_i64), ("500k_x12", 500_000_i64, 12_i64)]
-        {
-            let x = numpy
-                .call_method1("linspace", (-1.5_f64, 1.5_f64, n))
-                .expect("vander x input");
-            let fnp_kwargs = PyDict::new(py);
-            fnp_kwargs.set_item("N", cols).expect("fnp N kwarg");
-            let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("N", cols).expect("numpy N kwarg");
-
-            group.bench_function(format!("fnp_vander_f64_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_vander
-                        .call((&x,), Some(&fnp_kwargs))
-                        .expect("fnp vander call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_vander_f64_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_vander
-                        .call((&x,), Some(&numpy_kwargs))
-                        .expect("numpy vander call");
-                    black_box(result);
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
-fn bench_polyval_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_polyval_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_polyval = module.getattr("polyval").expect("fnp_python.polyval");
-        let numpy_polyval = numpy.getattr("polyval").expect("numpy.polyval");
-
-        for (label, n, deg) in [("1M_deg5", 1_000_000_i64, 5_i64), ("4M_deg8", 4_000_000_i64, 8_i64)]
-        {
-            let x = numpy
-                .call_method1("linspace", (-3.0_f64, 3.0_f64, n))
-                .expect("polyval x input");
-            let p = numpy
-                .call_method1("linspace", (0.5_f64, 2.0_f64, deg + 1))
-                .expect("polyval coeffs");
-
-            group.bench_function(format!("fnp_polyval_f64_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_polyval
-                        .call1((&p, &x))
-                        .expect("fnp polyval call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_polyval_f64_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_polyval
-                        .call1((&p, &x))
-                        .expect("numpy polyval call");
-                    black_box(result);
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
-fn bench_gradient_axis_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_gradient_axis_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_grad = module.getattr("gradient").expect("fnp_python.gradient");
-        let numpy_grad = numpy.getattr("gradient").expect("numpy.gradient");
-
-        for (label, rows, cols) in [
-            ("4096x1024", 4096_i64, 1024_i64),
-            ("1024x4096", 1024_i64, 4096_i64),
-        ] {
-            let size = rows * cols;
-            let input = numpy
-                .call_method1("linspace", (-4.0_f64, 6.0_f64, size))
-                .expect("gradient f64 input")
-                .call_method1("reshape", ((rows, cols),))
-                .expect("gradient 2-D shape");
-            // axis=0 is the strided (non-last) path.
-            let fnp_kwargs = PyDict::new(py);
-            fnp_kwargs.set_item("axis", 0_i64).expect("fnp axis kwarg");
-            let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("axis", 0_i64).expect("numpy axis kwarg");
-
-            group.bench_function(format!("fnp_gradient_f64_axis0_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_grad
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp gradient axis0 call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_gradient_f64_axis0_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_grad
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy gradient axis0 call");
-                    black_box(result);
-                });
-            });
-            // No-axis full gradient: returns a tuple of per-axis gradients.
-            group.bench_function(format!("fnp_gradient_f64_full_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_grad.call1((&input,)).expect("fnp gradient full call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_gradient_f64_full_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_grad.call1((&input,)).expect("numpy gradient full call");
-                    black_box(result);
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
-fn bench_norm_axis_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_norm_axis_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_norm = module.getattr("norm").expect("fnp_python.norm");
-        let numpy_norm = numpy
-            .getattr("linalg")
-            .expect("numpy.linalg")
-            .getattr("norm")
-            .expect("numpy.linalg.norm");
-
-        for (label, rows, cols) in [
-            ("4096x512", 4096_i64, 512_i64),
-            ("8192x1024", 8192_i64, 1024_i64),
-        ] {
-            let size = rows * cols;
-            let input = numpy
-                .call_method1("linspace", (-4.0_f64, 6.0_f64, size))
-                .expect("norm axis f64 input")
-                .call_method1("reshape", ((rows, cols),))
-                .expect("norm axis 2-D shape");
-
-            let fnp_kwargs = PyDict::new(py);
-            fnp_kwargs.set_item("axis", -1_i64).expect("fnp axis kwarg");
-            let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs
-                .set_item("axis", -1_i64)
-                .expect("numpy axis kwarg");
-
-            group.bench_function(format!("fnp_norm_f64_axis_last_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_norm
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp norm axis benchmark call");
-                    black_box(result);
-                });
-            });
-
-            group.bench_function(format!("numpy_norm_f64_axis_last_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_norm
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy norm axis benchmark call");
-                    black_box(result);
-                });
-            });
-
-            let fnp_l1_kwargs = PyDict::new(py);
-            fnp_l1_kwargs.set_item("ord", 1_i64).expect("fnp l1 ord kwarg");
-            fnp_l1_kwargs
-                .set_item("axis", -1_i64)
-                .expect("fnp l1 axis kwarg");
-            let numpy_l1_kwargs = PyDict::new(py);
-            numpy_l1_kwargs
-                .set_item("ord", 1_i64)
-                .expect("numpy l1 ord kwarg");
-            numpy_l1_kwargs
-                .set_item("axis", -1_i64)
-                .expect("numpy l1 axis kwarg");
-
-            group.bench_function(format!("fnp_norm_l1_f64_axis_last_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_norm
-                        .call((&input,), Some(&fnp_l1_kwargs))
-                        .expect("fnp norm l1 axis benchmark call");
-                    black_box(result);
-                });
-            });
-
-            group.bench_function(format!("numpy_norm_l1_f64_axis_last_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_norm
-                        .call((&input,), Some(&numpy_l1_kwargs))
-                        .expect("numpy norm l1 axis benchmark call");
-                    black_box(result);
-                });
-            });
-
-            let inf = f64::INFINITY;
-            let fnp_inf_kwargs = PyDict::new(py);
-            fnp_inf_kwargs.set_item("ord", inf).expect("fnp inf ord kwarg");
-            fnp_inf_kwargs
-                .set_item("axis", -1_i64)
-                .expect("fnp inf axis kwarg");
-            let numpy_inf_kwargs = PyDict::new(py);
-            numpy_inf_kwargs
-                .set_item("ord", inf)
-                .expect("numpy inf ord kwarg");
-            numpy_inf_kwargs
-                .set_item("axis", -1_i64)
-                .expect("numpy inf axis kwarg");
-
-            group.bench_function(format!("fnp_norm_inf_f64_axis_last_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_norm
-                        .call((&input,), Some(&fnp_inf_kwargs))
-                        .expect("fnp norm inf axis benchmark call");
-                    black_box(result);
-                });
-            });
-
-            group.bench_function(format!("numpy_norm_inf_f64_axis_last_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_norm
-                        .call((&input,), Some(&numpy_inf_kwargs))
-                        .expect("numpy norm inf axis benchmark call");
-                    black_box(result);
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
-// Vector norm along a NON-LAST axis for the order-independent ords (ord in {+inf,
-// -inf, 0}). numpy runs a serial materialize-then-reduce; the native block-parallel /
-// band-privatized column reduction (try_zerocopy_f64_vector_norm_axis non-last branch)
-// is bit-exact for these order-free reductions. L2/L1 are NOT here (they delegate -
-// numpy's strided summation order is not reproducible bit-for-bit in parallel).
-fn bench_norm_nonlast_axis_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_norm_nonlast_axis_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_norm = module.getattr("norm").expect("fnp_python.norm");
-        let numpy_norm = numpy
-            .getattr("linalg")
-            .expect("numpy.linalg")
-            .getattr("norm")
-            .expect("numpy.linalg.norm");
-
-        let inf = f64::INFINITY;
-        // (label, shape, axis)
-        let cases: [(&str, Vec<i64>, i64); 4] = [
-            ("4096x2048_ax0", vec![4096, 2048], 0),
-            ("8192x1024_ax0", vec![8192, 1024], 0),
-            ("256x256x64_ax1", vec![256, 256, 64], 1),
-            ("256x256x64_ax0", vec![256, 256, 64], 0),
-        ];
-        for (label, shape, axis) in cases {
-            let size: i64 = shape.iter().product();
-            let shape_tuple = PyTuple::new(py, shape.iter().copied()).expect("shape tuple");
-            let input = numpy
-                .call_method1("linspace", (-4.0_f64, 6.0_f64, size))
-                .expect("norm nonlast f64 input")
-                .call_method1("reshape", (shape_tuple,))
-                .expect("norm nonlast reshape");
-
-            for (ord_label, ord_val) in [("inf", inf), ("ninf", -inf), ("zero", 0.0_f64)] {
-                let fnp_kwargs = PyDict::new(py);
-                fnp_kwargs.set_item("ord", ord_val).expect("fnp ord kwarg");
-                fnp_kwargs.set_item("axis", axis).expect("fnp axis kwarg");
-                let numpy_kwargs = PyDict::new(py);
-                numpy_kwargs.set_item("ord", ord_val).expect("numpy ord kwarg");
-                numpy_kwargs.set_item("axis", axis).expect("numpy axis kwarg");
-
-                group.bench_function(format!("fnp_norm_{ord_label}_{label}"), |bench| {
-                    bench.iter(|| {
-                        let result = fnp_norm
-                            .call((&input,), Some(&fnp_kwargs))
-                            .expect("fnp norm nonlast call");
-                        black_box(result);
-                    });
-                });
-                group.bench_function(format!("numpy_norm_{ord_label}_{label}"), |bench| {
-                    bench.iter(|| {
-                        let result = numpy_norm
-                            .call((&input,), Some(&numpy_kwargs))
-                            .expect("numpy norm nonlast call");
-                        black_box(result);
-                    });
-                });
-            }
-        }
-    });
-
-    group.finish();
-}
-
-fn bench_norm_frobenius_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_norm_frobenius_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_norm = module.getattr("norm").expect("fnp_python.norm");
-        let numpy_norm = numpy
-            .getattr("linalg")
-            .expect("numpy.linalg")
-            .getattr("norm")
-            .expect("numpy.linalg.norm");
-
-        for (label, b, m, n) in [
-            ("4096x16x16", 4096_i64, 16_i64, 16_i64),
-            ("2048x32x32", 2048_i64, 32_i64, 32_i64),
-        ] {
-            let size = b * m * n;
-            let input = numpy
-                .call_method1("linspace", (-4.0_f64, 6.0_f64, size))
-                .expect("frobenius f64 input")
-                .call_method1("reshape", ((b, m, n),))
-                .expect("frobenius 3-D shape");
-
-            let fnp_kwargs = PyDict::new(py);
-            fnp_kwargs
-                .set_item("axis", (-2_i64, -1_i64))
-                .expect("fnp axis kwarg");
-            let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs
-                .set_item("axis", (-2_i64, -1_i64))
-                .expect("numpy axis kwarg");
-
-            group.bench_function(format!("fnp_norm_fro_f64_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_norm
-                        .call((&input,), Some(&fnp_kwargs))
-                        .expect("fnp frobenius benchmark call");
-                    black_box(result);
-                });
-            });
-
-            group.bench_function(format!("numpy_norm_fro_f64_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_norm
-                        .call((&input,), Some(&numpy_kwargs))
-                        .expect("numpy frobenius benchmark call");
-                    black_box(result);
-                });
-            });
-
-            // Induced matrix inf-norm (max abs row sum).
-            let fnp_inf = PyDict::new(py);
-            fnp_inf.set_item("ord", f64::INFINITY).expect("fnp inf ord");
-            fnp_inf
-                .set_item("axis", (-2_i64, -1_i64))
-                .expect("fnp inf axis");
-            let np_inf = PyDict::new(py);
-            np_inf.set_item("ord", f64::INFINITY).expect("np inf ord");
-            np_inf
-                .set_item("axis", (-2_i64, -1_i64))
-                .expect("np inf axis");
-            group.bench_function(format!("fnp_norm_inf_f64_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_norm
-                        .call((&input,), Some(&fnp_inf))
-                        .expect("fnp matrix inf-norm call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_norm_inf_f64_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_norm
-                        .call((&input,), Some(&np_inf))
-                        .expect("numpy matrix inf-norm call");
-                    black_box(result);
-                });
-            });
-
-            // Induced matrix 1-norm (max abs col sum).
-            let fnp_l1 = PyDict::new(py);
-            fnp_l1.set_item("ord", 1_i64).expect("fnp l1 ord");
-            fnp_l1
-                .set_item("axis", (-2_i64, -1_i64))
-                .expect("fnp l1 axis");
-            let np_l1 = PyDict::new(py);
-            np_l1.set_item("ord", 1_i64).expect("np l1 ord");
-            np_l1
-                .set_item("axis", (-2_i64, -1_i64))
-                .expect("np l1 axis");
-            group.bench_function(format!("fnp_norm_l1_f64_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_norm
-                        .call((&input,), Some(&fnp_l1))
-                        .expect("fnp matrix 1-norm call");
-                    black_box(result);
-                });
-            });
-            group.bench_function(format!("numpy_norm_l1_f64_{label}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_norm
-                        .call((&input,), Some(&np_l1))
-                        .expect("numpy matrix 1-norm call");
-                    black_box(result);
-                });
-            });
-        }
     });
 
     group.finish();
@@ -3397,6 +1286,49 @@ fn bench_compress_boundary(c: &mut Criterion) {
                 });
             });
         }
+    });
+
+    group.finish();
+}
+
+// np.roll(2-D, tuple shifts, tuple axes) for NON-f64 dtypes: numpy does successive full-copy
+// concatenations; the f64 fused-parallel path won 3.6x but non-f64 delegated. Generalized to a
+// uint8-view byte roll -> int64 3.0x / float32 2.6x / complex128 3.1x.
+fn bench_roll_2d_multi_dtype_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_roll_2d_multi_dtype_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\nrng = np.random.default_rng(0)\n\
+x = rng.integers(-1000, 1000, (4096, 4096)).astype(np.int64)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("roll 2d multi setup");
+        let x = ns.get_item("x").expect("x");
+        let fnp_roll = module.getattr("roll").expect("fnp roll");
+        let numpy_roll = numpy.getattr("roll").expect("numpy roll");
+        let shifts = (3_i64, 5_i64);
+        let axes = (0_i64, 1_i64);
+        group.bench_function("fnp_roll_2d_multi_int64", |b| {
+            b.iter(|| black_box(fnp_roll.call1((&x, shifts, axes)).expect("fnp roll")));
+        });
+        group.bench_function("numpy_roll_2d_multi_int64", |b| {
+            b.iter(|| black_box(numpy_roll.call1((&x, shifts, axes)).expect("np roll")));
+        });
     });
 
     group.finish();
@@ -4257,6 +2189,37 @@ fn bench_linalg_boundary(c: &mut Criterion) {
             );
         }
 
+        // INTEGER matrix_power: numpy has no BLAS (repeated naive int matmul). Native
+        // binary-exp parallel GEMM should crush it.
+        let imp_setup = "import numpy as np\n\
+imp = np.random.default_rng(9).integers(-3, 3, (256, 256)).astype(np.int64)\n";
+        let imp_ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(imp_setup).unwrap().as_c_str(),
+            Some(&imp_ns),
+            Some(&imp_ns),
+        )
+        .expect("int matpow setup");
+        let imp = imp_ns.get_item("imp").expect("imp");
+        group.bench_function("fnp_matrix_power_i64_256_n5", |bench| {
+            bench.iter(|| {
+                black_box(
+                    fnp_matrix_power
+                        .call1((&imp, 5_i64))
+                        .expect("fnp int matpow"),
+                )
+            });
+        });
+        group.bench_function("numpy_matrix_power_i64_256_n5", |bench| {
+            bench.iter(|| {
+                black_box(
+                    numpy_matrix_power
+                        .call1((&imp, 5_i64))
+                        .expect("np int matpow"),
+                )
+            });
+        });
+
         for (label, input) in [
             ("batch10000_4x4", make_spd_stack(10_000, 4)),
             ("batch4000_8x8", make_spd_stack(4_000, 8)),
@@ -4308,7 +2271,9 @@ fn bench_unary_parallel_boundary(c: &mut Criterion) {
             .expect("8M base")
             .call_method1("__sub__", (4_000_000_i64,))
             .expect("centered base");
-        let f32_in = base.call_method1("astype", ("float32",)).expect("f32 input");
+        let f32_in = base
+            .call_method1("astype", ("float32",))
+            .expect("f32 input");
         let i64_in = base.call_method1("astype", ("int64",)).expect("i64 input");
         let i32_in = base.call_method1("astype", ("int32",)).expect("i32 input");
         let u64_in = base.call_method1("astype", ("uint64",)).expect("u64 input");
@@ -4369,10 +2334,22 @@ fn bench_clip_boundary(c: &mut Criterion) {
         let fnp_clip = module.getattr("clip").expect("fnp clip");
         let numpy_clip = numpy.getattr("clip").expect("numpy clip");
         group.bench_function("fnp_clip_f64_8m", |b| {
-            b.iter(|| black_box(fnp_clip.call1((&input, -1000.0_f64, 1000.0_f64)).expect("fnp clip")));
+            b.iter(|| {
+                black_box(
+                    fnp_clip
+                        .call1((&input, -1000.0_f64, 1000.0_f64))
+                        .expect("fnp clip"),
+                )
+            });
         });
         group.bench_function("numpy_clip_f64_8m", |b| {
-            b.iter(|| black_box(numpy_clip.call1((&input, -1000.0_f64, 1000.0_f64)).expect("numpy clip")));
+            b.iter(|| {
+                black_box(
+                    numpy_clip
+                        .call1((&input, -1000.0_f64, 1000.0_f64))
+                        .expect("numpy clip"),
+                )
+            });
         });
 
         let input_f32 = input
@@ -4416,6 +2393,107 @@ fn bench_clip_boundary(c: &mut Criterion) {
         }
         iclip!("clip_i64_8m", &i64_in, -1000_i64, 1000_i64);
         iclip!("clip_i32_8m", &i32_in, -1000_i32, 1000_i32);
+    });
+
+    group.finish();
+}
+
+fn bench_int_convolve_boundary(c: &mut Criterion) {
+    // Integer 1-D convolve/correlate: numpy is a direct serial loop (no int fast path).
+    let mut group = c.benchmark_group("python_int_convolve_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(12)\n\
+a = rng.integers(-100, 100, 200_000).astype(np.int64)\n\
+v = rng.integers(-100, 100, 256).astype(np.int64)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("int convolve setup");
+        let a = ns.get_item("a").expect("a");
+        let v = ns.get_item("v").expect("v");
+        let fnp_conv = module.getattr("convolve").expect("fnp convolve");
+        let numpy_conv = numpy.getattr("convolve").expect("numpy convolve");
+        group.bench_function("fnp_convolve_i64_200k_256", |b| {
+            b.iter(|| black_box(fnp_conv.call1((&a, &v, "full")).expect("fnp int convolve")));
+        });
+        group.bench_function("numpy_convolve_i64_200k_256", |b| {
+            b.iter(|| {
+                black_box(
+                    numpy_conv
+                        .call1((&a, &v, "full"))
+                        .expect("numpy int convolve"),
+                )
+            });
+        });
+    });
+
+    group.finish();
+}
+
+fn bench_f64_convolve_boundary(c: &mut Criterion) {
+    // Float64 1-D convolve/correlate with k=256: this is the stale
+    // deadlock-audit-1nzxt band. Current main should use the parallel direct
+    // gather path for large outputs and beat NumPy's serial direct loop.
+    let mut group = c.benchmark_group("python_f64_convolve_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(17)\n\
+a = rng.standard_normal(1 << 20).astype(np.float64)\n\
+v = rng.standard_normal(256).astype(np.float64)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("f64 convolve setup");
+        let a = ns.get_item("a").expect("a");
+        let v = ns.get_item("v").expect("v");
+        let fnp_conv = module.getattr("convolve").expect("fnp convolve");
+        let numpy_conv = numpy.getattr("convolve").expect("numpy convolve");
+        let fnp_corr = module.getattr("correlate").expect("fnp correlate");
+        let numpy_corr = numpy.getattr("correlate").expect("numpy correlate");
+
+        group.bench_function("fnp_convolve_f64_1m_256_same", |b| {
+            b.iter(|| black_box(fnp_conv.call1((&a, &v, "same")).expect("fnp convolve")));
+        });
+        group.bench_function("numpy_convolve_f64_1m_256_same", |b| {
+            b.iter(|| black_box(numpy_conv.call1((&a, &v, "same")).expect("numpy convolve")));
+        });
+        group.bench_function("fnp_correlate_f64_1m_256_valid", |b| {
+            b.iter(|| black_box(fnp_corr.call1((&a, &v, "valid")).expect("fnp correlate")));
+        });
+        group.bench_function("numpy_correlate_f64_1m_256_valid", |b| {
+            b.iter(|| {
+                black_box(
+                    numpy_corr
+                        .call1((&a, &v, "valid"))
+                        .expect("numpy correlate"),
+                )
+            });
+        });
     });
 
     group.finish();
@@ -4501,7 +2579,13 @@ fn bench_where_boundary(c: &mut Criterion) {
         let ia32 = ia.call_method1("astype", ("int32",)).expect("ia32");
         let ib32 = ib.call_method1("astype", ("int32",)).expect("ib32");
         group.bench_function("fnp_where_i32_8m", |bn| {
-            bn.iter(|| black_box(fnp_where.call1((&imask, &ia32, &ib32)).expect("fnp where i32")));
+            bn.iter(|| {
+                black_box(
+                    fnp_where
+                        .call1((&imask, &ia32, &ib32))
+                        .expect("fnp where i32"),
+                )
+            });
         });
         group.bench_function("numpy_where_i32_8m", |bn| {
             bn.iter(|| {
@@ -4552,19 +2636,39 @@ fn bench_around_boundary(c: &mut Criterion) {
             .call_method1("view", ("complex128",))
             .expect("c128 view");
         group.bench_function("fnp_around_c128_4m", |b| {
-            b.iter(|| black_box(fnp_around.call1((&input_c, 3_i64)).expect("fnp around c128")));
+            b.iter(|| {
+                black_box(
+                    fnp_around
+                        .call1((&input_c, 3_i64))
+                        .expect("fnp around c128"),
+                )
+            });
         });
         group.bench_function("numpy_around_c128_4m", |b| {
-            b.iter(|| black_box(numpy_around.call1((&input_c, 3_i64)).expect("numpy around c128")));
+            b.iter(|| {
+                black_box(
+                    numpy_around
+                        .call1((&input_c, 3_i64))
+                        .expect("numpy around c128"),
+                )
+            });
         });
 
         // f32 sibling — compute-heavy (round-ties-even + mul/div) so wins at 4-byte.
-        let input32 = input.call_method1("astype", ("float32",)).expect("f32 input");
+        let input32 = input
+            .call_method1("astype", ("float32",))
+            .expect("f32 input");
         group.bench_function("fnp_around_f32_8m", |b| {
             b.iter(|| black_box(fnp_around.call1((&input32, 3_i64)).expect("fnp around f32")));
         });
         group.bench_function("numpy_around_f32_8m", |b| {
-            b.iter(|| black_box(numpy_around.call1((&input32, 3_i64)).expect("numpy around f32")));
+            b.iter(|| {
+                black_box(
+                    numpy_around
+                        .call1((&input32, 3_i64))
+                        .expect("numpy around f32"),
+                )
+            });
         });
     });
 
@@ -4763,41 +2867,12 @@ fn bench_kron_boundary(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_tile_boundary(c: &mut Criterion) {
-    // np.tile of a 1-D array (scalar reps) -> ~4M output. numpy.tile is a single-threaded
-    // python helper (reshape + C repeat); fnp does a parallel block memcpy. Bit-exact.
-    let mut group = c.benchmark_group("python_tile_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        // base 1-D of 4096 elements tiled 1024x -> ~4.19M output.
-        let base = numpy
-            .call_method1("arange", (4096_i64,))
-            .expect("base")
-            .call_method1("astype", ("float64",))
-            .expect("f64");
-        let fnp_tile = module.getattr("tile").expect("fnp tile");
-        let numpy_tile = numpy.getattr("tile").expect("numpy tile");
-        group.bench_function("fnp_tile_f64_4m", |bn| {
-            bn.iter(|| black_box(fnp_tile.call1((&base, 1024_i64)).expect("fnp tile f64")));
-        });
-        group.bench_function("numpy_tile_f64_4m", |bn| {
-            bn.iter(|| black_box(numpy_tile.call1((&base, 1024_i64)).expect("numpy tile f64")));
-        });
-    });
-    group.finish();
-}
-
-fn bench_digitize_boundary(c: &mut Criterion) {
-    // np.digitize(4M f64, 50 bins) — serial per-element binary search vs parallel raw-slice.
-    let mut group = c.benchmark_group("python_digitize_boundary");
+fn bench_pad_edge_boundary(c: &mut Criterion) {
+    // np.pad(1-D, mode="edge"): numpy runs a slow (~0.8 GB/s) single-threaded python path
+    // (~77ms @8M f64). fnp splats the first/last element bytes into the edge runs and
+    // parallel-memcpys the interior (value-agnostic byte copy) — bit-exact. Covers f64 +
+    // the byte path (int32 here). Correctness asserted vs numpy before timing.
+    let mut group = c.benchmark_group("python_pad_edge_boundary");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(4));
     group.warm_up_time(Duration::from_secs(2));
@@ -4810,558 +2885,226 @@ fn bench_digitize_boundary(c: &mut Criterion) {
         let numpy = py.import("numpy").expect("numpy oracle");
         let setup = "import numpy as np\n\
 rng = np.random.default_rng(0)\n\
-x = rng.standard_normal(4_000_000)\n\
-bins = np.linspace(-4.0, 4.0, 50)\n";
+x = rng.standard_normal(8_000_000)\n\
+xi = rng.integers(-1000, 1000, 8_000_000).astype(np.int32)\n";
         let ns = PyDict::new(py);
         py.run(
             std::ffi::CString::new(setup).unwrap().as_c_str(),
             Some(&ns),
             Some(&ns),
         )
-        .expect("digitize setup");
+        .expect("pad edge setup");
         let x = ns.get_item("x").expect("x");
-        let bins = ns.get_item("bins").expect("bins");
-        let fnp_dig = module.getattr("digitize").expect("fnp digitize");
-        let numpy_dig = numpy.getattr("digitize").expect("numpy digitize");
-        group.bench_function("fnp_digitize_f64_4m", |b| {
-            b.iter(|| black_box(fnp_dig.call1((&x, &bins)).expect("fnp digitize")));
-        });
-        group.bench_function("numpy_digitize_f64_4m", |b| {
-            b.iter(|| black_box(numpy_dig.call1((&x, &bins)).expect("numpy digitize")));
-        });
-    });
-
-    group.finish();
-}
-
-// np.bincount(int64) — a tight serial scatter `ans[x[i]]++` in NumPy. The native zero-copy
-// path drops the per-element bounds check (the max-scan proves every index is in range) so the
-// serial tally matches/beats NumPy across the common range; the privatized parallel tally only
-// engages for huge inputs (>=67M) where aggregate bandwidth beats the contention overhead on a
-// loaded many-core box. Bins span N=2M (mid) and N=64M (huge/parallel).
-fn bench_bincount_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_bincount_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let setup = "import numpy as np\n\
-rng = np.random.default_rng(0)\n\
-x_mid = rng.integers(0, 256, 2_000_000)\n\
-x_big = rng.integers(0, 512, 64_000_000)\n";
-        let ns = PyDict::new(py);
-        py.run(
-            std::ffi::CString::new(setup).unwrap().as_c_str(),
-            Some(&ns),
-            Some(&ns),
-        )
-        .expect("bincount setup");
-        let x_mid = ns.get_item("x_mid").expect("x_mid");
-        let x_big = ns.get_item("x_big").expect("x_big");
-        let fnp_bc = module.getattr("bincount").expect("fnp bincount");
-        let numpy_bc = numpy.getattr("bincount").expect("numpy bincount");
-        for (label, x) in [("mid_2m_k256", &x_mid), ("big_64m_k512", &x_big)] {
-            group.bench_function(format!("fnp_bincount_i64_{label}"), |b| {
-                b.iter(|| black_box(fnp_bc.call1((x,)).expect("fnp bincount")));
-            });
-            group.bench_function(format!("numpy_bincount_i64_{label}"), |b| {
-                b.iter(|| black_box(numpy_bc.call1((x,)).expect("numpy bincount")));
-            });
-        }
-    });
-
-    group.finish();
-}
-
-fn bench_searchsorted_boundary(c: &mut Criterion) {
-    // np.searchsorted(1M sorted haystack, 4M queries) — serial per-query binary search vs parallel.
-    let mut group = c.benchmark_group("python_searchsorted_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let setup = "import numpy as np\n\
-rng = np.random.default_rng(0)\n\
-a = np.sort(rng.standard_normal(1_000_000))\n\
-v = rng.standard_normal(4_000_000)\n";
-        let ns = PyDict::new(py);
-        py.run(
-            std::ffi::CString::new(setup).unwrap().as_c_str(),
-            Some(&ns),
-            Some(&ns),
-        )
-        .expect("searchsorted setup");
-        let a = ns.get_item("a").expect("a");
-        let v = ns.get_item("v").expect("v");
-        let fnp_ss = module.getattr("searchsorted").expect("fnp searchsorted");
-        let numpy_ss = numpy.getattr("searchsorted").expect("numpy searchsorted");
-        group.bench_function("fnp_searchsorted_f64_4m", |b| {
-            b.iter(|| black_box(fnp_ss.call1((&a, &v)).expect("fnp searchsorted")));
-        });
-        group.bench_function("numpy_searchsorted_f64_4m", |b| {
-            b.iter(|| black_box(numpy_ss.call1((&a, &v)).expect("numpy searchsorted")));
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_take_boundary(c: &mut Criterion) {
-    // np.take(16M f64 source, 8M random indices) — serial gather vs parallel raw-slice gather.
-    let mut group = c.benchmark_group("python_take_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let setup = "import numpy as np\n\
-rng = np.random.default_rng(0)\n\
-a = rng.standard_normal(16_000_000)\n\
-idx = rng.integers(0, 16_000_000, 8_000_000).astype(np.int64)\n";
-        let ns = PyDict::new(py);
-        py.run(
-            std::ffi::CString::new(setup).unwrap().as_c_str(),
-            Some(&ns),
-            Some(&ns),
-        )
-        .expect("take setup");
-        let a = ns.get_item("a").expect("a");
-        let idx = ns.get_item("idx").expect("idx");
-        let fnp_take = module.getattr("take").expect("fnp take");
-        let numpy_take = numpy.getattr("take").expect("numpy take");
-        group.bench_function("fnp_take_f64_8m", |b| {
-            b.iter(|| black_box(fnp_take.call1((&a, &idx)).expect("fnp take")));
-        });
-        group.bench_function("numpy_take_f64_8m", |b| {
-            b.iter(|| black_box(numpy_take.call1((&a, &idx)).expect("numpy take")));
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_take_along_axis_boundary(c: &mut Criterion) {
-    // np.take_along_axis(4096x4096 f64, 4096x2048 idx, axis=1) — serial gather vs parallel.
-    let mut group = c.benchmark_group("python_take_along_axis_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let setup = "import numpy as np\n\
-rng = np.random.default_rng(0)\n\
-a = rng.standard_normal((4096, 4096))\n\
-idx = rng.integers(0, 4096, (4096, 2048)).astype(np.int64)\n";
-        let ns = PyDict::new(py);
-        py.run(
-            std::ffi::CString::new(setup).unwrap().as_c_str(),
-            Some(&ns),
-            Some(&ns),
-        )
-        .expect("take_along_axis setup");
-        let a = ns.get_item("a").expect("a");
-        let idx = ns.get_item("idx").expect("idx");
-        let fnp_t = module.getattr("take_along_axis").expect("fnp take_along_axis");
-        let numpy_t = numpy.getattr("take_along_axis").expect("numpy take_along_axis");
-        let axis = 1_i64;
-        group.bench_function("fnp_take_along_axis_f64_8m", |b| {
-            b.iter(|| black_box(fnp_t.call1((&a, &idx, axis)).expect("fnp take_along_axis")));
-        });
-        group.bench_function("numpy_take_along_axis_f64_8m", |b| {
-            b.iter(|| black_box(numpy_t.call1((&a, &idx, axis)).expect("numpy take_along_axis")));
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_take_axis_boundary(c: &mut Criterion) {
-    // np.take(4096x4096 f64, 2048 idx, axis=1) — serial per-axis gather vs parallel raw-slice.
-    let mut group = c.benchmark_group("python_take_axis_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let setup = "import numpy as np\n\
-rng = np.random.default_rng(0)\n\
-a = rng.standard_normal((4096, 4096))\n\
-idx = rng.integers(0, 4096, 2048).astype(np.int64)\n";
-        let ns = PyDict::new(py);
-        py.run(
-            std::ffi::CString::new(setup).unwrap().as_c_str(),
-            Some(&ns),
-            Some(&ns),
-        )
-        .expect("take_axis setup");
-        let a = ns.get_item("a").expect("a");
-        let idx = ns.get_item("idx").expect("idx");
-        let fnp_take = module.getattr("take").expect("fnp take");
-        let numpy_take = numpy.getattr("take").expect("numpy take");
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("axis", 1_i64).expect("axis");
-        group.bench_function("fnp_take_axis1_f64_8m", |b| {
-            b.iter(|| black_box(fnp_take.call((&a, &idx), Some(&kwargs)).expect("fnp take axis")));
-        });
-        group.bench_function("numpy_take_axis1_f64_8m", |b| {
-            b.iter(|| black_box(numpy_take.call((&a, &idx), Some(&kwargs)).expect("numpy take axis")));
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_parallel_binary_boundary(c: &mut Criterion) {
-    // float_power / remainder / nextafter / power / fmod / heaviside / maximum / minimum /
-    // copysign at 8M — routed through the zero-copy parallel binary kernel (numpy runs these
-    // single-threaded).
-    let mut group = c.benchmark_group("python_parallel_binary_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let setup = "import numpy as np\n\
-rng = np.random.default_rng(0)\n\
-a = np.abs(rng.standard_normal(8_000_000)) + 0.1\n\
-b = rng.standard_normal(8_000_000) * 5.0\n\
-bnz = np.where(b == 0.0, 1.0, b)\n";
-        let ns = PyDict::new(py);
-        py.run(
-            std::ffi::CString::new(setup).unwrap().as_c_str(),
-            Some(&ns),
-            Some(&ns),
-        )
-        .expect("parallel binary setup");
-        let a = ns.get_item("a").expect("a");
-        let b = ns.get_item("b").expect("b");
-        let bnz = ns.get_item("bnz").expect("bnz");
-        for (op, x, y) in [
-            ("float_power", &a, &b),
-            ("nextafter", &a, &b),
-            ("remainder", &a, &bnz),
-            ("power", &a, &b),
-            ("fmod", &a, &bnz),
-            ("heaviside", &b, &a),
-            ("maximum", &a, &b),
-            ("minimum", &a, &b),
-            ("copysign", &a, &b),
-            ("divide", &a, &b),
-        ] {
-            let fnp_fn = module.getattr(op).expect("fnp op");
-            let numpy_fn = numpy.getattr(op).expect("numpy op");
-            group.bench_function(format!("fnp_{op}_f64_8m"), |bch| {
-                bch.iter(|| black_box(fnp_fn.call1((x, y)).expect("fnp call")));
-            });
-            group.bench_function(format!("numpy_{op}_f64_8m"), |bch| {
-                bch.iter(|| black_box(numpy_fn.call1((x, y)).expect("numpy call")));
-            });
-        }
-    });
-
-    group.finish();
-}
-
-fn bench_sort_axis_boundary(c: &mut Criterion) {
-    // np.sort / np.argsort along the LAST (contiguous) axis of a 2-D f64 array — newly routed
-    // through the per-lane parallel sort (numpy sorts each lane single-threaded, sequentially).
-    let mut group = c.benchmark_group("python_sort_axis_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let setup = "import numpy as np\n\
-rng = np.random.default_rng(0)\n\
-m = rng.standard_normal((2048, 2048))\n\
-mshort = rng.standard_normal((65536, 64))\n\
-m3 = rng.standard_normal((4096, 32, 32))\n\
-m3b = rng.standard_normal((256, 256, 64))\n";
-        let ns = PyDict::new(py);
-        py.run(
-            std::ffi::CString::new(setup).unwrap().as_c_str(),
-            Some(&ns),
-            Some(&ns),
-        )
-        .expect("sort axis setup");
-        let m = ns.get_item("m").expect("m");
-        let mshort = ns.get_item("mshort").expect("mshort");
-        let m3 = ns.get_item("m3").expect("m3");
-        let m3b = ns.get_item("m3b").expect("m3b");
-        for op in ["sort", "argsort"] {
-            let fnp_fn = module.getattr(op).expect("fnp op");
-            let numpy_fn = numpy.getattr(op).expect("numpy op");
-            group.bench_function(format!("fnp_{op}_lastaxis_2048x2048"), |bch| {
-                bch.iter(|| black_box(fnp_fn.call1((&m,)).expect("fnp call")));
-            });
-            group.bench_function(format!("numpy_{op}_lastaxis_2048x2048"), |bch| {
-                bch.iter(|| black_box(numpy_fn.call1((&m,)).expect("numpy call")));
-            });
-            // SHORT-LANE last axis (65536 x 64, cols=64 < SORT_LANE_PARALLEL_MIN=256): tens of
-            // thousands of tiny lanes. The eager-parallel path lost 1.8-3.6x here; gated to
-            // DELEGATE to numpy -> parity. Guards the 106th-win regression fix.
-            group.bench_function(format!("fnp_{op}_lastaxis_short_65536x64"), |bch| {
-                bch.iter(|| black_box(fnp_fn.call1((&mshort,)).expect("fnp call")));
-            });
-            group.bench_function(format!("numpy_{op}_lastaxis_short_65536x64"), |bch| {
-                bch.iter(|| black_box(numpy_fn.call1((&mshort,)).expect("numpy call")));
-            });
-            // axis=0 (lane sort): numpy's strided per-lane sort is ~2x its last-axis sort.
-            let kw0 = PyDict::new(py);
-            kw0.set_item("axis", 0).expect("axis kwarg");
-            group.bench_function(format!("fnp_{op}_axis0_2048x2048"), |bch| {
-                bch.iter(|| black_box(fnp_fn.call((&m,), Some(&kw0)).expect("fnp call")));
-            });
-            group.bench_function(format!("numpy_{op}_axis0_2048x2048"), |bch| {
-                bch.iter(|| black_box(numpy_fn.call((&m,), Some(&kw0)).expect("numpy call")));
-            });
-            // ndim>=2 axis=0 on a 3-D batched shape (cols = prod(shape[1:]) lanes).
-            group.bench_function(format!("fnp_{op}_axis0_4096x32x32"), |bch| {
-                bch.iter(|| black_box(fnp_fn.call((&m3,), Some(&kw0)).expect("fnp call")));
-            });
-            group.bench_function(format!("numpy_{op}_axis0_4096x32x32"), |bch| {
-                bch.iter(|| black_box(numpy_fn.call((&m3,), Some(&kw0)).expect("numpy call")));
-            });
-            // ndim>=3 MIDDLE axis (axis=1): gather-strided-lane -> sort -> scatter. numpy's
-            // strided middle-axis sort is ~1.2-1.8x slower than its last-axis sort, single-threaded.
-            let kw1 = PyDict::new(py);
-            kw1.set_item("axis", 1).expect("axis kwarg");
-            group.bench_function(format!("fnp_{op}_midaxis_4096x32x32"), |bch| {
-                bch.iter(|| black_box(fnp_fn.call((&m3,), Some(&kw1)).expect("fnp call")));
-            });
-            group.bench_function(format!("numpy_{op}_midaxis_4096x32x32"), |bch| {
-                bch.iter(|| black_box(numpy_fn.call((&m3,), Some(&kw1)).expect("numpy call")));
-            });
-            group.bench_function(format!("fnp_{op}_midaxis_256x256x64"), |bch| {
-                bch.iter(|| black_box(fnp_fn.call((&m3b,), Some(&kw1)).expect("fnp call")));
-            });
-            group.bench_function(format!("numpy_{op}_midaxis_256x256x64"), |bch| {
-                bch.iter(|| black_box(numpy_fn.call((&m3b,), Some(&kw1)).expect("numpy call")));
-            });
-        }
-    });
-
-    group.finish();
-}
-
-fn bench_sort_kind_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_sort_kind_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let setup = "import numpy as np\n\
-rng = np.random.default_rng(1)\n\
-m = rng.standard_normal((2048, 2048))\n";
-        let ns = PyDict::new(py);
-        py.run(
-            std::ffi::CString::new(setup).unwrap().as_c_str(),
-            Some(&ns),
-            Some(&ns),
-        )
-        .expect("sort kind setup");
-        let m = ns.get_item("m").expect("m");
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("kind", "stable").expect("kind kwarg");
-        for op in ["sort", "argsort"] {
-            let fnp_fn = module.getattr(op).expect("fnp op");
-            let numpy_fn = numpy.getattr(op).expect("numpy op");
-            group.bench_function(format!("fnp_{op}_stable_lastaxis_2048x2048"), |bch| {
-                bch.iter(|| black_box(fnp_fn.call((&m,), Some(&kwargs)).expect("fnp call")));
-            });
-            group.bench_function(format!("numpy_{op}_stable_lastaxis_2048x2048"), |bch| {
-                bch.iter(|| black_box(numpy_fn.call((&m,), Some(&kwargs)).expect("numpy call")));
-            });
-        }
-    });
-
-    group.finish();
-}
-
-// np.matmul / np.dot on 2-D f64 squares spanning the native GEMM gate window
-// ([320..1024]). The native pure-Rust GEMM was profiled as winning here, but a
-// later numpy/OpenBLAS speedup made the gate stale (now a 1.5-6x loss vs BLAS).
-fn bench_matmul_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_matmul_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let setup = "import numpy as np\n\
-rng = np.random.default_rng(0)\n\
-a512 = rng.standard_normal((512, 512))\n\
-b512 = rng.standard_normal((512, 512))\n\
-a1024 = rng.standard_normal((1024, 1024))\n\
-b1024 = rng.standard_normal((1024, 1024))\n\
-a1536 = rng.standard_normal((1536, 1536))\n\
-b1536 = rng.standard_normal((1536, 1536))\n\
-a2048 = rng.standard_normal((2048, 2048))\n\
-b2048 = rng.standard_normal((2048, 2048))\n\
-a3d = rng.standard_normal((64, 256, 256))\n\
-b3d = rng.standard_normal((64, 256, 256))\n\
-a3db = rng.standard_normal((256, 128, 128))\n\
-b3db = rng.standard_normal((256, 128, 128))\n";
-        let ns = PyDict::new(py);
-        py.run(
-            std::ffi::CString::new(setup).unwrap().as_c_str(),
-            Some(&ns),
-            Some(&ns),
-        )
-        .expect("matmul setup");
-        let m_fn = module.getattr("matmul").expect("fnp matmul");
-        let np_m = numpy.getattr("matmul").expect("np matmul");
-        for op in ["matmul", "dot"] {
-            let fnp_fn = module.getattr(op).expect("fnp op");
-            let numpy_fn = numpy.getattr(op).expect("numpy op");
-            for sz in ["512", "1024", "1536", "2048"] {
-                let a = ns.get_item(format!("a{sz}")).expect("a");
-                let b = ns.get_item(format!("b{sz}")).expect("b");
-                group.bench_function(format!("fnp_{op}_{sz}x{sz}"), |bch| {
-                    bch.iter(|| black_box(fnp_fn.call1((&a, &b)).expect("fnp call")));
-                });
-                group.bench_function(format!("numpy_{op}_{sz}x{sz}"), |bch| {
-                    bch.iter(|| black_box(numpy_fn.call1((&a, &b)).expect("numpy call")));
-                });
+        let xi = ns.get_item("xi").expect("xi");
+        let fnp_pad = module.getattr("pad").expect("fnp pad");
+        let numpy_pad = numpy.getattr("pad").expect("numpy pad");
+        let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+        // Correctness gate: fnp.pad(edge) == numpy.pad(edge) for f64 and int32, scalar
+        // width and asymmetric tuple width; panics on any mismatch.
+        for (arr, label) in [(&x, "f64"), (&xi, "i32")] {
+            let scalar = (
+                fnp_pad
+                    .call1((arr, 4000_i64, "edge"))
+                    .expect("fnp pad edge scalar"),
+                numpy_pad
+                    .call1((arr, 4000_i64, "edge"))
+                    .expect("numpy pad edge scalar"),
+            );
+            let tuple = (
+                fnp_pad
+                    .call1((arr, (3_i64, 7_i64), "edge"))
+                    .expect("fnp pad edge tuple"),
+                numpy_pad
+                    .call1((arr, (3_i64, 7_i64), "edge"))
+                    .expect("numpy pad edge tuple"),
+            );
+            for (f, n) in [scalar, tuple] {
+                let eq: bool = np_array_equal
+                    .call1((&f, &n))
+                    .expect("array_equal")
+                    .extract()
+                    .expect("bool");
+                assert!(eq, "pad edge correctness mismatch: dtype={label}");
             }
         }
-        let fnp_tensordot = module.getattr("tensordot").expect("fnp tensordot");
-        let np_tensordot = numpy.getattr("tensordot").expect("np tensordot");
-        for sz in ["1024", "1536"] {
-            let a = ns.get_item(format!("a{sz}")).expect("a");
-            let b = ns.get_item(format!("b{sz}")).expect("b");
-            group.bench_function(format!("fnp_tensordot_axes1_{sz}x{sz}"), |bch| {
-                bch.iter(|| {
-                    black_box(
-                        fnp_tensordot
-                            .call1((&a, &b, 1_i64))
-                            .expect("fnp call"),
-                    )
-                });
+        group.bench_function("fnp_pad_edge_f64_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    fnp_pad
+                        .call1((&x, 4000_i64, "edge"))
+                        .expect("fnp pad edge f64"),
+                )
             });
-            group.bench_function(format!("numpy_tensordot_axes1_{sz}x{sz}"), |bch| {
-                bch.iter(|| {
-                    black_box(
-                        np_tensordot
-                            .call1((&a, &b, 1_i64))
-                            .expect("numpy call"),
-                    )
-                });
-            });
-        }
-        // Batched (3-D) matmul: native parallel-across-batch packed GEMM vs numpy slow BLAS.
-        for (tag, ak, bk) in [("64x256x256", "a3d", "b3d"), ("256x128x128", "a3db", "b3db")] {
-            let a = ns.get_item(ak).expect("a3d");
-            let b = ns.get_item(bk).expect("b3d");
-            group.bench_function(format!("fnp_matmul_batched_{tag}"), |bch| {
-                bch.iter(|| black_box(m_fn.call1((&a, &b)).expect("fnp call")));
-            });
-            group.bench_function(format!("numpy_matmul_batched_{tag}"), |bch| {
-                bch.iter(|| black_box(np_m.call1((&a, &b)).expect("numpy call")));
-            });
-        }
-        // Matrix-BROADCAST batched matmul: one 2-D operand applied across the other's batch.
-        let bcast_setup = "import numpy as np\n\
-rng = np.random.default_rng(2)\n\
-ab = rng.standard_normal((64, 256, 256))\n\
-wb = rng.standard_normal((256, 256))\n\
-aw = rng.standard_normal((256, 256))\n\
-bb = rng.standard_normal((64, 256, 256))\n";
-        py.run(
-            std::ffi::CString::new(bcast_setup).unwrap().as_c_str(),
-            Some(&ns),
-            Some(&ns),
-        )
-        .expect("bcast setup");
-        let ab = ns.get_item("ab").expect("ab");
-        let wb = ns.get_item("wb").expect("wb");
-        let aw = ns.get_item("aw").expect("aw");
-        let bb = ns.get_item("bb").expect("bb");
-        group.bench_function("fnp_matmul_bcast_3dA_2dB_64x256x256", |bch| {
-            bch.iter(|| black_box(m_fn.call1((&ab, &wb)).expect("fnp call")));
         });
-        group.bench_function("numpy_matmul_bcast_3dA_2dB_64x256x256", |bch| {
-            bch.iter(|| black_box(np_m.call1((&ab, &wb)).expect("numpy call")));
-        });
-        group.bench_function("fnp_matmul_bcast_2dA_3dB_64x256x256", |bch| {
-            bch.iter(|| black_box(m_fn.call1((&aw, &bb)).expect("fnp call")));
-        });
-        group.bench_function("numpy_matmul_bcast_2dA_3dB_64x256x256", |bch| {
-            bch.iter(|| black_box(np_m.call1((&aw, &bb)).expect("numpy call")));
-        });
-        // matrix_power: 2-D square repeated-squaring through the native packed GEMM vs numpy.
-        let fnp_mp = module.getattr("matrix_power").expect("fnp matrix_power");
-        let np_mp = numpy
-            .getattr("linalg")
-            .expect("linalg")
-            .getattr("matrix_power")
-            .expect("np matrix_power");
-        for (sz, p) in [("512", 8_i64), ("1024", 6_i64)] {
-            let a = ns.get_item(format!("a{sz}")).expect("a");
-            group.bench_function(format!("fnp_matrix_power_{sz}x{sz}_p{p}"), |bch| {
-                bch.iter(|| black_box(fnp_mp.call1((&a, p)).expect("fnp call")));
+        group.bench_function("numpy_pad_edge_f64_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    numpy_pad
+                        .call1((&x, 4000_i64, "edge"))
+                        .expect("numpy pad edge f64"),
+                )
             });
-            group.bench_function(format!("numpy_matrix_power_{sz}x{sz}_p{p}"), |bch| {
-                bch.iter(|| black_box(np_mp.call1((&a, p)).expect("numpy call")));
+        });
+        group.bench_function("fnp_pad_edge_i32_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    fnp_pad
+                        .call1((&xi, 4000_i64, "edge"))
+                        .expect("fnp pad edge i32"),
+                )
             });
-        }
+        });
+        group.bench_function("numpy_pad_edge_i32_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    numpy_pad
+                        .call1((&xi, 4000_i64, "edge"))
+                        .expect("numpy pad edge i32"),
+                )
+            });
+        });
     });
-
     group.finish();
 }
 
-// np.char.add / np.strings.add (string concatenation) — numpy runs a slow per-element Python
-// loop; fnp has a native parallel UCS4 codepoint-copy path.
-fn bench_char_add_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_char_add_boundary");
+fn bench_pad_wrap_boundary(c: &mut Criterion) {
+    // np.pad(1-D, mode="wrap") (before<=n & after<=n): numpy runs a slow single-threaded
+    // python path; fnp copies the last-`before`/first-`after` contiguous slices into the edge
+    // runs and parallel-memcpys the interior (value-agnostic byte copy) — bit-exact. Covers
+    // f64 + the byte path (int32). Correctness asserted vs numpy before timing.
+    let mut group = c.benchmark_group("python_pad_wrap_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+	rng = np.random.default_rng(0)\n\
+	x = rng.standard_normal(8_000_000)\n\
+	xi = rng.integers(-1000, 1000, 8_000_000).astype(np.int32)\n\
+	xm = rng.integers(-1000, 1000, 4096).astype(np.int32)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("pad wrap setup");
+        let x = ns.get_item("x").expect("x");
+        let xi = ns.get_item("xi").expect("xi");
+        let xm = ns.get_item("xm").expect("xm");
+        let fnp_pad = module.getattr("pad").expect("fnp pad");
+        let numpy_pad = numpy.getattr("pad").expect("numpy pad");
+        let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+        // Correctness gate: fnp.pad(wrap) == numpy.pad(wrap) for f64 and int32, scalar
+        // width and asymmetric tuple width; panics on any mismatch.
+        for (arr, label) in [(&x, "f64"), (&xi, "i32")] {
+            let scalar = (
+                fnp_pad
+                    .call1((arr, 4000_i64, "wrap"))
+                    .expect("fnp pad wrap scalar"),
+                numpy_pad
+                    .call1((arr, 4000_i64, "wrap"))
+                    .expect("numpy pad wrap scalar"),
+            );
+            let tuple = (
+                fnp_pad
+                    .call1((arr, (3_i64, 7_i64), "wrap"))
+                    .expect("fnp pad wrap tuple"),
+                numpy_pad
+                    .call1((arr, (3_i64, 7_i64), "wrap"))
+                    .expect("numpy pad wrap tuple"),
+            );
+            for (f, n) in [scalar, tuple] {
+                let eq: bool = np_array_equal
+                    .call1((&f, &n))
+                    .expect("array_equal")
+                    .extract()
+                    .expect("bool");
+                assert!(eq, "pad wrap correctness mismatch: dtype={label}");
+            }
+        }
+        let multi_width = (4_000_000_i64, 4_003_000_i64);
+        let f_multi = fnp_pad
+            .call1((&xm, multi_width, "wrap"))
+            .expect("fnp pad wrap multi-tile");
+        let n_multi = numpy_pad
+            .call1((&xm, multi_width, "wrap"))
+            .expect("numpy pad wrap multi-tile");
+        let eq: bool = np_array_equal
+            .call1((&f_multi, &n_multi))
+            .expect("array_equal")
+            .extract()
+            .expect("bool");
+        assert!(eq, "pad wrap multi-tile correctness mismatch");
+        group.bench_function("fnp_pad_wrap_f64_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    fnp_pad
+                        .call1((&x, 4000_i64, "wrap"))
+                        .expect("fnp pad wrap f64"),
+                )
+            });
+        });
+        group.bench_function("numpy_pad_wrap_f64_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    numpy_pad
+                        .call1((&x, 4000_i64, "wrap"))
+                        .expect("numpy pad wrap f64"),
+                )
+            });
+        });
+        group.bench_function("fnp_pad_wrap_i32_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    fnp_pad
+                        .call1((&xi, 4000_i64, "wrap"))
+                        .expect("fnp pad wrap i32"),
+                )
+            });
+        });
+        group.bench_function("numpy_pad_wrap_i32_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    numpy_pad
+                        .call1((&xi, 4000_i64, "wrap"))
+                        .expect("numpy pad wrap i32"),
+                )
+            });
+        });
+        group.bench_function("fnp_pad_wrap_i32_multitile_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    fnp_pad
+                        .call1((&xm, multi_width, "wrap"))
+                        .expect("fnp pad wrap multi-tile i32"),
+                )
+            });
+        });
+        group.bench_function("numpy_pad_wrap_i32_multitile_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    numpy_pad
+                        .call1((&xm, multi_width, "wrap"))
+                        .expect("numpy pad wrap multi-tile i32"),
+                )
+            });
+        });
+    });
+    group.finish();
+}
+
+fn bench_pad_reflect_boundary(c: &mut Criterion) {
+    // np.pad(1-D, mode in {"reflect","symmetric"}): numpy runs a slow single-threaded python
+    // path; fnp mirrors the (small) edge runs and parallel-memcpys the (bulk) interior —
+    // bit-exact. Covers f64 + the byte path (int32), both modes. Correctness asserted vs numpy.
+    let mut group = c.benchmark_group("python_pad_reflect_boundary");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(4));
     group.warm_up_time(Duration::from_secs(2));
@@ -5374,159 +3117,139 @@ fn bench_char_add_boundary(c: &mut Criterion) {
         let numpy = py.import("numpy").expect("numpy oracle");
         let setup = "import numpy as np\n\
 rng = np.random.default_rng(0)\n\
-a = np.array(['Hello World '+str(i%1000) for i in range(300000)], dtype='<U16')\n\
-b = np.array(['suffix'+str(i%50) for i in range(300000)], dtype='<U10')\n";
+x = rng.standard_normal(8_000_000)\n\
+xi = rng.integers(-1000, 1000, 8_000_000).astype(np.int32)\n";
         let ns = PyDict::new(py);
         py.run(
             std::ffi::CString::new(setup).unwrap().as_c_str(),
             Some(&ns),
             Some(&ns),
         )
-        .expect("char add setup");
-        let a = ns.get_item("a").expect("a");
-        let b = ns.get_item("b").expect("b");
-        let fnp_add = module
-            .getattr("char")
-            .expect("char")
-            .getattr("add")
-            .expect("fnp char.add");
-        let np_add = numpy
-            .getattr("char")
-            .expect("char")
-            .getattr("add")
-            .expect("np char.add");
-        group.bench_function("fnp_char_add_300k", |bch| {
-            bch.iter(|| black_box(fnp_add.call1((&a, &b)).expect("fnp call")));
-        });
-        group.bench_function("numpy_char_add_300k", |bch| {
-            bch.iter(|| black_box(np_add.call1((&a, &b)).expect("numpy call")));
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_asarray_dtype_boundary(c: &mut Criterion) {
-    // np.asarray(ndarray, dtype=<convert>) — a dtype CONVERSION delegates the cast
-    // to numpy, but the native pre-check used to copy the whole input into a
-    // UFuncArray before discarding it (a wasted full-array copy on top of numpy's
-    // own cast = a 2-3x regression). The fix delegates BEFORE that extract; this
-    // guards the conversion path stays at parity with numpy.
-    let mut group = c.benchmark_group("python_asarray_dtype_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let setup = "import numpy as np\n\
-rng = np.random.default_rng(0)\n\
-f64 = rng.standard_normal(4_000_000)\n\
-i32 = rng.integers(0, 1000, 4_000_000).astype(np.int32)\n";
-        let ns = PyDict::new(py);
-        py.run(
-            std::ffi::CString::new(setup).unwrap().as_c_str(),
-            Some(&ns),
-            Some(&ns),
-        )
-        .expect("asarray setup");
-        let f64 = ns.get_item("f64").expect("f64");
-        let i32 = ns.get_item("i32").expect("i32");
-        let fnp_asarray = module.getattr("asarray").expect("fnp asarray");
-        let np_asarray = numpy.getattr("asarray").expect("np asarray");
-        for (name, arr, to) in [
-            ("f64_to_f32", &f64, "float32"),
-            ("i32_to_f64", &i32, "float64"),
-        ] {
-            let kw = PyDict::new(py);
-            kw.set_item("dtype", to).expect("dtype kwarg");
-            group.bench_function(format!("fnp_asarray_{name}_4m"), |bch| {
-                bch.iter(|| black_box(fnp_asarray.call((arr,), Some(&kw)).expect("fnp call")));
-            });
-            group.bench_function(format!("numpy_asarray_{name}_4m"), |bch| {
-                bch.iter(|| black_box(np_asarray.call((arr,), Some(&kw)).expect("numpy call")));
-            });
+        .expect("pad reflect setup");
+        let x = ns.get_item("x").expect("x");
+        let xi = ns.get_item("xi").expect("xi");
+        let fnp_pad = module.getattr("pad").expect("fnp pad");
+        let numpy_pad = numpy.getattr("pad").expect("numpy pad");
+        let np_array_equal = numpy.getattr("array_equal").expect("np.array_equal");
+        // Correctness gate: fnp.pad == numpy.pad for reflect+symmetric, f64+int32, scalar
+        // and asymmetric tuple width; panics on any mismatch.
+        for md in ["reflect", "symmetric"] {
+            for (arr, label) in [(&x, "f64"), (&xi, "i32")] {
+                let scalar = (
+                    fnp_pad.call1((arr, 4000_i64, md)).expect("fnp pad scalar"),
+                    numpy_pad
+                        .call1((arr, 4000_i64, md))
+                        .expect("numpy pad scalar"),
+                );
+                let tuple = (
+                    fnp_pad
+                        .call1((arr, (3_i64, 7_i64), md))
+                        .expect("fnp pad tuple"),
+                    numpy_pad
+                        .call1((arr, (3_i64, 7_i64), md))
+                        .expect("numpy pad tuple"),
+                );
+                for (f, n) in [scalar, tuple] {
+                    let eq: bool = np_array_equal
+                        .call1((&f, &n))
+                        .expect("array_equal")
+                        .extract()
+                        .expect("bool");
+                    assert!(eq, "pad {md} correctness mismatch: dtype={label}");
+                }
+            }
         }
+        group.bench_function("fnp_pad_reflect_f64_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    fnp_pad
+                        .call1((&x, 4000_i64, "reflect"))
+                        .expect("fnp reflect f64"),
+                )
+            });
+        });
+        group.bench_function("numpy_pad_reflect_f64_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    numpy_pad
+                        .call1((&x, 4000_i64, "reflect"))
+                        .expect("numpy reflect f64"),
+                )
+            });
+        });
+        group.bench_function("fnp_pad_symmetric_i32_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    fnp_pad
+                        .call1((&xi, 4000_i64, "symmetric"))
+                        .expect("fnp symmetric i32"),
+                )
+            });
+        });
+        group.bench_function("numpy_pad_symmetric_i32_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    numpy_pad
+                        .call1((&xi, 4000_i64, "symmetric"))
+                        .expect("numpy symmetric i32"),
+                )
+            });
+        });
     });
-
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_asarray_dtype_boundary,
-    bench_char_add_boundary,
-    bench_matmul_boundary,
-    bench_sort_kind_boundary,
-    bench_sort_axis_boundary,
-    bench_parallel_binary_boundary,
-    bench_take_axis_boundary,
-    bench_take_along_axis_boundary,
-    bench_take_boundary,
-    bench_searchsorted_boundary,
-    bench_digitize_boundary,
-    bench_bincount_boundary,
-    bench_tile_boundary,
-    bench_kron_boundary,
-    bench_nan_to_num_boundary,
-    bench_cross_boundary,
-    bench_sqrt_input_extraction,
-    bench_around_boundary,
-    bench_where_boundary,
-    bench_clip_boundary,
-    bench_unary_parallel_boundary,
-    bench_int32_unary_boundary,
-    bench_narrow_int_unary_boundary,
-    bench_remainder_mod_boundary,
-    bench_max_min_reduction_boundary,
-    bench_ptp_axis0_boundary,
-    bench_bool_minmax_reduction_boundary,
-    bench_prod_reduction_boundary,
-    bench_ediff1d_boundary,
-    bench_select_boundary,
-    bench_ldexp_boundary,
-    bench_float_power_boundary,
-    bench_frexp_boundary,
-    bench_modf_boundary,
-    bench_putmask_boundary,
-    bench_shift_boundary,
-    bench_concat_hstack_boundary,
-    bench_indices_construction_boundary,
-    bench_char_ascii_boundary,
-    bench_average_nansum_axis_boundary,
-    bench_histogram_boundary,
-    bench_setops_boundary,
-    bench_unique_medium_boundary,
-    bench_sort_complex_boundary,
-    bench_statistics_boundary,
-    bench_std_var_axis_boundary,
-    bench_var_multiaxis_boundary,
-    bench_var_midaxis_boundary,
-    bench_var_f32_axis_boundary,
-    bench_nanvar_f32_axis_boundary,
-    bench_nanvar_f32_last_axis_boundary,
-    bench_nanvar_midaxis_boundary,
-    bench_var_axis0_boundary,
-    bench_sum_lastaxis_boundary,
-    bench_prod_lastaxis_boundary,
-    bench_cumsum_lastaxis_boundary,
-    bench_cumsum_flat_boundary,
-    bench_accumulate_extremum_boundary,
-    bench_cum_midaxis_boundary,
-    bench_int_cum_boundary,
-    bench_vander_boundary,
-    bench_polyval_boundary,
-    bench_gradient_axis_boundary,
-    bench_norm_axis_boundary,
-    bench_norm_nonlast_axis_boundary,
-    bench_norm_frobenius_boundary,
-    bench_compress_boundary,
-    bench_roll_boundary,
-    bench_einsum_boundary,
-    bench_linalg_boundary
-);
-criterion_main!(benches);
+/// Drives the selected bench group functions via [`common::gated_main`], which
+/// gates each on [`common::group_enabled`] (`FNP_BENCH_GROUPS`) and emits the
+/// final summary. Replaces the former `gated_benches!` macro; the target list is
+/// the same set of group functions in the same order.
+fn main() {
+    common::gated_main(&[
+        ("bench_pad_edge_boundary", bench_pad_edge_boundary),
+        ("bench_pad_wrap_boundary", bench_pad_wrap_boundary),
+        ("bench_pad_reflect_boundary", bench_pad_reflect_boundary),
+        ("bench_kron_boundary", bench_kron_boundary),
+        ("bench_nan_to_num_boundary", bench_nan_to_num_boundary),
+        ("bench_cross_boundary", bench_cross_boundary),
+        ("bench_sqrt_input_extraction", bench_sqrt_input_extraction),
+        ("bench_around_boundary", bench_around_boundary),
+        ("bench_where_boundary", bench_where_boundary),
+        ("bench_f64_convolve_boundary", bench_f64_convolve_boundary),
+        ("bench_int_convolve_boundary", bench_int_convolve_boundary),
+        ("bench_clip_boundary", bench_clip_boundary),
+        (
+            "bench_unary_parallel_boundary",
+            bench_unary_parallel_boundary,
+        ),
+        ("bench_float_isin_boundary", bench_float_isin_boundary),
+        (
+            "bench_f16_binary_transcendental_boundary",
+            bench_f16_binary_transcendental_boundary,
+        ),
+        ("bench_unique_medium_boundary", bench_unique_medium_boundary),
+        ("bench_sort_complex_boundary", bench_sort_complex_boundary),
+        ("bench_f16_matmul_boundary", bench_f16_matmul_boundary),
+        (
+            "bench_flat_sort_dtype_boundary",
+            bench_flat_sort_dtype_boundary,
+        ),
+        (
+            "bench_int32_flat_sort_small_pool_regate",
+            bench_int32_flat_sort_small_pool_regate,
+        ),
+        ("bench_compress_boundary", bench_compress_boundary),
+        (
+            "bench_compress_lastaxis_boundary",
+            bench_compress_lastaxis_boundary,
+        ),
+        ("bench_delete_mask_boundary", bench_delete_mask_boundary),
+        ("bench_insert_block_boundary", bench_insert_block_boundary),
+        (
+            "bench_roll_2d_multi_dtype_boundary",
+            bench_roll_2d_multi_dtype_boundary,
+        ),
+        ("bench_roll_boundary", bench_roll_boundary),
+        ("bench_einsum_boundary", bench_einsum_boundary),
+        ("bench_linalg_boundary", bench_linalg_boundary),
+    ]);
+}

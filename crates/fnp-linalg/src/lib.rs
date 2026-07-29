@@ -1049,6 +1049,117 @@ fn slogdet_from_lu_diagonal(lu: &[f64], n: usize, sign: f64) -> (f64, f64) {
     (det_sign, log_abs_det)
 }
 
+fn det_nxn_exact_upper_triangular(a: &[f64], n: usize) -> Option<f64> {
+    let mut matrix_max_abs = 0.0_f64;
+    for row in 0..n {
+        let row_values = &a[row * n..(row + 1) * n];
+        for (col, &value) in row_values.iter().enumerate() {
+            if !value.is_finite() || (col < row && value.to_bits() != 0) {
+                return None;
+            }
+            matrix_max_abs = matrix_max_abs.max(value.abs());
+        }
+    }
+
+    let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
+    let mut det = 1.0;
+    for diagonal in 0..n {
+        let value = a[diagonal * n + diagonal];
+        if value.abs() <= singularity_threshold {
+            return None;
+        }
+        det *= value;
+    }
+    Some(det)
+}
+
+fn det_nxn_exact_lower_triangular_no_pivot(a: &[f64], n: usize) -> Option<f64> {
+    if n >= LU_BLOCK_MIN {
+        return None;
+    }
+
+    let mut matrix_max_abs = 0.0_f64;
+    for row in 0..n {
+        let row_values = &a[row * n..(row + 1) * n];
+        for (col, &value) in row_values.iter().enumerate() {
+            if !value.is_finite() || (col > row && value.to_bits() != 0) {
+                return None;
+            }
+            matrix_max_abs = matrix_max_abs.max(value.abs());
+        }
+    }
+
+    let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
+    let mut det = 1.0;
+    for col in 0..n {
+        let diagonal = a[col * n + col];
+        if diagonal.abs() <= singularity_threshold
+            || ((col + 1)..n).any(|row| a[row * n + col].abs() > diagonal.abs())
+        {
+            return None;
+        }
+        det *= diagonal;
+    }
+    Some(det)
+}
+
+fn slogdet_nxn_exact_upper_triangular(a: &[f64], n: usize) -> Option<(f64, f64)> {
+    let mut matrix_max_abs = 0.0_f64;
+    for row in 0..n {
+        let row_values = &a[row * n..(row + 1) * n];
+        for (col, &value) in row_values.iter().enumerate() {
+            if !value.is_finite() || (col < row && value.to_bits() != 0) {
+                return None;
+            }
+            matrix_max_abs = matrix_max_abs.max(value.abs());
+        }
+    }
+
+    let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
+    for diagonal in 0..n {
+        if a[diagonal * n + diagonal].abs() <= singularity_threshold {
+            return None;
+        }
+    }
+    Some(slogdet_from_lu_diagonal(a, n, 1.0))
+}
+
+fn slogdet_nxn_exact_lower_triangular_no_pivot(a: &[f64], n: usize) -> Option<(f64, f64)> {
+    if n >= LU_BLOCK_MIN {
+        return None;
+    }
+
+    let mut matrix_max_abs = 0.0_f64;
+    for row in 0..n {
+        let row_values = &a[row * n..(row + 1) * n];
+        for (col, &value) in row_values.iter().enumerate() {
+            if !value.is_finite() || (col > row && value.to_bits() != 0) {
+                return None;
+            }
+            matrix_max_abs = matrix_max_abs.max(value.abs());
+        }
+    }
+
+    let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
+    for col in 0..n {
+        let diagonal = a[col * n + col];
+        if diagonal.abs() <= singularity_threshold
+            || ((col + 1)..n).any(|row| a[row * n + col].abs() > diagonal.abs())
+        {
+            return None;
+        }
+    }
+    Some(slogdet_from_lu_diagonal(a, n, 1.0))
+}
+
+fn det_nxn_general_validated(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
+    match lu_decompose_for_det(a, n) {
+        Ok((lu, _, sign)) => Ok(det_from_lu_diagonal(&lu, n, sign)),
+        Err(LinAlgError::SolverSingularity) => Ok(0.0),
+        Err(e) => Err(e),
+    }
+}
+
 /// Determinant of an NxN matrix (flat row-major).  Returns 0.0 for singular
 /// matrices instead of erroring.
 pub fn det_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
@@ -1061,15 +1172,58 @@ pub fn det_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
         return Ok(1.0);
     }
 
-    match lu_decompose_for_det(a, n) {
-        Ok((lu, _, sign)) => Ok(det_from_lu_diagonal(&lu, n, sign)),
-        Err(LinAlgError::SolverSingularity) => Ok(0.0),
-        Err(e) => Err(e),
+    if let Some(det) = det_nxn_exact_upper_triangular(a, n) {
+        return Ok(det);
     }
+    if let Some(det) = det_nxn_exact_lower_triangular_no_pivot(a, n) {
+        return Ok(det);
+    }
+
+    det_nxn_general_validated(a, n)
+}
+
+/// Former general determinant route retained for same-binary performance controls.
+#[doc(hidden)]
+pub fn det_nxn_general_control(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
+    if Some(a.len()) != n.checked_mul(n) {
+        return Err(LinAlgError::ShapeContractViolation(
+            "det_nxn: input length must equal n*n",
+        ));
+    }
+    if n == 0 {
+        return Ok(1.0);
+    }
+    det_nxn_general_validated(a, n)
 }
 
 /// Sign and log-absolute-determinant for an NxN matrix.
 pub fn slogdet_nxn(a: &[f64], n: usize) -> Result<(f64, f64), LinAlgError> {
+    if Some(a.len()) != n.checked_mul(n) {
+        return Err(LinAlgError::ShapeContractViolation(
+            "slogdet_nxn: input length must equal n*n",
+        ));
+    }
+    if n == 0 {
+        return Ok((1.0, 0.0));
+    }
+
+    if let Some(slogdet) = slogdet_nxn_exact_upper_triangular(a, n) {
+        return Ok(slogdet);
+    }
+    if let Some(slogdet) = slogdet_nxn_exact_lower_triangular_no_pivot(a, n) {
+        return Ok(slogdet);
+    }
+
+    match lu_decompose_for_det(a, n) {
+        Ok((lu, _, sign)) => Ok(slogdet_from_lu_diagonal(&lu, n, sign)),
+        Err(LinAlgError::SolverSingularity) => Ok((0.0, f64::NEG_INFINITY)),
+        Err(e) => Err(e),
+    }
+}
+
+/// Former general slogdet route retained for same-binary performance controls.
+#[doc(hidden)]
+pub fn slogdet_nxn_general_control(a: &[f64], n: usize) -> Result<(f64, f64), LinAlgError> {
     if Some(a.len()) != n.checked_mul(n) {
         return Err(LinAlgError::ShapeContractViolation(
             "slogdet_nxn: input length must equal n*n",
@@ -1737,7 +1891,7 @@ fn cholesky_blocked(a: &[f64], n: usize, panel_nb: usize) -> Result<Vec<f64>, Li
     Ok(l)
 }
 
-pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+fn validate_cholesky_nxn_input(a: &[f64], n: usize) -> Result<(), LinAlgError> {
     if Some(a.len()) != n.checked_mul(n) || n == 0 {
         return Err(LinAlgError::CholeskyContractViolation(
             "cholesky_nxn: input must be n*n with n > 0",
@@ -1748,7 +1902,10 @@ pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
             "cholesky requires finite entries",
         ));
     }
+    Ok(())
+}
 
+fn cholesky_nxn_general_validated(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     if n >= CHOL_MID_MIN {
         return cholesky_blocked(a, n, cholesky_panel_width(n));
     }
@@ -1782,6 +1939,74 @@ pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
         }
     }
     Ok(l)
+}
+
+pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+    validate_cholesky_nxn_input(a, n)?;
+
+    // Exact diagonal inputs otherwise enter the full blocked factorization at
+    // n >= CHOL_MID_MIN, including panel solves and zero-valued trailing SYRKs.
+    // Restrict admission to +0.0 below the diagonal: the general kernel carries
+    // a -0.0 input through its division, so accepting it here would change bits.
+    if (1..n).all(|row| {
+        a[row * n..row * n + row]
+            .iter()
+            .all(|value| value.to_bits() == 0)
+    }) {
+        let mut l = vec![0.0; n * n];
+        for row in 0..n {
+            let diagonal = a[row * n + row];
+            if diagonal <= 0.0 {
+                return Err(LinAlgError::CholeskyContractViolation(
+                    "matrix is not positive definite",
+                ));
+            }
+            l[row * n + row] = diagonal.sqrt();
+        }
+        return Ok(l);
+    }
+
+    // An exact tridiagonal lower triangle produces an exact bidiagonal factor.
+    // As above, require +0.0 outside the admitted band so the zero-initialized
+    // output cannot erase a -0.0 that the general division path would retain.
+    if (2..n).all(|row| {
+        a[row * n..row * n + row - 1]
+            .iter()
+            .all(|value| value.to_bits() == 0)
+    }) {
+        let mut l = vec![0.0; n * n];
+        let first_diagonal = a[0];
+        if first_diagonal <= 0.0 {
+            return Err(LinAlgError::CholeskyContractViolation(
+                "matrix is not positive definite",
+            ));
+        }
+        l[0] = first_diagonal.sqrt();
+
+        for row in 1..n {
+            let row_base = row * n;
+            let previous_diagonal = l[(row - 1) * n + row - 1];
+            let subdiagonal = a[row_base + row - 1] / previous_diagonal;
+            l[row_base + row - 1] = subdiagonal;
+            let diagonal = a[row_base + row] - subdiagonal * subdiagonal;
+            if diagonal <= 0.0 {
+                return Err(LinAlgError::CholeskyContractViolation(
+                    "matrix is not positive definite",
+                ));
+            }
+            l[row_base + row] = diagonal.sqrt();
+        }
+        return Ok(l);
+    }
+
+    cholesky_nxn_general_validated(a, n)
+}
+
+/// Benchmark control retaining the former unconditional general factorization.
+#[doc(hidden)]
+pub fn cholesky_nxn_general_control(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+    validate_cholesky_nxn_input(a, n)?;
+    cholesky_nxn_general_validated(a, n)
 }
 
 /// Write the lower Cholesky factor `L` (n*n) directly into `out`, with no per-lane
@@ -2207,6 +2432,68 @@ fn qr_blocked(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> 
     Ok((q, r))
 }
 
+fn qr_exact_upper_triangular(a: &[f64], n: usize) -> Option<(Vec<f64>, Vec<f64>)> {
+    for row in 1..n {
+        if a[row * n..row * n + row]
+            .iter()
+            .any(|value| value.to_bits() != 0)
+        {
+            return None;
+        }
+    }
+
+    let mut q = vec![0.0; n * n];
+    for i in 0..n {
+        q[i * n + i] = 1.0;
+    }
+    let mut r = a.to_vec();
+
+    // With an exactly positive-zero strict lower triangle, every Householder
+    // vector has only its diagonal component. Reproduce the unblocked scalar
+    // arithmetic on that component and its active row, skipping only products
+    // by known positive zeros.
+    for k in 0..n {
+        let diagonal = r[k * n + k];
+        let mut col_norm_sq = 0.0;
+        col_norm_sq += diagonal * diagonal;
+        if !col_norm_sq.is_finite() {
+            return None;
+        }
+        let col_norm = col_norm_sq.sqrt();
+        if col_norm == 0.0 {
+            continue;
+        }
+
+        let sign = if diagonal >= 0.0 { 1.0 } else { -1.0 };
+        let mut v = diagonal;
+        v += sign * col_norm;
+        let mut v_norm_sq = 0.0;
+        v_norm_sq += v * v;
+        if !v_norm_sq.is_finite() {
+            return None;
+        }
+        if v_norm_sq == 0.0 {
+            continue;
+        }
+
+        let scale = 2.0 / v_norm_sq;
+        for value in &mut r[k * n + k..k * n + n] {
+            let mut dot = 0.0;
+            dot += v * *value;
+            let factor = scale * dot;
+            *value -= factor * v;
+        }
+
+        let diagonal_index = k * n + k;
+        let mut dot = 0.0;
+        dot += q[diagonal_index] * v;
+        let factor = scale * dot;
+        q[diagonal_index] -= factor * v;
+    }
+
+    Some((q, r))
+}
+
 pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
     if Some(a.len()) != n.checked_mul(n) || n == 0 {
         return Err(LinAlgError::ShapeContractViolation(
@@ -2219,6 +2506,11 @@ pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> 
         ));
     }
 
+    if n < QR_BLOCK_MIN
+        && let Some(result) = qr_exact_upper_triangular(a, n)
+    {
+        return Ok(result);
+    }
     if n >= QR_BLOCK_MIN {
         return qr_blocked(a, n);
     }
@@ -2301,6 +2593,68 @@ pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> 
     Ok((q, r))
 }
 
+fn qr_mxn_exact_upper_trapezoidal(a: &[f64], m: usize, n: usize) -> Option<(Vec<f64>, Vec<f64>)> {
+    for row in 1..m {
+        let below_diagonal = row.min(n);
+        if a[row * n..row * n + below_diagonal]
+            .iter()
+            .any(|value| value.to_bits() != 0)
+        {
+            return None;
+        }
+    }
+
+    let mut q = vec![0.0; m * m];
+    for i in 0..m {
+        q[i * m + i] = 1.0;
+    }
+    let mut r = a.to_vec();
+
+    // Every admitted reflector has one nonzero component. Preserve the former
+    // scalar operation grouping for that component while skipping products by
+    // the proven positive-zero tail.
+    for col in 0..m.min(n) {
+        let diagonal = r[col * n + col];
+        let mut col_norm_sq = 0.0;
+        col_norm_sq += diagonal * diagonal;
+        if !col_norm_sq.is_finite() {
+            return None;
+        }
+        let col_norm = col_norm_sq.sqrt();
+        if col_norm == 0.0 {
+            continue;
+        }
+
+        let sign = if diagonal >= 0.0 { 1.0 } else { -1.0 };
+        let mut v = diagonal;
+        v += sign * col_norm;
+        let mut v_norm_sq = 0.0;
+        v_norm_sq += v * v;
+        if !v_norm_sq.is_finite() {
+            return None;
+        }
+        if v_norm_sq == 0.0 {
+            continue;
+        }
+
+        let scale = 2.0 / v_norm_sq;
+        for value in &mut r[col * n + col..col * n + n] {
+            let mut dot = 0.0;
+            dot += v * *value;
+            let factor = scale * dot;
+            *value -= factor * v;
+        }
+
+        let diagonal_index = col * m + col;
+        let mut dot = 0.0;
+        dot += q[diagonal_index] * v;
+        let factor = scale * dot;
+        q[diagonal_index] -= factor * v;
+    }
+
+    Some((q, r))
+}
+
 /// QR decomposition of an m×n rectangular matrix (Householder reflections).
 ///
 /// Input `a` is row-major with shape (m, n). Returns `(Q, R)` where:
@@ -2319,6 +2673,10 @@ pub fn qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f64>), Lin
         return Err(LinAlgError::NormDetRankPolicyViolation(
             "matrix entries must be finite for QR",
         ));
+    }
+
+    if let Some(result) = qr_mxn_exact_upper_trapezoidal(a, m, n) {
+        return Ok(result);
     }
 
     // Q = I_m, R = copy of A
@@ -2382,6 +2740,425 @@ pub fn qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f64>), Lin
     }
 
     Ok((q, r))
+}
+
+/// Minimum rows per TSQR leaf block. Below this the per-leaf Householder pass
+/// is too short to amortize the reduction-tree work, so the block count is
+/// capped to keep every leaf at least this tall.
+const TSQR_MIN_LEAF_ROWS: usize = 4096;
+
+/// In-place Householder QR of a row-major `rows × n` block, keeping only R.
+///
+/// On return the leading `min(rows, n) × n` upper triangle of `block` holds R
+/// and everything strictly below the diagonal is exactly zero. Q is never
+/// formed - that is the entire point for tall-skinny inputs, where an explicit
+/// m×m Q (as `qr_mxn` builds) would be m² elements.
+fn householder_r_in_place(block: &mut [f64], rows: usize, n: usize) {
+    let steps = rows.min(n);
+    let mut v = vec![0.0f64; rows];
+    // Per-column reflector dot products, hoisted so the trailing update can
+    // stream the block row-major. The naive form recomputes one dot per
+    // trailing column, walking `block[i * n + j]` down `i` at stride n, which
+    // costs (n - col) cache-hostile passes over the block per reflector; this
+    // buffer collapses that to two sequential passes total. Each `dots[j]`
+    // still accumulates over `i` in ascending order, so the arithmetic is
+    // unchanged - this is a pure memory-traffic transform.
+    let mut dots = vec![0.0f64; n];
+    for col in 0..steps {
+        let mut norm_sq = 0.0;
+        for i in col..rows {
+            let x = block[i * n + col];
+            norm_sq += x * x;
+        }
+        if norm_sq == 0.0 {
+            continue;
+        }
+        // Sign chosen away from the pivot to avoid cancellation in v[col].
+        let norm = norm_sq.sqrt();
+        let pivot = block[col * n + col];
+        let alpha = if pivot > 0.0 { -norm } else { norm };
+
+        for i in col..rows {
+            v[i] = block[i * n + col];
+        }
+        v[col] -= alpha;
+
+        let mut v_norm_sq = 0.0;
+        for &value in &v[col..rows] {
+            v_norm_sq += value * value;
+        }
+        if v_norm_sq == 0.0 {
+            continue;
+        }
+
+        // Apply H = I - 2vvᵀ/(vᵀv) to the trailing columns, streaming the
+        // block row-major in two passes instead of two passes per column.
+        dots[col..n].fill(0.0);
+        for i in col..rows {
+            let vi = v[i];
+            if vi == 0.0 {
+                continue;
+            }
+            let row = &block[i * n + col..i * n + n];
+            for (acc, &value) in dots[col..n].iter_mut().zip(row) {
+                *acc += vi * value;
+            }
+        }
+        // Deliberately `2.0 * dot / v_norm_sq`, not `dot * (2.0 / v_norm_sq)`:
+        // the reciprocal form would change the rounding and break the claim
+        // that this rewrite is arithmetic-preserving.
+        for acc in dots[col..n].iter_mut() {
+            *acc = 2.0 * *acc / v_norm_sq;
+        }
+        for i in col..rows {
+            let vi = v[i];
+            if vi == 0.0 {
+                continue;
+            }
+            let row = &mut block[i * n + col..i * n + n];
+            for (value, &factor) in row.iter_mut().zip(dots[col..n].iter()) {
+                *value -= factor * vi;
+            }
+        }
+    }
+
+    for i in 0..rows {
+        let upper = n.min(i);
+        for j in 0..upper {
+            block[i * n + j] = 0.0;
+        }
+    }
+}
+
+/// R factor of a row-major `rows × n` block, returned as a dense `n × n`.
+fn leaf_r(block: &[f64], rows: usize, n: usize) -> Vec<f64> {
+    let mut work = block.to_vec();
+    householder_r_in_place(&mut work, rows, n);
+    let mut r = vec![0.0f64; n * n];
+    let copy_rows = rows.min(n);
+    for i in 0..copy_rows {
+        r[i * n..i * n + n].copy_from_slice(&work[i * n..i * n + n]);
+    }
+    r
+}
+
+/// Combine two n×n R factors into one by re-triangularizing their 2n×n stack.
+fn combine_r(top: &[f64], bottom: &[f64], n: usize) -> Vec<f64> {
+    let mut stacked = vec![0.0f64; 2 * n * n];
+    stacked[..n * n].copy_from_slice(top);
+    stacked[n * n..].copy_from_slice(bottom);
+    householder_r_in_place(&mut stacked, 2 * n, n);
+    stacked.truncate(n * n);
+    stacked
+}
+
+/// Tall-skinny QR (TSQR / communication-avoiding QR), R factor only.
+///
+/// Input `a` is row-major with shape (m, n) and m ≥ n. Returns the n×n upper
+/// triangular R such that A = QR for some orthonormal Q, with R's diagonal
+/// sign convention matching a standard Householder QR (LAPACK does not fix a
+/// sign either, so callers comparing against `numpy.linalg.qr` must normalize
+/// row signs).
+///
+/// Why this exists: LAPACK's `dgeqrf` on a tall-skinny matrix falls into an
+/// unblocked BLAS-2 path that makes n passes over the m×n data. TSQR makes a
+/// single streaming pass - each row block is reduced to an n×n R independently
+/// (embarrassingly parallel, each leaf's working set is cache-resident), then
+/// the R factors are folded pairwise up a binary tree. Communication rounds
+/// drop from O(n) to O(log P).
+///
+/// DETERMINISM: the leaves are computed in parallel but written to fixed index
+/// positions, and the fold is a *sequential* binary tree over that fixed order.
+/// The floating-point association order therefore does not depend on thread
+/// count or scheduling, so repeated runs are bit-identical to each other. It is
+/// NOT bit-identical to LAPACK's sequential Householder sweep - TSQR applies a
+/// different (still exactly orthogonal) sequence of reflections, so it is
+/// backward stable but only `allclose` to `dgeqrf`.
+pub fn tsqr_r(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
+    if Some(a.len()) != m.checked_mul(n) || m == 0 || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tsqr_r: input must be m*n with m,n > 0",
+        ));
+    }
+    if m < n {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tsqr_r: requires m >= n (tall-skinny)",
+        ));
+    }
+    if a.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "matrix entries must be finite for QR",
+        ));
+    }
+
+    // One block per worker (at least TSQR_MIN_LEAF_ROWS tall); a single block
+    // degenerates to a plain streaming Householder pass, which is correct.
+    let threads = rayon::current_num_threads().max(1);
+    let max_blocks = (m / TSQR_MIN_LEAF_ROWS).max(1);
+    let blocks = threads.min(max_blocks);
+
+    if blocks <= 1 {
+        let mut work = a.to_vec();
+        householder_r_in_place(&mut work, m, n);
+        let mut r = vec![0.0f64; n * n];
+        for i in 0..n.min(m) {
+            r[i * n..i * n + n].copy_from_slice(&work[i * n..i * n + n]);
+        }
+        return Ok(r);
+    }
+
+    let base = m / blocks;
+    let remainder = m % blocks;
+    let mut ranges = Vec::with_capacity(blocks);
+    let mut start = 0;
+    for b in 0..blocks {
+        let rows = base + usize::from(b < remainder);
+        ranges.push((start, rows));
+        start += rows;
+    }
+
+    let mut level: Vec<Vec<f64>> = ranges
+        .par_iter()
+        .map(|&(row_start, rows)| leaf_r(&a[row_start * n..(row_start + rows) * n], rows, n))
+        .collect();
+
+    // Deterministic sequential fold: pair adjacent factors, left to right.
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut idx = 0;
+        while idx + 1 < level.len() {
+            next.push(combine_r(&level[idx], &level[idx + 1], n));
+            idx += 2;
+        }
+        if idx < level.len() {
+            next.push(level[idx].clone());
+        }
+        level = next;
+    }
+
+    Ok(level.pop().unwrap_or_else(|| vec![0.0f64; n * n]))
+}
+
+/// In-place Householder QR of a row-major `rows × n` block that ALSO applies the
+/// same reflector sequence to a right-hand-side vector `b` of length `rows`.
+///
+/// This is [`householder_r_in_place`] extended to carry Qᵀb. The block arithmetic
+/// is byte-for-byte identical to that function (same reflector, same trailing
+/// update, same association order), so the R it leaves is bit-identical to the
+/// R-only path; the only addition is applying each reflector to `b` as well. On
+/// return the leading `min(rows, n)` entries of `b` hold the top of Qᵀb (the part
+/// that determines x), and the block's upper triangle holds R.
+fn householder_r_apply_b_in_place(block: &mut [f64], b: &mut [f64], rows: usize, n: usize) {
+    let steps = rows.min(n);
+    let mut v = vec![0.0f64; rows];
+    let mut dots = vec![0.0f64; n];
+    for col in 0..steps {
+        let mut norm_sq = 0.0;
+        for i in col..rows {
+            let x = block[i * n + col];
+            norm_sq += x * x;
+        }
+        if norm_sq == 0.0 {
+            continue;
+        }
+        let norm = norm_sq.sqrt();
+        let pivot = block[col * n + col];
+        let alpha = if pivot > 0.0 { -norm } else { norm };
+
+        for i in col..rows {
+            v[i] = block[i * n + col];
+        }
+        v[col] -= alpha;
+
+        let mut v_norm_sq = 0.0;
+        for &value in &v[col..rows] {
+            v_norm_sq += value * value;
+        }
+        if v_norm_sq == 0.0 {
+            continue;
+        }
+
+        // Trailing-column update of the block: byte-for-byte identical to
+        // householder_r_in_place, so carrying b leaves R unchanged.
+        dots[col..n].fill(0.0);
+        for i in col..rows {
+            let vi = v[i];
+            if vi == 0.0 {
+                continue;
+            }
+            let row = &block[i * n + col..i * n + n];
+            for (acc, &value) in dots[col..n].iter_mut().zip(row) {
+                *acc += vi * value;
+            }
+        }
+        for acc in dots[col..n].iter_mut() {
+            *acc = 2.0 * *acc / v_norm_sq;
+        }
+        for i in col..rows {
+            let vi = v[i];
+            if vi == 0.0 {
+                continue;
+            }
+            let row = &mut block[i * n + col..i * n + n];
+            for (value, &factor) in row.iter_mut().zip(dots[col..n].iter()) {
+                *value -= factor * vi;
+            }
+        }
+
+        // Apply the SAME reflector H = I - 2vvᵀ/(vᵀv) to b, using the identical
+        // `2.0 * dot / v_norm_sq` form as the block update for matching rounding.
+        let mut bdot = 0.0;
+        for i in col..rows {
+            bdot += v[i] * b[i];
+        }
+        let bfactor = 2.0 * bdot / v_norm_sq;
+        for i in col..rows {
+            b[i] -= bfactor * v[i];
+        }
+    }
+
+    for i in 0..rows {
+        let upper = n.min(i);
+        for j in 0..upper {
+            block[i * n + j] = 0.0;
+        }
+    }
+}
+
+/// Leaf reduction for [`tsqr_qtb`]: the n×n R factor plus the top `n` entries of
+/// Qᵀb for one row block.
+fn leaf_qtb(block: &[f64], b_block: &[f64], rows: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut work = block.to_vec();
+    let mut b_work = b_block.to_vec();
+    householder_r_apply_b_in_place(&mut work, &mut b_work, rows, n);
+    let mut r = vec![0.0f64; n * n];
+    let copy_rows = rows.min(n);
+    for i in 0..copy_rows {
+        r[i * n..i * n + n].copy_from_slice(&work[i * n..i * n + n]);
+    }
+    let mut c = vec![0.0f64; n];
+    c[..copy_rows].copy_from_slice(&b_work[..copy_rows]);
+    (r, c)
+}
+
+/// Combine two `(R, Qᵀb-top)` pairs by re-triangularizing their stacked 2n×n R
+/// and carrying the stacked 2n b-components through the same reflectors.
+fn combine_qtb(
+    r_top: &[f64],
+    c_top: &[f64],
+    r_bottom: &[f64],
+    c_bottom: &[f64],
+    n: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let mut stacked = vec![0.0f64; 2 * n * n];
+    stacked[..n * n].copy_from_slice(r_top);
+    stacked[n * n..].copy_from_slice(r_bottom);
+    let mut b_stacked = vec![0.0f64; 2 * n];
+    b_stacked[..n].copy_from_slice(c_top);
+    b_stacked[n..].copy_from_slice(c_bottom);
+    householder_r_apply_b_in_place(&mut stacked, &mut b_stacked, 2 * n, n);
+    stacked.truncate(n * n);
+    let c = b_stacked[..n].to_vec();
+    (stacked, c)
+}
+
+/// Tall-skinny QR reduction returning both R and the top `n` entries of Qᵀb.
+///
+/// This is [`tsqr_r`] extended to carry the transformed right-hand side needed
+/// for least squares. For full-rank tall-skinny A the least-squares solution is
+/// `x = R⁻¹ (Qᵀb)_top`, which is UNIQUE regardless of the (sign-ambiguous) Q/R
+/// choice TSQR makes - so callers get numpy-parity `x` without the sign
+/// divergence a bare R (or `qr(mode="r")`) would expose. The returned R is
+/// bit-identical to [`tsqr_r`] (same block ranges, same fold order, same
+/// arithmetic).
+///
+/// `b` has length m. Returns `(R, c)` with R the n×n upper-triangular factor and
+/// `c` the length-n top of Qᵀb.
+pub fn tsqr_qtb(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    n: usize,
+) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
+    if Some(a.len()) != m.checked_mul(n) || m == 0 || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tsqr_qtb: input must be m*n with m,n > 0",
+        ));
+    }
+    if b.len() != m {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tsqr_qtb: b must have length m",
+        ));
+    }
+    if m < n {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tsqr_qtb: requires m >= n (tall-skinny)",
+        ));
+    }
+    if a.iter().any(|v| !v.is_finite()) || b.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "matrix entries must be finite for QR",
+        ));
+    }
+
+    let threads = rayon::current_num_threads().max(1);
+    let max_blocks = (m / TSQR_MIN_LEAF_ROWS).max(1);
+    let blocks = threads.min(max_blocks);
+
+    if blocks <= 1 {
+        let mut work = a.to_vec();
+        let mut b_work = b.to_vec();
+        householder_r_apply_b_in_place(&mut work, &mut b_work, m, n);
+        let mut r = vec![0.0f64; n * n];
+        for i in 0..n.min(m) {
+            r[i * n..i * n + n].copy_from_slice(&work[i * n..i * n + n]);
+        }
+        let c = b_work[..n].to_vec();
+        return Ok((r, c));
+    }
+
+    let base = m / blocks;
+    let remainder = m % blocks;
+    let mut ranges = Vec::with_capacity(blocks);
+    let mut start = 0;
+    for b_idx in 0..blocks {
+        let rows = base + usize::from(b_idx < remainder);
+        ranges.push((start, rows));
+        start += rows;
+    }
+
+    let mut level: Vec<(Vec<f64>, Vec<f64>)> = ranges
+        .par_iter()
+        .map(|&(row_start, rows)| {
+            leaf_qtb(
+                &a[row_start * n..(row_start + rows) * n],
+                &b[row_start..row_start + rows],
+                rows,
+                n,
+            )
+        })
+        .collect();
+
+    // Deterministic sequential fold: pair adjacent factors, left to right - the
+    // same tree tsqr_r uses, so R stays bit-identical and c follows that tree.
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut idx = 0;
+        while idx + 1 < level.len() {
+            let (r_top, c_top) = &level[idx];
+            let (r_bottom, c_bottom) = &level[idx + 1];
+            next.push(combine_qtb(r_top, c_top, r_bottom, c_bottom, n));
+            idx += 2;
+        }
+        if idx < level.len() {
+            next.push(level[idx].clone());
+        }
+        level = next;
+    }
+
+    Ok(level
+        .pop()
+        .unwrap_or_else(|| (vec![0.0f64; n * n], vec![0.0f64; n])))
 }
 
 /// SVD of an m×n rectangular matrix (singular values only).
@@ -2594,12 +3371,7 @@ impl SvdRightVtPanel {
 
         let slot = self.len;
         self.taus[slot] = tau;
-        for (row, &value) in w_house
-            .iter()
-            .enumerate()
-            .take(n)
-            .skip(reflector_col + 1)
-        {
+        for (row, &value) in w_house.iter().enumerate().take(n).skip(reflector_col + 1) {
             self.v[(row - self.start) * SVD_RIGHT_VT_PANEL_NB + slot] = value;
         }
         self.len += 1;
@@ -3035,10 +3807,7 @@ fn svd_bidiag_values(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgEr
 
 #[inline]
 fn sort_singular_values_descending_in_place(values: &mut [f64]) {
-    values.sort_by(|a, b| {
-        b.partial_cmp(a)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    values.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
 }
 
 /// Core QR-phase SVD implementation for the bidiagonalized matrix.
@@ -4048,15 +4817,9 @@ pub fn matrix_norm_nxn(a: &[f64], m: usize, n: usize, ord: &str) -> Result<f64, 
             // scan rows once while preserving the per-column addition order.
             Ok(matrix_norm_column_sum(a, m, n, false))
         }
-        "-1" => {
-            Ok(matrix_norm_column_sum(a, m, n, true))
-        }
-        "inf" => {
-            Ok(matrix_norm_row_sum(a, n, false))
-        }
-        "-inf" => {
-            Ok(matrix_norm_row_sum(a, n, true))
-        }
+        "-1" => Ok(matrix_norm_column_sum(a, m, n, true)),
+        "inf" => Ok(matrix_norm_row_sum(a, n, false)),
+        "-inf" => Ok(matrix_norm_row_sum(a, n, true)),
         "2" => {
             // Spectral norm = largest singular value (works on MxN)
             if let Some(value) = matrix_norm_spectral_precheck(a)? {
@@ -4238,13 +5001,7 @@ const TRIDIAG_SERIAL_ROWDOT_MAX_N: usize = 384;
 // a large matrix also stay serial.
 const TRIDIAG_MATVEC_PAR_MIN: usize = 1024;
 
-fn tridiag_symmetric_matvec_serial(
-    work: &[f64],
-    n: usize,
-    start: usize,
-    v: &[f64],
-    u: &mut [f64],
-) {
+fn tridiag_symmetric_matvec_serial(work: &[f64], n: usize, start: usize, v: &[f64], u: &mut [f64]) {
     debug_assert_eq!(work.len(), n * n);
     debug_assert_eq!(v.len(), n);
     debug_assert_eq!(u.len(), n);
@@ -4313,7 +5070,11 @@ fn tridiag_symmetric_matvec_serial(
 // trailing-matrix memory traffic of the unblocked per-column left+right sweep
 // (which is DRAM-bound). Same reflectors as the unblocked path → tolerance
 // equivalent (reassociated updates; never bit-exact). Returns (d, e).
-fn tridiag_reduce_blocked(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+fn tridiag_reduce_blocked(
+    a: &[f64],
+    n: usize,
+    accumulate_q: bool,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let mut work = a.to_vec();
     let mut d = vec![0.0f64; n];
     let mut e = vec![0.0f64; n - 1];
@@ -4733,7 +5494,10 @@ fn sbr_stage1_dense_to_band_impl(
             for row in t..h {
                 let vi = vv[row * nb + t];
                 let src = row * nb + t;
-                for (dj, &cell) in dpanel[..width].iter_mut().zip(panel[src..src + width].iter()) {
+                for (dj, &cell) in dpanel[..width]
+                    .iter_mut()
+                    .zip(panel[src..src + width].iter())
+                {
                     *dj += vi * cell;
                 }
             }
@@ -4743,7 +5507,10 @@ fn sbr_stage1_dense_to_band_impl(
             for row in t..h {
                 let vi = vv[row * nb + t];
                 let dst = row * nb + t;
-                for (cell, &dj) in panel[dst..dst + width].iter_mut().zip(dpanel[..width].iter()) {
+                for (cell, &dj) in panel[dst..dst + width]
+                    .iter_mut()
+                    .zip(dpanel[..width].iter())
+                {
                     *cell -= dj * vi;
                 }
             }
@@ -5459,7 +6226,11 @@ fn hessenberg_qr_iter(h: &mut [f64], mut z: Option<&mut [f64]>, n: usize) {
             // Exceptional shift to break a rare cycle: complex shifts of magnitude
             // ~the local subdiagonal scale.
             let sa = h[m * n + (m - 1)].abs()
-                + if m >= lo + 2 { h[(m - 1) * n + (m - 2)].abs() } else { 0.0 };
+                + if m >= lo + 2 {
+                    h[(m - 1) * n + (m - 2)].abs()
+                } else {
+                    0.0
+                };
             (1.5 * sa, sa * sa)
         } else {
             let tr = h[(p - 2) * n + (p - 2)] + h[(p - 1) * n + (p - 1)];
@@ -5475,7 +6246,11 @@ fn hessenberg_qr_iter(h: &mut [f64], mut z: Option<&mut [f64]>, n: usize) {
         let h01 = h[lo * n + (lo + 1)];
         let mut x = h00 * h00 + h01 * h10 - s * h00 + t;
         let mut y = h10 * (h00 + h11 - s);
-        let mut zz = if lo + 2 <= m { h10 * h[(lo + 2) * n + (lo + 1)] } else { 0.0 };
+        let mut zz = if lo + 2 <= m {
+            h10 * h[(lo + 2) * n + (lo + 1)]
+        } else {
+            0.0
+        };
 
         let mut k = lo;
         while k <= p - 2 {
@@ -5594,8 +6369,8 @@ fn eigvalsh_finite_nxn(a: &[f64], n: usize) -> Vec<f64> {
     debug_assert!(n > 0);
     debug_assert!(a.iter().all(|v| v.is_finite()));
 
-    let (mut d, mut e) = exact_symmetric_tridiagonal_values(a, n)
-        .unwrap_or_else(|| tridiag_reduce_values(a, n));
+    let (mut d, mut e) =
+        exact_symmetric_tridiagonal_values(a, n).unwrap_or_else(|| tridiag_reduce_values(a, n));
     tridiag_eigvals_qr(&mut d, &mut e, n);
 
     d.sort_by(|a, b| a.total_cmp(b));
@@ -5862,6 +6637,14 @@ pub fn kron_nxn(
     let out_count = out_rows * out_cols;
     if out_count == 0 {
         return Ok(Vec::new());
+    }
+    if a.len() == 1 {
+        let lhs = a[0];
+        return Ok(b.iter().map(|&value| lhs * value).collect());
+    }
+    if b.len() == 1 {
+        let rhs = b[0];
+        return Ok(a.iter().map(|&value| value * rhs).collect());
     }
     if let Some(identity_result) = kron_identity_rhs_nonnegative_fast_path(a, m, n, b, p, q) {
         return Ok(identity_result);
@@ -6771,6 +7554,91 @@ pub fn lstsq_svd(
     Ok((x, residuals, rank, s))
 }
 
+/// Least squares for a full-rank tall-skinny (m ≥ n) system via TSQR.
+///
+/// Matches `numpy.linalg.lstsq`'s `(x, residuals, rank, singular_values)` return.
+/// For the full-rank tall-skinny regime this avoids the O(mn·min(m,n)) SVD that
+/// [`lstsq_svd`] runs on the whole m×n matrix: TSQR reduces A to a tiny n×n R in
+/// one streaming, embarrassingly-parallel pass, `x = R⁻¹(Qᵀb)_top` by back
+/// substitution, and the singular values / rank come from an n×n SVD of R since
+/// σ(A) = σ(R). Every returned element is invariant to TSQR's Q/R sign choice, so
+/// this is `allclose` to numpy with no sign divergence.
+///
+/// Rank-deficient inputs (rank < n by the same singular-value threshold
+/// [`lstsq_svd`] uses) fall back to [`lstsq_svd`], which handles the minimum-norm
+/// solution and truncated pseudo-inverse.
+pub fn lstsq_tsqr(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    n: usize,
+    rcond: f64,
+) -> Result<LstsqResult, LinAlgError> {
+    if Some(a.len()) != m.checked_mul(n) || b.len() != m || m == 0 || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "lstsq_tsqr: a must be m*n, b must be m",
+        ));
+    }
+    if m < n {
+        return Err(LinAlgError::ShapeContractViolation(
+            "lstsq_tsqr: requires m >= n",
+        ));
+    }
+    if a.iter().any(|v| !v.is_finite()) || b.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "entries must be finite for lstsq",
+        ));
+    }
+
+    let (r, c) = tsqr_qtb(a, b, m, n)?;
+
+    // Singular values and rank from the tiny n×n R (σ(A) = σ(R)). Same threshold
+    // rule as lstsq_svd so the reported rank matches that path exactly.
+    let s = svd_mxn(&r, n, n)?;
+    let sigma_max = s.first().copied().unwrap_or(0.0);
+    let threshold = if rcond < 0.0 {
+        f64::EPSILON * (m.max(n) as f64) * sigma_max
+    } else {
+        rcond * sigma_max
+    };
+    let rank = s.iter().filter(|&&si| si > threshold).count();
+
+    // Rank-deficient: back substitution against a singular R is invalid; defer to
+    // the SVD minimum-norm path (which also matches numpy for rank < n).
+    if rank != n {
+        return lstsq_svd(a, b, m, n, rcond);
+    }
+
+    // x = R⁻¹ c by back substitution (R upper triangular, row-major).
+    let mut x = vec![0.0f64; n];
+    for i in (0..n).rev() {
+        let mut sum = c[i];
+        for j in (i + 1)..n {
+            sum -= r[i * n + j] * x[j];
+        }
+        x[i] = sum / r[i * n + i];
+    }
+
+    // Residuals: numpy reports the summed squared residual only when full rank and
+    // m > n. Computed directly as ‖b - Ax‖²; norm-preserving orthogonal transforms
+    // make this equal to the ‖(Qᵀb)_bottom‖² the SVD path accumulates.
+    let mut residuals = Vec::new();
+    if m > n {
+        let mut sum_sq = 0.0;
+        for row in 0..m {
+            let mut ax = 0.0;
+            for col in 0..n {
+                ax += a[row * n + col] * x[col];
+            }
+            let diff = b[row] - ax;
+            sum_sq += diff * diff;
+        }
+        residuals.push(sum_sq);
+    }
+
+    Ok((x, residuals, rank, s))
+}
+
 pub fn lstsq_nxn(a: &[f64], b: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
     let (x, _, _, _) = lstsq_svd(a, b, m, n, -1.0)?;
     Ok(x)
@@ -6948,8 +7816,77 @@ const PACKED_NR: usize = 8;
 // k in ascending order. Every output element sums k in the SAME ascending order
 // as the naive ikj loop, so the result is BIT-IDENTICAL (locked by the
 // mat_mul_*_row_parallel_matches_serial_reference_and_golden_sha256 tests).
+/// Narrow row tile. Two regimes select it, measured 2026-07-22:
+///
+/// 1. LARGE k (square, k = n): only on AVX-512. On `hz2` (AMD EPYC Genoa /
+///    Zen 4, `avx512f`) MR=2 is 18.5% faster at n=512 and 19.2% at n=1024
+///    against an A/A null-control spread of 1.3-2.7%, while the SAME tile is
+///    18.6% SLOWER on AVX2. Genuine ISA split - hence a runtime gate.
+/// 2. SMALL k (panel widths): on BOTH ISAs. At the trailing-update shapes the
+///    blocked factorizations actually use, MR=2 wins by 19.0-21.6% on AVX-512
+///    and 21.8-26.8% on AVX2. With a short k-loop the accumulator tile is
+///    loaded and flushed far more often relative to the work it amortizes, so
+///    the smaller tile wins regardless of register width.
+///
+/// Basis caveat for regime 1: Zen 4 implements AVX-512 as double-pumped
+/// 256-bit and no Intel native-512 host exists in the fleet, so that
+/// microarchitecture is unmeasured; refine with an Intel datapoint rather than
+/// assuming it carries.
+const PACKED_MR_NARROW: usize = 2;
+
+/// Largest k measured in the small-k regime. Every in-tree `sub_assign` caller
+/// passes a panel width (`LU_PANEL_NB` = 64, `TRSM_PANEL_NB` = 128, SVD 128),
+/// so this covers the production range; anything wider falls back to the
+/// ISA-gated choice rather than extrapolating past the measurement.
+const PACKED_NARROW_K_MAX: usize = 128;
+
+/// Selects the row-tile height for the host ISA. `is_x86_feature_detected!` is
+/// a safe macro, so this keeps the crate's `#![forbid(unsafe_code)]` contract.
+fn packed_tile_rows() -> usize {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx512f") {
+            return PACKED_MR_NARROW;
+        }
+    }
+    PACKED_MR
+}
+
+/// Row-tile height for the trailing-update kernels, which are dominated by the
+/// short-k regime. Falls back to the ISA gate outside the measured k range.
+fn packed_sub_assign_tile_rows(k: usize) -> usize {
+    if k <= PACKED_NARROW_K_MAX {
+        PACKED_MR_NARROW
+    } else {
+        packed_tile_rows()
+    }
+}
+
 fn packed_gemm_serial(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
-    let m_full = m - m % PACKED_MR;
+    // Tile height is chosen once per call, then the body is monomorphized for
+    // that height so the register tile stays a compile-time-sized array.
+    if packed_tile_rows() == PACKED_MR_NARROW {
+        packed_gemm_serial_tiled::<PACKED_MR_NARROW>(a, b, m, k, n, out);
+    } else {
+        packed_gemm_serial_tiled::<PACKED_MR>(a, b, m, k, n, out);
+    }
+}
+
+/// The packed kernel, generic over row-tile height. `MR` changes only which
+/// output elements share a register tile; every element still accumulates k in
+/// ascending order, so all instantiations are BIT-IDENTICAL to each other and
+/// to the pre-2026-07-22 fixed-MR=4 kernel. Verified byte-for-byte across
+/// MR in {2,4,6,8} x NR in {8,16} by `benches/gemm_microkernel.rs`, which is why
+/// this regate needs no golden-sha256 regeneration.
+fn packed_gemm_serial_tiled<const MR: usize>(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    out: &mut [f64],
+) {
+    let m_full = m - m % MR;
     let n_full = n - n % PACKED_NR;
     let nc = {
         let cols = (256 * 1024) / (k.max(1) * core::mem::size_of::<f64>());
@@ -6967,7 +7904,7 @@ fn packed_gemm_serial(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &
             }
             let mut i0 = 0;
             while i0 < m_full {
-                let mut acc = [[0.0f64; PACKED_NR]; PACKED_MR];
+                let mut acc = [[0.0f64; PACKED_NR]; MR];
                 for kk in 0..k {
                     let brow = &bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR];
                     for (ii, row) in acc.iter_mut().enumerate() {
@@ -6983,7 +7920,7 @@ fn packed_gemm_serial(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &
                         *slot += v;
                     }
                 }
-                i0 += PACKED_MR;
+                i0 += MR;
             }
             j0 += PACKED_NR;
         }
@@ -7120,7 +8057,26 @@ fn packed_gemm_sub_assign_serial(
     n: usize,
     target: &mut [f64],
 ) {
-    let m_full = m - m % PACKED_MR;
+    if packed_sub_assign_tile_rows(k) == PACKED_MR_NARROW {
+        packed_gemm_sub_assign_serial_tiled::<PACKED_MR_NARROW>(a, b, m, k, n, target);
+    } else {
+        packed_gemm_sub_assign_serial_tiled::<PACKED_MR>(a, b, m, k, n, target);
+    }
+}
+
+/// Trailing-update kernel, generic over row-tile height. As with
+/// `packed_gemm_serial_tiled`, `MR` only regroups which output elements share a
+/// register tile; each element still accumulates k ascending before the single
+/// subtracting writeback, so all instantiations are BIT-IDENTICAL.
+fn packed_gemm_sub_assign_serial_tiled<const MR: usize>(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    target: &mut [f64],
+) {
+    let m_full = m - m % MR;
     let n_full = n - n % PACKED_NR;
     let nc = {
         let cols = (256 * 1024) / (k.max(1) * core::mem::size_of::<f64>());
@@ -7138,7 +8094,7 @@ fn packed_gemm_sub_assign_serial(
             }
             let mut i0 = 0;
             while i0 < m_full {
-                let mut acc = [[0.0f64; PACKED_NR]; PACKED_MR];
+                let mut acc = [[0.0f64; PACKED_NR]; MR];
                 for kk in 0..k {
                     let brow = &bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR];
                     for (ii, row) in acc.iter_mut().enumerate() {
@@ -7154,7 +8110,7 @@ fn packed_gemm_sub_assign_serial(
                         *slot -= v;
                     }
                 }
-                i0 += PACKED_MR;
+                i0 += MR;
             }
             j0 += PACKED_NR;
         }
@@ -7197,7 +8153,28 @@ fn packed_gemm_sub_assign_strided_serial(
     row_stride: usize,
     target: &mut [f64],
 ) {
-    let m_full = m - m % PACKED_MR;
+    if packed_sub_assign_tile_rows(k) == PACKED_MR_NARROW {
+        packed_gemm_sub_assign_strided_serial_tiled::<PACKED_MR_NARROW>(
+            a, b, m, k, n, row_stride, target,
+        );
+    } else {
+        packed_gemm_sub_assign_strided_serial_tiled::<PACKED_MR>(a, b, m, k, n, row_stride, target);
+    }
+}
+
+/// Strided trailing-update kernel, generic over row-tile height. Same tiling
+/// invariance as the contiguous form - `MR` regroups tiles without reordering
+/// any element's ascending k-sum - so all instantiations are BIT-IDENTICAL.
+fn packed_gemm_sub_assign_strided_serial_tiled<const MR: usize>(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    row_stride: usize,
+    target: &mut [f64],
+) {
+    let m_full = m - m % MR;
     let n_full = n - n % PACKED_NR;
     let nc = {
         let cols = (256 * 1024) / (k.max(1) * core::mem::size_of::<f64>());
@@ -7215,7 +8192,7 @@ fn packed_gemm_sub_assign_strided_serial(
             }
             let mut i0 = 0;
             while i0 < m_full {
-                let mut acc = [[0.0f64; PACKED_NR]; PACKED_MR];
+                let mut acc = [[0.0f64; PACKED_NR]; MR];
                 for kk in 0..k {
                     let brow = &bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR];
                     for (ii, row) in acc.iter_mut().enumerate() {
@@ -7231,7 +8208,7 @@ fn packed_gemm_sub_assign_strided_serial(
                         *slot -= v;
                     }
                 }
-                i0 += PACKED_MR;
+                i0 += MR;
             }
             j0 += PACKED_NR;
         }
@@ -8426,6 +9403,128 @@ pub fn batch_solve(
         ));
     }
 
+    // A literal 2-D matrix broadcast across a vector- or matrix-RHS batch has one
+    // LU, not `batch` independent LUs. Factor the finite, unblocked matrix once,
+    // then preserve the existing per-lane permutation and substitution order.
+    if a_shape.len() == 2
+        && a_batch == 1
+        && b_batch > 1
+        && (vector_rhs || rhs_cols > 0)
+        && n < LU_BLOCK_MIN
+        && a.iter().all(|value| value.is_finite())
+    {
+        let matrix_max_abs = a.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
+        let mut lu = vec![0.0f64; mat_size];
+        let mut perm = vec![0usize; n];
+        lu_factor_unblocked_into(a, n, singularity_threshold, &mut lu, &mut perm)?;
+
+        let solve_factored_into = |b_sub: &[f64], out: &mut [f64]| {
+            if vector_rhs {
+                for i in 0..n {
+                    out[i] = b_sub[perm[i]];
+                }
+                for i in 1..n {
+                    for j in 0..i {
+                        out[i] -= lu[i * n + j] * out[j];
+                    }
+                }
+                for i in (0..n).rev() {
+                    for j in (i + 1)..n {
+                        out[i] -= lu[i * n + j] * out[j];
+                    }
+                    out[i] /= lu[i * n + i];
+                }
+                return;
+            }
+
+            for i in 0..n {
+                let p_i = perm[i];
+                for col in 0..rhs_cols {
+                    out[i * rhs_cols + col] = b_sub[p_i * rhs_cols + col];
+                }
+            }
+            for i in 1..n {
+                let row_base = i * rhs_cols;
+                let mut col = 0;
+                while col + 4 <= rhs_cols {
+                    let mut x0 = out[row_base + col];
+                    let mut x1 = out[row_base + col + 1];
+                    let mut x2 = out[row_base + col + 2];
+                    let mut x3 = out[row_base + col + 3];
+                    for j in 0..i {
+                        let l_ij = lu[i * n + j];
+                        let src = j * rhs_cols + col;
+                        x0 -= l_ij * out[src];
+                        x1 -= l_ij * out[src + 1];
+                        x2 -= l_ij * out[src + 2];
+                        x3 -= l_ij * out[src + 3];
+                    }
+                    out[row_base + col] = x0;
+                    out[row_base + col + 1] = x1;
+                    out[row_base + col + 2] = x2;
+                    out[row_base + col + 3] = x3;
+                    col += 4;
+                }
+                for col in col..rhs_cols {
+                    let mut x = out[row_base + col];
+                    for j in 0..i {
+                        x -= lu[i * n + j] * out[j * rhs_cols + col];
+                    }
+                    out[row_base + col] = x;
+                }
+            }
+            for i in (0..n).rev() {
+                let u_ii = lu[i * n + i];
+                let row_base = i * rhs_cols;
+                let mut col = 0;
+                while col + 4 <= rhs_cols {
+                    let mut x0 = out[row_base + col];
+                    let mut x1 = out[row_base + col + 1];
+                    let mut x2 = out[row_base + col + 2];
+                    let mut x3 = out[row_base + col + 3];
+                    for j in (i + 1)..n {
+                        let u_ij = lu[i * n + j];
+                        let src = j * rhs_cols + col;
+                        x0 -= u_ij * out[src];
+                        x1 -= u_ij * out[src + 1];
+                        x2 -= u_ij * out[src + 2];
+                        x3 -= u_ij * out[src + 3];
+                    }
+                    out[row_base + col] = x0 / u_ii;
+                    out[row_base + col + 1] = x1 / u_ii;
+                    out[row_base + col + 2] = x2 / u_ii;
+                    out[row_base + col + 3] = x3 / u_ii;
+                    col += 4;
+                }
+                for col in col..rhs_cols {
+                    let mut x = out[row_base + col];
+                    for j in (i + 1)..n {
+                        x -= lu[i * n + j] * out[j * rhs_cols + col];
+                    }
+                    out[row_base + col] = x / u_ii;
+                }
+            }
+        };
+
+        let mut result = vec![0.0f64; batch * rhs_width];
+        if batch_should_parallelize(batch, mat_size + rhs_width) {
+            result
+                .par_chunks_mut(rhs_width)
+                .enumerate()
+                .for_each(|(idx, out_chunk)| {
+                    let b_sub = &b[idx * rhs_width..(idx + 1) * rhs_width];
+                    solve_factored_into(b_sub, out_chunk);
+                });
+        } else {
+            for (idx, out_chunk) in result.chunks_mut(rhs_width).enumerate() {
+                let b_sub = &b[idx * rhs_width..(idx + 1) * rhs_width];
+                solve_factored_into(b_sub, out_chunk);
+            }
+        }
+        return Ok(result);
+    }
+
     // Matrix-RHS does m columns of substitution per lane, so its per-lane compute
     // (~O(n²·m)) overtakes the constant per-lane alloc cost at a much smaller n than
     // vector-RHS: same-worker A/B shows matrix-RHS 3.3x @ n=3, 1.3-1.6x @ n=8, but
@@ -8636,7 +9735,12 @@ pub fn batch_pinv(
     }
     let resolved_rcond = resolve_pinv_tolerance_aliases(rcond, rtol)?;
     let lanes = batch_map_lanes(batch, mat_size, |b| {
-        pinv_mxn(&data[b * mat_size..(b + 1) * mat_size], m, n, resolved_rcond)
+        pinv_mxn(
+            &data[b * mat_size..(b + 1) * mat_size],
+            m,
+            n,
+            resolved_rcond,
+        )
     })?;
     let mut result = Vec::with_capacity(batch * n * m);
     for lane in &lanes {
@@ -8687,19 +9791,22 @@ pub fn batch_cholesky(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgE
         if batch_should_parallelize(batch, mat_size) {
             use std::sync::Mutex;
             let first_err: Mutex<Option<(usize, LinAlgError)>> = Mutex::new(None);
-            result.par_chunks_mut(mat_size).enumerate().for_each(|(idx, out_chunk)| {
-                let a_sub = &data[idx * mat_size..(idx + 1) * mat_size];
-                if let Err(e) = cholesky_nxn_into_out(a_sub, n, out_chunk) {
-                    let mut slot = first_err.lock().unwrap();
-                    let replace = match slot.as_ref() {
-                        None => true,
-                        Some((i, _)) => idx < *i,
-                    };
-                    if replace {
-                        *slot = Some((idx, e));
+            result
+                .par_chunks_mut(mat_size)
+                .enumerate()
+                .for_each(|(idx, out_chunk)| {
+                    let a_sub = &data[idx * mat_size..(idx + 1) * mat_size];
+                    if let Err(e) = cholesky_nxn_into_out(a_sub, n, out_chunk) {
+                        let mut slot = first_err.lock().unwrap();
+                        let replace = match slot.as_ref() {
+                            None => true,
+                            Some((i, _)) => idx < *i,
+                        };
+                        if replace {
+                            *slot = Some((idx, e));
+                        }
                     }
-                }
-            });
+                });
             if let Some((_, e)) = first_err.into_inner().unwrap() {
                 return Err(e);
             }
@@ -8783,12 +9890,10 @@ pub fn batch_matrix_norm(
     })
 }
 
-/// Batched matrix rank: rank on (..., m, n) → (...).
-pub fn batch_matrix_rank(
+fn parse_batch_matrix_rank_input(
     data: &[f64],
     shape: &[usize],
-    rcond: f64,
-) -> Result<Vec<usize>, LinAlgError> {
+) -> Result<(usize, usize, usize), LinAlgError> {
     let (batch, m, n) = parse_batched_shape(shape)?;
     if m != n {
         return Err(LinAlgError::ShapeContractViolation(
@@ -8801,6 +9906,34 @@ pub fn batch_matrix_rank(
             "batch_matrix_rank: data length does not match shape",
         ));
     }
+    Ok((batch, n, mat_size))
+}
+
+/// Batched matrix rank: rank on (..., m, n) → (...).
+pub fn batch_matrix_rank(
+    data: &[f64],
+    shape: &[usize],
+    rcond: f64,
+) -> Result<Vec<usize>, LinAlgError> {
+    let (batch, n, mat_size) = parse_batch_matrix_rank_input(data, shape)?;
+    batch_map_lanes(batch, mat_size, |b| {
+        let lane = &data[b * mat_size..(b + 1) * mat_size];
+        if n > 0 && rcond.is_finite() && rcond >= 0.0 && lane.iter().all(|&value| value == 0.0) {
+            Ok(0)
+        } else {
+            matrix_rank_nxn(lane, n, rcond)
+        }
+    })
+}
+
+/// Former all-SVD batched matrix-rank route retained for same-binary controls.
+#[doc(hidden)]
+pub fn batch_matrix_rank_general_control(
+    data: &[f64],
+    shape: &[usize],
+    rcond: f64,
+) -> Result<Vec<usize>, LinAlgError> {
+    let (batch, n, mat_size) = parse_batch_matrix_rank_input(data, shape)?;
     batch_map_lanes(batch, mat_size, |b| {
         matrix_rank_nxn(&data[b * mat_size..(b + 1) * mat_size], n, rcond)
     })
@@ -8877,7 +10010,9 @@ fn complex_lu_decompose(
     }
 
     let matrix_max_abs = a
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| cabs2(c[0], c[1]).sqrt())
         .fold(0.0_f64, f64::max);
     let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
@@ -9233,7 +10368,7 @@ pub fn complex_qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f6
 /// Frobenius norm of a complex matrix (2·m·n interleaved).
 pub fn complex_matrix_norm_frobenius(a: &[f64]) -> f64 {
     let mut sum = 0.0;
-    for chunk in a.chunks_exact(2) {
+    for chunk in a.as_chunks::<2>().0 {
         sum += cabs2(chunk[0], chunk[1]);
     }
     sum.sqrt()
@@ -9447,6 +10582,28 @@ fn complex_matmul_band(a: &[f64], b: &[f64], k: usize, n: usize, row_start: usiz
     }
 }
 
+fn complex_matmul_packed_parallel(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    bands_per_thread: usize,
+    c: &mut [f64],
+) {
+    let threads = rayon::current_num_threads();
+    let band_rows = (m
+        .div_ceil(threads * bands_per_thread.max(1))
+        .div_ceil(MATMUL_ROW_BLOCK)
+        .max(2))
+        * MATMUL_ROW_BLOCK;
+    c.par_chunks_mut(band_rows * 2 * n)
+        .enumerate()
+        .for_each(|(block, c_block)| {
+            complex_matmul_band(a, b, k, n, block * band_rows, c_block);
+        });
+}
+
 pub fn complex_matmul(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
     let mut c = vec![0.0; 2 * m * n];
     if c.is_empty() {
@@ -9464,14 +10621,10 @@ pub fn complex_matmul(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec
         && flops >= COMPLEX_MATMUL_PARALLEL_MIN_FLOPS
         && m >= 8
     {
-        let threads = rayon::current_num_threads();
-        let band_rows =
-            (m.div_ceil(threads * 2).div_ceil(MATMUL_ROW_BLOCK).max(2)) * MATMUL_ROW_BLOCK;
-        c.par_chunks_mut(band_rows * 2 * n)
-            .enumerate()
-            .for_each(|(block, c_block)| {
-                complex_matmul_band(a, b, k, n, block * band_rows, c_block);
-            });
+        // Each band repacks every B panel. The square packed lane has uniform
+        // row work, so one band per worker avoids duplicate packing without
+        // sacrificing useful parallelism.
+        complex_matmul_packed_parallel(a, b, m, k, n, 1, &mut c);
     } else if use_packed {
         complex_matmul_band(a, b, k, n, 0, &mut c);
     } else if rayon::current_num_threads() >= 2
@@ -9505,6 +10658,40 @@ pub fn complex_conjugate_transpose(a: &[f64], m: usize, n: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn batch_matrix_rank_zero_certificate_matches_general_control() {
+        let n = 3usize;
+        let mat_size = n * n;
+        let mut data = vec![0.0; 4 * mat_size];
+
+        for value in &mut data[mat_size..2 * mat_size] {
+            *value = -0.0;
+        }
+        data[2 * mat_size] = 3.0;
+        data[2 * mat_size + 4] = 2.0;
+        data[2 * mat_size + 8] = 1.0;
+        data[3 * mat_size..4 * mat_size]
+            .copy_from_slice(&[1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 0.0, 0.0, 0.0]);
+
+        let shape = [4, n, n];
+        for rcond in [0.0, 1e-12] {
+            let former = super::batch_matrix_rank_general_control(&data, &shape, rcond);
+            let certified = super::batch_matrix_rank(&data, &shape, rcond);
+            assert_eq!(certified, former);
+        }
+
+        let zeros = [0.0; 4];
+        for rcond in [-1.0, f64::INFINITY, f64::NAN] {
+            let former = super::batch_matrix_rank_general_control(&zeros, &[1, 2, 2], rcond);
+            let certified = super::batch_matrix_rank(&zeros, &[1, 2, 2], rcond);
+            assert_eq!(certified, former);
+        }
+
+        let former = super::batch_matrix_rank_general_control(&[], &[0, 0, 0], f64::NAN);
+        let certified = super::batch_matrix_rank(&[], &[0, 0, 0], f64::NAN);
+        assert_eq!(certified, former);
+    }
+
+    #[test]
     fn batch_inv_small_matrices_parallel_matches_serial_bits() {
         // A large batch of small (n < 128) matrices now takes the parallel path via
         // the total-work gate (it stayed serial under the old per-lane gate). The
@@ -9533,7 +10720,11 @@ mod tests {
         }
         assert_eq!(parallel.len(), serial.len());
         for (i, (p, s)) in parallel.iter().zip(&serial).enumerate() {
-            assert_eq!(p.to_bits(), s.to_bits(), "lane-flattened index {i} diverged");
+            assert_eq!(
+                p.to_bits(),
+                s.to_bits(),
+                "lane-flattened index {i} diverged"
+            );
         }
     }
 
@@ -9583,6 +10774,7 @@ mod tests {
         cross_product,
         det_2x2,
         det_nxn,
+        det_nxn_general_control,
         eig_nxn,
         eig_nxn_full,
         eigh_2x2,
@@ -9643,6 +10835,7 @@ mod tests {
         trace_nxn,
         tridiag_reduce,
         tridiag_reduce_values,
+        tsqr_r,
         validate_backend_bridge,
         validate_cholesky_diagonal,
         validate_matrix_shape,
@@ -9969,8 +11162,7 @@ mod tests {
             super::packed_gemm_sub_assign_strided(&a, &b, m, k, n, row_stride, &mut fused)
         });
         assert_eq!(fused.len(), materialized.len());
-        for (idx, (fused_value, materialized_value)) in
-            fused.iter().zip(&materialized).enumerate()
+        for (idx, (fused_value, materialized_value)) in fused.iter().zip(&materialized).enumerate()
         {
             assert_eq!(
                 fused_value.to_bits(),
@@ -10191,6 +11383,76 @@ mod tests {
         assert_eq!(
             digest, "71af9c98bd94b4c56cf5375e77c1d081316283aa448cfd47f615ec8f5c13d3f8",
             "complex_matmul packed-path golden digest drifted: {digest}"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf timing; run with --profile release -- --ignored --nocapture"]
+    fn complex_matmul_single_band_per_thread_median_self_time() {
+        use std::time::Instant;
+
+        let n = 512usize;
+        let mut state: u64 = 0xBADC_0FFE_EE11_2233;
+        let mut fill = |len: usize| -> Vec<f64> {
+            (0..len)
+                .map(|_| {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+                })
+                .collect()
+        };
+        let a = fill(2 * n * n);
+        let b = fill(2 * n * n);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("build local rayon pool");
+
+        let measure = |bands_per_thread| {
+            let start = Instant::now();
+            let out = pool.install(|| {
+                let mut out = vec![0.0; 2 * n * n];
+                super::complex_matmul_packed_parallel(&a, &b, n, n, n, bands_per_thread, &mut out);
+                out
+            });
+            std::hint::black_box(&out);
+            (start.elapsed().as_nanos(), out)
+        };
+
+        let (_, baseline_out) = measure(2);
+        let (_, candidate_out) = measure(1);
+        for (baseline, candidate) in baseline_out.iter().zip(&candidate_out) {
+            assert_eq!(
+                baseline.to_bits(),
+                candidate.to_bits(),
+                "packed complex band policy changed output bits"
+            );
+        }
+
+        let mut baseline_ns = Vec::with_capacity(11);
+        let mut candidate_ns = Vec::with_capacity(11);
+        for round in 0..11 {
+            if round % 2 == 0 {
+                baseline_ns.push(measure(2).0);
+                candidate_ns.push(measure(1).0);
+            } else {
+                candidate_ns.push(measure(1).0);
+                baseline_ns.push(measure(2).0);
+            }
+        }
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median = baseline_ns[baseline_ns.len() / 2];
+        let candidate_median = candidate_ns[candidate_ns.len() / 2];
+        println!(
+            "complex_matmul/512 four-thread median self-time: two_bands={:.3} ms one_band={:.3} ms ratio={:.4}",
+            baseline_median as f64 / 1e6,
+            candidate_median as f64 / 1e6,
+            candidate_median as f64 / baseline_median as f64,
+        );
+        assert!(
+            candidate_median < baseline_median,
+            "one packed complex band per thread failed the median self-time gate"
         );
     }
 
@@ -11430,7 +12692,11 @@ mod tests {
                 .map(|i| {
                     let cell = i % ms;
                     let (r, c) = (cell / n, cell % n);
-                    if r == c { n as f64 + 2.0 } else { ((i % 11) as f64 - 5.0) * 0.1 }
+                    if r == c {
+                        n as f64 + 2.0
+                    } else {
+                        ((i % 11) as f64 - 5.0) * 0.1
+                    }
                 })
                 .collect();
             let b: Vec<f64> = (0..batch * n).map(|i| (i % 17) as f64 - 8.0).collect();
@@ -11441,7 +12707,10 @@ mod tests {
             let old = || -> usize {
                 let lanes: Vec<Vec<f64>> = (0..batch)
                     .into_par_iter()
-                    .map(|i| super::solve_nxn(&a[i * ms..(i + 1) * ms], &b[i * n..(i + 1) * n], n).unwrap())
+                    .map(|i| {
+                        super::solve_nxn(&a[i * ms..(i + 1) * ms], &b[i * n..(i + 1) * n], n)
+                            .unwrap()
+                    })
                     .collect();
                 let mut out = Vec::with_capacity(batch * n);
                 for x in &lanes {
@@ -11451,7 +12720,9 @@ mod tests {
             };
             // NEW: batch_solve scratch fast path (reused lu/perm per thread).
             let new = || -> usize {
-                super::batch_solve(&a, &a_shape, &b, &b_shape, true).unwrap().len()
+                super::batch_solve(&a, &a_shape, &b, &b_shape, true)
+                    .unwrap()
+                    .len()
             };
             let _ = old();
             let _ = new();
@@ -11497,13 +12768,21 @@ mod tests {
             // Independent per-lane reference via the unchanged solve_nxn.
             let mut reference = Vec::with_capacity(batch * n);
             for lane in 0..batch {
-                let x = super::solve_nxn(&a[lane * ms..(lane + 1) * ms], &b[lane * n..(lane + 1) * n], n)
-                    .expect("solve_nxn");
+                let x = super::solve_nxn(
+                    &a[lane * ms..(lane + 1) * ms],
+                    &b[lane * n..(lane + 1) * n],
+                    n,
+                )
+                .expect("solve_nxn");
                 reference.extend_from_slice(&x);
             }
             assert_eq!(got.len(), reference.len());
             for (i, (g, r)) in got.iter().zip(&reference).enumerate() {
-                assert_eq!(g.to_bits(), r.to_bits(), "n={n} lane-flat index {i} diverged");
+                assert_eq!(
+                    g.to_bits(),
+                    r.to_bits(),
+                    "n={n} lane-flat index {i} diverged"
+                );
             }
         }
     }
@@ -11563,7 +12842,11 @@ mod tests {
                 .map(|i| {
                     let cell = i % ms;
                     let (r, c) = (cell / n, cell % n);
-                    if r == c { n as f64 + 2.0 } else { ((i % 11) as f64 - 5.0) * 0.1 }
+                    if r == c {
+                        n as f64 + 2.0
+                    } else {
+                        ((i % 11) as f64 - 5.0) * 0.1
+                    }
                 })
                 .collect();
             let b: Vec<f64> = (0..batch * rw).map(|i| (i % 19) as f64 - 9.0).collect();
@@ -11573,8 +12856,13 @@ mod tests {
                 let lanes: Vec<Vec<f64>> = (0..batch)
                     .into_par_iter()
                     .map(|i| {
-                        super::solve_nxn_multi(&a[i * ms..(i + 1) * ms], &b[i * rw..(i + 1) * rw], n, m)
-                            .unwrap()
+                        super::solve_nxn_multi(
+                            &a[i * ms..(i + 1) * ms],
+                            &b[i * rw..(i + 1) * rw],
+                            n,
+                            m,
+                        )
+                        .unwrap()
                     })
                     .collect();
                 let mut out = Vec::with_capacity(batch * rw);
@@ -11584,7 +12872,9 @@ mod tests {
                 out.len()
             };
             let new = || -> usize {
-                super::batch_solve(&a, &a_shape, &b, &b_shape, false).unwrap().len()
+                super::batch_solve(&a, &a_shape, &b, &b_shape, false)
+                    .unwrap()
+                    .len()
             };
             let _ = old();
             let _ = new();
@@ -11641,6 +12931,94 @@ mod tests {
     fn det_empty_matrix_returns_one() {
         let d0 = det_nxn(&[], 0).expect("empty det");
         assert_eq!(d0, 1.0);
+    }
+
+    #[test]
+    fn det_exact_upper_triangular_matches_general_lu_bits() {
+        for n in [1usize, 2, 7, 64] {
+            let mut matrix = vec![0.0; n * n];
+            for row in 0..n {
+                let magnitude = 1.0 + (row % 7) as f64 * 0.001;
+                matrix[row * n + row] = if row % 2 == 0 { magnitude } else { -magnitude };
+                for col in (row + 1)..n {
+                    matrix[row * n + col] = ((row * 17 + col * 13) % 97) as f64 / 101.0 - 0.4;
+                }
+            }
+
+            let former = det_nxn_general_control(&matrix, n).expect("general determinant");
+            let actual = det_nxn(&matrix, n).expect("structured determinant");
+            assert_eq!(actual.to_bits(), former.to_bits(), "n={n}");
+        }
+    }
+
+    #[test]
+    fn det_exact_lower_triangular_no_pivot_matches_general_lu_bits() {
+        for n in [2usize, 7, 64] {
+            let mut matrix = vec![0.0; n * n];
+            for row in 0..n {
+                let magnitude = 2.0 + (row % 7) as f64 * 0.001;
+                matrix[row * n + row] = if row % 2 == 0 { magnitude } else { -magnitude };
+                for col in 0..row {
+                    matrix[row * n + col] = ((row * 17 + col * 13) % 97) as f64 / 101.0 - 0.4;
+                }
+            }
+
+            let former = det_nxn_general_control(&matrix, n).expect("general determinant");
+            let actual = det_nxn(&matrix, n).expect("structured determinant");
+            assert_eq!(actual.to_bits(), former.to_bits(), "n={n}");
+        }
+
+        let pivoting = [1.0, 0.0, 2.0, 3.0];
+        assert!(super::det_nxn_exact_lower_triangular_no_pivot(&pivoting, 2).is_none());
+        let negative_zero_upper = [2.0, -0.0, 0.25, 3.0];
+        assert!(super::det_nxn_exact_lower_triangular_no_pivot(&negative_zero_upper, 2).is_none());
+    }
+
+    #[test]
+    fn slogdet_exact_upper_triangular_matches_general_lu_bits() {
+        for n in [1usize, 2, 7, 64] {
+            let mut matrix = vec![0.0; n * n];
+            for row in 0..n {
+                let magnitude = 1.0 + (row % 7) as f64 * 0.001;
+                matrix[row * n + row] = if row % 2 == 0 { magnitude } else { -magnitude };
+                for col in (row + 1)..n {
+                    matrix[row * n + col] = ((row * 17 + col * 13) % 97) as f64 / 101.0 - 0.4;
+                }
+            }
+
+            let former =
+                super::slogdet_nxn_general_control(&matrix, n).expect("general sign and logdet");
+            let actual = slogdet_nxn(&matrix, n).expect("structured sign and logdet");
+            assert_eq!(actual.0.to_bits(), former.0.to_bits(), "sign n={n}");
+            assert_eq!(actual.1.to_bits(), former.1.to_bits(), "logdet n={n}");
+        }
+    }
+
+    #[test]
+    fn slogdet_exact_lower_triangular_no_pivot_matches_general_lu_bits() {
+        for n in [2usize, 7, 64] {
+            let mut matrix = vec![0.0; n * n];
+            for row in 0..n {
+                let magnitude = 2.0 + (row % 7) as f64 * 0.001;
+                matrix[row * n + row] = if row % 2 == 0 { magnitude } else { -magnitude };
+                for col in 0..row {
+                    matrix[row * n + col] = ((row * 17 + col * 13) % 97) as f64 / 101.0 - 0.4;
+                }
+            }
+
+            let former =
+                super::slogdet_nxn_general_control(&matrix, n).expect("general sign and logdet");
+            let actual = slogdet_nxn(&matrix, n).expect("structured sign and logdet");
+            assert_eq!(actual.0.to_bits(), former.0.to_bits(), "sign n={n}");
+            assert_eq!(actual.1.to_bits(), former.1.to_bits(), "logdet n={n}");
+        }
+
+        let pivoting = [1.0, 0.0, 2.0, 3.0];
+        assert!(super::slogdet_nxn_exact_lower_triangular_no_pivot(&pivoting, 2).is_none());
+        let negative_zero_upper = [2.0, -0.0, 0.25, 3.0];
+        assert!(
+            super::slogdet_nxn_exact_lower_triangular_no_pivot(&negative_zero_upper, 2).is_none()
+        );
     }
 
     #[test]
@@ -11714,7 +13092,8 @@ mod tests {
             let got = super::batch_cholesky(&a, &shape).expect("batch_cholesky");
             let mut reference = Vec::with_capacity(batch * ms);
             for lane in 0..batch {
-                let l = super::cholesky_nxn(&a[lane * ms..(lane + 1) * ms], n).expect("cholesky_nxn");
+                let l =
+                    super::cholesky_nxn(&a[lane * ms..(lane + 1) * ms], n).expect("cholesky_nxn");
                 reference.extend_from_slice(&l);
             }
             assert_eq!(got.len(), reference.len());
@@ -11784,7 +13163,11 @@ mod tests {
                 .map(|i| {
                     let cell = i % ms;
                     let (r, c) = (cell / n, cell % n);
-                    if r == c { n as f64 + 2.0 } else { ((i % 11) as f64 - 5.0) * 0.1 }
+                    if r == c {
+                        n as f64 + 2.0
+                    } else {
+                        ((i % 11) as f64 - 5.0) * 0.1
+                    }
                 })
                 .collect();
             let shape = [batch, n, n];
@@ -11946,7 +13329,9 @@ mod tests {
         let mut a = vec![0.0f64; n * n];
         let mut state = 0x00c0_ffee_1234_5678_u64;
         for v in a.iter_mut() {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             *v = ((state >> 11) as f64 / (1u64 << 53) as f64) - 0.5;
         }
         for i in 0..n {
@@ -12461,8 +13846,7 @@ mod tests {
     #[test]
     fn exact_symmetric_tridiagonal_values_accepts_only_exact_band() {
         let tri = [
-            2.0, -1.0, 0.0, 0.0, -1.0, 2.0, -1.0, 0.0, 0.0, -1.0, 2.0, -1.0, 0.0,
-            0.0, -1.0, 2.0,
+            2.0, -1.0, 0.0, 0.0, -1.0, 2.0, -1.0, 0.0, 0.0, -1.0, 2.0, -1.0, 0.0, 0.0, -1.0, 2.0,
         ];
         let (d, e) = super::exact_symmetric_tridiagonal_values(&tri, 4).expect("tridiagonal");
         assert_eq!(d, vec![2.0, 2.0, 2.0, 2.0]);
@@ -13659,7 +15043,9 @@ mod tests {
                 d[hi] - e[hi - 1].abs()
             } else {
                 let sign = if delta >= 0.0 { 1.0 } else { -1.0 };
-                d[hi] - e[hi - 1] * e[hi - 1] / (delta + sign * (delta * delta + e[hi - 1] * e[hi - 1]).sqrt())
+                d[hi]
+                    - e[hi - 1] * e[hi - 1]
+                        / (delta + sign * (delta * delta + e[hi - 1] * e[hi - 1]).sqrt())
             };
             let mut x = d[lo] - shift;
             let mut z = e[lo];
@@ -13724,7 +15110,10 @@ mod tests {
                 assert!(maxq < 1e-12, "Q mismatch {maxq:e}");
             }
             let (o, nn) = (med(to), med(tn));
-            println!("n={n:5} stride-n={o:9.2}ms transposed={nn:9.2}ms speedup={:.2}x", o / nn);
+            println!(
+                "n={n:5} stride-n={o:9.2}ms transposed={nn:9.2}ms speedup={:.2}x",
+                o / nn
+            );
         }
     }
 
@@ -13825,7 +15214,11 @@ mod tests {
                 let sd = disc.sqrt();
                 let l1 = (trace + sd) / 2.0;
                 let l2 = (trace - sd) / 2.0;
-                if (l1 - a22).abs() < (l2 - a22).abs() { l1 } else { l2 }
+                if (l1 - a22).abs() < (l2 - a22).abs() {
+                    l1
+                } else {
+                    l2
+                }
             } else if iter % 10 == 0 {
                 a22 + h[(p - 1) * n + (p - 2)].abs()
             } else {
@@ -13838,7 +15231,11 @@ mod tests {
                 let ff = h[k * n + k];
                 let gg = h[(k + 1) * n + k];
                 let r = ff.hypot(gg);
-                let (c, s) = if r > 0.0 { (ff / r, gg / r) } else { (1.0, 0.0) };
+                let (c, s) = if r > 0.0 {
+                    (ff / r, gg / r)
+                } else {
+                    (1.0, 0.0)
+                };
                 cos_vals[k] = c;
                 sin_vals[k] = s;
                 for j in k..n {
@@ -13871,7 +15268,9 @@ mod tests {
             let mut s = seed | 1;
             (0..n * n)
                 .map(|_| {
-                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    s = s
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
                     ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
                 })
                 .collect()
@@ -13894,7 +15293,11 @@ mod tests {
             let mut ed = super::extract_schur_eigenvalues(&hd, n);
             es.sort_by(|a, b| a.partial_cmp(b).unwrap());
             ed.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let maxd = es.iter().zip(&ed).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+            let maxd = es
+                .iter()
+                .zip(&ed)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f64, f64::max);
             assert!(maxd < 1e-6, "eigenvalue mismatch {maxd:e} (n={n})");
             for _ in 0..it {
                 let mut h1 = h0.clone();
@@ -13906,7 +15309,12 @@ mod tests {
                 super::hessenberg_qr_iter(&mut h2, None, n);
                 tn.push(t.elapsed().as_secs_f64() * 1e3);
             }
-            println!("n={n:5} single-shift={:9.2}ms double-shift={:9.2}ms speedup={:.2}x", med(to.clone()), med(tn.clone()), med(to) / med(tn));
+            println!(
+                "n={n:5} single-shift={:9.2}ms double-shift={:9.2}ms speedup={:.2}x",
+                med(to.clone()),
+                med(tn.clone()),
+                med(to) / med(tn)
+            );
         }
     }
 
@@ -13985,7 +15393,9 @@ mod tests {
             let mut s = seed | 1;
             (0..n * n)
                 .map(|_| {
-                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    s = s
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
                     ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
                 })
                 .collect()
@@ -13995,7 +15405,11 @@ mod tests {
             // bit-exactness of the new contiguous left apply vs the stride-n ref.
             let hs = hessenberg_reduce_stridn_ref(&a, n);
             let (hn, _q) = super::hessenberg_reduce(&a, n);
-            let maxd = hs.iter().zip(&hn).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+            let maxd = hs
+                .iter()
+                .zip(&hn)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f64, f64::max);
             assert!(maxd == 0.0, "Hessenberg not bit-exact: {maxd:e} (n={n})");
             let med = |mut xs: Vec<f64>| {
                 xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -14013,7 +15427,12 @@ mod tests {
                 std::hint::black_box(&r);
                 tn.push(t.elapsed().as_secs_f64() * 1e3);
             }
-            println!("n={n:5} stride-n={:9.2}ms contiguous={:9.2}ms speedup={:.2}x", med(to.clone()), med(tn.clone()), med(to) / med(tn));
+            println!(
+                "n={n:5} stride-n={:9.2}ms contiguous={:9.2}ms speedup={:.2}x",
+                med(to.clone()),
+                med(tn.clone()),
+                med(to) / med(tn)
+            );
         }
     }
 
@@ -14024,12 +15443,14 @@ mod tests {
         let threads = rayon::current_num_threads();
         if m >= 128 && k >= 128 && n >= 128 && threads >= 2 {
             let band_rows = m.div_ceil(threads * 4).max(1);
-            c.par_chunks_mut(band_rows * n).enumerate().for_each(|(bi, c_band)| {
-                let row_start = bi * band_rows;
-                let rows = c_band.len() / n;
-                let a_band = &a[row_start * k..row_start * k + rows * k];
-                super::packed_gemm_serial(a_band, b, rows, k, n, c_band);
-            });
+            c.par_chunks_mut(band_rows * n)
+                .enumerate()
+                .for_each(|(bi, c_band)| {
+                    let row_start = bi * band_rows;
+                    let rows = c_band.len() / n;
+                    let a_band = &a[row_start * k..row_start * k + rows * k];
+                    super::packed_gemm_serial(a_band, b, rows, k, n, c_band);
+                });
         } else {
             super::packed_gemm_serial(a, b, m, k, n, &mut c);
         }
@@ -14044,7 +15465,9 @@ mod tests {
             let mut s = seed | 1;
             (0..rows * cols)
                 .map(|_| {
-                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    s = s
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
                     ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
                 })
                 .collect()
@@ -14055,8 +15478,15 @@ mod tests {
             // bit-exactness of aligned vs misaligned (same serial kernel).
             let ca = super::packed_gemm(&a, &b, n, n, n);
             let cm = packed_gemm_misaligned(&a, &b, n, n, n);
-            let maxd = ca.iter().zip(&cm).map(|(x, y)| (x - y).abs()).fold(0.0f64, f64::max);
-            assert!(maxd == 0.0, "GEMM not bit-exact across band split: {maxd:e}");
+            let maxd = ca
+                .iter()
+                .zip(&cm)
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f64, f64::max);
+            assert!(
+                maxd == 0.0,
+                "GEMM not bit-exact across band split: {maxd:e}"
+            );
             let med = |mut xs: Vec<f64>| {
                 xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 xs[xs.len() / 2]
@@ -14073,7 +15503,12 @@ mod tests {
                 std::hint::black_box(&r);
                 tn.push(t.elapsed().as_secs_f64() * 1e3);
             }
-            println!("n={n:5} misaligned={:9.2}ms aligned={:9.2}ms speedup={:.2}x", med(to.clone()), med(tn.clone()), med(to) / med(tn));
+            println!(
+                "n={n:5} misaligned={:9.2}ms aligned={:9.2}ms speedup={:.2}x",
+                med(to.clone()),
+                med(tn.clone()),
+                med(to) / med(tn)
+            );
         }
     }
 
@@ -14092,9 +15527,18 @@ mod tests {
                 .then(x.1.partial_cmp(&y.1).unwrap())
         });
         // Expected sorted by (re, im): (0,-1), (0,1), (2,0).
-        assert!((pairs[0].0 - 0.0).abs() < 1e-9 && (pairs[0].1 + 1.0).abs() < 1e-9, "{pairs:?}");
-        assert!((pairs[1].0 - 0.0).abs() < 1e-9 && (pairs[1].1 - 1.0).abs() < 1e-9, "{pairs:?}");
-        assert!((pairs[2].0 - 2.0).abs() < 1e-9 && (pairs[2].1 - 0.0).abs() < 1e-9, "{pairs:?}");
+        assert!(
+            (pairs[0].0 - 0.0).abs() < 1e-9 && (pairs[0].1 + 1.0).abs() < 1e-9,
+            "{pairs:?}"
+        );
+        assert!(
+            (pairs[1].0 - 0.0).abs() < 1e-9 && (pairs[1].1 - 1.0).abs() < 1e-9,
+            "{pairs:?}"
+        );
+        assert!(
+            (pairs[2].0 - 2.0).abs() < 1e-9 && (pairs[2].1 - 0.0).abs() < 1e-9,
+            "{pairs:?}"
+        );
     }
 
     // Inline unblocked two-sided tridiagonalization WITH Q accumulation, for the
@@ -14119,7 +15563,11 @@ mod tests {
             if cn < f64::EPSILON * work[j * n + j].abs().max(1.0) {
                 continue;
             }
-            let sign = if work[(j + 1) * n + j] >= 0.0 { 1.0 } else { -1.0 };
+            let sign = if work[(j + 1) * n + j] >= 0.0 {
+                1.0
+            } else {
+                -1.0
+            };
             for vi in &mut v[..=j] {
                 *vi = 0.0;
             }
@@ -14200,7 +15648,12 @@ mod tests {
                 std::hint::black_box(&r2);
                 tn.push(t.elapsed().as_secs_f64() * 1e3);
             }
-            println!("n={n:5} unblocked-Q={:9.2}ms blocked-Q={:9.2}ms speedup={:.2}x", med(to.clone()), med(tn.clone()), med(to) / med(tn));
+            println!(
+                "n={n:5} unblocked-Q={:9.2}ms blocked-Q={:9.2}ms speedup={:.2}x",
+                med(to.clone()),
+                med(tn.clone()),
+                med(to) / med(tn)
+            );
         }
     }
 
@@ -14235,7 +15688,8 @@ mod tests {
                         r += q[i * n + k] * tqt[k * n + j];
                         o += q[k * n + i] * q[k * n + j];
                     }
-                    max_recon = max_recon.max((r - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
+                    max_recon =
+                        max_recon.max((r - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
                     let t = if i == j { 1.0 } else { 0.0 };
                     max_orth = max_orth.max((o - t).abs());
                 }
@@ -14432,15 +15886,7 @@ mod tests {
             }
 
             let mut triangular = work;
-            super::sbr_apply_symmetric_rank2k_update(
-                &mut triangular,
-                n,
-                active,
-                h,
-                nb,
-                &vv,
-                &ww,
-            );
+            super::sbr_apply_symmetric_rank2k_update(&mut triangular, n, active, h, nb, &vv, &ww);
             for row in 0..h {
                 for col in 0..h {
                     let idx = (active + row) * n + active + col;
@@ -14552,7 +15998,11 @@ mod tests {
         assert_eq!(q.len(), n * n);
         let unpacked = super::unpack_lower_band(&lower_band, n, bandwidth);
         for (idx, (&dense, &packed)) in dense_band.iter().zip(&unpacked).enumerate() {
-            assert_eq!(dense.to_bits(), packed.to_bits(), "compact band drift at flat index {idx}");
+            assert_eq!(
+                dense.to_bits(),
+                packed.to_bits(),
+                "compact band drift at flat index {idx}"
+            );
         }
 
         let mut max_outside = 0.0f64;
@@ -14600,7 +16050,10 @@ mod tests {
         let reduced = eigvalsh_nxn(&dense_band, n).expect("band eigvalsh");
         for (idx, (&lhs, &rhs)) in original.iter().zip(&reduced).enumerate() {
             let err = (lhs - rhs).abs() / (1.0 + lhs.abs().max(rhs.abs()));
-            assert!(err < 2e-8, "eigval {idx} drifted: {lhs} vs {rhs}, rel {err:e}");
+            assert!(
+                err < 2e-8,
+                "eigval {idx} drifted: {lhs} vs {rhs}, rel {err:e}"
+            );
         }
     }
 
@@ -14689,7 +16142,10 @@ mod tests {
             }
             let (u, b) = (med(tu2), med(tb));
             let _ = med(tu);
-            println!("n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x", u / b);
+            println!(
+                "n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x",
+                u / b
+            );
         }
     }
 
@@ -14711,7 +16167,11 @@ mod tests {
             if cn < f64::EPSILON * work[j * n + j].abs().max(1.0) {
                 continue;
             }
-            let sign = if work[(j + 1) * n + j] >= 0.0 { 1.0 } else { -1.0 };
+            let sign = if work[(j + 1) * n + j] >= 0.0 {
+                1.0
+            } else {
+                -1.0
+            };
             for vi in &mut v[..=j] {
                 *vi = 0.0;
             }
@@ -14779,7 +16239,8 @@ mod tests {
                     for k in 0..n {
                         s += qb[i * n + k] * rb[k * n + j];
                     }
-                    max_recon = max_recon.max((s - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
+                    max_recon =
+                        max_recon.max((s - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
                     // Q^T·Q
                     let mut o = 0.0;
                     for k in 0..n {
@@ -14787,8 +16248,10 @@ mod tests {
                     }
                     let target = if i == j { 1.0 } else { 0.0 };
                     max_orth = max_orth.max((o - target).abs());
-                    max_q = max_q.max((qb[i * n + j] - qu[i * n + j]).abs() / (1.0 + qu[i * n + j].abs()));
-                    max_r = max_r.max((rb[i * n + j] - ru[i * n + j]).abs() / (1.0 + ru[i * n + j].abs()));
+                    max_q = max_q
+                        .max((qb[i * n + j] - qu[i * n + j]).abs() / (1.0 + qu[i * n + j].abs()));
+                    max_r = max_r
+                        .max((rb[i * n + j] - ru[i * n + j]).abs() / (1.0 + ru[i * n + j].abs()));
                 }
             }
             assert!(max_recon < 1e-9, "Q·R=A err {max_recon:e} (n={n})");
@@ -14814,10 +16277,18 @@ mod tests {
             let (q, r) = pool.install(|| super::qr_nxn(&a, n).expect("qr"));
             let (qref, rref) = qr_unblocked_ref(&a, n);
             for (p, s) in q.iter().zip(&qref) {
-                assert_eq!(p.to_bits(), s.to_bits(), "Q drifted from serial ref (n={n})");
+                assert_eq!(
+                    p.to_bits(),
+                    s.to_bits(),
+                    "Q drifted from serial ref (n={n})"
+                );
             }
             for (p, s) in r.iter().zip(&rref) {
-                assert_eq!(p.to_bits(), s.to_bits(), "R drifted from serial ref (n={n})");
+                assert_eq!(
+                    p.to_bits(),
+                    s.to_bits(),
+                    "R drifted from serial ref (n={n})"
+                );
             }
         }
 
@@ -14945,7 +16416,10 @@ mod tests {
                 tb.push(t.elapsed().as_secs_f64() * 1e3);
             }
             let (u, b) = (med(tu), med(tb));
-            println!("n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x", u / b);
+            println!(
+                "n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x",
+                u / b
+            );
         }
     }
 
@@ -15019,7 +16493,10 @@ mod tests {
             for idx in 0..n * m {
                 max_diff = max_diff.max((xb[idx] - xu[idx]).abs() / (1.0 + xu[idx].abs()));
             }
-            assert!(max_diff < 1e-9, "blocked vs unblocked TRSM err {max_diff:e} (n={n})");
+            assert!(
+                max_diff < 1e-9,
+                "blocked vs unblocked TRSM err {max_diff:e} (n={n})"
+            );
             // A·X must reconstruct B (identity).
             let mut max_recon = 0.0f64;
             for i in 0..n {
@@ -15032,7 +16509,10 @@ mod tests {
                     max_recon = max_recon.max((s - target).abs());
                 }
             }
-            assert!(max_recon < 1e-7, "A·X=I reconstruction err {max_recon:e} (n={n})");
+            assert!(
+                max_recon < 1e-7,
+                "A·X=I reconstruction err {max_recon:e} (n={n})"
+            );
         }
     }
 
@@ -15184,7 +16664,10 @@ mod tests {
                 tb.push(t.elapsed().as_secs_f64() * 1e3);
             }
             let (u, b) = (med(tu), med(tb));
-            println!("n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x", u / b);
+            println!(
+                "n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x",
+                u / b
+            );
         }
     }
 
@@ -15210,13 +16693,20 @@ mod tests {
                     for k in 0..=j {
                         s += lb[i * n + k] * lb[j * n + k];
                     }
-                    max_recon = max_recon.max((s - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
-                    max_diff =
-                        max_diff.max((lb[i * n + j] - lr[i * n + j]).abs() / (1.0 + lr[i * n + j].abs()));
+                    max_recon =
+                        max_recon.max((s - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
+                    max_diff = max_diff
+                        .max((lb[i * n + j] - lr[i * n + j]).abs() / (1.0 + lr[i * n + j].abs()));
                 }
             }
-            assert!(max_recon < 1e-9, "blocked L·L^T=A err {max_recon:e} (n={n})");
-            assert!(max_diff < 1e-9, "blocked vs unblocked err {max_diff:e} (n={n})");
+            assert!(
+                max_recon < 1e-9,
+                "blocked L·L^T=A err {max_recon:e} (n={n})"
+            );
+            assert!(
+                max_diff < 1e-9,
+                "blocked vs unblocked err {max_diff:e} (n={n})"
+            );
         }
     }
 
@@ -15234,8 +16724,7 @@ mod tests {
                 for k in 0..=j {
                     s += l[i * n + k] * l[j * n + k];
                 }
-                max_recon =
-                    max_recon.max((s - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
+                max_recon = max_recon.max((s - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
             }
         }
         assert!(
@@ -15274,8 +16763,7 @@ mod tests {
                 for k in 0..=j {
                     s += l[i * n + k] * l[j * n + k];
                 }
-                max_recon =
-                    max_recon.max((s - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
+                max_recon = max_recon.max((s - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
             }
         }
         assert!(
@@ -15324,7 +16812,10 @@ mod tests {
                 tb.push(t.elapsed().as_secs_f64() * 1e3);
             }
             let (u, b) = (med(tu), med(tb));
-            println!("n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x", u / b);
+            println!(
+                "n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x",
+                u / b
+            );
         }
     }
 
@@ -15389,7 +16880,10 @@ mod tests {
             let thr = (n as f64) * f64::EPSILON * max_abs;
             let (lu, perm, _sign) = super::lu_decompose_blocked(&a, n, thr).expect("blocked lu");
             let (_lu_ref, perm_ref) = lu_unblocked_ref(&a, n);
-            assert_eq!(perm, perm_ref, "pivot sequence must match unblocked (n={n})");
+            assert_eq!(
+                perm, perm_ref,
+                "pivot sequence must match unblocked (n={n})"
+            );
             let mut max_err = 0.0f64;
             for i in 0..n {
                 for j in 0..n {
@@ -15409,7 +16903,10 @@ mod tests {
                     max_err = max_err.max((s - pa).abs() / (1.0 + pa.abs()));
                 }
             }
-            assert!(max_err < 1e-9, "blocked P·A=L·U reconstruction err {max_err:e} (n={n})");
+            assert!(
+                max_err < 1e-9,
+                "blocked P·A=L·U reconstruction err {max_err:e} (n={n})"
+            );
         }
     }
 
@@ -15491,7 +16988,10 @@ mod tests {
                 tb.push(t.elapsed().as_secs_f64() * 1e3);
             }
             let (u, b) = (med(tu), med(tb));
-            println!("n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x", u / b);
+            println!(
+                "n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x",
+                u / b
+            );
         }
     }
 
@@ -15757,8 +17257,8 @@ mod tests {
     #[test]
     fn cond_p_spectral_symmetric_matches_svd_reference() {
         let a = [
-            5.0, 0.25, -0.5, 0.75, 0.25, 4.0, 0.125, -0.25, -0.5, 0.125, 3.0, 0.5,
-            0.75, -0.25, 0.5, 2.0,
+            5.0, 0.25, -0.5, 0.75, 0.25, 4.0, 0.125, -0.25, -0.5, 0.125, 3.0, 0.5, 0.75, -0.25,
+            0.5, 2.0,
         ];
         let fast = cond_nxn(&a, 4).unwrap();
         let sigmas = svd_nxn(&a, 4).unwrap();
@@ -15967,6 +17467,34 @@ mod tests {
         let b = [1.0, 2.0, 3.0, 4.0];
         let result = kron_nxn(&a, 1, 1, &b, 2, 2).unwrap();
         assert_eq!(result, vec![3.0, 6.0, 9.0, 12.0]);
+
+        // [1, 2; 3, 4] ⊗ [3] takes the scalar-RHS scaling path.
+        let result = kron_nxn(&b, 2, 2, &a, 1, 1).unwrap();
+        assert_eq!(result, vec![3.0, 6.0, 9.0, 12.0]);
+    }
+
+    #[test]
+    fn kron_scalar_lhs_fast_path_matches_generic_product_bits() {
+        let a = [-0.75];
+        let b = [
+            -0.0,
+            0.0,
+            1.25,
+            f64::from_bits(0x7ff8_0000_0000_0123),
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        let got = kron_nxn(&a, 1, 1, &b, 2, 3).unwrap();
+        let mut want = vec![0.0; b.len()];
+        for k in 0..2 {
+            for l in 0..3 {
+                want[k * 3 + l] = a[0] * b[k * 3 + l];
+            }
+        }
+        assert_eq!(
+            got.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            want.iter().map(|value| value.to_bits()).collect::<Vec<_>>()
+        );
     }
 
     // ── multi_dot tests ──
@@ -17376,6 +18904,20 @@ mod tests {
     }
 
     #[test]
+    fn batch_solve_broadcast_a_zero_column_matrix_rhs_is_empty() {
+        let n = 16usize;
+        let batch = 3usize;
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            a[i * n + i] = 1.0;
+        }
+
+        let x =
+            batch_solve(&a, &[n, n], &[], &[batch, n, 0], false).expect("zero-column matrix rhs");
+        assert!(x.is_empty());
+    }
+
+    #[test]
     fn batch_eigvalsh_stacked() {
         // 2 stacked 3x3 symmetric matrices
         let a1 = [2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 5.0]; // eigs: 5, 3, 2
@@ -18442,8 +19984,7 @@ except Exception as exc:
             let mat_size = n * n;
             (0..batch)
                 .map(|b| {
-                    trace_nxn(&data[b * mat_size..(b + 1) * mat_size], n)
-                        .expect("reference trace")
+                    trace_nxn(&data[b * mat_size..(b + 1) * mat_size], n).expect("reference trace")
                 })
                 .collect()
         }
@@ -18644,5 +20185,294 @@ except Exception as exc:
                 orig
             );
         }
+    }
+
+    /// Deterministic tall-skinny operand (SplitMix64; no RNG dep, no clock).
+    fn tsqr_test_matrix(rows: usize, cols: usize, seed: u64) -> Vec<f64> {
+        let mut state = seed | 1;
+        (0..rows * cols)
+            .map(|_| {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                (z >> 11) as f64 / (1u64 << 52) as f64 - 1.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tsqr_r_matches_qr_mxn_up_to_row_sign() {
+        // Neither LAPACK nor Householder pins R's row signs, so compare with a
+        // per-row sign normalization keyed off the diagonal.
+        for (m, n) in [(64usize, 8usize), (256, 16), (513, 7)] {
+            let a = tsqr_test_matrix(m, n, 0xA11C_E501);
+            let (_, reference) = qr_mxn(&a, m, n).expect("qr_mxn reference");
+            let r = tsqr_r(&a, m, n).expect("tsqr_r");
+            for i in 0..n {
+                let flip = if reference[i * n + i].signum() == r[i * n + i].signum() {
+                    1.0
+                } else {
+                    -1.0
+                };
+                for j in 0..n {
+                    let expected = reference[i * n + j];
+                    let actual = flip * r[i * n + j];
+                    assert!(
+                        (expected - actual).abs() < 1e-8,
+                        "tsqr_r({m}x{n}) row {i} col {j}: {actual} vs {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tsqr_r_is_upper_triangular_and_preserves_gram() {
+        // RᵀR == AᵀA determines R up to row signs for full-rank A and never
+        // forms Q, so it independently validates the whole reduction tree.
+        let (m, n) = (4096usize, 12usize);
+        let a = tsqr_test_matrix(m, n, 0xBEEF_0001);
+        let r = tsqr_r(&a, m, n).expect("tsqr_r");
+
+        for i in 0..n {
+            for j in 0..i {
+                assert_eq!(r[i * n + j], 0.0, "R not upper triangular at ({i},{j})");
+            }
+        }
+
+        let mut ata = vec![0.0f64; n * n];
+        for row in 0..m {
+            for i in 0..n {
+                let av = a[row * n + i];
+                for j in 0..n {
+                    ata[i * n + j] += av * a[row * n + j];
+                }
+            }
+        }
+        let mut rtr = vec![0.0f64; n * n];
+        for row in 0..n {
+            for i in 0..n {
+                let rv = r[row * n + i];
+                for j in 0..n {
+                    rtr[i * n + j] += rv * r[row * n + j];
+                }
+            }
+        }
+        let scale = ata.iter().fold(0.0f64, |acc, v| acc.max(v.abs())).max(1.0);
+        for idx in 0..n * n {
+            assert!(
+                (ata[idx] - rtr[idx]).abs() <= 1e-9 * scale,
+                "Gram mismatch at {idx}: {} vs {}",
+                ata[idx],
+                rtr[idx]
+            );
+        }
+    }
+
+    #[test]
+    fn tsqr_r_is_deterministic_across_repeated_runs() {
+        // The leaves are parallel but land at fixed indices and the fold is a
+        // sequential binary tree, so the association order - and therefore the
+        // exact bits - must not depend on scheduling.
+        let (m, n) = (20_000usize, 6usize);
+        let a = tsqr_test_matrix(m, n, 0x0D07_0D07);
+        let first = tsqr_r(&a, m, n).expect("tsqr_r");
+        for _ in 0..3 {
+            let again = tsqr_r(&a, m, n).expect("tsqr_r");
+            for (idx, (x, y)) in first.iter().zip(again.iter()).enumerate() {
+                assert_eq!(x.to_bits(), y.to_bits(), "tsqr_r nondeterministic at {idx}");
+            }
+        }
+    }
+
+    #[test]
+    fn tsqr_r_rejects_wide_and_malformed_shapes() {
+        assert!(tsqr_r(&[1.0, 2.0, 3.0, 4.0], 2, 2).is_ok());
+        // Wide (m < n) is not tall-skinny.
+        assert!(tsqr_r(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 2, 3).is_err());
+        // Length must equal m*n.
+        assert!(tsqr_r(&[1.0, 2.0, 3.0], 2, 2).is_err());
+        // Non-finite entries are rejected like the other QR entry points.
+        assert!(tsqr_r(&[1.0, f64::NAN, 3.0, 4.0], 2, 2).is_err());
+    }
+
+    #[test]
+    fn tsqr_qtb_r_is_bit_identical_to_tsqr_r() {
+        // Carrying Qᵀb must not perturb the R reduction by a single bit, across
+        // both the single-block and multi-block (folded) paths.
+        for (m, n, seed) in [
+            (64usize, 8usize, 0x11u64),
+            (4096, 12, 0x22),
+            (20_000, 6, 0x33),
+        ] {
+            let a = tsqr_test_matrix(m, n, seed);
+            let b = tsqr_test_matrix(m, 1, seed ^ 0xFF);
+            let r_only = tsqr_r(&a, m, n).expect("tsqr_r");
+            let (r_qtb, _c) = super::tsqr_qtb(&a, &b, m, n).expect("tsqr_qtb");
+            for (idx, (x, y)) in r_only.iter().zip(r_qtb.iter()).enumerate() {
+                assert_eq!(x.to_bits(), y.to_bits(), "R diverged at {idx} for {m}x{n}");
+            }
+        }
+    }
+
+    #[test]
+    fn lstsq_tsqr_matches_lstsq_svd_full_rank_tall_skinny() {
+        // The whole 4-tuple must be allclose to the SVD path on full-rank
+        // tall-skinny inputs (numpy's own path is SVD, so allclose here == allclose
+        // to numpy). Sizes stay modest here because the lstsq_svd reference builds
+        // a full m×m U (the very cost TSQR avoids); the multi-block TSQR path is
+        // validated cheaply by lstsq_tsqr_multiblock_satisfies_normal_equations.
+        for (m, n, seed) in [
+            (64usize, 8usize, 0xABCD_u64),
+            (300, 8, 0x1234),
+            (1000, 8, 0xBEEF),
+            (400, 12, 0xC0DE),
+            (513, 7, 0x0F0F),
+            (200, 16, 0x7777),
+        ] {
+            let a = tsqr_test_matrix(m, n, seed);
+            let b = tsqr_test_matrix(m, 1, seed ^ 0x5A5A);
+            let (x_svd, res_svd, rank_svd, s_svd) =
+                super::lstsq_svd(&a, &b, m, n, -1.0).expect("lstsq_svd");
+            let (x_t, res_t, rank_t, s_t) =
+                super::lstsq_tsqr(&a, &b, m, n, -1.0).expect("lstsq_tsqr");
+
+            assert_eq!(rank_t, n, "expected full rank for {m}x{n}");
+            assert_eq!(rank_t, rank_svd, "rank mismatch {m}x{n}");
+
+            let xscale = x_svd
+                .iter()
+                .fold(0.0f64, |acc, v| acc.max(v.abs()))
+                .max(1.0);
+            for (i, (t, s)) in x_t.iter().zip(&x_svd).enumerate() {
+                assert!((t - s).abs() <= 1e-7 * xscale, "x[{i}] {m}x{n}: {t} vs {s}");
+            }
+
+            assert_eq!(res_t.len(), res_svd.len(), "residual arity {m}x{n}");
+            if !res_svd.is_empty() {
+                let rscale = res_svd[0].abs().max(1.0);
+                assert!(
+                    (res_t[0] - res_svd[0]).abs() <= 1e-6 * rscale,
+                    "residual {m}x{n}: {} vs {}",
+                    res_t[0],
+                    res_svd[0]
+                );
+            }
+
+            assert_eq!(s_t.len(), s_svd.len(), "singular count {m}x{n}");
+            let sscale = s_svd
+                .iter()
+                .fold(0.0f64, |acc, v| acc.max(v.abs()))
+                .max(1.0);
+            for (i, (t, s)) in s_t.iter().zip(&s_svd).enumerate() {
+                assert!(
+                    (t - s).abs() <= 1e-7 * sscale,
+                    "sigma[{i}] {m}x{n}: {t} vs {s}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lstsq_tsqr_multiblock_satisfies_normal_equations() {
+        // On a large multi-block (m >> TSQR_MIN_LEAF_ROWS) full-rank system the
+        // least-squares solution makes the residual orthogonal to A's columns:
+        // Aᵀ(b - Ax) ≈ 0. This validates the folded Qᵀb path without paying for a
+        // full m×m SVD reference.
+        let (m, n) = (16_384usize, 8usize);
+        let a = tsqr_test_matrix(m, n, 0x5EED_1234);
+        let b = tsqr_test_matrix(m, 1, 0x0B0B_0B0B);
+        let (x, res, rank, _s) = super::lstsq_tsqr(&a, &b, m, n, -1.0).expect("lstsq_tsqr");
+        assert_eq!(rank, n, "expected full rank");
+        assert_eq!(res.len(), 1);
+
+        // resid = b - A x
+        let mut resid = b.clone();
+        for row in 0..m {
+            let mut ax = 0.0;
+            for col in 0..n {
+                ax += a[row * n + col] * x[col];
+            }
+            resid[row] -= ax;
+        }
+        // g = Aᵀ resid should be ~0 at the least-squares solution.
+        let mut g = vec![0.0f64; n];
+        for row in 0..m {
+            let rv = resid[row];
+            for col in 0..n {
+                g[col] += a[row * n + col] * rv;
+            }
+        }
+        let a_norm = a.iter().fold(0.0f64, |acc, v| acc + v * v).sqrt();
+        let b_norm = b.iter().fold(0.0f64, |acc, v| acc + v * v).sqrt();
+        let scale = (a_norm * b_norm).max(1.0);
+        let g_inf = g.iter().fold(0.0f64, |acc, v| acc.max(v.abs()));
+        assert!(
+            g_inf <= 1e-8 * scale,
+            "normal-equations residual too large: {g_inf} (scale {scale})"
+        );
+        // Reported residual equals ‖b - Ax‖² directly.
+        let direct: f64 = resid.iter().map(|v| v * v).sum();
+        let rscale = direct.abs().max(1.0);
+        assert!(
+            (res[0] - direct).abs() <= 1e-9 * rscale,
+            "reported residual {} vs direct {}",
+            res[0],
+            direct
+        );
+    }
+
+    #[test]
+    fn lstsq_tsqr_solves_small_overdetermined_exactly() {
+        // Points (0,1),(1,2),(2,3) lie exactly on y = 1 + 1·x; design columns
+        // [1, x]. The fit is exact, so x = (1, 1) and the residual is ~0.
+        let a = [1.0, 0.0, 1.0, 1.0, 1.0, 2.0];
+        let b = [1.0, 2.0, 3.0];
+        let (x, res, rank, s) = super::lstsq_tsqr(&a, &b, 3, 2, -1.0).expect("lstsq_tsqr");
+        assert_eq!(rank, 2);
+        assert!((x[0] - 1.0).abs() < 1e-10, "intercept {}", x[0]);
+        assert!((x[1] - 1.0).abs() < 1e-10, "slope {}", x[1]);
+        assert_eq!(res.len(), 1);
+        assert!(res[0] < 1e-18, "residual {}", res[0]);
+        assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn lstsq_tsqr_rank_deficient_falls_back_to_svd() {
+        // Column 1 = 2·column 0 -> rank 1 < n = 2. With an explicit rcond that
+        // clearly separates the tiny second singular value, TSQR must defer to
+        // lstsq_svd and return its exact minimum-norm result and rank.
+        let a = [1.0, 2.0, 2.0, 4.0, 3.0, 6.0, 4.0, 8.0];
+        let b = [1.0, 2.0, 2.0, 5.0];
+        let (x_t, res_t, rank_t, s_t) = super::lstsq_tsqr(&a, &b, 4, 2, 1e-6).expect("lstsq_tsqr");
+        let (x_svd, res_svd, rank_svd, s_svd) =
+            super::lstsq_svd(&a, &b, 4, 2, 1e-6).expect("lstsq_svd");
+        assert_eq!(rank_t, 1, "rank-deficient should report rank 1");
+        assert_eq!(rank_t, rank_svd);
+        for (t, s) in x_t.iter().zip(&x_svd) {
+            assert_eq!(
+                t.to_bits(),
+                s.to_bits(),
+                "fallback x must equal lstsq_svd bit for bit"
+            );
+        }
+        assert_eq!(res_t.len(), res_svd.len());
+        assert_eq!(s_t.len(), s_svd.len());
+    }
+
+    #[test]
+    fn tsqr_qtb_and_lstsq_tsqr_reject_malformed_shapes() {
+        // Wide (m < n).
+        assert!(super::tsqr_qtb(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1.0, 2.0], 2, 3).is_err());
+        // b length mismatch.
+        assert!(super::tsqr_qtb(&[1.0, 2.0, 3.0, 4.0], &[1.0], 2, 2).is_err());
+        // Non-finite entries.
+        assert!(
+            super::lstsq_tsqr(&[1.0, f64::INFINITY, 3.0, 4.0], &[1.0, 2.0], 2, 2, -1.0).is_err()
+        );
+        // a length must equal m*n.
+        assert!(super::lstsq_tsqr(&[1.0, 2.0, 3.0], &[1.0, 2.0], 2, 2, -1.0).is_err());
     }
 }

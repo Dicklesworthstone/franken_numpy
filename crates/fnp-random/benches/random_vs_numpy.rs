@@ -335,4 +335,7 @@ criterion_group!(
     bench_pcg64_laplace_vs_numpy,
     bench_pcg64_uint8_full_range_vs_numpy,
 );
-criterion_main!(benches);
+#[path = "../../bench_identity.rs"]
+mod bench_identity;
+
+criterion_main!(bench_identity::report_bench_identity, benches);

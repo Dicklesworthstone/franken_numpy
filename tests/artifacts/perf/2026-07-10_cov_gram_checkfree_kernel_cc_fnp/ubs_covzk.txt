@@ -1,0 +1,25 @@
+║                    UBS: ULTIMATE BUG SCANNER • SARIF FUSION ☄️               ║
+║                                                                              ║
+║                                                                              ║
+║                     Night Owl QA                                             ║
+║                     “We see bugs before you do.”                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+UBS Meta-Runner v5.3.4  2026-07-10 03:38:17
+Project: /data/projects/.scratch/franken_numpy-ccfnp-covzc-20260709
+Format:  text
+Detected: rust
+Scanning rust...
+✗ Module 'rust' timed out after 300s (MODULE_TIMEOUT); partial result recorded.
+Finished rust (300s)
+
+──────── rust ────────
+MODULE_TIMEOUT: rust
+  Scanner module 'rust' timed out after 300s (UBS_MODULE_TIMEOUT) and was terminated; the scan continued with a bounded partial result. A common cause is a build tool such as cargo blocking on a locked target/ directory or on network access. Raise UBS_MODULE_TIMEOUT or investigate the wedge.
+Critical issues: 1
+
+──────── Combined Summary ────────
+Files: 0
+Critical: 1
+Warning: 0
+Info: 0

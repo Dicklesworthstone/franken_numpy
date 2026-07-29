@@ -1,0 +1,72 @@
+Benchmarking python_cov_large_boundary/fnp_cov_rowvar_f64_2000x500
+Benchmarking python_cov_large_boundary/fnp_cov_rowvar_f64_2000x500: Warming up for 1.0000 s
+Benchmarking python_cov_large_boundary/fnp_cov_rowvar_f64_2000x500: Collecting 10 samples in estimated 5.6037 s (275 iterations)
+Benchmarking python_cov_large_boundary/fnp_cov_rowvar_f64_2000x500: Analyzing
+python_cov_large_boundary/fnp_cov_rowvar_f64_2000x500
+                        time:   [19.675 ms 20.062 ms 20.404 ms]
+Benchmarking python_cov_large_boundary/numpy_cov_rowvar_f64_2000x500
+Benchmarking python_cov_large_boundary/numpy_cov_rowvar_f64_2000x500: Warming up for 1.0000 s
+Benchmarking python_cov_large_boundary/numpy_cov_rowvar_f64_2000x500: Collecting 10 samples in estimated 6.6046 s (165 iterations)
+Benchmarking python_cov_large_boundary/numpy_cov_rowvar_f64_2000x500: Analyzing
+python_cov_large_boundary/numpy_cov_rowvar_f64_2000x500
+                        time:   [30.135 ms 33.008 ms 38.691 ms]
+Benchmarking python_cov_large_boundary/fnp_corrcoef_rowvar_f64_2000x500
+Benchmarking python_cov_large_boundary/fnp_corrcoef_rowvar_f64_2000x500: Warming up for 1.0000 s
+Benchmarking python_cov_large_boundary/fnp_corrcoef_rowvar_f64_2000x500: Collecting 10 samples in estimated 5.2946 s (220 iterations)
+Benchmarking python_cov_large_boundary/fnp_corrcoef_rowvar_f64_2000x500: Analyzing
+python_cov_large_boundary/fnp_corrcoef_rowvar_f64_2000x500
+                        time:   [22.836 ms 23.727 ms 24.856 ms]
+Benchmarking python_cov_large_boundary/numpy_corrcoef_rowvar_f64_2000x500
+Benchmarking python_cov_large_boundary/numpy_corrcoef_rowvar_f64_2000x500: Warming up for 1.0000 s
+Benchmarking python_cov_large_boundary/numpy_corrcoef_rowvar_f64_2000x500: Collecting 10 samples in estimated 5.4201 s (165 iterations)
+Benchmarking python_cov_large_boundary/numpy_corrcoef_rowvar_f64_2000x500: Analyzing
+python_cov_large_boundary/numpy_corrcoef_rowvar_f64_2000x500
+                        time:   [32.740 ms 38.777 ms 44.416 ms]
+Benchmarking python_cov_large_boundary/fnp_cov_rowvar_f64_1000x1000
+Benchmarking python_cov_large_boundary/fnp_cov_rowvar_f64_1000x1000: Warming up for 1.0000 s
+Benchmarking python_cov_large_boundary/fnp_cov_rowvar_f64_1000x1000: Collecting 10 samples in estimated 5.0115 s (550 iterations)
+Benchmarking python_cov_large_boundary/fnp_cov_rowvar_f64_1000x1000: Analyzing
+python_cov_large_boundary/fnp_cov_rowvar_f64_1000x1000
+                        time:   [7.5942 ms 7.7436 ms 7.9694 ms]
+Benchmarking python_cov_large_boundary/numpy_cov_rowvar_f64_1000x1000
+Benchmarking python_cov_large_boundary/numpy_cov_rowvar_f64_1000x1000: Warming up for 1.0000 s
+Benchmarking python_cov_large_boundary/numpy_cov_rowvar_f64_1000x1000: Collecting 10 samples in estimated 5.0810 s (275 iterations)
+Benchmarking python_cov_large_boundary/numpy_cov_rowvar_f64_1000x1000: Analyzing
+python_cov_large_boundary/numpy_cov_rowvar_f64_1000x1000
+                        time:   [10.653 ms 15.435 ms 21.412 ms]
+Benchmarking python_cov_large_boundary/fnp_corrcoef_rowvar_f64_1000x1000
+Benchmarking python_cov_large_boundary/fnp_corrcoef_rowvar_f64_1000x1000: Warming up for 1.0000 s
+Benchmarking python_cov_large_boundary/fnp_corrcoef_rowvar_f64_1000x1000: Collecting 10 samples in estimated 5.3502 s (605 iterations)
+Benchmarking python_cov_large_boundary/fnp_corrcoef_rowvar_f64_1000x1000: Analyzing
+python_cov_large_boundary/fnp_corrcoef_rowvar_f64_1000x1000
+                        time:   [8.3251 ms 8.5502 ms 8.7772 ms]
+Benchmarking python_cov_large_boundary/numpy_corrcoef_rowvar_f64_1000x1000
+Benchmarking python_cov_large_boundary/numpy_corrcoef_rowvar_f64_1000x1000: Warming up for 1.0000 s
+Benchmarking python_cov_large_boundary/numpy_corrcoef_rowvar_f64_1000x1000: Collecting 10 samples in estimated 5.2868 s (440 iterations)
+Benchmarking python_cov_large_boundary/numpy_corrcoef_rowvar_f64_1000x1000: Analyzing
+python_cov_large_boundary/numpy_corrcoef_rowvar_f64_1000x1000
+                        time:   [11.437 ms 11.856 ms 12.144 ms]
+Benchmarking python_cov_large_boundary/fnp_cov_rowvar_f64_500x5000
+Benchmarking python_cov_large_boundary/fnp_cov_rowvar_f64_500x5000: Warming up for 1.0000 s
+Benchmarking python_cov_large_boundary/fnp_cov_rowvar_f64_500x5000: Collecting 10 samples in estimated 5.4094 s (330 iterations)
+Benchmarking python_cov_large_boundary/fnp_cov_rowvar_f64_500x5000: Analyzing
+python_cov_large_boundary/fnp_cov_rowvar_f64_500x5000
+                        time:   [16.298 ms 16.791 ms 17.451 ms]
+Benchmarking python_cov_large_boundary/numpy_cov_rowvar_f64_500x5000
+Benchmarking python_cov_large_boundary/numpy_cov_rowvar_f64_500x5000: Warming up for 1.0000 s
+Benchmarking python_cov_large_boundary/numpy_cov_rowvar_f64_500x5000: Collecting 10 samples in estimated 5.3426 s (165 iterations)
+Benchmarking python_cov_large_boundary/numpy_cov_rowvar_f64_500x5000: Analyzing
+python_cov_large_boundary/numpy_cov_rowvar_f64_500x5000
+                        time:   [29.505 ms 29.826 ms 30.408 ms]
+Benchmarking python_cov_large_boundary/fnp_corrcoef_rowvar_f64_500x5000
+Benchmarking python_cov_large_boundary/fnp_corrcoef_rowvar_f64_500x5000: Warming up for 1.0000 s
+Benchmarking python_cov_large_boundary/fnp_corrcoef_rowvar_f64_500x5000: Collecting 10 samples in estimated 5.2597 s (330 iterations)
+Benchmarking python_cov_large_boundary/fnp_corrcoef_rowvar_f64_500x5000: Analyzing
+python_cov_large_boundary/fnp_corrcoef_rowvar_f64_500x5000
+                        time:   [16.472 ms 17.245 ms 18.282 ms]
+Benchmarking python_cov_large_boundary/numpy_corrcoef_rowvar_f64_500x5000
+Benchmarking python_cov_large_boundary/numpy_corrcoef_rowvar_f64_500x5000: Warming up for 1.0000 s
+Benchmarking python_cov_large_boundary/numpy_corrcoef_rowvar_f64_500x5000: Collecting 10 samples in estimated 5.3881 s (165 iterations)
+Benchmarking python_cov_large_boundary/numpy_corrcoef_rowvar_f64_500x5000: Analyzing
+python_cov_large_boundary/numpy_corrcoef_rowvar_f64_500x5000
+                        time:   [30.126 ms 31.046 ms 32.127 ms]

@@ -54,7 +54,8 @@ fn assert_same(label: &str, fnp_res: &Bound<'_, PyAny>, np_res: &Bound<'_, PyAny
     let g_bytes = g.call_method0("tobytes")?.extract::<Vec<u8>>()?;
     let x_bytes = x.call_method0("tobytes")?.extract::<Vec<u8>>()?;
     assert_eq!(
-        g_bytes, x_bytes,
+        g_bytes,
+        x_bytes,
         "{label}: bytes mismatch (fnp={:?} numpy={:?})",
         g.call_method0("tolist")?.str()?.to_string(),
         x.call_method0("tolist")?.str()?.to_string()
@@ -126,7 +127,9 @@ fn integer_overflow_reductions_and_products_match_numpy() {
         }
 
         // ── cross: preserves the promoted integer dtype with wraparound ──
-        for dt in ["int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"] {
+        for dt in [
+            "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+        ] {
             // Values fit int8 (so they construct for every dtype) but their cross
             // component products (e.g. 120*110, 100*90) overflow int8/int16 → wrap.
             let a = np_int_array(py, &numpy, &[120, 100, 3], &[3], dt)?;

@@ -339,6 +339,64 @@ print(np.allclose(fnp_pow, np_pow, rtol=1e-10))
     Ok(())
 }
 
+#[test]
+fn matrix_power_bool_bitpacked_bit_exact_matches_numpy() -> Result<(), String> {
+    // Bool A^n is OR-AND reachability; the binary-exp driver over the bitpacked
+    // bool GEMM must be byte-identical to numpy for every parenthesization-
+    // independent case (semiring associativity), across powers, densities, and
+    // the n<=1 / small-dim / non-square delegates.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(41)
+verdicts = []
+for dens in [0.002, 0.02, 0.3]:
+    for dim in [64, 97, 200]:
+        A = rng.random((dim, dim)) < dens
+        for p in [2, 3, 5, 12, 13]:
+            r = fnp.matrix_power(A, p)
+            e = np.linalg.matrix_power(A, p)
+            if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+                verdicts.append(f"FAIL dens={dens} dim={dim} p={p}")
+# delegates: n=0 identity, n=1 alias-semantics, small dim, non-square error
+A = rng.random((96, 96)) > 0.9
+if fnp.matrix_power(A, 0).tobytes() != np.linalg.matrix_power(A, 0).tobytes():
+    verdicts.append("FAIL n=0")
+if fnp.matrix_power(A, 1).tobytes() != np.linalg.matrix_power(A, 1).tobytes():
+    verdicts.append("FAIL n=1")
+S = rng.random((16, 16)) > 0.5
+if fnp.matrix_power(S, 4).tobytes() != np.linalg.matrix_power(S, 4).tobytes():
+    verdicts.append("FAIL small-dim delegate")
+try:
+    fnp.matrix_power(rng.random((8, 9)) > 0.5, 2)
+    verdicts.append("FAIL non-square must raise")
+except Exception:
+    pass
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.random((1024, 1024)) < 0.005
+tn = best(lambda: np.linalg.matrix_power(W, 13))
+tf = best(lambda: fnp.matrix_power(W, 13))
+print(f"MATPOW_BOOL_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces MATPOW_BOOL_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "bool matrix_power must be bit-identical to numpy incl. delegates: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // svd
 // ─────────────────────────────────────────────────────────────────────────────
@@ -680,4 +738,138 @@ np.linalg.eigvals(a)
         fnp_err, np_err,
         "eigvals on non-square should raise same error as numpy"
     );
+}
+
+#[test]
+fn int_matrix_power_native_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // numpy integer matrix_power = repeated naive int matmul (no BLAS). The native
+    // binary-exp parallel GEMM must be byte-identical (Z/2^w ring assoc) incl. overflow
+    // wrap, across powers and int widths.
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(19)
+ok = True
+for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32]:
+    M = rng.integers(-3, 4, (96, 96)).astype(dt)
+    for p in [2, 3, 5, 8, 13]:
+        r = fnp.matrix_power(M, p); e = np.linalg.matrix_power(M, p)
+        ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# explicit overflow wrap (int64, values grow fast)
+M = rng.integers(100000, 200000, (80, 80)).astype(np.int64)
+for p in [2, 4, 7]:
+    ok = ok and fnp.matrix_power(M, p).tobytes() == np.linalg.matrix_power(M, p).tobytes()
+# n==1 and n==0 still match (delegated paths)
+M = rng.integers(-5, 5, (70, 70)).astype(np.int64)
+ok = ok and fnp.matrix_power(M, 1).tobytes() == np.linalg.matrix_power(M, 1).tobytes()
+ok = ok and fnp.matrix_power(M, 0).tobytes() == np.linalg.matrix_power(M, 0).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native integer matrix_power must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn f16_multi_dot_three_chain_bit_exact() -> Result<(), String> {
+    // f16 3-array multi_dot: numpy's _multi_dot_three order rule (documented
+    // cost arithmetic, byte-stable on numpy 2.2.4/2.3.5/2.4.3/2.4.6) + matmul
+    // pairs. fnp replicates the rule and routes both pairs through the
+    // shipped byte-matched f16 matmul kernel. Shapes exercise BOTH orders,
+    // MR tails, and the below-gate fallback.
+    let script = fnp_script(
+        r#"
+verdicts = []
+rng = np.random.default_rng(20260715)
+for (p0, p1, p2, p3) in ((96, 96, 96, 96), (24, 8, 400, 12), (12, 400, 8, 24), (130, 64, 96, 70), (65, 33, 129, 17)):
+    a = (rng.standard_normal((p0, p1)) * 0.3).astype(np.float16)
+    b = (rng.standard_normal((p1, p2)) * 0.3).astype(np.float16)
+    c = (rng.standard_normal((p2, p3)) * 0.3).astype(np.float16)
+    r = fnp.multi_dot([a, b, c]); e = np.linalg.multi_dot([a, b, c])
+    if r.dtype != e.dtype or r.shape != e.shape:
+        verdicts.append(f"FAIL ({p0},{p1},{p2},{p3}) shape/dtype")
+    elif not bool(((r.view(np.uint16) == e.view(np.uint16)) | (np.isnan(r) & np.isnan(e))).all()):
+        verdicts.append(f"FAIL ({p0},{p1},{p2},{p3}) bytes")
+# below-gate + 1-D endpoints + 4-array + f64 all defer byte-exactly
+sm = (rng.standard_normal((8, 8)) * 0.3).astype(np.float16)
+if fnp.multi_dot([sm, sm, sm]).tobytes() != np.linalg.multi_dot([sm, sm, sm]).tobytes():
+    verdicts.append("FAIL below-gate")
+v = (rng.standard_normal(96) * 0.3).astype(np.float16)
+m1 = (rng.standard_normal((96, 96)) * 0.3).astype(np.float16)
+if fnp.multi_dot([v, m1, m1]).tobytes() != np.linalg.multi_dot([v, m1, m1]).tobytes():
+    verdicts.append("FAIL 1-D endpoint defer")
+if fnp.multi_dot([m1, m1, m1, m1]).tobytes() != np.linalg.multi_dot([m1, m1, m1, m1]).tobytes():
+    verdicts.append("FAIL 4-array defer")
+d64 = rng.standard_normal((96, 96))
+if fnp.multi_dot([d64, d64, d64]).tobytes() != np.linalg.multi_dot([d64, d64, d64]).tobytes():
+    verdicts.append("FAIL f64 defer")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 multi_dot 3-chain must be bit-identical via the order rule + matmul pairs: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn matrix_power_noncontig_base_bit_exact_matches_numpy() -> Result<(), String> {
+    // Transposed/strided int and bool bases now contiguate post-gate and route
+    // the native binary-exp GEMM chain; results must be byte-identical to
+    // numpy across dtypes, powers, and layouts (F-order, strided views).
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(127)
+verdicts = []
+A = rng.integers(-10, 10, (256, 256))
+cases = [
+    ("A.T int64", np.ascontiguousarray(A).T),
+    ("F-order int64", np.asfortranarray(A)),
+    ("strided int64", rng.integers(-10, 10, (256, 512))[:, ::2]),
+]
+for name, M in cases:
+    for p in (2, 3, 5, 13):
+        r = fnp.matrix_power(M, p)
+        e = np.linalg.matrix_power(M, p)
+        if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+            verdicts.append(f"FAIL {name} p={p}")
+Bb = (rng.random((256, 256)) < 0.01)
+Bt = np.ascontiguousarray(Bb).T
+for p in (2, 5, 13):
+    if fnp.matrix_power(Bt, p).tobytes() != np.linalg.matrix_power(Bt, p).tobytes():
+        verdicts.append(f"FAIL bool A.T p={p}")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-10, 10, (512, 512))
+Wt = np.ascontiguousarray(W).T
+tn = best(lambda: np.linalg.matrix_power(Wt, 5))
+tf = best(lambda: fnp.matrix_power(Wt, 5))
+print(f"MATPOW_INT_NC_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces MATPOW_INT_NC_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "non-contiguous-base matrix_power must be bit-identical to numpy: {result}"
+    );
+    Ok(())
 }

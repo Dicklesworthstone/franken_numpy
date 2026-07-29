@@ -58,10 +58,10 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 We only use **Cargo** in this project, NEVER any other package manager.
 
-- **Edition:** Rust 2024 (nightly required — pinned to `nightly-2026-02-20` in `rust-toolchain.toml`; CI mirrors the same via `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`)
+- **Edition:** Rust 2024 (nightly required — pinned to `nightly-2026-07-05` in `rust-toolchain.toml`; CI mirrors the same via `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`)
 - **Dependency versions:** Explicit versions for stability
 - **Configuration:** Cargo.toml workspace with `workspace = true` pattern
-- **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`) on 9 of 10 crates. `fnp-python` is the lone opt-out because PyO3 procedural macros may expand into unsafe as part of generating the cdylib entry point — but its source still contains zero hand-written `unsafe` blocks (verified by ripgrep). If narrow unsafe usage ever becomes unavoidable in any other crate, isolate it behind audited interfaces and tests.
+- **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`) on 9 of 10 crates — the numeric core stays entirely on the safe-Rust path, enforced by `no_unsafe_code_blocks_or_items` in `crates/fnp-conformance/tests/codebase_hygiene.rs`. `fnp-python` is the lone opt-out: as the PyO3 boundary it uses hand-written `unsafe` (chiefly `std::slice::from_raw_parts` on borrowed `PyBuffer` bytes, plus narrow layout-checked views of native result buffers) for zero-copy fast paths. Those blocks are confined to `fnp-python` and excluded from the hygiene scan; every other crate must stay unsafe-free. If narrow unsafe usage ever becomes unavoidable in one of the 9 core crates, isolate it behind audited interfaces and tests rather than relaxing the invariant.
 
 ### Key Dependencies
 
@@ -503,6 +503,149 @@ bv --robot-plan | jq '.plan.summary.highest_impact'        # Best unblock target
 bv --robot-insights | jq '.status'                         # Check metric readiness
 bv --robot-insights | jq '.Cycles'                         # Circular deps (must fix!)
 ```
+
+---
+
+## Performance Ledger — preflight before you optimize, evidence before you reject
+
+`docs/NEGATIVE_EVIDENCE.md` is the append-only record of every performance
+hypothesis: wins, losses, and the retry predicate for each. It is 1,000+ entries
+and it is the authoritative record — not `cass`, not memory, not the commit log.
+
+**Ledger integrity decays.** The corrected 2026-07-27 hand audit classified 109
+actual rejected levers and found 71 (65.1%) **VOID**. Sixty-six of those 71 were
+an A/B rejected on a near-1.0 ratio with no A/A null control and no counted
+mechanism recorded. Two gates now exist so that class cannot grow. Use them.
+
+### Before you touch source for a perf candidate
+
+```bash
+RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- \
+  cargo run -q -p fnp-conformance --bin perf_ledger_preflight -- \
+  --lever "selected bool parse" --surface "loadtxt usecols"
+```
+
+| Exit | Meaning |
+|---|---|
+| `0` CLEAR | No prior ledger row matched. |
+| `2` BLOCKED | Prior evidence matched; the command prints each row and its retry predicate. Satisfy that predicate before reopening it. |
+| `64` | usage or tool error |
+
+`scripts/ledger_preflight.sh <keyword> ...` remains a fast heading-only triage
+helper, but its regex classification is not authoritative. Use the Rust
+preflight above for a real proposal and rely on its staged audit in pre-commit.
+
+### When you write a REJECT row
+
+`crates/fnp-conformance/tests/ledger_hygiene.rs` fails CI unless a REJECT row
+dated on/after its `ENFORCEMENT_DATE` records **either**:
+
+- an **A/A null control** measured in the *same invocation* as the A/B, or
+- a **counted mechanism** — instructions, cycles, syscalls, allocations, faults,
+  bandwidth — unchanged. A null cannot change the fact that no work was removed.
+
+It also requires a concrete retry predicate and a unique heading, and it caps
+the grandfathered historical debt so backdating a row to dodge the gate trips a
+second test instead.
+
+### What counts as a win
+
+These are different things and the ledger must say which one a row is.
+
+| Class | Base arm | Status |
+|---|---|---|
+| **`maintenance-self-speedup`** | our own former code | **Maintenance.** Land it and ledger it, but never quote it as a competitive claim. |
+| **`incumbent-win`** | the real NumPy call, timed **side-by-side in the same invocation** | Campaign output. |
+
+A same-binary former/candidate A/B is the right way to *isolate a lever* — it is
+the cleanest control we have — but it measures how much we improved on
+ourselves, which says nothing about NumPy. Only an arm that runs the incumbent
+in the same process, same round, alternating order, produces a number that may
+be quoted against NumPy.
+
+Rules:
+
+- **Put the exact class in the row body**:
+  `**Campaign result class:** maintenance-self-speedup` or
+  `**Campaign result class:** incumbent-win`. A heading alias does not count.
+- An `incumbent-win` must carry a numeric same-invocation A/A marker and one
+  same-line incumbent marker:
+  `**Legacy incumbent arm (same invocation):** name=NumPy version=<pin>
+  artifact_sha256=<64 lowercase hex> invocation_id=<shared id>
+  measured_ratio=<number>x`.
+- The incumbent artifact hash must identify NumPy and must not equal the
+  candidate process's `bench_elf_sha256`; equality is provenance substitution.
+- Two arms across two invocations, two binaries, or two workers is **not** a
+  campaign result. Cross-worker and cross-binary A/Bs are invalid.
+- Beating our own former path by 4× while still losing to NumPy is a
+  `maintenance-self-speedup`.
+
+### The six traps — all have already produced false wins in this fleet
+
+Check every one before you quote an `incumbent-win` ratio.
+
+1. **Dispatch trap.** Assert the incumbent arm's type and identity **at
+   runtime**, inside the measured binary. franken_networkx published a "2.6×"
+   whose baseline was already dispatched to their own code; genuine NetworkX was
+   **1.88× slower**. For us: assert `numpy.__name__ == "numpy"`, that the
+   callable is not one of ours, and print the incumbent's version.
+2. **Unmatched config.** frankensqlite compared `synchronous=FULL` against
+   `NORMAL`; franken_whisper compared its greedy decode against a default
+   beam-5. Both arms must receive identical dtype, shape, order, and options.
+3. **Non-interleaved arms.** Interleave both arms inside **one** measured
+   routine with alternating order. Host load degrades arms unequally —
+   frankenfs measured the C arm degrading ~3× harder, which biased the ratio
+   *in their own favour*.
+4. **Core contention.** Pin, and keep an A/A null between identical arms in the
+   same invocation. frankenredis invalidated an entire window after a peer
+   pinned 53% to one arm's core; their A/A between identical binaries read
+   **0.556**. If the null is not near unity the window is void, whatever the
+   effect says.
+5. **Client-bound harness.** Confirm the measured cost is the thing under test
+   and not harness/marshaling overhead shared by both arms.
+6. **Shared component as baseline.** If both arms call the same expensive
+   incumbent code, you are measuring yourself. This repo produced exactly that:
+   a bool-return arm where the *identical real NumPy allocation tail* ran in
+   both arms, so the 4.31× was fnp-old vs fnp-new — a self-speedup, not a
+   NumPy comparison. An `incumbent-win` arm must be **end-to-end**: our whole
+   call against their whole call.
+
+### Where domination actually lives
+
+The best frontier candidates are **missing-capability** surfaces — places NumPy
+has no fast path at all: `isin` on floats (its `table` method is int-only),
+`float16` ordering and GEMM (no f16 BLAS), integer matmul (no integer BLAS),
+ASCII `translate`, wide-key string set-ops. Hunt there, then earn any
+competitive claim through the `incumbent-win` contract.
+
+Do **not** open square compute-bound f64 GEMM against OpenBLAS. That is its
+strength, our kernel is bit-exactness-constrained to no-FMA and already at the
+no-FMA AVX2 peak, and the remaining gap is the price of reproducibility.
+
+### How to decide a perf claim
+
+**Gate on the median-CI, never on `cv`.** `cv < 5%` is unreachable on this
+hardware and rejects levers rather than measurements — it is what voided this
+repo's two highest-value rows, one of which later re-decided at 3.64× as a
+`maintenance-self-speedup` (own former path as base, not NumPy). Report `cv`
+as provenance only.
+
+The harness already exists — **do not build another one**:
+
+- `crates/fnp-python/benches/common/mod.rs` → `run_median_ci_contract` runs the
+  A/A null before the effect in the same invocation, retains 41 interleaved
+  min-of-three rounds, bootstraps the median-ratio CI, and gates on twice the
+  null-CI half-width. `cv` is provenance only.
+- `common::gated_main` prints `bench_elf_sha256=…` as line one of every bench,
+  hashing `current_exe()`. A hash computed by a shell step next to the run
+  proves nothing: rch builds into an opaque per-worker target dir you cannot
+  predict. Never move that print after `Criterion` is constructed — its backend
+  notice will bury it.
+- Prefer a **same-binary control** (both arms in one ELF) over comparing two
+  builds. Cross-worker and cross-binary A/Bs are invalid.
+
+Full taxonomy, the per-row audit, and the standing rules are in
+[`docs/LEDGER_RESURRECTION.md`](docs/LEDGER_RESURRECTION.md).
 
 ---
 

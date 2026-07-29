@@ -91,11 +91,30 @@ impl std::error::Error for ShapeError {}
 
 #[must_use]
 pub fn can_broadcast(lhs: &[usize], rhs: &[usize]) -> bool {
-    broadcast_shape(lhs, rhs).is_ok()
+    if std::ptr::eq(lhs, rhs) {
+        return true;
+    }
+    let nd = lhs.len().max(rhs.len());
+    for axis_from_end in 0..nd {
+        let l = if axis_from_end < lhs.len() {
+            lhs[lhs.len() - 1 - axis_from_end]
+        } else {
+            1
+        };
+        let r = if axis_from_end < rhs.len() {
+            rhs[rhs.len() - 1 - axis_from_end]
+        } else {
+            1
+        };
+        if l != r && l != 1 && r != 1 {
+            return false;
+        }
+    }
+    true
 }
 
 pub fn broadcast_shape(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>, ShapeError> {
-    if lhs == rhs {
+    if std::ptr::eq(lhs, rhs) || lhs == rhs {
         return Ok(lhs.to_vec());
     }
 
@@ -147,10 +166,38 @@ pub fn broadcast_shape(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>, Shape
 }
 
 pub fn broadcast_shapes(shapes: &[&[usize]]) -> Result<Vec<usize>, ShapeError> {
-    let mut acc = Vec::new();
-    for shape in shapes {
-        acc = broadcast_shape(&acc, shape)?;
+    let max_rank = shapes.iter().map(|shape| shape.len()).max().unwrap_or(0);
+    let mut acc = vec![1; max_rank];
+    let mut current_rank = 0;
+
+    for &shape in shapes {
+        let acc_start = max_rank - current_rank;
+        let shape_start = max_rank - shape.len();
+        let merged_start = acc_start.min(shape_start);
+
+        for axis in merged_start..max_rank {
+            let lhs = acc[axis];
+            let rhs = if axis < shape_start {
+                1
+            } else {
+                shape[axis - shape_start]
+            };
+            if lhs != rhs && lhs != 1 && rhs != 1 {
+                return Err(ShapeError::IncompatibleBroadcast {
+                    lhs: acc[acc_start..].to_vec(),
+                    rhs: shape.to_vec(),
+                });
+            }
+        }
+
+        for axis in merged_start..max_rank {
+            if acc[axis] == 1 && axis >= shape_start {
+                acc[axis] = shape[axis - shape_start];
+            }
+        }
+        current_rank = current_rank.max(shape.len());
     }
+
     Ok(acc)
 }
 
@@ -258,8 +305,7 @@ pub fn broadcast_strides(
         });
     }
 
-    let merged = broadcast_shape(src_shape, dst_shape)?;
-    if merged != dst_shape {
+    if src_shape.len() > dst_shape.len() {
         return Err(ShapeError::IncompatibleBroadcast {
             lhs: src_shape.to_vec(),
             rhs: dst_shape.to_vec(),
@@ -389,6 +435,19 @@ impl NdLayout {
     }
 
     pub fn broadcast_to(&self, shape: Vec<usize>) -> Result<Self, ShapeError> {
+        if shape == self.shape
+            && self.shape.len() == self.strides.len()
+            && (self.is_contiguous() || self.is_fortran_contiguous())
+        {
+            return Ok(Self {
+                shape,
+                strides: self.strides.clone(),
+                item_size: self.item_size,
+                writeable: false,
+                has_internal_overlap: false,
+            });
+        }
+
         let strides = broadcast_strides(&self.shape, &self.strides, &shape)?;
         let has_internal_overlap = detect_internal_overlap(&shape, &strides, self.item_size)?;
         Ok(Self {
@@ -525,7 +584,13 @@ impl NdLayout {
         let mut strides = Vec::with_capacity(self.strides.len() * 2);
         strides.extend(self.strides.iter().copied());
         strides.extend(self.strides.iter().copied());
-        let has_internal_overlap = detect_internal_overlap(&shape, &strides, self.item_size)?;
+        let unit_window_contiguous = window_shape.iter().all(|&window| window == 1)
+            && (self.is_contiguous() || self.is_fortran_contiguous());
+        let has_internal_overlap = if unit_window_contiguous {
+            false
+        } else {
+            detect_internal_overlap(&shape, &strides, self.item_size)?
+        };
 
         Ok(Self {
             shape,
@@ -558,13 +623,85 @@ fn detect_internal_overlap(
         return Ok(false);
     }
 
+    let item_size_bytes = item_size;
     let item_size = isize::try_from(item_size).map_err(|_| ShapeError::Overflow)?;
     let element_count = element_count(shape)?;
+    if shape
+        .iter()
+        .zip(strides)
+        .any(|(&dim, &stride)| dim > 1 && stride == 0)
+    {
+        return Ok(true);
+    }
+    // Two active axes with the same stride magnitude alias immediately. For
+    // equal signs, incrementing either axis reaches the same byte offset; for
+    // opposite signs, incrementing both axes returns to the original offset.
+    // Sliding-window layouts naturally duplicate each base stride across their
+    // position/window axes.
+    for (axis, (&dim, &stride)) in shape.iter().zip(strides).enumerate() {
+        if dim > 1
+            && shape[axis + 1..].iter().zip(&strides[axis + 1..]).any(
+                |(&other_dim, &other_stride)| {
+                    other_dim > 1 && other_stride.unsigned_abs() == stride.unsigned_abs()
+                },
+            )
+        {
+            return Ok(true);
+        }
+    }
+    if element_count <= EXACT_OVERLAP_ELEMENT_LIMIT
+        && has_bounded_commensurate_stride_overlap(shape, strides)
+    {
+        // The exact detector formerly visited every offset before sorting, so
+        // retain its overflow precedence before accepting the pair witness.
+        let required_nbytes = required_view_nbytes(shape, strides, item_size_bytes)?;
+        if isize::try_from(required_nbytes).is_ok() {
+            return Ok(true);
+        }
+    }
     if element_count <= EXACT_OVERLAP_ELEMENT_LIMIT {
         return detect_internal_overlap_exact(shape, strides, item_size, element_count);
     }
 
     detect_internal_overlap_conservative(shape, strides, item_size)
+}
+
+fn has_bounded_commensurate_stride_overlap(shape: &[usize], strides: &[isize]) -> bool {
+    for (axis, (&dim, &stride)) in shape.iter().zip(strides).enumerate() {
+        if dim <= 1 || stride == 0 {
+            continue;
+        }
+
+        let stride_magnitude = stride.unsigned_abs();
+        for (&other_dim, &other_stride) in shape[axis + 1..].iter().zip(&strides[axis + 1..]) {
+            if other_dim <= 1 || other_stride == 0 {
+                continue;
+            }
+
+            let other_magnitude = other_stride.unsigned_abs();
+            if stride_magnitude == other_magnitude {
+                continue;
+            }
+
+            let divisor = greatest_common_divisor(stride_magnitude, other_magnitude);
+            let axis_steps = other_magnitude / divisor;
+            let other_axis_steps = stride_magnitude / divisor;
+            if axis_steps < dim && other_axis_steps < other_dim {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn greatest_common_divisor(mut lhs: usize, mut rhs: usize) -> usize {
+    while rhs != 0 {
+        let remainder = lhs % rhs;
+        lhs = rhs;
+        rhs = remainder;
+    }
+    lhs
 }
 
 fn detect_internal_overlap_exact(
@@ -680,6 +817,33 @@ mod tests {
         let err = broadcast_shape(&[4, 3], &[5, 3]).expect_err("should fail");
         assert!(matches!(err, ShapeError::IncompatibleBroadcast { .. }));
         assert!(!can_broadcast(&[4, 3], &[5, 3]));
+    }
+
+    #[test]
+    fn can_broadcast_matches_shape_construction_predicate() {
+        let shapes: &[&[usize]] = &[
+            &[],
+            &[0],
+            &[1],
+            &[2],
+            &[3],
+            &[0, 1],
+            &[1, 0],
+            &[1, 3],
+            &[2, 1],
+            &[2, 3],
+            &[1, 2, 1],
+            &[4, 1, 5],
+        ];
+        for &lhs in shapes {
+            for &rhs in shapes {
+                assert_eq!(
+                    can_broadcast(lhs, rhs),
+                    broadcast_shape(lhs, rhs).is_ok(),
+                    "predicate disagrees for lhs={lhs:?}, rhs={rhs:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1151,6 +1315,26 @@ mod tests {
     }
 
     #[test]
+    fn obvious_zero_stride_overlap_preserves_edge_semantics() {
+        assert!(super::detect_internal_overlap(&[2, 3], &[24, 0], 8).expect("active zero"));
+        assert!(!super::detect_internal_overlap(&[1], &[0], 8).expect("singleton zero"));
+        assert!(!super::detect_internal_overlap(&[0, 3], &[0, 8], 8).expect("zero extent"));
+
+        // Equal-magnitude non-zero strides have direct alias certificates.
+        assert!(super::detect_internal_overlap(&[2, 2], &[8, 8], 8).expect("collision"));
+        assert!(
+            super::detect_internal_overlap(&[2, 2], &[8, -8], 8).expect("opposite-sign collision")
+        );
+        assert!(!super::detect_internal_overlap(&[2, 2], &[16, 8], 8).expect("contiguous"));
+
+        // Keep shape-overflow precedence ahead of the obvious-overlap proof.
+        assert_eq!(
+            super::detect_internal_overlap(&[usize::MAX, 2], &[0, 0], 8),
+            Err(ShapeError::Overflow)
+        );
+    }
+
+    #[test]
     fn as_strided_overlapping_view_is_read_only() {
         let base = NdLayout::contiguous(vec![8], 8, MemoryOrder::C).expect("layout");
         let view = base
@@ -1171,6 +1355,45 @@ mod tests {
     }
 
     #[test]
+    fn commensurate_stride_overlap_respects_extent_bounds_and_signs() {
+        assert!(
+            super::detect_internal_overlap(&[3, 2], &[8, 16], 8).expect("positive-stride witness")
+        );
+        assert!(
+            super::detect_internal_overlap(&[3, 2], &[8, -16], 8).expect("opposite-stride witness")
+        );
+        assert!(!super::detect_internal_overlap(&[2, 2], &[8, 16], 8).expect("short axis"));
+        assert!(!super::detect_internal_overlap(&[1, 3], &[8, 16], 8).expect("singleton axis"));
+
+        let half_max = (isize::MAX - 1) / 2;
+        assert_eq!(
+            super::detect_internal_overlap(&[2, 3], &[isize::MAX - 1, half_max], 1),
+            Err(ShapeError::Overflow)
+        );
+    }
+
+    #[test]
+    fn commensurate_stride_certificate_matches_exact_grid() {
+        for first_dim in 1..=5 {
+            for second_dim in 1..=5 {
+                let shape = [first_dim, second_dim];
+                let count = first_dim * second_dim;
+                for first_stride in -5..=5 {
+                    for second_stride in -5..=5 {
+                        let strides = [first_stride, second_stride];
+                        let expected =
+                            super::detect_internal_overlap_exact(&shape, &strides, 1, count)
+                                .expect("small grid cannot overflow");
+                        let actual = super::detect_internal_overlap(&shape, &strides, 1)
+                            .expect("small grid cannot overflow");
+                        assert_eq!(actual, expected, "shape={shape:?}, strides={strides:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn sliding_window_size_one_is_still_read_only_without_overlap() {
         let base = NdLayout::contiguous(vec![4], 8, MemoryOrder::C).expect("layout");
         let view = base
@@ -1178,6 +1401,43 @@ mod tests {
             .expect("unit window should succeed");
         assert!(!view.has_internal_overlap());
         assert!(!view.is_writeable());
+    }
+
+    #[test]
+    fn sliding_window_unit_shape_is_non_overlapping_for_both_contiguous_orders() {
+        for shape in [vec![], vec![1], vec![3, 4], vec![2, 1, 5]] {
+            for order in [MemoryOrder::C, MemoryOrder::F] {
+                let base = NdLayout::contiguous(shape.clone(), 8, order).expect("layout");
+                let window = vec![1; shape.len()];
+                let view = base
+                    .sliding_window_view(&window)
+                    .expect("unit window should succeed");
+
+                let mut expected_shape = shape.clone();
+                expected_shape.extend(window.iter().copied());
+                let mut expected_strides = base.strides.clone();
+                expected_strides.extend(base.strides.iter().copied());
+                assert_eq!(view.shape, expected_shape);
+                assert_eq!(view.strides, expected_strides);
+                assert!(!view.has_internal_overlap());
+                assert!(!view.is_writeable());
+            }
+        }
+    }
+
+    #[test]
+    fn sliding_window_unit_shape_preserves_invalid_item_size_error() {
+        let invalid = NdLayout {
+            shape: vec![1],
+            strides: vec![0],
+            item_size: 0,
+            writeable: true,
+            has_internal_overlap: false,
+        };
+        assert_eq!(
+            invalid.sliding_window_view(&[1]),
+            Err(ShapeError::InvalidItemSize)
+        );
     }
 
     #[test]
@@ -1404,6 +1664,34 @@ mod tests {
         assert!(r.is_empty());
     }
 
+    #[test]
+    fn broadcast_shapes_in_place_merge_matches_pairwise_fold() {
+        fn pairwise_fold(shapes: &[&[usize]]) -> Result<Vec<usize>, ShapeError> {
+            let mut acc = Vec::new();
+            for &shape in shapes {
+                acc = broadcast_shape(&acc, shape)?;
+            }
+            Ok(acc)
+        }
+
+        let shapes: &[&[usize]] = &[&[], &[0], &[1], &[2], &[0, 3], &[1, 3], &[2, 1], &[4, 2, 5]];
+
+        assert_eq!(broadcast_shapes(&[]), pairwise_fold(&[]));
+        for &first in shapes {
+            assert_eq!(broadcast_shapes(&[first]), pairwise_fold(&[first]));
+            for &second in shapes {
+                for &third in shapes {
+                    let batch = [first, second, third];
+                    assert_eq!(
+                        broadcast_shapes(&batch),
+                        pairwise_fold(&batch),
+                        "batch={batch:?}"
+                    );
+                }
+            }
+        }
+    }
+
     // ── reshape edge cases ────────
 
     #[test]
@@ -1540,6 +1828,55 @@ mod tests {
         // (4,) → (3, 4): row stride = 0, col stride preserved
         let out = broadcast_strides(&[4], &[8], &[3, 4]).unwrap();
         assert_eq!(out, vec![0, 8]);
+    }
+
+    #[test]
+    fn broadcast_strides_direct_validation_matches_shape_merge() {
+        let shapes: &[&[usize]] = &[
+            &[],
+            &[0],
+            &[1],
+            &[2],
+            &[0, 3],
+            &[1, 3],
+            &[2, 1],
+            &[2, 3],
+            &[1, 2, 1],
+            &[4, 2, 5],
+        ];
+
+        for &src_shape in shapes {
+            let src_strides: Vec<isize> = (1..=src_shape.len())
+                .map(|axis| isize::try_from(axis * 8).unwrap())
+                .collect();
+
+            for &dst_shape in shapes {
+                let expected = match broadcast_shape(src_shape, dst_shape) {
+                    Ok(merged) if merged == dst_shape => {
+                        let mut strides = vec![0; dst_shape.len()];
+                        let offset = dst_shape.len() - src_shape.len();
+                        for (axis, (&src_dim, &src_stride)) in
+                            src_shape.iter().zip(&src_strides).enumerate()
+                        {
+                            if src_dim == dst_shape[axis + offset] {
+                                strides[axis + offset] = src_stride;
+                            }
+                        }
+                        Ok(strides)
+                    }
+                    _ => Err(ShapeError::IncompatibleBroadcast {
+                        lhs: src_shape.to_vec(),
+                        rhs: dst_shape.to_vec(),
+                    }),
+                };
+
+                assert_eq!(
+                    broadcast_strides(src_shape, &src_strides, dst_shape),
+                    expected,
+                    "src={src_shape:?} dst={dst_shape:?}"
+                );
+            }
+        }
     }
 
     // ── element count edge cases ────────

@@ -114,4 +114,7 @@ criterion_group!(
     bench_tensordot,
     bench_inner
 );
-criterion_main!(benches);
+#[path = "../../bench_identity.rs"]
+mod bench_identity;
+
+criterion_main!(bench_identity::report_bench_identity, benches);

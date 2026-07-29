@@ -176,6 +176,42 @@ print(np.allclose(result, expected))
 }
 
 #[test]
+fn percentile_quantile_large_bounded_integer_scalar_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20260708)
+n = (1 << 20) + 33
+cases = [
+    ("i64", rng.integers(-500, 500, n, dtype=np.int64), 12.5, 0.125),
+    ("u16", rng.integers(0, 30000, n, dtype=np.uint16), 75.0, 0.75),
+]
+ok = True
+for label, a, p, q in cases:
+    got_p = fnp.percentile(a, p)
+    exp_p = np.percentile(a, p)
+    got_q = fnp.quantile(a, q)
+    exp_q = np.quantile(a, q)
+    for op, got, exp in [("percentile", got_p, exp_p), ("quantile", got_q, exp_q)]:
+        if str(np.asarray(got).dtype) != str(np.asarray(exp).dtype):
+            print(("dtype", label, op, str(np.asarray(got).dtype), str(np.asarray(exp).dtype)))
+            ok = False
+        if not np.array_equal(np.asarray(got), np.asarray(exp)):
+            print(("value", label, op, repr(got), repr(exp)))
+            ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large bounded integer percentile/quantile scalar paths should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn percentile_multiple() -> Result<(), String> {
     let script = fnp_script(
         r#"
@@ -590,6 +626,43 @@ print(type(fnp_result).__name__ == type(np_result).__name__)
     assert!(
         result.trim() == "True",
         "percentile scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+// Array-q WITH an axis is delegated to numpy (no native multi-q-axis path) — the delegation must be
+// byte-identical AND must happen BEFORE the whole-array extract (a perf fix: the wasted 32MB copy made
+// percentile([25,50,75], axis=1) a 0.64x loss). This locks in the byte-exact parity across q-forms/axes.
+#[test]
+fn percentile_quantile_array_q_with_axis_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import numpy as np
+ok = True
+rng = np.random.default_rng(20260701)
+m = rng.standard_normal((400, 500))
+t = rng.standard_normal((40, 50, 30))
+for q in ([25, 50, 75], [0, 100], [33.3, 66.6], np.array([10.0, 90.0])):
+    for ax in (0, 1, -1):
+        if not np.array_equal(np.asarray(fnp.percentile(m, q, axis=ax)),
+                              np.percentile(m, q, axis=ax), equal_nan=True):
+            ok = False
+        qq = np.asarray(q) / 100.0
+        if not np.array_equal(np.asarray(fnp.quantile(m, qq, axis=ax)),
+                              np.quantile(m, qq, axis=ax), equal_nan=True):
+            ok = False
+    if not np.array_equal(np.asarray(fnp.percentile(t, q, axis=1)),
+                          np.percentile(t, q, axis=1), equal_nan=True):
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "percentile/quantile array-q with axis must delegate byte-identically to numpy: {result}"
     );
     Ok(())
 }

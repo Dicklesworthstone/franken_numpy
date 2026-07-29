@@ -450,3 +450,117 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+#[test]
+fn parallel_flatnonzero_and_nonzero_1d_bit_exact_match_numpy() -> Result<(), String> {
+    // Large contiguous inputs take the parallel two-pass kernel (per-block
+    // count -> prefix -> disjoint index fills); indices must be bit-identical
+    // to numpy across dtypes, densities (incl. all-zero / all-nonzero), block
+    // boundaries, float +-0.0/NaN rules, and the nonzero() 1-tuple form.
+    let script = fnp_flatnonzero_script(
+        r#"
+import time
+rng = np.random.default_rng(67)
+verdicts = []
+N = 4_000_003  # deliberately not a multiple of the 1<<20 block
+for name, arr in [
+    ("int64", rng.integers(-5, 5, N)),
+    ("int32", rng.integers(-5, 5, N).astype(np.int32)),
+    ("int8", rng.integers(-2, 2, N).astype(np.int8)),
+    ("uint16", (rng.integers(0, 3, N)).astype(np.uint16)),
+    ("bool", rng.random(N) > 0.9),
+    ("f64", np.where(rng.random(N) > 0.5, rng.standard_normal(N), 0.0)),
+    ("f32", np.where(rng.random(N) > 0.5, rng.standard_normal(N), 0.0).astype(np.float32)),
+    ("all-zero", np.zeros(N, dtype=np.int64)),
+    ("all-nonzero", np.ones(N, dtype=np.int64)),
+]:
+    r = fnp.flatnonzero(arr); e = np.flatnonzero(arr)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL flatnonzero {name}")
+    rt = fnp.nonzero(arr); et = np.nonzero(arr)
+    if len(rt) != len(et) or rt[0].dtype != et[0].dtype or rt[0].tobytes() != et[0].tobytes():
+        verdicts.append(f"FAIL nonzero {name}")
+# float sign/NaN rules: -0.0 and +0.0 excluded, NaN included
+f = np.array([0.0, -0.0, np.nan, 1.0, -1.0] * 200_000)
+if fnp.flatnonzero(f).tobytes() != np.flatnonzero(f).tobytes():
+    verdicts.append("FAIL float zero/NaN rules")
+# 2-D input: flatnonzero ravels (flat kernel); nonzero/where write (rows, cols)
+# via the per-block odometer kernel
+for name2, M in [
+    ("int64", rng.integers(-2, 2, (2048, 1024))),
+    ("bool", rng.random((2048, 1024)) > 0.9),
+    ("f64", np.where(rng.random((2048, 1024)) > 0.5, rng.standard_normal((2048, 1024)), 0.0)),
+    ("odd-cols", rng.integers(-2, 2, (999, 1237))),
+    ("tall", rng.integers(-2, 2, (1_000_000, 3))),
+    ("wide", rng.integers(-2, 2, (3, 1_000_000))),
+    ("all-zero", np.zeros((1024, 1024), dtype=np.int64)),
+]:
+    if fnp.flatnonzero(M).tobytes() != np.flatnonzero(M).tobytes():
+        verdicts.append(f"FAIL flatnonzero 2-D {name2}")
+    rt = fnp.nonzero(M); et = np.nonzero(M)
+    if len(rt) != 2 or rt[0].dtype != et[0].dtype or rt[0].tobytes() != et[0].tobytes() or rt[1].tobytes() != et[1].tobytes():
+        verdicts.append(f"FAIL nonzero 2-D {name2}")
+    rw = fnp.where(M); ew = np.where(M)
+    if len(rw) != 2 or rw[0].tobytes() != ew[0].tobytes() or rw[1].tobytes() != ew[1].tobytes():
+        verdicts.append(f"FAIL where-1arg 2-D {name2}")
+# where 1-arg 1-D
+w1 = rng.integers(-5, 5, 2_000_000)
+rw = fnp.where(w1); ew = np.where(w1)
+if len(rw) != 1 or rw[0].tobytes() != ew[0].tobytes():
+    verdicts.append("FAIL where-1arg 1-D")
+# 3-D+ nonzero/where now write d coordinate arrays via the N-D odometer
+for name3, M3 in [
+    ("3-D int64", rng.integers(-2, 2, (64, 128, 128))),
+    ("3-D bool", rng.random((128, 128, 128)) > 0.9),
+    ("3-D f64", np.where(rng.random((64, 128, 128)) > 0.5, rng.standard_normal((64, 128, 128)), 0.0)),
+    ("4-D int32", rng.integers(-2, 2, (16, 32, 64, 32)).astype(np.int32)),
+    ("3-D odd", rng.integers(-2, 2, (61, 127, 129))),
+    ("3-D all-zero", np.zeros((64, 128, 128), dtype=np.int64)),
+]:
+    rt = fnp.nonzero(M3); et = np.nonzero(M3)
+    if len(rt) != M3.ndim or any(rt[i].dtype != et[i].dtype or rt[i].tobytes() != et[i].tobytes() for i in range(M3.ndim)):
+        verdicts.append(f"FAIL nonzero {name3}")
+    rw = fnp.where(M3); ew = np.where(M3)
+    if len(rw) != M3.ndim or any(rw[i].tobytes() != ew[i].tobytes() for i in range(M3.ndim)):
+        verdicts.append(f"FAIL where-1arg {name3}")
+# non-contiguous stays a byte-identical delegate
+s = rng.integers(-5, 5, 2_000_000)[::2]
+if fnp.flatnonzero(s).tobytes() != np.flatnonzero(s).tobytes():
+    verdicts.append("FAIL non-contig delegate")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-5, 5, 16_000_000)
+tn = best(lambda: np.flatnonzero(W)); tf = best(lambda: fnp.flatnonzero(W))
+print(f"FLATNONZERO_INT64_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+Wb = rng.random(16_000_000) > 0.9
+tn = best(lambda: np.flatnonzero(Wb)); tf = best(lambda: fnp.flatnonzero(Wb))
+print(f"FLATNONZERO_BOOL_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.nonzero(W)); tf = best(lambda: fnp.nonzero(W))
+print(f"NONZERO_INT64_1D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+W2 = rng.integers(-5, 5, (4096, 4096))
+tn = best(lambda: np.nonzero(W2)); tf = best(lambda: fnp.nonzero(W2))
+print(f"NONZERO_INT64_2D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+W2b = rng.random((4096, 4096)) > 0.9
+tn = best(lambda: np.nonzero(W2b)); tf = best(lambda: fnp.nonzero(W2b))
+print(f"NONZERO_BOOL_2D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+W3 = rng.integers(-3, 3, (256, 256, 256))
+tn = best(lambda: np.nonzero(W3)); tf = best(lambda: fnp.nonzero(W3))
+print(f"NONZERO_INT64_3D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces FLATNONZERO/NONZERO_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "parallel flatnonzero/nonzero must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}

@@ -1,0 +1,7 @@
+  [2m2026-07-10T05:47:23.090456Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: perf stat -d cargo bench -p fnp-python --profile release-perf --bench criterion_python_surface -- intersect1d_struct_i4f4[0m
+    [2;3mat[0m rch/src/hook.rs:703 [2;3mon[0m ThreadId(1)
+
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory

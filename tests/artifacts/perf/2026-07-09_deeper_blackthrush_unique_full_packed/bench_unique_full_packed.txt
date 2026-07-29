@@ -1,0 +1,8 @@
+python_unique_arrayapi_boundary/fnp_unique_counts_U8_2m
+                        time:   [47.591 ms 50.587 ms 57.270 ms]
+python_unique_arrayapi_boundary/numpy_unique_counts_U8_2m
+                        time:   [318.03 ms 319.77 ms 321.80 ms]
+python_unique_arrayapi_boundary/fnp_unique_all_U8_2m
+                        time:   [85.532 ms 89.336 ms 94.605 ms]
+python_unique_arrayapi_boundary/numpy_unique_all_U8_2m
+                        time:   [523.75 ms 541.10 ms 561.84 ms]

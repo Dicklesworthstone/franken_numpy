@@ -1,0 +1,8 @@
+python_argsort_string_stable_boundary/fnp_argsort_U6_stable_2m
+                        time:   [53.499 ms 55.157 ms 56.596 ms]
+python_argsort_string_stable_boundary/numpy_argsort_U6_stable_2m
+                        time:   [405.63 ms 414.29 ms 423.47 ms]
+python_argsort_string_stable_boundary/fnp_argsort_S6_stable_2m
+                        time:   [46.634 ms 48.389 ms 50.354 ms]
+python_argsort_string_stable_boundary/numpy_argsort_S6_stable_2m
+                        time:   [341.20 ms 346.54 ms 352.97 ms]

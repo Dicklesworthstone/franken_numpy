@@ -1039,3 +1039,455 @@ print(ok)
     );
     Ok(())
 }
+
+// The native parallel-across-lanes complex nanprod (np.nanprod) along the LAST contiguous axis must be
+// byte-identical to numpy: numpy replaces NaN-complex with 1+0j and runs the slow multiply.reduce chain;
+// this kernel replaces NaN inline during the identical per-lane sequential product. Exercises the engaged
+// path (large arrays past the 1<<18 gate, c128 + c64, keepdims) with sprinkled NaNs, the NaN-edge lanes
+// (all-NaN -> 1+0j, (nan,x), (x,nan), (inf,nan), overflow, zero), and every defer path (below gate,
+// axis=0, flatten, non-contiguous) — all of which must equal numpy bit-for-bit.
+#[test]
+fn nanprod_complex_lastaxis_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib, warnings
+rng = np.random.default_rng(20260701)
+ok = True
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    for cdt in (np.complex128, np.complex64):
+        chunks_f, chunks_n = [], []
+        def add(arr, **kw):
+            chunks_f.append(np.ascontiguousarray(fnp.nanprod(arr, **kw)).tobytes())
+            chunks_n.append(np.ascontiguousarray(np.nanprod(arr, **kw)).tobytes())
+        # engaged last-axis path (rows*cols >= 1<<18) with sprinkled NaNs
+        for shp in [(2000, 2000), (512, 2049), (2, 131072), (262144, 2), (100, 50, 80)]:
+            x = (rng.standard_normal(shp) + 1j * rng.standard_normal(shp)).astype(cdt)
+            x.ravel()[::11] = np.nan
+            add(x, axis=-1)
+            add(x, axis=-1, keepdims=True)
+        # NaN-edge lanes
+        xe = (rng.standard_normal((2000, 2000)) + 1j * rng.standard_normal((2000, 2000))).astype(cdt)
+        xe[0, :] = np.nan
+        xe[1, 5] = complex(np.nan, 1.0)
+        xe[2, 7] = complex(1.0, np.nan)
+        xe[3, 9] = complex(np.inf, np.nan)
+        xe[4, :] = complex(1e30, 1e30) if cdt == np.complex128 else complex(1e18, 1e18)
+        xe[5, 11] = complex(0.0, 0.0)
+        add(xe, axis=1)
+        # defer paths (must still equal numpy)
+        sm = (rng.standard_normal((3, 3)) + 1j * rng.standard_normal((3, 3))).astype(cdt)
+        add(sm, axis=1)
+        big = (rng.standard_normal((2000, 2000)) + 1j * rng.standard_normal((2000, 2000))).astype(cdt)
+        big.ravel()[::13] = np.nan
+        add(big, axis=0)
+        chunks_f.append(np.asarray(fnp.nanprod(big)).tobytes())
+        chunks_n.append(np.asarray(np.nanprod(big)).tobytes())
+        add(np.asfortranarray(big), axis=1)
+        add(big[:, ::2], axis=1)
+        if hashlib.sha256(b"".join(chunks_f)).hexdigest() != hashlib.sha256(b"".join(chunks_n)).hexdigest():
+            ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native complex last-axis nanprod must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn flat_multi_quantile_and_weighted_average_track_numpy() -> Result<(), String> {
+    // Convergence-sweep probe (2026-07-12): the last two ambiguous wide-rank rows.
+    // quantile(array-q, flat) and percentile(list-q, flat) ride the shipped native
+    // order-statistics path - assert byte parity and record the coarse A/B.
+    // average(weights=) rides the extract path whose serial sum is NOT numpy's
+    // pairwise order - assert allclose (documented mean-family tolerance) and
+    // record the A/B so the extract-tax gap is measured, not assumed.
+    let script = fnp_script(
+        r#"
+import time
+import warnings
+verdicts = []
+rng = np.random.default_rng(20260712)
+a = rng.standard_normal(8_000_000)
+w = np.abs(rng.standard_normal(8_000_000)) + 0.01
+qs = np.linspace(0.1, 0.9, 9)
+# Byte-exact since the numpy_quantile_lerp fix (bead deadlock-audit-19jv4): the
+# linear method now runs numpy's two-sided _lerp, so multi-q flat is tobytes-equal.
+r, e = fnp.quantile(a, qs), np.quantile(a, qs)
+if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL quantile9 bytes")
+r, e = fnp.percentile(a, [25, 50, 75]), np.percentile(a, [25, 50, 75])
+if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL percentile-trio bytes")
+ra, ea = fnp.average(a, weights=w), np.average(a, weights=w)
+if not np.allclose(ra, ea, rtol=1e-12):
+    verdicts.append("FAIL average allclose")
+# multi-q LAST-axis native path (fractions_last_axis): byte parity + q-first layout
+m = rng.standard_normal((2896, 2896))
+r, e = fnp.percentile(m, [25, 50, 75], axis=1), np.percentile(m, [25, 50, 75], axis=1)
+if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL percentile3-ax1 bytes")
+r, e = fnp.quantile(m, qs, axis=1), np.quantile(m, qs, axis=1)
+if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL quantile9-ax1 bytes")
+r, e = fnp.quantile(m, [0.5], axis=-1), np.quantile(m, [0.5], axis=-1)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL single-q-list ax-1 bytes")
+mn = m.copy(); mn[7, 123] = np.nan
+r, e = fnp.percentile(mn, [25, 75], axis=1), np.percentile(mn, [25, 75], axis=1)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL nan-lane bytes")
+r, e = fnp.percentile(m, [25, 75], axis=0), np.percentile(m, [25, 75], axis=0)
+if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL percentile-ax0 bytes")
+r, e = fnp.quantile(m, qs, axis=0), np.quantile(m, qs, axis=0)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL quantile9-ax0 bytes")
+mc = m.copy(); mc[123, 7] = np.nan
+r, e = fnp.percentile(mc, [25, 75], axis=0), np.percentile(mc, [25, 75], axis=0)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL nan-column-ax0 bytes")
+# N-D non-last-axis multi-q via the generalized strided-lane kernel
+t3 = rng.standard_normal((64, 512, 256))
+for tag, ax in (("3d-ax1", 1), ("3d-ax0", 0)):
+    r, e = fnp.percentile(t3, [25, 50, 75], axis=ax), np.percentile(t3, [25, 50, 75], axis=ax)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL {tag} bytes")
+r, e = fnp.quantile(t3, qs, axis=1, keepdims=True), np.quantile(t3, qs, axis=1, keepdims=True)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 3d-ax1-keepdims bytes")
+t3n = t3.copy(); t3n[3, 100, 7] = np.nan
+r, e = fnp.percentile(t3n, [25, 75], axis=1), np.percentile(t3n, [25, 75], axis=1)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 3d-nan-lane bytes")
+# nan N-D non-last-axis multi-q: compaction composed into the strided kernel
+t3nn = t3.copy()
+t3nn.ravel()[rng.integers(0, t3.size, 20000)] = np.nan
+for tag, ax in (("3d-nanpct-ax1", 1), ("3d-nanpct-ax0", 0)):
+    r, e = fnp.nanpercentile(t3nn, [25, 50, 75], axis=ax), np.nanpercentile(t3nn, [25, 50, 75], axis=ax)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL {tag} bytes")
+r, e = fnp.nanquantile(t3nn, qs, axis=1, keepdims=True), np.nanquantile(t3nn, qs, axis=1, keepdims=True)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 3d-nan-keepdims bytes")
+t3all = t3nn.copy(); t3all[5, :, 9] = np.nan
+with warnings.catch_warnings(record=True) as wf:
+    warnings.simplefilter("always")
+    r = fnp.nanpercentile(t3all, [25, 75], axis=1)
+with warnings.catch_warnings(record=True) as wn:
+    warnings.simplefilter("always")
+    e = np.nanpercentile(t3all, [25, 75], axis=1)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 3d-all-nan-lane bytes")
+if [str(w.message) for w in wf] != [str(w.message) for w in wn]:
+    verdicts.append("FAIL 3d-all-nan-lane warnings")
+# nanmedian MEDIAN-vs-lerp(0.5) regression battery (window 9d5d83ac..fix):
+# even-count compacted lanes are where mean-of-middles differs bitwise from lerp.
+me = rng.standard_normal((4096, 33))
+me[:, 7] = np.nan  # 32 valid per lane = EVEN
+for tag, arr, kw in (
+    ("nanmedian-even-ax1", me, {"axis": 1}),
+    ("nanmedian-even-ax0", me.T.copy(), {"axis": 0}),
+    ("nanmedian-3d-ax1", t3nn, {"axis": 1}),
+    ("nanmedian-odd-ax1", me[:, :32], {"axis": 1}),
+):
+    r, e = fnp.nanmedian(arr, **kw), np.nanmedian(arr, **kw)
+    r, e = np.asarray(r), np.asarray(e)
+    if r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL {tag} bytes")
+r, e = fnp.quantile(m, qs, axis=1, keepdims=True), np.quantile(m, qs, axis=1, keepdims=True)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL keepdims-ax1 bytes")
+r, e = fnp.percentile(m, [25, 75], axis=0, keepdims=True), np.percentile(m, [25, 75], axis=0, keepdims=True)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL keepdims-ax0 bytes")
+# nan multi-q native path: per-lane NaN compaction + shared plan/lerp
+mn = m.copy()
+mn[rng.integers(0, 2896, 20000), rng.integers(0, 2896, 20000)] = np.nan
+r, e = fnp.nanpercentile(mn, [25, 50, 75], axis=1), np.nanpercentile(mn, [25, 50, 75], axis=1)
+if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL nanpercentile3-ax1 bytes")
+r, e = fnp.nanquantile(mn, qs, axis=1), np.nanquantile(mn, qs, axis=1)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL nanquantile9-ax1 bytes")
+r, e = fnp.nanquantile(mn.ravel(), [0.1, 0.5, 0.9]), np.nanquantile(mn.ravel(), [0.1, 0.5, 0.9])
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL nan-flat multi-q bytes")
+allnan = mn.copy(); allnan[5, :] = np.nan
+with warnings.catch_warnings(record=True) as wf:
+    warnings.simplefilter("always")
+    r = fnp.nanpercentile(allnan, [25, 75], axis=1)
+with warnings.catch_warnings(record=True) as wn:
+    warnings.simplefilter("always")
+    e = np.nanpercentile(allnan, [25, 75], axis=1)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL all-nan-lane bytes")
+if [str(w.message) for w in wf] != [str(w.message) for w in wn]:
+    verdicts.append("FAIL all-nan-lane warnings")
+# nan multi-q axis 0: block gather + compaction composition
+r, e = fnp.nanpercentile(mn, [25, 50, 75], axis=0), np.nanpercentile(mn, [25, 50, 75], axis=0)
+if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL nanpercentile3-ax0 bytes")
+allnan0 = mn.copy(); allnan0[:, 5] = np.nan
+with warnings.catch_warnings(record=True) as wf:
+    warnings.simplefilter("always")
+    r = fnp.nanquantile(allnan0, [0.25, 0.75], axis=0)
+with warnings.catch_warnings(record=True) as wn:
+    warnings.simplefilter("always")
+    e = np.nanquantile(allnan0, [0.25, 0.75], axis=0)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL all-nan-column-ax0 bytes")
+if [str(w.message) for w in wf] != [str(w.message) for w in wn]:
+    verdicts.append("FAIL all-nan-column-ax0 warnings")
+r, e = fnp.nanpercentile(mn, [25, 75], axis=1, keepdims=True), np.nanpercentile(mn, [25, 75], axis=1, keepdims=True)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL nan-keepdims-ax1 bytes")
+r, e = fnp.nanquantile(mn, [0.1, 0.9], keepdims=True), np.nanquantile(mn, [0.1, 0.9], keepdims=True)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL nan-keepdims-flat bytes")
+r, e = fnp.quantile(m, qs, keepdims=True), np.quantile(m, qs, keepdims=True)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL plain-keepdims-flat bytes")
+r, e = fnp.percentile(a, [25, 50, 75], keepdims=True), np.percentile(a, [25, 50, 75], keepdims=True)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL plain-keepdims-flat-1d bytes")
+# method='midpoint' native unlock: numpy _lerp(a,b,0.5), not (a+b)/2
+for tag, call_f, call_n in (
+    ("mid-flat", lambda: fnp.percentile(a, 37.3, method="midpoint"), lambda: np.percentile(a, 37.3, method="midpoint")),
+    ("mid-ax1", lambda: fnp.percentile(m, 50, axis=1, method="midpoint"), lambda: np.percentile(m, 50, axis=1, method="midpoint")),
+    ("mid-ax0", lambda: fnp.quantile(m, 0.66, axis=0, method="midpoint"), lambda: np.quantile(m, 0.66, axis=0, method="midpoint")),
+    ("mid-exact-idx", lambda: fnp.percentile(a[:100001], 50, method="midpoint"), lambda: np.percentile(a[:100001], 50, method="midpoint")),
+):
+    rf, rn = call_f(), call_n()
+    rf, rn = np.asarray(rf), np.asarray(rn)
+    if rf.shape != rn.shape or rf.tobytes() != rn.tobytes():
+        verdicts.append(f"FAIL {tag} bytes")
+# continuous H&F methods: clamped virtual-index plan + two-sided lerp
+for meth in ("hazen", "weibull", "median_unbiased", "normal_unbiased"):
+    rf = np.asarray(fnp.percentile(a, 37.3, method=meth))
+    rn = np.asarray(np.percentile(a, 37.3, method=meth))
+    if rf.tobytes() != rn.tobytes():
+        verdicts.append(f"FAIL {meth}-flat bytes")
+    r, e = fnp.quantile(m, 0.66, axis=1, method=meth), np.quantile(m, 0.66, axis=1, method=meth)
+    if r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL {meth}-ax1 bytes")
+# clamp edges: tiny/huge q on H&F (vi < 0 and vi >= n-1)
+for qv in (1e-9, 1.0 - 1e-9, 0.0, 1.0):
+    rf = np.asarray(fnp.quantile(a, qv, method="weibull"))
+    rn = np.asarray(np.quantile(a, qv, method="weibull"))
+    if rf.tobytes() != rn.tobytes():
+        verdicts.append(f"FAIL weibull-clamp q={qv} bytes")
+# INTEGER array-q unlock (stale-reject reopen): int percentile == exact-f64-widened, byte-for-byte
+mi64 = rng.integers(-10**9, 10**9, (1024, 1024))
+mi16 = rng.integers(-30000, 30000, (1024, 1024)).astype(np.int16)
+for tag, arr, args, kw in (
+    ("int64-pct3-ax1", mi64, ([25, 50, 75],), {"axis": 1}),
+    ("int64-q9-ax0", mi64, (qs,), {"axis": 0}),
+    ("int16-flat", mi16, ([10, 90],), {}),
+    ("int64-kd", mi64, (qs,), {"axis": 1, "keepdims": True}),
+):
+    r, e = fnp.percentile(arr, *args, **kw), np.percentile(arr, *args, **kw)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL {tag} bytes")
+if fnp.percentile(mi64, 50).tobytes() != np.asarray(np.percentile(mi64, 50)).tobytes():
+    verdicts.append("FAIL int-scalar-delegate bytes")
+# weights= inverted_cdf: source-exact selection kernel
+wq = np.abs(rng.standard_normal(a.size)) + 0.01
+wq[rng.integers(0, a.size, 200000)] = 0.0
+r = fnp.quantile(a, [0.25, 0.5, 0.75], weights=wq, method="inverted_cdf")
+e = np.quantile(a, [0.25, 0.5, 0.75], weights=wq, method="inverted_cdf")
+if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL weighted-q3 bytes")
+at = np.round(a[:300000], 1); at[at == 0] = 0.1
+wt = wq[:300000]
+r = fnp.quantile(at, [0.0, 0.1, 0.5, 0.9, 1.0], weights=wt, method="inverted_cdf")
+e = np.quantile(at, [0.0, 0.1, 0.5, 0.9, 1.0], weights=wt, method="inverted_cdf")
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL weighted-ties-edges bytes")
+rs = fnp.quantile(a, 0.5, weights=wq, method="inverted_cdf")
+es = np.quantile(a, 0.5, weights=wq, method="inverted_cdf")
+if np.asarray(rs).tobytes() != np.asarray(es).tobytes():
+    verdicts.append("FAIL weighted-scalar-q bytes")
+r = fnp.percentile(a, [25, 75], weights=wq, method="inverted_cdf")
+e = np.percentile(a, [25, 75], weights=wq, method="inverted_cdf")
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL weighted-percentile bytes")
+wneg = wq.copy(); wneg[123] = -1.0
+fe = ne = None
+try:
+    fnp.quantile(a, [0.5], weights=wneg, method="inverted_cdf")
+except Exception as ex:
+    fe = type(ex).__name__
+try:
+    np.quantile(a, [0.5], weights=wneg, method="inverted_cdf")
+except Exception as ex:
+    ne = type(ex).__name__
+if fe != ne:
+    verdicts.append(f"FAIL neg-weight error parity fnp={fe} np={ne}")
+an = a.copy(); an[77] = np.nan
+r = fnp.quantile(an, [0.5], weights=wq, method="inverted_cdf")
+e = np.quantile(an, [0.5], weights=wq, method="inverted_cdf")
+if np.asarray(r).tobytes() != np.asarray(e).tobytes():
+    verdicts.append("FAIL weighted-nan-defer bytes")
+def best(fn, reps=5):
+    fn(); best_s = float("inf")
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); best_s = min(best_s, time.perf_counter() - t0)
+    return best_s * 1000
+for name, nf, ff in (
+    ("quantile9", lambda: np.quantile(a, qs), lambda: fnp.quantile(a, qs)),
+    ("percentile3_ax1", lambda: np.percentile(m, [25, 50, 75], axis=1), lambda: fnp.percentile(m, [25, 50, 75], axis=1)),
+    ("quantile9_ax1", lambda: np.quantile(m, qs, axis=1), lambda: fnp.quantile(m, qs, axis=1)),
+    ("nanpct3_ax1", lambda: np.nanpercentile(mn, [25, 50, 75], axis=1), lambda: fnp.nanpercentile(mn, [25, 50, 75], axis=1)),
+    ("percentile3_ax0", lambda: np.percentile(m, [25, 50, 75], axis=0), lambda: fnp.percentile(m, [25, 50, 75], axis=0)),
+    ("nanpct3_ax0", lambda: np.nanpercentile(mn, [25, 50, 75], axis=0), lambda: fnp.nanpercentile(mn, [25, 50, 75], axis=0)),
+    ("quantile9_ax1_kd", lambda: np.quantile(m, qs, axis=1, keepdims=True), lambda: fnp.quantile(m, qs, axis=1, keepdims=True)),
+    ("quantile9_flat_kd", lambda: np.quantile(m, qs, keepdims=True), lambda: fnp.quantile(m, qs, keepdims=True)),
+    ("pct50_ax1_midpoint", lambda: np.percentile(m, 50, axis=1, method="midpoint"), lambda: fnp.percentile(m, 50, axis=1, method="midpoint")),
+    ("pct3_3d_ax1", lambda: np.percentile(t3, [25, 50, 75], axis=1), lambda: fnp.percentile(t3, [25, 50, 75], axis=1)),
+    ("nanpct3_3d_ax1", lambda: np.nanpercentile(t3nn, [25, 50, 75], axis=1), lambda: fnp.nanpercentile(t3nn, [25, 50, 75], axis=1)),
+    ("nanmedian_3d_ax1", lambda: np.nanmedian(t3nn, axis=1), lambda: fnp.nanmedian(t3nn, axis=1)),
+    ("hazen_ax1", lambda: np.percentile(m, 37.3, axis=1, method="hazen"), lambda: fnp.percentile(m, 37.3, axis=1, method="hazen")),
+    ("int64_pct3_ax1", lambda: np.percentile(mi64, [25, 50, 75], axis=1), lambda: fnp.percentile(mi64, [25, 50, 75], axis=1)),
+    ("weighted_q3", lambda: np.quantile(a, [0.25, 0.5, 0.75], weights=wq, method="inverted_cdf"), lambda: fnp.quantile(a, [0.25, 0.5, 0.75], weights=wq, method="inverted_cdf")),
+    ("percentile3", lambda: np.percentile(a, [25, 50, 75]), lambda: fnp.percentile(a, [25, 50, 75])),
+    ("avg_weights", lambda: np.average(a, weights=w), lambda: fnp.average(a, weights=w)),
+):
+    tn, tf = best(nf), best(ff)
+    print(f"SURFACE_PROBE_AB row={name} numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces SURFACE_PROBE_AB rows under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "flat multi-quantile/percentile must stay byte-exact and weighted average allclose: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn int_nanargmax_nanargmin_route_to_argextreme_bit_exact_matches_numpy() -> Result<(), String> {
+    // Integer/bool nanargmax/nanargmin route to fnp's argmax/argmin (numpy's
+    // _replace_nan returns non-inexact arrays untouched, so the nan* forms
+    // equal the plain reductions byte-exactly); fnp's native int/bool axis
+    // kernels cover the strided forms numpy runs serially. Ties (first-max),
+    // keepdims, flat, and float inputs (nan machinery intact) all pinned.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(193)
+verdicts = []
+M = rng.integers(-2**40, 2**40, (2048, 1024))
+for fname, nfname in (("nanargmax", "nanargmax"), ("nanargmin", "nanargmin")):
+    ff = getattr(fnp, fname); nf = getattr(np, nfname)
+    for kw in [dict(), dict(axis=0), dict(axis=1), dict(axis=-1), dict(axis=0, keepdims=True)]:
+        r = ff(M, **kw); e = nf(M, **kw)
+        ra = np.asarray(r); ea = np.asarray(e)
+        if ra.dtype != ea.dtype or ra.shape != ea.shape or ra.tobytes() != ea.tobytes():
+            verdicts.append(f"FAIL {fname} {kw}")
+# ties resolve to FIRST occurrence
+T = np.zeros((512, 512), dtype=np.int64); T[7] = 5; T[300] = 5
+if np.asarray(fnp.nanargmax(T, axis=0)).tobytes() != np.asarray(np.nanargmax(T, axis=0)).tobytes():
+    verdicts.append("FAIL tie first-max")
+# bool + narrow widths
+B = rng.random((2048, 1024)) > 0.9
+if np.asarray(fnp.nanargmax(B, axis=0)).tobytes() != np.asarray(np.nanargmax(B, axis=0)).tobytes():
+    verdicts.append("FAIL bool")
+M8 = rng.integers(-100, 100, (2048, 1024)).astype(np.int8)
+if np.asarray(fnp.nanargmin(M8, axis=1)).tobytes() != np.asarray(np.nanargmin(M8, axis=1)).tobytes():
+    verdicts.append("FAIL int8")
+# float inputs keep the nan machinery (regression)
+F = rng.standard_normal((1024, 512)); F[rng.random((1024, 512)) < 0.01] = np.nan
+if np.asarray(fnp.nanargmax(F, axis=1)).tobytes() != np.asarray(np.nanargmax(F, axis=1)).tobytes():
+    verdicts.append("FAIL float nan regression")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-2**40, 2**40, (8192, 4096))
+tn = best(lambda: np.nanargmax(W, axis=0)); tf = best(lambda: fnp.nanargmax(W, axis=0))
+print(f"NANARGMAX_INT_AX0_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces NANARGMAX_INT_AX0_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "int nanargmax/nanargmin routing must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn narrow_int_argextreme_nonlast_axis_bit_exact_matches_numpy() -> Result<(), String> {
+    // The narrow-int (1/2-byte) argmax/argmin axis delegate is now LAST-axis
+    // only; non-last axes engage the native narrow arms (numpy's strided walk
+    // probed 249.1ms int16 axis=0 at (8192,4096) vs 4.4ms last-axis). First-
+    // occurrence ties and the last-axis delegate stay pinned. Also reaches
+    // through nanargmax/nanargmin via the int routing.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(199)
+verdicts = []
+for dt in [np.int16, np.int8, np.uint16, np.uint8]:
+    info = np.iinfo(dt)
+    M = rng.integers(info.min, int(info.max) + 1, (2048, 1024)).astype(dt)
+    for fname in ("argmax", "argmin"):
+        ff = getattr(fnp, fname); nf = getattr(np, fname)
+        for ax in (0, -2):
+            r = ff(M, axis=ax); e = nf(M, axis=ax)
+            ra = np.asarray(r); ea = np.asarray(e)
+            if ra.dtype != ea.dtype or ra.tobytes() != ea.tobytes():
+                verdicts.append(f"FAIL {fname} {dt.__name__} ax={ax}")
+        # last axis stays a byte-identical delegate
+        if np.asarray(ff(M, axis=1)).tobytes() != np.asarray(nf(M, axis=1)).tobytes():
+            verdicts.append(f"FAIL {fname} {dt.__name__} last-axis delegate")
+# 3-D middle axis + dense ties (first occurrence)
+M3 = rng.integers(-100, 100, (64, 256, 256)).astype(np.int16)
+if np.asarray(fnp.argmax(M3, axis=1)).tobytes() != np.asarray(np.argmax(M3, axis=1)).tobytes():
+    verdicts.append("FAIL 3-D mid-axis")
+T = np.zeros((512, 512), dtype=np.int8); T[9] = 5; T[400] = 5
+if np.asarray(fnp.argmax(T, axis=0)).tobytes() != np.asarray(np.argmax(T, axis=0)).tobytes():
+    verdicts.append("FAIL tie first-max")
+if np.asarray(fnp.nanargmax(T, axis=0)).tobytes() != np.asarray(np.nanargmax(T, axis=0)).tobytes():
+    verdicts.append("FAIL nanargmax narrow ax0")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-30000, 30000, (8192, 4096)).astype(np.int16)
+tn = best(lambda: np.argmax(W, axis=0)); tf = best(lambda: fnp.argmax(W, axis=0))
+print(f"ARGMAX_INT16_AX0_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces ARGMAX_INT16_AX0_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "narrow-int non-last-axis argextreme must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}

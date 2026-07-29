@@ -358,3 +358,41 @@ print(np.array_equal(result_ab, result_ba))
     assert_eq!(result.trim(), "True", "isclose should be symmetric");
     Ok(())
 }
+
+#[test]
+fn isclose_parallel_gate_size_bit_exact() -> Result<(), String> {
+    // The zero-copy array-array f64/f32 isclose kernels parallelize above
+    // 1<<20 elements (2026-07-12); the per-element predicate is independent,
+    // so chunks are byte-identical - this locks it at gate size with planted
+    // inf/nan/signed-zero/huge pairs across both dtypes and equal_nan modes.
+    let script = fnp_script(
+        r#"
+import numpy as np
+verdicts = []
+rng = np.random.default_rng(20260716)
+for dt in (np.float64, np.float32):
+    a = rng.standard_normal(2_000_000).astype(dt)
+    b = (a + rng.standard_normal(2_000_000) * 1e-7).astype(dt)
+    a[5] = np.inf; b[5] = np.inf
+    a[6] = np.inf; b[6] = -np.inf
+    a[7] = np.nan; b[7] = np.nan
+    a[8] = np.nan; b[8] = dt(1.0)
+    a[10] = dt(0.0); b[10] = dt(-0.0)
+    for eqn in (False, True):
+        r = fnp.isclose(a, b, equal_nan=eqn); e = np.isclose(a, b, equal_nan=eqn)
+        if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+            verdicts.append(f"FAIL {dt.__name__} eqn={eqn}")
+    if fnp.allclose(a, a) != np.allclose(a, a):
+        verdicts.append(f"FAIL allclose {dt.__name__}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "parallel isclose must be bit-identical at gate size: {result}"
+    );
+    Ok(())
+}

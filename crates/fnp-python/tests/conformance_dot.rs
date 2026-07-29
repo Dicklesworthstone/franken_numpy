@@ -318,3 +318,34 @@ print(all_pass)
     );
     Ok(())
 }
+
+#[test]
+fn int_dot_2d_native_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    // np.dot(2d, 2d) == matmul; numpy has no BLAS for ints (slow naive loop). The native
+    // parallel GEMM route must be byte-identical to numpy.dot incl. overflow wrap.
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(13)
+ok = True
+for dt in [np.int64, np.int32, np.int16, np.int8, np.uint64, np.uint32]:
+    info = np.iinfo(dt)
+    a = rng.integers(info.min // 2, info.max // 2, (96, 130)).astype(dt)
+    b = rng.integers(info.min // 2, info.max // 2, (130, 97)).astype(dt)
+    r = fnp.dot(a, b); e = np.dot(a, b)
+    ok = ok and r.dtype == e.dtype and r.shape == e.shape and r.tobytes() == e.tobytes()
+# int64 overflow wrap
+a = np.full((80, 80), 5_000_000_000, dtype=np.int64)
+b = np.full((80, 80), 5_000_000_000, dtype=np.int64)
+ok = ok and fnp.dot(a, b).tobytes() == np.dot(a, b).tobytes()
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native integer dot must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}

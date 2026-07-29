@@ -1,0 +1,16 @@
+=== model verify (3 versions):
+BATCHED_T_MODEL numpy=2.4.3 total=16 fails=0
+VERIFY_OK
+BATCHED_T_MODEL numpy=2.4.6 total=16 fails=0
+VERIFY_OK
+BATCHED_T_MODEL numpy=2.2.4 total=16 fails=0
+VERIFY_OK
+=== discriminator:
+B=2 m=2 k=2001 n=3: ['single', 'ch8192', 'ch4096', 'ch2048', 'ch16384']
+B=1 m=4 k=9000 n=3: ['single', 'ch16384']
+B=2 m=3 k=8193 n=2: ['ch8192']
+B=1 m=2 k=16389 n=2: ['single', 'ch16384']
+B=1 m=2 k=24576 n=2: ['single', 'ch8192']
+B=1 m=2 k=8192 n=2: ['single', 'ch8192', 'ch16384']
+B=1 m=1 k=9000 n=1: ['single', 'ch8192', 'ch4096', 'ch2048', 'ch16384']
+numpy=2.4.3

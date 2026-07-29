@@ -1,0 +1,15 @@
+F32_REDUCE_VERIFY numpy=2.4.3 total=36 fails=0
+VERIFY_OK
+F32_REDUCE_VERIFY numpy=2.4.6 total=36 fails=0
+VERIFY_OK
+F32_REDUCE_VERIFY numpy=2.2.4 total=36 fails=0
+VERIFY_OK
+F32_REDUCE_VERIFY numpy=2.3.5 total=36 fails=0
+VERIFY_OK
+=== fold discriminator:
+n=41: ['hadd_01_23']
+n=64: ['hadd_01_23']
+n=1000: ['hadd_01_23']
+n=8193: ['seq', 'shuf_02_13', 'hadd_01_23']
+n=16389: ['seq', 'shuf_02_13', 'hadd_01_23']
+numpy=2.4.3

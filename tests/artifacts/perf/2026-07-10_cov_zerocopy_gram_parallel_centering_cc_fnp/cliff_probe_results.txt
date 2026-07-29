@@ -1,0 +1,49 @@
+# Cliff probes, interleaved processes, min-of-9 in-process, ms.
+# old  = HEAD-equivalent .so built by cod_fnp 2026-07-09 22:51 (wt-strsearch target dir)
+# v1   = zero-copy Gram into numpy buffer + FUSED mirror + parallel centering/normalize (built ~23:15)
+# v2   = zero-copy Gram + separate PARALLEL mirror pass + parallel centering/normalize (built ~23:40)
+# v3   = parallel centering/normalize ONLY (gram/output stages byte-identical to HEAD) (built ~23:50)
+# v4   = v3 + #[inline(never)] center_rows (built ~00:15)
+# ctrl = PRISTINE HEAD source, rebuilt locally in same target dir as v1-v4 (built ~00:30)
+
+## probe A: n_vars sweep at n_obs=500 (v3 binary)
+v3 cov 1900x500: 49.52    v3 cov 1500x500: 12.91    v3 cov 1000x500: 5.80
+v3 cov 2000x500: 48.62    v3 cov 2048x500: 59.44    v3 cov 2000x1000: 57.08
+# n^2 scaling holds 1000->1500; 4x discontinuity 1500->1900.
+
+## probe B: all four binaries interleaved at 1900x500 / 2000x1000 (2 rounds)
+old  14.57..17.00 / 26.78..30.09
+v1   14.57..16.00 / 25.34..25.65
+v2   13.90..14.90 / 24.73..27.00
+v3   50.00..62.19 / 58.06..64.40
+
+## probe C: n_obs sweep at n_vars=2000 (old vs v4, 2 rounds) -- offset is CONSTANT in n_obs,
+## so the deopt lives in the n_vars^2 output stages (Vec/mirror/serial copy), NOT the dot kernel.
+old  cov 2000x50: 2.24..2.74   2000x128: 3.05..3.40   2000x500: 7.84..7.87
+v4   cov 2000x50: 29.16..29.88 2000x128: 31.18..31.21 2000x500: 38.54..39.20
+
+## probe D (CONTROL): pristine HEAD source rebuilt locally == just as slow as v3/v4.
+## The slowdown is a BUILD ARTIFACT, not any source change.
+old  cov 2000x50: 2.49..2.50   2000x128: 3.22..3.23   2000x500: 7.67..7.95
+ctrl cov 2000x50: 29.20..29.99 2000x128: 30.82..32.35 2000x500: 38.35..38.58
+
+## probe E (CONTROL 2): COLD rebuild of pristine HEAD in a FRESH target dir -- STILL SLOW.
+## Not incremental-state poisoning; every local rebuild tonight of the Vec-gram source is slow-mode.
+old   cov 2000x50: 2.23..2.42   2000x128: 2.84..3.38   2000x500: 7.35..9.07
+ctrl2 cov 2000x50: 28.86..29.63 2000x128: 30.18..30.67 2000x500: 37.42..37.54
+
+## probe F (MECHANISM): minor page faults per cov((2000,50)) call, 20-call average
+old:   ~4.8-5.1 ms/call,  2722-3125 minor faults/call  (~12 MiB refaulted/call)
+ctrl2: ~31-33  ms/call, 15792-15793 minor faults/call  (~64.7 MiB refaulted/call
+        = the 30.5 MiB result Vec + the 30.5 MiB numpy buffer, refaulted EVERY call)
+## ~13k extra faults x ~2us = ~26 ms = the whole constant offset. Mechanism: glibc malloc
+## mmap/trim-threshold page-recycling behavior, deterministic per binary but flips between
+## builds of the SAME SOURCE (5 slow builds vs 3 fast observed tonight).
+
+## probe G (CONFIRMATION + residual): MALLOC_MMAP_THRESHOLD_=128M MALLOC_TRIM_THRESHOLD_=128M
+ctrl2-knobs: 11.35 ms/call, 2 minor faults/call   (was 31.4 / 15793)
+old-knobs:    2.93 ms/call, 3 minor faults/call   (was  5.4 /  3047)
+## Fault storm fully eliminated by knobs => allocator mechanism CONFIRMED.
+## RESIDUAL: ctrl2 still 11.35 vs old 2.93 with identical (zero) fault behavior --
+## a real ~4x binary-to-binary difference in the n_vars^2 output stages remains
+## UNEXPLAINED (codegen variance suspected, not proven). Open question.

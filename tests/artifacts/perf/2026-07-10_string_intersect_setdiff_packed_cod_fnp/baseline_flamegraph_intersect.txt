@@ -1,0 +1,4 @@
+  [2m2026-07-10T02:59:24.473711Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: cargo flamegraph -p fnp-python --profile release-perf --bench criterion_python_surface --output tests/artifacts/perf/2026-07-10_string_intersect_setdiff_packed_cod_fnp/baseline_flamegraph_intersect.svg -- python_string_setops_boundary/fnp_intersect1d_U8_2m[0m
+    [2;3mat[0m rch/src/hook.rs:703 [2;3mon[0m ThreadId(1)
+
+    Blocking waiting for file lock on build directory

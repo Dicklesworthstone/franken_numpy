@@ -1632,7 +1632,7 @@ impl SeedSequence {
 
         let u32_words = self.generate_state_u32(doubled_words)?;
         let mut generated = Vec::with_capacity(words);
-        for pair in u32_words.chunks_exact(2) {
+        for pair in u32_words.as_chunks::<2>().0 {
             generated.push(u64::from(pair[0]) | (u64::from(pair[1]) << 32));
         }
         Ok(generated)
@@ -2814,6 +2814,45 @@ fn exponential_from_core<R: ZigguratRngCore>(rng: &mut R, scale: f64, size: usiz
         .collect()
 }
 
+/// Parameter-only terms of gamma sampling, computed once per batch. Every
+/// field holds the exact expression the sampling loops formerly evaluated in
+/// place, and none of them consumes an RNG draw, so hoisting them preserves
+/// the output stream bit-for-bit. Mirrors the Poisson parameter cache
+/// (franken_numpy-ixs5y.312).
+#[derive(Clone, Copy)]
+enum GammaShapeCache {
+    /// `shape == 1.0`, `shape == 0.0`, and non-finite shapes: the early
+    /// returns never read cached terms, so nothing is computed (matching the
+    /// former per-call cost exactly).
+    Degenerate,
+    /// `shape < 1.0` (uniform + exponential rejection).
+    Small {
+        one_minus_shape: f64,
+        inv_shape: f64,
+    },
+    /// Finite `shape > 1.0` (Marsaglia-Tsang).
+    MarsagliaTsang { d: f64, c: f64 },
+}
+
+impl GammaShapeCache {
+    fn new(shape_param: f64) -> Self {
+        if shape_param == 1.0 || shape_param == 0.0 || !shape_param.is_finite() {
+            Self::Degenerate
+        } else if shape_param < 1.0 {
+            Self::Small {
+                one_minus_shape: 1.0 - shape_param,
+                inv_shape: 1.0 / shape_param,
+            }
+        } else {
+            let d = shape_param - 1.0 / 3.0;
+            Self::MarsagliaTsang {
+                d,
+                c: 1.0 / (9.0 * d).sqrt(),
+            }
+        }
+    }
+}
+
 #[inline(always)]
 fn sample_ziggurat_normal_core<R: ZigguratRngCore + ?Sized>(rng: &mut R) -> f64 {
     use crate::ziggurat::{
@@ -3692,24 +3731,27 @@ impl RandomState {
         if a.is_nan() || a <= 1.0 {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| self.legacy_zipf_single(a) as u64)
-            .collect())
-    }
-
-    fn legacy_zipf_single(&mut self, a: f64) -> i64 {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
         if a >= 1025.0 {
-            return 1;
+            return Ok(vec![1; size]);
         }
         let am1 = a - 1.0;
         let b = 2.0_f64.powf(am1);
         let umin = (i64::MAX as f64).powf(-am1);
+        let exponent = -1.0 / am1;
+        Ok((0..size)
+            .map(|_| self.legacy_zipf_single(am1, b, umin, exponent) as u64)
+            .collect())
+    }
 
+    fn legacy_zipf_single(&mut self, am1: f64, b: f64, umin: f64, exponent: f64) -> i64 {
         loop {
             let u01 = self.next_f64();
             let u = u01 * umin + (1.0 - u01);
             let v = self.next_f64();
-            let x = u.powf(-1.0 / am1).floor();
+            let x = u.powf(exponent).floor();
 
             if x > (i64::MAX as f64) || x < 1.0 {
                 continue;
@@ -3880,6 +3922,94 @@ impl BinomialCache {
             p2: 0.0,
             p3: 0.0,
             p4: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PoissonPtrsCache {
+    lam: f64,
+    loglam: f64,
+    b: f64,
+    a: f64,
+    log_invalpha: f64,
+    vr: f64,
+}
+
+impl PoissonPtrsCache {
+    fn new(lam: f64) -> Self {
+        let b = 0.931 + 2.53 * lam.sqrt();
+        let a = -0.059 + 0.02483 * b;
+        Self {
+            lam,
+            loglam: lam.ln(),
+            b,
+            a,
+            log_invalpha: (1.1239 + 1.1328 / (b - 3.4)).ln(),
+            vr: 0.9277 - 3.6224 / (b - 2.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HypergeometricHruaCache {
+    good: i64,
+    bad: i64,
+    sample: i64,
+    computed_sample: i64,
+    mingoodbad: i64,
+    maxgoodbad: i64,
+    a: f64,
+    h: f64,
+    b: f64,
+    g: f64,
+}
+
+impl HypergeometricHruaCache {
+    #[expect(clippy::many_single_char_names)]
+    fn new(good: i64, bad: i64, sample: i64) -> Self {
+        // D1 = 2*sqrt(2/e), D2 = 3 - 2*sqrt(3/e)
+        const D1: f64 = 1.7155277699214135;
+        const D2: f64 = 0.8989161620588988;
+
+        let popsize = good + bad;
+        let computed_sample = sample.min(popsize - sample);
+        let mingoodbad = good.min(bad);
+        let maxgoodbad = good.max(bad);
+
+        let p = (mingoodbad as f64) / (popsize as f64);
+        let q = (maxgoodbad as f64) / (popsize as f64);
+
+        let mu = (computed_sample as f64) * p;
+        let a = mu + 0.5;
+
+        let var = ((popsize - computed_sample) as f64) * (computed_sample as f64) * p * q
+            / ((popsize - 1) as f64);
+        let c = (var + 0.5).sqrt();
+        let h = D1 * c + D2;
+
+        let m = (((computed_sample + 1) as f64) * ((mingoodbad + 1) as f64)
+            / ((popsize + 2) as f64))
+            .floor() as i64;
+
+        let g = logfactorial(m)
+            + logfactorial(mingoodbad - m)
+            + logfactorial(computed_sample - m)
+            + logfactorial(maxgoodbad - computed_sample + m);
+
+        let b = (((computed_sample.min(mingoodbad) + 1) as f64).min(a + 16.0 * c)).floor();
+
+        Self {
+            good,
+            bad,
+            sample,
+            computed_sample,
+            mingoodbad,
+            maxgoodbad,
+            a,
+            h,
+            b,
+            g,
         }
     }
 }
@@ -4879,7 +5009,11 @@ impl Generator {
         if shape_param == 0.0 {
             return Ok(vec![0.0; size]);
         }
-        Ok((0..size).map(|_| self.sample_gamma(shape_param)).collect())
+        // Parameter-only terms once per batch (bit-identical hoist, .312 sibling).
+        let cache = GammaShapeCache::new(shape_param);
+        Ok((0..size)
+            .map(|_| self.sample_gamma_cached(shape_param, cache))
+            .collect())
     }
 
     /// Generate random bytes.
@@ -4976,24 +5110,32 @@ impl Generator {
         if !(0.0..=POISSON_LAM_MAX).contains(&lam) {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size).map(|_| self.sample_poisson_single(lam)).collect())
+        if lam >= 10.0 {
+            let cache = PoissonPtrsCache::new(lam);
+            return Ok((0..size).map(|_| self.poisson_ptrs(cache) as u64).collect());
+        }
+        if lam == 0.0 {
+            Ok(vec![0; size])
+        } else {
+            let enlam = (-lam).exp();
+            Ok((0..size).map(|_| self.poisson_mult(enlam) as u64).collect())
+        }
     }
 
     /// Single Poisson sample matching NumPy's `random_poisson` dispatcher.
     fn sample_poisson_single(&mut self, lam: f64) -> u64 {
         if lam >= 10.0 {
-            self.poisson_ptrs(lam) as u64
+            self.poisson_ptrs(PoissonPtrsCache::new(lam)) as u64
         } else if lam == 0.0 {
             0
         } else {
-            self.poisson_mult(lam) as u64
+            self.poisson_mult((-lam).exp()) as u64
         }
     }
 
     /// Multiplicative (Knuth) method for small lambda.
     /// Matches `random_poisson_mult()` in NumPy's distributions.c.
-    fn poisson_mult(&mut self, lam: f64) -> i64 {
-        let enlam = (-lam).exp();
+    fn poisson_mult(&mut self, enlam: f64) -> i64 {
         let mut x: i64 = 0;
         let mut prod = 1.0;
         loop {
@@ -5011,28 +5153,21 @@ impl Generator {
     /// Matches `random_poisson_ptrs()` in NumPy's distributions.c.
     /// W. Hörmann, "The transformed rejection method for generating
     /// Poisson random variables", Insurance: Mathematics and Economics 12, 39-45 (1993).
-    fn poisson_ptrs(&mut self, lam: f64) -> i64 {
-        let slam = lam.sqrt();
-        let loglam = lam.ln();
-        let b = 0.931 + 2.53 * slam;
-        let a = -0.059 + 0.02483 * b;
-        let invalpha = 1.1239 + 1.1328 / (b - 3.4);
-        let vr = 0.9277 - 3.6224 / (b - 2.0);
-
+    fn poisson_ptrs(&mut self, cache: PoissonPtrsCache) -> i64 {
         loop {
             let u = self.next_f64() - 0.5;
             let v = self.next_f64();
             let us = 0.5 - u.abs();
-            let k = ((2.0 * a / us + b) * u + lam + 0.43).floor() as i64;
+            let k = ((2.0 * cache.a / us + cache.b) * u + cache.lam + 0.43).floor() as i64;
 
-            if us >= 0.07 && v <= vr {
+            if us >= 0.07 && v <= cache.vr {
                 return k;
             }
             if k < 0 || (us < 0.013 && v > us) {
                 continue;
             }
-            if v.ln() + invalpha.ln() - (a / (us * us) + b).ln()
-                <= -lam + (k as f64) * loglam - random_loggam((k + 1) as f64)
+            if v.ln() + cache.log_invalpha - (cache.a / (us * us) + cache.b).ln()
+                <= -cache.lam + (k as f64) * cache.loglam - random_loggam((k + 1) as f64)
             {
                 return k;
             }
@@ -5417,6 +5552,18 @@ impl Generator {
             return Err(RandomError::InvalidParameter);
         }
 
+        if replace && size == 1 {
+            let draw = self.next_f64();
+            let mut cumulative = 0.0;
+            for (&value, &prob) in a.iter().zip(p) {
+                cumulative += prob;
+                if cumulative > draw {
+                    return Ok(vec![value]);
+                }
+            }
+            return Ok(vec![a[n - 1]]);
+        }
+
         if replace {
             // Inverse-CDF sampling
             let mut cdf = Vec::with_capacity(n);
@@ -5563,12 +5710,18 @@ impl Generator {
             }
             return Ok(vec![0.0; size]);
         }
+        // Parameter-only terms once per batch (bit-identical hoist, .312 sibling).
+        let cache = GammaShapeCache::new(shape_param);
         Ok((0..size)
-            .map(|_| self.sample_gamma(shape_param) * scale)
+            .map(|_| self.sample_gamma_cached(shape_param, cache) * scale)
             .collect())
     }
 
     fn sample_gamma(&mut self, shape_param: f64) -> f64 {
+        self.sample_gamma_cached(shape_param, GammaShapeCache::new(shape_param))
+    }
+
+    fn sample_gamma_cached(&mut self, shape_param: f64, cache: GammaShapeCache) -> f64 {
         if shape_param == 1.0 {
             // Special case: gamma(1) = exponential(1)
             return self.sample_ziggurat_exponential();
@@ -5583,18 +5736,27 @@ impl Generator {
         }
         if shape_param < 1.0 {
             // NumPy's exact algorithm for shape < 1 from distributions.c:
-            // Uses uniform + exponential rejection.
+            // Uses uniform + exponential rejection. The parameter-only terms
+            // come from the batch cache; the defensive arm re-evaluates the
+            // exact same expressions, so both sources are bit-identical.
+            let (one_minus_shape, inv_shape) = match cache {
+                GammaShapeCache::Small {
+                    one_minus_shape,
+                    inv_shape,
+                } => (one_minus_shape, inv_shape),
+                _ => (1.0 - shape_param, 1.0 / shape_param),
+            };
             loop {
                 let u = self.next_f64();
                 let v = self.sample_ziggurat_exponential();
-                if u <= 1.0 - shape_param {
-                    let x = u.powf(1.0 / shape_param);
+                if u <= one_minus_shape {
+                    let x = u.powf(inv_shape);
                     if x <= v {
                         return x;
                     }
                 } else {
                     let y = -((1.0 - u) / shape_param).ln();
-                    let x = (1.0 - shape_param + shape_param * y).powf(1.0 / shape_param);
+                    let x = (one_minus_shape + shape_param * y).powf(inv_shape);
                     if x <= v + y {
                         return x;
                     }
@@ -5602,8 +5764,13 @@ impl Generator {
             }
         }
         // Marsaglia and Tsang's method for shape >= 1
-        let d = shape_param - 1.0 / 3.0;
-        let c = 1.0 / (9.0 * d).sqrt();
+        let (d, c) = match cache {
+            GammaShapeCache::MarsagliaTsang { d, c } => (d, c),
+            _ => {
+                let d = shape_param - 1.0 / 3.0;
+                (d, 1.0 / (9.0 * d).sqrt())
+            }
+        };
         loop {
             let x = self.sample_standard_normal_single();
             let v = (1.0 + c * x).powi(3);
@@ -5685,10 +5852,13 @@ impl Generator {
                 })
                 .collect());
         }
+        // Fixed shapes: parameter-only gamma terms once per batch (.334 sibling).
+        let cache_a = GammaShapeCache::new(a);
+        let cache_b = GammaShapeCache::new(b);
         Ok((0..size)
             .map(|_| {
-                let x = self.sample_gamma(a);
-                let y = self.sample_gamma(b);
+                let x = self.sample_gamma_cached(a, cache_a);
+                let y = self.sample_gamma_cached(b, cache_b);
                 if x == 0.0 && y == 0.0 {
                     0.0
                 } else {
@@ -5713,6 +5883,7 @@ impl Generator {
                 })
                 .collect());
         }
+        let inversion_log_q = if p < 1.0 / 3.0 { (-p).ln_1p() } else { 0.0 };
         Ok((0..size)
             .map(|_| {
                 if p >= 1.0 / 3.0 {
@@ -5730,6 +5901,46 @@ impl Generator {
                     x
                 } else {
                     // Inversion via standard exponential
+                    let z = (-self.sample_ziggurat_exponential() / inversion_log_q).ceil();
+                    if z >= 9.223_372_036_854_776e18 {
+                        i64::MAX as u64
+                    } else {
+                        z as u64
+                    }
+                }
+            })
+            .collect())
+    }
+
+    #[cfg(test)]
+    #[inline(never)]
+    fn geometric_former_recompute(&mut self, p: f64, size: usize) -> Result<Vec<u64>, RandomError> {
+        if p <= 0.0 || p > 1.0 || p.is_nan() {
+            return Err(RandomError::InvalidParameter);
+        }
+        if p == 1.0 {
+            return Ok((0..size)
+                .map(|_| {
+                    let _ = self.next_f64();
+                    1
+                })
+                .collect());
+        }
+        Ok((0..size)
+            .map(|_| {
+                if p >= 1.0 / 3.0 {
+                    let q = 1.0 - p;
+                    let u = self.next_f64();
+                    let mut x = 1u64;
+                    let mut sum = p;
+                    let mut prod = p;
+                    while u > sum {
+                        prod *= q;
+                        sum += prod;
+                        x += 1;
+                    }
+                    x
+                } else {
                     let z = (-self.sample_ziggurat_exponential() / (-p).ln_1p()).ceil();
                     if z >= 9.223_372_036_854_776e18 {
                         i64::MAX as u64
@@ -5978,9 +6189,18 @@ impl Generator {
         if alpha.iter().any(|&a| a < 0.0) {
             return Err(RandomError::InvalidParameter);
         }
+        // The alpha vector is batch-fixed: build each component's
+        // parameter-only gamma terms once and reuse them across every draw
+        // (.334/.335 sibling; caches consume no RNG draws, so the output
+        // stream is bit-identical).
+        let caches: Vec<GammaShapeCache> = alpha.iter().map(|&a| GammaShapeCache::new(a)).collect();
         Ok((0..size)
             .map(|_| {
-                let gamma_samples: Vec<f64> = alpha.iter().map(|&a| self.sample_gamma(a)).collect();
+                let gamma_samples: Vec<f64> = alpha
+                    .iter()
+                    .zip(&caches)
+                    .map(|(&a, &cache)| self.sample_gamma_cached(a, cache))
+                    .collect();
                 let sum: f64 = gamma_samples.iter().sum();
                 if sum == 0.0 {
                     vec![0.0; gamma_samples.len()]
@@ -6013,6 +6233,37 @@ impl Generator {
             .collect())
     }
 
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn multivariate_normal_diag_cached_sqrt_control(
+        &mut self,
+        mean: &[f64],
+        cov_diag: &[f64],
+        size: usize,
+    ) -> Result<Vec<Vec<f64>>, RandomError> {
+        if cov_diag.iter().any(|&v| v < 0.0) {
+            return Err(RandomError::InvalidParameter);
+        }
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        let standard_deviations = cov_diag
+            .iter()
+            .take(mean.len())
+            .map(|value| value.sqrt())
+            .collect::<Vec<_>>();
+        Ok((0..size)
+            .map(|_| {
+                mean.iter()
+                    .zip(&standard_deviations)
+                    .map(|(&m, &standard_deviation)| {
+                        m + self.sample_standard_normal_single() * standard_deviation
+                    })
+                    .collect()
+            })
+            .collect())
+    }
+
     /// Negative binomial distribution (np.random.negative_binomial).
     /// Number of failures before `n` successes, with success probability `p`.
     ///
@@ -6030,9 +6281,11 @@ impl Generator {
         if !n.is_finite() || n <= 0.0 || p.is_nan() || p <= 0.0 || p > 1.0 {
             return Err(RandomError::InvalidParameter);
         }
+        // Fixed shape: parameter-only gamma terms once per batch (.334 sibling).
+        let cache_n = GammaShapeCache::new(n);
         Ok((0..size)
             .map(|_| {
-                let y = self.sample_gamma(n) * (1.0 - p) / p;
+                let y = self.sample_gamma_cached(n, cache_n) * (1.0 - p) / p;
                 self.sample_poisson_single(y)
             })
             .collect())
@@ -6049,10 +6302,16 @@ impl Generator {
         if dfnum <= 0.0 || dfden <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
+        // Fixed shapes: the hoisted `dfnum / 2.0` values are the identical f64s
+        // the loop formerly recomputed, so the streams are unchanged (.334 sibling).
+        let half_dfnum = dfnum / 2.0;
+        let half_dfden = dfden / 2.0;
+        let cache_num = GammaShapeCache::new(half_dfnum);
+        let cache_den = GammaShapeCache::new(half_dfden);
         Ok((0..size)
             .map(|_| {
-                let x1 = self.sample_gamma(dfnum / 2.0) * 2.0 / dfnum;
-                let x2 = self.sample_gamma(dfden / 2.0) * 2.0 / dfden;
+                let x1 = self.sample_gamma_cached(half_dfnum, cache_num) * 2.0 / dfnum;
+                let x2 = self.sample_gamma_cached(half_dfden, cache_den) * 2.0 / dfden;
                 x1 / x2
             })
             .collect())
@@ -6100,6 +6359,21 @@ impl Generator {
             return Err(RandomError::InvalidUpperBound);
         }
 
+        let axis_len = shape[axis];
+        if axis_len <= 1 {
+            return Ok(result);
+        }
+
+        if axis + 1 == shape.len() {
+            for lane in result.chunks_exact_mut(axis_len) {
+                for i in (1..axis_len).rev() {
+                    let j = self.random_interval(i as u64) as usize;
+                    lane.swap(i, j);
+                }
+            }
+            return Ok(result);
+        }
+
         // Compute strides for row-major layout
         let ndim = shape.len();
         let mut strides = vec![1usize; ndim];
@@ -6107,10 +6381,6 @@ impl Generator {
             strides[i] = strides[i + 1] * shape[i + 1];
         }
 
-        let axis_len = shape[axis];
-        if axis_len <= 1 {
-            return Ok(result);
-        }
         let axis_stride = strides[axis];
 
         // Number of independent 1-D slices to shuffle
@@ -6118,32 +6388,21 @@ impl Generator {
 
         // For each slice along the axis, perform Fisher-Yates shuffle
         for slice_idx in 0..n_slices {
-            // Compute multi-index excluding axis dimension
-            let mut multi_idx = vec![0usize; ndim];
             let mut rem = slice_idx;
+            let mut base_offset = 0;
             for d in (0..ndim).rev() {
                 if d == axis {
                     continue;
                 }
-                multi_idx[d] = rem % shape[d];
+                let coordinate = rem % shape[d];
                 rem /= shape[d];
-            }
-            let mut base_offset = 0;
-            for d in 0..ndim {
-                if d != axis {
-                    base_offset += multi_idx[d] * strides[d];
-                }
+                base_offset += coordinate * strides[d];
             }
 
-            // Gather indices along the axis
-            let indices: Vec<usize> = (0..axis_len)
-                .map(|k| base_offset + k * axis_stride)
-                .collect();
-
-            // Fisher-Yates shuffle on these indices (random_interval for generic arrays)
+            // Fisher-Yates shuffle at the strided addresses (random_interval for generic arrays)
             for i in (1..axis_len).rev() {
                 let j = self.random_interval(i as u64) as usize;
-                result.swap(indices[i], indices[j]);
+                result.swap(base_offset + i * axis_stride, base_offset + j * axis_stride);
             }
         }
 
@@ -6167,10 +6426,13 @@ impl Generator {
         if df <= 0.0 || df.is_sign_negative() {
             return Err(RandomError::InvalidParameter);
         }
+        // Fixed shape: parameter-only gamma terms once per batch (.334 sibling).
+        let half_df = df / 2.0;
+        let cache_df = GammaShapeCache::new(half_df);
         Ok((0..size)
             .map(|_| {
                 let z = self.sample_standard_normal_single();
-                let chi2 = self.sample_gamma(df / 2.0) * 2.0;
+                let chi2 = self.sample_gamma_cached(half_df, cache_df) * 2.0;
                 z / (chi2 / df).sqrt()
             })
             .collect())
@@ -6182,6 +6444,43 @@ impl Generator {
     /// or equivalently: Poisson(nonc/2) mixture of chi-squared variates.
     /// Uses the simpler additive method: sum of (Z + sqrt(nonc/df))² for each df.
     pub fn noncentral_chisquare(
+        &mut self,
+        df: f64,
+        nonc: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if df <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+
+        let central = nonc == 0.0;
+        let fixed_shape = if central {
+            Some(df / 2.0)
+        } else if !nonc.is_nan() && df > 1.0 {
+            Some((df - 1.0) / 2.0)
+        } else {
+            None
+        };
+        let fixed_cache = fixed_shape.map(GammaShapeCache::new);
+        Ok((0..size)
+            .map(|_| {
+                let Some((shape, cache)) = fixed_shape.zip(fixed_cache) else {
+                    return self.sample_noncentral_chisquare(df, nonc);
+                };
+                let chi2_part = self.sample_gamma_cached(shape, cache) * 2.0;
+                if central {
+                    chi2_part
+                } else {
+                    let z = self.sample_standard_normal_single() + nonc.sqrt();
+                    chi2_part + z * z
+                }
+            })
+            .collect())
+    }
+
+    /// Exact pre-cache implementation retained as a benchmark control.
+    #[doc(hidden)]
+    pub fn noncentral_chisquare_recomputed_control(
         &mut self,
         df: f64,
         nonc: f64,
@@ -6226,10 +6525,34 @@ impl Generator {
         if dfnum <= 0.0 || dfden <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
+
+        let denominator_shape = dfden / 2.0;
+        let denominator_cache = GammaShapeCache::new(denominator_shape);
+        let central_numerator = nonc == 0.0;
+        let numerator_cache = if central_numerator {
+            let shape = dfnum / 2.0;
+            Some((shape, GammaShapeCache::new(shape)))
+        } else if !nonc.is_nan() && dfnum > 1.0 {
+            let shape = (dfnum - 1.0) / 2.0;
+            Some((shape, GammaShapeCache::new(shape)))
+        } else {
+            None
+        };
+
         Ok((0..size)
             .map(|_| {
-                let nc_chi2 = self.sample_noncentral_chisquare(dfnum, nonc);
-                let chi2 = self.sample_gamma(dfden / 2.0) * 2.0;
+                let nc_chi2 = if let Some((shape, cache)) = numerator_cache {
+                    let chi2_part = self.sample_gamma_cached(shape, cache) * 2.0;
+                    if central_numerator {
+                        chi2_part
+                    } else {
+                        let z = self.sample_standard_normal_single() + nonc.sqrt();
+                        chi2_part + z * z
+                    }
+                } else {
+                    self.sample_noncentral_chisquare(dfnum, nonc)
+                };
+                let chi2 = self.sample_gamma_cached(denominator_shape, denominator_cache) * 2.0;
                 (nc_chi2 / dfnum) / (chi2 / dfden)
             })
             .collect())
@@ -6271,6 +6594,11 @@ impl Generator {
                 RngBackend::Sfc64(rng) => vonmises_uniform_from_core(rng, size),
             });
         }
+        // NOTE (2026-07-16 NO-SHIP, ledger + bench vonmises_kappa_cache):
+        // hoisting the kappa-only terms (Best-Fisher s, large-kappa scale)
+        // per batch is stream-safe but measured 1.02-1.04x, noise-level -
+        // the per-sample cos/ln/acos rejection body dominates. Do not re-hoist
+        // without a faster rejection body to expose the terms.
         Ok((0..size)
             .map(|_| {
                 if kappa > 1e6 {
@@ -6375,6 +6703,12 @@ impl Generator {
         let good = ngood as i64;
         let bad = nbad as i64;
         let sample = nsample as i64;
+        if sample >= 10 && sample <= good + bad - 10 {
+            let cache = HypergeometricHruaCache::new(good, bad, sample);
+            return Ok((0..size)
+                .map(|_| self.hypergeometric_hrua(cache) as u64)
+                .collect());
+        }
         Ok((0..size)
             .map(|_| self.sample_hypergeometric(good, bad, sample) as u64)
             .collect())
@@ -6384,7 +6718,7 @@ impl Generator {
     fn sample_hypergeometric(&mut self, good: i64, bad: i64, sample: i64) -> i64 {
         let total = good + bad;
         if sample >= 10 && sample <= total - 10 {
-            self.hypergeometric_hrua(good, bad, sample)
+            self.hypergeometric_hrua(HypergeometricHruaCache::new(good, bad, sample))
         } else {
             self.hypergeometric_sample(good, bad, sample)
         }
@@ -6426,56 +6760,25 @@ impl Generator {
     /// HRUA (ratio-of-uniforms) hypergeometric sampling.
     /// Matches `hypergeometric_hrua()` in NumPy's `random_hypergeometric.c`.
     #[expect(clippy::many_single_char_names)]
-    fn hypergeometric_hrua(&mut self, good: i64, bad: i64, sample: i64) -> i64 {
-        // D1 = 2*sqrt(2/e), D2 = 3 - 2*sqrt(3/e)
-        const D1: f64 = 1.7155277699214135;
-        const D2: f64 = 0.8989161620588988;
-
-        let popsize = good + bad;
-        let computed_sample = sample.min(popsize - sample);
-        let mingoodbad = good.min(bad);
-        let maxgoodbad = good.max(bad);
-
-        let p = (mingoodbad as f64) / (popsize as f64);
-        let q = (maxgoodbad as f64) / (popsize as f64);
-
-        let mu = (computed_sample as f64) * p;
-        let a = mu + 0.5;
-
-        let var = ((popsize - computed_sample) as f64) * (computed_sample as f64) * p * q
-            / ((popsize - 1) as f64);
-        let c = (var + 0.5).sqrt();
-        let h = D1 * c + D2;
-
-        let m = (((computed_sample + 1) as f64) * ((mingoodbad + 1) as f64)
-            / ((popsize + 2) as f64))
-            .floor() as i64;
-
-        let g = logfactorial(m)
-            + logfactorial(mingoodbad - m)
-            + logfactorial(computed_sample - m)
-            + logfactorial(maxgoodbad - computed_sample + m);
-
-        let b = (((computed_sample.min(mingoodbad) + 1) as f64).min(a + 16.0 * c)).floor();
-
+    fn hypergeometric_hrua(&mut self, cache: HypergeometricHruaCache) -> i64 {
         let mut k;
         loop {
             let u = self.next_f64();
             let v = self.next_f64();
-            let x = a + h * (v - 0.5) / u;
+            let x = cache.a + cache.h * (v - 0.5) / u;
 
-            if x < 0.0 || x >= b {
+            if x < 0.0 || x >= cache.b {
                 continue;
             }
 
             k = x.floor() as i64;
 
             let gp = logfactorial(k)
-                + logfactorial(mingoodbad - k)
-                + logfactorial(computed_sample - k)
-                + logfactorial(maxgoodbad - computed_sample + k);
+                + logfactorial(cache.mingoodbad - k)
+                + logfactorial(cache.computed_sample - k)
+                + logfactorial(cache.maxgoodbad - cache.computed_sample + k);
 
-            let t = g - gp;
+            let t = cache.g - gp;
 
             if u * (4.0 - u) - 3.0 <= t {
                 break;
@@ -6488,11 +6791,11 @@ impl Generator {
             }
         }
 
-        if good > bad {
-            k = computed_sample - k;
+        if cache.good > cache.bad {
+            k = cache.computed_sample - k;
         }
-        if computed_sample < sample {
-            k = good - k;
+        if cache.computed_sample < cache.sample {
+            k = cache.good - k;
         }
 
         k
@@ -6506,24 +6809,27 @@ impl Generator {
         if a.is_nan() || a <= 1.0 {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| self.sample_zipf_single(a) as f64)
-            .collect())
-    }
-
-    fn sample_zipf_single(&mut self, a: f64) -> i64 {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
         if a >= 1025.0 {
-            return 1;
+            return Ok(vec![1.0; size]);
         }
         let am1 = a - 1.0;
         let b = 2.0_f64.powf(am1);
         let umin = (i64::MAX as f64).powf(-am1);
+        let exponent = -1.0 / am1;
+        Ok((0..size)
+            .map(|_| self.sample_zipf_single(am1, b, umin, exponent) as f64)
+            .collect())
+    }
 
+    fn sample_zipf_single(&mut self, am1: f64, b: f64, umin: f64, exponent: f64) -> i64 {
         loop {
             let u01 = self.next_f64();
             let u = u01 * umin + (1.0 - u01); // U in (Umin, 1]
             let v = self.next_f64();
-            let x = u.powf(-1.0 / am1).floor();
+            let x = u.powf(exponent).floor();
 
             if x > (i64::MAX as f64) || x < 1.0 {
                 continue;
@@ -6875,12 +7181,10 @@ fn os_entropy_u32_words(words: usize) -> Result<Vec<u32>, SeedSequenceError> {
     getrandom::fill(&mut bytes).map_err(|_| SeedSequenceError::GenerateStateContractViolation)?;
 
     Ok(bytes
-        .chunks_exact(std::mem::size_of::<u32>())
-        .map(|chunk| {
-            let mut word = [0_u8; std::mem::size_of::<u32>()];
-            word.copy_from_slice(chunk);
-            u32::from_ne_bytes(word)
-        })
+        .as_chunks::<{ std::mem::size_of::<u32>() }>()
+        .0
+        .iter()
+        .map(|word| u32::from_ne_bytes(*word))
         .collect())
 }
 
@@ -12974,6 +13278,162 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn geometric_batch_matches_former_stream() {
+        for &p in &[0.1, 0.32, 1.0 / 3.0, 0.9, 1.0] {
+            let mut batch = test_generator();
+            let mut former = test_generator();
+            assert_eq!(
+                batch.geometric(p, 128).unwrap(),
+                former.geometric_former_recompute(p, 128).unwrap(),
+                "geometric output divergence at p={p}"
+            );
+            assert_eq!(
+                batch.next_u64(),
+                former.next_u64(),
+                "post-geometric stream divergence at p={p}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual same-binary performance audit"]
+    fn geometric_inversion_parameter_cache_perf_audit() -> Result<(), String> {
+        const OBSERVATIONS: usize = 10;
+        const REPEATS: usize = 2_048;
+        const SIZE: usize = 100_000;
+        const P: f64 = 0.1;
+
+        fn former_batch(generator: &mut Generator) -> Vec<u64> {
+            generator.geometric_former_recompute(P, SIZE).unwrap()
+        }
+
+        fn candidate_batch(generator: &mut Generator) -> Vec<u64> {
+            generator.geometric(P, SIZE).unwrap()
+        }
+
+        fn stats(samples: &[f64]) -> (f64, f64) {
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            let variance = samples
+                .iter()
+                .map(|sample| {
+                    let delta = sample - mean;
+                    delta * delta
+                })
+                .sum::<f64>()
+                / (samples.len() - 1) as f64;
+            (mean, variance.sqrt() * 100.0 / mean)
+        }
+
+        let mut former_proof = test_generator();
+        let mut candidate_proof = test_generator();
+        assert_eq!(
+            former_batch(&mut former_proof),
+            candidate_batch(&mut candidate_proof)
+        );
+        assert_eq!(former_proof.next_u64(), candidate_proof.next_u64());
+
+        if let Ok(arm) = std::env::var("FNP_GEOMETRIC_PERF_ARM") {
+            const SINGLE_ARM_REPEATS: usize = 512;
+            let mut generator = test_generator();
+            let started = std::time::Instant::now();
+            for _ in 0..SINGLE_ARM_REPEATS {
+                match arm.as_str() {
+                    "former" => std::hint::black_box(former_batch(&mut generator)),
+                    "candidate_a" | "candidate_b" | "candidate_c" => {
+                        std::hint::black_box(candidate_batch(&mut generator))
+                    }
+                    _ => return Err(format!("unknown FNP_GEOMETRIC_PERF_ARM value: {arm}")),
+                };
+            }
+            println!(
+                "LEDGER_AUDIT row=geometric_inversion_parameter_cache_single_arm \
+                 arm={arm} repeats={SINGLE_ARM_REPEATS} elapsed_ms={:.6}",
+                started.elapsed().as_secs_f64() * 1_000.0,
+            );
+            return Ok(());
+        }
+
+        let time_former = |generator: &mut Generator| {
+            let started = std::time::Instant::now();
+            std::hint::black_box(former_batch(generator));
+            started.elapsed()
+        };
+        let time_candidate = |generator: &mut Generator| {
+            let started = std::time::Instant::now();
+            std::hint::black_box(candidate_batch(generator));
+            started.elapsed()
+        };
+
+        let mut effect_former = Vec::with_capacity(OBSERVATIONS);
+        let mut effect_candidate = Vec::with_capacity(OBSERVATIONS);
+        for observation in 0..OBSERVATIONS {
+            let mut former_generator = test_generator();
+            let mut candidate_generator = test_generator();
+            let mut former = std::time::Duration::ZERO;
+            let mut candidate = std::time::Duration::ZERO;
+            for repeat in 0..REPEATS {
+                if (observation + repeat) & 1 == 0 {
+                    former += time_former(&mut former_generator);
+                    candidate += time_candidate(&mut candidate_generator);
+                    candidate += time_candidate(&mut candidate_generator);
+                    former += time_former(&mut former_generator);
+                } else {
+                    candidate += time_candidate(&mut candidate_generator);
+                    former += time_former(&mut former_generator);
+                    former += time_former(&mut former_generator);
+                    candidate += time_candidate(&mut candidate_generator);
+                }
+            }
+            effect_former.push(former.as_secs_f64() * 500.0 / REPEATS as f64);
+            effect_candidate.push(candidate.as_secs_f64() * 500.0 / REPEATS as f64);
+        }
+
+        let mut null_lhs = Vec::with_capacity(OBSERVATIONS);
+        let mut null_rhs = Vec::with_capacity(OBSERVATIONS);
+        for observation in 0..OBSERVATIONS {
+            let mut lhs_generator = test_generator();
+            let mut rhs_generator = test_generator();
+            let mut lhs = std::time::Duration::ZERO;
+            let mut rhs = std::time::Duration::ZERO;
+            for repeat in 0..REPEATS {
+                if (observation + repeat) & 1 == 0 {
+                    lhs += time_candidate(&mut lhs_generator);
+                    rhs += time_candidate(&mut rhs_generator);
+                    rhs += time_candidate(&mut rhs_generator);
+                    lhs += time_candidate(&mut lhs_generator);
+                } else {
+                    rhs += time_candidate(&mut rhs_generator);
+                    lhs += time_candidate(&mut lhs_generator);
+                    lhs += time_candidate(&mut lhs_generator);
+                    rhs += time_candidate(&mut rhs_generator);
+                }
+            }
+            null_lhs.push(lhs.as_secs_f64() * 500.0 / REPEATS as f64);
+            null_rhs.push(rhs.as_secs_f64() * 500.0 / REPEATS as f64);
+        }
+
+        let (former_mean, former_cv) = stats(&effect_former);
+        let (candidate_mean, candidate_cv) = stats(&effect_candidate);
+        let (null_lhs_mean, null_lhs_cv) = stats(&null_lhs);
+        let (null_rhs_mean, null_rhs_cv) = stats(&null_rhs);
+        println!(
+            "LEDGER_AUDIT row=geometric_inversion_parameter_cache_effect \
+             samples={OBSERVATIONS} candidate_mean_ms={candidate_mean:.6} \
+             candidate_cv_pct={candidate_cv:.3} orig_mean_ms={former_mean:.6} \
+             orig_cv_pct={former_cv:.3} orig_over_candidate={:.4}",
+            former_mean / candidate_mean,
+        );
+        println!(
+            "LEDGER_AUDIT row=geometric_inversion_parameter_cache_null \
+             samples={OBSERVATIONS} candidate_mean_ms={null_lhs_mean:.6} \
+             candidate_cv_pct={null_lhs_cv:.3} orig_mean_ms={null_rhs_mean:.6} \
+             orig_cv_pct={null_rhs_cv:.3} orig_over_candidate={:.4}",
+            null_rhs_mean / null_lhs_mean,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn lognormal_basic() {
         let mut rng = test_generator();
         let samples = rng.lognormal(0.0, 1.0, 1000).unwrap();
@@ -13302,6 +13762,54 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn multivariate_normal_diag_hoisted_sqrt_matches_former_stream() {
+        let fixtures = [
+            (vec![0.0, 5.0, -2.0, 1.0], vec![1.0, 4.0, 0.25, 9.0], 4_096),
+            (
+                vec![1.0, 2.0, 3.0, 4.0],
+                vec![0.0, -0.0, f64::NAN, f64::INFINITY],
+                257,
+            ),
+            (vec![1.0, 2.0], vec![1.0, 4.0, 9.0], 31),
+            (vec![1.0, 2.0, 3.0], vec![1.0], 31),
+            (vec![1.0, 2.0], vec![1.0, 4.0], 0),
+        ];
+
+        for (mean, cov_diag, size) in fixtures {
+            let mut former = test_generator();
+            let mut candidate = test_generator();
+            let former_output = former
+                .multivariate_normal_diag(&mean, &cov_diag, size)
+                .unwrap();
+            let candidate_output = candidate
+                .multivariate_normal_diag_cached_sqrt_control(&mean, &cov_diag, size)
+                .unwrap();
+            assert_eq!(former_output.len(), candidate_output.len());
+            for (former_row, candidate_row) in former_output.iter().zip(&candidate_output) {
+                assert_eq!(
+                    former_row
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    candidate_row
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                );
+            }
+            assert_eq!(former.next_u64(), candidate.next_u64());
+        }
+
+        let mut former = test_generator();
+        let mut candidate = test_generator();
+        assert_eq!(
+            former.multivariate_normal_diag(&[0.0], &[-1.0], 1),
+            candidate.multivariate_normal_diag_cached_sqrt_control(&[0.0], &[-1.0], 1)
+        );
+        assert_eq!(former.next_u64(), candidate.next_u64());
+    }
+
+    #[test]
     fn negative_binomial_basic() {
         let mut rng = test_generator();
         let samples = rng.negative_binomial(5.0, 0.5, 100).unwrap();
@@ -13543,6 +14051,162 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn hypergeometric_batch_matches_singleton_stream() {
+        for &(good, bad, sample) in &[
+            (20_u64, 30_u64, 10_u64),
+            (20_000, 30_000, 10_000),
+            (5, 5, 3),
+            (5, 5, 8),
+        ] {
+            let mut batch = test_generator();
+            let mut singleton = test_generator();
+            let batch_values = batch.hypergeometric(good, bad, sample, 128).unwrap();
+            let singleton_values = (0..128)
+                .map(|_| singleton.hypergeometric(good, bad, sample, 1).unwrap()[0])
+                .collect::<Vec<_>>();
+            assert_eq!(
+                batch_values, singleton_values,
+                "batch/singleton divergence for ({good}, {bad}, {sample})"
+            );
+            assert_eq!(
+                batch.next_u64(),
+                singleton.next_u64(),
+                "post-batch stream divergence for ({good}, {bad}, {sample})"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual same-binary performance audit"]
+    fn hypergeometric_hrua_parameter_cache_perf_audit() {
+        const OBSERVATIONS: usize = 10;
+        const REPEATS: usize = 32;
+        const SIZE: usize = 100_000;
+        const GOOD: i64 = 20_000;
+        const BAD: i64 = 30_000;
+        const SAMPLE: i64 = 10_000;
+
+        fn former_batch(generator: &mut Generator) -> Vec<u64> {
+            (0..SIZE)
+                .map(|_| {
+                    generator
+                        .hypergeometric_hrua(super::HypergeometricHruaCache::new(GOOD, BAD, SAMPLE))
+                        as u64
+                })
+                .collect()
+        }
+
+        fn candidate_batch(generator: &mut Generator) -> Vec<u64> {
+            generator
+                .hypergeometric(GOOD as u64, BAD as u64, SAMPLE as u64, SIZE)
+                .unwrap()
+        }
+
+        fn stats(samples: &[f64]) -> (f64, f64) {
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            let variance = samples
+                .iter()
+                .map(|sample| {
+                    let delta = sample - mean;
+                    delta * delta
+                })
+                .sum::<f64>()
+                / (samples.len() - 1) as f64;
+            (mean, variance.sqrt() * 100.0 / mean)
+        }
+
+        let mut former_proof = test_generator();
+        let mut candidate_proof = test_generator();
+        assert_eq!(
+            former_batch(&mut former_proof),
+            candidate_batch(&mut candidate_proof)
+        );
+        assert_eq!(former_proof.next_u64(), candidate_proof.next_u64());
+
+        let time_former = || {
+            let mut generator = test_generator();
+            let started = std::time::Instant::now();
+            for _ in 0..REPEATS {
+                std::hint::black_box(former_batch(&mut generator));
+            }
+            started.elapsed()
+        };
+        let time_candidate = || {
+            let mut generator = test_generator();
+            let started = std::time::Instant::now();
+            for _ in 0..REPEATS {
+                std::hint::black_box(candidate_batch(&mut generator));
+            }
+            started.elapsed()
+        };
+
+        let mut effect_former = Vec::with_capacity(OBSERVATIONS);
+        let mut effect_candidate = Vec::with_capacity(OBSERVATIONS);
+        for observation in 0..OBSERVATIONS {
+            let (former, candidate) = if observation & 1 == 0 {
+                let former_first = time_former();
+                let candidate_first = time_candidate();
+                let candidate_second = time_candidate();
+                let former_second = time_former();
+                (
+                    former_first + former_second,
+                    candidate_first + candidate_second,
+                )
+            } else {
+                let candidate_first = time_candidate();
+                let former_first = time_former();
+                let former_second = time_former();
+                let candidate_second = time_candidate();
+                (
+                    former_first + former_second,
+                    candidate_first + candidate_second,
+                )
+            };
+            effect_former.push(former.as_secs_f64() * 500.0 / REPEATS as f64);
+            effect_candidate.push(candidate.as_secs_f64() * 500.0 / REPEATS as f64);
+        }
+
+        let mut null_lhs = Vec::with_capacity(OBSERVATIONS);
+        let mut null_rhs = Vec::with_capacity(OBSERVATIONS);
+        for observation in 0..OBSERVATIONS {
+            let (lhs, rhs) = if observation & 1 == 0 {
+                let lhs_first = time_candidate();
+                let rhs_first = time_candidate();
+                let rhs_second = time_candidate();
+                let lhs_second = time_candidate();
+                (lhs_first + lhs_second, rhs_first + rhs_second)
+            } else {
+                let rhs_first = time_candidate();
+                let lhs_first = time_candidate();
+                let lhs_second = time_candidate();
+                let rhs_second = time_candidate();
+                (lhs_first + lhs_second, rhs_first + rhs_second)
+            };
+            null_lhs.push(lhs.as_secs_f64() * 500.0 / REPEATS as f64);
+            null_rhs.push(rhs.as_secs_f64() * 500.0 / REPEATS as f64);
+        }
+
+        let (former_mean, former_cv) = stats(&effect_former);
+        let (candidate_mean, candidate_cv) = stats(&effect_candidate);
+        let (null_lhs_mean, null_lhs_cv) = stats(&null_lhs);
+        let (null_rhs_mean, null_rhs_cv) = stats(&null_rhs);
+        println!(
+            "LEDGER_AUDIT row=hypergeometric_hrua_parameter_cache_effect \
+             samples={OBSERVATIONS} candidate_mean_ms={candidate_mean:.6} \
+             candidate_cv_pct={candidate_cv:.3} orig_mean_ms={former_mean:.6} \
+             orig_cv_pct={former_cv:.3} orig_over_candidate={:.4}",
+            former_mean / candidate_mean,
+        );
+        println!(
+            "LEDGER_AUDIT row=hypergeometric_hrua_parameter_cache_null \
+             samples={OBSERVATIONS} candidate_mean_ms={null_lhs_mean:.6} \
+             candidate_cv_pct={null_lhs_cv:.3} orig_mean_ms={null_rhs_mean:.6} \
+             orig_cv_pct={null_rhs_cv:.3} orig_over_candidate={:.4}",
+            null_rhs_mean / null_lhs_mean,
+        );
+    }
+
+    #[test]
     fn zipf_values_are_positive_integers() {
         let mut rng = test_generator();
         let samples = rng.zipf(2.0, 5000).unwrap();
@@ -13705,6 +14369,35 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn noncentral_chisquare_fixed_cache_matches_recomputed_stream() {
+        for &(df, nonc, size) in &[
+            (5.0, 0.0, 64),
+            (5.0, 1.0, 64),
+            (0.5, 1.0, 64),
+            (5.0, f64::NAN, 64),
+            (5.0, 1.0, 0),
+        ] {
+            let mut former = test_generator();
+            let mut candidate = test_generator();
+            let former_output = former
+                .noncentral_chisquare_recomputed_control(df, nonc, size)
+                .unwrap();
+            let candidate_output = candidate.noncentral_chisquare(df, nonc, size).unwrap();
+            assert_eq!(
+                former_output
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                candidate_output
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(former.next_u64(), candidate.next_u64());
+        }
+    }
+
+    #[test]
     fn noncentral_f_positive_values() {
         let mut rng = test_generator();
         let samples = rng.noncentral_f(5.0, 10.0, 1.0, 1000).unwrap();
@@ -13737,6 +14430,31 @@ for child in rng.spawn(n_children):
         let actual = noncentral.noncentral_f(5.0, 10.0, 0.0, 8).unwrap();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn noncentral_f_batch_matches_singleton_stream() {
+        for &(dfnum, dfden, nonc) in &[
+            (5.0, 20.0, 2.0),
+            (0.5, 20.0, 2.0),
+            (5.0, 20.0, 0.0),
+            (2.0, 5.0, f64::NAN),
+        ] {
+            let mut batch = test_generator();
+            let mut singleton = test_generator();
+            let batch_values = batch.noncentral_f(dfnum, dfden, nonc, 64).unwrap();
+            let singleton_values = (0..64)
+                .map(|_| singleton.noncentral_f(dfnum, dfden, nonc, 1).unwrap()[0])
+                .collect::<Vec<_>>();
+            assert!(
+                batch_values
+                    .iter()
+                    .zip(&singleton_values)
+                    .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits()),
+                "batch/singleton mismatch for ({dfnum}, {dfden}, {nonc})"
+            );
+            assert_eq!(batch.next_u64(), singleton.next_u64());
+        }
     }
 
     #[test]
@@ -15712,6 +16430,157 @@ for child in rng.spawn(n_children):
         ];
         let after = g.random(5);
         assert_f64_seq("geometric_p_one_after", &after, &expected_after);
+    }
+
+    #[test]
+    fn gamma_batch_matches_singleton_stream() {
+        // The per-batch GammaShapeCache must not change what a batched draw
+        // produces relative to repeated single draws with the same seed, and
+        // both must leave the raw stream in the same place. Covers the
+        // small-shape rejection, Marsaglia-Tsang, and every degenerate early
+        // return, for standard_gamma and scaled gamma.
+        let shapes = [0.25f64, 0.5, 1.0, 2.5, 5.0, 20.0, 0.0, f64::INFINITY];
+        let mut batch = oracle_gen();
+        let mut single = oracle_gen();
+        for &shape in &shapes {
+            let batched = batch.standard_gamma(shape, 32).unwrap();
+            let singles: Vec<f64> = (0..32)
+                .map(|_| single.standard_gamma(shape, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "standard_gamma batch/singleton divergence at shape {shape}"
+            );
+        }
+        assert_eq!(batch.next_u64(), single.next_u64());
+
+        let mut batch = oracle_gen();
+        let mut single = oracle_gen();
+        for &shape in &shapes {
+            let batched = batch.gamma(shape, 2.5, 32).unwrap();
+            let singles: Vec<f64> = (0..32)
+                .map(|_| single.gamma(shape, 2.5, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "gamma batch/singleton divergence at shape {shape}"
+            );
+        }
+        assert_eq!(batch.next_u64(), single.next_u64());
+    }
+
+    #[test]
+    fn gamma_consumers_batch_match_singleton_stream() {
+        // The fixed-shape cache hoists in beta/negative_binomial/f/standard_t
+        // must not change what a batched draw produces relative to repeated
+        // single draws with the same seed, including small-shape (< 1),
+        // Marsaglia-Tsang (> 1), and exponential (== 1 via shape 2.0/2) regimes.
+        let mut batch = oracle_gen();
+        let mut single = oracle_gen();
+        for &(a, b) in &[(2.5f64, 4.0f64), (0.5, 3.0), (1.5, 0.75), (1.0, 1.0)] {
+            let batched = batch.beta(a, b, 24).unwrap();
+            let singles: Vec<f64> = (0..24).map(|_| single.beta(a, b, 1).unwrap()[0]).collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "beta batch/singleton divergence at ({a}, {b})"
+            );
+        }
+        for &n in &[0.5f64, 1.0, 7.5] {
+            let batched = batch.negative_binomial(n, 0.35, 24).unwrap();
+            let singles: Vec<u64> = (0..24)
+                .map(|_| single.negative_binomial(n, 0.35, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched, singles,
+                "negative_binomial batch/singleton divergence at n {n}"
+            );
+        }
+        for &(dfnum, dfden) in &[(5.0f64, 8.0f64), (1.0, 2.0), (0.5, 3.5)] {
+            let batched = batch.f_distribution(dfnum, dfden, 24).unwrap();
+            let singles: Vec<f64> = (0..24)
+                .map(|_| single.f_distribution(dfnum, dfden, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "f batch/singleton divergence at ({dfnum}, {dfden})"
+            );
+        }
+        for &df in &[1.0f64, 2.0, 10.5] {
+            let batched = batch.standard_t(df, 24).unwrap();
+            let singles: Vec<f64> = (0..24)
+                .map(|_| single.standard_t(df, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "standard_t batch/singleton divergence at df {df}"
+            );
+        }
+        assert_eq!(batch.next_u64(), single.next_u64());
+    }
+
+    #[test]
+    fn dirichlet_batch_matches_singleton_stream() {
+        // The per-alpha cache vector must not change what a batched draw
+        // produces relative to repeated single draws with the same seed.
+        // Mixed regimes per component: sub-1, Marsaglia-Tsang, exponential
+        // (a == 1), zero, and NaN alphas.
+        let alphas_sets: &[&[f64]] = &[
+            &[2.5, 4.0, 1.5, 0.5, 3.0],
+            &[0.5, 0.0, 2.0],
+            &[1.0, 1.0],
+            &[f64::NAN, 2.0],
+        ];
+        let mut batch = oracle_gen();
+        let mut single = oracle_gen();
+        for &alphas in alphas_sets {
+            let batched = batch.dirichlet(alphas, 16).unwrap();
+            let singles: Vec<Vec<f64>> = (0..16)
+                .map(|_| {
+                    single
+                        .dirichlet(alphas, 1)
+                        .unwrap()
+                        .into_iter()
+                        .next()
+                        .unwrap()
+                })
+                .collect();
+            for (draw, (b, s)) in batched.iter().zip(singles.iter()).enumerate() {
+                assert_eq!(
+                    b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    s.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    "dirichlet batch/singleton divergence at draw {draw} for {alphas:?}"
+                );
+            }
+        }
+        assert_eq!(batch.next_u64(), single.next_u64());
+    }
+
+    #[test]
+    fn vonmises_batch_matches_singleton_stream() {
+        // The per-batch kappa-term hoist (and the batch-level split of the
+        // large-kappa normal approximation) must not change what a batched
+        // draw produces relative to repeated single draws with the same seed.
+        // Covers the small-s series (kappa < 1e-5), the Best-Fisher rejection
+        // loop, and the kappa > 1e6 normal approximation.
+        let mut batch = oracle_gen();
+        let mut single = oracle_gen();
+        for &kappa in &[5e-6f64, 0.5, 2.5, 4.0, 1e7] {
+            let batched = batch.vonmises(1.25, kappa, 24).unwrap();
+            let singles: Vec<f64> = (0..24)
+                .map(|_| single.vonmises(1.25, kappa, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "vonmises batch/singleton divergence at kappa {kappa}"
+            );
+        }
+        assert_eq!(batch.next_u64(), single.next_u64());
     }
 
     #[test]
@@ -18154,6 +19023,104 @@ for child in rng.spawn(n_children):
         let expected = numpy_oracle_permuted(&[3, 4], Some(1));
         assert_eq!(actual.shape(), &[3, 4]);
         assert_eq!(actual.values(), expected.as_slice());
+    }
+
+    #[test]
+    fn permuted_last_axis_matches_former_output_and_stream() {
+        let shape = [257, 8];
+        let data: Vec<f64> = (0..shape.iter().product::<usize>())
+            .map(|value| value as f64)
+            .collect();
+        let mut former = Generator::from_pcg64(42).unwrap();
+        let mut candidate = Generator::from_pcg64(42).unwrap();
+
+        let mut expected = data.clone();
+        let ndim = shape.len();
+        let axis = ndim - 1;
+        let mut strides = vec![1usize; ndim];
+        for index in (0..ndim - 1).rev() {
+            strides[index] = strides[index + 1] * shape[index + 1];
+        }
+        let axis_len = shape[axis];
+        let axis_stride = strides[axis];
+        let n_slices = expected.len() / axis_len;
+        for slice_index in 0..n_slices {
+            let mut multi_index = vec![0usize; ndim];
+            let mut remainder = slice_index;
+            for dimension in (0..ndim).rev() {
+                if dimension == axis {
+                    continue;
+                }
+                multi_index[dimension] = remainder % shape[dimension];
+                remainder /= shape[dimension];
+            }
+            let mut base_offset = 0;
+            for dimension in 0..ndim {
+                if dimension != axis {
+                    base_offset += multi_index[dimension] * strides[dimension];
+                }
+            }
+            let indices: Vec<usize> = (0..axis_len)
+                .map(|index| base_offset + index * axis_stride)
+                .collect();
+            for index in (1..axis_len).rev() {
+                let swap_index = former.random_interval(index as u64) as usize;
+                expected.swap(indices[index], indices[swap_index]);
+            }
+        }
+
+        let actual = candidate.permuted(&data, &shape, Some(axis)).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(candidate.random(16), former.random(16));
+    }
+
+    #[test]
+    fn permuted_strided_axis_matches_former_output_and_stream() {
+        let shape = [17, 8, 5];
+        let axis = 1;
+        let data: Vec<f64> = (0..shape.iter().product::<usize>())
+            .map(|value| value as f64)
+            .collect();
+        let mut former = Generator::from_pcg64(42).unwrap();
+        let mut candidate = Generator::from_pcg64(42).unwrap();
+
+        let mut expected = data.clone();
+        let ndim = shape.len();
+        let mut strides = vec![1usize; ndim];
+        for index in (0..ndim - 1).rev() {
+            strides[index] = strides[index + 1] * shape[index + 1];
+        }
+        let axis_len = shape[axis];
+        let axis_stride = strides[axis];
+        let n_slices = expected.len() / axis_len;
+        for slice_index in 0..n_slices {
+            let mut multi_index = vec![0usize; ndim];
+            let mut remainder = slice_index;
+            for dimension in (0..ndim).rev() {
+                if dimension == axis {
+                    continue;
+                }
+                multi_index[dimension] = remainder % shape[dimension];
+                remainder /= shape[dimension];
+            }
+            let mut base_offset = 0;
+            for dimension in 0..ndim {
+                if dimension != axis {
+                    base_offset += multi_index[dimension] * strides[dimension];
+                }
+            }
+            let indices: Vec<usize> = (0..axis_len)
+                .map(|index| base_offset + index * axis_stride)
+                .collect();
+            for index in (1..axis_len).rev() {
+                let swap_index = former.random_interval(index as u64) as usize;
+                expected.swap(indices[index], indices[swap_index]);
+            }
+        }
+
+        let actual = candidate.permuted(&data, &shape, Some(axis)).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(candidate.random(16), former.random(16));
     }
 
     #[test]

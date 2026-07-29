@@ -1,0 +1,6682 @@
+//! median-gate / substrate-v2 variance-protocol criterion benches — the paired
+//! `iter_custom` A/B harness with median-gate reporting (interleaved AB/BA,
+//! null control, tail stats) plus its local timing helpers. Split out of the
+//! monolithic `criterion_python_surface.rs` into their own per-domain bench
+//! binary; this is the single largest domain (~3900 lines / 21 fns), so pulling
+//! it out is the biggest compile-volume reduction of the split. See bead
+//! deadlock-audit-x7nnf.
+
+#[path = "common/mod.rs"]
+mod common;
+
+use common::*;
+use criterion::Criterion;
+use fnp_python::fnp_python;
+use pyo3::types::{PyAnyMethods, PyDict, PyModule};
+use pyo3::{Bound, PyAny, Python};
+use rayon::prelude::*;
+use std::cell::{Cell, RefCell};
+use std::fmt::Write as _;
+use std::hint::black_box;
+use std::time::{Duration, Instant};
+
+fn workload_checksum<const N: usize>(
+    numpy: &Bound<'_, PyModule>,
+    outputs: &[Bound<'_, PyAny>; N],
+) -> u64 {
+    fn mix_bytes(mut state: u64, bytes: &[u8]) -> u64 {
+        for byte in (bytes.len() as u64)
+            .to_le_bytes()
+            .iter()
+            .chain(bytes.iter())
+        {
+            state = (state ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        state
+    }
+
+    let mut state = 0xcbf2_9ce4_8422_2325_u64;
+    for output in outputs {
+        let array = numpy
+            .call_method1("asarray", (output,))
+            .expect("workload output converts to ndarray");
+        let dtype = array
+            .getattr("dtype")
+            .expect("workload output dtype")
+            .str()
+            .expect("workload output dtype string")
+            .to_string();
+        let shape = array
+            .getattr("shape")
+            .expect("workload output shape")
+            .str()
+            .expect("workload output shape string")
+            .to_string();
+        let bytes = array
+            .call_method0("tobytes")
+            .expect("workload output bytes")
+            .extract::<Vec<u8>>()
+            .expect("workload output byte vector");
+        state = mix_bytes(state, dtype.as_bytes());
+        state = mix_bytes(state, shape.as_bytes());
+        state = mix_bytes(state, &bytes);
+    }
+    state
+}
+
+fn assert_workload_outputs_equal<const N: usize>(
+    numpy: &Bound<'_, PyModule>,
+    row: &str,
+    candidate: &[Bound<'_, PyAny>; N],
+    incumbent: &[Bound<'_, PyAny>; N],
+) {
+    for (index, (candidate_output, incumbent_output)) in candidate.iter().zip(incumbent).enumerate()
+    {
+        let candidate_array = numpy
+            .call_method1("asarray", (candidate_output,))
+            .expect("candidate workload output converts to ndarray");
+        let incumbent_array = numpy
+            .call_method1("asarray", (incumbent_output,))
+            .expect("incumbent workload output converts to ndarray");
+        let candidate_dtype = candidate_array
+            .getattr("dtype")
+            .expect("candidate output dtype")
+            .str()
+            .expect("candidate output dtype string")
+            .to_string();
+        let incumbent_dtype = incumbent_array
+            .getattr("dtype")
+            .expect("incumbent output dtype")
+            .str()
+            .expect("incumbent output dtype string")
+            .to_string();
+        assert_eq!(
+            candidate_dtype, incumbent_dtype,
+            "{row}: output {index} dtype differs"
+        );
+        let candidate_shape = candidate_array
+            .getattr("shape")
+            .expect("candidate output shape")
+            .extract::<Vec<usize>>()
+            .expect("candidate output shape vector");
+        let incumbent_shape = incumbent_array
+            .getattr("shape")
+            .expect("incumbent output shape")
+            .extract::<Vec<usize>>()
+            .expect("incumbent output shape vector");
+        assert_eq!(
+            candidate_shape, incumbent_shape,
+            "{row}: output {index} shape differs"
+        );
+        let candidate_bytes = candidate_array
+            .call_method0("tobytes")
+            .expect("candidate output bytes")
+            .extract::<Vec<u8>>()
+            .expect("candidate output byte vector");
+        let incumbent_bytes = incumbent_array
+            .call_method0("tobytes")
+            .expect("incumbent output bytes")
+            .extract::<Vec<u8>>()
+            .expect("incumbent output byte vector");
+        assert_eq!(
+            candidate_bytes, incumbent_bytes,
+            "{row}: output {index} bytes differ"
+        );
+    }
+    assert_eq!(
+        workload_checksum(numpy, candidate),
+        workload_checksum(numpy, incumbent),
+        "{row}: aggregate output checksum differs"
+    );
+}
+
+struct EventAttributionArm<'py> {
+    add_at: Bound<'py, PyAny>,
+    maximum_at: Bound<'py, PyAny>,
+    minimum_at: Bound<'py, PyAny>,
+    spend_state: Bound<'py, PyAny>,
+    first_seen_state: Bound<'py, PyAny>,
+    last_seen_state: Bound<'py, PyAny>,
+}
+
+impl<'py> EventAttributionArm<'py> {
+    fn reset(&self) {
+        self.spend_state
+            .call_method1("fill", (0_i64,))
+            .expect("reset spend state");
+        self.first_seen_state
+            .call_method1("fill", (i64::MAX,))
+            .expect("reset first-seen state");
+        self.last_seen_state
+            .call_method1("fill", (i64::MIN,))
+            .expect("reset last-seen state");
+    }
+
+    fn run(
+        &self,
+        account_ids: &Bound<'py, PyAny>,
+        spend_deltas: &Bound<'py, PyAny>,
+        event_timestamps: &Bound<'py, PyAny>,
+    ) -> (Duration, [Bound<'py, PyAny>; 3]) {
+        // Reset is harness preparation, not part of the persistent-state update
+        // job. Keeping it outside the interval also prevents a shared ndarray
+        // fill from contaminating the independent public FNP/NumPy call graphs.
+        self.reset();
+        let started = Instant::now();
+        self.add_at
+            .call1((
+                black_box(&self.spend_state),
+                black_box(account_ids),
+                black_box(spend_deltas),
+            ))
+            .expect("event spend scatter-add");
+        self.maximum_at
+            .call1((
+                black_box(&self.last_seen_state),
+                black_box(account_ids),
+                black_box(event_timestamps),
+            ))
+            .expect("event last-seen scatter-maximum");
+        self.minimum_at
+            .call1((
+                black_box(&self.first_seen_state),
+                black_box(account_ids),
+                black_box(event_timestamps),
+            ))
+            .expect("event first-seen scatter-minimum");
+        let elapsed = started.elapsed();
+        (
+            elapsed,
+            [
+                self.spend_state.clone(),
+                self.first_seen_state.clone(),
+                self.last_seen_state.clone(),
+            ],
+        )
+    }
+
+    fn profile(
+        &self,
+        account_ids: &Bound<'py, PyAny>,
+        spend_deltas: &Bound<'py, PyAny>,
+        event_timestamps: &Bound<'py, PyAny>,
+    ) -> [f64; 3] {
+        const PROFILE_ROUNDS: usize = 7;
+        let mut add_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut maximum_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut minimum_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        for _ in 0..PROFILE_ROUNDS {
+            self.reset();
+            let started = Instant::now();
+            self.add_at
+                .call1((&self.spend_state, account_ids, spend_deltas))
+                .expect("profile event spend scatter-add");
+            add_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            self.maximum_at
+                .call1((&self.last_seen_state, account_ids, event_timestamps))
+                .expect("profile event last-seen scatter-maximum");
+            maximum_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            self.minimum_at
+                .call1((&self.first_seen_state, account_ids, event_timestamps))
+                .expect("profile event first-seen scatter-minimum");
+            minimum_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+        }
+        let median = |samples: &mut Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        [
+            median(&mut add_ms),
+            median(&mut maximum_ms),
+            median(&mut minimum_ms),
+        ]
+    }
+}
+
+struct EntitlementReconciliationArm<'py> {
+    unique: Bound<'py, PyAny>,
+    intersect1d: Bound<'py, PyAny>,
+    setdiff1d: Bound<'py, PyAny>,
+    unique_kwargs: Bound<'py, PyDict>,
+}
+
+impl<'py> EntitlementReconciliationArm<'py> {
+    fn run(
+        &self,
+        previous: &Bound<'py, PyAny>,
+        current: &Bound<'py, PyAny>,
+    ) -> (Duration, [Bound<'py, PyAny>; 5]) {
+        let started = Instant::now();
+        let canonical = self
+            .unique
+            .call((black_box(current),), Some(&self.unique_kwargs))
+            .expect("canonicalize current entitlement grants");
+        let current_unique = canonical
+            .get_item(0)
+            .expect("canonical current entitlement keys");
+        let current_counts = canonical
+            .get_item(1)
+            .expect("current entitlement duplicate counts");
+        let unchanged = self
+            .intersect1d
+            .call1((black_box(previous), black_box(current)))
+            .expect("unchanged entitlement grants");
+        let added = self
+            .setdiff1d
+            .call1((black_box(current), black_box(previous)))
+            .expect("added entitlement grants");
+        let revoked = self
+            .setdiff1d
+            .call1((black_box(previous), black_box(current)))
+            .expect("revoked entitlement grants");
+        let elapsed = started.elapsed();
+        (
+            elapsed,
+            [current_unique, current_counts, unchanged, added, revoked],
+        )
+    }
+
+    fn profile(&self, previous: &Bound<'py, PyAny>, current: &Bound<'py, PyAny>) -> [f64; 4] {
+        const PROFILE_ROUNDS: usize = 7;
+        let mut canonicalize_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut unchanged_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut added_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut revoked_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        for _ in 0..PROFILE_ROUNDS {
+            let started = Instant::now();
+            black_box(
+                self.unique
+                    .call((current,), Some(&self.unique_kwargs))
+                    .expect("profile canonical entitlement grants"),
+            );
+            canonicalize_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            black_box(
+                self.intersect1d
+                    .call1((previous, current))
+                    .expect("profile unchanged entitlement grants"),
+            );
+            unchanged_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            black_box(
+                self.setdiff1d
+                    .call1((current, previous))
+                    .expect("profile added entitlement grants"),
+            );
+            added_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            black_box(
+                self.setdiff1d
+                    .call1((previous, current))
+                    .expect("profile revoked entitlement grants"),
+            );
+            revoked_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+        }
+        let median = |samples: &mut Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        [
+            median(&mut canonicalize_ms),
+            median(&mut unchanged_ms),
+            median(&mut added_ms),
+            median(&mut revoked_ms),
+        ]
+    }
+}
+
+fn bench_median_gate_python_binary<'py>(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    bench_name: &'static str,
+    row: &'static str,
+    base: &Bound<'py, PyAny>,
+    candidate: &Bound<'py, PyAny>,
+    lhs: &Bound<'py, PyAny>,
+    rhs: &Bound<'py, PyAny>,
+) {
+    let null_base_ns = RefCell::new(Vec::new());
+    let null_peer_ns = RefCell::new(Vec::new());
+    let null_ratios = RefCell::new(Vec::new());
+    let base_ns = RefCell::new(Vec::new());
+    let candidate_ns = RefCell::new(Vec::new());
+    let effect_ratios = RefCell::new(Vec::new());
+    group.bench_function(bench_name, |bench| {
+        bench.iter_custom(|iterations| {
+            let mut combined = Duration::ZERO;
+            for _ in 0..iterations {
+                // The exact-function A/A null is always measured first. The two observations
+                // are ABBA then BAAB, balancing call position before the effect is observed.
+                for observation in 0..MEDIAN_GATE_OBSERVATIONS_PER_BATCH {
+                    let outer_base = observation & 1 == 0;
+                    let (base_total, peer_total) = if outer_base {
+                        let a1 = time_python_binary_call(base, lhs, rhs);
+                        let b1 = time_python_binary_call(base, lhs, rhs);
+                        let b2 = time_python_binary_call(base, lhs, rhs);
+                        let a2 = time_python_binary_call(base, lhs, rhs);
+                        (a1 + a2, b1 + b2)
+                    } else {
+                        let b1 = time_python_binary_call(base, lhs, rhs);
+                        let a1 = time_python_binary_call(base, lhs, rhs);
+                        let a2 = time_python_binary_call(base, lhs, rhs);
+                        let b2 = time_python_binary_call(base, lhs, rhs);
+                        (a1 + a2, b1 + b2)
+                    };
+                    let base_average = base_total.as_secs_f64() * 0.5e9;
+                    let peer_average = peer_total.as_secs_f64() * 0.5e9;
+                    null_base_ns.borrow_mut().push(base_average);
+                    null_peer_ns.borrow_mut().push(peer_average);
+                    null_ratios.borrow_mut().push(base_average / peer_average);
+                    combined += base_total + peer_total;
+                }
+                for observation in 0..MEDIAN_GATE_OBSERVATIONS_PER_BATCH {
+                    let outer_base = observation & 1 == 0;
+                    let (base_total, candidate_total) = if outer_base {
+                        let a1 = time_python_binary_call(base, lhs, rhs);
+                        let b1 = time_python_binary_call(candidate, lhs, rhs);
+                        let b2 = time_python_binary_call(candidate, lhs, rhs);
+                        let a2 = time_python_binary_call(base, lhs, rhs);
+                        (a1 + a2, b1 + b2)
+                    } else {
+                        let b1 = time_python_binary_call(candidate, lhs, rhs);
+                        let a1 = time_python_binary_call(base, lhs, rhs);
+                        let a2 = time_python_binary_call(base, lhs, rhs);
+                        let b2 = time_python_binary_call(candidate, lhs, rhs);
+                        (a1 + a2, b1 + b2)
+                    };
+                    let base_average = base_total.as_secs_f64() * 0.5e9;
+                    let candidate_average = candidate_total.as_secs_f64() * 0.5e9;
+                    base_ns.borrow_mut().push(base_average);
+                    candidate_ns.borrow_mut().push(candidate_average);
+                    effect_ratios
+                        .borrow_mut()
+                        .push(base_average / candidate_average);
+                    combined += base_total + candidate_total;
+                }
+            }
+            combined
+        });
+    });
+    report_median_gate_pair(
+        row,
+        &null_base_ns,
+        &null_peer_ns,
+        &null_ratios,
+        &base_ns,
+        &candidate_ns,
+        &effect_ratios,
+    );
+}
+
+fn bench_median_gate_python_unary<'py>(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    bench_name: &'static str,
+    row: &'static str,
+    base: &Bound<'py, PyAny>,
+    candidate: &Bound<'py, PyAny>,
+    input: &Bound<'py, PyAny>,
+) {
+    let null_base_ns = RefCell::new(Vec::new());
+    let null_peer_ns = RefCell::new(Vec::new());
+    let null_ratios = RefCell::new(Vec::new());
+    let base_ns = RefCell::new(Vec::new());
+    let candidate_ns = RefCell::new(Vec::new());
+    let effect_ratios = RefCell::new(Vec::new());
+    group.bench_function(bench_name, |bench| {
+        bench.iter_custom(|iterations| {
+            let mut combined = Duration::ZERO;
+            for _ in 0..iterations {
+                for observation in 0..MEDIAN_GATE_OBSERVATIONS_PER_BATCH {
+                    let outer_base = observation & 1 == 0;
+                    let (base_total, peer_total) = if outer_base {
+                        let a1 = time_python_unary_call(base, input);
+                        let b1 = time_python_unary_call(base, input);
+                        let b2 = time_python_unary_call(base, input);
+                        let a2 = time_python_unary_call(base, input);
+                        (a1 + a2, b1 + b2)
+                    } else {
+                        let b1 = time_python_unary_call(base, input);
+                        let a1 = time_python_unary_call(base, input);
+                        let a2 = time_python_unary_call(base, input);
+                        let b2 = time_python_unary_call(base, input);
+                        (a1 + a2, b1 + b2)
+                    };
+                    let base_average = base_total.as_secs_f64() * 0.5e9;
+                    let peer_average = peer_total.as_secs_f64() * 0.5e9;
+                    null_base_ns.borrow_mut().push(base_average);
+                    null_peer_ns.borrow_mut().push(peer_average);
+                    null_ratios.borrow_mut().push(base_average / peer_average);
+                    combined += base_total + peer_total;
+                }
+                for observation in 0..MEDIAN_GATE_OBSERVATIONS_PER_BATCH {
+                    let outer_base = observation & 1 == 0;
+                    let (base_total, candidate_total) = if outer_base {
+                        let a1 = time_python_unary_call(base, input);
+                        let b1 = time_python_unary_call(candidate, input);
+                        let b2 = time_python_unary_call(candidate, input);
+                        let a2 = time_python_unary_call(base, input);
+                        (a1 + a2, b1 + b2)
+                    } else {
+                        let b1 = time_python_unary_call(candidate, input);
+                        let a1 = time_python_unary_call(base, input);
+                        let a2 = time_python_unary_call(base, input);
+                        let b2 = time_python_unary_call(candidate, input);
+                        (a1 + a2, b1 + b2)
+                    };
+                    let base_average = base_total.as_secs_f64() * 0.5e9;
+                    let candidate_average = candidate_total.as_secs_f64() * 0.5e9;
+                    base_ns.borrow_mut().push(base_average);
+                    candidate_ns.borrow_mut().push(candidate_average);
+                    effect_ratios
+                        .borrow_mut()
+                        .push(base_average / candidate_average);
+                    combined += base_total + candidate_total;
+                }
+            }
+            combined
+        });
+    });
+    report_median_gate_pair(
+        row,
+        &null_base_ns,
+        &null_peer_ns,
+        &null_ratios,
+        &base_ns,
+        &candidate_ns,
+        &effect_ratios,
+    );
+}
+
+fn bench_substrate_v2_python_binary_pair<'py>(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    bench_name: &'static str,
+    row: &'static str,
+    candidate: &Bound<'py, PyAny>,
+    orig: &Bound<'py, PyAny>,
+    lhs: &Bound<'py, PyAny>,
+    rhs: &Bound<'py, PyAny>,
+) {
+    let candidate_samples = RefCell::new(Vec::new());
+    let orig_samples = RefCell::new(Vec::new());
+    let order = Cell::new(0_u64);
+    group.bench_function(bench_name, |bench| {
+        bench.iter_custom(|iterations| {
+            // Slow Python surface rows otherwise collapse to one A/B pair per
+            // Criterion sample.  Keep each sample order-balanced and average
+            // enough interleaved pairs to make worker jitter visible instead
+            // of letting a single interruption decide the row.
+            let measured_iterations = iterations.max(4);
+            let measured_iterations = measured_iterations + (measured_iterations & 1);
+            let mut candidate_total = Duration::ZERO;
+            let mut orig_total = Duration::ZERO;
+            for _ in 0..measured_iterations {
+                let orig_first = order.get() & 1 == 1;
+                order.set(order.get().wrapping_add(1));
+                let time_call = |function: &Bound<'py, PyAny>| {
+                    let start = Instant::now();
+                    let lhs = black_box(lhs);
+                    let rhs = black_box(rhs);
+                    let result = function
+                        .call1((lhs, rhs))
+                        .expect("paired binary Python call");
+                    black_box(result);
+                    start.elapsed()
+                };
+                if orig_first {
+                    orig_total += time_call(orig);
+                    candidate_total += time_call(candidate);
+                } else {
+                    candidate_total += time_call(candidate);
+                    orig_total += time_call(orig);
+                }
+            }
+            candidate_samples
+                .borrow_mut()
+                .push(candidate_total.as_secs_f64() * 1e9 / measured_iterations as f64);
+            orig_samples
+                .borrow_mut()
+                .push(orig_total.as_secs_f64() * 1e9 / measured_iterations as f64);
+            (candidate_total + orig_total).mul_f64(iterations as f64 / measured_iterations as f64)
+        });
+    });
+    report_substrate_v2_pair(row, &candidate_samples, &orig_samples);
+}
+
+fn bench_substrate_v2_python_unary_pair<'py>(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    bench_name: &'static str,
+    row: &'static str,
+    candidate: &Bound<'py, PyAny>,
+    orig: &Bound<'py, PyAny>,
+    input: &Bound<'py, PyAny>,
+) {
+    let candidate_samples = RefCell::new(Vec::new());
+    let orig_samples = RefCell::new(Vec::new());
+    let order = Cell::new(0_u64);
+    group.bench_function(bench_name, |bench| {
+        bench.iter_custom(|iterations| {
+            let measured_iterations = iterations.max(4);
+            let measured_iterations = measured_iterations + (measured_iterations & 1);
+            let mut candidate_total = Duration::ZERO;
+            let mut orig_total = Duration::ZERO;
+            for _ in 0..measured_iterations {
+                let orig_first = order.get() & 1 == 1;
+                order.set(order.get().wrapping_add(1));
+                let time_call = |function: &Bound<'py, PyAny>| {
+                    let start = Instant::now();
+                    let input = black_box(input);
+                    let result = function.call1((input,)).expect("paired unary Python call");
+                    black_box(result);
+                    start.elapsed()
+                };
+                if orig_first {
+                    orig_total += time_call(orig);
+                    candidate_total += time_call(candidate);
+                } else {
+                    candidate_total += time_call(candidate);
+                    orig_total += time_call(orig);
+                }
+            }
+            candidate_samples
+                .borrow_mut()
+                .push(candidate_total.as_secs_f64() * 1e9 / measured_iterations as f64);
+            orig_samples
+                .borrow_mut()
+                .push(orig_total.as_secs_f64() * 1e9 / measured_iterations as f64);
+            (candidate_total + orig_total).mul_f64(iterations as f64 / measured_iterations as f64)
+        });
+    });
+    report_substrate_v2_pair(row, &candidate_samples, &orig_samples);
+}
+
+fn bench_completion_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_completion_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        println!(
+            "ISA_PROVENANCE target_arch={} avx2={} sse2={}",
+            std::env::consts::ARCH,
+            cfg!(target_feature = "avx2"),
+            cfg!(target_feature = "sse2"),
+        );
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_completion_median_gate")
+            .expect("completion bench module");
+        fnp_python(&module).expect("initialize fnp_python completion bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy version")
+            .extract::<String>()
+            .expect("numpy version string");
+        let numpy_simd = numpy
+            .getattr("__config__")
+            .expect("numpy config")
+            .getattr("CONFIG")
+            .expect("numpy CONFIG")
+            .get_item("SIMD Extensions")
+            .expect("numpy SIMD Extensions")
+            .str()
+            .expect("numpy SIMD str")
+            .extract::<String>()
+            .expect("numpy SIMD string value");
+        let numpy_cpu_features = numpy
+            .getattr("_core")
+            .expect("numpy core")
+            .getattr("_multiarray_umath")
+            .expect("numpy multiarray umath")
+            .getattr("__cpu_features__")
+            .expect("numpy runtime CPU features")
+            .str()
+            .expect("numpy runtime CPU feature str")
+            .extract::<String>()
+            .expect("numpy runtime CPU feature string value");
+        println!(
+            "NUMPY_PROVENANCE version={numpy_version} build_simd={numpy_simd} \
+             runtime_cpu_features={numpy_cpu_features}"
+        );
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 powers = np.power(np.uint64(26), np.arange(5, dtype=np.uint64))\n\
+                 u_a_ids = np.arange(0, 1_000_000, dtype=np.uint64)\n\
+                 u_a_words = np.zeros((1_000_000, 16), dtype=np.uint32)\n\
+                 u_a_words[:, :5] = (97 + (u_a_ids[:, None] // powers) % 26).astype(np.uint32)\n\
+                 u_a = u_a_words.reshape(-1).view('U16')\n\
+                 u_fresh_ids = np.arange(1_000_000, 1_500_000, dtype=np.uint64)\n\
+                 u_fresh_words = np.zeros((500_000, 16), dtype=np.uint32)\n\
+                 u_fresh_words[:, :5] = (97 + (u_fresh_ids[:, None] // powers) % 26).astype(np.uint32)\n\
+                 u_fresh = u_fresh_words.reshape(-1).view('U16')\n\
+                 u_b = np.concatenate([u_a[:500_000], u_fresh])\n\
+                 u_union_ids = np.arange(2_000_000, 3_000_000, dtype=np.uint64)\n\
+                 u_union_words = np.zeros((1_000_000, 16), dtype=np.uint32)\n\
+                 u_union_words[:, :5] = (97 + (u_union_ids[:, None] // powers) % 26).astype(np.uint32)\n\
+                 u_union_b = u_union_words.reshape(-1).view('U16')\n",
+            )
+            .expect("completion setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("completion setup");
+        let u_a = namespace.get_item("u_a").expect("u_a present");
+        let u_b = namespace.get_item("u_b").expect("u_b present");
+        let u_union_b = namespace.get_item("u_union_b").expect("u_union_b present");
+        let array_equal = numpy.getattr("array_equal").expect("numpy.array_equal");
+
+        let fnp_unique = module.getattr("unique").expect("fnp unique");
+        let np_unique = numpy.getattr("unique").expect("numpy unique");
+        let fnp_union = module.getattr("union1d").expect("fnp union1d");
+        let np_union = numpy.getattr("union1d").expect("numpy union1d");
+        let fnp_setxor = module.getattr("setxor1d").expect("fnp setxor1d");
+        let np_setxor = numpy.getattr("setxor1d").expect("numpy setxor1d");
+
+        for (label, candidate, base) in [
+            (
+                "U16 unique",
+                fnp_unique.call1((&u_a,)).expect("fnp unique parity"),
+                np_unique.call1((&u_a,)).expect("numpy unique parity"),
+            ),
+            (
+                "U16 disjoint union",
+                fnp_union
+                    .call1((&u_a, &u_union_b))
+                    .expect("fnp union parity"),
+                np_union
+                    .call1((&u_a, &u_union_b))
+                    .expect("numpy union parity"),
+            ),
+            (
+                "U16 50% overlap setxor",
+                fnp_setxor.call1((&u_a, &u_b)).expect("fnp setxor parity"),
+                np_setxor.call1((&u_a, &u_b)).expect("numpy setxor parity"),
+            ),
+        ] {
+            let candidate_dtype = candidate.getattr("dtype").expect("candidate dtype");
+            let base_dtype = base.getattr("dtype").expect("base dtype");
+            assert_eq!(
+                candidate_dtype
+                    .getattr("str")
+                    .expect("candidate dtype str")
+                    .extract::<String>()
+                    .expect("candidate dtype str value"),
+                base_dtype
+                    .getattr("str")
+                    .expect("base dtype str")
+                    .extract::<String>()
+                    .expect("base dtype str value"),
+                "{label} dtype string parity",
+            );
+            assert!(
+                candidate_dtype
+                    .getattr("metadata")
+                    .expect("candidate dtype metadata")
+                    .eq(base_dtype.getattr("metadata").expect("base dtype metadata"))
+                    .expect("dtype metadata equality"),
+                "{label} dtype metadata parity",
+            );
+            assert!(
+                array_equal
+                    .call1((&candidate, &base))
+                    .expect("completion array_equal")
+                    .extract::<bool>()
+                    .expect("completion array_equal bool"),
+                "{label} value parity",
+            );
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "{label} byte parity",
+            );
+        }
+
+        bench_median_gate_python_unary(
+            &mut group,
+            "u16_unique_1m_null_then_effect",
+            "u16_unique_1m",
+            &np_unique,
+            &fnp_unique,
+            &u_a,
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "u16_union_disjoint_1m_null_then_effect",
+            "u16_union_disjoint_1m",
+            &np_union,
+            &fnp_union,
+            &u_a,
+            &u_union_b,
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "u16_setxor_1m_null_then_effect",
+            "u16_setxor_1m",
+            &np_setxor,
+            &fnp_setxor,
+            &u_a,
+            &u_b,
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_f64_transcendental_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_f64_transcendental_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        println!(
+            "ISA_PROVENANCE target_arch={} avx2={} sse2={}",
+            std::env::consts::ARCH,
+            cfg!(target_feature = "avx2"),
+            cfg!(target_feature = "sse2"),
+        );
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_f64_transcendental_median_gate")
+            .expect("transcendental bench module");
+        fnp_python(&module).expect("initialize fnp_python transcendental bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy version")
+            .extract::<String>()
+            .expect("numpy version string");
+        let numpy_cpu_features = numpy
+            .getattr("_core")
+            .expect("numpy core")
+            .getattr("_multiarray_umath")
+            .expect("numpy multiarray umath")
+            .getattr("__cpu_features__")
+            .expect("numpy runtime CPU features")
+            .str()
+            .expect("numpy runtime CPU feature str")
+            .extract::<String>()
+            .expect("numpy runtime CPU feature string value");
+        println!(
+            "NUMPY_PROVENANCE version={numpy_version} runtime_cpu_features={numpy_cpu_features}"
+        );
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260710)\n\
+                 t_262k = rng.standard_normal(262_144)\n\
+                 t_1m = rng.standard_normal(1_048_576)\n\
+                 t_4m = rng.standard_normal(4_194_304)\n",
+            )
+            .expect("transcendental setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("transcendental setup");
+        let t_262k = namespace.get_item("t_262k").expect("t_262k present");
+        let t_1m = namespace.get_item("t_1m").expect("t_1m present");
+        let t_4m = namespace.get_item("t_4m").expect("t_4m present");
+
+        // Diagnostic parity probe (print, not assert): fnp's native f64 route is
+        // scalar system libm; numpy may dispatch a SIMD kernel on some workers.
+        // Byte-level agreement per worker is itself evidence for the transcendental
+        // lane (see the 2026-07-10 ISA addendum), so record it instead of dying.
+        for name in ["sin", "cos", "tan", "tanh", "expm1"] {
+            let fnp_fn = module.getattr(name).expect("fnp transcendental fn");
+            let np_fn = numpy.getattr(name).expect("numpy transcendental fn");
+            for (label, input) in [("262k", &t_262k), ("1m", &t_1m), ("4m", &t_4m)] {
+                let candidate = fnp_fn.call1((input,)).expect("fnp parity call");
+                let base = np_fn.call1((input,)).expect("numpy parity call");
+                let candidate_bytes: Vec<u8> = candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract()
+                    .expect("candidate byte Vec");
+                let base_bytes: Vec<u8> = base
+                    .call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract()
+                    .expect("base byte Vec");
+                let first_diff = candidate_bytes
+                    .chunks_exact(8)
+                    .zip(base_bytes.chunks_exact(8))
+                    .position(|(a, b)| a != b);
+                let diff_count = candidate_bytes
+                    .chunks_exact(8)
+                    .zip(base_bytes.chunks_exact(8))
+                    .filter(|(a, b)| a != b)
+                    .count();
+                println!(
+                    "TRANSCENDENTAL_PARITY op={name} n={label} byte_equal={} \
+                     diff_elems={diff_count} first_diff_elem={:?}",
+                    candidate_bytes == base_bytes,
+                    first_diff,
+                );
+            }
+        }
+
+        let fnp_sin = module.getattr("sin").expect("fnp sin");
+        let np_sin = numpy.getattr("sin").expect("numpy sin");
+        let fnp_cos = module.getattr("cos").expect("fnp cos");
+        let np_cos = numpy.getattr("cos").expect("numpy cos");
+        let fnp_tan = module.getattr("tan").expect("fnp tan");
+        let np_tan = numpy.getattr("tan").expect("numpy tan");
+        let fnp_tanh = module.getattr("tanh").expect("fnp tanh");
+        let np_tanh = numpy.getattr("tanh").expect("numpy tanh");
+        let fnp_expm1 = module.getattr("expm1").expect("fnp expm1");
+        let np_expm1 = numpy.getattr("expm1").expect("numpy expm1");
+
+        bench_median_gate_python_unary(
+            &mut group,
+            "f64_sin_262k_null_then_effect",
+            "f64_sin_262k",
+            &np_sin,
+            &fnp_sin,
+            &t_262k,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "f64_sin_1m_null_then_effect",
+            "f64_sin_1m",
+            &np_sin,
+            &fnp_sin,
+            &t_1m,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "f64_sin_4m_null_then_effect",
+            "f64_sin_4m",
+            &np_sin,
+            &fnp_sin,
+            &t_4m,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "f64_cos_1m_null_then_effect",
+            "f64_cos_1m",
+            &np_cos,
+            &fnp_cos,
+            &t_1m,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "f64_tan_1m_null_then_effect",
+            "f64_tan_1m",
+            &np_tan,
+            &fnp_tan,
+            &t_1m,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "f64_tanh_1m_null_then_effect",
+            "f64_tanh_1m",
+            &np_tanh,
+            &fnp_tanh,
+            &t_1m,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "f64_expm1_262k_null_then_effect",
+            "f64_expm1_262k",
+            &np_expm1,
+            &fnp_expm1,
+            &t_262k,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "f64_expm1_1m_null_then_effect",
+            "f64_expm1_1m",
+            &np_expm1,
+            &fnp_expm1,
+            &t_1m,
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_f64_exp_log_probe(c: &mut Criterion) {
+    // Probe for bead deadlock-audit-gkznn (reopen of the stale 2026-06-09
+    // exp/log passthrough decision): (1) BYTE PROBE — does numpy's f64
+    // exp/log/log2/log10 output match Rust scalar system-libm bit-for-bit on
+    // this worker? (2) TIMING — does a rayon parallel scalar-libm map (with a
+    // deliberate vec![0.0; n] zero-init handicap the real zero-copy path would
+    // not pay) beat numpy's kernel? Both must hold before any production
+    // rewiring; the probe writes evidence only.
+    let mut group = c.benchmark_group("python_f64_exp_log_probe");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy version")
+            .extract::<String>()
+            .expect("numpy version string");
+        println!("EXP_LOG_PROBE_NUMPY version={numpy_version}");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 e_1m = rng.standard_normal(1_048_576)\n\
+                 e_4m = rng.standard_normal(4_194_304)\n\
+                 l_1m = np.abs(rng.standard_normal(1_048_576)) + 0.5\n\
+                 l_4m = np.abs(rng.standard_normal(4_194_304)) + 0.5\n",
+            )
+            .expect("probe setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("probe setup");
+        let e_1m = namespace.get_item("e_1m").expect("e_1m present");
+        let e_4m = namespace.get_item("e_4m").expect("e_4m present");
+        let l_1m = namespace.get_item("l_1m").expect("l_1m present");
+        let l_4m = namespace.get_item("l_4m").expect("l_4m present");
+
+        let to_vec = |arr: &Bound<'_, PyAny>| -> Vec<f64> {
+            let raw: Vec<u8> = arr
+                .call_method0("tobytes")
+                .expect("probe input bytes")
+                .extract()
+                .expect("probe input byte Vec");
+            raw.chunks_exact(8)
+                .map(|chunk| f64::from_ne_bytes(chunk.try_into().expect("one native f64")))
+                .collect()
+        };
+
+        // (1) BYTE PROBE: numpy output vs Rust scalar libm, element-exact.
+        for (name, rust_fn, input) in [
+            ("exp", f64::exp as fn(f64) -> f64, &e_1m),
+            ("log", f64::ln as fn(f64) -> f64, &l_1m),
+            ("log2", f64::log2 as fn(f64) -> f64, &l_1m),
+            ("log10", f64::log10 as fn(f64) -> f64, &l_1m),
+        ] {
+            let data = to_vec(input);
+            let np_bytes: Vec<u8> = numpy
+                .getattr(name)
+                .expect("numpy probe fn")
+                .call1((input,))
+                .expect("numpy probe call")
+                .call_method0("tobytes")
+                .expect("numpy probe bytes")
+                .extract()
+                .expect("numpy probe byte Vec");
+            let mut diff_elems = 0usize;
+            let mut first_diff = None;
+            let mut max_bitdiff: u64 = 0;
+            for (index, (np_chunk, &value)) in np_bytes.chunks_exact(8).zip(data.iter()).enumerate()
+            {
+                let np_bits = u64::from_ne_bytes(np_chunk.try_into().expect("np f64 chunk"));
+                let mine_bits = rust_fn(value).to_bits();
+                if np_bits != mine_bits {
+                    diff_elems += 1;
+                    if first_diff.is_none() {
+                        first_diff = Some(index);
+                    }
+                    max_bitdiff = max_bitdiff.max(np_bits.abs_diff(mine_bits));
+                }
+            }
+            println!(
+                "EXP_LOG_PROBE op={name} n=1m byte_equal={} diff_elems={diff_elems} \
+                 first_diff_elem={first_diff:?} max_bitdiff={max_bitdiff}",
+                diff_elems == 0,
+            );
+        }
+
+        // (2) TIMING: ledger-pair ABBA — candidate = parallel scalar-libm map
+        // (zero-init handicap), orig = the numpy call. Plus numpy A/A nulls.
+        for (row, name, rust_fn, input) in [
+            (
+                "exp_log_probe_exp_1m",
+                "exp",
+                f64::exp as fn(f64) -> f64,
+                &e_1m,
+            ),
+            (
+                "exp_log_probe_exp_4m",
+                "exp",
+                f64::exp as fn(f64) -> f64,
+                &e_4m,
+            ),
+            (
+                "exp_log_probe_log_1m",
+                "log",
+                f64::ln as fn(f64) -> f64,
+                &l_1m,
+            ),
+            (
+                "exp_log_probe_log_4m",
+                "log",
+                f64::ln as fn(f64) -> f64,
+                &l_4m,
+            ),
+        ] {
+            let data = to_vec(input);
+            let np_fn = numpy.getattr(name).expect("numpy timing fn");
+            let run_candidate = || {
+                let n = data.len();
+                let mut out = vec![0.0f64; n];
+                let chunk = n.div_ceil(rayon::current_num_threads().max(1));
+                out.par_chunks_mut(chunk)
+                    .zip(data.par_chunks(chunk))
+                    .for_each(|(o, i)| {
+                        for (slot, &value) in o.iter_mut().zip(i.iter()) {
+                            *slot = rust_fn(value);
+                        }
+                    });
+                out
+            };
+            let candidate_samples = RefCell::new(Vec::new());
+            let orig_samples = RefCell::new(Vec::new());
+            let order = Cell::new(0u64);
+            group.bench_function(format!("{row}_paired"), |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut candidate_total = Duration::ZERO;
+                    let mut orig_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let orig_first = order.get() & 1 == 1;
+                        order.set(order.get().wrapping_add(1));
+                        if orig_first {
+                            let start = Instant::now();
+                            black_box(np_fn.call1((input,)).expect("np timing call"));
+                            orig_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(run_candidate());
+                            candidate_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(run_candidate());
+                            candidate_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(np_fn.call1((input,)).expect("np timing call"));
+                            orig_total += start.elapsed();
+                        }
+                    }
+                    candidate_samples
+                        .borrow_mut()
+                        .push(candidate_total.as_secs_f64() * 1e9 / iterations as f64);
+                    orig_samples
+                        .borrow_mut()
+                        .push(orig_total.as_secs_f64() * 1e9 / iterations as f64);
+                    candidate_total + orig_total
+                });
+            });
+            report_ledger_pair(row, &candidate_samples, &orig_samples);
+
+            let null_a = RefCell::new(Vec::new());
+            let null_b = RefCell::new(Vec::new());
+            let null_order = Cell::new(0u64);
+            group.bench_function(format!("{row}_null_aa"), |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut a_total = Duration::ZERO;
+                    let mut b_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let b_first = null_order.get() & 1 == 1;
+                        null_order.set(null_order.get().wrapping_add(1));
+                        if b_first {
+                            let start = Instant::now();
+                            black_box(np_fn.call1((input,)).expect("np null call"));
+                            b_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(np_fn.call1((input,)).expect("np null call"));
+                            a_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(np_fn.call1((input,)).expect("np null call"));
+                            a_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(np_fn.call1((input,)).expect("np null call"));
+                            b_total += start.elapsed();
+                        }
+                    }
+                    null_a
+                        .borrow_mut()
+                        .push(a_total.as_secs_f64() * 1e9 / iterations as f64);
+                    null_b
+                        .borrow_mut()
+                        .push(b_total.as_secs_f64() * 1e9 / iterations as f64);
+                    a_total + b_total
+                });
+            });
+            report_ledger_pair(&format!("{row}_null"), &null_a, &null_b);
+        }
+    });
+
+    group.finish();
+}
+
+fn bench_f64_exp_log_median_gate(c: &mut Criterion) {
+    // SHIP rows for bead deadlock-audit-gkznn: the ACTUAL wired route
+    // (fnp.exp/log/log2/log10 -> try_zerocopy_f64_unary parallel scalar-libm
+    // map on non-AVX-512 hosts) vs numpy, with pre-timing byte parity asserts.
+    // On an avx512f worker the ISA gate routes these to the numpy passthrough
+    // and the rows read ~1.0x by construction; the probe group's
+    // EXP_LOG_PROBE byte rows identify the worker class in the same run.
+    let mut group = c.benchmark_group("python_f64_exp_log_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_exp_log_median_gate").expect("exp/log bench module");
+        fnp_python(&module).expect("initialize fnp_python exp/log bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        // Worker-class provenance: the rows below are only expected to beat
+        // numpy where the ISA gate enables the native route (x86-64 with
+        // avx512f=false); elsewhere they measure passthrough-vs-numpy ~1.0x.
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy version")
+            .extract::<String>()
+            .expect("numpy version string");
+        #[cfg(target_arch = "x86_64")]
+        let native_route = !std::arch::is_x86_feature_detected!("avx512f");
+        #[cfg(not(target_arch = "x86_64"))]
+        let native_route = false;
+        println!("EXP_LOG_GATE_WORKER numpy={numpy_version} native_route={native_route}");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 e_1m = rng.standard_normal(1_048_576)\n\
+                 e_4m = rng.standard_normal(4_194_304)\n\
+                 l_1m = np.abs(rng.standard_normal(1_048_576)) + 0.5\n\
+                 l_4m = np.abs(rng.standard_normal(4_194_304)) + 0.5\n",
+            )
+            .expect("exp/log gate setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("exp/log gate setup");
+        let e_1m = namespace.get_item("e_1m").expect("e_1m present");
+        let e_4m = namespace.get_item("e_4m").expect("e_4m present");
+        let l_1m = namespace.get_item("l_1m").expect("l_1m present");
+        let l_4m = namespace.get_item("l_4m").expect("l_4m present");
+
+        let rows = [
+            (
+                "explog_exp_1m_null_then_effect",
+                "explog_exp_1m",
+                "exp",
+                &e_1m,
+            ),
+            (
+                "explog_exp_4m_null_then_effect",
+                "explog_exp_4m",
+                "exp",
+                &e_4m,
+            ),
+            (
+                "explog_exp2_4m_null_then_effect",
+                "explog_exp2_4m",
+                "exp2",
+                &e_4m,
+            ),
+            (
+                "explog_log_1m_null_then_effect",
+                "explog_log_1m",
+                "log",
+                &l_1m,
+            ),
+            (
+                "explog_log_4m_null_then_effect",
+                "explog_log_4m",
+                "log",
+                &l_4m,
+            ),
+            (
+                "explog_log2_4m_null_then_effect",
+                "explog_log2_4m",
+                "log2",
+                &l_4m,
+            ),
+            (
+                "explog_log10_4m_null_then_effect",
+                "explog_log10_4m",
+                "log10",
+                &l_4m,
+            ),
+        ];
+        for (bench_name, row, op, input) in rows {
+            let fnp_fn = module.getattr(op).expect("fnp exp/log fn");
+            let np_fn = numpy.getattr(op).expect("numpy exp/log fn");
+            let candidate = fnp_fn.call1((input,)).expect("fnp exp/log parity call");
+            let base = np_fn.call1((input,)).expect("numpy exp/log parity call");
+            assert_eq!(
+                candidate
+                    .getattr("dtype")
+                    .expect("candidate dtype")
+                    .str()
+                    .expect("candidate dtype str")
+                    .to_string(),
+                base.getattr("dtype")
+                    .expect("base dtype")
+                    .str()
+                    .expect("base dtype str")
+                    .to_string(),
+                "exp/log {row} dtype parity",
+            );
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "exp/log {row} byte parity",
+            );
+            bench_median_gate_python_unary(&mut group, bench_name, row, &np_fn, &fnp_fn, input);
+        }
+    });
+
+    group.finish();
+}
+
+fn bench_bool_sort_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_bool_sort_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_bool_sort_median_gate").expect("bool sort bench module");
+        fnp_python(&module).expect("initialize fnp_python bool sort bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 b_8m = rng.integers(0, 2, 8_000_000).astype(bool)\n\
+                 b_2m = rng.integers(0, 2, 2_000_000).astype(bool)\n",
+            )
+            .expect("bool sort setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("bool sort setup");
+        let b_8m = namespace.get_item("b_8m").expect("b_8m present");
+        let b_2m = namespace.get_item("b_2m").expect("b_2m present");
+
+        let fnp_sort = module.getattr("sort").expect("fnp sort");
+        let np_sort = numpy.getattr("sort").expect("numpy sort");
+        for (label, input) in [("8m", &b_8m), ("2m", &b_2m)] {
+            let candidate = fnp_sort.call1((input,)).expect("fnp bool sort parity");
+            let base = np_sort.call1((input,)).expect("numpy bool sort parity");
+            assert_eq!(
+                candidate
+                    .getattr("dtype")
+                    .expect("candidate dtype")
+                    .str()
+                    .expect("candidate dtype str")
+                    .to_string(),
+                base.getattr("dtype")
+                    .expect("base dtype")
+                    .str()
+                    .expect("base dtype str")
+                    .to_string(),
+                "bool sort {label} dtype parity",
+            );
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "bool sort {label} byte parity",
+            );
+        }
+
+        bench_median_gate_python_unary(
+            &mut group,
+            "bool_sort_8m_null_then_effect",
+            "bool_sort_8m",
+            &np_sort,
+            &fnp_sort,
+            &b_8m,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "bool_sort_2m_null_then_effect",
+            "bool_sort_2m",
+            &np_sort,
+            &fnp_sort,
+            &b_2m,
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_wide_string_sort_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_wide_string_sort_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_wide_string_sort_median_gate")
+            .expect("wide string sort bench module");
+        fnp_python(&module).expect("initialize fnp_python wide string sort bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 u9 = rng.integers(97, 123, (1_000_000, 9), dtype=np.uint32).reshape(-1).view('U9')\n\
+                 u16 = rng.integers(97, 123, (1_000_000, 16), dtype=np.uint32).reshape(-1).view('U16')\n\
+                 s9 = rng.integers(97, 123, (1_000_000, 9), dtype=np.uint8).reshape(-1).view('S9')\n\
+                 s16 = rng.integers(97, 123, (1_000_000, 16), dtype=np.uint8).reshape(-1).view('S16')\n",
+            )
+            .expect("wide string sort setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("wide string sort setup");
+        let u9_input = namespace.get_item("u9").expect("u9 present");
+        let u16_input = namespace.get_item("u16").expect("u16 present");
+        let s9_input = namespace.get_item("s9").expect("s9 present");
+        let s16_input = namespace.get_item("s16").expect("s16 present");
+        let fnp_sort = module.getattr("sort").expect("fnp sort");
+        let numpy_sort = numpy.getattr("sort").expect("numpy sort");
+
+        for (label, input) in [
+            ("U9", &u9_input),
+            ("U16", &u16_input),
+            ("S9", &s9_input),
+            ("S16", &s16_input),
+        ] {
+            let candidate = fnp_sort
+                .call1((input,))
+                .expect("fnp wide string sort parity");
+            let base = numpy_sort
+                .call1((input,))
+                .expect("numpy wide string sort parity");
+            assert_eq!(
+                candidate
+                    .getattr("dtype")
+                    .expect("candidate dtype")
+                    .str()
+                    .expect("candidate dtype str")
+                    .to_string(),
+                base.getattr("dtype")
+                    .expect("base dtype")
+                    .str()
+                    .expect("base dtype str")
+                    .to_string(),
+                "wide string sort {label} dtype parity",
+            );
+            assert_eq!(
+                candidate
+                    .getattr("shape")
+                    .expect("candidate shape")
+                    .extract::<Vec<usize>>()
+                    .expect("candidate shape Vec"),
+                base.getattr("shape")
+                    .expect("base shape")
+                    .extract::<Vec<usize>>()
+                    .expect("base shape Vec"),
+                "wide string sort {label} shape parity",
+            );
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "wide string sort {label} byte parity",
+            );
+            assert_eq!(
+                candidate
+                    .getattr("flags")
+                    .expect("candidate flags")
+                    .getattr("owndata")
+                    .expect("candidate owndata")
+                    .extract::<bool>()
+                    .expect("candidate owndata bool"),
+                base.getattr("flags")
+                    .expect("base flags")
+                    .getattr("owndata")
+                    .expect("base owndata")
+                    .extract::<bool>()
+                    .expect("base owndata bool"),
+                "wide string sort {label} ownership parity",
+            );
+        }
+
+        group.bench_function("wide_string_sort_u16_1m_fnp_profile", |bench| {
+            bench.iter(|| {
+                black_box(
+                    fnp_sort
+                        .call1((black_box(&u16_input),))
+                        .expect("profile fnp U16 sort"),
+                )
+            });
+        });
+        bench_median_gate_python_unary(
+            &mut group,
+            "wide_string_sort_u9_1m_null_then_effect",
+            "wide_string_sort_u9_1m",
+            &numpy_sort,
+            &fnp_sort,
+            &u9_input,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "wide_string_sort_u16_1m_null_then_effect",
+            "wide_string_sort_u16_1m",
+            &numpy_sort,
+            &fnp_sort,
+            &u16_input,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "wide_string_sort_s9_1m_null_then_effect",
+            "wide_string_sort_s9_1m",
+            &numpy_sort,
+            &fnp_sort,
+            &s9_input,
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "wide_string_sort_s16_1m_null_then_effect",
+            "wide_string_sort_s16_1m",
+            &numpy_sort,
+            &fnp_sort,
+            &s16_input,
+        );
+    });
+
+    group.finish();
+    if std::env::var_os("FNP_WIDE_STRING_SORT_BENCH_ONLY").is_some() {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        std::process::exit(0);
+    }
+}
+
+fn bench_accumulate_extremum_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_accumulate_extremum_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_accumulate_extremum_median_gate")
+            .expect("accumulate extremum bench module");
+        fnp_python(&module).expect("initialize fnp_python accumulate extremum bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 x = rng.standard_normal(8_000_000).astype(np.float64)\n",
+            )
+            .expect("accumulate extremum setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("accumulate extremum setup");
+        let input = namespace.get_item("x").expect("x present");
+        let fnp_accumulate = module
+            .getattr("maximum")
+            .expect("fnp maximum")
+            .getattr("accumulate")
+            .expect("fnp maximum.accumulate");
+        let numpy_accumulate = numpy
+            .getattr("maximum")
+            .expect("numpy maximum")
+            .getattr("accumulate")
+            .expect("numpy maximum.accumulate");
+
+        let candidate = fnp_accumulate
+            .call1((&input,))
+            .expect("fnp maximum.accumulate parity");
+        let base = numpy_accumulate
+            .call1((&input,))
+            .expect("numpy maximum.accumulate parity");
+        assert_eq!(
+            candidate
+                .getattr("dtype")
+                .expect("candidate dtype")
+                .str()
+                .expect("candidate dtype str")
+                .to_string(),
+            base.getattr("dtype")
+                .expect("base dtype")
+                .str()
+                .expect("base dtype str")
+                .to_string(),
+            "maximum.accumulate dtype parity",
+        );
+        assert_eq!(
+            candidate
+                .getattr("shape")
+                .expect("candidate shape")
+                .extract::<Vec<usize>>()
+                .expect("candidate shape Vec"),
+            base.getattr("shape")
+                .expect("base shape")
+                .extract::<Vec<usize>>()
+                .expect("base shape Vec"),
+            "maximum.accumulate shape parity",
+        );
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "maximum.accumulate byte parity",
+        );
+
+        group.bench_function("maximum_accumulate_f64_8m_fnp_profile", |bench| {
+            bench.iter(|| {
+                black_box(
+                    fnp_accumulate
+                        .call1((black_box(&input),))
+                        .expect("profile fnp maximum.accumulate"),
+                )
+            });
+        });
+        bench_median_gate_python_unary(
+            &mut group,
+            "maximum_accumulate_f64_8m_null_then_effect",
+            "maximum_accumulate_f64_8m",
+            &numpy_accumulate,
+            &fnp_accumulate,
+            &input,
+        );
+    });
+
+    group.finish();
+    if std::env::var_os("FNP_ACCUMULATE_EXTREMUM_BENCH_ONLY").is_some() {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        std::process::exit(0);
+    }
+}
+
+fn bench_int_convolve_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_int_convolve_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_int_convolve_median_gate")
+            .expect("int convolve bench module");
+        fnp_python(&module).expect("initialize fnp_python int convolve bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 a = rng.integers(-2**31, 2**31, 200_000).astype(np.int64)\n\
+                 v = rng.integers(-2**31, 2**31, 256).astype(np.int64)\n",
+            )
+            .expect("int convolve setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("int convolve setup");
+        let a = namespace.get_item("a").expect("a present");
+        let v = namespace.get_item("v").expect("v present");
+        let fnp_convolve = module.getattr("convolve").expect("fnp convolve");
+        let numpy_convolve = numpy.getattr("convolve").expect("numpy convolve");
+
+        let candidate = fnp_convolve
+            .call1((&a, &v))
+            .expect("fnp int convolve parity");
+        let base = numpy_convolve
+            .call1((&a, &v))
+            .expect("numpy int convolve parity");
+        assert_eq!(
+            candidate
+                .getattr("dtype")
+                .expect("candidate dtype")
+                .str()
+                .expect("candidate dtype str")
+                .to_string(),
+            base.getattr("dtype")
+                .expect("base dtype")
+                .str()
+                .expect("base dtype str")
+                .to_string(),
+            "int convolve dtype parity",
+        );
+        assert_eq!(
+            candidate
+                .getattr("shape")
+                .expect("candidate shape")
+                .extract::<Vec<usize>>()
+                .expect("candidate shape Vec"),
+            base.getattr("shape")
+                .expect("base shape")
+                .extract::<Vec<usize>>()
+                .expect("base shape Vec"),
+            "int convolve shape parity",
+        );
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "int convolve byte parity",
+        );
+
+        group.bench_function("int_convolve_i64_200k_256_fnp_profile", |bench| {
+            bench.iter(|| {
+                black_box(
+                    fnp_convolve
+                        .call1((black_box(&a), black_box(&v)))
+                        .expect("profile fnp int convolve"),
+                )
+            });
+        });
+        bench_median_gate_python_binary(
+            &mut group,
+            "int_convolve_i64_200k_256_null_then_effect",
+            "int_convolve_i64_200k_256",
+            &numpy_convolve,
+            &fnp_convolve,
+            &a,
+            &v,
+        );
+    });
+
+    group.finish();
+    if std::env::var_os("FNP_INT_CONVOLVE_BENCH_ONLY").is_some() {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        std::process::exit(0);
+    }
+}
+
+fn bench_int_matmul_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_int_matmul_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_int_matmul_median_gate")
+            .expect("int matmul bench module");
+        fnp_python(&module).expect("initialize fnp_python int matmul bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 a64 = rng.integers(-2**31, 2**31, (512, 512)).astype(np.int64)\n\
+                 b64 = rng.integers(-2**31, 2**31, (512, 512)).astype(np.int64)\n\
+                 a32 = rng.integers(-2**15, 2**15, (512, 512)).astype(np.int32)\n\
+                 b32 = rng.integers(-2**15, 2**15, (512, 512)).astype(np.int32)\n\
+                 ab64 = rng.integers(-2**31, 2**31, (64, 128, 128)).astype(np.int64)\n\
+                 bb64 = rng.integers(-2**31, 2**31, (64, 128, 128)).astype(np.int64)\n\
+                 mp64 = rng.integers(-2**31, 2**31, (256, 256)).astype(np.int64)\n\
+                 p5 = 5\n",
+            )
+            .expect("int matmul setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("int matmul setup");
+        let a64 = namespace.get_item("a64").expect("a64 present");
+        let b64 = namespace.get_item("b64").expect("b64 present");
+        let a32 = namespace.get_item("a32").expect("a32 present");
+        let b32 = namespace.get_item("b32").expect("b32 present");
+
+        let fnp_matmul = module.getattr("matmul").expect("fnp matmul");
+        let np_matmul = numpy.getattr("matmul").expect("numpy matmul");
+        for (label, x, y) in [("i64_512", &a64, &b64), ("i32_512", &a32, &b32)] {
+            let candidate = fnp_matmul.call1((x, y)).expect("fnp int matmul parity");
+            let base = np_matmul.call1((x, y)).expect("numpy int matmul parity");
+            assert_eq!(
+                candidate
+                    .getattr("dtype")
+                    .expect("candidate dtype")
+                    .str()
+                    .expect("candidate dtype str")
+                    .to_string(),
+                base.getattr("dtype")
+                    .expect("base dtype")
+                    .str()
+                    .expect("base dtype str")
+                    .to_string(),
+                "int matmul {label} dtype parity",
+            );
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "int matmul {label} byte parity",
+            );
+        }
+
+        bench_median_gate_python_binary(
+            &mut group,
+            "int_matmul_i64_512_null_then_effect",
+            "int_matmul_i64_512",
+            &np_matmul,
+            &fnp_matmul,
+            &a64,
+            &b64,
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "int_matmul_i32_512_null_then_effect",
+            "int_matmul_i32_512",
+            &np_matmul,
+            &fnp_matmul,
+            &a32,
+            &b32,
+        );
+
+        let ab64 = namespace.get_item("ab64").expect("ab64 present");
+        let bb64 = namespace.get_item("bb64").expect("bb64 present");
+        let mp64 = namespace.get_item("mp64").expect("mp64 present");
+        let p5 = namespace.get_item("p5").expect("p5 present");
+        let fnp_matrix_power = module
+            .getattr("linalg")
+            .expect("fnp linalg")
+            .getattr("matrix_power")
+            .expect("fnp matrix_power");
+        let np_matrix_power = numpy
+            .getattr("linalg")
+            .expect("numpy linalg")
+            .getattr("matrix_power")
+            .expect("numpy matrix_power");
+        for (label, f_c, f_b, x, y) in [
+            ("i64_batched", &fnp_matmul, &np_matmul, &ab64, &bb64),
+            (
+                "i64_matpow5",
+                &fnp_matrix_power,
+                &np_matrix_power,
+                &mp64,
+                &p5,
+            ),
+        ] {
+            let candidate = f_c.call1((x, y)).expect("fnp candidate parity");
+            let base = f_b.call1((x, y)).expect("numpy base parity");
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "int {label} byte parity",
+            );
+        }
+        bench_median_gate_python_binary(
+            &mut group,
+            "int_matmul_i64_batched_null_then_effect",
+            "int_matmul_i64_batched",
+            &np_matmul,
+            &fnp_matmul,
+            &ab64,
+            &bb64,
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "int_matrix_power_i64_256_p5_null_then_effect",
+            "int_matrix_power_i64_256_p5",
+            &np_matrix_power,
+            &fnp_matrix_power,
+            &mp64,
+            &p5,
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_f16_matmul_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_f16_matmul_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_f16_matmul_median_gate")
+            .expect("f16 matmul bench module");
+        fnp_python(&module).expect("initialize fnp_python f16 matmul bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 h_a = rng.standard_normal((512, 512)).astype(np.float16)\n\
+                 h_b = rng.standard_normal((512, 512)).astype(np.float16)\n\
+                 hb_a = rng.standard_normal((8, 256, 256)).astype(np.float16)\n\
+                 hb_b = rng.standard_normal((8, 256, 256)).astype(np.float16)\n\
+                 hbc_a = rng.standard_normal((32, 128, 128)).astype(np.float16)\n\
+                 hbc_b = rng.standard_normal((128, 96)).astype(np.float16)\n",
+            )
+            .expect("f16 matmul setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("f16 matmul setup");
+        let h_a = namespace.get_item("h_a").expect("h_a present");
+        let h_b = namespace.get_item("h_b").expect("h_b present");
+
+        let fnp_matmul = module.getattr("matmul").expect("fnp matmul");
+        let np_matmul = numpy.getattr("matmul").expect("numpy matmul");
+        let candidate = fnp_matmul
+            .call1((&h_a, &h_b))
+            .expect("fnp f16 matmul parity");
+        let base = np_matmul
+            .call1((&h_a, &h_b))
+            .expect("numpy f16 matmul parity");
+        assert_eq!(
+            candidate
+                .getattr("dtype")
+                .expect("candidate dtype")
+                .str()
+                .expect("candidate dtype str")
+                .to_string(),
+            base.getattr("dtype")
+                .expect("base dtype")
+                .str()
+                .expect("base dtype str")
+                .to_string(),
+            "f16 matmul dtype parity",
+        );
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 matmul byte parity",
+        );
+
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_matmul_512_null_then_effect",
+            "f16_matmul_512",
+            &np_matmul,
+            &fnp_matmul,
+            &h_a,
+            &h_b,
+        );
+
+        let hb_a = namespace.get_item("hb_a").expect("hb_a present");
+        let hb_b = namespace.get_item("hb_b").expect("hb_b present");
+        let candidate = fnp_matmul
+            .call1((&hb_a, &hb_b))
+            .expect("fnp f16 batched matmul parity");
+        let base = np_matmul
+            .call1((&hb_a, &hb_b))
+            .expect("numpy f16 batched matmul parity");
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 batched matmul byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_matmul_batched_8x256_null_then_effect",
+            "f16_matmul_batched_8x256",
+            &np_matmul,
+            &fnp_matmul,
+            &hb_a,
+            &hb_b,
+        );
+
+        let hbc_a = namespace.get_item("hbc_a").expect("hbc_a present");
+        let hbc_b = namespace.get_item("hbc_b").expect("hbc_b present");
+        let candidate = fnp_matmul
+            .call1((&hbc_a, &hbc_b))
+            .expect("fnp f16 broadcast matmul parity");
+        let base = np_matmul
+            .call1((&hbc_a, &hbc_b))
+            .expect("numpy f16 broadcast matmul parity");
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 broadcast matmul byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_matmul_broadcast_32x128_null_then_effect",
+            "f16_matmul_broadcast_32x128",
+            &np_matmul,
+            &fnp_matmul,
+            &hbc_a,
+            &hbc_b,
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_f16_unique_median_gate(c: &mut Criterion) {
+    // f16 unique at 8M: presence-table walk vs numpy's ~600ms-class sort.
+    let mut group = c.benchmark_group("python_f16_unique_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_f16_unique_median_gate").expect("unique bench module");
+        fnp_python(&module).expect("initialize fnp_python unique bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260716)\n\
+                 uq16 = (rng.standard_normal(8_000_000) * 2).astype(np.float16)\n",
+            )
+            .expect("unique setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("unique setup");
+        let uq16 = namespace.get_item("uq16").expect("uq16 present");
+        let fnp_unique = module.getattr("unique").expect("fnp unique");
+        let np_unique = numpy.getattr("unique").expect("numpy unique");
+        let candidate = fnp_unique.call1((&uq16,)).expect("fnp unique parity");
+        let base = np_unique.call1((&uq16,)).expect("numpy unique parity");
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 unique byte parity",
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "f16_unique_8m_null_then_effect",
+            "f16_unique_8m",
+            &np_unique,
+            &fnp_unique,
+            &uq16,
+        );
+
+        // f16 isin at 8M/1k: presence-bitmap membership vs numpy's ~1.2s sort path.
+        py.run(
+            std::ffi::CString::new("iq16 = (rng.standard_normal(1000) * 2).astype(np.float16)\n")
+                .expect("isin setup CString")
+                .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("isin setup");
+        let iq16 = namespace.get_item("iq16").expect("iq16 present");
+        let fnp_isin = module.getattr("isin").expect("fnp isin");
+        let np_isin = numpy.getattr("isin").expect("numpy isin");
+        let candidate_i = fnp_isin.call1((&uq16, &iq16)).expect("fnp isin parity");
+        let base_i = np_isin.call1((&uq16, &iq16)).expect("numpy isin parity");
+        assert_eq!(
+            candidate_i
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_i
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 isin byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_isin_8m_null_then_effect",
+            "f16_isin_8m",
+            &np_isin,
+            &fnp_isin,
+            &uq16,
+            &iq16,
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_f16_around_median_gate(c: &mut Criterion) {
+    // f16 round(a, 2) at 8M: the per-step-narrow chain kernel vs numpy's serial
+    // half multiply->rint->divide loops (~90ms class on hz1).
+    let mut group = c.benchmark_group("python_f16_around_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_f16_around_median_gate").expect("around bench module");
+        fnp_python(&module).expect("initialize fnp_python around bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260718)\n\
+                 ra16 = (rng.standard_normal(8_000_000) * 2).astype(np.float16)\n\
+                 dec2 = 2\n",
+            )
+            .expect("around setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("around setup");
+        let ra16 = namespace.get_item("ra16").expect("ra16 present");
+        let dec2 = namespace.get_item("dec2").expect("dec2 present");
+        let fnp_round = module.getattr("round").expect("fnp round");
+        let np_round = numpy.getattr("round").expect("numpy round");
+        let candidate = fnp_round.call1((&ra16, &dec2)).expect("fnp round parity");
+        let base = np_round.call1((&ra16, &dec2)).expect("numpy round parity");
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 around byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_around_8m_null_then_effect",
+            "f16_around_8m",
+            &np_round,
+            &fnp_round,
+            &ra16,
+            &dec2,
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_isclose_median_gate(c: &mut Criterion) {
+    // f64 array-array isclose at 8M: the parallelized zero-copy predicate vs
+    // numpy's temp-heavy ufunc chain (~180ms class on hz1).
+    let mut group = c.benchmark_group("python_isclose_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_isclose_median_gate").expect("isclose bench module");
+        fnp_python(&module).expect("initialize fnp_python isclose bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260716)\n\
+                 ic_a = rng.standard_normal(8_000_000)\n\
+                 ic_b = ic_a + rng.standard_normal(8_000_000) * 1e-7\n",
+            )
+            .expect("isclose setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("isclose setup");
+        let ic_a = namespace.get_item("ic_a").expect("ic_a present");
+        let ic_b = namespace.get_item("ic_b").expect("ic_b present");
+        let fnp_isclose = module.getattr("isclose").expect("fnp isclose");
+        let np_isclose = numpy.getattr("isclose").expect("numpy isclose");
+        let candidate = fnp_isclose
+            .call1((&ic_a, &ic_b))
+            .expect("fnp isclose parity");
+        let base = np_isclose
+            .call1((&ic_a, &ic_b))
+            .expect("numpy isclose parity");
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "isclose byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "isclose_f64_8m_null_then_effect",
+            "isclose_f64_8m",
+            &np_isclose,
+            &fnp_isclose,
+            &ic_a,
+            &ic_b,
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_multidot_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_multidot_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_multidot_median_gate").expect("multidot bench module");
+        fnp_python(&module).expect("initialize fnp_python multidot bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 md_args = [rng.standard_normal((512, 512)) for _ in range(3)]\n",
+            )
+            .expect("multidot setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("multidot setup");
+        let md_args = namespace.get_item("md_args").expect("md_args present");
+
+        let fnp_multidot = module
+            .getattr("linalg")
+            .expect("fnp linalg")
+            .getattr("multi_dot")
+            .expect("fnp multi_dot");
+        let np_multidot = numpy
+            .getattr("linalg")
+            .expect("numpy linalg")
+            .getattr("multi_dot")
+            .expect("numpy multi_dot");
+        let candidate = fnp_multidot
+            .call1((&md_args,))
+            .expect("fnp multi_dot parity");
+        let base = np_multidot
+            .call1((&md_args,))
+            .expect("numpy multi_dot parity");
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "multi_dot byte parity",
+        );
+
+        bench_median_gate_python_unary(
+            &mut group,
+            "multidot_3x512_null_then_effect",
+            "multidot_3x512",
+            &np_multidot,
+            &fnp_multidot,
+            &md_args,
+        );
+
+        // f16 3-chain: numpy's pairs are the naive ~245x f16 loops; fnp
+        // routes both pairs through the shipped byte-matched f16 matmul
+        // kernel per the replicated _multi_dot_three order rule.
+        py.run(
+            std::ffi::CString::new(
+                "md16_args = [(rng.standard_normal((256, 256)) * 0.3).astype(np.float16) for _ in range(3)]\n",
+            )
+            .expect("multidot f16 setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("multidot f16 setup");
+        let md16_args = namespace.get_item("md16_args").expect("md16_args present");
+        let candidate16 = fnp_multidot
+            .call1((&md16_args,))
+            .expect("fnp f16 multi_dot parity");
+        let base16 = np_multidot
+            .call1((&md16_args,))
+            .expect("numpy f16 multi_dot parity");
+        assert_eq!(
+            candidate16
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base16
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 multi_dot byte parity",
+        );
+        bench_median_gate_python_unary(
+            &mut group,
+            "multidot_f16_3x256_null_then_effect",
+            "multidot_f16_3x256",
+            &np_multidot,
+            &fnp_multidot,
+            &md16_args,
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_f16_einsum_median_gate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_f16_einsum_median_gate");
+    group.sample_size(MEDIAN_GATE_FINAL_BATCHES);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_f16_einsum_median_gate")
+            .expect("f16 einsum bench module");
+        fnp_python(&module).expect("initialize fnp_python f16 einsum bench module");
+        let _numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        namespace
+            .set_item("fnp_mod", &module)
+            .expect("expose fnp module");
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260711)\n\
+                 es_a = (rng.standard_normal((512, 512)) * 0.3).astype(np.float16)\n\
+                 es_b = (rng.standard_normal((512, 512)) * 0.3).astype(np.float16)\n\
+                 fnp_es = lambda a, b: fnp_mod.einsum('ij,jk->ik', a, b)\n\
+                 np_es = lambda a, b: np.einsum('ij,jk->ik', a, b)\n\
+                 fnp_es_t = lambda a, b: fnp_mod.einsum('ij,lj->il', a, b)\n\
+                 np_es_t = lambda a, b: np.einsum('ij,lj->il', a, b)\n\
+                 fnp_es_g = lambda a, b: fnp_mod.einsum('ji,jl->il', a, b)\n\
+                 np_es_g = lambda a, b: np.einsum('ji,jl->il', a, b)\n\
+                 fnp_es_ts = lambda a, b: fnp_mod.einsum('ij,lj->li', a, b)\n\
+                 np_es_ts = lambda a, b: np.einsum('ij,lj->li', a, b)\n\
+                 fnp_es_gs = lambda a, b: fnp_mod.einsum('ji,jl->li', a, b)\n\
+                 np_es_gs = lambda a, b: np.einsum('ji,jl->li', a, b)\n\
+                 dot_a = (rng.standard_normal(8_388_608) * 0.3).astype(np.float16)\n\
+                 dot_b = (rng.standard_normal(8_388_608) * 0.3).astype(np.float16)\n\
+                 fnp_es_d = lambda a, b: fnp_mod.einsum('j,j->', a, b)\n\
+                 np_es_d = lambda a, b: np.einsum('j,j->', a, b)\n\
+                 fc_a = (rng.standard_normal((2896, 2896)) * 0.3).astype(np.float16)\n\
+                 fc_b = (rng.standard_normal((2896, 2896)) * 0.3).astype(np.float16)\n\
+                 fnp_es_fc = lambda a, b: fnp_mod.einsum('ij,ij->', a, b)\n\
+                 np_es_fc = lambda a, b: np.einsum('ij,ij->', a, b)\n\
+                 fnp_es_ew = lambda a, b: fnp_mod.einsum('j,j->j', a, b)\n\
+                 np_es_ew = lambda a, b: np.einsum('j,j->j', a, b)\n\
+                 ew64_a = rng.standard_normal(8_388_608)\n\
+                 ew64_b = rng.standard_normal(8_388_608)\n\
+                 bc64_full = rng.standard_normal((2896, 2896))\n\
+                 bc64_vec = rng.standard_normal(2896)\n\
+                 red16 = (rng.standard_normal((2896, 2896)) * 0.3).astype(np.float16)\n\
+                 red64 = rng.standard_normal((2896, 2896))\n\
+                 red32 = rng.standard_normal((2896, 2896)).astype(np.float32)\n\
+                 ch_a = (rng.standard_normal((512, 512)) * 0.3).astype(np.float16)\n\
+                 ch_b = (rng.standard_normal((512, 512)) * 0.3).astype(np.float16)\n\
+                 ch_c = (rng.standard_normal((512, 512)) * 0.3).astype(np.float16)\n\
+                 fnp_es_ch = lambda a, b: fnp_mod.einsum('ij,jk,kl->il', a, b, ch_c, optimize=True)\n\
+                 np_es_ch = lambda a, b: np.einsum('ij,jk,kl->il', a, b, ch_c, optimize=True)\n\
+                 fnp_es_rj = lambda a: fnp_mod.einsum('ij->j', a)\n\
+                 np_es_rj = lambda a: np.einsum('ij->j', a)\n\
+                 fnp_es_ri = lambda a: fnp_mod.einsum('ij->i', a)\n\
+                 np_es_ri = lambda a: np.einsum('ij->i', a)\n\
+                 fnp_es_bc = lambda a, b: fnp_mod.einsum('ij,j->ij', a, b)\n\
+                 np_es_bc = lambda a, b: np.einsum('ij,j->ij', a, b)\n\
+                 bat_a = (rng.standard_normal((8, 256, 256)) * 0.3).astype(np.float16)\n\
+                 bat_b = (rng.standard_normal((8, 256, 256)) * 0.3).astype(np.float16)\n\
+                 fnp_es_b = lambda a, b: fnp_mod.einsum('bij,bjk->bik', a, b)\n\
+                 np_es_b = lambda a, b: np.einsum('bij,bjk->bik', a, b)\n\
+                 fnp_es_bt = lambda a, b: fnp_mod.einsum('bij,blj->bil', a, b)\n\
+                 np_es_bt = lambda a, b: np.einsum('bij,blj->bil', a, b)\n\
+                 fnp_es_bg = lambda a, b: fnp_mod.einsum('bji,bjl->bil', a, b)\n\
+                 np_es_bg = lambda a, b: np.einsum('bji,bjl->bil', a, b)\n\
+                 fnp_es_bts = lambda a, b: fnp_mod.einsum('bij,blj->bli', a, b)\n\
+                 np_es_bts = lambda a, b: np.einsum('bij,blj->bli', a, b)\n\
+                 fnp_es_bgs = lambda a, b: fnp_mod.einsum('bji,bjl->bli', a, b)\n\
+                 np_es_bgs = lambda a, b: np.einsum('bji,bjl->bli', a, b)\n",
+            )
+            .expect("f16 einsum setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("f16 einsum setup");
+        let es_a = namespace.get_item("es_a").expect("es_a present");
+        let es_b = namespace.get_item("es_b").expect("es_b present");
+        let fnp_es = namespace.get_item("fnp_es").expect("fnp_es present");
+        let np_es = namespace.get_item("np_es").expect("np_es present");
+
+        let candidate = fnp_es.call1((&es_a, &es_b)).expect("fnp f16 einsum parity");
+        let base = np_es
+            .call1((&es_a, &es_b))
+            .expect("numpy f16 einsum parity");
+        assert_eq!(
+            candidate
+                .getattr("dtype")
+                .expect("candidate dtype")
+                .str()
+                .expect("candidate dtype str")
+                .to_string(),
+            base.getattr("dtype")
+                .expect("base dtype")
+                .str()
+                .expect("base dtype str")
+                .to_string(),
+            "f16 einsum dtype parity",
+        );
+        assert_eq!(
+            candidate
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base.call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum byte parity",
+        );
+
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_matmul_512_null_then_effect",
+            "f16_einsum_matmul_512",
+            &np_es,
+            &fnp_es,
+            &es_a,
+            &es_b,
+        );
+
+        // Transposed spec ('ij,lj->il', the a@b.T idiom): a different numpy
+        // contract class (wide-accumulate-once blocked-4) with its own kernel.
+        let fnp_es_t = namespace.get_item("fnp_es_t").expect("fnp_es_t present");
+        let np_es_t = namespace.get_item("np_es_t").expect("np_es_t present");
+        let candidate_t = fnp_es_t
+            .call1((&es_a, &es_b))
+            .expect("fnp f16 einsum transposed parity");
+        let base_t = np_es_t
+            .call1((&es_a, &es_b))
+            .expect("numpy f16 einsum transposed parity");
+        assert_eq!(
+            candidate_t
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_t
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum transposed byte parity",
+        );
+
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_transposed_512_null_then_effect",
+            "f16_einsum_transposed_512",
+            &np_es_t,
+            &fnp_es_t,
+            &es_a,
+            &es_b,
+        );
+
+        // Gram spec ('ji,jl->il', the a.T@b idiom): the third numpy contract
+        // class (per-step-narrow muladd rows, stride0_contig_outcontig) with
+        // its own kernel. Same 512^2 operands (k = leading axis).
+        let fnp_es_g = namespace.get_item("fnp_es_g").expect("fnp_es_g present");
+        let np_es_g = namespace.get_item("np_es_g").expect("np_es_g present");
+        let candidate_g = fnp_es_g
+            .call1((&es_a, &es_b))
+            .expect("fnp f16 einsum gram parity");
+        let base_g = np_es_g
+            .call1((&es_a, &es_b))
+            .expect("numpy f16 einsum gram parity");
+        assert_eq!(
+            candidate_g
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_g
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum gram byte parity",
+        );
+
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_gram_512_null_then_effect",
+            "f16_einsum_gram_512",
+            &np_es_g,
+            &fnp_es_g,
+            &es_a,
+            &es_b,
+        );
+
+        // Output-transposed variants: operand-swap arms of the transposed and
+        // gram kernels ('ij,lj->li' / 'ji,jl->li'). Rows prove the swapped
+        // dispatch engages the native route (effect >> 1, not numpy ~1.0x).
+        for (bench_name, row, fnp_key, np_key) in [
+            (
+                "f16_einsum_transposed_swapped_512_null_then_effect",
+                "f16_einsum_transposed_swapped_512",
+                "fnp_es_ts",
+                "np_es_ts",
+            ),
+            (
+                "f16_einsum_gram_swapped_512_null_then_effect",
+                "f16_einsum_gram_swapped_512",
+                "fnp_es_gs",
+                "np_es_gs",
+            ),
+        ] {
+            let fnp_fn = namespace.get_item(fnp_key).expect("fnp swapped fn");
+            let np_fn = namespace.get_item(np_key).expect("np swapped fn");
+            let candidate = fnp_fn
+                .call1((&es_a, &es_b))
+                .expect("fnp swapped einsum parity");
+            let base = np_fn
+                .call1((&es_a, &es_b))
+                .expect("numpy swapped einsum parity");
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "f16 einsum swapped-output byte parity ({row})",
+            );
+            bench_median_gate_python_binary(
+                &mut group, bench_name, row, &np_fn, &fnp_fn, &es_a, &es_b,
+            );
+        }
+
+        // 1-D dot ('j,j->') at 8M: per-8192-buffer trees in parallel, serial
+        // f16 fold. Scalar output - parity assert via float16 byte equality.
+        let dot_a = namespace.get_item("dot_a").expect("dot_a present");
+        let dot_b = namespace.get_item("dot_b").expect("dot_b present");
+        let fnp_es_d = namespace.get_item("fnp_es_d").expect("fnp_es_d present");
+        let np_es_d = namespace.get_item("np_es_d").expect("np_es_d present");
+        let candidate_d = fnp_es_d
+            .call1((&dot_a, &dot_b))
+            .expect("fnp f16 einsum dot parity");
+        let base_d = np_es_d
+            .call1((&dot_a, &dot_b))
+            .expect("numpy f16 einsum dot parity");
+        assert_eq!(
+            candidate_d
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_d
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum 1-D dot byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_dot1d_8m_null_then_effect",
+            "f16_einsum_dot1d_8m",
+            &np_es_d,
+            &fnp_es_d,
+            &dot_a,
+            &dot_b,
+        );
+
+        // 2-D full contraction ('ij,ij->') at 2896^2 ~ 8.4M: the coalesced
+        // chunk-fold route through the generalized full-contraction parser.
+        let fc_a = namespace.get_item("fc_a").expect("fc_a present");
+        let fc_b = namespace.get_item("fc_b").expect("fc_b present");
+        let fnp_es_fc = namespace.get_item("fnp_es_fc").expect("fnp_es_fc present");
+        let np_es_fc = namespace.get_item("np_es_fc").expect("np_es_fc present");
+        let candidate_fc = fnp_es_fc
+            .call1((&fc_a, &fc_b))
+            .expect("fnp f16 einsum full-contraction parity");
+        let base_fc = np_es_fc
+            .call1((&fc_a, &fc_b))
+            .expect("numpy f16 einsum full-contraction parity");
+        assert_eq!(
+            candidate_fc
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_fc
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum full-contraction byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_fullc_2d_8m_null_then_effect",
+            "f16_einsum_fullc_2d_8m",
+            &np_es_fc,
+            &fnp_es_fc,
+            &fc_a,
+            &fc_b,
+        );
+
+        // Elementwise product ('j,j->j') at 8M: zero-seeded parallel flat map.
+        let fnp_es_ew = namespace.get_item("fnp_es_ew").expect("fnp_es_ew present");
+        let np_es_ew = namespace.get_item("np_es_ew").expect("np_es_ew present");
+        let candidate_ew = fnp_es_ew
+            .call1((&dot_a, &dot_b))
+            .expect("fnp f16 einsum elementwise parity");
+        let base_ew = np_es_ew
+            .call1((&dot_a, &dot_b))
+            .expect("numpy f16 einsum elementwise parity");
+        assert_eq!(
+            candidate_ew
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_ew
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum elementwise byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_elemwise_8m_null_then_effect",
+            "f16_einsum_elemwise_8m",
+            &np_es_ew,
+            &fnp_es_ew,
+            &dot_a,
+            &dot_b,
+        );
+
+        // f64 elementwise ('j,j->j') at 8M: the f64/f32 zero-seeded kernel.
+        let ew64_a = namespace.get_item("ew64_a").expect("ew64_a present");
+        let ew64_b = namespace.get_item("ew64_b").expect("ew64_b present");
+        let candidate_e64 = fnp_es_ew
+            .call1((&ew64_a, &ew64_b))
+            .expect("fnp f64 einsum elementwise parity");
+        let base_e64 = np_es_ew
+            .call1((&ew64_a, &ew64_b))
+            .expect("numpy f64 einsum elementwise parity");
+        assert_eq!(
+            candidate_e64
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_e64
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f64 einsum elementwise byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f64_einsum_elemwise_8m_null_then_effect",
+            "f64_einsum_elemwise_8m",
+            &np_es_ew,
+            &fnp_es_ew,
+            &ew64_a,
+            &ew64_b,
+        );
+
+        // f64 broadcast form ('ij,j->ij') at 2896^2: the broadcast kernel.
+        let bc64_full = namespace.get_item("bc64_full").expect("bc64_full present");
+        let bc64_vec = namespace.get_item("bc64_vec").expect("bc64_vec present");
+        let fnp_es_bc = namespace.get_item("fnp_es_bc").expect("fnp_es_bc present");
+        let np_es_bc = namespace.get_item("np_es_bc").expect("np_es_bc present");
+        let candidate_bc = fnp_es_bc
+            .call1((&bc64_full, &bc64_vec))
+            .expect("fnp f64 einsum broadcast parity");
+        let base_bc = np_es_bc
+            .call1((&bc64_full, &bc64_vec))
+            .expect("numpy f64 einsum broadcast parity");
+        assert_eq!(
+            candidate_bc
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_bc
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f64 einsum broadcast byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f64_einsum_bcast_8m_null_then_effect",
+            "f64_einsum_bcast_8m",
+            &np_es_bc,
+            &fnp_es_bc,
+            &bc64_full,
+            &bc64_vec,
+        );
+
+        // f16 3-op chain 512^3 with optimize=True: plan + shipped matmul
+        // kernel per pair (c operand captured in the lambda closures).
+        let ch_a = namespace.get_item("ch_a").expect("ch_a present");
+        let ch_b = namespace.get_item("ch_b").expect("ch_b present");
+        let fnp_es_ch = namespace.get_item("fnp_es_ch").expect("fnp_es_ch present");
+        let np_es_ch = namespace.get_item("np_es_ch").expect("np_es_ch present");
+        let candidate_ch = fnp_es_ch
+            .call1((&ch_a, &ch_b))
+            .expect("fnp f16 chain parity");
+        let base_ch = np_es_ch
+            .call1((&ch_a, &ch_b))
+            .expect("numpy f16 chain parity");
+        assert_eq!(
+            candidate_ch
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_ch
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum chain3 byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_chain3_512_null_then_effect",
+            "f16_einsum_chain3_512",
+            &np_es_ch,
+            &fnp_es_ch,
+            &ch_a,
+            &ch_b,
+        );
+
+        // f16 reduction specs at 2896^2: col-sum (the 27.9ms strided rank)
+        // and row-sum.
+        let red16 = namespace.get_item("red16").expect("red16 present");
+        let red64 = namespace.get_item("red64").expect("red64 present");
+        let red32 = namespace.get_item("red32").expect("red32 present");
+        for (bench_name, row, fnp_key, np_key, input) in [
+            (
+                "f16_einsum_colsum_8m_null_then_effect",
+                "f16_einsum_colsum_8m",
+                "fnp_es_rj",
+                "np_es_rj",
+                &red16,
+            ),
+            (
+                "f16_einsum_rowsum_8m_null_then_effect",
+                "f16_einsum_rowsum_8m",
+                "fnp_es_ri",
+                "np_es_ri",
+                &red16,
+            ),
+            (
+                "f64_einsum_colsum_8m_null_then_effect",
+                "f64_einsum_colsum_8m",
+                "fnp_es_rj",
+                "np_es_rj",
+                &red64,
+            ),
+            (
+                "f64_einsum_rowsum_8m_null_then_effect",
+                "f64_einsum_rowsum_8m",
+                "fnp_es_ri",
+                "np_es_ri",
+                &red64,
+            ),
+            (
+                "f32_einsum_colsum_8m_null_then_effect",
+                "f32_einsum_colsum_8m",
+                "fnp_es_rj",
+                "np_es_rj",
+                &red32,
+            ),
+            (
+                "f32_einsum_rowsum_8m_null_then_effect",
+                "f32_einsum_rowsum_8m",
+                "fnp_es_ri",
+                "np_es_ri",
+                &red32,
+            ),
+        ] {
+            let fnp_fn = namespace.get_item(fnp_key).expect("fnp reduce fn");
+            let np_fn = namespace.get_item(np_key).expect("np reduce fn");
+            let candidate = fnp_fn.call1((input,)).expect("fnp reduce parity");
+            let base = np_fn.call1((input,)).expect("numpy reduce parity");
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "f16 einsum reduction byte parity ({row})",
+            );
+            bench_median_gate_python_unary(&mut group, bench_name, row, &np_fn, &fnp_fn, input);
+        }
+
+        // Batched matmul spec ('bij,bjk->bik') at (8,256,256)@(8,256,256):
+        // the plain per-step chain per batch, parallel across batches.
+        let bat_a = namespace.get_item("bat_a").expect("bat_a present");
+        let bat_b = namespace.get_item("bat_b").expect("bat_b present");
+        let fnp_es_b = namespace.get_item("fnp_es_b").expect("fnp_es_b present");
+        let np_es_b = namespace.get_item("np_es_b").expect("np_es_b present");
+        let candidate_b = fnp_es_b
+            .call1((&bat_a, &bat_b))
+            .expect("fnp f16 einsum batched parity");
+        let base_b = np_es_b
+            .call1((&bat_a, &bat_b))
+            .expect("numpy f16 einsum batched parity");
+        assert_eq!(
+            candidate_b
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_b
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum batched byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_batched_8x256_null_then_effect",
+            "f16_einsum_batched_8x256",
+            &np_es_b,
+            &fnp_es_b,
+            &bat_a,
+            &bat_b,
+        );
+
+        // Batched transposed spec ('bij,blj->bil'): buffered chunk-fold wide
+        // trees per element, parallel across batches + row blocks.
+        let fnp_es_bt = namespace.get_item("fnp_es_bt").expect("fnp_es_bt present");
+        let np_es_bt = namespace.get_item("np_es_bt").expect("np_es_bt present");
+        let candidate_bt = fnp_es_bt
+            .call1((&bat_a, &bat_b))
+            .expect("fnp f16 einsum batched-t parity");
+        let base_bt = np_es_bt
+            .call1((&bat_a, &bat_b))
+            .expect("numpy f16 einsum batched-t parity");
+        assert_eq!(
+            candidate_bt
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_bt
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum batched transposed byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_batched_t_8x256_null_then_effect",
+            "f16_einsum_batched_t_8x256",
+            &np_es_bt,
+            &fnp_es_bt,
+            &bat_a,
+            &bat_b,
+        );
+
+        // Batched gram spec ('bji,bjl->bil'): per-step muladd rows per batch
+        // (chunk-immune per-step class). Same (8,256,256) operands.
+        let fnp_es_bg = namespace.get_item("fnp_es_bg").expect("fnp_es_bg present");
+        let np_es_bg = namespace.get_item("np_es_bg").expect("np_es_bg present");
+        let candidate_bg = fnp_es_bg
+            .call1((&bat_a, &bat_b))
+            .expect("fnp f16 einsum batched-gram parity");
+        let base_bg = np_es_bg
+            .call1((&bat_a, &bat_b))
+            .expect("numpy f16 einsum batched-gram parity");
+        assert_eq!(
+            candidate_bg
+                .call_method0("tobytes")
+                .expect("candidate bytes")
+                .extract::<Vec<u8>>()
+                .expect("candidate byte Vec"),
+            base_bg
+                .call_method0("tobytes")
+                .expect("base bytes")
+                .extract::<Vec<u8>>()
+                .expect("base byte Vec"),
+            "f16 einsum batched gram byte parity",
+        );
+        bench_median_gate_python_binary(
+            &mut group,
+            "f16_einsum_batched_g_8x256_null_then_effect",
+            "f16_einsum_batched_g_8x256",
+            &np_es_bg,
+            &fnp_es_bg,
+            &bat_a,
+            &bat_b,
+        );
+
+        // Output-swapped batched forms: operand-swap arms of the batched
+        // transposed/gram kernels. Rows prove the swapped dispatch engages.
+        for (bench_name, row, fnp_key, np_key) in [
+            (
+                "f16_einsum_batched_ts_8x256_null_then_effect",
+                "f16_einsum_batched_ts_8x256",
+                "fnp_es_bts",
+                "np_es_bts",
+            ),
+            (
+                "f16_einsum_batched_gs_8x256_null_then_effect",
+                "f16_einsum_batched_gs_8x256",
+                "fnp_es_bgs",
+                "np_es_bgs",
+            ),
+        ] {
+            let fnp_fn = namespace.get_item(fnp_key).expect("fnp batched-swap fn");
+            let np_fn = namespace.get_item(np_key).expect("np batched-swap fn");
+            let candidate = fnp_fn
+                .call1((&bat_a, &bat_b))
+                .expect("fnp batched-swap parity");
+            let base = np_fn
+                .call1((&bat_a, &bat_b))
+                .expect("numpy batched-swap parity");
+            assert_eq!(
+                candidate
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte Vec"),
+                base.call_method0("tobytes")
+                    .expect("base bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("base byte Vec"),
+                "f16 einsum batched swapped byte parity ({row})",
+            );
+            bench_median_gate_python_binary(
+                &mut group, bench_name, row, &np_fn, &fnp_fn, &bat_a, &bat_b,
+            );
+        }
+    });
+
+    group.finish();
+}
+
+fn bench_wide_string_substrate_v2(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_wide_string_substrate_v2");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_wide_string_v2").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(611)\n\
+                 u_a = rng.integers(97, 123, (1_000_000, 16), dtype=np.uint32).reshape(-1).view('U16')\n\
+                 u_fresh = rng.integers(97, 123, (500_000, 16), dtype=np.uint32).reshape(-1).view('U16')\n\
+                 u_b = np.concatenate([u_a[:500_000], u_fresh])\n\
+                 u_union_b = rng.integers(97, 123, (1_000_000, 16), dtype=np.uint32).reshape(-1).view('U16')\n\
+                 s_a = rng.integers(0, 256, (1_000_000, 16), dtype=np.uint8).view('S16').reshape(-1)\n\
+                 s_fresh = rng.integers(0, 256, (500_000, 16), dtype=np.uint8).view('S16').reshape(-1)\n\
+                 s_b = np.concatenate([s_a[:500_000], s_fresh])\n",
+            )
+            .expect("wide string setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("wide string setup");
+        let u_a = namespace.get_item("u_a").expect("u_a present");
+        let u_b = namespace.get_item("u_b").expect("u_b present");
+        let u_union_b = namespace.get_item("u_union_b").expect("u_union_b present");
+        let s_a = namespace.get_item("s_a").expect("s_a present");
+        let s_b = namespace.get_item("s_b").expect("s_b present");
+        let array_equal = numpy.getattr("array_equal").expect("numpy.array_equal");
+
+        for (lhs, rhs) in [(&u_a, &u_b), (&s_a, &s_b)] {
+            for op in ["unique", "union1d", "intersect1d", "setxor1d"] {
+                let candidate_fn = module.getattr(op).expect("fnp op");
+                let orig_fn = numpy.getattr(op).expect("numpy op");
+                let candidate = if op == "unique" {
+                    candidate_fn.call1((lhs,)).expect("fnp parity call")
+                } else {
+                    candidate_fn.call1((lhs, rhs)).expect("fnp parity call")
+                };
+                let orig = if op == "unique" {
+                    orig_fn.call1((lhs,)).expect("numpy parity call")
+                } else {
+                    orig_fn.call1((lhs, rhs)).expect("numpy parity call")
+                };
+                assert!(
+                    array_equal
+                        .call1((&candidate, &orig))
+                        .expect("array_equal")
+                        .extract::<bool>()
+                        .expect("array_equal bool"),
+                    "wide string {op} parity",
+                );
+            }
+        }
+        let fnp_union_parity = module
+            .getattr("union1d")
+            .expect("fnp union1d parity function")
+            .call1((&u_a, &u_union_b))
+            .expect("fnp union1d parity call");
+        let numpy_union_parity = numpy
+            .getattr("union1d")
+            .expect("numpy union1d parity function")
+            .call1((&u_a, &u_union_b))
+            .expect("numpy union1d parity call");
+        assert!(
+            array_equal
+                .call1((&fnp_union_parity, &numpy_union_parity))
+                .expect("union array_equal")
+                .extract::<bool>()
+                .expect("union array_equal bool"),
+            "wide string disjoint union parity",
+        );
+
+        let fnp_unique = module.getattr("unique").expect("fnp unique");
+        let np_unique = numpy.getattr("unique").expect("numpy unique");
+        let fnp_union = module.getattr("union1d").expect("fnp union1d");
+        let np_union = numpy.getattr("union1d").expect("numpy union1d");
+        let fnp_intersect = module.getattr("intersect1d").expect("fnp intersect1d");
+        let np_intersect = numpy.getattr("intersect1d").expect("numpy intersect1d");
+        let fnp_setxor = module.getattr("setxor1d").expect("fnp setxor1d");
+        let np_setxor = numpy.getattr("setxor1d").expect("numpy setxor1d");
+
+        bench_substrate_v2_python_unary_pair(
+            &mut group,
+            "u16_unique_1m_paired",
+            "u16_unique_1m",
+            &fnp_unique,
+            &np_unique,
+            &u_a,
+        );
+        bench_substrate_v2_python_binary_pair(
+            &mut group,
+            "u16_union_disjoint_1m_paired",
+            "u16_union_disjoint_1m",
+            &fnp_union,
+            &np_union,
+            &u_a,
+            &u_union_b,
+        );
+        bench_substrate_v2_python_binary_pair(
+            &mut group,
+            "u16_setxor_1m_paired",
+            "u16_setxor_1m",
+            &fnp_setxor,
+            &np_setxor,
+            &u_a,
+            &u_b,
+        );
+        bench_substrate_v2_python_unary_pair(
+            &mut group,
+            "s16_unique_1m_paired",
+            "s16_unique_1m",
+            &fnp_unique,
+            &np_unique,
+            &s_a,
+        );
+        bench_substrate_v2_python_binary_pair(
+            &mut group,
+            "s16_intersect_1m_paired",
+            "s16_intersect_1m",
+            &fnp_intersect,
+            &np_intersect,
+            &s_a,
+            &s_b,
+        );
+        bench_substrate_v2_python_binary_pair(
+            &mut group,
+            "s16_setxor_1m_paired",
+            "s16_setxor_1m",
+            &fnp_setxor,
+            &np_setxor,
+            &s_a,
+            &s_b,
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_ledger_integrity_rejects(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_ledger_integrity_rejects");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(6));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_ledger_audit").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+
+        {
+            let namespace = PyDict::new(py);
+            py.run(
+                std::ffi::CString::new(
+                    "import numpy as np\n\
+                     rng = np.random.default_rng(0)\n\
+                     median_input = rng.standard_normal(16_000_000).astype(np.float64)\n",
+                )
+                .expect("median setup CString")
+                .as_c_str(),
+                Some(&namespace),
+                Some(&namespace),
+            )
+            .expect("median setup");
+            let input = namespace
+                .get_item("median_input")
+                .expect("median input present");
+            let raw: Vec<u8> = input
+                .call_method0("tobytes")
+                .expect("median bytes")
+                .extract()
+                .expect("extract median bytes");
+            let data: Vec<f64> = raw
+                .chunks_exact(8)
+                .map(|chunk| {
+                    f64::from_ne_bytes(chunk.try_into().expect("one native f64 per chunk"))
+                })
+                .collect();
+            assert_eq!(data.len(), 16_000_000);
+            let numpy_median = numpy.getattr("median").expect("numpy.median");
+            let candidate = ledger_radix_median_f64(&data);
+            let orig = ledger_orig_median_reference(&numpy_median, &input)
+                .expect("NumPy median parity reference");
+            assert_eq!(candidate.to_bits(), orig.to_bits(), "radix median parity");
+
+            let candidate_samples = RefCell::new(Vec::new());
+            let orig_samples = RefCell::new(Vec::new());
+            let order = Cell::new(0u64);
+            group.bench_function("radix_median_f64_normal_16m_paired", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut candidate_total = Duration::ZERO;
+                    let mut orig_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let orig_first = order.get() & 1 == 1;
+                        order.set(order.get().wrapping_add(1));
+                        if orig_first {
+                            let start = Instant::now();
+                            black_box(
+                                ledger_orig_median_reference(&numpy_median, &input)
+                                    .expect("NumPy median audit call"),
+                            );
+                            orig_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(ledger_radix_median_f64(&data));
+                            candidate_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(ledger_radix_median_f64(&data));
+                            candidate_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                ledger_orig_median_reference(&numpy_median, &input)
+                                    .expect("NumPy median audit call"),
+                            );
+                            orig_total += start.elapsed();
+                        }
+                    }
+                    candidate_samples
+                        .borrow_mut()
+                        .push(candidate_total.as_secs_f64() * 1e9 / iterations as f64);
+                    orig_samples
+                        .borrow_mut()
+                        .push(orig_total.as_secs_f64() * 1e9 / iterations as f64);
+                    candidate_total + orig_total
+                });
+            });
+            report_ledger_pair(
+                "radix_median_f64_normal_16m",
+                &candidate_samples,
+                &orig_samples,
+            );
+        }
+
+        {
+            let namespace = PyDict::new(py);
+            py.run(
+                std::ffi::CString::new(
+                    "import numpy as np\n\
+                     rng = np.random.default_rng(0)\n\
+                     f16_input = (rng.integers(1, 4000, 4_000_000) / 7).astype(np.float16)\n",
+                )
+                .expect("f16 setup CString")
+                .as_c_str(),
+                Some(&namespace),
+                Some(&namespace),
+            )
+            .expect("f16 setup");
+            let input = namespace.get_item("f16_input").expect("f16 input present");
+            let bit_bytes: Vec<u8> = input
+                .call_method1("view", ("uint16",))
+                .expect("f16 uint16 view")
+                .call_method0("tobytes")
+                .expect("f16 bit bytes")
+                .extract()
+                .expect("extract f16 bit bytes");
+            let input_bits: Vec<u16> = bit_bytes
+                .chunks_exact(2)
+                .map(|chunk| {
+                    u16::from_ne_bytes(chunk.try_into().expect("one native u16 per chunk"))
+                })
+                .collect();
+            assert_eq!(input_bits.len(), 4_000_000);
+            let numpy_sort = numpy.getattr("sort").expect("numpy.sort");
+            let equal = numpy.getattr("array_equal").expect("numpy.array_equal");
+            let candidate = ledger_try_native_f16_sort(&numpy_sort, &input, &input_bits)
+                .expect("f16 widening candidate parity call");
+            let orig =
+                ledger_orig_f16_sort_reference(&numpy_sort, &input).expect("f16 ORIG parity call");
+            assert!(
+                equal
+                    .call1((candidate.bind(py), orig.bind(py)))
+                    .expect("f16 array_equal")
+                    .extract::<bool>()
+                    .expect("f16 equality bool"),
+                "f16 widening-sort parity",
+            );
+
+            let candidate_samples = RefCell::new(Vec::new());
+            let orig_samples = RefCell::new(Vec::new());
+            let order = Cell::new(0u64);
+            group.bench_function("f16_sort_via_f32_widening_4m_paired", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut candidate_total = Duration::ZERO;
+                    let mut orig_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let orig_first = order.get() & 1 == 1;
+                        order.set(order.get().wrapping_add(1));
+                        if orig_first {
+                            let start = Instant::now();
+                            black_box(
+                                ledger_orig_f16_sort_reference(&numpy_sort, &input)
+                                    .expect("f16 ORIG audit call"),
+                            );
+                            orig_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                ledger_try_native_f16_sort(&numpy_sort, &input, &input_bits)
+                                    .expect("f16 widening audit call"),
+                            );
+                            candidate_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(
+                                ledger_try_native_f16_sort(&numpy_sort, &input, &input_bits)
+                                    .expect("f16 widening audit call"),
+                            );
+                            candidate_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                ledger_orig_f16_sort_reference(&numpy_sort, &input)
+                                    .expect("f16 ORIG audit call"),
+                            );
+                            orig_total += start.elapsed();
+                        }
+                    }
+                    candidate_samples
+                        .borrow_mut()
+                        .push(candidate_total.as_secs_f64() * 1e9 / iterations as f64);
+                    orig_samples
+                        .borrow_mut()
+                        .push(orig_total.as_secs_f64() * 1e9 / iterations as f64);
+                    candidate_total + orig_total
+                });
+            });
+            report_ledger_pair(
+                "f16_sort_via_f32_widening_4m",
+                &candidate_samples,
+                &orig_samples,
+            );
+
+            // PRODUCTION arm (bead deadlock-audit-98chw): fnp.sort(f16) now routes through
+            // try_native_f16_sort_flat for this input; paired vs numpy.sort in the same
+            // interleaved routine, plus an A/A null-control row (per-function noise floor).
+            let fnp_sort = module.getattr("sort").expect("fnp sort");
+            let prod = fnp_sort.call1((&input,)).expect("fnp f16 sort parity call");
+            let prod_bytes: Vec<u8> = prod
+                .call_method0("tobytes")
+                .expect("prod bytes")
+                .extract()
+                .expect("extract prod bytes");
+            let orig_bytes: Vec<u8> = orig
+                .bind(py)
+                .call_method0("tobytes")
+                .expect("orig bytes")
+                .extract()
+                .expect("extract orig bytes");
+            assert_eq!(
+                prod_bytes, orig_bytes,
+                "production f16 sort parity (tobytes)"
+            );
+
+            let prod_samples = RefCell::new(Vec::new());
+            let prod_orig_samples = RefCell::new(Vec::new());
+            let prod_order = Cell::new(0u64);
+            group.bench_function("f16_sort_production_4m_paired", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut cand_total = Duration::ZERO;
+                    let mut orig_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let orig_first = prod_order.get() & 1 == 1;
+                        prod_order.set(prod_order.get().wrapping_add(1));
+                        if orig_first {
+                            let start = Instant::now();
+                            black_box(numpy_sort.call1((&input,)).expect("numpy f16 sort"));
+                            orig_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("fnp f16 sort"));
+                            cand_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("fnp f16 sort"));
+                            cand_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(numpy_sort.call1((&input,)).expect("numpy f16 sort"));
+                            orig_total += start.elapsed();
+                        }
+                    }
+                    prod_samples
+                        .borrow_mut()
+                        .push(cand_total.as_secs_f64() * 1e9 / iterations as f64);
+                    prod_orig_samples
+                        .borrow_mut()
+                        .push(orig_total.as_secs_f64() * 1e9 / iterations as f64);
+                    cand_total + orig_total
+                });
+            });
+            report_ledger_pair("f16_sort_production_4m", &prod_samples, &prod_orig_samples);
+
+            let null_a = RefCell::new(Vec::new());
+            let null_b = RefCell::new(Vec::new());
+            let null_order = Cell::new(0u64);
+            group.bench_function("f16_sort_production_4m_null_control", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut a_total = Duration::ZERO;
+                    let mut b_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let b_first = null_order.get() & 1 == 1;
+                        null_order.set(null_order.get().wrapping_add(1));
+                        if b_first {
+                            let start = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("null b"));
+                            b_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("null a"));
+                            a_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("null a"));
+                            a_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("null b"));
+                            b_total += start.elapsed();
+                        }
+                    }
+                    null_a
+                        .borrow_mut()
+                        .push(a_total.as_secs_f64() * 1e9 / iterations as f64);
+                    null_b
+                        .borrow_mut()
+                        .push(b_total.as_secs_f64() * 1e9 / iterations as f64);
+                    a_total + b_total
+                });
+            });
+            report_ledger_pair("f16_sort_production_null_AA", &null_a, &null_b);
+
+            // f16 STABLE ARGSORT production arm (widened stable radix; sibling lever): the
+            // same 4M f16 input is tie-dense by construction (63k distinct values), the case
+            // where stability is load-bearing. Paired vs numpy + A/A null control.
+            let fnp_argsort = module.getattr("argsort").expect("fnp argsort");
+            let numpy_argsort = numpy.getattr("argsort").expect("numpy argsort");
+            let stable_kw = pyo3::types::PyDict::new(py);
+            stable_kw.set_item("kind", "stable").expect("kind kwarg");
+            let ag_prod = fnp_argsort
+                .call((&input,), Some(&stable_kw))
+                .expect("fnp f16 stable argsort parity call");
+            let ag_orig = numpy_argsort
+                .call((&input,), Some(&stable_kw))
+                .expect("numpy f16 stable argsort parity call");
+            assert!(
+                equal
+                    .call1((&ag_prod, &ag_orig))
+                    .expect("f16 argsort array_equal")
+                    .extract::<bool>()
+                    .expect("f16 argsort equality bool"),
+                "production f16 stable argsort parity",
+            );
+
+            let ag_samples = RefCell::new(Vec::new());
+            let ag_orig_samples = RefCell::new(Vec::new());
+            let ag_order = Cell::new(0u64);
+            group.bench_function("f16_argsort_stable_production_4m_paired", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut cand_total = Duration::ZERO;
+                    let mut orig_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let orig_first = ag_order.get() & 1 == 1;
+                        ag_order.set(ag_order.get().wrapping_add(1));
+                        if orig_first {
+                            let start = Instant::now();
+                            black_box(
+                                numpy_argsort
+                                    .call((&input,), Some(&stable_kw))
+                                    .expect("numpy f16 argsort"),
+                            );
+                            orig_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                fnp_argsort
+                                    .call((&input,), Some(&stable_kw))
+                                    .expect("fnp f16 argsort"),
+                            );
+                            cand_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(
+                                fnp_argsort
+                                    .call((&input,), Some(&stable_kw))
+                                    .expect("fnp f16 argsort"),
+                            );
+                            cand_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                numpy_argsort
+                                    .call((&input,), Some(&stable_kw))
+                                    .expect("numpy f16 argsort"),
+                            );
+                            orig_total += start.elapsed();
+                        }
+                    }
+                    ag_samples
+                        .borrow_mut()
+                        .push(cand_total.as_secs_f64() * 1e9 / iterations as f64);
+                    ag_orig_samples
+                        .borrow_mut()
+                        .push(orig_total.as_secs_f64() * 1e9 / iterations as f64);
+                    cand_total + orig_total
+                });
+            });
+            report_ledger_pair(
+                "f16_argsort_stable_production_4m",
+                &ag_samples,
+                &ag_orig_samples,
+            );
+
+            let ag_null_a = RefCell::new(Vec::new());
+            let ag_null_b = RefCell::new(Vec::new());
+            let ag_null_order = Cell::new(0u64);
+            group.bench_function("f16_argsort_stable_production_4m_null_control", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut a_total = Duration::ZERO;
+                    let mut b_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let b_first = ag_null_order.get() & 1 == 1;
+                        ag_null_order.set(ag_null_order.get().wrapping_add(1));
+                        if b_first {
+                            let start = Instant::now();
+                            black_box(
+                                fnp_argsort
+                                    .call((&input,), Some(&stable_kw))
+                                    .expect("null b"),
+                            );
+                            b_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                fnp_argsort
+                                    .call((&input,), Some(&stable_kw))
+                                    .expect("null a"),
+                            );
+                            a_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(
+                                fnp_argsort
+                                    .call((&input,), Some(&stable_kw))
+                                    .expect("null a"),
+                            );
+                            a_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                fnp_argsort
+                                    .call((&input,), Some(&stable_kw))
+                                    .expect("null b"),
+                            );
+                            b_total += start.elapsed();
+                        }
+                    }
+                    ag_null_a
+                        .borrow_mut()
+                        .push(a_total.as_secs_f64() * 1e9 / iterations as f64);
+                    ag_null_b
+                        .borrow_mut()
+                        .push(b_total.as_secs_f64() * 1e9 / iterations as f64);
+                    a_total + b_total
+                });
+            });
+            report_ledger_pair("f16_argsort_stable_null_AA", &ag_null_a, &ag_null_b);
+
+            // LAST-AXIS siblings (2000x2000 view of the same 4M input): per-lane widened
+            // value sort + per-lane widened stable argsort, paired with A/A null controls.
+            let input2d = input
+                .call_method1("reshape", ((2000, 2000),))
+                .expect("reshape 2000x2000");
+            let axis_kw = pyo3::types::PyDict::new(py);
+            axis_kw.set_item("axis", -1).expect("axis kwarg");
+            let fnp_sort2 = module.getattr("sort").expect("fnp sort");
+            let numpy_sort2 = numpy.getattr("sort").expect("numpy sort");
+            let s2_f = fnp_sort2
+                .call((&input2d,), Some(&axis_kw))
+                .expect("fnp f16 lastaxis sort parity");
+            let s2_n = numpy_sort2
+                .call((&input2d,), Some(&axis_kw))
+                .expect("numpy f16 lastaxis sort parity");
+            let s2_fb: Vec<u8> = s2_f
+                .call_method0("tobytes")
+                .expect("bytes")
+                .extract()
+                .expect("extract");
+            let s2_nb: Vec<u8> = s2_n
+                .call_method0("tobytes")
+                .expect("bytes")
+                .extract()
+                .expect("extract");
+            assert_eq!(s2_fb, s2_nb, "f16 lastaxis sort parity (tobytes)");
+            let stable_axis_kw = pyo3::types::PyDict::new(py);
+            stable_axis_kw.set_item("axis", -1).expect("axis kwarg");
+            stable_axis_kw
+                .set_item("kind", "stable")
+                .expect("kind kwarg");
+            let a2_f = fnp_argsort
+                .call((&input2d,), Some(&stable_axis_kw))
+                .expect("fnp f16 lastaxis argsort parity");
+            let a2_n = numpy_argsort
+                .call((&input2d,), Some(&stable_axis_kw))
+                .expect("numpy f16 lastaxis argsort parity");
+            assert!(
+                equal
+                    .call1((&a2_f, &a2_n))
+                    .expect("array_equal")
+                    .extract::<bool>()
+                    .expect("bool"),
+                "f16 lastaxis stable argsort parity",
+            );
+
+            for (label, fnp_fn, numpy_fn, kw) in [
+                (
+                    "f16_sort_lastaxis_2000x2000",
+                    &fnp_sort2,
+                    &numpy_sort2,
+                    &axis_kw,
+                ),
+                (
+                    "f16_argsort_stable_lastaxis_2000x2000",
+                    &fnp_argsort,
+                    &numpy_argsort,
+                    &stable_axis_kw,
+                ),
+            ] {
+                let cand = RefCell::new(Vec::new());
+                let orig = RefCell::new(Vec::new());
+                let ord = Cell::new(0u64);
+                group.bench_function(format!("{label}_paired"), |bench| {
+                    bench.iter_custom(|iterations| {
+                        let mut ct = Duration::ZERO;
+                        let mut ot = Duration::ZERO;
+                        for _ in 0..iterations {
+                            let of = ord.get() & 1 == 1;
+                            ord.set(ord.get().wrapping_add(1));
+                            if of {
+                                let s = Instant::now();
+                                black_box(numpy_fn.call((&input2d,), Some(kw)).expect("orig"));
+                                ot += s.elapsed();
+                                let s = Instant::now();
+                                black_box(fnp_fn.call((&input2d,), Some(kw)).expect("cand"));
+                                ct += s.elapsed();
+                            } else {
+                                let s = Instant::now();
+                                black_box(fnp_fn.call((&input2d,), Some(kw)).expect("cand"));
+                                ct += s.elapsed();
+                                let s = Instant::now();
+                                black_box(numpy_fn.call((&input2d,), Some(kw)).expect("orig"));
+                                ot += s.elapsed();
+                            }
+                        }
+                        cand.borrow_mut()
+                            .push(ct.as_secs_f64() * 1e9 / iterations as f64);
+                        orig.borrow_mut()
+                            .push(ot.as_secs_f64() * 1e9 / iterations as f64);
+                        ct + ot
+                    });
+                });
+                report_ledger_pair(label, &cand, &orig);
+
+                let na = RefCell::new(Vec::new());
+                let nb = RefCell::new(Vec::new());
+                let nord = Cell::new(0u64);
+                group.bench_function(format!("{label}_null_control"), |bench| {
+                    bench.iter_custom(|iterations| {
+                        let mut at = Duration::ZERO;
+                        let mut bt = Duration::ZERO;
+                        for _ in 0..iterations {
+                            let bf = nord.get() & 1 == 1;
+                            nord.set(nord.get().wrapping_add(1));
+                            if bf {
+                                let s = Instant::now();
+                                black_box(fnp_fn.call((&input2d,), Some(kw)).expect("nb"));
+                                bt += s.elapsed();
+                                let s = Instant::now();
+                                black_box(fnp_fn.call((&input2d,), Some(kw)).expect("na"));
+                                at += s.elapsed();
+                            } else {
+                                let s = Instant::now();
+                                black_box(fnp_fn.call((&input2d,), Some(kw)).expect("na"));
+                                at += s.elapsed();
+                                let s = Instant::now();
+                                black_box(fnp_fn.call((&input2d,), Some(kw)).expect("nb"));
+                                bt += s.elapsed();
+                            }
+                        }
+                        na.borrow_mut()
+                            .push(at.as_secs_f64() * 1e9 / iterations as f64);
+                        nb.borrow_mut()
+                            .push(bt.as_secs_f64() * 1e9 / iterations as f64);
+                        at + bt
+                    });
+                });
+                report_ledger_pair(&format!("{label}_null_AA"), &na, &nb);
+            }
+        }
+
+        {
+            // Narrow-int counting sort: i16 8M full-range (the 2-byte case is where numpy's
+            // serial radix is slowest). Paired vs numpy + A/A null control.
+            let namespace = PyDict::new(py);
+            py.run(
+                std::ffi::CString::new(
+                    "import numpy as np\n\
+                     rng = np.random.default_rng(5)\n\
+                     i16_input = rng.integers(-32768, 32768, 8_000_000, dtype=np.int16)\n",
+                )
+                .expect("i16 setup CString")
+                .as_c_str(),
+                Some(&namespace),
+                Some(&namespace),
+            )
+            .expect("i16 setup");
+            let input = namespace.get_item("i16_input").expect("i16 input");
+            let fnp_sort = module.getattr("sort").expect("fnp sort");
+            let numpy_sort = numpy.getattr("sort").expect("numpy sort");
+            let equal = numpy.getattr("array_equal").expect("array_equal");
+            let f = fnp_sort.call1((&input,)).expect("fnp i16 sort parity");
+            let nres = numpy_sort.call1((&input,)).expect("numpy i16 sort parity");
+            assert!(
+                equal
+                    .call1((&f, &nres))
+                    .expect("array_equal")
+                    .extract::<bool>()
+                    .expect("bool"),
+                "narrow-int i16 sort parity",
+            );
+
+            let cand = RefCell::new(Vec::new());
+            let orig = RefCell::new(Vec::new());
+            let ord = Cell::new(0u64);
+            group.bench_function("narrow_int_i16_sort_8m_paired", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut ct = Duration::ZERO;
+                    let mut ot = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let of = ord.get() & 1 == 1;
+                        ord.set(ord.get().wrapping_add(1));
+                        if of {
+                            let s = Instant::now();
+                            black_box(numpy_sort.call1((&input,)).expect("orig"));
+                            ot += s.elapsed();
+                            let s = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("cand"));
+                            ct += s.elapsed();
+                        } else {
+                            let s = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("cand"));
+                            ct += s.elapsed();
+                            let s = Instant::now();
+                            black_box(numpy_sort.call1((&input,)).expect("orig"));
+                            ot += s.elapsed();
+                        }
+                    }
+                    cand.borrow_mut()
+                        .push(ct.as_secs_f64() * 1e9 / iterations as f64);
+                    orig.borrow_mut()
+                        .push(ot.as_secs_f64() * 1e9 / iterations as f64);
+                    ct + ot
+                });
+            });
+            report_ledger_pair("narrow_int_i16_sort_8m", &cand, &orig);
+
+            let na = RefCell::new(Vec::new());
+            let nb = RefCell::new(Vec::new());
+            let nord = Cell::new(0u64);
+            group.bench_function("narrow_int_i16_sort_8m_null_control", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut at = Duration::ZERO;
+                    let mut bt = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let bf = nord.get() & 1 == 1;
+                        nord.set(nord.get().wrapping_add(1));
+                        if bf {
+                            let s = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("nb"));
+                            bt += s.elapsed();
+                            let s = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("na"));
+                            at += s.elapsed();
+                        } else {
+                            let s = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("na"));
+                            at += s.elapsed();
+                            let s = Instant::now();
+                            black_box(fnp_sort.call1((&input,)).expect("nb"));
+                            bt += s.elapsed();
+                        }
+                    }
+                    na.borrow_mut()
+                        .push(at.as_secs_f64() * 1e9 / iterations as f64);
+                    nb.borrow_mut()
+                        .push(bt.as_secs_f64() * 1e9 / iterations as f64);
+                    at + bt
+                });
+            });
+            report_ledger_pair("narrow_int_i16_sort_null_AA", &na, &nb);
+
+            // Stable ARGSORT sibling on the same 8M i16 input (dense ties by construction;
+            // routes to the parallel counting-prefix stable argsort). Paired + A/A null.
+            let fnp_argsort_n = module.getattr("argsort").expect("fnp argsort");
+            let numpy_argsort_n = numpy.getattr("argsort").expect("numpy argsort");
+            let skw = pyo3::types::PyDict::new(py);
+            skw.set_item("kind", "stable").expect("kind kwarg");
+            let af = fnp_argsort_n
+                .call((&input,), Some(&skw))
+                .expect("fnp i16 stable argsort parity");
+            let an = numpy_argsort_n
+                .call((&input,), Some(&skw))
+                .expect("numpy i16 stable argsort parity");
+            assert!(
+                equal
+                    .call1((&af, &an))
+                    .expect("array_equal")
+                    .extract::<bool>()
+                    .expect("bool"),
+                "narrow-int i16 stable argsort parity",
+            );
+            let cand2 = RefCell::new(Vec::new());
+            let orig2 = RefCell::new(Vec::new());
+            let ord2 = Cell::new(0u64);
+            group.bench_function("narrow_int_i16_argsort_stable_8m_paired", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut ct = Duration::ZERO;
+                    let mut ot = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let of = ord2.get() & 1 == 1;
+                        ord2.set(ord2.get().wrapping_add(1));
+                        if of {
+                            let s = Instant::now();
+                            black_box(numpy_argsort_n.call((&input,), Some(&skw)).expect("orig"));
+                            ot += s.elapsed();
+                            let s = Instant::now();
+                            black_box(fnp_argsort_n.call((&input,), Some(&skw)).expect("cand"));
+                            ct += s.elapsed();
+                        } else {
+                            let s = Instant::now();
+                            black_box(fnp_argsort_n.call((&input,), Some(&skw)).expect("cand"));
+                            ct += s.elapsed();
+                            let s = Instant::now();
+                            black_box(numpy_argsort_n.call((&input,), Some(&skw)).expect("orig"));
+                            ot += s.elapsed();
+                        }
+                    }
+                    cand2
+                        .borrow_mut()
+                        .push(ct.as_secs_f64() * 1e9 / iterations as f64);
+                    orig2
+                        .borrow_mut()
+                        .push(ot.as_secs_f64() * 1e9 / iterations as f64);
+                    ct + ot
+                });
+            });
+            report_ledger_pair("narrow_int_i16_argsort_stable_8m", &cand2, &orig2);
+
+            let na2 = RefCell::new(Vec::new());
+            let nb2 = RefCell::new(Vec::new());
+            let nord2 = Cell::new(0u64);
+            group.bench_function("narrow_int_i16_argsort_stable_8m_null_control", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut at = Duration::ZERO;
+                    let mut bt = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let bf = nord2.get() & 1 == 1;
+                        nord2.set(nord2.get().wrapping_add(1));
+                        if bf {
+                            let s = Instant::now();
+                            black_box(fnp_argsort_n.call((&input,), Some(&skw)).expect("nb"));
+                            bt += s.elapsed();
+                            let s = Instant::now();
+                            black_box(fnp_argsort_n.call((&input,), Some(&skw)).expect("na"));
+                            at += s.elapsed();
+                        } else {
+                            let s = Instant::now();
+                            black_box(fnp_argsort_n.call((&input,), Some(&skw)).expect("na"));
+                            at += s.elapsed();
+                            let s = Instant::now();
+                            black_box(fnp_argsort_n.call((&input,), Some(&skw)).expect("nb"));
+                            bt += s.elapsed();
+                        }
+                    }
+                    na2.borrow_mut()
+                        .push(at.as_secs_f64() * 1e9 / iterations as f64);
+                    nb2.borrow_mut()
+                        .push(bt.as_secs_f64() * 1e9 / iterations as f64);
+                    at + bt
+                });
+            });
+            report_ledger_pair("narrow_int_i16_argsort_stable_null_AA", &na2, &nb2);
+
+            // LAST-AXIS siblings on a 4000x2000 view of the same 8M i16 input: per-lane sort
+            // + per-lane stable argsort, paired with A/A null controls.
+            let input2d = input
+                .call_method1("reshape", ((4000, 2000),))
+                .expect("reshape 4000x2000");
+            let axkw = pyo3::types::PyDict::new(py);
+            axkw.set_item("axis", -1).expect("axis kwarg");
+            let stax_kw = pyo3::types::PyDict::new(py);
+            stax_kw.set_item("axis", -1).expect("axis kwarg");
+            stax_kw.set_item("kind", "stable").expect("kind kwarg");
+            let sf = fnp_sort
+                .call((&input2d,), Some(&axkw))
+                .expect("fnp lastaxis parity");
+            let sn = numpy_sort
+                .call((&input2d,), Some(&axkw))
+                .expect("numpy lastaxis parity");
+            let sfb: Vec<u8> = sf.call_method0("tobytes").expect("b").extract().expect("e");
+            let snb: Vec<u8> = sn.call_method0("tobytes").expect("b").extract().expect("e");
+            assert_eq!(sfb, snb, "narrow-int i16 lastaxis sort parity");
+            let gf = fnp_argsort_n
+                .call((&input2d,), Some(&stax_kw))
+                .expect("fnp lastaxis argsort parity");
+            let gn = numpy_argsort_n
+                .call((&input2d,), Some(&stax_kw))
+                .expect("numpy lastaxis argsort parity");
+            assert!(
+                equal
+                    .call1((&gf, &gn))
+                    .expect("array_equal")
+                    .extract::<bool>()
+                    .expect("bool"),
+                "narrow-int i16 lastaxis stable argsort parity",
+            );
+            for (label, ffn, nfn, kw) in [
+                (
+                    "narrow_int_i16_sort_lastaxis_4000x2000",
+                    &fnp_sort,
+                    &numpy_sort,
+                    &axkw,
+                ),
+                (
+                    "narrow_int_i16_argsort_stable_lastaxis_4000x2000",
+                    &fnp_argsort_n,
+                    &numpy_argsort_n,
+                    &stax_kw,
+                ),
+            ] {
+                let cand = RefCell::new(Vec::new());
+                let orig = RefCell::new(Vec::new());
+                let ord = Cell::new(0u64);
+                group.bench_function(format!("{label}_paired"), |bench| {
+                    bench.iter_custom(|iterations| {
+                        let mut ct = Duration::ZERO;
+                        let mut ot = Duration::ZERO;
+                        for _ in 0..iterations {
+                            let of = ord.get() & 1 == 1;
+                            ord.set(ord.get().wrapping_add(1));
+                            if of {
+                                let s = Instant::now();
+                                black_box(nfn.call((&input2d,), Some(kw)).expect("orig"));
+                                ot += s.elapsed();
+                                let s = Instant::now();
+                                black_box(ffn.call((&input2d,), Some(kw)).expect("cand"));
+                                ct += s.elapsed();
+                            } else {
+                                let s = Instant::now();
+                                black_box(ffn.call((&input2d,), Some(kw)).expect("cand"));
+                                ct += s.elapsed();
+                                let s = Instant::now();
+                                black_box(nfn.call((&input2d,), Some(kw)).expect("orig"));
+                                ot += s.elapsed();
+                            }
+                        }
+                        cand.borrow_mut()
+                            .push(ct.as_secs_f64() * 1e9 / iterations as f64);
+                        orig.borrow_mut()
+                            .push(ot.as_secs_f64() * 1e9 / iterations as f64);
+                        ct + ot
+                    });
+                });
+                report_ledger_pair(label, &cand, &orig);
+                let na = RefCell::new(Vec::new());
+                let nb = RefCell::new(Vec::new());
+                let nord = Cell::new(0u64);
+                group.bench_function(format!("{label}_null_control"), |bench| {
+                    bench.iter_custom(|iterations| {
+                        let mut at = Duration::ZERO;
+                        let mut bt = Duration::ZERO;
+                        for _ in 0..iterations {
+                            let bf = nord.get() & 1 == 1;
+                            nord.set(nord.get().wrapping_add(1));
+                            if bf {
+                                let s = Instant::now();
+                                black_box(ffn.call((&input2d,), Some(kw)).expect("nb"));
+                                bt += s.elapsed();
+                                let s = Instant::now();
+                                black_box(ffn.call((&input2d,), Some(kw)).expect("na"));
+                                at += s.elapsed();
+                            } else {
+                                let s = Instant::now();
+                                black_box(ffn.call((&input2d,), Some(kw)).expect("na"));
+                                at += s.elapsed();
+                                let s = Instant::now();
+                                black_box(ffn.call((&input2d,), Some(kw)).expect("nb"));
+                                bt += s.elapsed();
+                            }
+                        }
+                        na.borrow_mut()
+                            .push(at.as_secs_f64() * 1e9 / iterations as f64);
+                        nb.borrow_mut()
+                            .push(bt.as_secs_f64() * 1e9 / iterations as f64);
+                        at + bt
+                    });
+                });
+                report_ledger_pair(&format!("{label}_null_AA"), &na, &nb);
+            }
+        }
+
+        {
+            let namespace = PyDict::new(py);
+            py.run(
+                std::ffi::CString::new(
+                    "import numpy as np\n\
+                     rng = np.random.default_rng(0)\n\
+                     f32_ties = np.round(rng.standard_normal(2_000_000), 2).astype(np.float32)\n",
+                )
+                .expect("f32 argsort setup CString")
+                .as_c_str(),
+                Some(&namespace),
+                Some(&namespace),
+            )
+            .expect("f32 argsort setup");
+            let input = namespace
+                .get_item("f32_ties")
+                .expect("f32 tie input present");
+            let fnp_argsort = module.getattr("argsort").expect("fnp argsort");
+            let numpy_argsort = numpy.getattr("argsort").expect("numpy.argsort");
+            let equal = numpy.getattr("array_equal").expect("numpy.array_equal");
+            let candidate = ledger_f32_tie_argsort_candidate(&fnp_argsort, &input)
+                .expect("f32 tied candidate parity call");
+            let orig = ledger_orig_f32_argsort_reference(&numpy_argsort, &input)
+                .expect("f32 tied ORIG parity call");
+            assert!(
+                equal
+                    .call1((candidate.bind(py), orig.bind(py)))
+                    .expect("f32 argsort array_equal")
+                    .extract::<bool>()
+                    .expect("f32 argsort equality bool"),
+                "tied f32 argsort parity",
+            );
+
+            let candidate_samples = RefCell::new(Vec::new());
+            let orig_samples = RefCell::new(Vec::new());
+            let order = Cell::new(0u64);
+            group.bench_function("f32_argsort_rounded_ties_2m_paired", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut candidate_total = Duration::ZERO;
+                    let mut orig_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let orig_first = order.get() & 1 == 1;
+                        order.set(order.get().wrapping_add(1));
+                        if orig_first {
+                            let start = Instant::now();
+                            black_box(
+                                ledger_orig_f32_argsort_reference(&numpy_argsort, &input)
+                                    .expect("f32 argsort ORIG audit call"),
+                            );
+                            orig_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                ledger_f32_tie_argsort_candidate(&fnp_argsort, &input)
+                                    .expect("f32 argsort candidate audit call"),
+                            );
+                            candidate_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(
+                                ledger_f32_tie_argsort_candidate(&fnp_argsort, &input)
+                                    .expect("f32 argsort candidate audit call"),
+                            );
+                            candidate_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                ledger_orig_f32_argsort_reference(&numpy_argsort, &input)
+                                    .expect("f32 argsort ORIG audit call"),
+                            );
+                            orig_total += start.elapsed();
+                        }
+                    }
+                    candidate_samples
+                        .borrow_mut()
+                        .push(candidate_total.as_secs_f64() * 1e9 / iterations as f64);
+                    orig_samples
+                        .borrow_mut()
+                        .push(orig_total.as_secs_f64() * 1e9 / iterations as f64);
+                    candidate_total + orig_total
+                });
+            });
+            report_ledger_pair(
+                "f32_argsort_rounded_ties_2m",
+                &candidate_samples,
+                &orig_samples,
+            );
+
+            // NULL CONTROL (A/A): the candidate arm registered twice in the same interleaved
+            // routine. Its ratio and cv are the harness noise floor - any lever effect below
+            // this floor is undecidable on this harness (franken_whisper null-control rule).
+            let null_a = RefCell::new(Vec::new());
+            let null_b = RefCell::new(Vec::new());
+            let null_order = Cell::new(0u64);
+            group.bench_function("f32_argsort_rounded_ties_2m_null_control", |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut a_total = Duration::ZERO;
+                    let mut b_total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let b_first = null_order.get() & 1 == 1;
+                        null_order.set(null_order.get().wrapping_add(1));
+                        if b_first {
+                            let start = Instant::now();
+                            black_box(
+                                ledger_f32_tie_argsort_candidate(&fnp_argsort, &input)
+                                    .expect("null-control arm b"),
+                            );
+                            b_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                ledger_f32_tie_argsort_candidate(&fnp_argsort, &input)
+                                    .expect("null-control arm a"),
+                            );
+                            a_total += start.elapsed();
+                        } else {
+                            let start = Instant::now();
+                            black_box(
+                                ledger_f32_tie_argsort_candidate(&fnp_argsort, &input)
+                                    .expect("null-control arm a"),
+                            );
+                            a_total += start.elapsed();
+                            let start = Instant::now();
+                            black_box(
+                                ledger_f32_tie_argsort_candidate(&fnp_argsort, &input)
+                                    .expect("null-control arm b"),
+                            );
+                            b_total += start.elapsed();
+                        }
+                    }
+                    null_a
+                        .borrow_mut()
+                        .push(a_total.as_secs_f64() * 1e9 / iterations as f64);
+                    null_b
+                        .borrow_mut()
+                        .push(b_total.as_secs_f64() * 1e9 / iterations as f64);
+                    a_total + b_total
+                });
+            });
+            report_ledger_pair("f32_argsort_null_control_AA", &null_a, &null_b);
+
+            // Self-time of the pre-check unit the dispatch dedupe removes: ONE full parallel
+            // NaN scan + ONE 65,536-sample strided tie oracle over the same 2M f32 buffer
+            // (bench-local reconstruction of the dispatch's NaN scan + argsort_sample_has_tie;
+            // before the fix, dense-tie input paid this unit TWICE - radix candidate then
+            // comparison candidate - before delegation).
+            let raw: Vec<u8> = input
+                .call_method0("tobytes")
+                .expect("f32 tie bytes")
+                .extract()
+                .expect("extract f32 tie bytes");
+            let data: Vec<f32> = raw
+                .chunks_exact(4)
+                .map(|chunk| f32::from_ne_bytes(chunk.try_into().expect("one native f32")))
+                .collect();
+            group.bench_function("f32_argsort_tie_precheck_selftime_2m", |bench| {
+                bench.iter(|| {
+                    use rayon::prelude::*;
+                    let d = black_box(&data);
+                    let nan = d.par_iter().any(|v| v.is_nan());
+                    const TIE_SAMPLE: usize = 1 << 16;
+                    let n = d.len();
+                    let k = n.min(TIE_SAMPLE);
+                    let stride = (n / k).max(1);
+                    let mut sample: Vec<f32> = (0..k).map(|i| d[i * stride]).collect();
+                    sample.sort_unstable_by(|a, b| {
+                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    let tie = (1..sample.len()).any(|i| sample[i] == sample[i - 1]);
+                    black_box((nan, tie))
+                });
+            });
+        }
+    });
+
+    group.finish();
+}
+
+/// Resurrection of `franken_numpy-ixs5y.377` (ledger row `NEGATIVE_EVIDENCE.md:300`,
+/// audit rank 1). The original measured 3.09-3.69x across five runs against A/A
+/// nulls of 0.988-1.045 and was rejected anyway, because a predeclared gate
+/// required all four arms to clear `cv < 5%` — a threshold campaign §2.3 shows is
+/// unreachable on this hardware. Re-decided here on the bootstrapped median-CI
+/// contract: the effect must clear twice the A/A CI half-width, and `cv` is
+/// provenance only.
+///
+/// SAME-BINARY MAINTENANCE CONTROL: both sides are
+/// `fnp.loadtxt` on the identical file selecting the identical columns. The base
+/// uses NEGATIVE `usecols`, which the direct path deliberately declines (negative
+/// indices resolve against the row width, which the borrowed view does not
+/// hoist), so it walks the former `Vec<Vec<String>>` owned-token path. The
+/// candidate uses the equivalent non-negative indices and takes the new path.
+/// One ELF, one file, one selection — the only difference is the code path, so
+/// this isolates the lever. Under the campaign's incumbent-only win policy that
+/// first ratio is `maintenance-self-speedup`; the second contract below compares
+/// the candidate with the actual `numpy.loadtxt` incumbent.
+///
+/// The corpus poisons an UNSELECTED column with a non-bool token. NumPy never
+/// parses unselected columns and neither may the direct path; if that ever
+/// regresses, this bench fails its parity assert before it times anything.
+fn bench_loadtxt_selected_bool_median_gate(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_loadtxt_selected_bool")
+            .expect("loadtxt selected-bool bench module");
+        fnp_python(&module).expect("initialize fnp_python loadtxt bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np, os, tempfile\n\
+                 rng = np.random.default_rng(20260726)\n\
+                 rows, cols = 8192, 16\n\
+                 vals = rng.integers(0, 2, size=(rows, cols))\n\
+                 lines = []\n\
+                 for r in range(rows):\n\
+                 \x20   cells = [str(v) for v in vals[r]]\n\
+                 \x20   cells[7] = 'not_a_bool'\n\
+                 \x20   lines.append(','.join(cells))\n\
+                 lt_path = os.path.join(tempfile.gettempdir(),\n\
+                 \x20   'fnp_loadtxt_selected_bool_%d.csv' % os.getpid())\n\
+                 with open(lt_path, 'w') as fh:\n\
+                 \x20   fh.write('\\n'.join(lines) + '\\n')\n",
+            )
+            .expect("loadtxt corpus CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("loadtxt corpus setup");
+        let lt_path = namespace.get_item("lt_path").expect("lt_path present");
+
+        let functools = py.import("functools").expect("functools");
+        let partial = functools.getattr("partial").expect("functools.partial");
+        let fnp_loadtxt = module.getattr("loadtxt").expect("fnp loadtxt");
+        let numpy_loadtxt = numpy.getattr("loadtxt").expect("numpy loadtxt");
+        assert!(
+            !numpy_loadtxt.is(&fnp_loadtxt),
+            "dispatch trap: incumbent loadtxt resolved to the FNP callable"
+        );
+        common::report_numpy_loadtxt_incumbent_identity(py, &numpy_loadtxt);
+        let bool_dtype = numpy.getattr("bool_").expect("numpy bool_");
+
+        // 16 columns: -16 == 0, -15 == 1, -13 == 3, -12 == 4. Same four columns,
+        // and column 7 (the poisoned one) is selected by neither.
+        let make_fnp_arm = |cols: Vec<i64>| {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("delimiter", ",").expect("delimiter kwarg");
+            kwargs.set_item("dtype", &bool_dtype).expect("dtype kwarg");
+            kwargs.set_item("usecols", cols).expect("usecols kwarg");
+            partial
+                .call((&fnp_loadtxt,), Some(&kwargs))
+                .expect("partial-bound loadtxt arm")
+        };
+        let former = make_fnp_arm(vec![-16, -15, -13, -12]);
+        let candidate = make_fnp_arm(vec![0, 1, 3, 4]);
+        let incumbent_kwargs = PyDict::new(py);
+        incumbent_kwargs
+            .set_item("delimiter", ",")
+            .expect("incumbent delimiter");
+        incumbent_kwargs
+            .set_item("dtype", &bool_dtype)
+            .expect("incumbent dtype");
+        incumbent_kwargs
+            .set_item("usecols", vec![0_i64, 1, 3, 4])
+            .expect("incumbent usecols");
+        let incumbent = partial
+            .call((&numpy_loadtxt,), Some(&incumbent_kwargs))
+            .expect("partial-bound numpy loadtxt arm");
+
+        // BEHAVIOR BEFORE TIMING: the two paths must be byte-identical, and both
+        // must match the live NumPy oracle.
+        let former_out = former.call1((&lt_path,)).expect("former path parity");
+        let candidate_out = candidate.call1((&lt_path,)).expect("direct path parity");
+        let oracle = incumbent.call1((&lt_path,)).expect("numpy oracle parity");
+        let bytes_of = |value: &Bound<'_, PyAny>| {
+            value
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec")
+        };
+        assert_eq!(
+            bytes_of(&former_out),
+            bytes_of(&candidate_out),
+            "selected-bool direct path must be byte-identical to the former owned-token path",
+        );
+        assert_eq!(
+            bytes_of(&candidate_out),
+            bytes_of(&oracle),
+            "selected-bool direct path must be byte-identical to numpy",
+        );
+
+        // Prove this valid compatible workload cannot be silently delegated to
+        // the incumbent. Restore NumPy before any timed call.
+        let poison = PyModule::from_code(
+            py,
+            pyo3::ffi::c_str!(
+                "def fail(*args, **kwargs):\n    raise RuntimeError('numpy.loadtxt passthrough called')\n"
+            ),
+            pyo3::ffi::c_str!("poison_loadtxt_bench.py"),
+            pyo3::ffi::c_str!("poison_loadtxt_bench"),
+        )
+        .expect("loadtxt poison module");
+        numpy
+            .setattr("loadtxt", poison.getattr("fail").expect("poison callable"))
+            .expect("install loadtxt poison");
+        let native_out = candidate
+            .call1((&lt_path,))
+            .expect("selected-bool path must not delegate");
+        numpy
+            .setattr("loadtxt", &numpy_loadtxt)
+            .expect("restore numpy.loadtxt");
+        assert_eq!(
+            bytes_of(&native_out),
+            bytes_of(&oracle),
+            "native selected-bool path must retain NumPy bytes",
+        );
+        println!(
+            "DISPATCH_PROOF row=python_loadtxt_selected_bool_8192x16_vs_numpy \
+             fnp_callable=fnp_python.loadtxt delegated_to_numpy=false"
+        );
+
+        let time_arm = |function: &Bound<'_, PyAny>| {
+            let started = Instant::now();
+            let output = function
+                .call1((&lt_path,))
+                .expect("selected-bool median-CI arm");
+            let elapsed = started.elapsed();
+            let checksum = bytes_of(&output)
+                .into_iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                });
+            black_box(output);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let _ = common::run_median_ci_contract(
+            "loadtxt_selected_bool_8192x16",
+            || time_arm(&former),
+            || time_arm(&candidate),
+        );
+        let _ = common::run_median_ci_contract(
+            "python_loadtxt_selected_bool_8192x16_vs_numpy",
+            || time_arm(&incumbent),
+            || time_arm(&candidate),
+        );
+    });
+}
+
+/// End-to-end incumbent decision for the bounded all-negative `usecols`
+/// tail-ring. Both arms call the compatible Python surface with the identical
+/// path, dtype, delimiter, and duplicate/order-preserving selection. The FNP
+/// binding routes this measured f64 shape into `fnp_io::loadtxt_usecols_signed`;
+/// mixed, positive, empty, oversized, and unpacked cases stay on their former
+/// paths and are outside this row.
+fn bench_loadtxt_negative_tail_vs_numpy_median_gate(_c: &mut Criterion) {
+    const ROWS: usize = 8_192;
+    const COLS: usize = 64;
+    const USECOLS: [i64; 4] = [-1, -8, -32, -1];
+
+    let mut text = String::new();
+    for row in 0..ROWS {
+        for column in 0..COLS {
+            if column > 0 {
+                text.push(',');
+            }
+            text.push_str(&format!("{}.{}", row % 977, column));
+        }
+        text.push('\n');
+    }
+    let path = std::env::temp_dir().join(format!(
+        "fnp_loadtxt_negative_tail_bench_{}.csv",
+        std::process::id()
+    ));
+    std::fs::write(&path, text).expect("write negative-tail bench corpus");
+    let path = path.to_str().expect("temporary path is UTF-8").to_owned();
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_loadtxt_negative_tail")
+            .expect("negative-tail bench module");
+        fnp_python(&module).expect("initialize fnp_python loadtxt bench module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+        let fnp_loadtxt = module.getattr("loadtxt").expect("fnp loadtxt");
+        let numpy_loadtxt = numpy.getattr("loadtxt").expect("numpy loadtxt");
+        assert!(
+            !numpy_loadtxt.is(&fnp_loadtxt),
+            "dispatch trap: incumbent loadtxt resolved to the FNP callable"
+        );
+        common::report_numpy_loadtxt_incumbent_identity(py, &numpy_loadtxt);
+
+        let float64 = numpy.getattr("float64").expect("numpy float64");
+        let functools = py.import("functools").expect("functools");
+        let partial = functools.getattr("partial").expect("functools.partial");
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("delimiter", ",").expect("delimiter kwarg");
+        kwargs.set_item("dtype", &float64).expect("dtype kwarg");
+        kwargs
+            .set_item("usecols", USECOLS)
+            .expect("negative usecols kwarg");
+        let candidate = partial
+            .call((&fnp_loadtxt,), Some(&kwargs))
+            .expect("partial-bound FNP loadtxt arm");
+        let incumbent = partial
+            .call((&numpy_loadtxt,), Some(&kwargs))
+            .expect("partial-bound NumPy loadtxt arm");
+
+        let bytes_of = |value: &Bound<'_, PyAny>| {
+            value
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec")
+        };
+        let oracle = incumbent
+            .call1((&path,))
+            .expect("negative-tail NumPy parity");
+        let candidate_out = candidate.call1((&path,)).expect("negative-tail FNP parity");
+        assert_eq!(
+            bytes_of(&candidate_out),
+            bytes_of(&oracle),
+            "negative-tail FNP path must be byte-identical to NumPy",
+        );
+        assert_eq!(
+            candidate_out
+                .getattr("shape")
+                .expect("candidate shape")
+                .extract::<Vec<usize>>()
+                .expect("candidate shape vector"),
+            [ROWS, USECOLS.len()],
+        );
+
+        // A valid all-negative bounded selection must stay native. If the
+        // binding accidentally falls back to NumPy, this call fails loudly.
+        let poison = PyModule::from_code(
+            py,
+            pyo3::ffi::c_str!(
+                "def fail(*args, **kwargs):\n    raise RuntimeError('numpy.loadtxt passthrough called')\n"
+            ),
+            pyo3::ffi::c_str!("poison_loadtxt_tail_bench.py"),
+            pyo3::ffi::c_str!("poison_loadtxt_tail_bench"),
+        )
+        .expect("loadtxt poison module");
+        numpy
+            .setattr("loadtxt", poison.getattr("fail").expect("poison callable"))
+            .expect("install loadtxt poison");
+        let native_out = candidate
+            .call1((&path,))
+            .expect("negative-tail path must not delegate");
+        numpy
+            .setattr("loadtxt", &numpy_loadtxt)
+            .expect("restore numpy.loadtxt");
+        assert_eq!(
+            bytes_of(&native_out),
+            bytes_of(&oracle),
+            "native negative-tail path must retain NumPy bytes",
+        );
+        println!(
+            "DISPATCH_PROOF row=python_loadtxt_negative_tail_8192x64_vs_numpy \
+             fnp_callable=fnp_python.loadtxt \
+             native_route=fnp_io::loadtxt_usecols_signed delegated_to_numpy=false"
+        );
+
+        let time_arm = |function: &Bound<'_, PyAny>| {
+            let started = Instant::now();
+            let output = function
+                .call1((black_box(&path),))
+                .expect("negative-tail median-CI arm");
+            let elapsed = started.elapsed();
+            let checksum = bytes_of(&output)
+                .into_iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                });
+            black_box(output);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let _ = common::run_median_ci_contract(
+            "python_loadtxt_negative_tail_8192x64_vs_numpy",
+            || time_arm(&incumbent),
+            || time_arm(&candidate),
+        );
+    });
+}
+
+/// Isolates the two byte-producing shapes in `build_numpy_array_from_storage`'s
+/// `ArrayStorage::Bool` materialization arm. This is a common funnel for owned
+/// bool storage, but direct and passthrough bool-returning paths can bypass it.
+///
+/// The former arm collected a second full-size `Vec<u8>` from the `Vec<bool>`
+/// before copying it into the NumPy buffer. Rust guarantees `bool` is size 1,
+/// align 1, and only ever the bit patterns 0x00/0x01 — exactly what
+/// `u8::from(b)` produced — so that collect walked every element to rebuild
+/// bytes it already had. The 8,000,000-element measured configuration showed
+/// allocation-sensitive variance, but this harness did not count allocator
+/// calls or faults. Glibc's 128 KiB mmap threshold is only its initial/default
+/// setting and may adapt, so it is not a universal boundary.
+///
+/// Both arms below perform the *identical* NumPy tail — `numpy.empty(n, uint8)`
+/// then `PyBuffer::copy_from_slice` — so the only difference measured is the
+/// redundant allocation and pass. This is not a replica of production logic;
+/// it is production's exact two lines with a shared, real tail.
+///
+/// `run_median_ci_contract` asserts the two arms' output checksums are equal on
+/// every round, so byte-identity is enforced continuously during timing rather
+/// than once beforehand.
+/// VS-INCUMBENT, end-to-end: `fnp.isin` against `numpy.isin` on f64.
+///
+/// This is a **missing-capability** surface, which is where our real margins
+/// live. NumPy's `isin` has a fast `table` method that is integer-only; float
+/// input falls back to a sort-based path. We do not share that path, so nothing
+/// expensive is common to the two arms — the whole of our call is measured
+/// against the whole of theirs.
+///
+/// All six fleet traps are guarded here, in order:
+///
+/// 1. DISPATCH — the incumbent's identity is asserted **at runtime inside this
+///    binary**: the module is genuinely `numpy`, the callable's `__module__` is
+///    under `numpy`, and it is not the same object as ours. franken_networkx
+///    published a 2.6x whose baseline was already dispatched to their own code
+///    while genuine NetworkX was 1.88x SLOWER.
+/// 2. UNMATCHED CONFIG — both arms receive the identical two array objects; no
+///    dtype, order, or option differs.
+/// 3. NON-INTERLEAVED — `run_median_ci_contract` interleaves both arms inside one
+///    measured routine with the order alternating per round.
+/// 4. CORE CONTENTION — the contract establishes a base/base A/A null in the same
+///    invocation before the effect. If that null is not near unity the window is
+///    void regardless of the effect.
+/// 5. CLIENT-BOUND — the timed region is the call itself, and both arms marshal
+///    the same pre-built Python objects, so harness cost is common and small
+///    relative to a 1M-element scan.
+/// 6. SHARED COMPONENT — none. `fnp.isin` allocates and computes its own result;
+///    `numpy.isin` allocates and computes its own. This is the trap the
+///    bool-return arm fell into and the reason this arm exists.
+fn bench_isin_f64_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_isin_vs_numpy").expect("isin vs-numpy bench module");
+        fnp_python(&module).expect("initialize fnp_python isin bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+
+        // TRAP 1 — prove the incumbent is genuinely NumPy, at runtime, here.
+        let numpy_name = numpy
+            .getattr("__name__")
+            .expect("numpy __name__")
+            .extract::<String>()
+            .expect("numpy __name__ str");
+        assert_eq!(numpy_name, "numpy", "incumbent module is not numpy");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy __version__")
+            .extract::<String>()
+            .expect("numpy __version__ str");
+        let np_isin = numpy.getattr("isin").expect("numpy isin");
+        let fnp_isin = module.getattr("isin").expect("fnp isin");
+        common::report_numpy_incumbent_identity(py, "isin", &np_isin);
+        let incumbent_module = np_isin
+            .getattr("__module__")
+            .expect("numpy isin __module__")
+            .extract::<String>()
+            .expect("numpy isin __module__ str");
+        assert!(
+            incumbent_module.starts_with("numpy"),
+            "incumbent isin is not defined under numpy: {incumbent_module}"
+        );
+        assert!(
+            !np_isin.is(&fnp_isin),
+            "dispatch trap: the incumbent arm resolved to our own callable"
+        );
+        println!(
+            "INCUMBENT_IDENTITY arm=numpy.isin numpy.__version__={numpy_version} \
+             callable_module={incumbent_module} dispatch_assert=passed"
+        );
+        common::report_incumbent_topology("fnp.isin", "numpy.isin");
+
+        // TRAP 2 — one pair of inputs, handed to both arms unchanged.
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260727)\n\
+                 isin_a = rng.standard_normal(1_000_000)\n\
+                 isin_b = rng.standard_normal(1_000)\n\
+                 isin_b[:200] = isin_a[:200]\n",
+            )
+            .expect("isin setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("isin corpus setup");
+        let isin_a = namespace.get_item("isin_a").expect("isin_a present");
+        let isin_b = namespace.get_item("isin_b").expect("isin_b present");
+
+        let checksum_of = |array: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let bytes = array
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec");
+            bytes
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        // Behavior before timing: our whole result must equal theirs, byte for
+        // byte. `run_median_ci_contract` re-asserts this every round.
+        let ours = fnp_isin.call1((&isin_a, &isin_b)).expect("fnp isin");
+        let theirs = np_isin.call1((&isin_a, &isin_b)).expect("numpy isin");
+        assert_eq!(
+            checksum_of(&ours),
+            checksum_of(&theirs),
+            "fnp.isin and numpy.isin disagree — a perf comparison of divergent \
+             results is meaningless",
+        );
+
+        let mut time_incumbent = || {
+            let started = Instant::now();
+            let result = np_isin
+                .call1((black_box(&isin_a), black_box(&isin_b)))
+                .expect("numpy isin arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let mut time_ours = || {
+            let started = Instant::now();
+            let result = fnp_isin
+                .call1((black_box(&isin_a), black_box(&isin_b)))
+                .expect("fnp isin arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+
+        // Base arm is the INCUMBENT, so the reported ratio reads
+        // numpy-over-fnp: above 1.0 means we are faster.
+        let _ = common::run_median_ci_contract(
+            "python_isin_f64_1m_vs_numpy",
+            &mut time_incumbent,
+            &mut time_ours,
+        );
+    });
+}
+
+/// End-to-end redecision for the public bool-return surface fed by the
+/// `ArrayStorage::Bool` materialization funnel. The internal funnel remains a
+/// maintenance-only result; this row times `fnp.greater` as a whole against
+/// `numpy.greater` as a whole, with no shared measured component.
+/// CLASS-3 MISSING CAPABILITY, end-to-end vs NumPy. Two surfaces NumPy has no
+/// fast path for at all, which is where every historical monster in this repo
+/// came from. Deliberately not square f64 GEMM.
+///
+/// 1. `matmul` on int64 — **NumPy has no integer BLAS**, so it falls to a
+///    generic loop while we route to the native tiled integer kernel.
+/// 2. `char.upper` on a fixed-width ASCII array — **NumPy has no vectorized
+///    string case kernel**; it loops per element through the Python-level
+///    `numpy.char` layer.
+///
+/// Both are exactly reproducible (integer arithmetic; byte-wise ASCII mapping),
+/// so the arms are byte-identical by construction and the contract's per-round
+/// checksum equality holds without tolerance.
+///
+/// This function also restores measurement for the int64 matmul row: a
+/// concurrent edit dropped the original arm, which left a banked incumbent-win
+/// whose evidence could not be regenerated from the tree. An unreproducible
+/// claim is the frankensearch failure mode in miniature.
+fn bench_class3_missing_capability_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_class3_gaps").expect("class3 missing-capability module");
+        fnp_python(&module).expect("initialize fnp_python class3 module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260728)\n\
+                 mm_a = rng.integers(-64, 64, size=(256, 256), dtype=np.int64)\n\
+                 mm_b = rng.integers(-64, 64, size=(256, 256), dtype=np.int64)\n\
+                 alphabet = np.array(list('abcdefghijklmnopqrstuvwxyz'))\n\
+                 idx = rng.integers(0, 26, size=(400_000, 16))\n\
+                 up_a = np.array([''.join(row) for row in alphabet[idx]], dtype='U16')\n",
+            )
+            .expect("class3 setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("class3 corpus setup");
+
+        let checksum_of = |array: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let bytes = array
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec");
+            bytes
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        // --- surface 1: int64 matmul, no integer BLAS ---
+        {
+            let np_matmul = numpy.getattr("matmul").expect("numpy matmul");
+            let fnp_matmul = module.getattr("matmul").expect("fnp matmul");
+            common::report_numpy_incumbent_identity(py, "matmul", &np_matmul);
+            assert!(
+                !np_matmul.is(&fnp_matmul),
+                "dispatch trap: incumbent matmul resolved to our callable"
+            );
+            common::report_incumbent_topology("fnp.matmul", "numpy.matmul");
+
+            let lhs = namespace.get_item("mm_a").expect("mm_a present");
+            let rhs = namespace.get_item("mm_b").expect("mm_b present");
+            let ours = fnp_matmul.call1((&lhs, &rhs)).expect("fnp matmul parity");
+            let theirs = np_matmul.call1((&lhs, &rhs)).expect("numpy matmul parity");
+            assert_eq!(
+                checksum_of(&ours),
+                checksum_of(&theirs),
+                "int64 matmul: fnp and numpy disagree"
+            );
+
+            let mut time_incumbent = || {
+                let started = Instant::now();
+                let result = np_matmul
+                    .call1((black_box(&lhs), black_box(&rhs)))
+                    .expect("numpy matmul arm");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let mut time_ours = || {
+                let started = Instant::now();
+                let result = fnp_matmul
+                    .call1((black_box(&lhs), black_box(&rhs)))
+                    .expect("fnp matmul arm");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let _ = common::run_median_ci_contract(
+                "python_int64_matmul_256_vs_numpy",
+                &mut time_incumbent,
+                &mut time_ours,
+            );
+        }
+
+        // --- surface 2: ASCII case mapping, no vectorized string kernel ---
+        {
+            let np_char = numpy.getattr("char").expect("numpy char namespace");
+            let np_upper = np_char.getattr("upper").expect("numpy char.upper");
+            let fnp_upper = module
+                .getattr("char")
+                .expect("fnp char namespace")
+                .getattr("upper")
+                .expect("fnp char.upper");
+            assert!(
+                !np_upper.is(&fnp_upper),
+                "dispatch trap: incumbent char.upper resolved to our callable"
+            );
+            common::report_incumbent_topology("fnp.char.upper", "numpy.char.upper");
+
+            let text = namespace.get_item("up_a").expect("up_a present");
+            let ours = fnp_upper.call1((&text,)).expect("fnp char.upper parity");
+            let theirs = np_upper.call1((&text,)).expect("numpy char.upper parity");
+            assert_eq!(
+                checksum_of(&ours),
+                checksum_of(&theirs),
+                "char.upper: fnp and numpy disagree"
+            );
+
+            let mut time_incumbent = || {
+                let started = Instant::now();
+                let result = np_upper
+                    .call1((black_box(&text),))
+                    .expect("numpy char.upper arm");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let mut time_ours = || {
+                let started = Instant::now();
+                let result = fnp_upper
+                    .call1((black_box(&text),))
+                    .expect("fnp char.upper arm");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let _ = common::run_median_ci_contract(
+                "python_char_upper_ascii_400k_vs_numpy",
+                &mut time_incumbent,
+                &mut time_ours,
+            );
+        }
+    });
+}
+
+fn bench_bool_public_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bool_public").expect("bool-public bench module");
+        fnp_python(&module).expect("initialize fnp_python bool-public module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let np_greater = numpy.getattr("greater").expect("numpy greater");
+        let fnp_greater = module.getattr("greater").expect("fnp greater");
+        common::report_numpy_incumbent_identity(py, "greater", &np_greater);
+        assert!(
+            !np_greater.is(&fnp_greater),
+            "dispatch trap: incumbent greater resolved to our callable"
+        );
+        common::report_incumbent_topology("fnp.greater", "numpy.greater");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260727)\n\
+                 cmp_a = rng.standard_normal(8_000_000)\n\
+                 cmp_b = rng.standard_normal(8_000_000)\n",
+            )
+            .expect("bool-public setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("bool-public corpus setup");
+
+        let checksum_of = |array: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let bytes = array
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec");
+            bytes
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        let lhs = namespace.get_item("cmp_a").expect("cmp_a present");
+        let rhs = namespace.get_item("cmp_b").expect("cmp_b present");
+        let ours = fnp_greater.call1((&lhs, &rhs)).expect("fnp greater parity");
+        let theirs = np_greater
+            .call1((&lhs, &rhs))
+            .expect("numpy greater parity");
+        assert_eq!(
+            checksum_of(&ours),
+            checksum_of(&theirs),
+            "fnp.greater and numpy.greater disagree",
+        );
+
+        let mut time_incumbent = || {
+            let started = Instant::now();
+            let result = np_greater
+                .call1((black_box(&lhs), black_box(&rhs)))
+                .expect("numpy greater arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let mut time_ours = || {
+            let started = Instant::now();
+            let result = fnp_greater
+                .call1((black_box(&lhs), black_box(&rhs)))
+                .expect("fnp greater arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let _ = common::run_median_ci_contract(
+            "python_greater_f64_8m_bool_out_vs_numpy",
+            &mut time_incumbent,
+            &mut time_ours,
+        );
+    });
+}
+
+/// Class-3 missing-capability candidate: NumPy has no f16 ALU. For a large
+/// finite C-contiguous last-axis reduction, its unweighted `average` is one f32
+/// pairwise sum and division per lane. FrankenNumPy reproduces that exact tree
+/// while parallelizing across independent lanes.
+fn bench_average_f16_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_average_f16").expect("average-f16 bench module");
+        fnp_python(&module).expect("initialize fnp_python average-f16 module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let np_average = numpy.getattr("average").expect("numpy average");
+        let fnp_average = module.getattr("average").expect("fnp average");
+        common::report_numpy_incumbent_identity(py, "average", &np_average);
+        assert!(
+            !np_average.is(&fnp_average),
+            "dispatch trap: incumbent average resolved to our callable"
+        );
+        common::report_incumbent_topology("fnp.average", "numpy.average");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260727)\n\
+                 avg_f16 = rng.uniform(-3.0, 3.0, size=(2048, 4096)).astype(np.float16)\n",
+            )
+            .expect("average-f16 setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("average-f16 corpus setup");
+        let input = namespace.get_item("avg_f16").expect("avg_f16 present");
+
+        // Profile the actual incumbent workload before timing the proposed
+        // routing change. This names the Python frames and supplies the
+        // cumulative-time denominator used for the Amdahl ceiling; the C ufunc
+        // body is charged to NumPy's `_methods._mean` call.
+        let profile_namespace = PyDict::new(py);
+        profile_namespace
+            .set_item("np_average", &np_average)
+            .expect("profile average callable");
+        profile_namespace
+            .set_item("avg_f16", &input)
+            .expect("profile average input");
+        py.run(
+            std::ffi::CString::new(
+                "import cProfile, io, pstats\n\
+                 profiler = cProfile.Profile()\n\
+                 profiler.enable()\n\
+                 profile_results = [np_average(avg_f16, axis=-1) for _ in range(8)]\n\
+                 profiler.disable()\n\
+                 profile_stream = io.StringIO()\n\
+                 pstats.Stats(profiler, stream=profile_stream).sort_stats('cumulative').print_stats(8)\n\
+                 profile_report = profile_stream.getvalue()\n",
+            )
+            .expect("average-f16 profile CString")
+            .as_c_str(),
+            Some(&profile_namespace),
+            Some(&profile_namespace),
+        )
+        .expect("profile NumPy average");
+        println!(
+            "PROFILE_ATTRIBUTION surface=numpy.average(float16,2048x4096,axis=-1) repeats=8\n{}",
+            profile_namespace
+                .get_item("profile_report")
+                .expect("profile report present")
+                .extract::<String>()
+                .expect("profile report string")
+        );
+
+        let checksum_of = |value: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let bytes = value
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec");
+            bytes
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        let ours = fnp_average
+            .call1((&input, -1_i64))
+            .expect("fnp average parity");
+        let theirs = np_average
+            .call1((&input, -1_i64))
+            .expect("numpy average parity");
+        assert_eq!(
+            checksum_of(&ours),
+            checksum_of(&theirs),
+            "fnp.average and numpy.average disagree",
+        );
+
+        let mut time_incumbent = || {
+            let started = Instant::now();
+            let result = np_average
+                .call1((black_box(&input), -1_i64))
+                .expect("numpy average arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let mut time_ours = || {
+            let started = Instant::now();
+            let result = fnp_average
+                .call1((black_box(&input), -1_i64))
+                .expect("fnp average arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let _ = common::run_median_ci_contract(
+            "python_average_f16_2048x4096_axis_last_vs_numpy",
+            &mut time_incumbent,
+            &mut time_ours,
+        );
+    });
+}
+
+/// Class-3 missing-capability gate for the bounded float16 domain. NumPy has no
+/// half-precision order-statistics kernel: its exact public arm copies the input
+/// and partitions it, while the candidate uses one 65,536-bin histogram.
+fn bench_quantile_f16_histogram_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_quantile_f16").expect("quantile-f16 bench module");
+        fnp_python(&module).expect("initialize fnp_python quantile-f16 module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let np_quantile = numpy.getattr("quantile").expect("numpy quantile");
+        let fnp_quantile = module.getattr("quantile").expect("fnp quantile");
+        common::report_numpy_incumbent_identity(py, "quantile", &np_quantile);
+        assert!(
+            !np_quantile.is(&fnp_quantile),
+            "dispatch trap: incumbent quantile resolved to our callable"
+        );
+        common::report_incumbent_topology("fnp.quantile", "numpy.quantile");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260728)\n\
+                 quantile_f16 = rng.uniform(-200.0, 200.0, size=8_000_000).astype(np.float16)\n\
+                 quantile_qs = np.array([0.01, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 0.999], dtype=np.float64)\n",
+            )
+            .expect("quantile-f16 setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("quantile-f16 corpus setup");
+        let input = namespace
+            .get_item("quantile_f16")
+            .expect("quantile_f16 present");
+        let qs = namespace
+            .get_item("quantile_qs")
+            .expect("quantile_qs present");
+
+        let profile_namespace = PyDict::new(py);
+        profile_namespace
+            .set_item("np_quantile", &np_quantile)
+            .expect("profile quantile callable");
+        profile_namespace
+            .set_item("quantile_f16", &input)
+            .expect("profile quantile input");
+        profile_namespace
+            .set_item("quantile_qs", &qs)
+            .expect("profile quantiles");
+        py.run(
+            std::ffi::CString::new(
+                "import cProfile, io, pstats\n\
+                 profiler = cProfile.Profile()\n\
+                 profiler.enable()\n\
+                 profile_results = [np_quantile(quantile_f16, quantile_qs) for _ in range(5)]\n\
+                 profiler.disable()\n\
+                 profile_stream = io.StringIO()\n\
+                 pstats.Stats(profiler, stream=profile_stream).strip_dirs().sort_stats('tottime').print_stats(8)\n\
+                 profile_report = profile_stream.getvalue()\n",
+            )
+            .expect("quantile-f16 profile CString")
+            .as_c_str(),
+            Some(&profile_namespace),
+            Some(&profile_namespace),
+        )
+        .expect("profile NumPy quantile");
+        println!(
+            "PROFILE_ATTRIBUTION surface=numpy.quantile(float16[8m],float64[9]) repeats=5 \
+             target_frame=ndarray.partition self_time_fraction=profile_report \
+             amdahl_ceiling=total_time/(total_time-partition_self_time)\n{}",
+            profile_namespace
+                .get_item("profile_report")
+                .expect("profile report present")
+                .extract::<String>()
+                .expect("profile report string")
+        );
+
+        let checksum_of = |value: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let bytes = value
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec");
+            bytes
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        let ours = fnp_quantile
+            .call1((&input, &qs))
+            .expect("fnp quantile parity");
+        let theirs = np_quantile
+            .call1((&input, &qs))
+            .expect("numpy quantile parity");
+        assert_eq!(
+            ours.getattr("dtype")
+                .expect("fnp dtype")
+                .str()
+                .expect("fnp dtype string")
+                .to_string(),
+            theirs
+                .getattr("dtype")
+                .expect("numpy dtype")
+                .str()
+                .expect("numpy dtype string")
+                .to_string(),
+            "f16 multi-quantile dtype mismatch"
+        );
+        assert_eq!(
+            checksum_of(&ours),
+            checksum_of(&theirs),
+            "f16 multi-quantile byte mismatch"
+        );
+
+        let mut time_incumbent = || {
+            let started = Instant::now();
+            let result = np_quantile
+                .call1((black_box(&input), black_box(&qs)))
+                .expect("numpy quantile arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let mut time_ours = || {
+            let started = Instant::now();
+            let result = fnp_quantile
+                .call1((black_box(&input), black_box(&qs)))
+                .expect("fnp quantile arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let _ = common::run_median_ci_contract(
+            "python_quantile_f16_8m_q9_vs_numpy",
+            &mut time_incumbent,
+            &mut time_ours,
+        );
+    });
+}
+
+/// Phase-2 incumbent suite: complete jobs rather than accessor-level kernels.
+/// Every job consumes realistic, skewed data; crosses multiple public
+/// subsystems; returns the report a user asked for; and runs the live NumPy job
+/// side-by-side in the same process. Output hashing is deliberately outside the
+/// timed interval, so the timed arms share no checksum or serialization tail.
+fn bench_realistic_end_to_end_workloads_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const CSV_ROWS: usize = 25_000;
+    const CSV_COLUMNS: usize = 48;
+    const CSV_USECOLS: [i64; 8] = [-1, -3, -5, -7, -9, -11, -13, -15];
+    const THREADS: &str = "4";
+
+    for variable in [
+        "RAYON_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(THREADS),
+            "{variable} must be explicitly pinned before workload timing"
+        );
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        THREADS
+            .parse::<usize>()
+            .expect("thread count constant is numeric"),
+        "Rayon pool width does not match the pinned workload configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME host={} rayon_threads={} RAYON_NUM_THREADS={} \
+         OPENBLAS_NUM_THREADS={} OMP_NUM_THREADS={} MKL_NUM_THREADS={}",
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "unavailable".to_owned()),
+        rayon::current_num_threads(),
+        THREADS,
+        THREADS,
+        THREADS,
+        THREADS,
+    );
+
+    let csv_path = std::env::temp_dir().join(format!(
+        "fnp_phase2_wide_sensor_batch_{}.csv",
+        std::process::id()
+    ));
+    let mut csv = String::with_capacity(CSV_ROWS * CSV_COLUMNS * 10);
+    for row in 0..CSV_ROWS {
+        for column in 0..CSV_COLUMNS {
+            if column > 0 {
+                csv.push(',');
+            }
+            let raw = ((row * 7_919 + column * 104_729) % 1_000_000) as i64 - 500_000;
+            write!(&mut csv, "{:.3}", raw as f64 / 1_000.0)
+                .expect("writing the CSV corpus to a String cannot fail");
+        }
+        csv.push('\n');
+    }
+    std::fs::write(&csv_path, csv).expect("write Phase-2 wide CSV corpus");
+    let csv_path = csv_path
+        .to_str()
+        .expect("temporary CSV path is UTF-8")
+        .to_owned();
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_realistic_workloads")
+            .expect("realistic-workload bench module");
+        fnp_python(&module).expect("initialize fnp_python realistic-workload module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                r#"
+import numpy as np
+rng = np.random.default_rng(20260728)
+
+# 4,096 normalized sensors, each reporting a 512-sample finite half-precision window.
+device_level = rng.lognormal(mean=0.5, sigma=0.45, size=(4096, 1))
+phase = rng.uniform(0.0, 2.0 * np.pi, size=(4096, 1))
+t = np.linspace(0.0, 4.0 * np.pi, 512, dtype=np.float32)[None, :]
+seasonal = 0.08 * device_level * np.sin(t + phase)
+drift = rng.normal(0.0, 0.0015, size=(4096, 1)) * np.arange(512)[None, :]
+noise = rng.normal(0.0, 0.15, size=(4096, 512))
+telemetry = np.clip(device_level + seasonal + drift + noise, -8.0, 8.0).astype(np.float16)
+telemetry_q = np.array([0.01, 0.10, 0.50, 0.90, 0.99], dtype=np.float64)
+
+# Two million transactions with the heavy-tailed merchant skew seen in fraud logs.
+merchant_ids = ((rng.zipf(1.25, size=2_000_000) - 1) % 250_000).astype(np.int64)
+watchlist = np.unique(rng.integers(0, 250_000, size=50_000, dtype=np.int64))
+channel_ids = rng.integers(0, 64, size=2_000_000, dtype=np.int16)
+
+# A zero-inflated quantized inference batch with rectangular integer GEMM.
+activations = rng.integers(-8, 9, size=(4096, 256), dtype=np.int64)
+activations[rng.random(size=activations.shape) < 0.72] = 0
+weights = rng.integers(-6, 7, size=(256, 64), dtype=np.int64)
+
+# Five hundred thousand service tags drawn from a Zipfian 4,096-tag vocabulary.
+tag_vocabulary = np.array(
+    [f"svc-{index:04d}-ERR" for index in range(4096)],
+    dtype="U16",
+)
+tag_indices = ((rng.zipf(1.22, size=500_000) - 1) % len(tag_vocabulary)).astype(np.int64)
+log_tags = tag_vocabulary[tag_indices]
+translate_table = str.maketrans("-ERR", "_err")
+"#,
+            )
+            .expect("realistic-workload setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("realistic-workload corpus setup");
+
+        let telemetry = namespace.get_item("telemetry").expect("telemetry present");
+        let telemetry_q = namespace
+            .get_item("telemetry_q")
+            .expect("telemetry quantiles present");
+        let merchant_ids = namespace
+            .get_item("merchant_ids")
+            .expect("merchant ids present");
+        let watchlist = namespace.get_item("watchlist").expect("watchlist present");
+        let channel_ids = namespace
+            .get_item("channel_ids")
+            .expect("channel ids present");
+        let activations = namespace
+            .get_item("activations")
+            .expect("activations present");
+        let weights = namespace.get_item("weights").expect("weights present");
+        let log_tags = namespace.get_item("log_tags").expect("log tags present");
+        let translate_table = namespace
+            .get_item("translate_table")
+            .expect("translation table present");
+
+        let fnp_average = module.getattr("average").expect("fnp average");
+        let np_average = numpy.getattr("average").expect("numpy average");
+        let fnp_std = module.getattr("std").expect("fnp std");
+        let np_std = numpy.getattr("std").expect("numpy std");
+        let fnp_quantile = module.getattr("quantile").expect("fnp quantile");
+        let np_quantile = numpy.getattr("quantile").expect("numpy quantile");
+        let fnp_isin = module.getattr("isin").expect("fnp isin");
+        let np_isin = numpy.getattr("isin").expect("numpy isin");
+        let fnp_count_nonzero = module.getattr("count_nonzero").expect("fnp count_nonzero");
+        let np_count_nonzero = numpy.getattr("count_nonzero").expect("numpy count_nonzero");
+        let fnp_unique = module.getattr("unique").expect("fnp unique");
+        let np_unique = numpy.getattr("unique").expect("numpy unique");
+        let fnp_bincount = module.getattr("bincount").expect("fnp bincount");
+        let np_bincount = numpy.getattr("bincount").expect("numpy bincount");
+        let fnp_matmul = module.getattr("matmul").expect("fnp matmul");
+        let np_matmul = numpy.getattr("matmul").expect("numpy matmul");
+        let fnp_argmax = module.getattr("argmax").expect("fnp argmax");
+        let np_argmax = numpy.getattr("argmax").expect("numpy argmax");
+        let fnp_loadtxt = module.getattr("loadtxt").expect("fnp loadtxt");
+        let np_loadtxt = numpy.getattr("loadtxt").expect("numpy loadtxt");
+        let fnp_histogram = module.getattr("histogram").expect("fnp histogram");
+        let np_histogram = numpy.getattr("histogram").expect("numpy histogram");
+        let fnp_char_translate = module
+            .getattr("char")
+            .expect("fnp char namespace")
+            .getattr("translate")
+            .expect("fnp char.translate");
+        let np_char_translate = numpy
+            .getattr("char")
+            .expect("numpy char namespace")
+            .getattr("translate")
+            .expect("numpy char.translate");
+
+        for (candidate, incumbent, surface) in [
+            (&fnp_average, &np_average, "average"),
+            (&fnp_std, &np_std, "std"),
+            (&fnp_quantile, &np_quantile, "quantile"),
+            (&fnp_isin, &np_isin, "isin"),
+            (&fnp_count_nonzero, &np_count_nonzero, "count_nonzero"),
+            (&fnp_unique, &np_unique, "unique"),
+            (&fnp_bincount, &np_bincount, "bincount"),
+            (&fnp_matmul, &np_matmul, "matmul"),
+            (&fnp_argmax, &np_argmax, "argmax"),
+            (&fnp_loadtxt, &np_loadtxt, "loadtxt"),
+            (&fnp_histogram, &np_histogram, "histogram"),
+            (&fnp_char_translate, &np_char_translate, "char.translate"),
+        ] {
+            assert!(
+                !candidate.is(incumbent),
+                "dispatch trap: {surface} incumbent resolved to the FNP callable"
+            );
+        }
+
+        // Workload 1: a device-health report over an in-memory telemetry window.
+        {
+            const ROW: &str = "workload_telemetry_health_report_f16_4096x512";
+            common::report_numpy_incumbent_identity(py, "average", &np_average);
+            common::report_incumbent_topology(
+                "fnp.workload.telemetry_health_report",
+                "numpy.workload.telemetry_health_report",
+            );
+            println!(
+                "WORKLOAD_CONFIG row={ROW} user_job=device_health_report \
+                 input=float16[4096,512] distribution=lognormal_baseline_plus_seasonality_drift_noise \
+                 stages=average_axis_last,std_axis_last,quantile_q5 \
+                 output=per_device_mean_std_plus_fleet_quantiles matched_config=same_process_same_inputs"
+            );
+
+            let run_incumbent = || {
+                let started = Instant::now();
+                let mean = np_average
+                    .call1((black_box(&telemetry), -1_i64))
+                    .expect("numpy telemetry average");
+                let std = np_std
+                    .call1((black_box(&telemetry), -1_i64))
+                    .expect("numpy telemetry std");
+                let quantiles = np_quantile
+                    .call1((black_box(&telemetry), black_box(&telemetry_q)))
+                    .expect("numpy telemetry quantiles");
+                let elapsed = started.elapsed();
+                (elapsed, [mean, std, quantiles])
+            };
+            let run_candidate = || {
+                let started = Instant::now();
+                let mean = fnp_average
+                    .call1((black_box(&telemetry), -1_i64))
+                    .expect("fnp telemetry average");
+                let std = fnp_std
+                    .call1((black_box(&telemetry), -1_i64))
+                    .expect("fnp telemetry std");
+                let quantiles = fnp_quantile
+                    .call1((black_box(&telemetry), black_box(&telemetry_q)))
+                    .expect("fnp telemetry quantiles");
+                let elapsed = started.elapsed();
+                (elapsed, [mean, std, quantiles])
+            };
+
+            let (_, incumbent_output) = run_incumbent();
+            let (_, candidate_output) = run_candidate();
+            let isfinite = numpy.getattr("isfinite").expect("numpy isfinite");
+            for (arm, outputs) in [
+                ("candidate", &candidate_output),
+                ("incumbent", &incumbent_output),
+            ] {
+                for (index, output) in outputs.iter().enumerate() {
+                    let finite = isfinite
+                        .call1((output,))
+                        .expect("telemetry output finiteness")
+                        .call_method0("all")
+                        .expect("all telemetry outputs finite")
+                        .extract::<bool>()
+                        .expect("telemetry finite verdict");
+                    assert!(
+                        finite,
+                        "{ROW}: {arm} output {index} must be finite for a useful report"
+                    );
+                }
+            }
+            assert_workload_outputs_equal(&numpy, ROW, &candidate_output, &incumbent_output);
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = run_incumbent();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = run_candidate();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let _ = common::run_dual_null_median_ci_contract(
+                ROW,
+                &mut observe_incumbent,
+                &mut observe_candidate,
+            );
+        }
+
+        // Workload 2: transaction-risk screening and a compact categorical report.
+        {
+            const ROW: &str = "workload_transaction_risk_report_zipf_2m";
+            common::report_numpy_incumbent_identity(py, "isin", &np_isin);
+            common::report_incumbent_topology(
+                "fnp.workload.transaction_risk_report",
+                "numpy.workload.transaction_risk_report",
+            );
+            println!(
+                "WORKLOAD_CONFIG row={ROW} user_job=transaction_risk_report \
+                 input=int64_transactions[2000000]_watchlist[~45000]_int16_channels[2000000] \
+                 distribution=zipf_merchants_plus_uniform_channels \
+                 stages=isin,count_nonzero,unique_return_counts,bincount \
+                 output=risk_hits_merchant_frequency_channel_frequency \
+                 matched_config=same_process_same_inputs"
+            );
+            let unique_kwargs = PyDict::new(py);
+            unique_kwargs
+                .set_item("return_counts", true)
+                .expect("unique return_counts kwarg");
+
+            let run_incumbent = || {
+                let started = Instant::now();
+                let risk_mask = np_isin
+                    .call1((black_box(&merchant_ids), black_box(&watchlist)))
+                    .expect("numpy transaction isin");
+                let risk_hits = np_count_nonzero
+                    .call1((black_box(&risk_mask),))
+                    .expect("numpy risk hit count");
+                let merchant_frequency = np_unique
+                    .call((black_box(&merchant_ids),), Some(&unique_kwargs))
+                    .expect("numpy merchant frequency");
+                let channel_frequency = np_bincount
+                    .call1((black_box(&channel_ids),))
+                    .expect("numpy channel frequency");
+                let elapsed = started.elapsed();
+                let merchant_values = merchant_frequency
+                    .get_item(0)
+                    .expect("numpy merchant values");
+                let merchant_counts = merchant_frequency
+                    .get_item(1)
+                    .expect("numpy merchant counts");
+                (
+                    elapsed,
+                    [
+                        risk_hits,
+                        merchant_values,
+                        merchant_counts,
+                        channel_frequency,
+                    ],
+                )
+            };
+            let run_candidate = || {
+                let started = Instant::now();
+                let risk_mask = fnp_isin
+                    .call1((black_box(&merchant_ids), black_box(&watchlist)))
+                    .expect("fnp transaction isin");
+                let risk_hits = fnp_count_nonzero
+                    .call1((black_box(&risk_mask),))
+                    .expect("fnp risk hit count");
+                let merchant_frequency = fnp_unique
+                    .call((black_box(&merchant_ids),), Some(&unique_kwargs))
+                    .expect("fnp merchant frequency");
+                let channel_frequency = fnp_bincount
+                    .call1((black_box(&channel_ids),))
+                    .expect("fnp channel frequency");
+                let elapsed = started.elapsed();
+                let merchant_values = merchant_frequency.get_item(0).expect("fnp merchant values");
+                let merchant_counts = merchant_frequency.get_item(1).expect("fnp merchant counts");
+                (
+                    elapsed,
+                    [
+                        risk_hits,
+                        merchant_values,
+                        merchant_counts,
+                        channel_frequency,
+                    ],
+                )
+            };
+
+            let (_, incumbent_output) = run_incumbent();
+            let (_, candidate_output) = run_candidate();
+            assert_workload_outputs_equal(&numpy, ROW, &candidate_output, &incumbent_output);
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = run_incumbent();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = run_candidate();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let _ = common::run_dual_null_median_ci_contract(
+                ROW,
+                &mut observe_incumbent,
+                &mut observe_candidate,
+            );
+        }
+
+        // Workload 3: rectangular integer inference followed by prediction tallying.
+        {
+            const ROW: &str = "workload_quantized_batch_inference_i64_4096x256x64";
+            common::report_numpy_incumbent_identity(py, "matmul", &np_matmul);
+            common::report_incumbent_topology(
+                "fnp.workload.quantized_batch_inference",
+                "numpy.workload.quantized_batch_inference",
+            );
+            println!(
+                "WORKLOAD_CONFIG row={ROW} user_job=quantized_batch_inference \
+                 input=int64_activations[4096,256]_weights[256,64] \
+                 distribution=72pct_zero_inflated_small_integers \
+                 stages=rectangular_matmul,argmax_axis1,bincount \
+                 output=predicted_class_per_row_plus_class_frequency \
+                 matched_config=same_process_same_inputs no_square_float_gemm=true"
+            );
+
+            let run_incumbent = || {
+                let started = Instant::now();
+                let scores = np_matmul
+                    .call1((black_box(&activations), black_box(&weights)))
+                    .expect("numpy inference matmul");
+                let predictions = np_argmax
+                    .call1((black_box(&scores), 1_i64))
+                    .expect("numpy inference argmax");
+                let class_frequency = np_bincount
+                    .call1((black_box(&predictions),))
+                    .expect("numpy inference bincount");
+                let elapsed = started.elapsed();
+                (elapsed, [predictions, class_frequency])
+            };
+            let run_candidate = || {
+                let started = Instant::now();
+                let scores = fnp_matmul
+                    .call1((black_box(&activations), black_box(&weights)))
+                    .expect("fnp inference matmul");
+                let predictions = fnp_argmax
+                    .call1((black_box(&scores), 1_i64))
+                    .expect("fnp inference argmax");
+                let class_frequency = fnp_bincount
+                    .call1((black_box(&predictions),))
+                    .expect("fnp inference bincount");
+                let elapsed = started.elapsed();
+                (elapsed, [predictions, class_frequency])
+            };
+
+            let (_, incumbent_output) = run_incumbent();
+            let (_, candidate_output) = run_candidate();
+            assert_workload_outputs_equal(&numpy, ROW, &candidate_output, &incumbent_output);
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = run_incumbent();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = run_candidate();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let _ = common::run_dual_null_median_ci_contract(
+                ROW,
+                &mut observe_incumbent,
+                &mut observe_candidate,
+            );
+        }
+
+        // Workload 4: parse a wide on-disk sensor batch and immediately summarize it.
+        {
+            const ROW: &str = "workload_wide_csv_sensor_etl_25000x48_use8";
+            common::report_numpy_loadtxt_incumbent_identity(py, &np_loadtxt);
+            common::report_incumbent_topology(
+                "fnp.workload.wide_csv_sensor_etl",
+                "numpy.workload.wide_csv_sensor_etl",
+            );
+            println!(
+                "WORKLOAD_CONFIG row={ROW} user_job=wide_csv_sensor_etl \
+                 input=csv[25000,48]_selected_tail_columns[8] distribution=bounded_signed_decimal \
+                 stages=loadtxt_negative_usecols,histogram_64,std_axis0 \
+                 output=global_histogram_edges_plus_per_column_std \
+                 matched_config=same_process_same_path_warm_page_cache"
+            );
+            let loadtxt_kwargs = PyDict::new(py);
+            loadtxt_kwargs
+                .set_item("delimiter", ",")
+                .expect("CSV delimiter kwarg");
+            loadtxt_kwargs
+                .set_item("dtype", numpy.getattr("float64").expect("numpy float64"))
+                .expect("CSV dtype kwarg");
+            loadtxt_kwargs
+                .set_item("usecols", CSV_USECOLS)
+                .expect("CSV usecols kwarg");
+
+            let run_incumbent = || {
+                let started = Instant::now();
+                let parsed = np_loadtxt
+                    .call((black_box(&csv_path),), Some(&loadtxt_kwargs))
+                    .expect("numpy CSV parse");
+                let histogram = np_histogram
+                    .call1((black_box(&parsed), 64_i64))
+                    .expect("numpy CSV histogram");
+                let std = np_std
+                    .call1((black_box(&parsed), 0_i64))
+                    .expect("numpy CSV std");
+                let elapsed = started.elapsed();
+                let counts = histogram.get_item(0).expect("numpy histogram counts");
+                let edges = histogram.get_item(1).expect("numpy histogram edges");
+                (elapsed, [counts, edges, std])
+            };
+            let run_candidate = || {
+                let started = Instant::now();
+                let parsed = fnp_loadtxt
+                    .call((black_box(&csv_path),), Some(&loadtxt_kwargs))
+                    .expect("fnp CSV parse");
+                let histogram = fnp_histogram
+                    .call1((black_box(&parsed), 64_i64))
+                    .expect("fnp CSV histogram");
+                let std = fnp_std
+                    .call1((black_box(&parsed), 0_i64))
+                    .expect("fnp CSV std");
+                let elapsed = started.elapsed();
+                let counts = histogram.get_item(0).expect("fnp histogram counts");
+                let edges = histogram.get_item(1).expect("fnp histogram edges");
+                (elapsed, [counts, edges, std])
+            };
+
+            let (_, incumbent_output) = run_incumbent();
+            let (_, candidate_output) = run_candidate();
+            assert_workload_outputs_equal(&numpy, ROW, &candidate_output, &incumbent_output);
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = run_incumbent();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = run_candidate();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let _ = common::run_dual_null_median_ci_contract(
+                ROW,
+                &mut observe_incumbent,
+                &mut observe_candidate,
+            );
+        }
+
+        // Workload 5: normalize fixed-width ASCII service tags, then aggregate them.
+        {
+            const ROW: &str = "workload_ascii_log_normalization_zipf_500k";
+            common::report_numpy_incumbent_identity(py, "unique", &np_unique);
+            common::report_incumbent_topology(
+                "fnp.workload.ascii_log_normalization",
+                "numpy.workload.ascii_log_normalization",
+            );
+            println!(
+                "WORKLOAD_CONFIG row={ROW} user_job=ascii_log_normalization \
+                 input=unicode16_tags[500000]_vocabulary[4096] distribution=zipf \
+                 stages=char_translate,unique_return_counts \
+                 output=normalized_tag_dictionary_plus_frequency \
+                 matched_config=same_process_same_inputs"
+            );
+            let unique_kwargs = PyDict::new(py);
+            unique_kwargs
+                .set_item("return_counts", true)
+                .expect("log unique return_counts kwarg");
+
+            let run_incumbent = || {
+                let started = Instant::now();
+                let normalized = np_char_translate
+                    .call1((black_box(&log_tags), black_box(&translate_table)))
+                    .expect("numpy log normalization");
+                let frequency = np_unique
+                    .call((black_box(&normalized),), Some(&unique_kwargs))
+                    .expect("numpy normalized tag frequency");
+                let elapsed = started.elapsed();
+                let values = frequency.get_item(0).expect("numpy normalized tags");
+                let counts = frequency.get_item(1).expect("numpy normalized counts");
+                (elapsed, [values, counts])
+            };
+            let run_candidate = || {
+                let started = Instant::now();
+                let normalized = fnp_char_translate
+                    .call1((black_box(&log_tags), black_box(&translate_table)))
+                    .expect("fnp log normalization");
+                let frequency = fnp_unique
+                    .call((black_box(&normalized),), Some(&unique_kwargs))
+                    .expect("fnp normalized tag frequency");
+                let elapsed = started.elapsed();
+                let values = frequency.get_item(0).expect("fnp normalized tags");
+                let counts = frequency.get_item(1).expect("fnp normalized counts");
+                (elapsed, [values, counts])
+            };
+
+            let (_, incumbent_output) = run_incumbent();
+            let (_, candidate_output) = run_candidate();
+            assert_workload_outputs_equal(&numpy, ROW, &candidate_output, &incumbent_output);
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = run_incumbent();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = run_candidate();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let _ = common::run_dual_null_median_ci_contract(
+                ROW,
+                &mut observe_incumbent,
+                &mut observe_candidate,
+            );
+        }
+    });
+}
+
+/// Phase-2 Class-3 workload: apply a batch of financial events to a
+/// large-cardinality account state. NumPy owns the public `ufunc.at` API but
+/// has no order-free parallel scatter engine for its cache-exceeding target
+/// regime; FrankenNumPy's integer add/min/max arms use atomic RMWs.
+///
+/// The mixed uniform/Zipf account distribution supplies both cold random
+/// targets and duplicate hot accounts. Three event counts distinguish a flat
+/// per-event gap from fixed overhead or coordination effects. The 3,000,000
+/// account target deliberately excludes the ledger-rejected 1,024-bin
+/// histogram regime where NumPy's own specialized loop is already saturated.
+fn bench_realistic_event_attribution_scatter_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const ACCOUNT_COUNT: usize = 3_000_000;
+    const EVENT_SIZES: [usize; 3] = [2_200_000, 4_400_000, 8_800_000];
+    const THREADS: &str = "4";
+
+    for variable in [
+        "RAYON_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(THREADS),
+            "{variable} must be explicitly pinned before workload timing"
+        );
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        THREADS
+            .parse::<usize>()
+            .expect("thread count constant is numeric"),
+        "Rayon pool width does not match the pinned workload configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME host={} rayon_threads={} RAYON_NUM_THREADS={} \
+         OPENBLAS_NUM_THREADS={} OMP_NUM_THREADS={} MKL_NUM_THREADS={} trj_used=false",
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "unavailable".to_owned()),
+        rayon::current_num_threads(),
+        THREADS,
+        THREADS,
+        THREADS,
+        THREADS,
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_event_attribution_workload")
+            .expect("event-attribution module");
+        fnp_python(&module).expect("initialize fnp_python event-attribution module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(format!(
+                r#"
+import numpy as np
+rng = np.random.default_rng(20260729)
+account_count = {ACCOUNT_COUNT}
+event_sizes = {EVENT_SIZES:?}
+max_events = event_sizes[-1]
+
+# Most events touch the long tail, while 35% land on a 100k-account hot set.
+# This models payment/accounting streams without collapsing into the rejected
+# tiny-histogram regime.
+event_accounts = rng.integers(0, account_count, size=max_events, dtype=np.int64)
+hot_mask = rng.random(max_events) < 0.35
+hot_count = int(hot_mask.sum())
+event_accounts[hot_mask] = (
+    (rng.zipf(1.18, size=hot_count) - 1) % 100_000
+).astype(np.int64)
+spend_deltas = rng.integers(-25_000, 50_001, size=max_events, dtype=np.int64)
+event_timestamps = (
+    np.arange(max_events, dtype=np.int64) + np.int64(1_800_000_000_000_000)
+)
+
+event_accounts_by_size = [
+    np.ascontiguousarray(event_accounts[:size]) for size in event_sizes
+]
+spend_deltas_by_size = [
+    np.ascontiguousarray(spend_deltas[:size]) for size in event_sizes
+]
+event_timestamps_by_size = [
+    np.ascontiguousarray(event_timestamps[:size]) for size in event_sizes
+]
+
+np_spend_state = np.empty(account_count, dtype=np.int64)
+np_first_seen_state = np.empty(account_count, dtype=np.int64)
+np_last_seen_state = np.empty(account_count, dtype=np.int64)
+fnp_spend_state = np.empty(account_count, dtype=np.int64)
+fnp_first_seen_state = np.empty(account_count, dtype=np.int64)
+fnp_last_seen_state = np.empty(account_count, dtype=np.int64)
+"#
+            ))
+            .expect("event-attribution setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("event-attribution corpus setup");
+
+        let fnp_add = module.getattr("add").expect("fnp add");
+        let np_add = numpy.getattr("add").expect("numpy add");
+        let fnp_maximum = module.getattr("maximum").expect("fnp maximum");
+        let np_maximum = numpy.getattr("maximum").expect("numpy maximum");
+        let fnp_minimum = module.getattr("minimum").expect("fnp minimum");
+        let np_minimum = numpy.getattr("minimum").expect("numpy minimum");
+        for (candidate, incumbent, surface) in [
+            (&fnp_add, &np_add, "add"),
+            (&fnp_maximum, &np_maximum, "maximum"),
+            (&fnp_minimum, &np_minimum, "minimum"),
+        ] {
+            assert!(
+                !candidate.is(incumbent),
+                "{surface}: candidate callable aliases NumPy"
+            );
+            common::report_numpy_incumbent_identity(py, surface, incumbent);
+        }
+        common::report_incumbent_topology(
+            "fnp.workload.event_attribution_scatter",
+            "numpy.workload.event_attribution_scatter",
+        );
+        println!(
+            "INCUMBENT_PIPELINE workload=event_attribution_scatter \
+             candidate=fnp.add.at+fnp.maximum.at+fnp.minimum.at \
+             incumbent=numpy.add.at+numpy.maximum.at+numpy.minimum.at \
+             shared_timed_component=none reset_outside_timed_region=true \
+             inputs_shared_read_only=true"
+        );
+
+        let incumbent = EventAttributionArm {
+            add_at: np_add.getattr("at").expect("numpy add.at"),
+            maximum_at: np_maximum.getattr("at").expect("numpy maximum.at"),
+            minimum_at: np_minimum.getattr("at").expect("numpy minimum.at"),
+            spend_state: namespace
+                .get_item("np_spend_state")
+                .expect("numpy spend state"),
+            first_seen_state: namespace
+                .get_item("np_first_seen_state")
+                .expect("numpy first-seen state"),
+            last_seen_state: namespace
+                .get_item("np_last_seen_state")
+                .expect("numpy last-seen state"),
+        };
+        let candidate = EventAttributionArm {
+            add_at: fnp_add.getattr("at").expect("fnp add.at"),
+            maximum_at: fnp_maximum.getattr("at").expect("fnp maximum.at"),
+            minimum_at: fnp_minimum.getattr("at").expect("fnp minimum.at"),
+            spend_state: namespace
+                .get_item("fnp_spend_state")
+                .expect("fnp spend state"),
+            first_seen_state: namespace
+                .get_item("fnp_first_seen_state")
+                .expect("fnp first-seen state"),
+            last_seen_state: namespace
+                .get_item("fnp_last_seen_state")
+                .expect("fnp last-seen state"),
+        };
+
+        let account_ids_by_size = namespace
+            .get_item("event_accounts_by_size")
+            .expect("event accounts by size");
+        let spend_deltas_by_size = namespace
+            .get_item("spend_deltas_by_size")
+            .expect("spend deltas by size");
+        let timestamps_by_size = namespace
+            .get_item("event_timestamps_by_size")
+            .expect("event timestamps by size");
+
+        let mut scaling = Vec::with_capacity(EVENT_SIZES.len());
+        for (size_index, size) in EVENT_SIZES.into_iter().enumerate() {
+            let row = format!("workload_event_attribution_scatter_i64_{size}");
+            println!(
+                "WORKLOAD_CONFIG row={row} user_job=event_attribution_state_update \
+                 accounts={ACCOUNT_COUNT} events={size} \
+                 distribution=65pct_uniform_plus_35pct_zipf_hot100k \
+                 stages=add_at_spend,maximum_at_last_seen,minimum_at_first_seen \
+                 output=int64_spend_first_seen_last_seen_state \
+                 matched_config=same_process_same_inputs target_regime=large \
+                 rejected_histogram_regime_excluded=true"
+            );
+            let account_ids = account_ids_by_size
+                .get_item(size_index)
+                .expect("event account slice");
+            let spend_deltas = spend_deltas_by_size
+                .get_item(size_index)
+                .expect("event spend slice");
+            let event_timestamps = timestamps_by_size
+                .get_item(size_index)
+                .expect("event timestamp slice");
+
+            let (_, incumbent_output) =
+                incumbent.run(&account_ids, &spend_deltas, &event_timestamps);
+            let (_, candidate_output) =
+                candidate.run(&account_ids, &spend_deltas, &event_timestamps);
+            assert_workload_outputs_equal(&numpy, &row, &candidate_output, &incumbent_output);
+            println!(
+                "PARITY row={row} dtype=int64 shape=[{ACCOUNT_COUNT}] outputs=3 \
+                 byte_identity=passed checksum={:016x}",
+                workload_checksum(&numpy, &candidate_output),
+            );
+
+            let incumbent_profile =
+                incumbent.profile(&account_ids, &spend_deltas, &event_timestamps);
+            let candidate_profile =
+                candidate.profile(&account_ids, &spend_deltas, &event_timestamps);
+            let candidate_total = candidate_profile.iter().sum::<f64>();
+            let (target_stage, target_ms) = [
+                ("add_at_spend", candidate_profile[0]),
+                ("maximum_at_last_seen", candidate_profile[1]),
+                ("minimum_at_first_seen", candidate_profile[2]),
+            ]
+            .into_iter()
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .expect("three profile stages");
+            for (stage, incumbent_ms, candidate_ms) in [
+                ("add_at_spend", incumbent_profile[0], candidate_profile[0]),
+                (
+                    "maximum_at_last_seen",
+                    incumbent_profile[1],
+                    candidate_profile[1],
+                ),
+                (
+                    "minimum_at_first_seen",
+                    incumbent_profile[2],
+                    candidate_profile[2],
+                ),
+            ] {
+                println!(
+                    "PROFILE_STAGE row={row} arm_pair=numpy_fnp stage={stage} \
+                     incumbent_median_ms={incumbent_ms:.6} \
+                     candidate_median_ms={candidate_ms:.6}"
+                );
+            }
+            let target_fraction = target_ms / candidate_total;
+            println!(
+                "PROFILE_SUMMARY row={row} target_stage={target_stage} \
+                 target_candidate_ms={target_ms:.6} candidate_stage_sum_ms={candidate_total:.6} \
+                 target_self_fraction_pct={:.3} amdahl_remove_ceiling={:.6}",
+                target_fraction * 100.0,
+                1.0 / (1.0 - target_fraction),
+            );
+
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) =
+                    incumbent.run(&account_ids, &spend_deltas, &event_timestamps);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) =
+                    candidate.run(&account_ids, &spend_deltas, &event_timestamps);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+                &row,
+                &mut observe_incumbent,
+                &mut observe_candidate,
+            );
+            println!(
+                "WORKLOAD_SIZE_POINT workload=event_attribution_scatter size={size} \
+                 incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ratio={:.6} candidate_null_ratio={:.6} \
+                 incumbent_ns_per_event={:.3} candidate_ns_per_event={:.3}",
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+                effect.arm_a_median_ns / size as f64,
+                effect.arm_b_median_ns / size as f64,
+            );
+            scaling.push(effect);
+        }
+
+        let first_ratio = scaling.first().expect("first scaling point").ratio_median;
+        let last_ratio = scaling.last().expect("last scaling point").ratio_median;
+        let ratio_min = scaling
+            .iter()
+            .map(|stats| stats.ratio_median)
+            .fold(f64::INFINITY, f64::min);
+        let ratio_max = scaling
+            .iter()
+            .map(|stats| stats.ratio_median)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let ratio_spread = ratio_max / ratio_min - 1.0;
+        let monotonic_up = scaling
+            .windows(2)
+            .all(|points| points[1].ratio_median >= points[0].ratio_median);
+        let monotonic_down = scaling
+            .windows(2)
+            .all(|points| points[1].ratio_median <= points[0].ratio_median);
+        let shape = if ratio_spread <= 0.15 {
+            "FLAT_PER_EVENT_COST"
+        } else if monotonic_up && last_ratio >= first_ratio * 1.15 {
+            "WIDENING_WITH_BATCH"
+        } else if monotonic_down && last_ratio <= first_ratio * 0.85 {
+            "NARROWING_WITH_BATCH"
+        } else {
+            "MIXED_OR_NOISE"
+        };
+        println!(
+            "SCALING_SHAPE workload=event_attribution_scatter dimension=batch_size \
+             sizes=[{},{},{}] ratios=[{:.6},{:.6},{:.6}] \
+             ratio_spread={ratio_spread:.6} classification={shape}",
+            EVENT_SIZES[0],
+            EVENT_SIZES[1],
+            EVENT_SIZES[2],
+            scaling[0].ratio_median,
+            scaling[1].ratio_median,
+            scaling[2].ratio_median,
+        );
+    });
+}
+
+/// Phase-2 Class-3 workload: reconcile two entitlement snapshots whose keys
+/// are packed `(tenant, principal, entitlement)` records. NumPy has no hashed
+/// structured-record set algebra; its public operations sort through the
+/// generic per-field void comparator. FrankenNumPy value-lex canonicalizes the
+/// records and uses fixed-record hash membership for intersection/difference.
+///
+/// Three snapshot sizes distinguish fixed setup from per-record comparator
+/// cost. Each current snapshot deliberately contains repeated carry-forward
+/// grants plus genuinely new keys, producing meaningful canonical counts and
+/// unchanged/added/revoked outputs.
+fn bench_realistic_entitlement_reconciliation_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    // Keep all three points on the >=65,536-record structured-hash route while
+    // fitting the complete explicit dual-null sweep inside RCH's 1,800-second
+    // remote-execution ceiling.
+    const SNAPSHOT_SIZES: [usize; 3] = [65_536, 72_000, 80_000];
+    const WORKLOAD_CONTRACT_ROUNDS: usize = 21;
+    const WORKLOAD_CONTRACT_MIN_OF: usize = 2;
+    const THREADS: &str = "4";
+
+    for variable in [
+        "RAYON_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(THREADS),
+            "{variable} must be explicitly pinned before workload timing"
+        );
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        THREADS
+            .parse::<usize>()
+            .expect("thread count constant is numeric"),
+        "Rayon pool width does not match the pinned workload configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME host={} rayon_threads={} RAYON_NUM_THREADS={} \
+         OPENBLAS_NUM_THREADS={} OMP_NUM_THREADS={} MKL_NUM_THREADS={} trj_used=false",
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "unavailable".to_owned()),
+        rayon::current_num_threads(),
+        THREADS,
+        THREADS,
+        THREADS,
+        THREADS,
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_entitlement_reconciliation_workload")
+            .expect("entitlement-reconciliation module");
+        fnp_python(&module).expect("initialize fnp_python entitlement-reconciliation module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(format!(
+                r#"
+import numpy as np
+rng = np.random.default_rng(20260729)
+snapshot_sizes = {SNAPSHOT_SIZES:?}
+grant_dtype = np.dtype([
+    ("tenant_id", "<i8"),
+    ("principal_id", "<i8"),
+    ("entitlement_id", "<i8"),
+], align=False)
+
+previous_by_size = []
+current_by_size = []
+for size in snapshot_sizes:
+    previous = np.empty(size, dtype=grant_dtype)
+    previous["tenant_id"] = (rng.zipf(1.19, size=size) - 1) % 2_048
+    previous["principal_id"] = (
+        previous["tenant_id"] * np.int64(1_000_000)
+        + rng.integers(0, 200_000, size=size, dtype=np.int64)
+    )
+    previous["entitlement_id"] = (
+        (rng.zipf(1.31, size=size) - 1) % 512
+    ).astype(np.int64)
+
+    carry_count = int(size * 0.72)
+    carry = previous[
+        rng.integers(0, size, size=carry_count, dtype=np.int64)
+    ].copy()
+    new_count = size - carry_count
+    new = np.empty(new_count, dtype=grant_dtype)
+    new["tenant_id"] = (rng.zipf(1.19, size=new_count) - 1) % 2_048
+    new["principal_id"] = (
+        new["tenant_id"] * np.int64(1_000_000)
+        + rng.integers(200_000, 450_000, size=new_count, dtype=np.int64)
+    )
+    new["entitlement_id"] = (
+        (rng.zipf(1.31, size=new_count) - 1) % 512
+    ).astype(np.int64)
+
+    current = np.concatenate((carry, new))
+    rng.shuffle(current)
+    previous_by_size.append(np.ascontiguousarray(previous))
+    current_by_size.append(np.ascontiguousarray(current))
+
+assert grant_dtype.names == (
+    "tenant_id", "principal_id", "entitlement_id",
+)
+assert grant_dtype.itemsize == 24
+for snapshot in previous_by_size + current_by_size:
+    assert snapshot.ndim == 1
+    assert snapshot.flags.c_contiguous
+    assert snapshot.dtype == grant_dtype
+"#
+            ))
+            .expect("entitlement-reconciliation setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("entitlement-reconciliation corpus setup");
+
+        let fnp_unique = module.getattr("unique").expect("fnp unique");
+        let np_unique = numpy.getattr("unique").expect("numpy unique");
+        let fnp_intersect1d = module.getattr("intersect1d").expect("fnp intersect1d");
+        let np_intersect1d = numpy.getattr("intersect1d").expect("numpy intersect1d");
+        let fnp_setdiff1d = module.getattr("setdiff1d").expect("fnp setdiff1d");
+        let np_setdiff1d = numpy.getattr("setdiff1d").expect("numpy setdiff1d");
+        for (candidate, incumbent, surface) in [
+            (&fnp_unique, &np_unique, "unique"),
+            (&fnp_intersect1d, &np_intersect1d, "intersect1d"),
+            (&fnp_setdiff1d, &np_setdiff1d, "setdiff1d"),
+        ] {
+            assert!(
+                !candidate.is(incumbent),
+                "{surface}: candidate callable aliases NumPy"
+            );
+            common::report_numpy_incumbent_identity(py, surface, incumbent);
+        }
+        common::report_incumbent_topology(
+            "fnp.workload.entitlement_reconciliation",
+            "numpy.workload.entitlement_reconciliation",
+        );
+        println!(
+            "INCUMBENT_PIPELINE workload=entitlement_reconciliation \
+             candidate=fnp.unique+fnp.intersect1d+fnp.setdiff1d \
+             incumbent=numpy.unique+numpy.intersect1d+numpy.setdiff1d \
+             shared_timed_component=none inputs_shared_read_only=true"
+        );
+        println!(
+            "ROUTE_PRECONDITIONS workload=entitlement_reconciliation \
+             dtype=packed_native_3xi64 itemsize=24 ndim=1 c_contiguous=true \
+             no_padding=true no_float_fields=true min_snapshot_size={} \
+             structured_hash_min=65536 route_gates_satisfied=true \
+             contract_rounds={WORKLOAD_CONTRACT_ROUNDS} \
+             contract_min_of={WORKLOAD_CONTRACT_MIN_OF}",
+            SNAPSHOT_SIZES[0],
+        );
+
+        let fnp_unique_kwargs = PyDict::new(py);
+        fnp_unique_kwargs
+            .set_item("return_counts", true)
+            .expect("fnp unique return_counts kwarg");
+        let np_unique_kwargs = PyDict::new(py);
+        np_unique_kwargs
+            .set_item("return_counts", true)
+            .expect("numpy unique return_counts kwarg");
+        let candidate = EntitlementReconciliationArm {
+            unique: fnp_unique,
+            intersect1d: fnp_intersect1d,
+            setdiff1d: fnp_setdiff1d,
+            unique_kwargs: fnp_unique_kwargs,
+        };
+        let incumbent = EntitlementReconciliationArm {
+            unique: np_unique,
+            intersect1d: np_intersect1d,
+            setdiff1d: np_setdiff1d,
+            unique_kwargs: np_unique_kwargs,
+        };
+
+        let previous_by_size = namespace
+            .get_item("previous_by_size")
+            .expect("previous entitlement snapshots");
+        let current_by_size = namespace
+            .get_item("current_by_size")
+            .expect("current entitlement snapshots");
+
+        let mut scaling = Vec::with_capacity(SNAPSHOT_SIZES.len());
+        for (size_index, size) in SNAPSHOT_SIZES.into_iter().enumerate() {
+            let row = format!("workload_entitlement_reconciliation_struct_3xi64_{size}");
+            println!(
+                "WORKLOAD_CONFIG row={row} user_job=entitlement_snapshot_reconciliation \
+                 previous_records={size} current_records={size} \
+                 distribution=zipf_tenants_and_entitlements_72pct_carry_forward \
+                 stages=unique_return_counts_current,intersect_unchanged,\
+                 setdiff_added,setdiff_revoked \
+                 output=canonical_counts_unchanged_added_revoked \
+                 matched_config=same_process_same_inputs target_regime=large_structured"
+            );
+            let previous = previous_by_size
+                .get_item(size_index)
+                .expect("previous entitlement snapshot");
+            let current = current_by_size
+                .get_item(size_index)
+                .expect("current entitlement snapshot");
+
+            let (_, incumbent_output) = incumbent.run(&previous, &current);
+            let (_, candidate_output) = candidate.run(&previous, &current);
+            assert_workload_outputs_equal(&numpy, &row, &candidate_output, &incumbent_output);
+            println!(
+                "PARITY row={row} dtype=packed_struct_3xi64 input_shape=[{size}] outputs=5 \
+                 byte_identity=passed checksum={:016x}",
+                workload_checksum(&numpy, &candidate_output),
+            );
+
+            let incumbent_profile = incumbent.profile(&previous, &current);
+            let candidate_profile = candidate.profile(&previous, &current);
+            let candidate_total = candidate_profile.iter().sum::<f64>();
+            let (target_stage, target_ms) = [
+                ("unique_return_counts_current", candidate_profile[0]),
+                ("intersect_unchanged", candidate_profile[1]),
+                ("setdiff_added", candidate_profile[2]),
+                ("setdiff_revoked", candidate_profile[3]),
+            ]
+            .into_iter()
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .expect("four profile stages");
+            for (stage, incumbent_ms, candidate_ms) in [
+                (
+                    "unique_return_counts_current",
+                    incumbent_profile[0],
+                    candidate_profile[0],
+                ),
+                (
+                    "intersect_unchanged",
+                    incumbent_profile[1],
+                    candidate_profile[1],
+                ),
+                ("setdiff_added", incumbent_profile[2], candidate_profile[2]),
+                (
+                    "setdiff_revoked",
+                    incumbent_profile[3],
+                    candidate_profile[3],
+                ),
+            ] {
+                println!(
+                    "PROFILE_STAGE row={row} arm_pair=numpy_fnp stage={stage} \
+                     incumbent_median_ms={incumbent_ms:.6} \
+                     candidate_median_ms={candidate_ms:.6}"
+                );
+            }
+            let target_fraction = target_ms / candidate_total;
+            println!(
+                "PROFILE_SUMMARY row={row} target_stage={target_stage} \
+                 target_candidate_ms={target_ms:.6} candidate_stage_sum_ms={candidate_total:.6} \
+                 target_self_fraction_pct={:.3} amdahl_remove_ceiling={:.6}",
+                target_fraction * 100.0,
+                1.0 / (1.0 - target_fraction),
+            );
+
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = incumbent.run(&previous, &current);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = candidate.run(&previous, &current);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &row,
+                    &mut observe_incumbent,
+                    &mut observe_candidate,
+                    WORKLOAD_CONTRACT_ROUNDS,
+                    WORKLOAD_CONTRACT_MIN_OF,
+                );
+            println!(
+                "WORKLOAD_SIZE_POINT workload=entitlement_reconciliation size={size} \
+                 incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ratio={:.6} candidate_null_ratio={:.6} \
+                 incumbent_ns_per_input_record={:.3} \
+                 candidate_ns_per_input_record={:.3}",
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+                effect.arm_a_median_ns / (2 * size) as f64,
+                effect.arm_b_median_ns / (2 * size) as f64,
+            );
+            scaling.push(effect);
+        }
+
+        let first_ratio = scaling.first().expect("first scaling point").ratio_median;
+        let last_ratio = scaling.last().expect("last scaling point").ratio_median;
+        let ratio_min = scaling
+            .iter()
+            .map(|stats| stats.ratio_median)
+            .fold(f64::INFINITY, f64::min);
+        let ratio_max = scaling
+            .iter()
+            .map(|stats| stats.ratio_median)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let ratio_spread = ratio_max / ratio_min - 1.0;
+        let monotonic_up = scaling
+            .windows(2)
+            .all(|points| points[1].ratio_median >= points[0].ratio_median);
+        let monotonic_down = scaling
+            .windows(2)
+            .all(|points| points[1].ratio_median <= points[0].ratio_median);
+        let shape = if ratio_spread <= 0.15 {
+            "FLAT_PER_RECORD_COST"
+        } else if monotonic_up && last_ratio >= first_ratio * 1.15 {
+            "WIDENING_WITH_SNAPSHOT"
+        } else if monotonic_down && last_ratio <= first_ratio * 0.85 {
+            "NARROWING_WITH_SNAPSHOT"
+        } else {
+            "MIXED_OR_NOISE"
+        };
+        println!(
+            "SCALING_SHAPE workload=entitlement_reconciliation dimension=snapshot_size \
+             sizes=[{},{},{}] ratios=[{:.6},{:.6},{:.6}] \
+             ratio_spread={ratio_spread:.6} classification={shape}",
+            SNAPSHOT_SIZES[0],
+            SNAPSHOT_SIZES[1],
+            SNAPSHOT_SIZES[2],
+            scaling[0].ratio_median,
+            scaling[1].ratio_median,
+            scaling[2].ratio_median,
+        );
+    });
+}
+
+fn bench_bool_storage_bytes_median_gate(c: &mut Criterion) {
+    let _ = c;
+    const N: usize = 8_000_000;
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+
+        // Deterministic mixed pattern; the byte content is what gets copied, so
+        // an all-true or all-false buffer would not be representative.
+        let values: Vec<bool> = (0..N).map(|index| index % 3 == 0).collect();
+
+        let checksum_of = |array: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let bytes = array
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec");
+            bytes
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        let build_from = |bytes: &[u8]| -> pyo3::Bound<'_, pyo3::PyAny> {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", "uint8").expect("dtype kwarg");
+            let array = numpy
+                .call_method("empty", (bytes.len(),), Some(&kwargs))
+                .expect("numpy.empty");
+            let buffer = pyo3::buffer::PyBuffer::<u8>::get(&array).expect("uint8 buffer");
+            buffer.copy_from_slice(py, bytes).expect("buffer copy");
+            array
+        };
+
+        let mut time_former = || {
+            let started = Instant::now();
+            let bytes: Vec<u8> = values.iter().map(|&b| u8::from(b)).collect();
+            let array = build_from(black_box(&bytes));
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&array),
+            }
+        };
+        let mut time_candidate = || {
+            let started = Instant::now();
+            // SAFETY: `bool` and `u8` share size 1 and align 1, and every valid
+            // `bool` is a valid `u8`, so the `Vec<bool>` allocation is a valid
+            // `[u8]` of the same length for as long as `values` lives.
+            let bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), values.len()) };
+            let array = build_from(black_box(bytes));
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&array),
+            }
+        };
+
+        // Byte-identity before any timing, over and above the per-round checksum
+        // equality the contract harness enforces.
+        assert_eq!(
+            time_former().checksum,
+            time_candidate().checksum,
+            "bool storage arms must produce byte-identical NumPy output",
+        );
+
+        let _ = common::run_median_ci_contract(
+            "python_bool_storage_bytes_8m",
+            &mut time_former,
+            &mut time_candidate,
+        );
+    });
+}
+
+fn main() {
+    common::gated_main(&[
+        (
+            "bench_average_f16_vs_numpy_median_gate",
+            bench_average_f16_vs_numpy_median_gate,
+        ),
+        (
+            "bench_bool_public_vs_numpy_median_gate",
+            bench_bool_public_vs_numpy_median_gate,
+        ),
+        (
+            "bench_class3_missing_capability_vs_numpy_median_gate",
+            bench_class3_missing_capability_vs_numpy_median_gate,
+        ),
+        (
+            "bench_isin_f64_vs_numpy_median_gate",
+            bench_isin_f64_vs_numpy_median_gate,
+        ),
+        (
+            "bench_quantile_f16_histogram_vs_numpy_median_gate",
+            bench_quantile_f16_histogram_vs_numpy_median_gate,
+        ),
+        (
+            "bench_realistic_end_to_end_workloads_vs_numpy_median_gate",
+            bench_realistic_end_to_end_workloads_vs_numpy_median_gate,
+        ),
+        (
+            "bench_realistic_event_attribution_scatter_vs_numpy_median_gate",
+            bench_realistic_event_attribution_scatter_vs_numpy_median_gate,
+        ),
+        (
+            "bench_realistic_entitlement_reconciliation_vs_numpy_median_gate",
+            bench_realistic_entitlement_reconciliation_vs_numpy_median_gate,
+        ),
+        (
+            "bench_bool_storage_bytes_median_gate",
+            bench_bool_storage_bytes_median_gate,
+        ),
+        (
+            "bench_loadtxt_selected_bool_median_gate",
+            bench_loadtxt_selected_bool_median_gate,
+        ),
+        (
+            "bench_loadtxt_negative_tail_vs_numpy_median_gate",
+            bench_loadtxt_negative_tail_vs_numpy_median_gate,
+        ),
+        (
+            "bench_wide_string_sort_median_gate",
+            bench_wide_string_sort_median_gate,
+        ),
+        (
+            "bench_accumulate_extremum_median_gate",
+            bench_accumulate_extremum_median_gate,
+        ),
+        (
+            "bench_int_convolve_median_gate",
+            bench_int_convolve_median_gate,
+        ),
+        ("bench_completion_median_gate", bench_completion_median_gate),
+        (
+            "bench_f64_transcendental_median_gate",
+            bench_f64_transcendental_median_gate,
+        ),
+        ("bench_f64_exp_log_probe", bench_f64_exp_log_probe),
+        (
+            "bench_f64_exp_log_median_gate",
+            bench_f64_exp_log_median_gate,
+        ),
+        ("bench_bool_sort_median_gate", bench_bool_sort_median_gate),
+        ("bench_int_matmul_median_gate", bench_int_matmul_median_gate),
+        ("bench_f16_matmul_median_gate", bench_f16_matmul_median_gate),
+        ("bench_multidot_median_gate", bench_multidot_median_gate),
+        ("bench_isclose_median_gate", bench_isclose_median_gate),
+        ("bench_f16_unique_median_gate", bench_f16_unique_median_gate),
+        ("bench_f16_around_median_gate", bench_f16_around_median_gate),
+        ("bench_f16_einsum_median_gate", bench_f16_einsum_median_gate),
+        (
+            "bench_wide_string_substrate_v2",
+            bench_wide_string_substrate_v2,
+        ),
+        (
+            "bench_ledger_integrity_rejects",
+            bench_ledger_integrity_rejects,
+        ),
+    ]);
+}
