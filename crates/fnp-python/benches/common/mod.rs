@@ -21,15 +21,19 @@ use pyo3::{Bound, Py, PyAny, PyResult, Python};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::hint::black_box;
 use std::path::Path;
 use std::sync::OnceLock;
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const CONTRACT_ROUNDS: usize = 41;
 const CONTRACT_MIN_OF: usize = 3;
 const CONTRACT_BOOTSTRAP_RESAMPLES: usize = 4_096;
+const HOST_WIDE_CPU_SAMPLE_INTERVAL: Duration = Duration::from_millis(300);
+const HOST_WIDE_MAX_BUSY_FRACTION: f64 = 0.20;
 
 #[derive(Clone, Copy)]
 pub struct ContractPairStats {
@@ -47,6 +51,12 @@ pub struct ContractPairStats {
 pub struct ContractObservation {
     pub elapsed: Duration,
     pub checksum: u64,
+}
+
+#[derive(Clone, Copy)]
+struct CpuTicks {
+    total: u64,
+    idle: u64,
 }
 
 fn file_identity(path: &Path) -> Option<(String, usize)> {
@@ -71,6 +81,170 @@ fn self_identity() -> String {
         return "unavailable".to_string();
     };
     format!("{} ({} bytes) {}", hash, byte_len, path.display())
+}
+
+fn read_cpu_ticks() -> Result<BTreeMap<usize, CpuTicks>, String> {
+    let content = std::fs::read_to_string("/proc/stat")
+        .map_err(|error| format!("read /proc/stat: {error}"))?;
+    let mut cpus = BTreeMap::new();
+    for line in content.lines() {
+        let mut fields = line.split_ascii_whitespace();
+        let Some(label) = fields.next() else {
+            continue;
+        };
+        let Some(suffix) = label.strip_prefix("cpu") else {
+            continue;
+        };
+        if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let cpu = suffix
+            .parse::<usize>()
+            .map_err(|error| format!("parse CPU index {suffix}: {error}"))?;
+        let ticks = fields
+            .map(str::parse::<u64>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("parse /proc/stat ticks for cpu{cpu}: {error}"))?;
+        if ticks.len() < 5 {
+            return Err(format!("cpu{cpu} /proc/stat row is too short"));
+        }
+        cpus.insert(
+            cpu,
+            CpuTicks {
+                total: ticks.iter().copied().sum(),
+                idle: ticks[3].saturating_add(ticks[4]),
+            },
+        );
+    }
+    if cpus.is_empty() {
+        return Err("no per-CPU rows in /proc/stat".to_owned());
+    }
+    Ok(cpus)
+}
+
+fn parse_cpu_list(value: &str) -> Result<BTreeSet<usize>, String> {
+    let mut cpus = BTreeSet::new();
+    for range in value.trim().split(',').filter(|part| !part.is_empty()) {
+        if let Some((start, end)) = range.split_once('-') {
+            let start = start
+                .parse::<usize>()
+                .map_err(|error| format!("parse CPU range start {start}: {error}"))?;
+            let end = end
+                .parse::<usize>()
+                .map_err(|error| format!("parse CPU range end {end}: {error}"))?;
+            if start > end {
+                return Err(format!("descending CPU range: {range}"));
+            }
+            cpus.extend(start..=end);
+        } else {
+            cpus.insert(
+                range
+                    .parse::<usize>()
+                    .map_err(|error| format!("parse CPU index {range}: {error}"))?,
+            );
+        }
+    }
+    if cpus.is_empty() {
+        return Err("CPU list is empty".to_owned());
+    }
+    Ok(cpus)
+}
+
+fn self_allowed_cpus() -> Result<BTreeSet<usize>, String> {
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|error| format!("read /proc/self/status: {error}"))?;
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:").map(str::trim))
+        .ok_or_else(|| "Cpus_allowed_list missing from /proc/self/status".to_owned())?;
+    parse_cpu_list(allowed)
+}
+
+fn sample_cpu_busy() -> Result<BTreeMap<usize, f64>, String> {
+    let before = read_cpu_ticks()?;
+    thread::sleep(HOST_WIDE_CPU_SAMPLE_INTERVAL);
+    let after = read_cpu_ticks()?;
+    let mut busy = BTreeMap::new();
+    for (cpu, start) in before {
+        let end = after
+            .get(&cpu)
+            .ok_or_else(|| format!("cpu{cpu} disappeared during load sample"))?;
+        let total = end.total.saturating_sub(start.total);
+        let idle = end.idle.saturating_sub(start.idle);
+        let fraction = if total == 0 {
+            1.0
+        } else {
+            total.saturating_sub(idle) as f64 / total as f64
+        };
+        busy.insert(cpu, fraction);
+    }
+    Ok(busy)
+}
+
+fn format_cpu_set(cpus: &BTreeSet<usize>) -> String {
+    cpus.iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn block_benchmark(reason: &str) -> ! {
+    eprintln!("HOST_WIDE_QUIESCENCE verdict=blocked reason={reason}");
+    std::io::Write::flush(&mut std::io::stderr()).expect("flushing stderr cannot fail");
+    std::process::exit(2);
+}
+
+/// Refuse to measure unless this process owns a full-host affinity mask and
+/// every online CPU is quiet. This makes benchmark exclusivity a checked
+/// harness contract instead of an operator convention.
+fn require_host_wide_benchmark_exclusivity(phase: &str) {
+    let allowed = self_allowed_cpus()
+        .unwrap_or_else(|error| block_benchmark(&format!("affinity_check:{error}")));
+    let busy = sample_cpu_busy()
+        .unwrap_or_else(|error| block_benchmark(&format!("quiescence_check:{error}")));
+    let online = busy.keys().copied().collect::<BTreeSet<_>>();
+    if allowed != online {
+        block_benchmark(&format!(
+            "affinity_not_host_wide:allowed={}:online={}",
+            format_cpu_set(&allowed),
+            format_cpu_set(&online),
+        ));
+    }
+
+    let busy_cpus = allowed
+        .iter()
+        .filter_map(|cpu| {
+            let fraction = busy
+                .get(cpu)
+                .copied()
+                .unwrap_or_else(|| block_benchmark(&format!("allowed_cpu_disappeared:cpu{cpu}")));
+            (fraction > HOST_WIDE_MAX_BUSY_FRACTION)
+                .then_some(format!("cpu{cpu}={:.1}%", fraction * 100.0))
+        })
+        .collect::<Vec<_>>();
+    if !busy_cpus.is_empty() {
+        block_benchmark(&format!(
+            "host_not_quiet:maximum_allowed_busy_pct={:.1}:busy_cpus={}",
+            HOST_WIDE_MAX_BUSY_FRACTION * 100.0,
+            busy_cpus.join(","),
+        ));
+    }
+    let maximum_observed_busy = allowed
+        .iter()
+        .filter_map(|cpu| busy.get(cpu))
+        .copied()
+        .fold(0.0_f64, f64::max);
+    println!(
+        "HOST_WIDE_QUIESCENCE phase={phase} allowed_cpu_count={} affinity={} \
+         sample_ms={} maximum_allowed_busy_fraction={:.3} \
+         maximum_observed_busy_fraction={maximum_observed_busy:.3} \
+         busy_cpu_count_above_limit=0 verdict=clear",
+        allowed.len(),
+        format_cpu_set(&allowed),
+        HOST_WIDE_CPU_SAMPLE_INTERVAL.as_millis(),
+        HOST_WIDE_MAX_BUSY_FRACTION,
+    );
+    std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
 }
 
 pub fn bench_invocation_id() -> &'static str {
@@ -382,6 +556,7 @@ where
     A: FnMut() -> ContractObservation,
     B: FnMut() -> ContractObservation,
 {
+    require_host_wide_benchmark_exclusivity("median_ci_contract_preflight");
     for _ in 0..4 {
         black_box(min_observation(&mut former));
         black_box(min_observation(&mut former));
@@ -490,6 +665,7 @@ where
     );
     assert!(min_of >= 1, "contract min-of count must be non-zero");
 
+    require_host_wide_benchmark_exclusivity("dual_null_contract_preflight");
     for _ in 0..4 {
         black_box(min_observation_with(&mut incumbent, min_of));
         black_box(min_observation_with(&mut incumbent, min_of));
@@ -697,6 +873,7 @@ pub fn gated_main(targets: &[BenchGroup]) {
     // Line one, before Criterion is constructed: Criterion may print its
     // backend notice during construction.
     report_bench_identity();
+    require_host_wide_benchmark_exclusivity("process_preflight");
     let mut criterion = Criterion::default().configure_from_args();
     for (name, target) in targets {
         if group_enabled(name) {
