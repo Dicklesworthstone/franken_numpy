@@ -368,6 +368,88 @@ parity, both same-invocation nulls, executable/artifact identities, and the
 median-CI gate. Consider S17+ multiword keys only if a new profile ranks that
 width family; do not extrapolate this two-word result.
 
+## 2026-07-28 - HOLD-UNBANKED: ASCII `char.upper` end-to-end observation lacked the candidate null and execution provenance
+
+`BlackThrush`. Class-3 capability gap: NumPy has **no vectorized string-case
+kernel**. `numpy.char.upper` loops per element through the `numpy.char` layer;
+we map ASCII bytes directly. Byte-wise case mapping is exact, so the arms are
+byte-identical by construction rather than by tolerance — checksum
+`85f084b87ad006ac` in both the null and effect rows.
+
+Same family as the historical ASCII-translate row. Deliberately not square f64
+GEMM. The measurement is retained below as diagnostic evidence, but it is not
+campaign output under the current dual-null contract.
+
+**Campaign status:** HOLD-UNBANKED; no competitive magnitude is publishable
+from this invocation.
+
+**A/A null control (same invocation):** NumPy/NumPy ratio median 0.964077, CI95 [0.922213, 1.002180], 41 rounds, min_of=3
+
+**Candidate A/A null control (same invocation):** not measured. The old
+single-null harness never ran FNP/FNP, so it cannot distinguish a stable
+incumbent window from candidate-arm instability.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c695f696a01f22-000e1f43 measured_ratio=24.189553x median=85.856594ms
+
+`bench_elf_sha256=aba10e66f7406834da449154eb56dc925bc103278913404b5e9c111d1823b1ef`
+(47,476,736 bytes)
+
+The process imported NumPy 2.4.6 and asserted that the resolved NumPy and FNP
+callables were distinct, but it did not emit the complete nested-callable
+identity record for `numpy.char.upper`. The measured topology was
+`candidate=fnp.char.upper incumbent=numpy.char.upper
+shared_timed_component=none`.
+
+| row | arm A (numpy) | arm B (fnp) | ratio median | ratio CI95 | cv |
+|---|---:|---:|---:|---:|---:|
+| A/A null (NumPy/NumPy) | 83.767593 ms | 85.515994 ms | 0.964077 | `[0.922213, 1.002180]` | 15.511% |
+| effect (numpy/fnp) | 85.856594 ms | **3.450471 ms** | **24.189553** | **`[23.517680, 26.658538]`** | 22.417% |
+
+**Recorded one-null harness verdict: DECIDABLE_WIN. Current verdict:
+HOLD-UNBANKED.** The old gate computed `null_half_width=0.077787` and
+`required_2x_delta=0.155573`; the effect delta of 23.189553 cleared that obsolete
+single-null threshold. Without the candidate null, however, it does not clear
+the current wider-of-two-nulls gate.
+
+CAVEAT — THE NULL IS MARGINAL. The NumPy/NumPy null read **0.964077** with CI
+`[0.922213, 1.002180]`. That brackets unity only at the very top of the
+interval, so the window is admissible but barely: arm A was consistently a few
+percent faster than arm B in the null despite both being NumPy. That is a
+first-mover or thermal-drift asymmetry the alternating order did not fully
+cancel. It does not threaten a 24x verdict — no plausible correction of 3.6%
+touches it — but on a surface with a small expected effect the same window would
+have been unusable, and a null that is 3.6% off unity should be treated as a
+yellow flag on the measurement conditions, not ignored because the headline
+survived it.
+
+COUNTED_MECHANISM: 1 algorithmic class - NumPy has no vectorized string-case
+kernel and loops per element through the `numpy.char` layer; we map ASCII bytes
+directly.
+
+WORK ACCOUNTING: both arms receive one public call over the same 400,000 `U16`
+elements containing 6,400,000 populated Unicode codepoint slots. The FNP ASCII
+route performs an all-ASCII scan and then a case-map pass; the incumbent's exact
+internal visit count was not instrumented. The observation is therefore not an
+iteration-count win and cannot be attributed to the candidate doing fewer
+logical elements.
+
+PROVENANCE DEFECT: the invocation predates the host/thread contract. It did not
+record hostname, physical cores, logical threads, configured thread variables,
+governor, ISA, or OS-observed threads actually used by each arm. The ELF and
+NumPy artifact hashes alone do not repair those missing fields.
+
+SCOPE OF UNBANKED OBSERVATION: the recorded 24.189553x effect is 400,000
+elements of `U16` ASCII under NumPy 2.4.6. Non-ASCII input takes a different
+path in both implementations. Do not quote this magnitude as a campaign result.
+
+Retry predicate: reopen only with one invocation that emits the exact nested
+NumPy callable identity, NumPy/NumPy and FNP/FNP nulls, an alternating
+NumPy/FNP effect gated on the bootstrap median CI against the wider null,
+hostname, physical/logical topology, threads configured and actually used,
+governor, ISA, both artifact hashes, exact byte parity, and the work accounting
+above. Re-measure as well if NumPy gains a vectorized string kernel.
+
+
 ## 2026-07-28 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): f16 telemetry health report - 4.848358x vs NumPy
 
 `BeigeDog`, bead `franken_numpy-ixs5y.384`, cod / Lane M. This is a whole
@@ -831,7 +913,7 @@ is a physical wall rather than a tuning gap. Reopen only if a profile shows the
 result-materialisation path exceeding 20% of exact self-time on the public call,
 which would mean the funnel had become dominant after all.
 
-## 2026-07-27 - WIN (KEEP, INCUMBENT-WIN): int64 `matmul` end-to-end vs NumPy - 23.328871x, no integer BLAS exists
+## 2026-07-27 - HOLD-UNBANKED: int64 `matmul` direction was large but the candidate magnitude was unstable
 
 `BlackThrush`. Second surface of the same sweep, and a class-3 capability gap:
 **NumPy has no integer BLAS**. Its `matmul` on int64 falls to a generic loop
@@ -842,11 +924,16 @@ Deliberately **not** square f64 GEMM: that is OpenBLAS's strength, our kernel is
 bit-exactness-constrained to no-FMA and already at the no-FMA AVX2 peak, and this
 ledger has already settled the tile geometry.
 
-**Campaign result class:** incumbent-win
+**Campaign status:** HOLD-UNBANKED; the three historical effects are retained
+as diagnostics, not as a competitive magnitude.
 
 **A/A null control (same invocation):** numpy/numpy ratio median 1.000568, CI95 [0.991549, 1.021377], 41 rounds, min_of=3
 
-**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=int64-matmul-256-vmi1227854-20260727-run2 measured_ratio=23.328871x median=19.603036ms
+**Candidate A/A null control (same invocation):** not measured in any of the
+three runs. That missing control is decisive because the FNP arm itself moved
+from about 0.83 ms to 1.37 ms while NumPy stayed near 19.7 ms.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c695f696a01f22-000e1f43 measured_ratio=14.338935x median=19.722484ms
 
 **Incumbent isolation proof:** candidate=fnp.matmul incumbent=numpy.matmul shared_timed_component=none
 
@@ -867,10 +954,12 @@ the one a peer row recorded for the same interpreter.
 | A/A null (numpy/numpy) | 19.536464 ms | 19.416554 ms | 1.000568 | `[0.991549, 1.021377]` | 2.947% |
 | effect (numpy/fnp) | 19.794581 ms | **0.825496 ms** | **23.328871** | **`[22.036655, 24.645978]`** | 20.204% |
 
-**Verdict: DECIDABLE_WIN.** `null_half_width=0.021377`, so `required_2x_delta`
-is 0.042754; the effect delta of 22.328871 exceeds it by roughly 522x and the
-CIs are disjoint by a wide margin. The null is unusually tight here (cv 2.947%),
-so the window is clean. Checksum `1d511b65895cd251` identical in both rows.
+**Recorded one-null harness verdict: DECIDABLE_WIN. Current verdict:
+HOLD-UNBANKED.** The old gate computed `null_half_width=0.021377` and
+`required_2x_delta=0.042754`; the effect delta cleared it and checksum
+`1d511b65895cd251` matched. That establishes exact output parity and a large
+diagnostic direction, but not an admissible magnitude without the candidate
+null.
 
 Six traps: incumbent identity asserted at runtime inside the binary and printed
 (`INCUMBENT_IDENTITY arm=numpy.matmul numpy.__version__=2.4.6
@@ -884,18 +973,58 @@ COUNTED_MECHANISM: 1 algorithmic class - NumPy dispatches int64 matmul to a
 generic elementwise loop because no integer BLAS exists; we use a tiled register-
 blocked integer kernel.
 
-REPRODUCED. Two independent runs from separately built ELFs:
-23.328871x CI95 [22.036655, 24.645978] (null 1.000568) and 23.915864x CI95
-[20.146464, 25.470754] (null 0.992721). **The conservative 23.328871x is the
-published figure**; the range across runs is 23.33-23.92x.
+REPRODUCED THREE TIMES, AND THE MAGNITUDE IS UNSTABLE. Three independent runs
+from separately built ELFs:
 
-SCOPE: 23.328871x is 256x256 int64 on this worker under numpy 2.4.6. The ratio
-depends on shape, and the historical 27-35x integer-matmul rows are different
-shapes; quote the shape with the ratio.
+| run | effect median | effect CI95 | A/A null | fnp arm median | numpy arm median |
+|---|---:|---|---:|---:|---:|
+| 1 | 23.328871x | [22.036655, 24.645978] | 1.000568 | 0.825496 ms | 19.794581 ms |
+| 2 | 23.915864x | [20.146464, 25.470754] | 0.992721 | 0.833238 ms | 19.603036 ms |
+| 3 | **14.338935x** | [13.507942, 15.415057] | 1.001583 | 1.367689 ms | 19.722484 ms |
 
-Retry predicate: reopen only to widen the shape grid, or if NumPy gains an
-integer BLAS path, which would remove the capability gap. Do not reopen it to
-re-decide this point.
+**No magnitude from these three runs is publishable.** The observed range is
+14.34-23.92x, a 67% spread, and choosing the smallest point does not turn an
+unstable candidate arm into a controlled campaign result.
+
+The direction is not in doubt — every run is decisively outside its own null,
+and run 3's null is the tightest of the three (CI [0.996750, 1.007798], half
+width 0.007798). What moved is **our own arm**: 0.83 ms, 0.83 ms, then 1.37 ms,
+while NumPy held at 19.6-19.8 ms in all three. So the incumbent side is stable
+and the variance is entirely ours.
+
+That is worth stating plainly rather than smoothing: an A/A null between two
+NumPy calls cannot detect instability in the *candidate* arm, because the null
+never runs our code. A tight null is evidence the window was quiet, not evidence
+our arm was consistent. Run 3's effect cv of 23.601% is where that shows up, and
+cv is provenance only, so nothing in the contract flags it. The gap is real and
+large under any of the three, but a single-run magnitude from this surface should
+not be quoted as precise.
+
+Retry predicate for the instability specifically: before quoting a tighter
+figure, run a candidate/candidate null on this surface (fnp vs fnp) to establish
+our own arm's spread; the numpy/numpy null cannot supply it.
+
+WORK ACCOUNTING: both arms multiply the same 256x256 int64 matrices and compute
+exactly 256^3 = 16,777,216 scalar multiply-accumulates into 65,536 output
+elements. The candidate is not winning by taking fewer mathematical iterations;
+the known difference is its tiled register-blocked kernel versus NumPy's generic
+integer loop.
+
+PROVENANCE DEFECT: none of these runs recorded the complete current baseline:
+hostname, physical cores, logical threads, configured threads, governor, ISA,
+and OS-observed threads actually used by both arms. The row therefore cannot be
+promoted merely by adding an FNP/FNP timing from a separate process.
+
+SCOPE OF UNBANKED OBSERVATIONS: all three effects are for 256x256 int64 under
+NumPy 2.4.6. Historical 27-35x integer-matmul rows use different shapes and do
+not repair this contract.
+
+Retry predicate: reopen this point only with one invocation that records both
+A/A controls, the interleaved effect, bootstrap median CIs gated against the
+wider null, complete host/thread/governor/ISA provenance, both artifact hashes,
+OS-observed threads per arm, exact output parity, and equal operation counts.
+After that, widen the shape grid only if the point is stable, or re-measure if
+NumPy gains an integer BLAS path.
 
 ## 2026-07-27 - INCUMBENT WIN (KEEP): bounded negative-`usecols` tail ring through `fnp.loadtxt` - 1.195768x vs NumPy
 
