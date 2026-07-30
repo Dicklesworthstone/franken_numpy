@@ -4,6 +4,326 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-30 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN, DISCLOSED PARTIAL DELEGATION): int64 access-control exposure report - 17.43-19.55x vs NumPy with a flat account curve
+
+`BlackThrush`, bead `franken_numpy-ixs5y.391`. This is a whole
+authorization-risk scoring job, not a kernel probe: propagate a sparse
+account-to-role assignment matrix through a fixed role-to-permission risk-weight
+matrix, then emit per-account total exposure, per-account peak exposure, and one
+fleet total. Each arm independently executes the same four public calls a real
+analyst writes — `matmul`, `sum(axis=1)`, `max(axis=1)`, `sum()` — over the same
+read-only int64 inputs.
+
+WHY THIS WORKLOAD IS REPRESENTATIVE: it is the linear-algebra-heavy scoring loop
+shape. Integer counts times integer severity weights is how access review,
+entitlement risk, and rules-engine scoring are actually written; the dtype is
+int64 because the values are counts and severity points, not estimates, and
+users do not cast them to float just to matmul. The reductions are the columns a
+report needs. Nothing here is curated toward a kernel we happen to like: the
+public call list came first, and two of the four calls turn out not to have a
+native FrankenNumPy route at all (disclosed below).
+
+`bench_elf_sha256=6a5ca476ab622c441b7e1a30eb73ca49d1f77a4f7cbb461ae838fe60d69d7880`
+(297,690,600 bytes), self-reported by the executing process from
+`/proc/self/exe`, invocation
+`000000000000000018c6f0288dafc907-000207a1`.
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 0.988789x, CI95 [0.982472, 0.997568], 21 rounds, min_of=2 at the conservative 2,048-account headline point; the table records all three sizes.
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio 0.960072x, CI95 [0.914994, 1.015724], 21 rounds, min_of=2 at the same headline point.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa artifact_bytes=10452641 invocation_id=000000000000000018c6f0288dafc907-000207a1 measured_ratio=17.427451x median=75.742331ms
+
+The incumbent was live in the timed process, never a cached number and never a
+shared component: runtime identity checks proved `numpy.matmul`, `numpy.sum`,
+and `numpy.max` were the live NumPy 2.4.6 objects
+(`/root/.local/lib/python3.13/site-packages/numpy/_core/_multiarray_umath.cpython-313-x86_64-linux-gnu.so`)
+and that each was a distinct object from its FNP counterpart. Both arms, both
+A/A controls, every size point, and both artifact identities came from the one
+invocation above.
+
+**Incumbent isolation proof:** candidate=fnp.workload.access_control_exposure_report incumbent=numpy.workload.access_control_exposure_report shared_timed_component=numpy.sum_int64_axis1,numpy.sum_int64_flat
+
+**Shared timed component disclosure:** components=numpy.sum_int64_axis1,numpy.sum_int64_flat direction=conservative_for_candidate share_of_candidate_pct=7.427,9.773,6.479
+
+This row does **not** claim `shared_timed_component=none`, and it must not be
+quoted as if it did. Two of the candidate's four public stages are
+source-pinned NumPy passthroughs:
+
+| stage | candidate route | source pin |
+|---|---|---|
+| `matmul_exposure` | native int64 tiled GEMM | `fnp-python/src/lib.rs` `try_native_int_matmul` (int64, 2-D@2-D, C-contiguous, `m*k*n >= 1<<18`, rayon >= 2) |
+| `account_sum_axis1` | **delegated to `numpy.sum`** | `fnp-python/src/lib.rs` `sum` — its native routes cover f64 last-axis and f16 only, so an int64 axis reduction falls through |
+| `account_max_axis1` | native int64 zero-copy minmax | `fnp-python/src/lib.rs` `py_max` -> `try_zerocopy_int_minmax` |
+| `fleet_sum` | **delegated to `numpy.sum`** | `fnp-python/src/lib.rs` `sum` (axis=None, int64 passthrough) |
+
+The delegation direction is **conservative for the candidate, never
+flattering**: identical NumPy code runs in both arms there, and the candidate
+additionally pays FrankenNumPy's Python-level dispatch on top. The measured
+delegated-stage ratios confirm this empirically rather than by assertion —
+0.897x/0.852x at 2,048 accounts, 0.575x/0.610x at 4,096, and 1.020x/0.613x at
+8,192, i.e. at or below parity. Delegated work was 7.427%, 9.773%, and 6.479%
+of candidate job time. Those stages can only shrink the end-to-end ratio.
+
+HOST AND THREAD PROVENANCE (identical for every row below, one invocation):
+host `vmi1227854`, `AMD EPYC Processor (with IBPB)`, 10 physical cores, 10
+logical threads, process affinity covering every online CPU 0-9. Rayon,
+OpenBLAS, OMP, and MKL were each pinned to 4 threads and `rayon::current_num_threads()`
+was asserted to equal 4 before timing. The scaling governor is honestly
+recorded as unavailable: this VM exposes no cpufreq governor file. Runtime ISA
+capture from inside the process: compile-time SSE2+AVX2; runtime SSE2, AVX,
+AVX2, F16C, and FMA true; AVX-512F and AVX-512BW false. Host-wide fail-closed
+quiescence passed at process startup and before each of the three dual-null
+contracts, with maximum observed per-CPU busy fractions of 13.8%, 13.8%, 17.9%,
+and 16.7% — all under the 20% refuse threshold. The worker was drained from RCH
+admission before the run and re-enabled immediately after.
+
+BUILD/RUN SPLIT: the ELF was built on RCH worker `ovh-a` and executed on the
+drained `vmi1227854`. Both hosts reported the identical
+`6a5ca476ab622c441b7e1a30eb73ca49d1f77a4f7cbb461ae838fe60d69d7880`
+(297,690,600 bytes) before the run, and the executing process re-derived that
+same hash from inside itself, so the timed binary is provably the built binary.
+
+THREADS ACTUALLY USED (not configured width): the `/proc/self/task` CPU-tick
+probe observed exactly **one** NumPy OS thread at every size and **five** FNP OS
+threads (the caller plus all four Rayon workers). Across 11 untimed
+repetitions, NumPy/FNP accumulated 87/17, 170/33, and 333/58 CPU ticks at the
+three sizes.
+
+WORK ACCOUNTING: both arms make four public calls with identical mathematical
+work — no iteration-count asymmetry. At 2,048/4,096/8,192 accounts each arm
+performs 67,108,864 / 134,217,728 / 268,435,456 multiplications and
+66,584,576 / 133,169,152 / 266,338,304 additions in the matrix product,
+522,240 / 1,044,480 / 2,088,960 additions in the per-account sum, the same
+count of comparisons in the per-account max, 2,047 / 4,095 / 8,191 additions in
+the fleet total, and produces 528,385 / 1,056,769 / 2,113,537 output elements.
+The int64 headroom is proven, not assumed: the largest possible exposure
+element is 128*4*31 = 15,872 and the largest possible fleet total is far below
+`iinfo(int64).max`, so parity does not depend on wraparound.
+
+Exact dtype, shape, and every output byte matched for the exposure matrix,
+per-account totals, per-account peaks, and the fleet total at all three sizes
+(pre-timing checksums `ee69a28166809dfe`, `d5f0998bed084a62`,
+`6fbcb9d31f77d443`). Within each size, the incumbent A/A phase, the candidate
+A/A phase, and the effect phase all reproduced one identical mixed checksum
+(`8d4994f88b705259`, `9ed866c84cd1a1b4`, `97ea3b947755a7ae`), so every timed
+observation in every phase produced byte-identical output.
+
+| accounts | NumPy/NumPy null ratio (CI95) | FNP/FNP null ratio (CI95) | NumPy median | FNP median | NumPy/FNP ratio (CI95) | required 2x null delta | verdict |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 2,048 | 0.988789 `[0.982472,0.997568]` | 0.960072 `[0.914994,1.015724]` | 75.742331 ms | 4.270147 ms | **17.427451x** `[16.093410,18.862740]` | 0.170011 | DECIDABLE_WIN |
+| 4,096 | 1.003418 `[0.992062,1.011808]` | 1.008456 `[0.945840,1.119086]` | 153.521399 ms | 8.813422 ms | **17.597505x** `[17.171739,18.011851]` | 0.238171 | DECIDABLE_WIN |
+| 8,192 | 1.008028 `[0.987253,1.018455]` | 1.013660 `[0.973500,1.037900]` | 308.632595 ms | 15.908449 ms | **19.549047x** `[18.878030,20.032672]` | 0.075800 | DECIDABLE_WIN |
+
+Every effect median clears twice the wider same-invocation A/A half-width, and
+every effect CI sits entirely outside both null envelopes. Effect CVs of
+12.992%, 5.792%, and 6.191% are retained as provenance only: the bootstrap
+median CI against the wider null made every decision, and **no row was admitted
+or rejected on CV**. Sampling was 21 odd rounds, min-of-2, alternating arm
+order, 4,096-resample bootstrap.
+
+SCALING SHAPE: ratios `[17.427451, 17.597505, 19.549047]` span 12.1739%, inside
+the 15% flat boundary, so the harness classifies the curve
+`FLAT_PER_ACCOUNT_COST`. Per-multiplication cost is 1.128649 / 1.143824 /
+1.149746 ns for NumPy and 0.063630 / 0.065665 / 0.059264 ns for FrankenNumPy.
+Publish the honest 17.43-19.55x range; 17.427451x is the conservative point.
+Do not promote the 8,192-account number to a single headline.
+
+PROFILE ATTRIBUTION (7-round stage medians, NumPy/FNP ms, ratio):
+
+| accounts | matmul_exposure | account_sum_axis1 | account_max_axis1 | fleet_sum | matmul self-share of candidate |
+|---:|---|---|---|---|---:|
+| 2,048 | 80.992565 / 4.131639 = 19.603x | 0.286258 / 0.319108 = 0.897x | 0.399138 / 0.266880 = 1.496x | 0.028773 / 0.033790 = 0.852x | 86.956% |
+| 4,096 | 154.639119 / 6.461167 = 23.934x | 0.437976 / 0.761361 = 0.575x | 0.933027 / 1.002633 = 0.931x | 0.028713 / 0.047080 = 0.610x | 78.107% |
+| 8,192 | 316.375884 / 13.459270 = 23.506x | 0.987618 / 0.968540 = 1.020x | 1.900457 / 1.882861 = 1.009x | 0.057796 / 0.094342 = 0.613x | 82.044% |
+
+The whole-job win is carried entirely by the matrix product. The second native
+stage, int64 `max(axis=1)`, is at parity here (0.931-1.496x), and the two
+delegated stages are at or slightly below parity. An honest reading of this row
+is "one dominant stage wins big inside a realistic four-call job that is
+otherwise a wash", not "FrankenNumPy is 18x at integer analytics".
+
+COUNTED MECHANISM: NumPy has no integer BLAS, so int64 `matmul` falls to a
+generic single-threaded loop — the OS-thread probe confirms one thread, and it
+is the same capability gap this ledger recorded before. FrankenNumPy routes the
+same shapes to the shipped register-tiled wrapping-int GEMM across four Rayon
+workers. The CPU-tick probe separates the two contributions instead of crediting
+everything to threads: FNP consumed 5.1x (87/17) to 5.7x (333/58) fewer total
+CPU ticks than NumPy for identical work, so roughly a 5x per-CPU work-efficiency
+advantage multiplied by roughly 3.4x realized parallel speedup on four workers
+produces the observed 17-20x wall-clock ratio. Tick granularity is coarse, so
+treat that split as an attribution, not a measurement.
+
+SUPERSESSION — PRIOR SOUND REJECTION SATISFIED, NOT IGNORED:
+`scripts/ledger_preflight.sh int64 matmul` reports BLOCKED on the 2026-07-27
+HOLD-UNBANKED int64 `matmul` row (docs/NEGATIVE_EVIDENCE.md:1220), which is a
+SOUND rejection. That row's retry predicate is met item by item before this row
+claims anything:
+
+* "run a candidate/candidate null on this surface (fnp vs fnp) to establish our
+  own arm's spread" — done at all three sizes, in the same invocation as the
+  effect: 0.960072 `[0.914994,1.015724]`, 1.008456 `[0.945840,1.119086]`,
+  1.013660 `[0.973500,1.037900]`, candidate-null CVs 11.595%, 10.812%, 5.161%.
+* "cannot be promoted merely by adding an FNP/FNP timing from a separate
+  process" — both nulls and the effect come from the one process above.
+* the named provenance defect (hostname, physical cores, logical threads,
+  configured threads, governor, ISA, OS-observed threads per arm) — every field
+  is recorded above, including the honest `governor=unavailable`.
+
+The old row's instability was in OUR arm (0.83/0.83/1.37 ms across separately
+built ELFs, a 67% magnitude spread). Here the candidate arm's own spread is
+measured rather than assumed, and the three size points agree within 12.1739%.
+This row is deliberately weaker in scope and magnitude than that retracted
+microbenchmark: it is a whole-job claim with both nulls, full provenance, and
+disclosed delegation. The old 23.328871x figure remains unbankable and must not
+be revived.
+
+NO PRODUCTION LEVER OPENED. The matmul stage does exceed the 50% self-time
+threshold (78.1-87.0%), but the second half of the rule is unmet: there is no
+counted work-removal mechanism. At 0.059-0.066 ns per int64 multiply-add on four
+threads the kernel is near the scalar int64 issue limit for this ISA — AVX2 has
+no 64x64 vector multiply (`vpmullq` requires AVX-512DQ, and runtime AVX-512F is
+false on this host), so there is no vector-width headroom to claim here.
+
+CHOOSER STATEMENT: for this int64 access-control exposure report — 2,048 to
+8,192 accounts, 128 roles, 256 permissions, finite C-contiguous int64 inputs, on
+the recorded artifacts at four threads — choose FrankenNumPy whenever completion
+time matters: the complete report took a median 4.27 ms / 8.81 ms / 15.91 ms
+versus NumPy's 75.74 ms / 153.52 ms / 308.63 ms, byte-identical output. Choose
+NumPy only if you need the two delegated reduction calls to avoid
+FrankenNumPy's dispatch tax in isolation, which is worth at most about 1 ms of
+the job. If your scoring matmul is float64, this row does not apply: that path
+is OpenBLAS's strength and is settled elsewhere in this ledger.
+
+**Decision: KEEP, INCUMBENT-WIN.** Bank the whole-job harness and the range; no
+production kernel changed in this commit.
+
+Retry predicate: do not repeat this exact corpus against these two artifacts at
+four threads. Reopen if either artifact hash changes; if the FNP `sum` int64
+axis route stops being a NumPy passthrough (that would change the isolation
+disclosure and should raise the ratio); if real inputs leave the finite
+C-contiguous int64 2-D route or fall below the `1<<18` matmul work gate, where
+NumPy's loop is cheap enough that fixed costs dominate; if the report gains or
+loses a stage; if the ratio spread exceeds the 15% flat boundary; or if a
+different thread topology is the question under test. Do not open an int64 GEMM
+lever without a counted work-removal mechanism — a plausible one is an
+AVX-512DQ `vpmullq` path, which needs a host where runtime AVX-512F/DQ is true,
+or a range-gated narrow-multiply path proven bit-exact for the input domain.
+
+## 2026-07-29 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): f16 Cartesian-to-polar vector-field report - 2.994-3.295x vs NumPy with a flat field curve
+
+`BeigeDog`, bead `franken_numpy-ixs5y.390`, cod / Lane M. This whole
+vector-field report converts planar velocity components to magnitude and
+heading, then emits the mean and peak magnitude for every frame. Each arm
+independently executes exactly one public `hypot`, one public `arctan2`, one
+public `average(axis=1)`, and one public `max(axis=1)` call over the same
+read-only arrays. The candidate and incumbent call graphs share no timed
+component.
+
+The corpus contains 4,096 frames at widths 512, 1,024, and 2,048
+(2,097,152, 4,194,304, and 8,388,608 component pairs). A seeded rotating
+lognormal flow supplies frame-level phase and speed variation, low-frequency
+gusts, and independent component noise. Both inputs are finite native
+C-contiguous `float16`; their absolute values stay below 32,768 so every row
+satisfies the recorded native-route preconditions.
+
+**Campaign result class:** incumbent-win
+
+`bench_elf_sha256=1e02eaedf84a0d7090e842609eb6875280f52d4f93e8f35e96df094339b8dab1`
+(48,024,224 bytes)
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 0.996056x, CI95 [0.960578, 1.032206], 21 rounds, min_of=2 at the conservative 4,194,304-element headline point; the table records all three sizes.
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio 0.958539x, CI95 [0.931902, 0.994990], 21 rounds, min_of=2 at the conservative 4,194,304-element headline point.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c6e6bf77e78af3-003ef98f measured_ratio=2.994066x median=120.766756ms
+
+**Incumbent isolation proof:** candidate=fnp.workload.f16_vector_field_polar_report incumbent=numpy.workload.f16_vector_field_polar_report shared_timed_component=none
+
+The NumPy artifact was
+`d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa`
+(10,452,641 bytes,
+`numpy/_core/_multiarray_umath.cpython-313-x86_64-linux-gnu.so`). Runtime
+identity checks proved all four incumbent callables were the live NumPy 2.4.6
+objects and distinct from the four FNP callables. The executing benchmark
+process produced both arms, both A/A controls, every size point, and both
+artifact identities under invocation
+`000000000000000018c6e6bf77e78af3-003ef98f`.
+
+HOST AND THREAD PROVENANCE: the non-TRJ run used an RCH-drained
+`vmi1227854` host with an `AMD EPYC Processor (with IBPB)`, 10 physical cores,
+10 logical threads, and process affinity covering all online CPUs 0-9. Rayon,
+OpenBLAS, OMP, and MKL were all pinned to four threads. The scaling governor
+was honestly reported as unavailable because the VM exposes no cpufreq
+governor file. The executing process reported compile-time SSE2+AVX2 and
+runtime SSE2, AVX, AVX2, F16C, and FMA; runtime AVX-512F/BW were false.
+Host-wide quiescence passed at process startup and before every dual-null
+contract; the maximum observed per-CPU busy fraction in those checks was
+13.3%, below the fail-closed 20% ceiling.
+
+THREADS ACTUALLY USED: the `/proc/self/task` CPU-tick probe observed exactly
+one NumPy OS thread at every size. It observed five FNP OS threads at every
+size: the caller plus all four configured Rayon workers. Across five untimed
+probe repetitions, NumPy/FNP accumulated 35/32, 87/60, and 143/127 CPU ticks
+at the three sizes. Configured pool width is therefore not being substituted
+for observed execution.
+
+WORK ACCOUNTING: both arms make four public calls. For a size of `E` component
+pairs, each executes `E` `hypot` pairs, `E` `arctan2` pairs, an `E`-element
+average, and an `E`-element maximum: `4E` logical element visits, `6E` input
+element reads, and `2E + 8,192` output elements. The candidate is not doing
+less public work and the incumbent is not doing extra stages. The result is a
+per-operation and parallel-execution advantage, not an iteration-count
+mismatch.
+
+Exact dtype, shape, and every output byte matched for magnitude, heading,
+per-frame mean, and per-frame peak at all three sizes. Pre-timing and timed
+checksums were `63578cb3f2b3eb9a`, `c81c29912643979a`, and
+`c39240b54e4c85d4`.
+
+| component pairs | NumPy/NumPy null ratio (CI95) | FNP/FNP null ratio (CI95) | NumPy median | FNP median | NumPy/FNP ratio (CI95) | required 2x null delta | verdict |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 2,097,152 | 0.994131 `[0.971575,1.047689]` | 1.011088 `[0.961262,1.059091]` | 72.001258 ms | 21.813189 ms | **3.240352x** `[2.938959,3.603200]` | 0.118182 | DECIDABLE_WIN |
+| 4,194,304 | 0.996056 `[0.960578,1.032206]` | 0.958539 `[0.931902,0.994990]` | 120.766756 ms | 39.719852 ms | **2.994066x** `[2.876221,3.221307]` | 0.136196 | DECIDABLE_WIN |
+| 8,388,608 | 0.969456 `[0.937868,1.021455]` | 0.995177 `[0.968572,1.020220]` | 263.322903 ms | 76.613906 ms | **3.294627x** `[3.212699,3.646746]` | 0.124265 | DECIDABLE_WIN |
+
+Every effect median clears twice the wider same-invocation A/A half-width.
+Effect CVs of 13.559%, 10.295%, and 14.956% are retained as provenance only;
+the bootstrap median-CI plus wider-null gate made every decision. The
+21-round, min-of-2 sampling budget is explicit and preserves odd sampling,
+alternating order, both nulls, and 4,096-resample bootstrap intervals.
+
+SCALING SHAPE: ratios `[3.240352, 2.994066, 3.294627]` have 10.0386% spread,
+so the harness classifies the gap `FLAT_PER_ELEMENT_COST`. Candidate costs
+fall from 10.401 to 9.133 ns per pair while NumPy ranges from 28.793 to
+34.333 ns per pair. The direction and magnitude do not have a fixed setup or
+coordination-shaped signature across this 4x element-count sweep.
+
+PROFILE ATTRIBUTION: the largest FNP stage was `arctan2`, at 45.572%,
+45.357%, and 45.736% of summed candidate stage time. At the conservative
+4,194,304-element point, NumPy/FNP stage medians were 45.519533/12.887362 ms
+for `hypot`, 75.283078/18.033615 ms for `arctan2`,
+6.826290/3.812193 ms for `average(axis=1)`, and
+11.282137/5.025771 ms for `max(axis=1)`. Every candidate stage was faster;
+no single stage exceeds 50% self-time, so this result banks the existing
+integration capability and does not justify a speculative production lever.
+
+**Decision: KEEP.** For this exact finite contiguous f16 vector-field report
+on the recorded artifacts and four-thread topology, choose FrankenNumPy when
+completion time is decisive. Publish the honest 2.994-3.295x range and use
+2.994066x as the conservative point; do not turn the fastest size into a
+single-number headline.
+
+Retry predicate: do not repeat this exact corpus against the same FNP and
+NumPy artifacts at four threads. Reopen if either artifact hash changes, real
+data violates a route precondition, the report adds/removes a stage, the
+ratio spread exceeds the 15% flat-curve boundary, or a different thread
+topology is the question under test. Profile a production lever only after a
+fresh profile places one stage above 50% self-time or a counted mechanism
+removes work.
+
 ## 2026-07-29 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): structured entitlement reconciliation - 12.98-14.50x vs NumPy with a flat snapshot curve
 
 `BeigeDog`, bead `franken_numpy-ixs5y.387`, cod / Lane M. This whole

@@ -569,6 +569,96 @@ impl<'py> VectorFieldPolarArm<'py> {
     }
 }
 
+struct AccessControlExposureArm<'py> {
+    matmul: Bound<'py, PyAny>,
+    sum: Bound<'py, PyAny>,
+    maximum: Bound<'py, PyAny>,
+}
+
+impl<'py> AccessControlExposureArm<'py> {
+    fn run(
+        &self,
+        account_roles: &Bound<'py, PyAny>,
+        role_permissions: &Bound<'py, PyAny>,
+    ) -> (Duration, [Bound<'py, PyAny>; 4]) {
+        let started = Instant::now();
+        let exposure = self
+            .matmul
+            .call1((black_box(account_roles), black_box(role_permissions)))
+            .expect("access-control exposure propagation");
+        let account_total = self
+            .sum
+            .call1((black_box(&exposure), 1_i64))
+            .expect("per-account total exposure");
+        let account_peak = self
+            .maximum
+            .call1((black_box(&exposure), 1_i64))
+            .expect("per-account peak exposure");
+        let fleet_total = self
+            .sum
+            .call1((black_box(&account_total),))
+            .expect("fleet total exposure");
+        let elapsed = started.elapsed();
+        (
+            elapsed,
+            [exposure, account_total, account_peak, fleet_total],
+        )
+    }
+
+    fn profile(
+        &self,
+        account_roles: &Bound<'py, PyAny>,
+        role_permissions: &Bound<'py, PyAny>,
+    ) -> [f64; 4] {
+        const PROFILE_ROUNDS: usize = 7;
+        let mut matmul_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut account_sum_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut account_max_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut fleet_sum_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        for _ in 0..PROFILE_ROUNDS {
+            let started = Instant::now();
+            let exposure = self
+                .matmul
+                .call1((account_roles, role_permissions))
+                .expect("profile access-control exposure propagation");
+            matmul_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            let account_total = self
+                .sum
+                .call1((&exposure, 1_i64))
+                .expect("profile per-account total exposure");
+            account_sum_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            black_box(
+                self.maximum
+                    .call1((&exposure, 1_i64))
+                    .expect("profile per-account peak exposure"),
+            );
+            account_max_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            black_box(
+                self.sum
+                    .call1((&account_total,))
+                    .expect("profile fleet total exposure"),
+            );
+            fleet_sum_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+        }
+        let median = |samples: &mut Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        [
+            median(&mut matmul_ms),
+            median(&mut account_sum_ms),
+            median(&mut account_max_ms),
+            median(&mut fleet_sum_ms),
+        ]
+    }
+}
+
 fn bench_median_gate_python_binary<'py>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     bench_name: &'static str,
@@ -7713,6 +7803,453 @@ assert np.max(np.abs(velocity_y)) < np.float16(32768.0)
     });
 }
 
+/// Class-3 integration workload: propagate sparse account-role assignments
+/// through a role-permission risk matrix, then emit per-account total and peak
+/// exposure plus a fleet total. Both arms execute the same four public calls
+/// and the same mathematical operation counts. NumPy has no integer BLAS, so
+/// its int64 matrix product uses the generic integer loop while FrankenNumPy
+/// takes the existing safe-Rust tiled kernel.
+fn bench_realistic_access_control_exposure_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const ACCOUNT_COUNTS: [usize; 3] = [2_048, 4_096, 8_192];
+    const ROLE_COUNT: usize = 128;
+    const PERMISSION_COUNT: usize = 256;
+    const WORKLOAD_CONTRACT_ROUNDS: usize = 21;
+    const WORKLOAD_CONTRACT_MIN_OF: usize = 2;
+    const THREAD_ACTIVITY_REPETITIONS: usize = 11;
+    const THREADS: &str = "4";
+
+    for variable in [
+        "RAYON_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(THREADS),
+            "{variable} must be explicitly pinned before workload timing"
+        );
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        THREADS
+            .parse::<usize>()
+            .expect("thread count constant is numeric"),
+        "Rayon pool width does not match the pinned workload configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME host={} rayon_threads={} RAYON_NUM_THREADS={} \
+         OPENBLAS_NUM_THREADS={} OMP_NUM_THREADS={} MKL_NUM_THREADS={} trj_used=false",
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "unavailable".to_owned()),
+        rayon::current_num_threads(),
+        THREADS,
+        THREADS,
+        THREADS,
+        THREADS,
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_access_control_exposure_workload")
+            .expect("access-control exposure module");
+        fnp_python(&module).expect("initialize fnp_python access-control exposure module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(format!(
+                r#"
+import numpy as np
+rng = np.random.default_rng(20260730)
+account_counts = {ACCOUNT_COUNTS:?}
+role_count = {ROLE_COUNT}
+permission_count = {PERMISSION_COUNT}
+
+# Fixed integer risk weights for every role/permission pair. Zero weights model
+# permissions irrelevant to a role; positive weights are bounded severity
+# points, not floating estimates.
+role_permissions = rng.integers(
+    0,
+    32,
+    size=(role_count, permission_count),
+    dtype=np.int64,
+)
+
+account_roles_by_size = []
+for account_count in account_counts:
+    # Most accounts have no assignment to most roles. A deterministic hot-role
+    # increment guarantees at least one assigned role per account while
+    # retaining a realistic sparse count matrix.
+    account_roles = rng.binomial(
+        3,
+        0.08,
+        size=(account_count, role_count),
+    ).astype(np.int64, copy=False)
+    hot_role = rng.integers(
+        0,
+        role_count,
+        size=account_count,
+        dtype=np.int64,
+    )
+    account_roles[np.arange(account_count), hot_role] += np.int64(1)
+    account_roles_by_size.append(np.ascontiguousarray(account_roles))
+
+assert role_permissions.dtype == np.int64
+assert role_permissions.ndim == 2
+assert role_permissions.flags.c_contiguous
+assert int(role_permissions.min()) >= 0
+assert int(role_permissions.max()) <= 31
+for account_roles in account_roles_by_size:
+    assert account_roles.dtype == np.int64
+    assert account_roles.ndim == 2
+    assert account_roles.shape[1] == role_count
+    assert account_roles.flags.c_contiguous
+    assert int(account_roles.min()) >= 0
+    assert int(account_roles.max()) <= 4
+
+# The largest possible intermediate and aggregation remain far below int64
+# overflow, so exact parity is not relying on wraparound.
+assert role_count * 4 * 31 < np.iinfo(np.int64).max
+assert (
+    max(account_counts) * permission_count * role_count * 4 * 31
+    < np.iinfo(np.int64).max
+)
+"#
+            ))
+            .expect("access-control exposure setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("access-control exposure corpus setup");
+
+        let fnp_matmul = module.getattr("matmul").expect("fnp matmul");
+        let np_matmul = numpy.getattr("matmul").expect("numpy matmul");
+        let fnp_sum = module.getattr("sum").expect("fnp sum");
+        let np_sum = numpy.getattr("sum").expect("numpy sum");
+        let fnp_maximum = module.getattr("max").expect("fnp max");
+        let np_maximum = numpy.getattr("max").expect("numpy max");
+        for (candidate, incumbent, surface) in [
+            (&fnp_matmul, &np_matmul, "matmul"),
+            (&fnp_sum, &np_sum, "sum"),
+            (&fnp_maximum, &np_maximum, "max"),
+        ] {
+            assert!(
+                !candidate.is(incumbent),
+                "{surface}: candidate callable aliases NumPy"
+            );
+            common::report_numpy_incumbent_identity(py, surface, incumbent);
+        }
+        // Truthful isolation record. Two of the candidate's four public stages
+        // are source-pinned NumPy passthroughs, so this pair is NOT
+        // shared_timed_component=none and must not borrow that claim.
+        common::report_incumbent_topology_with_shared_component(
+            "fnp.workload.access_control_exposure_report",
+            "numpy.workload.access_control_exposure_report",
+            "numpy.sum_int64_axis1,numpy.sum_int64_flat",
+        );
+        println!(
+            "INCUMBENT_PIPELINE workload=access_control_exposure_report \
+             candidate=fnp.matmul+fnp.sum+fnp.max+fnp.sum \
+             incumbent=numpy.matmul+numpy.sum+numpy.max+numpy.sum \
+             shared_timed_component=numpy.sum_int64_axis1,numpy.sum_int64_flat \
+             native_candidate_stages=matmul_exposure,account_max_axis1 \
+             delegated_candidate_stages=account_sum_axis1,fleet_sum \
+             inputs_shared_read_only=true"
+        );
+        // Source-pinned routing for every stage the candidate executes. These
+        // pins are read from the shipped dispatch, not inferred from timings;
+        // the per-stage profile below is the independent empirical corroboration
+        // (a delegated stage must land near parity with the incumbent).
+        for (stage, route, pin) in [
+            (
+                "matmul_exposure",
+                "native_int64_tiled_gemm",
+                "fnp-python/src/lib.rs:try_native_int_matmul(int64,2d,2d,contiguous,work>=1<<18,threads>=2)",
+            ),
+            (
+                "account_sum_axis1",
+                "delegated_to_numpy_sum",
+                "fnp-python/src/lib.rs:sum(native routes cover f64 last-axis and f16 only; int64 axis falls through to numpy.sum)",
+            ),
+            (
+                "account_max_axis1",
+                "native_int64_zerocopy_minmax",
+                "fnp-python/src/lib.rs:py_max->try_zerocopy_int_minmax(int64,contiguous,integer axis)",
+            ),
+            (
+                "fleet_sum",
+                "delegated_to_numpy_sum",
+                "fnp-python/src/lib.rs:sum(axis=None,int64 -> numpy.sum passthrough)",
+            ),
+        ] {
+            println!(
+                "ROUTE_DISCLOSURE workload=access_control_exposure_report stage={stage} \
+                 candidate_route={route} source_pin={pin}"
+            );
+        }
+        println!(
+            "ROUTE_PRECONDITIONS workload=access_control_exposure_report \
+             dtype=int64 lhs_ndim=2 rhs_ndim=2 c_contiguous=true \
+             same_dtype=true matching_inner_dim={ROLE_COUNT} \
+             min_matmul_work={} int_matmul_min_work={} \
+             rayon_threads_min=2 axis_reductions=1 fleet_sum_axis=none \
+             overflow_headroom=proven contract_rounds={WORKLOAD_CONTRACT_ROUNDS} \
+             contract_min_of={WORKLOAD_CONTRACT_MIN_OF}",
+            ACCOUNT_COUNTS[0] * ROLE_COUNT * PERMISSION_COUNT,
+            1 << 18,
+        );
+
+        let incumbent = AccessControlExposureArm {
+            matmul: np_matmul,
+            sum: np_sum,
+            maximum: np_maximum,
+        };
+        let candidate = AccessControlExposureArm {
+            matmul: fnp_matmul,
+            sum: fnp_sum,
+            maximum: fnp_maximum,
+        };
+        let account_roles_by_size = namespace
+            .get_item("account_roles_by_size")
+            .expect("account-role matrices by size");
+        let role_permissions = namespace
+            .get_item("role_permissions")
+            .expect("role-permission risk weights");
+
+        let mut scaling = Vec::with_capacity(ACCOUNT_COUNTS.len());
+        for (size_index, account_count) in ACCOUNT_COUNTS.into_iter().enumerate() {
+            let matmul_outputs = account_count * PERMISSION_COUNT;
+            let matmul_multiplications = matmul_outputs * ROLE_COUNT;
+            let matmul_additions = matmul_outputs * (ROLE_COUNT - 1);
+            let account_sum_additions = account_count * (PERMISSION_COUNT - 1);
+            let account_max_comparisons = account_count * (PERMISSION_COUNT - 1);
+            let fleet_sum_additions = account_count - 1;
+            let output_elements = matmul_outputs + 2 * account_count + 1;
+            let row = format!(
+                "workload_access_control_exposure_{account_count}x{ROLE_COUNT}x{PERMISSION_COUNT}"
+            );
+            println!(
+                "WORKLOAD_CONFIG row={row} user_job=access_control_exposure_report \
+                 accounts={account_count} roles={ROLE_COUNT} \
+                 permissions={PERMISSION_COUNT} dtype=int64 \
+                 distribution=sparse_binomial_role_counts_plus_one_hot_role \
+                 stages=matmul_exposure,account_sum_axis1,account_max_axis1,fleet_sum \
+                 output=exposure_matrix_per_account_total_per_account_peak_fleet_total \
+                 matched_config=same_process_same_inputs_same_axes \
+                 target_user=access_control_risk_analytics"
+            );
+            println!(
+                "WORK_ACCOUNTING row={row} candidate_public_calls=4 incumbent_public_calls=4 \
+                 candidate_matmul_multiplications={matmul_multiplications} \
+                 incumbent_matmul_multiplications={matmul_multiplications} \
+                 candidate_matmul_additions={matmul_additions} \
+                 incumbent_matmul_additions={matmul_additions} \
+                 candidate_account_sum_additions={account_sum_additions} \
+                 incumbent_account_sum_additions={account_sum_additions} \
+                 candidate_account_max_comparisons={account_max_comparisons} \
+                 incumbent_account_max_comparisons={account_max_comparisons} \
+                 candidate_fleet_sum_additions={fleet_sum_additions} \
+                 incumbent_fleet_sum_additions={fleet_sum_additions} \
+                 candidate_output_elements={output_elements} \
+                 incumbent_output_elements={output_elements} \
+                 more_work_verdict=equal_mathematical_work"
+            );
+            let account_roles = account_roles_by_size
+                .get_item(size_index)
+                .expect("account-role matrix for size");
+
+            let (_, incumbent_output) = incumbent.run(&account_roles, &role_permissions);
+            let (_, candidate_output) = candidate.run(&account_roles, &role_permissions);
+            assert_workload_outputs_equal(&numpy, &row, &candidate_output, &incumbent_output);
+            println!(
+                "PARITY row={row} outputs=4 dtype_shape_byte_identity=passed \
+                 no_overflow_precondition=passed checksum={:016x}",
+                workload_checksum(&numpy, &candidate_output),
+            );
+
+            common::report_observed_thread_activity(
+                &row,
+                "numpy",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    let (_, outputs) = incumbent.run(&account_roles, &role_permissions);
+                    black_box(outputs);
+                },
+            );
+            common::report_observed_thread_activity(
+                &row,
+                "fnp",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    let (_, outputs) = candidate.run(&account_roles, &role_permissions);
+                    black_box(outputs);
+                },
+            );
+
+            let incumbent_profile = incumbent.profile(&account_roles, &role_permissions);
+            let candidate_profile = candidate.profile(&account_roles, &role_permissions);
+            let candidate_total = candidate_profile.iter().sum::<f64>();
+            let (target_stage, target_ms) = [
+                ("matmul_exposure", candidate_profile[0]),
+                ("account_sum_axis1", candidate_profile[1]),
+                ("account_max_axis1", candidate_profile[2]),
+                ("fleet_sum", candidate_profile[3]),
+            ]
+            .into_iter()
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .expect("four access-control profile stages");
+            for (stage, incumbent_ms, candidate_ms) in [
+                (
+                    "matmul_exposure",
+                    incumbent_profile[0],
+                    candidate_profile[0],
+                ),
+                (
+                    "account_sum_axis1",
+                    incumbent_profile[1],
+                    candidate_profile[1],
+                ),
+                (
+                    "account_max_axis1",
+                    incumbent_profile[2],
+                    candidate_profile[2],
+                ),
+                ("fleet_sum", incumbent_profile[3], candidate_profile[3]),
+            ] {
+                println!(
+                    "PROFILE_STAGE row={row} arm_pair=numpy_fnp stage={stage} \
+                     incumbent_median_ms={incumbent_ms:.6} \
+                     candidate_median_ms={candidate_ms:.6} \
+                     stage_ratio_numpy_over_fnp={:.6}",
+                    incumbent_ms / candidate_ms,
+                );
+            }
+            // Quantify how much of the candidate's own job time is NumPy code
+            // running inside the candidate arm. This bounds how much of the
+            // end-to-end ratio can be credited to FrankenNumPy at all, and the
+            // delegated stages double as an in-arm parity check: their
+            // numpy/fnp stage ratios must sit near unity.
+            let delegated_ms = candidate_profile[1] + candidate_profile[3];
+            let native_ms = candidate_profile[0] + candidate_profile[2];
+            println!(
+                "DELEGATION_SHARE row={row} \
+                 delegated_stages=account_sum_axis1,fleet_sum \
+                 delegated_candidate_ms={delegated_ms:.6} \
+                 native_candidate_ms={native_ms:.6} \
+                 delegated_share_of_candidate_pct={:.3} \
+                 delegated_stage_ratio_account_sum={:.6} \
+                 delegated_stage_ratio_fleet_sum={:.6} \
+                 expectation=delegated_ratios_near_unity",
+                delegated_ms / candidate_total * 100.0,
+                incumbent_profile[1] / candidate_profile[1],
+                incumbent_profile[3] / candidate_profile[3],
+            );
+            let target_fraction = target_ms / candidate_total;
+            println!(
+                "PROFILE_SUMMARY row={row} target_stage={target_stage} \
+                 target_candidate_ms={target_ms:.6} candidate_stage_sum_ms={candidate_total:.6} \
+                 target_self_fraction_pct={:.3} amdahl_remove_ceiling={:.6}",
+                target_fraction * 100.0,
+                1.0 / (1.0 - target_fraction),
+            );
+
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = incumbent.run(&account_roles, &role_permissions);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = candidate.run(&account_roles, &role_permissions);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &row,
+                    &mut observe_incumbent,
+                    &mut observe_candidate,
+                    WORKLOAD_CONTRACT_ROUNDS,
+                    WORKLOAD_CONTRACT_MIN_OF,
+                );
+            println!(
+                "WORKLOAD_SIZE_POINT workload=access_control_exposure_report \
+                 accounts={account_count} roles={ROLE_COUNT} \
+                 permissions={PERMISSION_COUNT} \
+                 incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ratio={:.6} candidate_null_ratio={:.6} \
+                 incumbent_ns_per_matmul_multiplication={:.6} \
+                 candidate_ns_per_matmul_multiplication={:.6}",
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+                effect.arm_a_median_ns / matmul_multiplications as f64,
+                effect.arm_b_median_ns / matmul_multiplications as f64,
+            );
+            scaling.push(effect);
+        }
+
+        let first_ratio = scaling.first().expect("first scaling point").ratio_median;
+        let last_ratio = scaling.last().expect("last scaling point").ratio_median;
+        let ratio_min = scaling
+            .iter()
+            .map(|stats| stats.ratio_median)
+            .fold(f64::INFINITY, f64::min);
+        let ratio_max = scaling
+            .iter()
+            .map(|stats| stats.ratio_median)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let ratio_spread = ratio_max / ratio_min - 1.0;
+        let monotonic_up = scaling
+            .windows(2)
+            .all(|points| points[1].ratio_median >= points[0].ratio_median);
+        let monotonic_down = scaling
+            .windows(2)
+            .all(|points| points[1].ratio_median <= points[0].ratio_median);
+        let shape = if ratio_spread <= 0.15 {
+            "FLAT_PER_ACCOUNT_COST"
+        } else if monotonic_up && last_ratio >= first_ratio * 1.15 {
+            "WIDENING_WITH_ACCOUNTS"
+        } else if monotonic_down && last_ratio <= first_ratio * 0.85 {
+            "NARROWING_WITH_ACCOUNTS"
+        } else {
+            "MIXED_OR_NOISE"
+        };
+        println!(
+            "SCALING_SHAPE workload=access_control_exposure_report \
+             dimension=account_count roles={ROLE_COUNT} permissions={PERMISSION_COUNT} \
+             sizes=[{},{},{}] ratios=[{:.6},{:.6},{:.6}] \
+             ratio_spread={ratio_spread:.6} classification={shape}",
+            ACCOUNT_COUNTS[0],
+            ACCOUNT_COUNTS[1],
+            ACCOUNT_COUNTS[2],
+            scaling[0].ratio_median,
+            scaling[1].ratio_median,
+            scaling[2].ratio_median,
+        );
+        println!(
+            "CHOOSER_SCOPE workload=access_control_exposure_report \
+             target_user=access_control_risk_analytics dtype=int64 \
+             account_range={}..={} roles={ROLE_COUNT} permissions={PERMISSION_COUNT} \
+             thread_topology=recorded_above decision_requires_all_three_effects_and_both_nulls \
+             generalization_beyond_measured_shape=false",
+            ACCOUNT_COUNTS[0], ACCOUNT_COUNTS[2],
+        );
+    });
+}
+
 fn bench_bool_storage_bytes_median_gate(c: &mut Criterion) {
     let _ = c;
     const N: usize = 8_000_000;
@@ -7816,6 +8353,10 @@ fn main() {
         (
             "bench_realistic_end_to_end_workloads_vs_numpy_median_gate",
             bench_realistic_end_to_end_workloads_vs_numpy_median_gate,
+        ),
+        (
+            "bench_realistic_access_control_exposure_vs_numpy_median_gate",
+            bench_realistic_access_control_exposure_vs_numpy_median_gate,
         ),
         (
             "bench_realistic_event_attribution_scatter_vs_numpy_median_gate",

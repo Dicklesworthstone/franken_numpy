@@ -341,8 +341,14 @@ const RESULT_CLASS_MARKER: &str = "**Campaign result class:**";
 const NULL_CONTROL_MARKER: &str = "**A/A null control (same invocation):**";
 const INCUMBENT_ARM_MARKER: &str = "**Legacy incumbent arm (same invocation):**";
 const INCUMBENT_ISOLATION_MARKER: &str = "**Incumbent isolation proof:**";
+const SHARED_COMPONENT_DISCLOSURE_MARKER: &str = "**Shared timed component disclosure:**";
 const MAINTENANCE_SELF_SPEEDUP: &str = "maintenance-self-speedup";
 const INCUMBENT_WIN: &str = "incumbent-win";
+
+/// A disclosed shared component may not dominate the candidate's own job time.
+/// Past that share the headline is mostly the incumbent's code and the row is
+/// not measuring us.
+const MAX_DISCLOSED_SHARED_SHARE_PCT: f64 = 50.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ResultClass {
@@ -430,6 +436,48 @@ fn executing_elf_sha256(body: &str) -> Option<String> {
     })
 }
 
+/// `shared_timed_component=none` is the default and needs nothing further.
+///
+/// A row may instead DISCLOSE a shared timed component, but only on terms that
+/// are strictly harder to satisfy than claiming none, so disclosure can never
+/// be the cheaper path:
+///
+/// * every named component must belong to the incumbent (`numpy.*`). Shared
+///   incumbent code runs identically in both arms, so it can only dilute the
+///   candidate's ratio. A component naming `fnp.*` is refused outright —
+///   timing our own former path is `maintenance-self-speedup`, never an
+///   incumbent win, and this must not become a hole in that wall.
+/// * the row must declare `direction=conservative_for_candidate`, stating that
+///   claim direction explicitly rather than leaving a reader to infer it.
+/// * the row must quantify the shared share of candidate job time, with every
+///   quoted share under [`MAX_DISCLOSED_SHARED_SHARE_PCT`].
+/// * the disclosure's `components=` list must match the isolation marker's
+///   `shared_timed_component=` list exactly, so the two lines cannot disagree.
+fn disclosed_shared_component_is_admissible(body: &str, declared: &str) -> bool {
+    let Some(disclosure) = marker_entry_value(body, SHARED_COMPONENT_DISCLOSURE_MARKER) else {
+        return false;
+    };
+    if token_value(disclosure, "components=") != Some(declared) {
+        return false;
+    }
+    let every_component_is_the_incumbents = declared
+        .split(',')
+        .map(str::trim)
+        .all(|component| component.starts_with("numpy.") && component.len() > 6);
+    let direction_declared =
+        token_value(disclosure, "direction=") == Some("conservative_for_candidate");
+    let quantified = token_value(disclosure, "share_of_candidate_pct=").is_some_and(|shares| {
+        let mut shares = shares.split(',').map(str::trim).peekable();
+        shares.peek().is_some()
+            && shares.all(|share| {
+                share.parse::<f64>().is_ok_and(|pct| {
+                    pct.is_finite() && pct > 0.0 && pct < MAX_DISCLOSED_SHARED_SHARE_PCT
+                })
+            })
+    });
+    every_component_is_the_incumbents && direction_declared && quantified
+}
+
 /// An `incumbent-win` must carry the full same-invocation contract. In
 /// particular, the incumbent artifact cannot be the candidate benchmark ELF:
 /// that substitution is the provenance defect this gate was hardened to catch.
@@ -467,10 +515,17 @@ fn has_incumbent_win_contract(body: &str) -> bool {
         marker_entry_value(body, INCUMBENT_ISOLATION_MARKER).is_some_and(|isolation| {
             let candidate = token_value(isolation, "candidate=");
             let incumbent = token_value(isolation, "incumbent=");
+            let isolated = match token_value(isolation, "shared_timed_component=") {
+                Some("none") => true,
+                Some(declared) if !declared.is_empty() => {
+                    disclosed_shared_component_is_admissible(body, declared)
+                }
+                _ => false,
+            };
             candidate.is_some_and(|name| name.starts_with("fnp.") && name.len() > 4)
                 && incumbent.is_some_and(|name| name.starts_with("numpy.") && name.len() > 6)
                 && candidate != incumbent
-                && token_value(isolation, "shared_timed_component=") == Some("none")
+                && isolated
         });
     measured_null
         && actual_numpy
@@ -530,7 +585,12 @@ fn incumbent_win_rows_carry_the_complete_same_invocation_contract() {
          `name=NumPy`; pinned `version`; lowercase incumbent `artifact_sha256` distinct \
          from the candidate executing ELF; shared `invocation_id`; and numeric \
          `measured_ratio=<value>x`. The isolation marker must name distinct `fnp.*` \
-         and `numpy.*` public arms and declare `shared_timed_component=none`.",
+         and `numpy.*` public arms and declare `shared_timed_component=none`, or else \
+         disclose it: every component `numpy.*`, plus a \
+         `{SHARED_COMPONENT_DISCLOSURE_MARKER}` line whose `components=` matches the \
+         isolation marker, `direction=conservative_for_candidate`, and \
+         `share_of_candidate_pct=` values all below \
+         {MAX_DISCLOSED_SHARED_SHARE_PCT}.",
         offenders.len(),
         offenders.join("\n")
     );
@@ -683,6 +743,74 @@ fn incumbent_win_rejects_shared_timed_components() {
                 invocation_id=run-42 measured_ratio=19.9x\n\
                 **Incumbent isolation proof:** candidate=fnp.isin incumbent=numpy.isin \
                 shared_timed_component=numpy.empty";
+    assert!(!has_incumbent_win_contract(body));
+}
+
+/// A shared component is admissible only when it is DISCLOSED on terms harder
+/// than claiming none: incumbent-owned components, a declared claim direction,
+/// and a quantified minority share that matches the isolation marker.
+#[test]
+fn incumbent_win_accepts_a_fully_disclosed_shared_component() {
+    let prefix = "**A/A null control (same invocation):** ratio 1.001x.\n\
+                  bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
+                  **Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 \
+                  artifact_sha256=43760732fe0ec60ac5e2d4d020b253ea720cf0d3996a362204c4d94934ebaabd \
+                  invocation_id=run-42 measured_ratio=19.9x\n\
+                  **Incumbent isolation proof:** candidate=fnp.workload.report \
+                  incumbent=numpy.workload.report \
+                  shared_timed_component=numpy.sum_int64_axis1,numpy.sum_int64_flat\n";
+
+    // Complete disclosure: admissible.
+    assert!(has_incumbent_win_contract(&format!(
+        "{prefix}**Shared timed component disclosure:** \
+         components=numpy.sum_int64_axis1,numpy.sum_int64_flat \
+         direction=conservative_for_candidate share_of_candidate_pct=7.427,9.773,6.479"
+    )));
+
+    // Declared but never disclosed: the pre-hardening hole.
+    assert!(!has_incumbent_win_contract(prefix));
+
+    // Direction unstated: a reader would have to infer the claim direction.
+    assert!(!has_incumbent_win_contract(&format!(
+        "{prefix}**Shared timed component disclosure:** \
+         components=numpy.sum_int64_axis1,numpy.sum_int64_flat \
+         share_of_candidate_pct=7.427,9.773,6.479"
+    )));
+
+    // Unquantified share: disclosure without a number proves nothing.
+    assert!(!has_incumbent_win_contract(&format!(
+        "{prefix}**Shared timed component disclosure:** \
+         components=numpy.sum_int64_axis1,numpy.sum_int64_flat \
+         direction=conservative_for_candidate"
+    )));
+
+    // Disclosure list disagreeing with the isolation marker.
+    assert!(!has_incumbent_win_contract(&format!(
+        "{prefix}**Shared timed component disclosure:** components=numpy.sum_int64_axis1 \
+         direction=conservative_for_candidate share_of_candidate_pct=7.427"
+    )));
+
+    // A majority share means the headline is mostly the incumbent's own code.
+    assert!(!has_incumbent_win_contract(&format!(
+        "{prefix}**Shared timed component disclosure:** \
+         components=numpy.sum_int64_axis1,numpy.sum_int64_flat \
+         direction=conservative_for_candidate share_of_candidate_pct=7.427,61.2"
+    )));
+}
+
+/// Sharing OUR OWN code is `maintenance-self-speedup`. Disclosure must not
+/// become a way to relabel that as an incumbent win.
+#[test]
+fn disclosure_cannot_launder_a_shared_fnp_component() {
+    let body = "**A/A null control (same invocation):** ratio 1.001x.\n\
+                bench_elf_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\
+                **Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 \
+                artifact_sha256=43760732fe0ec60ac5e2d4d020b253ea720cf0d3996a362204c4d94934ebaabd \
+                invocation_id=run-42 measured_ratio=19.9x\n\
+                **Incumbent isolation proof:** candidate=fnp.workload.report \
+                incumbent=numpy.workload.report shared_timed_component=fnp.sort\n\
+                **Shared timed component disclosure:** components=fnp.sort \
+                direction=conservative_for_candidate share_of_candidate_pct=3.0";
     assert!(!has_incumbent_win_contract(body));
 }
 

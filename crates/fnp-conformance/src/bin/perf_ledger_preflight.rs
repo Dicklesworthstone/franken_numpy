@@ -10,6 +10,12 @@ const RESULT_CLASS_MARKER: &str = "**Campaign result class:**";
 const NULL_CONTROL_MARKER: &str = "**A/A null control (same invocation):**";
 const INCUMBENT_ARM_MARKER: &str = "**Legacy incumbent arm (same invocation):**";
 const INCUMBENT_ISOLATION_MARKER: &str = "**Incumbent isolation proof:**";
+const SHARED_COMPONENT_DISCLOSURE_MARKER: &str = "**Shared timed component disclosure:**";
+/// A disclosed shared component may not dominate the candidate's own job time.
+/// Past that share the headline is mostly the incumbent's code and the row is
+/// not measuring us. Kept identical to the CI backstop in
+/// `crates/fnp-conformance/tests/ledger_hygiene.rs`.
+const MAX_DISCLOSED_SHARED_SHARE_PCT: f64 = 50.0;
 const MAINTENANCE_SELF_SPEEDUP: &str = "maintenance-self-speedup";
 const INCUMBENT_WIN: &str = "incumbent-win";
 
@@ -380,6 +386,46 @@ fn is_lowercase_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// `shared_timed_component=none` is the default and needs nothing further.
+///
+/// A row may instead DISCLOSE a shared timed component, but only on terms that
+/// are strictly harder to satisfy than claiming none, so disclosure can never
+/// be the cheaper path: every named component must be the incumbent's own
+/// (`numpy.*`, which runs identically in both arms and can only dilute the
+/// candidate's ratio — an `fnp.*` component is refused so this cannot become a
+/// hole in the `maintenance-self-speedup` wall), the row must declare
+/// `direction=conservative_for_candidate`, it must quantify every shared share
+/// of candidate job time below [`MAX_DISCLOSED_SHARED_SHARE_PCT`], and the
+/// disclosure's `components=` list must match the isolation marker exactly.
+///
+/// Kept behaviourally identical to the CI backstop in
+/// `crates/fnp-conformance/tests/ledger_hygiene.rs`; neither path may accept a
+/// row the other rejects.
+fn disclosed_shared_component_is_admissible(entry: &LedgerEntry, declared: &str) -> bool {
+    let Some(disclosure) = marker_entry_value(entry, SHARED_COMPONENT_DISCLOSURE_MARKER) else {
+        return false;
+    };
+    if token_value(disclosure, "components=") != Some(declared) {
+        return false;
+    }
+    let every_component_is_the_incumbents = declared
+        .split(',')
+        .map(str::trim)
+        .all(|component| component.starts_with("numpy.") && component.len() > 6);
+    let direction_declared =
+        token_value(disclosure, "direction=") == Some("conservative_for_candidate");
+    let quantified = token_value(disclosure, "share_of_candidate_pct=").is_some_and(|shares| {
+        let mut shares = shares.split(',').map(str::trim).peekable();
+        shares.peek().is_some()
+            && shares.all(|share| {
+                share.parse::<f64>().is_ok_and(|pct| {
+                    pct.is_finite() && pct > 0.0 && pct < MAX_DISCLOSED_SHARED_SHARE_PCT
+                })
+            })
+    });
+    every_component_is_the_incumbents && direction_declared && quantified
+}
+
 fn has_incumbent_win_contract(entry: &LedgerEntry) -> bool {
     let measured_null =
         marker_entry_value(entry, NULL_CONTROL_MARKER).is_some_and(line_has_decimal_measurement);
@@ -414,10 +460,17 @@ fn has_incumbent_win_contract(entry: &LedgerEntry) -> bool {
         marker_entry_value(entry, INCUMBENT_ISOLATION_MARKER).is_some_and(|isolation| {
             let candidate = token_value(isolation, "candidate=");
             let incumbent = token_value(isolation, "incumbent=");
+            let isolated = match token_value(isolation, "shared_timed_component=") {
+                Some("none") => true,
+                Some(declared) if !declared.is_empty() => {
+                    disclosed_shared_component_is_admissible(entry, declared)
+                }
+                _ => false,
+            };
             candidate.is_some_and(|name| name.starts_with("fnp.") && name.len() > 4)
                 && incumbent.is_some_and(|name| name.starts_with("numpy.") && name.len() > 6)
                 && candidate != incumbent
-                && token_value(isolation, "shared_timed_component=") == Some("none")
+                && isolated
         });
     measured_null
         && actual_numpy

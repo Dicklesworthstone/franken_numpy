@@ -603,6 +603,38 @@ pub fn report_incumbent_topology(candidate: &str, incumbent: &str) {
     std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
 }
 
+/// State the measured topology when the candidate arm is known to route one or
+/// more of its public stages back into the incumbent's compiled code. The
+/// shared component must be named: an end-to-end job comparison stays honest
+/// only if a delegated stage is disclosed rather than implied absent. A shared
+/// stage cannot inflate the candidate's ratio (identical code runs in both
+/// arms), so a disclosed-delegation row is conservative, not flattering.
+pub fn report_incumbent_topology_with_shared_component(
+    candidate: &str,
+    incumbent: &str,
+    shared_timed_component: &str,
+) {
+    assert!(
+        candidate.starts_with("fnp.") && incumbent.starts_with("numpy."),
+        "incumbent topology must name public fnp and numpy entry points"
+    );
+    assert_ne!(
+        candidate, incumbent,
+        "candidate and incumbent entry points must be distinct"
+    );
+    assert!(
+        !shared_timed_component.is_empty() && shared_timed_component != "none",
+        "this helper exists to name a real shared component; \
+         use report_incumbent_topology for a fully independent pair"
+    );
+    println!(
+        "INCUMBENT_TOPOLOGY candidate={candidate} incumbent={incumbent} \
+         shared_timed_component={shared_timed_component} \
+         shared_component_direction=conservative_for_candidate"
+    );
+    std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
+}
+
 fn report_bench_identity() {
     println!("bench_elf_sha256={}", self_identity());
     println!("bench_invocation_id={}", bench_invocation_id());
