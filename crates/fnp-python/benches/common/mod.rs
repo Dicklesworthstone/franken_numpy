@@ -1421,6 +1421,36 @@ pub fn report_median_gate_pair(
     let base = median_gate_distribution(&median_gate_tail(base_ns));
     let candidate = median_gate_distribution(&median_gate_tail(candidate_ns));
     let effect = median_gate_distribution(&median_gate_tail(effect_ratios));
+    // LATENT GATE DEFECT — DORMANT HERE, DO NOT COPY THIS CLAUSE INTO A NEW GATE.
+    //
+    // `null_brackets_one` vetoes before the effect is even consulted, and it
+    // keys on the null's PRECISION: the tighter (better) the null, the narrower
+    // p10..p90, the more likely it excludes 1.0, the more likely it vetoes a
+    // real effect. frankenlibc quantified the same clause elsewhere in the fleet
+    // suppressing 130-265% effects on null intervals that missed 1.0 by
+    // 0.04-0.5%. The current dual-null contract
+    // (`report_dual_null_contract_gate`) deliberately does NOT have this clause:
+    // it compares the EFFECT median against the null CI bounds and folds null
+    // bias into `required_delta`, so null precision cannot veto a row.
+    //
+    // Audited 2026-07-30 on the identical release-perf ELF
+    // a27630778eff50a49987056bc8d5fc5025758a686d0b2f6dac54232b3ec6ac53, two
+    // passes on a drained host-exclusive worker: isclose_f64_8m,
+    // maximum_accumulate_f64_8m, and int_convolve_i64_200k_256 reproduced their
+    // effects within 1.6-8.9% and returned WIN 6/6. No veto fired, because
+    // these microbench nulls are WIDE (p10..p90 spans 4-24%) and so bracket 1.0
+    // comfortably. The defect is therefore dormant on this surface, and the
+    // fleet rule is to leave a verdict-stable gate alone — hence no behaviour
+    // change here.
+    //
+    // It stops being dormant the moment anyone tightens these arms (more
+    // batches, pinned warm iterations, a quieter host). If you do that, replace
+    // this clause with the corrected rule rather than debugging your data: gate
+    // on the effect CI excluding 1.0 AND the effect deviation exceeding twice
+    // the larger null half-width, and report null bias as telemetry. Bound the
+    // bias against its OWN uncertainty if you must gate on it at all; a bare
+    // "median within 2%" test was measured on this repo's workload surface to
+    // move which size point it rejects between identical-ELF runs.
     let null_brackets_one = null.p10 <= 1.0 && null.p90 >= 1.0;
     let verdict = if !null_brackets_one {
         "BIASED_NULL"

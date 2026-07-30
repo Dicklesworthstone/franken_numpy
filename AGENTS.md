@@ -535,6 +535,46 @@ RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- \
 helper, but its regex classification is not authoritative. Use the Rust
 preflight above for a real proposal and rely on its staged audit in pre-commit.
 
+### A/A null gate semantics — audited 2026-07-30, do not "fix" it blind
+
+The fleet found a defect in the mandated harness contract: an A/A null clause
+that vetoed a row unless the null's interval INCLUDED 1.0. That couples the
+verdict to the null's *precision* in the wrong direction — a tighter, better
+null is more likely to exclude 1.0 and veto a real effect.
+
+**This repo's live contract does not have that defect.**
+`report_dual_null_contract_gate` compares the EFFECT median against the null CI
+bounds; it never requires a null CI to contain 1.0, and it folds null bias into
+`required_delta` (half-width measured from 1.0). Proof from banked rows that
+scored `DECIDABLE_WIN` while a null CI excluded 1.0 entirely: the 2,048-account
+access-control incumbent null `[0.982472, 0.997568]`, the f16 telemetry
+candidate null `[1.069905, 1.179077]`, and the f16 vector-field candidate null
+`[0.931902, 0.994990]`.
+
+**A dormant copy of the defect survives** in the legacy
+`report_median_gate_pair` (`benches/common/mod.rs`, `verdict=BIASED_NULL`), used
+by 48 arms across 8 groups. Audited with two passes of one identical ELF on a
+drained host: effects reproduced within 1.6-8.9%, verdicts were WIN 6/6, no veto
+fired — those microbench nulls are wide (p10..p90 spans 4-24%). Verdict-stable
+gates get left alone, so it is unchanged, but the hazard comment at that line
+tells you what to do if you ever tighten those arms.
+
+**Before adopting the corrected rule's "null median within 2% of 1.0" clause,
+read this.** Two clauses of it (effect CI excludes 1.0; effect deviation beats
+2x the larger null half-width) are already enforced here. The third was measured
+on this repo's workload surface and is NOT stable at 21 rounds: across two runs
+of the identical ELF the clause rejected a *different* size point each time
+(8,192 at 3.208% off unity in one run; 2,048 at 5.241% in the other, with 8,192
+then passing at 0.259%) while the end-to-end effect reproduced within 5.1%. A
+reproducible effect with a moving verdict is the same diagnostic that condemned
+the straddle clause — the coupling has just moved from the null's CI width to the
+null median's point-estimate noise. If you gate on arm-order bias, bound it
+against its own uncertainty or raise the round count until the null median's
+standard error is well under 2%; otherwise report it as telemetry. Note this
+clause would also make the f16 telemetry health report (candidate null 1.129564,
+12.96% off unity) undecidable, so adopting it is a retroactive re-scoring
+decision, not a formatting change.
+
 ### When you write a REJECT row
 
 `crates/fnp-conformance/tests/ledger_hygiene.rs` fails CI unless a REJECT row
@@ -757,6 +797,27 @@ executes the binary.
 **Provenance requirement:** record WHICH worker built the binary and WHICH
 profile, next to the ELF SHA-256 the harness self-reports from inside the
 process. A binary of unknown origin or unknown profile is not evidence.
+
+**FOOTGUN INTRODUCED BY ROUTE 1: pass `--bench`.** When `cargo bench` runs a
+criterion binary it passes `--bench` for you. Running a scp'd ELF directly does
+not, so criterion silently enters *test mode*: each benchmark executes exactly
+one validation iteration, no samples are collected, `report_median_gate_pair`
+early-returns on the empty sample vectors, and the process **exits 0 having
+measured nothing and printed no gate line**. Measured 2026-07-30: five seconds
+and zero `NULL_MEDIAN_GATE` rows, with an exit code that looks like success.
+This is the "unregistered groups run green measuring nothing" trap wearing a new
+hat. Direct ELF invocation therefore needs BOTH:
+
+```bash
+FNP_BENCH_GROUPS=<group-fn-substrings> ./<elf> --bench
+```
+
+Also note the two group selectors are not interchangeable. The `fnp-group=<...>`
+argv token is ALSO consumed by criterion as a benchmark-name filter, which
+silently filters out every criterion-driven arm; it only works for
+self-timing workload groups that ignore criterion entirely. For criterion-driven
+arms use the `FNP_BENCH_GROUPS` environment variable, which criterion never
+sees.
 
 **Route 2 is FROZEN as of 2026-07-30 23:10 — do not start a local cargo build.**
 The 150G floor below has tripped: `/data` fell to 127G and then 114G free,
