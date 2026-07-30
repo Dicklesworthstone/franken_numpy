@@ -4,6 +4,172 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-30 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): isolated int64 rolling-load saturation report - 1.90-2.08x vs live NumPy under release-perf
+
+`CloudyChapel`, bead `franken_numpy-ixs5y.393`. This is an end-to-end site
+reliability capacity-review job, not another microbenchmark. It starts with
+2.2M to 8.8M one-second request-count samples containing a Poisson service
+baseline plus periodic incident bursts, computes every valid 60-second rolling
+total, converts those totals into a running high-water envelope, and reports
+the rolling-load peak-to-peak spread. Each arm independently executes the same
+three public calls over the same read-only `int64` input:
+`convolve(..., mode="valid")`, `maximum.accumulate`, and `ptp`.
+
+WHY THIS WORKLOAD IS REPRESENTATIVE: rolling request totals and the high-water
+envelope are the time-series arrays an SRE uses to decide whether current
+capacity still covers incident demand. A one-second cadence and a 60-second
+window are recognizable operational units, while `int64` preserves exact
+request counts. The report retains both full arrays plus the scalar spread, so
+the timed job includes the materialized data an analyst graphs and the summary
+number they alert on. The three input sizes represent about 25.5, 50.9, and
+101.9 days of one-second observations and exercise the same source-pinned
+candidate routes throughout.
+
+`bench_elf_sha256=2676e0ab1f328ded31ac1820120811a16895dca6c6e876ebbd8d2e9084975c59`
+(217,332,904 bytes), self-reported by the executing process from
+`/proc/self/exe`, invocation
+`000000000000000018c6faaa97d75f7d-0004b6a2`. The preserved 67-line execution
+log at `.rch-bench-replay/rolling-load-393-release-perf.log` has SHA-256
+`8a088ea551508981319e29147bd41110e8d6b164d2a14b1a814eb5266feb835f`.
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy median ratios and bootstrap CI95s were 1.021750 `[0.935915,1.045390]`, 0.995816 `[0.978763,1.027212]`, and 1.025385 `[0.942647,1.066285]` at 2.2M, 4.4M, and 8.8M samples.
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratios and
+bootstrap CI95s were 1.033618 `[0.987529,1.069002]`, 1.031145
+`[0.958723,1.054414]`, and 1.060456 `[0.962945,1.133203]` at the same
+three points.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c6faaa97d75f7d-0004b6a2 measured_ratio=1.896072x
+
+**Incumbent isolation proof:** candidate=fnp.workload.rolling_load_saturation_report incumbent=numpy.workload.rolling_load_saturation_report shared_timed_component=none
+
+The process proved that the incumbent callables were the live
+`numpy.convolve`, `numpy.maximum.accumulate`, and `numpy.ptp` objects from
+NumPy 2.4.6, backed by
+`_multiarray_umath.cpython-313-x86_64-linux-gnu.so` with the incumbent hash
+above. They were object-distinct from the FNP callables. Every timed NumPy
+observation executed all three live calls in the same process and invocation
+as FNP; callable handles were bound once, but no NumPy result or intermediate
+was cached. The candidate's source-pinned routes were:
+
+| report stage | candidate route | source-pinned admission condition |
+|---|---|---|
+| 60-second rolling totals | native parallel direct int64 valid convolution | 1-D same-dtype C-contiguous `int64`, valid mode, `n*m >= 1<<16`, Rayon >= 2 |
+| running high-water envelope | native parallel two-pass int64 maximum accumulate | 1-D C-contiguous `int64`, axis 0, no dtype/out, `n >= 1<<21`, Rayon >= 2 |
+| rolling-load spread | native zero-copy int64 peak-to-peak | non-empty exact contiguous `int64` ndarray, axis `None` |
+
+BUILD AND RUN PROVENANCE: the exact committed harness at `326588a5` was built
+under strict RCH from that clean base with `--clean-overlay --no-overlay` and
+Cargo's ship-grade `release-perf` profile. RCH pool worker `ovh-a` (builder
+hostname `fixmydocuments`, alias `fmd`, 51.222.245.56) produced
+`release-perf/deps/criterion_python_median_gate-77b53e183b347063`. The
+builder-side artifact and the copy transferred directly to the measurement
+host both had the executing ELF hash and byte count above. The copied ELF ran
+on drained worker `vmi1227854`; that worker was re-enabled after the process
+exited.
+
+HOST, THREAD, AND ISA PROVENANCE: every row ran on `vmi1227854`
+(109.123.245.77), `AMD EPYC Processor (with IBPB)`, 10 physical cores, 10
+logical threads, and online/allowed CPUs 0-9; governor availability was
+honestly reported as unavailable. Compile-time SSE2 and AVX2 were true.
+Runtime SSE2, AVX, AVX2, F16C, and FMA were true; runtime AVX-512F and
+AVX-512BW were false. NumPy reported x86-v3, AVX2, and FMA3 enabled and every
+AVX-512 family disabled. Rayon, OpenBLAS, OMP, and MKL were each explicitly
+pinned to four threads, and the Rayon pool asserted four workers.
+
+The per-row `/proc/self/task` probes observed one NumPy thread and five FNP
+threads (main plus four Rayon workers) actually accruing CPU ticks at all three
+sizes. NumPy/FNP total tick deltas were 40/62, 74/120, and 374/514. This is a
+four-thread FNP versus single-active-thread live NumPy chooser on the recorded
+topology, not a single-thread kernel claim. Host-wide fail-closed quiescence
+passed at process start and before every contract; maximum observed busy
+fractions were 3.3%, 3.2%, 0.0%, and 0.0%, below the 20% refusal threshold.
+
+WORK ACCOUNTING CAME BEFORE INTERPRETATION. Both arms make three public calls,
+materialize the same outputs, and evaluate the same 131,996,460 / 263,996,460
+/ 527,996,460 convolution terms. Both perform 4,399,880 / 8,799,880 /
+17,599,880 semantic `ptp` comparisons. The incumbent performs 2,199,940 /
+4,399,940 / 8,799,940 maximum-accumulate comparisons, while FNP's parallel
+two-pass algorithm performs 4,399,880 / 8,799,880 / 17,599,880. The harness
+therefore records `candidate_does_more_counted_accumulate_work`, with one extra
+comparison per rolling element. The win is not credited to doing less work.
+
+Exact dtype, shape, and every output byte matched for the rolling totals,
+running high-water envelope, and scalar spread at all three sizes. Pre-timing
+mixed checksums were `7b7377fa6141f4f9`, `9c6553fc877976bb`, and
+`713d05293e0f3ef0`; the incumbent A/A, candidate A/A, and effect phases
+reproduced one identical checksum per size (`ca056d134bca3363`,
+`2fab49719f9dfcee`, and `5f666dac788fa0bf`).
+
+| one-second samples | NumPy/NumPy null ratio (CI95) | FNP/FNP null ratio (CI95) | NumPy median | FNP median | NumPy/FNP ratio (bootstrap CI95) | required 2x null delta | verdict |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 2,200,000 | 1.021750 `[0.935915,1.045390]` | 1.033618 `[0.987529,1.069002]` | 69.538142 ms | 35.638694 ms | **2.010480x** `[1.897086,2.176454]` | 0.138004 | DECIDABLE_WIN |
+| 4,400,000 | 0.995816 `[0.978763,1.027212]` | 1.031145 `[0.958723,1.054414]` | 141.070070 ms | 75.222599 ms | **1.896072x** `[1.860069,1.959474]` | 0.108829 | DECIDABLE_WIN |
+| 8,800,000 | 1.025385 `[0.942647,1.066285]` | 1.060456 `[0.962945,1.133203]` | 380.346066 ms | 185.549489 ms | **2.077257x** `[1.886425,2.196633]` | 0.266406 | DECIDABLE_WIN |
+
+All three 21-round, min-of-2, alternating-order effects have a bootstrap
+median CI wholly above 1.0, put the effect median outside both same-invocation
+null envelopes, and clear twice the larger null half-width measured from 1.0.
+Effect CVs of 17.887%, 8.545%, and 14.756% are provenance only and never enter
+the acceptance gate.
+
+GATE PROVENANCE: the full-reasoning re-audit found that provisional audit
+commit `121d793c` was right that the live dual-null scorer had no
+null-CI-straddle veto, but wrong that it already required effect-CI exclusion.
+Commit `ad31891e` corrected that omission before this ELF was built. The
+scorer now requires the effect bootstrap median CI to exclude 1.0 as well as
+the point estimate to clear both null envelopes and twice the controlling null
+half-width. Fail-fast synthetic checks cover CI-crossing apparent wins and
+regressions, a clear win and regression, an effect-CI-only result that misses
+the null margin, and a valid win whose null CI excludes 1.0. This row was
+scored only under that corrected contract. CV was not a gate.
+
+PROFILE ATTRIBUTION (seven-round stage medians, NumPy/FNP ms, ratio):
+
+| samples | rolling total | high-water accumulate | spread `ptp` | convolution share of FNP stage time |
+|---:|---|---|---|---:|
+| 2,200,000 | 70.509957 / 32.695633 = 2.157x | 1.853357 / 2.560606 = 0.724x | 1.102932 / 1.372646 = 0.804x | 89.262% |
+| 4,400,000 | 127.370250 / 67.171364 = 1.896x | 5.848925 / 5.850707 = 1.000x | 2.196622 / 2.554348 = 0.860x | 88.879% |
+| 8,800,000 | 418.230305 / 137.877505 = 3.033x | 67.053048 / 98.943474 = 0.678x | 5.314523 / 5.009858 = 1.061x | 57.014% |
+
+The complete report wins; not every stage does. FNP's high-water accumulate is
+slower at 2.2M and 8.8M, essentially tied at 4.4M, and performs more counted
+comparisons. FNP's standalone `ptp` is slower at the two smaller points. Those
+losses are not hidden behind the whole-job headline. Direct convolution is the
+dominant candidate stage and the measured source of the complete-report win.
+No production lever was opened: this row characterizes shipped native routes.
+
+The whole-job ratios `[2.010480, 1.896072, 2.077257]` have a 9.556% max/min
+spread, classified `FLAT_PER_SAMPLE_COST` under the harness's 15% boundary.
+That supports interpolation only within the measured sample interval, dtype,
+window, route, thread, and ISA contract. It is not permission to extrapolate
+to other cadences, windows, layouts, or thread topologies.
+
+CHOOSER STATEMENT: for site-reliability capacity reports over 2.2M to 8.8M
+one-second `int64` request-count samples, using a 60-second valid rolling
+window and requiring the rolling totals, running high-water envelope, and
+peak-to-peak spread on the recorded four-thread FNP / single-active-thread
+NumPy EPYC AVX2 topology, choose FrankenNumPy: the byte-identical complete job
+measured 2.010x, 1.896x, and 2.077x faster than live NumPy. NumPy ran all three
+calls live in the same invocation with no result cache. Outside that exact
+scope, run the same corrected dual-null contract before choosing.
+
+**Decision: KEEP, INCUMBENT-WIN.** Bank the fully isolated `release-perf`
+harness and its honest size-specific 1.90-2.08x complete-job result; no
+production kernel changed.
+
+Retry predicate: do not repeat this exact corpus against these candidate and
+NumPy artifact hashes on the recorded host and thread topology. Reopen when
+either artifact hash or a named native route changes; for a different sample
+range, cadence, window, dtype, layout, thread count, host ISA, or required
+output set; or when counted instructions, cycles, allocations, faults, cache
+misses, or memory traffic identify removable work in the losing FNP
+high-water or `ptp` stage. A new headline requires fresh live-NumPy,
+same-invocation dual-null evidence under the corrected effect-bootstrap-CI plus
+2x-null-margin gate.
+
 ## 2026-07-30 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): fully isolated int64 critical-access exposure report - 2.68-7.49x vs NumPy under release-perf with a narrowing account curve
 
 `BlackThrush`, bead `franken_numpy-ixs5y.392`. This is a complete enterprise
