@@ -704,6 +704,82 @@ rch exec -- cargo test
 rch exec -- cargo clippy
 ```
 
+### DEFAULT BUILD INVOCATION: pin a clean baseline, or you pay a cold build every time
+
+**This is the fleet default as of 2026-07-30. Use it instead of a bare `rch exec`.**
+
+rch folds *working-tree state* into its project hash, and this checkout is shared
+by a `cc` agent and a `cod` agent. Every edit either of them makes moves the
+hash, the hash misses the remote target cache, and you pay a full cold build.
+Pinning a worker does not help: the cache key itself moved.
+
+```bash
+# You have uncommitted edits: transfer a clean commit plus ONLY your paths.
+RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec \
+  --base <commit-sha> --clean-overlay \
+  --overlay-path crates/fnp-python/benches -- \
+  cargo bench --profile release-perf --bench <target> --no-run
+
+# Everything you need is committed: the baseline IS your tree (most deterministic).
+RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec \
+  --base <commit-sha> --clean-overlay --no-overlay -- \
+  cargo bench --profile release-perf --bench <target> --no-run
+```
+
+`--no-overlay` still requires `--clean-overlay` on the command line; the two are
+declared together. Keep the overlay list **minimal** — a broad `--overlay-path`
+re-imports the churn you are excluding. If the build is still cold, report the
+two differing project hashes (visible as the
+`.rch-target-<worker>-pool-<hash>` directory in the build output).
+
+**`RCH_WORKER` pinning is currently refused for this repo** — every worker fails
+a hard preflight with `alias_wrong_target:/data` because each has a real
+`/data/projects/franken_numpy` directory rather than rch's expected alias
+symlink. Verified 2026-07-30 that the clean-baseline form does *not* change this,
+so build unpinned and choose your measurement host separately (below).
+`rch diagnose` shows a *simulated* selection succeeding; the hard preflight only
+runs on the real `rch exec`.
+
+### Getting a perf binary you can actually run and time
+
+`rch exec` has **no artifact-retrieval mechanism**, and it compiles *and runs*
+remotely. That is fine for `cargo test`, but a perf measurement needs the binary
+on a host you control.
+
+**Route 1 (preferred): scp it off the worker.** The build output names the ELF
+under `.rch-target-<worker>-pool-<hash>/<profile>/deps/<bench>-<hash>`. Pipe it
+to your measurement host and verify `sha256sum` on both ends. This is safe here:
+no repo sets `target-cpu=native`, and this repo's only ISA pin is the *portable*
+`target-feature=+avx2` (`x86-64-v3` is a correctness hazard — it breaks 16
+conformance tests), so runtime ISA dispatch resolves against the CPU that
+executes the binary.
+
+**Provenance requirement:** record WHICH worker built the binary and WHICH
+profile, next to the ELF SHA-256 the harness self-reports from inside the
+process. A binary of unknown origin or unknown profile is not evidence.
+
+**Route 2 (permitted, guardrails): one bounded local build.** Local builds are no
+longer banned — that ban was a disk-emergency measure and it was pushing people
+to measure on the wrong profile. Guardrails: reuse ONE target dir per repo (never
+mint a fresh `CARGO_TARGET_DIR` per task — that ballooned `/data/tmp` to 612G
+twice); **`df` precheck, and do not start a local build under 150G free on
+/data**; local builds are for the final measurement artifact only (edit loop,
+`cargo check`, clippy, and tests stay remote); and `force_local = true` remains
+banned as an rch *config* setting — if you need one local build, run that one
+command with `env -u CARGO_TARGET_DIR cargo build --profile release-perf ...`
+directly rather than editing rch config.
+
+### PROFILE: `bench` is triage-grade, `release-perf` is ship-grade
+
+`[profile.bench]` inherits stock `release` (`lto = false`,
+`codegen-units = 16`), i.e. the same optimization level as the `bench-fast`
+triage profile. A plain `cargo bench` therefore measures our arm **without**
+thin LTO or cross-crate inlining. Per this workspace's own profile comment,
+ship-grade fnp-vs-NumPy ratios must be confirmed under `--profile release-perf`.
+State the profile in every ledger row that publishes an absolute level. A ratio
+measured with the candidate at `bench` is conservative (release-perf can only
+speed our arm up) but it is still mislabeled if the row does not say so.
+
 Quick commands:
 ```bash
 rch doctor                    # Health check
