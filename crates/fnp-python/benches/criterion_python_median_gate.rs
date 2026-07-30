@@ -755,6 +755,84 @@ impl<'py> CriticalAccessExposureArm<'py> {
     }
 }
 
+struct RollingLoadSaturationArm<'py> {
+    convolve: Bound<'py, PyAny>,
+    maximum_accumulate: Bound<'py, PyAny>,
+    ptp: Bound<'py, PyAny>,
+}
+
+impl<'py> RollingLoadSaturationArm<'py> {
+    fn run(
+        &self,
+        requests_per_second: &Bound<'py, PyAny>,
+        rolling_window: &Bound<'py, PyAny>,
+    ) -> (Duration, [Bound<'py, PyAny>; 3]) {
+        let started = Instant::now();
+        let rolling_load = self
+            .convolve
+            .call1((
+                black_box(requests_per_second),
+                black_box(rolling_window),
+                "valid",
+            ))
+            .expect("rolling 60-second request totals");
+        let high_water_envelope = self
+            .maximum_accumulate
+            .call1((black_box(&rolling_load),))
+            .expect("running rolling-load high-water envelope");
+        let rolling_spread = self
+            .ptp
+            .call1((black_box(&rolling_load),))
+            .expect("rolling-load peak-to-peak spread");
+        let elapsed = started.elapsed();
+        (elapsed, [rolling_load, high_water_envelope, rolling_spread])
+    }
+
+    fn profile(
+        &self,
+        requests_per_second: &Bound<'py, PyAny>,
+        rolling_window: &Bound<'py, PyAny>,
+    ) -> [f64; 3] {
+        const PROFILE_ROUNDS: usize = 7;
+        let mut convolve_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut high_water_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut spread_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        for _ in 0..PROFILE_ROUNDS {
+            let started = Instant::now();
+            let rolling_load = self
+                .convolve
+                .call1((requests_per_second, rolling_window, "valid"))
+                .expect("profile rolling 60-second request totals");
+            convolve_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            black_box(
+                self.maximum_accumulate
+                    .call1((&rolling_load,))
+                    .expect("profile rolling-load high-water envelope"),
+            );
+            high_water_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            black_box(
+                self.ptp
+                    .call1((&rolling_load,))
+                    .expect("profile rolling-load spread"),
+            );
+            spread_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+        }
+        let median = |samples: &mut Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        [
+            median(&mut convolve_ms),
+            median(&mut high_water_ms),
+            median(&mut spread_ms),
+        ]
+    }
+}
+
 fn bench_median_gate_python_binary<'py>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     bench_name: &'static str,
@@ -8787,6 +8865,482 @@ assert role_count * 4 * 31 < np.iinfo(np.int64).max
     });
 }
 
+/// Phase-2 Class-3 workload: turn a production request-count stream into the
+/// rolling capacity report an SRE uses for saturation review. The 60-second
+/// valid convolution produces per-minute rolling totals, maximum.accumulate
+/// records the running high-water envelope, and ptp reports demand spread.
+///
+/// All three public candidate stages stay on independently implemented native
+/// int64 paths at every size. In particular, this workload deliberately avoids
+/// flat int64 argmax: that route delegates large arrays to NumPy and would make
+/// a purported incumbent-isolated job share a timed component.
+fn bench_realistic_rolling_load_saturation_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const SAMPLE_SIZES: [usize; 3] = [2_200_000, 4_400_000, 8_800_000];
+    const WINDOW_SECONDS: usize = 60;
+    const WORKLOAD_CONTRACT_ROUNDS: usize = 21;
+    const WORKLOAD_CONTRACT_MIN_OF: usize = 2;
+    const THREAD_ACTIVITY_REPETITIONS: usize = 5;
+    const THREADS: &str = "4";
+    const REQUIRED_BUILD_PROFILE: &str = "release-perf";
+
+    assert_eq!(
+        std::env::var("FNP_BENCH_PROFILE").as_deref(),
+        Ok(REQUIRED_BUILD_PROFILE),
+        "ship-grade rolling-load evidence requires FNP_BENCH_PROFILE=release-perf"
+    );
+    let build_worker =
+        std::env::var("FNP_BUILD_WORKER").expect("FNP_BUILD_WORKER records the RCH build origin");
+    assert!(
+        !build_worker.trim().is_empty(),
+        "FNP_BUILD_WORKER must name the RCH build worker"
+    );
+    for variable in [
+        "RAYON_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(THREADS),
+            "{variable} must be explicitly pinned before workload timing"
+        );
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        THREADS
+            .parse::<usize>()
+            .expect("thread count constant is numeric"),
+        "Rayon pool width does not match the pinned workload configuration"
+    );
+    let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "unavailable".to_owned());
+    println!(
+        "WORKLOAD_RUNTIME workload=rolling_load_saturation_report host={host} \
+         build_worker={build_worker} build_profile={REQUIRED_BUILD_PROFILE} \
+         rayon_threads={} RAYON_NUM_THREADS={} OPENBLAS_NUM_THREADS={} \
+         OMP_NUM_THREADS={} MKL_NUM_THREADS={} trj_used=false",
+        rayon::current_num_threads(),
+        THREADS,
+        THREADS,
+        THREADS,
+        THREADS,
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_rolling_load_saturation_workload")
+            .expect("rolling-load saturation module");
+        fnp_python(&module).expect("initialize fnp_python rolling-load saturation module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(format!(
+                r#"
+import numpy as np
+rng = np.random.default_rng(20260730)
+sample_sizes = {SAMPLE_SIZES:?}
+window_seconds = {WINDOW_SECONDS}
+max_samples = sample_sizes[-1]
+
+# A stable service baseline with periodic incident bursts. Each element is the
+# observed request count for one second; the timed job starts from this already
+# collected stream, as a normal capacity-analysis notebook would.
+request_counts = rng.poisson(900, size=max_samples).astype(np.int64, copy=False)
+for start in range(200_000, max_samples, 600_000):
+    stop = min(start + 3_600, max_samples)
+    request_counts[start:stop] += rng.poisson(
+        2_200,
+        size=stop - start,
+    ).astype(np.int64, copy=False)
+
+requests_by_size = [
+    np.ascontiguousarray(request_counts[:sample_count])
+    for sample_count in sample_sizes
+]
+rolling_window = np.ones(window_seconds, dtype=np.int64)
+
+max_request_count = int(request_counts.max())
+assert max_request_count >= 0
+assert max_request_count * window_seconds < np.iinfo(np.int64).max
+assert rolling_window.dtype == np.int64
+assert rolling_window.ndim == 1
+assert rolling_window.flags.c_contiguous
+for sample_count, requests in zip(sample_sizes, requests_by_size):
+    assert requests.dtype == np.int64
+    assert requests.ndim == 1
+    assert requests.flags.c_contiguous
+    assert requests.size == sample_count
+    assert requests.size - window_seconds + 1 >= (1 << 21)
+    requests.flags.writeable = False
+rolling_window.flags.writeable = False
+"#
+            ))
+            .expect("rolling-load setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("rolling-load corpus setup");
+
+        let fnp_convolve = module.getattr("convolve").expect("fnp convolve");
+        let np_convolve = numpy.getattr("convolve").expect("numpy convolve");
+        let fnp_maximum = module.getattr("maximum").expect("fnp maximum");
+        let np_maximum = numpy.getattr("maximum").expect("numpy maximum");
+        let fnp_maximum_accumulate = fnp_maximum
+            .getattr("accumulate")
+            .expect("fnp maximum.accumulate");
+        let np_maximum_accumulate = np_maximum
+            .getattr("accumulate")
+            .expect("numpy maximum.accumulate");
+        let fnp_ptp = module.getattr("ptp").expect("fnp ptp");
+        let np_ptp = numpy.getattr("ptp").expect("numpy ptp");
+        for (candidate, incumbent, surface) in [
+            (&fnp_convolve, &np_convolve, "convolve"),
+            (&fnp_maximum, &np_maximum, "maximum"),
+            (&fnp_ptp, &np_ptp, "ptp"),
+        ] {
+            assert!(
+                !candidate.is(incumbent),
+                "{surface}: candidate callable aliases NumPy"
+            );
+            common::report_numpy_incumbent_identity(py, surface, incumbent);
+        }
+        let numpy_cpu_features = numpy
+            .getattr("_core")
+            .expect("numpy core")
+            .getattr("_multiarray_umath")
+            .expect("numpy multiarray umath")
+            .getattr("__cpu_features__")
+            .expect("numpy runtime CPU features")
+            .str()
+            .expect("numpy runtime CPU feature str")
+            .extract::<String>()
+            .expect("numpy runtime CPU feature string");
+        println!(
+            "NUMPY_RUNTIME_ISA workload=rolling_load_saturation_report \
+             runtime_cpu_features={numpy_cpu_features}"
+        );
+        common::report_incumbent_topology(
+            "fnp.workload.rolling_load_saturation_report",
+            "numpy.workload.rolling_load_saturation_report",
+        );
+        println!(
+            "INCUMBENT_ISOLATION_PROOF workload=rolling_load_saturation_report \
+             candidate=fnp.convolve+fnp.maximum.accumulate+fnp.ptp \
+             incumbent=numpy.convolve+numpy.maximum.accumulate+numpy.ptp \
+             candidate_callable_identity_distinct=passed \
+             shared_timed_component=none candidate_stages_all_native=true \
+             inputs_shared_read_only=true numpy_live_calls_per_observation=3 \
+             numpy_result_cache=none callable_handles_bound_once=true"
+        );
+        for (stage, route, pin) in [
+            (
+                "rolling_total_60s",
+                "native_int64_parallel_direct_convolve_valid",
+                "fnp-python/src/lib.rs:try_native_int_convolve(int64,1d,same-dtype,c-contiguous,mode=valid,n*m>=1<<16,threads>=2)",
+            ),
+            (
+                "running_high_water",
+                "native_int64_parallel_two_pass_maximum_accumulate",
+                "fnp-python/src/lib.rs:try_zerocopy_accumulate_extremum(int64,1d,c-contiguous,axis=0,dtype/out=None,n>=1<<21,threads>=2)",
+            ),
+            (
+                "rolling_spread",
+                "native_int64_zerocopy_ptp",
+                "fnp-python/src/lib.rs:try_zerocopy_int_ptp(int64,axis=None,nonempty-exact-ndarray)",
+            ),
+        ] {
+            println!(
+                "ROUTE_DISCLOSURE workload=rolling_load_saturation_report stage={stage} \
+                 candidate_route={route} source_pin={pin}"
+            );
+        }
+        println!(
+            "ROUTE_PRECONDITIONS workload=rolling_load_saturation_report \
+             dtype=int64 ndim=1 c_contiguous=true mode=valid window_seconds={WINDOW_SECONDS} \
+             min_convolve_work={} int_convolve_min_work={} \
+             min_rolling_elements={} accumulate_parallel_min={} \
+             rayon_threads_min=2 overflow_headroom=proven \
+             contract_rounds={WORKLOAD_CONTRACT_ROUNDS} \
+             contract_min_of={WORKLOAD_CONTRACT_MIN_OF}",
+            SAMPLE_SIZES[0] * WINDOW_SECONDS,
+            1 << 16,
+            SAMPLE_SIZES[0] - WINDOW_SECONDS + 1,
+            1 << 21,
+        );
+        println!(
+            "RUNTIME_ISA_BINDING workload=rolling_load_saturation_report \
+             candidate_process_features=ISA_BASELINE_above \
+             incumbent_dispatch_features=NUMPY_RUNTIME_ISA_above \
+             same_process_same_host_all_rows=true"
+        );
+
+        let incumbent = RollingLoadSaturationArm {
+            convolve: np_convolve,
+            maximum_accumulate: np_maximum_accumulate,
+            ptp: np_ptp,
+        };
+        let candidate = RollingLoadSaturationArm {
+            convolve: fnp_convolve,
+            maximum_accumulate: fnp_maximum_accumulate,
+            ptp: fnp_ptp,
+        };
+        let requests_by_size = namespace
+            .get_item("requests_by_size")
+            .expect("request streams by size");
+        let rolling_window = namespace
+            .get_item("rolling_window")
+            .expect("60-second rolling window");
+
+        let mut scaling = Vec::with_capacity(SAMPLE_SIZES.len());
+        for (size_index, sample_count) in SAMPLE_SIZES.into_iter().enumerate() {
+            let rolling_elements = sample_count - WINDOW_SECONDS + 1;
+            let convolve_terms = rolling_elements * WINDOW_SECONDS;
+            let incumbent_accumulate_comparisons = rolling_elements - 1;
+            let candidate_accumulate_comparisons = 2 * rolling_elements - 2;
+            let ptp_comparisons = 2 * (rolling_elements - 1);
+            let output_elements = 2 * rolling_elements + 1;
+            let row =
+                format!("workload_rolling_load_saturation_{sample_count}s_window{WINDOW_SECONDS}");
+            println!(
+                "WORKLOAD_CONFIG row={row} user_job=rolling_load_saturation_report \
+                 host={host} build_worker={build_worker} \
+                 invocation_id={} configured_threads={THREADS} \
+                 samples={sample_count} cadence=one_second window_seconds={WINDOW_SECONDS} \
+                 dtype=int64 distribution=poisson_service_baseline_plus_periodic_incident_bursts \
+                 stages=convolve_valid_rolling_total,maximum_accumulate_high_water,ptp_spread \
+                 output=rolling_totals_running_high_water_envelope_peak_to_peak_spread \
+                 matched_config=same_process_same_inputs_same_mode_no_result_cache \
+                 target_user=site_reliability_capacity_review",
+                common::bench_invocation_id(),
+            );
+            let requests = requests_by_size
+                .get_item(size_index)
+                .expect("request stream for size");
+
+            let (_, incumbent_output) = incumbent.run(&requests, &rolling_window);
+            let (_, candidate_output) = candidate.run(&requests, &rolling_window);
+            assert_workload_outputs_equal(&numpy, &row, &candidate_output, &incumbent_output);
+            println!(
+                "WORK_ACCOUNTING row={row} candidate_public_calls=3 incumbent_public_calls=3 \
+                 candidate_convolve_terms={convolve_terms} \
+                 incumbent_convolve_terms={convolve_terms} \
+                 candidate_accumulate_comparisons={candidate_accumulate_comparisons} \
+                 incumbent_accumulate_comparisons={incumbent_accumulate_comparisons} \
+                 candidate_ptp_comparisons={ptp_comparisons} \
+                 incumbent_ptp_comparisons={ptp_comparisons} \
+                 candidate_output_elements={output_elements} \
+                 incumbent_output_elements={output_elements} \
+                 more_work_verdict=candidate_does_more_counted_accumulate_work \
+                 extra_candidate_comparisons={incumbent_accumulate_comparisons}"
+            );
+            println!(
+                "PARITY row={row} outputs=3 dtype_shape_byte_identity=passed \
+                 no_overflow_precondition=passed checksum={:016x}",
+                workload_checksum(&numpy, &candidate_output),
+            );
+
+            common::report_observed_thread_activity(
+                &row,
+                "numpy",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    let (_, outputs) = incumbent.run(&requests, &rolling_window);
+                    black_box(outputs);
+                },
+            );
+            common::report_observed_thread_activity(
+                &row,
+                "fnp",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    let (_, outputs) = candidate.run(&requests, &rolling_window);
+                    black_box(outputs);
+                },
+            );
+
+            let incumbent_profile = incumbent.profile(&requests, &rolling_window);
+            let candidate_profile = candidate.profile(&requests, &rolling_window);
+            let candidate_total = candidate_profile.iter().sum::<f64>();
+            let (target_stage, target_ms) = [
+                ("rolling_total_60s", candidate_profile[0]),
+                ("running_high_water", candidate_profile[1]),
+                ("rolling_spread", candidate_profile[2]),
+            ]
+            .into_iter()
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .expect("three rolling-load profile stages");
+            for (stage, incumbent_ms, candidate_ms) in [
+                (
+                    "rolling_total_60s",
+                    incumbent_profile[0],
+                    candidate_profile[0],
+                ),
+                (
+                    "running_high_water",
+                    incumbent_profile[1],
+                    candidate_profile[1],
+                ),
+                ("rolling_spread", incumbent_profile[2], candidate_profile[2]),
+            ] {
+                println!(
+                    "PROFILE_STAGE row={row} arm_pair=numpy_fnp stage={stage} \
+                     incumbent_median_ms={incumbent_ms:.6} \
+                     candidate_median_ms={candidate_ms:.6} \
+                     stage_ratio_numpy_over_fnp={:.6}",
+                    incumbent_ms / candidate_ms,
+                );
+            }
+            let target_fraction = target_ms / candidate_total;
+            println!(
+                "PROFILE_SUMMARY row={row} target_stage={target_stage} \
+                 target_candidate_ms={target_ms:.6} candidate_stage_sum_ms={candidate_total:.6} \
+                 target_self_fraction_pct={:.3} amdahl_remove_ceiling={:.6} \
+                 shared_timed_component=none",
+                target_fraction * 100.0,
+                1.0 / (1.0 - target_fraction),
+            );
+
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = incumbent.run(&requests, &rolling_window);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = candidate.run(&requests, &rolling_window);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &row,
+                    &mut observe_incumbent,
+                    &mut observe_candidate,
+                    WORKLOAD_CONTRACT_ROUNDS,
+                    WORKLOAD_CONTRACT_MIN_OF,
+                );
+            let verdict =
+                common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+            println!(
+                "WORKLOAD_SIZE_POINT workload=rolling_load_saturation_report row={row} \
+                 host={host} build_worker={build_worker} \
+                 invocation_id={} configured_threads={THREADS} \
+                 samples={sample_count} rolling_elements={rolling_elements} \
+                 incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ratio={:.6} candidate_null_ratio={:.6} \
+                 verdict={verdict} gate=effect_bootstrap_ci_plus_2x_controlling_null_margin \
+                 cv_gate=false incumbent_ns_per_input_sample={:.6} \
+                 candidate_ns_per_input_sample={:.6}",
+                common::bench_invocation_id(),
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+                effect.arm_a_median_ns / sample_count as f64,
+                effect.arm_b_median_ns / sample_count as f64,
+            );
+            scaling.push((effect, incumbent_null, candidate_null));
+        }
+
+        let first_ratio = scaling.first().expect("first scaling point").0.ratio_median;
+        let last_ratio = scaling.last().expect("last scaling point").0.ratio_median;
+        let ratio_min = scaling
+            .iter()
+            .map(|(effect, _, _)| effect.ratio_median)
+            .fold(f64::INFINITY, f64::min);
+        let ratio_max = scaling
+            .iter()
+            .map(|(effect, _, _)| effect.ratio_median)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let ratio_spread = ratio_max / ratio_min - 1.0;
+        let monotonic_up = scaling
+            .windows(2)
+            .all(|points| points[1].0.ratio_median >= points[0].0.ratio_median);
+        let monotonic_down = scaling
+            .windows(2)
+            .all(|points| points[1].0.ratio_median <= points[0].0.ratio_median);
+        let shape = if ratio_spread <= 0.15 {
+            "FLAT_PER_SAMPLE_COST"
+        } else if monotonic_up && last_ratio >= first_ratio * 1.15 {
+            "WIDENING_WITH_SAMPLES"
+        } else if monotonic_down && last_ratio <= first_ratio * 0.85 {
+            "NARROWING_WITH_SAMPLES"
+        } else {
+            "MIXED_OR_NOISE"
+        };
+        println!(
+            "SCALING_SHAPE workload=rolling_load_saturation_report \
+             dimension=sample_count window_seconds={WINDOW_SECONDS} \
+             sizes=[{},{},{}] ratios=[{:.6},{:.6},{:.6}] \
+             ratio_spread={ratio_spread:.6} classification={shape}",
+            SAMPLE_SIZES[0],
+            SAMPLE_SIZES[1],
+            SAMPLE_SIZES[2],
+            scaling[0].0.ratio_median,
+            scaling[1].0.ratio_median,
+            scaling[2].0.ratio_median,
+        );
+        let all_decidable_wins = scaling
+            .iter()
+            .all(|(effect, incumbent_null, candidate_null)| {
+                common::dual_null_contract_verdict(*effect, *incumbent_null, *candidate_null)
+                    == "DECIDABLE_WIN"
+            });
+        let any_decidable_regression =
+            scaling
+                .iter()
+                .any(|(effect, incumbent_null, candidate_null)| {
+                    common::dual_null_contract_verdict(*effect, *incumbent_null, *candidate_null)
+                        == "DECIDABLE_REGRESSION"
+                });
+        let (decision, reason) = if all_decidable_wins {
+            (
+                "choose_fnp",
+                "all_three_effect_CIs_and_2x_null_margins_clear",
+            )
+        } else if any_decidable_regression {
+            (
+                "choose_numpy",
+                "at_least_one_size_is_a_decidable_regression",
+            )
+        } else {
+            (
+                "choose_numpy_pending_remeasure",
+                "at_least_one_size_is_statistically_undecided",
+            )
+        };
+        println!(
+            "CHOOSER_SCOPE workload=rolling_load_saturation_report \
+             target_user=site_reliability_capacity_review dtype=int64 \
+             sample_range={}..={} cadence=one_second window_seconds={WINDOW_SECONDS} \
+             candidate_profile={REQUIRED_BUILD_PROFILE} build_worker={build_worker} \
+             measurement_host={host} configured_threads={THREADS} \
+             thread_activity_recorded_per_row=true \
+             decision_requires_all_three_effects_and_both_nulls \
+             generalization_beyond_measured_shape=false",
+            SAMPLE_SIZES[0], SAMPLE_SIZES[2],
+        );
+        println!(
+            "CHOOSER_STATEMENT workload=rolling_load_saturation_report decision={decision} \
+             reason={reason} measured_scope=int64_one_second_request_streams_60s_valid_window \
+             incumbent=numpy_live_same_invocation_no_result_cache \
+             outside_scope=run_same_contract_before_choosing"
+        );
+    });
+}
+
 fn bench_bool_storage_bytes_median_gate(c: &mut Criterion) {
     let _ = c;
     const N: usize = 8_000_000;
@@ -8898,6 +9452,10 @@ fn main() {
         (
             "bench_realistic_critical_access_exposure_vs_numpy_median_gate",
             bench_realistic_critical_access_exposure_vs_numpy_median_gate,
+        ),
+        (
+            "bench_realistic_rolling_load_saturation_vs_numpy_median_gate",
+            bench_realistic_rolling_load_saturation_vs_numpy_median_gate,
         ),
         (
             "bench_realistic_event_attribution_scatter_vs_numpy_median_gate",
