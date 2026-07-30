@@ -4,6 +4,186 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-30 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): fully isolated int64 critical-access exposure report - 2.68-7.49x vs NumPy under release-perf with a narrowing account curve
+
+`BlackThrush`, bead `franken_numpy-ixs5y.392`. This is a complete enterprise
+access-review job, not a kernel call: propagate sparse account-to-role counts
+through a fixed role-to-permission risk matrix, emit the full account-permission
+exposure matrix, identify each account's peak exposure and the permission
+responsible for it, then report the fleet-wide peak-exposure spread. Each arm
+independently executes the same four public calls over the same read-only data:
+`matmul`, `max(axis=1)`, `argmax(axis=1)`, and `ptp()`.
+
+WHY THIS WORKLOAD IS REPRESENTATIVE: an access reviewer needs both the scored
+entitlement matrix and an actionable "which permission is worst?" summary.
+Eight coarse organizational roles map onto 2,048 enterprise entitlements for
+4,096 to 16,384 accounts. Counts and severity weights are auditable integers,
+so `int64` is the natural dtype; casting the job to float merely to reach BLAS
+would change the user's representation. The three exposure matrices contain
+2^23, 2^24, and 2^25 elements, deliberately crossing FrankenNumPy's
+source-pinned native wide-integer reduction gate at every measured size.
+
+`bench_elf_sha256=9e5fce0b9b0f42c018a3273a3ee6e2be38f43ff8fae3d644c0306b0c25d632d8`
+(217,125,984 bytes), self-reported by the executing process from
+`/proc/self/exe`, invocation
+`000000000000000018c6f43869e3db14-00030daf`. The captured 69-line execution
+log has SHA-256
+`4d8c79f257e0314846286140617753b5b2dbe3c29794542aeef3ba55358880f2`.
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 1.007021x, CI95 [0.952720, 1.022372], 21 rounds, min_of=2 at the conservative 16,384-account point; the table records all three sizes.
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio 1.006182x, CI95 [0.943503, 1.029350], 21 rounds, min_of=2 at the same conservative point.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c6f43869e3db14-00030daf measured_ratio=2.677785x
+
+**Incumbent isolation proof:** candidate=fnp.workload.critical_access_exposure_report incumbent=numpy.workload.critical_access_exposure_report shared_timed_component=none
+
+Runtime identity checks inside the measured process proved that all four
+incumbent callables were the live `numpy.matmul`, `numpy.max`,
+`numpy.argmax`, and `numpy.ptp` objects from NumPy 2.4.6, all backed by
+`_multiarray_umath.cpython-313-x86_64-linux-gnu.so` with the incumbent hash
+above. Every callable was object-distinct from its FNP counterpart. The
+candidate's four source-pinned routes were:
+
+| stage | candidate route | source-pinned admission condition |
+|---|---|---|
+| `matmul_exposure` | native int64 tiled GEMM | `try_native_int_matmul`: same-dtype 2-D integer operands, matched inner dimension, work >= `1<<18`, Rayon >= 2 |
+| `account_max_axis1` | native int64 zero-copy minmax | `try_zerocopy_int_minmax`: wide integer, total elements >= `1<<23`, axis 1 |
+| `account_argmax_axis1` | native int64 last-axis argextreme | `try_zerocopy_lastaxis_argextreme`: C-contiguous int64, last axis, total elements >= `1<<20` for parallel execution |
+| `fleet_peak_ptp` | native int64 zero-copy peak-to-peak | `try_zerocopy_int_ptp`: non-empty contiguous int64, axis `None` |
+
+BUILD AND RUN PROVENANCE: this was a ship-grade `release-perf` build
+(`opt-level=3`, thin LTO, one codegen unit), not the triage `bench` profile.
+The build ran through strict RCH from clean base `7fc01c17` with only
+`crates/fnp-python/benches/criterion_python_median_gate.rs` overlaid. RCH worker
+`vmi1293453` produced
+`release-perf/deps/criterion_python_median_gate-77b53e183b347063`; the builder,
+local Route-1 copy, and measurement-host copy all hashed to the executing ELF
+hash above before the run. The copied ELF executed on drained worker
+`vmi1227854`; the worker was re-enabled immediately after the process exited.
+
+HOST AND THREAD PROVENANCE: `vmi1227854`, `AMD EPYC Processor (with IBPB)`, 10
+physical cores, 10 logical threads, online/allowed CPUs 0-9, and governor
+honestly recorded as unavailable. Compile-time SSE2 and AVX2 were true.
+Runtime SSE2, AVX, AVX2, F16C, and FMA were true; runtime AVX-512F and
+AVX-512BW were false. Rayon, OpenBLAS, OMP, and MKL were each explicitly
+pinned to four threads, and `rayon::current_num_threads()` was asserted to be
+four. The `/proc/self/task` probes observed one NumPy thread at every size and
+4 / 5 / 5 FNP threads actually accruing CPU ticks. Host-wide fail-closed
+quiescence passed at process start and immediately before all three dual-null
+contracts; maximum per-CPU busy fractions were 3.2%, 0.0%, 3.6%, and 0.0%,
+all below the 20% refusal threshold.
+
+WORK ACCOUNTING CAME BEFORE INTERPRETATION. Both arms make four public calls and
+perform the same semantic matrix/reduction job. At 4,096 / 8,192 / 16,384
+accounts each arm performs 67,108,864 / 134,217,728 / 268,435,456 integer
+multiplications and 58,720,256 / 117,440,512 / 234,881,024 matrix-product
+additions. Each arm also performs 8,384,512 / 16,769,024 / 33,538,048
+per-account max comparisons and the same semantic argmax extreme-comparison
+counts, plus 8,190 / 16,382 / 32,766 comparisons for the fleet `ptp`.
+
+FrankenNumPy is not credited with a less-work explanation: its native
+last-axis argmax is a two-pass first-occurrence algorithm, so it additionally
+performed a source- and output-counted 2,723,796 / 5,511,087 / 10,803,426
+first-index equality checks. The harness records
+`more_work_verdict=candidate_does_more_counted_argmax_work`. The win therefore
+survives known extra candidate work rather than hiding an iteration-count
+asymmetry.
+
+Exact dtype, shape, and every output byte matched for the exposure matrix,
+per-account peaks, critical-permission indices, and fleet peak spread at all
+three sizes. Pre-timing mixed checksums were `4867fe06e4b8cf6b`,
+`35a9d45a6353073d`, and `510aa35269f068c2`; the incumbent A/A, candidate A/A,
+and effect phases reproduced one identical checksum per size
+(`44a66ca23a8afa98`, `779c98713f470b9f`, and `bee885f453e0a9a8`).
+
+| accounts | NumPy/NumPy null ratio (CI95) | FNP/FNP null ratio (CI95) | NumPy median | FNP median | NumPy/FNP ratio (CI95) | required 2x null delta | verdict |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 4,096 | 0.981767 `[0.924185,1.002817]` | 1.014311 `[0.974262,1.077187]` | 54.659580 ms | 7.645316 ms | **7.491134x** `[6.675878,7.655346]` | 0.154375 | DECIDABLE_WIN |
+| 8,192 | 1.041073 `[0.983943,1.134491]` | 1.024899 `[0.895378,1.126652]` | 120.314092 ms | 17.780733 ms | **6.614077x** `[6.422388,7.256979]` | 0.268981 | DECIDABLE_WIN |
+| 16,384 | 1.007021 `[0.952720,1.022372]` | 1.006182 `[0.943503,1.029350]` | 775.674441 ms | 291.347720 ms | **2.677785x** `[2.546784,2.967123]` | 0.112994 | DECIDABLE_WIN |
+
+All effects clear twice the wider same-invocation A/A half-width and every
+effect CI lies outside both null envelopes. Effect CVs of 11.641%, 19.048%,
+and 16.762% are provenance only. In particular, the 8,192-account candidate
+null CV was 57.738%; it neither admitted nor rejected the row. The odd
+21-round, min-of-2, alternating-order bootstrap median CI against the wider
+null made every decision.
+
+PROFILE ATTRIBUTION (seven-round stage medians, NumPy/FNP ms, ratio):
+
+| accounts | `matmul_exposure` | `account_max_axis1` | `account_argmax_axis1` | `fleet_peak_ptp` | matmul share of FNP stage time |
+|---:|---|---|---|---|---:|
+| 4,096 | 51.311513 / 8.461970 = 6.064x | 2.572085 / 1.012867 = 2.539x | 2.348298 / 1.473087 = 1.594x | 0.085118 / 0.054552 = 1.560x | 76.910% |
+| 8,192 | 161.242878 / 20.958267 = 7.694x | 5.631169 / 1.666809 = 3.378x | 4.822357 / 2.722590 = 1.771x | 0.089564 / 0.051037 = 1.755x | 82.517% |
+| 16,384 | 765.523128 / 272.896004 = 2.805x | 10.918171 / 3.103070 = 3.519x | 9.572875 / 5.096667 = 1.878x | 0.104186 / 0.056775 = 1.835x | 97.063% |
+
+Every native candidate stage beats its live NumPy counterpart at every
+measured size. The whole-job curve nevertheless narrows:
+`[7.491134, 6.614077, 2.677785]`, a 179.7511% max/min spread classified
+`NARROWING_WITH_ACCOUNTS`. This is a real working-set-shaped boundary, not a
+flat per-operation claim. FNP's measured nanoseconds per matrix
+multiplication rise from 0.113924 / 0.132477 at the two smaller points to
+1.085355 at 16,384 accounts; NumPy rises from 0.814491 / 0.896410 to 2.889612.
+The OS tick probe likewise moves from NumPy/FNP totals of 222/56 and 289/173
+to 953/1,215. Thus the largest point still wins wall time through parallelism,
+but FNP performs more aggregate CPU work there. No cache-miss or bandwidth
+cause is asserted without counters.
+
+SUPERSESSION AND CORRECTION OF `franken_numpy-ixs5y.391`: retain that older
+row's raw timings as diagnostic history, but do not quote its 18.57-20.03x
+range as current campaign output. It is ship-profile evidence now, but it
+discloses two NumPy `sum` stages and is not fully isolated. Source re-audit
+additionally found that its exposure matrices contained only 524,288 to
+2,097,152 elements, below `try_zerocopy_int_minmax`'s `1<<23` wide-integer
+gate; its claimed native `max(axis=1)` stage therefore delegated to
+`numpy.max` too. That makes three shared timed incumbent components, not the
+two recorded there, and invalidates its native-stage attribution and
+quantified shared share. This append-only row does not rewrite the old
+evidence; it replaces the campaign claim with the fully isolated result above.
+
+NO PRODUCTION LEVER OPENED. The shipped Class-3 paths already create the
+competitive result. Matmul is the dominant FNP stage, but the 16,384-account
+cliff does not by itself name removable work. A future kernel change requires
+hardware-counter or allocation evidence that counts cache misses, memory
+traffic, faults, or another mechanism and shows exactly which work will be
+removed; timing shape alone is not authorization to optimize.
+
+CHOOSER STATEMENT: for enterprise access-review reports with exactly eight
+coarse roles, 2,048 entitlements, 4,096 to 16,384 accounts, finite
+C-contiguous `int64` inputs, and the recorded four-thread/ISA topology, choose
+FrankenNumPy: the complete byte-identical job measured 7.49x faster at 4,096
+accounts, 6.61x at 8,192, and 2.68x at 16,384. Treat those as size-specific
+points, not one general ratio. Do not extrapolate beyond 16,384 accounts: the
+curve narrows sharply there. Below 2^23 exposure elements the FNP `max` route
+delegates and this isolation proof no longer applies. Float matrix products,
+different role/permission dimensions, non-contiguous inputs, and other thread
+topologies are outside this chooser.
+
+**Decision: KEEP, INCUMBENT-WIN.** Bank the fully isolated release-perf harness
+and the honest size-specific 2.68-7.49x range; no production kernel changed.
+
+Retry predicate: do not repeat this exact corpus against these two artifact
+hashes at four threads. Reopen when either artifact hash or a named native
+route changes; when the question is a different role/permission shape, account
+range, layout, or thread topology; or when a counted cache/traffic/fault
+mechanism justifies a specific large-working-set lever. A future flat-curve
+headline additionally requires all measured size ratios to fall within the
+15% boundary under fresh dual-null `release-perf` evidence.
+
+HANDOFF: the fully isolated benchmark, release-perf execution, parity proof,
+dual A/A evidence, incumbent identity proof, and size-bounded chooser are
+complete and bank the 7.49x / 6.61x / 2.68x result. This work did not prove a
+cache, traffic, or fault mechanism for the large-size narrowing and opened no
+production-kernel lever. The newly reported fleet-wide null-contract defect
+does not change this row because all six measured null CIs happened to include
+1.0; the single next step after reset is to amend the shared benchmark scorer
+so null precision cannot veto a result merely because its CI excludes 1.0,
+while retaining the effect-versus-twice-null-margin gate and adding regression
+coverage for sub-percent arm-order asymmetry.
+
 ## 2026-07-30 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN, DISCLOSED PARTIAL DELEGATION): int64 access-control exposure report - 18.57-20.03x vs NumPy at `release-perf`, flat account curve
 
 `BlackThrush`, bead `franken_numpy-ixs5y.391`. This is a whole
