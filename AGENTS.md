@@ -758,8 +758,17 @@ executes the binary.
 profile, next to the ELF SHA-256 the harness self-reports from inside the
 process. A binary of unknown origin or unknown profile is not evidence.
 
-**Route 2 (permitted, guardrails): one bounded local build.** Local builds are no
-longer banned — that ban was a disk-emergency measure and it was pushing people
+**Route 2 is FROZEN as of 2026-07-30 23:10 — do not start a local cargo build.**
+The 150G floor below has tripped: `/data` fell to 127G and then 114G free,
+because an unrelated build outside this swarm grew one target directory to 261G.
+The cause is not this campaign, but the guardrail is enforced regardless. Use
+Route 1 (a few MB) until told otherwise, keep `force_local = true` unset, and if
+a local build is already running let it finish rather than wasting the space
+already spent. The guardrails below are the standing policy for when the floor
+clears again.
+
+**Route 2 (guardrails): one bounded local build.** Local builds are not banned in
+principle — that ban was a disk-emergency measure and it was pushing people
 to measure on the wrong profile. Guardrails: reuse ONE target dir per repo (never
 mint a fresh `CARGO_TARGET_DIR` per task — that ballooned `/data/tmp` to 612G
 twice); **`df` precheck, and do not start a local build under 150G free on
