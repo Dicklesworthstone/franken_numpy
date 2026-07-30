@@ -481,6 +481,94 @@ impl<'py> DynamicRangeAuditArm<'py> {
     }
 }
 
+struct VectorFieldPolarArm<'py> {
+    hypot: Bound<'py, PyAny>,
+    arctan2: Bound<'py, PyAny>,
+    average: Bound<'py, PyAny>,
+    maximum: Bound<'py, PyAny>,
+}
+
+impl<'py> VectorFieldPolarArm<'py> {
+    fn run(
+        &self,
+        velocity_x: &Bound<'py, PyAny>,
+        velocity_y: &Bound<'py, PyAny>,
+    ) -> (Duration, [Bound<'py, PyAny>; 4]) {
+        let started = Instant::now();
+        let magnitude = self
+            .hypot
+            .call1((black_box(velocity_x), black_box(velocity_y)))
+            .expect("vector-field magnitude");
+        let heading = self
+            .arctan2
+            .call1((black_box(velocity_y), black_box(velocity_x)))
+            .expect("vector-field heading");
+        let mean_magnitude = self
+            .average
+            .call1((black_box(&magnitude), 1_i64))
+            .expect("per-frame mean magnitude");
+        let peak_magnitude = self
+            .maximum
+            .call1((black_box(&magnitude), 1_i64))
+            .expect("per-frame peak magnitude");
+        let elapsed = started.elapsed();
+        (
+            elapsed,
+            [magnitude, heading, mean_magnitude, peak_magnitude],
+        )
+    }
+
+    fn profile(&self, velocity_x: &Bound<'py, PyAny>, velocity_y: &Bound<'py, PyAny>) -> [f64; 4] {
+        const PROFILE_ROUNDS: usize = 7;
+        let mut hypot_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut arctan2_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut average_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut maximum_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        for _ in 0..PROFILE_ROUNDS {
+            let started = Instant::now();
+            let magnitude = self
+                .hypot
+                .call1((velocity_x, velocity_y))
+                .expect("profile vector-field magnitude");
+            hypot_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            black_box(
+                self.arctan2
+                    .call1((velocity_y, velocity_x))
+                    .expect("profile vector-field heading"),
+            );
+            arctan2_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            black_box(
+                self.average
+                    .call1((&magnitude, 1_i64))
+                    .expect("profile per-frame mean magnitude"),
+            );
+            average_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            black_box(
+                self.maximum
+                    .call1((&magnitude, 1_i64))
+                    .expect("profile per-frame peak magnitude"),
+            );
+            maximum_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+        }
+        let median = |samples: &mut Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        [
+            median(&mut hypot_ms),
+            median(&mut arctan2_ms),
+            median(&mut average_ms),
+            median(&mut maximum_ms),
+        ]
+    }
+}
+
 fn bench_median_gate_python_binary<'py>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     bench_name: &'static str,
@@ -7268,6 +7356,363 @@ assert route_exponents.max() < {EXPONENT_BUCKETS}
     });
 }
 
+/// Class-3 integration workload: convert a realistic half-precision planar
+/// vector field to magnitude/heading, then emit per-frame mean and peak
+/// magnitude. Both arms perform the same four public calls over the same
+/// inputs. NumPy has no f16 ALU for the two binary transcendentals, while the
+/// FrankenNumPy routes are exact parallel widen/operate/narrow kernels.
+fn bench_realistic_f16_vector_field_polar_report_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const FRAME_COUNT: usize = 4_096;
+    const SAMPLES_PER_FRAME: [usize; 3] = [512, 1_024, 2_048];
+    const WORKLOAD_CONTRACT_ROUNDS: usize = 21;
+    const WORKLOAD_CONTRACT_MIN_OF: usize = 2;
+    const THREAD_ACTIVITY_REPETITIONS: usize = 5;
+    const THREADS: &str = "4";
+
+    for variable in [
+        "RAYON_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(THREADS),
+            "{variable} must be explicitly pinned before workload timing"
+        );
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        THREADS
+            .parse::<usize>()
+            .expect("thread count constant is numeric"),
+        "Rayon pool width does not match the pinned workload configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME host={} rayon_threads={} RAYON_NUM_THREADS={} \
+         OPENBLAS_NUM_THREADS={} OMP_NUM_THREADS={} MKL_NUM_THREADS={} trj_used=false",
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "unavailable".to_owned()),
+        rayon::current_num_threads(),
+        THREADS,
+        THREADS,
+        THREADS,
+        THREADS,
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_f16_vector_field_polar_workload")
+            .expect("f16 vector-field module");
+        fnp_python(&module).expect("initialize fnp_python vector-field module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(format!(
+                r#"
+import numpy as np
+rng = np.random.default_rng(20260730)
+frame_count = {FRAME_COUNT}
+samples_per_frame = {SAMPLES_PER_FRAME:?}
+max_width = samples_per_frame[-1]
+
+# A rotating planar flow field with frame-level speed/phase variation,
+# low-frequency gusts, and independent component noise.
+frame_phase = rng.uniform(-np.pi, np.pi, size=(frame_count, 1))
+frame_speed = rng.lognormal(mean=2.2, sigma=0.55, size=(frame_count, 1))
+sample_phase = np.linspace(0.0, 8.0 * np.pi, max_width, dtype=np.float32)[None, :]
+gust = 1.0 + 0.22 * np.sin(0.37 * sample_phase + frame_phase)
+turn = frame_phase + 0.31 * np.sin(0.19 * sample_phase + 0.5 * frame_phase)
+speed = frame_speed * gust
+noise_x = rng.normal(0.0, 0.18, size=(frame_count, max_width))
+noise_y = rng.normal(0.0, 0.18, size=(frame_count, max_width))
+velocity_x = np.clip(speed * np.cos(turn) + noise_x, -2048.0, 2048.0).astype(np.float16)
+velocity_y = np.clip(speed * np.sin(turn) + noise_y, -2048.0, 2048.0).astype(np.float16)
+velocity_x_by_width = [
+    np.ascontiguousarray(velocity_x[:, :width]) for width in samples_per_frame
+]
+velocity_y_by_width = [
+    np.ascontiguousarray(velocity_y[:, :width]) for width in samples_per_frame
+]
+
+assert velocity_x.dtype == np.float16
+assert velocity_y.dtype == np.float16
+assert velocity_x.flags.c_contiguous
+assert velocity_y.flags.c_contiguous
+assert np.isfinite(velocity_x).all()
+assert np.isfinite(velocity_y).all()
+assert np.max(np.abs(velocity_x)) < np.float16(32768.0)
+assert np.max(np.abs(velocity_y)) < np.float16(32768.0)
+"#
+            ))
+            .expect("f16 vector-field setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("f16 vector-field corpus setup");
+
+        let fnp_hypot = module.getattr("hypot").expect("fnp hypot");
+        let np_hypot = numpy.getattr("hypot").expect("numpy hypot");
+        let fnp_arctan2 = module.getattr("arctan2").expect("fnp arctan2");
+        let np_arctan2 = numpy.getattr("arctan2").expect("numpy arctan2");
+        let fnp_average = module.getattr("average").expect("fnp average");
+        let np_average = numpy.getattr("average").expect("numpy average");
+        let fnp_maximum = module.getattr("max").expect("fnp max");
+        let np_maximum = numpy.getattr("max").expect("numpy max");
+        for (candidate, incumbent, surface) in [
+            (&fnp_hypot, &np_hypot, "hypot"),
+            (&fnp_arctan2, &np_arctan2, "arctan2"),
+            (&fnp_average, &np_average, "average"),
+            (&fnp_maximum, &np_maximum, "max"),
+        ] {
+            assert!(
+                !candidate.is(incumbent),
+                "{surface}: candidate callable aliases NumPy"
+            );
+            common::report_numpy_incumbent_identity(py, surface, incumbent);
+        }
+        common::report_incumbent_topology(
+            "fnp.workload.f16_vector_field_polar_report",
+            "numpy.workload.f16_vector_field_polar_report",
+        );
+        println!(
+            "INCUMBENT_PIPELINE workload=f16_vector_field_polar_report \
+             candidate=fnp.hypot+fnp.arctan2+fnp.average+fnp.max \
+             incumbent=numpy.hypot+numpy.arctan2+numpy.average+numpy.max \
+             shared_timed_component=none inputs_shared_read_only=true"
+        );
+        println!(
+            "ROUTE_PRECONDITIONS workload=f16_vector_field_polar_report \
+             dtype=float16 ndim=2 c_contiguous=true native_endian=true finite=true \
+             hypot_abs_input_lt=32768 last_axis=true elements_min={} \
+             average_weights=none average_returned=false max_keepdims=false \
+             contract_rounds={WORKLOAD_CONTRACT_ROUNDS} \
+             contract_min_of={WORKLOAD_CONTRACT_MIN_OF}",
+            FRAME_COUNT * SAMPLES_PER_FRAME[0],
+        );
+
+        let incumbent = VectorFieldPolarArm {
+            hypot: np_hypot,
+            arctan2: np_arctan2,
+            average: np_average,
+            maximum: np_maximum,
+        };
+        let candidate = VectorFieldPolarArm {
+            hypot: fnp_hypot,
+            arctan2: fnp_arctan2,
+            average: fnp_average,
+            maximum: fnp_maximum,
+        };
+        let velocity_x_by_width = namespace
+            .get_item("velocity_x_by_width")
+            .expect("vector-field x arrays by width");
+        let velocity_y_by_width = namespace
+            .get_item("velocity_y_by_width")
+            .expect("vector-field y arrays by width");
+
+        let mut scaling = Vec::with_capacity(SAMPLES_PER_FRAME.len());
+        for (size_index, width) in SAMPLES_PER_FRAME.into_iter().enumerate() {
+            let elements = FRAME_COUNT * width;
+            let row = format!("workload_f16_vector_field_polar_{FRAME_COUNT}x{width}");
+            println!(
+                "WORKLOAD_CONFIG row={row} user_job=vector_field_polar_report \
+                 frames={FRAME_COUNT} samples_per_frame={width} elements={elements} \
+                 dtype=float16 distribution=rotating_lognormal_flow_plus_gusts_and_noise \
+                 stages=hypot_magnitude,arctan2_heading,average_magnitude_axis1,max_magnitude_axis1 \
+                 output=magnitude_heading_per_frame_mean_per_frame_peak \
+                 matched_config=same_process_same_inputs_same_axis square_gemm_excluded=true"
+            );
+            println!(
+                "WORK_ACCOUNTING row={row} candidate_public_calls=4 incumbent_public_calls=4 \
+                 candidate_hypot_pairs={elements} incumbent_hypot_pairs={elements} \
+                 candidate_arctan2_pairs={elements} incumbent_arctan2_pairs={elements} \
+                 candidate_average_elements={elements} incumbent_average_elements={elements} \
+                 candidate_max_elements={elements} incumbent_max_elements={elements} \
+                 candidate_logical_element_visits={} incumbent_logical_element_visits={} \
+                 candidate_input_element_reads={} incumbent_input_element_reads={} \
+                 candidate_output_elements={} incumbent_output_elements={} \
+                 more_work_verdict=equal_public_work",
+                4 * elements,
+                4 * elements,
+                6 * elements,
+                6 * elements,
+                2 * elements + 2 * FRAME_COUNT,
+                2 * elements + 2 * FRAME_COUNT,
+            );
+            let velocity_x = velocity_x_by_width
+                .get_item(size_index)
+                .expect("vector-field x array for width");
+            let velocity_y = velocity_y_by_width
+                .get_item(size_index)
+                .expect("vector-field y array for width");
+
+            let (_, incumbent_output) = incumbent.run(&velocity_x, &velocity_y);
+            let (_, candidate_output) = candidate.run(&velocity_x, &velocity_y);
+            assert_workload_outputs_equal(&numpy, &row, &candidate_output, &incumbent_output);
+            println!(
+                "PARITY row={row} outputs=4 dtype_shape_byte_identity=passed checksum={:016x}",
+                workload_checksum(&numpy, &candidate_output),
+            );
+
+            common::report_observed_thread_activity(
+                &row,
+                "numpy",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    let (_, outputs) = incumbent.run(&velocity_x, &velocity_y);
+                    black_box(outputs);
+                },
+            );
+            common::report_observed_thread_activity(
+                &row,
+                "fnp",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    let (_, outputs) = candidate.run(&velocity_x, &velocity_y);
+                    black_box(outputs);
+                },
+            );
+
+            let incumbent_profile = incumbent.profile(&velocity_x, &velocity_y);
+            let candidate_profile = candidate.profile(&velocity_x, &velocity_y);
+            let candidate_total = candidate_profile.iter().sum::<f64>();
+            let (target_stage, target_ms) = [
+                ("hypot_magnitude", candidate_profile[0]),
+                ("arctan2_heading", candidate_profile[1]),
+                ("average_magnitude_axis1", candidate_profile[2]),
+                ("max_magnitude_axis1", candidate_profile[3]),
+            ]
+            .into_iter()
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .expect("four vector-field profile stages");
+            for (stage, incumbent_ms, candidate_ms) in [
+                (
+                    "hypot_magnitude",
+                    incumbent_profile[0],
+                    candidate_profile[0],
+                ),
+                (
+                    "arctan2_heading",
+                    incumbent_profile[1],
+                    candidate_profile[1],
+                ),
+                (
+                    "average_magnitude_axis1",
+                    incumbent_profile[2],
+                    candidate_profile[2],
+                ),
+                (
+                    "max_magnitude_axis1",
+                    incumbent_profile[3],
+                    candidate_profile[3],
+                ),
+            ] {
+                println!(
+                    "PROFILE_STAGE row={row} arm_pair=numpy_fnp stage={stage} \
+                     incumbent_median_ms={incumbent_ms:.6} \
+                     candidate_median_ms={candidate_ms:.6}"
+                );
+            }
+            let target_fraction = target_ms / candidate_total;
+            println!(
+                "PROFILE_SUMMARY row={row} target_stage={target_stage} \
+                 target_candidate_ms={target_ms:.6} candidate_stage_sum_ms={candidate_total:.6} \
+                 target_self_fraction_pct={:.3} amdahl_remove_ceiling={:.6}",
+                target_fraction * 100.0,
+                1.0 / (1.0 - target_fraction),
+            );
+
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = incumbent.run(&velocity_x, &velocity_y);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = candidate.run(&velocity_x, &velocity_y);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &row,
+                    &mut observe_incumbent,
+                    &mut observe_candidate,
+                    WORKLOAD_CONTRACT_ROUNDS,
+                    WORKLOAD_CONTRACT_MIN_OF,
+                );
+            println!(
+                "WORKLOAD_SIZE_POINT workload=f16_vector_field_polar_report \
+                 frames={FRAME_COUNT} samples_per_frame={width} elements={elements} \
+                 incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ratio={:.6} candidate_null_ratio={:.6} \
+                 incumbent_ns_per_element={:.3} candidate_ns_per_element={:.3}",
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+                effect.arm_a_median_ns / elements as f64,
+                effect.arm_b_median_ns / elements as f64,
+            );
+            scaling.push(effect);
+        }
+
+        let first_ratio = scaling.first().expect("first scaling point").ratio_median;
+        let last_ratio = scaling.last().expect("last scaling point").ratio_median;
+        let ratio_min = scaling
+            .iter()
+            .map(|stats| stats.ratio_median)
+            .fold(f64::INFINITY, f64::min);
+        let ratio_max = scaling
+            .iter()
+            .map(|stats| stats.ratio_median)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let ratio_spread = ratio_max / ratio_min - 1.0;
+        let monotonic_up = scaling
+            .windows(2)
+            .all(|points| points[1].ratio_median >= points[0].ratio_median);
+        let monotonic_down = scaling
+            .windows(2)
+            .all(|points| points[1].ratio_median <= points[0].ratio_median);
+        let shape = if ratio_spread <= 0.15 {
+            "FLAT_PER_ELEMENT_COST"
+        } else if monotonic_up && last_ratio >= first_ratio * 1.15 {
+            "WIDENING_WITH_FIELD"
+        } else if monotonic_down && last_ratio <= first_ratio * 0.85 {
+            "NARROWING_WITH_FIELD"
+        } else {
+            "MIXED_OR_NOISE"
+        };
+        println!(
+            "SCALING_SHAPE workload=f16_vector_field_polar_report \
+             dimension=samples_per_frame frames={FRAME_COUNT} \
+             widths=[{},{},{}] elements=[{},{},{}] \
+             ratios=[{:.6},{:.6},{:.6}] ratio_spread={ratio_spread:.6} \
+             classification={shape}",
+            SAMPLES_PER_FRAME[0],
+            SAMPLES_PER_FRAME[1],
+            SAMPLES_PER_FRAME[2],
+            FRAME_COUNT * SAMPLES_PER_FRAME[0],
+            FRAME_COUNT * SAMPLES_PER_FRAME[1],
+            FRAME_COUNT * SAMPLES_PER_FRAME[2],
+            scaling[0].ratio_median,
+            scaling[1].ratio_median,
+            scaling[2].ratio_median,
+        );
+    });
+}
+
 fn bench_bool_storage_bytes_median_gate(c: &mut Criterion) {
     let _ = c;
     const N: usize = 8_000_000;
@@ -7387,6 +7832,10 @@ fn main() {
         (
             "bench_realistic_f16_dynamic_range_audit_vs_numpy_median_gate",
             bench_realistic_f16_dynamic_range_audit_vs_numpy_median_gate,
+        ),
+        (
+            "bench_realistic_f16_vector_field_polar_report_vs_numpy_median_gate",
+            bench_realistic_f16_vector_field_polar_report_vs_numpy_median_gate,
         ),
         (
             "bench_bool_storage_bytes_median_gate",

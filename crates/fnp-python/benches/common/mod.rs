@@ -190,6 +190,232 @@ fn format_cpu_set(cpus: &BTreeSet<usize>) -> String {
         .join(":")
 }
 
+fn read_trimmed(path: impl AsRef<Path>) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn sanitize_provenance_field(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn host_name() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| read_trimmed("/etc/hostname"))
+        .unwrap_or_else(|| "unavailable".to_owned())
+}
+
+fn cpu_model_name() -> String {
+    std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                let (label, value) = line.split_once(':')?;
+                matches!(label.trim(), "model name" | "Hardware").then(|| value.trim().to_owned())
+            })
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unavailable".to_owned())
+}
+
+fn physical_core_count(online: &BTreeSet<usize>) -> Option<usize> {
+    let mut cores = BTreeSet::new();
+    for cpu in online {
+        let topology = format!("/sys/devices/system/cpu/cpu{cpu}/topology");
+        let package = read_trimmed(Path::new(&topology).join("physical_package_id"))?;
+        let core = read_trimmed(Path::new(&topology).join("core_id"))?;
+        cores.insert((package, core));
+    }
+    (!cores.is_empty()).then_some(cores.len())
+}
+
+fn cpu_governors(online: &BTreeSet<usize>) -> String {
+    let governors = online
+        .iter()
+        .filter_map(|cpu| {
+            read_trimmed(format!(
+                "/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_governor"
+            ))
+        })
+        .collect::<BTreeSet<_>>();
+    if governors.is_empty() {
+        "unavailable".to_owned()
+    } else {
+        governors.into_iter().collect::<Vec<_>>().join(":")
+    }
+}
+
+fn report_host_execution_provenance() {
+    let online = read_cpu_ticks()
+        .expect("host topology requires readable per-CPU /proc/stat rows")
+        .into_keys()
+        .collect::<BTreeSet<_>>();
+    let allowed = self_allowed_cpus().expect("host topology requires process affinity");
+    let physical_cores = physical_core_count(&online)
+        .map_or_else(|| "unavailable".to_owned(), |count| count.to_string());
+    println!(
+        "HOST_BASELINE host={} cpu_model={} physical_cores={physical_cores} \
+         logical_threads={} online_cpus={} allowed_logical_threads={} allowed_cpus={} \
+         governor={}",
+        sanitize_provenance_field(&host_name()),
+        sanitize_provenance_field(&cpu_model_name()),
+        online.len(),
+        format_cpu_set(&online),
+        allowed.len(),
+        format_cpu_set(&allowed),
+        sanitize_provenance_field(&cpu_governors(&online)),
+    );
+    println!(
+        "THREAD_CONFIGURATION rayon_pool_threads={} RAYON_NUM_THREADS={} \
+         OPENBLAS_NUM_THREADS={} OMP_NUM_THREADS={} MKL_NUM_THREADS={}",
+        rayon::current_num_threads(),
+        std::env::var("RAYON_NUM_THREADS").unwrap_or_else(|_| "unset".to_owned()),
+        std::env::var("OPENBLAS_NUM_THREADS").unwrap_or_else(|_| "unset".to_owned()),
+        std::env::var("OMP_NUM_THREADS").unwrap_or_else(|_| "unset".to_owned()),
+        std::env::var("MKL_NUM_THREADS").unwrap_or_else(|_| "unset".to_owned()),
+    );
+    #[cfg(target_arch = "x86_64")]
+    println!(
+        "ISA_BASELINE target_arch=x86_64 compile_sse2={} compile_avx2={} \
+         runtime_sse2={} runtime_avx={} runtime_avx2={} runtime_f16c={} \
+         runtime_fma={} runtime_avx512f={} runtime_avx512bw={}",
+        cfg!(target_feature = "sse2"),
+        cfg!(target_feature = "avx2"),
+        std::arch::is_x86_feature_detected!("sse2"),
+        std::arch::is_x86_feature_detected!("avx"),
+        std::arch::is_x86_feature_detected!("avx2"),
+        std::arch::is_x86_feature_detected!("f16c"),
+        std::arch::is_x86_feature_detected!("fma"),
+        std::arch::is_x86_feature_detected!("avx512f"),
+        std::arch::is_x86_feature_detected!("avx512bw"),
+    );
+    #[cfg(not(target_arch = "x86_64"))]
+    println!(
+        "ISA_BASELINE target_arch={} runtime_features=not_x86_64",
+        std::env::consts::ARCH,
+    );
+    std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
+}
+
+#[derive(Clone)]
+struct ThreadCpuTicks {
+    name: String,
+    ticks: u64,
+}
+
+fn process_thread_cpu_ticks() -> Result<BTreeMap<u32, ThreadCpuTicks>, String> {
+    let entries = std::fs::read_dir("/proc/self/task")
+        .map_err(|error| format!("read /proc/self/task: {error}"))?;
+    let mut threads = BTreeMap::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read /proc/self/task entry: {error}"))?;
+        let Some(tid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let stat = match std::fs::read_to_string(entry.path().join("stat")) {
+            Ok(stat) => stat,
+            Err(_) => continue,
+        };
+        let Some(open) = stat.find('(') else {
+            continue;
+        };
+        let Some(close) = stat.rfind(')') else {
+            continue;
+        };
+        if close <= open {
+            continue;
+        }
+        let fields = stat[close + 1..]
+            .split_ascii_whitespace()
+            .collect::<Vec<_>>();
+        let Some(user_ticks) = fields.get(11).and_then(|value| value.parse::<u64>().ok()) else {
+            continue;
+        };
+        let Some(system_ticks) = fields.get(12).and_then(|value| value.parse::<u64>().ok()) else {
+            continue;
+        };
+        threads.insert(
+            tid,
+            ThreadCpuTicks {
+                name: stat[open + 1..close].to_owned(),
+                ticks: user_ticks.saturating_add(system_ticks),
+            },
+        );
+    }
+    if threads.is_empty() {
+        Err("/proc/self/task exposed no readable thread CPU counters".to_owned())
+    } else {
+        Ok(threads)
+    }
+}
+
+/// Count the OS threads that actually accrued CPU time while repeatedly
+/// executing one arm outside the timed contract. Configured pool width is
+/// useful context, but it is not evidence that every configured worker ran.
+pub fn report_observed_thread_activity<F>(
+    row: &str,
+    arm: &str,
+    repetitions: usize,
+    mut operation: F,
+) where
+    F: FnMut(),
+{
+    assert!(
+        repetitions > 0,
+        "thread-activity repetitions must be non-zero"
+    );
+    operation();
+    let before =
+        process_thread_cpu_ticks().expect("thread-activity baseline requires /proc task counters");
+    for _ in 0..repetitions {
+        operation();
+    }
+    let after =
+        process_thread_cpu_ticks().expect("thread-activity result requires /proc task counters");
+    let mut active = Vec::new();
+    let mut total_ticks = 0_u64;
+    for (tid, final_ticks) in &after {
+        let initial_ticks = before.get(tid).map_or(0, |initial| initial.ticks);
+        let delta = final_ticks.ticks.saturating_sub(initial_ticks);
+        if delta > 0 {
+            total_ticks = total_ticks.saturating_add(delta);
+            active.push(format!(
+                "{tid}:{}:{delta}",
+                sanitize_provenance_field(&final_ticks.name)
+            ));
+        }
+    }
+    assert!(
+        !active.is_empty(),
+        "{row} {arm}: no thread accrued a scheduler CPU tick across {repetitions} repetitions"
+    );
+    println!(
+        "OBSERVED_THREAD_ACTIVITY row={row} arm={arm} repetitions={repetitions} \
+         threads_actually_used={} total_cpu_ticks={total_ticks} \
+         tid_name_delta_ticks={}",
+        active.len(),
+        active.join(","),
+    );
+    std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
+}
+
 fn block_benchmark(reason: &str) -> ! {
     eprintln!("HOST_WIDE_QUIESCENCE verdict=blocked reason={reason}");
     std::io::Write::flush(&mut std::io::stderr()).expect("flushing stderr cannot fail");
@@ -380,6 +606,7 @@ pub fn report_incumbent_topology(candidate: &str, incumbent: &str) {
 fn report_bench_identity() {
     println!("bench_elf_sha256={}", self_identity());
     println!("bench_invocation_id={}", bench_invocation_id());
+    report_host_execution_provenance();
     std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
 }
 
