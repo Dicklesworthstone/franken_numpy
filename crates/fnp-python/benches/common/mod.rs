@@ -766,26 +766,50 @@ fn report_contract_pair_with_sampling(
     );
 }
 
+fn contract_gate_verdict(
+    effect: ContractPairStats,
+    null_ci_low: f64,
+    null_ci_high: f64,
+    controlling_half_width: f64,
+) -> &'static str {
+    let required_delta = (2.0 * controlling_half_width).max(0.01);
+    let effect_delta = effect.ratio_median - 1.0;
+    let effect_ci_above_one = effect.ratio_ci_low > 1.0;
+    let effect_ci_below_one = effect.ratio_ci_high < 1.0;
+    let above_null_envelope = effect.ratio_median > null_ci_high;
+    let below_null_envelope = effect.ratio_median < null_ci_low;
+    if effect_ci_above_one && above_null_envelope && effect_delta >= required_delta {
+        "DECIDABLE_WIN"
+    } else if effect_ci_below_one && below_null_envelope && effect_delta <= -required_delta {
+        "DECIDABLE_REGRESSION"
+    } else {
+        "UNDECIDED"
+    }
+}
+
 fn report_contract_gate(row: &str, effect: ContractPairStats, null: ContractPairStats) {
     let null_half_width = (null.ratio_ci_low - 1.0)
         .abs()
         .max((null.ratio_ci_high - 1.0).abs());
     let required_delta = (2.0 * null_half_width).max(0.01);
-    let effect_delta = effect.ratio_median - 1.0;
-    let outside_null_ci =
-        effect.ratio_median < null.ratio_ci_low || effect.ratio_median > null.ratio_ci_high;
-    let verdict = if outside_null_ci && effect_delta >= required_delta {
-        "DECIDABLE_WIN"
-    } else if outside_null_ci && effect_delta <= -required_delta {
-        "DECIDABLE_REGRESSION"
-    } else {
-        "UNDECIDED"
-    };
+    let verdict = contract_gate_verdict(
+        effect,
+        null.ratio_ci_low,
+        null.ratio_ci_high,
+        null_half_width,
+    );
     println!(
         "MEDIAN_CI_GATE row={row} verdict={verdict} effect_ratio={:.6} \
+         effect_ci95=[{:.6},{:.6}] effect_ci_excludes_one={} \
          null_ci95=[{:.6},{:.6}] null_half_width={:.6} required_2x_delta={required_delta:.6} \
          cv_is_provenance_only=true",
-        effect.ratio_median, null.ratio_ci_low, null.ratio_ci_high, null_half_width,
+        effect.ratio_median,
+        effect.ratio_ci_low,
+        effect.ratio_ci_high,
+        effect.ratio_ci_low > 1.0 || effect.ratio_ci_high < 1.0,
+        null.ratio_ci_low,
+        null.ratio_ci_high,
+        null_half_width,
     );
 }
 
@@ -793,6 +817,20 @@ fn null_half_width(null: ContractPairStats) -> f64 {
     (null.ratio_ci_low - 1.0)
         .abs()
         .max((null.ratio_ci_high - 1.0).abs())
+}
+
+pub fn dual_null_contract_verdict(
+    effect: ContractPairStats,
+    incumbent_null: ContractPairStats,
+    candidate_null: ContractPairStats,
+) -> &'static str {
+    let controlling_half_width =
+        null_half_width(incumbent_null).max(null_half_width(candidate_null));
+    let null_ci_low = incumbent_null.ratio_ci_low.min(candidate_null.ratio_ci_low);
+    let null_ci_high = incumbent_null
+        .ratio_ci_high
+        .max(candidate_null.ratio_ci_high);
+    contract_gate_verdict(effect, null_ci_low, null_ci_high, controlling_half_width)
 }
 
 fn report_dual_null_contract_gate(
@@ -805,32 +843,67 @@ fn report_dual_null_contract_gate(
     let candidate_half_width = null_half_width(candidate_null);
     let controlling_half_width = incumbent_half_width.max(candidate_half_width);
     let required_delta = (2.0 * controlling_half_width).max(0.01);
-    let effect_delta = effect.ratio_median - 1.0;
-    let above_both_nulls = effect.ratio_median
-        > incumbent_null
-            .ratio_ci_high
-            .max(candidate_null.ratio_ci_high);
-    let below_both_nulls =
-        effect.ratio_median < incumbent_null.ratio_ci_low.min(candidate_null.ratio_ci_low);
-    let verdict = if above_both_nulls && effect_delta >= required_delta {
-        "DECIDABLE_WIN"
-    } else if below_both_nulls && effect_delta <= -required_delta {
-        "DECIDABLE_REGRESSION"
-    } else {
-        "UNDECIDED"
-    };
+    let verdict = dual_null_contract_verdict(effect, incumbent_null, candidate_null);
     println!(
         "MEDIAN_CI_GATE row={row} verdict={verdict} effect_ratio={:.6} \
+         effect_ci95=[{:.6},{:.6}] effect_ci_excludes_one={} \
          incumbent_null_ci95=[{:.6},{:.6}] candidate_null_ci95=[{:.6},{:.6}] \
          incumbent_null_half_width={incumbent_half_width:.6} \
          candidate_null_half_width={candidate_half_width:.6} \
          controlling_null_half_width={controlling_half_width:.6} \
          required_2x_delta={required_delta:.6} both_nulls=true cv_is_provenance_only=true",
         effect.ratio_median,
+        effect.ratio_ci_low,
+        effect.ratio_ci_high,
+        effect.ratio_ci_low > 1.0 || effect.ratio_ci_high < 1.0,
         incumbent_null.ratio_ci_low,
         incumbent_null.ratio_ci_high,
         candidate_null.ratio_ci_low,
         candidate_null.ratio_ci_high,
+    );
+}
+
+fn verify_contract_gate_semantics() {
+    let stats = |median: f64, low: f64, high: f64| ContractPairStats {
+        ratio_median: median,
+        ratio_ci_low: low,
+        ratio_ci_high: high,
+        ratio_cv_pct: 0.0,
+        ratio_mad: 0.0,
+        arm_a_median_ns: 1.0,
+        arm_b_median_ns: 1.0,
+        checksum: 0,
+    };
+
+    assert_eq!(
+        contract_gate_verdict(stats(1.30, 0.98, 1.40), 0.98, 1.02, 0.02),
+        "UNDECIDED",
+        "an effect CI that crosses 1.0 must never score a win"
+    );
+    assert_eq!(
+        contract_gate_verdict(stats(0.70, 0.60, 1.01), 0.98, 1.02, 0.02),
+        "UNDECIDED",
+        "an effect CI that crosses 1.0 must never score a regression"
+    );
+    assert_eq!(
+        contract_gate_verdict(stats(1.30, 1.20, 1.40), 0.98, 1.02, 0.02),
+        "DECIDABLE_WIN",
+        "a separated effect CI that clears the 2x null margin must score a win"
+    );
+    assert_eq!(
+        contract_gate_verdict(stats(0.70, 0.60, 0.80), 0.98, 1.02, 0.02),
+        "DECIDABLE_REGRESSION",
+        "a separated effect CI that clears the 2x null margin must score a regression"
+    );
+    assert_eq!(
+        contract_gate_verdict(stats(1.03, 1.01, 1.05), 0.98, 1.02, 0.02),
+        "UNDECIDED",
+        "an effect CI excluding 1.0 is insufficient without the 2x null margin"
+    );
+    assert_eq!(
+        contract_gate_verdict(stats(1.30, 1.20, 1.40), 0.96, 0.99, 0.04),
+        "DECIDABLE_WIN",
+        "a precise null must not be vetoed merely because its CI excludes 1.0"
     );
 }
 
@@ -1162,6 +1235,7 @@ pub fn gated_main(targets: &[BenchGroup]) {
     // Line one, before Criterion is constructed: Criterion may print its
     // backend notice during construction.
     report_bench_identity();
+    verify_contract_gate_semantics();
     require_host_wide_benchmark_exclusivity("process_preflight");
     let mut criterion = Criterion::default().configure_from_args();
     for (name, target) in targets {
@@ -1430,8 +1504,9 @@ pub fn report_median_gate_pair(
     // suppressing 130-265% effects on null intervals that missed 1.0 by
     // 0.04-0.5%. The current dual-null contract
     // (`report_dual_null_contract_gate`) deliberately does NOT have this clause:
-    // it compares the EFFECT median against the null CI bounds and folds null
-    // bias into `required_delta`, so null precision cannot veto a row.
+    // it requires the EFFECT bootstrap CI to exclude 1.0, compares the effect
+    // median against the null CI bounds, and folds null bias into
+    // `required_delta`, so null precision cannot veto a row.
     //
     // Audited 2026-07-30 on the identical release-perf ELF
     // a27630778eff50a49987056bc8d5fc5025758a686d0b2f6dac54232b3ec6ac53, two

@@ -535,7 +535,7 @@ RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- \
 helper, but its regex classification is not authoritative. Use the Rust
 preflight above for a real proposal and rely on its staged audit in pre-commit.
 
-### A/A null gate semantics — audited 2026-07-30, do not "fix" it blind
+### A/A null gate semantics — audited and corrected 2026-07-30
 
 The fleet found a defect in the mandated harness contract: an A/A null clause
 that vetoed a row unless the null's interval INCLUDED 1.0. That couples the
@@ -543,13 +543,23 @@ verdict to the null's *precision* in the wrong direction — a tighter, better
 null is more likely to exclude 1.0 and veto a real effect.
 
 **This repo's live contract does not have that defect.**
-`report_dual_null_contract_gate` compares the EFFECT median against the null CI
-bounds; it never requires a null CI to contain 1.0, and it folds null bias into
-`required_delta` (half-width measured from 1.0). Proof from banked rows that
-scored `DECIDABLE_WIN` while a null CI excluded 1.0 entirely: the 2,048-account
+`report_dual_null_contract_gate` requires the EFFECT bootstrap median CI to
+exclude 1.0, compares the effect median against both null CI envelopes, and
+requires the effect-median deviation to exceed twice the larger null half-width
+(measured from 1.0). It never requires a null CI to contain 1.0. Proof from
+banked rows that the null-straddle veto is absent: the 2,048-account
 access-control incumbent null `[0.982472, 0.997568]`, the f16 telemetry
 candidate null `[1.069905, 1.179077]`, and the f16 vector-field candidate null
-`[0.931902, 0.994990]`.
+`[0.931902, 0.994990]` all excluded 1.0 while their rows scored
+`DECIDABLE_WIN`.
+
+**Full-reasoning correction to the provisional audit:** commit `121d793c`
+correctly diagnosed the null-straddle defect as absent, but incorrectly claimed
+that the live gate already enforced effect-CI exclusion. At that commit the
+gate used only the effect median. The contract now enforces effect-CI exclusion
+explicitly and fail-fast checks that a synthetic effect whose CI crosses 1.0 is
+`UNDECIDED`, even when its point estimate would otherwise clear the null
+envelope and 2x margin.
 
 **A dormant copy of the defect survives** in the legacy
 `report_median_gate_pair` (`benches/common/mod.rs`, `verdict=BIASED_NULL`), used
@@ -559,21 +569,20 @@ fired — those microbench nulls are wide (p10..p90 spans 4-24%). Verdict-stable
 gates get left alone, so it is unchanged, but the hazard comment at that line
 tells you what to do if you ever tighten those arms.
 
-**Before adopting the corrected rule's "null median within 2% of 1.0" clause,
-read this.** Two clauses of it (effect CI excludes 1.0; effect deviation beats
-2x the larger null half-width) are already enforced here. The third was measured
-on this repo's workload surface and is NOT stable at 21 rounds: across two runs
-of the identical ELF the clause rejected a *different* size point each time
-(8,192 at 3.208% off unity in one run; 2,048 at 5.241% in the other, with 8,192
-then passing at 0.259%) while the end-to-end effect reproduced within 5.1%. A
-reproducible effect with a moving verdict is the same diagnostic that condemned
-the straddle clause — the coupling has just moved from the null's CI width to the
-null median's point-estimate noise. If you gate on arm-order bias, bound it
-against its own uncertainty or raise the round count until the null median's
-standard error is well under 2%; otherwise report it as telemetry. Note this
-clause would also make the f16 telemetry health report (candidate null 1.129564,
-12.96% off unity) undecidable, so adopting it is a retroactive re-scoring
-decision, not a formatting change.
+**Before adopting a "null median within 2% of 1.0" clause, read this.** The
+effect-CI exclusion and 2x-null-margin clauses are enforced here. A bare 2%
+point-estimate clause was measured on this repo's workload surface and is NOT
+stable at 21 rounds: across two runs of the identical ELF the clause rejected a
+*different* size point each time (8,192 at 3.208% off unity in one run; 2,048 at
+5.241% in the other, with 8,192 then passing at 0.259%) while the end-to-end
+effect reproduced within 5.1%. A reproducible effect with a moving verdict is
+the same diagnostic that condemned the straddle clause — the coupling has just
+moved from the null's CI width to the null median's point-estimate noise. If you
+gate on arm-order bias, bound it against its OWN uncertainty or raise the round
+count until the null median's standard error is well under 2%; otherwise report
+it as telemetry. Note this clause would also make the f16 telemetry health
+report (candidate null 1.129564, 12.96% off unity) undecidable, so adopting it
+is a retroactive re-scoring decision, not a formatting change.
 
 ### When you write a REJECT row
 
