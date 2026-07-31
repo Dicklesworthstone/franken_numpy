@@ -109410,6 +109410,81 @@ mod tests {
     }
 
     #[test]
+    fn random_generator_incumbent_ratio_regimes_match_numpy_exact_bytes_and_next_stream() {
+        fn assert_exact_array(
+            label: &str,
+            actual: &Bound<'_, PyAny>,
+            expected: &Bound<'_, PyAny>,
+        ) -> PyResult<()> {
+            let actual_dtype = actual.getattr("dtype")?.str()?.extract::<String>()?;
+            let expected_dtype = expected.getattr("dtype")?.str()?.extract::<String>()?;
+            assert_eq!(actual_dtype, expected_dtype, "{label}: dtype differs");
+            let actual_shape = actual.getattr("shape")?.extract::<Vec<usize>>()?;
+            let expected_shape = expected.getattr("shape")?.extract::<Vec<usize>>()?;
+            assert_eq!(actual_shape, expected_shape, "{label}: shape differs");
+            let actual_bytes = actual.call_method0("tobytes")?.extract::<Vec<u8>>()?;
+            let expected_bytes = expected.call_method0("tobytes")?.extract::<Vec<u8>>()?;
+            assert_eq!(actual_bytes, expected_bytes, "{label}: output bytes differ");
+            Ok(())
+        }
+
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            const SIZE: usize = 100_000;
+            let module = PyModule::new(py, "fnp_python_generator_incumbent_ratio_regimes")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+
+            let generator_pair = |seed: u64| -> PyResult<(Bound<'_, PyAny>, Bound<'_, PyAny>)> {
+                let ours_bit_generator = random.getattr("PCG64")?.call1((seed,))?;
+                let theirs_bit_generator = numpy_random.getattr("PCG64")?.call1((seed,))?;
+                Ok((
+                    random.getattr("Generator")?.call1((ours_bit_generator,))?,
+                    numpy_random
+                        .getattr("Generator")?
+                        .call1((theirs_bit_generator,))?,
+                ))
+            };
+
+            let (ours, theirs) = generator_pair(42)?;
+            let ours_output = ours.call_method1("zipf", (2.5_f64, SIZE))?;
+            let theirs_output = theirs.call_method1("zipf", (2.5_f64, SIZE))?;
+            assert_exact_array(
+                "Generator.zipf at-scale output",
+                &ours_output,
+                &theirs_output,
+            )?;
+            let ours_next = ours.call_method1("random", (32_usize,))?;
+            let theirs_next = theirs.call_method1("random", (32_usize,))?;
+            assert_exact_array("Generator.zipf post-call stream", &ours_next, &theirs_next)?;
+
+            let (ours, theirs) = generator_pair(42)?;
+            let ours_output =
+                ours.call_method1("noncentral_chisquare", (5.0_f64, 1.0_f64, SIZE))?;
+            let theirs_output =
+                theirs.call_method1("noncentral_chisquare", (5.0_f64, 1.0_f64, SIZE))?;
+            assert_exact_array(
+                "Generator.noncentral_chisquare at-scale output",
+                &ours_output,
+                &theirs_output,
+            )?;
+            let ours_next = ours.call_method1("random", (32_usize,))?;
+            let theirs_next = theirs.call_method1("random", (32_usize,))?;
+            assert_exact_array(
+                "Generator.noncentral_chisquare post-call stream",
+                &ours_next,
+                &theirs_next,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn random_generator_multivariate_distribution_methods_match_numpy_oracles() {
         with_python(|py| {
             if !numpy_available(py) {

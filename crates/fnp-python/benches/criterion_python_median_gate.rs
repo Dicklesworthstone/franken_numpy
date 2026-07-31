@@ -12,7 +12,8 @@ mod common;
 use common::*;
 use criterion::Criterion;
 use fnp_python::fnp_python;
-use pyo3::types::{PyAnyMethods, PyDict, PyModule};
+use pyo3::buffer::PyBuffer;
+use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyTuple};
 use pyo3::{Bound, PyAny, Python};
 use rayon::prelude::*;
 use std::cell::{Cell, RefCell};
@@ -10218,6 +10219,448 @@ diff_user_boundary,diff_inter_event_gap,count_nonzero_user_transitions \
     });
 }
 
+#[derive(Clone, Copy)]
+enum GeneratorIncumbentDistribution {
+    Zipf,
+    NoncentralChisquare,
+}
+
+#[derive(Clone, Copy)]
+struct GeneratorIncumbentSpec {
+    row: &'static str,
+    method_name: &'static str,
+    seed: u64,
+    distribution: GeneratorIncumbentDistribution,
+}
+
+fn seeded_pcg64_generator<'py>(random: &Bound<'py, PyAny>, seed: u64) -> Bound<'py, PyAny> {
+    let bit_generator = random
+        .getattr("PCG64")
+        .expect("random.PCG64")
+        .call1((seed,))
+        .expect("construct seeded PCG64");
+    random
+        .getattr("Generator")
+        .expect("random.Generator")
+        .call1((bit_generator,))
+        .expect("construct Generator(PCG64)")
+}
+
+fn call_generator_incumbent_distribution<'py>(
+    method: &Bound<'py, PyAny>,
+    spec: GeneratorIncumbentSpec,
+) -> Bound<'py, PyAny> {
+    const SIZE: usize = 100_000;
+    match spec.distribution {
+        GeneratorIncumbentDistribution::Zipf => method
+            .call1((black_box(2.5_f64), black_box(SIZE)))
+            .expect("Generator.zipf"),
+        GeneratorIncumbentDistribution::NoncentralChisquare => method
+            .call1((black_box(5.0_f64), black_box(1.0_f64), black_box(SIZE)))
+            .expect("Generator.noncentral_chisquare"),
+    }
+}
+
+fn observe_generator_incumbent_distribution(
+    numpy: &Bound<'_, PyModule>,
+    random: &Bound<'_, PyAny>,
+    spec: GeneratorIncumbentSpec,
+) -> common::ContractObservation {
+    // A real user keeps a Generator and times the distribution draw, not its
+    // one-time constructor. Recreate the fixed seed outside each timed interval
+    // so every null/effect observation sees the identical stream and output.
+    let generator = seeded_pcg64_generator(random, spec.seed);
+    let method = generator
+        .getattr(spec.method_name)
+        .expect("bind Generator distribution method");
+    let started = Instant::now();
+    let output = call_generator_incumbent_distribution(&method, spec);
+    let elapsed = started.elapsed();
+    common::ContractObservation {
+        elapsed,
+        checksum: workload_checksum(numpy, &[output]),
+    }
+}
+
+fn prove_generator_incumbent_distribution_stream(
+    numpy: &Bound<'_, PyModule>,
+    candidate_random: &Bound<'_, PyAny>,
+    incumbent_random: &Bound<'_, PyAny>,
+    spec: GeneratorIncumbentSpec,
+) -> u64 {
+    let candidate_generator = seeded_pcg64_generator(candidate_random, spec.seed);
+    let incumbent_generator = seeded_pcg64_generator(incumbent_random, spec.seed);
+    let candidate_method = candidate_generator
+        .getattr(spec.method_name)
+        .expect("bind candidate Generator method");
+    let incumbent_method = incumbent_generator
+        .getattr(spec.method_name)
+        .expect("bind incumbent Generator method");
+    let candidate_output = call_generator_incumbent_distribution(&candidate_method, spec);
+    let incumbent_output = call_generator_incumbent_distribution(&incumbent_method, spec);
+    let candidate_next = candidate_generator
+        .call_method1("random", (32_usize,))
+        .expect("candidate post-distribution stream probe");
+    let incumbent_next = incumbent_generator
+        .call_method1("random", (32_usize,))
+        .expect("incumbent post-distribution stream probe");
+    let candidate_outputs = [candidate_output, candidate_next];
+    let incumbent_outputs = [incumbent_output, incumbent_next];
+    assert_workload_outputs_equal(numpy, spec.row, &candidate_outputs, &incumbent_outputs);
+    workload_checksum(numpy, &candidate_outputs)
+}
+
+fn observe_numpy_output_array_bridge<T>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    values: &[T],
+    dtype_name: &str,
+) -> common::ContractObservation
+where
+    T: pyo3::buffer::Element + Copy,
+{
+    let started = Instant::now();
+    let live_numpy = py.import("numpy").expect("re-import numpy output bridge");
+    assert!(
+        live_numpy.is(numpy),
+        "candidate output bridge resolved a different NumPy module"
+    );
+    let kwargs = PyDict::new(py);
+    kwargs
+        .set_item("dtype", dtype_name)
+        .expect("output bridge dtype");
+    let array = live_numpy
+        .call_method("empty", (values.len(),), Some(&kwargs))
+        .expect("numpy.empty output bridge");
+    if !values.is_empty() {
+        let buffer = PyBuffer::<T>::get(&array).expect("typed NumPy output buffer");
+        buffer
+            .copy_from_slice(py, values)
+            .expect("copy output bridge bytes");
+    }
+    let output_shape = PyTuple::new(py, [values.len()]).expect("output bridge shape");
+    let output = array
+        .call_method1("reshape", (&output_shape,))
+        .expect("reshape output bridge");
+    let elapsed = started.elapsed();
+    common::ContractObservation {
+        elapsed,
+        checksum: workload_checksum(numpy, &[output]),
+    }
+}
+
+fn component_min_of_three_median_ns<F>(mut observe: F) -> f64
+where
+    F: FnMut() -> common::ContractObservation,
+{
+    const ROUNDS: usize = 41;
+    const MIN_OF: usize = 3;
+    for _ in 0..4 {
+        black_box(observe());
+    }
+    let mut samples = Vec::with_capacity(ROUNDS);
+    let mut expected_checksum = None;
+    for _ in 0..ROUNDS {
+        let mut best = None;
+        for _ in 0..MIN_OF {
+            let observation = observe();
+            if let Some(expected) = expected_checksum {
+                assert_eq!(
+                    observation.checksum, expected,
+                    "shared output bridge checksum changed between observations"
+                );
+            } else {
+                expected_checksum = Some(observation.checksum);
+            }
+            best = Some(best.map_or(observation.elapsed, |elapsed: Duration| {
+                elapsed.min(observation.elapsed)
+            }));
+        }
+        samples.push(
+            best.expect("min-of-three output bridge observation")
+                .as_secs_f64()
+                * 1.0e9,
+        );
+    }
+    samples.sort_by(f64::total_cmp);
+    samples[ROUNDS / 2]
+}
+
+/// Convert the two banked Generator maintenance wins to public, same-invocation
+/// NumPy ratios. These are distribution-batch jobs users recognize directly:
+/// draw 100,000 variates from a long-lived seeded Generator. The parameters and
+/// PCG64 seed match the historical self-speedup regimes exactly.
+fn bench_generator_distribution_incumbent_ratios_median_gate(c: &mut Criterion) {
+    let _ = c;
+    const SIZE: usize = 100_000;
+    const THREAD_ACTIVITY_REPETITIONS: usize = 5;
+    const RAYON_THREADS: &str = "4";
+    const NATIVE_LIBRARY_THREADS: &str = "1";
+    const REQUIRED_BUILD_PROFILE: &str = "release-perf";
+    const SHARED_COMPONENT: &str = "numpy.empty_reshape_buffer_bridge";
+    const SPECS: [GeneratorIncumbentSpec; 2] = [
+        GeneratorIncumbentSpec {
+            row: "python_generator_zipf_pcg64_a2p5_100k_vs_numpy",
+            method_name: "zipf",
+            seed: 42,
+            distribution: GeneratorIncumbentDistribution::Zipf,
+        },
+        GeneratorIncumbentSpec {
+            row: "python_generator_noncentral_chisquare_pcg64_df5_nonc1_100k_vs_numpy",
+            method_name: "noncentral_chisquare",
+            seed: 42,
+            distribution: GeneratorIncumbentDistribution::NoncentralChisquare,
+        },
+    ];
+
+    assert_eq!(
+        std::env::var("FNP_BENCH_PROFILE").as_deref(),
+        Ok(REQUIRED_BUILD_PROFILE),
+        "Generator incumbent evidence requires the ship-grade release-perf profile"
+    );
+    let build_worker =
+        std::env::var("FNP_BUILD_WORKER").expect("FNP_BUILD_WORKER records the RCH build origin");
+    assert!(
+        !build_worker.trim().is_empty(),
+        "FNP_BUILD_WORKER must name the RCH build worker"
+    );
+    assert_eq!(
+        std::env::var("RAYON_NUM_THREADS").as_deref(),
+        Ok(RAYON_THREADS),
+        "Rayon configuration must be explicit"
+    );
+    for variable in [
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "BLIS_NUM_THREADS",
+    ] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(NATIVE_LIBRARY_THREADS),
+            "{variable} must be pinned to one thread"
+        );
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        4,
+        "Rayon pool width differs from the declared configuration"
+    );
+    let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "unavailable".to_owned());
+    println!(
+        "GENERATOR_RUNTIME host={host} build_worker={build_worker} \
+         build_profile={REQUIRED_BUILD_PROFILE} rayon_pool_threads=4 \
+         native_library_threads=1 actual_threads_reported_per_row=true"
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_generator_incumbent_ratios")
+            .expect("Generator incumbent-ratio module");
+        fnp_python(&module).expect("initialize fnp_python Generator incumbent-ratio module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+        let candidate_random = module.getattr("random").expect("fnp.random");
+        let incumbent_random = numpy.getattr("random").expect("numpy.random");
+        let numpy_generator_type = incumbent_random
+            .getattr("Generator")
+            .expect("numpy.random.Generator");
+
+        let mut chooser_rows = Vec::with_capacity(SPECS.len());
+        for spec in SPECS {
+            let candidate_generator = seeded_pcg64_generator(&candidate_random, spec.seed);
+            let incumbent_generator = seeded_pcg64_generator(&incumbent_random, spec.seed);
+            assert!(
+                !candidate_generator.is_exact_instance(&numpy_generator_type),
+                "{}: candidate Generator resolved to the incumbent type",
+                spec.row
+            );
+            let incumbent_method = incumbent_generator
+                .getattr(spec.method_name)
+                .expect("bind live NumPy Generator method");
+            common::report_numpy_generator_method_identity(
+                py,
+                spec.method_name,
+                &incumbent_generator,
+                &incumbent_method,
+            );
+            let candidate_name = format!("fnp.random.Generator.{}", spec.method_name);
+            let incumbent_name = format!("numpy.random.Generator.{}", spec.method_name);
+            common::report_incumbent_topology_with_shared_component(
+                &candidate_name,
+                &incumbent_name,
+                SHARED_COMPONENT,
+            );
+
+            let parameters = match spec.distribution {
+                GeneratorIncumbentDistribution::Zipf => "a=2.5",
+                GeneratorIncumbentDistribution::NoncentralChisquare => "df=5.0,nonc=1.0",
+            };
+            println!(
+                "GENERATOR_REGIME row={} host={host} build_worker={build_worker} \
+                 bit_generator=PCG64 seed={} samples={SIZE} parameters={} \
+                 candidate_public_calls=1 incumbent_public_calls=1 \
+                 generator_construction_outside_timed_region=true \
+                 bound_method_lookup_outside_timed_region=true \
+                 output_materialization_inside_timed_region=true \
+                 shared_timed_component={SHARED_COMPONENT}",
+                spec.row, spec.seed, parameters,
+            );
+            println!(
+                "WORK_ACCOUNTING row={} candidate_samples={SIZE} \
+                 incumbent_samples={SIZE} variable_rejection_draws=true \
+                 exact_draw_count_not_instrumented=true less_work_claim=false",
+                spec.row,
+            );
+
+            let parity_checksum = prove_generator_incumbent_distribution_stream(
+                &numpy,
+                &candidate_random,
+                &incumbent_random,
+                spec,
+            );
+            println!(
+                "PARITY row={} generator_api=true at_scale=true samples={SIZE} \
+                 dtype_shape_every_output_byte=identical \
+                 next_stream_f64_values=32 next_stream_every_byte=identical \
+                 aggregate_checksum={parity_checksum:016x}",
+                spec.row,
+            );
+
+            common::report_observed_thread_activity(
+                spec.row,
+                "numpy",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    let generator = seeded_pcg64_generator(&incumbent_random, spec.seed);
+                    let method = generator
+                        .getattr(spec.method_name)
+                        .expect("bind NumPy Generator thread probe");
+                    black_box(call_generator_incumbent_distribution(&method, spec));
+                },
+            );
+            common::report_observed_thread_activity(
+                spec.row,
+                "fnp",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    let generator = seeded_pcg64_generator(&candidate_random, spec.seed);
+                    let method = generator
+                        .getattr(spec.method_name)
+                        .expect("bind FNP Generator thread probe");
+                    black_box(call_generator_incumbent_distribution(&method, spec));
+                },
+            );
+
+            let mut observe_incumbent =
+                || observe_generator_incumbent_distribution(&numpy, &incumbent_random, spec);
+            let mut observe_candidate =
+                || observe_generator_incumbent_distribution(&numpy, &candidate_random, spec);
+            let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+                spec.row,
+                &mut observe_incumbent,
+                &mut observe_candidate,
+            );
+            let statistical_verdict =
+                common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+
+            let output_bridge_median_ns = match spec.distribution {
+                GeneratorIncumbentDistribution::Zipf => {
+                    let values = vec![0_i64; SIZE];
+                    component_min_of_three_median_ns(|| {
+                        observe_numpy_output_array_bridge(py, &numpy, &values, "int64")
+                    })
+                }
+                GeneratorIncumbentDistribution::NoncentralChisquare => {
+                    let values = vec![0.0_f64; SIZE];
+                    component_min_of_three_median_ns(|| {
+                        observe_numpy_output_array_bridge(py, &numpy, &values, "float64")
+                    })
+                }
+            };
+            let shared_component_pct = output_bridge_median_ns / effect.arm_b_median_ns * 100.0;
+            println!(
+                "SHARED_COMPONENT_TELEMETRY row={} component={SHARED_COMPONENT} \
+                 component_median_ms={:.6} candidate_median_ms={:.6} \
+                 share_of_candidate_pct={shared_component_pct:.6} \
+                 rounds=41 min_of=3 direction=conservative_for_candidate",
+                spec.row,
+                output_bridge_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+            );
+
+            let shared_component_admissible = shared_component_pct < 50.0;
+            let (campaign_verdict, decision, reason) = match statistical_verdict {
+                "DECIDABLE_WIN" if shared_component_admissible => (
+                    "INCUMBENT_WIN_ELIGIBLE",
+                    "choose_fnp",
+                    "effect_CI_and_2x_null_margin_clear_and_shared_component_is_below_50pct",
+                ),
+                "DECIDABLE_WIN" => (
+                    "MAINTENANCE_ONLY_SHARED_COMPONENT_DOMINATES",
+                    "choose_numpy",
+                    "candidate_routes_at_least_half_its_time_through_incumbent_code",
+                ),
+                "DECIDABLE_REGRESSION" => (
+                    "INCUMBENT_REGRESSION",
+                    "choose_numpy",
+                    "effect_CI_and_2x_null_margin_show_numpy_faster",
+                ),
+                _ => (
+                    "STATISTICALLY_UNDECIDED",
+                    "choose_numpy_pending_remeasure",
+                    "effect_does_not_clear_corrected_dual_null_gate",
+                ),
+            };
+            println!(
+                "INCUMBENT_RATIO row={} host={host} build_worker={build_worker} \
+                 invocation_id={} statistical_verdict={statistical_verdict} \
+                 campaign_verdict={campaign_verdict} \
+                 incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ratio={:.6} incumbent_null_ci95=[{:.6},{:.6}] \
+                 candidate_null_ratio={:.6} candidate_null_ci95=[{:.6},{:.6}] \
+                 effect_ci_excludes_one={} corrected_dual_null_gate=true \
+                 median_clause=true actual_threads_reported=true \
+                 shared_component_pct={shared_component_pct:.6}",
+                spec.row,
+                common::bench_invocation_id(),
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                incumbent_null.ratio_ci_low,
+                incumbent_null.ratio_ci_high,
+                candidate_null.ratio_median,
+                candidate_null.ratio_ci_low,
+                candidate_null.ratio_ci_high,
+                effect.ratio_ci_low > 1.0 || effect.ratio_ci_high < 1.0,
+            );
+            println!(
+                "CHOOSER_STATEMENT workload={} decision={decision} reason={reason} \
+                 measured_scope=PCG64_seed42_100000_samples_parameters_{} \
+                 incumbent=numpy_live_same_invocation_no_result_cache \
+                 outside_scope=run_same_contract_before_choosing",
+                spec.method_name,
+                parameters.replace([',', '='], "_"),
+            );
+            chooser_rows.push((spec.method_name, decision));
+        }
+
+        println!(
+            "CHOOSER_STATEMENT workload=generator_distribution_batches \
+             decision=method_specific choices={}:{};{}:{} \
+             representative_job=draw_100000_variates_from_a_long_lived_seeded_Generator \
+             incumbent=numpy_live_same_invocation \
+             outside_measured_regimes=run_same_contract_before_choosing",
+            chooser_rows[0].0, chooser_rows[0].1, chooser_rows[1].0, chooser_rows[1].1,
+        );
+    });
+}
+
 fn bench_bool_storage_bytes_median_gate(c: &mut Criterion) {
     let _ = c;
     const N: usize = 8_000_000;
@@ -10313,6 +10756,10 @@ fn main() {
         (
             "bench_char_upper_hold_redecision_median_gate",
             bench_char_upper_hold_redecision_median_gate,
+        ),
+        (
+            "bench_generator_distribution_incumbent_ratios_median_gate",
+            bench_generator_distribution_incumbent_ratios_median_gate,
         ),
         (
             "bench_isin_f64_vs_numpy_median_gate",

@@ -1508,6 +1508,143 @@ both same-invocation nulls, OS-observed threads, and the corrected effect-CI
 plus twice-wider-null median gate.
 
 
+## 2026-07-31 - INCUMBENT RATIO CONVERSION / KEEP (TWO INCUMBENT-WINS): seeded `Generator.zipf` and `Generator.noncentral_chisquare` batches - 1.621213x and 1.267444x vs live NumPy
+
+`BlackThrush`, bead `franken_numpy-ixs5y.397`. This row converts two banked
+maintenance wins into campaign results against the actual incumbent. The
+historical self-speedups were 1.364282x for
+`Generator.zipf(a=2.5, size=100000)` and 1.108215x for
+`Generator.noncentral_chisquare(df=5.0, nonc=1.0, size=100000)`, both with
+PCG64 seed 42. Those before/after ratios remain maintenance evidence. The
+current same-process live-NumPy ratios are the citable results.
+
+The measured job is one public distribution draw from an already-constructed,
+long-lived seeded `Generator`. Each observation constructs an independent
+PCG64(seed=42) generator and binds its public distribution method outside the
+timer, then times the public call including allocation and materialization of
+all 100,000 outputs. No output, intermediate, or post-call stream state is
+cached. This is the exact parameter and batch-size regime of each historical
+self-speedup.
+
+`bench_elf_sha256=96c17999c85c5424545d066417fcef7986b12404edd4f61b9d9c6723e2875459`
+(218,003,056 bytes), self-reported by the executing process from
+`/proc/self/exe`, invocation
+`000000000000000018c74c5f2b63228b-00263261`.
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy ratio medians were 1.005712 `[0.988497,1.025913]` for `zipf` and 0.998734 `[0.973754,1.018050]` for `noncentral_chisquare`, 41 rounds and min-of-3 per contract.
+
+**Candidate A/A null control (same invocation):** FNP/FNP ratio medians were
+0.996431 `[0.978616,1.002818]` for `zipf` and 0.984766
+`[0.890840,1.012534]` for `noncentral_chisquare`.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=7bf16558f84b1ab33f74564b00b1dc22b7b5c98dbdf84d4080d098a55a0ac3e2 invocation_id=000000000000000018c74c5f2b63228b-00263261 measured_ratio=1.267444x
+
+**Incumbent isolation proof:** candidate=fnp.random.Generator.batch_distributions incumbent=numpy.random.Generator.batch_distributions shared_timed_component=numpy.empty_reshape_buffer_bridge
+
+**Shared timed component disclosure:** components=numpy.empty_reshape_buffer_bridge direction=conservative_for_candidate share_of_candidate_pct=0.561910,1.284527
+
+INCUMBENT IDENTITY: for each method, the process asserted an exact live
+`numpy.random.Generator` receiver, its bound method's `__self__`, `__name__`,
+`__module__`, and `__qualname__`, and equality with the public
+`Generator.<method>` descriptor rebound to that receiver. Both callables
+resolved to `numpy.random._generator`, whose executing extension artifact is
+the NumPy hash above (809,408 bytes). Candidate receivers were asserted not to
+be instances of the NumPy `Generator` type.
+
+SHARED-COMPONENT ACCOUNTING: FNP returns its native result through a live
+NumPy `empty` + typed-buffer copy + `reshape` bridge. A local exact replica of
+that bridge ran for 41 min-of-3 rounds. It consumed only 0.561910% of the
+candidate `zipf` median and 1.284527% of the candidate
+`noncentral_chisquare` median, both far below the 50% incumbent-code ceiling.
+Because identical incumbent code is included only in the candidate arm, its
+effect is conservative for FNP.
+
+EXACT PARITY AND STREAM STATE: before timing, each FNP result matched NumPy in
+dtype, shape, and every output byte across all 100,000 values. The harness then
+drew 32 public `random()` f64 values from each post-distribution generator;
+those dtype, shape, and every byte also matched. Aggregate parity checksums
+were `85b882a1e9136490` for `zipf` and `8c770144c2c90f31` for
+`noncentral_chisquare`. All three contracts reproduced stable per-round
+checksums (`7227721fd2ab1829` and `61ae8bc57533dc79`).
+
+WORK ACCOUNTING: each effect pair makes one public distribution call and
+materializes 100,000 outputs. Both samplers use data-dependent rejection, so
+exact internal draw counts were deliberately not guessed or claimed equal.
+The post-call stream parity proves both public arms consumed the same random
+stream for this seed and regime. This is an end-to-end public-surface chooser,
+not a less-work or instruction-count claim.
+
+BUILD PROVENANCE, INCLUDING THE TRANSPORT DEFECT: strict
+`RCH_REQUIRE_REMOTE=1 rch exec --base a899c8c9 --clean-overlay` sent only
+`crates/fnp-python/src/lib.rs`,
+`crates/fnp-python/benches/common/mod.rs`, and
+`crates/fnp-python/benches/criterion_python_median_gate.rs` over the committed
+base. Builder `vmi1264463` (38.242.209.154) used the ship-grade
+`release-perf` profile and the single reusable `/data/tmp/cargo-target`.
+RCH's client transport reached its fixed 1,800-second SSH timeout during the
+final bench link and correctly refused local fallback. The already-running
+remote Cargo/link process continued to completion and emitted the unique
+`criterion_python_median_gate-77b53e183b347063` executable. The three remote
+overlay files matched the local source SHA-256 values exactly, and the builder
+artifact matched the measurement copy in SHA-256 and byte count. This is
+strict-remote build evidence with a disclosed late transport timeout, not a
+successful local fallback or a claim that the RCH client returned zero.
+
+RUN PROVENANCE: that exact ELF ran on drained worker `vmi1227854`
+(109.123.245.77), `AMD EPYC Processor (with IBPB)`, 10 physical cores and 10
+logical threads, CPUs 0-9 online and allowed. Compile-time SSE2 and AVX2 were
+true; runtime SSE2, AVX, AVX2, F16C, and FMA were true; AVX-512F/BW were
+false. The worker was re-enabled immediately after the decisive process, and
+the transient copied-ELF directory was reclaimed.
+
+Configured controls were Rayon=4 and OpenBLAS/OMP/MKL/NumExpr/BLIS=1, but the
+OS `/proc/self/task` probes are the evidence: both NumPy and FNP actually used
+one thread in both rows. For `zipf`, NumPy/FNP accrued 5/3 CPU ticks over five
+repetitions; for `noncentral_chisquare`, they accrued 2/1. These are
+single-observed-thread public API wins, despite the wider dormant Rayon pool.
+
+Host-wide fail-closed quiescence passed at process start and before each
+contract. The largest observed busy-CPU fraction was 0.032 against the 0.200
+refusal threshold. An immediately preceding identical-ELF run was retained as
+routing evidence only because its row-local `HOSTNAME` fields fell back to
+`unavailable`; its process-level hostname was correct and both wins reproduced
+(1.569531x and 1.413125x), but only the fully labeled second invocation decides
+this row.
+
+| workload | host | actual threads NumPy/FNP | executing ELF SHA-256 | NumPy/NumPy null (CI95) | FNP/FNP null (CI95) | NumPy median | FNP median | NumPy/FNP effect (CI95) | required 2x null delta | bridge share | verdict |
+|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `Generator.zipf(a=2.5, size=100000)`, PCG64 seed 42 | `vmi1227854` | 1 / 1 | `96c17999c85c5424545d066417fcef7986b12404edd4f61b9d9c6723e2875459` | 1.005712 `[0.988497,1.025913]` | 0.996431 `[0.978616,1.002818]` | 8.448700 ms | 5.209727 ms | **1.621213x** `[1.536976,1.659035]` | 0.051827 | 0.561910% | **DECIDABLE_WIN** |
+| `Generator.noncentral_chisquare(df=5.0, nonc=1.0, size=100000)`, PCG64 seed 42 | `vmi1227854` | 1 / 1 | `96c17999c85c5424545d066417fcef7986b12404edd4f61b9d9c6723e2875459` | 0.998734 `[0.973754,1.018050]` | 0.984766 `[0.890840,1.012534]` | 3.531362 ms | 2.678184 ms | **1.267444x** `[1.238380,1.339879]` | 0.218320 | 1.284527% | **DECIDABLE_WIN** |
+
+CORRECTED NULL GATE: both effect bootstrap median CIs exclude 1.0. Each effect
+median lies beyond both null CI envelopes, and each median deviation from
+unity exceeds twice the wider null half-width: 0.621213 > 0.051827 for `zipf`
+and 0.267444 > 0.218320 for `noncentral_chisquare`. CV was recorded only as
+provenance and did not admit or reject either row. Neither null was required to
+straddle unity.
+
+**CHOOSER STATEMENT:** on the recorded 10-core AVX2 host, for a long-lived
+PCG64(seed=42) generator drawing 100,000 values, choose
+`fnp.random.Generator.zipf(a=2.5)`: it was 1.621213x faster than live NumPy.
+Choose `fnp.random.Generator.noncentral_chisquare(df=5.0, nonc=1.0)`: it was
+1.267444x faster. Both choices have exact output and next-stream byte identity,
+one actually observed thread per arm, and decisive corrected dual-null CIs.
+For other parameters, bit generators, batch sizes, or host/thread topologies,
+choose only after running this same incumbent contract.
+
+Retry predicate: do not repeat these exact regimes against these artifacts and
+topology. Reopen a method only if FNP or NumPy changes its relevant sampler or
+Generator boundary, a different parameter/bit-generator/batch-size regime is
+the intended chooser, or the observed-thread topology changes. Any retry must
+retain exact output plus next-stream parity, bound-method and compiled NumPy
+artifact identity, process-self ELF identity, host-wide quiescence, the
+quantified shared-component ceiling, both same-invocation nulls, actual
+OS-observed threads, effect-CI exclusion, and the twice-wider-null median
+clause.
+
+
 ## 2026-07-28 - HOLD-UNBANKED: ASCII `char.upper` end-to-end observation lacked the candidate null and execution provenance
 
 `BlackThrush`. Class-3 capability gap: NumPy has **no vectorized string-case

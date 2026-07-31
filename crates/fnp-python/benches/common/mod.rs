@@ -587,6 +587,114 @@ pub fn report_numpy_incumbent_identity(
     std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
 }
 
+/// Pin a bound method on an exact live `numpy.random.Generator` instance to the
+/// compiled `_generator` extension that implements it. A bound C method is not
+/// object-identical to the descriptor stored on `Generator`, so this checks its
+/// receiver, name, qualified name, module, and descriptor rebind rather than
+/// weakening the ordinary incumbent identity helper.
+pub fn report_numpy_generator_method_identity(
+    py: Python<'_>,
+    method_name: &str,
+    generator: &Bound<'_, PyAny>,
+    bound_method: &Bound<'_, PyAny>,
+) {
+    assert!(
+        !method_name.is_empty() && !method_name.contains('.'),
+        "Generator method identity requires one non-empty attribute name"
+    );
+    let numpy = py.import("numpy").expect("numpy incumbent");
+    let numpy_name = numpy
+        .getattr("__name__")
+        .expect("numpy __name__")
+        .extract::<String>()
+        .expect("numpy __name__ string");
+    assert_eq!(numpy_name, "numpy", "incumbent module is not numpy");
+    let numpy_version = numpy
+        .getattr("__version__")
+        .expect("numpy __version__")
+        .extract::<String>()
+        .expect("numpy __version__ string");
+    let numpy_random = numpy.getattr("random").expect("numpy.random");
+    let generator_type = numpy_random
+        .getattr("Generator")
+        .expect("numpy.random.Generator");
+    assert!(
+        generator.is_exact_instance(&generator_type),
+        "incumbent receiver is not an exact numpy.random.Generator"
+    );
+
+    let receiver = bound_method
+        .getattr("__self__")
+        .expect("bound Generator method __self__");
+    assert!(
+        receiver.is(generator),
+        "bound Generator method receiver differs from the measured incumbent"
+    );
+    let reported_name = bound_method
+        .getattr("__name__")
+        .expect("bound Generator method __name__")
+        .extract::<String>()
+        .expect("bound Generator method name string");
+    assert_eq!(
+        reported_name, method_name,
+        "bound Generator method name differs from the requested incumbent"
+    );
+    let callable_module = bound_method
+        .getattr("__module__")
+        .expect("bound Generator method __module__")
+        .extract::<String>()
+        .expect("bound Generator method module string");
+    assert_eq!(
+        callable_module, "numpy.random._generator",
+        "bound incumbent method is not implemented by numpy.random._generator"
+    );
+    let qualified_name = bound_method
+        .getattr("__qualname__")
+        .expect("bound Generator method __qualname__")
+        .extract::<String>()
+        .expect("bound Generator method qualified-name string");
+    assert_eq!(
+        qualified_name,
+        format!("Generator.{method_name}"),
+        "bound Generator method qualified name differs"
+    );
+
+    let descriptor = generator_type
+        .getattr(method_name)
+        .unwrap_or_else(|_| panic!("numpy.random.Generator.{method_name} descriptor"));
+    let rebound = descriptor
+        .call_method1("__get__", (generator, &generator_type))
+        .expect("rebind numpy.random.Generator descriptor");
+    assert!(
+        rebound
+            .eq(bound_method)
+            .expect("compare rebound numpy.random.Generator method"),
+        "measured bound method does not match the public Generator descriptor"
+    );
+
+    let generator_module = py
+        .import("numpy.random._generator")
+        .expect("numpy.random compiled Generator module");
+    let artifact_path = generator_module
+        .getattr("__file__")
+        .expect("numpy.random._generator __file__")
+        .extract::<String>()
+        .expect("numpy.random._generator path string");
+    let artifact_path = Path::new(&artifact_path);
+    let (artifact_sha256, artifact_bytes) =
+        file_identity(artifact_path).expect("hash numpy.random Generator artifact");
+    println!(
+        "INCUMBENT_IDENTITY arm=numpy.random.Generator.{method_name} \
+         numpy_version={numpy_version} callable_module={callable_module} \
+         qualified_name={qualified_name} invocation_id={} \
+         artifact_sha256={artifact_sha256} artifact_bytes={artifact_bytes} \
+         artifact_path={} receiver_assert=passed descriptor_rebind_assert=passed",
+        bench_invocation_id(),
+        artifact_path.display(),
+    );
+    std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
+}
+
 /// Loadtxt-specific compatibility wrapper retained for the existing benches.
 pub fn report_numpy_loadtxt_incumbent_identity(py: Python<'_>, numpy_loadtxt: &Bound<'_, PyAny>) {
     report_numpy_incumbent_identity(py, "loadtxt", numpy_loadtxt);
