@@ -29572,6 +29572,65 @@ fn multiply_add(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, c: Py<PyAny>) -> PyR
 /// inputs and writes one output exactly once. Floating-point arithmetic keeps
 /// NumPy's subtract, multiply, then add rounding order; fixed-width integers use
 /// the same modular overflow semantics as the three NumPy ufuncs.
+fn subtract_multiply_add_into<T>(out: &mut [T], a: &[T], b: &[T], c: &[T], d: &[T])
+where
+    T: MultiplyAddValue,
+{
+    debug_assert_eq!(out.len(), a.len());
+    debug_assert_eq!(out.len(), b.len());
+    debug_assert_eq!(out.len(), c.len());
+    debug_assert_eq!(out.len(), d.len());
+
+    use rayon::prelude::*;
+    const SUBTRACT_MULTIPLY_ADD_PARALLEL_MIN: usize = 1 << 16;
+    // Five float64 streams occupy 320 KiB per band, fitting Zen 3's 512 KiB
+    // private L2 while leaving headroom for loop state and adjacent traffic.
+    const SUBTRACT_MULTIPLY_ADD_CHUNK: usize = 1 << 13;
+    if out.len() >= SUBTRACT_MULTIPLY_ADD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        out.par_chunks_mut(SUBTRACT_MULTIPLY_ADD_CHUNK)
+            .zip(a.par_chunks(SUBTRACT_MULTIPLY_ADD_CHUNK))
+            .zip(b.par_chunks(SUBTRACT_MULTIPLY_ADD_CHUNK))
+            .zip(c.par_chunks(SUBTRACT_MULTIPLY_ADD_CHUNK))
+            .zip(d.par_chunks(SUBTRACT_MULTIPLY_ADD_CHUNK))
+            .for_each(|((((slots, band_a), band_b), band_c), band_d)| {
+                for ((((slot, &x), &y), &z), &w) in slots
+                    .iter_mut()
+                    .zip(band_a.iter())
+                    .zip(band_b.iter())
+                    .zip(band_c.iter())
+                    .zip(band_d.iter())
+                {
+                    *slot = x.subtract_multiply_add_numpy(y, z, w);
+                }
+            });
+    } else {
+        for ((((slot, &x), &y), &z), &w) in out
+            .iter_mut()
+            .zip(a.iter())
+            .zip(b.iter())
+            .zip(c.iter())
+            .zip(d.iter())
+        {
+            *slot = x.subtract_multiply_add_numpy(y, z, w);
+        }
+    }
+}
+
+fn contiguous_buffers_overlap<T>(left: &PyBuffer<T>, right: &PyBuffer<T>) -> bool
+where
+    T: pyo3::buffer::Element,
+{
+    let left_start = left.buf_ptr() as usize;
+    let right_start = right.buf_ptr() as usize;
+    let Some(left_end) = left_start.checked_add(left.len_bytes()) else {
+        return true;
+    };
+    let Some(right_end) = right_start.checked_add(right.len_bytes()) else {
+        return true;
+    };
+    left_start < right_end && right_start < left_end
+}
+
 fn zerocopy_subtract_multiply_add_typed<T>(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -29647,39 +29706,7 @@ where
         let out: &mut [T] =
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
 
-        use rayon::prelude::*;
-        const SUBTRACT_MULTIPLY_ADD_PARALLEL_MIN: usize = 1 << 16;
-        // Five float64 streams occupy 320 KiB per band, fitting Zen 3's 512 KiB
-        // private L2 while leaving headroom for loop state and adjacent traffic.
-        const SUBTRACT_MULTIPLY_ADD_CHUNK: usize = 1 << 13;
-        if n >= SUBTRACT_MULTIPLY_ADD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
-            out.par_chunks_mut(SUBTRACT_MULTIPLY_ADD_CHUNK)
-                .zip(va.par_chunks(SUBTRACT_MULTIPLY_ADD_CHUNK))
-                .zip(vb.par_chunks(SUBTRACT_MULTIPLY_ADD_CHUNK))
-                .zip(vc.par_chunks(SUBTRACT_MULTIPLY_ADD_CHUNK))
-                .zip(vd.par_chunks(SUBTRACT_MULTIPLY_ADD_CHUNK))
-                .for_each(|((((slots, band_a), band_b), band_c), band_d)| {
-                    for ((((slot, &x), &y), &z), &w) in slots
-                        .iter_mut()
-                        .zip(band_a.iter())
-                        .zip(band_b.iter())
-                        .zip(band_c.iter())
-                        .zip(band_d.iter())
-                    {
-                        *slot = x.subtract_multiply_add_numpy(y, z, w);
-                    }
-                });
-        } else {
-            for ((((slot, &x), &y), &z), &w) in out
-                .iter_mut()
-                .zip(va.iter())
-                .zip(vb.iter())
-                .zip(vc.iter())
-                .zip(vd.iter())
-            {
-                *slot = x.subtract_multiply_add_numpy(y, z, w);
-            }
-        }
+        subtract_multiply_add_into(out, va, vb, vc, vd);
     }
     if shape.len() == 1 {
         Ok(Some(flat.unbind()))
@@ -29691,24 +29718,124 @@ where
     }
 }
 
-/// `subtract_multiply_add(a, b, c, d)` -> `(a - b) * c + d` in one pass.
+/// Write `(a - b) * c + d` directly into a caller-owned NumPy array.
+///
+/// The byte-range test is deliberately stronger than object identity: distinct
+/// ndarray views may still overlap. Any overlap delegates to NumPy because each
+/// incumbent ufunc observes mutations made by the preceding in-place ufunc.
+fn zerocopy_subtract_multiply_add_out_typed<T>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    c: &Bound<'_, PyAny>,
+    d: &Bound<'_, PyAny>,
+    output: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: MultiplyAddValue,
+{
+    let ndarray = numpy.getattr("ndarray")?;
+    for operand in [a, b, c, d, output] {
+        if !operand.is_exact_instance(&ndarray) {
+            return Ok(None);
+        }
+    }
+    let (Ok(buf_a), Ok(buf_b), Ok(buf_c), Ok(buf_d), Ok(buf_out)) = (
+        PyBuffer::<T>::get(a),
+        PyBuffer::<T>::get(b),
+        PyBuffer::<T>::get(c),
+        PyBuffer::<T>::get(d),
+        PyBuffer::<T>::get(output),
+    ) else {
+        return Ok(None);
+    };
+    let shape = buf_a.shape();
+    if shape.is_empty()
+        || buf_b.shape() != shape
+        || buf_c.shape() != shape
+        || buf_d.shape() != shape
+        || buf_out.shape() != shape
+    {
+        return Ok(None);
+    }
+    if !buf_a.is_c_contiguous()
+        || !buf_b.is_c_contiguous()
+        || !buf_c.is_c_contiguous()
+        || !buf_d.is_c_contiguous()
+        || !buf_out.is_c_contiguous()
+        || buf_out.readonly()
+    {
+        return Ok(None);
+    }
+    if [&buf_a, &buf_b, &buf_c, &buf_d]
+        .into_iter()
+        .any(|input| contiguous_buffers_overlap(input, &buf_out))
+    {
+        return Ok(None);
+    }
+    let (Some(cells_a), Some(cells_b), Some(cells_c), Some(cells_d), Some(out_cells)) = (
+        buf_a.as_slice(py),
+        buf_b.as_slice(py),
+        buf_c.as_slice(py),
+        buf_d.as_slice(py),
+        buf_out.as_mut_slice(py),
+    ) else {
+        return Ok(None);
+    };
+    let n = cells_a.len();
+    if n == 0
+        || cells_b.len() != n
+        || cells_c.len() != n
+        || cells_d.len() != n
+        || out_cells.len() != n
+    {
+        return Ok(None);
+    }
+    // SAFETY: the buffer protocol validated element formats and contiguity.
+    // The explicit byte-range checks above prove the mutable output is disjoint
+    // from every read-only input for the complete duration of the fused pass.
+    let va: &[T] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<T>(), n) };
+    let vb: &[T] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<T>(), n) };
+    let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
+    let vd: &[T] = unsafe { std::slice::from_raw_parts(cells_d.as_ptr().cast::<T>(), n) };
+    let out: &mut [T] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+    subtract_multiply_add_into(out, va, vb, vc, vd);
+    Ok(Some(output.clone().unbind()))
+}
+
+/// `subtract_multiply_add(a, b, c, d, out=None)` -> `(a - b) * c + d` in one pass.
 ///
 /// Byte-identical to NumPy for matched fixed-width numeric, equal-shape,
 /// C-contiguous ndarrays. Every unsupported regime delegates to NumPy's exact
 /// three-ufunc expression.
 #[pyfunction]
-#[pyo3(signature = (a, b, c, d))]
+#[pyo3(signature = (a, b, c, d, *, out=None))]
 fn subtract_multiply_add(
     py: Python<'_>,
     a: Py<PyAny>,
     b: Py<PyAny>,
     c: Py<PyAny>,
     d: Py<PyAny>,
+    out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     macro_rules! try_route {
         ($value:ty, $dtype:literal) => {
-            if let Some(out) = zerocopy_subtract_multiply_add_typed::<$value>(
+            if let Some(output) = out.as_ref() {
+                if let Some(result) = zerocopy_subtract_multiply_add_out_typed::<$value>(
+                    py,
+                    &numpy,
+                    a.bind(py),
+                    b.bind(py),
+                    c.bind(py),
+                    d.bind(py),
+                    output.bind(py),
+                )? {
+                    return Ok(result);
+                }
+            } else if let Some(result) = zerocopy_subtract_multiply_add_typed::<$value>(
                 py,
                 &numpy,
                 a.bind(py),
@@ -29717,7 +29844,7 @@ fn subtract_multiply_add(
                 d.bind(py),
                 $dtype,
             )? {
-                return Ok(out);
+                return Ok(result);
             }
         };
     }
@@ -29732,6 +29859,20 @@ fn subtract_multiply_add(
     try_route!(i8, "int8");
     try_route!(u8, "uint8");
 
+    if let Some(output) = out.as_ref() {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("out", output.bind(py))?;
+        let difference = numpy
+            .getattr("subtract")?
+            .call((a.bind(py), b.bind(py)), Some(&kwargs))?;
+        let product = numpy
+            .getattr("multiply")?
+            .call((difference, c.bind(py)), Some(&kwargs))?;
+        return Ok(numpy
+            .getattr("add")?
+            .call((product, d.bind(py)), Some(&kwargs))?
+            .unbind());
+    }
     let difference = numpy.getattr("subtract")?.call1((a.bind(py), b.bind(py)))?;
     let product = numpy.getattr("multiply")?.call1((difference, c.bind(py)))?;
     Ok(numpy.getattr("add")?.call1((product, d.bind(py)))?.unbind())
