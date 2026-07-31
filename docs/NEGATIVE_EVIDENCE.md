@@ -4,6 +4,68 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-31 - LONG-CHAIN FUSION ROUT (KEEP, INCUMBENT-WIN): `(a-b)*c+d` wins 4.67-4.97x across ten numeric dtypes on 64 physical cores
+
+`IvoryDesert`, bead `franken_numpy-ixs5y.406`. The new public
+`fnp.subtract_multiply_add(a, b, c, d)` route evaluates NumPy's three arithmetic
+operations in the same order while streaming four equal-shape C-contiguous
+inputs into one output. It covers `float64`, `float32`, and all eight fixed-width
+integer dtypes. Floats preserve the intermediate subtract and multiply
+roundings; integers use explicit wrapping subtract, multiply, and add.
+
+Every row used four 32 MiB operands and compared the whole public job with live
+NumPy 2.4.2 in the same invocation on `trj`. Full result bytes matched before
+timing for every dtype. The corrected dual-null contract reported
+`DECIDABLE_WIN` for all ten rows.
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** every dtype carried both controls; for `float64`, NumPy/NumPy ratio median 0.993635 with CI95 `[0.976479,1.017941]`, and FNP/FNP ratio median 1.007635 with CI95 `[0.975320,1.027570]`, under the same 21-round invocation.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.2 artifact_sha256=85b8816f43f04afa5700072a6df18e39cd423e9efa5a5fb9f5a562b261ffd69b artifact_bytes=10452721 invocation_id=000000000000000018c769fe6bf50c78-0009ea26 measured_ratio=4.671523x
+
+**Incumbent isolation proof:** candidate=fnp.subtract_multiply_add incumbent=numpy.subtract+numpy.multiply+numpy.add shared_timed_component=none
+
+| dtype | NumPy median | FNP median | NumPy/FNP median | effect CI95 |
+|---|---:|---:|---:|---:|
+| `float64` | 15.531259 ms | 3.146683 ms | **4.923942x** | `[4.684973,5.136155]` |
+| `float32` | 15.355410 ms | 3.236912 ms | **4.671523x** | `[4.558591,4.800096]` |
+| `int8` | 15.678405 ms | 3.311483 ms | **4.815664x** | `[4.451333,4.875336]` |
+| `uint8` | 15.651644 ms | 3.244948 ms | **4.812358x** | `[4.561562,5.031796]` |
+| `int16` | 15.482528 ms | 3.136965 ms | **4.932746x** | `[4.842325,5.123728]` |
+| `uint16` | 15.471066 ms | 3.229088 ms | **4.819022x** | `[4.686019,4.902052]` |
+| `int32` | 15.765317 ms | 3.305091 ms | **4.803349x** | `[4.692385,4.947244]` |
+| `uint32` | 15.527933 ms | 3.194774 ms | **4.803484x** | `[4.720704,5.005041]` |
+| `int64` | 15.092107 ms | 3.199813 ms | **4.730245x** | `[4.635753,4.890004]` |
+| `uint64` | 15.252026 ms | 3.139020 ms | **4.969487x** | `[4.674828,5.071342]` |
+
+COUNTED_MECHANISM: `class=materialization_and_pass_elimination`. The incumbent
+performs nine element-stream touches and three output allocations. The candidate
+performs five stream touches and one allocation, eliminating two 32 MiB
+temporaries (64 MiB total) while retaining the same three arithmetic operations
+per element.
+
+PROVENANCE:
+`bench_elf_sha256=201dd507206a93efd559ab763b6f7d282cbafd519a4bcbe8bbc76c7912dcc658`
+(221,441,296 bytes), built through strict RCH as `release-perf` on
+`vmi1149989` and copied hash-identically to `trj`. The measurement host was an
+AMD Ryzen Threadripper PRO 5995WX with 64 physical cores and 128 logical threads,
+performance governor, full-host affinity, and a pinned 64-thread Rayon pool.
+Host-wide quiescence passed before the invocation and before every dtype row.
+NumPy 2.4.2 was linked to `scipy-openblas` / OpenBLAS 0.3.31.dev
+(`USE64BITINT DYNAMIC_ARCH NO_AFFINITY`, Haswell target, `MAX_THREADS=64`),
+although these three element-wise ufuncs do not dispatch through BLAS.
+
+SCOPE: equal-shape C-contiguous arrays in the ten routed dtypes at or above the
+parallel threshold. Broadcasting, mixed dtypes, non-contiguous arrays, complex
+arrays, lists, and other unsupported regimes defer to the three live NumPy
+ufuncs in sequence.
+
+Retry predicate: rerun only when extending the fused expression surface (for
+example, `out=` or another operation graph), when changing the cache band or
+scheduler, or if NumPy gains a public fused expression engine that removes the
+two intermediates.
+
 ## 2026-07-31 - FUSION DTYPE ROUT (KEEP, INCUMBENT-WIN): one-pass `a*b+c` wins 2.75-4.63x across all eight fixed-width integer dtypes
 
 `IvoryDesert`, bead `franken_numpy-ixs5y.405`. The fused public
