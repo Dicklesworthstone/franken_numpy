@@ -5686,6 +5686,506 @@ fn bench_isin_f64_readme_16m_vs_numpy_median_gate(c: &mut Criterion) {
     });
 }
 
+/// FUSED ELEMENT-WISE CHAIN, whole job vs live NumPy.
+///
+/// The job is "compute `a * b + c` over three large `float64` arrays". NumPy's
+/// only public way to do it is two ufunc calls that materialize a full
+/// intermediate array; ours is one fused parallel pass. This is a structural
+/// gap, not a tuning gap: NumPy cannot fuse an expression without a JIT.
+fn bench_fused_multiply_add_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const ROW: &str = "python_fused_multiply_add_f64_8m_vs_numpy";
+    const ELEMENTS: usize = 8_000_000;
+    const CONTRACT_ROUNDS: usize = 41;
+    const CONTRACT_MIN_OF: usize = 3;
+    const THREAD_ACTIVITY_REPETITIONS: usize = 3;
+    const REQUIRED_BUILD_PROFILE: &str = "release-perf";
+
+    assert_eq!(
+        std::env::var("FNP_BENCH_PROFILE").as_deref(),
+        Ok(REQUIRED_BUILD_PROFILE),
+        "ship-grade fusion evidence requires FNP_BENCH_PROFILE=release-perf"
+    );
+    let build_worker =
+        std::env::var("FNP_BUILD_WORKER").expect("FNP_BUILD_WORKER records the RCH build origin");
+    assert!(
+        !build_worker.trim().is_empty(),
+        "FNP_BUILD_WORKER must be set"
+    );
+    // The pool width is a MEASURED VARIABLE for this lever, not a fixed 4: the
+    // whole point is that NumPy is single-threaded here while we are not, so the
+    // row must be reproducible at any pinned width. Every pool is still pinned
+    // to the SAME explicit value and the actual Rayon width is asserted, so a
+    // silently-defaulted pool can never be mistaken for a pinned one.
+    let threads = std::env::var("RAYON_NUM_THREADS")
+        .expect("RAYON_NUM_THREADS must be explicitly pinned before fusion timing");
+    for variable in ["OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(threads.as_str()),
+            "{variable} must be pinned to the same width as RAYON_NUM_THREADS"
+        );
+    }
+    let threads: usize = threads.parse().expect("thread count is numeric");
+    assert!(threads >= 1, "pinned thread count must be positive");
+    assert_eq!(
+        rayon::current_num_threads(),
+        threads,
+        "Rayon pool width does not match the pinned fusion configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME workload=fused_multiply_add build_worker={build_worker} \
+         build_profile={REQUIRED_BUILD_PROFILE} pinned_threads={threads} \
+         rayon_threads={} contract_rounds={CONTRACT_ROUNDS} \
+         contract_min_of={CONTRACT_MIN_OF}",
+        rayon::current_num_threads()
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_fused_multiply_add")
+            .expect("fused multiply-add bench module");
+        fnp_python(&module).expect("initialize fnp_python fused multiply-add module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let np_multiply = numpy.getattr("multiply").expect("numpy multiply");
+        let np_add = numpy.getattr("add").expect("numpy add");
+        let fnp_multiply_add = module.getattr("multiply_add").expect("fnp multiply_add");
+        common::report_numpy_incumbent_identity(py, "multiply", &np_multiply);
+        for (name, callable) in [("multiply", &np_multiply), ("add", &np_add)] {
+            let owner = callable
+                .getattr("__module__")
+                .ok()
+                .and_then(|value| value.extract::<String>().ok())
+                .unwrap_or_else(|| "numpy".to_owned());
+            assert!(
+                owner.starts_with("numpy"),
+                "incumbent {name} is not defined under numpy: {owner}"
+            );
+            assert!(
+                !callable.is(&fnp_multiply_add),
+                "dispatch trap: incumbent {name} resolved to the candidate callable"
+            );
+        }
+        common::report_incumbent_topology("fnp.multiply_add", "numpy.multiply+numpy.add");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260731)\n\
+                 fma_a = rng.standard_normal(8_000_000)\n\
+                 fma_b = rng.standard_normal(8_000_000)\n\
+                 fma_c = rng.standard_normal(8_000_000)\n",
+            )
+            .expect("fused multiply-add corpus CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("fused multiply-add corpus setup");
+        let fma_a = namespace.get_item("fma_a").expect("fma_a present");
+        let fma_b = namespace.get_item("fma_b").expect("fma_b present");
+        let fma_c = namespace.get_item("fma_c").expect("fma_c present");
+
+        let checksum_of = |array: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let bytes = array
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec");
+            bytes
+                .len()
+                .to_le_bytes()
+                .iter()
+                .chain(bytes.iter())
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        // The incumbent arm is exactly what a NumPy user writes for this job.
+        let run_incumbent = || {
+            let product = np_multiply
+                .call1((black_box(&fma_a), black_box(&fma_b)))
+                .expect("numpy multiply arm");
+            np_add
+                .call1((product, black_box(&fma_c)))
+                .expect("numpy add arm")
+        };
+        let run_candidate = || {
+            fnp_multiply_add
+                .call1((black_box(&fma_a), black_box(&fma_b), black_box(&fma_c)))
+                .expect("fnp multiply_add arm")
+        };
+
+        // BIT-EXACTNESS before timing: fusion must not change a single bit.
+        let ours = run_candidate();
+        let theirs = run_incumbent();
+        let ours_bytes = ours
+            .call_method0("tobytes")
+            .expect("fnp tobytes")
+            .extract::<Vec<u8>>()
+            .expect("fnp byte Vec");
+        let theirs_bytes = theirs
+            .call_method0("tobytes")
+            .expect("numpy tobytes")
+            .extract::<Vec<u8>>()
+            .expect("numpy byte Vec");
+        assert_eq!(
+            ours_bytes, theirs_bytes,
+            "fused multiply_add is not byte-identical to numpy multiply-then-add"
+        );
+        let ours_dtype = ours
+            .getattr("dtype")
+            .expect("fnp dtype")
+            .str()
+            .expect("fnp dtype str")
+            .to_string();
+        let theirs_dtype = theirs
+            .getattr("dtype")
+            .expect("numpy dtype")
+            .str()
+            .expect("numpy dtype str")
+            .to_string();
+        assert_eq!(ours_dtype, theirs_dtype, "result dtype differs");
+        println!(
+            "PARITY row={ROW} exact_bytes=passed result_dtype={ours_dtype} \
+             result_elements={ELEMENTS} checksum={:016x} \
+             fma_contraction=absent_two_roundings_match_numpy",
+            checksum_of(&theirs)
+        );
+        println!(
+            "ROUTE_PRECONDITIONS row={ROW} dtype=float64 elements={ELEMENTS} \
+             operands=3 equal_shapes=true all_c_contiguous=true \
+             candidate_route=zerocopy_multiply_add_typed \
+             parallel_min=65536 chunk_elements=16384"
+        );
+        println!(
+            "WORK_ACCOUNTING row={ROW} candidate_public_calls=1 incumbent_public_calls=2 \
+             candidate_elements={ELEMENTS} incumbent_elements={ELEMENTS} \
+             candidate_output_elements={ELEMENTS} incumbent_output_elements={ELEMENTS} \
+             candidate_intermediate_arrays=0 incumbent_intermediate_arrays=1 \
+             candidate_intermediate_bytes=0 incumbent_intermediate_bytes={} \
+             shared_inputs=true equal_work=true",
+            ELEMENTS * 8
+        );
+        println!(
+            "COUNTED_MECHANISM row={ROW} class=materialization_and_pass_elimination \
+             incumbent_element_stream_touches=6 candidate_element_stream_touches=4 \
+             incumbent_output_allocations=2 candidate_output_allocations=1 \
+             incumbent_eliminated_temporary_bytes={} \
+             incumbent_reason=numpy_evaluates_each_ufunc_separately_and_cannot_fuse_without_a_jit",
+            ELEMENTS * 8
+        );
+
+        common::report_observed_thread_activity(ROW, "numpy", THREAD_ACTIVITY_REPETITIONS, || {
+            black_box(checksum_of(&run_incumbent()));
+        });
+        common::report_observed_thread_activity(ROW, "fnp", THREAD_ACTIVITY_REPETITIONS, || {
+            black_box(checksum_of(&run_candidate()));
+        });
+
+        let mut observe_incumbent = || {
+            let started = Instant::now();
+            let result = run_incumbent();
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let mut observe_candidate = || {
+            let started = Instant::now();
+            let result = run_candidate();
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let (effect, incumbent_null, candidate_null) =
+            common::run_dual_null_median_ci_contract_with_sampling(
+                ROW,
+                &mut observe_incumbent,
+                &mut observe_candidate,
+                CONTRACT_ROUNDS,
+                CONTRACT_MIN_OF,
+            );
+        let verdict = common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+        println!(
+            "FUSION_RESULT row={ROW} verdict={verdict} \
+             incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+             ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+             incumbent_null_ratio={:.6} incumbent_null_ci95=[{:.6},{:.6}] \
+             candidate_null_ratio={:.6} candidate_null_ci95=[{:.6},{:.6}] \
+             effect_ci_excludes_one={} corrected_dual_null_gate=true \
+             median_clause=true actual_threads_reported=true \
+             incumbent=numpy_live_same_invocation",
+            effect.arm_a_median_ns / 1_000_000.0,
+            effect.arm_b_median_ns / 1_000_000.0,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            incumbent_null.ratio_median,
+            incumbent_null.ratio_ci_low,
+            incumbent_null.ratio_ci_high,
+            candidate_null.ratio_median,
+            candidate_null.ratio_ci_low,
+            candidate_null.ratio_ci_high,
+            effect.ratio_ci_low > 1.0 || effect.ratio_ci_high < 1.0,
+        );
+        let (decision, reason) = match verdict {
+            "DECIDABLE_WIN" => ("choose_fnp", "corrected_dual_null_incumbent_win"),
+            "DECIDABLE_REGRESSION" => ("choose_numpy", "corrected_dual_null_regression"),
+            _ => (
+                "choose_numpy",
+                "effect_not_separated_from_dual_null_envelope",
+            ),
+        };
+        println!(
+            "CHOOSER_STATEMENT workload=fused_multiply_add_f64_8m \
+             decision={decision} reason={reason} \
+             incumbent=numpy_live_same_invocation \
+             measured_scope=float64_8m_three_equal_shape_c_contiguous_operands_at_{threads}_pinned_threads \
+             outside_scope=run_same_contract_before_choosing"
+        );
+    });
+}
+
+/// Broad integer-width proof for the fused `a * b + c` implementation.
+///
+/// Every row processes 32 MiB per operand so the working set is beyond cache
+/// for narrow as well as wide dtypes. The incumbent is the live two-ufunc
+/// NumPy expression in the same invocation; the candidate eliminates its full
+/// intermediate and performs wrapping integer arithmetic in one parallel pass.
+fn bench_fused_multiply_add_integer_matrix_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const TARGET_BYTES_PER_OPERAND: usize = 32 * 1024 * 1024;
+    const CONTRACT_ROUNDS: usize = 21;
+    const CONTRACT_MIN_OF: usize = 1;
+    const REQUIRED_BUILD_PROFILE: &str = "release-perf";
+
+    assert_eq!(
+        std::env::var("FNP_BENCH_PROFILE").as_deref(),
+        Ok(REQUIRED_BUILD_PROFILE),
+        "ship-grade fusion evidence requires FNP_BENCH_PROFILE=release-perf"
+    );
+    let build_worker =
+        std::env::var("FNP_BUILD_WORKER").expect("FNP_BUILD_WORKER records the RCH build origin");
+    assert!(
+        !build_worker.trim().is_empty(),
+        "FNP_BUILD_WORKER must be set"
+    );
+    let threads = std::env::var("RAYON_NUM_THREADS")
+        .expect("RAYON_NUM_THREADS must be explicitly pinned before fusion timing");
+    for variable in ["OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(threads.as_str()),
+            "{variable} must be pinned to the same width as RAYON_NUM_THREADS"
+        );
+    }
+    let threads: usize = threads.parse().expect("thread count is numeric");
+    assert_eq!(
+        rayon::current_num_threads(),
+        threads,
+        "Rayon pool width does not match the pinned fusion configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME workload=fused_multiply_add_integer_matrix \
+         build_worker={build_worker} build_profile={REQUIRED_BUILD_PROFILE} \
+         pinned_threads={threads} rayon_threads={} contract_rounds={CONTRACT_ROUNDS} \
+         contract_min_of={CONTRACT_MIN_OF} bytes_per_operand={TARGET_BYTES_PER_OPERAND}",
+        rayon::current_num_threads()
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_fused_multiply_add_integer_matrix")
+            .expect("integer fusion bench module");
+        fnp_python(&module).expect("initialize fnp_python integer fusion module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+        let np_multiply = numpy.getattr("multiply").expect("numpy multiply");
+        let np_add = numpy.getattr("add").expect("numpy add");
+        let fnp_multiply_add = module.getattr("multiply_add").expect("fnp multiply_add");
+        common::report_numpy_incumbent_identity(py, "multiply", &np_multiply);
+        common::report_incumbent_topology(
+            "fnp.multiply_add_integer_matrix",
+            "numpy.multiply+numpy.add",
+        );
+
+        let checksum_of = |array: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let bytes = array
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec");
+            bytes
+                .len()
+                .to_le_bytes()
+                .iter()
+                .chain(bytes.iter())
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        let dtypes = [
+            ("int8", 1usize, -120i64, 120i64),
+            ("uint8", 1, 0, 240),
+            ("int16", 2, -30_000, 30_000),
+            ("uint16", 2, 0, 60_000),
+            ("int32", 4, -1_000_000, 1_000_000),
+            ("uint32", 4, 0, 2_000_000),
+            ("int64", 8, -1_000_000, 1_000_000),
+            ("uint64", 8, 0, 2_000_000),
+        ];
+
+        for (dtype, item_size, low, high) in dtypes {
+            let elements = TARGET_BYTES_PER_OPERAND / item_size;
+            let row = format!("python_fused_multiply_add_{dtype}_32mib_vs_numpy");
+            let namespace = PyDict::new(py);
+            let corpus = format!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260731)\n\
+                 fma_a = rng.integers({low}, {high}, {elements}, dtype=np.{dtype})\n\
+                 fma_b = rng.integers({low}, {high}, {elements}, dtype=np.{dtype})\n\
+                 fma_c = rng.integers({low}, {high}, {elements}, dtype=np.{dtype})\n"
+            );
+            py.run(
+                std::ffi::CString::new(corpus)
+                    .expect("integer fusion corpus CString")
+                    .as_c_str(),
+                Some(&namespace),
+                Some(&namespace),
+            )
+            .expect("integer fusion corpus setup");
+            let fma_a = namespace.get_item("fma_a").expect("fma_a present");
+            let fma_b = namespace.get_item("fma_b").expect("fma_b present");
+            let fma_c = namespace.get_item("fma_c").expect("fma_c present");
+
+            let run_incumbent = || {
+                let product = np_multiply
+                    .call1((black_box(&fma_a), black_box(&fma_b)))
+                    .expect("numpy multiply arm");
+                np_add
+                    .call1((product, black_box(&fma_c)))
+                    .expect("numpy add arm")
+            };
+            let run_candidate = || {
+                fnp_multiply_add
+                    .call1((black_box(&fma_a), black_box(&fma_b), black_box(&fma_c)))
+                    .expect("fnp multiply_add arm")
+            };
+
+            let ours = run_candidate();
+            let theirs = run_incumbent();
+            assert_eq!(
+                ours.call_method0("tobytes")
+                    .expect("fnp tobytes")
+                    .extract::<Vec<u8>>()
+                    .expect("fnp bytes"),
+                theirs
+                    .call_method0("tobytes")
+                    .expect("numpy tobytes")
+                    .extract::<Vec<u8>>()
+                    .expect("numpy bytes"),
+                "fused {dtype} result is not byte-identical to NumPy"
+            );
+            assert_eq!(
+                ours.getattr("dtype")
+                    .expect("fnp dtype")
+                    .str()
+                    .expect("fnp dtype str")
+                    .to_string(),
+                dtype,
+                "fused integer dtype drifted"
+            );
+            println!(
+                "PARITY row={row} exact_bytes=passed result_dtype={dtype} \
+                 result_elements={elements} result_bytes={TARGET_BYTES_PER_OPERAND} \
+                 checksum={:016x} wrapping_overflow=explicit",
+                checksum_of(&theirs)
+            );
+            println!(
+                "COUNTED_MECHANISM row={row} class=materialization_and_pass_elimination \
+                 incumbent_element_stream_touches=6 candidate_element_stream_touches=4 \
+                 incumbent_output_allocations=2 candidate_output_allocations=1 \
+                 incumbent_eliminated_temporary_bytes={TARGET_BYTES_PER_OPERAND} \
+                 shared_inputs=true equal_work=true"
+            );
+
+            common::report_observed_thread_activity(&row, "numpy", 1, || {
+                black_box(checksum_of(&run_incumbent()));
+            });
+            common::report_observed_thread_activity(&row, "fnp", 1, || {
+                black_box(checksum_of(&run_candidate()));
+            });
+
+            let mut observe_incumbent = || {
+                let started = Instant::now();
+                let result = run_incumbent();
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let mut observe_candidate = || {
+                let started = Instant::now();
+                let result = run_candidate();
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &row,
+                    &mut observe_incumbent,
+                    &mut observe_candidate,
+                    CONTRACT_ROUNDS,
+                    CONTRACT_MIN_OF,
+                );
+            let verdict =
+                common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+            println!(
+                "FUSION_DTYPE_RESULT row={row} dtype={dtype} verdict={verdict} \
+                 incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ci95=[{:.6},{:.6}] candidate_null_ci95=[{:.6},{:.6}] \
+                 corrected_dual_null_gate=true incumbent=numpy_live_same_invocation",
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_ci_low,
+                incumbent_null.ratio_ci_high,
+                candidate_null.ratio_ci_low,
+                candidate_null.ratio_ci_high,
+            );
+            let decision = if verdict == "DECIDABLE_WIN" {
+                "choose_fnp"
+            } else {
+                "choose_numpy"
+            };
+            println!(
+                "CHOOSER_STATEMENT workload=fused_multiply_add_{dtype}_32mib \
+                 decision={decision} verdict={verdict} \
+                 incumbent=numpy_live_same_invocation measured_scope={elements}_equal_shape_c_contiguous_elements_at_{threads}_pinned_threads \
+                 outside_scope=run_same_contract_before_choosing"
+            );
+        }
+    });
+}
+
 /// End-to-end redecision for the public bool-return surface fed by the
 /// `ArrayStorage::Bool` materialization funnel. The internal funnel remains a
 /// maintenance-only result; this row times `fnp.greater` as a whole against
@@ -12003,6 +12503,14 @@ fn main() {
         (
             "bench_generator_distribution_incumbent_ratios_median_gate",
             bench_generator_distribution_incumbent_ratios_median_gate,
+        ),
+        (
+            "bench_fused_multiply_add_vs_numpy_median_gate",
+            bench_fused_multiply_add_vs_numpy_median_gate,
+        ),
+        (
+            "bench_fused_multiply_add_integer_matrix_vs_numpy_median_gate",
+            bench_fused_multiply_add_integer_matrix_vs_numpy_median_gate,
         ),
         (
             "bench_isin_f64_vs_numpy_median_gate",

@@ -28974,6 +28974,218 @@ fn try_zerocopy_f64_heaviside_scalar(
     }
 }
 
+/// Arithmetic contract for one fused pass of `a * b + c`.
+///
+/// Floating-point implementations deliberately spell this as two operations so
+/// they retain NumPy's multiply rounding followed by add rounding. Integer
+/// implementations use explicit wrapping operations because NumPy integer
+/// ufuncs are modular even in debug builds.
+trait MultiplyAddValue: pyo3::buffer::Element + Copy + Send + Sync {
+    fn multiply_add_numpy(self, multiplier: Self, addend: Self) -> Self;
+}
+
+impl MultiplyAddValue for f64 {
+    #[inline]
+    fn multiply_add_numpy(self, multiplier: Self, addend: Self) -> Self {
+        let product = self * multiplier;
+        product + addend
+    }
+}
+
+impl MultiplyAddValue for f32 {
+    #[inline]
+    fn multiply_add_numpy(self, multiplier: Self, addend: Self) -> Self {
+        let product = self * multiplier;
+        product + addend
+    }
+}
+
+macro_rules! impl_wrapping_multiply_add_value {
+    ($($integer:ty),+ $(,)?) => {
+        $(
+            impl MultiplyAddValue for $integer {
+                #[inline]
+                fn multiply_add_numpy(self, multiplier: Self, addend: Self) -> Self {
+                    self.wrapping_mul(multiplier).wrapping_add(addend)
+                }
+            }
+        )+
+    };
+}
+
+impl_wrapping_multiply_add_value!(i8, u8, i16, u16, i32, u32, i64, u64);
+
+/// One fused pass for `a * b + c`.
+///
+/// NumPy has no fused public form of this expression. `a * b + c` is two ufunc
+/// calls: `multiply` materializes a whole intermediate array, then `add` reads
+/// it back. At 8M `float64` that intermediate is 64 MiB — allocated, written,
+/// re-read, and freed, for a value nobody wants. Both ufuncs are also
+/// single-threaded. So the incumbent touches memory six times on one core where
+/// the job needs four touches, and it cannot fuse without a JIT.
+///
+/// BIT-EXACTNESS: this is deliberately NOT an FMA. `t = a * b` rounds, then
+/// `t + c` rounds again, exactly as NumPy's two ufuncs do. Rust does not
+/// contract `a * b + c` into a single-rounding `vfmadd` (and this workspace
+/// compiles without `+fma` anyway, verified by `objdump`: zero `vfmadd` sites),
+/// so every output bit matches the incumbent's two-call form.
+fn zerocopy_multiply_add_typed<T>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    c: &Bound<'_, PyAny>,
+    dtype: &str,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: MultiplyAddValue,
+{
+    let ndarray = numpy.getattr("ndarray")?;
+    for operand in [a, b, c] {
+        if !operand.is_exact_instance(&ndarray) {
+            return Ok(None);
+        }
+    }
+    let (Ok(buf_a), Ok(buf_b), Ok(buf_c)) = (
+        PyBuffer::<T>::get(a),
+        PyBuffer::<T>::get(b),
+        PyBuffer::<T>::get(c),
+    ) else {
+        return Ok(None);
+    };
+    // Identical shapes only. Broadcasting changes which elements pair up, and
+    // NumPy owns those rules; defer rather than reimplement them.
+    let shape: Vec<usize> = buf_a.shape().to_vec();
+    if shape.is_empty() || buf_b.shape() != shape.as_slice() || buf_c.shape() != shape.as_slice() {
+        return Ok(None);
+    }
+    if !buf_a.is_c_contiguous() || !buf_b.is_c_contiguous() || !buf_c.is_c_contiguous() {
+        return Ok(None);
+    }
+    let (Some(cells_a), Some(cells_b), Some(cells_c)) =
+        (buf_a.as_slice(py), buf_b.as_slice(py), buf_c.as_slice(py))
+    else {
+        return Ok(None);
+    };
+    let n = cells_a.len();
+    if n == 0 || cells_b.len() != n || cells_c.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+    let va: &[T] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<T>(), n) };
+    let vb: &[T] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<T>(), n) };
+    let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype)?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: freshly allocated numpy.empty output, cannot alias the inputs;
+        // every slot is written exactly once below.
+        let out: &mut [T] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+
+        use rayon::prelude::*;
+        // Below this the Rayon split costs more than the pass saves.
+        const MULTIPLY_ADD_PARALLEL_MIN: usize = 1 << 16;
+        // Each worker streams three inputs and one output inside its own
+        // cache-resident band instead of sweeping the whole array.
+        const MULTIPLY_ADD_CHUNK: usize = 1 << 14;
+        if n >= MULTIPLY_ADD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            out.par_chunks_mut(MULTIPLY_ADD_CHUNK)
+                .zip(va.par_chunks(MULTIPLY_ADD_CHUNK))
+                .zip(vb.par_chunks(MULTIPLY_ADD_CHUNK))
+                .zip(vc.par_chunks(MULTIPLY_ADD_CHUNK))
+                .for_each(|(((slots, band_a), band_b), band_c)| {
+                    for (((slot, &x), &y), &z) in slots
+                        .iter_mut()
+                        .zip(band_a.iter())
+                        .zip(band_b.iter())
+                        .zip(band_c.iter())
+                    {
+                        *slot = x.multiply_add_numpy(y, z);
+                    }
+                });
+        } else {
+            for (((slot, &x), &y), &z) in
+                out.iter_mut().zip(va.iter()).zip(vb.iter()).zip(vc.iter())
+            {
+                *slot = x.multiply_add_numpy(y, z);
+            }
+        }
+    }
+    if shape.len() == 1 {
+        Ok(Some(flat.unbind()))
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        Ok(Some(
+            flat.call_method1("reshape", (&shape_tuple,))?.unbind(),
+        ))
+    }
+}
+
+/// `multiply_add(a, b, c)` -> `a * b + c`, element-wise, in one pass.
+///
+/// Byte-identical to NumPy's `a * b + c` for the routed regime (matched
+/// fixed-width numeric dtype C-contiguous ndarrays of equal shape); every other
+/// input defers to the incumbent's own two-call form, so semantics never diverge.
+#[pyfunction]
+#[pyo3(signature = (a, b, c))]
+fn multiply_add(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    if let Some(out) = zerocopy_multiply_add_typed::<f64>(
+        py,
+        &numpy,
+        a.bind(py),
+        b.bind(py),
+        c.bind(py),
+        "float64",
+    )? {
+        return Ok(out);
+    }
+    if let Some(out) = zerocopy_multiply_add_typed::<f32>(
+        py,
+        &numpy,
+        a.bind(py),
+        b.bind(py),
+        c.bind(py),
+        "float32",
+    )? {
+        return Ok(out);
+    }
+    macro_rules! try_integer_route {
+        ($integer:ty, $dtype:literal) => {
+            if let Some(out) = zerocopy_multiply_add_typed::<$integer>(
+                py,
+                &numpy,
+                a.bind(py),
+                b.bind(py),
+                c.bind(py),
+                $dtype,
+            )? {
+                return Ok(out);
+            }
+        };
+    }
+    try_integer_route!(i64, "int64");
+    try_integer_route!(u64, "uint64");
+    try_integer_route!(i32, "int32");
+    try_integer_route!(u32, "uint32");
+    try_integer_route!(i16, "int16");
+    try_integer_route!(u16, "uint16");
+    try_integer_route!(i8, "int8");
+    try_integer_route!(u8, "uint8");
+    // Defer: exactly the expression a NumPy user writes, so rounding matches.
+    let product = numpy.getattr("multiply")?.call1((a.bind(py), b.bind(py)))?;
+    Ok(numpy.getattr("add")?.call1((product, c.bind(py)))?.unbind())
+}
+
 #[pyfunction]
 fn sinc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // extract_numeric_array canonicalizes narrow widths to f64, so the native sinc
@@ -102582,6 +102794,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(degrees, m)?)?;
     m.add_function(wrap_pyfunction!(radians, m)?)?;
     m.add_function(wrap_pyfunction!(sinc, m)?)?;
+    m.add_function(wrap_pyfunction!(multiply_add, m)?)?;
     m.add_function(wrap_pyfunction!(copysign, m)?)?;
     m.add_function(wrap_pyfunction!(nextafter, m)?)?;
     m.add_function(wrap_pyfunction!(hypot, m)?)?;

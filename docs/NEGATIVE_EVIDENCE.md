@@ -4,6 +4,107 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-31 - FUSION WIN (KEEP, INCUMBENT-WIN): `a*b+c` in one pass - 2.888467x at 4 threads and 5.235572x at 8 vs live NumPy, byte-exact
+
+`BlackThrush`, bead `franken_numpy-ixs5y.405`. New public `fnp.multiply_add(a, b, c)`.
+
+THE STRUCTURAL GAP, not a tuning gap. NumPy's only public way to evaluate
+`a*b+c` is two ufunc calls: `multiply` materializes a whole intermediate array,
+then `add` reads it back and frees it. At 8,000,000 `float64` that intermediate
+is 64,000,000 bytes allocated, written, re-read and released for a value nobody
+asked for. Both ufuncs are single-threaded. So the incumbent makes **six
+element-stream touches on one core and two output allocations** where the job
+needs four touches and one. NumPy cannot fuse an expression without a JIT, so
+this gap is not closable by tuning on their side.
+
+BYTE-EXACT, AND DELIBERATELY NOT AN FMA. `t = a*b` rounds, then `t + c` rounds
+again, exactly as the two ufuncs do. Rust does not contract `a*b+c`, and this
+workspace compiles without `+fma`. Parity asserted in-process before timing on
+the full 8,000,000-element result: `exact_bytes=passed`, `result_dtype=float64`,
+checksum `cad416e9ad5e0e76`. `conformance_multiply_add.rs` carries an explicit
+anti-contraction test whose operands are chosen so a single-rounding FMA returns
+a different answer, so the byte claim fails loudly if the kernel ever contracts.
+
+`bench_elf_sha256=31da2d6bcea96979bd2b6e984230f9ba5b1270efbaef292123d7d5753903053b`
+(218,930,112 bytes), self-reported from `/proc/self/exe`. Invocations
+`000000000000000018c75eb0bc3f41c0-0000730e` (4 threads) and
+`000000000000000018c75f34b10cb9d5-000113a6` (8 threads).
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy ratio median 0.994812, bootstrap median CI95 `[0.965332,1.027770]`, 41 rounds, min-of-3, at 4 threads; 0.965525 CI95 `[0.932305,0.995587]` at 8 threads.
+
+**Candidate A/A null control (same invocation):** FNP/FNP ratio median 0.960112, bootstrap median CI95 `[0.929664,1.032596]`, 41 rounds, min-of-3, at 4 threads; 0.991732 CI95 `[0.930804,1.072257]` at 8 threads. The candidate null is the CONTROLLING one at both widths.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa artifact_bytes=10452641 invocation_id=000000000000000018c75f34b10cb9d5-000113a6 measured_ratio=5.235572x
+
+**Incumbent isolation proof:** candidate=fnp.multiply_add incumbent=numpy.multiply+numpy.add shared_timed_component=none
+
+| threads | arm A (NumPy) | arm B (FNP) | ratio median | ratio CI95 | controlling null half-width | required 2x delta |
+|---:|---:|---:|---:|---:|---:|---:|
+| 4 | 16.568808 ms | **5.641701 ms** | **2.888467** | `[2.680867,3.355119]` | 0.070336 | 0.140671 |
+| 8 | 15.920479 ms | **3.107800 ms** | **5.235572** | `[4.753086,5.389282]` | 0.072257 | 0.144515 |
+
+**Verdict: DECIDABLE_WIN at both widths.** Measured deltas 1.888467 and 4.235572
+against required 0.140671 and 0.144515, so the gate is cleared by 13x and 29x.
+Both effect CIs exclude 1.0 and are disjoint from both A/A intervals.
+
+THE SCALING IS THE POINT: the incumbent median is FLAT at 15.9-16.6 ms across
+both runs because `numpy.multiply` and `numpy.add` are single-threaded and do
+not care how many cores exist. Our arm goes 5.641701 -> 3.107800 ms. Doubling
+the pool nearly doubles the ratio. `OBSERVED_THREAD_ACTIVITY` confirms the
+asymmetry directly: NumPy accrued ticks on exactly ONE thread in both runs;
+FNP accrued them on 5 and 4 respectively.
+
+COUNTED_MECHANISM: `class=materialization_and_pass_elimination`. Incumbent
+element-stream touches 6, candidate 4. Incumbent output allocations 2, candidate
+1. Eliminated temporary: 64,000,000 bytes per call. Incumbent public calls 2,
+candidate 1. Equal element work both arms.
+
+ROUTE: `zerocopy_multiply_add_typed`, gated to matched `float64`/`float32`
+C-contiguous ndarrays of identical shape, `parallel_min=65536`,
+`chunk_elements=16384` so each worker streams three inputs and one output inside
+a cache-resident band. Broadcasting, non-contiguity, mixed widths, integer and
+complex dtypes all DEFER to `numpy.multiply`+`numpy.add`, so semantics can never
+diverge from the incumbent outside the routed regime.
+
+BUILD AND RUN PROVENANCE: strict RCH built from committed base `fd0c9002` with
+`--base fd0c9002 --clean-overlay` overlaying only
+`crates/fnp-python/src/lib.rs`,
+`crates/fnp-python/benches/criterion_python_median_gate.rs` and
+`crates/fnp-python/tests/conformance_multiply_add.rs`. Builder worker
+`vmi1153651`; builder and local copy hashes matched and the measurement-host
+copy matched both. Measurement host `vmi1293453` (149.102.137.103), `AMD EPYC
+Processor (with IBPB)`, 8 physical cores, 8 logical threads, allowed CPUs 0-7,
+governor unavailable. Compile-time SSE2 and AVX2 true; runtime SSE2, AVX, AVX2,
+F16C, FMA true; AVX-512F and AVX-512BW false. Host-wide fail-closed quiescence
+passed both preflights at every run with maximum observed busy fraction 0.032
+and 0.000 against the 0.200 threshold.
+
+TWO HONEST QUALIFICATIONS. First, the 8-thread incumbent A/A null CI
+`[0.932305,0.995587]` EXCLUDES unity: the second NumPy arm read about 3.4%
+slower than the first, an ordering asymmetry inside the null itself. It does not
+touch this verdict because the gate is controlled by the wider candidate null
+and the effect is 5.2x, but a future row resolving anything near 1.04x on this
+host must not treat that null as unbiased. Second, the intended headline was
+`trj` at 64 physical cores. It could not be produced: the harness refuses a
+restricted CPU affinity outright (`affinity_not_host_wide`), which is correct
+anti-gaming behaviour, and `trj` had two of its 128 CPUs held by other users'
+processes, so host-wide quiescence could not pass. 8 threads on an 8-core box is
+therefore a FLOOR for this lever, not its ceiling.
+
+SCOPE: 2.888467x and 5.235572x are 8,000,000-element `float64` operands, three
+equal-shape C-contiguous arrays, on `vmi1293453` under NumPy 2.4.6 at 4 and 8
+pinned threads. The lever's magnitude is expected to grow with pool width and to
+shrink toward the pure traffic ratio (6 touches -> 4, i.e. 1.5x) at one thread.
+
+Retry predicate: re-run on a genuinely idle many-core host to establish the
+scaling ceiling, since 8 cores is the widest pool that passed host-wide
+quiescence here. Reopen the DESIGN only if NumPy gains a fused public
+multiply-add or an expression JIT. The obvious extensions - integer dtypes,
+longer chains such as `(a-b)*c+d`, and an `out=` form that removes the last
+allocation - are separate levers and must each carry their own contract.
+
 ## 2026-07-31 - INDEPENDENT REPLICATION / WIN (KEEP, INCUMBENT-WIN): f64 `isin` at 16M x 65,536 - 143.661247x vs live NumPy, bracketing the published conversion at 134.5-143.7x
 
 `BlackThrush`, bead `franken_numpy-ixs5y.402`. Two sessions converted the same
