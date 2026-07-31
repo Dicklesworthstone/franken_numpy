@@ -56734,10 +56734,61 @@ fn tofile(
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let array = numpy.getattr("asarray")?.call1((a.bind(py),))?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("sep", sep)?;
-    kwargs.set_item("format", format)?;
-    array.call_method("tofile", (fid.bind(py),), Some(&kwargs))?;
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("sep", sep)?;
+        kwargs.set_item("format", format)?;
+        array.call_method("tofile", (fid.bind(py),), Some(&kwargs))?;
+        Ok(py.None())
+    };
+
+    // `fnp_io::tofile_text` is already the production formatter and has its
+    // own exact-output tests plus executed-ELF median-CI evidence. Keep this
+    // public route deliberately narrow: the helper's integral branch accepts
+    // exactly-representable f64 values below 1e15, so only C-contiguous int64
+    // arrays in that range can use it without losing integer precision.
+    if sep.is_empty() || format != "%s" {
+        return fallback();
+    }
+    let dtype_name = array
+        .getattr("dtype")?
+        .getattr("name")?
+        .extract::<String>()?;
+    let c_contiguous = array
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?;
+    if dtype_name != "int64" || !c_contiguous {
+        return fallback();
+    }
+
+    let path = match py
+        .import("os")?
+        .getattr("fspath")?
+        .call1((fid.bind(py),))
+        .and_then(|path| path.extract::<String>())
+    {
+        Ok(path) => path,
+        Err(_) => return fallback(),
+    };
+    let flat = array.call_method1("reshape", (-1,))?;
+    let values = match numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64") {
+        Ok(values) => values,
+        Err(_) => return fallback(),
+    };
+    const EXACT_INTEGER_LIMIT: u64 = 1_000_000_000_000_000;
+    if values
+        .iter()
+        .any(|value| value.unsigned_abs() >= EXACT_INTEGER_LIMIT)
+    {
+        return fallback();
+    }
+    let values = values
+        .into_iter()
+        .map(|value| value as f64)
+        .collect::<Vec<_>>();
+    let text = fnp_io::tofile_text(&values, sep);
+    std::fs::write(path, text.as_bytes()).map_err(|error| PyOSError::new_err(error.to_string()))?;
     Ok(py.None())
 }
 

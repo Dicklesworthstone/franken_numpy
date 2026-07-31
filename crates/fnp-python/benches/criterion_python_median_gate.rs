@@ -5908,6 +5908,297 @@ fn bench_int64_matmul_hold_redecision_median_gate(c: &mut Criterion) {
     });
 }
 
+/// Convert the banked `fnp_io::tofile_text` maintenance win into a complete
+/// public-job comparison. A million-element delimited integer snapshot is a
+/// recognizable NumPy workload: one call opens a path, formats every value,
+/// writes the complete interoperable text payload, and closes the file.
+fn bench_int64_tofile_text_snapshot_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+    const ELEMENTS: usize = 1_000_000;
+    const THREAD_ACTIVITY_REPETITIONS: usize = 3;
+    const THREADS: &str = "4";
+    const REQUIRED_BUILD_PROFILE: &str = "release-perf";
+    const ROW: &str = "python_int64_tofile_text_snapshot_1m_vs_numpy";
+
+    assert_eq!(
+        std::env::var("FNP_BENCH_PROFILE").as_deref(),
+        Ok(REQUIRED_BUILD_PROFILE),
+        "ship-grade tofile evidence requires FNP_BENCH_PROFILE=release-perf"
+    );
+    for variable in [
+        "RAYON_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(THREADS),
+            "{variable} must be explicitly pinned before tofile timing"
+        );
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        THREADS
+            .parse::<usize>()
+            .expect("thread count constant is numeric"),
+        "Rayon pool width does not match the pinned tofile configuration"
+    );
+
+    fn file_checksum(path: &str) -> u64 {
+        let bytes = std::fs::read(path).expect("read completed tofile payload");
+        bytes
+            .len()
+            .to_le_bytes()
+            .iter()
+            .chain(bytes.iter())
+            .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
+    }
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_int64_tofile_snapshot")
+            .expect("int64 tofile snapshot module");
+        fnp_python(&module).expect("initialize fnp_python int64 tofile snapshot module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 tofile_values = ((np.arange(1_000_000, dtype=np.int64) * 1_000_003) \
+                     % 1_999_999_999) - 999_999_999\n",
+            )
+            .expect("int64 tofile corpus CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("int64 tofile corpus setup");
+        let values = namespace
+            .get_item("tofile_values")
+            .expect("tofile_values present");
+        let shape = values
+            .getattr("shape")
+            .expect("tofile values shape")
+            .extract::<Vec<usize>>()
+            .expect("tofile values shape vector");
+        let dtype = values
+            .getattr("dtype")
+            .expect("tofile values dtype")
+            .str()
+            .expect("tofile values dtype string")
+            .to_string();
+        let c_contiguous = values
+            .getattr("flags")
+            .expect("tofile values flags")
+            .getattr("c_contiguous")
+            .expect("tofile values C-contiguous flag")
+            .extract::<bool>()
+            .expect("tofile values C-contiguous bool");
+        let minimum = values
+            .call_method0("min")
+            .expect("tofile values minimum")
+            .extract::<i64>()
+            .expect("tofile values minimum i64");
+        let maximum = values
+            .call_method0("max")
+            .expect("tofile values maximum")
+            .extract::<i64>()
+            .expect("tofile values maximum i64");
+        assert_eq!(shape, vec![ELEMENTS]);
+        assert_eq!(dtype, "int64");
+        assert!(c_contiguous);
+        assert!(
+            minimum.unsigned_abs() < 1_000_000_000_000_000
+                && maximum.unsigned_abs() < 1_000_000_000_000_000,
+            "tofile fixture must stay inside the exact native integer guard"
+        );
+
+        let ndarray_type = numpy.getattr("ndarray").expect("numpy.ndarray");
+        let np_tofile_descriptor = ndarray_type
+            .getattr("tofile")
+            .expect("numpy.ndarray.tofile descriptor");
+        common::report_numpy_incumbent_identity(py, "ndarray.tofile", &np_tofile_descriptor);
+        let np_tofile = values
+            .getattr("tofile")
+            .expect("bound numpy ndarray.tofile");
+        let receiver = np_tofile
+            .getattr("__self__")
+            .expect("bound numpy ndarray.tofile receiver");
+        assert!(
+            receiver.is(&values),
+            "measured incumbent method is bound to a different ndarray"
+        );
+        let rebound = np_tofile_descriptor
+            .call_method1("__get__", (&values, &ndarray_type))
+            .expect("rebind numpy.ndarray.tofile descriptor");
+        assert!(
+            rebound
+                .eq(&np_tofile)
+                .expect("compare rebound numpy ndarray.tofile"),
+            "measured incumbent method differs from numpy.ndarray.tofile descriptor"
+        );
+        let fnp_tofile = module.getattr("tofile").expect("fnp tofile");
+        assert!(
+            !np_tofile_descriptor.is(&fnp_tofile),
+            "dispatch trap: incumbent tofile descriptor resolved to the candidate callable"
+        );
+        common::report_incumbent_topology("fnp.tofile", "numpy.ndarray.tofile");
+        println!(
+            "INCUMBENT_PIPELINE workload=int64_tofile_text_snapshot \
+             candidate=fnp.tofile incumbent=numpy.ndarray.tofile \
+             shared_timed_component=none inputs_shared_read_only=true \
+             destination_contract=separate_same_filesystem_paths"
+        );
+
+        let invocation_id = common::bench_invocation_id();
+        let incumbent_path = format!("/data/tmp/fnp-tofile-{invocation_id}-numpy-incumbent.txt");
+        let candidate_path = format!("/data/tmp/fnp-tofile-{invocation_id}-candidate.txt");
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("sep", ",").expect("set tofile separator");
+
+        let run_incumbent = || {
+            np_tofile
+                .call((incumbent_path.as_str(),), Some(&kwargs))
+                .expect("numpy int64 tofile snapshot");
+        };
+        let run_candidate = || {
+            fnp_tofile
+                .call((&values, candidate_path.as_str()), Some(&kwargs))
+                .expect("fnp int64 tofile snapshot");
+        };
+
+        run_incumbent();
+        run_candidate();
+        let incumbent_bytes =
+            std::fs::read(&incumbent_path).expect("read NumPy tofile parity payload");
+        let candidate_bytes =
+            std::fs::read(&candidate_path).expect("read FNP tofile parity payload");
+        assert_eq!(
+            candidate_bytes, incumbent_bytes,
+            "public int64 tofile payload differs from live NumPy"
+        );
+        let output_bytes = candidate_bytes.len();
+        let parity_checksum = file_checksum(&candidate_path);
+        println!(
+            "PARITY row={ROW} outputs=1 exact_file_bytes=passed \
+             output_bytes={output_bytes} checksum={parity_checksum:016x}"
+        );
+        println!(
+            "ROUTE_PRECONDITIONS row={ROW} dtype=int64 shape={ELEMENTS} \
+             c_contiguous=true separator=comma format=percent_s \
+             min_value={minimum} max_value={maximum} \
+             exact_integer_limit=1000000000000000 destination=unicode_path \
+             candidate_route=fnp_io::tofile_text \
+             source_pin=fnp-python/src/lib.rs:tofile"
+        );
+        println!(
+            "WORK_ACCOUNTING row={ROW} candidate_public_calls=1 incumbent_public_calls=1 \
+             candidate_elements={ELEMENTS} incumbent_elements={ELEMENTS} \
+             candidate_output_bytes={output_bytes} incumbent_output_bytes={output_bytes} \
+             candidate_open_truncate_close=1 incumbent_open_truncate_close=1 \
+             candidate_write_all_calls=1 incumbent_value_fwrite_calls={ELEMENTS} \
+             incumbent_separator_writes={} equal_payload=true",
+            ELEMENTS - 1,
+        );
+        println!(
+            "COUNTED_MECHANISM row={ROW} class=object_and_write_call_elimination \
+             incumbent_per_element_scalar_objects={ELEMENTS} \
+             incumbent_per_element_string_objects={ELEMENTS} \
+             incumbent_per_element_ascii_byte_objects={ELEMENTS} \
+             incumbent_fwrite_calls={} candidate_python_scalar_objects=0 \
+             candidate_python_string_objects=0 candidate_python_byte_objects=0 \
+             candidate_write_all_calls=1 kernel_syscall_count=not_measured \
+             incumbent_source=legacy_numpy_code/numpy/numpy/_core/src/multiarray/convert.c:PyArray_ToFile",
+            ELEMENTS * 2 - 1,
+        );
+        println!(
+            "WORKLOAD_REPRESENTATIVENESS row={ROW} \
+             job=delimited_integer_snapshot_export \
+             rationale=users_persist_ids_counters_and_event_snapshots_as_interoperable_text \
+             whole_job=open_plus_format_all_values_plus_write_payload_plus_close"
+        );
+        println!(
+            "WORKLOAD_SCRATCH row={ROW} incumbent_path={incumbent_path} \
+             candidate_path={candidate_path} cleanup_owner=BlackThrush"
+        );
+
+        common::report_observed_thread_activity(ROW, "numpy", THREAD_ACTIVITY_REPETITIONS, || {
+            run_incumbent();
+            black_box(file_checksum(&incumbent_path));
+        });
+        common::report_observed_thread_activity(ROW, "fnp", THREAD_ACTIVITY_REPETITIONS, || {
+            run_candidate();
+            black_box(file_checksum(&candidate_path));
+        });
+
+        let mut observe_incumbent = || {
+            let started = Instant::now();
+            run_incumbent();
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: file_checksum(&incumbent_path),
+            }
+        };
+        let mut observe_candidate = || {
+            let started = Instant::now();
+            run_candidate();
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: file_checksum(&candidate_path),
+            }
+        };
+        let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+            ROW,
+            &mut observe_incumbent,
+            &mut observe_candidate,
+        );
+        let verdict = common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+        println!(
+            "WHOLE_JOB_RESULT row={ROW} verdict={verdict} \
+             incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+             ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+             incumbent_null_ratio={:.6} incumbent_null_ci95=[{:.6},{:.6}] \
+             candidate_null_ratio={:.6} candidate_null_ci95=[{:.6},{:.6}] \
+             effect_ci_excludes_one={} corrected_dual_null_gate=true \
+             median_clause=true actual_threads_reported=true",
+            effect.arm_a_median_ns / 1_000_000.0,
+            effect.arm_b_median_ns / 1_000_000.0,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            incumbent_null.ratio_median,
+            incumbent_null.ratio_ci_low,
+            incumbent_null.ratio_ci_high,
+            candidate_null.ratio_median,
+            candidate_null.ratio_ci_low,
+            candidate_null.ratio_ci_high,
+            effect.ratio_ci_low > 1.0 || effect.ratio_ci_high < 1.0,
+        );
+        let (decision, reason) = match verdict {
+            "DECIDABLE_WIN" => ("choose_fnp", "corrected_dual_null_incumbent_win"),
+            "DECIDABLE_REGRESSION" => ("choose_numpy", "corrected_dual_null_regression"),
+            _ => (
+                "choose_numpy",
+                "effect_not_separated_from_dual_null_envelope",
+            ),
+        };
+        println!(
+            "CHOOSER_STATEMENT workload=int64_tofile_text_snapshot_1m \
+             decision={decision} reason={reason} \
+             incumbent=numpy_live_same_invocation \
+             measured_scope=int64_c_contiguous_one_million_values_comma_sep_percent_s_path \
+             outside_scope=run_same_contract_before_choosing"
+        );
+    });
+}
+
 fn bench_bool_public_vs_numpy_median_gate(c: &mut Criterion) {
     let _ = c;
 
@@ -10994,6 +11285,10 @@ fn main() {
         (
             "bench_int64_matmul_hold_redecision_median_gate",
             bench_int64_matmul_hold_redecision_median_gate,
+        ),
+        (
+            "bench_int64_tofile_text_snapshot_vs_numpy_median_gate",
+            bench_int64_tofile_text_snapshot_vs_numpy_median_gate,
         ),
         (
             "bench_quantile_f16_histogram_vs_numpy_median_gate",

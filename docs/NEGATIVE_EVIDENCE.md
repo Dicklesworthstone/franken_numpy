@@ -4,6 +4,141 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-31 - REALISTIC WHOLE-JOB WIN (KEEP, INCUMBENT-WIN): one-million-`int64` delimited snapshot export - 6.762491x vs live NumPy under `release-perf`
+
+`BlackThrush`, bead `franken_numpy-ixs5y.400`. This converts the last current
+maintenance-self-speedup without an incumbent ratio into a public whole-job
+decision. A NumPy user would recognize the measured job directly: persist one
+million IDs, counters, or event values as an interoperable comma-delimited text
+snapshot with one `ndarray.tofile(path, sep=",")` call. The timed region opens
+and truncates a path, formats every value, writes the complete payload, and
+closes the file.
+
+The production lever is narrow. `fnp.tofile` now routes only C-contiguous
+`int64` arrays, a nonempty separator, default `%s` format, a Unicode path, and
+values with absolute magnitude below `10^15` through the already-proven
+`fnp_io::tofile_text` formatter. That range is exactly representable in `f64`,
+which is the helper's input contract. Binary output, other dtypes, noncontiguous
+arrays, file objects, nondefault formats, and precision-boundary values retain
+the live NumPy fallback.
+
+`bench_elf_sha256=da7053c5f8b34919fb7c6cd13f2cf416bb3680ad6796dcedf7372576765db214`
+(218,259,992 bytes), self-reported from `/proc/self/exe` by the executing
+process, invocation
+`000000000000000018c753d97d81025c-0028f521`.
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy ratio median 1.024042, bootstrap median CI95 `[0.987634,1.058796]`, 41 rounds, min-of-3.
+
+**Candidate A/A null control (same invocation):** FNP/FNP ratio median 1.000451, bootstrap median CI95 `[0.901640,1.061254]`, 41 rounds, min-of-3.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa artifact_bytes=10452641 invocation_id=000000000000000018c753d97d81025c-0028f521 measured_ratio=6.762491x
+
+**Incumbent isolation proof:** candidate=fnp.tofile incumbent=numpy.ndarray.tofile shared_timed_component=none
+
+The process bound the incumbent method to the exact input array, rebound
+`numpy.ndarray.tofile`'s public descriptor to that receiver, and asserted the
+methods equal. The candidate callable was object-distinct. NumPy's compiled
+`_multiarray_umath.cpython-313-x86_64-linux-gnu.so` carried the artifact hash
+and byte count above. Both complete public calls received the same read-only
+array and wrote separate paths on the same filesystem; neither timed arm
+called or shared the other's formatter or output.
+
+BUILD AND RUN PROVENANCE: strict RCH built the exact benchmark from committed
+base `10626d4b` with `--base 10626d4b --clean-overlay` and only
+`crates/fnp-python/src/lib.rs`,
+`crates/fnp-python/tests/conformance_savetxt_tofile.rs`, and
+`crates/fnp-python/benches/criterion_python_median_gate.rs` overlaid. Their
+remote source SHA-256 values were respectively
+`cf3b1ccf4b7b86d028980e386e47b48a3fdc2fc8bbda1635460dbe85c0f26ebd`,
+`638755edbb720d9424c36140e706320d092d1265425830cd715a55fcf8808007`,
+and
+`e38af636ddfc1fa64f9099095331c8a8d541b47bcb4b0b0ad6ff3f8830710341`.
+RCH worker `ovh-a` (51.222.245.56) produced
+`release-perf/deps/criterion_python_median_gate-77b53e183b347063`; the
+builder, transient local copy, and measurement-host copy all matched the
+executing ELF hash and byte count. The exact ELF ran on drained worker
+`vmi1227854`; that worker was re-enabled immediately after the process exited,
+and all transient binaries and output files were removed.
+
+HOST, THREAD, AND ISA PROVENANCE: the measurement host was `vmi1227854`
+(109.123.245.77), `AMD EPYC Processor (with IBPB)`, 10 physical cores, 10
+logical threads, online and allowed CPUs 0-9, with governor availability
+honestly reported as unavailable. Compile-time SSE2 and AVX2 were true.
+Runtime SSE2, AVX, AVX2, F16C, and FMA were true; runtime AVX-512F and
+AVX-512BW were false. Rayon, OpenBLAS, OMP, and MKL were each explicitly
+pinned to four threads, and the Rayon pool asserted four workers.
+
+ACTUAL OBSERVED THREADS, NOT REQUESTED THREADS: `/proc/self/task` probes
+observed one NumPy thread accruing 53 scheduler CPU ticks and one FNP thread
+accruing 10 ticks over three repetitions. Both formatters are serial in this
+scope, so the honest observed count is 1 / 1 even though four-thread
+environment settings were pinned. Host-wide fail-closed quiescence passed the
+process preflight and dual-null preflight with maximum observed busy fraction
+0.000 against the 0.200 refusal threshold.
+
+WORK AND PARITY ACCOUNTING CAME BEFORE INTERPRETATION. Each arm performs one
+public call over exactly 1,000,000 `int64` elements, opens/truncates/closes one
+path, and produces the same 10,388,890 bytes. Values range from -999,999,999
+through 999,998,327, well inside the exact native guard. Candidate and
+incumbent files matched byte-for-byte before timing with checksum
+`22b31c18811bff2c`; every null and effect pair then reproduced contract
+checksum `559ff868dd1dac93`.
+
+COUNTED_MECHANISM: 3,000,000 per-element Python objects and 1,999,998
+application-level write calls removed. NumPy's in-repo
+`PyArray_ToFile` source creates one scalar object, one string object, and one
+ASCII-bytes object per element, then invokes `fwrite` once for each value and
+once for each of 999,999 separators: 3,000,000 objects and 1,999,999
+`fwrite` calls. The candidate creates none of those per-element Python objects,
+formats into one Rust string, and makes one `write_all` call. Kernel syscall
+count was not measured and is deliberately not claimed.
+
+| workload | host | actual threads NumPy / FNP | executing ELF SHA-256 | NumPy/NumPy null ratio (CI95) | FNP/FNP null ratio (CI95) | NumPy median | FNP median | NumPy/FNP ratio (bootstrap median CI95) | required 2x null delta | verdict |
+|---|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| public delimited snapshot export, 1,000,000 C-contiguous `int64`, comma separator, `%s`, Unicode paths | `vmi1227854` (109.123.245.77) | 1 / 1 | `da7053c5f8b34919fb7c6cd13f2cf416bb3680ad6796dcedf7372576765db214` | 1.024042 `[0.987634,1.058796]` | 1.000451 `[0.901640,1.061254]` | 174.914421 ms | 26.162669 ms | **6.762491x** `[6.369910,7.057143]` | 0.196721 | **DECIDABLE_WIN** |
+
+THE CORRECTED NULL GATE, INCLUDING THE MEDIAN CLAUSE: the effect bootstrap
+median CI is wholly above 1.0; the 6.762491 effect median is above both null CI
+envelopes; and its 5.762491 deviation from unity exceeds twice the wider null
+half-width. The incumbent half-width was 0.058796, the candidate half-width
+was the controlling 0.098360, and the required two-times margin was 0.196721.
+Neither null was required to straddle 1.0. CV was provenance only (effect
+12.631%, incumbent null 7.783%, candidate null 17.900%), never an acceptance
+gate.
+
+INSTRUMENTATION SELF-CORRECTION: an immediately preceding ELF measured the
+same job at 6.922509x, but its mechanism class called C `fwrite` invocations
+"syscalls." That was too broad because libc may buffer them. The first
+magnitude is diagnostic only and is not banked. The harness was corrected to
+`object_and_write_call_elimination` with
+`kernel_syscall_count=not_measured`, rebuilt from a new clean overlay, and the
+complete contract above was rerun. Only the current 6.762491x ratio and CI are
+citable.
+
+VALIDATION: the exact production and conformance source passed all 14
+`conformance_savetxt_tofile` tests under `release-perf`. The new poison-subclass
+test raises if the eligible public call delegates to `numpy.ndarray.tofile`;
+the native call instead completed with exact bytes. Separate cases lock the
+`10^15` precision boundary, noncontiguous fallback, and nondefault-format
+fallback. Targeted release-perf Clippy with warnings denied passed against the
+same clean remote source.
+
+CHOOSER STATEMENT: for a C-contiguous one-million-element `int64` array whose
+values are below `10^15`, written to a Unicode path with comma separator and
+default `%s` format, choose `fnp.tofile`; it was 6.762491x faster than live
+NumPy 2.4.6 with exact file bytes and a corrected dual-null
+`DECIDABLE_WIN`. Outside this measured dtype, range, layout, formatting,
+destination, and host topology, run the same contract before choosing.
+
+Retry predicate: do not repeat this exact corpus, artifact pair, and topology.
+Reopen if either artifact hash changes, NumPy changes its text `tofile`
+implementation, FNP changes the native route, or the question is another
+dtype, range, layout, format, separator, destination kind, or observed-thread
+topology. Any extension must prove its own exact-byte and fallback contract
+before timing and retain both same-invocation nulls.
+
 ## 2026-07-31 - HOLD REDECISION / KEEP (INCUMBENT-WIN): exact 256x256 int64 `matmul` - 19.999278x vs live NumPy under `release-perf`
 
 `BlackThrush`, bead `franken_numpy-ixs5y.399`. This discharges the exact retry
