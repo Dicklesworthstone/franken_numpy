@@ -4,6 +4,59 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-31 - FUSION DTYPE ROUT (KEEP, INCUMBENT-WIN): one-pass `a*b+c` wins 2.75-4.63x across all eight fixed-width integer dtypes
+
+`IvoryDesert`, bead `franken_numpy-ixs5y.405`. The fused public
+`fnp.multiply_add(a, b, c)` route now covers matched, equal-shape,
+C-contiguous `int8`, `uint8`, `int16`, `uint16`, `int32`, `uint32`, `int64`,
+and `uint64` arrays. Its integer kernel uses explicit wrapping multiply and add,
+matching NumPy's modular overflow behavior while eliminating NumPy's full
+`multiply` intermediate and second element-wise pass.
+
+Every row processed 32 MiB per input operand and compared the whole public job
+against live NumPy 2.4.6 in the same invocation. The corrected dual-null gate
+reported `DECIDABLE_WIN` for all eight rows, and full output bytes matched before
+timing, including full-range inputs chosen to exercise signed and unsigned
+overflow.
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** each dtype carried both controls; `int8` NumPy/NumPy CI95 `[0.982406,1.118633]` and FNP/FNP CI95 `[0.878139,1.227961]` under the same 21-round invocation.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c75fed6cf22f12-00014b19 measured_ratio=2.752578x
+
+**Incumbent isolation proof:** candidate=fnp.multiply_add incumbent=numpy.multiply+numpy.add shared_timed_component=none
+
+| dtype | NumPy median | FNP median | NumPy/FNP median | effect CI95 |
+|---|---:|---:|---:|---:|
+| `int8` | 9.169229 ms | 2.446981 ms | **3.683359x** | `[3.380488,5.200842]` |
+| `uint8` | 9.669747 ms | 2.510336 ms | **3.926898x** | `[3.357704,4.567835]` |
+| `int16` | 10.202324 ms | 2.281974 ms | **4.320216x** | `[3.567171,5.029975]` |
+| `uint16` | 10.258859 ms | 2.441333 ms | **4.633301x** | `[4.197474,5.178460]` |
+| `int32` | 9.833643 ms | 3.299536 ms | **2.752578x** | `[2.107281,5.455450]` |
+| `uint32` | 9.617689 ms | 2.281513 ms | **4.511725x** | `[3.499559,5.383869]` |
+| `int64` | 9.982976 ms | 2.398790 ms | **4.228227x** | `[3.747145,5.055701]` |
+| `uint64` | 9.933292 ms | 2.575794 ms | **3.997220x** | `[3.525841,4.737401]` |
+
+COUNTED_MECHANISM: `class=materialization_and_pass_elimination`. For every row,
+the incumbent allocates, writes, reads, and frees one 32 MiB intermediate;
+the candidate removes that allocation and streams three inputs into one output
+in a single cache-banded parallel pass. Both arms process the same element count.
+
+PROVENANCE:
+`bench_elf_sha256=544188b1bcce552d1aab43371bdbaf3f9211d01f759fb3089f0858a8f277a18c`, built
+through strict RCH as `release-perf` and copied hash-identically to measurement
+host `vmi1293453`. The host exposed 8 physical/logical CPUs, AVX2, and a pinned
+8-thread Rayon pool; host-wide quiescence passed before the invocation.
+
+SCOPE: only the matched fixed-width integer regime above is claimed. Mixed
+dtypes, broadcasting, non-contiguous inputs, and unsupported dtypes continue to
+defer to `numpy.multiply` plus `numpy.add`.
+
+Retry predicate: re-run the same matrix only when a wider genuinely idle host is
+available to establish the scaling ceiling, or if NumPy gains a public fused
+expression path that removes its intermediate.
+
 ## 2026-07-31 - FUSION WIN (KEEP, INCUMBENT-WIN): `a*b+c` in one pass - 2.888467x at 4 threads and 5.235572x at 8 vs live NumPy, byte-exact
 
 `BlackThrush`, bead `franken_numpy-ixs5y.405`. New public `fnp.multiply_add(a, b, c)`.
