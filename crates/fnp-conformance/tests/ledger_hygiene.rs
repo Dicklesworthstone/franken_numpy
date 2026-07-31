@@ -201,7 +201,16 @@ fn is_keep(heading: &str) -> bool {
         None => heading,
     };
     let label = tail.split(':').next().unwrap_or(tail).to_uppercase();
-    label.contains("KEEP") || label.contains("WIN") || label.contains("SHIP")
+    let has_verdict_word = |word: &str| {
+        label
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|token| token == word)
+    };
+    let is_no_ship = ["NO-SHIP", "NO SHIP", "NOSHIP"]
+        .iter()
+        .any(|negative| label.contains(negative));
+
+    has_verdict_word("KEEP") || has_verdict_word("WIN") || (has_verdict_word("SHIP") && !is_no_ship)
 }
 
 /// A rejection that no measurement could overturn - bit-exactness, observable
@@ -665,6 +674,26 @@ fn unavailable_elf_cannot_borrow_a_source_hash() {
         "Executing ELF SHA-256: unavailable.\n\
          source_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     ));
+}
+
+#[test]
+fn keep_classifier_requires_a_positive_verdict_word() {
+    for heading in [
+        "2026-07-31 - REJECT (NO-SHIP): x",
+        "2026-07-31 - REJECT (NO SHIP): x",
+        "2026-07-31 - REJECT (NOSHIP): x",
+        "2026-07-31 - CODE-ONLY: delegate SHIPPED but loses",
+    ] {
+        assert!(!is_keep(heading), "{heading}");
+    }
+
+    for heading in [
+        "2026-07-31 - WIN (SHIP): x",
+        "2026-07-31 - WIN (KEEP, INCUMBENT-WIN): x",
+        "2026-07-31 - KEEP: x",
+    ] {
+        assert!(is_keep(heading), "{heading}");
+    }
 }
 
 #[test]
