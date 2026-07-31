@@ -29043,6 +29043,352 @@ macro_rules! impl_wrapping_multiply_add_value {
 
 impl_wrapping_multiply_add_value!(i8, u8, i16, u16, i32, u32, i64, u64);
 
+/// Below this a Rayon split costs more than the fused pass saves. Shared by
+/// every `multiply_add` route so the parallel gate is one number, not four.
+const MULTIPLY_ADD_PARALLEL_MIN: usize = 1 << 16;
+/// Each worker streams three inputs and one output inside a cache-resident
+/// band instead of sweeping the whole array.
+const MULTIPLY_ADD_CHUNK: usize = 1 << 14;
+
+/// One fused pass of `a * b + c` for `float16`.
+///
+/// NumPy has no `float16` ALU. Its `multiply` loop widens each half to `float`,
+/// multiplies, and narrows back; `add` then does the same again. So the
+/// incumbent pays two widen/narrow round trips AND materializes a whole
+/// `float16` intermediate, single-threaded.
+///
+/// BIT-EXACTNESS: rounding to `float16` happens after EACH ufunc, so the fused
+/// form must round the product to `float16` before adding — it is NOT an f32
+/// chain. Verified byte-exact against live NumPy over random operands: the
+/// intermediate narrow is load-bearing and dropping it changes results.
+fn zerocopy_multiply_add_f16(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    c: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let ndarray = numpy.getattr("ndarray")?;
+    for operand in [a, b, c] {
+        if !operand.is_exact_instance(&ndarray) {
+            return Ok(None);
+        }
+        let dtype = operand.getattr("dtype")?;
+        if dtype.getattr("kind")?.extract::<String>()? != "f"
+            || dtype.getattr("itemsize")?.extract::<usize>()? != 2
+        {
+            return Ok(None);
+        }
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    if shape.is_empty()
+        || b.getattr("shape")?.extract::<Vec<usize>>()? != shape
+        || c.getattr("shape")?.extract::<Vec<usize>>()? != shape
+    {
+        return Ok(None);
+    }
+    let n: usize = shape.iter().product();
+    if n == 0 {
+        return Ok(None);
+    }
+    // Reinterpret the halves as raw bit patterns; PyO3 has no f16 buffer element.
+    let u16_dtype = numpy.getattr("uint16")?;
+    let (Ok(raw_a), Ok(raw_b), Ok(raw_c)) = (
+        a.call_method1("view", (&u16_dtype,)),
+        b.call_method1("view", (&u16_dtype,)),
+        c.call_method1("view", (&u16_dtype,)),
+    ) else {
+        return Ok(None);
+    };
+    let (Ok(buf_a), Ok(buf_b), Ok(buf_c)) = (
+        PyBuffer::<u16>::get(&raw_a),
+        PyBuffer::<u16>::get(&raw_b),
+        PyBuffer::<u16>::get(&raw_c),
+    ) else {
+        return Ok(None);
+    };
+    if !buf_a.is_c_contiguous() || !buf_b.is_c_contiguous() || !buf_c.is_c_contiguous() {
+        return Ok(None);
+    }
+    let (Some(cells_a), Some(cells_b), Some(cells_c)) =
+        (buf_a.as_slice(py), buf_b.as_slice(py), buf_c.as_slice(py))
+    else {
+        return Ok(None);
+    };
+    if cells_a.len() != n || cells_b.len() != n || cells_c.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<u16> is repr(transparent) over u16; read-only under the GIL.
+    let va: &[u16] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<u16>(), n) };
+    let vb: &[u16] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<u16>(), n) };
+    let vc: &[u16] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<u16>(), n) };
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float16")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    {
+        let raw_out = flat.call_method1("view", (&u16_dtype,))?;
+        let Ok(out_buffer) = PyBuffer::<u16>::get(&raw_out) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: freshly allocated numpy.empty output, cannot alias the inputs;
+        // every slot is written exactly once below.
+        let out: &mut [u16] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u16, n) };
+
+        // Round to f16 after the multiply, then again after the add — one
+        // rounding per NumPy ufunc, in NumPy's order.
+        let kernel = |x: u16, y: u16, z: u16| -> u16 {
+            let product = f16::from_f32(f16::from_bits(x).to_f32() * f16::from_bits(y).to_f32());
+            f16::from_f32(product.to_f32() + f16::from_bits(z).to_f32()).to_bits()
+        };
+        use rayon::prelude::*;
+        if n >= MULTIPLY_ADD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            out.par_chunks_mut(MULTIPLY_ADD_CHUNK)
+                .zip(va.par_chunks(MULTIPLY_ADD_CHUNK))
+                .zip(vb.par_chunks(MULTIPLY_ADD_CHUNK))
+                .zip(vc.par_chunks(MULTIPLY_ADD_CHUNK))
+                .for_each(|(((slots, band_a), band_b), band_c)| {
+                    for (((slot, &x), &y), &z) in slots
+                        .iter_mut()
+                        .zip(band_a.iter())
+                        .zip(band_b.iter())
+                        .zip(band_c.iter())
+                    {
+                        *slot = kernel(x, y, z);
+                    }
+                });
+        } else {
+            for (((slot, &x), &y), &z) in
+                out.iter_mut().zip(va.iter()).zip(vb.iter()).zip(vc.iter())
+            {
+                *slot = kernel(x, y, z);
+            }
+        }
+    }
+    if shape.len() == 1 {
+        Ok(Some(flat.unbind()))
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        Ok(Some(
+            flat.call_method1("reshape", (&shape_tuple,))?.unbind(),
+        ))
+    }
+}
+
+/// One fused pass of complex `a * b + c` over an interleaved `[re, im, ...]` band.
+///
+/// NUMPY'S COMPLEX MULTIPLY CONTRACTS, and matching it is mandatory for the
+/// byte-exact claim. Measured against live NumPy 2.4.3 at every length from 1 to
+/// 100,000 and under non-contiguous strides, the exact per-element form is
+///
+/// ```text
+///   real = fma(ar, br, -(ai * bi))
+///   imag = fma(ar, bi,   ai * br)
+/// ```
+///
+/// — one rounding for the second product-and-accumulate. The naive schoolbook
+/// `ar*br - ai*bi` disagrees with NumPy on ~14% of components of random input,
+/// so this kernel MUST fuse. That is the exact opposite of the real `float64`
+/// route above, which must NOT fuse. The asymmetry is NumPy's, not ours: its
+/// complex loop is compiled with contraction enabled and its real ufuncs are
+/// two separate calls.
+///
+/// The addend stage is plain per-component addition (verified separately).
+///
+/// # Safety
+///
+/// Callers must have established `is_x86_feature_detected!("fma")`. The `fma`
+/// target feature is enabled on THIS FUNCTION ALONE so `mul_add` lowers to
+/// `vfmadd` rather than a libm call; it deliberately does not widen the
+/// workspace's global `+avx2`-only policy, which exists to stop LLVM contracting
+/// unrelated linalg kernels (`target-cpu=x86-64-v3` regresses 16 fnp-linalg
+/// conformance tests).
+macro_rules! impl_complex_multiply_add_band {
+    ($name:ident, $float:ty) => {
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "fma")]
+        unsafe fn $name(a: &[$float], b: &[$float], c: &[$float], out: &mut [$float]) {
+            let (out_pairs, _) = out.as_chunks_mut::<2>();
+            let (a_pairs, _) = a.as_chunks::<2>();
+            let (b_pairs, _) = b.as_chunks::<2>();
+            let (c_pairs, _) = c.as_chunks::<2>();
+            for (((slots, pa), pb), pc) in out_pairs
+                .iter_mut()
+                .zip(a_pairs.iter())
+                .zip(b_pairs.iter())
+                .zip(c_pairs.iter())
+            {
+                let (ar, ai) = (pa[0], pa[1]);
+                let (br, bi) = (pb[0], pb[1]);
+                slots[0] = ar.mul_add(br, -(ai * bi)) + pc[0];
+                slots[1] = ar.mul_add(bi, ai * br) + pc[1];
+            }
+        }
+    };
+}
+
+impl_complex_multiply_add_band!(complex_multiply_add_band_f64, f64);
+impl_complex_multiply_add_band!(complex_multiply_add_band_f32, f32);
+
+/// One fused pass for complex `a * b + c`.
+///
+/// The incumbent is `numpy.multiply` then `numpy.add`, both single-threaded, with
+/// a full complex intermediate in between — 128 MiB at 8M `complex128`, twice the
+/// `float64` case. This route views the interleaved buffer as its component float
+/// and streams three inputs into one output in a single parallel pass.
+fn zerocopy_multiply_add_complex(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    c: &Bound<'_, PyAny>,
+    itemsize: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        // Without a runtime FMA unit we cannot reproduce NumPy's contracted
+        // complex multiply bit-for-bit, so defer rather than emit a silently
+        // different answer.
+        let _ = (py, numpy, a, b, c, itemsize);
+        Ok(None)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if !std::arch::is_x86_feature_detected!("fma") {
+            return Ok(None);
+        }
+        let ndarray = numpy.getattr("ndarray")?;
+        for operand in [a, b, c] {
+            if !operand.is_exact_instance(&ndarray) {
+                return Ok(None);
+            }
+            let dtype = operand.getattr("dtype")?;
+            if dtype.getattr("kind")?.extract::<String>()? != "c"
+                || dtype.getattr("itemsize")?.extract::<usize>()? != itemsize
+            {
+                return Ok(None);
+            }
+        }
+        let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+        if shape.is_empty()
+            || b.getattr("shape")?.extract::<Vec<usize>>()? != shape
+            || c.getattr("shape")?.extract::<Vec<usize>>()? != shape
+        {
+            return Ok(None);
+        }
+        let n: usize = shape.iter().product();
+        if n == 0 {
+            return Ok(None);
+        }
+        let (component, complex_name) = if itemsize == 16 {
+            ("float64", "complex128")
+        } else {
+            ("float32", "complex64")
+        };
+        let component_dtype = numpy.getattr(component)?;
+
+        macro_rules! run_complex {
+            ($float:ty, $band:ident) => {{
+                let (Ok(view_a), Ok(view_b), Ok(view_c)) = (
+                    a.call_method1("view", (&component_dtype,)),
+                    b.call_method1("view", (&component_dtype,)),
+                    c.call_method1("view", (&component_dtype,)),
+                ) else {
+                    return Ok(None);
+                };
+                let (Ok(buf_a), Ok(buf_b), Ok(buf_c)) = (
+                    PyBuffer::<$float>::get(&view_a),
+                    PyBuffer::<$float>::get(&view_b),
+                    PyBuffer::<$float>::get(&view_c),
+                ) else {
+                    return Ok(None);
+                };
+                if !buf_a.is_c_contiguous() || !buf_b.is_c_contiguous() || !buf_c.is_c_contiguous()
+                {
+                    return Ok(None);
+                }
+                let (Some(cells_a), Some(cells_b), Some(cells_c)) =
+                    (buf_a.as_slice(py), buf_b.as_slice(py), buf_c.as_slice(py))
+                else {
+                    return Ok(None);
+                };
+                let components = 2 * n;
+                if cells_a.len() != components
+                    || cells_b.len() != components
+                    || cells_c.len() != components
+                {
+                    return Ok(None);
+                }
+                // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+                let va: &[$float] = unsafe {
+                    std::slice::from_raw_parts(cells_a.as_ptr().cast::<$float>(), components)
+                };
+                let vb: &[$float] = unsafe {
+                    std::slice::from_raw_parts(cells_b.as_ptr().cast::<$float>(), components)
+                };
+                let vc: &[$float] = unsafe {
+                    std::slice::from_raw_parts(cells_c.as_ptr().cast::<$float>(), components)
+                };
+
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("dtype", complex_name)?;
+                let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+                {
+                    let view_out = flat.call_method1("view", (&component_dtype,))?;
+                    let Ok(out_buffer) = PyBuffer::<$float>::get(&view_out) else {
+                        return Ok(None);
+                    };
+                    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+                        return Ok(None);
+                    };
+                    // SAFETY: freshly allocated numpy.empty output, cannot alias the
+                    // inputs; every slot is written exactly once below.
+                    let out: &mut [$float] = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            out_cells.as_ptr() as *mut $float,
+                            components,
+                        )
+                    };
+                    use rayon::prelude::*;
+                    // Bands must stay on complex-element boundaries, so split in pairs.
+                    let band = 2 * MULTIPLY_ADD_CHUNK;
+                    if n >= MULTIPLY_ADD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+                        out.par_chunks_mut(band)
+                            .zip(va.par_chunks(band))
+                            .zip(vb.par_chunks(band))
+                            .zip(vc.par_chunks(band))
+                            .for_each(|(((slots, band_a), band_b), band_c)| {
+                                // SAFETY: FMA availability established above.
+                                unsafe { $band(band_a, band_b, band_c, slots) };
+                            });
+                    } else {
+                        // SAFETY: FMA availability established above.
+                        unsafe { $band(va, vb, vc, out) };
+                    }
+                }
+                if shape.len() == 1 {
+                    Ok(Some(flat.unbind()))
+                } else {
+                    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+                    Ok(Some(
+                        flat.call_method1("reshape", (&shape_tuple,))?.unbind(),
+                    ))
+                }
+            }};
+        }
+
+        if itemsize == 16 {
+            run_complex!(f64, complex_multiply_add_band_f64)
+        } else {
+            run_complex!(f32, complex_multiply_add_band_f32)
+        }
+    }
+}
+
 /// One fused pass for `a * b + c`.
 ///
 /// NumPy has no fused public form of this expression. `a * b + c` is two ufunc
@@ -29120,11 +29466,6 @@ where
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
 
         use rayon::prelude::*;
-        // Below this the Rayon split costs more than the pass saves.
-        const MULTIPLY_ADD_PARALLEL_MIN: usize = 1 << 16;
-        // Each worker streams three inputs and one output inside its own
-        // cache-resident band instead of sweeping the whole array.
-        const MULTIPLY_ADD_CHUNK: usize = 1 << 14;
         if n >= MULTIPLY_ADD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             out.par_chunks_mut(MULTIPLY_ADD_CHUNK)
                 .zip(va.par_chunks(MULTIPLY_ADD_CHUNK))
@@ -29209,6 +29550,16 @@ fn multiply_add(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, c: Py<PyAny>) -> PyR
     try_integer_route!(u16, "uint16");
     try_integer_route!(i8, "int8");
     try_integer_route!(u8, "uint8");
+    if let Some(out) = zerocopy_multiply_add_f16(py, &numpy, a.bind(py), b.bind(py), c.bind(py))? {
+        return Ok(out);
+    }
+    for itemsize in [16, 8] {
+        if let Some(out) =
+            zerocopy_multiply_add_complex(py, &numpy, a.bind(py), b.bind(py), c.bind(py), itemsize)?
+        {
+            return Ok(out);
+        }
+    }
     // Defer: exactly the expression a NumPy user writes, so rounding matches.
     let product = numpy.getattr("multiply")?.call1((a.bind(py), b.bind(py)))?;
     Ok(numpy.getattr("add")?.call1((product, c.bind(py)))?.unbind())

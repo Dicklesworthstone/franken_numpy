@@ -4,6 +4,121 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-31 - FUSION DTYPE WIDENING (KEEP, INCUMBENT-WIN): one-pass `a*b+c` wins 8.66x on `float16`, 4.02x on `complex128`, 3.12x on `complex64`
+
+`QuartzHeron`, bead `franken_numpy-ixs5y.407`. Extends the `.405` fused
+`fnp.multiply_add(a, b, c)` route to the two dtype families NumPy handles worst,
+closing the dtype matrix opened by `.405` (f64/f32) and continued by the integer
+rout (int8..uint64). Every row processed 32 MiB per input operand and compared
+the whole public job against live NumPy 2.4.6 in the same invocation. The
+corrected dual-null gate reported `DECIDABLE_WIN` for all three rows, and full
+output bytes matched before timing.
+
+**Campaign result class:** incumbent-win
+
+| dtype | NumPy median | FNP median | NumPy/FNP median | effect CI95 |
+|---|---:|---:|---:|---:|
+| `float16` | 203.014702 ms | 23.578522 ms | **8.663530x** | `[7.568554,9.716032]` |
+| `complex128` | 10.467542 ms | 2.898931 ms | **4.018419x** | `[2.973850,5.496173]` |
+| `complex64` | 10.088614 ms | 3.414562 ms | **3.121320x** | `[2.271981,3.645941]` |
+
+THE STRUCTURAL GAP, per family:
+
+- `float16`: NumPy has **no f16 ALU**. `multiply` widens each half to `float`,
+  multiplies, and narrows back; `add` then pays the same round trip again, on top
+  of materializing a full f16 intermediate. That is why this is the largest
+  ratio in the whole fusion family — 8.66x, well above the f64 row's 5.24x.
+- `complex64`/`complex128`: the eliminated intermediate equals a full operand
+  (32 MiB per row), the widest in the family, and NumPy's complex loops are
+  single-threaded like every other ufunc.
+
+THE CONTRACTION ASYMMETRY (the load-bearing finding; a naive port of the f64
+kernel would have been silently wrong). NumPy's complex multiply loop is compiled
+WITH FP contraction. Verified against live NumPy at every length from 1 to
+100,000 and under non-contiguous strides, the exact per-element form is:
+
+```text
+real = fma(ar, br, -(ai * bi))
+imag = fma(ar, bi,   ai * br)
+```
+
+The naive schoolbook `ar*br - ai*bi` disagrees with NumPy on ~14% of components
+of random input. So the complex route **must** fuse to stay byte-exact — the
+exact opposite of the real `float64` route, which must **not** fuse. Confirmed
+identical under NumPy 2.3.5, 2.4.3 and 2.4.6, so this is not a single-wheel
+artifact.
+
+`#[target_feature(enable = "fma")]` is scoped to the complex band kernel ALONE,
+behind a runtime `is_x86_feature_detected!("fma")` gate that defers to NumPy when
+the unit is absent. The workspace's global `+avx2`-without-`+fma` policy — which
+exists because `target-cpu=x86-64-v3` regresses 16 fnp-linalg conformance tests —
+is deliberately NOT widened.
+
+For `float16` the intermediate narrow to f16 is LOAD-BEARING: keeping the product
+in f32 across the add (the obvious "faster" spelling) produces different bytes.
+
+**A/A null control (same invocation):** every dtype carried both controls under the same 21-round min-of-1 invocation; `float16` NumPy/NumPy CI95 `[0.747598,1.384530]` and FNP/FNP CI95 `[0.904156,1.034817]`; `complex128` NumPy/NumPy CI95 `[0.926943,1.005380]` and FNP/FNP CI95 `[0.901101,1.224299]`; `complex64` NumPy/NumPy CI95 `[0.931265,1.095449]` and FNP/FNP CI95 `[0.985632,1.210839]`. Every effect CI is disjoint from both of its null CIs.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa artifact_bytes=10452641 invocation_id=000000000000000018c76ae0a13ce6bf-00388292 measured_ratio=8.663530x
+
+**Incumbent isolation proof:** candidate=fnp.multiply_add incumbent=numpy.multiply+numpy.add shared_timed_component=none
+
+ROUTE ENGAGEMENT PROOF. Byte parity is NOT engagement evidence here: a silently
+deferred route would still match NumPy while measuring NumPy against NumPy.
+`OBSERVED_THREAD_ACTIVITY` is the discriminator, since the deferred path is
+single-threaded. Measured per row, NumPy accrued ticks on exactly ONE thread
+while FNP accrued them on 9 (`float16`), 5 (`complex64`) and 9 (`complex128`).
+Ratios near 1.0 would have been read as deferral, not as a neutral result.
+
+COUNTED_MECHANISM: `class=materialization_and_pass_elimination`. For every row
+the incumbent allocates, writes, reads and frees one 32 MiB intermediate;
+the candidate removes that allocation and streams three inputs into one output
+in a single cache-banded parallel pass. Incumbent element-stream touches 6,
+candidate 4. Incumbent output allocations 2, candidate 1. Equal element work.
+
+PARITY: 19/19 tests in `conformance_multiply_add.rs` pass against a live NumPy
+oracle, including both contraction guards in opposite directions
+(`multiply_add_does_not_contract_into_a_single_rounding_fma` for real f64,
+`multiply_add_complex_must_contract_like_numpy` for complex) and
+`multiply_add_f16_intermediate_narrowing_is_load_bearing`. Each of those three
+also asserts that the discriminating condition actually occurs on its test data,
+so none can pass vacuously.
+
+PROVENANCE: `bench_elf_sha256=6cad195d8368bea93bc09eb3625036194fff3311ffaa65d1f34a62e7a67030cc`
+(220,533,496 bytes), built through strict RCH as `release-perf` on builder
+`vmi1149989` and copied hash-identically to measurement host `vmi1227854`
+(`AMD EPYC Processor (with IBPB)`, 10 physical/logical CPUs, governor
+unavailable), sha verified at both ends. Invocation
+`000000000000000018c76ae0a13ce6bf-00388292`, 8 pinned Rayon threads with
+`OPENBLAS_NUM_THREADS`/`OMP_NUM_THREADS`/`MKL_NUM_THREADS` pinned to the same
+width. Compile-time SSE2 and AVX2 true; runtime SSE2, AVX, AVX2, F16C and FMA
+true; AVX-512F and AVX-512BW false. Host-wide fail-closed quiescence passed at
+every preflight, maximum observed busy fraction 0.065 against the 0.200 limit.
+
+TWO HONEST QUALIFICATIONS. First, the `float16` incumbent A/A null is WIDE,
+`[0.747598,1.384530]` — NumPy's own f16 path is noisy run to run. The verdict
+still stands (the gate is cleared by roughly 12x and the effect CI `[7.57,9.72]`
+is disjoint from both nulls), but that null must not be reused as a tight
+baseline for a row resolving anything near unity. Second, the intended
+measurement host `vmi1293453` — the host the `.405` rows used — could NOT be used:
+its `sbh` disk-pressure daemon was in `enforce` mode under yellow pressure and
+held a full core, so the fail-closed quiescence gate correctly refused two
+attempts. `vmi1227854` was substituted after a host survey; it runs the same
+NumPy 2.4.6 and Python 3.13.7, so the rows remain comparable to `.405`, but the
+CPU model and core count differ and absolute ms levels are not directly
+comparable to the `.405` table.
+
+SCOPE: only the matched, equal-shape, C-contiguous regime above is claimed.
+Broadcasting, non-contiguity, mixed widths, and hosts without a runtime FMA unit
+all continue to defer to `numpy.multiply` plus `numpy.add`.
+
+Retry predicate: re-run the same matrix only when a genuinely idle many-core host
+is available to establish the scaling ceiling — `trj` (64 physical cores) was
+again unusable, with a foreign `whisper-cli` at ~2875% CPU, which is the same
+obstacle recorded against `.405`. The published widths remain a FLOOR, not a
+ceiling. Reopen the DESIGN only if NumPy gains a fused public multiply-add, an
+expression JIT, or an f16 ALU.
+
 ## 2026-07-31 - LONG-CHAIN FUSION ROUT (KEEP, INCUMBENT-WIN): `(a-b)*c+d` wins 4.67-4.97x across ten numeric dtypes on 64 physical cores
 
 `IvoryDesert`, bead `franken_numpy-ixs5y.406`. The new public
