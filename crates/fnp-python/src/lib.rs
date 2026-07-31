@@ -77648,6 +77648,117 @@ fn try_zerocopy_f64_sum_lastaxis(
     Ok(Some(reshaped.unbind()))
 }
 
+// Parallel full reduction for a large C-contiguous fixed-width integer array.
+// NumPy promotes signed inputs to int64 and unsigned inputs to uint64, then adds
+// modulo 2^64. Wrapping addition is associative, so independent cache-sized
+// partials can be reduced in any order without changing a single result bit.
+// Each Rayon task owns a 256 KiB input band: small enough to fit comfortably in
+// a Zen 3 core's private L2 while leaving enough bands to balance the full pool.
+fn integer_sum_typed<'py, T, A, FC, FA>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    out_dtype_name: &str,
+    identity: A,
+    convert: FC,
+    add: FA,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy + Send + Sync,
+    A: Copy + Send + Sync + IntoPyObject<'py>,
+    FC: Fn(T) -> A + Sync,
+    FA: Fn(A, A) -> A + Sync,
+{
+    const INTEGER_SUM_PARALLEL_MIN_BYTES: usize = 8 * 1024 * 1024;
+    const INTEGER_SUM_BLOCK_BYTES: usize = 256 * 1024;
+
+    let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
+        return Ok(None);
+    };
+    if !in_buffer.is_c_contiguous() || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let Some(input_bytes) = input.len().checked_mul(std::mem::size_of::<T>()) else {
+        return Ok(None);
+    };
+    if input_bytes < INTEGER_SUM_PARALLEL_MIN_BYTES {
+        return Ok(None);
+    }
+
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T. The exact typed
+    // PyBuffer remains alive and read-only under the GIL for this parallel fold.
+    let data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
+    let block_elements = (INTEGER_SUM_BLOCK_BYTES / std::mem::size_of::<T>()).max(1);
+    use rayon::prelude::*;
+    let total = data
+        .par_chunks(block_elements)
+        .map(|block| {
+            block
+                .iter()
+                .copied()
+                .fold(identity, |acc, value| add(acc, convert(value)))
+        })
+        .reduce(|| identity, &add);
+    Ok(Some(
+        numpy.getattr(out_dtype_name)?.call1((total,))?.unbind(),
+    ))
+}
+
+// Large flat integer sum across every fixed-width signed/unsigned dtype. The
+// gate deliberately excludes bool, explicit dtype/out/initial/where, subclasses,
+// non-native byte order, and non-C layouts; the caller preserves NumPy for all
+// of them. keepdims only reshapes the already-exact promoted scalar.
+fn try_zerocopy_integer_sum_flat(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if !matches!(kind.as_str(), "i" | "u") || !dtype.getattr("isnative")?.extract::<bool>()? {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    macro_rules! dispatch {
+        ($input:ty, $acc:ty, $dtype:literal, $convert:expr) => {
+            integer_sum_typed::<$input, $acc, _, _>(
+                py,
+                &numpy,
+                a,
+                $dtype,
+                0,
+                $convert,
+                |left: $acc, right: $acc| left.wrapping_add(right),
+            )
+        };
+    }
+    let scalar = match (kind.as_str(), itemsize) {
+        ("i", 1) => dispatch!(i8, i64, "int64", |value| value as i64)?,
+        ("i", 2) => dispatch!(i16, i64, "int64", |value| value as i64)?,
+        ("i", 4) => dispatch!(i32, i64, "int64", |value| value as i64)?,
+        ("i", 8) => dispatch!(i64, i64, "int64", |value| value)?,
+        ("u", 1) => dispatch!(u8, u64, "uint64", |value| value as u64)?,
+        ("u", 2) => dispatch!(u16, u64, "uint64", |value| value as u64)?,
+        ("u", 4) => dispatch!(u32, u64, "uint64", |value| value as u64)?,
+        ("u", 8) => dispatch!(u64, u64, "uint64", |value| value)?,
+        _ => None,
+    };
+    let Some(scalar) = scalar else {
+        return Ok(None);
+    };
+    if keepdims {
+        return Ok(Some(keepdims_reshape_scalar(py, &numpy, a, scalar)?));
+    }
+    Ok(Some(scalar))
+}
+
 // Reductions: passthrough to NumPy because our input extraction (extract_precise_numeric_array)
 // calls .tolist() which is O(n) Python object creation. NumPy's native C path is faster.
 // See perf bead franken_numpy-c6t1m.
@@ -77665,6 +77776,18 @@ fn sum(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
+    // Large flat integer sum: NumPy's ufunc reduction is single-threaded. A
+    // cache-banded wrapping reduction uses the full Rayon pool while preserving
+    // exact default promotion and overflow bits for all eight integer dtypes.
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(o) = try_zerocopy_integer_sum_flat(py, a.bind(py), keepdims)?
+    {
+        return Ok(o);
+    }
     // Native last-axis fast path: per-lane pairwise sum (bit-exact, the same tree numpy
     // uses on the contiguous fast axis) parallel across lanes beats numpy's single-threaded
     // sum(axis=-1). No out/dtype/initial, native single last-axis int, empty kwargs.

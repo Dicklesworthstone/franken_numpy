@@ -350,6 +350,54 @@ fn sum_integer_dtypes_match_numpy() -> Result<(), String> {
 }
 
 #[test]
+fn sum_large_integer_flat_parallel_is_bit_exact() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+rng = np.random.default_rng(20260742)
+checks = []
+for dtype in [np.int8, np.uint8, np.int16, np.uint16,
+              np.int32, np.uint32, np.int64, np.uint64]:
+    dt = np.dtype(dtype)
+    n = (8 * 1024 * 1024) // dt.itemsize
+    a = np.frombuffer(rng.bytes(n * dt.itemsize), dtype=dt).copy()
+    ours = fnp.sum(a)
+    theirs = np.sum(a)
+    checks.append(type(ours) is type(theirs))
+    checks.append(ours.dtype == theirs.dtype)
+    checks.append(ours.tobytes() == theirs.tobytes())
+
+    shaped = a.reshape(8, -1)
+    ours_keep = fnp.sum(shaped, keepdims=True)
+    theirs_keep = np.sum(shaped, keepdims=True)
+    checks.append(ours_keep.shape == theirs_keep.shape)
+    checks.append(ours_keep.dtype == theirs_keep.dtype)
+    checks.append(ours_keep.tobytes() == theirs_keep.tobytes())
+
+# Explicit wraparound witnesses for both promoted accumulator classes.
+signed = np.full(2_000_000, np.iinfo(np.int64).max, dtype=np.int64)
+unsigned = np.full(2_000_000, np.iinfo(np.uint64).max, dtype=np.uint64)
+checks.append(fnp.sum(signed).tobytes() == np.sum(signed).tobytes())
+checks.append(fnp.sum(unsigned).tobytes() == np.sum(unsigned).tobytes())
+
+# Every unsupported boundary remains delegated.
+base = np.arange(4_000_000, dtype=np.int64)
+strided = base[::2]
+checks.append(fnp.sum(strided).tobytes() == np.sum(strided).tobytes())
+checks.append(fnp.sum(base, dtype=np.float64).tobytes() == np.sum(base, dtype=np.float64).tobytes())
+checks.append(fnp.sum(base, initial=17).tobytes() == np.sum(base, initial=17).tobytes())
+checks.append(fnp.sum(base.astype('>i8')).tobytes() == np.sum(base.astype('>i8')).tobytes())
+checks.append(fnp.sum(np.ones(9_000_000, dtype=np.bool_)).tobytes() ==
+              np.sum(np.ones(9_000_000, dtype=np.bool_)).tobytes())
+
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 55");
+    Ok(())
+}
+
+#[test]
 fn sum_nan_handling_matches_numpy() -> Result<(), String> {
     let test_cases = vec![
         "[1.0, np.nan, 3.0]",

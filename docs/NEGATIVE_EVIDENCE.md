@@ -4,6 +4,108 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-31 - PARALLEL FIXED-WIDTH INTEGER FLAT SUM (KEEP, INCUMBENT-WIN): 2.81-23.04x over live NumPy across all eight integer dtypes
+
+`IvoryDesert`, bead `franken_numpy-ixs5y.408`. `fnp.sum` now recognizes large,
+native-endian, C-contiguous fixed-width integer arrays when `axis`, `dtype`,
+`out`, and `initial` retain their defaults. It borrows the input buffer without
+copying, partitions it into 256 KiB cache bands, computes wrapping partial sums
+through the Rayon pool, and combines those partials into the exact NumPy scalar
+type. All unsupported layouts and options retain the live NumPy route.
+
+Each row reduced one 64 MiB input and compared the complete public call with
+live NumPy 2.4.6 in the same invocation on a quiescent 10-core AMD EPYC host.
+Exact scalar type, result dtype, and result bytes matched before timing. The
+21-round corrected dual-null contract reported `DECIDABLE_WIN` for every
+fixed-width signed and unsigned integer dtype.
+
+**Campaign result class:** incumbent-win
+
+| dtype | NumPy median | FNP median | NumPy/FNP median | effect CI95 |
+|---|---:|---:|---:|---:|
+| `int8` | 22.589550 ms | 0.963695 ms | **23.039338x** | `[22.148962,25.604483]` |
+| `uint8` | 22.980805 ms | 1.028181 ms | **22.254999x** | `[14.819832,27.075025]` |
+| `int16` | 14.196604 ms | 0.814681 ms | **17.816993x** | `[14.754509,21.171216]` |
+| `uint16` | 16.055469 ms | 1.142001 ms | **14.192124x** | `[11.456486,17.642349]` |
+| `int32` | 10.726493 ms | 1.672446 ms | **6.628707x** | `[5.728433,8.054406]` |
+| `uint32` | 10.788556 ms | 1.733807 ms | **6.216499x** | `[4.600087,7.826670]` |
+| `int64` | 2.652495 ms | 1.174270 ms | **3.116495x** | `[2.011415,3.983935]` |
+| `uint64` | 2.475971 ms | 0.915853 ms | **2.805825x** | `[2.269934,3.332770]` |
+
+**A/A null control (same invocation):** conservative_uint64 NumPy/NumPy_ratio=1.017598x FNP/FNP_ratio=1.068419x; every effect row carried both 21-round min-of-1 controls. Their bootstrap median CI95 intervals were:
+
+| dtype | NumPy/NumPy CI95 | FNP/FNP CI95 |
+|---|---:|---:|
+| `int8` | `[0.927670,0.990535]` | `[0.872973,1.246183]` |
+| `uint8` | `[0.991662,1.005229]` | `[0.894743,1.007413]` |
+| `int16` | `[0.966294,1.017000]` | `[0.881346,1.049296]` |
+| `uint16` | `[0.965719,1.042579]` | `[0.901730,1.037595]` |
+| `int32` | `[0.964106,1.044659]` | `[0.683479,1.009387]` |
+| `uint32` | `[0.995831,1.033388]` | `[0.765983,1.456385]` |
+| `int64` | `[0.991364,1.043955]` | `[0.779675,1.050410]` |
+| `uint64` | `[1.005399,1.052850]` | `[0.802509,1.301028]` |
+
+Every effect CI excluded 1.0, its median cleared both null envelopes, and its
+distance from 1.0 exceeded twice the larger null half-width.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa artifact_bytes=10452641 invocation_id=000000000000000018c778d70c599341-00003f8b measured_ratio=2.805825x
+
+**Incumbent isolation proof:** candidate=fnp.sum incumbent=numpy.sum shared_timed_component=none
+
+COUNTED_MECHANISM: `class=parallel_cache_banded_reduction`. Both arms read one
+64 MiB input exactly once and return one scalar. NumPy performs `elements-1`
+element additions on one active thread. FNP partitions the same bytes into 256
+cache bands, performs one wrapping fold per band plus scheduler-dependent
+partial combines, and engages a pinned 10-worker Rayon pool. Integer wrapping
+addition is associative, so band boundaries cannot change the result. This
+lever parallelizes the memory sweep and arithmetic rather than claiming that it
+removes additions.
+
+ROUTE ENGAGEMENT PROOF: `/proc` thread-tick sampling over 64 repetitions
+reported one active thread for every NumPy row and 10-11 active process threads
+for every FNP row (the caller plus the Rayon workers). A fallback to NumPy would
+therefore have been visible independently of byte parity.
+
+PARITY: the focused live-oracle test passes 55 checks spanning all eight routed
+dtypes, scalar type/dtype/bytes, `keepdims`, signed and unsigned overflow
+witnesses, and fallback coverage for non-contiguous, explicit-dtype,
+`initial`, non-native-endian, and boolean inputs. The full `conformance_sum`
+shard passes 28/28. Every benchmark row independently checked exact bytes,
+scalar type, and result dtype before timing.
+
+PROVENANCE:
+`bench_elf_sha256=95f302f19a329cf30b883ad99b7877b1a66ea1e6dc966979a27af80185a5257c`
+(candidate extension, 212,259,936 bytes), built from the final source through
+strict RCH on `ovh-a`.
+The formal measurement host was `vmi1227854`, an AMD EPYC VM with 10 physical
+cores / 10 logical threads, full-host affinity, and 10 pinned Rayon workers;
+runtime SSE2/AVX/AVX2/F16C/FMA were present. Host-wide quiescence passed twice
+before every row, with maximum observed busy fractions from 0.000 to 0.100,
+below the 0.200 fail-closed limit. One extension, one live NumPy core, and one
+invocation covered all eight banked rows.
+
+A separate directional sweep of the same implementation on `trj`, the
+64-physical-core / 128-thread Threadripper PRO 5995WX host, observed 2.87-27.81x
+across the same dtype matrix with 54-64 Rayon workers active. That sweep is not
+the banked verdict because a peer workload was present; it is scaling evidence
+only.
+
+NumPy 2.4.6 was linked to `scipy-openblas` / OpenBLAS 0.3.31.188.0
+(`USE64BITINT DYNAMIC_ARCH NO_AFFINITY`, Haswell target, `MAX_THREADS=64`).
+Fixed-width integer reduction does not dispatch through BLAS in either arm, so
+this is a result against NumPy's live single-threaded reduction loop, not a
+claim about beating OpenBLAS GEMM.
+
+SCOPE: exact `numpy.ndarray`, native-endian fixed-width integer dtype,
+C-contiguous storage, at least 8 MiB, no effective `axis`, `dtype`, `out`, or
+`initial` override, and no extra keyword semantics. `keepdims` is preserved.
+All other regimes retain live NumPy behavior.
+
+Retry predicate: rerun when adding float/complex or axis-specific reductions,
+changing the 8 MiB threshold or 256 KiB cache band, measuring on a fully idle
+64-physical-core host, or if NumPy adopts a parallel integer reduction. Do not
+rerun this exact 64 MiB, 10-worker fixed-width integer regime.
+
 ## 2026-07-31 - PREALLOCATED LONG-CHAIN FUSION (KEEP, INCUMBENT-WIN): one-pass `(a-b)*c+d` with `out=` wins 2.81-4.39x across ten numeric dtypes
 
 `IvoryDesert`, bead `franken_numpy-ixs5y.407`. The public

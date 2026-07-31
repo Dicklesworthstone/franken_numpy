@@ -6246,6 +6246,311 @@ fn bench_fused_subtract_multiply_add_matrix_vs_numpy_median_gate(c: &mut Criteri
     });
 }
 
+/// Broad fixed-width integer flat-sum matrix against live NumPy.
+///
+/// Each row reduces the same 64 MiB C-contiguous input to the exact promoted
+/// scalar. The candidate distributes cache-sized wrapping-add bands across the
+/// pinned Rayon pool; NumPy's integer ufunc reduction remains single-threaded.
+fn bench_integer_flat_sum_matrix_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const TARGET_INPUT_BYTES: usize = 64 * 1024 * 1024;
+    const CACHE_BAND_BYTES: usize = 256 * 1024;
+    const CONTRACT_ROUNDS: usize = 21;
+    const CONTRACT_MIN_OF: usize = 1;
+    const THREAD_ACTIVITY_REPETITIONS: usize = 64;
+    const REQUIRED_BUILD_PROFILE: &str = "release-perf";
+
+    assert_eq!(
+        std::env::var("FNP_BENCH_PROFILE").as_deref(),
+        Ok(REQUIRED_BUILD_PROFILE),
+        "ship-grade integer-sum evidence requires FNP_BENCH_PROFILE=release-perf"
+    );
+    let build_worker =
+        std::env::var("FNP_BUILD_WORKER").expect("FNP_BUILD_WORKER records the build origin");
+    assert!(
+        !build_worker.trim().is_empty(),
+        "FNP_BUILD_WORKER must be set"
+    );
+    let threads = std::env::var("RAYON_NUM_THREADS")
+        .expect("RAYON_NUM_THREADS must be explicitly pinned before integer-sum timing");
+    for variable in ["OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(threads.as_str()),
+            "{variable} must match RAYON_NUM_THREADS"
+        );
+    }
+    let threads: usize = threads.parse().expect("thread count is numeric");
+    assert_eq!(
+        rayon::current_num_threads(),
+        threads,
+        "Rayon pool width does not match the pinned integer-sum configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME workload=integer_flat_sum_matrix \
+         build_worker={build_worker} build_profile={REQUIRED_BUILD_PROFILE} \
+         pinned_threads={threads} rayon_threads={} contract_rounds={CONTRACT_ROUNDS} \
+         contract_min_of={CONTRACT_MIN_OF} input_bytes={TARGET_INPUT_BYTES}",
+        rayon::current_num_threads()
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_integer_flat_sum_matrix")
+            .expect("integer flat-sum bench module");
+        fnp_python(&module).expect("initialize integer flat-sum module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+        let np_sum = numpy.getattr("sum").expect("numpy sum");
+        let fnp_sum = module.getattr("sum").expect("fnp sum");
+        assert!(
+            !fnp_sum.is(&np_sum),
+            "dispatch trap: fnp.sum resolved to the NumPy callable"
+        );
+        common::report_numpy_incumbent_identity(py, "sum", &np_sum);
+        common::report_incumbent_topology("fnp.sum", "numpy.sum");
+        println!("NUMPY_BUILD_CONFIG_BEGIN workload=integer_flat_sum_matrix");
+        numpy
+            .getattr("show_config")
+            .expect("numpy.show_config")
+            .call0()
+            .expect("report NumPy build configuration");
+        println!("NUMPY_BUILD_CONFIG_END workload=integer_flat_sum_matrix");
+        println!(
+            "BLAS_RELEVANCE workload=integer_flat_sum_matrix numpy_sum_uses_blas=false \
+             candidate_uses_blas=false reason=fixed_width_integer_ufunc_reduction"
+        );
+
+        let checksum_of = |scalar: &Bound<'_, PyAny>| -> u64 {
+            let dtype = scalar
+                .getattr("dtype")
+                .expect("sum scalar dtype")
+                .str()
+                .expect("sum scalar dtype string")
+                .to_string();
+            let bytes = scalar
+                .call_method0("tobytes")
+                .expect("sum scalar tobytes")
+                .extract::<Vec<u8>>()
+                .expect("sum scalar byte Vec");
+            dtype
+                .as_bytes()
+                .iter()
+                .chain(bytes.iter())
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        let cases = [
+            ("int8", 1_usize, "int64"),
+            ("uint8", 1, "uint64"),
+            ("int16", 2, "int64"),
+            ("uint16", 2, "uint64"),
+            ("int32", 4, "int64"),
+            ("uint32", 4, "uint64"),
+            ("int64", 8, "int64"),
+            ("uint64", 8, "uint64"),
+        ];
+        let selected_dtypes = std::env::var("FNP_INTEGER_SUM_DTYPES").ok().map(|spec| {
+            spec.split(',')
+                .map(str::trim)
+                .filter(|dtype| !dtype.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        });
+        println!(
+            "INTEGER_SUM_DTYPE_FILTER selected={}",
+            selected_dtypes
+                .as_ref()
+                .map_or_else(|| "all".to_owned(), |dtypes| dtypes.join(":"))
+        );
+
+        for (case_index, (dtype, item_size, result_dtype)) in cases.into_iter().enumerate() {
+            if selected_dtypes
+                .as_ref()
+                .is_some_and(|selected| !selected.iter().any(|candidate| candidate == dtype))
+            {
+                continue;
+            }
+            let elements = TARGET_INPUT_BYTES / item_size;
+            let cache_bands = TARGET_INPUT_BYTES.div_ceil(CACHE_BAND_BYTES);
+            let row = format!("python_integer_flat_sum_{dtype}_64mib_vs_numpy");
+            let namespace = PyDict::new(py);
+            let setup = format!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng({})\n\
+                 dt = np.dtype('{}')\n\
+                 integer_sum_input = np.frombuffer(\
+                     rng.bytes({TARGET_INPUT_BYTES}), dtype=dt).copy()\n\
+                 assert integer_sum_input.size == {elements}\n\
+                 assert integer_sum_input.flags.c_contiguous\n\
+                 assert integer_sum_input.dtype.isnative\n",
+                20260742 + case_index,
+                dtype,
+            );
+            py.run(
+                std::ffi::CString::new(setup)
+                    .expect("integer flat-sum corpus CString")
+                    .as_c_str(),
+                Some(&namespace),
+                Some(&namespace),
+            )
+            .expect("integer flat-sum corpus setup");
+            let input = namespace
+                .get_item("integer_sum_input")
+                .expect("integer sum input present");
+
+            let run_incumbent = || {
+                np_sum
+                    .call1((black_box(&input),))
+                    .expect("numpy integer flat sum arm")
+            };
+            let run_candidate = || {
+                fnp_sum
+                    .call1((black_box(&input),))
+                    .expect("fnp integer flat sum arm")
+            };
+
+            let ours = run_candidate();
+            let theirs = run_incumbent();
+            assert!(
+                ours.get_type().is(&theirs.get_type()),
+                "integer flat-sum {dtype} scalar type differs from NumPy"
+            );
+            let ours_dtype = ours
+                .getattr("dtype")
+                .expect("fnp sum dtype")
+                .str()
+                .expect("fnp sum dtype string")
+                .to_string();
+            let theirs_dtype = theirs
+                .getattr("dtype")
+                .expect("numpy sum dtype")
+                .str()
+                .expect("numpy sum dtype string")
+                .to_string();
+            assert_eq!(ours_dtype, result_dtype, "candidate promotion drifted");
+            assert_eq!(
+                ours_dtype, theirs_dtype,
+                "candidate dtype differs from NumPy"
+            );
+            assert_eq!(
+                ours.call_method0("tobytes")
+                    .expect("fnp sum tobytes")
+                    .extract::<Vec<u8>>()
+                    .expect("fnp sum bytes"),
+                theirs
+                    .call_method0("tobytes")
+                    .expect("numpy sum tobytes")
+                    .extract::<Vec<u8>>()
+                    .expect("numpy sum bytes"),
+                "integer flat-sum {dtype} is not bit-exact"
+            );
+            println!(
+                "PARITY row={row} exact_bytes=passed exact_scalar_type=passed \
+                 input_dtype={dtype} result_dtype={result_dtype} input_elements={elements} \
+                 input_bytes={TARGET_INPUT_BYTES} checksum={:016x}",
+                checksum_of(&theirs)
+            );
+            println!(
+                "ROUTE_PRECONDITIONS row={row} axis=none dtype={dtype} item_size={item_size} \
+                 exact_ndarray=true c_contiguous=true native_endian=true \
+                 input_bytes={TARGET_INPUT_BYTES} parallel_min_bytes=8388608 \
+                 candidate_route=try_zerocopy_integer_sum_flat"
+            );
+            println!(
+                "COUNTED_MECHANISM row={row} class=parallel_cache_banded_reduction \
+                 incumbent_input_sweeps=1 candidate_input_sweeps=1 \
+                 incumbent_input_bytes={TARGET_INPUT_BYTES} candidate_input_bytes={TARGET_INPUT_BYTES} \
+                 incumbent_element_additions={} candidate_block_element_additions={elements} \
+                 candidate_partial_combine_additions=scheduler_dependent \
+                 candidate_cache_band_bytes={CACHE_BAND_BYTES} candidate_cache_bands={cache_bands} \
+                 incumbent_expected_threads=1 candidate_pinned_threads={threads} \
+                 incumbent_output_scalars=1 candidate_output_scalars=1 shared_input=true",
+                elements - 1,
+            );
+
+            common::report_observed_thread_activity(
+                &row,
+                "numpy",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    black_box(checksum_of(&run_incumbent()));
+                },
+            );
+            common::report_observed_thread_activity(
+                &row,
+                "fnp",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    black_box(checksum_of(&run_candidate()));
+                },
+            );
+
+            let mut observe_incumbent = || {
+                let started = Instant::now();
+                let result = run_incumbent();
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let mut observe_candidate = || {
+                let started = Instant::now();
+                let result = run_candidate();
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &row,
+                    &mut observe_incumbent,
+                    &mut observe_candidate,
+                    CONTRACT_ROUNDS,
+                    CONTRACT_MIN_OF,
+                );
+            let verdict =
+                common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+            println!(
+                "INTEGER_SUM_RESULT row={row} dtype={dtype} verdict={verdict} \
+                 incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ratio={:.6} incumbent_null_ci95=[{:.6},{:.6}] \
+                 candidate_null_ratio={:.6} candidate_null_ci95=[{:.6},{:.6}] \
+                 corrected_dual_null_gate=true incumbent=numpy_live_same_invocation",
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                incumbent_null.ratio_ci_low,
+                incumbent_null.ratio_ci_high,
+                candidate_null.ratio_median,
+                candidate_null.ratio_ci_low,
+                candidate_null.ratio_ci_high,
+            );
+            let decision = if verdict == "DECIDABLE_WIN" {
+                "choose_fnp"
+            } else {
+                "choose_numpy"
+            };
+            println!(
+                "CHOOSER_STATEMENT workload=integer_flat_sum_{dtype}_64mib \
+                 decision={decision} verdict={verdict} incumbent=numpy_live_same_invocation \
+                 measured_scope={elements}_c_contiguous_native_endian_elements_at_{threads}_pinned_threads \
+                 outside_scope=run_same_contract_before_choosing"
+            );
+        }
+    });
+}
+
 /// PREALLOCATED LONG-CHAIN FUSION, broad dtype matrix vs live NumPy.
 ///
 /// Both arms receive caller-owned output arrays, so neither allocates inside
@@ -13403,6 +13708,10 @@ fn main() {
         (
             "bench_int64_matmul_hold_redecision_median_gate",
             bench_int64_matmul_hold_redecision_median_gate,
+        ),
+        (
+            "bench_integer_flat_sum_matrix_vs_numpy_median_gate",
+            bench_integer_flat_sum_matrix_vs_numpy_median_gate,
         ),
         (
             "bench_int64_tofile_text_snapshot_vs_numpy_median_gate",
