@@ -29799,8 +29799,7 @@ where
     let vb: &[T] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<T>(), n) };
     let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
     let vd: &[T] = unsafe { std::slice::from_raw_parts(cells_d.as_ptr().cast::<T>(), n) };
-    let out: &mut [T] =
-        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+    let out: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
     subtract_multiply_add_into(out, va, vb, vc, vd);
     Ok(Some(output.clone().unbind()))
 }

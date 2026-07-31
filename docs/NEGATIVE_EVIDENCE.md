@@ -4,6 +4,103 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-31 - PREALLOCATED LONG-CHAIN FUSION (KEEP, INCUMBENT-WIN): one-pass `(a-b)*c+d` with `out=` wins 2.81-4.39x across ten numeric dtypes
+
+`IvoryDesert`, bead `franken_numpy-ixs5y.407`. The public
+`fnp.subtract_multiply_add(a, b, c, d, out=out)` route now writes a caller-owned
+output directly. For equal-shape, same-dtype, writable C-contiguous arrays whose
+full byte ranges are disjoint, it performs the three arithmetic operations in
+one cache-banded parallel pass. Exact aliases, partial byte-range overlaps,
+non-contiguous output, mixed output dtype, and other unsupported regimes defer
+to the three live NumPy ufuncs with that same output, preserving NumPy's
+mutation order.
+
+Both benchmark arms used a preallocated output, so neither timed job allocates.
+The incumbent job was the best explicit NumPy spelling for this contract:
+`numpy.subtract(a,b,out=out); numpy.multiply(out,c,out=out); numpy.add(out,d,out=out)`.
+Each row used four 32 MiB input operands and compared the whole public job with
+live NumPy 2.4.3 in the same invocation. Full result bytes and returned-output
+identity matched before every timing row. The corrected dual-null contract
+reported `DECIDABLE_WIN` for all ten dtypes.
+
+**Campaign result class:** incumbent-win
+
+| dtype | NumPy median | FNP median | NumPy/FNP median | effect CI95 |
+|---|---:|---:|---:|---:|
+| `float64` | 13.732093 ms | 4.826978 ms | **2.808222x** | `[2.729540,2.891805]` |
+| `float32` | 11.220864 ms | 3.285857 ms | **3.414897x** | `[3.262192,3.467263]` |
+| `int8` | 10.946053 ms | 2.500258 ms | **4.388122x** | `[4.341619,4.555017]` |
+| `uint8` | 11.739938 ms | 2.984776 ms | **3.685287x** | `[2.952211,3.951123]` |
+| `int16` | 10.736496 ms | 3.459526 ms | **3.109488x** | `[2.965786,3.207983]` |
+| `uint16` | 10.880459 ms | 3.537854 ms | **3.085665x** | `[2.982626,3.210199]` |
+| `int32` | 10.898002 ms | 3.303680 ms | **3.314350x** | `[3.116312,3.369872]` |
+| `uint32` | 11.365328 ms | 3.545609 ms | **3.218698x** | `[3.141280,3.229935]` |
+| `int64` | 11.322056 ms | 3.412507 ms | **3.331719x** | `[3.194031,3.391777]` |
+| `uint64` | 11.016036 ms | 3.353044 ms | **3.282007x** | `[3.216612,3.333506]` |
+
+**A/A null control (same invocation):** NumPy/NumPy ratio 1.024365x; every row carried both controls under
+the same 21-round min-of-1 invocation as its effect. In the conservative
+`float64` row, NumPy/NumPy CI95 was `[0.985823,1.037559]` and FNP/FNP CI95 was
+`[0.990832,1.024361]`; in the fastest `int8` row they were
+`[0.983538,1.053876]` and `[0.981000,1.009270]`. Every effect CI excluded 1.0
+and cleared both null envelopes plus the required 2x-null-width margin.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 artifact_bytes=10456817 invocation_id=000000000000000018c76f590bd300df-0002d559 measured_ratio=2.808222x
+
+**Incumbent isolation proof:** candidate=fnp.subtract_multiply_add(out=) incumbent=numpy.subtract(out=)+numpy.multiply(out=)+numpy.add(out=) shared_timed_component=none
+
+COUNTED_MECHANISM: `class=full_pass_elimination`. NumPy performs nine
+element-stream touches across three complete array sweeps: two reads plus one
+write for each ufunc. FNP performs five touches in one sweep: four input reads
+plus one output write. Both arms execute the same ordered subtract, multiply,
+and add per element; both timed allocation counts are zero. The candidate
+therefore removes two complete 32 MiB output read/write sweeps without changing
+the arithmetic work.
+
+ROUTE ENGAGEMENT PROOF: `OBSERVED_THREAD_ACTIVITY` reported one active thread
+for NumPy and 33 for FNP (the caller plus the 32-worker Rayon pool) for every
+dtype. A fallback to the live NumPy sequence would therefore have been visible,
+even though it would also produce byte-identical output.
+
+PARITY: the focused live-oracle test passes 18/18 cases: all ten routed dtypes,
+output aliased to each of the four inputs, partial overlapping views,
+non-contiguous output, mixed output dtype, and readonly-output error parity.
+The benchmark independently checks exact bytes and output identity for every
+32 MiB row before timing. The full `conformance_multiply_add` shard is 23/24;
+its sole failure is the pre-existing non-`out` f16 special-value route and does
+not exercise this implementation.
+
+PROVENANCE:
+`bench_elf_sha256=215278ec0860881f6e1fb6ffd92118c6d383f5b0cb91a786456e9f972c7af945`
+(222,001,760 bytes), one `release-perf` ELF used for all ten banked rows. It was
+built locally only because the strict-RCH builder produced a Python 3.14-linked
+ELF that could not execute on the Python 3.13 measurement hosts. The mandatory
+local-build disk precheck showed 344 GiB free; Cargo used the repo-local
+`./target` via `env -u CARGO_TARGET_DIR`, with no per-run or global target.
+Measurement host `thinkstation1` is an AMD Ryzen Threadripper PRO 5975WX with
+32 physical cores / 64 logical threads, full-host affinity, powersave governor,
+and 32 pinned Rayon threads; compile-time SSE2/AVX2 and runtime
+SSE2/AVX/AVX2/F16C/FMA were present. Host-wide quiescence passed before the
+process and every banked row. The first three rows share invocation
+`000000000000000018c76f590bd300df-0002d559`; the other seven were individually
+filtered invocations of the same ELF so foreign host load could not invalidate
+already-clear rows.
+
+NumPy 2.4.3 was linked to `scipy-openblas` / OpenBLAS 0.3.31.dev
+(`USE64BITINT DYNAMIC_ARCH NO_AFFINITY`, Haswell target, `MAX_THREADS=64`).
+These three element-wise ufuncs do not dispatch through BLAS, so the result is
+against NumPy's live ufunc loops rather than reference BLAS.
+
+SCOPE: equal-shape, same-dtype, C-contiguous arrays in the ten listed dtypes,
+writable C-contiguous output, disjoint input/output byte ranges, and sizes at or
+above the parallel threshold. All other regimes retain the exact live-NumPy
+three-ufunc path.
+
+Retry predicate: rerun only when widening the fused expression or output-layout
+surface, changing the cache band or scheduler, moving the final ELF to an idle
+64-physical-core host, or if NumPy gains an expression JIT/fused public route.
+Do not rerun this exact 32 MiB, 32-worker regime.
+
 ## 2026-07-31 - FUSION DTYPE WIDENING (KEEP, INCUMBENT-WIN): one-pass `a*b+c` wins 8.66x on `float16`, 4.02x on `complex128`, 3.12x on `complex64`
 
 `QuartzHeron`, bead `franken_numpy-ixs5y.407`. Extends the `.405` fused

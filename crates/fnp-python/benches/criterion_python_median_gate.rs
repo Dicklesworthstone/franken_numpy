@@ -6246,6 +6246,333 @@ fn bench_fused_subtract_multiply_add_matrix_vs_numpy_median_gate(c: &mut Criteri
     });
 }
 
+/// PREALLOCATED LONG-CHAIN FUSION, broad dtype matrix vs live NumPy.
+///
+/// Both arms receive caller-owned output arrays, so neither allocates inside
+/// the timed job. NumPy still has to stream that output through subtract,
+/// multiply, and add separately; the candidate writes it exactly once.
+fn bench_fused_subtract_multiply_add_out_matrix_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const TARGET_BYTES_PER_OPERAND: usize = 32 * 1024 * 1024;
+    const CONTRACT_ROUNDS: usize = 21;
+    const CONTRACT_MIN_OF: usize = 1;
+    const REQUIRED_BUILD_PROFILE: &str = "release-perf";
+
+    assert_eq!(
+        std::env::var("FNP_BENCH_PROFILE").as_deref(),
+        Ok(REQUIRED_BUILD_PROFILE),
+        "ship-grade fusion evidence requires FNP_BENCH_PROFILE=release-perf"
+    );
+    let build_worker =
+        std::env::var("FNP_BUILD_WORKER").expect("FNP_BUILD_WORKER records the RCH build origin");
+    assert!(
+        !build_worker.trim().is_empty(),
+        "FNP_BUILD_WORKER must be set"
+    );
+    let threads = std::env::var("RAYON_NUM_THREADS")
+        .expect("RAYON_NUM_THREADS must be explicitly pinned before fusion timing");
+    for variable in ["OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(threads.as_str()),
+            "{variable} must match RAYON_NUM_THREADS"
+        );
+    }
+    let threads: usize = threads.parse().expect("thread count is numeric");
+    assert_eq!(
+        rayon::current_num_threads(),
+        threads,
+        "Rayon pool width does not match the pinned fusion configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME workload=fused_subtract_multiply_add_out_matrix \
+         build_worker={build_worker} build_profile={REQUIRED_BUILD_PROFILE} \
+         pinned_threads={threads} rayon_threads={} contract_rounds={CONTRACT_ROUNDS} \
+         contract_min_of={CONTRACT_MIN_OF} bytes_per_operand={TARGET_BYTES_PER_OPERAND}",
+        rayon::current_num_threads()
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_fused_subtract_multiply_add_out")
+            .expect("preallocated long fusion bench module");
+        fnp_python(&module).expect("initialize preallocated long fusion module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let np_subtract = numpy.getattr("subtract").expect("numpy subtract");
+        let np_multiply = numpy.getattr("multiply").expect("numpy multiply");
+        let np_add = numpy.getattr("add").expect("numpy add");
+        let fnp_chain = module
+            .getattr("subtract_multiply_add")
+            .expect("fnp subtract_multiply_add");
+        common::report_numpy_incumbent_identity(py, "subtract", &np_subtract);
+        println!("NUMPY_BUILD_CONFIG_BEGIN workload=fused_subtract_multiply_add_out_matrix");
+        numpy
+            .getattr("show_config")
+            .expect("numpy.show_config")
+            .call0()
+            .expect("report NumPy build configuration");
+        println!("NUMPY_BUILD_CONFIG_END workload=fused_subtract_multiply_add_out_matrix");
+        for (name, callable) in [
+            ("subtract", &np_subtract),
+            ("multiply", &np_multiply),
+            ("add", &np_add),
+        ] {
+            let owner = callable
+                .getattr("__module__")
+                .ok()
+                .and_then(|value| value.extract::<String>().ok())
+                .unwrap_or_else(|| "numpy".to_owned());
+            assert!(
+                owner.starts_with("numpy"),
+                "incumbent {name} is not defined under numpy: {owner}"
+            );
+            assert!(
+                !callable.is(&fnp_chain),
+                "dispatch trap: incumbent {name} resolved to the candidate callable"
+            );
+        }
+        common::report_incumbent_topology(
+            "fnp.subtract_multiply_add(out=)",
+            "numpy.subtract(out=)+numpy.multiply(out=)+numpy.add(out=)",
+        );
+
+        let checksum_of = |array: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let bytes = array
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec");
+            bytes
+                .len()
+                .to_le_bytes()
+                .iter()
+                .chain(bytes.iter())
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        let cases = [
+            ("float64", 8_usize, false),
+            ("float32", 4, false),
+            ("int8", 1, true),
+            ("uint8", 1, true),
+            ("int16", 2, true),
+            ("uint16", 2, true),
+            ("int32", 4, true),
+            ("uint32", 4, true),
+            ("int64", 8, true),
+            ("uint64", 8, true),
+        ];
+        let selected_dtypes = std::env::var("FNP_FUSION_OUT_DTYPES").ok().map(|spec| {
+            spec.split(',')
+                .map(str::trim)
+                .filter(|dtype| !dtype.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        });
+        println!(
+            "FUSION_OUT_DTYPE_FILTER selected={}",
+            selected_dtypes
+                .as_ref()
+                .map_or_else(|| "all".to_owned(), |dtypes| dtypes.join(":"))
+        );
+        for (case_index, (dtype, item_size, is_integer)) in cases.into_iter().enumerate() {
+            if selected_dtypes
+                .as_ref()
+                .is_some_and(|selected| !selected.iter().any(|candidate| candidate == dtype))
+            {
+                continue;
+            }
+            let elements = TARGET_BYTES_PER_OPERAND / item_size;
+            let namespace = PyDict::new(py);
+            let setup = if is_integer {
+                format!(
+                    "import numpy as np\n\
+                     rng = np.random.default_rng({})\n\
+                     dt = np.dtype('{}')\n\
+                     n = {}\n\
+                     chain_a = np.frombuffer(rng.bytes(n * dt.itemsize), dtype=dt).copy()\n\
+                     chain_b = np.frombuffer(rng.bytes(n * dt.itemsize), dtype=dt).copy()\n\
+                     chain_c = np.frombuffer(rng.bytes(n * dt.itemsize), dtype=dt).copy()\n\
+                     chain_d = np.frombuffer(rng.bytes(n * dt.itemsize), dtype=dt).copy()\n\
+                     numpy_out = np.empty_like(chain_a)\n\
+                     fnp_out = np.empty_like(chain_a)\n",
+                    20260741 + case_index,
+                    dtype,
+                    elements,
+                )
+            } else {
+                format!(
+                    "import numpy as np\n\
+                     rng = np.random.default_rng({})\n\
+                     dt = np.dtype('{}')\n\
+                     n = {}\n\
+                     chain_a = rng.standard_normal(n).astype(dt)\n\
+                     chain_b = rng.standard_normal(n).astype(dt)\n\
+                     chain_c = rng.standard_normal(n).astype(dt)\n\
+                     chain_d = rng.standard_normal(n).astype(dt)\n\
+                     numpy_out = np.empty_like(chain_a)\n\
+                     fnp_out = np.empty_like(chain_a)\n",
+                    20260741 + case_index,
+                    dtype,
+                    elements,
+                )
+            };
+            py.run(
+                std::ffi::CString::new(setup)
+                    .expect("preallocated long fusion corpus CString")
+                    .as_c_str(),
+                Some(&namespace),
+                Some(&namespace),
+            )
+            .expect("preallocated long fusion corpus setup");
+            let a = namespace.get_item("chain_a").expect("chain_a present");
+            let b = namespace.get_item("chain_b").expect("chain_b present");
+            let c = namespace.get_item("chain_c").expect("chain_c present");
+            let d = namespace.get_item("chain_d").expect("chain_d present");
+            let numpy_out = namespace.get_item("numpy_out").expect("numpy_out present");
+            let fnp_out = namespace.get_item("fnp_out").expect("fnp_out present");
+            let numpy_kwargs = PyDict::new(py);
+            numpy_kwargs
+                .set_item("out", &numpy_out)
+                .expect("set NumPy output");
+            let fnp_kwargs = PyDict::new(py);
+            fnp_kwargs
+                .set_item("out", &fnp_out)
+                .expect("set candidate output");
+            let row = format!("python_fused_subtract_multiply_add_out_{dtype}_32mib_vs_numpy");
+
+            let run_incumbent = || {
+                let difference = np_subtract
+                    .call((black_box(&a), black_box(&b)), Some(&numpy_kwargs))
+                    .expect("numpy subtract out arm");
+                let product = np_multiply
+                    .call((difference, black_box(&c)), Some(&numpy_kwargs))
+                    .expect("numpy multiply out arm");
+                np_add
+                    .call((product, black_box(&d)), Some(&numpy_kwargs))
+                    .expect("numpy add out arm")
+            };
+            let run_candidate = || {
+                fnp_chain
+                    .call(
+                        (black_box(&a), black_box(&b), black_box(&c), black_box(&d)),
+                        Some(&fnp_kwargs),
+                    )
+                    .expect("fnp subtract_multiply_add out arm")
+            };
+
+            let ours = run_candidate();
+            let theirs = run_incumbent();
+            assert!(ours.is(&fnp_out), "candidate did not return its output");
+            assert!(theirs.is(&numpy_out), "NumPy did not return its output");
+            assert_eq!(
+                ours.call_method0("tobytes")
+                    .expect("fnp tobytes")
+                    .extract::<Vec<u8>>()
+                    .expect("fnp bytes"),
+                theirs
+                    .call_method0("tobytes")
+                    .expect("numpy tobytes")
+                    .extract::<Vec<u8>>()
+                    .expect("numpy bytes"),
+                "preallocated long fused {dtype} result is not byte-identical to NumPy"
+            );
+            println!(
+                "PARITY row={row} exact_bytes=passed result_dtype={dtype} \
+                 result_elements={elements} result_bytes={TARGET_BYTES_PER_OPERAND} \
+                 output_identity=passed checksum={:016x} operation_order=subtract_multiply_add",
+                checksum_of(&theirs)
+            );
+            println!(
+                "ROUTE_PRECONDITIONS row={row} dtype={dtype} elements={elements} \
+                 operands=4 equal_shapes=true all_c_contiguous=true output_c_contiguous=true \
+                 output_writable=true output_disjoint=true \
+                 candidate_route=zerocopy_subtract_multiply_add_out_typed \
+                 parallel_min=65536 chunk_elements=8192"
+            );
+            println!(
+                "COUNTED_MECHANISM row={row} class=full_pass_elimination \
+                 incumbent_element_stream_touches=9 candidate_element_stream_touches=5 \
+                 incumbent_timed_allocations=0 candidate_timed_allocations=0 \
+                 incumbent_full_array_sweeps=3 candidate_full_array_sweeps=1 \
+                 eliminated_full_array_sweeps=2 output_storage=preallocated_both_arms \
+                 arithmetic_ops_per_element=3 shared_inputs=true equal_work=true"
+            );
+
+            common::report_observed_thread_activity(&row, "numpy", 4, || {
+                black_box(checksum_of(&run_incumbent()));
+            });
+            common::report_observed_thread_activity(&row, "fnp", 32, || {
+                black_box(checksum_of(&run_candidate()));
+            });
+
+            let mut observe_incumbent = || {
+                let started = Instant::now();
+                let result = run_incumbent();
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let mut observe_candidate = || {
+                let started = Instant::now();
+                let result = run_candidate();
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &row,
+                    &mut observe_incumbent,
+                    &mut observe_candidate,
+                    CONTRACT_ROUNDS,
+                    CONTRACT_MIN_OF,
+                );
+            let verdict =
+                common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+            println!(
+                "FUSION_OUT_RESULT row={row} dtype={dtype} verdict={verdict} \
+                 incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ratio={:.6} incumbent_null_ci95=[{:.6},{:.6}] \
+                 candidate_null_ratio={:.6} candidate_null_ci95=[{:.6},{:.6}] \
+                 corrected_dual_null_gate=true incumbent=numpy_live_same_invocation",
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                incumbent_null.ratio_ci_low,
+                incumbent_null.ratio_ci_high,
+                candidate_null.ratio_median,
+                candidate_null.ratio_ci_low,
+                candidate_null.ratio_ci_high,
+            );
+            let decision = if verdict == "DECIDABLE_WIN" {
+                "choose_fnp"
+            } else {
+                "choose_numpy"
+            };
+            println!(
+                "CHOOSER_STATEMENT workload=fused_subtract_multiply_add_out_{dtype}_32mib \
+                 decision={decision} verdict={verdict} incumbent=numpy_live_same_invocation \
+                 measured_scope={elements}_equal_shape_c_contiguous_elements_preallocated_output_at_{threads}_pinned_threads \
+                 outside_scope=run_same_contract_before_choosing"
+            );
+        }
+    });
+}
+
 /// Broad integer-width proof for the fused `a * b + c` implementation.
 ///
 /// Every row processes 32 MiB per operand so the working set is beyond cache
@@ -13056,6 +13383,10 @@ fn main() {
         (
             "bench_fused_subtract_multiply_add_matrix_vs_numpy_median_gate",
             bench_fused_subtract_multiply_add_matrix_vs_numpy_median_gate,
+        ),
+        (
+            "bench_fused_subtract_multiply_add_out_matrix_vs_numpy_median_gate",
+            bench_fused_subtract_multiply_add_out_matrix_vs_numpy_median_gate,
         ),
         (
             "bench_fused_multiply_add_narrow_and_complex_matrix_vs_numpy_median_gate",

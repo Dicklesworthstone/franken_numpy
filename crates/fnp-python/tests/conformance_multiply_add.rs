@@ -319,6 +319,98 @@ print(all(checks), len(checks))
     Ok(())
 }
 
+/// A caller-owned output removes the candidate's final allocation. Disjoint
+/// outputs stay on the one-pass route; every exact/partial alias must defer so
+/// it observes the same mutations as NumPy's three in-place ufuncs.
+#[test]
+fn subtract_multiply_add_out_is_exact_and_alias_safe() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(41)
+checks = []
+
+for dtype in [np.float64, np.float32, np.int8, np.uint8, np.int16,
+              np.uint16, np.int32, np.uint32, np.int64, np.uint64]:
+    dt = np.dtype(dtype)
+    n = 300_000
+    if np.issubdtype(dt, np.integer):
+        a, b, c, d = [np.frombuffer(rng.bytes(n * dt.itemsize), dtype=dt).copy()
+                      for _ in range(4)]
+    else:
+        a, b, c, d = [rng.standard_normal(n).astype(dt) for _ in range(4)]
+    ours = np.empty_like(a)
+    theirs = np.empty_like(a)
+    with np.errstate(all='ignore'):
+        returned = fnp.subtract_multiply_add(a, b, c, d, out=ours)
+        np.subtract(a, b, out=theirs)
+        np.multiply(theirs, c, out=theirs)
+        np.add(theirs, d, out=theirs)
+    checks.append(returned is ours and ours.tobytes() == theirs.tobytes())
+
+original = [rng.standard_normal(4096) for _ in range(4)]
+for output_index in range(4):
+    ours_inputs = [value.copy() for value in original]
+    numpy_inputs = [value.copy() for value in original]
+    ours = ours_inputs[output_index]
+    theirs = numpy_inputs[output_index]
+    returned = fnp.subtract_multiply_add(*ours_inputs, out=ours)
+    np.subtract(numpy_inputs[0], numpy_inputs[1], out=theirs)
+    np.multiply(theirs, numpy_inputs[2], out=theirs)
+    np.add(theirs, numpy_inputs[3], out=theirs)
+    checks.append(returned is ours and ours.tobytes() == theirs.tobytes())
+
+# Distinct ndarray objects whose byte ranges overlap must also defer.
+ours_base = np.linspace(-3.0, 7.0, 4097)
+numpy_base = ours_base.copy()
+ours_a, ours_out = ours_base[:-1], ours_base[1:]
+numpy_a, numpy_out = numpy_base[:-1], numpy_base[1:]
+b, c, d = [rng.standard_normal(4096) for _ in range(3)]
+returned = fnp.subtract_multiply_add(ours_a, b, c, d, out=ours_out)
+np.subtract(numpy_a, b, out=numpy_out)
+np.multiply(numpy_out, c, out=numpy_out)
+np.add(numpy_out, d, out=numpy_out)
+checks.append(returned is ours_out and ours_base.tobytes() == numpy_base.tobytes())
+
+# Unsupported output layouts and casts retain NumPy's exact behavior.
+a, b, c, d = [rng.standard_normal(4096) for _ in range(4)]
+ours_storage = np.empty(8192)
+numpy_storage = np.empty(8192)
+ours_out = ours_storage[::2]
+numpy_out = numpy_storage[::2]
+returned = fnp.subtract_multiply_add(a, b, c, d, out=ours_out)
+np.subtract(a, b, out=numpy_out)
+np.multiply(numpy_out, c, out=numpy_out)
+np.add(numpy_out, d, out=numpy_out)
+checks.append(returned is ours_out and ours_out.tobytes() == numpy_out.tobytes())
+
+ours_out = np.empty(4096, dtype=np.float32)
+numpy_out = np.empty(4096, dtype=np.float32)
+returned = fnp.subtract_multiply_add(a, b, c, d, out=ours_out)
+np.subtract(a, b, out=numpy_out)
+np.multiply(numpy_out, c, out=numpy_out)
+np.add(numpy_out, d, out=numpy_out)
+checks.append(returned is ours_out and ours_out.tobytes() == numpy_out.tobytes())
+
+readonly = np.empty_like(a)
+readonly.flags.writeable = False
+try:
+    fnp.subtract_multiply_add(a, b, c, d, out=readonly)
+except Exception as exc:
+    ours_error = (type(exc).__name__, str(exc))
+try:
+    np.subtract(a, b, out=readonly)
+except Exception as exc:
+    numpy_error = (type(exc).__name__, str(exc))
+checks.append(ours_error == numpy_error)
+
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 18");
+    Ok(())
+}
+
 /// Broadcasting, mixed widths, non-contiguity, complex values, and Python
 /// sequences all stay on NumPy's own three-ufunc semantics.
 #[test]
