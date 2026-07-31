@@ -28974,14 +28974,16 @@ fn try_zerocopy_f64_heaviside_scalar(
     }
 }
 
-/// Arithmetic contract for one fused pass of `a * b + c`.
+/// Arithmetic contract for fused element-wise chains.
 ///
 /// Floating-point implementations deliberately spell this as two operations so
-/// they retain NumPy's multiply rounding followed by add rounding. Integer
-/// implementations use explicit wrapping operations because NumPy integer
-/// ufuncs are modular even in debug builds.
+/// they retain each of NumPy's intermediate roundings. Integer implementations
+/// use explicit wrapping operations because NumPy integer ufuncs are modular
+/// even in debug builds.
 trait MultiplyAddValue: pyo3::buffer::Element + Copy + Send + Sync {
     fn multiply_add_numpy(self, multiplier: Self, addend: Self) -> Self;
+
+    fn subtract_multiply_add_numpy(self, subtrahend: Self, multiplier: Self, addend: Self) -> Self;
 }
 
 impl MultiplyAddValue for f64 {
@@ -28990,12 +28992,26 @@ impl MultiplyAddValue for f64 {
         let product = self * multiplier;
         product + addend
     }
+
+    #[inline]
+    fn subtract_multiply_add_numpy(self, subtrahend: Self, multiplier: Self, addend: Self) -> Self {
+        let difference = self - subtrahend;
+        let product = difference * multiplier;
+        product + addend
+    }
 }
 
 impl MultiplyAddValue for f32 {
     #[inline]
     fn multiply_add_numpy(self, multiplier: Self, addend: Self) -> Self {
         let product = self * multiplier;
+        product + addend
+    }
+
+    #[inline]
+    fn subtract_multiply_add_numpy(self, subtrahend: Self, multiplier: Self, addend: Self) -> Self {
+        let difference = self - subtrahend;
+        let product = difference * multiplier;
         product + addend
     }
 }
@@ -29007,6 +29023,18 @@ macro_rules! impl_wrapping_multiply_add_value {
                 #[inline]
                 fn multiply_add_numpy(self, multiplier: Self, addend: Self) -> Self {
                     self.wrapping_mul(multiplier).wrapping_add(addend)
+                }
+
+                #[inline]
+                fn subtract_multiply_add_numpy(
+                    self,
+                    subtrahend: Self,
+                    multiplier: Self,
+                    addend: Self,
+                ) -> Self {
+                    self.wrapping_sub(subtrahend)
+                        .wrapping_mul(multiplier)
+                        .wrapping_add(addend)
                 }
             }
         )+
@@ -29184,6 +29212,178 @@ fn multiply_add(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, c: Py<PyAny>) -> PyR
     // Defer: exactly the expression a NumPy user writes, so rounding matches.
     let product = numpy.getattr("multiply")?.call1((a.bind(py), b.bind(py)))?;
     Ok(numpy.getattr("add")?.call1((product, c.bind(py)))?.unbind())
+}
+
+/// One fused pass for `(a - b) * c + d`.
+///
+/// NumPy must execute three independent ufuncs for this expression, allocating
+/// and streaming two discarded full-size intermediates. This route reads four
+/// inputs and writes one output exactly once. Floating-point arithmetic keeps
+/// NumPy's subtract, multiply, then add rounding order; fixed-width integers use
+/// the same modular overflow semantics as the three NumPy ufuncs.
+fn zerocopy_subtract_multiply_add_typed<T>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    c: &Bound<'_, PyAny>,
+    d: &Bound<'_, PyAny>,
+    dtype: &str,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: MultiplyAddValue,
+{
+    let ndarray = numpy.getattr("ndarray")?;
+    for operand in [a, b, c, d] {
+        if !operand.is_exact_instance(&ndarray) {
+            return Ok(None);
+        }
+    }
+    let (Ok(buf_a), Ok(buf_b), Ok(buf_c), Ok(buf_d)) = (
+        PyBuffer::<T>::get(a),
+        PyBuffer::<T>::get(b),
+        PyBuffer::<T>::get(c),
+        PyBuffer::<T>::get(d),
+    ) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = buf_a.shape().to_vec();
+    if shape.is_empty()
+        || buf_b.shape() != shape.as_slice()
+        || buf_c.shape() != shape.as_slice()
+        || buf_d.shape() != shape.as_slice()
+    {
+        return Ok(None);
+    }
+    if !buf_a.is_c_contiguous()
+        || !buf_b.is_c_contiguous()
+        || !buf_c.is_c_contiguous()
+        || !buf_d.is_c_contiguous()
+    {
+        return Ok(None);
+    }
+    let (Some(cells_a), Some(cells_b), Some(cells_c), Some(cells_d)) = (
+        buf_a.as_slice(py),
+        buf_b.as_slice(py),
+        buf_c.as_slice(py),
+        buf_d.as_slice(py),
+    ) else {
+        return Ok(None);
+    };
+    let n = cells_a.len();
+    if n == 0 || cells_b.len() != n || cells_c.len() != n || cells_d.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; inputs remain
+    // borrowed read-only under the GIL for the duration of the pass.
+    let va: &[T] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<T>(), n) };
+    let vb: &[T] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<T>(), n) };
+    let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
+    let vd: &[T] = unsafe { std::slice::from_raw_parts(cells_d.as_ptr().cast::<T>(), n) };
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype)?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: numpy.empty produced a fresh output that cannot alias the
+        // inputs, and every slot is initialized exactly once below.
+        let out: &mut [T] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+
+        use rayon::prelude::*;
+        const SUBTRACT_MULTIPLY_ADD_PARALLEL_MIN: usize = 1 << 16;
+        // Five float64 streams occupy 320 KiB per band, fitting Zen 3's 512 KiB
+        // private L2 while leaving headroom for loop state and adjacent traffic.
+        const SUBTRACT_MULTIPLY_ADD_CHUNK: usize = 1 << 13;
+        if n >= SUBTRACT_MULTIPLY_ADD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            out.par_chunks_mut(SUBTRACT_MULTIPLY_ADD_CHUNK)
+                .zip(va.par_chunks(SUBTRACT_MULTIPLY_ADD_CHUNK))
+                .zip(vb.par_chunks(SUBTRACT_MULTIPLY_ADD_CHUNK))
+                .zip(vc.par_chunks(SUBTRACT_MULTIPLY_ADD_CHUNK))
+                .zip(vd.par_chunks(SUBTRACT_MULTIPLY_ADD_CHUNK))
+                .for_each(|((((slots, band_a), band_b), band_c), band_d)| {
+                    for ((((slot, &x), &y), &z), &w) in slots
+                        .iter_mut()
+                        .zip(band_a.iter())
+                        .zip(band_b.iter())
+                        .zip(band_c.iter())
+                        .zip(band_d.iter())
+                    {
+                        *slot = x.subtract_multiply_add_numpy(y, z, w);
+                    }
+                });
+        } else {
+            for ((((slot, &x), &y), &z), &w) in out
+                .iter_mut()
+                .zip(va.iter())
+                .zip(vb.iter())
+                .zip(vc.iter())
+                .zip(vd.iter())
+            {
+                *slot = x.subtract_multiply_add_numpy(y, z, w);
+            }
+        }
+    }
+    if shape.len() == 1 {
+        Ok(Some(flat.unbind()))
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        Ok(Some(
+            flat.call_method1("reshape", (&shape_tuple,))?.unbind(),
+        ))
+    }
+}
+
+/// `subtract_multiply_add(a, b, c, d)` -> `(a - b) * c + d` in one pass.
+///
+/// Byte-identical to NumPy for matched fixed-width numeric, equal-shape,
+/// C-contiguous ndarrays. Every unsupported regime delegates to NumPy's exact
+/// three-ufunc expression.
+#[pyfunction]
+#[pyo3(signature = (a, b, c, d))]
+fn subtract_multiply_add(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    c: Py<PyAny>,
+    d: Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    macro_rules! try_route {
+        ($value:ty, $dtype:literal) => {
+            if let Some(out) = zerocopy_subtract_multiply_add_typed::<$value>(
+                py,
+                &numpy,
+                a.bind(py),
+                b.bind(py),
+                c.bind(py),
+                d.bind(py),
+                $dtype,
+            )? {
+                return Ok(out);
+            }
+        };
+    }
+    try_route!(f64, "float64");
+    try_route!(f32, "float32");
+    try_route!(i64, "int64");
+    try_route!(u64, "uint64");
+    try_route!(i32, "int32");
+    try_route!(u32, "uint32");
+    try_route!(i16, "int16");
+    try_route!(u16, "uint16");
+    try_route!(i8, "int8");
+    try_route!(u8, "uint8");
+
+    let difference = numpy.getattr("subtract")?.call1((a.bind(py), b.bind(py)))?;
+    let product = numpy.getattr("multiply")?.call1((difference, c.bind(py)))?;
+    Ok(numpy.getattr("add")?.call1((product, d.bind(py)))?.unbind())
 }
 
 #[pyfunction]
@@ -102795,6 +102995,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(radians, m)?)?;
     m.add_function(wrap_pyfunction!(sinc, m)?)?;
     m.add_function(wrap_pyfunction!(multiply_add, m)?)?;
+    m.add_function(wrap_pyfunction!(subtract_multiply_add, m)?)?;
     m.add_function(wrap_pyfunction!(copysign, m)?)?;
     m.add_function(wrap_pyfunction!(nextafter, m)?)?;
     m.add_function(wrap_pyfunction!(hypot, m)?)?;

@@ -1,4 +1,4 @@
-//! Conformance tests for the fused `multiply_add` lever against the NumPy oracle.
+//! Conformance tests for fused arithmetic chains against the NumPy oracle.
 //!
 //! `fnp.multiply_add(a, b, c)` computes `a * b + c` in one pass. NumPy has no
 //! fused public form, so the oracle is NumPy's own two-call expression. The
@@ -244,5 +244,126 @@ print(all(checks), len(checks))
         .to_string(),
     );
     assert_eq!(numpy_oracle(&script)?, "True 6");
+    Ok(())
+}
+
+/// The longer chain exercises the parallel path and preserves shape, dtype, and
+/// every output bit across both routed floating widths.
+#[test]
+fn subtract_multiply_add_float_routes_match_numpy_bitwise() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(29)
+checks = []
+for dtype in [np.float64, np.float32]:
+    arrays = [rng.standard_normal((300, 1000)).astype(dtype) for _ in range(4)]
+    a, b, c, d = arrays
+    ours = fnp.subtract_multiply_add(a, b, c, d)
+    theirs = (a - b) * c + d
+    checks.append(ours.dtype == theirs.dtype and
+                  ours.shape == theirs.shape and
+                  ours.tobytes() == theirs.tobytes())
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 2");
+    Ok(())
+}
+
+/// This makes a contracted multiply-add observably different from NumPy's
+/// subtract, multiply, then add sequence.
+#[test]
+fn subtract_multiply_add_retains_all_float_roundings() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0 + 2.0**-52, 1.0 + 2.0**-52, 0.1, 1e200], dtype=np.float64)
+b = np.zeros_like(a)
+c = np.array([1.0 + 2.0**-52, 1.0 - 2.0**-52, 0.1, 1e200], dtype=np.float64)
+d = -((a - b) * c)
+with np.errstate(all='ignore'):
+    ours = fnp.subtract_multiply_add(a, b, c, d)
+    theirs = (a - b) * c + d
+print(ours.tobytes() == theirs.tobytes(),
+      bool(np.all(ours[:3] == 0.0)),
+      bool(np.isnan(ours[3])))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True True True");
+    Ok(())
+}
+
+/// Full-range bytes force modular overflow at every fixed integer width.
+#[test]
+fn subtract_multiply_add_integer_routes_match_numpy_with_overflow() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(31)
+checks = []
+for dtype in [np.int8, np.uint8, np.int16, np.uint16,
+              np.int32, np.uint32, np.int64, np.uint64]:
+    dt = np.dtype(dtype)
+    n = 300_000
+    a, b, c, d = [np.frombuffer(rng.bytes(n * dt.itemsize), dtype=dt).copy()
+                  for _ in range(4)]
+    with np.errstate(over='ignore'):
+        ours = fnp.subtract_multiply_add(a, b, c, d)
+        theirs = (a - b) * c + d
+    checks.append(ours.dtype == theirs.dtype and ours.tobytes() == theirs.tobytes())
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 8");
+    Ok(())
+}
+
+/// Broadcasting, mixed widths, non-contiguity, complex values, and Python
+/// sequences all stay on NumPy's own three-ufunc semantics.
+#[test]
+fn subtract_multiply_add_deferred_regimes_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(37)
+checks = []
+
+a = rng.standard_normal((512, 4))
+b = rng.standard_normal((4,))
+c = rng.standard_normal((512, 1))
+d = rng.standard_normal((512, 4))
+checks.append(np.array_equal(fnp.subtract_multiply_add(a, b, c, d),
+                             (a - b) * c + d, equal_nan=True))
+
+base = rng.standard_normal((256, 16))
+a2, b2, c2, d2 = base[:, ::2], base[:, 1::2], base[:, ::2], base[:, 1::2]
+checks.append(np.array_equal(fnp.subtract_multiply_add(a2, b2, c2, d2),
+                             (a2 - b2) * c2 + d2, equal_nan=True))
+
+a3 = rng.standard_normal(1000).astype(np.float32)
+b3 = rng.standard_normal(1000)
+c3 = rng.standard_normal(1000)
+d3 = rng.standard_normal(1000)
+ours3 = fnp.subtract_multiply_add(a3, b3, c3, d3)
+theirs3 = (a3 - b3) * c3 + d3
+checks.append(ours3.dtype == theirs3.dtype and ours3.tobytes() == theirs3.tobytes())
+
+a4 = rng.standard_normal(2000) + 1j * rng.standard_normal(2000)
+b4 = rng.standard_normal(2000) + 1j * rng.standard_normal(2000)
+c4 = rng.standard_normal(2000) + 1j * rng.standard_normal(2000)
+d4 = rng.standard_normal(2000) + 1j * rng.standard_normal(2000)
+ours4 = fnp.subtract_multiply_add(a4, b4, c4, d4)
+theirs4 = (a4 - b4) * c4 + d4
+checks.append(ours4.dtype == theirs4.dtype and ours4.tobytes() == theirs4.tobytes())
+
+checks.append(np.array_equal(
+    fnp.subtract_multiply_add([5, 8], [1, 2], [3, 4], [7, 9]),
+    np.array([19, 33])))
+
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 5");
     Ok(())
 }
