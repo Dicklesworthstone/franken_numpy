@@ -515,7 +515,8 @@ pub fn bench_invocation_id() -> &'static str {
 }
 
 /// Prove that a Python benchmark's incumbent arm is the named live NumPy
-/// callable and bind it to NumPy's executing compiled core.
+/// callable and bind it to NumPy's executing compiled core. `callable_name`
+/// may be a dotted public path such as `char.upper`.
 ///
 /// The hash is computed by the executing bench process, not by an adjacent
 /// shell step, and the invocation id is shared with every row in this process.
@@ -538,9 +539,16 @@ pub fn report_numpy_incumbent_identity(
         .expect("numpy __version__")
         .extract::<String>()
         .expect("numpy __version__ string");
-    let expected_callable = numpy
-        .getattr(callable_name)
-        .expect("named NumPy incumbent callable");
+    let mut expected_callable = numpy.clone().into_any();
+    for component in callable_name.split('.') {
+        assert!(
+            !component.is_empty(),
+            "NumPy incumbent callable path contains an empty component"
+        );
+        expected_callable = expected_callable
+            .getattr(component)
+            .unwrap_or_else(|_| panic!("named NumPy incumbent callable numpy.{callable_name}"));
+    }
     assert!(
         expected_callable.is(numpy_callable),
         "incumbent callable is not numpy.{callable_name}"

@@ -1388,6 +1388,126 @@ parity, both same-invocation nulls, executable/artifact identities, and the
 median-CI gate. Consider S17+ multiword keys only if a new profile ranks that
 width family; do not extrapolate this two-word result.
 
+## 2026-07-31 - RETRY SATISFIED / KEEP (INCUMBENT-WIN): ASCII `char.upper` - 20.000211x vs live NumPy under the corrected dual-null gate
+
+`BlackThrush`, bead `franken_numpy-ixs5y.396`. This is the current result for
+the 400,000-element ASCII `U16` `char.upper` surface. It explicitly supersedes
+the 2026-07-28 HOLD-UNBANKED row immediately below: that row's retry predicate
+required the missing candidate null, exact nested-callable identity, host and
+ISA provenance, configured and actually observed threads, exact byte parity,
+and both artifact identities in one invocation. This redecision supplied all
+of them. The historical row remains only as the audit trail and its 24.189553x
+one-null observation is still not publishable.
+
+This is an incumbent comparison, not a structural class-3 claim. Both arms
+execute one independent public call over the same read-only array:
+`fnp.char.upper(input)` versus the exact live `numpy.char.upper(input)`
+callable. The fixed corpus contains 400,000 C-contiguous `U16` strings, or
+6,400,000 Unicode codepoint slots, generated from lowercase ASCII with seed
+20260728. The process asserted shape `[400000]`, dtype `<U16`, C contiguity,
+and the candidate's source-pinned
+`try_zerocopy_unicode_ascii_case` admission conditions before timing.
+
+`bench_elf_sha256=baff0a0bf0d31428f04493ca9401c55022a18dfb61de12e7e2622060c60f2313`
+(217,758,888 bytes), self-reported by the executing process from
+`/proc/self/exe`, invocation
+`000000000000000018c743eafc2c1ad4-00226f98`. The preserved 22-line execution
+log at `.rch-bench-replay/char-upper-396-release-perf.log` has SHA-256
+`12d5503c89e67b5bda2727d2c41e10953a4abaedbfee48075259e1ac1ed5d80a`.
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy ratio median 1.035629,
+bootstrap CI95 `[0.972758,1.103108]`, 41 rounds, min-of-3, arm medians
+76.633771 ms and 76.021342 ms, CV 17.518%.
+
+**Candidate A/A null control (same invocation):** FNP/FNP ratio median
+1.022091, bootstrap CI95 `[0.969999,1.077298]`, 41 rounds, min-of-3, arm
+medians 3.550371 ms and 3.391543 ms, CV 13.863%.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c743eafc2c1ad4-00226f98 measured_ratio=20.000211x
+
+**Incumbent isolation proof:** candidate=fnp.char.upper incumbent=numpy.char.upper shared_timed_component=none
+
+The process resolved the nested public path and asserted that the incumbent
+was the exact `numpy.char.upper` object (reported callable module
+`numpy.strings`), distinct from the FNP callable. It bound that live NumPy
+2.4.6 object to the executing
+`_multiarray_umath.cpython-313-x86_64-linux-gnu.so` artifact with the hash
+above. No incumbent output or intermediate was cached inside a timed
+observation.
+
+| row | arm A | arm B | ratio median | bootstrap CI95 | CV |
+|---|---:|---:|---:|---:|---:|
+| NumPy/NumPy null | 76.633771 ms | 76.021342 ms | 1.035629 | `[0.972758,1.103108]` | 17.518% |
+| FNP/FNP null | 3.550371 ms | 3.391543 ms | 1.022091 | `[0.969999,1.077298]` | 13.863% |
+| NumPy/FNP effect | 79.082226 ms | **3.781588 ms** | **20.000211** | **`[19.561011,22.604769]`** | 19.908% |
+
+**Corrected median-CI gate: DECIDABLE_WIN.** The effect CI excludes 1.0. Its
+median lies beyond both null CI envelopes, and its 19.000211 deviation from
+unity exceeds the required twice-wider-null margin of 0.206215 (controlling
+null half-width 0.103108). CV is recorded only as provenance and is not the
+acceptance gate. Neither null was required to straddle unity.
+
+EXACT PARITY: before timing, both public arms returned identical dtype, shape,
+and every output byte; the workload checksum was `0248a37eb9e6e25d`.
+Per-round checksums also agreed across both nulls and the effect
+(`e5280939cc7667dd`).
+
+WORK ACCOUNTING: each arm receives one public call over the same 400,000
+elements and 6,400,000 codepoint slots. The candidate performs an all-ASCII
+scan and a case-map pass; NumPy's exact internal pass count was not
+instrumented. This is therefore an algorithmic public-surface comparison, not
+an iteration-count or less-work claim.
+
+BUILD AND RUN PROVENANCE: strict RCH built the exact benchmark from committed
+base `560dfddb` with `rch exec --base 560dfddb --clean-overlay` and only
+`crates/fnp-python/benches/common/mod.rs` plus
+`crates/fnp-python/benches/criterion_python_median_gate.rs` as explicit
+overlays. Cargo used the ship-grade `release-perf` profile. Builder
+`vmi1153651` (38.242.134.66) produced
+`release-perf/deps/criterion_python_median_gate-77b53e183b347063`; its SHA-256
+and byte count matched the copy transferred directly to the measurement host.
+That exact ELF ran on drained worker `vmi1227854`, which was re-enabled
+immediately after the process exited.
+
+HOST, THREAD, AND ISA PROVENANCE: the process ran on `vmi1227854`
+(109.123.245.77), `AMD EPYC Processor (with IBPB)`, 10 physical cores and 10
+logical threads, with all online CPUs 0-9 allowed; governor availability was
+honestly reported as unavailable. Compile-time SSE2 and AVX2 were true.
+Runtime SSE2, AVX, AVX2, F16C, and FMA were true; runtime AVX-512F and
+AVX-512BW were false. Host-wide quiescence passed fail-closed at process start
+and before the dual-null contract with zero busy CPUs observed.
+
+Configured controls were Rayon=4 and OpenBLAS/OMP/MKL/NumExpr/BLIS=1. The
+OS `/proc/self/task` probes, rather than those requested values, observed one
+NumPy thread accruing 93 CPU ticks and four FNP Rayon threads accruing 16 total
+ticks over 11 repetitions. This result is therefore a four-active-thread FNP
+versus one-active-thread live NumPy chooser on the recorded topology, not a
+single-thread kernel claim.
+
+COUNTED_MECHANISM: one algorithmic class - the incumbent public string-case
+surface applies per-element string handling, while the candidate admits this
+fixed-width all-ASCII buffer to a parallel codepoint scan and map.
+
+**CHOOSER STATEMENT:** for a C-contiguous 400,000-element `U16` lowercase
+ASCII array on the recorded 10-core AVX2 host, with four FNP Rayon workers and
+one OS-observed active NumPy thread, choose `fnp.char.upper`: it was
+20.000211x faster with exact output-byte identity and a decisive corrected
+dual-null CI. Choose NumPy for non-ASCII data, other dtypes/layouts/sizes, or
+different thread/topology regimes until those routes are independently
+measured.
+
+Retry predicate: do not repeat this exact corpus on these artifacts and
+topology. Reopen only if NumPy or FNP changes the relevant string-case route,
+NumPy gains a vectorized fixed-width string kernel, the workload includes
+non-ASCII or a different Unicode width/layout, or a different observed-thread
+regime is the intended chooser. Any retry must retain exact nested incumbent
+identity, process-self ELF identity, exact byte parity, host-wide quiescence,
+both same-invocation nulls, OS-observed threads, and the corrected effect-CI
+plus twice-wider-null median gate.
+
+
 ## 2026-07-28 - HOLD-UNBANKED: ASCII `char.upper` end-to-end observation lacked the candidate null and execution provenance
 
 `BlackThrush`. Class-3 capability gap: NumPy has **no vectorized string-case

@@ -5508,6 +5508,179 @@ fn bench_class3_missing_capability_vs_numpy_median_gate(c: &mut Criterion) {
     });
 }
 
+/// Re-decide the 2026-07-28 `char.upper` HOLD row under the current campaign
+/// contract. The historical invocation had only a NumPy/NumPy null and omitted
+/// nested-callable, host, ISA, and observed-thread provenance.
+fn bench_char_upper_hold_redecision_median_gate(c: &mut Criterion) {
+    let _ = c;
+    const ELEMENTS: usize = 400_000;
+    const CODEPOINTS_PER_ELEMENT: usize = 16;
+    const THREAD_ACTIVITY_REPETITIONS: usize = 11;
+    const ROW: &str = "python_char_upper_ascii_u16_400k_hold_redecision";
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_char_upper_redecision")
+            .expect("char.upper redecision module");
+        fnp_python(&module).expect("initialize fnp_python char.upper redecision module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        assert_eq!(
+            rayon::current_num_threads(),
+            4,
+            "char.upper redecision requires the declared four-worker Rayon pool"
+        );
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260728)\n\
+                 alphabet = np.array(list('abcdefghijklmnopqrstuvwxyz'))\n\
+                 idx = rng.integers(0, 26, size=(400_000, 16))\n\
+                 up_a = np.array([''.join(row) for row in alphabet[idx]], dtype='U16')\n",
+            )
+            .expect("char.upper corpus CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("char.upper corpus setup");
+
+        let np_char = numpy.getattr("char").expect("numpy char namespace");
+        let np_upper = np_char.getattr("upper").expect("numpy char.upper");
+        let fnp_upper = module
+            .getattr("char")
+            .expect("fnp char namespace")
+            .getattr("upper")
+            .expect("fnp char.upper");
+        common::report_numpy_incumbent_identity(py, "char.upper", &np_upper);
+        assert!(
+            !np_upper.is(&fnp_upper),
+            "dispatch trap: incumbent char.upper resolved to the candidate callable"
+        );
+        common::report_incumbent_topology("fnp.char.upper", "numpy.char.upper");
+        println!(
+            "INCUMBENT_PIPELINE workload=char_upper_ascii_u16 \
+             candidate=fnp.char.upper incumbent=numpy.char.upper \
+             shared_timed_component=none inputs_shared_read_only=true"
+        );
+
+        let text = namespace.get_item("up_a").expect("up_a present");
+        let shape = text
+            .getattr("shape")
+            .expect("char.upper input shape")
+            .extract::<Vec<usize>>()
+            .expect("char.upper input shape vector");
+        let dtype = text
+            .getattr("dtype")
+            .expect("char.upper input dtype")
+            .str()
+            .expect("char.upper input dtype string")
+            .to_string();
+        let c_contiguous = text
+            .getattr("flags")
+            .expect("char.upper input flags")
+            .getattr("c_contiguous")
+            .expect("char.upper input C-contiguous flag")
+            .extract::<bool>()
+            .expect("char.upper input C-contiguous bool");
+        assert_eq!(shape, vec![ELEMENTS]);
+        assert_eq!(dtype, "<U16");
+        assert!(c_contiguous);
+        println!(
+            "ROUTE_PRECONDITIONS row={ROW} dtype=U16 shape={ELEMENTS} \
+             c_contiguous=true ascii_only=true total_codepoints={} \
+             native_parallel_gate={} rayon_pool_threads=4 \
+             candidate_route=try_zerocopy_unicode_ascii_case",
+            ELEMENTS * CODEPOINTS_PER_ELEMENT,
+            1 << 20,
+        );
+        println!(
+            "WORK_ACCOUNTING row={ROW} candidate_public_calls=1 incumbent_public_calls=1 \
+             candidate_elements={ELEMENTS} incumbent_elements={ELEMENTS} \
+             candidate_codepoint_slots={} incumbent_codepoint_slots={} \
+             candidate_codepoint_passes=2 incumbent_internal_passes=unmeasured \
+             more_work_verdict=no_less_work_claim",
+            ELEMENTS * CODEPOINTS_PER_ELEMENT,
+            ELEMENTS * CODEPOINTS_PER_ELEMENT,
+        );
+        println!(
+            "COUNTED_MECHANISM row={ROW} class=algorithmic \
+             incumbent=numpy_char_per_element_string_case \
+             candidate=parallel_ascii_codepoint_scan_plus_map"
+        );
+
+        let ours = fnp_upper.call1((&text,)).expect("fnp char.upper parity");
+        let theirs = np_upper.call1((&text,)).expect("numpy char.upper parity");
+        let candidate_outputs = [ours.clone()];
+        let incumbent_outputs = [theirs.clone()];
+        assert_workload_outputs_equal(&numpy, ROW, &candidate_outputs, &incumbent_outputs);
+        println!(
+            "PARITY row={ROW} outputs=1 dtype_shape_byte_identity=passed checksum={:016x}",
+            workload_checksum(&numpy, &candidate_outputs),
+        );
+
+        common::report_observed_thread_activity(ROW, "numpy", THREAD_ACTIVITY_REPETITIONS, || {
+            let output = np_upper
+                .call1((black_box(&text),))
+                .expect("numpy char.upper thread probe");
+            black_box(output);
+        });
+        common::report_observed_thread_activity(ROW, "fnp", THREAD_ACTIVITY_REPETITIONS, || {
+            let output = fnp_upper
+                .call1((black_box(&text),))
+                .expect("fnp char.upper thread probe");
+            black_box(output);
+        });
+
+        let mut observe_incumbent = || {
+            let started = Instant::now();
+            let output = np_upper
+                .call1((black_box(&text),))
+                .expect("numpy char.upper arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: workload_checksum(&numpy, &[output]),
+            }
+        };
+        let mut observe_candidate = || {
+            let started = Instant::now();
+            let output = fnp_upper
+                .call1((black_box(&text),))
+                .expect("fnp char.upper arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: workload_checksum(&numpy, &[output]),
+            }
+        };
+        let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+            ROW,
+            &mut observe_incumbent,
+            &mut observe_candidate,
+        );
+        let verdict = common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+        println!(
+            "HOLD_REDECISION row={ROW} verdict={verdict} \
+             incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+             ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+             incumbent_null_ratio={:.6} candidate_null_ratio={:.6} \
+             effect_ci_excludes_one={} corrected_dual_null_gate=true \
+             median_clause=true",
+            effect.arm_a_median_ns / 1_000_000.0,
+            effect.arm_b_median_ns / 1_000_000.0,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            incumbent_null.ratio_median,
+            candidate_null.ratio_median,
+            effect.ratio_ci_low > 1.0 || effect.ratio_ci_high < 1.0,
+        );
+    });
+}
+
 fn bench_bool_public_vs_numpy_median_gate(c: &mut Criterion) {
     let _ = c;
 
@@ -10136,6 +10309,10 @@ fn main() {
         (
             "bench_class3_missing_capability_vs_numpy_median_gate",
             bench_class3_missing_capability_vs_numpy_median_gate,
+        ),
+        (
+            "bench_char_upper_hold_redecision_median_gate",
+            bench_char_upper_hold_redecision_median_gate,
         ),
         (
             "bench_isin_f64_vs_numpy_median_gate",
