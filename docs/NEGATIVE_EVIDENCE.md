@@ -4,6 +4,62 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-31 - ISA CONTROL (EVIDENCE HARDENING, no production change): the exp/log AVX-512 divergence is ISA-driven, not numpy-version-driven
+
+`BlackThrush`, bead `deadlock-audit-gkznn` (already CLOSED 2026-07-12; this row
+does not reopen it). The shipped `numpy_explog_matches_libm()` ISA gate
+(`fnp-python/src/lib.rs:7626`) disables the native f64 `exp`/`log`/`log2`/`log10`
+route on `avx512f` hosts because numpy's AVX-512-SKX kernels are not byte-equal
+to the system libm there. That gate is a CORRECTNESS gate, and its original
+justification had a confound worth removing.
+
+THE CONFOUND: every byte-equal AVX2 sample in the shipped justification ran
+numpy 2.2.4 or 2.4.6, while the single divergent AVX-512 sample ran numpy
+2.3.5. No AVX2 host at 2.3.5 was ever sampled, so "AVX-512 diverges" and "numpy
+2.3.5 diverges" were not separated by the evidence. A future reader could have
+argued the gate was keyed on the wrong variable and removed it.
+
+VEHICLE, STATED PLAINLY: this run executed the body of
+`conformance_exp_log::f64_exp_log_numpy_vs_system_libm_byte_probe` verbatim as
+a standalone Python script over ssh, NOT the compiled test binary. No Rust
+artifact was built, so this row carries no executing-ELF hash and makes no
+timing claim. It is a numpy-versus-system-libm byte relation only, which is
+exactly what the diagnostic measures — `math.exp` and Rust's `f64::exp` call
+the same platform libm. 200,000 elements per op, seed 20260711, four ops.
+
+| host | numpy | avx512f / avx512_skx | byte_equal (exp/log/log2/log10) |
+|---|---|---|---|
+| hetzner1 | 2.3.5 | False / False | True, True, True, True (0 diffs) |
+| vmi1227854 | 2.4.6 | False / False | True, True, True, True (0 diffs) |
+| hetzner2 | 2.3.5 | True / True | **False, False, False, False** |
+
+Holding numpy at 2.3.5 across `hetzner1` and `hetzner2` and varying only the
+ISA flips the relation. The gate is keyed on the correct variable.
+
+COUNTED_MECHANISM: on `hetzner2` the diverging element counts over 200,000
+samples were 9,361 exp (4.68%), 883 log (0.44%), 629 log2 (0.31%), and 53,545
+log10 (26.77%); on both AVX2 hosts all four counts were 0 of 200,000. numpy
+dispatches its AVX-512-SKX f64 transcendental kernels only where `avx512f` is
+present; on every other x86-64 host its scalar path IS the system libm, so
+there is nothing for the native route to diverge from.
+
+REPLICATION: the `hetzner2` percentages reproduce the 2026-07-12 sample
+recorded in bead `deadlock-audit-gkznn` to the digit (4.68 / 0.44 / 0.31 /
+26.77), one ELF generation later and from an independently written script.
+That sample was previously single-run.
+
+No production change. The gate already does the right thing; this row upgrades
+its justification from confounded to controlled and adds an independent
+replication.
+
+Retry predicate: do not re-run this 2x2 on these three hosts. Re-run only if
+`numpy_explog_matches_libm()` is proposed for removal or relaxation, if an
+avx512f host appears whose numpy is built WITHOUT the SKX transcendental
+kernels (which would make the ISA flag over-broad and cost a real native win on
+that host), or if numpy ships f64 exp/log SIMD kernels for a non-AVX-512 ISA,
+which would silently invalidate the byte-equal half of this table. A
+non-x86-64 host is out of scope: the gate already returns false there.
+
 ## 2026-07-31 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): isolated int64 clickstream sessionization report - 5.72-7.96x vs live NumPy under release-perf
 
 `BlackThrush`, bead `franken_numpy-ixs5y.395`. This is an end-to-end product

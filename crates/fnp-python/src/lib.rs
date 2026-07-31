@@ -7622,6 +7622,14 @@ fn f64_over_under_event(value: f64, result: f64) -> bool {
 // The native route is enabled only where that byte parity is proven; AVX-512
 // and non-x86-64 hosts keep the numpy passthrough. Permanent per-host
 // diagnostic: conformance_exp_log::f64_exp_log_numpy_vs_system_libm_byte_probe.
+//
+// ISA CONTROL 2026-07-31 (ledger row of that date): the AVX2 samples above ran
+// numpy 2.2.4/2.4.6 while the divergent AVX-512 sample ran 2.3.5, so ISA and
+// numpy version were confounded. Re-running the diagnostic body on hz1 (numpy
+// 2.3.5, avx512f=false) returned byte_equal 4/4 with 0 diffs, versus hz2 (numpy
+// 2.3.5, avx512f=true) byte_equal false 4/4. Holding the numpy version fixed
+// and varying only the ISA flips the relation, so this gate is keyed on the
+// correct variable. Do not relax it to a version check.
 #[cfg(target_arch = "x86_64")]
 fn numpy_explog_matches_libm() -> bool {
     static LIBM_BYTE_EQUAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
