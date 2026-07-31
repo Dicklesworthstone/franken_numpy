@@ -9638,12 +9638,8 @@ for event_count in event_counts:
         let np_take = numpy.getattr("take").expect("numpy take");
         let fnp_diff = module.getattr("diff").expect("fnp diff");
         let np_diff = numpy.getattr("diff").expect("numpy diff");
-        let fnp_count_nonzero = module
-            .getattr("count_nonzero")
-            .expect("fnp count_nonzero");
-        let np_count_nonzero = numpy
-            .getattr("count_nonzero")
-            .expect("numpy count_nonzero");
+        let fnp_count_nonzero = module.getattr("count_nonzero").expect("fnp count_nonzero");
+        let np_count_nonzero = numpy.getattr("count_nonzero").expect("numpy count_nonzero");
         for (candidate, incumbent, surface) in [
             (&fnp_lexsort, &np_lexsort, "lexsort"),
             (&fnp_take, &np_take, "take"),
