@@ -833,6 +833,139 @@ impl<'py> RollingLoadSaturationArm<'py> {
     }
 }
 
+/// One arm of the clickstream sessionization job. Both arms hold their own
+/// module's `lexsort`, `take`, `diff`, and `count_nonzero` and execute the
+/// identical six public calls over the identical read-only inputs.
+struct ClickstreamSessionizationArm<'py> {
+    lexsort: Bound<'py, PyAny>,
+    take: Bound<'py, PyAny>,
+    diff: Bound<'py, PyAny>,
+    count_nonzero: Bound<'py, PyAny>,
+}
+
+impl<'py> ClickstreamSessionizationArm<'py> {
+    /// `sort_keys` is the pre-built `(event_time, user_id)` key tuple — NumPy's
+    /// LAST key is primary, so this orders events by user, then by time. The
+    /// tuple is constructed once outside the timer so neither arm pays tuple
+    /// allocation inside the measured region.
+    fn run(
+        &self,
+        sort_keys: &Bound<'py, PyAny>,
+        user_ids: &Bound<'py, PyAny>,
+        event_times: &Bound<'py, PyAny>,
+    ) -> (Duration, [Bound<'py, PyAny>; 6]) {
+        let started = Instant::now();
+        let session_order = self
+            .lexsort
+            .call1((black_box(sort_keys),))
+            .expect("session-order permutation");
+        let ordered_users = self
+            .take
+            .call1((black_box(user_ids), &session_order))
+            .expect("user column in session order");
+        let ordered_times = self
+            .take
+            .call1((black_box(event_times), &session_order))
+            .expect("timestamp column in session order");
+        let user_boundary = self
+            .diff
+            .call1((&ordered_users,))
+            .expect("user-boundary column");
+        let inter_event_gap = self
+            .diff
+            .call1((&ordered_times,))
+            .expect("inter-event gap column");
+        let user_transitions = self
+            .count_nonzero
+            .call1((&user_boundary,))
+            .expect("user-transition count");
+        let elapsed = started.elapsed();
+        (
+            elapsed,
+            [
+                session_order,
+                ordered_users,
+                ordered_times,
+                user_boundary,
+                inter_event_gap,
+                user_transitions,
+            ],
+        )
+    }
+
+    fn profile(
+        &self,
+        sort_keys: &Bound<'py, PyAny>,
+        user_ids: &Bound<'py, PyAny>,
+        event_times: &Bound<'py, PyAny>,
+    ) -> [f64; 6] {
+        const PROFILE_ROUNDS: usize = 7;
+        let mut order_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut gather_users_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut gather_times_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut boundary_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut gap_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        let mut transitions_ms = Vec::with_capacity(PROFILE_ROUNDS);
+        for _ in 0..PROFILE_ROUNDS {
+            let started = Instant::now();
+            let session_order = self
+                .lexsort
+                .call1((sort_keys,))
+                .expect("profile session-order permutation");
+            order_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            let ordered_users = self
+                .take
+                .call1((user_ids, &session_order))
+                .expect("profile user column in session order");
+            gather_users_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            let ordered_times = self
+                .take
+                .call1((event_times, &session_order))
+                .expect("profile timestamp column in session order");
+            gather_times_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            let user_boundary = self
+                .diff
+                .call1((&ordered_users,))
+                .expect("profile user-boundary column");
+            boundary_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            black_box(
+                self.diff
+                    .call1((&ordered_times,))
+                    .expect("profile inter-event gap column"),
+            );
+            gap_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+
+            let started = Instant::now();
+            black_box(
+                self.count_nonzero
+                    .call1((&user_boundary,))
+                    .expect("profile user-transition count"),
+            );
+            transitions_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+        }
+        let median = |samples: &mut Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        [
+            median(&mut order_ms),
+            median(&mut gather_users_ms),
+            median(&mut gather_times_ms),
+            median(&mut boundary_ms),
+            median(&mut gap_ms),
+            median(&mut transitions_ms),
+        ]
+    }
+}
+
 fn bench_median_gate_python_binary<'py>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     bench_name: &'static str,
@@ -9341,6 +9474,581 @@ rolling_window.flags.writeable = False
     });
 }
 
+/// Phase-2 Class-3 workload: turn a raw fortnight of clickstream events into the
+/// session-ordered event table an analyst cuts sessions from. This is the
+/// **permutation** class of whole job — order by a compound key, carry the
+/// payload columns through that order, then difference adjacent rows — which no
+/// other banked realistic row exercises (the f16 dynamic-range job is
+/// elementwise numeric, the access-control jobs are linear-algebra, the
+/// rolling-load job is a 1-D scan, and the entitlement job is set logic).
+///
+/// All six public candidate stages stay on independently implemented native
+/// int64 paths at every size. The corpus deliberately pins the packed composite
+/// span into `(1<<24, u64::MAX]` so the lexsort takes the parallel
+/// packed-composite pair sort — not the small-range counting sort and not
+/// NumPy's radix fallback — identically at all three sizes.
+fn bench_realistic_clickstream_sessionization_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const EVENT_COUNTS: [usize; 3] = [2_400_000, 4_800_000, 9_600_000];
+    const USER_COUNT: usize = 250_000;
+    const HORIZON_SECONDS: usize = 14 * 86_400;
+    const POWER_USER_COUNT: usize = 4_096;
+    const WORKLOAD_CONTRACT_ROUNDS: usize = 21;
+    const WORKLOAD_CONTRACT_MIN_OF: usize = 2;
+    const THREAD_ACTIVITY_REPETITIONS: usize = 5;
+    const THREADS: &str = "4";
+    const REQUIRED_BUILD_PROFILE: &str = "release-perf";
+
+    assert_eq!(
+        std::env::var("FNP_BENCH_PROFILE").as_deref(),
+        Ok(REQUIRED_BUILD_PROFILE),
+        "ship-grade sessionization evidence requires FNP_BENCH_PROFILE=release-perf"
+    );
+    let build_worker =
+        std::env::var("FNP_BUILD_WORKER").expect("FNP_BUILD_WORKER records the RCH build origin");
+    assert!(
+        !build_worker.trim().is_empty(),
+        "FNP_BUILD_WORKER must name the RCH build worker"
+    );
+    for variable in [
+        "RAYON_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(THREADS),
+            "{variable} must be explicitly pinned before workload timing"
+        );
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        THREADS
+            .parse::<usize>()
+            .expect("thread count constant is numeric"),
+        "Rayon pool width does not match the pinned workload configuration"
+    );
+    let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "unavailable".to_owned());
+    println!(
+        "WORKLOAD_RUNTIME workload=clickstream_sessionization_report host={host} \
+         build_worker={build_worker} build_profile={REQUIRED_BUILD_PROFILE} \
+         rayon_threads={} RAYON_NUM_THREADS={} OPENBLAS_NUM_THREADS={} \
+         OMP_NUM_THREADS={} MKL_NUM_THREADS={} trj_used=false",
+        rayon::current_num_threads(),
+        THREADS,
+        THREADS,
+        THREADS,
+        THREADS,
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_clickstream_sessionization_workload")
+            .expect("clickstream sessionization module");
+        fnp_python(&module).expect("initialize fnp_python clickstream sessionization module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(format!(
+                r#"
+import numpy as np
+rng = np.random.default_rng(20260731)
+event_counts = {EVENT_COUNTS:?}
+user_count = {USER_COUNT}
+horizon_seconds = {HORIZON_SECONDS}
+power_user_count = {POWER_USER_COUNT}
+max_events = event_counts[-1]
+
+# A fortnight of one-second-resolution product clickstream. Traffic is
+# heavy-tailed across users the way real telemetry is: a small set of power
+# users emits a large share of the events while the long tail emits a handful
+# each. The timed job starts from this already collected, arrival-ordered
+# stream, exactly as a sessionization notebook would.
+user_ids = rng.integers(0, user_count, size=max_events, dtype=np.int64)
+power_user_events = max_events // 5
+user_ids[:power_user_events] = rng.integers(
+    0,
+    power_user_count,
+    size=power_user_events,
+    dtype=np.int64,
+)
+rng.shuffle(user_ids)
+event_times = rng.integers(0, horizon_seconds, size=max_events, dtype=np.int64)
+
+# Pin the per-key spans so every size point takes the identical source-pinned
+# route: positions 0 and 1 carry both extremes of both keys, so every prefix
+# slice has exactly the same span and the same packed composite range.
+user_ids[0] = 0
+user_ids[1] = user_count - 1
+event_times[0] = 0
+event_times[1] = horizon_seconds - 1
+
+events_by_size = []
+corpus_structure = []
+for event_count in event_counts:
+    users = np.ascontiguousarray(user_ids[:event_count])
+    times = np.ascontiguousarray(event_times[:event_count])
+    assert users.dtype == np.int64
+    assert times.dtype == np.int64
+    assert users.ndim == 1 and times.ndim == 1
+    assert users.flags.c_contiguous and times.flags.c_contiguous
+    assert users.size == event_count and times.size == event_count
+    user_span = int(users.max()) - int(users.min()) + 1
+    time_span = int(times.max()) - int(times.min()) + 1
+    assert user_span == user_count
+    assert time_span == horizon_seconds
+    composite_range = user_span * time_span
+    # Above the packed counting-sort ceiling and inside the u64 packing ceiling:
+    # together these pin the parallel composite pair-sort route at every size.
+    assert composite_range > (1 << 24)
+    assert composite_range <= (1 << 64) - 1
+    # Both the gather and the first-difference parallel gates need the output to
+    # clear 1<<21 elements.
+    assert event_count >= (1 << 21)
+    assert event_count - 1 >= (1 << 21)
+    # How many events share an EXACT (user, time) key. These are the rows whose
+    # order is decided purely by the stable tie-break, so a non-zero count is what
+    # makes the byte-identity assertion below a real test of that contract rather
+    # than a vacuous one.
+    packed = (times - times.min()) + (users - users.min()) * time_span
+    _, key_counts = np.unique(packed, return_counts=True)
+    exact_key_collisions = int((key_counts - 1).sum())
+    distinct_users_present = int(np.unique(users).size)
+    corpus_structure.append((exact_key_collisions, distinct_users_present))
+    users.flags.writeable = False
+    times.flags.writeable = False
+    # NumPy's LAST lexsort key is primary: this orders by user, then by time.
+    events_by_size.append((users, times, (times, users)))
+"#
+            ))
+            .expect("clickstream sessionization setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("clickstream sessionization corpus setup");
+
+        let fnp_lexsort = module.getattr("lexsort").expect("fnp lexsort");
+        let np_lexsort = numpy.getattr("lexsort").expect("numpy lexsort");
+        let fnp_take = module.getattr("take").expect("fnp take");
+        let np_take = numpy.getattr("take").expect("numpy take");
+        let fnp_diff = module.getattr("diff").expect("fnp diff");
+        let np_diff = numpy.getattr("diff").expect("numpy diff");
+        let fnp_count_nonzero = module
+            .getattr("count_nonzero")
+            .expect("fnp count_nonzero");
+        let np_count_nonzero = numpy
+            .getattr("count_nonzero")
+            .expect("numpy count_nonzero");
+        for (candidate, incumbent, surface) in [
+            (&fnp_lexsort, &np_lexsort, "lexsort"),
+            (&fnp_take, &np_take, "take"),
+            (&fnp_diff, &np_diff, "diff"),
+            (&fnp_count_nonzero, &np_count_nonzero, "count_nonzero"),
+        ] {
+            assert!(
+                !candidate.is(incumbent),
+                "{surface}: candidate callable aliases NumPy"
+            );
+            common::report_numpy_incumbent_identity(py, surface, incumbent);
+        }
+        let numpy_cpu_features = numpy
+            .getattr("_core")
+            .expect("numpy core")
+            .getattr("_multiarray_umath")
+            .expect("numpy multiarray umath")
+            .getattr("__cpu_features__")
+            .expect("numpy runtime CPU features")
+            .str()
+            .expect("numpy runtime CPU feature str")
+            .extract::<String>()
+            .expect("numpy runtime CPU feature string");
+        println!(
+            "NUMPY_RUNTIME_ISA workload=clickstream_sessionization_report \
+             runtime_cpu_features={numpy_cpu_features}"
+        );
+        common::report_incumbent_topology(
+            "fnp.workload.clickstream_sessionization_report",
+            "numpy.workload.clickstream_sessionization_report",
+        );
+        println!(
+            "INCUMBENT_ISOLATION_PROOF workload=clickstream_sessionization_report \
+             candidate=fnp.lexsort+fnp.take+fnp.take+fnp.diff+fnp.diff+fnp.count_nonzero \
+             incumbent=numpy.lexsort+numpy.take+numpy.take+numpy.diff+numpy.diff+numpy.count_nonzero \
+             candidate_callable_identity_distinct=passed \
+             shared_timed_component=none candidate_stages_all_native=true \
+             inputs_shared_read_only=true numpy_live_calls_per_observation=6 \
+             numpy_result_cache=none callable_handles_bound_once=true \
+             sort_key_tuple_built_once_outside_timer=true"
+        );
+        for (stage, route, pin) in [
+            (
+                "session_order",
+                "native_int64_parallel_packed_composite_lexsort",
+                "fnp-python/src/lib.rs:lexsort->try_native_lexsort_composite(tuple-of-2 1-D int64 keys,axis=-1,n>=1<<18,threads>=2,packed-span>1<<24,packed-span<=u64::MAX)",
+            ),
+            (
+                "ordered_users",
+                "native_int64_parallel_zerocopy_byte_gather",
+                "fnp-python/src/lib.rs:take->try_zerocopy_int_take(int64 source,int64 indices,axis=None,mode=raise,n>=1<<21,threads>=2)",
+            ),
+            (
+                "ordered_times",
+                "native_int64_parallel_zerocopy_byte_gather",
+                "fnp-python/src/lib.rs:take->try_zerocopy_int_take(int64 source,int64 indices,axis=None,mode=raise,n>=1<<21,threads>=2)",
+            ),
+            (
+                "user_boundary",
+                "native_int64_parallel_first_difference",
+                "fnp-python/src/lib.rs:diff->try_zerocopy_int_diff(int64,1-D,n=1,axis=-1)->diff_typed(out>=1<<21,threads>=2)",
+            ),
+            (
+                "inter_event_gap",
+                "native_int64_parallel_first_difference",
+                "fnp-python/src/lib.rs:diff->try_zerocopy_int_diff(int64,1-D,n=1,axis=-1)->diff_typed(out>=1<<21,threads>=2)",
+            ),
+            (
+                "user_transitions",
+                "native_int64_zerocopy_count_nonzero_SERIAL",
+                "fnp-python/src/lib.rs:count_nonzero->try_zerocopy_count_nonzero(int64 exact ndarray,axis=None,keepdims=false)->count_nonzero_typed(serial scalar loop)",
+            ),
+        ] {
+            println!(
+                "ROUTE_DISCLOSURE workload=clickstream_sessionization_report stage={stage} \
+                 candidate_route={route} source_pin={pin}"
+            );
+        }
+        // Stated up front rather than discovered in the profile: the sixth stage
+        // has no parallel arm. It is native, but it is not expected to win, and
+        // the whole-job ratio is reported with that stage inside the timer.
+        println!(
+            "ROUTE_CAVEAT workload=clickstream_sessionization_report \
+             stage=user_transitions candidate_arm=serial_scalar_loop \
+             incumbent_arm=numpy_simd_count expected_stage_direction=parity_or_loss \
+             counted_in_candidate_total=true"
+        );
+        println!(
+            "ROUTE_PRECONDITIONS workload=clickstream_sessionization_report \
+             dtype=int64 ndim=1 c_contiguous=true keys=2 lexsort_axis=-1 \
+             primary_key=user_id secondary_key=event_time_seconds \
+             user_span={USER_COUNT} time_span={HORIZON_SECONDS} \
+             packed_composite_range={} lexsort_counting_sort_ceiling={} \
+             min_lexsort_elements={} lexsort_composite_min={} \
+             min_gather_elements={} take_parallel_min={} \
+             min_difference_outputs={} diff_parallel_min={} \
+             rayon_threads_min=2 index_dtype=intp_int64 \
+             candidate_auxiliary_buffers=composite_u64+pair_u64_u32 \
+             contract_rounds={WORKLOAD_CONTRACT_ROUNDS} \
+             contract_min_of={WORKLOAD_CONTRACT_MIN_OF}",
+            USER_COUNT * HORIZON_SECONDS,
+            1u64 << 24,
+            EVENT_COUNTS[0],
+            1 << 18,
+            EVENT_COUNTS[0],
+            1 << 21,
+            EVENT_COUNTS[0] - 1,
+            1 << 21,
+        );
+        println!(
+            "RUNTIME_ISA_BINDING workload=clickstream_sessionization_report \
+             candidate_process_features=ISA_BASELINE_above \
+             incumbent_dispatch_features=NUMPY_RUNTIME_ISA_above \
+             same_process_same_host_all_rows=true"
+        );
+
+        let incumbent = ClickstreamSessionizationArm {
+            lexsort: np_lexsort,
+            take: np_take,
+            diff: np_diff,
+            count_nonzero: np_count_nonzero,
+        };
+        let candidate = ClickstreamSessionizationArm {
+            lexsort: fnp_lexsort,
+            take: fnp_take,
+            diff: fnp_diff,
+            count_nonzero: fnp_count_nonzero,
+        };
+        let events_by_size = namespace
+            .get_item("events_by_size")
+            .expect("clickstream event columns by size");
+        let corpus_structure = namespace
+            .get_item("corpus_structure")
+            .expect("clickstream corpus tie structure by size");
+
+        let mut scaling = Vec::with_capacity(EVENT_COUNTS.len());
+        for (size_index, event_count) in EVENT_COUNTS.into_iter().enumerate() {
+            let permutation_elements = event_count;
+            let gathered_elements = 2 * event_count;
+            let differenced_elements = 2 * (event_count - 1);
+            let counted_elements = event_count - 1;
+            let output_elements = 3 * event_count + 2 * (event_count - 1) + 1;
+            let candidate_auxiliary_elements = 2 * event_count;
+            let row = format!("workload_clickstream_sessionization_{event_count}events");
+            println!(
+                "WORKLOAD_CONFIG row={row} user_job=clickstream_sessionization_report \
+                 host={host} build_worker={build_worker} \
+                 invocation_id={} configured_threads={THREADS} \
+                 events={event_count} cadence=one_second horizon_days=14 \
+                 users={USER_COUNT} power_users={POWER_USER_COUNT} dtype=int64 \
+                 distribution=heavy_tailed_power_user_clickstream \
+                 stages=lexsort_session_order,take_user_column,take_time_column,\
+diff_user_boundary,diff_inter_event_gap,count_nonzero_user_transitions \
+                 output=session_ordered_event_table_boundary_column_gap_column_transition_count \
+                 matched_config=same_process_same_inputs_same_keys_no_result_cache \
+                 target_user=product_analytics_sessionization",
+                common::bench_invocation_id(),
+            );
+            let size_entry = events_by_size
+                .get_item(size_index)
+                .expect("event columns for size");
+            let user_ids = size_entry.get_item(0).expect("user id column");
+            let event_times = size_entry.get_item(1).expect("event time column");
+            let sort_keys = size_entry.get_item(2).expect("lexsort key tuple");
+
+            let (_, incumbent_output) = incumbent.run(&sort_keys, &user_ids, &event_times);
+            let (_, candidate_output) = candidate.run(&sort_keys, &user_ids, &event_times);
+            assert_workload_outputs_equal(&numpy, &row, &candidate_output, &incumbent_output);
+            println!(
+                "WORK_ACCOUNTING row={row} candidate_public_calls=6 incumbent_public_calls=6 \
+                 candidate_permutation_elements={permutation_elements} \
+                 incumbent_permutation_elements={permutation_elements} \
+                 candidate_gathered_elements={gathered_elements} \
+                 incumbent_gathered_elements={gathered_elements} \
+                 candidate_differenced_elements={differenced_elements} \
+                 incumbent_differenced_elements={differenced_elements} \
+                 candidate_counted_elements={counted_elements} \
+                 incumbent_counted_elements={counted_elements} \
+                 candidate_output_elements={output_elements} \
+                 incumbent_output_elements={output_elements} \
+                 candidate_auxiliary_elements={candidate_auxiliary_elements} \
+                 incumbent_auxiliary_elements=0 \
+                 more_work_verdict=candidate_materializes_two_extra_full_length_buffers \
+                 extra_candidate_elements={candidate_auxiliary_elements}"
+            );
+            let structure = corpus_structure
+                .get_item(size_index)
+                .expect("corpus tie structure for size");
+            let exact_key_collisions = structure
+                .get_item(0)
+                .expect("exact key collision count")
+                .extract::<usize>()
+                .expect("collision count is an integer");
+            let distinct_users_present = structure
+                .get_item(1)
+                .expect("distinct user count")
+                .extract::<usize>()
+                .expect("distinct user count is an integer");
+            println!(
+                "CORPUS_TIE_STRUCTURE row={row} exact_user_time_key_collisions={exact_key_collisions} \
+                 distinct_users_present={distinct_users_present} \
+                 tie_break_contract_exercised={}",
+                exact_key_collisions > 0,
+            );
+            println!(
+                "PARITY row={row} outputs=6 dtype_shape_byte_identity=passed \
+                 stable_tie_order_matches_numpy_lexsort=passed checksum={:016x}",
+                workload_checksum(&numpy, &candidate_output),
+            );
+
+            common::report_observed_thread_activity(
+                &row,
+                "numpy",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    let (_, outputs) = incumbent.run(&sort_keys, &user_ids, &event_times);
+                    black_box(outputs);
+                },
+            );
+            common::report_observed_thread_activity(
+                &row,
+                "fnp",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    let (_, outputs) = candidate.run(&sort_keys, &user_ids, &event_times);
+                    black_box(outputs);
+                },
+            );
+
+            let incumbent_profile = incumbent.profile(&sort_keys, &user_ids, &event_times);
+            let candidate_profile = candidate.profile(&sort_keys, &user_ids, &event_times);
+            let candidate_total = candidate_profile.iter().sum::<f64>();
+            const STAGE_NAMES: [&str; 6] = [
+                "session_order",
+                "ordered_users",
+                "ordered_times",
+                "user_boundary",
+                "inter_event_gap",
+                "user_transitions",
+            ];
+            let (target_stage, target_ms) = STAGE_NAMES
+                .into_iter()
+                .zip(candidate_profile)
+                .max_by(|left, right| left.1.total_cmp(&right.1))
+                .expect("six sessionization profile stages");
+            for ((stage, incumbent_ms), candidate_ms) in STAGE_NAMES
+                .into_iter()
+                .zip(incumbent_profile)
+                .zip(candidate_profile)
+            {
+                println!(
+                    "PROFILE_STAGE row={row} arm_pair=numpy_fnp stage={stage} \
+                     incumbent_median_ms={incumbent_ms:.6} \
+                     candidate_median_ms={candidate_ms:.6} \
+                     stage_ratio_numpy_over_fnp={:.6}",
+                    incumbent_ms / candidate_ms,
+                );
+            }
+            let target_fraction = target_ms / candidate_total;
+            println!(
+                "PROFILE_SUMMARY row={row} target_stage={target_stage} \
+                 target_candidate_ms={target_ms:.6} candidate_stage_sum_ms={candidate_total:.6} \
+                 target_self_fraction_pct={:.3} amdahl_remove_ceiling={:.6} \
+                 shared_timed_component=none",
+                target_fraction * 100.0,
+                1.0 / (1.0 - target_fraction),
+            );
+
+            let mut observe_incumbent = || {
+                let (elapsed, outputs) = incumbent.run(&sort_keys, &user_ids, &event_times);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let mut observe_candidate = || {
+                let (elapsed, outputs) = candidate.run(&sort_keys, &user_ids, &event_times);
+                common::ContractObservation {
+                    elapsed,
+                    checksum: workload_checksum(&numpy, &outputs),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &row,
+                    &mut observe_incumbent,
+                    &mut observe_candidate,
+                    WORKLOAD_CONTRACT_ROUNDS,
+                    WORKLOAD_CONTRACT_MIN_OF,
+                );
+            let verdict =
+                common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+            println!(
+                "WORKLOAD_SIZE_POINT workload=clickstream_sessionization_report row={row} \
+                 host={host} build_worker={build_worker} \
+                 invocation_id={} configured_threads={THREADS} \
+                 events={event_count} users={USER_COUNT} \
+                 incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ratio={:.6} candidate_null_ratio={:.6} \
+                 verdict={verdict} gate=effect_bootstrap_ci_plus_2x_controlling_null_margin \
+                 cv_gate=false incumbent_ns_per_event={:.6} candidate_ns_per_event={:.6}",
+                common::bench_invocation_id(),
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+                effect.arm_a_median_ns / event_count as f64,
+                effect.arm_b_median_ns / event_count as f64,
+            );
+            scaling.push((effect, incumbent_null, candidate_null));
+        }
+
+        let first_ratio = scaling.first().expect("first scaling point").0.ratio_median;
+        let last_ratio = scaling.last().expect("last scaling point").0.ratio_median;
+        let ratio_min = scaling
+            .iter()
+            .map(|(effect, _, _)| effect.ratio_median)
+            .fold(f64::INFINITY, f64::min);
+        let ratio_max = scaling
+            .iter()
+            .map(|(effect, _, _)| effect.ratio_median)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let ratio_spread = ratio_max / ratio_min - 1.0;
+        let monotonic_up = scaling
+            .windows(2)
+            .all(|points| points[1].0.ratio_median >= points[0].0.ratio_median);
+        let monotonic_down = scaling
+            .windows(2)
+            .all(|points| points[1].0.ratio_median <= points[0].0.ratio_median);
+        let shape = if ratio_spread <= 0.15 {
+            "FLAT_PER_EVENT_COST"
+        } else if monotonic_up && last_ratio >= first_ratio * 1.15 {
+            "WIDENING_WITH_EVENTS"
+        } else if monotonic_down && last_ratio <= first_ratio * 0.85 {
+            "NARROWING_WITH_EVENTS"
+        } else {
+            "MIXED_OR_NOISE"
+        };
+        println!(
+            "SCALING_SHAPE workload=clickstream_sessionization_report \
+             dimension=event_count users={USER_COUNT} horizon_seconds={HORIZON_SECONDS} \
+             sizes=[{},{},{}] ratios=[{:.6},{:.6},{:.6}] \
+             ratio_spread={ratio_spread:.6} classification={shape}",
+            EVENT_COUNTS[0],
+            EVENT_COUNTS[1],
+            EVENT_COUNTS[2],
+            scaling[0].0.ratio_median,
+            scaling[1].0.ratio_median,
+            scaling[2].0.ratio_median,
+        );
+        let all_decidable_wins = scaling
+            .iter()
+            .all(|(effect, incumbent_null, candidate_null)| {
+                common::dual_null_contract_verdict(*effect, *incumbent_null, *candidate_null)
+                    == "DECIDABLE_WIN"
+            });
+        let any_decidable_regression =
+            scaling
+                .iter()
+                .any(|(effect, incumbent_null, candidate_null)| {
+                    common::dual_null_contract_verdict(*effect, *incumbent_null, *candidate_null)
+                        == "DECIDABLE_REGRESSION"
+                });
+        let (decision, reason) = if all_decidable_wins {
+            (
+                "choose_fnp",
+                "all_three_effect_CIs_and_2x_null_margins_clear",
+            )
+        } else if any_decidable_regression {
+            (
+                "choose_numpy",
+                "at_least_one_size_is_a_decidable_regression",
+            )
+        } else {
+            (
+                "choose_numpy_pending_remeasure",
+                "at_least_one_size_is_statistically_undecided",
+            )
+        };
+        println!(
+            "CHOOSER_SCOPE workload=clickstream_sessionization_report \
+             target_user=product_analytics_sessionization dtype=int64 \
+             event_range={}..={} users={USER_COUNT} horizon_seconds={HORIZON_SECONDS} \
+             keys=2 primary=user_id secondary=event_time_seconds \
+             candidate_profile={REQUIRED_BUILD_PROFILE} build_worker={build_worker} \
+             measurement_host={host} configured_threads={THREADS} \
+             thread_activity_recorded_per_row=true \
+             decision_requires_all_three_effects_and_both_nulls \
+             generalization_beyond_measured_shape=false",
+            EVENT_COUNTS[0], EVENT_COUNTS[2],
+        );
+        println!(
+            "CHOOSER_STATEMENT workload=clickstream_sessionization_report decision={decision} \
+             reason={reason} \
+             measured_scope=int64_two_key_clickstream_sessionization_2.4M_to_9.6M_events \
+             incumbent=numpy_live_same_invocation_no_result_cache \
+             outside_scope=run_same_contract_before_choosing"
+        );
+    });
+}
+
 fn bench_bool_storage_bytes_median_gate(c: &mut Criterion) {
     let _ = c;
     const N: usize = 8_000_000;
@@ -9456,6 +10164,10 @@ fn main() {
         (
             "bench_realistic_rolling_load_saturation_vs_numpy_median_gate",
             bench_realistic_rolling_load_saturation_vs_numpy_median_gate,
+        ),
+        (
+            "bench_realistic_clickstream_sessionization_vs_numpy_median_gate",
+            bench_realistic_clickstream_sessionization_vs_numpy_median_gate,
         ),
         (
             "bench_realistic_event_attribution_scatter_vs_numpy_median_gate",

@@ -4,6 +4,248 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-31 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): isolated int64 clickstream sessionization report - 5.72-7.96x vs live NumPy under release-perf
+
+`BlackThrush`, bead `franken_numpy-ixs5y.395`. This is an end-to-end product
+analytics sessionization job, not another microbenchmark. It starts from 2.4M
+to 9.6M raw one-second-resolution clickstream events collected in arrival order
+over a fortnight, orders them by user and then by time, carries both payload
+columns through that order, differences adjacent rows to produce the
+user-boundary and inter-event-gap columns, and counts the user transitions.
+Each arm independently executes the same six public calls over the same
+read-only `int64` input columns: `lexsort((event_time, user_id))`, `take`
+twice, `diff` twice, and `count_nonzero`.
+
+WHY THIS WORKLOAD IS REPRESENTATIVE: sessionization is the first thing an
+analytics team does to a raw event log, and the artifact it produces — the
+session-ordered event table plus the per-event boundary and gap columns — is
+what every downstream session metric is computed from. A one-second cadence
+over a 14-day horizon, 250,000 users with a heavy-tailed power-user head, and
+exact `int64` identifiers are recognizable operational units. The report
+retains both full reordered columns, both difference columns, and the scalar
+transition count, so the timed job includes the materialized data an analyst
+cuts sessions from rather than only a summary number. The three input sizes
+span 2.4M to 9.6M events and exercise the same source-pinned candidate routes
+throughout.
+
+WHY THIS CLASS WAS UNCLAIMED: the previously banked realistic rows cover
+elementwise numerics (f16 dynamic range), linear algebra (access-control and
+critical-access exposure), a 1-D scan (rolling load), and set logic
+(entitlement reconciliation). **None of them orders data.** Sessionization is
+the canonical PERMUTATION job — sort by a compound key, gather the payload
+columns through that permutation, then difference neighbours — and it is where
+most event-analytics pipelines actually spend their wall clock.
+
+`bench_elf_sha256=f2660ab2d45f78adcfcf50e0d47f7035031ef5f28c48d63fc1f143a96ade9d1c`
+(218,174,240 bytes), self-reported by the executing process from
+`/proc/self/exe`, invocation
+`000000000000000018c73a9db1988d21-001ec3f5`. The preserved 85-line execution
+log at `.rch-bench-replay/sessionization-395-release-perf.log` has SHA-256
+`428cea4e6178f98b18fed22afb442e283f2c1fa32637d072b0628d471ebb6b5b`.
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy median ratios and bootstrap CI95s were 1.003726 `[0.984610,1.033844]`, 1.021242 `[0.988228,1.042193]`, and 1.014307 `[0.986198,1.031964]` at 2.4M, 4.8M, and 9.6M events.
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratios and
+bootstrap CI95s were 1.036976 `[0.923228,1.134623]`, 1.058157
+`[1.000175,1.068756]`, and 0.984099 `[0.966486,1.018874]` at the same three
+points.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c73a9db1988d21-001ec3f5 measured_ratio=5.719589x
+
+**Incumbent isolation proof:** candidate=fnp.workload.clickstream_sessionization_report incumbent=numpy.workload.clickstream_sessionization_report shared_timed_component=none
+
+The process proved that the incumbent callables were the live `numpy.lexsort`,
+`numpy.take`, `numpy.diff`, and `numpy.count_nonzero` objects from NumPy 2.4.6,
+backed by `_multiarray_umath.cpython-313-x86_64-linux-gnu.so` with the
+incumbent hash above — the same NumPy artifact hash as the banked rolling-load
+row, so the two rows are directly comparable. They were object-distinct from
+the FNP callables. Every timed NumPy observation executed all six live calls in
+the same process and invocation as FNP; callable handles were bound once and
+the `(event_time, user_id)` key tuple was built once outside the timer, but no
+NumPy result or intermediate was cached. The candidate's source-pinned routes
+were:
+
+| report stage | candidate route | source-pinned admission condition |
+|---|---|---|
+| session order | native parallel packed-composite int64 lexsort | tuple of two 1-D `int64` keys, `axis=-1`, `n >= 1<<18`, Rayon >= 2, packed span in `(1<<24, u64::MAX]` |
+| user column in session order | native parallel zero-copy int64 byte gather | exact `int64` ndarray source, `int64` indices, `axis=None`, `mode="raise"`, `n >= 1<<21`, Rayon >= 2 |
+| timestamp column in session order | native parallel zero-copy int64 byte gather | as above |
+| user-boundary column | native parallel int64 first difference | 1-D `int64`, `n=1`, `axis=-1`, output `>= 1<<21`, Rayon >= 2 |
+| inter-event gap column | native parallel int64 first difference | as above |
+| user-transition count | native zero-copy int64 count_nonzero, SERIAL | non-empty exact `int64` ndarray, `axis=None`, no keepdims |
+
+ROUTE CAVEAT DECLARED BEFORE TIMING, NOT DISCOVERED AFTER: the sixth stage has
+no parallel arm. The harness printed `ROUTE_CAVEAT ...
+expected_stage_direction=parity_or_loss counted_in_candidate_total=true` before
+any measurement, and that stage stayed inside the timed job. It then measured
+0.993677x at 2.4M — a per-stage loss, as predicted — before turning into
+1.202626x and 1.120534x at the two larger sizes where the count becomes
+memory-bound.
+
+ROUTE PINNED BY CONSTRUCTION: the corpus writes both extremes of both keys into
+positions 0 and 1, so every prefix slice has identical per-key spans. The
+packed composite range is therefore exactly 302,400,000,000 at all three sizes
+— above the `1<<24` packed counting-sort ceiling and inside the `u64` packing
+ceiling — which pins the parallel composite pair-sort rather than the
+small-range counting sort or NumPy's radix fallback, identically at every size
+point.
+
+BUILD AND RUN PROVENANCE: the harness was built under strict RCH from clean
+base `310889a2` with `--clean-overlay --overlay-path
+crates/fnp-python/benches` and Cargo's ship-grade `release-perf` profile. RCH
+pool worker `ovh-a` (builder hostname `fixmydocuments`, alias `fmd`,
+51.222.245.56) produced
+`release-perf/deps/criterion_python_median_gate-fdb8ed9f77c20ca9`. The
+builder-side artifact and the copy transferred to the measurement host both had
+the executing ELF hash and byte count above. The copied ELF ran on drained
+worker `vmi1227854`; that worker was re-enabled after the process exited.
+
+HOST, THREAD, AND ISA PROVENANCE: every row ran on `vmi1227854`
+(109.123.245.77), `AMD EPYC Processor (with IBPB)`, 10 physical cores, 10
+logical threads, and online/allowed CPUs 0-9; governor availability was
+honestly reported as unavailable. Compile-time SSE2 and AVX2 were true. Runtime
+SSE2, AVX, AVX2, F16C, and FMA were true; runtime AVX-512F and AVX-512BW were
+false. NumPy reported x86-v3, AVX2, and FMA3 enabled and every AVX-512 family
+disabled. Rayon, OpenBLAS, OMP, and MKL were each explicitly pinned to four
+threads, and the Rayon pool asserted four workers.
+
+The per-row `/proc/self/task` probes observed one NumPy thread and five FNP
+threads (main plus four Rayon workers) actually accruing CPU ticks at all three
+sizes. NumPy/FNP total tick deltas were 504/299, 1150/649, and 2604/1687. **FNP
+consumed 59%, 56%, and 65% of NumPy's total CPU while also spreading it across
+four workers**, so this is not a case of buying wall clock with cores: the
+candidate does less aggregate CPU work as well as less wall-clock work. This
+remains a four-thread FNP versus single-active-thread live NumPy chooser on the
+recorded topology, not a single-thread kernel claim.
+
+HOST-WIDE QUIESCENCE, INCLUDING THE ONE THAT WAS NOT PERFECT: fail-closed
+quiescence passed at process start and before every contract. Maximum observed
+busy fractions were 0.000 at process preflight, then 0.065, 0.000, and **0.167**
+before the 2.4M, 4.8M, and 9.6M contracts, against a 0.200 refusal threshold.
+The 9.6M point was therefore the least quiet of the three and sat closest to
+refusal; it is also the point with the narrowest effect CI and the smallest
+required margin, so the residual activity did not manufacture the win. An
+earlier attempt at this same row was ABORTED and discarded unmeasured because
+an unrelated `fp-bench` process at ~297% CPU was running on the host; rch drain
+does not prevent that, because benchmarks launched directly over ssh never
+enter the rch queue.
+
+WORK ACCOUNTING CAME BEFORE INTERPRETATION. Both arms make six public calls and
+materialize identical outputs: an n-element permutation, 2n gathered elements,
+2(n-1) differenced elements, n-1 counted elements, and 5n-1 total output
+elements (11,999,999 / 23,999,999 / 47,999,999). The candidate additionally
+materializes two full-length auxiliary buffers the incumbent never builds — a
+`u64` packed composite and a `(u64, u32)` pair array — for 4,800,000 /
+9,600,000 / 19,200,000 extra elements. The harness therefore records
+`candidate_materializes_two_extra_full_length_buffers`. The win is not credited
+to doing less bookkeeping.
+
+Exact dtype, shape, and every output byte matched for all six outputs at all
+three sizes. Pre-timing mixed checksums were `95ba31c8723340d4`,
+`c8ac2ede57981dd0`, and `9397553fb49c2b31`; the incumbent A/A, candidate A/A,
+and effect phases each reproduced one identical checksum per size
+(`d54f102760dec4a6`, `c5547d8c0fc0ee07`, and `113d30c379ca692d`).
+
+TIE-BREAK CONTRACT ACTUALLY EXERCISED: the corpus contains 29, 145, and 513
+events sharing an EXACT `(user, time)` key, whose order is decided purely by
+the stable tie-break rather than by the keys. The harness printed those counts
+with `tie_break_contract_exercised=true` per row, so byte-identity here is a
+real test of the tie-break contract and not a vacuous one. The equivalence was
+also pre-verified in Python before any measurement was spent: sorting by
+`(packed composite, original index)` reproduces `np.lexsort` exactly at all
+three sizes.
+
+| events | NumPy/NumPy null ratio (CI95) | FNP/FNP null ratio (CI95) | NumPy median | FNP median | NumPy/FNP ratio (bootstrap CI95) | required 2x null delta | verdict |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 2,400,000 | 1.003726 `[0.984610,1.033844]` | 1.036976 `[0.923228,1.134623]` | 841.469325 ms | 106.730803 ms | **7.963376x** `[6.385590,8.652738]` | 0.269246 | DECIDABLE_WIN |
+| 4,800,000 | 1.021242 `[0.988228,1.042193]` | 1.058157 `[1.000175,1.068756]` | 1943.458392 ms | 301.798607 ms | **6.577998x** `[5.916733,6.731471]` | 0.137513 | DECIDABLE_WIN |
+| 9,600,000 | 1.014307 `[0.986198,1.031964]` | 0.984099 `[0.966486,1.018874]` | 4503.134527 ms | 796.292571 ms | **5.719589x** `[5.595230,5.884827]` | 0.067029 | DECIDABLE_WIN |
+
+All three 21-round, min-of-2, alternating-order effects have a bootstrap CI
+that excludes 1.0 and clears twice the wider same-invocation null half-width.
+Per-event costs were 350.6/44.5, 404.9/62.9, and 469.1/82.9 ns for
+NumPy/FNP. CV was recorded as provenance only and did not admit or reject a
+row.
+
+A PRECISE CANDIDATE NULL DID NOT VETO A ROW, CORRECTLY: at 4.8M the candidate
+A/A null CI was `[1.000175,1.068756]`, which EXCLUDES 1.0. The live dual-null
+gate treats a precise null as no reason to veto and instead requires the effect
+to clear twice the controlling half-width; `verify_contract_gate_semantics`
+asserts exactly this case. The dormant `BIASED_NULL` straddle veto still
+present at `report_median_gate_pair` would have behaved differently. This row
+is direct evidence that the two gates disagree on a real measurement, which
+raises the priority of reconciling them.
+
+SCALING SHAPE: ratios `[7.963376, 6.577998, 5.719589]` are monotonically
+decreasing with 39.2299% spread, and the last point is below 85% of the first,
+so the harness classifies the size curve `NARROWING_WITH_EVENTS`. **The honest
+headline is therefore the largest-size point, 5.719589x, not the 2.4M
+number**, and the range narrows as the event log grows. Extrapolating past 9.6M
+events is out of scope; the trend is downward and this row does not claim where
+it settles.
+
+PROFILE ATTRIBUTION: per-stage `NumPy/FNP` ratios were, at 2.4M / 4.8M / 9.6M —
+session order 7.152553 / 10.448591 / 11.115038; user-column gather 3.360425 /
+2.883609 / 2.794175; timestamp-column gather 4.450242 / 1.983699 / 2.050818;
+user-boundary difference 1.847727 / 1.241345 / 2.321924; inter-event-gap
+difference 1.282945 / **0.732334** / 2.615092; user-transition count 0.993677 /
+1.202626 / 1.120534.
+
+TWO PER-STAGE RESULTS THAT DO NOT FLATTER US. First, the inter-event-gap
+difference is a measured REGRESSION at 4.8M (0.732334x) while being a win at
+both neighbouring sizes. It is non-monotonic and its structurally identical
+sibling, the user-boundary difference on the same shape in the same job,
+measured 1.241345x at that same size. The most likely cause is buffer
+temperature and allocator state rather than anything structural, but this row
+does not claim to have identified it, and the whole-job verdict at 4.8M is a
+win with that regression inside the timer. Second, the serial user-transition
+count measured 0.993677x at 2.4M, exactly the direction declared in advance.
+
+The candidate's largest stage was session order at 66.097% / 39.687% / 39.907%
+self-time, for removal ceilings of 2.949634x / 1.658023x / 1.664099x. Only the
+2.4M point crosses the campaign's 50% threshold for naming a new production
+lever, and it does so at the size where the ratio is already highest, so this
+row opens no kernel lever.
+
+COUNTED MECHANISM: NumPy's `lexsort` on integer keys performs one stable radix
+argsort pass per key, sequentially, each an indirect gather over the full index
+array. FrankenNumPy packs both keys into a single order-preserving `u64`
+composite in two parallel passes and then performs ONE parallel sort of
+`(composite, index)` pairs. Sorting those pairs ascending is by construction
+identical to NumPy's stable lexsort order, because ties in the composite are
+broken by the original index. That replaces two sequential key-ordered passes
+with one, which is why total CPU ticks fall even though two extra full-length
+buffers are materialized. The gather and difference stages are parallel
+implementations of loops NumPy runs on one thread.
+
+CHOOSER STATEMENT: for this route-qualified 2.4M-to-9.6M-event int64
+two-key clickstream sessionization job on the recorded artifacts, choose
+FrankenNumPy when completion time is decisive. The conservative measured point
+is **5.719589x at 9.6M events**, and all three effect CIs clear both
+same-invocation null envelopes. Outside this measured shape — other dtypes,
+other key counts, key spans that fall below the packed counting-sort ceiling or
+overflow `u64`, fewer than `1<<18` events, a single-threaded Rayon pool, or a
+host where NumPy may use more than one thread — run the same contract before
+choosing.
+
+**Decision: KEEP, INCUMBENT-WIN.** Bank the realistic workload harness; this
+commit changes no production kernel.
+
+Retry predicate: do not rerun this exact corpus on these artifacts. Reopen if
+the executing ELF or NumPy artifact changes; if inputs leave the finite,
+native-endian, contiguous 1-D `int64` two-key route; if the packed composite
+span crosses either the `1<<24` counting-sort ceiling or the `u64` packing
+ceiling, which would move the lexsort onto a different route; or if a single
+stable headline rather than a narrowing range is required. For that last case,
+extend the size ladder past 9.6M on a drained full-host-exclusive worker and
+report where the narrowing stops. Reopen the inter-event-gap 4.8M regression
+only with an allocator- or fault-instrumented run that can name the cause; a
+bare rerun that merely reproduces 0.73x adds nothing. Do not propose a new
+kernel lever unless a fresh profile names a stage above 50% candidate self-time
+at a size where the whole-job ratio is not already the highest measured.
+
 ## 2026-07-30 - REALISTIC WORKLOAD WIN (KEEP, INCUMBENT-WIN): isolated int64 rolling-load saturation report - 1.90-2.08x vs live NumPy under release-perf
 
 `CloudyChapel`, bead `franken_numpy-ixs5y.393`. This is an end-to-end site
