@@ -5395,6 +5395,19 @@ fn bench_isin_f64_readme_16m_vs_numpy_median_gate(c: &mut Criterion) {
             .expect("thread count constant is numeric"),
         "Rayon pool width does not match the pinned isin configuration"
     );
+    let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "unavailable".to_owned());
+    println!(
+        "WORKLOAD_RUNTIME workload=isin_f64_16m_readme_headline host={host} \
+         build_worker={build_worker} build_profile={REQUIRED_BUILD_PROFILE} \
+         rayon_threads={} RAYON_NUM_THREADS={} OPENBLAS_NUM_THREADS={} \
+         OMP_NUM_THREADS={} MKL_NUM_THREADS={} contract_rounds={CONTRACT_ROUNDS} \
+         contract_min_of={CONTRACT_MIN_OF}",
+        rayon::current_num_threads(),
+        THREADS,
+        THREADS,
+        THREADS,
+        THREADS,
+    );
 
     Python::initialize();
     Python::attach(|py| {
@@ -5443,7 +5456,8 @@ fn bench_isin_f64_readme_16m_vs_numpy_median_gate(c: &mut Criterion) {
         let isin_a = namespace.get_item("isin_a").expect("isin_a present");
         let isin_b = namespace.get_item("isin_b").expect("isin_b present");
 
-        for (name, array, expected) in [("haystack", &isin_a, HAYSTACK), ("needle", &isin_b, NEEDLE)]
+        for (name, array, expected) in
+            [("haystack", &isin_a, HAYSTACK), ("needle", &isin_b, NEEDLE)]
         {
             let shape = array
                 .getattr("shape")
@@ -5484,8 +5498,34 @@ fn bench_isin_f64_readme_16m_vs_numpy_median_gate(c: &mut Criterion) {
                 })
         };
 
+        // Fail closed on route attribution before timing. The measured
+        // C-contiguous f64 regime must survive a poisoned NumPy entry point;
+        // otherwise the candidate and incumbent would share the expensive
+        // membership implementation.
+        let route_namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "def poison_isin(*args, **kwargs):\n\
+                 \x20   raise AssertionError('fnp.isin delegated to numpy.isin')\n",
+            )
+            .expect("isin route-attribution CString")
+            .as_c_str(),
+            Some(&route_namespace),
+            Some(&route_namespace),
+        )
+        .expect("isin route-attribution helper");
+        let poison_isin = route_namespace
+            .get_item("poison_isin")
+            .expect("poison_isin present");
+        numpy
+            .setattr("isin", &poison_isin)
+            .expect("poison numpy.isin");
+        let ours = fnp_isin
+            .call1((&isin_a, &isin_b))
+            .expect("native fnp.isin under poisoned numpy.isin");
+        numpy.setattr("isin", &np_isin).expect("restore numpy.isin");
+
         // Behavior before timing: the whole boolean result must be byte-equal.
-        let ours = fnp_isin.call1((&isin_a, &isin_b)).expect("fnp isin");
         let theirs = np_isin.call1((&isin_a, &isin_b)).expect("numpy isin");
         let ours_bytes = ours
             .call_method0("tobytes")
@@ -5533,6 +5573,11 @@ fn bench_isin_f64_readme_16m_vs_numpy_median_gate(c: &mut Criterion) {
              both_c_contiguous=true assume_unique=default invert=default \
              candidate_route=try_zerocopy_float_isin \
              readme_claim=README.md:1868_isin_hashed_set_up_to_530x_16M_f64"
+        );
+        println!(
+            "ROUTE_PROOF row={ROW} numpy_isin_poison_survived=true \
+             candidate_route=try_zerocopy_float_isin \
+             candidate_stages_all_native=true shared_timed_component=none"
         );
         println!(
             "WORK_ACCOUNTING row={ROW} candidate_public_calls=1 \
@@ -5601,7 +5646,7 @@ fn bench_isin_f64_readme_16m_vs_numpy_median_gate(c: &mut Criterion) {
         println!(
             "README_CLAIM_CONVERSION row={ROW} verdict={verdict} \
              claimed_readme_ratio=530 claimed_readme_source=README.md:1868 \
-             claimed_ledger_row=docs/NEGATIVE_EVIDENCE.md:18311 \
+             claimed_ledger_heading=2026-07-02_float_isin_530x \
              incumbent_median_ms={:.6} candidate_median_ms={:.6} \
              ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
              incumbent_null_ratio={:.6} incumbent_null_ci95=[{:.6},{:.6}] \
@@ -5626,7 +5671,7 @@ fn bench_isin_f64_readme_16m_vs_numpy_median_gate(c: &mut Criterion) {
             "DECIDABLE_WIN" => ("choose_fnp", "corrected_dual_null_incumbent_win"),
             "DECIDABLE_REGRESSION" => ("choose_numpy", "corrected_dual_null_regression"),
             _ => (
-                "choose_numpy",
+                "choose_neither_on_performance",
                 "effect_not_separated_from_dual_null_envelope",
             ),
         };
@@ -5635,6 +5680,7 @@ fn bench_isin_f64_readme_16m_vs_numpy_median_gate(c: &mut Criterion) {
              decision={decision} reason={reason} \
              incumbent=numpy_live_same_invocation \
              measured_scope=float64_16m_haystack_65536_needle_16384_planted_members \
+             shared_timed_component=none \
              outside_scope=run_same_contract_before_choosing"
         );
     });

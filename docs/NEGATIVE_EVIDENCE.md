@@ -4,6 +4,296 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-31 - INDEPENDENT REPLICATION / WIN (KEEP, INCUMBENT-WIN): f64 `isin` at 16M x 65,536 - 143.661247x vs live NumPy, bracketing the published conversion at 134.5-143.7x
+
+`BlackThrush`, bead `franken_numpy-ixs5y.402`. Two sessions converted the same
+README claim in parallel without seeing each other's work: the Agent Mail
+activity lock had been held by a hung `am` process since 04:04, so neither file
+reservations nor a HOLD broadcast were available. The collision is recorded
+rather than discarded, because two independent runs of one contract are worth
+more than either alone.
+
+**This row does not supersede the conversion below it.** Same measurement host,
+same shape, same corrected contract, a *different* executing ELF built from a
+different overlay of the same base. The published figure stays 134.544824x,
+which is the conservative one of the two.
+
+`bench_elf_sha256=e54eb5517153a2d71939b36831a80f48aedb42233de875c8bb5c8397414626fe`
+(218,563,856 bytes), self-reported from `/proc/self/exe` by the executing
+process, invocation `000000000000000018c75985786fdf29-003cbda2`.
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy ratio median 0.989345,
+bootstrap median CI95 `[0.924787,1.066819]`, 21 rounds, min-of-1, half-width
+0.075213.
+
+**Candidate A/A null control (same invocation):** FNP/FNP ratio median 1.030109,
+bootstrap median CI95 `[0.953428,1.500374]`, 21 rounds, min-of-1, half-width
+0.500374. This is the CONTROLLING null and it is WIDE: at a 28 ms candidate
+median the arm's own run-to-run spread reaches 50%. The gate is cleared by two
+orders of magnitude regardless, but the width is the reason the two sessions'
+point estimates differ by 6.8% and is disclosed rather than buried.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa artifact_bytes=10452641 invocation_id=000000000000000018c75985786fdf29-003cbda2 measured_ratio=143.661247x
+
+**Incumbent isolation proof:** candidate=fnp.isin incumbent=numpy.isin shared_timed_component=none
+
+| row | arm A (NumPy) | arm B (FNP) | ratio median | ratio CI95 | CV (provenance only) |
+|---|---:|---:|---:|---:|---:|
+| A/A null (NumPy/NumPy) | 4102.618147 ms | 3973.489667 ms | 0.989345 | `[0.924787,1.066819]` | 19.505% |
+| A/A null (FNP/FNP) | 30.303121 ms | 24.763158 ms | 1.030109 | `[0.953428,1.500374]` | 30.277% |
+| effect (NumPy/FNP) | 3887.220788 ms | **28.622691 ms** | **143.661247** | **`[130.711608,158.025408]`** | - |
+
+**Verdict: DECIDABLE_WIN.** Controlling null half-width 0.500374, so the gate
+required an effect delta of 1.000748. The measured delta is 142.661247 and the
+effect CI is disjoint from both A/A intervals by two orders of magnitude.
+
+PARITY: exact bytes, `result_dtype=bool`, 16,000,000 elements, 16,384 members
+observed, checksum `eb1e334fe0a7e795`. Route `try_zerocopy_float_isin`, both
+operands C-contiguous `float64`, default `assume_unique`/`invert`.
+
+COUNTED_MECHANISM: 1 fewer algorithmic class. NumPy sorts a 16,065,536-element
+concatenation because its O(1) `kind='table'` path admits integer and boolean
+input only; FrankenNumPy builds a 65,536-key hash set and probes it. Candidate
+sorted elements: 0.
+
+BUILD AND RUN PROVENANCE: strict RCH built from committed base `e48565a6` with
+`--base e48565a6 --clean-overlay` and only
+`crates/fnp-python/benches/criterion_python_median_gate.rs` overlaid. Builder
+worker `vmi1227854`; builder and local copy hashes matched, and the measurement
+host copy matched both. **The overlay is NOT byte-identical to the committed
+bench source**: the parallel session edited the same file after this build
+started, so the committed harness is that session's variant. The authoritative
+identity of what actually ran is the executing ELF hash above, which the process
+printed itself; the committed source reproduces the conversion, not this exact
+ELF. This is disclosed rather than papered over, and it is a direct cost of the
+Agent Mail lock outage described at the top of this row. The measurement host was `vmi1293453` (149.102.137.103),
+`AMD EPYC Processor (with IBPB)`, 8 physical cores, 8 logical threads, allowed
+CPUs 0-7, governor unavailable. Rayon/OpenBLAS/OMP/MKL each pinned to four
+threads and the Rayon pool asserted four workers. Host-wide fail-closed
+quiescence passed with maximum observed busy fraction 0.133 at process preflight
+and 0.033 at dual-null preflight, against the 0.200 refusal threshold.
+
+ACTUAL OBSERVED THREADS, NOT REQUESTED THREADS: one NumPy thread accruing 1,111
+scheduler ticks; five FNP threads accruing 27 ticks total over three
+repetitions. Five is the calling thread plus the four-worker Rayon pool.
+
+A BUILD-ARTIFACT LOSS WORTH RECORDING: the first build of this ELF completed
+after 1,526 s and its artifact was gone before the copy ran. The RCH pooled
+target directory is reclaimed by the next job scheduled on that worker, so the
+ELF must be pulled in the same command that runs the build, not in a later step.
+The second build was 822 s and captured immediately.
+
+SCOPE: 143.661247x is this 16,000,000-element `float64` haystack, 65,536-element
+needle with 16,384 planted members, four pinned threads, on `vmi1293453` under
+NumPy 2.4.6. Taken with the conversion below, the honest reading of the README
+claim is that the corrected-contract magnitude at this shape is **134.5-143.7x
+across two independent runs**, not a single point, and roughly 3.7-3.9x below the
+superseded 530x.
+
+Retry predicate: do not re-run this shape for a tighter point estimate. The
+controlling candidate A/A null is 50% wide, so a third run buys a third number,
+not more precision. Reopen only to NARROW that null - a larger candidate
+workload, more rounds, or `min_of` above 1 so the candidate arm's own spread
+stops dominating the gate - or if NumPy gains a non-integer `table` path.
+
+## 2026-07-31 - RETRY PREDICATE DISCHARGED / REJECT STANDS (NO-SHIP): the AVX-512 re-test of the GEMM tile sweep does not flip (8,16); production (4,8) is retained on both ISAs
+
+`BlackThrush`, bead `franken_numpy-ixs5y.403`. Discharges the explicit retry
+predicate of the 2026-07-22 GEMM tile REJECT: *"re-run this exact sweep on an
+**AVX-512 host**. With 32 registers x 8 f64 the register-pressure argument
+inverts - (8,16) needs 16 accumulator registers there, which fits, and is the
+one shape with a physical reason to win."* **It does not win. The REJECT
+stands, now on evidence from both ISAs rather than one.**
+
+A METHOD TRAP THE ORIGINAL PREDICATE DID NOT STATE, AND WHICH SWALLOWED THE
+FIRST ATTEMPT: running an AVX2-compiled binary on an AVX-512 host tests nothing.
+Without `+avx512f` at compile time LLVM emits VEX encodings limited to 16 vector
+registers, so the register-pressure argument cannot invert no matter what the
+host supports. The first re-test built with `RUSTFLAGS` set locally, ran green on
+`hz2`, and produced a full plausible table - and `objdump` on the executing ELF
+found **0 `zmm` references and 0 EVEX-encoded high-`ymm` registers**. `rch exec`
+does not forward the local `RUSTFLAGS` to the remote worker. That table was
+discarded unpublished. The correct invocation carries the flags in the command
+line, and must scope them to the target so host build scripts are not compiled
+with instructions the builder cannot execute:
+
+```
+rch exec --base e48565a6 --clean-overlay --no-overlay -- \
+  cargo build --target x86_64-unknown-linux-gnu \
+  --config 'target.x86_64-unknown-linux-gnu.rustflags=["-C","target-feature=+avx2,+avx512f,+avx512vl,+avx512bw"]' \
+  --profile release-perf -p fnp-linalg --bench gemm_microkernel
+```
+
+ENGAGEMENT PROVEN ON THE EXECUTING ELF, NOT ASSUMED:
+`bench_elf_sha256=4353456feae5800d870ccdd18f61ab53809e386c1866656afdac5efaddee3a92`
+(15,903,576 bytes), self-reported by the process; `objdump -d` counts **10,528
+`zmm` register references**. `vfmadd` count is **0**: Rust does not contract
+`a*b + c` by default, so enabling AVX-512 did not introduce fused multiply-add
+and the kernel's rounding is unchanged. `assert_all_shapes_bit_identical(256)`
+passed inside the AVX-512 binary, so tile geometry remains an FP-invariant
+choice on this ISA too.
+
+MEASUREMENT HOST: `hz2` / `hetzner2` (178.104.77.29), `AMD EPYC-Genoa
+Processor`, 16 logical threads, `avx512f` present on all 16, load average 2.49
+at start. All thread pools pinned to 1 - this is a single-threaded microkernel.
+
+THE NULL IS THE HEADLINE. `prod_4x8` runs first and `null_control_4x8` runs last
+in the same criterion group; both are the identical shipped kernel. At n=1024
+they read 56.515 ms and 48.592 ms in run 1 (**null = 1.163x**) and 51.957 ms and
+45.955 ms in run 2 (**null = 1.131x**). The original AVX2 run's null was 1.0002x.
+A monotone warm-up/frequency effect on this host, reproducible in direction
+across both runs, means the true production time is only bracketed, not pinned,
+and **nothing inside a 13-16% band is resolvable here**. Every verdict below is
+therefore taken against the CONSERVATIVE bracket edge (the slower `prod_4x8`
+read), which is the reading least favourable to keeping production.
+
+| tile (n=1024) | run 1 median | run 2 median | vs slowest prod read | verdict |
+|---|---:|---:|---:|---|
+| `prod_4x8` (production) | 56.515 ms | 51.957 ms | 1.000x | reference |
+| `null_control_4x8` (A/A) | 48.592 ms | 45.955 ms | **0.860x / 0.885x** | **the null; bounds resolution** |
+| `tile_8x16` (the predicted winner) | 61.218 ms | 60.495 ms | 1.083x / 1.164x | **loses on both runs** |
+| `tile_4x16` | 61.092 ms | 62.246 ms | 1.081x / 1.198x | loses |
+| `tile_6x8` | 67.499 ms | 64.456 ms | 1.194x / 1.240x | loses |
+| `tile_2x8` | 79.453 ms | 70.657 ms | 1.406x / 1.360x | loses |
+| `tile_6x16` | 72.598 ms | 72.573 ms | 1.285x / 1.397x | loses |
+| `tile_8x8` | 81.927 ms | 81.073 ms | 1.450x / 1.560x | loses |
+| `simd_4x8` | 48.560 ms | 48.111 ms | 0.859x / 0.926x | inside the null bracket; NOT reopened |
+
+At n=512 the null is tighter (5.9960 / 5.6300 = 1.065x) and `tile_8x16` reads
+10.201 ms against 5.630 ms production = **1.812x, a decisive loss**.
+
+WHAT THE ISA ACTUALLY CHANGED: on AVX2, `tile_8x16` lost 1.280x at n=1024. On
+AVX-512 it loses 1.083-1.164x. The register-pressure prediction materialised in
+DIRECTION - 32 registers do hurt (8,16) less than 16 do - but not in MAGNITUDE:
+it is still slower than the shipped (4,8) on every read of both runs, and
+decisively slower at n=512. **No production change. The 2026-07-22 REJECT is
+upgraded from "optimal on AVX2" to "optimal on AVX2 and not displaced on
+AVX-512".**
+
+COUNTED_MECHANISM: 0 tile shapes displaced production across 2 ISAs x 2 sizes x
+7 alternatives x 2 runs; 10,528 `zmm` references prove the wider register file
+was compiled in and still did not pay.
+
+Retry predicate: do NOT re-run this sweep on any host in its current single-pass
+form. Its ordering effect (13-16% on `hz2`) now exceeds the effect size it is
+being asked to resolve, which is a harness defect, not a host defect. A credible
+retry needs an INTERLEAVED ABBA/BAAB harness with a per-round A/A null - the
+`common::run_dual_null_median_ci_contract` shape used elsewhere in this campaign
+- ported into `crates/fnp-linalg/benches/gemm_microkernel.rs`. Only then is a
+sub-10% tile difference measurable at all. The `(4,8)` vs explicit-SIMD question
+remains closed by the original row and was not reopened here, though for the
+record `simd_4x8` sat inside the null bracket on both runs.
+
+## 2026-07-31 - README CLAIM CONVERSION / WIN (KEEP, INCUMBENT-WIN): f64 `isin` at 16M x 65,536 - 134.544824x vs live NumPy under `release-perf`
+
+`BlackThrush`, bead `franken_numpy-ixs5y.402`. This converts the most
+load-bearing unconverted magnitude in the public README at its own advertised
+shape. The old public text said "`isin` hashed-set up to 530x (16M f64)", but
+that 2026-07-02 result had no same-invocation A/A null, no process-self ELF
+identity, no incumbent artifact identity, no actual observed threads, and no
+median-CI gate. The current complete comparison supports **134.544824x**, so
+README.md now publishes 134.5x and nothing about the superseded magnitude. This
+ledger retains the retraction history.
+
+`bench_elf_sha256=f83c66d0c553ad3ee83f30eb34b4662853a90e017935ef7e05c9550b75e3d72d`
+(218,562,256 bytes), self-reported from `/proc/self/exe` by the executing
+process, invocation
+`000000000000000018c758eea9abc3f6-003c7988`.
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy ratio median 0.994170,
+bootstrap median CI95 `[0.962926,1.045613]`, 21 rounds, min-of-1.
+
+**Candidate A/A null control (same invocation):** FNP/FNP ratio median
+1.025382, bootstrap median CI95 `[0.972606,1.167012]`, 21 rounds, min-of-1.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa artifact_bytes=10452641 invocation_id=000000000000000018c758eea9abc3f6-003c7988 measured_ratio=134.544824x
+
+**Incumbent isolation proof:** candidate=fnp.isin incumbent=numpy.isin shared_timed_component=none
+
+The process bound live `numpy.isin`, asserted that it was object-distinct from
+the FNP public callable, and reported NumPy's compiled
+`_multiarray_umath.cpython-313-x86_64-linux-gnu.so` identity above. Before
+timing, the candidate completed while the module's `numpy.isin` attribute was
+replaced by a callable that always raises; that poison proof fails closed if
+the candidate delegates. The original NumPy callable was then restored. Each
+timed arm independently allocated and computed its complete boolean result
+from the same two read-only inputs. No timed implementation, output, or
+intermediate was shared.
+
+BUILD AND RUN PROVENANCE: strict RCH built the exact benchmark from committed
+base `14f42b5e` with `--base 14f42b5e --clean-overlay` and only
+`crates/fnp-python/benches/criterion_python_median_gate.rs` overlaid. The
+remote overlay and workspace source both hashed to
+`6a2915f91e32846673362593077f7c54cc05a7ec18ccad997dc3807a925801b3`.
+RCH worker `ovh-a` (51.222.245.56) produced
+`release-perf/deps/criterion_python_median_gate-77b53e183b347063`; the
+builder, transient local copy, and measurement-host copy all matched the
+executing ELF hash and byte count. The exact ELF ran on drained worker
+`vmi1293453`; that worker was re-enabled immediately after the process exited,
+and the owned build roots and both transient ELF copies were removed.
+
+HOST, THREAD, AND ISA PROVENANCE: the measurement host was `vmi1293453`
+(149.102.137.103), `AMD EPYC Processor (with IBPB)`, eight physical cores,
+eight logical threads, online and allowed CPUs 0-7, with governor availability
+honestly reported as unavailable. Compile-time SSE2 and AVX2 were true.
+Runtime SSE2, AVX, AVX2, F16C, and FMA were true; runtime AVX-512F and
+AVX-512BW were false. Rayon, OpenBLAS, OMP, and MKL were each explicitly
+pinned to four threads, and the Rayon pool asserted four workers.
+
+ACTUAL OBSERVED THREADS, NOT REQUESTED THREADS: `/proc/self/task` probes
+observed one NumPy thread accruing 1,813 scheduler CPU ticks and five FNP
+threads accruing 27 ticks over three repetitions. The five FNP threads are the
+calling thread plus the four-worker Rayon pool, so the honest observed topology
+is 1 / 5. Host-wide fail-closed quiescence passed the process preflight at
+0.000 and the dual-null preflight at 0.032 maximum observed busy fraction
+against the 0.200 refusal threshold.
+
+WORK AND PARITY ACCOUNTING CAME BEFORE INTERPRETATION. Both public calls
+received the same C-contiguous 16,000,000-element `float64` haystack and
+65,536-element `float64` needle. The needle planted 16,384 real members. Each
+arm produced one 16,000,000-element boolean result; dtype, shape, and every
+output byte matched. Exactly 16,384 members were observed, and every null and
+effect pair reproduced checksum `85d6b5592f949acb`.
+
+COUNTED_MECHANISM: one fewer algorithmic class. NumPy's table method admits
+integer and boolean arrays but not `float64`, so its fallback sorts the
+16,065,536-element concatenation. FNP builds a hash set for the 65,536 needles
+and probes it over the haystack; it sorts zero elements. This count is encoded
+in the benchmark before interpretation.
+
+| workload | host | actual threads NumPy / FNP | executing ELF SHA-256 | NumPy/NumPy null ratio (CI95) | FNP/FNP null ratio (CI95) | NumPy median | FNP median | NumPy/FNP ratio (bootstrap median CI95) | required 2x null delta | verdict |
+|---|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| public `isin`, 16,000,000-element f64 haystack, 65,536-element f64 needle, 16,384 planted members | `vmi1293453` (149.102.137.103) | 1 / 5 | `f83c66d0c553ad3ee83f30eb34b4662853a90e017935ef7e05c9550b75e3d72d` | 0.994170 `[0.962926,1.045613]` | 1.025382 `[0.972606,1.167012]` | 3,321.958263 ms | 24.330247 ms | **134.544824x** `[116.843522,153.857339]` | 0.334025 | **DECIDABLE_WIN** |
+
+THE CORRECTED NULL GATE, INCLUDING THE MEDIAN CLAUSE: the effect bootstrap
+median CI is wholly above 1.0; the 134.544824 effect median is above both null
+CI envelopes; and its 133.544824 deviation from unity exceeds twice the wider
+null half-width. The incumbent half-width was 0.045613, the candidate
+half-width was the controlling 0.167012, and the required two-times margin was
+0.334025. Neither null was required to straddle 1.0. CV was provenance only
+(effect 23.146%, incumbent null 15.188%, candidate null 16.238%), never an
+acceptance gate. The 21-round min-of-1 sampling was preregistered because each
+NumPy null call took about 5.3 seconds at this exact shape.
+
+CHOOSER STATEMENT: for a C-contiguous 16,000,000-element `float64` haystack
+tested against this 65,536-element `float64` needle with 16,384 planted
+members, choose `fnp.isin`; it was 134.544824x faster than live NumPy 2.4.6
+with exact boolean output under the corrected dual-null gate. Outside this
+dtype, size, membership density, artifact pair, host, and observed-thread
+topology, run the same contract before choosing.
+
+Retry predicate: do not repeat this exact corpus, artifact pair, and topology.
+Reopen if either executable hash changes, NumPy admits floats to a non-sort
+membership route, FNP changes its hashed route, or the question is another
+dtype, shape, needle cardinality, member density, layout, option set, or
+observed-thread topology. Every retry must retain exact-byte parity, native
+route poison proof, both same-invocation nulls, process-self ELF identity,
+actual observed threads, and the corrected median-CI gate.
+
 ## 2026-07-31 - RETRY PREDICATE SATISFIED / REALISTIC WHOLE-JOB REDECISION (UNDECIDED, VALID-AB): 100k x 48 wide-CSV sensor ETL - 1.079690x vs live NumPy does not clear the 2x null margin
 
 `BlackThrush`, bead `franken_numpy-ixs5y.401`. This discharges the exact scale
@@ -34,8 +324,7 @@ artifact_bytes=10452641
 invocation_id=000000000000000018c756a654325f17-0029f822
 measured_ratio=1.079690x
 
-**Incumbent isolation proof:** candidate=fnp.workload.wide_csv_sensor_etl_retry
-incumbent=numpy.workload.wide_csv_sensor_etl_retry shared_timed_component=none
+**Incumbent isolation proof:** candidate=fnp.workload.wide_csv_sensor_etl_retry incumbent=numpy.workload.wide_csv_sensor_etl_retry shared_timed_component=none
 
 The process bound live `numpy.loadtxt`, `numpy.histogram`, and `numpy.std`,
 proved all three callables object-distinct from the FNP public callables, and
