@@ -4,6 +4,116 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-31 - HOLD REDECISION / KEEP (INCUMBENT-WIN): exact 256x256 int64 `matmul` - 19.999278x vs live NumPy under `release-perf`
+
+`BlackThrush`, bead `franken_numpy-ixs5y.399`. This discharges the exact retry
+predicate on the 2026-07-27 HOLD-UNBANKED row. That row measured a stable NumPy
+arm but no FNP/FNP null while the candidate median moved from about 0.83 ms to
+1.37 ms across three separately built ELFs. This redecision uses the same
+seeded 256x256 `int64` public surface, but runs both A/A controls and the
+interleaved incumbent/candidate effect in one process under the corrected
+median-CI gate.
+
+`bench_elf_sha256=62d1eaddb657fe0b766985a0e467ef61cf8b32ea5938ab83269c549fcf368233`
+(218,111,344 bytes), self-reported from `/proc/self/exe` by the executing
+process, invocation
+`000000000000000018c750b3659c3048-0027b9b6`.
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy ratio median 1.009084, bootstrap median CI95 `[0.997526,1.013925]`, 41 rounds, min-of-3.
+
+**Candidate A/A null control (same invocation):** FNP/FNP ratio median 1.030473, bootstrap median CI95 `[0.980035,1.062272]`, 41 rounds, min-of-3.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa artifact_bytes=10452641 invocation_id=000000000000000018c750b3659c3048-0027b9b6 measured_ratio=19.999278x
+
+**Incumbent isolation proof:** candidate=fnp.matmul incumbent=numpy.matmul shared_timed_component=none
+
+The process bound the live `numpy.matmul` callable once and proved it was
+object-distinct from `fnp.matmul`. NumPy's callable was backed by
+`_multiarray_umath.cpython-313-x86_64-linux-gnu.so` with the artifact hash and
+byte count above. Both timed arms received the same two read-only inputs; no
+result, intermediate, or expensive setup was shared or cached.
+
+BUILD AND RUN PROVENANCE: strict RCH built the exact benchmark from committed
+base `b4d58f9b` with `--base b4d58f9b --clean-overlay` and only
+`crates/fnp-python/benches/criterion_python_median_gate.rs` overlaid. The
+remote overlay source and workspace source both hashed to
+`a889ce84478572760bc508eebd37b07e03c69ec8ab0edd03cb09399c1a75ff90`.
+RCH worker `ovh-a` (51.222.245.56) produced
+`release-perf/deps/criterion_python_median_gate-77b53e183b347063`; the builder
+ELF, transient local copy, and measurement-host copy all had the executing ELF
+hash and byte count above. The exact ELF ran on drained worker `vmi1227854`;
+that worker was re-enabled immediately after the process exited, and both
+transient copies were removed.
+
+HOST, THREAD, AND ISA PROVENANCE: the measurement host was `vmi1227854`
+(109.123.245.77), `AMD EPYC Processor (with IBPB)`, 10 physical cores, 10
+logical threads, online and allowed CPUs 0-9, with governor availability
+honestly reported as unavailable. Compile-time SSE2 and AVX2 were true.
+Runtime SSE2, AVX, AVX2, F16C, and FMA were true; runtime AVX-512F and
+AVX-512BW were false. Rayon, OpenBLAS, OMP, and MKL were each explicitly
+pinned to four threads, and the Rayon pool asserted four workers.
+
+ACTUAL OBSERVED THREADS, NOT REQUESTED THREADS: the `/proc/self/task` probes
+observed one NumPy thread accruing 196 scheduler CPU ticks and four FNP worker
+threads accruing 29 ticks over 101 repetitions. The caller did not accrue a
+whole scheduler tick during the FNP probe, so the honest observed count is 4,
+not the configured pool plus caller. Host-wide fail-closed quiescence passed
+both process preflight and the dual-null contract preflight with maximum
+observed busy fraction 0.000 against the 0.200 refusal threshold.
+
+WORK AND PARITY ACCOUNTING CAME BEFORE INTERPRETATION. Each arm performs one
+public call, computes exactly 256 cubed = 16,777,216 scalar integer
+multiply-accumulates, and materializes 65,536 `int64` output elements. Inputs
+were generated from NumPy `default_rng(20260727)` over `[-64,64)`, so the
+largest possible absolute dot-product sum is 1,048,576 and overflow is out of
+scope by construction. Input dtype, shape, C-contiguity, and matching inner
+dimension were asserted. The candidate route was source-pinned to
+`try_native_int_matmul` with work 16,777,216 above its 262,144-element
+admission floor and Rayon width at least two.
+
+COUNTED_MECHANISM: 1 algorithmic class - live NumPy has no integer BLAS route
+for this surface and executes generic integer matrix multiplication; FNP uses
+its tiled register-blocked integer kernel. Both arms retain identical integer
+arithmetic and operation counts.
+
+The pre-timing dtype, shape, and every output byte matched; mixed checksum
+`ec988517e34e95b8` was identical. The incumbent null, candidate null, and effect
+phases each reproduced contract checksum `9d82ad91e0144edc`.
+
+| workload | host | actual threads NumPy / FNP | executing ELF SHA-256 | NumPy/NumPy null ratio (CI95) | FNP/FNP null ratio (CI95) | NumPy median | FNP median | NumPy/FNP ratio (bootstrap median CI95) | required 2x null delta | verdict |
+|---|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| public `matmul`, two C-contiguous 256x256 `int64` operands, seed 20260727 | `vmi1227854` (109.123.245.77) | 1 / 4 | `62d1eaddb657fe0b766985a0e467ef61cf8b32ea5938ab83269c549fcf368233` | 1.009084 `[0.997526,1.013925]` | 1.030473 `[0.980035,1.062272]` | 19.134815 ms | 0.965827 ms | **19.999278x** `[18.751942,20.808011]` | 0.124545 | **DECIDABLE_WIN** |
+
+THE CORRECTED NULL GATE, INCLUDING THE MEDIAN CLAUSE: the effect bootstrap
+median CI is wholly above 1.0; the 19.999278 effect median is above both null
+CI envelopes; and its 18.999278 deviation from unity exceeds twice the wider
+null half-width. The incumbent half-width was 0.013925, the candidate
+half-width was the controlling 0.062272, and the required two-times margin was
+0.124545. Neither null was required to straddle 1.0. CV was recorded only as
+provenance (effect 15.928%, candidate null 11.856%), never as an acceptance
+gate.
+
+The current 0.965827 ms candidate median lies between the historical 0.83 ms
+and 1.37 ms diagnostics. That is exactly why this row does not select a
+historical extreme: the same-invocation FNP/FNP null now controls the verdict,
+and the effect remains separated even under its wider interval. Only the
+current 19.999278x ratio and CI are banked.
+
+CHOOSER STATEMENT: for two C-contiguous 256x256 `int64` matrices on the
+recorded four-thread configuration, choose `fnp.matmul`; it was 19.999278x
+faster than live NumPy 2.4.6 with exact output parity and a corrected
+dual-null `DECIDABLE_WIN`. Outside this measured dtype, shape, layout, and
+thread topology, run the same contract before choosing.
+
+Retry predicate: do not repeat this exact seed, shape, thread topology, and
+artifact pair. Reopen if either artifact hash changes, NumPy gains an integer
+BLAS or other named integer-matmul route, FNP changes the native route, or the
+question is a different dtype, shape, layout, or observed-thread topology. A
+future tighter magnitude claim must use the same dual-null contract and may
+not substitute a NumPy-only null for the candidate null.
+
 ## 2026-07-31 - ISA CONTROL (EVIDENCE HARDENING, no production change): the exp/log AVX-512 divergence is ISA-driven, not numpy-version-driven
 
 `BlackThrush`, bead `deadlock-audit-gkznn` (already CLOSED 2026-07-12; this row

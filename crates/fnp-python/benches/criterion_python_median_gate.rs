@@ -5682,6 +5682,232 @@ fn bench_char_upper_hold_redecision_median_gate(c: &mut Criterion) {
     });
 }
 
+/// Re-decide the exact 256x256 int64 `matmul` HOLD under the corrected
+/// dual-null contract. The historical row had a NumPy/NumPy null, but no
+/// FNP/FNP null; three independent ELFs consequently reported a stable NumPy
+/// arm and a candidate arm that moved from about 0.83 ms to 1.37 ms.
+fn bench_int64_matmul_hold_redecision_median_gate(c: &mut Criterion) {
+    let _ = c;
+    const DIMENSION: usize = 256;
+    const THREAD_ACTIVITY_REPETITIONS: usize = 101;
+    const THREADS: &str = "4";
+    const REQUIRED_BUILD_PROFILE: &str = "release-perf";
+    const ROW: &str = "python_int64_matmul_256_hold_redecision";
+
+    assert_eq!(
+        std::env::var("FNP_BENCH_PROFILE").as_deref(),
+        Ok(REQUIRED_BUILD_PROFILE),
+        "ship-grade int64 matmul evidence requires FNP_BENCH_PROFILE=release-perf"
+    );
+    for variable in [
+        "RAYON_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(THREADS),
+            "{variable} must be explicitly pinned before int64 matmul timing"
+        );
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        THREADS
+            .parse::<usize>()
+            .expect("thread count constant is numeric"),
+        "Rayon pool width does not match the pinned int64 matmul configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME host={} build_profile={REQUIRED_BUILD_PROFILE} \
+         rayon_threads={} RAYON_NUM_THREADS={THREADS} OPENBLAS_NUM_THREADS={THREADS} \
+         OMP_NUM_THREADS={THREADS} MKL_NUM_THREADS={THREADS}",
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "unavailable".to_owned()),
+        rayon::current_num_threads(),
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_int64_matmul_redecision")
+            .expect("int64 matmul redecision module");
+        fnp_python(&module).expect("initialize fnp_python int64 matmul redecision module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260727)\n\
+                 mm_a = rng.integers(-64, 64, size=(256, 256), dtype=np.int64)\n\
+                 mm_b = rng.integers(-64, 64, size=(256, 256), dtype=np.int64)\n",
+            )
+            .expect("int64 matmul corpus CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("int64 matmul corpus setup");
+
+        let np_matmul = numpy.getattr("matmul").expect("numpy matmul");
+        let fnp_matmul = module.getattr("matmul").expect("fnp matmul");
+        common::report_numpy_incumbent_identity(py, "matmul", &np_matmul);
+        assert!(
+            !np_matmul.is(&fnp_matmul),
+            "dispatch trap: incumbent matmul resolved to the candidate callable"
+        );
+        common::report_incumbent_topology("fnp.matmul", "numpy.matmul");
+        println!(
+            "INCUMBENT_PIPELINE workload=int64_matmul_256 \
+             candidate=fnp.matmul incumbent=numpy.matmul \
+             shared_timed_component=none inputs_shared_read_only=true"
+        );
+
+        let lhs = namespace.get_item("mm_a").expect("mm_a present");
+        let rhs = namespace.get_item("mm_b").expect("mm_b present");
+        for (name, operand) in [("lhs", &lhs), ("rhs", &rhs)] {
+            let shape = operand
+                .getattr("shape")
+                .expect("matmul operand shape")
+                .extract::<Vec<usize>>()
+                .expect("matmul operand shape vector");
+            let dtype = operand
+                .getattr("dtype")
+                .expect("matmul operand dtype")
+                .str()
+                .expect("matmul operand dtype string")
+                .to_string();
+            let c_contiguous = operand
+                .getattr("flags")
+                .expect("matmul operand flags")
+                .getattr("c_contiguous")
+                .expect("matmul operand C-contiguous flag")
+                .extract::<bool>()
+                .expect("matmul operand C-contiguous bool");
+            assert_eq!(shape, vec![DIMENSION, DIMENSION], "{name} shape");
+            assert_eq!(dtype, "int64", "{name} dtype");
+            assert!(c_contiguous, "{name} must be C-contiguous");
+        }
+        println!(
+            "ROUTE_PRECONDITIONS row={ROW} dtype=int64 lhs_shape=256x256 \
+             rhs_shape=256x256 c_contiguous=true same_dtype=true \
+             matching_inner_dim={DIMENSION} matmul_work={} int_matmul_min_work={} \
+             rayon_threads_min=2 candidate_route=native_int64_tiled_gemm \
+             source_pin=fnp-python/src/lib.rs:try_native_int_matmul",
+            DIMENSION * DIMENSION * DIMENSION,
+            1 << 18,
+        );
+        println!(
+            "WORK_ACCOUNTING row={ROW} candidate_public_calls=1 incumbent_public_calls=1 \
+             candidate_scalar_multiply_accumulates={} \
+             incumbent_scalar_multiply_accumulates={} \
+             candidate_output_elements={} incumbent_output_elements={} \
+             integer_bound_max_abs_product_sum={} overflow_headroom=proven",
+            DIMENSION * DIMENSION * DIMENSION,
+            DIMENSION * DIMENSION * DIMENSION,
+            DIMENSION * DIMENSION,
+            DIMENSION * DIMENSION,
+            DIMENSION * 64 * 64,
+        );
+        println!(
+            "COUNTED_MECHANISM row={ROW} class=algorithmic \
+             incumbent=generic_integer_matrix_multiplication \
+             candidate=tiled_register_blocked_integer_matrix_multiplication"
+        );
+
+        let ours = fnp_matmul
+            .call1((&lhs, &rhs))
+            .expect("fnp int64 matmul parity");
+        let theirs = np_matmul
+            .call1((&lhs, &rhs))
+            .expect("numpy int64 matmul parity");
+        let candidate_outputs = [ours.clone()];
+        let incumbent_outputs = [theirs.clone()];
+        assert_workload_outputs_equal(&numpy, ROW, &candidate_outputs, &incumbent_outputs);
+        println!(
+            "PARITY row={ROW} outputs=1 dtype_shape_byte_identity=passed checksum={:016x}",
+            workload_checksum(&numpy, &candidate_outputs),
+        );
+
+        common::report_observed_thread_activity(ROW, "numpy", THREAD_ACTIVITY_REPETITIONS, || {
+            let output = np_matmul
+                .call1((black_box(&lhs), black_box(&rhs)))
+                .expect("numpy int64 matmul thread probe");
+            black_box(output);
+        });
+        common::report_observed_thread_activity(ROW, "fnp", THREAD_ACTIVITY_REPETITIONS, || {
+            let output = fnp_matmul
+                .call1((black_box(&lhs), black_box(&rhs)))
+                .expect("fnp int64 matmul thread probe");
+            black_box(output);
+        });
+
+        let mut observe_incumbent = || {
+            let started = Instant::now();
+            let output = np_matmul
+                .call1((black_box(&lhs), black_box(&rhs)))
+                .expect("numpy int64 matmul arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: workload_checksum(&numpy, &[output]),
+            }
+        };
+        let mut observe_candidate = || {
+            let started = Instant::now();
+            let output = fnp_matmul
+                .call1((black_box(&lhs), black_box(&rhs)))
+                .expect("fnp int64 matmul arm");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: workload_checksum(&numpy, &[output]),
+            }
+        };
+        let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+            ROW,
+            &mut observe_incumbent,
+            &mut observe_candidate,
+        );
+        let verdict = common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+        println!(
+            "HOLD_REDECISION row={ROW} verdict={verdict} \
+             incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+             ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+             incumbent_null_ratio={:.6} incumbent_null_ci95=[{:.6},{:.6}] \
+             candidate_null_ratio={:.6} candidate_null_ci95=[{:.6},{:.6}] \
+             effect_ci_excludes_one={} corrected_dual_null_gate=true \
+             median_clause=true actual_threads_reported=true",
+            effect.arm_a_median_ns / 1_000_000.0,
+            effect.arm_b_median_ns / 1_000_000.0,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            incumbent_null.ratio_median,
+            incumbent_null.ratio_ci_low,
+            incumbent_null.ratio_ci_high,
+            candidate_null.ratio_median,
+            candidate_null.ratio_ci_low,
+            candidate_null.ratio_ci_high,
+            effect.ratio_ci_low > 1.0 || effect.ratio_ci_high < 1.0,
+        );
+        let (decision, reason) = match verdict {
+            "DECIDABLE_WIN" => ("choose_fnp", "corrected_dual_null_incumbent_win"),
+            "DECIDABLE_REGRESSION" => ("choose_numpy", "corrected_dual_null_regression"),
+            _ => (
+                "choose_numpy",
+                "effect_not_separated_from_dual_null_envelope",
+            ),
+        };
+        println!(
+            "CHOOSER_STATEMENT workload=int64_matmul_256x256 decision={decision} \
+             reason={reason} incumbent=numpy_live_same_invocation \
+             measured_scope=int64_c_contiguous_256x256_at_four_configured_threads \
+             outside_scope=run_same_contract_before_choosing"
+        );
+    });
+}
+
 fn bench_bool_public_vs_numpy_median_gate(c: &mut Criterion) {
     let _ = c;
 
@@ -10764,6 +10990,10 @@ fn main() {
         (
             "bench_isin_f64_vs_numpy_median_gate",
             bench_isin_f64_vs_numpy_median_gate,
+        ),
+        (
+            "bench_int64_matmul_hold_redecision_median_gate",
+            bench_int64_matmul_hold_redecision_median_gate,
         ),
         (
             "bench_quantile_f16_histogram_vs_numpy_median_gate",
