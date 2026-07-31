@@ -4,6 +4,113 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-31 - RETRY PREDICATE SATISFIED / REALISTIC WHOLE-JOB REDECISION (UNDECIDED, VALID-AB): 100k x 48 wide-CSV sensor ETL - 1.079690x vs live NumPy does not clear the 2x null margin
+
+`BlackThrush`, bead `franken_numpy-ixs5y.401`. This discharges the exact scale
+predicate on the 2026-07-28 25,000 x 48 UNDECIDED row: the rerun reads an
+on-disk 100,000 x 48 bounded-decimal CSV, selects eight alternating columns
+from the negative tail (one sixth of the fields), builds a 64-bin global
+histogram, and computes per-selected-column standard deviations. This is a
+complete sensor-batch ETL job a NumPy user would recognize, not a parser or
+reduction kernel. Each arm independently performs all three public operations
+against the same prewarmed path.
+
+`bench_elf_sha256=0aba65e224239932939e18f70c0667708a06fc09db9ae0d94f9e2f9c487956c6`
+(218,424,512 bytes), self-reported from `/proc/self/exe` by the executing
+process, invocation
+`000000000000000018c756a654325f17-0029f822`.
+
+**Campaign result class:** valid-ab-undecided
+
+**A/A null control (same invocation):** NumPy/NumPy ratio median 0.988043,
+bootstrap median CI95 `[0.927885,1.002913]`, 41 rounds, min-of-3.
+
+**Candidate A/A null control (same invocation):** FNP/FNP ratio median
+0.988883, bootstrap median CI95 `[0.937000,1.022223]`, 41 rounds, min-of-3.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6
+artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa
+artifact_bytes=10452641
+invocation_id=000000000000000018c756a654325f17-0029f822
+measured_ratio=1.079690x
+
+**Incumbent isolation proof:** candidate=fnp.workload.wide_csv_sensor_etl_retry
+incumbent=numpy.workload.wide_csv_sensor_etl_retry shared_timed_component=none
+
+The process bound live `numpy.loadtxt`, `numpy.histogram`, and `numpy.std`,
+proved all three callables object-distinct from the FNP public callables, and
+reported the compiled NumPy artifact above for every incumbent stage. Poisoned
+NumPy entry points proved the candidate parser and axis-0 standard deviation
+were native; a counted `numpy.histogram` trap observed zero calls while the
+candidate histogram completed. The candidate route was therefore native
+`fnp_io::loadtxt_usecols_signed` plus a zero-copy C-contiguous 2-D ravel into
+`try_zerocopy_histogram`, plus `try_zerocopy_f64_var_axis0`. No timed stage,
+result, intermediate, or expensive setup was shared between arms.
+
+BUILD AND RUN PROVENANCE: strict RCH built the exact benchmark from committed
+base `e48565a6` with `--base e48565a6 --clean-overlay` and only
+`crates/fnp-python/benches/criterion_python_median_gate.rs` overlaid. The
+remote overlay and workspace source both hashed to
+`784f27b2616f52216f869576df2a5b8d91959489611207c4151691070d0f9017`.
+RCH worker `ovh-a` (51.222.245.56) produced
+`release-perf/deps/criterion_python_median_gate-77b53e183b347063`; the
+builder, transient local copy, and measurement-host copy all matched the
+executing ELF hash and byte count. The exact ELF ran on drained worker
+`vmi1227854`; that worker was re-enabled immediately after the process exited,
+and the owned build root, both transient ELF copies, and generated CSV were
+removed.
+
+HOST, THREAD, AND ISA PROVENANCE: the measurement host was `vmi1227854`
+(109.123.245.77), `AMD EPYC Processor (with IBPB)`, 10 physical cores, 10
+logical threads, online and allowed CPUs 0-9, with governor availability
+honestly reported as unavailable. Compile-time SSE2 and AVX2 were true.
+Runtime SSE2, AVX, AVX2, F16C, and FMA were true; runtime AVX-512F and
+AVX-512BW were false. Rayon, OpenBLAS, OMP, and MKL were each explicitly
+pinned to four threads, and the Rayon pool asserted four workers.
+
+ACTUAL OBSERVED THREADS, NOT REQUESTED THREADS: `/proc/self/task` probes
+observed one NumPy thread accruing 31 scheduler CPU ticks and one FNP thread
+accruing 34 ticks over three repetitions. The honest observed topology is
+therefore 1 / 1. Host-wide fail-closed quiescence passed the process and
+dual-null preflights with maximum observed busy fraction 0.000 against the
+0.200 refusal threshold.
+
+WORK AND PARITY ACCOUNTING CAME BEFORE INTERPRETATION. Each arm read the same
+39,743,991 CSV bytes, parsed 4,800,000 fields, selected and summarized 800,000
+values, produced 64 histogram counts, 65 edges, and eight standard deviations,
+and made exactly three public calls. Counts, edges, and standard deviations
+matched in dtype, shape, and every byte with output checksum
+`116f76141fd937a9`; every null and effect observation reproduced contract
+checksum `34af7ec3c178c5c3`. The input checksum was `5439c2e1e1980509`.
+
+| workload | host | actual threads NumPy / FNP | executing ELF SHA-256 | NumPy/NumPy null ratio (CI95) | FNP/FNP null ratio (CI95) | NumPy median | FNP median | NumPy/FNP ratio (bootstrap median CI95) | required 2x null delta | verdict |
+|---|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| public `loadtxt` + `histogram(64)` + `std(axis=0)`, 100,000 x 48 bounded-decimal CSV, eight negative tail columns | `vmi1227854` (109.123.245.77) | 1 / 1 | `0aba65e224239932939e18f70c0667708a06fc09db9ae0d94f9e2f9c487956c6` | 0.988043 `[0.927885,1.002913]` | 0.988883 `[0.937000,1.022223]` | 111.940589 ms | 99.360748 ms | **1.079690x** `[1.040658,1.123709]` | 0.144230 | **UNDECIDED** |
+
+THE CORRECTED NULL GATE, INCLUDING THE MEDIAN CLAUSE: the effect bootstrap
+median CI is wholly above 1.0, and the 1.079690 effect median is above both
+null CI envelopes. Its 0.079690 deviation from unity does not, however, exceed
+twice the wider null half-width. The incumbent half-width was the controlling
+0.072115, the candidate half-width was 0.063000, and the required two-times
+margin was 0.144230. The row is therefore `UNDECIDED`, not a win. Neither null
+was required to straddle 1.0. CV was provenance only (effect 12.022%,
+incumbent null 15.107%, candidate null 9.881%), never an acceptance gate.
+
+CHOOSER STATEMENT: for this exact 100,000 x 48 bounded-decimal sensor ETL job,
+choose neither implementation on performance evidence. FNP's 99.36 ms median
+was directionally below live NumPy's 111.94 ms median, but the 1.079690x effect
+did not clear the corrected dual-null 2x margin. Outside this exact artifact,
+input, cache, and observed-thread topology, run the same contract before
+choosing.
+
+Retry predicate: do not repeat this exact 41-round min-of-3 contract. Reopen
+only if either executable artifact changes, a counted mechanism removes work
+from one of the three candidate stages, or a preregistered same-ELF protocol
+with at least 81 rounds and min-of-5 demonstrates both null half-widths at or
+below 0.035 before its effect is interpreted. Any retry must preserve the same
+on-disk path per pair, warm-cache policy, exact outputs, live NumPy in the same
+invocation, actual observed threads, and the corrected median-CI gate.
+
 ## 2026-07-31 - REALISTIC WHOLE-JOB WIN (KEEP, INCUMBENT-WIN): one-million-`int64` delimited snapshot export - 6.762491x vs live NumPy under `release-perf`
 
 `BlackThrush`, bead `franken_numpy-ixs5y.400`. This converts the last current

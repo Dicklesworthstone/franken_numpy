@@ -5340,6 +5340,306 @@ fn bench_isin_f64_vs_numpy_median_gate(c: &mut Criterion) {
     });
 }
 
+/// Convert the single most load-bearing unconverted number in the README:
+/// `README.md:1868` publishes "`isin` hashed-set up to 530x (16M f64)" under a
+/// heading that promises "Every ratio below is a measured vs-NumPy speedup".
+/// The 530x row (ledger 2026-07-02) is a bare same-worker A/B: no A/A null, no
+/// executing-ELF identity, no incumbent artifact identity, no observed threads,
+/// no median-CI gate. The successor incumbent-class row measured 23.882236x at
+/// 1,000,000 elements and explicitly disclaims generalizing to this shape, so
+/// the README's headline number has never been measured under the corrected
+/// contract. This arm measures the README's own regime, whichever way it falls.
+fn bench_isin_f64_readme_16m_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const ROW: &str = "python_isin_f64_16m_readme_headline_vs_numpy";
+    const HAYSTACK: usize = 16_000_000;
+    const NEEDLE: usize = 65_536;
+    const PLANTED_HITS: usize = 16_384;
+    // NumPy's sort-based f64 fallback runs in seconds at this size, so the
+    // 41-round min-of-3 microbenchmark default would not fit the worker's
+    // execution ceiling. Sampling stays odd, interleaved, and dual-null gated.
+    const CONTRACT_ROUNDS: usize = 21;
+    const CONTRACT_MIN_OF: usize = 1;
+    const THREAD_ACTIVITY_REPETITIONS: usize = 3;
+    const THREADS: &str = "4";
+    const REQUIRED_BUILD_PROFILE: &str = "release-perf";
+
+    assert_eq!(
+        std::env::var("FNP_BENCH_PROFILE").as_deref(),
+        Ok(REQUIRED_BUILD_PROFILE),
+        "ship-grade isin evidence requires FNP_BENCH_PROFILE=release-perf"
+    );
+    let build_worker =
+        std::env::var("FNP_BUILD_WORKER").expect("FNP_BUILD_WORKER records the RCH build origin");
+    assert!(
+        !build_worker.trim().is_empty(),
+        "FNP_BUILD_WORKER must name the RCH build worker"
+    );
+    for variable in [
+        "RAYON_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(THREADS),
+            "{variable} must be explicitly pinned before isin timing"
+        );
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        THREADS
+            .parse::<usize>()
+            .expect("thread count constant is numeric"),
+        "Rayon pool width does not match the pinned isin configuration"
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_isin_readme_16m")
+            .expect("isin README-conversion bench module");
+        fnp_python(&module).expect("initialize fnp_python isin README bench module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let np_isin = numpy.getattr("isin").expect("numpy isin");
+        let fnp_isin = module.getattr("isin").expect("fnp isin");
+        common::report_numpy_incumbent_identity(py, "isin", &np_isin);
+        let incumbent_module = np_isin
+            .getattr("__module__")
+            .expect("numpy isin __module__")
+            .extract::<String>()
+            .expect("numpy isin __module__ str");
+        assert!(
+            incumbent_module.starts_with("numpy"),
+            "incumbent isin is not defined under numpy: {incumbent_module}"
+        );
+        assert!(
+            !np_isin.is(&fnp_isin),
+            "dispatch trap: the incumbent arm resolved to our own callable"
+        );
+        common::report_incumbent_topology("fnp.isin", "numpy.isin");
+
+        // One pair of inputs, built once, handed unchanged to both arms. The
+        // needle plants real hits: a needle with zero members is a degenerate
+        // membership job and is not what a user runs.
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260731)\n\
+                 isin_a = rng.standard_normal(16_000_000)\n\
+                 isin_b = rng.standard_normal(65_536)\n\
+                 isin_b[:16_384] = isin_a[rng.choice(16_000_000, 16_384, replace=False)]\n",
+            )
+            .expect("isin README corpus CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("isin README corpus setup");
+        let isin_a = namespace.get_item("isin_a").expect("isin_a present");
+        let isin_b = namespace.get_item("isin_b").expect("isin_b present");
+
+        for (name, array, expected) in [("haystack", &isin_a, HAYSTACK), ("needle", &isin_b, NEEDLE)]
+        {
+            let shape = array
+                .getattr("shape")
+                .expect("isin operand shape")
+                .extract::<Vec<usize>>()
+                .expect("isin operand shape vector");
+            let dtype = array
+                .getattr("dtype")
+                .expect("isin operand dtype")
+                .str()
+                .expect("isin operand dtype string")
+                .to_string();
+            let c_contiguous = array
+                .getattr("flags")
+                .expect("isin operand flags")
+                .getattr("c_contiguous")
+                .expect("isin operand C-contiguous flag")
+                .extract::<bool>()
+                .expect("isin operand C-contiguous bool");
+            assert_eq!(shape, vec![expected], "{name} shape");
+            assert_eq!(dtype, "float64", "{name} dtype");
+            assert!(c_contiguous, "{name} must be C-contiguous");
+        }
+
+        let checksum_of = |array: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let bytes = array
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec");
+            bytes
+                .len()
+                .to_le_bytes()
+                .iter()
+                .chain(bytes.iter())
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        // Behavior before timing: the whole boolean result must be byte-equal.
+        let ours = fnp_isin.call1((&isin_a, &isin_b)).expect("fnp isin");
+        let theirs = np_isin.call1((&isin_a, &isin_b)).expect("numpy isin");
+        let ours_bytes = ours
+            .call_method0("tobytes")
+            .expect("fnp isin tobytes")
+            .extract::<Vec<u8>>()
+            .expect("fnp isin byte Vec");
+        let theirs_bytes = theirs
+            .call_method0("tobytes")
+            .expect("numpy isin tobytes")
+            .extract::<Vec<u8>>()
+            .expect("numpy isin byte Vec");
+        assert_eq!(
+            ours_bytes, theirs_bytes,
+            "fnp.isin and numpy.isin disagree - a perf comparison of divergent \
+             results is meaningless"
+        );
+        let ours_dtype = ours
+            .getattr("dtype")
+            .expect("fnp isin dtype")
+            .str()
+            .expect("fnp isin dtype string")
+            .to_string();
+        let theirs_dtype = theirs
+            .getattr("dtype")
+            .expect("numpy isin dtype")
+            .str()
+            .expect("numpy isin dtype string")
+            .to_string();
+        assert_eq!(ours_dtype, theirs_dtype, "isin result dtype differs");
+        let observed_hits = theirs_bytes.iter().filter(|byte| **byte != 0).count();
+        assert!(
+            observed_hits >= PLANTED_HITS,
+            "needle planting failed: {observed_hits} members observed"
+        );
+        println!(
+            "PARITY row={ROW} exact_bytes=passed result_dtype={ours_dtype} \
+             result_elements={} member_elements={observed_hits} checksum={:016x}",
+            theirs_bytes.len(),
+            checksum_of(&theirs)
+        );
+        println!(
+            "ROUTE_PRECONDITIONS row={ROW} haystack_dtype=float64 \
+             haystack_elements={HAYSTACK} needle_dtype=float64 \
+             needle_elements={NEEDLE} planted_members={PLANTED_HITS} \
+             both_c_contiguous=true assume_unique=default invert=default \
+             candidate_route=try_zerocopy_float_isin \
+             readme_claim=README.md:1868_isin_hashed_set_up_to_530x_16M_f64"
+        );
+        println!(
+            "WORK_ACCOUNTING row={ROW} candidate_public_calls=1 \
+             incumbent_public_calls=1 candidate_haystack_elements={HAYSTACK} \
+             incumbent_haystack_elements={HAYSTACK} \
+             candidate_needle_elements={NEEDLE} incumbent_needle_elements={NEEDLE} \
+             candidate_output_elements={HAYSTACK} incumbent_output_elements={HAYSTACK} \
+             shared_inputs=true equal_work=true"
+        );
+        println!(
+            "COUNTED_MECHANISM row={ROW} class=one_fewer_algorithmic_class \
+             incumbent_algorithm=sort_of_concatenated_haystack_and_needle \
+             incumbent_sorted_elements={} \
+             candidate_algorithm=hash_set_build_plus_membership_probe \
+             candidate_sorted_elements=0 \
+             incumbent_reason=numpy_kind_table_admits_integer_and_boolean_only \
+             incumbent_source=legacy_numpy_code/numpy/numpy/lib/_arraysetops_impl.py:in1d",
+            HAYSTACK + NEEDLE
+        );
+
+        let run_incumbent = || {
+            np_isin
+                .call1((black_box(&isin_a), black_box(&isin_b)))
+                .expect("numpy isin arm")
+        };
+        let run_candidate = || {
+            fnp_isin
+                .call1((black_box(&isin_a), black_box(&isin_b)))
+                .expect("fnp isin arm")
+        };
+
+        common::report_observed_thread_activity(ROW, "numpy", THREAD_ACTIVITY_REPETITIONS, || {
+            black_box(checksum_of(&run_incumbent()));
+        });
+        common::report_observed_thread_activity(ROW, "fnp", THREAD_ACTIVITY_REPETITIONS, || {
+            black_box(checksum_of(&run_candidate()));
+        });
+
+        let mut observe_incumbent = || {
+            let started = Instant::now();
+            let result = run_incumbent();
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let mut observe_candidate = || {
+            let started = Instant::now();
+            let result = run_candidate();
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let (effect, incumbent_null, candidate_null) =
+            common::run_dual_null_median_ci_contract_with_sampling(
+                ROW,
+                &mut observe_incumbent,
+                &mut observe_candidate,
+                CONTRACT_ROUNDS,
+                CONTRACT_MIN_OF,
+            );
+        let verdict = common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+        println!(
+            "README_CLAIM_CONVERSION row={ROW} verdict={verdict} \
+             claimed_readme_ratio=530 claimed_readme_source=README.md:1868 \
+             claimed_ledger_row=docs/NEGATIVE_EVIDENCE.md:18311 \
+             incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+             ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+             incumbent_null_ratio={:.6} incumbent_null_ci95=[{:.6},{:.6}] \
+             candidate_null_ratio={:.6} candidate_null_ci95=[{:.6},{:.6}] \
+             effect_ci_excludes_one={} corrected_dual_null_gate=true \
+             median_clause=true actual_threads_reported=true \
+             incumbent=numpy_live_same_invocation",
+            effect.arm_a_median_ns / 1_000_000.0,
+            effect.arm_b_median_ns / 1_000_000.0,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            incumbent_null.ratio_median,
+            incumbent_null.ratio_ci_low,
+            incumbent_null.ratio_ci_high,
+            candidate_null.ratio_median,
+            candidate_null.ratio_ci_low,
+            candidate_null.ratio_ci_high,
+            effect.ratio_ci_low > 1.0 || effect.ratio_ci_high < 1.0,
+        );
+        let (decision, reason) = match verdict {
+            "DECIDABLE_WIN" => ("choose_fnp", "corrected_dual_null_incumbent_win"),
+            "DECIDABLE_REGRESSION" => ("choose_numpy", "corrected_dual_null_regression"),
+            _ => (
+                "choose_numpy",
+                "effect_not_separated_from_dual_null_envelope",
+            ),
+        };
+        println!(
+            "CHOOSER_STATEMENT workload=isin_f64_16m_readme_headline \
+             decision={decision} reason={reason} \
+             incumbent=numpy_live_same_invocation \
+             measured_scope=float64_16m_haystack_65536_needle_16384_planted_members \
+             outside_scope=run_same_contract_before_choosing"
+        );
+    });
+}
+
 /// End-to-end redecision for the public bool-return surface fed by the
 /// `ArrayStorage::Bool` materialization funnel. The internal funnel remains a
 /// maintenance-only result; this row times `fnp.greater` as a whole against
@@ -6564,6 +6864,386 @@ fn bench_quantile_f16_histogram_vs_numpy_median_gate(c: &mut Criterion) {
             &mut time_ours,
         );
     });
+}
+
+/// Re-decide the 25k-row wide-CSV whole-job parity result at the exact
+/// 100k-row threshold in its retry predicate. This is the complete job a
+/// sensor-data user runs: parse eight tail columns from a wide on-disk batch,
+/// build a global histogram, and report per-channel standard deviations.
+fn bench_wide_csv_sensor_etl_retry_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const ROW: &str = "workload_wide_csv_sensor_etl_retry_100000x48_use8";
+    const CSV_ROWS: usize = 100_000;
+    const CSV_COLUMNS: usize = 48;
+    const CSV_USECOLS: [i64; 8] = [-1, -3, -5, -7, -9, -11, -13, -15];
+    const HISTOGRAM_BINS: usize = 64;
+    const THREAD_ACTIVITY_REPETITIONS: usize = 3;
+    const THREADS: &str = "4";
+    const REQUIRED_BUILD_PROFILE: &str = "release-perf";
+
+    assert_eq!(
+        std::env::var("FNP_BENCH_PROFILE").as_deref(),
+        Ok(REQUIRED_BUILD_PROFILE),
+        "ship-grade wide-CSV evidence requires FNP_BENCH_PROFILE=release-perf"
+    );
+    let build_worker =
+        std::env::var("FNP_BUILD_WORKER").expect("FNP_BUILD_WORKER records the RCH build origin");
+    assert!(
+        !build_worker.trim().is_empty(),
+        "FNP_BUILD_WORKER must name the RCH build worker"
+    );
+    for variable in [
+        "RAYON_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(THREADS),
+            "{variable} must be explicitly pinned before wide-CSV timing"
+        );
+    }
+    assert_eq!(
+        rayon::current_num_threads(),
+        THREADS
+            .parse::<usize>()
+            .expect("thread count constant is numeric"),
+        "Rayon pool width does not match the pinned wide-CSV configuration"
+    );
+    let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "unavailable".to_owned());
+    println!(
+        "WORKLOAD_RUNTIME workload=wide_csv_sensor_etl_retry host={host} \
+         build_worker={build_worker} build_profile={REQUIRED_BUILD_PROFILE} \
+         rayon_threads={} RAYON_NUM_THREADS={} OPENBLAS_NUM_THREADS={} \
+         OMP_NUM_THREADS={} MKL_NUM_THREADS={}",
+        rayon::current_num_threads(),
+        THREADS,
+        THREADS,
+        THREADS,
+        THREADS,
+    );
+
+    let csv_path = format!(
+        "/data/tmp/fnp-wide-csv-etl-retry-{}.csv",
+        common::bench_invocation_id()
+    );
+    let mut csv = String::with_capacity(CSV_ROWS * CSV_COLUMNS * 10);
+    for row in 0..CSV_ROWS {
+        for column in 0..CSV_COLUMNS {
+            if column > 0 {
+                csv.push(',');
+            }
+            let raw = ((row * 7_919 + column * 104_729) % 1_000_000) as i64 - 500_000;
+            write!(&mut csv, "{:.3}", raw as f64 / 1_000.0)
+                .expect("writing the wide-CSV corpus to a String cannot fail");
+        }
+        csv.push('\n');
+    }
+    let csv_bytes = csv.len();
+    let csv_checksum = csv
+        .as_bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+            (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    std::fs::write(&csv_path, csv).expect("write 100k-row wide-CSV corpus");
+    let warm_page_cache = std::fs::read(&csv_path).expect("warm wide-CSV page cache");
+    assert_eq!(warm_page_cache.len(), csv_bytes);
+    black_box(warm_page_cache.len());
+    drop(warm_page_cache);
+    println!(
+        "WORKLOAD_INPUT row={ROW} path={csv_path} rows={CSV_ROWS} \
+         columns={CSV_COLUMNS} selected_columns={} selected_fraction={:.6} \
+         csv_bytes={csv_bytes} csv_checksum={csv_checksum:016x} \
+         same_path_per_pair=true page_cache=prewarmed",
+        CSV_USECOLS.len(),
+        CSV_USECOLS.len() as f64 / CSV_COLUMNS as f64,
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_wide_csv_sensor_etl_retry")
+            .expect("wide-CSV retry module");
+        fnp_python(&module).expect("initialize fnp_python wide-CSV retry module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        let fnp_loadtxt = module.getattr("loadtxt").expect("fnp loadtxt");
+        let np_loadtxt = numpy.getattr("loadtxt").expect("numpy loadtxt");
+        let fnp_histogram = module.getattr("histogram").expect("fnp histogram");
+        let np_histogram = numpy.getattr("histogram").expect("numpy histogram");
+        let fnp_std = module.getattr("std").expect("fnp std");
+        let np_std = numpy.getattr("std").expect("numpy std");
+        for (candidate, incumbent, surface) in [
+            (&fnp_loadtxt, &np_loadtxt, "loadtxt"),
+            (&fnp_histogram, &np_histogram, "histogram"),
+            (&fnp_std, &np_std, "std"),
+        ] {
+            assert!(
+                !candidate.is(incumbent),
+                "dispatch trap: {surface} incumbent resolved to the FNP callable"
+            );
+        }
+        common::report_numpy_loadtxt_incumbent_identity(py, &np_loadtxt);
+        common::report_numpy_incumbent_identity(py, "histogram", &np_histogram);
+        common::report_numpy_incumbent_identity(py, "std", &np_std);
+        common::report_incumbent_topology(
+            "fnp.workload.wide_csv_sensor_etl_retry",
+            "numpy.workload.wide_csv_sensor_etl_retry",
+        );
+        println!(
+            "INCUMBENT_ISOLATION_PROOF workload=wide_csv_sensor_etl_retry \
+             candidate=fnp.loadtxt+fnp.histogram+fnp.std \
+             incumbent=numpy.loadtxt+numpy.histogram+numpy.std \
+             callable_identity_distinct=passed \
+             shared_timed_component=none candidate_stages_all_native=true \
+             inputs_shared_read_only=true same_path=true result_cache=none"
+        );
+
+        let loadtxt_kwargs = PyDict::new(py);
+        loadtxt_kwargs
+            .set_item("delimiter", ",")
+            .expect("CSV delimiter kwarg");
+        loadtxt_kwargs
+            .set_item("dtype", numpy.getattr("float64").expect("numpy float64"))
+            .expect("CSV dtype kwarg");
+        loadtxt_kwargs
+            .set_item("usecols", CSV_USECOLS)
+            .expect("CSV usecols kwarg");
+
+        // Fail closed on route attribution before timing. The compatible
+        // negative-usecols parse and axis-0 std must survive poisoned NumPy
+        // entry points. The C-contiguous 2-D histogram must likewise avoid the
+        // counted NumPy wrapper.
+        let route_namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "histogram_calls = [0]\n\
+                 def poison_loadtxt(*args, **kwargs):\n\
+                 \x20   raise AssertionError('fnp.loadtxt delegated')\n\
+                 def poison_std(*args, **kwargs):\n\
+                 \x20   raise AssertionError('fnp.std delegated')\n\
+                 def counted_histogram(*args, **kwargs):\n\
+                 \x20   histogram_calls[0] += 1\n\
+                 \x20   return original_histogram(*args, **kwargs)\n",
+            )
+            .expect("route-attribution CString")
+            .as_c_str(),
+            Some(&route_namespace),
+            Some(&route_namespace),
+        )
+        .expect("route-attribution helpers");
+        route_namespace
+            .set_item("original_histogram", &np_histogram)
+            .expect("publish original histogram");
+        let poison_loadtxt = route_namespace
+            .get_item("poison_loadtxt")
+            .expect("poison_loadtxt present");
+        numpy
+            .setattr("loadtxt", &poison_loadtxt)
+            .expect("poison numpy.loadtxt");
+        let native_parsed = fnp_loadtxt
+            .call((csv_path.as_str(),), Some(&loadtxt_kwargs))
+            .expect("native FNP wide-CSV parse under poisoned numpy.loadtxt");
+        numpy
+            .setattr("loadtxt", &np_loadtxt)
+            .expect("restore numpy.loadtxt");
+
+        let poison_std = route_namespace
+            .get_item("poison_std")
+            .expect("poison_std present");
+        numpy.setattr("std", &poison_std).expect("poison numpy.std");
+        fnp_std
+            .call1((&native_parsed, 0_i64))
+            .expect("native FNP axis-0 std under poisoned numpy.std");
+        numpy.setattr("std", &np_std).expect("restore numpy.std");
+
+        let counted_histogram = route_namespace
+            .get_item("counted_histogram")
+            .expect("counted_histogram present");
+        numpy
+            .setattr("histogram", &counted_histogram)
+            .expect("install counted numpy.histogram");
+        fnp_histogram
+            .call1((&native_parsed, HISTOGRAM_BINS))
+            .expect("FNP 2-D histogram through counted NumPy fallback");
+        numpy
+            .setattr("histogram", &np_histogram)
+            .expect("restore numpy.histogram");
+        let histogram_calls = route_namespace
+            .get_item("histogram_calls")
+            .expect("histogram_calls present")
+            .get_item(0)
+            .expect("histogram call counter")
+            .extract::<usize>()
+            .expect("histogram call counter integer");
+        assert_eq!(
+            histogram_calls, 0,
+            "FNP's native 2-D histogram route delegated to NumPy"
+        );
+        println!(
+            "ROUTE_PROOF row={ROW} loadtxt_numpy_poison_survived=true \
+             std_numpy_poison_survived=true histogram_counted_numpy_calls={histogram_calls} \
+             loadtxt_route=fnp_io::loadtxt_usecols_signed \
+             loadtxt_source_pin=fnp-python/src/lib.rs:loadtxt_bounded_negative_usecols \
+             histogram_route=try_zerocopy_histogram_2d_c_contiguous_ravel \
+             histogram_source_pin=fnp-python/src/lib.rs:try_zerocopy_histogram \
+             std_route=try_zerocopy_f64_var_axis0 \
+             std_source_pin=fnp-python/src/lib.rs:py_std_axis0"
+        );
+        println!(
+            "RETRY_PREDICATE_PROOF row={ROW} required_rows_min=100000 actual_rows={CSV_ROWS} \
+             required_columns_min=48 actual_columns={CSV_COLUMNS} \
+             selected_columns_max_fraction=0.25 actual_selected_fraction={:.6} satisfied=true",
+            CSV_USECOLS.len() as f64 / CSV_COLUMNS as f64,
+        );
+        println!(
+            "WORKLOAD_CONFIG row={ROW} user_job=wide_csv_sensor_etl \
+             input=csv[{CSV_ROWS},{CSV_COLUMNS}]_selected_tail_columns[{}] \
+             distribution=bounded_signed_decimal \
+             stages=loadtxt_negative_usecols,histogram_64,std_axis0 \
+             output=global_histogram_edges_plus_per_column_std \
+             matched_config=same_process_same_path_warm_page_cache \
+             target_user=sensor_batch_ETL",
+            CSV_USECOLS.len(),
+        );
+
+        let run_incumbent = || {
+            let started = Instant::now();
+            let parsed = np_loadtxt
+                .call((black_box(csv_path.as_str()),), Some(&loadtxt_kwargs))
+                .expect("numpy wide-CSV parse");
+            let histogram = np_histogram
+                .call1((black_box(&parsed), HISTOGRAM_BINS))
+                .expect("numpy wide-CSV histogram");
+            let std = np_std
+                .call1((black_box(&parsed), 0_i64))
+                .expect("numpy wide-CSV std");
+            let elapsed = started.elapsed();
+            let counts = histogram.get_item(0).expect("numpy histogram counts");
+            let edges = histogram.get_item(1).expect("numpy histogram edges");
+            (elapsed, [counts, edges, std])
+        };
+        let run_candidate = || {
+            let started = Instant::now();
+            let parsed = fnp_loadtxt
+                .call((black_box(csv_path.as_str()),), Some(&loadtxt_kwargs))
+                .expect("fnp wide-CSV parse");
+            let histogram = fnp_histogram
+                .call1((black_box(&parsed), HISTOGRAM_BINS))
+                .expect("fnp wide-CSV histogram");
+            let std = fnp_std
+                .call1((black_box(&parsed), 0_i64))
+                .expect("fnp wide-CSV std");
+            let elapsed = started.elapsed();
+            let counts = histogram.get_item(0).expect("fnp histogram counts");
+            let edges = histogram.get_item(1).expect("fnp histogram edges");
+            (elapsed, [counts, edges, std])
+        };
+
+        let (_, incumbent_output) = run_incumbent();
+        let (_, candidate_output) = run_candidate();
+        assert_workload_outputs_equal(&numpy, ROW, &candidate_output, &incumbent_output);
+        let output_checksum = workload_checksum(&numpy, &candidate_output);
+        println!(
+            "PARITY row={ROW} outputs=3 dtype_shape_every_output_byte=identical \
+             output_checksum={output_checksum:016x}"
+        );
+        println!(
+            "WORK_ACCOUNTING row={ROW} candidate_public_calls=3 incumbent_public_calls=3 \
+             candidate_source_rows={CSV_ROWS} incumbent_source_rows={CSV_ROWS} \
+             candidate_source_fields={} incumbent_source_fields={} \
+             candidate_selected_values={} incumbent_selected_values={} \
+             candidate_histogram_values={} incumbent_histogram_values={} \
+             candidate_histogram_bins={HISTOGRAM_BINS} \
+             incumbent_histogram_bins={HISTOGRAM_BINS} \
+             candidate_std_columns={} incumbent_std_columns={} \
+             candidate_output_elements={} incumbent_output_elements={} \
+             same_input_bytes={csv_bytes} less_work_claim=false",
+            CSV_ROWS * CSV_COLUMNS,
+            CSV_ROWS * CSV_COLUMNS,
+            CSV_ROWS * CSV_USECOLS.len(),
+            CSV_ROWS * CSV_USECOLS.len(),
+            CSV_ROWS * CSV_USECOLS.len(),
+            CSV_ROWS * CSV_USECOLS.len(),
+            CSV_USECOLS.len(),
+            CSV_USECOLS.len(),
+            HISTOGRAM_BINS + (HISTOGRAM_BINS + 1) + CSV_USECOLS.len(),
+            HISTOGRAM_BINS + (HISTOGRAM_BINS + 1) + CSV_USECOLS.len(),
+        );
+
+        common::report_observed_thread_activity(ROW, "numpy", THREAD_ACTIVITY_REPETITIONS, || {
+            let (_, outputs) = run_incumbent();
+            black_box(outputs);
+        });
+        common::report_observed_thread_activity(ROW, "fnp", THREAD_ACTIVITY_REPETITIONS, || {
+            let (_, outputs) = run_candidate();
+            black_box(outputs);
+        });
+
+        let mut observe_incumbent = || {
+            let (elapsed, outputs) = run_incumbent();
+            common::ContractObservation {
+                elapsed,
+                checksum: workload_checksum(&numpy, &outputs),
+            }
+        };
+        let mut observe_candidate = || {
+            let (elapsed, outputs) = run_candidate();
+            common::ContractObservation {
+                elapsed,
+                checksum: workload_checksum(&numpy, &outputs),
+            }
+        };
+        let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+            ROW,
+            &mut observe_incumbent,
+            &mut observe_candidate,
+        );
+        let verdict = common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+        println!(
+            "WHOLE_JOB_RESULT row={ROW} verdict={verdict} \
+             incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+             ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+             incumbent_null_ratio={:.6} incumbent_null_ci95=[{:.6},{:.6}] \
+             candidate_null_ratio={:.6} candidate_null_ci95=[{:.6},{:.6}] \
+             effect_ci_excludes_one={} corrected_dual_null_gate=true \
+             median_clause=true actual_threads_reported=true",
+            effect.arm_a_median_ns / 1_000_000.0,
+            effect.arm_b_median_ns / 1_000_000.0,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            incumbent_null.ratio_median,
+            incumbent_null.ratio_ci_low,
+            incumbent_null.ratio_ci_high,
+            candidate_null.ratio_median,
+            candidate_null.ratio_ci_low,
+            candidate_null.ratio_ci_high,
+            effect.ratio_ci_low > 1.0 || effect.ratio_ci_high < 1.0,
+        );
+        let (decision, reason) = match verdict {
+            "DECIDABLE_WIN" => ("choose_fnp", "corrected_dual_null_incumbent_win"),
+            "DECIDABLE_REGRESSION" => ("choose_numpy", "corrected_dual_null_regression"),
+            _ => (
+                "choose_neither_on_performance",
+                "effect_not_separated_from_dual_null_envelope",
+            ),
+        };
+        println!(
+            "CHOOSER_STATEMENT workload=wide_csv_sensor_etl_retry decision={decision} \
+             reason={reason} \
+             measured_scope=100000x48_bounded_decimal_csv_select_8_negative_tail_columns_histogram64_std_axis0 \
+             incumbent=numpy_live_same_invocation \
+             shared_component=none \
+             outside_scope=run_same_contract_before_choosing"
+        );
+    });
+
+    std::fs::remove_file(&csv_path).expect("remove owned wide-CSV retry corpus");
+    println!("WORKLOAD_SCRATCH_CLEANUP path={csv_path} removed=true");
 }
 
 /// Phase-2 incumbent suite: complete jobs rather than accessor-level kernels.
@@ -11283,6 +11963,10 @@ fn main() {
             bench_isin_f64_vs_numpy_median_gate,
         ),
         (
+            "bench_isin_f64_readme_16m_vs_numpy_median_gate",
+            bench_isin_f64_readme_16m_vs_numpy_median_gate,
+        ),
+        (
             "bench_int64_matmul_hold_redecision_median_gate",
             bench_int64_matmul_hold_redecision_median_gate,
         ),
@@ -11293,6 +11977,10 @@ fn main() {
         (
             "bench_quantile_f16_histogram_vs_numpy_median_gate",
             bench_quantile_f16_histogram_vs_numpy_median_gate,
+        ),
+        (
+            "bench_wide_csv_sensor_etl_retry_vs_numpy_median_gate",
+            bench_wide_csv_sensor_etl_retry_vs_numpy_median_gate,
         ),
         (
             "bench_realistic_end_to_end_workloads_vs_numpy_median_gate",
