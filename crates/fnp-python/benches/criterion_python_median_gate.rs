@@ -7124,6 +7124,265 @@ fn bench_fused_multiply_add_integer_matrix_vs_numpy_median_gate(c: &mut Criterio
 /// is compiled with FP contraction, so byte-exactness REQUIRES our kernel to
 /// fuse, where the real `float64` row above requires it not to. Both directions
 /// are asserted before any timing happens.
+/// Preallocated `out=` fusion for `a * b + c`, measured whole against live NumPy.
+///
+/// NEITHER ARM ALLOCATES. The incumbent is the strongest explicit NumPy spelling
+/// of this contract — `numpy.multiply(a, b, out=out)` then
+/// `numpy.add(out, c, out=out)` — which needs no temporary at all. Verified
+/// byte-identical to `numpy.add(numpy.multiply(a, b), c, out=out)` before timing,
+/// so this is a fair incumbent rather than a weakened one.
+///
+/// That removes the allocator from both sides, so the entire remaining gap is
+/// pass elimination (six element-stream touches down to four) plus parallelism.
+/// These ratios are therefore expected to sit BELOW the allocating rows, and the
+/// comparison is the honest one for callers who already reuse buffers.
+fn bench_fused_multiply_add_out_matrix_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const TARGET_BYTES_PER_OPERAND: usize = 32 * 1024 * 1024;
+    const CONTRACT_ROUNDS: usize = 21;
+    const CONTRACT_MIN_OF: usize = 1;
+    const REQUIRED_BUILD_PROFILE: &str = "release-perf";
+
+    assert_eq!(
+        std::env::var("FNP_BENCH_PROFILE").as_deref(),
+        Ok(REQUIRED_BUILD_PROFILE),
+        "ship-grade fusion evidence requires FNP_BENCH_PROFILE=release-perf"
+    );
+    let build_worker =
+        std::env::var("FNP_BUILD_WORKER").expect("FNP_BUILD_WORKER records the RCH build origin");
+    assert!(
+        !build_worker.trim().is_empty(),
+        "FNP_BUILD_WORKER must be set"
+    );
+    let threads = std::env::var("RAYON_NUM_THREADS")
+        .expect("RAYON_NUM_THREADS must be explicitly pinned before fusion timing");
+    for variable in ["OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(threads.as_str()),
+            "{variable} must be pinned to the same width as RAYON_NUM_THREADS"
+        );
+    }
+    let threads: usize = threads.parse().expect("thread count is numeric");
+    assert_eq!(
+        rayon::current_num_threads(),
+        threads,
+        "Rayon pool width does not match the pinned fusion configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME workload=fused_multiply_add_out_matrix \
+         build_worker={build_worker} build_profile={REQUIRED_BUILD_PROFILE} \
+         pinned_threads={threads} rayon_threads={} contract_rounds={CONTRACT_ROUNDS} \
+         contract_min_of={CONTRACT_MIN_OF} bytes_per_operand={TARGET_BYTES_PER_OPERAND} \
+         preallocated_output=true allocations_in_either_arm=0",
+        rayon::current_num_threads()
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_fused_multiply_add_out")
+            .expect("out= fusion bench module");
+        fnp_python(&module).expect("initialize fnp_python out= fusion module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+        let np_multiply = numpy.getattr("multiply").expect("numpy multiply");
+        let np_add = numpy.getattr("add").expect("numpy add");
+        let fnp_multiply_add = module.getattr("multiply_add").expect("fnp multiply_add");
+        common::report_numpy_incumbent_identity(py, "multiply", &np_multiply);
+        common::report_incumbent_topology(
+            "fnp.multiply_add_out_matrix",
+            "numpy.multiply+numpy.add",
+        );
+
+        let checksum_of = |array: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let bytes = array
+                .call_method0("tobytes")
+                .expect("tobytes")
+                .extract::<Vec<u8>>()
+                .expect("byte Vec");
+            bytes
+                .len()
+                .to_le_bytes()
+                .iter()
+                .chain(bytes.iter())
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        let dtypes = [
+            ("float64", 8usize),
+            ("float32", 4),
+            ("float16", 2),
+            ("int64", 8),
+            ("complex128", 16),
+            ("complex64", 8),
+        ];
+
+        for (dtype, item_size) in dtypes {
+            let elements = TARGET_BYTES_PER_OPERAND / item_size;
+            let row = format!("python_fused_multiply_add_out_{dtype}_32mib_vs_numpy");
+            let namespace = PyDict::new(py);
+            let draw = if dtype.starts_with("complex") {
+                format!(
+                    "(rng.standard_normal({elements}) \
+                     + 1j * rng.standard_normal({elements})).astype(np.{dtype})"
+                )
+            } else if dtype.starts_with("float") {
+                format!("(rng.standard_normal({elements}) * 4).astype(np.{dtype})")
+            } else {
+                format!("rng.integers(-1000000, 1000000, {elements}, dtype=np.{dtype})")
+            };
+            // Both output buffers are allocated ONCE here, outside every timed
+            // region, so neither arm pays an allocation during measurement.
+            let corpus = format!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260731)\n\
+                 fma_a = {draw}\n\
+                 fma_b = {draw}\n\
+                 fma_c = {draw}\n\
+                 out_numpy = np.empty({elements}, dtype=np.{dtype})\n\
+                 out_fnp = np.empty({elements}, dtype=np.{dtype})\n"
+            );
+            py.run(
+                std::ffi::CString::new(corpus)
+                    .expect("out= fusion corpus CString")
+                    .as_c_str(),
+                Some(&namespace),
+                Some(&namespace),
+            )
+            .expect("out= fusion corpus setup");
+            let fma_a = namespace.get_item("fma_a").expect("fma_a present");
+            let fma_b = namespace.get_item("fma_b").expect("fma_b present");
+            let fma_c = namespace.get_item("fma_c").expect("fma_c present");
+            let out_numpy = namespace.get_item("out_numpy").expect("out_numpy present");
+            let out_fnp = namespace.get_item("out_fnp").expect("out_fnp present");
+
+            // Chained through out=, so the incumbent needs no temporary either.
+            let run_incumbent = || {
+                np_multiply
+                    .call1((black_box(&fma_a), black_box(&fma_b), black_box(&out_numpy)))
+                    .expect("numpy multiply out= arm");
+                np_add
+                    .call1((
+                        black_box(&out_numpy),
+                        black_box(&fma_c),
+                        black_box(&out_numpy),
+                    ))
+                    .expect("numpy add out= arm")
+            };
+            let run_candidate = || {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("out", black_box(&out_fnp)).expect("out kw");
+                fnp_multiply_add
+                    .call(
+                        (black_box(&fma_a), black_box(&fma_b), black_box(&fma_c)),
+                        Some(&kwargs),
+                    )
+                    .expect("fnp multiply_add out= arm")
+            };
+
+            let ours = run_candidate();
+            let theirs = run_incumbent();
+            assert_eq!(
+                ours.call_method0("tobytes")
+                    .expect("fnp tobytes")
+                    .extract::<Vec<u8>>()
+                    .expect("fnp bytes"),
+                theirs
+                    .call_method0("tobytes")
+                    .expect("numpy tobytes")
+                    .extract::<Vec<u8>>()
+                    .expect("numpy bytes"),
+                "fused out= {dtype} result is not byte-identical to NumPy"
+            );
+            // The routed contract RETURNS the caller's array; if it ever stopped
+            // writing in place the ratio would be measuring the wrong thing.
+            assert!(
+                ours.is(&out_fnp),
+                "fnp.multiply_add(out=) must return the caller's output array"
+            );
+            println!(
+                "PARITY row={row} exact_bytes=passed result_dtype={dtype} \
+                 result_elements={elements} result_bytes={TARGET_BYTES_PER_OPERAND} \
+                 checksum={:016x} preallocated_output=true returned_output_identity=passed",
+                checksum_of(&theirs)
+            );
+            println!(
+                "COUNTED_MECHANISM row={row} class=pass_elimination_only \
+                 incumbent_element_stream_touches=6 candidate_element_stream_touches=4 \
+                 incumbent_output_allocations=0 candidate_output_allocations=0 \
+                 incumbent_eliminated_temporary_bytes=0 \
+                 shared_inputs=true equal_work=true"
+            );
+
+            common::report_observed_thread_activity(&row, "numpy", 1, || {
+                black_box(checksum_of(&run_incumbent()));
+            });
+            common::report_observed_thread_activity(&row, "fnp", 1, || {
+                black_box(checksum_of(&run_candidate()));
+            });
+
+            let mut observe_incumbent = || {
+                let started = Instant::now();
+                let result = run_incumbent();
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let mut observe_candidate = || {
+                let started = Instant::now();
+                let result = run_candidate();
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &row,
+                    &mut observe_incumbent,
+                    &mut observe_candidate,
+                    CONTRACT_ROUNDS,
+                    CONTRACT_MIN_OF,
+                );
+            let verdict =
+                common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+            println!(
+                "FUSION_OUT_RESULT row={row} dtype={dtype} verdict={verdict} \
+                 incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ci95=[{:.6},{:.6}] candidate_null_ci95=[{:.6},{:.6}] \
+                 corrected_dual_null_gate=true incumbent=numpy_live_same_invocation",
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_ci_low,
+                incumbent_null.ratio_ci_high,
+                candidate_null.ratio_ci_low,
+                candidate_null.ratio_ci_high,
+            );
+            let decision = if verdict == "DECIDABLE_WIN" {
+                "choose_fnp"
+            } else {
+                "choose_numpy"
+            };
+            println!(
+                "CHOOSER_STATEMENT workload=fused_multiply_add_out_{dtype}_32mib \
+                 decision={decision} verdict={verdict} \
+                 incumbent=numpy_live_same_invocation measured_scope={elements}_equal_shape_c_contiguous_elements_preallocated_out_at_{threads}_pinned_threads \
+                 outside_scope=run_same_contract_before_choosing"
+            );
+        }
+    });
+}
+
 fn bench_fused_multiply_add_narrow_and_complex_matrix_vs_numpy_median_gate(c: &mut Criterion) {
     let _ = c;
 
@@ -13696,6 +13955,10 @@ fn main() {
         (
             "bench_fused_multiply_add_narrow_and_complex_matrix_vs_numpy_median_gate",
             bench_fused_multiply_add_narrow_and_complex_matrix_vs_numpy_median_gate,
+        ),
+        (
+            "bench_fused_multiply_add_out_matrix_vs_numpy_median_gate",
+            bench_fused_multiply_add_out_matrix_vs_numpy_median_gate,
         ),
         (
             "bench_isin_f64_vs_numpy_median_gate",

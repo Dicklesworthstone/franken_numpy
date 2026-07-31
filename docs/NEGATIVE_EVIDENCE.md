@@ -4,6 +4,100 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-31 - PREALLOCATED `a*b+c` (MIXED, PARTIAL KEEP): `float16` out= wins 6.69x REPLICATED; the other five dtypes are NOT ESTABLISHED
+
+`QuartzHeron`, bead `franken_numpy-ixs5y.409`. `fnp.multiply_add(a, b, c, out=out)`
+now writes a caller-owned output across all thirteen routed dtypes (f64, f32,
+the eight fixed-width integers, f16, complex64, complex128). Correctness is
+complete and independent of the perf verdict: 29/29 tests in
+`conformance_multiply_add.rs` pass against a live NumPy oracle, covering the
+`out=` byte contract, returned-output identity, exact-alias and partial
+byte-range-overlap deferral, non-contiguous/mismatched-dtype/broadcast deferral,
+and a read-only output raising exactly as NumPy does.
+
+**Campaign result class:** incumbent-win
+
+NEITHER ARM ALLOCATES. The incumbent is the strongest explicit NumPy spelling —
+`numpy.multiply(a, b, out=out)` then `numpy.add(out, c, out=out)` — which needs
+no temporary at all. Pre-verified in plain Python that this is byte-identical to
+`numpy.add(numpy.multiply(a, b), c, out=out)` across every dtype, so it is a fair
+incumbent and not a weakened one.
+
+THE HEADLINE IS THE NEGATIVE RESULT. Removing the allocator from both arms
+strips the materialization advantage out of the fusion lever and leaves only the
+element-stream traffic ratio: six touches down to four, i.e. a **1.5x ceiling**
+for anything already DRAM-bandwidth-bound. `float64` and `float32` sit exactly on
+that ceiling and cannot clear the gate. Only dtypes with enough compute per byte
+for parallelism to matter win, and only `float16` wins decisively — NumPy has no
+f16 ALU, so its `out=` spelling still pays two widen/narrow round trips, making
+that row compute-bound rather than bandwidth-bound.
+
+| dtype | run A ratio / verdict | run B ratio / verdict | replicated? |
+|---|---|---|---|
+| `float16` | 6.351757x DECIDABLE_WIN | **6.686928x DECIDABLE_WIN** | **YES** |
+| `float64` | 1.365176x UNDECIDED | 2.011003x DECIDABLE_WIN | no |
+| `float32` | 1.498818x UNDECIDED | 1.339856x UNDECIDED | no (both undecided) |
+| `int64` | 2.164390x DECIDABLE_WIN | 2.054016x UNDECIDED | no |
+| `complex128` | 2.138868x DECIDABLE_WIN | 1.434819x UNDECIDED | no |
+| `complex64` | 2.027851x DECIDABLE_WIN | 1.476224x UNDECIDED | no |
+
+ONLY THE `float16` ROW IS CLAIMED. Run A and run B used the SAME ELF on the SAME
+host and disagreed on the verdict for five of six dtypes, so those five fail this
+project's same-ELF replication standard and are recorded as NOT ESTABLISHED, not
+as wins. Their candidate A/A nulls are wide and erratic (`complex64` run B:
+`[0.699026,1.750616]`), the expected signature of an effect near the noise floor
+at 21 rounds on a shared box. Run A additionally executed the sibling
+`subtract_multiply_add` out= group in the same invocation because the group
+substring filter `out_matrix` matched both; run B used the unique filter
+`fused_multiply_add_out_matrix` and is the reference run.
+
+`float16` measured 6.351757x and 6.686928x across the two independent runs with
+tight nulls in both, and is banked on run B.
+
+**A/A null control (same invocation):** run B `float16` NumPy/NumPy CI95 `[0.971512,1.074628]` and FNP/FNP CI95 `[0.921659,1.187849]`, 21 rounds, min-of-1; the effect CI `[5.475670,7.594449]` is disjoint from both.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa artifact_bytes=10452641 invocation_id=000000000000000018c77881d68a5d51-003af56d measured_ratio=6.686928x
+
+**Incumbent isolation proof:** candidate=fnp.multiply_add incumbent=numpy.multiply+numpy.add shared_timed_component=none
+
+ROUTE ENGAGEMENT PROOF: `OBSERVED_THREAD_ACTIVITY` on the `float16` row shows
+NumPy accruing ticks on exactly ONE thread (31) against FNP on NINE (24). Byte
+parity alone would not prove engagement, since a silently deferred route would
+still match while measuring NumPy against NumPy.
+
+COUNTED_MECHANISM: `class=pass_elimination_only`. Incumbent element-stream
+touches 6, candidate 4. Incumbent output allocations 0, candidate 0. Eliminated
+temporary 0 bytes. This is deliberately a DIFFERENT mechanism class from the
+allocating fusion rows, which carry `materialization_and_pass_elimination`.
+
+WHAT THIS BOUNDS. The allocating fusion rows (2.888467x-8.663530x) draw a
+material share of their advantage from eliminating NumPy's temporary, not purely
+from fusing passes. Callers who already reuse buffers should expect the smaller
+`out=` numbers, and for bandwidth-bound f64/f32 should expect at most the 1.5x
+traffic ratio.
+
+PROVENANCE: `bench_elf_sha256=0dd2add4aa5827951d72b3ed37219ebb03b7ff8e1f366c447ba92b0fc19d421d`
+(222,691,544 bytes), built through strict RCH as `release-perf` on builder
+`vmi1149989` and copied hash-identically to measurement host `vmi1152480`
+(`AMD EPYC Processor (with IBPB)`, 10 physical/logical CPUs), sha verified both
+ends. Run A invocation `000000000000000018c77827d35c7ce1-003ace4c`, run B
+`000000000000000018c77881d68a5d51-003af56d`, 8 pinned Rayon threads with
+`OPENBLAS_NUM_THREADS`/`OMP_NUM_THREADS`/`MKL_NUM_THREADS` pinned to match.
+Runtime FMA true, AVX-512F false. Host-wide fail-closed quiescence clear at every
+preflight, maximum observed busy fraction 0.033 against the 0.200 limit.
+
+BUILD PLACEMENT NOTE: the first `release-perf` build landed on `hz2` (Python
+3.14), whose ELF cannot execute on the Python 3.13 measurement hosts that carry
+NumPy 2.4.6. It was rebuilt after briefly draining `hz1` and `hz2` to steer
+placement onto a 3.13 worker; both were restored to the pool. Check the builder's
+Python ABI BEFORE measuring, not after.
+
+Retry predicate for the five NOT ESTABLISHED dtypes: re-run with a materially
+higher `CONTRACT_ROUNDS` (21 is too few to resolve sub-2x effects here) on a
+genuinely idle host, and require the verdict to be stable across two same-ELF
+runs before banking any of them. Do NOT re-derive the `float16` row; it is
+settled.
+
 ## 2026-07-31 - PARALLEL FIXED-WIDTH INTEGER FLAT SUM (KEEP, INCUMBENT-WIN): 2.81-23.04x over live NumPy across all eight integer dtypes
 
 `IvoryDesert`, bead `franken_numpy-ixs5y.408`. `fnp.sum` now recognizes large,

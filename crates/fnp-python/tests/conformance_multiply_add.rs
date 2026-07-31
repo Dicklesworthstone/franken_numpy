@@ -738,3 +738,197 @@ print(all(checks), len(checks))
     assert_eq!(numpy_oracle(&script)?, "True 4");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// out= — the preallocated contract. Neither arm allocates, so the whole
+// remaining gap is pass elimination plus parallelism.
+// ---------------------------------------------------------------------------
+
+/// Every routed dtype must write a caller-owned output byte-identically to
+/// NumPy's own `out=` spelling, and must RETURN that same object.
+#[test]
+fn multiply_add_out_matches_numpy_across_every_routed_dtype() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(41)
+checks = []
+def make(dtype, n):
+    dt = np.dtype(dtype)
+    if dt.kind == 'c':
+        return (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(dt)
+    if dt.kind == 'f':
+        return (rng.standard_normal(n) * 4).astype(dt)
+    return np.frombuffer(rng.bytes(n * dt.itemsize), dtype=dt).copy()
+
+for dtype in [np.float64, np.float32, np.float16,
+              np.int8, np.uint8, np.int16, np.uint16,
+              np.int32, np.uint32, np.int64, np.uint64,
+              np.complex64, np.complex128]:
+    n = 200_000
+    a, b, c = make(dtype, n), make(dtype, n), make(dtype, n)
+    ours = np.empty(n, dtype=dtype)
+    theirs = np.empty(n, dtype=dtype)
+    with np.errstate(all='ignore'):
+        returned = fnp.multiply_add(a, b, c, out=ours)
+        np.add(np.multiply(a, b), c, out=theirs)
+    checks.append(returned is ours and ours.dtype == theirs.dtype
+                  and ours.tobytes() == theirs.tobytes())
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 13");
+    Ok(())
+}
+
+/// The chained NumPy spelling `multiply(a,b,out=out); add(out,c,out=out)` is the
+/// benchmark incumbent. It must agree byte-for-byte with our fused write, or the
+/// measured ratio would be comparing two different computations.
+#[test]
+fn multiply_add_out_matches_the_chained_incumbent_spelling() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(42)
+checks = []
+for dtype in [np.float64, np.float32, np.float16, np.int32, np.complex128, np.complex64]:
+    n = 200_000
+    dt = np.dtype(dtype)
+    if dt.kind == 'c':
+        mk = lambda: (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(dt)
+    elif dt.kind == 'f':
+        mk = lambda: (rng.standard_normal(n) * 4).astype(dt)
+    else:
+        mk = lambda: rng.integers(-10**6, 10**6, n, dtype=dt)
+    a, b, c = mk(), mk(), mk()
+    ours = np.empty(n, dtype=dt)
+    chained = np.empty(n, dtype=dt)
+    with np.errstate(all='ignore'):
+        fnp.multiply_add(a, b, c, out=ours)
+        np.multiply(a, b, out=chained)
+        np.add(chained, c, out=chained)
+    checks.append(ours.tobytes() == chained.tobytes())
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 6");
+    Ok(())
+}
+
+/// ALIASING. A fused single pass cannot reproduce NumPy's intermediate mutation
+/// of `out` when `out` overlaps an input, so those regimes must DEFER. Exact
+/// aliases and partial byte-range overlaps are both covered, and the results
+/// must still equal NumPy's own expression.
+#[test]
+fn multiply_add_out_aliasing_defers_and_still_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(43)
+checks = []
+n = 200_000
+
+# out IS a
+a = rng.standard_normal(n); b = rng.standard_normal(n); c = rng.standard_normal(n)
+ours = a.copy()
+theirs = a.copy()
+fnp.multiply_add(ours, b, c, out=ours)
+np.add(np.multiply(theirs, b), c, out=theirs)
+checks.append(ours.tobytes() == theirs.tobytes())
+
+# out IS c
+a2 = rng.standard_normal(n); b2 = rng.standard_normal(n); c2 = rng.standard_normal(n)
+o2, t2 = c2.copy(), c2.copy()
+fnp.multiply_add(a2, b2, o2, out=o2)
+np.add(np.multiply(a2, b2), t2, out=t2)
+checks.append(o2.tobytes() == t2.tobytes())
+
+# partial byte-range overlap: out is a shifted slice of the same base buffer
+base = rng.standard_normal(n + 16)
+ours3 = base[:n]
+inp3 = base[8:n + 8]
+b3 = rng.standard_normal(n); c3 = rng.standard_normal(n)
+theirs_base = base.copy()
+t3_out = theirs_base[:n]
+t3_in = theirs_base[8:n + 8]
+fnp.multiply_add(inp3, b3, c3, out=ours3)
+np.add(np.multiply(t3_in, b3), c3, out=t3_out)
+checks.append(ours3.tobytes() == t3_out.tobytes())
+
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 3");
+    Ok(())
+}
+
+/// Unsupported `out=` regimes must defer rather than route: non-contiguous
+/// output, mismatched output dtype, mismatched shape, and broadcasting.
+#[test]
+fn multiply_add_out_unsupported_regimes_defer() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(44)
+checks = []
+n = 100_000
+
+# non-contiguous out (stride 2)
+a = rng.standard_normal(n); b = rng.standard_normal(n); c = rng.standard_normal(n)
+ours = np.zeros(2 * n)[::2]
+theirs = np.zeros(2 * n)[::2]
+fnp.multiply_add(a, b, c, out=ours)
+np.add(np.multiply(a, b), c, out=theirs)
+checks.append(ours.tobytes() == theirs.tobytes())
+
+# out dtype differs from operands (f32 out, f64 operands) -> numpy owns the cast
+ours2 = np.empty(n, dtype=np.float32)
+theirs2 = np.empty(n, dtype=np.float32)
+fnp.multiply_add(a, b, c, out=ours2)
+np.add(np.multiply(a, b), c, out=theirs2)
+checks.append(ours2.tobytes() == theirs2.tobytes())
+
+# broadcasting with out
+a3 = rng.standard_normal((512, 4)); b3 = rng.standard_normal((4,)); c3 = rng.standard_normal((512, 1))
+ours3 = np.empty((512, 4)); theirs3 = np.empty((512, 4))
+fnp.multiply_add(a3, b3, c3, out=ours3)
+np.add(np.multiply(a3, b3), c3, out=theirs3)
+checks.append(ours3.tobytes() == theirs3.tobytes())
+
+# read-only out must raise, exactly as numpy does
+ro = np.empty(n); ro.flags.writeable = False
+def raised(fn):
+    try:
+        fn(); return False
+    except Exception:
+        return True
+checks.append(raised(lambda: fnp.multiply_add(a, b, c, out=ro))
+              and raised(lambda: np.add(np.multiply(a, b), c, out=ro)))
+
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 4");
+    Ok(())
+}
+
+/// The allocating form must be unaffected by adding the keyword: omitting `out`
+/// still returns a fresh array and never mutates its inputs.
+#[test]
+fn multiply_add_without_out_still_allocates_and_leaves_inputs_intact() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(45)
+n = 200_000
+a, b, c = rng.standard_normal(n), rng.standard_normal(n), rng.standard_normal(n)
+a0, b0, c0 = a.copy(), b.copy(), c.copy()
+result = fnp.multiply_add(a, b, c)
+print(result is not a, result is not b, result is not c,
+      a.tobytes() == a0.tobytes(), b.tobytes() == b0.tobytes(), c.tobytes() == c0.tobytes(),
+      result.tobytes() == (a * b + c).tobytes())
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True True True True True True True");
+    Ok(())
+}
