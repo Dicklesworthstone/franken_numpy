@@ -3,6 +3,34 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## Current citable whole-job incumbent results
+
+This is the consolidated results view for the three whole-job incumbent wins
+banked on 2026-07-29 and 2026-07-30. Ratios are live NumPy 2.4.6 median time
+divided by FrankenNumPy median time, measured side-by-side in the same
+invocation; values above 1.0 favor FrankenNumPy. The size points in each ratio
+cell correspond in order to the sizes in its workload cell.
+
+| Workload | NumPy / FrankenNumPy ratio | Representative whole job | Build profile | Thread count | Measurement host | Executing ELF SHA-256 | Evidence |
+|---|---:|---|---|---|---|---|---|
+| f16 dynamic-range audit and exact reconstruction | **3.872568x / 3.749619x / 4.827240x**<br>conservative: **3.749619x** | 2M / 4M / 8M finite f16 samples; `frexp` decomposition, 17-bin exponent occupancy, then `ldexp` reconstruction; every reconstructed input and report output matched byte-for-byte | Not recorded in the banked row; do not relabel | 4 configured for each of Rayon, OpenBLAS, OMP, and MKL; OS-active task count was not recorded | `vmi1293453`, drained and full-host checked, CPUs 0-7 | `0f50e015de7e8f3cc0f738c082d1e400937f0c802bc27e3402f280c7a8894d51` | `franken_numpy-ixs5y.389`, `ce0763a0` |
+| int64 critical-access exposure report | **7.491134x / 6.614077x / 2.677785x**<br>conservative: **2.677785x** | 4,096 / 8,192 / 16,384 accounts, 8 roles, and 2,048 entitlements; `matmul`, per-account `max` and `argmax`, then fleet `ptp`; every report output matched byte-for-byte | `release-perf` | 4 configured; observed FNP 4 / 5 / 5 active OS tasks by size and NumPy 1 at every size | `vmi1227854` (109.123.245.77), drained, AMD EPYC, 10 physical cores / 10 logical threads | `9e5fce0b9b0f42c018a3273a3ee6e2be38f43ff8fae3d644c0306b0c25d632d8` | `franken_numpy-ixs5y.392`, `7598e182` |
+| int64 rolling-load saturation report | **2.010480x / 1.896072x / 2.077257x**<br>conservative: **1.896072x** | 2.2M / 4.4M / 8.8M one-second request counts; 60-second valid `convolve`, `maximum.accumulate` high-water envelope, then `ptp`; every materialized array and scalar matched byte-for-byte | `release-perf` | 4 configured; observed FNP 5 active OS tasks (caller plus 4 Rayon workers) and NumPy 1 | `vmi1227854` (109.123.245.77), drained, AMD EPYC, 10 physical cores / 10 logical threads | `2676e0ab1f328ded31ac1820120811a16895dca6c6e876ebbd8d2e9084975c59` | `franken_numpy-ixs5y.393`, `eca54584` |
+
+Every size point above had a same-invocation NumPy/NumPy null, an FNP/FNP
+null, and an effect bootstrap median CI wholly above 1.0; every effect median
+also cleared twice the controlling null half-width. The f16 and critical-access
+measurements predate enforcement commit `ad31891e`, but their recorded effect
+CIs already satisfy its effect-separation requirement. The rolling-load result
+was scored after that correction. CV is provenance, not an acceptance gate,
+and the dormant null-straddle scorer in the legacy median-pair harness did not
+score any of these rows. All three rows have `shared_timed_component=none`.
+
+The append-only source reports, including null intervals, effect CIs, invocation
+IDs, NumPy artifact identity, route admission conditions, work accounting,
+stage profiles, and retry predicates, remain in
+[`docs/NEGATIVE_EVIDENCE.md`](NEGATIVE_EVIDENCE.md).
+
 ## 2026-06-24 CreamEagle fnp-python prod last-axis parallel-across-lanes keep (58th win)
 
 | Area | Score | Verdict |
