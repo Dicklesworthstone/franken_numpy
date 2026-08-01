@@ -35330,3 +35330,84 @@ if an exact-output test finds a tree mismatch, or if a same-invocation contract
 at the 16 MiB floor is needed to lower the current conservative dispatch gate.
 Any replacement must retain exact bytes, observed thread activity, full-host
 quiescence, both A/A nulls, and the corrected median-CI decision rule.
+
+## 2026-07-31 - WIN (KEEP, INCUMBENT-WIN): exact-tree parallel float32/float64 flat mean - 3.55-5.45x vs live NumPy on eight physical cores
+
+`IvoryDesert`, bead `deadlock-audit-qr61v`. Strict preflight was CLEAR for
+lever `parallel exact-tree float flat mean`, surface
+`fnp.mean axis none contiguous float32 float64`, before source editing.
+
+**Campaign result class:** incumbent-win
+
+`bench_elf_sha256=41b8461b617df98c152779dcca9f2d142370da7ca2b0b168034a89e8c1c85024`
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 1.012005x,
+CI95 [0.971490, 1.059416], 21 rounds, min_of=1 on the conservative float32
+headline row; the table records both dtypes.
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio
+0.932741x, CI95 [0.895604, 1.109642], 21 rounds, min_of=1 on the float32 row.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c78b407946a3dd-00149e49 measured_ratio=3.546094x median=4.115196ms
+
+**Incumbent isolation proof:** candidate=fnp.mean incumbent=numpy.mean shared_timed_component=none
+
+WHY THIS LEVER: whole-job `perf` captures with BLAS pinned to one thread put
+77.40% of the delegated FNP job and 87.74% of live NumPy in
+`DOUBLE_pairwise_sum`. Both arms paid that same serial kernel, so wrapper work
+was not the gap. The structural lever was to stop paying it serially in FNP:
+mean can reuse the landed exact-tree parallel sum and add one scalar divide,
+while NumPy's public mean remains single-threaded.
+
+IMPLEMENTATION: `try_zerocopy_float_mean_flat` admits exact NumPy ndarrays with
+native-endian float32/float64 dtype, C contiguity, default `axis=None`, and at
+least 16 MiB of input. It preserves NumPy's <=128-element leaves and every
+pairwise combine edge, schedules 65,536-element subtrees on Rayon, then divides
+once. Float32 explicitly promotes the scalar total/count division to float64
+and narrows, matching NumPy's `np.float32 / np.intp` behavior above 2^24
+elements. A NaN computed total delegates so NumPy owns ISA-specific payload
+bits. Subclasses, other layouts, explicit dtype/out/where, and small inputs
+remain on live NumPy; `keepdims` reconstructs the all-ones output shape.
+
+BEHAVIOR PROOF: the focused remote exact-output test passed for float32 and
+float64 above the route floor, both `keepdims` modes, cancellation, signed
+zero, infinities, NaN delegation, explicit-dtype fallback, and non-contiguous
+fallback. The formal harness independently asserted exact scalar type, dtype,
+and bytes before timing each row.
+
+BLAS IDENTITY: the live NumPy 2.4.6 artifact is linked to ILP64
+`scipy-openblas`, OpenBLAS 0.3.31.188.0 (`DYNAMIC_ARCH`, `NO_AFFINITY`,
+`MAX_THREADS=64`). Neither mean arm calls BLAS, so OpenBLAS/OMP/MKL were pinned
+to one thread.
+
+CLAIM-BEARING INVOCATION: the 224,058,896-byte executable and live NumPy core
+hashes are recorded above. The mean-only group ran on `vmi1293453`, AMD EPYC,
+eight physical/logical cores, compile/runtime AVX2, Rayon pinned to eight, and
+did not execute the already-landed sum group. Full-host affinity and two
+consecutive 300 ms samples at <=20% busy cleared before the process and before
+both contracts (maximum observed busy fractions 0.033, 0.000, and 0.062).
+NumPy used one observed thread; FNP exercised all eight Rayon workers, with the
+coordinating caller also accruing a tick in the float32 activity sample.
+
+| dtype / 64 MiB | NumPy median | FNP median | NumPy/NumPy null (CI95) | FNP/FNP null (CI95) | NumPy/FNP effect (CI95) | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| float32 | 4.115196 ms | 1.133266 ms | 1.012005 `[0.971490,1.059416]` | 0.932741 `[0.895604,1.109642]` | **3.546094x** `[3.250487,4.050952]` | DECIDABLE_WIN |
+| float64 | 4.027575 ms | 0.772035 ms | 1.014857 `[0.994494,1.031615]` | 1.076265 `[0.969489,1.098429]` | **5.453436x** `[4.547575,5.556445]` | DECIDABLE_WIN |
+
+Both 21-round, min-of-one effect CIs exclude unity and clear twice the wider
+same-invocation null half-width. CV remained provenance only. COUNTED
+MECHANISM: both arms read 67,108,864 input bytes, retain the identical
+`elements-1` addition edges, and perform one scalar divide. The candidate
+exposes 256 float32 or 128 float64 independent tree leaves; NumPy retains one
+reduction thread.
+
+**Decision: KEEP, INCUMBENT-WIN.** Choose FrankenNumPy for route-qualified
+flat float32/float64 means at 16 MiB and above; retain live NumPy for the
+guarded fallback surface.
+
+Retry predicate: do not rerun this mean-only invocation on these artifacts.
+Reopen if either ELF changes, if the route admits new layouts/options, if an
+exact-output test finds a division/tree mismatch, or if a same-invocation
+contract at the 16 MiB floor is needed. Any replacement must retain exact
+bytes, observed threads, full-host quiescence, both nulls, and the corrected
+median-CI rule.
