@@ -79927,6 +79927,211 @@ fn var(
 /// to match the sibling float-sum route.
 const FLOAT_EXTREMA_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
 
+/// Parallel flat `float64` argmin/argmax — EXACT, with NO deferral regimes.
+///
+/// The tie convention is the OPPOSITE of the min/max VALUE routes below and must
+/// not share their combine. Verified against live NumPy at 2,200,000 elements
+/// across band boundaries:
+///
+/// * Ties return the **FIRST** index (zero violations at every boundary tested),
+///   where the value routes keep a later element.
+/// * Signed zeros are NOT a hazard here at all: `argmin` returns index 100
+///   whether the `-0.0` sits at 100 or at 200, because the answer is an index
+///   and ties go to the lower one regardless of sign. The value routes had to
+///   defer on this; these do not.
+/// * A NaN anywhere makes BOTH `argmin` and `argmax` return the **first NaN's
+///   index**, not the extremum's.
+///
+/// Scanning in increasing index order with a STRICTLY-better test gives
+/// first-index-on-ties for free, and keeps NaN out of the running (every
+/// comparison against NaN is false), so the hot loop stays branchless and
+/// vectorizes. NaN presence is tracked as a branchless mask and resolved by a
+/// short early-exiting scan only when one is actually present.
+fn parallel_arg_extremum_f64(data: &[f64], want_min: bool) -> usize {
+    use std::simd::{Select, Simd, cmp::SimdPartialEq, cmp::SimdPartialOrd};
+    const LANES: usize = 8;
+
+    /// Best `(value, index)` for one band, plus whether the band held a NaN.
+    /// `None` value means the band was all-NaN or empty of candidates.
+    fn band(chunk: &[f64], base: usize, want_min: bool) -> (Option<(f64, usize)>, bool) {
+        let mut saw_nan = false;
+        if chunk.len() < LANES {
+            let mut best: Option<(f64, usize)> = None;
+            for (offset, &value) in chunk.iter().enumerate() {
+                if value.is_nan() {
+                    saw_nan = true;
+                    continue;
+                }
+                let better = match best {
+                    None => true,
+                    // STRICTLY better only: a tie leaves the earlier index.
+                    Some((b, _)) => {
+                        if want_min {
+                            value < b
+                        } else {
+                            value > b
+                        }
+                    }
+                };
+                if better {
+                    best = Some((value, base + offset));
+                }
+            }
+            return (best, saw_nan);
+        }
+
+        let (vectors, tail) = chunk.as_chunks::<LANES>();
+        let lane_offsets = Simd::<u64, LANES>::from_array([0, 1, 2, 3, 4, 5, 6, 7]);
+        let first = Simd::<f64, LANES>::from_array(vectors[0]);
+        let mut nan_seen = first.simd_ne(first);
+        let mut best = first;
+        let mut best_idx = lane_offsets;
+        for (block_index, block) in vectors.iter().enumerate().skip(1) {
+            let v = Simd::<f64, LANES>::from_array(*block);
+            nan_seen |= v.simd_ne(v);
+            let idx = lane_offsets + Simd::splat((block_index * LANES) as u64);
+            // Strictly-better keeps the earlier index on ties, and is always
+            // false against NaN so NaN never becomes a candidate.
+            let takes = if want_min {
+                v.simd_lt(best)
+            } else {
+                v.simd_gt(best)
+            };
+            best = takes.select(v, best);
+            best_idx = takes.select(idx, best_idx);
+        }
+        saw_nan |= nan_seen.any();
+
+        let values = best.to_array();
+        let indices = best_idx.to_array();
+        let mut winner: Option<(f64, usize)> = None;
+        for lane in 0..LANES {
+            let value = values[lane];
+            if value.is_nan() {
+                continue;
+            }
+            let index = indices[lane] as usize;
+            winner = Some(match winner {
+                None => (value, index),
+                Some((bv, bi)) => {
+                    let strictly_better = if want_min { value < bv } else { value > bv };
+                    // Lane order is not index order, so ties must compare the
+                    // INDEX and keep the lower one.
+                    if strictly_better || (value == bv && index < bi) {
+                        (value, index)
+                    } else {
+                        (bv, bi)
+                    }
+                }
+            });
+        }
+        let vector_len = vectors.len() * LANES;
+        for (offset, &value) in tail.iter().enumerate() {
+            if value.is_nan() {
+                saw_nan = true;
+                continue;
+            }
+            let index = vector_len + offset;
+            let better = match winner {
+                None => true,
+                Some((bv, _)) => {
+                    if want_min {
+                        value < bv
+                    } else {
+                        value > bv
+                    }
+                }
+            };
+            if better {
+                winner = Some((value, index));
+            }
+        }
+        (winner.map(|(value, index)| (value, base + index)), saw_nan)
+    }
+
+    const ARG_BAND: usize = 1 << 16;
+    let partials: Vec<(Option<(f64, usize)>, bool)> =
+        if data.len() <= ARG_BAND || rayon::current_num_threads() < 2 {
+            vec![band(data, 0, want_min)]
+        } else {
+            use rayon::prelude::*;
+            data.par_chunks(ARG_BAND)
+                .enumerate()
+                .map(|(band_index, chunk)| band(chunk, band_index * ARG_BAND, want_min))
+                .collect()
+        };
+
+    // A NaN anywhere wins outright: NumPy returns the FIRST NaN's index for both
+    // argmin and argmax. Resolve it with an early-exiting scan, which only runs
+    // when a NaN is actually present.
+    if partials.iter().any(|(_, saw_nan)| *saw_nan) {
+        return data
+            .iter()
+            .position(|value| value.is_nan())
+            .expect("a band reported a NaN, so one exists");
+    }
+
+    let mut winner: Option<(f64, usize)> = None;
+    for (candidate, _) in &partials {
+        let Some((value, index)) = *candidate else {
+            continue;
+        };
+        winner = Some(match winner {
+            None => (value, index),
+            Some((bv, bi)) => {
+                let strictly_better = if want_min { value < bv } else { value > bv };
+                if strictly_better {
+                    (value, index)
+                } else {
+                    (bv, bi)
+                }
+            }
+        });
+    }
+    winner
+        .expect("caller guarantees a non-empty, non-all-NaN buffer")
+        .1
+}
+
+/// Zero-copy parallel flat `float64` `argmin`/`argmax`.
+fn try_zerocopy_f64_arg_extremum_flat(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    want_min: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+        || !dtype.getattr("isnative")?.extract::<bool>()?
+        || !a
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+        || a.getattr("nbytes")?.extract::<usize>()? < FLOAT_EXTREMA_PARALLEL_MIN_BYTES
+    {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if input.is_empty() {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; the exact ndarray
+    // stays alive and read-only under the held GIL for the whole scan.
+    let data: &[f64] =
+        unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+    let index = parallel_arg_extremum_f64(data, want_min);
+    Ok(Some(numpy.getattr("intp")?.call1((index,))?.unbind()))
+}
+
 /// Parallel flat `float64` min/max — EXACT, and exact for a different reason
 /// than the sum route.
 ///
@@ -83486,6 +83691,16 @@ fn argmax(
         return fallback();
     }
 
+    // Native parallel FLAT f64 argmax: NumPy's reduction is single-threaded.
+    // Ties take the FIRST index and NaN anywhere returns the first NaN index —
+    // the OPPOSITE convention from the min/max value routes, so this must not
+    // share their combine. Flat only.
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(o) = try_zerocopy_f64_arg_extremum_flat(py, a.bind(py), false)?
+    {
+        return Ok(o);
+    }
+
     // Parse axis: None or integer
     let axis_val: Option<isize> = match &axis {
         None => None,
@@ -83683,6 +83898,16 @@ fn argmin(
         || keepdims
     {
         return fallback();
+    }
+
+    // Native parallel FLAT f64 argmin: NumPy's reduction is single-threaded.
+    // Ties take the FIRST index and NaN anywhere returns the first NaN index —
+    // the OPPOSITE convention from the min/max value routes, so this must not
+    // share their combine. Flat only.
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(o) = try_zerocopy_f64_arg_extremum_flat(py, a.bind(py), true)?
+    {
+        return Ok(o);
     }
 
     // Parse axis: None or integer

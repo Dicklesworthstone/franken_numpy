@@ -4,6 +4,108 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-31 - PARALLEL EXACT FLAT `float64` ARGMIN/ARGMAX (KEEP, INCUMBENT-WIN): 2.50-2.85x at 64M, NO deferral regimes
+
+`QuartzHeron`, bead `deadlock-audit-qmbuo`. Closes retry predicate (3) of the
+min/max entries below. `fnp.argmin`/`fnp.argmax` on a large flat C-contiguous
+`float64` array now run a vectorized banded parallel scan instead of delegating.
+
+**Campaign result class:** incumbent-win
+
+MEASURED ON `vmi1156319`, and the host matters — see the comparability warning
+below. All rows same-invocation against live NumPy 2.4.6, corrected dual-null
+gate, 8 pinned threads:
+
+| elements | op | NumPy median | FNP median | NumPy/FNP | effect CI95 | verdict |
+|---|---|---:|---:|---:|---:|---|
+| 67,108,864 | `argmax` | 57.677465 ms | 20.605783 ms | **2.849702x** | `[2.571689,3.233187]` | DECIDABLE_WIN |
+| 67,108,864 | `argmin` | 60.054007 ms | 24.320237 ms | **2.498365x** | `[1.979808,2.675793]` | DECIDABLE_WIN |
+| 4,194,304 | `argmax` | 4.996198 ms | 2.982911 ms | **1.718456x** | `[1.540074,1.937013]` | DECIDABLE_WIN |
+| 4,194,304 | `argmin` | 5.585767 ms | 4.362810 ms | 1.271944x | `[0.945512,1.711230]` | UNDECIDED |
+
+The 4M `argmin` row is NOT claimed: its CI includes 1.0.
+
+**HOST COMPARABILITY WARNING — DO NOT COMPARE THESE RATIOS TO THE MIN/MAX
+ENTRIES BELOW.** This invocation landed on `vmi1156319`, which is substantially
+slower than the `vmi1293453` used for the min/max rows: NumPy's own `min` at 64M
+took **54.597640 ms here versus 15.595128 ms there**, ~3.5x. The same binary
+therefore reads a materially different ratio per host. The apples-to-apples
+comparison is the min/max rows measured IN THIS SAME INVOCATION, which read
+2.639941x (`min`) and 2.750167x (`max`) here against 3.582805x / 3.524936x on
+`vmi1293453`. Host choice moves these ratios by roughly 35%.
+
+**A PREDICTION THAT FAILED, recorded because it corrects a mental model.** Before
+measuring, the expectation was that `arg*` would land materially BELOW the value
+routes: they do a compare plus TWO `select`s per block and maintain a running
+index vector, versus one `simd_min` for the value routes, on a scan already
+believed bandwidth-bound. Measured in the same invocation, they are essentially
+EQUAL — `argmax` (2.849702x) even edges out `max` (2.750167x), and `argmin`
+(2.498365x) sits beside `min` (2.639941x). The index bookkeeping is free at these
+sizes, i.e. the extra ALU work hides entirely under the memory stall. The scan is
+memory-bound, not issue-bound, and the earlier note that the min/max kernel was
+"at or near achievable streaming bandwidth" should be read as host-specific.
+
+**NO DEFERRAL REGIMES, unlike the value routes.** Verified against live NumPy at
+2,200,000 elements across band boundaries:
+
+* Ties return the **FIRST index** — zero violations at every boundary tested.
+  This is the OPPOSITE of the value routes, which keep a later element, so the
+  combine is deliberately NOT shared.
+* Signed zeros are NOT a hazard: `argmin` returns index 100 whether the `-0.0`
+  sits at 100 or at 200, because the answer is an index and ties go to the lower
+  one regardless of sign. The value routes must defer on mixed-sign-zero
+  extrema; these must not.
+* A NaN anywhere makes BOTH `argmin` and `argmax` return the **first NaN's
+  index**, not the extremum's. That is a deterministic answer, so these routes
+  resolve NaN directly instead of deferring the way the value routes do (whose
+  NaN payload is path-dependent).
+
+Scanning in increasing index order with a STRICTLY-better test yields
+first-index-on-ties for free and keeps NaN out of the running (every comparison
+against NaN is false), so the hot loop is branchless and vectorizes as an 8-lane
+`simd_lt`/`simd_gt` plus two `select`s. NaN presence is a branchless mask
+resolved by a short early-exiting scan only when one is actually present. The
+horizontal lane reduction compares INDICES on ties, because lane order is not
+index order.
+
+**A/A null control (same invocation):** every row carried both controls under the same 21-round min-of-1 invocation; 64M `argmax` NumPy/NumPy CI95 `[0.978664,1.018151]` and FNP/FNP CI95 `[0.943379,1.162714]`; 64M `argmin` `[0.986428,1.028181]` and `[0.954572,1.099819]`; 4M `argmax` `[0.937046,0.986755]` and `[0.875236,1.323945]`. Each claimed effect CI is disjoint from both of its nulls.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa artifact_bytes=10452641 invocation_id=000000000000000018c791e9ebfc4fb3-0014c21b measured_ratio=2.849702x
+
+**Incumbent isolation proof:** candidate=fnp.argmin incumbent=numpy.argmin shared_timed_component=none
+
+COUNTED_MECHANISM: `class=serial_scan_parallelised_and_vectorised`. Incumbent
+threads 1, candidate 8. Order-independent selection, identical element work, no
+eliminated allocation — the gap is that NumPy cannot use the other cores.
+
+PARITY: 11/11 in `conformance_min_max_flat.rs`, passing on the FIRST run.
+argmin/argmax coverage: random data across the routed regime; duplicated extrema
+at eight positions including both sides of a band boundary and one spanning it
+exactly; signed zeros in both plant orders at four index pairs plus an
+all-mixed-zero buffer; NaN at five positions, three NaNs across bands, and an
+all-NaN buffer; and deferral for below-gate, non-contiguous, non-f64, axis,
+N-D and empty.
+
+PROVENANCE: `bench_elf_sha256=56303c6b875750910e938f555f7fc666599d8be267eeac0f8704b9189ca5d6ca`
+(224,583,848 bytes), built through strict RCH as `release-perf` on builder
+`vmi1227854` and copied hash-identically to measurement host `vmi1156319`
+(`AMD EPYC Processor (with IBPB)`, 8 physical/logical CPUs, NumPy 2.4.6,
+Python 3.13.7), sha verified both ends. Invocation
+`000000000000000018c791e9ebfc4fb3-0014c21b`, 8 pinned Rayon threads with
+`OPENBLAS_NUM_THREADS`/`OMP_NUM_THREADS`/`MKL_NUM_THREADS` matched. Host-wide
+fail-closed quiescence clear at every preflight, maximum observed busy fraction
+0.032 against the 0.200 limit.
+
+SCOPE: C-contiguous native `float64`, `axis=None`, at or above 16 MiB, non-empty.
+`keepdims`, `out`, an explicit axis, other dtypes, non-contiguity and below-gate
+sizes all defer to `numpy.argmin`/`numpy.argmax`.
+
+Retry predicate: re-run the whole min/max/arg matrix on ONE host to get directly
+comparable ratios across all four ops — this campaign's rows are split across
+`vmi1293453` and `vmi1156319` and the ~3.5x host speed difference makes
+cross-entry ratio comparison invalid. Also re-run on a genuinely idle many-core
+host for the scaling ceiling; every ratio here is an 8-thread floor.
+
 ## 2026-07-31 - VECTORIZED MIN/MAX BAND SCAN (KEEP, INCUMBENT-WIN): 2.34-3.58x, SUPERSEDING the 1.64-1.66x scalar row above
 
 `QuartzHeron`, bead `deadlock-audit-1aklb`. Closes retry predicate (1) of the
