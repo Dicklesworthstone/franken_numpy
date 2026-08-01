@@ -79908,16 +79908,67 @@ const FLOAT_EXTREMA_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
 /// NOTE the opposite convention in the argmin/argmax siblings, which owe the
 /// FIRST index on a tie — sharing one combine rule between them would silently
 /// corrupt one of the two.
-fn parallel_extremum_f64(data: &[f64], want_min: bool) -> f64 {
+///
+/// Returns the extremum together with whether ANY NaN was seen. The caller
+/// defers to NumPy on NaN, so the flag lets the vectorized hot loop skip
+/// per-element NaN handling entirely.
+fn parallel_extremum_f64(data: &[f64], want_min: bool) -> (f64, bool) {
     // Sequential over a band, in index order, taking the later element on ties.
-    fn band(chunk: &[f64], want_min: bool) -> f64 {
-        let mut acc = chunk[0];
-        for &value in &chunk[1..] {
-            acc = fold(acc, value, want_min);
+    //
+    // VECTORIZED, and the enabling observation is that this route DEFERS
+    // whenever the result is NaN — so the hot loop does not need per-element NaN
+    // semantics at all. It can use a plain SIMD min/max and accumulate a
+    // BRANCHLESS NaN mask (`v != v`) checked once per band. The scalar version
+    // this replaces carried a NaN test plus a conditional on every element,
+    // which is a serial dependency chain that will not vectorize: measured
+    // ~53 GB/s against the sibling parallel sum's ~97 GB/s on the same host.
+    //
+    // Signed zeros are still safe: `simd_min(-0.0, +0.0)` may return either, but
+    // the caller defers whenever the extremum is a zero AND both signs are
+    // present, and a uniform-sign zero is returned unchanged by any tie rule.
+    fn band(chunk: &[f64], want_min: bool) -> (f64, bool) {
+        use std::simd::{Simd, cmp::SimdPartialEq, num::SimdFloat};
+        const LANES: usize = 8;
+
+        if chunk.len() < LANES {
+            let mut acc = chunk[0];
+            let mut saw_nan = acc.is_nan();
+            for &value in &chunk[1..] {
+                saw_nan |= value.is_nan();
+                acc = fold(acc, value, want_min);
+            }
+            return (acc, saw_nan);
         }
-        acc
+
+        let (vectors, tail) = chunk.as_chunks::<LANES>();
+        let mut acc = Simd::<f64, LANES>::from_array(vectors[0]);
+        let mut nan_seen = acc.simd_ne(acc);
+        for block in &vectors[1..] {
+            let v = Simd::<f64, LANES>::from_array(*block);
+            nan_seen |= v.simd_ne(v);
+            acc = if want_min {
+                acc.simd_min(v)
+            } else {
+                acc.simd_max(v)
+            };
+        }
+        let mut saw_nan = nan_seen.any();
+        let lanes = acc.to_array();
+        let mut result = lanes[0];
+        for &lane in &lanes[1..] {
+            result = fold(result, lane, want_min);
+        }
+        for &value in tail {
+            saw_nan |= value.is_nan();
+            result = fold(result, value, want_min);
+        }
+        (result, saw_nan)
     }
-    // `acc` is always the earlier element, `value` the later one.
+    // `acc` is the earlier element, `value` the later one. Ties fall through to
+    // `value`. NOTE this is OUR internal convention, not a reproduction of
+    // NumPy's: NumPy's tie choice is NOT positional (it follows internal
+    // blocking and SIMD lane order), which is exactly why the caller defers on
+    // an ambiguous mixed-sign-zero extremum instead of trying to match it.
     #[inline]
     fn fold(acc: f64, value: f64, want_min: bool) -> f64 {
         if acc.is_nan() {
@@ -79927,7 +79978,6 @@ fn parallel_extremum_f64(data: &[f64], want_min: bool) -> f64 {
             return value;
         }
         let acc_wins = if want_min { acc < value } else { acc > value };
-        // Ties fall through to `value`: NumPy keeps the SECOND operand.
         if acc_wins { acc } else { value }
     }
 
@@ -79938,19 +79988,20 @@ fn parallel_extremum_f64(data: &[f64], want_min: bool) -> f64 {
     use rayon::prelude::*;
     // Collect one result per band and fold them SEQUENTIALLY in index order.
     // Rayon's `reduce` only combines adjacent segments for indexed iterators and
-    // the take-later-on-tie rule depends on that ordering, so rather than rest
-    // the bit-exactness claim on that guarantee, make the ordering explicit. The
-    // partial vector is tiny — 1,024 entries for a 64M-element input — so the
-    // sequential fold is free.
-    let partials: Vec<f64> = data
+    // the ordering matters here, so rather than rest correctness on that library
+    // guarantee, make the ordering explicit. The partial vector is tiny — 1,024
+    // entries for a 64M-element input — so the sequential fold is free.
+    let partials: Vec<(f64, bool)> = data
         .par_chunks(EXTREMUM_BAND)
         .map(|chunk| band(chunk, want_min))
         .collect();
-    let mut acc = partials[0];
-    for &value in &partials[1..] {
+    let mut acc = partials[0].0;
+    let mut saw_nan = partials[0].1;
+    for &(value, band_nan) in &partials[1..] {
+        saw_nan |= band_nan;
         acc = fold(acc, value, want_min);
     }
-    acc
+    (acc, saw_nan)
 }
 
 /// Zero-copy parallel flat `float64` `min`/`max`.
@@ -79992,15 +80043,18 @@ fn try_zerocopy_f64_extremum_flat(
     // stays alive and read-only under the held GIL for the whole scan.
     let data: &[f64] =
         unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
-    let value = parallel_extremum_f64(data, want_min);
-    // NaN RESULT -> DELEGATE. NumPy's own answer here is a NaN whose PAYLOAD
+    let (value, saw_nan) = parallel_extremum_f64(data, want_min);
+    // ANY NaN -> DELEGATE. NumPy's own answer here is a NaN whose PAYLOAD
     // depends on which code path ran: measured, the scalar path preserves a
     // planted payload (`0x7ff800000000dead`) while the SIMD path at n >= 8
     // returns a bare `0x7ff8000000000000`. Reproducing that selection across
     // ISAs is not something we can promise, so let NumPy stay the authority for
     // payload and sign bits. Finite hot paths pay only this one branch. Same
     // reasoning as the sibling float-sum route.
-    if value.is_nan() {
+    // The flag, not `value.is_nan()`: the vectorized scan uses `simd_min`, whose
+    // NaN handling differs from NumPy's, so a NaN anywhere in the buffer can
+    // leave a non-NaN `value`. Deferring on the flag covers every such case.
+    if saw_nan || value.is_nan() {
         return Ok(None);
     }
     // MIXED-SIGN ZERO EXTREMUM -> DELEGATE. `-0.0` and `+0.0` compare EQUAL but

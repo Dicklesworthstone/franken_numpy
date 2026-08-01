@@ -4,6 +4,87 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-31 - VECTORIZED MIN/MAX BAND SCAN (KEEP, INCUMBENT-WIN): 2.34-3.58x, SUPERSEDING the 1.64-1.66x scalar row above
+
+`QuartzHeron`, bead `deadlock-audit-1aklb`. Closes retry predicate (1) of the
+immediately preceding min/max entry, which banked 1.64-1.66x and named the
+scalar band scan as leaving roughly half the achievable bandwidth unclaimed.
+That diagnosis was correct and this supersedes those numbers.
+
+**Campaign result class:** incumbent-win
+
+| elements | bytes | op | NumPy median | FNP median | NumPy/FNP | effect CI95 | prior scalar row |
+|---|---|---|---:|---:|---:|---:|---:|
+| 67,108,864 | 512 MiB | `min` | 15.595128 ms | 4.415166 ms | **3.582805x** | `[3.291815,3.813154]` | was 1.641592x |
+| 67,108,864 | 512 MiB | `max` | 16.643135 ms | 4.840114 ms | **3.524936x** | `[3.218801,3.923207]` | was 1.663319x |
+| 4,194,304 | 32 MiB | `min` | 0.963813 ms | 0.405757 ms | **2.482527x** | `[2.041028,3.091728]` | was 1.085433x UNDECIDED |
+| 4,194,304 | 32 MiB | `max` | 1.001028 ms | 0.502552 ms | **2.344672x** | `[2.030971,2.741939]` | was 1.040035x UNDECIDED |
+
+ALL FOUR ROWS ARE NOW `DECIDABLE_WIN`, including the two 4 MiB rows that were
+previously near-parity and undecidable. That also RETIRES retry predicate (2) of
+the prior entry: the 16 MiB gate no longer admits a parity-only regime, so it
+does not need raising.
+
+THE MECHANISM, AND A QUANTITATIVE PREDICTION THAT HELD. The prior entry measured
+this route at ~53 GB/s against the sibling parallel float sum's ~97 GB/s on the
+same host and attributed the gap to the band scan being a SCALAR BRANCHY
+dependency chain — a NaN test plus a conditional on every element, which cannot
+vectorize. Vectorizing moved 512 MiB from 9.641657 ms to 4.415166 ms, i.e.
+**~53 GB/s to ~116 GB/s**, now ABOVE the sum route. The predicted bottleneck was
+the actual bottleneck.
+
+THE ENABLING OBSERVATION is that this route already DEFERS whenever a NaN is
+present, so the hot loop never needed per-element NaN semantics. It now runs a
+plain 8-lane `simd_min`/`simd_max` and accumulates a BRANCHLESS NaN mask
+(`v.simd_ne(v)`) that is checked once per band, then folds the eight lanes and
+the tail scalar-wise.
+
+A CORRECTNESS SUBTLETY THE REWRITE INTRODUCED: `simd_min` propagates NaN
+differently from NumPy's rule, so a NaN anywhere in the buffer can leave a
+NON-NaN accumulator. Testing `value.is_nan()` alone would therefore let NaN
+inputs through the fast path. The route now defers on the explicit
+any-NaN FLAG returned by the scan, not on the result's own NaN-ness.
+
+Both earlier deferrals are unchanged and still required: mixed-sign-zero
+extrema (NumPy's tie choice follows internal blocking and SIMD lane order, NOT
+index order — see the superseded entry) and any-NaN results.
+
+**A/A null control (same invocation):** every row carried both controls under the same 21-round min-of-1 invocation; 64M `min` NumPy/NumPy CI95 `[0.972045,1.019297]` and FNP/FNP CI95 `[0.965152,0.999870]`; 64M `max` `[0.968000,1.024055]` and `[0.980586,1.019400]`; 4M `min` `[0.965538,1.038903]` and `[0.900341,1.053470]`; 4M `max` `[0.997014,1.029653]` and `[0.900399,1.064624]`. Every effect CI is disjoint from both of its nulls.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa artifact_bytes=10452641 invocation_id=000000000000000018c78f277f3eb13a-00182ec9 measured_ratio=3.582805x
+
+**Incumbent isolation proof:** candidate=fnp.min incumbent=numpy.min shared_timed_component=none
+
+COUNTED_MECHANISM: `class=serial_scan_parallelised_and_vectorised`. Incumbent
+threads 1, candidate 8. Order-independent selection, identical element work, no
+eliminated allocation.
+
+PARITY: the same 6/6 `conformance_min_max_flat.rs` suite passes UNCHANGED against
+the vectorized kernel — signed-zero ties at nine positions including band
+boundaries and both orders, all-tied uniform buffers, NaN payloads planted across
+several bands, infinities, N-D C-contiguous, and every deferral regime. The suite
+was written for the scalar kernel and was not relaxed for this rewrite.
+
+PROVENANCE: `bench_elf_sha256=eca30deb902065b57a631bb00ac2e76f18bd51016607b99ceade3d10f8062976`
+(224,370,984 bytes), built through strict RCH as `release-perf` on builder
+`vmi1149989` and copied hash-identically to measurement host `vmi1293453`
+(`AMD EPYC Processor (with IBPB)`, 8 physical/logical CPUs), sha verified both
+ends. Invocation `000000000000000018c78f277f3eb13a-00182ec9`, 8 pinned Rayon
+threads with `OPENBLAS_NUM_THREADS`/`OMP_NUM_THREADS`/`MKL_NUM_THREADS` matched.
+Host-wide fail-closed quiescence clear at every preflight, maximum observed busy
+fraction 0.097 against the 0.200 limit.
+
+SCOPE: unchanged from the superseded entry — C-contiguous native `float64`,
+`axis=None`, at or above 16 MiB, no NaN anywhere in the buffer, and either a
+non-zero extremum or uniform-sign zeros.
+
+Retry predicate: at ~116 GB/s on 8 threads this is now at or near this host's
+achievable streaming bandwidth, so further kernel work is unlikely to pay;
+re-open only on a genuinely idle many-core host to find the scaling ceiling.
+Retry predicate (3) of the superseded entry STANDS: `argmin`/`argmax` remain
+unimplemented and owe the FIRST index on ties, the opposite convention from these
+value routes.
+
 ## 2026-07-31 - PARALLEL FLAT `float64` MIN/MAX (KEEP, INCUMBENT-WIN, SIZE-DEPENDENT): 1.64-1.66x at 64M; NEAR-PARITY and UNDECIDED at 4M
 
 `QuartzHeron`, bead `deadlock-audit-1aklb`. `fnp.min`/`fnp.max` on a large flat
