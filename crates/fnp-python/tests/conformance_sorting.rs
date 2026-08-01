@@ -965,3 +965,108 @@ fn bool_sort_counting_matches_numpy() {
         Ok(())
     });
 }
+
+/// Byte-exactness for the FLAT f64 native sort arm above its `1<<20` gate.
+///
+/// This arm was unreachable on every AVX2 host until the ISA gate was made
+/// thread-count-aware (`f64_flat_sort_native_is_profitable`), so on x86-64 CI
+/// these inputs previously exercised only the NumPy passthrough and proved
+/// nothing about the native kernel. Compares `tobytes()`, not `array_equal`,
+/// because the interesting cases are exactly the ones where equal VALUES have
+/// different BITS: `-0.0` vs `+0.0`.
+#[test]
+fn sort_flat_f64_native_arm_is_byte_exact_vs_numpy() {
+    // The arm needs >= F64_FLAT_SORT_SIMD_MIN_THREADS (8) workers on an AVX2 host.
+    // Below that it defers by design and these inputs exercise only the NumPy
+    // passthrough — still a valid parity check, but it proves nothing about the
+    // native kernel, so say which run this was instead of passing silently.
+    let workers = rayon::current_num_threads();
+    #[cfg(target_arch = "x86_64")]
+    let avx2 = std::arch::is_x86_feature_detected!("avx2");
+    #[cfg(not(target_arch = "x86_64"))]
+    let avx2 = false;
+    let reachable = !avx2 || workers >= 8;
+    println!(
+        "NATIVE_ARM_REACHABLE={reachable} rayon_workers={workers} host_avx2={avx2} \
+         min_threads_gate=8 test=sort_flat_f64_native_arm_is_byte_exact_vs_numpy"
+    );
+
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("np", numpy)?;
+        globals.set_item("fnp", module)?;
+        py.run(
+            pyo3::ffi::c_str!(
+                r#"
+GATE = 1 << 20
+
+def same(a, label):
+    f = fnp.sort(a)
+    n = np.sort(a)
+    assert f.dtype == n.dtype, label
+    assert f.shape == n.shape, label
+    assert f.tobytes() == n.tobytes(), label
+
+rng = np.random.default_rng(20260801)
+
+# straddle the 1<<20 crossover in both directions
+for n in (GATE - 1, GATE, GATE + 1, 3 * GATE):
+    same(rng.random(n), f"uniform n={n}")
+
+# heavy ties: equal values are equal bits, so an unstable sort stays byte-exact
+same(rng.integers(0, 8, size=3 * GATE).astype(np.float64), "dense ties")
+same(np.zeros(3 * GATE), "all +0.0")
+same(np.full(3 * GATE, -0.0), "all -0.0")
+
+# EVERY `kind` must agree byte-for-byte on tie-heavy input. Once the signed-zero
+# and NaN deferrals have passed, equal values are equal bits, so the sorted byte
+# sequence is fixed by the multiset alone and stability is unobservable. This is
+# what licenses the flat arm to drop its `require_distinct` tie post-check.
+ties = rng.integers(0, 8, size=3 * GATE).astype(np.float64)
+for kind in ("quicksort", "stable", "mergesort", "heapsort"):
+    f = fnp.sort(ties, kind=kind)
+    n = np.sort(ties, kind=kind)
+    assert f.tobytes() == n.tobytes(), f"dense ties kind={kind}"
+assert np.sort(ties, kind="stable").tobytes() == np.sort(ties).tobytes(), \
+    "numpy's own kinds disagree on tie-heavy bytes; the no-tie-defer proof would not hold"
+
+# extremes and subnormals mixed into a large body
+body = rng.standard_normal(3 * GATE)
+body[0] = np.inf
+body[1] = -np.inf
+body[2] = np.finfo(np.float64).max
+body[3] = np.finfo(np.float64).min
+body[4] = 5e-324
+body[5] = -5e-324
+body[6] = np.finfo(np.float64).tiny
+same(body, "extremes + subnormals")
+
+# DEFERRAL cases: the native arm must stand down and return numpy's own answer.
+mixed = np.zeros(3 * GATE)
+mixed[::2] = -0.0
+same(mixed, "mixed signed zeros (defers)")
+
+nanned = rng.random(3 * GATE)
+nanned[7] = np.nan
+nanned[GATE] = np.nan
+same(nanned, "NaN present (defers)")
+
+# axis=None on a C-contiguous 2-D array normalizes to the flat arm via ravel
+m = rng.random((2048, 1024))
+f = fnp.sort(m, axis=None)
+n = np.sort(m, axis=None)
+assert f.shape == n.shape
+assert f.tobytes() == n.tobytes(), "axis=None ravel"
+
+# a non-contiguous view must not reach the flat arm and must still match
+strided = rng.random(4 * GATE)[::2]
+assert not strided.flags.c_contiguous
+same(strided, "non-contiguous view")
+"#
+            ),
+            Some(&globals),
+            None,
+        )?;
+        Ok(())
+    });
+}

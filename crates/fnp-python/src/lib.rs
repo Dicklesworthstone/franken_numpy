@@ -62676,23 +62676,71 @@ fn f64_axis_sort_native_is_profitable() -> bool {
     !numpy_f64_qsort_is_simd() || rayon::current_num_threads() >= F64_AXIS_SORT_SIMD_MIN_THREADS
 }
 
+// Separate the WIDER avx512 basis from the avx2 one. The 2026-07-13 sampling read
+// them differently — avx512 worker: numpy 92.9ms vs 96.1ms native at 8M (a wash),
+// avx2 worker: numpy 121.1ms vs 202.3ms native (a clear numpy win) — and the two
+// bases are not interchangeable evidence. No avx512f host has been sampled at a
+// high core count, so the avx512 arm keeps its prior surrender until someone
+// measures it; only the avx2 arm is re-decided below.
+#[cfg(target_arch = "x86_64")]
+fn numpy_f64_qsort_is_avx512() -> bool {
+    static QSORT_AVX512: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *QSORT_AVX512.get_or_init(|| std::arch::is_x86_feature_detected!("avx512f"))
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn numpy_f64_qsort_is_avx512() -> bool {
+    false
+}
+
+// FLAT f64 value-sort profitability. The arm used to refuse on ANY avx2 host,
+// which generalized a CORE-COUNT result to an ISA check and left the route dead
+// on essentially every x86-64 machine in the fleet. The prior gate's own numbers
+// show the confound: its numpy arm (121.1ms at 8M) reproduces almost exactly on
+// thinkstation1 (126.07ms), while its native arm (202.3ms) is 5.5x the 36.6ms the
+// SAME kernel turns in here — same NumPy, much smaller box.
+//
+// Flat and axis sort have different economics, so they get different floors: axis
+// sort pays a fan-out PER LANE against NumPy's efficient per-lane SIMD basis,
+// while flat sort amortizes ONE fan-out over the whole array. Kernel-only sweep on
+// thinkstation1 (5975WX, 32 physical cores) vs live single-threaded NumPy 2.4.3,
+// uniform [0,1), ratios vs the same NumPy arm at each size:
+//
+//   workers |   16M   |   64M
+//   --------+---------+--------
+//         2 |  0.94x  |  1.44x
+//         4 |  1.61x  |  2.36x
+//         8 |  2.79x  |  4.33x
+//        16 |  3.49x  |  6.06x
+//        32 |  4.52x  |  6.63x
+//
+// Floor at 8 workers: that margin (2.79x/4.33x) clears the route's own overheads —
+// the defer scan plus the numpy.empty allocation — with room to spare, while 2- and
+// 4-worker boxes keep the NumPy passthrough.
+const F64_FLAT_SORT_SIMD_MIN_THREADS: usize = 8;
+
+fn f64_flat_sort_native_is_profitable() -> bool {
+    if numpy_f64_qsort_is_avx512() {
+        return false; // unmeasured at high core count; keep the prior surrender
+    }
+    !numpy_f64_qsort_is_simd() || rayon::current_num_threads() >= F64_FLAT_SORT_SIMD_MIN_THREADS
+}
+
 // Parallel flat f64 sort. numpy.sort is single-threaded introsort; for a 1-D C-contiguous
 // f64 array (default kind) a rayon par_sort_unstable over a fresh numpy.empty copy beats it
 // once n amortizes the fan-out + export (the passthrough comment about "export overhead" was
 // for a SERIAL native sort — parallel offsets it). Bit-identical for no-NaN input: np.sort
 // returns ascending values, and ties are equal values so unstable order is irrelevant.
-// Defers (Ok(None) -> passthrough) for: avx512f hosts (numpy's SIMD qsort owns the flat
-// basis there — see numpy_f64_qsort_is_simd), not exact 1-D C-contiguous f64, below the
-// crossover, or ANY NaN (numpy's NaN-at-end ordering of mixed payloads is
-// algorithm-specific).
+// Defers (Ok(None) -> passthrough) for: avx512f hosts, avx2 hosts with too few workers
+// to out-run NumPy's SIMD qsort (see f64_flat_sort_native_is_profitable), not exact 1-D
+// C-contiguous f64, below the crossover, or ANY NaN (numpy's NaN-at-end ordering of
+// mixed payloads is algorithm-specific).
 fn try_zerocopy_f64_sort_flat(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
-    require_distinct: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if numpy_f64_qsort_is_simd() {
-        return Ok(None); // numpy's SIMD (avx2/avx512) qsort owns the flat f64 basis here
+    if !f64_flat_sort_native_is_profitable() {
+        return Ok(None); // avx512 host, or too few workers to beat numpy's SIMD qsort
     }
     if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
@@ -62716,6 +62764,12 @@ fn try_zerocopy_f64_sort_flat(
     // crossover is higher: at 256K it's noisy break-even (can regress), at 1M+ it cleanly
     // wins ~1.6-1.85x ON PRE-AVX2/NON-X86 HOSTS (see the ISA gate above). Gate at 1<<20;
     // below it the numpy passthrough is parity.
+    //
+    // 1<<20 re-verified for the newly-reachable AVX2 case, where NumPy's basis is its
+    // FASTER SIMD qsort, so the crossover could only have moved up. Kernel-only on
+    // thinkstation1 at 32 workers vs live NumPy 2.4.3: 1M 10.29->5.4ms (1.91x),
+    // 2M 21.10->9.4 (2.24x), 4M 43.09->18.3 (2.35x), 8M 126.07->36.6 (3.44x),
+    // 16M 266.43->64.5 (4.13x). Still a win at the existing floor, so it stands.
     const SORT_PARALLEL_MIN: usize = 1 << 20;
     if n < SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
@@ -62739,9 +62793,18 @@ fn try_zerocopy_f64_sort_flat(
     dst.copy_from_slice(src);
     // No NaN -> partial_cmp is a total order; unstable parallel sort matches numpy's values.
     dst.par_sort_unstable_by(|x, y| x.partial_cmp(y).expect("no NaN after check"));
-    if require_distinct && dst.par_windows(2).any(|w| w[0] == w[1]) {
-        return Ok(None);
-    }
+    // NO TIE-DEFER, matching the complex128 flat sibling below. Once
+    // f64_sort_values_defer has passed, equal VALUES are equal BITS: the only
+    // distinct-bits/equal-value pair in binary64 is +0.0 vs -0.0, and the
+    // predicate defers when both signs are present (NaN, the other special
+    // case, defers outright). So the sorted byte sequence is fixed by the input
+    // multiset alone and is independent of stability — every `kind` yields the
+    // same bytes, and an unstable parallel sort is byte-exact for all of them.
+    //
+    // The old `require_distinct` post-check sorted the whole array, scanned for
+    // ties, then THREW THE RESULT AWAY and re-sorted in NumPy. That cost was
+    // invisible while the AVX2 gate kept this arm dead; re-enabling the arm made
+    // it a live regression for `kind="stable"` on tie-heavy input.
     Ok(Some(out.unbind()))
 }
 
@@ -68217,7 +68280,7 @@ fn sort(
                 axis_spec,
                 None | Some(None) | Some(Some(-1)) | Some(Some(0))
             ) {
-                if let Some(out) = try_zerocopy_f64_sort_flat(py, &numpy, &a, require_distinct)? {
+                if let Some(out) = try_zerocopy_f64_sort_flat(py, &numpy, &a)? {
                     return Ok(out);
                 }
                 // 4-/8-byte integer flat sort (numpy simd-sort single-threaded; par 1.44-2.35x).
