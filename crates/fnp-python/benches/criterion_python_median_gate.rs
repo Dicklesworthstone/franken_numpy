@@ -7422,6 +7422,188 @@ fn bench_fused_multiply_add_integer_matrix_vs_numpy_median_gate(c: &mut Criterio
 /// pass elimination (six element-stream touches down to four) plus parallelism.
 /// These ratios are therefore expected to sit BELOW the allocating rows, and the
 /// comparison is the honest one for callers who already reuse buffers.
+/// Flat `float64` min/max against live NumPy.
+///
+/// NumPy runs BOTH single-threaded — measured `cpu/wall = 1.00x` at 64M
+/// `float64`, the same structural gap as every reduction it owns; it has no
+/// threading layer for them at all. Unlike the sum route there is no
+/// accumulation tree to reproduce, because selection is order-independent.
+///
+/// The corpus is deliberately drawn from a continuous distribution so the
+/// extremum is not a zero: mixed-sign-zero extrema DEFER (NumPy's tie between
+/// `+0.0` and `-0.0` follows its internal blocking, not index order), and a
+/// corpus that tripped that guard would silently measure NumPy against NumPy.
+fn bench_f64_flat_min_max_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const CONTRACT_ROUNDS: usize = 21;
+    const CONTRACT_MIN_OF: usize = 1;
+    const REQUIRED_BUILD_PROFILE: &str = "release-perf";
+
+    assert_eq!(
+        std::env::var("FNP_BENCH_PROFILE").as_deref(),
+        Ok(REQUIRED_BUILD_PROFILE),
+        "ship-grade min/max evidence requires FNP_BENCH_PROFILE=release-perf"
+    );
+    let build_worker =
+        std::env::var("FNP_BUILD_WORKER").expect("FNP_BUILD_WORKER records the RCH build origin");
+    assert!(
+        !build_worker.trim().is_empty(),
+        "FNP_BUILD_WORKER must be set"
+    );
+    let threads = std::env::var("RAYON_NUM_THREADS")
+        .expect("RAYON_NUM_THREADS must be explicitly pinned before min/max timing");
+    for variable in ["OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok(threads.as_str()),
+            "{variable} must be pinned to the same width as RAYON_NUM_THREADS"
+        );
+    }
+    let threads: usize = threads.parse().expect("thread count is numeric");
+    assert_eq!(
+        rayon::current_num_threads(),
+        threads,
+        "Rayon pool width does not match the pinned min/max configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME workload=f64_flat_min_max build_worker={build_worker} \
+         build_profile={REQUIRED_BUILD_PROFILE} pinned_threads={threads} \
+         rayon_threads={} contract_rounds={CONTRACT_ROUNDS} contract_min_of={CONTRACT_MIN_OF}",
+        rayon::current_num_threads()
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_f64_min_max").expect("min/max bench module");
+        fnp_python(&module).expect("initialize fnp_python min/max module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+        let np_min = numpy.getattr("min").expect("numpy min");
+        let np_max = numpy.getattr("max").expect("numpy max");
+        let fnp_min = module.getattr("min").expect("fnp min");
+        let fnp_max = module.getattr("max").expect("fnp max");
+        common::report_numpy_incumbent_identity(py, "min", &np_min);
+        common::report_incumbent_topology("fnp.min_max_f64_flat", "numpy.min+numpy.max");
+
+        let bits_of = |value: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            value.extract::<f64>().expect("float64 scalar").to_bits()
+        };
+
+        for &elements in &[1usize << 22, 1 << 26] {
+            let namespace = PyDict::new(py);
+            let corpus = format!(
+                "import numpy as np\n\
+                 rng = np.random.default_rng(20260731)\n\
+                 mm_a = rng.standard_normal({elements})\n"
+            );
+            py.run(
+                std::ffi::CString::new(corpus)
+                    .expect("min/max corpus CString")
+                    .as_c_str(),
+                Some(&namespace),
+                Some(&namespace),
+            )
+            .expect("min/max corpus setup");
+            let mm_a = namespace.get_item("mm_a").expect("mm_a present");
+
+            for (label, np_fn, fnp_fn) in [("min", &np_min, &fnp_min), ("max", &np_max, &fnp_max)] {
+                let row = format!("python_f64_flat_{label}_{elements}_vs_numpy");
+                let run_incumbent = || np_fn.call1((black_box(&mm_a),)).expect("numpy arm");
+                let run_candidate = || fnp_fn.call1((black_box(&mm_a),)).expect("fnp arm");
+
+                let ours = run_candidate();
+                let theirs = run_incumbent();
+                assert_eq!(
+                    bits_of(&ours),
+                    bits_of(&theirs),
+                    "f64 flat {label} at {elements} is not BIT-identical to NumPy"
+                );
+                // A zero extremum would have taken the mixed-sign deferral guard
+                // and this row would be measuring NumPy against NumPy.
+                assert!(
+                    bits_of(&theirs) != 0u64 && bits_of(&theirs) != (1u64 << 63),
+                    "corpus extremum is a zero; this row would measure the deferral path"
+                );
+                println!(
+                    "PARITY row={row} exact_bits=passed op={label} result_elements={elements} \
+                     result_bits={:016x} tie_regime=non_zero_extremum",
+                    bits_of(&theirs)
+                );
+                println!(
+                    "COUNTED_MECHANISM row={row} class=serial_scan_parallelised \
+                     incumbent_threads=1 candidate_threads={threads} \
+                     order_independent_selection=true shared_inputs=true equal_work=true"
+                );
+
+                let reps = ((1usize << 27) / elements).max(1);
+                common::report_observed_thread_activity(&row, "numpy", reps, || {
+                    black_box(bits_of(&run_incumbent()));
+                });
+                common::report_observed_thread_activity(&row, "fnp", reps, || {
+                    black_box(bits_of(&run_candidate()));
+                });
+
+                let mut observe_incumbent = || {
+                    let started = Instant::now();
+                    let result = run_incumbent();
+                    let elapsed = started.elapsed();
+                    common::ContractObservation {
+                        elapsed,
+                        checksum: bits_of(&result),
+                    }
+                };
+                let mut observe_candidate = || {
+                    let started = Instant::now();
+                    let result = run_candidate();
+                    let elapsed = started.elapsed();
+                    common::ContractObservation {
+                        elapsed,
+                        checksum: bits_of(&result),
+                    }
+                };
+                let (effect, incumbent_null, candidate_null) =
+                    common::run_dual_null_median_ci_contract_with_sampling(
+                        &row,
+                        &mut observe_incumbent,
+                        &mut observe_candidate,
+                        CONTRACT_ROUNDS,
+                        CONTRACT_MIN_OF,
+                    );
+                let verdict =
+                    common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+                println!(
+                    "MINMAX_RESULT row={row} op={label} elements={elements} verdict={verdict} \
+                     incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                     ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                     incumbent_null_ci95=[{:.6},{:.6}] candidate_null_ci95=[{:.6},{:.6}] \
+                     corrected_dual_null_gate=true incumbent=numpy_live_same_invocation",
+                    effect.arm_a_median_ns / 1_000_000.0,
+                    effect.arm_b_median_ns / 1_000_000.0,
+                    effect.ratio_median,
+                    effect.ratio_ci_low,
+                    effect.ratio_ci_high,
+                    incumbent_null.ratio_ci_low,
+                    incumbent_null.ratio_ci_high,
+                    candidate_null.ratio_ci_low,
+                    candidate_null.ratio_ci_high,
+                );
+                let decision = if verdict == "DECIDABLE_WIN" {
+                    "choose_fnp"
+                } else {
+                    "choose_numpy"
+                };
+                println!(
+                    "CHOOSER_STATEMENT workload=f64_flat_{label}_{elements} decision={decision} \
+                     verdict={verdict} incumbent=numpy_live_same_invocation \
+                     measured_scope={elements}_c_contiguous_float64_elements_at_{threads}_pinned_threads \
+                     outside_scope=run_same_contract_before_choosing"
+                );
+            }
+        }
+    });
+}
+
 fn bench_fused_multiply_add_out_matrix_vs_numpy_median_gate(c: &mut Criterion) {
     let _ = c;
 
@@ -14245,6 +14427,10 @@ fn main() {
         (
             "bench_fused_multiply_add_out_matrix_vs_numpy_median_gate",
             bench_fused_multiply_add_out_matrix_vs_numpy_median_gate,
+        ),
+        (
+            "bench_f64_flat_min_max_vs_numpy_median_gate",
+            bench_f64_flat_min_max_vs_numpy_median_gate,
         ),
         (
             "bench_isin_f64_vs_numpy_median_gate",

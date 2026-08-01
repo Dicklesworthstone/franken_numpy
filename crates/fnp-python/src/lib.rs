@@ -79883,6 +79883,157 @@ fn var(
     Ok(var_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
 
+/// Below this NumPy's single-threaded scan is already at one core's memory
+/// bandwidth and the Rayon fan-out does not pay for itself. Expressed in bytes
+/// to match the sibling float-sum route.
+const FLOAT_EXTREMA_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
+
+/// Parallel flat `float64` min/max — EXACT, and exact for a different reason
+/// than the sum route.
+///
+/// Selection is order-independent, so there is no accumulation tree to
+/// reproduce. The entire difficulty is tie semantics, verified against live
+/// NumPy:
+///
+/// * NumPy's `minimum(a, b)` is `(a < b || isnan(a)) ? a : b`, which returns the
+///   SECOND operand when the two compare equal. In a left-to-right reduce that
+///   means the LAST tied element wins. This is observable because `-0.0` and
+///   `+0.0` compare equal but differ in bits: measured
+///   `min([+0.0, -0.0]) == -0.0` and `min([-0.0, +0.0]) == +0.0`.
+/// * NaN wins and its payload is preserved; the first NaN encountered takes over
+///   and sticks.
+///
+/// Combining partials left-to-right with the same take-second-on-tie rule
+/// reproduces the sequential result exactly, so the parallel split is free.
+/// NOTE the opposite convention in the argmin/argmax siblings, which owe the
+/// FIRST index on a tie — sharing one combine rule between them would silently
+/// corrupt one of the two.
+fn parallel_extremum_f64(data: &[f64], want_min: bool) -> f64 {
+    // Sequential over a band, in index order, taking the later element on ties.
+    fn band(chunk: &[f64], want_min: bool) -> f64 {
+        let mut acc = chunk[0];
+        for &value in &chunk[1..] {
+            acc = fold(acc, value, want_min);
+        }
+        acc
+    }
+    // `acc` is always the earlier element, `value` the later one.
+    #[inline]
+    fn fold(acc: f64, value: f64, want_min: bool) -> f64 {
+        if acc.is_nan() {
+            return acc;
+        }
+        if value.is_nan() {
+            return value;
+        }
+        let acc_wins = if want_min { acc < value } else { acc > value };
+        // Ties fall through to `value`: NumPy keeps the SECOND operand.
+        if acc_wins { acc } else { value }
+    }
+
+    const EXTREMUM_BAND: usize = 1 << 16;
+    if data.len() <= EXTREMUM_BAND || rayon::current_num_threads() < 2 {
+        return band(data, want_min);
+    }
+    use rayon::prelude::*;
+    // Collect one result per band and fold them SEQUENTIALLY in index order.
+    // Rayon's `reduce` only combines adjacent segments for indexed iterators and
+    // the take-later-on-tie rule depends on that ordering, so rather than rest
+    // the bit-exactness claim on that guarantee, make the ordering explicit. The
+    // partial vector is tiny — 1,024 entries for a 64M-element input — so the
+    // sequential fold is free.
+    let partials: Vec<f64> = data
+        .par_chunks(EXTREMUM_BAND)
+        .map(|chunk| band(chunk, want_min))
+        .collect();
+    let mut acc = partials[0];
+    for &value in &partials[1..] {
+        acc = fold(acc, value, want_min);
+    }
+    acc
+}
+
+/// Zero-copy parallel flat `float64` `min`/`max`.
+///
+/// NumPy runs both single-threaded — measured `cpu/wall = 1.00x` at 64M
+/// `float64`, the same structural gap as every other reduction it owns.
+fn try_zerocopy_f64_extremum_flat(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    want_min: bool,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+        || !dtype.getattr("isnative")?.extract::<bool>()?
+        || !a
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+        || a.getattr("nbytes")?.extract::<usize>()? < FLOAT_EXTREMA_PARALLEL_MIN_BYTES
+    {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if input.is_empty() {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; the exact ndarray
+    // stays alive and read-only under the held GIL for the whole scan.
+    let data: &[f64] =
+        unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+    let value = parallel_extremum_f64(data, want_min);
+    // NaN RESULT -> DELEGATE. NumPy's own answer here is a NaN whose PAYLOAD
+    // depends on which code path ran: measured, the scalar path preserves a
+    // planted payload (`0x7ff800000000dead`) while the SIMD path at n >= 8
+    // returns a bare `0x7ff8000000000000`. Reproducing that selection across
+    // ISAs is not something we can promise, so let NumPy stay the authority for
+    // payload and sign bits. Finite hot paths pay only this one branch. Same
+    // reasoning as the sibling float-sum route.
+    if value.is_nan() {
+        return Ok(None);
+    }
+    // MIXED-SIGN ZERO EXTREMUM -> DELEGATE. `-0.0` and `+0.0` compare EQUAL but
+    // differ in bits, so when the extremum is a zero the SIGN of the answer is
+    // decided purely by the reduction's tie rule. NumPy's is NOT positional:
+    // measured against live NumPy at 2,200,000 elements, its choice flips
+    // exactly when the planted zero sits at a 65,536-element boundary
+    // (positions 0 / 65,536 / 131,072 disagree with "last wins" while
+    // 1 / 65,535 / 65,537 agree), i.e. it follows NumPy's internal blocking and
+    // SIMD lane order rather than index order. That is not portably
+    // reproducible, so hand the case back.
+    //
+    // Only MIXED signs are ambiguous: if every zero in the buffer carries the
+    // same sign as our answer, any tie rule returns identical bits, so the
+    // common non-negative-data case keeps the fast path. The extra scan runs
+    // only when the extremum is exactly zero.
+    if value == 0.0 {
+        use rayon::prelude::*;
+        let answer_is_negative = value.is_sign_negative();
+        let mixed = data
+            .par_iter()
+            .any(|&v| v == 0.0 && v.is_sign_negative() != answer_is_negative);
+        if mixed {
+            return Ok(None);
+        }
+    }
+    let scalar = numpy.getattr("float64")?.call1((value,))?.unbind();
+    if keepdims {
+        return Ok(Some(keepdims_reshape_scalar(py, &numpy, a, scalar)?));
+    }
+    Ok(Some(scalar))
+}
+
 // Native Rust min with fallback for unsupported parameters.
 #[pyfunction]
 #[pyo3(name = "min", signature = (a, axis=None, out=None, keepdims=false, initial=None, **kwargs))]
@@ -79946,6 +80097,15 @@ fn py_min(
             .extract::<bool>()?
     {
         return fallback();
+    }
+
+    // Native parallel FLAT f64 min: NumPy's reduction is single-threaded, and
+    // selection is order-independent, so the parallel split is exact provided
+    // ties keep the LATER element (see `parallel_extremum_f64`). Flat only.
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(o) = try_zerocopy_f64_extremum_flat(py, a.bind(py), true, keepdims)?
+    {
+        return Ok(o);
     }
 
     // Parse axis: None, integer, or tuple → fallback for tuple
@@ -80110,6 +80270,14 @@ fn py_max(
             .extract::<bool>()?
     {
         return fallback();
+    }
+
+    // Native parallel FLAT f64 max: same structure and same take-later-on-tie
+    // rule as the min route above.
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(o) = try_zerocopy_f64_extremum_flat(py, a.bind(py), false, keepdims)?
+    {
+        return Ok(o);
     }
 
     // Parse axis: None, integer, or tuple → fallback for tuple

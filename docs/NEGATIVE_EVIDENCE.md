@@ -4,6 +4,102 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-31 - PARALLEL FLAT `float64` MIN/MAX (KEEP, INCUMBENT-WIN, SIZE-DEPENDENT): 1.64-1.66x at 64M; NEAR-PARITY and UNDECIDED at 4M
+
+`QuartzHeron`, bead `deadlock-audit-1aklb`. `fnp.min`/`fnp.max` on a large flat
+C-contiguous `float64` array now run a banded parallel scan instead of delegating.
+NumPy has no threading layer for reductions — measured `cpu/wall = 1.00x` for
+min, max, argmin, argmax, prod, sum, mean and cumsum at 64M `float64`, against
+`48.4x` for `a @ b` through OpenBLAS on the same box.
+
+**Campaign result class:** incumbent-win
+
+| elements | bytes | op | NumPy median | FNP median | NumPy/FNP | effect CI95 | verdict |
+|---|---|---|---:|---:|---:|---:|---|
+| 67,108,864 | 512 MiB | `min` | 16.513337 ms | 9.641657 ms | **1.641592x** | `[1.604640,1.765172]` | DECIDABLE_WIN |
+| 67,108,864 | 512 MiB | `max` | 16.453357 ms | 9.839251 ms | **1.663319x** | `[1.598455,1.814075]` | DECIDABLE_WIN |
+| 4,194,304 | 32 MiB | `min` | 0.972624 ms | 0.884584 ms | 1.085433x | `[1.024046,1.188218]` | UNDECIDED |
+| 4,194,304 | 32 MiB | `max` | 0.932945 ms | 0.871014 ms | 1.040035x | `[0.968517,1.122775]` | UNDECIDED |
+
+ONLY THE 64M ROWS ARE CLAIMED. At 4M the effect is near parity and the `max`
+row's CI includes 1.0. The route's gate is 16 MiB, so it DOES engage in a regime
+where it is merely at parity rather than winning — not harmful, but not a win,
+and stated here rather than hidden behind the headline.
+
+**THE WIN IS UNDER-OPTIMIZED, and the arithmetic says by how much.** At 512 MiB
+NumPy reaches ~31 GB/s (a bare compare with no dependency chain — about twice its
+own pairwise-sum rate of ~16 GB/s), while this route reaches only ~53 GB/s
+against the sibling parallel sum's ~97 GB/s on the same host. The band scan is a
+SCALAR, BRANCHY dependency chain: a NaN test plus a conditional per element,
+which does not vectorize. Roughly half the achievable bandwidth is unclaimed.
+
+TWO SEMANTIC HAZARDS, both found by testing rather than reasoning, and both
+resolved by DEFERRING rather than by emulation.
+
+1. **THE TIE RULE IS NOT POSITIONAL — a correction to this campaign's own earlier
+   claim.** `-0.0` and `+0.0` compare EQUAL but differ in bits, so when the
+   extremum is a zero the answer's SIGN is decided purely by the reduction's tie
+   rule. Small arrays and adjacent elements suggested "the LAST tied element
+   wins" (`min([+0.0,-0.0])` is `-0.0`, `min([-0.0,+0.0])` is `+0.0`, consistent
+   from n=8 to n=2.2M for ADJACENT plants). That characterization is FALSE in
+   general: measured at 2,200,000 elements, NumPy's choice flips exactly when the
+   tied zero sits at a 65,536-element boundary — positions 0 / 65,536 / 131,072
+   disagree with positional-last while 1 / 65,535 / 65,537 agree. NumPy resolves
+   the tie by its internal blocking and SIMD lane order, not by index.
+   Reproducing that portably is not possible, so the route DEFERS when the
+   extremum is a zero AND both signs of zero are present. Uniform-sign zeros are
+   unambiguous under any rule, so the common non-negative-data case keeps the
+   fast path, and the extra scan runs only when the extremum is exactly zero.
+2. **NaN PAYLOAD IS PATH-DEPENDENT.** The scalar path preserves a planted payload
+   (`0x7ff800000000dead`) while the SIMD path at n >= 8 returns a bare
+   `0x7ff8000000000000`. The route defers whenever the result is NaN, leaving
+   NumPy the authority for payload and sign bits — the same resolution the
+   sibling float-sum route uses.
+
+**A/A null control (same invocation):** every row carried both controls under the same 21-round min-of-1 invocation; 64M `min` NumPy/NumPy CI95 `[0.920619,1.027437]` and FNP/FNP CI95 `[0.951901,1.007879]`; 64M `max` `[0.983778,1.022536]` and `[0.975047,1.009731]`. Both claimed effect CIs are disjoint from their nulls.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa artifact_bytes=10452641 invocation_id=000000000000000018c78d32332ef107-0015586b measured_ratio=1.663319x
+
+**Incumbent isolation proof:** candidate=fnp.min incumbent=numpy.min shared_timed_component=none
+
+COUNTED_MECHANISM: `class=serial_scan_parallelised`. Incumbent threads 1,
+candidate 8. Order-independent selection, identical element work, no eliminated
+allocation — the entire gap is that NumPy cannot use the other cores.
+
+VACUOUS-MEASUREMENT GUARD: the bench asserts the corpus extremum is NOT a zero.
+A corpus whose extremum happened to be zero would hit the mixed-sign deferral and
+the row would silently measure NumPy against NumPy, reading ~1.0x and looking
+like a failed lever rather than a misconfigured benchmark.
+
+PARITY: 6/6 in `conformance_min_max_flat.rs` — random data across the routed
+regime; signed-zero ties planted at nine positions including band boundaries
+(`1<<16 ± 1`, `2<<16`) and the final element, in both orders; all-tied uniform
+buffers; NaN payloads at several bands; infinities; N-D C-contiguous; and
+deferral for below-gate, non-contiguous, non-f64, keepdims, axis, out, initial
+and empty.
+
+PROVENANCE: `bench_elf_sha256=737613f1df3ec1f27a516b7786a41e71e7fd7118199b535361aafd8802922aa1`
+(224,314,256 bytes), built through strict RCH as `release-perf` on builder
+`vmi1149989` and copied hash-identically to measurement host `vmi1293453`
+(`AMD EPYC Processor (with IBPB)`, 8 physical/logical CPUs), sha verified both
+ends. Invocation `000000000000000018c78d32332ef107-0015586b`, 8 pinned Rayon
+threads with `OPENBLAS_NUM_THREADS`/`OMP_NUM_THREADS`/`MKL_NUM_THREADS` matched.
+Host-wide fail-closed quiescence clear at every preflight, maximum observed busy
+fraction 0.033 against the 0.200 limit.
+
+SCOPE: C-contiguous native `float64`, `axis=None`, at or above 16 MiB, non-NaN
+result, and either a non-zero extremum or uniform-sign zeros. Everything else
+defers to `numpy.min`/`numpy.max`.
+
+Retry predicate: (1) VECTORIZE THE BAND SCAN — the scalar branchy inner loop is
+the reason this reaches ~53 GB/s where the sibling sum reaches ~97 GB/s; a SIMD
+min/max with the NaN test hoisted out of the element loop should roughly double
+this. (2) Measure a size matrix between 32 MiB and 512 MiB to find the real
+crossover and raise the 16 MiB gate to it, since the current gate admits a
+parity-only regime. (3) `argmin`/`argmax` are NOT implemented here — they owe the
+FIRST index on ties, the OPPOSITE convention from the value routes, and must not
+share this combine rule.
+
 ## 2026-07-31 - CORRECTNESS QUALIFICATION (no perf claim): the parallel float sum needed a `+0.0` identity fold and a runtime NumPy-tree guard
 
 `QuartzHeron`. This entry makes NO performance claim. It records two defects
