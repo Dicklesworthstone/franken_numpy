@@ -235,3 +235,149 @@ print(all(checks), len(checks))
     assert_eq!(numpy_oracle(&script)?, "True 10");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// argmin / argmax. The tie convention is the OPPOSITE of the value routes above
+// (FIRST index, not a later element), and unlike them there is no signed-zero
+// hazard and no NaN deferral: NumPy returns the FIRST NaN's index for both.
+// ---------------------------------------------------------------------------
+
+/// Ordinary random data across the routed regime.
+#[test]
+fn argmin_argmax_flat_random_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(4242)
+bad = []
+for n in [2_200_000, 3_000_007, 8_388_608]:
+    a = rng.standard_normal(n)
+    if int(fnp.argmin(a)) != int(a.argmin()): bad.append(("min", n))
+    if int(fnp.argmax(a)) != int(a.argmax()): bad.append(("max", n))
+print(len(bad) == 0, bad[:3])
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True []");
+    Ok(())
+}
+
+/// THE TIE TEST, and it is the MIRROR of the value-route tie test: duplicated
+/// extrema must return the FIRST index, where `min`/`max` keep a later element.
+/// Duplicates are planted straddling band boundaries so a parallel combine that
+/// prefers a later band is caught.
+#[test]
+fn argmin_argmax_flat_ties_return_first_index() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+n = 2_200_000
+band = 1 << 16
+checks = []
+for pos in [0, 1, band - 1, band, band + 1, 2 * band, n // 2, n - 2]:
+    a = np.ones(n); a[pos] = -5.0; a[pos + 1] = -5.0
+    checks.append(int(fnp.argmin(a)) == int(a.argmin()) == pos)
+    b = np.ones(n); b[pos] = 5.0; b[pos + 1] = 5.0
+    checks.append(int(fnp.argmax(b)) == int(b.argmax()) == pos)
+# a duplicate spanning a band boundary exactly
+c = np.ones(n); c[band - 1] = -7.0; c[band] = -7.0
+checks.append(int(fnp.argmin(c)) == int(c.argmin()) == band - 1)
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 17");
+    Ok(())
+}
+
+/// Signed zeros are NOT a hazard for arg*: the answer is an index and ties go to
+/// the lower one regardless of sign, so both plant orders give the same index.
+/// This is exactly where the value routes must defer and these must not.
+#[test]
+fn argmin_argmax_flat_signed_zero_is_index_based() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+n = 2_200_000
+band = 1 << 16
+checks = []
+for lo, hi in [(100, 200), (0, n - 1), (band - 1, band), (band, 2 * band)]:
+    for first, second in ((-0.0, 0.0), (0.0, -0.0)):
+        z = np.ones(n); z[lo] = first; z[hi] = second
+        checks.append(int(fnp.argmin(z)) == int(z.argmin()) == lo)
+# all zeros, mixed signs everywhere: still the first index
+w = np.zeros(n); w[1::2] = -0.0
+checks.append(int(fnp.argmin(w)) == int(w.argmin()) == 0)
+checks.append(int(fnp.argmax(w)) == int(w.argmax()) == 0)
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 10");
+    Ok(())
+}
+
+/// A NaN anywhere makes BOTH argmin and argmax return the FIRST NaN's index,
+/// not the extremum's — so these routes resolve NaN directly rather than
+/// deferring the way the value routes do.
+#[test]
+fn argmin_argmax_flat_nan_returns_first_nan_index() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+n = 2_200_000
+band = 1 << 16
+checks = []
+for pos in [0, 7, band + 3, n // 2, n - 1]:
+    a = np.ones(n); a[5] = -99.0; a[n - 3] = 99.0; a[pos] = np.nan
+    with np.errstate(all='ignore'):
+        checks.append(int(fnp.argmin(a)) == int(a.argmin()))
+        checks.append(int(fnp.argmax(a)) == int(a.argmax()))
+# several NaNs across bands: the earliest index wins
+b = np.ones(n); b[10] = np.nan; b[band + 3] = np.nan; b[n - 5] = np.nan
+with np.errstate(all='ignore'):
+    checks.append(int(fnp.argmin(b)) == int(b.argmin()) == 10)
+    checks.append(int(fnp.argmax(b)) == int(b.argmax()) == 10)
+# all NaN
+c = np.full(n, np.nan)
+with np.errstate(all='ignore'):
+    checks.append(int(fnp.argmin(c)) == int(c.argmin()) == 0)
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 13");
+    Ok(())
+}
+
+/// Deferred regimes must still agree: below the gate, non-contiguous, non-f64,
+/// axis, keepdims, out, N-D flattened, and empty (which raises).
+#[test]
+fn argmin_argmax_flat_deferred_regimes_still_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(31)
+checks = []
+n = 2_200_000
+small = rng.standard_normal(1000)
+checks.append(int(fnp.argmin(small)) == int(small.argmin()))
+nc = rng.standard_normal(2 * n)[::2]
+checks.append(int(fnp.argmin(nc)) == int(nc.argmin()))
+f32 = rng.standard_normal(n).astype(np.float32)
+checks.append(int(fnp.argmin(f32)) == int(f32.argmin()))
+i64 = rng.integers(-10**9, 10**9, n, dtype=np.int64)
+checks.append(int(fnp.argmax(i64)) == int(i64.argmax()))
+m = rng.standard_normal((1500, 1500))
+checks.append(int(fnp.argmin(m)) == int(m.argmin()))
+checks.append(np.array_equal(fnp.argmin(m, axis=0), m.argmin(axis=0)))
+checks.append(np.array_equal(fnp.argmax(m, axis=1), m.argmax(axis=1)))
+def raised(fn):
+    try:
+        fn(); return False
+    except Exception:
+        return True
+empty = np.zeros(0)
+checks.append(raised(lambda: fnp.argmin(empty)) and raised(lambda: empty.argmin()))
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 8");
+    Ok(())
+}

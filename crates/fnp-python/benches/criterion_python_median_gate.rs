@@ -7741,11 +7741,19 @@ fn bench_f64_flat_min_max_vs_numpy_median_gate(c: &mut Criterion) {
         let np_max = numpy.getattr("max").expect("numpy max");
         let fnp_min = module.getattr("min").expect("fnp min");
         let fnp_max = module.getattr("max").expect("fnp max");
+        let np_argmin = numpy.getattr("argmin").expect("numpy argmin");
+        let np_argmax = numpy.getattr("argmax").expect("numpy argmax");
+        let fnp_argmin = module.getattr("argmin").expect("fnp argmin");
+        let fnp_argmax = module.getattr("argmax").expect("fnp argmax");
         common::report_numpy_incumbent_identity(py, "min", &np_min);
         common::report_incumbent_topology("fnp.min_max_f64_flat", "numpy.min+numpy.max");
 
         let bits_of = |value: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
             value.extract::<f64>().expect("float64 scalar").to_bits()
+        };
+        // arg* return an INDEX, not a float, so they need their own extraction.
+        let index_of = |value: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            value.extract::<u64>().expect("index")
         };
 
         for &elements in &[1usize << 22, 1 << 26] {
@@ -7818,6 +7826,101 @@ fn bench_f64_flat_min_max_vs_numpy_median_gate(c: &mut Criterion) {
                     common::ContractObservation {
                         elapsed,
                         checksum: bits_of(&result),
+                    }
+                };
+                let (effect, incumbent_null, candidate_null) =
+                    common::run_dual_null_median_ci_contract_with_sampling(
+                        &row,
+                        &mut observe_incumbent,
+                        &mut observe_candidate,
+                        CONTRACT_ROUNDS,
+                        CONTRACT_MIN_OF,
+                    );
+                let verdict =
+                    common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+                println!(
+                    "MINMAX_RESULT row={row} op={label} elements={elements} verdict={verdict} \
+                     incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                     ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                     incumbent_null_ci95=[{:.6},{:.6}] candidate_null_ci95=[{:.6},{:.6}] \
+                     corrected_dual_null_gate=true incumbent=numpy_live_same_invocation",
+                    effect.arm_a_median_ns / 1_000_000.0,
+                    effect.arm_b_median_ns / 1_000_000.0,
+                    effect.ratio_median,
+                    effect.ratio_ci_low,
+                    effect.ratio_ci_high,
+                    incumbent_null.ratio_ci_low,
+                    incumbent_null.ratio_ci_high,
+                    candidate_null.ratio_ci_low,
+                    candidate_null.ratio_ci_high,
+                );
+                let decision = if verdict == "DECIDABLE_WIN" {
+                    "choose_fnp"
+                } else {
+                    "choose_numpy"
+                };
+                println!(
+                    "CHOOSER_STATEMENT workload=f64_flat_{label}_{elements} decision={decision} \
+                     verdict={verdict} incumbent=numpy_live_same_invocation \
+                     measured_scope={elements}_c_contiguous_float64_elements_at_{threads}_pinned_threads \
+                     outside_scope=run_same_contract_before_choosing"
+                );
+            }
+
+            // arg* rows. Same corpus, but the result is an index, and unlike the
+            // value routes these have NO deferral regimes — ties resolve to the
+            // first index and NaN resolves to the first NaN's index, both
+            // exactly, so any corpus is measurable.
+            for (label, np_fn, fnp_fn) in [
+                ("argmin", &np_argmin, &fnp_argmin),
+                ("argmax", &np_argmax, &fnp_argmax),
+            ] {
+                let row = format!("python_f64_flat_{label}_{elements}_vs_numpy");
+                let run_incumbent = || np_fn.call1((black_box(&mm_a),)).expect("numpy arg arm");
+                let run_candidate = || fnp_fn.call1((black_box(&mm_a),)).expect("fnp arg arm");
+
+                let ours = run_candidate();
+                let theirs = run_incumbent();
+                assert_eq!(
+                    index_of(&ours),
+                    index_of(&theirs),
+                    "f64 flat {label} at {elements} does not match NumPy's index"
+                );
+                println!(
+                    "PARITY row={row} exact_index=passed op={label} result_elements={elements} \
+                     result_index={} tie_regime=first_index",
+                    index_of(&theirs)
+                );
+                println!(
+                    "COUNTED_MECHANISM row={row} class=serial_scan_parallelised_and_vectorised \
+                     incumbent_threads=1 candidate_threads={threads} \
+                     order_independent_selection=true shared_inputs=true equal_work=true"
+                );
+
+                let reps = ((1usize << 27) / elements).max(1);
+                common::report_observed_thread_activity(&row, "numpy", reps, || {
+                    black_box(index_of(&run_incumbent()));
+                });
+                common::report_observed_thread_activity(&row, "fnp", reps, || {
+                    black_box(index_of(&run_candidate()));
+                });
+
+                let mut observe_incumbent = || {
+                    let started = Instant::now();
+                    let result = run_incumbent();
+                    let elapsed = started.elapsed();
+                    common::ContractObservation {
+                        elapsed,
+                        checksum: index_of(&result),
+                    }
+                };
+                let mut observe_candidate = || {
+                    let started = Instant::now();
+                    let result = run_candidate();
+                    let elapsed = started.elapsed();
+                    common::ContractObservation {
+                        elapsed,
+                        checksum: index_of(&result),
                     }
                 };
                 let (effect, incumbent_null, candidate_null) =
