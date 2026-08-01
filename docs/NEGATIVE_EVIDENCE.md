@@ -4,6 +4,74 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-01 - FLAT `float64` PROD IS NOT BIT-EXACTLY PARALLELIZABLE (NO-SHIP, design rejected before any build)
+
+`QuartzHeron`. Closes the last open item on this campaign's reduction map. NO
+code was written and NO build was spent: the design is refuted by a plain-Python
+probe against live NumPy.
+
+**Campaign result class:** no-ship
+
+`prod` looked like the obvious next reduction lever — NumPy runs it
+single-threaded like every other reduction (measured `cpu/wall = 1.00x`, ~50 ms
+at 64M `float64`, the largest remaining unclaimed entry on the map), and `fnp`
+delegates it. The sibling `sum` lever parallelizes bit-exactly at 6.31x.
+
+**IT DOES NOT TRANSFER, because NumPy's `prod` uses a DIFFERENT accumulation
+shape from its `sum`.** Probed against live NumPy 2.4.3 at n = 7 / 100 / 1000 /
+4096 with values drawn near 1.0 (so neither underflow nor overflow perturbs the
+comparison):
+
+| candidate accumulation | n=7 | n=100 | n=1000 | n=4096 |
+|---|---|---|---|---|
+| SEQUENTIAL `r = r * a[i]` | match | **match** | **match** | **match** |
+| PAIRWISE tree (the `sum` shape) | match | differ | differ | differ |
+
+`add.reduce` is a pairwise TREE, which is why the sum route parallelizes with
+bit-identity — the two halves are independent and evaluating them concurrently
+reproduces the identical tree. `multiply.reduce` is a flat SEQUENTIAL CHAIN.
+
+WHY THAT IS FATAL, not merely inconvenient:
+
+1. Floating-point multiplication is NOT associative, so any parallel
+   decomposition re-associates the products and changes the rounding. There is
+   no split that preserves the sequential chain's bits, unlike the pairwise case
+   where the split points are the tree's own nodes.
+2. The chain is a TRUE serial dependency (each product feeds the next), so there
+   is no instruction-level parallelism to recover either — the usual escape of
+   keeping several partial accumulators is exactly the re-association that breaks
+   bit-exactness. NumPy's own loop is already a tight C dependency chain, so
+   there is no implementation slack to win on the same association.
+
+This repo's contract is byte-exactness with zero active rows in
+`docs/DIVERGENCES.md`, so shipping a re-associated parallel product is not an
+option on accuracy grounds either, even though it would be numerically
+defensible in isolation.
+
+COUNTED_MECHANISM: class=non_decomposable_accumulation_shape incumbent_accumulation_shape=sequential_chain incumbent_independent_subtrees=0 candidate_required_subtrees=2 bit_exact_splits_available=0 probe_sizes=7,100,1000,4096 sequential_shape_matches=4 pairwise_shape_matches=1 of 4
+
+No A/A null is reported because NOTHING WAS TIMED — this row is refuted
+structurally, not statistically, and a timing harness would be measuring a
+candidate that cannot legally exist. The counted quantity is the accumulation
+shape itself, established by exact-bit comparison against live NumPy rather than
+by a stopwatch. The single pairwise match is n=7, below the tree base case where
+the two shapes coincide. Because `incumbent_independent_subtrees=0`, every
+candidate decomposition changes the association and therefore the result bits:
+the win is unavailable at ANY thread count, not merely too small to measure.
+
+CONTRAST WORTH KEEPING: "NumPy is single-threaded here" is necessary but NOT
+sufficient for a reduction lever. The transferable precondition is that NumPy's
+accumulation shape must be DECOMPOSABLE — a tree, or an order-independent
+selection. Of the reduction family measured on this campaign: `sum`/`mean` are
+trees (shipped), `min`/`max`/`argmin`/`argmax` are order-independent selections
+(shipped), and `prod` is a sequential chain (dead). Check the SHAPE, not just the
+thread count, before opening a reduction bead.
+
+Retry predicate: reopen ONLY if NumPy changes `multiply.reduce` to a pairwise
+tree (re-run the probe above — four lines of Python, no build), or if this
+project ever accepts a documented accuracy divergence for reductions, which it
+currently does not.
+
 ## 2026-08-01 - RETRACTION + SINGLE-HOST MATRIX: `arg*` IS materially slower than `min`/`max`; the "failed prediction" note in the entry below is WRONG
 
 `QuartzHeron`, bead `deadlock-audit-qmbuo`. NO new code and NO new performance
