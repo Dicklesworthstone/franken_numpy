@@ -22778,9 +22778,9 @@ fn count_nonzero_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
 // with an OR / zero-OR (both autovectorize) and only branching once per block
 // keeps SIMD throughput AND a coarse early-exit. Truthiness is order-independent,
 // so the result is identical to the short-circuit form.
-const ANY_ALL_BLK: usize = 8192;
-const ANY_ALL_PAR_MIN: usize = 1 << 24;
-const ANY_ALL_PAR_CHUNK: usize = 1 << 20;
+const ANY_ALL_PREFIX_BYTES: usize = 8192;
+const ANY_ALL_PAR_MIN_BYTES: usize = 1 << 24;
+const ANY_ALL_PAR_CHUNK_BYTES: usize = 1 << 20;
 
 #[inline]
 fn any_nonzero_u8(input: &[u8]) -> bool {
@@ -22817,58 +22817,40 @@ fn block_any_u8(input: &[pyo3::buffer::ReadOnlyCell<u8>]) -> bool {
     // the GIL for this entire reduction. The native view is read-only.
     let data: &[u8] =
         unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), input.len()) };
-    let prefix_len = data.len().min(ANY_ALL_BLK);
+    let prefix_len = data.len().min(ANY_ALL_PREFIX_BYTES);
     if any_nonzero_u8(&data[..prefix_len]) {
         return true;
     }
     let tail = &data[prefix_len..];
-    if tail.len() >= ANY_ALL_PAR_MIN && rayon::current_num_threads() > 1 {
+    if tail.len() >= ANY_ALL_PAR_MIN_BYTES && rayon::current_num_threads() > 1 {
         use rayon::prelude::*;
-        return tail.par_chunks(ANY_ALL_PAR_CHUNK).any(any_nonzero_u8);
+        return tail.par_chunks(ANY_ALL_PAR_CHUNK_BYTES).any(any_nonzero_u8);
     }
-    tail.chunks(ANY_ALL_BLK).any(any_nonzero_u8)
+    tail.chunks(ANY_ALL_PREFIX_BYTES).any(any_nonzero_u8)
 }
 
 fn block_all_u8(input: &[pyo3::buffer::ReadOnlyCell<u8>]) -> bool {
     // SAFETY: same buffer/layout/lifetime argument as `block_any_u8` above.
     let data: &[u8] =
         unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), input.len()) };
-    let prefix_len = data.len().min(ANY_ALL_BLK);
+    let prefix_len = data.len().min(ANY_ALL_PREFIX_BYTES);
     if any_zero_u8(&data[..prefix_len]) {
         return false;
     }
     let tail = &data[prefix_len..];
-    if tail.len() >= ANY_ALL_PAR_MIN && rayon::current_num_threads() > 1 {
+    if tail.len() >= ANY_ALL_PAR_MIN_BYTES && rayon::current_num_threads() > 1 {
         use rayon::prelude::*;
-        return !tail.par_chunks(ANY_ALL_PAR_CHUNK).any(any_zero_u8);
+        return !tail.par_chunks(ANY_ALL_PAR_CHUNK_BYTES).any(any_zero_u8);
     }
-    !tail.chunks(ANY_ALL_BLK).any(any_zero_u8)
+    !tail.chunks(ANY_ALL_PREFIX_BYTES).any(any_zero_u8)
 }
 
 fn block_any_f64(input: &[pyo3::buffer::ReadOnlyCell<f64>]) -> bool {
-    for chunk in input.chunks(ANY_ALL_BLK) {
-        let mut acc = false;
-        for c in chunk {
-            acc |= c.get() != 0.0;
-        }
-        if acc {
-            return true;
-        }
-    }
-    false
+    block_any_all(input, false, |value| value != 0.0)
 }
 
 fn block_all_f64(input: &[pyo3::buffer::ReadOnlyCell<f64>]) -> bool {
-    for chunk in input.chunks(ANY_ALL_BLK) {
-        let mut zero = false;
-        for c in chunk {
-            zero |= c.get() == 0.0;
-        }
-        if zero {
-            return false;
-        }
-    }
-    true
+    block_any_all(input, true, |value| value != 0.0)
 }
 
 // Per-axis any/all over a C-contiguous borrowed buffer. The generic
@@ -22994,27 +22976,61 @@ fn axis_any_all_fold<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
 // widths). Folds each fixed block with an OR (any) / falsy-OR (all) so the
 // no-early-exit case (any over all-zero, all over all-nonzero) still
 // autovectorizes, then branches once per block for a coarse short-circuit.
-fn block_any_all<T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
-    input: &[pyo3::buffer::ReadOnlyCell<T>],
-    is_all: bool,
-    truthy: F,
-) -> bool {
-    for chunk in input.chunks(ANY_ALL_BLK) {
+fn block_any_all<T, F>(input: &[pyo3::buffer::ReadOnlyCell<T>], is_all: bool, truthy: F) -> bool
+where
+    T: pyo3::buffer::Element + Copy + Send + Sync,
+    F: Fn(T) -> bool + Copy + Send + Sync,
+{
+    #[inline]
+    fn fold_chunk<T: Copy, F: Fn(T) -> bool + Copy>(input: &[T], is_all: bool, truthy: F) -> bool {
         let mut hit = 0u8;
         if is_all {
-            for c in chunk {
-                hit |= u8::from(!truthy(c.get()));
-            }
-            if hit != 0 {
-                return false;
+            for &value in input {
+                hit |= u8::from(!truthy(value));
             }
         } else {
-            for c in chunk {
-                hit |= u8::from(truthy(c.get()));
+            for &value in input {
+                hit |= u8::from(truthy(value));
             }
-            if hit != 0 {
-                return true;
-            }
+        }
+        if is_all { hit == 0 } else { hit != 0 }
+    }
+
+    // SAFETY: `PyBuffer::as_slice` supplied `input` from a C-contiguous native
+    // numeric ndarray and keeps the exporter borrowed under the GIL for this
+    // reduction. `ReadOnlyCell<T>` is `repr(transparent)` over `UnsafeCell<T>`,
+    // so it has T's size/alignment and every element is initialized. The view is
+    // read-only. Sharing it lets independent Rayon bands read disjoint elements;
+    // no worker calls Python or retains the view beyond this function.
+    let data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast(), input.len()) };
+    let item_bytes = std::mem::size_of::<T>();
+    debug_assert!(item_bytes > 0);
+    let prefix_elements = ANY_ALL_PREFIX_BYTES.div_ceil(item_bytes).min(data.len());
+    let prefix_value = fold_chunk(&data[..prefix_elements], is_all, truthy);
+    if prefix_value != is_all {
+        return prefix_value;
+    }
+
+    let tail = &data[prefix_elements..];
+    let parallel_min_elements = ANY_ALL_PAR_MIN_BYTES.div_ceil(item_bytes);
+    let parallel_chunk_elements = ANY_ALL_PAR_CHUNK_BYTES.div_ceil(item_bytes);
+    if tail.len() >= parallel_min_elements && rayon::current_num_threads() > 1 {
+        use rayon::prelude::*;
+        if is_all {
+            return tail
+                .par_chunks(parallel_chunk_elements)
+                .all(|chunk| fold_chunk(chunk, true, truthy));
+        }
+        return tail
+            .par_chunks(parallel_chunk_elements)
+            .any(|chunk| fold_chunk(chunk, false, truthy));
+    }
+
+    let serial_chunk_elements = ANY_ALL_PREFIX_BYTES.div_ceil(item_bytes);
+    for chunk in tail.chunks(serial_chunk_elements) {
+        let value = fold_chunk(chunk, is_all, truthy);
+        if value != is_all {
+            return value;
         }
     }
     is_all
@@ -23033,8 +23049,8 @@ fn zerocopy_any_all_buf<'py, T, F>(
     truthy: F,
 ) -> PyResult<Option<Py<PyAny>>>
 where
-    T: pyo3::buffer::Element + Copy,
-    F: Fn(T) -> bool + Copy,
+    T: pyo3::buffer::Element + Copy + Send + Sync,
+    F: Fn(T) -> bool + Copy + Send + Sync,
 {
     let Ok(buffer) = PyBuffer::<T>::get(a) else {
         return Ok(None);

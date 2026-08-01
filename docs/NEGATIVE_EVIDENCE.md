@@ -35969,3 +35969,102 @@ an exact-output test finds a boundary/noncanonical-byte mismatch, or if a
 same-invocation contract at the 16 MiB floor is needed. Any replacement must
 retain observed threads, full-host quiescence, both nulls, and the corrected
 median-CI rule.
+
+## 2026-08-01 - WIN (KEEP, INCUMBENT-WIN): parallel flat numeric all/any - 2.18-5.65x vs live NumPy across ten dtypes on eight cores
+
+`IcyForest`, bead `deadlock-audit-ydvbz`. Strict preflight was CLEAR for lever
+`parallel fixed-width flat all any`, surface
+`fnp.all fnp.any axis none contiguous numeric worst-case full scan`, before
+source editing.
+
+**Campaign result class:** incumbent-win
+
+`bench_elf_sha256=eeac6f001207bdff19676c958d73f86000d8fbd5c5b7a6d78999f25cd73e1167`
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 0.992622x,
+CI95 [0.985418, 0.999715], 21 rounds, min_of=1 on the conservative uint64
+`any_false` headline row; the table records every dtype and operation.
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio
+1.117129x, CI95 [1.007769, 1.207591], 21 rounds, min_of=1 on that same
+headline row.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c7c0e3957f2d32-002a79be measured_ratio=2.181738x median=1.965241ms
+
+The full measured ratio range was 2.181738x..5.653763x.
+
+**Incumbent isolation proof:** candidate=fnp.all/fnp.any incumbent=numpy.all/numpy.any shared_timed_component=none
+
+WHY THIS LEVER: whole-job `perf` on the prior 256 MiB int64 `any_false` loss
+ranked `zerocopy_any_all_buf::<i64>` at 84.28% of candidate self-time. NumPy
+spent 78.83% in its aligned long-to-bool cast and another 9.04% in logical OR.
+Both implementations therefore paid the required truth classification; the
+structural gap was that NumPy retained one reduction thread while FrankenNumPy
+could distribute the associative scan without materializing a bool array.
+
+IMPLEMENTATION: the native int8/uint8/int16/uint16/int32/uint32/int64/uint64,
+float32, and float64 flat paths now share a byte-sized scheduler. They scan an
+8 KiB prefix serially to preserve common early exits, then, once the remaining
+tail reaches 16 MiB, fold independent 1 MiB bands across Rayon and combine
+their boolean verdicts. The float predicates preserve NumPy truth semantics:
+negative zero is false and NaN is true. Small inputs and axis reductions retain
+the serial path; no intermediate bool array is allocated.
+
+BEHAVIOR PROOF: the complete remote `conformance_all` and `conformance_any`
+shards passed 24/24. New above-threshold cases cover all ten dtypes, full-scan
+identities, hits at index 0, the 8,192-byte prefix boundary, midpoint, and tail,
+plus float negative-zero and NaN behavior. The claim-bearing harness separately
+asserted exact NumPy scalar type and bytes for every timed row.
+
+BLAS IDENTITY: live NumPy 2.4.6 reports ILP64 `scipy-openblas`, OpenBLAS
+0.3.31.188.0 (`USE64BITINT`, `DYNAMIC_ARCH`, `NO_AFFINITY`, Haswell,
+`MAX_THREADS=64`). Neither truth-reduction arm calls BLAS, so
+OpenBLAS/OMP/MKL were pinned to one thread.
+
+CLAIM-BEARING INVOCATION: the 226,361,576-byte release-perf executable ran on
+`vmi1293453`, eight physical/logical AMD EPYC cores with full 0-7 affinity,
+Rayon pinned to eight, and runtime/compile AVX2. Full-host quiescence cleared
+before the process and every contract; the maximum observed busy fraction was
+0.065 against the 0.200 ceiling. NumPy used one observed thread on every row.
+FrankenNumPy exercised all eight Rayon workers (and sometimes the caller).
+
+| dtype | op/corpus | NumPy ms | FNP ms | NumPy/NumPy null (CI95) | FNP/FNP null (CI95) | NumPy/FNP effect (CI95) | verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| int8 | `any_false` | 2.683383 | 0.480839 | 1.024779 `[0.997563,1.044532]` | 0.932803 `[0.710759,1.275685]` | **5.653763x** `[4.987738,6.715336]` | DECIDABLE_WIN |
+| int8 | `all_true` | 3.745984 | 1.382908 | 1.052102 `[0.988224,1.130405]` | 1.066466 `[0.821709,1.184891]` | **3.333251x** `[2.461617,3.607623]` | DECIDABLE_WIN |
+| uint8 | `any_false` | 3.615608 | 0.930051 | 0.996412 `[0.968982,1.005556]` | 0.777659 `[0.524868,1.317548]` | **3.901471x** `[3.117047,5.108742]` | DECIDABLE_WIN |
+| uint8 | `all_true` | 3.885793 | 1.073145 | 0.967129 `[0.910076,1.053318]` | 0.969904 `[0.836082,1.072508]` | **3.611625x** `[3.173941,4.350713]` | DECIDABLE_WIN |
+| int16 | `any_false` | 2.264799 | 0.562471 | 0.966079 `[0.951111,1.047721]` | 1.041265 `[1.014553,1.098560]` | **3.768881x** `[3.066997,4.360926]` | DECIDABLE_WIN |
+| int16 | `all_true` | 3.974866 | 1.159464 | 1.000392 `[0.975441,1.039918]` | 1.136568 `[0.969649,1.194480]` | **3.254386x** `[2.843253,3.917834]` | DECIDABLE_WIN |
+| uint16 | `any_false` | 3.140899 | 0.884893 | 1.003326 `[0.999489,1.008591]` | 1.132518 `[1.006654,1.299842]` | **3.546696x** `[2.349019,4.322038]` | DECIDABLE_WIN |
+| uint16 | `all_true` | 4.167184 | 1.561445 | 1.025332 `[0.936529,1.047065]` | 0.914540 `[0.860015,1.086927]` | **3.086390x** `[2.451998,3.764094]` | DECIDABLE_WIN |
+| int32 | `any_false` | 1.974964 | 0.656112 | 0.992455 `[0.946756,1.028377]` | 0.984435 `[0.777410,1.214399]` | **3.111856x** `[2.409388,3.517549]` | DECIDABLE_WIN |
+| int32 | `all_true` | 3.565484 | 1.032904 | 0.997525 `[0.947176,1.048087]` | 1.077108 `[0.819525,1.296634]` | **3.472509x** `[3.030924,4.236582]` | DECIDABLE_WIN |
+| uint32 | `any_false` | 2.070907 | 0.675000 | 1.018502 `[0.991715,1.035662]` | 1.030316 `[0.933842,1.041765]` | **3.387045x** `[2.699796,4.071085]` | DECIDABLE_WIN |
+| uint32 | `all_true` | 3.876329 | 1.145814 | 0.987717 `[0.947272,1.046200]` | 0.937973 `[0.737743,1.080214]` | **3.494157x** `[2.869880,3.897675]` | DECIDABLE_WIN |
+| int64 | `any_false` | 1.638321 | 0.632587 | 1.002179 `[0.990786,1.025525]` | 0.937276 `[0.872473,1.062286]` | **2.385305x** `[1.926049,2.993201]` | DECIDABLE_WIN |
+| int64 | `all_true` | 3.332346 | 0.954367 | 1.003807 `[0.980685,1.046266]` | 1.077052 `[1.010482,1.147052]` | **3.716289x** `[3.248173,3.803985]` | DECIDABLE_WIN |
+| uint64 | `any_false` | 1.965241 | 0.940186 | 0.992622 `[0.985418,0.999715]` | 1.117129 `[1.007769,1.207591]` | **2.181738x** `[1.843843,2.993626]` | DECIDABLE_WIN |
+| uint64 | `all_true` | 3.520396 | 0.926376 | 1.003550 `[0.975550,1.045323]` | 0.967489 `[0.863895,1.006303]` | **4.002351x** `[2.932685,4.629920]` | DECIDABLE_WIN |
+| float32 | `any_false` | 1.845210 | 0.533308 | 1.004535 `[1.001600,1.014081]` | 1.109837 `[1.021472,1.430960]` | **3.743008x** `[2.983639,4.105605]` | DECIDABLE_WIN |
+| float32 | `all_true` | 3.391213 | 0.907538 | 1.019974 `[1.006754,1.027477]` | 0.998662 `[0.888229,1.123904]` | **3.852386x** `[3.536011,4.109153]` | DECIDABLE_WIN |
+| float64 | `any_false` | 1.317851 | 0.441560 | 0.999240 `[0.972924,1.010024]` | 0.995951 `[0.923555,1.062735]` | **2.994792x** `[2.740841,3.178306]` | DECIDABLE_WIN |
+| float64 | `all_true` | 3.229061 | 1.060106 | 0.981741 `[0.913989,1.060587]` | 0.976142 `[0.944810,1.101684]` | **3.074810x** `[2.551387,3.389737]` | DECIDABLE_WIN |
+
+All 20 effect CIs exclude unity and clear twice the wider same-invocation null
+half-width under 21-round, min-of-one contracts. CV remained provenance only.
+COUNTED MECHANISM: both arms read the same 67,108,864-byte native ndarray in
+one logical sweep and emit one bool scalar. The candidate checks 8 KiB on the
+caller, then exposes 64 independent 1 MiB bands to eight pinned workers; NumPy
+retains one reduction thread.
+
+**Decision: KEEP, INCUMBENT-WIN.** Choose FrankenNumPy for route-qualified
+worst-case flat native numeric truth reductions whose post-prefix tail is at
+least 16 MiB; retain the guarded serial paths for early-exit, small, axis, and
+non-native dtype surfaces.
+
+Retry predicate: do not rerun this 64 MiB ten-dtype matrix on these artifacts.
+Reopen for another dtype/layout, a lower parallel floor, axis scheduling, or if
+an exact-output boundary/float-special-value test fails. Any replacement claim
+must retain exact scalar checks, observed threads, host quiescence, live NumPy,
+both same-invocation nulls, and the corrected median-CI rule.

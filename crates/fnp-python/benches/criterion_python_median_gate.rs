@@ -6246,28 +6246,50 @@ fn bench_fused_subtract_multiply_add_matrix_vs_numpy_median_gate(c: &mut Criteri
     });
 }
 
-/// Parallel worst-case boolean truth reductions against live NumPy.
+/// Parallel worst-case fixed-width truth reductions against live NumPy.
 ///
-/// Both rows force a complete 256 MiB scan: `any` sees only false bytes and
-/// `all` sees only true bytes. The candidate first checks one 8 KiB prefix for
-/// the common early-exit case, then distributes independent 1 MiB bands across
-/// the pinned Rayon pool. Boolean OR/AND are associative, so scheduling cannot
-/// change the scalar result.
-fn bench_bool_flat_all_any_vs_numpy_median_gate(c: &mut Criterion) {
+/// Each row forces a complete 64 MiB scan: `any` sees only zeros and `all` sees
+/// only ones. The candidate first checks one 8 KiB prefix for the common
+/// early-exit case, then distributes independent 1 MiB bands across the pinned
+/// Rayon pool. Truth OR/AND are associative, so scheduling cannot change the
+/// scalar result. `FNP_TRUTH_REDUCTION_DTYPES=numeric` selects every native
+/// integer width plus float32/float64; a single NumPy dtype name selects one row
+/// family, and the default remains bool for a cheap smoke run.
+fn bench_flat_all_any_vs_numpy_median_gate(c: &mut Criterion) {
     let _ = c;
 
-    const TARGET_INPUT_BYTES: usize = 256 * 1024 * 1024;
+    const TARGET_INPUT_BYTES: usize = 64 * 1024 * 1024;
     const PREFIX_BYTES: usize = 8192;
     const PARALLEL_CHUNK_BYTES: usize = 1 << 20;
     const CONTRACT_ROUNDS: usize = 21;
     const CONTRACT_MIN_OF: usize = 1;
-    const THREAD_ACTIVITY_REPETITIONS: usize = 64;
+    const INCUMBENT_THREAD_ACTIVITY_REPETITIONS: usize = 16;
+    const CANDIDATE_THREAD_ACTIVITY_REPETITIONS: usize = 128;
     const REQUIRED_BUILD_PROFILE: &str = "release-perf";
+
+    let dtype_mode =
+        std::env::var("FNP_TRUTH_REDUCTION_DTYPES").unwrap_or_else(|_| "bool".to_owned());
+    let dtype_names = if dtype_mode == "numeric" {
+        vec![
+            "int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32",
+            "float64",
+        ]
+    } else {
+        assert!(
+            [
+                "bool", "int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64",
+                "float32", "float64",
+            ]
+            .contains(&dtype_mode.as_str()),
+            "FNP_TRUTH_REDUCTION_DTYPES must be numeric or one native fixed-width dtype"
+        );
+        vec![dtype_mode.as_str()]
+    };
 
     assert_eq!(
         std::env::var("FNP_BENCH_PROFILE").as_deref(),
         Ok(REQUIRED_BUILD_PROFILE),
-        "ship-grade bool-reduction evidence requires FNP_BENCH_PROFILE=release-perf"
+        "ship-grade truth-reduction evidence requires FNP_BENCH_PROFILE=release-perf"
     );
     let build_worker =
         std::env::var("FNP_BUILD_WORKER").expect("FNP_BUILD_WORKER records the build origin");
@@ -6276,46 +6298,48 @@ fn bench_bool_flat_all_any_vs_numpy_median_gate(c: &mut Criterion) {
         "FNP_BUILD_WORKER must be set"
     );
     let threads = std::env::var("RAYON_NUM_THREADS")
-        .expect("RAYON_NUM_THREADS must be explicitly pinned before bool-reduction timing");
+        .expect("RAYON_NUM_THREADS must be explicitly pinned before truth-reduction timing");
     for variable in ["OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"] {
         assert_eq!(
             std::env::var(variable).as_deref(),
             Ok("1"),
-            "{variable} must be one: neither bool-reduction arm calls BLAS"
+            "{variable} must be one: neither truth-reduction arm calls BLAS"
         );
     }
     let threads: usize = threads.parse().expect("thread count is numeric");
     assert_eq!(
         rayon::current_num_threads(),
         threads,
-        "Rayon pool width does not match the pinned bool-reduction configuration"
+        "Rayon pool width does not match the pinned truth-reduction configuration"
     );
     println!(
-        "WORKLOAD_RUNTIME workload=bool_flat_all_any_matrix \
+        "WORKLOAD_RUNTIME workload=fixed_width_flat_all_any_matrix dtype_mode={dtype_mode} \
          build_worker={build_worker} build_profile={REQUIRED_BUILD_PROFILE} \
          pinned_threads={threads} rayon_threads={} contract_rounds={CONTRACT_ROUNDS} \
-         contract_min_of={CONTRACT_MIN_OF} input_bytes={TARGET_INPUT_BYTES}",
-        rayon::current_num_threads()
+         contract_min_of={CONTRACT_MIN_OF} input_bytes={TARGET_INPUT_BYTES} dtype_count={}",
+        rayon::current_num_threads(),
+        dtype_names.len()
     );
 
     Python::initialize();
     Python::attach(|py| {
         ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bool_flat_all_any_matrix")
-            .expect("bool flat-reduction bench module");
-        fnp_python(&module).expect("initialize bool flat-reduction module");
+        let module = PyModule::new(py, "fnp_python_fixed_width_flat_all_any_matrix")
+            .expect("fixed-width flat-reduction bench module");
+        fnp_python(&module).expect("initialize fixed-width flat-reduction module");
         let numpy = py.import("numpy").expect("numpy incumbent");
         common::report_incumbent_topology("fnp.all/fnp.any", "numpy.all/numpy.any");
-        println!("NUMPY_BUILD_CONFIG_BEGIN workload=bool_flat_all_any_matrix");
+        println!("NUMPY_BUILD_CONFIG_BEGIN workload=fixed_width_flat_all_any_matrix");
         numpy
             .getattr("show_config")
             .expect("numpy.show_config")
             .call0()
             .expect("report NumPy build configuration");
-        println!("NUMPY_BUILD_CONFIG_END workload=bool_flat_all_any_matrix");
+        println!("NUMPY_BUILD_CONFIG_END workload=fixed_width_flat_all_any_matrix");
         println!(
-            "BLAS_RELEVANCE workload=bool_flat_all_any_matrix numpy_reduction_uses_blas=false \
-             candidate_uses_blas=false blas_threads_pinned=1 reason=boolean_ufunc_reduction"
+            "BLAS_RELEVANCE workload=fixed_width_flat_all_any_matrix \
+             numpy_reduction_uses_blas=false candidate_uses_blas=false \
+             blas_threads_pinned=1 reason=native_truth_ufunc_reduction"
         );
 
         let checksum_of = |scalar: &Bound<'_, PyAny>| -> u64 {
@@ -6340,166 +6364,202 @@ fn bench_bool_flat_all_any_vs_numpy_median_gate(c: &mut Criterion) {
         };
 
         let cases = [("any_false", "any", "zeros"), ("all_true", "all", "ones")];
-        for (case, operation, constructor) in cases {
-            let row = format!("python_bool_flat_{case}_256mib_vs_numpy");
-            let np_reduction = numpy.getattr(operation).expect("numpy bool reduction");
-            let fnp_reduction = module.getattr(operation).expect("fnp bool reduction");
-            assert!(
-                !fnp_reduction.is(&np_reduction),
-                "dispatch trap: fnp.{operation} resolved to the NumPy callable"
-            );
-            common::report_numpy_incumbent_identity(py, operation, &np_reduction);
-
-            let kwargs = PyDict::new(py);
-            kwargs
-                .set_item("dtype", numpy.getattr("bool_").expect("numpy bool dtype"))
-                .expect("set bool dtype");
-            let input = numpy
-                .call_method(constructor, (TARGET_INPUT_BYTES,), Some(&kwargs))
-                .expect("construct worst-case bool input");
+        for dtype in dtype_names {
+            let numpy_dtype_name = if dtype == "bool" { "bool_" } else { dtype };
+            let dtype_object = numpy
+                .getattr(numpy_dtype_name)
+                .expect("native fixed-width NumPy dtype");
+            let dtype_spec = numpy
+                .call_method1("dtype", (&dtype_object,))
+                .expect("normalize NumPy dtype");
+            let item_bytes = dtype_spec
+                .getattr("itemsize")
+                .expect("dtype itemsize")
+                .extract::<usize>()
+                .expect("numeric dtype itemsize");
             assert_eq!(
-                input
-                    .getattr("nbytes")
-                    .expect("bool input nbytes")
-                    .extract::<usize>()
-                    .expect("bool input nbytes value"),
-                TARGET_INPUT_BYTES
+                TARGET_INPUT_BYTES % item_bytes,
+                0,
+                "target byte count must divide the native dtype width"
             );
-            assert!(
-                input
-                    .getattr("flags")
-                    .expect("bool input flags")
-                    .getattr("c_contiguous")
-                    .expect("bool input C-contiguous flag")
-                    .extract::<bool>()
-                    .expect("bool input C-contiguous value")
-            );
+            let elements = TARGET_INPUT_BYTES / item_bytes;
 
-            let run_incumbent = || {
-                np_reduction
-                    .call1((black_box(&input),))
-                    .expect("numpy bool flat reduction arm")
-            };
-            let run_candidate = || {
-                fnp_reduction
-                    .call1((black_box(&input),))
-                    .expect("fnp bool flat reduction arm")
-            };
-
-            let ours = run_candidate();
-            let theirs = run_incumbent();
-            assert!(
-                ours.get_type().is(theirs.get_type()),
-                "bool flat-{operation} scalar type differs from NumPy"
-            );
-            assert_eq!(
-                ours.call_method0("tobytes")
-                    .expect("fnp bool reduction tobytes")
-                    .extract::<Vec<u8>>()
-                    .expect("fnp bool reduction bytes"),
-                theirs
-                    .call_method0("tobytes")
-                    .expect("numpy bool reduction tobytes")
-                    .extract::<Vec<u8>>()
-                    .expect("numpy bool reduction bytes"),
-                "bool flat-{operation} is not byte-exact"
-            );
-            println!(
-                "PARITY row={row} exact_bytes=passed exact_scalar_type=passed \
-                 input_dtype=bool result_dtype=bool input_elements={TARGET_INPUT_BYTES} \
-                 input_bytes={TARGET_INPUT_BYTES} corpus={case} checksum={:016x}",
-                checksum_of(&theirs)
-            );
-            println!(
-                "ROUTE_PRECONDITIONS row={row} axis=none dtype=bool exact_ndarray=true \
-                 c_contiguous=true input_bytes={TARGET_INPUT_BYTES} parallel_min_bytes=16777216 \
-                 prefix_bytes={PREFIX_BYTES} candidate_route=block_{operation}_u8"
-            );
-            println!(
-                "COUNTED_MECHANISM row={row} class=parallel_associative_truth_reduction \
-                 incumbent_input_sweeps=1 candidate_input_sweeps=1 \
-                 incumbent_input_bytes={TARGET_INPUT_BYTES} candidate_input_bytes={TARGET_INPUT_BYTES} \
-                 incumbent_expected_threads=1 candidate_pinned_threads={threads} \
-                 candidate_prefix_bytes={PREFIX_BYTES} candidate_parallel_chunk_bytes={PARALLEL_CHUNK_BYTES} \
-                 candidate_parallel_chunks={} truth_operation_associative=true shared_input=true",
-                (TARGET_INPUT_BYTES - PREFIX_BYTES).div_ceil(PARALLEL_CHUNK_BYTES)
-            );
-
-            common::report_observed_thread_activity(
-                &row,
-                "numpy",
-                THREAD_ACTIVITY_REPETITIONS,
-                || {
-                    black_box(checksum_of(&run_incumbent()));
-                },
-            );
-            common::report_observed_thread_activity(
-                &row,
-                "fnp",
-                THREAD_ACTIVITY_REPETITIONS,
-                || {
-                    black_box(checksum_of(&run_candidate()));
-                },
-            );
-
-            let mut observe_incumbent = || {
-                let started = Instant::now();
-                let result = run_incumbent();
-                let elapsed = started.elapsed();
-                common::ContractObservation {
-                    elapsed,
-                    checksum: checksum_of(&result),
-                }
-            };
-            let mut observe_candidate = || {
-                let started = Instant::now();
-                let result = run_candidate();
-                let elapsed = started.elapsed();
-                common::ContractObservation {
-                    elapsed,
-                    checksum: checksum_of(&result),
-                }
-            };
-            let (effect, incumbent_null, candidate_null) =
-                common::run_dual_null_median_ci_contract_with_sampling(
-                    &row,
-                    &mut observe_incumbent,
-                    &mut observe_candidate,
-                    CONTRACT_ROUNDS,
-                    CONTRACT_MIN_OF,
+            for &(case, operation, constructor) in &cases {
+                let row = format!("python_{dtype}_flat_{case}_64mib_vs_numpy");
+                let np_reduction = numpy
+                    .getattr(operation)
+                    .expect("NumPy fixed-width truth reduction");
+                let fnp_reduction = module
+                    .getattr(operation)
+                    .expect("FrankenNumPy fixed-width truth reduction");
+                assert!(
+                    !fnp_reduction.is(&np_reduction),
+                    "dispatch trap: fnp.{operation} resolved to the NumPy callable"
                 );
-            let verdict =
-                common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
-            println!(
-                "BOOL_REDUCTION_RESULT row={row} operation={operation} corpus={case} verdict={verdict} \
-                 incumbent_median_ms={:.6} candidate_median_ms={:.6} \
-                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
-                 incumbent_null_ratio={:.6} incumbent_null_ci95=[{:.6},{:.6}] \
-                 candidate_null_ratio={:.6} candidate_null_ci95=[{:.6},{:.6}] \
-                 corrected_dual_null_gate=true incumbent=numpy_live_same_invocation",
-                effect.arm_a_median_ns / 1_000_000.0,
-                effect.arm_b_median_ns / 1_000_000.0,
-                effect.ratio_median,
-                effect.ratio_ci_low,
-                effect.ratio_ci_high,
-                incumbent_null.ratio_median,
-                incumbent_null.ratio_ci_low,
-                incumbent_null.ratio_ci_high,
-                candidate_null.ratio_median,
-                candidate_null.ratio_ci_low,
-                candidate_null.ratio_ci_high,
-            );
-            let decision = if verdict == "DECIDABLE_WIN" {
-                "choose_fnp"
-            } else {
-                "choose_numpy"
-            };
-            println!(
-                "CHOOSER_STATEMENT workload=bool_flat_{case}_256mib \
-                 decision={decision} verdict={verdict} incumbent=numpy_live_same_invocation \
-                 measured_scope={TARGET_INPUT_BYTES}_c_contiguous_bool_elements_at_{threads}_pinned_threads \
-                 outside_scope=run_same_contract_before_choosing"
-            );
+                common::report_numpy_incumbent_identity(py, operation, &np_reduction);
+
+                let kwargs = PyDict::new(py);
+                kwargs
+                    .set_item("dtype", &dtype_object)
+                    .expect("set fixed-width input dtype");
+                let input = numpy
+                    .call_method(constructor, (elements,), Some(&kwargs))
+                    .expect("construct worst-case fixed-width truth input");
+                assert_eq!(
+                    input
+                        .getattr("nbytes")
+                        .expect("truth input nbytes")
+                        .extract::<usize>()
+                        .expect("truth input nbytes value"),
+                    TARGET_INPUT_BYTES
+                );
+                assert!(
+                    input
+                        .getattr("flags")
+                        .expect("truth input flags")
+                        .getattr("c_contiguous")
+                        .expect("truth input C-contiguous flag")
+                        .extract::<bool>()
+                        .expect("truth input C-contiguous value")
+                );
+
+                let run_incumbent = || {
+                    np_reduction
+                        .call1((black_box(&input),))
+                        .expect("NumPy fixed-width flat truth-reduction arm")
+                };
+                let run_candidate = || {
+                    fnp_reduction
+                        .call1((black_box(&input),))
+                        .expect("FrankenNumPy fixed-width flat truth-reduction arm")
+                };
+
+                let ours = run_candidate();
+                let theirs = run_incumbent();
+                assert!(
+                    ours.get_type().is(theirs.get_type()),
+                    "{dtype} flat-{operation} scalar type differs from NumPy"
+                );
+                assert_eq!(
+                    ours.call_method0("tobytes")
+                        .expect("FrankenNumPy truth reduction tobytes")
+                        .extract::<Vec<u8>>()
+                        .expect("FrankenNumPy truth reduction bytes"),
+                    theirs
+                        .call_method0("tobytes")
+                        .expect("NumPy truth reduction tobytes")
+                        .extract::<Vec<u8>>()
+                        .expect("NumPy truth reduction bytes"),
+                    "{dtype} flat-{operation} is not byte-exact"
+                );
+                println!(
+                    "PARITY row={row} exact_bytes=passed exact_scalar_type=passed \
+                     input_dtype={dtype} result_dtype=bool input_elements={elements} \
+                     input_bytes={TARGET_INPUT_BYTES} corpus={case} checksum={:016x}",
+                    checksum_of(&theirs)
+                );
+                let candidate_route = if dtype == "bool" {
+                    if operation == "any" {
+                        "block_any_u8"
+                    } else {
+                        "block_all_u8"
+                    }
+                } else {
+                    "block_any_all_native_numeric"
+                };
+                println!(
+                    "ROUTE_PRECONDITIONS row={row} axis=none dtype={dtype} exact_ndarray=true \
+                     c_contiguous=true input_bytes={TARGET_INPUT_BYTES} parallel_min_bytes=16777216 \
+                     prefix_bytes={PREFIX_BYTES} candidate_route={candidate_route}"
+                );
+                println!(
+                    "COUNTED_MECHANISM row={row} class=parallel_associative_truth_reduction \
+                     incumbent_input_sweeps=1 candidate_input_sweeps=1 \
+                     incumbent_input_bytes={TARGET_INPUT_BYTES} candidate_input_bytes={TARGET_INPUT_BYTES} \
+                     incumbent_expected_threads=1 candidate_pinned_threads={threads} \
+                     candidate_prefix_bytes={PREFIX_BYTES} candidate_parallel_chunk_bytes={PARALLEL_CHUNK_BYTES} \
+                     candidate_parallel_chunks={} truth_operation_associative=true \
+                     candidate_intermediate_bool_buffer=false shared_input=true",
+                    (TARGET_INPUT_BYTES - PREFIX_BYTES).div_ceil(PARALLEL_CHUNK_BYTES)
+                );
+
+                common::report_observed_thread_activity(
+                    &row,
+                    "numpy",
+                    INCUMBENT_THREAD_ACTIVITY_REPETITIONS,
+                    || {
+                        black_box(checksum_of(&run_incumbent()));
+                    },
+                );
+                common::report_observed_thread_activity(
+                    &row,
+                    "fnp",
+                    CANDIDATE_THREAD_ACTIVITY_REPETITIONS,
+                    || {
+                        black_box(checksum_of(&run_candidate()));
+                    },
+                );
+
+                let mut observe_incumbent = || {
+                    let started = Instant::now();
+                    let result = run_incumbent();
+                    let elapsed = started.elapsed();
+                    common::ContractObservation {
+                        elapsed,
+                        checksum: checksum_of(&result),
+                    }
+                };
+                let mut observe_candidate = || {
+                    let started = Instant::now();
+                    let result = run_candidate();
+                    let elapsed = started.elapsed();
+                    common::ContractObservation {
+                        elapsed,
+                        checksum: checksum_of(&result),
+                    }
+                };
+                let (effect, incumbent_null, candidate_null) =
+                    common::run_dual_null_median_ci_contract_with_sampling(
+                        &row,
+                        &mut observe_incumbent,
+                        &mut observe_candidate,
+                        CONTRACT_ROUNDS,
+                        CONTRACT_MIN_OF,
+                    );
+                let verdict =
+                    common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+                println!(
+                    "TRUTH_REDUCTION_RESULT row={row} dtype={dtype} operation={operation} \
+                     corpus={case} verdict={verdict} \
+                     incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                     ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                     incumbent_null_ratio={:.6} incumbent_null_ci95=[{:.6},{:.6}] \
+                     candidate_null_ratio={:.6} candidate_null_ci95=[{:.6},{:.6}] \
+                     corrected_dual_null_gate=true incumbent=numpy_live_same_invocation",
+                    effect.arm_a_median_ns / 1_000_000.0,
+                    effect.arm_b_median_ns / 1_000_000.0,
+                    effect.ratio_median,
+                    effect.ratio_ci_low,
+                    effect.ratio_ci_high,
+                    incumbent_null.ratio_median,
+                    incumbent_null.ratio_ci_low,
+                    incumbent_null.ratio_ci_high,
+                    candidate_null.ratio_median,
+                    candidate_null.ratio_ci_low,
+                    candidate_null.ratio_ci_high,
+                );
+                let decision = if verdict == "DECIDABLE_WIN" {
+                    "choose_fnp"
+                } else {
+                    "choose_numpy"
+                };
+                println!(
+                    "CHOOSER_STATEMENT workload={dtype}_flat_{case}_64mib \
+                     decision={decision} verdict={verdict} incumbent=numpy_live_same_invocation \
+                     measured_scope={elements}_c_contiguous_{dtype}_elements_{TARGET_INPUT_BYTES}_bytes_at_{threads}_pinned_threads \
+                     outside_scope=run_same_contract_before_choosing"
+                );
+            }
         }
     });
 }
@@ -14754,8 +14814,8 @@ fn main() {
             bench_bool_public_vs_numpy_median_gate,
         ),
         (
-            "bench_bool_flat_all_any_vs_numpy_median_gate",
-            bench_bool_flat_all_any_vs_numpy_median_gate,
+            "bench_flat_all_any_vs_numpy_median_gate",
+            bench_flat_all_any_vs_numpy_median_gate,
         ),
         (
             "bench_class3_missing_capability_vs_numpy_median_gate",
