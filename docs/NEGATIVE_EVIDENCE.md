@@ -4,6 +4,140 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-01 - FLAT `float64` SORT ISA-GATE RE-DECISION (KEEP, INCUMBENT-WIN): 1.48-1.90x on distinct data, WASH on dense ties; and a RETRACTION of my own kernel-only sweep
+
+`StormyLake`, bead `deadlock-audit-flat-f64-sort-avx2-surrender-7mh1i`, commit
+`190b2bed`. The arm this row measures was **unreachable on every AVX2 host**
+until this change: `try_zerocopy_f64_sort_flat` opened with
+`if numpy_f64_qsort_is_simd() { return Ok(None) }`, and that predicate is plain
+`is_x86_feature_detected!("avx2")`. `np.sort` on a 1-D f64 array was 100% NumPy
+passthrough, single-threaded, fleet-wide.
+
+**READ THE RETRACTION BEFORE THE RATIOS.** The bead and commit message for this
+change quote a *kernel-only* sweep predicting 4.13x at 16M and 6.63x at 64M.
+**Those numbers do not survive route-level measurement and must not be cited.**
+Both of their arms were wrong in the flattering direction:
+
+| | kernel-only sweep | this contract | why |
+|---|---:|---:|---|
+| NumPy 64M | 1780.3 ms | 1009.1 ms | the sweep's NumPy arm was timed on a LOADED box |
+| FNP 64M | 268.4 ms | 533.2 ms | the sweep omitted the route's defer scan + `numpy.empty` alloc |
+| ratio | 6.63x | **1.86x** | |
+
+The candidate's own overhead roughly DOUBLES the kernel time, and an inflated
+incumbent did the rest. The lesson generalizes: a standalone kernel probe is a
+lever-selection tool, never a ratio, and its incumbent arm must be re-timed under
+the same quiescence gate as the candidate.
+
+**MEASURED, same invocation, live NumPy 2.4.3.** 21 rounds, min-of-1, interleaved
+AB/BA, dual A/A nulls, bootstrap median CI.
+
+**Campaign result class:** incumbent-win
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 artifact_bytes=10456817 invocation_id=000000000000000018c7c3675b3bd1dc-0008fa23 measured_ratio=1.860723x
+
+**A/A null control (same invocation):** every row carried both controls in its own 21-round min-of-1 invocation; 64M NumPy/NumPy CI95 `[0.995606,1.003891]` and FNP/FNP CI95 `[0.991378,1.019637]`; 16M `[0.996866,1.003236]` and `[0.973046,1.028331]`; 4M `[0.985690,1.007956]` and `[0.966829,1.021966]`. Each claimed effect CI is disjoint from both of its nulls and clears twice the controlling null half-width.
+
+**Incumbent isolation proof:** candidate=fnp.sort incumbent=numpy.sort shared_timed_component=numpy.empty_output_allocation
+
+**Shared timed component disclosure:** components=numpy.empty_output_allocation direction=conservative_for_candidate share_of_candidate_pct=0.0054,0.0058,0.0013
+
+The disclosed component is a lazy mmap reservation, measured on the same quiet host
+at 0.001373 / 0.007174 / 0.007134 ms against candidate medians of 25.409663 /
+124.488115 / 533.154894 ms (4M / 16M / 64M). The first-touch page faults it defers
+land in the candidate's OWN `copy_from_slice`, not in NumPy, and the incumbent
+allocates its own result too - so the disclosure is conservative for the candidate
+and cannot inflate the ratio.
+
+| corpus | n | RAYON=32 | RAYON=8 | verdict (both) |
+|---|---:|---:|---:|---|
+| distinct uniform | 4M | **1.725158x** `[1.526040,1.810626]` | **1.645758x** `[1.631015,1.664600]` | DECIDABLE_WIN |
+| distinct uniform | 16M | **1.903363x** `[1.845796,1.964173]` | **1.480154x** `[1.467964,1.488405]` | DECIDABLE_WIN |
+| distinct uniform | 64M | **1.860723x** `[1.748078,1.925704]` | **1.533145x** `[1.528655,1.555603]` | DECIDABLE_WIN |
+| dense ties (64 distinct) | 16M | 0.990872x `[0.978523,1.016313]` | 1.015746x `[0.999857,1.025930]` | **UNDECIDED** |
+
+Absolute medians at 32 workers: 4M 41.459591 -> 25.409663 ms; 16M 233.491484 ->
+124.488115 ms; 64M 1009.071562 -> 533.154894 ms. Every effect CI on a distinct-data
+row excludes unity and clears twice the controlling null half-width.
+
+**THE 8-WORKER FLOOR IS ROUTE-VERIFIED, NOT INHERITED.** `F64_FLAT_SORT_SIMD_MIN_THREADS = 8`
+was first set from the kernel sweep; the RAYON=8 column above re-establishes it
+against the real route, where all three distinct rows stay DECIDABLE_WIN at
+1.48-1.65x. Note how flat the 8-vs-32 comparison is: the route is dominated by its
+serial/bandwidth overheads, not by sort parallelism, which is exactly why the
+kernel sweep mispredicted.
+
+**DENSE TIES ARE A WASH AT BOTH WIDTHS, NOT A LOSS.** NumPy's SIMD qsort is far
+faster on 64-distinct-value data than on distinct data (116-120 ms vs 228-233 ms at
+16M) and `par_sort_unstable` gets no comparable benefit. 0.991x/1.016x, both
+UNDECIDED, both nulls clean. The route is therefore not harmful in that regime, but
+NOTHING here licenses a tie-heavy claim. Regime-gate any future citation on tie
+density.
+
+**ENGAGEMENT PROOF (this arm was dead code, so green parity proves nothing).**
+`OBSERVED_THREAD_ACTIVITY` at 64M: NumPy arm `threads_actually_used=1`, 322 CPU
+ticks; FNP arm `threads_actually_used=33`, 1573 ticks across the caller plus 32
+pinned workers. Independently, a deferred route returns NumPy's own answer and
+measures 1.0 by construction, so a DECIDABLE_WIN cannot be produced by a
+passthrough.
+
+**PARITY.** Exact bytes and exact dtype asserted for every row before timing
+(checksums `aad716d9ecf5a808` 4M, `bfa0b6af968731ac` 16M, `71c27b85e621e0c7` 64M).
+`conformance_sorting` 13/13 with `NATIVE_ARM_REACHABLE=true rayon_workers=64`,
+covering the 1<<20 boundary, dense ties, all-+0.0, all--0.0, inf/subnormals, the
+mixed-signed-zero and NaN deferrals, `axis=None` ravel, a non-contiguous view, and
+all four `kind`s byte-for-byte on tie-heavy input.
+
+**DISCLOSED DELEGATION.** `shared_timed_component=numpy.empty_output_allocation`:
+the candidate allocates its result through `numpy.empty` inside the timed region.
+The incumbent allocates its own result too, so the shared stage is conservative for
+the candidate, not flattering.
+
+**A DEAD ROUTE HID A REGRESSION IN ITS OWN BODY.** Re-enabling exposed a
+`require_distinct` post-check (set by `kind="stable"/"mergesort"/"heapsort"`) that
+sorted the whole array, scanned for ties, THREW THE RESULT AWAY and re-sorted in
+NumPy. Removed with proof: once `f64_sort_values_defer` passes, equal VALUES are
+equal BITS (+-0.0 is binary64's only distinct-bits/equal-value pair and it defers;
+NaN defers), so the sorted byte sequence is fixed by the input multiset alone and
+stability is unobservable. The `complex128` flat sibling already stated this.
+
+**REJECTED DESIGN, recorded so it is not rebuilt.** MSD radix partition on the TOP
+bits of the order-preserving u64 key COLLAPSES on float data: uniform [0,1) doubles
+share sign+exponent, the top 11 bits take ~30 distinct values, one bucket holds half
+the array, measured 0.8 GB/s - WORSE than `par_sort_unstable`. Sample sort with
+data-drawn splitters is distribution-independent but was not robustly better than the
+`par_sort` already in tree, so the fix was the GATE, not a new kernel.
+
+PROVENANCE: `bench_elf_sha256=7f185f9afcb5e52d02207e5230869bba4a5bb2b41183a5196567777d84a96fb5`
+(217,295,512 bytes), `release-perf`, built locally on the measurement host because
+the strict-RCH builder links Python 3.14 and cannot execute on this Python 3.13
+host. Invocations `000000000000000018c7c3675b3bd1dc-0008fa23` (32 workers) and
+`000000000000000018c7c39fa3e9ef6b-002110d4` (8 workers). Host `thinkstation1`, AMD
+Ryzen Threadripper PRO 5975WX, 32 physical / 64 logical, full 0-63 affinity,
+governor `powersave`. `ISA_BASELINE runtime_avx2=true runtime_avx512f=false`
+(compile baseline portable, `compile_avx2=false`). NumPy 2.4.3,
+`artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48`,
+`dispatch_assert=passed`. OpenBLAS/OMP/MKL pinned to 1; neither sort arm calls BLAS.
+Host-wide quiescence cleared before the process and before every contract;
+**maximum observed busy fraction across both invocations was 0.200 against the
+0.200 ceiling** (one `dual_null_contract_preflight` sample in the 8-worker run;
+`busy_cpu_count_above_limit=0`, the gate tests strictly-greater), the rest 0.067-0.138.
+
+SCOPE: exact 1-D C-contiguous `float64` ndarrays, `n >= 1<<20`, no NaN, not both
+signed zeros, AVX2 without AVX-512, >= 8 Rayon workers. Everything else keeps the
+NumPy passthrough.
+
+**AVX-512 IS UNMEASURED IN BOTH DIRECTIONS** and deliberately keeps the prior
+surrender. `hz2` (AMD EPYC-Genoa, 16 cores) reports `runtime_avx512f=true`, so the
+fleet's usual remote host CANNOT validate this route - it would defer and measure a
+passthrough against itself. A full remote `release-perf` build was spent
+discovering that.
+
+Retry predicate: do not rerun this ELF on these two regimes. Reopen if the ELF
+changes, if a many-core **avx512f** host becomes available (the one open direction),
+if the route widens to another dtype/layout/axis, or if a tie-density sweep is
+wanted between the 64-distinct and fully-distinct corpora measured here.
+
 ## 2026-08-01 - FLAT `float64` PROD IS NOT BIT-EXACTLY PARALLELIZABLE (NO-SHIP, design rejected before any build)
 
 `QuartzHeron`. Closes the last open item on this campaign's reduction map. NO
