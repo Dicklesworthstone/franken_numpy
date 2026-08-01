@@ -78196,6 +78196,79 @@ fn try_zerocopy_float_sum_flat(
     Ok(Some(scalar))
 }
 
+// Large flat float32/float64 mean: reuse NumPy's exact pairwise tree in
+// parallel, then perform only the scalar divide.  NumPy promotes the scalar
+// float32 sum / np.intp count operation to float64 and narrows the result back
+// to float32; spelling that conversion explicitly preserves the one-ULP cases
+// above 2^24 elements.  Eligibility mirrors the parallel sum route.
+fn try_zerocopy_float_mean_flat(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    const FLOAT_MEAN_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
+
+    let numpy = py.import("numpy")?;
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || !dtype.getattr("isnative")?.extract::<bool>()?
+        || !a
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+        || a.getattr("nbytes")?.extract::<usize>()? < FLOAT_MEAN_PARALLEL_MIN_BYTES
+    {
+        return Ok(None);
+    }
+
+    let scalar = match dtype.getattr("itemsize")?.extract::<usize>()? {
+        4 => {
+            let Ok(in_buffer) = PyBuffer::<f32>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = in_buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32.  The
+            // exact ndarray remains alive and read-only under the held GIL.
+            let data: &[f32] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), input.len()) };
+            let total = par_pairwise_sum_f32(data);
+            if total.is_nan() {
+                return Ok(None);
+            }
+            let mean = (f64::from(total) / data.len() as f64) as f32;
+            numpy.getattr("float32")?.call1((mean,))?.unbind()
+        }
+        8 => {
+            let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = in_buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64.  The
+            // exact ndarray remains alive and read-only under the held GIL.
+            let data: &[f64] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+            let total = par_pairwise_sum_f64(data);
+            if total.is_nan() {
+                return Ok(None);
+            }
+            let mean = total / data.len() as f64;
+            numpy.getattr("float64")?.call1((mean,))?.unbind()
+        }
+        _ => return Ok(None),
+    };
+    if keepdims {
+        return Ok(Some(keepdims_reshape_scalar(py, &numpy, a, scalar)?));
+    }
+    Ok(Some(scalar))
+}
+
 // Parallel full reduction for a large C-contiguous fixed-width integer array.
 // NumPy promotes signed inputs to int64 and unsigned inputs to uint64, then adds
 // modulo 2^64. Wrapping addition is associative, so independent cache-sized
@@ -79374,6 +79447,17 @@ fn mean(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
+    // Native exact-tree parallel flat float32/float64 mean.  The incumbent's
+    // scalar division is negligible; its single-threaded pairwise reduction is
+    // the whole-job hotspot, so schedule those independent tree nodes on Rayon.
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(o) = try_zerocopy_float_mean_flat(py, a.bind(py), keepdims)?
+    {
+        return Ok(o);
+    }
     // Native parallel FLAT f16 mean (= float16(f32_pairwise_sum / n)): numpy's f16 mean is single-
     // threaded compute-bound like the sum. Flat only (axis None), no dtype/out/keepdims/extra-kwargs.
     if kwargs.is_none_or(|kw| kw.is_empty())

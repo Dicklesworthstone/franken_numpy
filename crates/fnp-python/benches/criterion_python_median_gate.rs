@@ -6262,10 +6262,16 @@ fn bench_float_flat_sum_matrix_vs_numpy_median_gate(c: &mut Criterion) {
     const THREAD_ACTIVITY_REPETITIONS: usize = 64;
     const REQUIRED_BUILD_PROFILE: &str = "release-perf";
 
+    let operation = std::env::var("FNP_FLOAT_FLAT_REDUCTION").unwrap_or_else(|_| "sum".to_owned());
+    assert!(
+        operation == "sum" || operation == "mean",
+        "FNP_FLOAT_FLAT_REDUCTION must be sum or mean"
+    );
+
     assert_eq!(
         std::env::var("FNP_BENCH_PROFILE").as_deref(),
         Ok(REQUIRED_BUILD_PROFILE),
-        "ship-grade float-sum evidence requires FNP_BENCH_PROFILE=release-perf"
+        "ship-grade float-reduction evidence requires FNP_BENCH_PROFILE=release-perf"
     );
     let build_worker =
         std::env::var("FNP_BUILD_WORKER").expect("FNP_BUILD_WORKER records the build origin");
@@ -6274,22 +6280,22 @@ fn bench_float_flat_sum_matrix_vs_numpy_median_gate(c: &mut Criterion) {
         "FNP_BUILD_WORKER must be set"
     );
     let threads = std::env::var("RAYON_NUM_THREADS")
-        .expect("RAYON_NUM_THREADS must be explicitly pinned before float-sum timing");
+        .expect("RAYON_NUM_THREADS must be explicitly pinned before float-reduction timing");
     for variable in ["OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"] {
         assert_eq!(
             std::env::var(variable).as_deref(),
             Ok("1"),
-            "{variable} must be one: neither sum arm calls BLAS"
+            "{variable} must be one: neither reduction arm calls BLAS"
         );
     }
     let threads: usize = threads.parse().expect("thread count is numeric");
     assert_eq!(
         rayon::current_num_threads(),
         threads,
-        "Rayon pool width does not match the pinned float-sum configuration"
+        "Rayon pool width does not match the pinned float-reduction configuration"
     );
     println!(
-        "WORKLOAD_RUNTIME workload=float_flat_sum_matrix \
+        "WORKLOAD_RUNTIME workload=float_flat_{operation}_matrix operation={operation} \
          build_worker={build_worker} build_profile={REQUIRED_BUILD_PROFILE} \
          pinned_threads={threads} rayon_threads={} contract_rounds={CONTRACT_ROUNDS} \
          contract_min_of={CONTRACT_MIN_OF} input_bytes={TARGET_INPUT_BYTES}",
@@ -6299,42 +6305,49 @@ fn bench_float_flat_sum_matrix_vs_numpy_median_gate(c: &mut Criterion) {
     Python::initialize();
     Python::attach(|py| {
         ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_float_flat_sum_matrix")
-            .expect("float flat-sum bench module");
-        fnp_python(&module).expect("initialize float flat-sum module");
+        let module = PyModule::new(py, "fnp_python_float_flat_reduction_matrix")
+            .expect("float flat-reduction bench module");
+        fnp_python(&module).expect("initialize float flat-reduction module");
         let numpy = py.import("numpy").expect("numpy incumbent");
-        let np_sum = numpy.getattr("sum").expect("numpy sum");
-        let fnp_sum = module.getattr("sum").expect("fnp sum");
+        let np_reduction = numpy
+            .getattr(operation.as_str())
+            .expect("numpy float reduction");
+        let fnp_reduction = module
+            .getattr(operation.as_str())
+            .expect("fnp float reduction");
         assert!(
-            !fnp_sum.is(&np_sum),
-            "dispatch trap: fnp.sum resolved to the NumPy callable"
+            !fnp_reduction.is(&np_reduction),
+            "dispatch trap: fnp.{operation} resolved to the NumPy callable"
         );
-        common::report_numpy_incumbent_identity(py, "sum", &np_sum);
-        common::report_incumbent_topology("fnp.sum", "numpy.sum");
-        println!("NUMPY_BUILD_CONFIG_BEGIN workload=float_flat_sum_matrix");
+        common::report_numpy_incumbent_identity(py, operation.as_str(), &np_reduction);
+        common::report_incumbent_topology(
+            &format!("fnp.{operation}"),
+            &format!("numpy.{operation}"),
+        );
+        println!("NUMPY_BUILD_CONFIG_BEGIN workload=float_flat_{operation}_matrix");
         numpy
             .getattr("show_config")
             .expect("numpy.show_config")
             .call0()
             .expect("report NumPy build configuration");
-        println!("NUMPY_BUILD_CONFIG_END workload=float_flat_sum_matrix");
+        println!("NUMPY_BUILD_CONFIG_END workload=float_flat_{operation}_matrix");
         println!(
-            "BLAS_RELEVANCE workload=float_flat_sum_matrix numpy_sum_uses_blas=false \
+            "BLAS_RELEVANCE workload=float_flat_{operation}_matrix numpy_reduction_uses_blas=false \
              candidate_uses_blas=false blas_threads_pinned=1 reason=floating_ufunc_reduction"
         );
 
         let checksum_of = |scalar: &Bound<'_, PyAny>| -> u64 {
             let dtype = scalar
                 .getattr("dtype")
-                .expect("sum scalar dtype")
+                .expect("reduction scalar dtype")
                 .str()
-                .expect("sum scalar dtype string")
+                .expect("reduction scalar dtype string")
                 .to_string();
             let bytes = scalar
                 .call_method0("tobytes")
-                .expect("sum scalar tobytes")
+                .expect("reduction scalar tobytes")
                 .extract::<Vec<u8>>()
-                .expect("sum scalar byte Vec");
+                .expect("reduction scalar byte Vec");
             dtype
                 .as_bytes()
                 .iter()
@@ -6348,72 +6361,72 @@ fn bench_float_flat_sum_matrix_vs_numpy_median_gate(c: &mut Criterion) {
         for (case_index, (dtype, item_size)) in cases.into_iter().enumerate() {
             let elements = TARGET_INPUT_BYTES / item_size;
             let exact_tree_parallel_leaves = elements.div_ceil(PARALLEL_LEAF_ELEMENTS);
-            let row = format!("python_float_flat_sum_{dtype}_64mib_vs_numpy");
+            let row = format!("python_float_flat_{operation}_{dtype}_64mib_vs_numpy");
             let namespace = PyDict::new(py);
             let setup = format!(
                 "import numpy as np\n\
                  rng = np.random.default_rng({})\n\
-                 float_sum_input = rng.standard_normal({elements}, dtype=np.{dtype})\n\
-                 assert float_sum_input.nbytes == {TARGET_INPUT_BYTES}\n\
-                 assert float_sum_input.flags.c_contiguous\n\
-                 assert float_sum_input.dtype.isnative\n\
-                 assert np.isfinite(float_sum_input).all()\n",
+                 float_reduction_input = rng.standard_normal({elements}, dtype=np.{dtype})\n\
+                 assert float_reduction_input.nbytes == {TARGET_INPUT_BYTES}\n\
+                 assert float_reduction_input.flags.c_contiguous\n\
+                 assert float_reduction_input.dtype.isnative\n\
+                 assert np.isfinite(float_reduction_input).all()\n",
                 20260801 + case_index,
             );
             py.run(
                 std::ffi::CString::new(setup)
-                    .expect("float flat-sum corpus CString")
+                    .expect("float flat-reduction corpus CString")
                     .as_c_str(),
                 Some(&namespace),
                 Some(&namespace),
             )
-            .expect("float flat-sum corpus setup");
+            .expect("float flat-reduction corpus setup");
             let input = namespace
-                .get_item("float_sum_input")
-                .expect("float sum input present");
+                .get_item("float_reduction_input")
+                .expect("float reduction input present");
 
             let run_incumbent = || {
-                np_sum
+                np_reduction
                     .call1((black_box(&input),))
-                    .expect("numpy float flat sum arm")
+                    .expect("numpy float flat reduction arm")
             };
             let run_candidate = || {
-                fnp_sum
+                fnp_reduction
                     .call1((black_box(&input),))
-                    .expect("fnp float flat sum arm")
+                    .expect("fnp float flat reduction arm")
             };
 
             let ours = run_candidate();
             let theirs = run_incumbent();
             assert!(
                 ours.get_type().is(theirs.get_type()),
-                "float flat-sum {dtype} scalar type differs from NumPy"
+                "float flat-{operation} {dtype} scalar type differs from NumPy"
             );
             assert_eq!(
                 ours.getattr("dtype")
-                    .expect("fnp sum dtype")
+                    .expect("fnp reduction dtype")
                     .str()
-                    .expect("fnp sum dtype string")
+                    .expect("fnp reduction dtype string")
                     .to_string(),
                 theirs
                     .getattr("dtype")
-                    .expect("numpy sum dtype")
+                    .expect("numpy reduction dtype")
                     .str()
-                    .expect("numpy sum dtype string")
+                    .expect("numpy reduction dtype string")
                     .to_string(),
                 "candidate dtype differs from NumPy"
             );
             assert_eq!(
                 ours.call_method0("tobytes")
-                    .expect("fnp sum tobytes")
+                    .expect("fnp reduction tobytes")
                     .extract::<Vec<u8>>()
-                    .expect("fnp sum bytes"),
+                    .expect("fnp reduction bytes"),
                 theirs
                     .call_method0("tobytes")
-                    .expect("numpy sum tobytes")
+                    .expect("numpy reduction tobytes")
                     .extract::<Vec<u8>>()
-                    .expect("numpy sum bytes"),
-                "float flat-sum {dtype} is not bit-exact"
+                    .expect("numpy reduction bytes"),
+                "float flat-{operation} {dtype} is not bit-exact"
             );
             println!(
                 "PARITY row={row} exact_bytes=passed exact_scalar_type=passed \
@@ -6425,7 +6438,7 @@ fn bench_float_flat_sum_matrix_vs_numpy_median_gate(c: &mut Criterion) {
                 "ROUTE_PRECONDITIONS row={row} axis=none dtype={dtype} item_size={item_size} \
                  exact_ndarray=true c_contiguous=true native_endian=true finite=true \
                  input_bytes={TARGET_INPUT_BYTES} parallel_min_bytes=16777216 \
-                 candidate_route=try_zerocopy_float_sum_flat"
+                 candidate_route=try_zerocopy_float_{operation}_flat"
             );
             println!(
                 "COUNTED_MECHANISM row={row} class=parallel_exact_pairwise_tree \
@@ -6486,7 +6499,7 @@ fn bench_float_flat_sum_matrix_vs_numpy_median_gate(c: &mut Criterion) {
             let verdict =
                 common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
             println!(
-                "FLOAT_SUM_RESULT row={row} dtype={dtype} verdict={verdict} \
+                "FLOAT_REDUCTION_RESULT row={row} operation={operation} dtype={dtype} verdict={verdict} \
                  incumbent_median_ms={:.6} candidate_median_ms={:.6} \
                  ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
                  incumbent_null_ratio={:.6} incumbent_null_ci95=[{:.6},{:.6}] \
@@ -6510,7 +6523,7 @@ fn bench_float_flat_sum_matrix_vs_numpy_median_gate(c: &mut Criterion) {
                 "choose_numpy"
             };
             println!(
-                "CHOOSER_STATEMENT workload=float_flat_sum_{dtype}_64mib \
+                "CHOOSER_STATEMENT workload=float_flat_{operation}_{dtype}_64mib \
                  decision={decision} verdict={verdict} incumbent=numpy_live_same_invocation \
                  measured_scope={elements}_c_contiguous_native_endian_elements_at_{threads}_pinned_threads \
                  outside_scope=run_same_contract_before_choosing"
@@ -14247,6 +14260,10 @@ fn main() {
         ),
         (
             "bench_float_flat_sum_matrix_vs_numpy_median_gate",
+            bench_float_flat_sum_matrix_vs_numpy_median_gate,
+        ),
+        (
+            "bench_float_flat_mean_matrix_vs_numpy_median_gate",
             bench_float_flat_sum_matrix_vs_numpy_median_gate,
         ),
         (
