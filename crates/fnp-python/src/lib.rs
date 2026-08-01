@@ -22779,31 +22779,70 @@ fn count_nonzero_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
 // keeps SIMD throughput AND a coarse early-exit. Truthiness is order-independent,
 // so the result is identical to the short-circuit form.
 const ANY_ALL_BLK: usize = 8192;
+const ANY_ALL_PAR_MIN: usize = 1 << 24;
+const ANY_ALL_PAR_CHUNK: usize = 1 << 20;
 
-fn block_any_u8(input: &[pyo3::buffer::ReadOnlyCell<u8>]) -> bool {
-    for chunk in input.chunks(ANY_ALL_BLK) {
-        let mut acc = 0u8;
-        for c in chunk {
-            acc |= c.get();
-        }
-        if acc != 0 {
+#[inline]
+fn any_nonzero_u8(input: &[u8]) -> bool {
+    let mut acc = 0u8;
+    for &value in input {
+        acc |= value;
+    }
+    acc != 0
+}
+
+#[inline]
+fn any_zero_u8(input: &[u8]) -> bool {
+    // Detect a zero byte eight lanes at a time. For each byte lane, subtracting
+    // 0x01 sets that lane's high bit exactly when the original byte was zero;
+    // masking with `!word` and 0x80 removes borrow/high-bit false positives.
+    // This is endian-independent because only the existence of a zero lane
+    // matters, and it remains correct for noncanonical NumPy bool bytes.
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    let (words, tail) = input.as_chunks::<8>();
+    for bytes in words {
+        let word = u64::from_ne_bytes(*bytes);
+        if word.wrapping_sub(ONES) & !word & HIGHS != 0 {
             return true;
         }
     }
-    false
+    tail.contains(&0)
+}
+
+fn block_any_u8(input: &[pyo3::buffer::ReadOnlyCell<u8>]) -> bool {
+    // SAFETY: `PyBuffer::as_slice` supplied `input` from a C-contiguous uint8
+    // view, so it covers `input.len()` initialized bytes. ReadOnlyCell<u8> is
+    // layout-compatible with u8, and the owning ndarray remains borrowed under
+    // the GIL for this entire reduction. The native view is read-only.
+    let data: &[u8] =
+        unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), input.len()) };
+    let prefix_len = data.len().min(ANY_ALL_BLK);
+    if any_nonzero_u8(&data[..prefix_len]) {
+        return true;
+    }
+    let tail = &data[prefix_len..];
+    if tail.len() >= ANY_ALL_PAR_MIN && rayon::current_num_threads() > 1 {
+        use rayon::prelude::*;
+        return tail.par_chunks(ANY_ALL_PAR_CHUNK).any(any_nonzero_u8);
+    }
+    tail.chunks(ANY_ALL_BLK).any(any_nonzero_u8)
 }
 
 fn block_all_u8(input: &[pyo3::buffer::ReadOnlyCell<u8>]) -> bool {
-    for chunk in input.chunks(ANY_ALL_BLK) {
-        let mut zero = 0u8;
-        for c in chunk {
-            zero |= (c.get() == 0) as u8;
-        }
-        if zero != 0 {
-            return false;
-        }
+    // SAFETY: same buffer/layout/lifetime argument as `block_any_u8` above.
+    let data: &[u8] =
+        unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), input.len()) };
+    let prefix_len = data.len().min(ANY_ALL_BLK);
+    if any_zero_u8(&data[..prefix_len]) {
+        return false;
     }
-    true
+    let tail = &data[prefix_len..];
+    if tail.len() >= ANY_ALL_PAR_MIN && rayon::current_num_threads() > 1 {
+        use rayon::prelude::*;
+        return !tail.par_chunks(ANY_ALL_PAR_CHUNK).any(any_zero_u8);
+    }
+    !tail.chunks(ANY_ALL_BLK).any(any_zero_u8)
 }
 
 fn block_any_f64(input: &[pyo3::buffer::ReadOnlyCell<f64>]) -> bool {

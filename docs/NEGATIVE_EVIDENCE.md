@@ -35646,3 +35646,87 @@ exact-output test finds a division/tree mismatch, or if a same-invocation
 contract at the 16 MiB floor is needed. Any replacement must retain exact
 bytes, observed threads, full-host quiescence, both nulls, and the corrected
 median-CI rule.
+
+## 2026-07-31 - WIN (KEEP, INCUMBENT-WIN): parallel worst-case flat bool all/any - 3.40-10.72x vs live NumPy on 32 physical cores
+
+`IvoryDesert`, bead `deadlock-audit-ivtv6`. Strict preflight was CLEAR for
+lever `parallel flat boolean all any`, surface
+`fnp.all fnp.any axis none contiguous bool worst-case full scan`, before source
+editing.
+
+**Campaign result class:** incumbent-win
+
+`bench_elf_sha256=3dbf858de385a83dc35a55e548998da23f2c6067921abb914c3e6d8a87947d3f`
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 1.004840x,
+CI95 [0.989221, 1.008665], 21 rounds, min_of=1 on the conservative `all_true`
+headline row; the table records both operations.
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio
+1.012792x, CI95 [1.001602, 1.036524], 21 rounds, min_of=1 on the `all_true`
+row.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=000000000000000018c78faf5b72d7e1-0007f663 measured_ratio=3.395379x median=22.971643ms
+
+**Incumbent isolation proof:** candidate=fnp.all/fnp.any incumbent=numpy.all/numpy.any shared_timed_component=none
+
+WHY THIS LEVER: whole-job `perf` on the same 256 MiB `all_true` job ranked
+`fnp_python::try_zerocopy_any_all` at 89.17% candidate self-time and NumPy's
+`BOOL_logical_and_X86_V3` at 92.59% incumbent self-time. Both jobs therefore
+paid the same required byte classification; no wrapper cost was the gap. The
+structural difference was scheduling: live NumPy kept the full truth scan on
+one thread, while boolean AND/OR are associative and let FNP split that same
+scan across physical cores without changing a bit.
+
+IMPLEMENTATION: exact C-contiguous bool ndarrays keep the existing first-8-KiB
+serial block, preserving immediate exits for ordinary `any(True, ...)` and
+`all(False, ...)` calls. At 16 MiB and above, a miss in that prefix fans the
+remaining input into 1 MiB Rayon bands. `any` OR-folds raw bytes; `all` uses a
+portable eight-byte zero-detection word scan, then AND-combines the band
+verdicts. The zero detector treats every nonzero byte as true, including
+noncanonical bool views, and is endian-independent. Small inputs, axis
+reductions, other dtypes, and option-bearing calls keep their prior paths.
+
+BEHAVIOR PROOF: the complete remote `conformance_all` and `conformance_any`
+shards passed 22/22. New above-threshold cases cover full-scan identities,
+hits at index 0, the 8,192-byte prefix boundary, the midpoint and final byte,
+plus noncanonical `uint8(2).view(bool)` inputs under a four-thread pool. The
+formal harness independently asserted exact NumPy scalar type and bytes before
+timing both rows.
+
+BLAS IDENTITY: live NumPy 2.4.3 reports ILP64 `scipy-openblas`, OpenBLAS
+0.3.31.dev (`USE64BITINT`, `DYNAMIC_ARCH`, `NO_AFFINITY`, Haswell,
+`MAX_THREADS=64`). Neither bool-reduction arm calls BLAS, so
+OpenBLAS/OMP/MKL were pinned to one thread.
+
+CLAIM-BEARING INVOCATION: the 222,977,488-byte executable and live NumPy core
+hashes are recorded above. The bool-only group ran on `thinkstation1`, AMD
+Ryzen Threadripper PRO 5975WX, 32 physical cores / 64 logical threads, full
+0-63 affinity, Rayon pinned to the 32 physical cores, runtime AVX2, and a
+portable compile baseline. Full-host quiescence cleared before the process and
+before both contracts; maximum observed busy fractions were 0.103, 0.129, and
+0.103 against the 0.200 ceiling. NumPy used one observed thread. FNP exercised
+all 32 workers (`any` also accrued one caller-thread tick).
+
+| bool / 256 MiB full scan | NumPy median | FNP median | NumPy/NumPy null (CI95) | FNP/FNP null (CI95) | NumPy/FNP effect (CI95) | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| `any_false` | 3.665360 ms | 0.340956 ms | 0.988946 `[0.986141,1.008086]` | 0.993836 `[0.979095,1.014603]` | **10.717887x** `[9.843980,15.249399]` | DECIDABLE_WIN |
+| `all_true` | 22.971643 ms | 6.815291 ms | 1.004840 `[0.989221,1.008665]` | 1.012792 `[1.001602,1.036524]` | **3.395379x** `[3.340485,3.554528]` | DECIDABLE_WIN |
+
+Both 21-round, min-of-one effect CIs exclude unity and clear twice the wider
+same-invocation null half-width. CV remained provenance only. COUNTED
+MECHANISM: both arms read the same 268,435,456-byte exact bool ndarray in one
+logical sweep and emit one bool scalar. The candidate checks 8,192 bytes on the
+caller, then exposes 256 independent 1 MiB bands to 32 pinned workers; NumPy
+retains one reduction thread.
+
+**Decision: KEEP, INCUMBENT-WIN.** Choose FrankenNumPy for route-qualified
+worst-case flat bool truth reductions at 16 MiB and above; retain the guarded
+serial/NumPy paths for early-exit, small, axis, dtype, and option surfaces.
+
+Retry predicate: do not rerun this bool-only invocation on these artifacts.
+Reopen if either ELF changes, if the route widens to another dtype/layout, if
+an exact-output test finds a boundary/noncanonical-byte mismatch, or if a
+same-invocation contract at the 16 MiB floor is needed. Any replacement must
+retain observed threads, full-host quiescence, both nulls, and the corrected
+median-CI rule.

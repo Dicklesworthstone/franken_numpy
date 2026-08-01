@@ -6246,6 +6246,264 @@ fn bench_fused_subtract_multiply_add_matrix_vs_numpy_median_gate(c: &mut Criteri
     });
 }
 
+/// Parallel worst-case boolean truth reductions against live NumPy.
+///
+/// Both rows force a complete 256 MiB scan: `any` sees only false bytes and
+/// `all` sees only true bytes. The candidate first checks one 8 KiB prefix for
+/// the common early-exit case, then distributes independent 1 MiB bands across
+/// the pinned Rayon pool. Boolean OR/AND are associative, so scheduling cannot
+/// change the scalar result.
+fn bench_bool_flat_all_any_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    const TARGET_INPUT_BYTES: usize = 256 * 1024 * 1024;
+    const PREFIX_BYTES: usize = 8192;
+    const PARALLEL_CHUNK_BYTES: usize = 1 << 20;
+    const CONTRACT_ROUNDS: usize = 21;
+    const CONTRACT_MIN_OF: usize = 1;
+    const THREAD_ACTIVITY_REPETITIONS: usize = 64;
+    const REQUIRED_BUILD_PROFILE: &str = "release-perf";
+
+    assert_eq!(
+        std::env::var("FNP_BENCH_PROFILE").as_deref(),
+        Ok(REQUIRED_BUILD_PROFILE),
+        "ship-grade bool-reduction evidence requires FNP_BENCH_PROFILE=release-perf"
+    );
+    let build_worker =
+        std::env::var("FNP_BUILD_WORKER").expect("FNP_BUILD_WORKER records the build origin");
+    assert!(
+        !build_worker.trim().is_empty(),
+        "FNP_BUILD_WORKER must be set"
+    );
+    let threads = std::env::var("RAYON_NUM_THREADS")
+        .expect("RAYON_NUM_THREADS must be explicitly pinned before bool-reduction timing");
+    for variable in ["OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok("1"),
+            "{variable} must be one: neither bool-reduction arm calls BLAS"
+        );
+    }
+    let threads: usize = threads.parse().expect("thread count is numeric");
+    assert_eq!(
+        rayon::current_num_threads(),
+        threads,
+        "Rayon pool width does not match the pinned bool-reduction configuration"
+    );
+    println!(
+        "WORKLOAD_RUNTIME workload=bool_flat_all_any_matrix \
+         build_worker={build_worker} build_profile={REQUIRED_BUILD_PROFILE} \
+         pinned_threads={threads} rayon_threads={} contract_rounds={CONTRACT_ROUNDS} \
+         contract_min_of={CONTRACT_MIN_OF} input_bytes={TARGET_INPUT_BYTES}",
+        rayon::current_num_threads()
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bool_flat_all_any_matrix")
+            .expect("bool flat-reduction bench module");
+        fnp_python(&module).expect("initialize bool flat-reduction module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+        common::report_incumbent_topology("fnp.all/fnp.any", "numpy.all/numpy.any");
+        println!("NUMPY_BUILD_CONFIG_BEGIN workload=bool_flat_all_any_matrix");
+        numpy
+            .getattr("show_config")
+            .expect("numpy.show_config")
+            .call0()
+            .expect("report NumPy build configuration");
+        println!("NUMPY_BUILD_CONFIG_END workload=bool_flat_all_any_matrix");
+        println!(
+            "BLAS_RELEVANCE workload=bool_flat_all_any_matrix numpy_reduction_uses_blas=false \
+             candidate_uses_blas=false blas_threads_pinned=1 reason=boolean_ufunc_reduction"
+        );
+
+        let checksum_of = |scalar: &Bound<'_, PyAny>| -> u64 {
+            let dtype = scalar
+                .getattr("dtype")
+                .expect("bool reduction scalar dtype")
+                .str()
+                .expect("bool reduction scalar dtype string")
+                .to_string();
+            let bytes = scalar
+                .call_method0("tobytes")
+                .expect("bool reduction scalar tobytes")
+                .extract::<Vec<u8>>()
+                .expect("bool reduction scalar byte Vec");
+            dtype
+                .as_bytes()
+                .iter()
+                .chain(bytes.iter())
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        let cases = [("any_false", "any", "zeros"), ("all_true", "all", "ones")];
+        for (case, operation, constructor) in cases {
+            let row = format!("python_bool_flat_{case}_256mib_vs_numpy");
+            let np_reduction = numpy.getattr(operation).expect("numpy bool reduction");
+            let fnp_reduction = module.getattr(operation).expect("fnp bool reduction");
+            assert!(
+                !fnp_reduction.is(&np_reduction),
+                "dispatch trap: fnp.{operation} resolved to the NumPy callable"
+            );
+            common::report_numpy_incumbent_identity(py, operation, &np_reduction);
+
+            let kwargs = PyDict::new(py);
+            kwargs
+                .set_item("dtype", numpy.getattr("bool_").expect("numpy bool dtype"))
+                .expect("set bool dtype");
+            let input = numpy
+                .call_method(constructor, (TARGET_INPUT_BYTES,), Some(&kwargs))
+                .expect("construct worst-case bool input");
+            assert_eq!(
+                input
+                    .getattr("nbytes")
+                    .expect("bool input nbytes")
+                    .extract::<usize>()
+                    .expect("bool input nbytes value"),
+                TARGET_INPUT_BYTES
+            );
+            assert!(
+                input
+                    .getattr("flags")
+                    .expect("bool input flags")
+                    .getattr("c_contiguous")
+                    .expect("bool input C-contiguous flag")
+                    .extract::<bool>()
+                    .expect("bool input C-contiguous value")
+            );
+
+            let run_incumbent = || {
+                np_reduction
+                    .call1((black_box(&input),))
+                    .expect("numpy bool flat reduction arm")
+            };
+            let run_candidate = || {
+                fnp_reduction
+                    .call1((black_box(&input),))
+                    .expect("fnp bool flat reduction arm")
+            };
+
+            let ours = run_candidate();
+            let theirs = run_incumbent();
+            assert!(
+                ours.get_type().is(theirs.get_type()),
+                "bool flat-{operation} scalar type differs from NumPy"
+            );
+            assert_eq!(
+                ours.call_method0("tobytes")
+                    .expect("fnp bool reduction tobytes")
+                    .extract::<Vec<u8>>()
+                    .expect("fnp bool reduction bytes"),
+                theirs
+                    .call_method0("tobytes")
+                    .expect("numpy bool reduction tobytes")
+                    .extract::<Vec<u8>>()
+                    .expect("numpy bool reduction bytes"),
+                "bool flat-{operation} is not byte-exact"
+            );
+            println!(
+                "PARITY row={row} exact_bytes=passed exact_scalar_type=passed \
+                 input_dtype=bool result_dtype=bool input_elements={TARGET_INPUT_BYTES} \
+                 input_bytes={TARGET_INPUT_BYTES} corpus={case} checksum={:016x}",
+                checksum_of(&theirs)
+            );
+            println!(
+                "ROUTE_PRECONDITIONS row={row} axis=none dtype=bool exact_ndarray=true \
+                 c_contiguous=true input_bytes={TARGET_INPUT_BYTES} parallel_min_bytes=16777216 \
+                 prefix_bytes={PREFIX_BYTES} candidate_route=block_{operation}_u8"
+            );
+            println!(
+                "COUNTED_MECHANISM row={row} class=parallel_associative_truth_reduction \
+                 incumbent_input_sweeps=1 candidate_input_sweeps=1 \
+                 incumbent_input_bytes={TARGET_INPUT_BYTES} candidate_input_bytes={TARGET_INPUT_BYTES} \
+                 incumbent_expected_threads=1 candidate_pinned_threads={threads} \
+                 candidate_prefix_bytes={PREFIX_BYTES} candidate_parallel_chunk_bytes={PARALLEL_CHUNK_BYTES} \
+                 candidate_parallel_chunks={} truth_operation_associative=true shared_input=true",
+                (TARGET_INPUT_BYTES - PREFIX_BYTES).div_ceil(PARALLEL_CHUNK_BYTES)
+            );
+
+            common::report_observed_thread_activity(
+                &row,
+                "numpy",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    black_box(checksum_of(&run_incumbent()));
+                },
+            );
+            common::report_observed_thread_activity(
+                &row,
+                "fnp",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    black_box(checksum_of(&run_candidate()));
+                },
+            );
+
+            let mut observe_incumbent = || {
+                let started = Instant::now();
+                let result = run_incumbent();
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let mut observe_candidate = || {
+                let started = Instant::now();
+                let result = run_candidate();
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &row,
+                    &mut observe_incumbent,
+                    &mut observe_candidate,
+                    CONTRACT_ROUNDS,
+                    CONTRACT_MIN_OF,
+                );
+            let verdict =
+                common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+            println!(
+                "BOOL_REDUCTION_RESULT row={row} operation={operation} corpus={case} verdict={verdict} \
+                 incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ratio={:.6} incumbent_null_ci95=[{:.6},{:.6}] \
+                 candidate_null_ratio={:.6} candidate_null_ci95=[{:.6},{:.6}] \
+                 corrected_dual_null_gate=true incumbent=numpy_live_same_invocation",
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                incumbent_null.ratio_ci_low,
+                incumbent_null.ratio_ci_high,
+                candidate_null.ratio_median,
+                candidate_null.ratio_ci_low,
+                candidate_null.ratio_ci_high,
+            );
+            let decision = if verdict == "DECIDABLE_WIN" {
+                "choose_fnp"
+            } else {
+                "choose_numpy"
+            };
+            println!(
+                "CHOOSER_STATEMENT workload=bool_flat_{case}_256mib \
+                 decision={decision} verdict={verdict} incumbent=numpy_live_same_invocation \
+                 measured_scope={TARGET_INPUT_BYTES}_c_contiguous_bool_elements_at_{threads}_pinned_threads \
+                 outside_scope=run_same_contract_before_choosing"
+            );
+        }
+    });
+}
+
 /// Exact-tree parallel float32/float64 flat sums against live NumPy.
 ///
 /// Both arms reduce the same 64 MiB C-contiguous input with NumPy's exact
@@ -14391,6 +14649,10 @@ fn main() {
         (
             "bench_bool_public_vs_numpy_median_gate",
             bench_bool_public_vs_numpy_median_gate,
+        ),
+        (
+            "bench_bool_flat_all_any_vs_numpy_median_gate",
+            bench_bool_flat_all_any_vs_numpy_median_gate,
         ),
         (
             "bench_class3_missing_capability_vs_numpy_median_gate",
