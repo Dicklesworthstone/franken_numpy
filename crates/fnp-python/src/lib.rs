@@ -78124,6 +78124,53 @@ fn try_zerocopy_f64_sum_lastaxis(
 // subtree reads a disjoint cache band, while the fixed parent-child add order
 // remains byte-identical.  Small arrays, subclasses, non-native byte order,
 // non-C layouts, and explicit reduction options stay on NumPy's mature path.
+/// One-time runtime PROOF that our pairwise tree is THIS NumPy's pairwise tree.
+///
+/// NumPy CHANGED its float reduction tree between 2.2.4 and 2.4.2. Verified
+/// directly: the same 100,000-element buffer sums to `9305c15effb55240` under
+/// 2.2.4 and `9205c15effb55240` under 2.4.2/2.4.3/2.4.6 — a last-ULP difference.
+/// So "bit-exact vs NumPy" for float reductions is scoped to a NumPy BUILD, not
+/// absolute, and a route that assumes one tree SILENTLY returns different bits
+/// on the other. Both NumPy generations are live in this project's worker fleet.
+///
+/// Gating on a version string would break the next time upstream retunes the
+/// reduction, so prove it empirically once per process instead: sum a
+/// deterministic probe whose result is sensitive to tree shape both ways and
+/// compare bits, deferring the whole route on disagreement.
+///
+/// THE PROBE MUST BE LARGE. The two trees agree for every length up to 32,768
+/// and only diverge from 65,536 upward, where NumPy switches reduction strategy
+/// — a 4,096-element probe was measured reporting a FALSE match on the 2.2.4
+/// host, letting the route engage on exactly the build it must exclude.
+fn float_pairwise_tree_matches_numpy(numpy: &Bound<'_, PyModule>) -> bool {
+    static MATCHES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MATCHES.get_or_init(|| {
+        // Mixed-sign, similar-magnitude values: a few large terms would absorb
+        // the low bits and hide the tree shape entirely (measured — a probe
+        // interleaving 1e8 failed to discriminate at any length).
+        const PROBE_LEN: usize = 1 << 17;
+        let mut state: u64 = 0x853c_49e6_748f_ea9b;
+        let mut probe = Vec::with_capacity(PROBE_LEN);
+        for _ in 0..PROBE_LEN {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            probe.push(((state >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0);
+        }
+        let ours = 0.0 + pairwise_sum_f64_slice(&probe);
+        let Ok(array) = numpy.call_method1("array", (probe,)) else {
+            return false;
+        };
+        let Ok(theirs) = array
+            .call_method0("sum")
+            .and_then(|total| total.extract::<f64>())
+        else {
+            return false;
+        };
+        ours.to_bits() == theirs.to_bits()
+    })
+}
+
 fn try_zerocopy_float_sum_flat(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -78148,6 +78195,10 @@ fn try_zerocopy_float_sum_flat(
     {
         return Ok(None);
     }
+    // Refuse to route unless this NumPy's reduction tree is provably ours.
+    if !float_pairwise_tree_matches_numpy(&numpy) {
+        return Ok(None);
+    }
 
     let scalar = match dtype.getattr("itemsize")?.extract::<usize>()? {
         4 => {
@@ -78161,7 +78212,13 @@ fn try_zerocopy_float_sum_flat(
             // exact ndarray remains alive and read-only under the held GIL.
             let data: &[f32] =
                 unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), input.len()) };
-            let total = par_pairwise_sum_f32(data);
+            // FOLD IN add.reduce's +0.0 IDENTITY. `0.0 + x == x` for every x
+            // EXCEPT `-0.0`, which becomes `+0.0`. A bare pairwise tree over an
+            // all-`-0.0` buffer yields `-0.0` (since `-0.0 + -0.0 == -0.0`)
+            // where NumPy yields `+0.0` — verified against NumPy 2.4.6 at
+            // 2,200,000 elements, inside this routed regime. Dropping this add
+            // diverges on that one degenerate input and nothing else.
+            let total = 0.0 + par_pairwise_sum_f32(data);
             // SIMD NaN payload selection varies by ISA even when the arithmetic
             // tree is identical.  Delegate the rare NaN-result case so NumPy
             // remains the authority for payload/sign bits; finite hot jobs pay
@@ -78182,7 +78239,8 @@ fn try_zerocopy_float_sum_flat(
             // exact ndarray remains alive and read-only under the held GIL.
             let data: &[f64] =
                 unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
-            let total = par_pairwise_sum_f64(data);
+            // Same `+0.0` identity fold as the f32 arm above.
+            let total = 0.0 + par_pairwise_sum_f64(data);
             if total.is_nan() {
                 return Ok(None);
             }

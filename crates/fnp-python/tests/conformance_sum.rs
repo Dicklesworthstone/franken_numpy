@@ -982,3 +982,56 @@ print(ok)
     );
     Ok(())
 }
+
+/// REGRESSION: `add.reduce` folds in a `+0.0` identity, so summing an all-`-0.0`
+/// buffer yields `+0.0` in NumPy while a bare pairwise tree yields `-0.0`
+/// (because `-0.0 + -0.0 == -0.0`). Sized above the parallel gate so the native
+/// route is the one under test. One degenerate input, silently wrong without the
+/// identity fold, and invisible to every random-data test.
+#[test]
+fn sum_float_all_negative_zero_matches_numpy_sign() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+checks = []
+for dtype in (np.float64, np.float32):
+    n = 2_200_000 if dtype is np.float64 else 4_400_000
+    a = np.full(n, dtype(-0.0), dtype=dtype)
+    ours = dtype(fnp.sum(a))
+    theirs = dtype(a.sum())
+    checks.append(ours.tobytes() == theirs.tobytes())
+    # sanity: the discriminating condition is real — NumPy really does return +0.0
+    checks.append(theirs.tobytes() == dtype(0.0).tobytes())
+    checks.append(dtype(0.0).tobytes() != dtype(-0.0).tobytes())
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 6");
+    Ok(())
+}
+
+/// The parallel float route reproduces ONE specific NumPy reduction tree, and
+/// NumPy changed that tree between 2.2.4 and 2.4.2 (same buffer, different last
+/// ULP). Whatever NumPy is live here, `fnp.sum` must agree with it bitwise —
+/// either because the tree matches and we route, or because the runtime
+/// self-check rejected it and we delegated.
+#[test]
+fn sum_float_flat_agrees_with_whatever_numpy_tree_is_live() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+rng = np.random.default_rng(20260731)
+bad = []
+for n in [2_200_000, 3_000_007, 8_388_608]:
+    a = rng.standard_normal(n)
+    if np.float64(fnp.sum(a)).tobytes() != np.float64(a.sum()).tobytes():
+        bad.append(n)
+    f = rng.standard_normal(2 * n).astype(np.float32)
+    if np.float32(fnp.sum(f)).tobytes() != np.float32(f.sum()).tobytes():
+        bad.append(('f32', n))
+print(len(bad) == 0, bad[:3])
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True []");
+    Ok(())
+}

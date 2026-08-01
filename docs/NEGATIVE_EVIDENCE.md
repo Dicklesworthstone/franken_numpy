@@ -4,6 +4,64 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-07-31 - CORRECTNESS QUALIFICATION (no perf claim): the parallel float sum needed a `+0.0` identity fold and a runtime NumPy-tree guard
+
+`QuartzHeron`. This entry makes NO performance claim. It records two defects
+found in the freshly landed parallel float reduction (`29ca22f7`,
+`deadlock-audit-svbzm`) and the fixes applied on top of it, plus a finding that
+SCOPES that row's bit-exactness claim.
+
+**Campaign result class:** correctness-qualification
+
+**1. SIGNED ZERO — `add.reduce` folds a `+0.0` identity that a bare tree does not.**
+`0.0 + x == x` for every `x` except `-0.0`, which becomes `+0.0`. A pure pairwise
+tree over an all-`-0.0` buffer yields `-0.0` (because `-0.0 + -0.0 == -0.0`)
+where NumPy yields `+0.0`. Verified against live NumPy 2.4.6 at 2,200,000
+`float64` elements — inside the routed regime, since the route's gate is 16 MiB —
+and equivalently for `float32`. The landed route returned the bare total, so it
+diverged on that input. Fixed by folding the identity in both arms. This is
+invisible to every random-data test, which is why it survived to land.
+
+**2. NUMPY'S FLOAT REDUCTION TREE IS VERSION-DEPENDENT — this SCOPES the parity claim.**
+The same 100,000-element buffer sums to `9305c15effb55240` under NumPy 2.2.4 and
+`9205c15effb55240` under 2.4.2 / 2.4.3 / 2.4.6: a last-ULP difference. So
+"bit-exact vs NumPy" for float reductions holds against a NumPy BUILD, not
+absolutely. Both generations are live in this project's worker fleet
+(`vmi1149989` and `ovh-a` carry 2.2.4), so the landed route silently returned
+different bits from the NumPy it was matching whenever it ran there.
+
+Fixed with a runtime PROOF rather than a version-string gate, which would break
+the next time upstream retunes the reduction: the route sums a deterministic,
+tree-shape-sensitive probe both ways once per process and defers entirely on
+disagreement. Verified to defer on the 2.2.4 hosts and route on 2.4.6.
+
+THE PROBE SIZE IS LOAD-BEARING. The two trees agree for every length up to
+32,768 and only diverge from 65,536 upward, where NumPy switches reduction
+strategy. A 4,096-element probe was measured reporting a FALSE match on the
+2.2.4 host, letting the route engage on exactly the build it exists to exclude —
+a self-check that can silently pass is worse than none, because it reads as a
+guarantee. The probe is 131,072.
+
+CONSEQUENCE FOR THE BANKED ROW: `29ca22f7`'s ratios stand on NumPy 2.4.x. On a
+NumPy whose tree the probe rejects the route now DEFERS, so parity holds but the
+speedup silently disappears. After any NumPy upgrade, re-check
+`OBSERVED_THREAD_ACTIVITY` and not merely parity — a deferred route passes every
+bit-equality test trivially.
+
+SIBLING EXPOSURE: the older `pairwise_simd_f64` consumers (`nansum` flat, f64
+last-axis sum) reproduce the same tree and carry the same version exposure. They
+are NOT covered by this guard and pass today only because the gate workers run
+2.4.x. Not changed here; flagged for a follow-up.
+
+PARITY: 31/31 in `conformance_sum.rs`, including
+`sum_float_all_negative_zero_matches_numpy_sign` (which also asserts NumPy really
+does return `+0.0` and that the two zeros differ in bits, so it cannot pass
+vacuously) and `sum_float_flat_agrees_with_whatever_numpy_tree_is_live`.
+
+Retry predicate: none — this is a correctness fix, not a hypothesis. Revisit only
+if NumPy changes its reduction tree again, which the runtime probe will detect by
+deferring.
+
 ## 2026-07-31 - PREALLOCATED `a*b+c` (MIXED, PARTIAL KEEP): `float16` out= wins 6.69x REPLICATED; the other five dtypes are NOT ESTABLISHED
 
 `QuartzHeron`, bead `franken_numpy-ixs5y.409`. `fnp.multiply_add(a, b, c, out=out)`
