@@ -40015,6 +40015,63 @@ fn base_sum_simd_f32(a: &[f32]) -> f32 {
     res
 }
 
+// NumPy's contiguous floating sum is a fixed pairwise tree: <=128-element
+// SIMD leaves, then n/2 rounded down to a multiple of eight at every internal
+// node.  Reproducing that exact tree makes the independent subtrees safe to
+// evaluate concurrently without changing a result bit.  The serial helpers
+// below operate directly on the borrowed NumPy buffer (unlike the older
+// ReadOnlyCell helper, no 128-element copy per leaf); the parallel drivers
+// merely choose which thread evaluates each subtree and retain every add edge.
+fn pairwise_sum_f64_slice(data: &[f64]) -> f64 {
+    if data.len() <= 128 {
+        return base_sum_simd(data);
+    }
+    let mut split = data.len() / 2;
+    split -= split % 8;
+    pairwise_sum_f64_slice(&data[..split]) + pairwise_sum_f64_slice(&data[split..])
+}
+
+fn par_pairwise_sum_f64(data: &[f64]) -> f64 {
+    // 512 KiB f64 leaves fit in a Zen 3 core's private L2 and expose at least
+    // two tasks per physical core for the 64 MiB incumbent workload.
+    const PAR_LEAF: usize = 1 << 16;
+    if data.len() <= PAR_LEAF {
+        return pairwise_sum_f64_slice(data);
+    }
+    let mut split = data.len() / 2;
+    split -= split % 8;
+    let (left, right) = rayon::join(
+        || par_pairwise_sum_f64(&data[..split]),
+        || par_pairwise_sum_f64(&data[split..]),
+    );
+    left + right
+}
+
+fn pairwise_sum_f32_slice(data: &[f32]) -> f32 {
+    if data.len() <= 128 {
+        return base_sum_simd_f32(data);
+    }
+    let mut split = data.len() / 2;
+    split -= split % 8;
+    pairwise_sum_f32_slice(&data[..split]) + pairwise_sum_f32_slice(&data[split..])
+}
+
+fn par_pairwise_sum_f32(data: &[f32]) -> f32 {
+    // 256 KiB f32 leaves balance cache locality with enough work to amortize
+    // each Rayon join.  The split points are still NumPy's exact tree nodes.
+    const PAR_LEAF: usize = 1 << 16;
+    if data.len() <= PAR_LEAF {
+        return pairwise_sum_f32_slice(data);
+    }
+    let mut split = data.len() / 2;
+    split -= split % 8;
+    let (left, right) = rayon::join(
+        || par_pairwise_sum_f32(&data[..split]),
+        || par_pairwise_sum_f32(&data[split..]),
+    );
+    left + right
+}
+
 // numpy sums float16 by WIDENING each value to f32, running the SAME f32 pairwise tree it uses for
 // np.add.reduce(float32), and narrowing the final f32 total once to float16 (verified byte-exact:
 // np.sum(f16) == float16(np.add.reduce(f16.astype(f32))) over sizes 127..16M x scales x kinds). It does
@@ -78062,6 +78119,83 @@ fn try_zerocopy_f64_sum_lastaxis(
     Ok(Some(reshaped.unbind()))
 }
 
+// Large flat float32/float64 sum using NumPy's exact arithmetic tree across the
+// Rayon pool.  NumPy's contiguous add.reduce is single-threaded; here every
+// subtree reads a disjoint cache band, while the fixed parent-child add order
+// remains byte-identical.  Small arrays, subclasses, non-native byte order,
+// non-C layouts, and explicit reduction options stay on NumPy's mature path.
+fn try_zerocopy_float_sum_flat(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    // The directional size matrix crossed decisively at 16 MiB for both
+    // dtypes; 8 MiB f64 was only 1.07x and is deliberately left to NumPy.
+    const FLOAT_SUM_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
+
+    let numpy = py.import("numpy")?;
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || !dtype.getattr("isnative")?.extract::<bool>()?
+        || !a
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+        || a.getattr("nbytes")?.extract::<usize>()? < FLOAT_SUM_PARALLEL_MIN_BYTES
+    {
+        return Ok(None);
+    }
+
+    let scalar = match dtype.getattr("itemsize")?.extract::<usize>()? {
+        4 => {
+            let Ok(in_buffer) = PyBuffer::<f32>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = in_buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32.  The
+            // exact ndarray remains alive and read-only under the held GIL.
+            let data: &[f32] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), input.len()) };
+            let total = par_pairwise_sum_f32(data);
+            // SIMD NaN payload selection varies by ISA even when the arithmetic
+            // tree is identical.  Delegate the rare NaN-result case so NumPy
+            // remains the authority for payload/sign bits; finite hot jobs pay
+            // only this scalar branch after the reduction.
+            if total.is_nan() {
+                return Ok(None);
+            }
+            numpy.getattr("float32")?.call1((total,))?.unbind()
+        }
+        8 => {
+            let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = in_buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64.  The
+            // exact ndarray remains alive and read-only under the held GIL.
+            let data: &[f64] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+            let total = par_pairwise_sum_f64(data);
+            if total.is_nan() {
+                return Ok(None);
+            }
+            numpy.getattr("float64")?.call1((total,))?.unbind()
+        }
+        _ => return Ok(None),
+    };
+    if keepdims {
+        return Ok(Some(keepdims_reshape_scalar(py, &numpy, a, scalar)?));
+    }
+    Ok(Some(scalar))
+}
+
 // Parallel full reduction for a large C-contiguous fixed-width integer array.
 // NumPy promotes signed inputs to int64 and unsigned inputs to uint64, then adds
 // modulo 2^64. Wrapping addition is associative, so independent cache-sized
@@ -78190,6 +78324,18 @@ fn sum(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
+    // Large flat float32/float64 sum: evaluate NumPy's exact pairwise tree on
+    // Rayon.  The incumbent pays one serial DOUBLE/FLOAT_pairwise_sum; every
+    // candidate subtree is independent and preserves the same combine edges.
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(o) = try_zerocopy_float_sum_flat(py, a.bind(py), keepdims)?
+    {
+        return Ok(o);
+    }
     // Large flat integer sum: NumPy's ufunc reduction is single-threaded. A
     // cache-banded wrapping reduction uses the full Rayon pool while preserving
     // exact default promotion and overflow bits for all eight integer dtypes.

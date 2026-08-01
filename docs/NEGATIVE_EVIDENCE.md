@@ -35234,3 +35234,99 @@ repeat on a drained full-host-exclusive worker and require size-ratio spread
 at or below 15% before replacing the range. Do not propose a new kernel lever
 unless a fresh profile names a stage above 50% candidate self-time or supplies
 a counted work-removal mechanism.
+
+## 2026-07-31 - WIN (KEEP, INCUMBENT-WIN): exact-tree parallel float32/float64 flat sum - 3.83-4.52x vs live NumPy on eight physical cores
+
+`IvoryDesert`, bead `deadlock-audit-svbzm`. Strict preflight was CLEAR for
+lever `parallel exact-tree float flat sum`, surface
+`fnp.sum axis none contiguous float32 float64`, before editing source.
+
+**Campaign result class:** incumbent-win
+
+`bench_elf_sha256=7b00572958bbf881e076da0c4a248317260604928779032d6c92c7a76ee6ec1f`
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 1.010074x,
+CI95 [0.954945, 1.057460], 21 rounds, min_of=1 on the conservative float32
+headline row; the table records both dtypes.
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio
+0.981620x, CI95 [0.849460, 1.072826], 21 rounds, min_of=1 on the float32 row.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c7892ef1966f4e-0013ecdd measured_ratio=3.831046x median=3.777919ms
+
+**Incumbent isolation proof:** candidate=fnp.sum incumbent=numpy.sum shared_timed_component=none
+
+WHY THIS LEVER: a whole-job `perf` capture with BLAS pinned to one thread put
+95.81% of live NumPy cycles and 93.33% of the delegated FNP job in NumPy's
+`DOUBLE_pairwise_sum`; Python/PyO3 dispatch was below the reporting floor.
+Both arms paid the same serial kernel, so wrapper polish was not the gap. The
+structural lever was to replace that fixed tree with the identical tree whose
+independent subtrees execute on Rayon, something NumPy's elementwise reduction
+does not do.
+
+IMPLEMENTATION: `try_zerocopy_float_sum_flat` admits exact NumPy ndarrays with
+native-endian float32/float64 dtype, C contiguity, default `axis=None`, and at
+least 16 MiB of input. It retains NumPy's <=128-element SIMD leaves and every
+`n/2`-rounded-to-eight combine edge, but evaluates 65,536-element subtrees in
+parallel. Subclasses, non-native/non-contiguous arrays, explicit dtype/out/
+initial/where, and inputs below the floor stay on live NumPy. The 16 MiB floor
+is deliberate: co-tenant routing telemetry found only 1.07x at 8 MiB f64 but
+1.64x at 16 MiB; the marginal region was not shipped.
+
+BEHAVIOR PROOF: all 29 tests in the remote `conformance_sum` shard passed. The
+new exact-output case covered float32 and float64 above the route floor,
+cancellation, signed zero, infinities, NaN propagation, scalar type/dtype,
+`keepdims`, explicit-dtype fallback, and non-contiguous fallback. SIMD NaN
+payload selection differed on one worker ISA, so a NaN computed total now
+delegates to NumPy after the parallel reduction; finite jobs pay only that final
+scalar branch. Output type, shape, dtype, and bytes matched NumPy on the
+cross-ISA rerun. The formal harness also asserted exact scalar type/dtype/bytes
+before timing both finite 64 MiB rows.
+
+BLAS IDENTITY: the formal NumPy 2.4.6 wheel is linked to ILP64
+`scipy-openblas`, OpenBLAS 0.3.31.188.0 (`DYNAMIC_ARCH`, `NO_AFFINITY`,
+`MAX_THREADS=64`). Neither sum arm calls BLAS, so OpenBLAS/OMP/MKL were pinned
+to one thread. The separate 64-core routing host used NumPy 2.4.2 with ILP64
+`scipy-openblas` OpenBLAS 0.3.31.dev.
+
+CLAIM-BEARING INVOCATION: executable
+`7b00572958bbf881e076da0c4a248317260604928779032d6c92c7a76ee6ec1f`
+(224,034,840 bytes), invocation
+`000000000000000018c7892ef1966f4e-0013ecdd`, live NumPy core
+`d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa`
+(10,452,641 bytes). It ran on `vmi1293453`, AMD EPYC, eight physical/logical
+cores, compile/runtime AVX2, with Rayon pinned to eight. Full-host affinity and
+two consecutive 300 ms samples at <=20% busy cleared before the process and
+again before each dual-null contract (maximum observed busy fractions 0.000,
+0.161, and 0.033). NumPy used one observed OS thread; FNP exercised all eight
+Rayon workers and the coordinating caller accrued a scheduler tick in both
+thread-activity samples.
+
+| dtype / 64 MiB | NumPy median | FNP median | NumPy/NumPy null (CI95) | FNP/FNP null (CI95) | NumPy/FNP effect (CI95) | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| float32 | 3.777919 ms | 0.974527 ms | 1.010074 `[0.954945,1.057460]` | 0.981620 `[0.849460,1.072826]` | **3.831046x** `[2.840551,4.401254]` | DECIDABLE_WIN |
+| float64 | 4.296686 ms | 0.973445 ms | 0.987689 `[0.956749,1.025527]` | 0.979233 `[0.753207,1.151101]` | **4.518011x** `[4.101742,4.857351]` | DECIDABLE_WIN |
+
+Both 21-round, min-of-one effects exclude unity and clear twice the wider null
+half-width under the corrected dual-null gate. CV remained provenance only.
+COUNTED MECHANISM: both arms read exactly 67,108,864 input bytes once and
+retain exactly `elements-1` arithmetic add edges; the candidate changes only
+where independent exact-tree subproblems execute. The candidate exposed 256
+float32 or 128 float64 parallel leaves; NumPy retained one reduction thread.
+
+Non-claim routing telemetry on the co-tenant 64-thread `trj` host measured the
+same finite arithmetic path before the final NaN-result delegation branch at
+64 MiB as 3.757721/0.591398 ms (6.35x) for float32 and 3.047901/0.599984 ms
+(5.08x) for float64. These points support placement but are not substituted
+for the final-binary quiescent dual-null verdicts above.
+
+**Decision: KEEP, INCUMBENT-WIN.** Choose FrankenNumPy for route-qualified
+flat float32/float64 sums at 16 MiB and above; keep live NumPy for the guarded
+fallback surface.
+
+Retry predicate: do not rerun these exact artifacts and 64 MiB rows. Reopen if
+the FNP ELF or live NumPy core changes, if the route admits new layouts/options,
+if an exact-output test finds a tree mismatch, or if a same-invocation contract
+at the 16 MiB floor is needed to lower the current conservative dispatch gate.
+Any replacement must retain exact bytes, observed thread activity, full-host
+quiescence, both A/A nulls, and the corrected median-CI decision rule.

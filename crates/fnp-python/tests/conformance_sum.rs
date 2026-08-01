@@ -922,3 +922,63 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn sum_flat_parallel_float_pairwise_is_bitexact() -> Result<(), String> {
+    // Both arrays clear the 16 MiB native-route gate.  The adversarial values
+    // exercise cancellation, signed zero, infinities, NaN propagation, scalar
+    // dtype/type, and the keepdims reconstruction around the parallel tree.
+    let script = fnp_sum_script(
+        r#"
+def same(a, b):
+    aa = np.asarray(a)
+    bb = np.asarray(b)
+    return (
+        type(a) is type(b)
+        and aa.shape == bb.shape
+        and aa.dtype == bb.dtype
+        and aa.tobytes() == bb.tobytes()
+    )
+
+rng = np.random.default_rng(90210)
+f64 = rng.standard_normal(2_097_173, dtype=np.float64)
+f64[7:15] = [1e300, -1e300, 1.0, -0.0, np.inf, -np.inf, 3.0, -3.0]
+f32 = rng.standard_normal(4095 * 1025, dtype=np.float32).reshape(4095, 1025)
+f32.flat[9:17] = np.array([1e30, -1e30, 1.0, -0.0, np.inf, -np.inf, 7.0, -7.0], dtype=np.float32)
+
+cases = [
+    (f64, False),
+    (f64, True),
+    (f32, False),
+    (f32, True),
+]
+ok = True
+for arr, keepdims in cases:
+    got = fnp.sum(arr, keepdims=keepdims)
+    want = np.sum(arr, keepdims=keepdims)
+    if not same(got, want):
+        print("FAIL", arr.dtype, keepdims, type(got), type(want), np.asarray(got).tobytes().hex(), np.asarray(want).tobytes().hex())
+        ok = False
+
+# A native-endian contiguous NaN payload delegates to NumPy so ISA-specific
+# SIMD NaN selection cannot alter the observable payload bits.
+with_nan = f64.copy()
+with_nan[1_048_589] = np.float64(np.nan)
+ok = ok and same(fnp.sum(with_nan), np.sum(with_nan))
+
+# Explicit dtype and non-contiguous inputs deliberately fall through unchanged.
+view = f32[:, ::2]
+ok = ok and same(fnp.sum(f32, dtype=np.float64), np.sum(f32, dtype=np.float64))
+ok = ok and same(fnp.sum(view), np.sum(view))
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "parallel flat float sum must be byte-exact with NumPy: {result}"
+    );
+    Ok(())
+}
