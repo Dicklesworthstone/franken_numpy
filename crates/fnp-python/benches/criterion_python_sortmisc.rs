@@ -537,12 +537,15 @@ fn bench_flat_f64_sort_median_gate(_c: &mut criterion::Criterion) {
                 .expect("result size value");
             let stride = (n / 4096).max(1);
             let sampled = result
-                .call_method1("__getitem__", (pyo3::types::PySlice::new(
-                    result.py(),
-                    0,
-                    n as isize,
-                    stride as isize,
-                ),))
+                .call_method1(
+                    "__getitem__",
+                    (pyo3::types::PySlice::new(
+                        result.py(),
+                        0,
+                        n as isize,
+                        stride as isize,
+                    ),),
+                )
                 .expect("strided digest slice")
                 .call_method0("tobytes")
                 .expect("strided digest tobytes")
@@ -695,7 +698,8 @@ ties_16m = rng.integers(0, 64, 16_000_000).astype(np.float64)\n";
                     CONTRACT_ROUNDS,
                     CONTRACT_MIN_OF,
                 );
-            let verdict = common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+            let verdict =
+                common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
             println!(
                 "FLAT_SORT_RESULT row={row} corpus={corpus} elements={elements} \
                  verdict={verdict} incumbent_median_ms={:.6} candidate_median_ms={:.6} \
