@@ -4,6 +4,75 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-01 - RETRACTION + SINGLE-HOST MATRIX: `arg*` IS materially slower than `min`/`max`; the "failed prediction" note in the entry below is WRONG
+
+`QuartzHeron`, bead `deadlock-audit-qmbuo`. NO new code and NO new performance
+claim — this re-measures the ALREADY-LANDED kernels with all EIGHT rows in ONE
+invocation on ONE host, which is exactly what the argmin/argmax entry's own retry
+predicate asked for. The ELF is byte-identical to that entry's
+(`bench_elf_sha256=56303c6b875750910e938f555f7fc666599d8be267eeac0f8704b9189ca5d6ca`).
+
+**Campaign result class:** correctness-qualification
+
+| elements | `min` | `max` | `argmin` | `argmax` |
+|---|---:|---:|---:|---:|
+| 67,108,864 | **4.080776x** | **4.245702x** | 2.800304x | 2.501226x |
+| 4,194,304 | 1.708952x | 1.869273x | 1.410469x | 1.224282x UNDECIDED |
+
+All rows `DECIDABLE_WIN` except 4M `argmax`. Host `vmi1293453`, invocation
+`000000000000000018c79425853b7c3c-0019f47e`, 8 pinned threads, NumPy 2.4.6,
+quiescence clear at 0.032 against the 0.200 limit.
+
+**THE RETRACTION.** The argmin/argmax entry below records "A PREDICTION THAT
+FAILED": `arg*` was expected to run materially slower than the value routes (a
+compare plus TWO `select`s per block and a running index vector, versus one
+`simd_min`), measured essentially equal, and the entry concluded from that "the
+scan is memory-bound, not issue-bound". **That conclusion is WRONG and is
+retracted.**
+
+Measured here on one host, `min`/`max` (4.080776x / 4.245702x) are roughly
+**1.6x faster** than `arg*` (2.800304x / 2.501226x) at 64M. The original
+prediction was CORRECT: the index bookkeeping does cost real time.
+
+WHY IT LOOKED EQUAL: that observation came from `vmi1156319`, where NumPy's own
+`min` at 64M takes 54.597640 ms against 15.905760 ms here — a ~3.4x slower box.
+On a slow enough host the memory stall is large enough to hide the extra ALU work
+entirely and the two ops converge. On a fast host the ALU work becomes visible.
+The scan is memory-bound ON THAT HOST, not in general.
+
+**THE GENERAL LESSON, and the reason to keep this row:** a slow measurement host
+does not merely scale ratios down uniformly — it can INVERT a micro-architectural
+conclusion by masking compute behind memory latency. Any claim of the form "X and
+Y cost the same" or "this is bandwidth-bound" is a statement about a HOST, not
+about a kernel, unless it is reproduced on hardware where the compute is not
+hidden. The same trap sits under the earlier note that the vectorized min/max
+kernel was "at or near achievable streaming bandwidth".
+
+RUN-TO-RUN VARIANCE ON ONE HOST is also non-trivial: `min` at 64M read
+3.582805x in the earlier min/max-only invocation and 4.080776x here, same host
+and same kernel — ~14%, plausibly cache and corpus state from the extra `arg*`
+rows sharing this invocation. Treat sub-15% differences between separate
+invocations as noise even when the host matches.
+
+WHAT STANDS from the entries below: every DECIDABLE_WIN verdict, all parity
+(11/11), the deferral designs, and the fact that both families beat
+single-threaded NumPy. What does NOT stand is the "essentially equal"
+cross-op comparison and the bound-type inference drawn from it.
+
+**A/A null control (same invocation):** every row carried both controls under the same 21-round min-of-1 invocation; 64M `min` NumPy/NumPy CI95 `[0.994323,1.054781]` and FNP/FNP CI95 `[0.969360,1.108996]`; 64M `max` `[0.971313,1.006534]` and `[0.959139,1.014549]`; 64M `argmin` `[0.986366,1.049749]` and `[0.988563,1.020962]`; 64M `argmax` `[0.990212,1.043346]` and `[0.937807,1.008731]`. Each claimed effect CI is disjoint from both of its nulls.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa artifact_bytes=10452641 invocation_id=000000000000000018c79425853b7c3c-0019f47e measured_ratio=4.245702x
+
+**Incumbent isolation proof:** candidate=fnp.min incumbent=numpy.min shared_timed_component=none
+
+COUNTED_MECHANISM: `class=serial_scan_parallelised_and_vectorised`. Incumbent
+threads 1, candidate 8. Unchanged from the entries below; only the cross-op
+comparison and the bound-type inference are corrected here.
+
+Retry predicate: none for the comparison itself — it is now single-host and
+single-invocation. Still open: a genuinely idle many-core host for the scaling
+ceiling, since every ratio in this campaign is an 8-thread floor.
+
 ## 2026-07-31 - PARALLEL EXACT FLAT `float64` ARGMIN/ARGMAX (KEEP, INCUMBENT-WIN): 2.50-2.85x at 64M, NO deferral regimes
 
 `QuartzHeron`, bead `deadlock-audit-qmbuo`. Closes retry predicate (3) of the
