@@ -4,6 +4,63 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-02 - WIN (KEEP, INCUMBENT-WIN): fuse `a*b+c*d` into one parallel pass - 2.67-3.86x vs live NumPy
+
+The new `fnp.pairwise_multiply_add(a, b, c, d)` route evaluates the two
+products in NumPy order and adds them directly into one result allocation. It
+supports equal-shape C-contiguous `float64`, `float32`, and signed/unsigned
+8/16/32/64-bit integer arrays; all other inputs defer to the exact three-ufunc
+NumPy expression.
+
+**Campaign result class:** incumbent-win
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa artifact_bytes=10452641 invocation_id=000000000000000018c7e6200da3deca-003db4c5 measured_ratio=2.668583x
+
+**Incumbent isolation proof:** candidate=fnp.pairwise_multiply_add(a,b,c,d) incumbent=numpy.add(numpy.multiply(a,b),numpy.multiply(c,d)) shared_timed_component=none
+
+Same-invocation whole-job results used 32 MiB per input, 21 interleaved
+min-of-1 rounds, exact output-byte comparison, bootstrap median CIs, both A/A
+controls, and the corrected dual-null contract:
+
+| dtype | NumPy median | FNP median | effect median and CI95 | NumPy/NumPy null median and CI95 | FNP/FNP null median and CI95 | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| float64 | 48.856223 ms | 18.486294 ms | **2.668583x** `[1.749992,3.735850]` | 1.020096 `[0.940018,1.063935]` | 0.851254 `[0.763526,1.334185]` | DECIDABLE_WIN |
+| float32 | 41.689331 ms | 12.703561 ms | **3.451712x** `[3.067286,4.386335]` | 0.986654 `[0.819886,1.150627]` | 1.142209 `[0.860147,1.211636]` | DECIDABLE_WIN |
+| int8 | 41.072374 ms | 10.754011 ms | **3.861382x** `[2.361283,5.668707]` | 0.958583 `[0.911473,1.023242]` | 1.159191 `[0.996119,1.270768]` | DECIDABLE_WIN |
+| uint8 | 37.569865 ms | 9.992474 ms | **3.658221x** `[2.619031,3.916529]` | 1.022104 `[0.934054,1.230679]` | 1.064098 `[0.831566,1.296006]` | DECIDABLE_WIN |
+
+**A/A null control (same invocation):** float64 incumbent_null_median=1.020096x candidate_null_median=0.851254x; both controls for every claimed row are shown above. Every effect CI excludes 1.0, is disjoint from both null envelopes, and clears twice the larger null half-width.
+
+**Counted mechanism:** class=materialization_elimination_and_parallelism. For
+each row, NumPy allocates three result-sized arrays and performs nine full-array
+stream touches (four input reads plus two product writes, then two product reads
+plus the final write). FNP allocates one result and performs five touches (four
+reads plus one write), eliminating two 32 MiB temporaries, 67,108,864 allocated
+bytes, and four full-array memory streams. NumPy observed one active thread; FNP
+observed multiple active threads (nine for float64, five for float32, four for
+int8, and six for uint8 in the sampling window). This operation does not invoke
+BLAS in either arm.
+
+**Provenance:** `bench_elf_sha256=4203936e19c2079273e99c59c2530545f076875050fe4c21ab043d9439f10311`
+(228,386,936 bytes), built by strict RCH on `ovh-a` and measured on
+`vmi1156319` (AMD EPYC, 8 physical / 8 logical CPUs, AVX2, no AVX-512), Python
+3.13, live NumPy 2.4.6. Every claimed row passed the full host-quiescence
+preflight immediately before timing. New fleet load tripped that gate before
+the `int16` row, so no competitive claim is made for `int16`, `uint16`,
+`int32`, `uint32`, `int64`, or `uint64`; their route remains covered by exact
+conformance tests.
+
+**Decision:** KEEP. Exact conformance covers all ten routed dtypes plus scalar,
+broadcast, mixed-dtype, non-contiguous, and subclass deferrals. Focused tests
+passed 2/2, and the benchmark asserted exact bytes before admitting each result.
+
+Retry predicate: do not rerun these four banked rows with the same artifact.
+Reopen only to widen the structural win to a new family such as f16, complex,
+or preallocated `out=`, or to measure one of the six currently unclaimed routed
+dtypes under a newly clean same-invocation contract.
+
+---
+
 ## 2026-08-01 - FLAT `float64` SORT ISA-GATE RE-DECISION (KEEP, INCUMBENT-WIN): 1.48-1.90x on distinct data, WASH on dense ties; and a RETRACTION of my own kernel-only sweep
 
 `StormyLake`, bead `deadlock-audit-flat-f64-sort-avx2-surrender-7mh1i`, commit
