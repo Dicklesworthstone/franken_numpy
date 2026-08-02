@@ -29039,6 +29039,13 @@ trait MultiplyAddValue: pyo3::buffer::Element + Copy + Send + Sync {
     fn multiply_add_numpy(self, multiplier: Self, addend: Self) -> Self;
 
     fn subtract_multiply_add_numpy(self, subtrahend: Self, multiplier: Self, addend: Self) -> Self;
+
+    fn pairwise_multiply_add_numpy(
+        self,
+        multiplier: Self,
+        other: Self,
+        other_multiplier: Self,
+    ) -> Self;
 }
 
 impl MultiplyAddValue for f64 {
@@ -29054,6 +29061,18 @@ impl MultiplyAddValue for f64 {
         let product = difference * multiplier;
         product + addend
     }
+
+    #[inline]
+    fn pairwise_multiply_add_numpy(
+        self,
+        multiplier: Self,
+        other: Self,
+        other_multiplier: Self,
+    ) -> Self {
+        let first_product = self * multiplier;
+        let second_product = other * other_multiplier;
+        first_product + second_product
+    }
 }
 
 impl MultiplyAddValue for f32 {
@@ -29068,6 +29087,18 @@ impl MultiplyAddValue for f32 {
         let difference = self - subtrahend;
         let product = difference * multiplier;
         product + addend
+    }
+
+    #[inline]
+    fn pairwise_multiply_add_numpy(
+        self,
+        multiplier: Self,
+        other: Self,
+        other_multiplier: Self,
+    ) -> Self {
+        let first_product = self * multiplier;
+        let second_product = other * other_multiplier;
+        first_product + second_product
     }
 }
 
@@ -29090,6 +29121,17 @@ macro_rules! impl_wrapping_multiply_add_value {
                     self.wrapping_sub(subtrahend)
                         .wrapping_mul(multiplier)
                         .wrapping_add(addend)
+                }
+
+                #[inline]
+                fn pairwise_multiply_add_numpy(
+                    self,
+                    multiplier: Self,
+                    other: Self,
+                    other_multiplier: Self,
+                ) -> Self {
+                    self.wrapping_mul(multiplier)
+                        .wrapping_add(other.wrapping_mul(other_multiplier))
                 }
             }
         )+
@@ -30085,6 +30127,57 @@ where
     }
 }
 
+/// One fused pass for `a * b + c * d`.
+///
+/// NumPy must write two full-size product temporaries and then read both back
+/// for the final add. This kernel reads the four inputs and writes the result
+/// exactly once. The two products are explicitly named before the add so real
+/// arithmetic retains the three ufunc roundings; integer arithmetic wraps at
+/// each operation exactly as NumPy's fixed-width ufuncs do.
+fn pairwise_multiply_add_into<T>(out: &mut [T], a: &[T], b: &[T], c: &[T], d: &[T])
+where
+    T: MultiplyAddValue,
+{
+    debug_assert_eq!(out.len(), a.len());
+    debug_assert_eq!(out.len(), b.len());
+    debug_assert_eq!(out.len(), c.len());
+    debug_assert_eq!(out.len(), d.len());
+
+    use rayon::prelude::*;
+    const PAIRWISE_MULTIPLY_ADD_PARALLEL_MIN: usize = 1 << 16;
+    // Five float64 streams occupy 320 KiB per band, fitting Zen 3's 512 KiB
+    // private L2 while leaving headroom for loop state and adjacent traffic.
+    const PAIRWISE_MULTIPLY_ADD_CHUNK: usize = 1 << 13;
+    if out.len() >= PAIRWISE_MULTIPLY_ADD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        out.par_chunks_mut(PAIRWISE_MULTIPLY_ADD_CHUNK)
+            .zip(a.par_chunks(PAIRWISE_MULTIPLY_ADD_CHUNK))
+            .zip(b.par_chunks(PAIRWISE_MULTIPLY_ADD_CHUNK))
+            .zip(c.par_chunks(PAIRWISE_MULTIPLY_ADD_CHUNK))
+            .zip(d.par_chunks(PAIRWISE_MULTIPLY_ADD_CHUNK))
+            .for_each(|((((slots, band_a), band_b), band_c), band_d)| {
+                for ((((slot, &x), &y), &z), &w) in slots
+                    .iter_mut()
+                    .zip(band_a.iter())
+                    .zip(band_b.iter())
+                    .zip(band_c.iter())
+                    .zip(band_d.iter())
+                {
+                    *slot = x.pairwise_multiply_add_numpy(y, z, w);
+                }
+            });
+    } else {
+        for ((((slot, &x), &y), &z), &w) in out
+            .iter_mut()
+            .zip(a.iter())
+            .zip(b.iter())
+            .zip(c.iter())
+            .zip(d.iter())
+        {
+            *slot = x.pairwise_multiply_add_numpy(y, z, w);
+        }
+    }
+}
+
 fn contiguous_buffers_overlap<T>(left: &PyBuffer<T>, right: &PyBuffer<T>) -> bool
 where
     T: pyo3::buffer::Element,
@@ -30176,6 +30269,92 @@ where
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
 
         subtract_multiply_add_into(out, va, vb, vc, vd);
+    }
+    if shape.len() == 1 {
+        Ok(Some(flat.unbind()))
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        Ok(Some(
+            flat.call_method1("reshape", (&shape_tuple,))?.unbind(),
+        ))
+    }
+}
+
+fn zerocopy_pairwise_multiply_add_typed<T>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    c: &Bound<'_, PyAny>,
+    d: &Bound<'_, PyAny>,
+    dtype: &str,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: MultiplyAddValue,
+{
+    let ndarray = numpy.getattr("ndarray")?;
+    for operand in [a, b, c, d] {
+        if !operand.is_exact_instance(&ndarray) {
+            return Ok(None);
+        }
+    }
+    let (Ok(buf_a), Ok(buf_b), Ok(buf_c), Ok(buf_d)) = (
+        PyBuffer::<T>::get(a),
+        PyBuffer::<T>::get(b),
+        PyBuffer::<T>::get(c),
+        PyBuffer::<T>::get(d),
+    ) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = buf_a.shape().to_vec();
+    if shape.is_empty()
+        || buf_b.shape() != shape.as_slice()
+        || buf_c.shape() != shape.as_slice()
+        || buf_d.shape() != shape.as_slice()
+    {
+        return Ok(None);
+    }
+    if !buf_a.is_c_contiguous()
+        || !buf_b.is_c_contiguous()
+        || !buf_c.is_c_contiguous()
+        || !buf_d.is_c_contiguous()
+    {
+        return Ok(None);
+    }
+    let (Some(cells_a), Some(cells_b), Some(cells_c), Some(cells_d)) = (
+        buf_a.as_slice(py),
+        buf_b.as_slice(py),
+        buf_c.as_slice(py),
+        buf_d.as_slice(py),
+    ) else {
+        return Ok(None);
+    };
+    let n = cells_a.len();
+    if n == 0 || cells_b.len() != n || cells_c.len() != n || cells_d.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; inputs remain
+    // borrowed read-only under the GIL for the duration of the pass.
+    let va: &[T] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<T>(), n) };
+    let vb: &[T] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<T>(), n) };
+    let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
+    let vd: &[T] = unsafe { std::slice::from_raw_parts(cells_d.as_ptr().cast::<T>(), n) };
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype)?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: numpy.empty produced a fresh output that cannot alias the
+        // inputs, and every slot is initialized exactly once below.
+        let out: &mut [T] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+        pairwise_multiply_add_into(out, va, vb, vc, vd);
     }
     if shape.len() == 1 {
         Ok(Some(flat.unbind()))
@@ -30344,6 +30523,54 @@ fn subtract_multiply_add(
     let difference = numpy.getattr("subtract")?.call1((a.bind(py), b.bind(py)))?;
     let product = numpy.getattr("multiply")?.call1((difference, c.bind(py)))?;
     Ok(numpy.getattr("add")?.call1((product, d.bind(py)))?.unbind())
+}
+
+/// `pairwise_multiply_add(a, b, c, d)` -> `a * b + c * d` in one pass.
+///
+/// Matched fixed-width numeric, equal-shape C-contiguous ndarrays use the
+/// cache-banded parallel kernel. Broadcasting, mixed dtypes, views, scalars,
+/// and every other regime delegate to NumPy's exact three-ufunc expression.
+#[pyfunction]
+fn pairwise_multiply_add(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    c: Py<PyAny>,
+    d: Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    macro_rules! try_route {
+        ($value:ty, $dtype:literal) => {
+            if let Some(result) = zerocopy_pairwise_multiply_add_typed::<$value>(
+                py,
+                &numpy,
+                a.bind(py),
+                b.bind(py),
+                c.bind(py),
+                d.bind(py),
+                $dtype,
+            )? {
+                return Ok(result);
+            }
+        };
+    }
+    try_route!(f64, "float64");
+    try_route!(f32, "float32");
+    try_route!(i64, "int64");
+    try_route!(u64, "uint64");
+    try_route!(i32, "int32");
+    try_route!(u32, "uint32");
+    try_route!(i16, "int16");
+    try_route!(u16, "uint16");
+    try_route!(i8, "int8");
+    try_route!(u8, "uint8");
+
+    let first_product = numpy.getattr("multiply")?.call1((a.bind(py), b.bind(py)))?;
+    let second_product = numpy.getattr("multiply")?.call1((c.bind(py), d.bind(py)))?;
+    Ok(numpy
+        .getattr("add")?
+        .call1((first_product, second_product))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -104877,6 +105104,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sinc, m)?)?;
     m.add_function(wrap_pyfunction!(multiply_add, m)?)?;
     m.add_function(wrap_pyfunction!(subtract_multiply_add, m)?)?;
+    m.add_function(wrap_pyfunction!(pairwise_multiply_add, m)?)?;
     m.add_function(wrap_pyfunction!(copysign, m)?)?;
     m.add_function(wrap_pyfunction!(nextafter, m)?)?;
     m.add_function(wrap_pyfunction!(hypot, m)?)?;

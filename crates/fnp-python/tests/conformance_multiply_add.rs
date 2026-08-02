@@ -932,3 +932,77 @@ print(result is not a, result is not b, result is not c,
     assert_eq!(numpy_oracle(&script)?, "True True True True True True True");
     Ok(())
 }
+
+/// The new four-input fusion must preserve every routed primitive dtype and
+/// every intermediate rounding/overflow bit, not merely numerical closeness.
+#[test]
+fn pairwise_multiply_add_matches_numpy_across_routed_dtypes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20260802)
+checks = []
+
+for dtype in [np.float64, np.float32]:
+    arrays = [(rng.standard_normal(300_000) * 8).astype(dtype) for _ in range(4)]
+    ours = fnp.pairwise_multiply_add(*arrays)
+    theirs = arrays[0] * arrays[1] + arrays[2] * arrays[3]
+    checks.append(ours.dtype == theirs.dtype and ours.shape == theirs.shape
+                  and ours.tobytes() == theirs.tobytes())
+
+for dtype in [np.int8, np.uint8, np.int16, np.uint16,
+              np.int32, np.uint32, np.int64, np.uint64]:
+    base = np.arange(300_000, dtype=np.int64)
+    arrays = [
+        (base * 17 + 101).astype(dtype),
+        (base * 29 + 211).astype(dtype),
+        (base * 43 + 307).astype(dtype),
+        (base * 61 + 401).astype(dtype),
+    ]
+    ours = fnp.pairwise_multiply_add(*arrays)
+    theirs = arrays[0] * arrays[1] + arrays[2] * arrays[3]
+    checks.append(ours.dtype == theirs.dtype and ours.shape == theirs.shape
+                  and ours.tobytes() == theirs.tobytes())
+
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 10");
+    Ok(())
+}
+
+/// Broadcasting, mixed dtypes, non-contiguous views, and Python sequences stay
+/// owned by NumPy; the fusion route must never approximate those semantics.
+#[test]
+fn pairwise_multiply_add_deferred_regimes_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20260802)
+checks = []
+
+a = rng.standard_normal((512, 1))
+b = rng.standard_normal((1, 8))
+c = rng.standard_normal((512, 8))
+d = np.float32(0.25)
+ours = fnp.pairwise_multiply_add(a, b, c, d)
+theirs = a * b + c * d
+checks.append(ours.dtype == theirs.dtype and ours.shape == theirs.shape
+              and ours.tobytes() == theirs.tobytes())
+
+base = rng.standard_normal(800_000)
+a2, b2, c2, d2 = base[::2], base[1::2], base[::-2], base[-2::-2]
+ours2 = fnp.pairwise_multiply_add(a2, b2, c2, d2)
+theirs2 = a2 * b2 + c2 * d2
+checks.append(ours2.tobytes() == theirs2.tobytes())
+
+ours3 = fnp.pairwise_multiply_add([1, 2], [3, 4], [5, 6], [7, 8])
+theirs3 = np.multiply([1, 2], [3, 4]) + np.multiply([5, 6], [7, 8])
+checks.append(ours3.dtype == theirs3.dtype and ours3.tobytes() == theirs3.tobytes())
+
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 3");
+    Ok(())
+}
