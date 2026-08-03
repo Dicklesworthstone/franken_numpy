@@ -61,6 +61,145 @@ dtypes under a newly clean same-invocation contract.
 
 ---
 
+## 2026-08-02 - WIN (LANDED): fused `a[mask].sum()` in one parallel pass, no gathered temporary - 17.9x/20.9x REPLICATED
+
+`deadlock-audit-v94ol`. New `fnp.masked_sum(a, mask)` computes `a[mask].sum()` without
+ever materialising the compacted array.
+
+**Campaign result class:** structural-gap
+
+WHY THIS IS A GAP AND NOT A SHARED COST. Whole-job profile of
+`vals[(a > lo) & (a < hi)].sum()` at 64M f64 against live NumPy 2.4.3, stage by stage:
+
+| stage | ms | % of whole job |
+|---|---|---|
+| `a > lo` | 68.88 | 14.3% |
+| `a < hi` | 67.03 | 13.9% |
+| `m1 & m2` | 37.12 | 7.7% |
+| **`vals[mask]` gather** | **311.11** | **64.7%** |
+| `.sum()` | 13.11 | 2.7% |
+| whole job | 481.21 | |
+
+The gather moves ~772 MB in 311 ms = ~2.5 GB/s, far below this box's ~47 GB/s, and
+measures **1.01x cpu/wall** — a single-threaded scalar loop, not a bandwidth wall.
+NumPy's API FORCES that materialisation: there is no fused spelling, so the compacted
+array must exist before it can be reduced. The candidate never builds it. This is the
+"incumbent cannot follow" class, not a kernel-speed contest.
+
+BIT-EXACTNESS IS THE WHOLE DESIGN, and it is not approximate. NumPy sums the COMPACTED
+sequence with its pairwise tree, whose shape depends ONLY on the compacted length k.
+`masked_pairwise_streamed` evaluates that same tree — same `<= 128` base case, same split
+at `n/2` rounded DOWN to a multiple of 8, same `base_sum_simd` leaf — pulling leaves from
+a cursor over the selected elements instead of from an array. For the parallel form,
+split points are located from band prefix sums (`masked_locate`, binary search + one
+in-band scan), so every parallel boundary is a GENUINE split point of the global tree:
+parallelism changes which thread evaluates a subtree, never the accumulation order.
+
+| run | candidate median | incumbent median | ratio | CI95 | verdict |
+|---|---|---|---|---|---|
+| A | 17.87 ms | 326.91 ms | **17.911x** | `[12.244,22.541]` | DECIDABLE_WIN |
+| B | 16.54 ms | 346.32 ms | **20.925x** | `[15.934,29.375]` | DECIDABLE_WIN |
+
+**A/A null control (same invocation):** run B candidate FNP/FNP median 1.008x CI95
+`[0.651,1.616]`, incumbent NumPy/NumPy median 1.011x CI95 `[0.916,1.105]`, 41 rounds,
+min-of-1. The effect CI `[15.934,29.375]` is disjoint from both.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 spelling=`a[mask].sum()`
+measured_ratio=20.925x
+
+**Incumbent isolation proof:** candidate=fnp.masked_sum incumbent=`a[mask].sum()`
+shared_timed_component=none
+
+ROUTE ENGAGEMENT PROOF: candidate **22.25x cpu/wall** against incumbent **1.00x** in the
+same invocation. Byte parity alone would NOT prove engagement — a silently deferred route
+would match bits while measuring NumPy against NumPy, and would read ~1.0x on both arms.
+
+COUNTED_MECHANISM: `class=materialization_elimination_and_parallelism`. Incumbent
+allocates one k-element f64 temporary (196 MB at this density) and touches it twice;
+candidate allocates nothing. Incumbent threads 1, candidate ~22.
+
+DISCLOSURE — THE OTHER NUMPY SPELLING. `np.sum(a, where=mask)` expresses the same intent
+and is also single-threaded (1.00x cpu/wall), measuring 364.79 ms; the ratio against it
+would be 20.408x. It is NOT the banked incumbent because it returns DIFFERENT BITS: it is
+not zero-substitution either (verified — `np.sum(v, where=m)` diverges from
+`np.sum(np.where(m, v, 0.0))` at n=128, density 0.5), so reproducing it exactly would mean
+tracking NumPy's masked-loop internals, which are version-dependent. `a[mask].sum()` is
+the byte-equivalent incumbent and is what the claim is made against.
+
+PARITY: `conformance_masked_sum.rs` — sizes {0,1,7,8,127,128,129,1000,4096,100k,1<<20-1,
+1<<20,1.5M} x densities {0,0.001,0.25,0.5,0.75,1.0} all byte-identical, with magnitudes
+mixed by 1e6/1e-6 so ANY reordering shows in the bits rather than hiding in rounding.
+Skewed masks (front/back/middle/stride-7/single/none/all) on the parallel path, signed
+zeros, NaN, inf, overflow. Deferrals verified to still equal NumPy: float32, integer,
+non-contiguous, 2-D C-order, and an int8 "mask" which must keep NumPy's INTEGER
+fancy-index semantics rather than being read as a boolean mask. Plus a Rust-level unit
+test comparing the streamed and parallel kernels against a compacted reference at three
+different `cut` values, so it cannot pass vacuously via deferral.
+
+PROVENANCE: `bench_elf_sha256=2716f8d4613dcd79ad35d0d64f1604e2c2bcca9235487e03b22ef79c5b4c5bcf`
+(44,889,688 bytes), built and measured on the SAME host (AMD Ryzen Threadripper PRO
+5975WX, 32 physical / 64 logical, no AVX-512), Python 3.13.7, NumPy 2.4.3,
+scipy-openblas 0.3.31.dev.
+
+BUILD-GRADE CAVEAT (understates, does not inflate): built `--release` with
+`CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16` because the full
+`lto=true, codegen-units=1` profile was killed locally under memory pressure. This is
+NOT `release-perf`. Weaker codegen can only slow the native arm; NumPy is a prebuilt
+wheel and is unaffected. The banked ratio is therefore conservative.
+
+CONTENTION DISCLOSURE: this is a shared box carrying other agents' builds and benchmarks.
+An earlier 21-round run at ~86% host-busy produced median 3.251x with a candidate A/A null
+of `[0.654,3.732]` — the effect CI overlapped the null, so that run is recorded as
+UNDECIDED and is NOT banked. Runs A and B above were taken after the box quieted and both
+carry nulls near 1.0. Contention penalises the parallel arm only.
+
+Retry predicate: revisit if NumPy ever gains a fused masked reduction, or if its pairwise
+tree changes (the parity sweep detects it).
+
+---
+
+## 2026-08-02 - REJECT (measured, no ship): compaction BLOCK SIZE is not a lever - the parallel compaction is already bandwidth-saturated
+
+`deadlock-audit-v94ol`, incidental. `compact_typed`'s parallel two-pass (shipped in
+e86f54c8 at 2.3-2.5x) uses `COMPACT_BLOCK = 1 << 20`, which at 16M elements yields only
+16 blocks against 64 logical CPUs. HYPOTHESIS: most cores idle, so a smaller block should
+recover the missing parallelism.
+
+REFUTED, measured. Standalone prototype of the identical algorithm, 50% density, block
+size swept 1<<20 down to 1<<10, byte parity asserted at every size (block size is purely a
+scheduling knob — element order is preserved, so it cannot change the result):
+
+| block | blocks @16M | ms @16M | vs 1<<20 | blocks @64M | ms @64M | vs 1<<20 |
+|---|---|---|---|---|---|---|
+| 1<<20 | 16 | 5.78 | 1.00x | 62 | 16.95 | 1.00x |
+| 1<<18 | 62 | 5.24 | 1.10x | 245 | 16.48 | 1.03x |
+| 1<<16 | 245 | **4.64** | **1.25x** | 977 | 17.08 | 0.99x |
+| 1<<14 | 977 | 5.44 | 1.06x | 3907 | 17.31 | 0.98x |
+| 1<<12 | 3907 | 8.96 | 0.65x | 15625 | 19.84 | 0.85x |
+| 1<<10 | 15625 | 7.68 | 0.75x | 62500 | 21.56 | 0.79x |
+
+At 64M the curve is FLAT (16.95 -> 17.08) and every finer block is a LOSS; at 16M the best
+case is 1.25x. 16 blocks already saturate DRAM (~40 GB/s at 16M), so the idle cores are
+not idle for want of work — there is no bandwidth left for them. Finer blocks only add
+prefix/slice overhead.
+
+WHAT THIS CORRECTS: the banked "2.3-2.5x" for parallel compaction is a SMALL-HOST number,
+not a block-size defect. The same design measures ~12.8x against a serial baseline on this
+32-physical-core box. Cross-host ratio comparison remains invalid (see
+`reduction-family-map-and-peer-collision-protocol`).
+
+
+**A/A null control (same invocation):** median ratio 1.00x CI [0.99, 1.01] on
+repeated 1<<20 control runs; block size is order-preserving so parity is exact.
+
+COUNTED_MECHANISM: allocation traffic unchanged. 16 blocks @16M already saturate
+DRAM (~40 GB/s); finer COMPACT_BLOCK only adds prefix/slice overhead (1<<12 is
+0.65x of 1<<20). Required predeclared lever "smaller block recovers idle cores"
+failed.
+
+Retry predicate: none for block size. Reopens only if the compaction stops being
+bandwidth-bound (e.g. a non-temporal-store variant that raises the ceiling).
+
 ## 2026-08-01 - FLAT `float64` SORT ISA-GATE RE-DECISION (KEEP, INCUMBENT-WIN): 1.48-1.90x on distinct data, WASH on dense ties; and a RETRACTION of my own kernel-only sweep
 
 `StormyLake`, bead `deadlock-audit-flat-f64-sort-avx2-surrender-7mh1i`, commit
