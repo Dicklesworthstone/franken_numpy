@@ -38671,9 +38671,9 @@ fn cov_gram_from_centered(centered: &[f64], n_vars: usize, n_obs: usize, ddof: u
 
     let dot8 = |ci: &[f64], cj: &[f64]| -> f64 {
         let mut acc = [0.0f64; 8];
-        let mut ca = ci.chunks_exact(8);
-        let mut cb = cj.chunks_exact(8);
-        for (ga, gb) in ca.by_ref().zip(cb.by_ref()) {
+        let (ca, ca_remainder) = ci.as_chunks::<8>();
+        let (cb, cb_remainder) = cj.as_chunks::<8>();
+        for (ga, gb) in ca.iter().zip(cb) {
             acc[0] += ga[0] * gb[0];
             acc[1] += ga[1] * gb[1];
             acc[2] += ga[2] * gb[2];
@@ -38685,7 +38685,7 @@ fn cov_gram_from_centered(centered: &[f64], n_vars: usize, n_obs: usize, ddof: u
         }
         let mut s =
             ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-        for (&a, &b) in ca.remainder().iter().zip(cb.remainder()) {
+        for (&a, &b) in ca_remainder.iter().zip(cb_remainder) {
             s += a * b;
         }
         s
@@ -38727,12 +38727,17 @@ fn cov_gram_from_centered(centered: &[f64], n_vars: usize, n_obs: usize, ddof: u
                 // in ascending ch order, multiply then add under +avx2 without
                 // +fma), so every cell stays bit-identical.
                 let (r0, r1, r2, r3) = (row(i0), row(i0 + 1), row(i0 + 2), row(i0 + 3));
-                for ((((b, a0), a1), a2), a3) in cj[..tail]
-                    .chunks_exact(8)
-                    .zip(r0[..tail].chunks_exact(8))
-                    .zip(r1[..tail].chunks_exact(8))
-                    .zip(r2[..tail].chunks_exact(8))
-                    .zip(r3[..tail].chunks_exact(8))
+                let (b_chunks, _) = cj[..tail].as_chunks::<8>();
+                let (a0_chunks, _) = r0[..tail].as_chunks::<8>();
+                let (a1_chunks, _) = r1[..tail].as_chunks::<8>();
+                let (a2_chunks, _) = r2[..tail].as_chunks::<8>();
+                let (a3_chunks, _) = r3[..tail].as_chunks::<8>();
+                for ((((b, a0), a1), a2), a3) in b_chunks
+                    .iter()
+                    .zip(a0_chunks)
+                    .zip(a1_chunks)
+                    .zip(a2_chunks)
+                    .zip(a3_chunks)
                 {
                     let bv = Lanes::from_slice(b);
                     acc[0] += Lanes::from_slice(a0) * bv;
