@@ -36,20 +36,21 @@ use fnp_random::{
     SeedMaterial, SeedSequence, SeedSequenceSnapshot, ShapedRandomOutput,
 };
 use fnp_ufunc::{
-    BinaryOp, FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
-    FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError, MaskedArray, UFuncArray, UnaryOp,
-    bitwise_and as ufunc_bitwise_and, bitwise_count as ufunc_bitwise_count,
-    bitwise_or as ufunc_bitwise_or, bitwise_xor as ufunc_bitwise_xor, divide as ufunc_divide,
-    divmod_arrays as ufunc_divmod, equal as ufunc_equal, fmax as ufunc_fmax, fmin as ufunc_fmin,
-    frexp as ufunc_frexp, greater as ufunc_greater, greater_equal as ufunc_greater_equal,
-    isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, left_shift as ufunc_left_shift,
-    less as ufunc_less, less_equal as ufunc_less_equal, logaddexp2 as ufunc_logaddexp2,
+    BinaryOp, FloatErrorMode, FromPyFuncReduceAxisSpec, FromPyFuncReduceError,
+    FromPyFuncReduceIdentity, FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError,
+    MaskedArray, UFuncArray, UnaryOp, bitwise_and as ufunc_bitwise_and,
+    bitwise_count as ufunc_bitwise_count, bitwise_or as ufunc_bitwise_or,
+    bitwise_xor as ufunc_bitwise_xor, divide as ufunc_divide, divmod_arrays as ufunc_divmod,
+    equal as ufunc_equal, fmax as ufunc_fmax, fmin as ufunc_fmin, frexp as ufunc_frexp,
+    greater as ufunc_greater, greater_equal as ufunc_greater_equal, isneginf as ufunc_isneginf,
+    isposinf as ufunc_isposinf, left_shift as ufunc_left_shift, less as ufunc_less,
+    less_equal as ufunc_less_equal, logaddexp2 as ufunc_logaddexp2,
     logical_and as ufunc_logical_and, logical_not as ufunc_logical_not,
     logical_or as ufunc_logical_or, logical_xor as ufunc_logical_xor, ma_is_masked, ma_make_mask,
     ma_mask_or, matmul_accumulate_serial, maximum as ufunc_maximum, minimum as ufunc_minimum,
     modf as ufunc_modf, not_equal as ufunc_not_equal, power as ufunc_power,
     reduce_frompyfunc_values, remainder as ufunc_remainder, right_shift as ufunc_right_shift,
-    signbit as ufunc_signbit, spacing as ufunc_spacing,
+    signbit as ufunc_signbit, spacing as ufunc_spacing, take_float_error_events,
 };
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{
@@ -7638,6 +7639,155 @@ fn numpy_explog_matches_libm() -> bool {
 #[cfg(not(target_arch = "x86_64"))]
 fn numpy_explog_matches_libm() -> bool {
     false
+}
+
+// Runtime BYTE-EQUALITY PROBE of a NumPy f64 unary kernel against the scalar
+// libm call fnp's native path makes for the same op. Where `numpy_explog_matches_libm`
+// above encodes a cross-host *finding* about exp/log as an ISA predicate, this
+// asks NumPy directly, because that finding does not generalize op-by-op:
+// NumPy's dispatch table is per-op, per-ISA AND per-version, and for `tanh` it is
+// already different. Measured 2026-08-04, thinkstation1, NumPy 2.4.3, AVX2
+// (`SIMD Extensions: baseline X86_V2, found X86_V3`, no AVX-512): `np.tanh`
+// differs from libm `tanh` on 9.9% (args in +-40), 26.7% (+-5), 34.1% (+-1e-3)
+// and 47.2% (+-1) of elements, by up to 3 ULP. An `!avx512f` guess would have
+// declared that host byte-equal and kept shipping a divergent `fnp.tanh`.
+//
+// Returns false (delegate to NumPy) on ANY probe failure: parity is the
+// fail-closed direction, matching the runtime's fail-closed doctrine for
+// unknown semantics.
+//
+// Cached per NumPy function name; the probe runs at most once per name per
+// process. Adding an op is one call site, which is what the AVX-512
+// transcendental sibling (deadlock-audit-fs5pu) needs.
+fn numpy_f64_unary_matches_libm(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    numpy_name: &'static str,
+    native: fn(f64) -> f64,
+    low: f64,
+    high: f64,
+) -> bool {
+    static PROBED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<&'static str, bool>>,
+    > = std::sync::OnceLock::new();
+    let cache = PROBED.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(&known) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(numpy_name)
+    {
+        return known;
+    }
+
+    // Long enough that NumPy runs its vector body rather than only a scalar
+    // tail, and swept across the op's whole DOMAIN so a kernel that only parts
+    // from libm in one region is still caught.
+    //
+    // The domain is per-op and must stay inside it. Sampling `arccosh` below 1
+    // or `arcsin` outside [-1, 1] yields NaN on both sides, and NaN payload bits
+    // are not required to agree between NumPy and libm — the probe would read
+    // that as a divergence and defer an op that is in fact byte-exact, costing
+    // the native path for nothing.
+    const PROBE_LEN: usize = 4096;
+    let span = high - low;
+    let samples: Vec<f64> = (0..PROBE_LEN)
+        .map(|i| low + span * (i as f64) / ((PROBE_LEN - 1) as f64))
+        .collect();
+
+    let probe = || -> PyResult<bool> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "float64")?;
+        let arr = numpy.call_method("asarray", (samples.clone(),), Some(&kwargs))?;
+        let theirs: Vec<f64> = numpy
+            .getattr(numpy_name)?
+            .call1((&arr,))?
+            .call_method0("tolist")?
+            .extract()?;
+        if theirs.len() != samples.len() {
+            return Ok(false);
+        }
+        Ok(samples
+            .iter()
+            .zip(theirs.iter())
+            .all(|(&x, &t)| native(x).to_bits() == t.to_bits()))
+    };
+    let matches = probe().unwrap_or(false);
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(numpy_name, matches);
+    matches
+}
+
+// The scalar-libm transcendental set fnp routes natively for f64, each with the
+// NumPy name to probe and an argument range inside its domain.
+//
+// Every one of these is a candidate for the same defect `tanh` had: NumPy may
+// dispatch a vectorized kernel that is not the system libm, and fnp's native
+// routes all compute the scalar libm call, so where they differ fnp is not a
+// drop-in. Which ops actually diverge is per-op AND per-ISA AND per-NumPy-version
+// — on this AVX2 host (NumPy 2.4.3) only `tanh` does, while
+// deadlock-audit-fs5pu records twelve more diverging on an AVX-512 host with
+// NumPy 2.3.5. Rather than encode either host's answer, probe every op and let
+// the host decide: where NumPy is libm the native parallel path is kept at no
+// cost, and where it is not the call delegates and stays byte-exact.
+//
+// exp/exp2/log/log2/log10 are deliberately absent: they carry their own
+// `numpy_explog_matches_libm` ISA gate, whose cross-host control isolated the
+// relation properly (NumPy version held fixed, ISA varied). Folding them in here
+// is deadlock-audit-gkznn's call, not this one's.
+/// A probed op: the NumPy function name, the scalar call fnp's native routes
+/// make, and the closed argument range to sweep (inside the op's domain).
+struct ProbedUnary {
+    numpy_name: &'static str,
+    native: fn(f64) -> f64,
+    low: f64,
+    high: f64,
+}
+
+fn probed_f64_unary(op: UnaryOp) -> Option<ProbedUnary> {
+    let (numpy_name, native, low, high): (&'static str, fn(f64) -> f64, f64, f64) = match op {
+        UnaryOp::Sin => ("sin", |v| UnaryOp::Sin.apply(v), -5.0, 5.0),
+        UnaryOp::Cos => ("cos", |v| UnaryOp::Cos.apply(v), -5.0, 5.0),
+        UnaryOp::Tan => ("tan", |v| UnaryOp::Tan.apply(v), -1.5, 1.5),
+        UnaryOp::Arcsin => ("arcsin", |v| UnaryOp::Arcsin.apply(v), -1.0, 1.0),
+        UnaryOp::Arccos => ("arccos", |v| UnaryOp::Arccos.apply(v), -1.0, 1.0),
+        UnaryOp::Arctan => ("arctan", |v| UnaryOp::Arctan.apply(v), -40.0, 40.0),
+        UnaryOp::Sinh => ("sinh", |v| UnaryOp::Sinh.apply(v), -5.0, 5.0),
+        UnaryOp::Cosh => ("cosh", |v| UnaryOp::Cosh.apply(v), -5.0, 5.0),
+        UnaryOp::Tanh => ("tanh", |v| UnaryOp::Tanh.apply(v), -4.0, 4.0),
+        UnaryOp::Arcsinh => ("arcsinh", |v| UnaryOp::Arcsinh.apply(v), -40.0, 40.0),
+        UnaryOp::Arccosh => ("arccosh", |v| UnaryOp::Arccosh.apply(v), 1.000_1, 40.0),
+        UnaryOp::Arctanh => ("arctanh", |v| UnaryOp::Arctanh.apply(v), -0.99, 0.99),
+        UnaryOp::Cbrt => ("cbrt", |v| UnaryOp::Cbrt.apply(v), -40.0, 40.0),
+        UnaryOp::Expm1 => ("expm1", |v| UnaryOp::Expm1.apply(v), -5.0, 5.0),
+        UnaryOp::Log1p => ("log1p", |v| UnaryOp::Log1p.apply(v), -0.9, 40.0),
+        _ => return None,
+    };
+    Some(ProbedUnary {
+        numpy_name,
+        native,
+        low,
+        high,
+    })
+}
+
+fn numpy_f64_native_unary_is_byte_exact(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    op: UnaryOp,
+) -> bool {
+    match probed_f64_unary(op) {
+        Some(probed) => numpy_f64_unary_matches_libm(
+            py,
+            numpy,
+            probed.numpy_name,
+            probed.native,
+            probed.low,
+            probed.high,
+        ),
+        None => true, // not a probed scalar-libm op; nothing to decide here
+    }
 }
 
 // Fused single-pass transcendental map + float-error-event detection over the
@@ -26671,6 +26821,18 @@ fn matrix_rank(
         Err(_) => return fallback(),
     };
     let shape = array.shape();
+    // Zero-size input has no error surface of its own here: numpy's matrix_rank
+    // reduces the (empty) singular-value vector with `S.max(axis=-1)`, and every
+    // released numpy (checked 1.26.4 and 2.4.3) passes no `initial`, so it raises
+    // ValueError("zero-size array to reduction operation maximum which has no
+    // identity"). Upstream main (2.5.0.dev0, the vendored oracle in
+    // legacy_numpy_code) added `initial=0` and will return 0 instead. Native
+    // ranking would silently return 0 on both. Defer so the observable behaviour
+    // — value or exception — tracks whichever numpy is actually installed
+    // instead of pinning one side of that upstream change.
+    if shape.contains(&0) {
+        return fallback();
+    }
     // Batched (stacked) square inputs: rank every lane natively via the parallel
     // batch_matrix_rank instead of passing the whole stack through to numpy (whose
     // batched matrix_rank is a serial per-lane SVD in C). rank is a deterministic
@@ -40171,6 +40333,10 @@ fn masked_pairwise_parallel(
     n: usize,
     cut: usize,
 ) -> f64 {
+    // The pairwise reduction's leaf is 128 elements.  A smaller caller cutoff
+    // would eventually reach 9..15 elements, whose rounded split is zero and
+    // therefore cannot make recursive progress.
+    let cut = cut.max(128);
     if n <= cut {
         let mut buf = [0.0f64; 128];
         let mut stream = MaskedStream {
@@ -44677,15 +44843,13 @@ fn try_zerocopy_f64_vector_norm_axis(
     // above ~1e5 total elements.
     const NORM_AXIS_PARALLEL_MIN: usize = 98_304;
     let total = data.len();
-    let out: Vec<f64>;
-    let out_shape: Vec<usize>;
-    if ax == ndim - 1 {
+    let (out, out_shape) = if ax == ndim - 1 {
         // Contiguous last-axis lanes (inner == 1): each lane is one chunk; the pairwise
         // tree (L2/L1) is bit-identical to numpy's add.reduce over the materialized temp.
         let outer: usize = shape[..ax].iter().product();
         let parallel =
             outer * axis_len >= NORM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
-        out = if parallel {
+        let out: Vec<f64> = if parallel {
             data.par_chunks_exact(axis_len).map(lane_norm).collect()
         } else {
             data.chunks_exact(axis_len).map(lane_norm).collect()
@@ -44694,7 +44858,7 @@ fn try_zerocopy_f64_vector_norm_axis(
         if keepdims {
             s.push(1);
         }
-        out_shape = s;
+        (out, s)
     } else {
         // Non-last single axis (inner > 1, strided lanes): numpy's per-axis reduce uses a
         // different summation order than a per-lane gather, so an ORDER-DEPENDENT reduce
@@ -44828,15 +44992,14 @@ fn try_zerocopy_f64_vector_norm_axis(
         } else {
             reduce_rows(data, &mut out_vec, alen);
         }
-        out = out_vec;
         let mut s: Vec<usize> = Vec::with_capacity(ndim);
         s.extend_from_slice(&shape[..ax]);
         if keepdims {
             s.push(1);
         }
         s.extend_from_slice(&shape[ax + 1..]);
-        out_shape = s;
-    }
+        (out_vec, s)
+    };
     let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
     let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
     if out_shape.is_empty() {
@@ -44927,13 +45090,11 @@ fn try_zerocopy_f32_vector_norm_axis(
             _ => unreachable!(),
         }
     };
-    let out: Vec<f32>;
-    let out_shape: Vec<usize>;
-    if ax == ndim - 1 {
+    let (out, out_shape) = if ax == ndim - 1 {
         let outer: usize = shape[..ax].iter().product();
         let parallel =
             outer * axis_len >= NORM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
-        out = if parallel {
+        let out: Vec<f32> = if parallel {
             data.par_chunks_exact(axis_len).map(lane_norm).collect()
         } else {
             data.chunks_exact(axis_len).map(lane_norm).collect()
@@ -44942,7 +45103,7 @@ fn try_zerocopy_f32_vector_norm_axis(
         if keepdims {
             s.push(1);
         }
-        out_shape = s;
+        (out, s)
     } else {
         let inner: usize = shape[ax + 1..].iter().product();
         let outer: usize = shape[..ax].iter().product();
@@ -45057,15 +45218,14 @@ fn try_zerocopy_f32_vector_norm_axis(
         } else {
             reduce_rows(data, &mut out_vec, alen);
         }
-        out = out_vec;
         let mut s: Vec<usize> = Vec::with_capacity(ndim);
         s.extend_from_slice(&shape[..ax]);
         if keepdims {
             s.push(1);
         }
         s.extend_from_slice(&shape[ax + 1..]);
-        out_shape = s;
-    }
+        (out_vec, s)
+    };
     let flat = numpy_array_from_slice(py, &numpy, &out, "float32")?;
     let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
     if out_shape.is_empty() {
@@ -53709,6 +53869,39 @@ fn native_unary_promoting(
     {
         return Ok(out);
     }
+    // SCALAR-LIBM TRANSCENDENTALS: delegate wherever NumPy's f64 kernel is not
+    // the system libm. Every native route below computes the same scalar
+    // `UnaryOp::apply` call — the zero-copy buffer map, the direct-f64 bridge
+    // and the UFuncArray elementwise path alike — so where NumPy has dispatched
+    // a vectorized kernel instead, none of them is a drop-in and the deferral
+    // has to happen here, above all three, rather than inside one of them.
+    //
+    // WHICH ops diverge is per-op AND per-ISA AND per-NumPy-version, so this
+    // asks the host rather than guessing (`probed_f64_unary` carries the set and
+    // each op's domain). Two measured points, and they disagree, which is the
+    // whole reason this is a probe: on this AVX2 host with NumPy 2.4.3 only
+    // `tanh` differs — 9.9-47.2% of elements by up to 3 ULP depending on the
+    // argument range (deadlock-audit-d4mc2) — while an AVX-512 host with NumPy
+    // 2.3.5 has twelve more diverging by 1-3 ULP (deadlock-audit-fs5pu).
+    // `numpy_explog_matches_libm`'s `!avx512f` predicate is right for exp/log,
+    // whose relation was isolated properly by holding the NumPy version fixed
+    // and varying only the ISA, but it does NOT generalize op-by-op: tanh
+    // diverges on plain AVX2, where that predicate says byte-equal.
+    //
+    // Hosts whose NumPy kernel really is libm keep the parallel native path at
+    // no cost; only hosts where we would otherwise be wrong pay the passthrough.
+    //
+    // For `tanh` this NARROWS the tanh column of the 2026-07-10 `f64
+    // transcendental unary zero-copy fused-defer path (15 ops)` ledger row, and
+    // only that column. That row's own three-worker tanh spread is
+    // 0.757 LOSS / 1.372 / 1.613, and the LOSS came from an AVX2 host running
+    // NumPy 2.4.6 — exactly the class this probe defers, so there the deferral
+    // is not a give-up. The row itself is left untouched (the ledger_integrity
+    // pre-commit hook holds historical rows to the current evidence standard,
+    // which a 2026-07-10 row cannot retroactively meet).
+    if !numpy_f64_native_unary_is_byte_exact(py, &numpy, op) {
+        return fallback(py);
+    }
     // Zero-copy fast path: exact float64 C-contiguous ndarray inputs skip the
     // cold extract Vec entirely (see zerocopy_f64_unary_flat). Integer inputs
     // (which this promoting path widens to float) are not float64 ndarrays, so
@@ -53800,6 +53993,21 @@ fn native_unary_promoting(
     Ok(output)
 }
 
+fn emit_native_float_warnings(py: Python<'_>) -> PyResult<()> {
+    let events = take_float_error_events();
+    if events.is_empty() {
+        return Ok(());
+    }
+    let warnings = py.import("warnings")?;
+    let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
+    for event in events {
+        if matches!(event.mode, FloatErrorMode::Warn) {
+            warnings.call_method1("warn", (event.message, &category))?;
+        }
+    }
+    Ok(())
+}
+
 fn native_unary_promoting_or_passthrough(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -53810,7 +54018,10 @@ fn native_unary_promoting_or_passthrough(
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
         let x = args.get_item(0)?;
-        native_unary_promoting(py, &x, op, numpy_name, context)
+        take_float_error_events();
+        let result = native_unary_promoting(py, &x, op, numpy_name, context);
+        emit_native_float_warnings(py)?;
+        result
     } else {
         core_numpy_passthrough(py, numpy_name, args, kwargs)
     }
@@ -63189,6 +63400,61 @@ fn f64_flat_sort_native_is_profitable() -> bool {
         return false; // unmeasured at high core count; keep the prior surrender
     }
     !numpy_f64_qsort_is_simd() || rayon::current_num_threads() >= F64_FLAT_SORT_SIMD_MIN_THREADS
+}
+
+// FLAT f64 `np.unique`, re-decided 2026-08-04 from a blanket AVX2 surrender to a
+// worker floor (deadlock-audit-f64-unique-flat-avx2-surrender-hey9a). BOTH halves
+// of the old gate's recorded basis — "0.995x on distinct data and 0.547x on dense
+// ties" — were small-worker artifacts, the same core-count-vs-ISA confound the
+// flat-sort sibling above carried.
+//
+// Incumbent topology measured BEFORE any candidate existed: numpy.unique is
+// single-threaded at cpu/wall 0.997-1.000 at every size and tie density sampled
+// (n = 4M/16M/64M crossed with 4M/1M/64/2 distinct), and its np.sort is 73% of the
+// job on distinct input, 87% on dense ties. Dense ties buy NumPy no threading;
+// they only make its sort cheaper in absolute terms.
+//
+// Ratio vs live NumPy 2.4.3, same invocation, dual-null median-CI gate, on a
+// 32-physical/64-logical Threadripper PRO 5975WX (AVX2, no AVX-512). DW =
+// DECIDABLE_WIN, UND = UNDECIDED (effect CI overlaps a null CI):
+//
+//   corpus (n, values drawn from) |    4T    |    8T    |   16T    |   32T
+//   -----------------------------+----------+----------+----------+---------
+//   uniform  4M, all distinct     | 1.040 DW | 1.525 DW | 1.885 DW | 2.18 DW
+//   uniform 16M, all distinct     |     -    | 1.326 DW | 1.492 DW | 1.51 DW
+//   uniform 64M, all distinct     |     -    |     -    | 1.677 DW | 1.76 DW
+//   16M from 1M distinct          |     -    | 1.611 DW | 1.868 DW | 1.95 DW
+//   16M from 64 distinct          | 1.012 UND| 1.094 DW | 1.101 DW | 1.21 DW
+//   64M from 64 distinct          |     -    | 1.313 DW | 1.313 DW | 1.30 DW
+//   16M from 2 distinct           | 0.999 UND| 0.996 UND| 1.030 UND| 1.16 DW
+//
+// TWO MECHANISMS, and they behave differently in the worker count. The
+// compute-bound rows (distinct, and 1M-distinct) scale: 1.04 -> 1.53 -> 1.89 ->
+// 2.18. The bandwidth-bound dense-tie rows are FLAT: 64-distinct at 64M reads
+// 1.313 / 1.313 / 1.302 across 8/16/32. With few distinct values
+// `par_sort_unstable` is near-linear and the cost collapses onto the input copy
+// and the defer scan, which no extra worker helps.
+//
+// FLOOR AT 8, where the knee is. At 8 workers five of the six measured corpora
+// are DECIDABLE_WIN at 1.09-1.61x and the sixth is a measured WASH, not a loss.
+// At 4 workers the route has essentially no margin anywhere: both tie corpora are
+// UNDECIDED and the one row that decides does so at 1.040x, inside the noise a
+// different host would produce.
+//
+// THE 2-DISTINCT CORNER IS PARITY, NOT A WIN, AND IS NOT SOLD AS ONE. It reads
+// 0.999 / 0.996 / 1.030 UNDECIDED at 4/8/16 and decided exactly once, at 32
+// (1.159x), unreplicated; a separate ELF measured the same corpus at 16 as 1.169
+// and 1.125 DW, so 1.03-1.17 is its run-to-run spread. Enabling the route there
+// costs nothing measurable, which is why the wash does not hold the floor
+// hostage — but nothing here claims a speedup for `unique` on an array with a
+// handful of distinct values.
+const F64_UNIQUE_SIMD_MIN_THREADS: usize = 8;
+
+fn f64_unique_native_is_profitable() -> bool {
+    if numpy_f64_qsort_is_avx512() {
+        return false; // unmeasured in either direction; keep the prior surrender
+    }
+    !numpy_f64_qsort_is_simd() || rayon::current_num_threads() >= F64_UNIQUE_SIMD_MIN_THREADS
 }
 
 // Parallel flat f64 sort. numpy.sort is single-threaded introsort; for a 1-D C-contiguous
@@ -92529,13 +92795,14 @@ fn try_zerocopy_f64_unique_flat(
     py: Python<'_>,
     item: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    // Stale-basis regate (2026-07-14, sibling of the flat f64 sort regate):
-    // numpy 2.x's SIMD introsort saturates the f64 unique basis on avx2+
-    // hosts - gate-measured 0.995x on distinct data and 0.547x on dense ties
-    // (numpy's sort+flags+compress beats the par_sort+dedup outright there).
-    // Pre-AVX2/non-x86 hosts keep the arm and its original margin. The
-    // binary-grid bucket path above is O(n+range), not sort-based - unaffected.
-    if numpy_f64_qsort_is_simd() {
+    // Worker floor, not a blanket AVX2 surrender: the 2026-07-14 regate's basis
+    // ("0.995x on distinct data and 0.547x on dense ties") was measured on a
+    // small worker and does not survive at 8+ (see F64_UNIQUE_SIMD_MIN_THREADS
+    // for the full 4/8/16/32-worker table and the two mechanisms behind it).
+    // Pre-AVX2 / non-x86 hosts keep the arm unconditionally as before, and the
+    // binary-grid bucket path earlier in this file is O(n+range) rather than
+    // sort-based, so it is unaffected either way.
+    if !f64_unique_native_is_profitable() {
         return Ok(None);
     }
     let numpy = py.import("numpy")?;
@@ -101517,7 +101784,7 @@ fn try_zerocopy_int_ptp_axis(
             numpy.getattr("ptp")?.call((a,), Some(&kwargs))?.unbind(),
         ));
     }
-    let result = match (kind.as_str(), itemsize) {
+    let Some((flat, out_shape)) = (match (kind.as_str(), itemsize) {
         ("i", 1) => ptp_axis_typed::<i8, _>(py, &numpy, a, axis, "int8", |x, y| x.wrapping_sub(y))?,
         ("i", 2) => {
             ptp_axis_typed::<i16, _>(py, &numpy, a, axis, "int16", |x, y| x.wrapping_sub(y))?
@@ -101541,8 +101808,7 @@ fn try_zerocopy_int_ptp_axis(
             ptp_axis_typed::<u64, _>(py, &numpy, a, axis, "uint64", |x, y| x.wrapping_sub(y))?
         }
         _ => return Ok(None),
-    };
-    let Some((flat, out_shape)) = result else {
+    }) else {
         return Ok(None);
     };
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
@@ -104709,11 +104975,9 @@ fn try_native_datetime_as_string_day(
                 return Ok(None);
             }
         }
-        2 => {
-            if cin.par_iter().any(|&v| v > i64::MAX - 1970) {
-                return Ok(None);
-            }
-        }
+        // Guard rather than an `if` inside the arm: with the guard false this
+        // falls through to `_ => {}`, exactly as the inner `if` did.
+        2 if cin.par_iter().any(|&v| v > i64::MAX - 1970) => return Ok(None),
         _ => {}
     }
     let kwargs = PyDict::new(py);
@@ -107459,6 +107723,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn masked_pairwise_parallel_clamps_subleaf_cutoff() {
+        let data: Vec<f64> = (0..129).map(|i| i as f64 - 64.0).collect();
+        let mask = vec![1u8; data.len()];
+        let prefix = vec![0, data.len()];
+        let expected = masked_sum_reference(&data, 0, data.len());
+
+        let actual = masked_pairwise_parallel(&mask, &data, &prefix, 0, 0, data.len(), 8);
+
+        assert_eq!(actual.to_bits(), expected.to_bits());
     }
 
     fn with_python(test: impl FnOnce(Python<'_>) -> PyResult<()>) {
@@ -118337,6 +118613,49 @@ mod tests {
                     .extract::<bool>()?,
                 "matrix_rank batched diverged"
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn matrix_rank_zero_size_error_surface_matches_numpy() {
+        // Zero-size input is the one matrix_rank case where numpy's own
+        // behaviour is not stable across releases: every released numpy
+        // (1.26.4 and 2.4.3 both checked) raises ValueError out of
+        // `S.max(axis=-1)` over the empty singular-value vector, while upstream
+        // main (2.5.0.dev0, the vendored oracle) passes `initial=0` and returns
+        // 0. fnp must pin neither side — it must reproduce whatever numpy is
+        // installed. A native ranking path that quietly returns 0 fails this on
+        // every released numpy, which is exactly the divergence
+        // `linalg_error_surface_probe` caught
+        // (deadlock-audit-linalg-matrix-rank-error-surface-pdrxy).
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let matrix_rank_fn = module.getattr("matrix_rank")?;
+            let numpy = py.import("numpy")?;
+            let numpy_matrix_rank = numpy.getattr("linalg")?.getattr("matrix_rank")?;
+            let zeros = numpy.getattr("zeros")?;
+
+            // 2-D zero-size in both orientations, the square 0x0 case, a batched
+            // stack whose lanes are themselves zero-size, a zero-length batch of
+            // well-formed lanes, and the 1-D empty vector.
+            let shapes: [&[i64]; 6] = [&[0, 3], &[3, 0], &[0, 0], &[2, 0, 0], &[0, 3, 3], &[0]];
+            for shape in shapes {
+                let arr = zeros.call1((PyTuple::new(py, shape.iter().copied())?,))?;
+                let ours =
+                    call_outcome(py, &matrix_rank_fn, &PyTuple::new(py, [arr.clone()])?, None)?;
+                let theirs = call_outcome(py, &numpy_matrix_rank, &PyTuple::new(py, [arr])?, None)?;
+                assert_eq!(
+                    ours, theirs,
+                    "matrix_rank(zeros({shape:?})) diverged from numpy"
+                );
+            }
 
             Ok(())
         });
@@ -152313,6 +152632,68 @@ mod tests {
     }
 
     #[test]
+    fn native_unary_f64_float_errors_match_numpy_runtimewarnings() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let warnings = py.import("warnings")?;
+            let catch_warnings = warnings.getattr("catch_warnings")?;
+            let record_warnings = PyDict::new(py);
+            record_warnings.set_item("record", true)?;
+            let input = numpy.getattr("array")?.call1((vec![2.0_f64],))?;
+
+            let ours_ctx = catch_warnings.call((), Some(&record_warnings))?;
+            let ours_records = ours_ctx.call_method0("__enter__")?;
+            warnings.call_method1("simplefilter", ("always",))?;
+            let ours = module.getattr("arcsin")?.call1((input.clone(),))?;
+            ours_ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+
+            let numpy_ctx = catch_warnings.call((), Some(&record_warnings))?;
+            let numpy_records = numpy_ctx.call_method0("__enter__")?;
+            warnings.call_method1("simplefilter", ("always",))?;
+            let expected = numpy.getattr("arcsin")?.call1((input.clone(),))?;
+            numpy_ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+
+            assert_array_matches_numpy(&ours, &expected)?;
+            assert_eq!(
+                ours_records.call_method0("__len__")?.extract::<usize>()?,
+                numpy_records.call_method0("__len__")?.extract::<usize>()?,
+                "native f64 arcsin must emit the same warning count as NumPy"
+            );
+            assert_eq!(
+                ours_records
+                    .get_item(0)?
+                    .getattr("category")?
+                    .getattr("__name__")?
+                    .extract::<String>()?,
+                "RuntimeWarning"
+            );
+
+            // Draining after the native call prevents an invalid event from
+            // leaking into the next warning-free unary operation.
+            let clean_ctx = catch_warnings.call((), Some(&record_warnings))?;
+            let clean_records = clean_ctx.call_method0("__enter__")?;
+            warnings.call_method1("simplefilter", ("always",))?;
+            let _ = module
+                .getattr("sqrt")?
+                .call1((numpy.getattr("array")?.call1((vec![4.0_f64],))?,))?;
+            clean_ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+            assert_eq!(
+                clean_records.call_method0("__len__")?.extract::<usize>()?,
+                0,
+                "a prior native float error must not leak into a clean call"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn native_unary_f64_boundary_outputs_match_numpy_golden_sha256() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -152920,6 +153301,349 @@ mod tests {
                 env!("CARGO_PKG_VERSION"),
                 "__version__ must track the fnp-python crate's Cargo.toml version"
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn flat_f64_unique_woken_route_is_byte_exact_and_defers_correctly() {
+        // `try_zerocopy_f64_unique_flat` was dead on every AVX2 host until the
+        // blanket ISA surrender became a worker floor
+        // (deadlock-audit-f64-unique-flat-avx2-surrender-hey9a). Two things have
+        // to hold for that to be safe, and only one of them is about bytes.
+        //
+        // 1. The woken body must be byte-exact where it ENGAGES. Waking a
+        //    dormant route is how the flat-sort sibling discovered a regression
+        //    hiding inside its own body, so the engaging cases are checked
+        //    against live NumPy rather than assumed correct.
+        // 2. It must still DEFER on everything its preconditions exclude — NaN,
+        //    both signed zeros present, non-contiguous, below the size gate —
+        //    and NumPy's answer must come back unchanged through the
+        //    passthrough.
+        //
+        // NATIVE_ARM_REACHABLE is printed because a green run here proves
+        // nothing on its own: on a host below the floor every case below takes
+        // the NumPy passthrough and the whole test passes while measuring
+        // NumPy against itself.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let fnp_unique = module.getattr("unique")?;
+            let np_unique = numpy.getattr("unique")?;
+            assert!(
+                !fnp_unique.is(&np_unique),
+                "dispatch trap: fnp.unique resolved to the NumPy callable"
+            );
+            println!(
+                "NATIVE_ARM_REACHABLE={} host_avx2={} host_avx512f={} rayon_workers={} floor={}",
+                super::f64_unique_native_is_profitable(),
+                std::arch::is_x86_feature_detected!("avx2"),
+                std::arch::is_x86_feature_detected!("avx512f"),
+                rayon::current_num_threads(),
+                super::F64_UNIQUE_SIMD_MIN_THREADS,
+            );
+
+            // Corpora are built off the 1/16 binary grid so the earlier
+            // `try_zerocopy_f64_unique_binary_grid` route cannot claim them —
+            // integer-valued f64 would silently be handled there instead, which
+            // would make this test say nothing about the sort route.
+            let ns = PyDict::new(py);
+            py.run(
+                std::ffi::CString::new(
+                    "import numpy as np\n\
+                     rng = np.random.default_rng(20260804)\n\
+                     n = (1 << 20) + 3\n\
+                     engages_distinct = rng.random(n)\n\
+                     pool = rng.random(37)\n\
+                     engages_dense_ties = pool[rng.integers(0, 37, n)]\n\
+                     engages_all_same = np.full(n, float(pool[0]))\n\
+                     engages_plus_zero = np.concatenate([np.zeros(n // 2), pool[rng.integers(0, 37, n - n // 2)]])\n\
+                     engages_minus_zero = np.concatenate([np.full(n // 2, -0.0), pool[rng.integers(0, 37, n - n // 2)]])\n\
+                     engages_extremes = np.concatenate([rng.random(n - 4), np.array([np.inf, -np.inf, 5e-324, 1.7976931348623157e308])])\n\
+                     engages_2d = rng.random((1024, 1024 + 1))\n\
+                     defers_nan = np.concatenate([rng.random(n - 2), np.array([np.nan, np.nan])])\n\
+                     defers_both_zeros = np.concatenate([np.zeros(2), np.full(2, -0.0), rng.random(n - 4)])\n\
+                     defers_strided = rng.random(2 * n)[::2]\n\
+                     defers_small = rng.random(1024)\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&ns),
+                Some(&ns),
+            )?;
+
+            for name in [
+                "engages_distinct",
+                "engages_dense_ties",
+                "engages_all_same",
+                "engages_plus_zero",
+                "engages_minus_zero",
+                "engages_extremes",
+                "engages_2d",
+                "defers_nan",
+                "defers_both_zeros",
+                "defers_strided",
+                "defers_small",
+            ] {
+                let input = ns.get_item(name).expect("corpus present");
+                let ours = fnp_unique.call1((&input,))?;
+                let theirs = np_unique.call1((&input,))?;
+                assert_eq!(
+                    ours.getattr("dtype")?.str()?.to_string(),
+                    theirs.getattr("dtype")?.str()?.to_string(),
+                    "unique({name}) dtype diverges from numpy"
+                );
+                assert_eq!(
+                    ours.getattr("shape")?.extract::<Vec<usize>>()?,
+                    theirs.getattr("shape")?.extract::<Vec<usize>>()?,
+                    "unique({name}) shape diverges from numpy"
+                );
+                assert_eq!(
+                    ours.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    theirs.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "unique({name}) is not byte-exact vs numpy"
+                );
+            }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn every_probed_f64_transcendental_is_byte_exact_with_numpy() {
+        // The whole scalar-libm transcendental set, not just the one op that
+        // happens to diverge on this host. `tanh` is the AVX2 case
+        // (deadlock-audit-d4mc2); deadlock-audit-fs5pu records twelve more
+        // diverging on an AVX-512 host with NumPy 2.3.5, which THIS host cannot
+        // reproduce — it is AVX2-only. The probe is what makes that fixable from
+        // here: it decides per host, so the AVX-512 divergence is handled
+        // without an AVX-512 box, and the assertion below is what proves the
+        // decision was right on whatever host runs it.
+        //
+        // Each op is sampled inside its own domain. Sampling out of domain
+        // (arccosh below 1, arcsin outside [-1,1]) gives NaN on both sides, and
+        // NaN payload bits need not agree between NumPy and libm — that would
+        // read as a divergence and defer an op that is actually byte-exact.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            // (fnp name, numpy name, domain) — the domains match
+            // `probed_f64_unary`'s, which is the point: the test exercises the
+            // same regions the probe judges on.
+            let ops: [(&str, &str, f64, f64); 20] = [
+                ("sin", "sin", -5.0, 5.0),
+                ("cos", "cos", -5.0, 5.0),
+                ("tan", "tan", -1.5, 1.5),
+                ("arcsin", "arcsin", -1.0, 1.0),
+                ("arccos", "arccos", -1.0, 1.0),
+                ("arctan", "arctan", -40.0, 40.0),
+                ("sinh", "sinh", -5.0, 5.0),
+                ("cosh", "cosh", -5.0, 5.0),
+                ("tanh", "tanh", -4.0, 4.0),
+                ("arcsinh", "arcsinh", -40.0, 40.0),
+                ("arccosh", "arccosh", 1.000_1, 40.0),
+                ("arctanh", "arctanh", -0.99, 0.99),
+                ("cbrt", "cbrt", -40.0, 40.0),
+                ("expm1", "expm1", -5.0, 5.0),
+                ("log1p", "log1p", -0.9, 40.0),
+                // The exp/log five are NOT in `probed_f64_unary` — they ride
+                // `numpy_explog_matches_libm`'s ISA gate, which is bead
+                // deadlock-audit-gkznn's territory. They are asserted here
+                // anyway: that gate lets them take the NATIVE path on this
+                // AVX2 host, so if Rust's libm parted from the system libm for
+                // them the way it does for arctanh and cbrt, the gate would be
+                // unsound and this assertion is what would say so.
+                ("exp", "exp", -5.0, 5.0),
+                ("exp2", "exp2", -5.0, 5.0),
+                ("log", "log", 1.0e-3, 40.0),
+                ("log2", "log2", 1.0e-3, 40.0),
+                ("log10", "log10", 1.0e-3, 40.0),
+            ];
+
+            let mut delegated: Vec<&str> = Vec::new();
+            for (fnp_name, np_name, low, high) in ops {
+                let linspace = numpy.getattr("linspace")?;
+                // 40_001 points: past the zero-copy path's 1<<15 parallel gate,
+                // and an odd count so the parallel band split has a ragged tail.
+                let input = linspace.call1((low, high, 40_001_usize))?;
+                let ours = module.getattr(fnp_name)?.call1((&input,))?;
+                let theirs = numpy.getattr(np_name)?.call1((&input,))?;
+                assert_eq!(
+                    ours.getattr("dtype")?.str()?.to_string(),
+                    theirs.getattr("dtype")?.str()?.to_string(),
+                    "{fnp_name} dtype diverges from numpy"
+                );
+                assert_eq!(
+                    ours.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    theirs.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "{fnp_name} is not byte-exact vs numpy over [{low}, {high}]"
+                );
+                let unary_op = match fnp_name {
+                    "sin" => super::UnaryOp::Sin,
+                    "cos" => super::UnaryOp::Cos,
+                    "tan" => super::UnaryOp::Tan,
+                    "arcsin" => super::UnaryOp::Arcsin,
+                    "arccos" => super::UnaryOp::Arccos,
+                    "arctan" => super::UnaryOp::Arctan,
+                    "sinh" => super::UnaryOp::Sinh,
+                    "cosh" => super::UnaryOp::Cosh,
+                    "tanh" => super::UnaryOp::Tanh,
+                    "arcsinh" => super::UnaryOp::Arcsinh,
+                    "arccosh" => super::UnaryOp::Arccosh,
+                    "arctanh" => super::UnaryOp::Arctanh,
+                    "cbrt" => super::UnaryOp::Cbrt,
+                    "expm1" => super::UnaryOp::Expm1,
+                    "log1p" => super::UnaryOp::Log1p,
+                    "exp" => super::UnaryOp::Exp,
+                    "exp2" => super::UnaryOp::Exp2,
+                    "log" => super::UnaryOp::Log,
+                    "log2" => super::UnaryOp::Log2,
+                    "log10" => super::UnaryOp::Log10,
+                    other => unreachable!("unmapped probed op name: {other}"),
+                };
+                let probed = super::probed_f64_unary(unary_op);
+                if !super::numpy_f64_native_unary_is_byte_exact(py, &numpy, unary_op) {
+                    delegated.push(fnp_name);
+                    // Name the first disagreeing sample with both bit patterns.
+                    // "This op delegated" is not a finding on its own — the
+                    // useful question is WHICH value parts them and by how much,
+                    // and whether the cause is NumPy's kernel or Rust's libm.
+                    let native = probed.expect("probed op has an entry").native;
+                    let theirs_values: Vec<f64> = theirs.call_method0("tolist")?.extract()?;
+                    let inputs: Vec<f64> = input.call_method0("tolist")?.extract()?;
+                    if let Some((x, t)) = inputs
+                        .iter()
+                        .zip(theirs_values.iter())
+                        .find(|&(&x, &t)| native(x).to_bits() != t.to_bits())
+                    {
+                        println!(
+                            "  FIRST_DIVERGENCE op={fnp_name} x={x:.17e} \
+                             fnp_native_bits={:#018x} numpy_bits={:#018x} ulp_gap={}",
+                            native(*x).to_bits(),
+                            t.to_bits(),
+                            (native(*x).to_bits() as i64 - t.to_bits() as i64).abs(),
+                        );
+                    }
+                }
+            }
+
+            // Which ops the host delegated is the interesting half: on a machine
+            // where NumPy is libm throughout this is empty and every assertion
+            // above passed through the NATIVE path, which is a different (and
+            // also correct) outcome from passing because everything delegated.
+            println!("NUMPY_F64_DIVERGENT_OPS_DELEGATED={delegated:?}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tanh_f64_is_byte_exact_with_numpy_on_every_input_route() {
+        // `allclose` cannot see this class of bug: NumPy's vectorized f64 tanh
+        // and the scalar libm tanh fnp's native routes call agree to ~3 ULP, so
+        // the existing hyperbolic conformance test passes while `fnp.tanh(a)`
+        // and `np.tanh(a)` return DIFFERENT BYTES on 9.9-47.2% of elements
+        // (AVX2, NumPy 2.4.3). Drop-in compatibility is a byte claim, so this
+        // asserts bytes. (deadlock-audit-d4mc2)
+        //
+        // Every input route is covered because the deferral sits above all
+        // three native f64 paths — the zero-copy buffer map (exact C-contiguous
+        // f64 ndarray), the direct-f64 bridge, and the UFuncArray elementwise
+        // path (non-contiguous views, lists, promoted integers).
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let fnp_tanh = module.getattr("tanh")?;
+            let np_tanh = numpy.getattr("tanh")?;
+            assert!(
+                !fnp_tanh.is(&np_tanh),
+                "dispatch trap: fnp.tanh resolved to the NumPy callable"
+            );
+
+            // Diagnostic, so a host where NumPy's tanh IS the system libm
+            // cannot make this test look like it proved the deferral. On such a
+            // host the native parallel path stays engaged and the bytes match
+            // for the opposite reason; both outcomes are correct, and the line
+            // says which one was exercised.
+            println!(
+                "NUMPY_F64_TANH_MATCHES_LIBM={}",
+                super::numpy_f64_native_unary_is_byte_exact(py, &numpy, super::UnaryOp::Tanh)
+            );
+
+            let ns = PyDict::new(py);
+            py.run(
+                std::ffi::CString::new(
+                    "import numpy as np\n\
+                     rng = np.random.default_rng(20260804)\n\
+                     # Argument regions where a SIMD polynomial kernel and libm\n\
+                     # part ways: near zero, the mid range, and the saturating tail.\n\
+                     tiny = rng.uniform(-1e-3, 1e-3, 40_000)\n\
+                     unit = rng.uniform(-1.0, 1.0, 40_000)\n\
+                     mid = rng.uniform(-5.0, 5.0, 40_000)\n\
+                     tail = rng.uniform(-40.0, 40.0, 40_000)\n\
+                     strided = rng.uniform(-3.0, 3.0, 80_000)[::2]\n\
+                     ints = np.arange(-8, 9, dtype=np.int64)\n\
+                     edges = np.array([0.0, -0.0, np.inf, -np.inf, 1e-320, -1e-320])\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&ns),
+                Some(&ns),
+            )?;
+
+            for name in ["tiny", "unit", "mid", "tail", "strided", "ints", "edges"] {
+                let input = ns.get_item(name).expect("corpus present");
+                let ours = fnp_tanh.call1((&input,))?;
+                let theirs = np_tanh.call1((&input,))?;
+                assert_eq!(
+                    ours.getattr("dtype")?.str()?.to_string(),
+                    theirs.getattr("dtype")?.str()?.to_string(),
+                    "tanh({name}) dtype diverges from numpy"
+                );
+                assert_eq!(
+                    ours.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    theirs.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "tanh({name}) is not byte-exact vs numpy"
+                );
+            }
+
+            // Python list and bare scalar reach the same promoting path without
+            // ever being an ndarray, so they exercise the extract route.
+            let list_input = PyList::new(py, [-2.5_f64, -0.25, 0.0, 0.125, 7.5])?;
+            assert_eq!(
+                fnp_tanh
+                    .call1((&list_input,))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                np_tanh
+                    .call1((&list_input,))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                "tanh(list) is not byte-exact vs numpy"
+            );
+            let scalar_ours: f64 = fnp_tanh.call1((0.37_f64,))?.extract()?;
+            let scalar_theirs: f64 = np_tanh.call1((0.37_f64,))?.extract()?;
+            assert_eq!(
+                scalar_ours.to_bits(),
+                scalar_theirs.to_bits(),
+                "tanh(scalar) is not byte-exact vs numpy"
+            );
+
             Ok(())
         });
     }

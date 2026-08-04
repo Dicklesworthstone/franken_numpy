@@ -13,7 +13,9 @@ fuzz_target!(|data: &[u8]| {
     // Reinterpret the byte slice as a u32 entropy buffer (round down to
     // u32 boundary). Empty entropy is a legitimate edge case for the parser.
     let entropy: Vec<u32> = data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect();
     let _ = fnp_random::SeedSequence::new(&entropy);

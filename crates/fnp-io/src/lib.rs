@@ -11951,8 +11951,10 @@ mm.flush()
         assert!(!arr.header.fortran_order);
         let read_vals: Vec<f64> = arr
             .payload
-            .chunks_exact(8)
-            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| f64::from_le_bytes(*c))
             .collect();
         assert_eq!(read_vals, values);
     }
@@ -11973,8 +11975,10 @@ mm.flush()
         assert_eq!(arr.header.descr, IOSupportedDType::I32);
         let read_vals: Vec<i32> = arr
             .payload
-            .chunks_exact(4)
-            .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| i32::from_le_bytes(*c))
             .collect();
         assert_eq!(read_vals, values);
     }
@@ -12010,8 +12014,10 @@ mm.flush()
         assert_eq!(arr.header.shape, vec![2, 3]);
         let read_vals: Vec<f64> = arr
             .payload
-            .chunks_exact(8)
-            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| f64::from_le_bytes(*c))
             .collect();
         assert_eq!(read_vals, values);
     }

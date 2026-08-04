@@ -818,7 +818,10 @@ fn bench_complex_pow_borrow(c: &mut Criterion) {
     );
     for (name, lhs, rhs) in [("c128_c128", &c128, &c128), ("c64_c64", &c64, &c64)] {
         let former = former_complex_pow(lhs, rhs).to_complex128_vec();
-        let public = lhs.complex_pow(rhs).to_complex128_vec();
+        let public = lhs
+            .complex_pow(rhs)
+            .expect("equal-length benchmark operands")
+            .to_complex128_vec();
         assert_eq!(public.len(), former.len());
         for (actual, expected) in public.iter().zip(&former) {
             assert_eq!(actual.0.to_bits(), expected.0.to_bits());
@@ -828,7 +831,11 @@ fn bench_complex_pow_borrow(c: &mut Criterion) {
             b.iter(|| former_complex_pow(black_box(lhs), black_box(rhs)))
         });
         group.bench_function(format!("direct_borrow_{name}"), |b| {
-            b.iter(|| black_box(lhs).complex_pow(black_box(rhs)))
+            b.iter(|| {
+                black_box(lhs)
+                    .complex_pow(black_box(rhs))
+                    .expect("equal-length benchmark operands")
+            })
         });
     }
 

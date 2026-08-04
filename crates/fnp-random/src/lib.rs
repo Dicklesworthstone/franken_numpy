@@ -10733,6 +10733,9 @@ for child in rng.spawn(n_children):
         let after: Vec<u64> = (0..5).map(|_| shaped.random_interval(9)).collect();
         assert_eq!(after, vec![9, 2, 6, 3, 8]);
 
+        let mut high_shape = RandomState::new(SeedMaterial::U64(42)).expect("high shape");
+        assert_eq!(high_shape.zipf(17.0, 10).expect("high shape zipf"), vec![1; 10]);
+
         let mut cached = RandomState::new(SeedMaterial::U64(7)).expect("cached");
         assert_f64_seq(
             "random_state_zipf_cached_normal_prefix",

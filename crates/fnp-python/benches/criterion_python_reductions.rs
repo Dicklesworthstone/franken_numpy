@@ -36,8 +36,10 @@ fn cov_gram_schedule(
     let tail = n_chunks * 8;
     let dot8 = |ci: &[f64], cj: &[f64]| -> f64 {
         let mut acc = [0.0_f64; 8];
-        let mut ca = ci.chunks_exact(8);
-        let mut cb = cj.chunks_exact(8);
+        let (ca_chunks, ca_remainder) = ci.as_chunks::<8>();
+        let (cb_chunks, cb_remainder) = cj.as_chunks::<8>();
+        let mut ca = ca_chunks.iter();
+        let mut cb = cb_chunks.iter();
         for (ga, gb) in ca.by_ref().zip(cb.by_ref()) {
             for lane in 0..8 {
                 acc[lane] += ga[lane] * gb[lane];
@@ -45,7 +47,7 @@ fn cov_gram_schedule(
         }
         let mut sum =
             ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-        for (&a, &b) in ca.remainder().iter().zip(cb.remainder()) {
+        for (&a, &b) in ca_remainder.iter().zip(cb_remainder) {
             sum += a * b;
         }
         sum
@@ -68,11 +70,13 @@ fn cov_gram_schedule(
             if mr == MR {
                 let (r0, r1, r2, r3) = (row(i0), row(i0 + 1), row(i0 + 2), row(i0 + 3));
                 for ((((b, a0), a1), a2), a3) in j_row[..tail]
-                    .chunks_exact(8)
-                    .zip(r0[..tail].chunks_exact(8))
-                    .zip(r1[..tail].chunks_exact(8))
-                    .zip(r2[..tail].chunks_exact(8))
-                    .zip(r3[..tail].chunks_exact(8))
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .zip(r0[..tail].as_chunks::<8>().0.iter())
+                    .zip(r1[..tail].as_chunks::<8>().0.iter())
+                    .zip(r2[..tail].as_chunks::<8>().0.iter())
+                    .zip(r3[..tail].as_chunks::<8>().0.iter())
                 {
                     let b = Lanes::from_slice(b);
                     acc[0] += Lanes::from_slice(a0) * b;

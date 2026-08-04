@@ -201,16 +201,29 @@ fn is_keep(heading: &str) -> bool {
         None => heading,
     };
     let label = tail.split(':').next().unwrap_or(tail).to_uppercase();
-    let has_verdict_word = |word: &str| {
-        label
-            .split(|character: char| !character.is_ascii_alphanumeric())
-            .any(|token| token == word)
-    };
-    let is_no_ship = ["NO-SHIP", "NO SHIP", "NOSHIP"]
-        .iter()
-        .any(|negative| label.contains(negative));
+    let tokens = || label.split(|character: char| !character.is_ascii_alphanumeric());
+    let has_verdict_word = |word: &str| tokens().any(|token| token == word);
+    // SHIP is the only one of the three verdict words that gets NEGATED in
+    // practice, and the negation is not always adjacent: `NO-SHIP` / `NO SHIP`
+    // were handled by substring, but `REJECT (measured, no production ship)`
+    // slipped a word in between and was read as a positive SHIP verdict — so a
+    // row whose verdict is literally REJECT was enforced as a KEEP, which is
+    // what made this gate red on main (deadlock-audit-p126d). Suppress SHIP on
+    // any NO token anywhere in the label instead.
+    //
+    // Deliberately NOT "is_keep is false whenever is_reject is true": seven
+    // headings satisfy both, and six of them are genuinely dual-verdict
+    // (`MAINTENANCE KEEP / INCUMBENT REJECT`, `SPLIT (SHIP c64 / REJECT c128)`,
+    // `WIN (SHIP, ARCHITECTURAL) + embedded REJECT`, ...). Those MUST keep their
+    // KEEP obligations, and they do — through their own KEEP/WIN tokens, which
+    // this rule leaves alone. Over the whole ledger the change moves exactly one
+    // row (1072 headings, is_keep 771 -> 770), the one beginning with REJECT;
+    // see `is_keep_reads_negated_ship_verdicts_as_rejections` below.
+    let ship_is_negated = has_verdict_word("NO");
 
-    has_verdict_word("KEEP") || has_verdict_word("WIN") || (has_verdict_word("SHIP") && !is_no_ship)
+    has_verdict_word("KEEP")
+        || has_verdict_word("WIN")
+        || (has_verdict_word("SHIP") && !ship_is_negated)
 }
 
 /// A rejection that no measurement could overturn - bit-exactness, observable
@@ -316,6 +329,48 @@ fn historical_void_nonull_debt_does_not_grow() {
          Either a pre-{ENFORCEMENT_DATE} row was added without a null control, or an \
          existing row lost one. New rejections must be dated and must carry evidence."
     );
+}
+
+/// THE CLASSIFIER ITSELF. `is_keep` decides which rows the two KEEP gates below
+/// apply to, so a misreading of a heading silently redirects the whole gate — it
+/// can demand KEEP evidence from a rejection, or (worse, in the other direction)
+/// let a real win skip it. Pin both directions on the exact wordings that have
+/// occurred in this ledger.
+///
+/// The negated-SHIP case is not hypothetical: `REJECT (measured, no production
+/// ship)` was read as a positive SHIP verdict and turned both KEEP gates red on
+/// main (deadlock-audit-p126d), because the old guard tested for the literal
+/// substrings `NO-SHIP` / `NO SHIP` and this negation had a word in between.
+#[test]
+fn is_keep_reads_negated_ship_verdicts_as_rejections() {
+    // Negated SHIP, adjacent or not: never a KEEP.
+    for heading in [
+        "2026-08-04 - REJECT (measured, no production ship): RandomState Zipf cache retry",
+        "2026-07-04 - NO-SHIP (REVERTED, ~PARITY): np.unique(2-D 'U'/'S', axis=0)",
+        "2026-06-25 - NO SHIP: f64 `np.unique` duplicate-heavy bit HashSet",
+    ] {
+        assert!(
+            !is_keep(heading),
+            "a negated SHIP verdict must not be classified as a KEEP: {heading}"
+        );
+    }
+
+    // Genuine keeps, including the dual-verdict forms this ledger really uses.
+    // These carry a KEEP or WIN token of their own, which is exactly why the fix
+    // above targets the SHIP token alone rather than exempting every heading
+    // that also mentions a rejection.
+    for heading in [
+        "2026-07-10 - WIN (SHIP): f64 transcendental unary zero-copy fused-defer path",
+        "2026-07-14 - SPLIT (SHIP c64 / REJECT c128): complex np.select arms",
+        "2026-07-22 - WIN (SHIP, ARCHITECTURAL) + embedded REJECT: BENCH-BLOCKED is two costs",
+        "2026-07-27 - MAINTENANCE KEEP / INCUMBENT REJECT: selected-bool loadtxt(usecols)",
+        "2026-07-12 - STALE-REJECT REOPENED (WIN): integer ARRAY-q percentile/quantile",
+    ] {
+        assert!(
+            is_keep(heading),
+            "a heading carrying its own KEEP/WIN verdict must stay a KEEP: {heading}"
+        );
+    }
 }
 
 /// A KEEP without the exact executing ELF is not reproducible evidence. The

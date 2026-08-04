@@ -94,7 +94,13 @@ fn fft_reference(values: &[f64]) -> Vec<f64> {
     let mut im = vec![0.0; values.len()];
     fft_pow2_old_bitrev(&mut re, &mut im);
     let mut out = vec![0.0; values.len() * 2];
-    for ((pair, &real), &imag) in out.chunks_exact_mut(2).zip(re.iter()).zip(im.iter()) {
+    for ((pair, &real), &imag) in out
+        .as_chunks_mut::<2>()
+        .0
+        .iter_mut()
+        .zip(re.iter())
+        .zip(im.iter())
+    {
         pair[0] = real;
         pair[1] = imag;
     }

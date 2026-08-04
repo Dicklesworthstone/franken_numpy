@@ -15520,7 +15520,8 @@ mod tests {
         let a = [0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 2.0];
         let ev = super::eig_nxn(&a, 3).expect("eig");
         // ev is interleaved (re, im) per eigenvalue.
-        let mut pairs: Vec<(f64, f64)> = ev.chunks_exact(2).map(|c| (c[0], c[1])).collect();
+        let mut pairs: Vec<(f64, f64)> =
+            ev.as_chunks::<2>().0.iter().map(|c| (c[0], c[1])).collect();
         pairs.sort_by(|x, y| {
             x.0.partial_cmp(&y.0)
                 .unwrap()

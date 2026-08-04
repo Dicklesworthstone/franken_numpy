@@ -591,11 +591,15 @@ fn f16_sort_flat_widening_matches_numpy() {
                 // f32-widened composition. On healthy numpy builds the strict byte-equality
                 // above is the bar.
                 let mut ours_ms: Vec<u16> = ours_bytes
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|c| u16::from_le_bytes([c[0], c[1]]))
                     .collect();
                 let mut theirs_ms: Vec<u16> = theirs_bytes
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|c| u16::from_le_bytes([c[0], c[1]]))
                     .collect();
                 ours_ms.sort_unstable();

@@ -55,6 +55,50 @@ name = "criterion_python_surface"
 harness = false
 
 [[bench]]
+name = "criterion_python_extract"
+harness = false
+
+[[bench]]
+name = "criterion_python_unique_medium"
+harness = false
+
+[[bench]]
+name = "criterion_python_sort_complex"
+harness = false
+
+[[bench]]
+name = "criterion_python_structural"
+harness = false
+
+[[bench]]
+name = "criterion_python_f16_transcendental"
+harness = false
+
+[[bench]]
+name = "criterion_python_isin"
+harness = false
+
+[[bench]]
+name = "criterion_python_compress"
+harness = false
+
+[[bench]]
+name = "criterion_python_f16_matmul"
+harness = false
+
+[[bench]]
+name = "criterion_python_roll"
+harness = false
+
+[[bench]]
+name = "criterion_python_f64_convolve"
+harness = false
+
+[[bench]]
+name = "criterion_python_int_convolve"
+harness = false
+
+[[bench]]
 name = "criterion_python_io_text"
 harness = false
 
