@@ -152397,15 +152397,17 @@ mod tests {
             let numpy = py.import("numpy")?;
             let warnings = py.import("warnings")?;
             let catch_warnings = warnings.getattr("catch_warnings")?;
+            let record_warnings = PyDict::new(py);
+            record_warnings.set_item("record", true)?;
             let input = numpy.getattr("array")?.call1((vec![2.0_f64],))?;
 
-            let ours_ctx = catch_warnings.call0()?;
+            let ours_ctx = catch_warnings.call((), Some(&record_warnings))?;
             let ours_records = ours_ctx.call_method0("__enter__")?;
             warnings.call_method1("simplefilter", ("always",))?;
             let ours = module.getattr("arcsin")?.call1((input.clone(),))?;
             ours_ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
 
-            let numpy_ctx = catch_warnings.call0()?;
+            let numpy_ctx = catch_warnings.call((), Some(&record_warnings))?;
             let numpy_records = numpy_ctx.call_method0("__enter__")?;
             warnings.call_method1("simplefilter", ("always",))?;
             let expected = numpy.getattr("arcsin")?.call1((input.clone(),))?;
@@ -152428,7 +152430,7 @@ mod tests {
 
             // Draining after the native call prevents an invalid event from
             // leaking into the next warning-free unary operation.
-            let clean_ctx = catch_warnings.call0()?;
+            let clean_ctx = catch_warnings.call((), Some(&record_warnings))?;
             let clean_records = clean_ctx.call_method0("__enter__")?;
             warnings.call_method1("simplefilter", ("always",))?;
             let _ = module
