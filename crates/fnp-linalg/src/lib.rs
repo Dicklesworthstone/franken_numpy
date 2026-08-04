@@ -3025,9 +3025,13 @@ fn householder_r_apply_b_in_place(block: &mut [f64], b: &mut [f64], rows: usize,
     }
 }
 
-/// Leaf reduction for [`tsqr_qtb`]: the n×n R factor plus the top `n` entries of
-/// Qᵀb for one row block.
-fn leaf_qtb(block: &[f64], b_block: &[f64], rows: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
+/// Leaf reduction for [`tsqr_qtb`]: the n×n R factor, the top `n` entries of
+/// Qᵀb for one row block, and the squared norm of the entries this node drops.
+///
+/// The dropped entries are exactly the part of Qᵀb that no later stage can
+/// touch, so their squared norms accumulate into the least-squares residual —
+/// see [`tsqr_qtb`].
+fn leaf_qtb(block: &[f64], b_block: &[f64], rows: usize, n: usize) -> (Vec<f64>, Vec<f64>, f64) {
     let mut work = block.to_vec();
     let mut b_work = b_block.to_vec();
     householder_r_apply_b_in_place(&mut work, &mut b_work, rows, n);
@@ -3038,18 +3042,21 @@ fn leaf_qtb(block: &[f64], b_block: &[f64], rows: usize, n: usize) -> (Vec<f64>,
     }
     let mut c = vec![0.0f64; n];
     c[..copy_rows].copy_from_slice(&b_work[..copy_rows]);
-    (r, c)
+    let dropped = b_work[copy_rows..].iter().map(|v| v * v).sum();
+    (r, c, dropped)
 }
 
 /// Combine two `(R, Qᵀb-top)` pairs by re-triangularizing their stacked 2n×n R
-/// and carrying the stacked 2n b-components through the same reflectors.
+/// and carrying the stacked 2n b-components through the same reflectors. Also
+/// returns the squared norm of the bottom `n` b-components, which this node
+/// drops.
 fn combine_qtb(
     r_top: &[f64],
     c_top: &[f64],
     r_bottom: &[f64],
     c_bottom: &[f64],
     n: usize,
-) -> (Vec<f64>, Vec<f64>) {
+) -> (Vec<f64>, Vec<f64>, f64) {
     let mut stacked = vec![0.0f64; 2 * n * n];
     stacked[..n * n].copy_from_slice(r_top);
     stacked[n * n..].copy_from_slice(r_bottom);
@@ -3059,7 +3066,8 @@ fn combine_qtb(
     householder_r_apply_b_in_place(&mut stacked, &mut b_stacked, 2 * n, n);
     stacked.truncate(n * n);
     let c = b_stacked[..n].to_vec();
-    (stacked, c)
+    let dropped = b_stacked[n..].iter().map(|v| v * v).sum();
+    (stacked, c, dropped)
 }
 
 /// Tall-skinny QR reduction returning both R and the top `n` entries of Qᵀb.
@@ -3072,14 +3080,23 @@ fn combine_qtb(
 /// bit-identical to [`tsqr_r`] (same block ranges, same fold order, same
 /// arithmetic).
 ///
-/// `b` has length m. Returns `(R, c)` with R the n×n upper-triangular factor and
-/// `c` the length-n top of Qᵀb.
+/// `b` has length m. Returns `(R, c, residual_sq)` with R the n×n
+/// upper-triangular factor, `c` the length-n top of Qᵀb, and `residual_sq` the
+/// squared norm of everything the reduction dropped.
+///
+/// `residual_sq` is the least-squares residual ‖b − Ax‖² for full-rank A, and it
+/// comes out of the tree for free. Q is orthogonal, so it splits ‖b‖² into the
+/// retained ‖c‖² and the discarded remainder; the discarded part is precisely the
+/// component of b orthogonal to the range of A, which is what the minimiser
+/// leaves behind. Accumulating it here is a sum of squares along data the
+/// reduction already touches — no second O(mn) pass over A, and no
+/// ‖b‖² − ‖c‖² cancellation.
 pub fn tsqr_qtb(
     a: &[f64],
     b: &[f64],
     m: usize,
     n: usize,
-) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
+) -> Result<(Vec<f64>, Vec<f64>, f64), LinAlgError> {
     if Some(a.len()) != m.checked_mul(n) || m == 0 || n == 0 {
         return Err(LinAlgError::ShapeContractViolation(
             "tsqr_qtb: input must be m*n with m,n > 0",
@@ -3114,7 +3131,8 @@ pub fn tsqr_qtb(
             r[i * n..i * n + n].copy_from_slice(&work[i * n..i * n + n]);
         }
         let c = b_work[..n].to_vec();
-        return Ok((r, c));
+        let residual_sq = b_work[n..].iter().map(|v| v * v).sum();
+        return Ok((r, c, residual_sq));
     }
 
     let base = m / blocks;
@@ -3127,7 +3145,7 @@ pub fn tsqr_qtb(
         start += rows;
     }
 
-    let mut level: Vec<(Vec<f64>, Vec<f64>)> = ranges
+    let leaves: Vec<(Vec<f64>, Vec<f64>, f64)> = ranges
         .par_iter()
         .map(|&(row_start, rows)| {
             leaf_qtb(
@@ -3139,6 +3157,17 @@ pub fn tsqr_qtb(
         })
         .collect();
 
+    // Dropped components are summed in leaf order, then in fold order, so the
+    // residual is as deterministic as R and c are.
+    let mut residual_sq = 0.0;
+    let mut level: Vec<(Vec<f64>, Vec<f64>)> = leaves
+        .into_iter()
+        .map(|(r, c, dropped)| {
+            residual_sq += dropped;
+            (r, c)
+        })
+        .collect();
+
     // Deterministic sequential fold: pair adjacent factors, left to right - the
     // same tree tsqr_r uses, so R stays bit-identical and c follows that tree.
     while level.len() > 1 {
@@ -3147,7 +3176,9 @@ pub fn tsqr_qtb(
         while idx + 1 < level.len() {
             let (r_top, c_top) = &level[idx];
             let (r_bottom, c_bottom) = &level[idx + 1];
-            next.push(combine_qtb(r_top, c_top, r_bottom, c_bottom, n));
+            let (r, c, dropped) = combine_qtb(r_top, c_top, r_bottom, c_bottom, n);
+            residual_sq += dropped;
+            next.push((r, c));
             idx += 2;
         }
         if idx < level.len() {
@@ -3156,9 +3187,10 @@ pub fn tsqr_qtb(
         level = next;
     }
 
-    Ok(level
+    let (r, c) = level
         .pop()
-        .unwrap_or_else(|| (vec![0.0f64; n * n], vec![0.0f64; n])))
+        .unwrap_or_else(|| (vec![0.0f64; n * n], vec![0.0f64; n]));
+    Ok((r, c, residual_sq))
 }
 
 /// SVD of an m×n rectangular matrix (singular values only).
@@ -7567,6 +7599,11 @@ pub fn lstsq_svd(
 /// Rank-deficient inputs (rank < n by the same singular-value threshold
 /// [`lstsq_svd`] uses) fall back to [`lstsq_svd`], which handles the minimum-norm
 /// solution and truncated pseudo-inverse.
+///
+/// That fallback is O(m²) in both time and memory — [`lstsq_svd`] materialises a
+/// full m×m U — so callers that route very tall inputs here should gate on
+/// [`lstsq_tsqr_full_rank`] instead and hand rank-deficient matrices to a solver
+/// that does not form U.
 pub fn lstsq_tsqr(
     a: &[f64],
     b: &[f64],
@@ -7574,6 +7611,28 @@ pub fn lstsq_tsqr(
     n: usize,
     rcond: f64,
 ) -> Result<LstsqResult, LinAlgError> {
+    match lstsq_tsqr_full_rank(a, b, m, n, rcond)? {
+        Some(result) => Ok(result),
+        // Rank-deficient: back substitution against a singular R is invalid; defer
+        // to the SVD minimum-norm path (which also matches numpy for rank < n).
+        None => lstsq_svd(a, b, m, n, rcond),
+    }
+}
+
+/// [`lstsq_tsqr`] restricted to the full-rank case, reporting rank deficiency
+/// instead of falling back.
+///
+/// Returns `Ok(None)` when `rank < n` under the same singular-value threshold
+/// [`lstsq_svd`] uses. Callers with very tall inputs want this: [`lstsq_tsqr`]'s
+/// own fallback forms an m×m U, which for m in the millions is not a slow path
+/// but an unallocatable one.
+pub fn lstsq_tsqr_full_rank(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    n: usize,
+    rcond: f64,
+) -> Result<Option<LstsqResult>, LinAlgError> {
     if Some(a.len()) != m.checked_mul(n) || b.len() != m || m == 0 || n == 0 {
         return Err(LinAlgError::ShapeContractViolation(
             "lstsq_tsqr: a must be m*n, b must be m",
@@ -7590,7 +7649,7 @@ pub fn lstsq_tsqr(
         ));
     }
 
-    let (r, c) = tsqr_qtb(a, b, m, n)?;
+    let (r, c, residual_sq) = tsqr_qtb(a, b, m, n)?;
 
     // Singular values and rank from the tiny n×n R (σ(A) = σ(R)). Same threshold
     // rule as lstsq_svd so the reported rank matches that path exactly.
@@ -7603,10 +7662,10 @@ pub fn lstsq_tsqr(
     };
     let rank = s.iter().filter(|&&si| si > threshold).count();
 
-    // Rank-deficient: back substitution against a singular R is invalid; defer to
-    // the SVD minimum-norm path (which also matches numpy for rank < n).
+    // Rank-deficient: back substitution against a singular R is invalid. Report it
+    // and let the caller choose a minimum-norm solver.
     if rank != n {
-        return lstsq_svd(a, b, m, n, rcond);
+        return Ok(None);
     }
 
     // x = R⁻¹ c by back substitution (R upper triangular, row-major).
@@ -7620,23 +7679,16 @@ pub fn lstsq_tsqr(
     }
 
     // Residuals: numpy reports the summed squared residual only when full rank and
-    // m > n. Computed directly as ‖b - Ax‖²; norm-preserving orthogonal transforms
-    // make this equal to the ‖(Qᵀb)_bottom‖² the SVD path accumulates.
+    // m > n. TSQR already accumulated ‖(Qᵀb)_dropped‖² on its way up the tree,
+    // which is ‖b - Ax‖² because orthogonal transforms preserve norms. Reading it
+    // off the reduction avoids a second O(mn) pass over A — at the m this path
+    // targets that pass costs as much as the reduction itself.
     let mut residuals = Vec::new();
     if m > n {
-        let mut sum_sq = 0.0;
-        for row in 0..m {
-            let mut ax = 0.0;
-            for col in 0..n {
-                ax += a[row * n + col] * x[col];
-            }
-            let diff = b[row] - ax;
-            sum_sq += diff * diff;
-        }
-        residuals.push(sum_sq);
+        residuals.push(residual_sq);
     }
 
-    Ok((x, residuals, rank, s))
+    Ok(Some((x, residuals, rank, s)))
 }
 
 pub fn lstsq_nxn(a: &[f64], b: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
@@ -20311,7 +20363,7 @@ except Exception as exc:
             let a = tsqr_test_matrix(m, n, seed);
             let b = tsqr_test_matrix(m, 1, seed ^ 0xFF);
             let r_only = tsqr_r(&a, m, n).expect("tsqr_r");
-            let (r_qtb, _c) = super::tsqr_qtb(&a, &b, m, n).expect("tsqr_qtb");
+            let (r_qtb, _c, _residual_sq) = super::tsqr_qtb(&a, &b, m, n).expect("tsqr_qtb");
             for (idx, (x, y)) in r_only.iter().zip(r_qtb.iter()).enumerate() {
                 assert_eq!(x.to_bits(), y.to_bits(), "R diverged at {idx} for {m}x{n}");
             }
@@ -20373,6 +20425,48 @@ except Exception as exc:
                     "sigma[{i}] {m}x{n}: {t} vs {s}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn tsqr_qtb_residual_matches_direct_norm_across_fold_shapes() {
+        // The residual is now read off the reduction rather than recomputed from
+        // A, so every node that drops b-components must contribute exactly once.
+        // Odd leaf counts are the risk: the fold carries the unpaired node
+        // forward untouched, and a carry that also re-counted (or a combine whose
+        // drop was ignored) still yields a plausible-looking positive number.
+        // These row counts span single-block, even folds, and odd folds with a
+        // carried leaf.
+        for (m, n, seed) in [
+            (64usize, 4usize, 0x2468_u64),
+            (4096, 8, 0x1357),
+            (12_295, 8, 0x9BDF),
+            (20_481, 6, 0x0ACE),
+        ] {
+            let a = tsqr_test_matrix(m, n, seed);
+            let b = tsqr_test_matrix(m, 1, seed ^ 0x3C3C);
+            let (_r, _c, residual_sq) = super::tsqr_qtb(&a, &b, m, n).expect("tsqr_qtb");
+            let (x, _res, rank, _s) = super::lstsq_tsqr(&a, &b, m, n, -1.0).expect("lstsq_tsqr");
+            assert_eq!(rank, n, "expected full rank for {m}x{n}");
+            let direct: f64 = (0..m)
+                .map(|row| {
+                    let ax: f64 = (0..n).map(|col| a[row * n + col] * x[col]).sum();
+                    let diff = b[row] - ax;
+                    diff * diff
+                })
+                .sum();
+            assert!(
+                (residual_sq - direct).abs() <= 1e-9 * direct.abs().max(1.0),
+                "tree residual {residual_sq} vs direct {direct} for {m}x{n}"
+            );
+            // A residual that silently collapsed to zero (e.g. only the final
+            // node's drop counted) would pass a loose relative check against a
+            // near-zero reference, so pin the scale too: random overdetermined
+            // systems leave a genuinely large residual.
+            assert!(
+                residual_sq > 1.0,
+                "expected a substantial residual for {m}x{n}, got {residual_sq}"
+            );
         }
     }
 
