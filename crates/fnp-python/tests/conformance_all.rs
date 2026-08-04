@@ -55,6 +55,62 @@ fn parse_bool_list(s: &str) -> Vec<bool> {
 }
 
 #[test]
+fn all_large_bool_parallel_full_scan_and_early_exit_match_numpy() -> Result<(), String> {
+    let body = concat!(
+        "n = (1 << 24) + (1 << 13) + 1\n",
+        "a = np.ones(n, dtype=np.bool_)\n",
+        "results = [bool(np.all(a))]\n",
+        "for index in (0, 8192, n // 2, n - 1):\n",
+        "    a[index] = False\n",
+        "    results.append(bool(np.all(a)))\n",
+        "    a[index] = True\n",
+        "noncanonical = np.full(n, 2, dtype=np.uint8).view(np.bool_)\n",
+        "results.append(bool(np.all(noncanonical)))\n",
+        "print(results)",
+    );
+    let numpy_result = numpy_oracle(&format!("import numpy as np\n{body}"))?;
+    let fnp_body = body.replace("np.all", "fnp.all");
+    let fnp_result = numpy_oracle(&fnp_all_script(format!(
+        "import os\nos.environ['RAYON_NUM_THREADS'] = '4'\n{fnp_body}"
+    )))?;
+    assert_eq!(fnp_result, numpy_result);
+    Ok(())
+}
+
+#[test]
+fn all_large_numeric_parallel_full_scan_and_early_exit_match_numpy() -> Result<(), String> {
+    let body = concat!(
+        "dtypes = (np.int8, np.uint8, np.int16, np.uint16, np.int32, np.uint32, ",
+        "np.int64, np.uint64, np.float32, np.float64)\n",
+        "target_bytes = (1 << 24) + (1 << 16)\n",
+        "results = []\n",
+        "for dtype in dtypes:\n",
+        "    itemsize = np.dtype(dtype).itemsize\n",
+        "    n = (target_bytes + itemsize - 1) // itemsize\n",
+        "    a = np.ones(n, dtype=dtype)\n",
+        "    row = [np.dtype(dtype).name, type(np.all(a)).__name__, bool(np.all(a))]\n",
+        "    for index in (0, 8192 // itemsize, n // 2, n - 1):\n",
+        "        a[index] = dtype(0)\n",
+        "        row.append(bool(np.all(a)))\n",
+        "        a[index] = dtype(1)\n",
+        "    if np.issubdtype(dtype, np.floating):\n",
+        "        a[n // 3] = dtype(-0.0)\n",
+        "        row.append(bool(np.all(a)))\n",
+        "        a[n // 3] = dtype(np.nan)\n",
+        "        row.append(bool(np.all(a)))\n",
+        "    results.append(row)\n",
+        "print(results)",
+    );
+    let numpy_result = numpy_oracle(&format!("import numpy as np\n{body}"))?;
+    let fnp_body = body.replace("np.all", "fnp.all");
+    let fnp_result = numpy_oracle(&fnp_all_script(format!(
+        "import os\nos.environ['RAYON_NUM_THREADS'] = '4'\n{fnp_body}"
+    )))?;
+    assert_eq!(fnp_result, numpy_result);
+    Ok(())
+}
+
+#[test]
 fn all_flat_matches_numpy_across_50_cases() -> Result<(), String> {
     let test_cases = vec![
         // All true arrays

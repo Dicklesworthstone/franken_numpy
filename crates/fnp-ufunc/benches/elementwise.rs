@@ -755,4 +755,7 @@ criterion_group!(
     bench_masked_count_axis_no_mask,
     bench_masked_count_axis_masked
 );
-criterion_main!(benches);
+#[path = "../../bench_identity.rs"]
+mod bench_identity;
+
+criterion_main!(bench_identity::report_bench_identity, benches);

@@ -456,4 +456,7 @@ criterion_group!(
     bench_transpose_suffix,
     bench_transpose_rotation
 );
-criterion_main!(benches);
+#[path = "../../bench_identity.rs"]
+mod bench_identity;
+
+criterion_main!(bench_identity::report_bench_identity, benches);

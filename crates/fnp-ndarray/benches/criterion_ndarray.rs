@@ -652,4 +652,7 @@ criterion_group!(
     bench_ndlayout_nbytes,
 );
 
-criterion_main!(benches);
+#[path = "../../bench_identity.rs"]
+mod bench_identity;
+
+criterion_main!(bench_identity::report_bench_identity, benches);

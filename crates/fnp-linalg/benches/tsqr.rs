@@ -138,4 +138,7 @@ fn bench_tsqr(c: &mut Criterion) {
 }
 
 criterion_group!(benches, bench_tsqr);
-criterion_main!(benches);
+#[path = "../../bench_identity.rs"]
+mod bench_identity;
+
+criterion_main!(bench_identity::report_bench_identity, benches);

@@ -2346,6 +2346,28 @@ pub fn loadtxt_usecols_signed(
     max_rows: usize,
     usecols: Option<&[isize]>,
 ) -> Result<TextArrayData, IOError> {
+    const SIGNED_TAIL_RING_MAX_FIELDS: usize = 4_096;
+
+    let negative_offsets = usecols.and_then(|cols| {
+        if cols.is_empty() || cols.iter().any(|&column| column >= 0) {
+            return None;
+        }
+        let offsets = cols
+            .iter()
+            .map(|&column| {
+                column
+                    .checked_neg()
+                    .and_then(|value| usize::try_from(value).ok())
+            })
+            .collect::<Option<Vec<_>>>()?;
+        offsets
+            .iter()
+            .copied()
+            .max()
+            .filter(|&max_tail| max_tail <= SIGNED_TAIL_RING_MAX_FIELDS)
+            .map(|_| offsets)
+    });
+
     if let Some(cols) = usecols {
         // Positive signed selections are row-invariant. Partially evaluate
         // that case once, then reuse the unsigned call-level plan instead of
@@ -2389,7 +2411,11 @@ pub fn loadtxt_usecols_signed(
             break;
         }
         let row_vals = if let Some(cols) = usecols {
-            parse_loadtxt_row_usecols_signed(trimmed, delimiter, cols)?
+            if let Some(offsets) = &negative_offsets {
+                parse_loadtxt_row_negative_tail(trimmed, delimiter, offsets)?
+            } else {
+                parse_loadtxt_row_usecols_signed(trimmed, delimiter, cols)?
+            }
         } else {
             parse_loadtxt_row(trimmed, delimiter)?
         };
@@ -2769,6 +2795,50 @@ fn parse_loadtxt_row_usecols_signed(
         selected.push(value);
     }
 
+    Ok(selected)
+}
+
+/// Resolve an all-negative signed selection while retaining only the bounded
+/// suffix that can be addressed. Parsing remains in request order after the
+/// full width is known, preserving the generic resolver's bounds/parse error
+/// precedence and duplicate-column behavior.
+fn parse_loadtxt_row_negative_tail(
+    trimmed: &str,
+    delimiter: char,
+    offsets: &[usize],
+) -> Result<Vec<f64>, IOError> {
+    let Some(max_tail) = offsets.iter().copied().max() else {
+        return Ok(Vec::new());
+    };
+
+    let mut tail = vec![""; max_tail];
+    let mut row_width = 0usize;
+    if delimiter == ' ' {
+        for field in trimmed.split_whitespace() {
+            tail[row_width % max_tail] = field;
+            row_width += 1;
+        }
+    } else {
+        for field in trimmed.split(delimiter) {
+            tail[row_width % max_tail] = field;
+            row_width += 1;
+        }
+    }
+
+    let mut selected = Vec::with_capacity(offsets.len());
+    for &offset in offsets {
+        if offset == 0 || offset > row_width {
+            return Err(IOError::ReadPayloadIncomplete(
+                "loadtxt: usecols index out of bounds",
+            ));
+        }
+        let index = row_width - offset;
+        let value = tail[index % max_tail]
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?;
+        selected.push(value);
+    }
     Ok(selected)
 }
 
@@ -4330,6 +4400,27 @@ fn fromfile_text_with_budget(
 /// Write array values as text with a separator (np.ndarray.tofile with sep parameter).
 ///
 /// When `sep` is non-empty, `tofile` writes elements as text separated by `sep`.
+fn push_i64_decimal(out: &mut String, value: i64) {
+    let negative = value.is_negative();
+    let mut magnitude = value.unsigned_abs();
+    let mut digits = [0_u8; 20];
+    let mut cursor = digits.len();
+    loop {
+        cursor -= 1;
+        digits[cursor] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if negative {
+        out.push('-');
+    }
+    out.push_str(
+        std::str::from_utf8(&digits[cursor..]).expect("decimal digits are valid ASCII UTF-8"),
+    );
+}
+
 pub fn tofile_text(values: &[f64], sep: &str) -> String {
     use std::fmt::Write;
 
@@ -4343,12 +4434,9 @@ pub fn tofile_text(values: &[f64], sep: &str) -> String {
             && v.abs() < 1e15
             && !(*v == 0.0 && v.is_sign_negative())
         {
-            // NOTE (2026-07-16 NO-SHIP, ledger + bench tofile_text_integral):
-            // replacing this write! with a manual digit loop measured
-            // 1.00-1.10x overlapping - Display's cost IS the digit loop, and
-            // a reimplementation removes only dispatch. Do not retry without
-            // a design that does structurally less work per element.
-            let _ = write!(&mut out, "{}", *v as i64);
+            // Re-decided under the executed-ELF A/A median-CI contract after
+            // the 2026-07-16 rejection was classified VOID-NONULL.
+            push_i64_decimal(&mut out, *v as i64);
         } else {
             let _ = write!(&mut out, "{v}");
         }
@@ -6348,7 +6436,7 @@ fn decode_bytes_element(chunk: &[u8]) -> String {
 /// null-padded. Little-endian if `is_le`, big-endian otherwise.
 fn decode_unicode_element(chunk: &[u8], is_le: bool) -> Result<String, IOError> {
     let mut chars = Vec::with_capacity(chunk.len() / 4);
-    for code_unit in chunk.chunks_exact(4) {
+    for code_unit in chunk.as_chunks::<4>().0 {
         let cp = if is_le {
             u32::from_le_bytes([code_unit[0], code_unit[1], code_unit[2], code_unit[3]])
         } else {
@@ -8768,6 +8856,48 @@ mm.flush()
     }
 
     #[test]
+    fn tofile_text_manual_integer_formatter_matches_display() {
+        for value in [
+            i64::MIN,
+            i64::MIN + 1,
+            -1_000_000_000_000_000,
+            -10,
+            -1,
+            0,
+            1,
+            10,
+            1_000_000_000_000_000,
+            i64::MAX - 1,
+            i64::MAX,
+        ] {
+            let mut actual = String::new();
+            super::push_i64_decimal(&mut actual, value);
+            assert_eq!(actual, value.to_string());
+        }
+        for value in -10_000_i64..=10_000 {
+            let mut actual = String::new();
+            super::push_i64_decimal(&mut actual, value);
+            assert_eq!(actual, value.to_string());
+        }
+
+        let values = [
+            -999_999_999_999_999.0,
+            -10.0,
+            -1.0,
+            0.0,
+            1.0,
+            10.0,
+            999_999_999_999_999.0,
+            -0.0,
+            3.5,
+        ];
+        assert_eq!(
+            tofile_text(&values, ","),
+            "-999999999999999,-10,-1,0,1,10,999999999999999,-0,3.5"
+        );
+    }
+
+    #[test]
     fn fromfile_tofile_text_roundtrip() {
         let original = vec![1.0, 2.5, 3.0, 4.75];
         let text = tofile_text(&original, " ");
@@ -8844,6 +8974,56 @@ mm.flush()
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 2);
         assert_eq!(result.values, vec![3.0, 1.0, 6.0, 4.0]);
+    }
+
+    #[test]
+    fn loadtxt_signed_all_negative_tail_ring_preserves_order_duplicates_and_bits() {
+        let text = "header\n1,-0,3,4.5 # comment\ninf,6,7,-8.25\n";
+        let result =
+            loadtxt_usecols_signed(text, ',', '#', 1, usize::MAX, Some(&[-1, -3, -1])).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 3);
+        let expected = [4.5_f64, -0.0, 4.5, -8.25, 6.0, -8.25];
+        assert!(
+            result
+                .values
+                .iter()
+                .zip(expected)
+                .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+        );
+    }
+
+    #[test]
+    fn loadtxt_signed_all_negative_tail_ring_preserves_error_precedence() {
+        let parse_first =
+            loadtxt_usecols_signed("1,2,bad\n", ',', '#', 0, usize::MAX, Some(&[-1, -5]))
+                .unwrap_err();
+        assert_eq!(parse_first.to_string(), "loadtxt: parse error in row");
+
+        let bounds_first =
+            loadtxt_usecols_signed("1,2,bad\n", ',', '#', 0, usize::MAX, Some(&[-5, -1]))
+                .unwrap_err();
+        assert_eq!(
+            bounds_first.to_string(),
+            "loadtxt: usecols index out of bounds"
+        );
+    }
+
+    #[test]
+    fn loadtxt_signed_large_negative_offset_uses_generic_fallback() {
+        let mut text = String::new();
+        for column in 0..4_097 {
+            if column > 0 {
+                text.push(' ');
+            }
+            text.push_str(&column.to_string());
+        }
+        text.push('\n');
+        let result =
+            loadtxt_usecols_signed(&text, ' ', '#', 0, usize::MAX, Some(&[-4_097, -1])).unwrap();
+        assert_eq!(result.nrows, 1);
+        assert_eq!(result.ncols, 2);
+        assert_eq!(result.values, vec![0.0, 4_096.0]);
     }
 
     #[test]

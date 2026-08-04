@@ -5,14 +5,39 @@
 //! - Distribution sampling (normal, uniform, exponential, integers)
 //! - Array generation at various sizes
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
 use fnp_random::{
     BitGenerator, BitGeneratorKind, Generator, Pcg64DxsmRng, Pcg64Rng, PhiloxRng, RandomError,
     RandomState, SeedMaterial, SeedSequence, Sfc64Rng,
 };
-use std::cell::{Cell, RefCell};
+use sha2::{Digest, Sha256};
+use std::cell::RefCell;
+use std::fmt::Write as _;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
+
+const CONTRACT_ROUNDS: usize = 41;
+const CONTRACT_MIN_OF: usize = 3;
+const CONTRACT_BOOTSTRAP_RESAMPLES: usize = 4_096;
+
+#[derive(Clone, Copy)]
+struct TimedValue {
+    elapsed: Duration,
+    checksum: u64,
+}
+
+#[derive(Clone, Copy)]
+struct PairStats {
+    rounds: usize,
+    arm_a_median_ns: f64,
+    arm_b_median_ns: f64,
+    ratio_median: f64,
+    ratio_ci_low: f64,
+    ratio_ci_high: f64,
+    ratio_cv_pct: f64,
+    ratio_mad: f64,
+    checksum: u64,
+}
 
 fn seed_sequence() -> SeedSequence {
     SeedSequence::new(&[42]).unwrap()
@@ -24,42 +49,275 @@ fn pcg64_generator() -> Generator {
     Generator::from_bit_generator(bit_generator)
 }
 
-fn ledger_tail_stats(samples: &RefCell<Vec<f64>>) -> (usize, f64, f64) {
-    let samples = samples.borrow();
-    let count = samples.len().min(10);
-    assert!(count >= 2, "Criterion must retain paired samples");
-    let tail = &samples[samples.len() - count..];
-    let mean = tail.iter().sum::<f64>() / count as f64;
-    let variance = tail
+fn self_identity() -> String {
+    let Ok(path) = std::env::current_exe() else {
+        return "unavailable".to_string();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return "unavailable".to_string();
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let digest = hasher.finalize();
+    let mut hash = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut hash, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("{} ({} bytes) {}", hash, bytes.len(), path.display())
+}
+
+fn report_bench_identity() {
+    println!("bench_elf_sha256={}", self_identity());
+    std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
+}
+
+fn mix_checksum(state: u64, value: u64) -> u64 {
+    state.rotate_left(11) ^ value.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0xa076_1d64_78bd_642f
+}
+
+fn checksum_f64(values: &[f64]) -> u64 {
+    values.iter().fold(values.len() as u64, |state, value| {
+        mix_checksum(state, value.to_bits())
+    })
+}
+
+fn checksum_u64(values: &[u64]) -> u64 {
+    values.iter().fold(values.len() as u64, |state, &value| {
+        mix_checksum(state, value)
+    })
+}
+
+fn min_of<F>(arm: &mut F) -> TimedValue
+where
+    F: FnMut() -> TimedValue,
+{
+    let mut best = arm();
+    let mut checksum = best.checksum;
+    for _ in 1..CONTRACT_MIN_OF {
+        let observation = arm();
+        checksum = mix_checksum(checksum, observation.checksum);
+        if observation.elapsed < best.elapsed {
+            best.elapsed = observation.elapsed;
+        }
+    }
+    TimedValue {
+        elapsed: best.elapsed,
+        checksum,
+    }
+}
+
+fn paired<A, B>(round: usize, arm_a: &mut A, arm_b: &mut B) -> (TimedValue, TimedValue)
+where
+    A: FnMut() -> TimedValue,
+    B: FnMut() -> TimedValue,
+{
+    let (a, b) = if round & 1 == 0 {
+        (min_of(arm_a), min_of(arm_b))
+    } else {
+        let b = min_of(arm_b);
+        (min_of(arm_a), b)
+    };
+    assert_eq!(
+        a.checksum, b.checksum,
+        "paired benchmark arms produced different output checksums"
+    );
+    (a, b)
+}
+
+fn median(values: &mut [f64]) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let mid = values.len() / 2;
+    if values.len() & 1 == 0 {
+        (values[mid - 1] + values[mid]) * 0.5
+    } else {
+        values[mid]
+    }
+}
+
+fn bootstrap_median_ci(values: &[f64]) -> (f64, f64) {
+    let mut state = 0x4d59_5df4_d0f3_3173u64 ^ values.len() as u64;
+    let mut resample = vec![0.0; values.len()];
+    let mut medians = Vec::with_capacity(CONTRACT_BOOTSTRAP_RESAMPLES);
+    for _ in 0..CONTRACT_BOOTSTRAP_RESAMPLES {
+        for slot in &mut resample {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *slot = values[(state as usize) % values.len()];
+        }
+        medians.push(median(&mut resample));
+    }
+    medians.sort_by(f64::total_cmp);
+    let low = CONTRACT_BOOTSTRAP_RESAMPLES * 25 / 1_000;
+    let high = (CONTRACT_BOOTSTRAP_RESAMPLES * 975 / 1_000).min(CONTRACT_BOOTSTRAP_RESAMPLES - 1);
+    (medians[low], medians[high])
+}
+
+fn pair_stats(
+    arm_a_samples: &RefCell<Vec<f64>>,
+    arm_b_samples: &RefCell<Vec<f64>>,
+    checksum: u64,
+) -> Option<PairStats> {
+    let arm_a_samples = arm_a_samples.borrow();
+    let arm_b_samples = arm_b_samples.borrow();
+    let count = arm_a_samples
+        .len()
+        .min(arm_b_samples.len())
+        .min(CONTRACT_ROUNDS);
+    if count < CONTRACT_ROUNDS {
+        return None;
+    }
+    let arm_a = &arm_a_samples[arm_a_samples.len() - count..];
+    let arm_b = &arm_b_samples[arm_b_samples.len() - count..];
+    let ratios = arm_a
         .iter()
-        .map(|sample| {
-            let delta = sample - mean;
+        .zip(arm_b)
+        .map(|(a, b)| a / b)
+        .collect::<Vec<_>>();
+
+    let mut arm_a_sorted = arm_a.to_vec();
+    let mut arm_b_sorted = arm_b.to_vec();
+    let mut ratio_sorted = ratios.clone();
+    let arm_a_median_ns = median(&mut arm_a_sorted);
+    let arm_b_median_ns = median(&mut arm_b_sorted);
+    let ratio_median = median(&mut ratio_sorted);
+    let (ratio_ci_low, ratio_ci_high) = bootstrap_median_ci(&ratios);
+    let ratio_mean = ratios.iter().sum::<f64>() / count as f64;
+    let ratio_variance = ratios
+        .iter()
+        .map(|ratio| {
+            let delta = ratio - ratio_mean;
             delta * delta
         })
         .sum::<f64>()
         / (count - 1) as f64;
-    (count, mean, variance.sqrt() * 100.0 / mean)
+    let mut deviations = ratios
+        .iter()
+        .map(|ratio| (ratio - ratio_median).abs())
+        .collect::<Vec<_>>();
+
+    Some(PairStats {
+        rounds: count,
+        arm_a_median_ns,
+        arm_b_median_ns,
+        ratio_median,
+        ratio_ci_low,
+        ratio_ci_high,
+        ratio_cv_pct: ratio_variance.sqrt() * 100.0 / ratio_mean,
+        ratio_mad: median(&mut deviations),
+        checksum,
+    })
 }
 
 fn report_ledger_pair(
     row: &str,
-    candidate_samples: &RefCell<Vec<f64>>,
-    former_samples: &RefCell<Vec<f64>>,
-) {
-    if candidate_samples.borrow().len() < 2 || former_samples.borrow().len() < 2 {
-        return;
-    }
-    let (candidate_n, candidate_ns, candidate_cv) = ledger_tail_stats(candidate_samples);
-    let (former_n, former_ns, former_cv) = ledger_tail_stats(former_samples);
-    assert_eq!(candidate_n, former_n);
+    arm_a_samples: &RefCell<Vec<f64>>,
+    arm_b_samples: &RefCell<Vec<f64>>,
+    checksum: u64,
+) -> Option<PairStats> {
+    let stats = pair_stats(arm_a_samples, arm_b_samples, checksum)?;
     println!(
-        "LEDGER_AUDIT row={row} samples={candidate_n} candidate_mean_ms={:.6} \
-         candidate_cv_pct={candidate_cv:.3} orig_mean_ms={:.6} orig_cv_pct={former_cv:.3} \
-         orig_over_candidate={:.4}",
-        candidate_ns / 1_000_000.0,
-        former_ns / 1_000_000.0,
-        former_ns / candidate_ns,
+        "PAIRED row={row} rounds={} min_of={CONTRACT_MIN_OF} arm_a_median_ms={:.6} \
+         arm_b_median_ms={:.6} ratio_median={:.6} ratio_median_ci95=[{:.6},{:.6}] \
+         ratio_cv_pct={:.3} ratio_mad={:.6} checksum={:016x}",
+        stats.rounds,
+        stats.arm_a_median_ns / 1_000_000.0,
+        stats.arm_b_median_ns / 1_000_000.0,
+        stats.ratio_median,
+        stats.ratio_ci_low,
+        stats.ratio_ci_high,
+        stats.ratio_cv_pct,
+        stats.ratio_mad,
+        stats.checksum,
     );
+    Some(stats)
+}
+
+fn report_median_ci_gate(row: &str, effect: PairStats, null: PairStats) {
+    let null_half_width = (null.ratio_ci_low - 1.0)
+        .abs()
+        .max((null.ratio_ci_high - 1.0).abs());
+    let required_delta = (2.0 * null_half_width).max(0.01);
+    let effect_delta = effect.ratio_median - 1.0;
+    let outside_null_ci =
+        effect.ratio_median < null.ratio_ci_low || effect.ratio_median > null.ratio_ci_high;
+    let verdict = if outside_null_ci && effect_delta >= required_delta {
+        "DECIDABLE_WIN"
+    } else if outside_null_ci && effect_delta <= -required_delta {
+        "DECIDABLE_REGRESSION"
+    } else {
+        "UNDECIDED"
+    };
+    println!(
+        "MEDIAN_CI_GATE row={row} verdict={verdict} effect_ratio={:.6} \
+         null_ci95=[{:.6},{:.6}] null_half_width={:.6} required_2x_delta={required_delta:.6} \
+         cv_is_provenance_only=true",
+        effect.ratio_median, null.ratio_ci_low, null.ratio_ci_high, null_half_width,
+    );
+}
+
+fn run_median_ci_contract<NA, NB, BA, CA>(
+    row: &str,
+    mut null_base_a: NA,
+    mut null_base_b: NB,
+    mut effect_base: BA,
+    mut effect_candidate: CA,
+) -> (PairStats, PairStats)
+where
+    NA: FnMut() -> TimedValue,
+    NB: FnMut() -> TimedValue,
+    BA: FnMut() -> TimedValue,
+    CA: FnMut() -> TimedValue,
+{
+    for round in 0..4 {
+        let _ = paired(round, &mut null_base_a, &mut null_base_b);
+    }
+    let null_a_samples = RefCell::new(Vec::with_capacity(CONTRACT_ROUNDS));
+    let null_b_samples = RefCell::new(Vec::with_capacity(CONTRACT_ROUNDS));
+    let mut null_checksum = 0_u64;
+    for round in 0..CONTRACT_ROUNDS {
+        let (a, b) = paired(round, &mut null_base_a, &mut null_base_b);
+        null_a_samples
+            .borrow_mut()
+            .push(a.elapsed.as_secs_f64() * 1.0e9);
+        null_b_samples
+            .borrow_mut()
+            .push(b.elapsed.as_secs_f64() * 1.0e9);
+        null_checksum = mix_checksum(null_checksum, a.checksum);
+    }
+    let null = report_ledger_pair(
+        "null_base_aa",
+        &null_a_samples,
+        &null_b_samples,
+        null_checksum,
+    )
+    .expect("the explicit contract always supplies 41 null rounds");
+
+    for round in 0..4 {
+        let _ = paired(round, &mut effect_base, &mut effect_candidate);
+    }
+    let base_samples = RefCell::new(Vec::with_capacity(CONTRACT_ROUNDS));
+    let candidate_samples = RefCell::new(Vec::with_capacity(CONTRACT_ROUNDS));
+    let mut effect_checksum = 0_u64;
+    for round in 0..CONTRACT_ROUNDS {
+        let (base, candidate) = paired(round, &mut effect_base, &mut effect_candidate);
+        base_samples
+            .borrow_mut()
+            .push(base.elapsed.as_secs_f64() * 1.0e9);
+        candidate_samples
+            .borrow_mut()
+            .push(candidate.elapsed.as_secs_f64() * 1.0e9);
+        effect_checksum = mix_checksum(effect_checksum, base.checksum);
+    }
+    let effect = report_ledger_pair(
+        "effect_base_over_candidate",
+        &base_samples,
+        &candidate_samples,
+        effect_checksum,
+    )
+    .expect("the explicit contract always supplies 41 effect rounds");
+    report_median_ci_gate(row, effect, null);
+    (effect, null)
 }
 
 #[allow(clippy::excessive_precision)]
@@ -1220,6 +1478,434 @@ fn bench_noncentral_f_fixed_shape_cache(c: &mut Criterion) {
     group.finish();
 }
 
+fn time_noncentral_chisquare_fixed_trace(
+    df: f64,
+    nonc: f64,
+    size: usize,
+    candidate: bool,
+) -> TimedValue {
+    let mut generator = pcg64_generator();
+    let started = Instant::now();
+    let output = if candidate {
+        generator.noncentral_chisquare(df, nonc, size).unwrap()
+    } else {
+        generator
+            .noncentral_chisquare_recomputed_control(df, nonc, size)
+            .unwrap()
+    };
+    let mut elapsed = started.elapsed();
+    let checksum = mix_checksum(checksum_f64(&output), generator.next_u64());
+    let drop_started = Instant::now();
+    drop(black_box(output));
+    elapsed += drop_started.elapsed();
+    TimedValue { elapsed, checksum }
+}
+
+fn bench_noncentral_chisquare_fixed_shape_cache(c: &mut Criterion) {
+    const SIZE: usize = 100_000;
+    const DF: f64 = 5.0;
+    const NONC: f64 = 1.0;
+
+    for &(df, nonc, size) in &[
+        (5.0, 0.0, 4_096),
+        (5.0, 1.0, 4_096),
+        (0.5, 1.0, 4_096),
+        (5.0, f64::NAN, 4_096),
+        (5.0, 1.0, 0),
+    ] {
+        let mut former = pcg64_generator();
+        let mut candidate = pcg64_generator();
+        let former_output = former
+            .noncentral_chisquare_recomputed_control(df, nonc, size)
+            .unwrap();
+        let candidate_output = candidate.noncentral_chisquare(df, nonc, size).unwrap();
+        assert_eq!(
+            former_output
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            candidate_output
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(former.next_u64(), candidate.next_u64());
+    }
+
+    let _ = run_median_ci_contract(
+        "noncentral_chisquare_fixed_shape_cache_resurrection",
+        || time_noncentral_chisquare_fixed_trace(DF, NONC, SIZE, false),
+        || time_noncentral_chisquare_fixed_trace(DF, NONC, SIZE, false),
+        || time_noncentral_chisquare_fixed_trace(DF, NONC, SIZE, false),
+        || time_noncentral_chisquare_fixed_trace(DF, NONC, SIZE, true),
+    );
+
+    let mut group = c.benchmark_group("noncentral_chisquare_fixed_shape_cache");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements(SIZE as u64));
+    group.bench_function("former_recomputed_shape_terms", |bench| {
+        bench.iter(|| black_box(time_noncentral_chisquare_fixed_trace(DF, NONC, SIZE, false)))
+    });
+    group.bench_function("candidate_hoisted_shape_terms", |bench| {
+        bench.iter(|| black_box(time_noncentral_chisquare_fixed_trace(DF, NONC, SIZE, true)))
+    });
+    group.finish();
+}
+
+fn bench_hypergeometric_hrua_cache(c: &mut Criterion) {
+    const SIZE: usize = 100_000;
+    const NGOOD: u64 = 20_000;
+    const NBAD: u64 = 30_000;
+    const NSAMPLE: u64 = 10_000;
+
+    let mut generator = pcg64_generator();
+    let mut group = c.benchmark_group("hypergeometric_hrua_parameter_cache");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements(SIZE as u64));
+    group.bench_function("cached_plan_per_batch", |bench| {
+        bench.iter(|| {
+            black_box(
+                generator
+                    .hypergeometric(
+                        black_box(NGOOD),
+                        black_box(NBAD),
+                        black_box(NSAMPLE),
+                        black_box(SIZE),
+                    )
+                    .unwrap(),
+            )
+        })
+    });
+    group.finish();
+}
+
+fn bench_geometric_inversion_cache(c: &mut Criterion) {
+    const SIZE: usize = 100_000;
+    const P: f64 = 0.1;
+
+    let mut generator = pcg64_generator();
+    let mut group = c.benchmark_group("geometric_inversion_parameter_cache");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements(SIZE as u64));
+    group.bench_function("public_batch", |bench| {
+        bench.iter(|| black_box(generator.geometric(black_box(P), black_box(SIZE)).unwrap()))
+    });
+    group.finish();
+}
+
+#[derive(Clone, Copy)]
+enum LogseriesEnvelope {
+    Former,
+    LinearUpper,
+    Taylor,
+}
+
+#[inline(never)]
+fn counted_logseries_control(
+    generator: &mut Generator,
+    p: f64,
+    size: usize,
+    envelope: LogseriesEnvelope,
+) -> Result<(Vec<u64>, usize), RandomError> {
+    if p == 0.0 {
+        return Ok((
+            (0..size)
+                .map(|_| {
+                    let _ = generator.next_f64();
+                    1
+                })
+                .collect(),
+            0,
+        ));
+    }
+    if !(0.0..1.0).contains(&p) {
+        return Err(RandomError::InvalidParameter);
+    }
+    let r = (-p).ln_1p();
+    let mut expm1_calls = 0;
+    let output = (0..size)
+        .map(|_| {
+            loop {
+                let v = generator.next_f64();
+                if v >= p {
+                    return 1;
+                }
+                let u = generator.next_f64();
+                let exponent = r * u;
+                match envelope {
+                    LogseriesEnvelope::Former => {}
+                    LogseriesEnvelope::LinearUpper => {
+                        if v >= (-exponent).next_up() {
+                            return 1;
+                        }
+                    }
+                    LogseriesEnvelope::Taylor => {
+                        let x = -exponent;
+                        let x_squared = x * x;
+                        let q_lower = (-0.5_f64).mul_add(x_squared, x).next_down().next_down();
+                        let q_upper = x_squared
+                            .mul_add(x.mul_add(1.0 / 6.0, -0.5), x)
+                            .next_up()
+                            .next_up();
+                        if v >= q_upper {
+                            return 1;
+                        }
+                        let q_upper_squared = (q_upper * q_upper).next_up().next_up();
+                        if v < q_lower && v > q_upper_squared {
+                            return 2;
+                        }
+                    }
+                }
+                expm1_calls += 1;
+                let q = -exponent.exp_m1();
+                if v <= q * q {
+                    let result = (1.0 + v.ln() / q.ln()).floor() as i64;
+                    if result < 1 || v == 0.0 {
+                        continue;
+                    }
+                    return result as u64;
+                }
+                if v >= q {
+                    return 1;
+                }
+                return 2;
+            }
+        })
+        .collect();
+    Ok((output, expm1_calls))
+}
+
+fn time_logseries_fixed_trace(p: f64, size: usize, candidate: bool) -> TimedValue {
+    let mut generator = pcg64_generator();
+    let started = Instant::now();
+    let envelope = if candidate {
+        LogseriesEnvelope::Taylor
+    } else {
+        LogseriesEnvelope::Former
+    };
+    let output = counted_logseries_control(&mut generator, black_box(p), black_box(size), envelope)
+        .unwrap()
+        .0;
+    let mut elapsed = started.elapsed();
+    let checksum = mix_checksum(checksum_u64(&output), generator.next_u64());
+    let drop_started = Instant::now();
+    drop(black_box(output));
+    elapsed += drop_started.elapsed();
+    TimedValue { elapsed, checksum }
+}
+
+fn bench_logseries_taylor_envelope(c: &mut Criterion) {
+    const SIZE: usize = 100_000;
+    const P: f64 = 0.8;
+
+    for &p in &[
+        0.0,
+        f64::from_bits(1),
+        1.0e-12,
+        0.01,
+        0.25,
+        0.5,
+        0.8,
+        0.99,
+        1.0 - f64::EPSILON,
+    ] {
+        let mut former = pcg64_generator();
+        let mut linear = pcg64_generator();
+        let mut modeled = pcg64_generator();
+        let mut candidate = pcg64_generator();
+        let (former_output, _) =
+            counted_logseries_control(&mut former, p, 4_096, LogseriesEnvelope::Former).unwrap();
+        let (linear_output, _) =
+            counted_logseries_control(&mut linear, p, 4_096, LogseriesEnvelope::LinearUpper)
+                .unwrap();
+        let (modeled_output, _) =
+            counted_logseries_control(&mut modeled, p, 4_096, LogseriesEnvelope::Taylor).unwrap();
+        let candidate_output = candidate.logseries(p, 4_096).unwrap();
+        assert_eq!(former_output, linear_output, "linear output at p={p}");
+        assert_eq!(former_output, modeled_output, "modeled output at p={p}");
+        assert_eq!(former_output, candidate_output, "public output at p={p}");
+        let expected_after = former.next_u64();
+        assert_eq!(expected_after, linear.next_u64(), "linear stream at p={p}");
+        assert_eq!(
+            expected_after,
+            modeled.next_u64(),
+            "modeled stream at p={p}"
+        );
+        assert_eq!(
+            expected_after,
+            candidate.next_u64(),
+            "public stream at p={p}"
+        );
+    }
+
+    let mut former_count = pcg64_generator();
+    let mut linear_count = pcg64_generator();
+    let mut candidate_count = pcg64_generator();
+    let (former_output, former_expm1_calls) =
+        counted_logseries_control(&mut former_count, P, SIZE, LogseriesEnvelope::Former).unwrap();
+    let (linear_output, linear_expm1_calls) =
+        counted_logseries_control(&mut linear_count, P, SIZE, LogseriesEnvelope::LinearUpper)
+            .unwrap();
+    let (candidate_output, candidate_expm1_calls) =
+        counted_logseries_control(&mut candidate_count, P, SIZE, LogseriesEnvelope::Taylor)
+            .unwrap();
+    assert_eq!(former_output, linear_output);
+    assert_eq!(former_output, candidate_output);
+    let expected_after = former_count.next_u64();
+    assert_eq!(expected_after, linear_count.next_u64());
+    assert_eq!(expected_after, candidate_count.next_u64());
+    println!(
+        "COUNTED_MECHANISM row=logseries_taylor_envelope_expm1_elision \
+         outputs={SIZE} former_expm1_calls={former_expm1_calls} \
+         linear_expm1_calls={linear_expm1_calls} candidate_expm1_calls={candidate_expm1_calls} \
+         removed={} removed_pct={:.3}",
+        former_expm1_calls - candidate_expm1_calls,
+        (former_expm1_calls - candidate_expm1_calls) as f64 * 100.0 / former_expm1_calls as f64,
+    );
+
+    let _ = run_median_ci_contract(
+        "logseries_taylor_envelope_expm1_elision",
+        || time_logseries_fixed_trace(P, SIZE, false),
+        || time_logseries_fixed_trace(P, SIZE, false),
+        || time_logseries_fixed_trace(P, SIZE, false),
+        || time_logseries_fixed_trace(P, SIZE, true),
+    );
+
+    let mut rejected_model = pcg64_generator();
+    let mut group = c.benchmark_group("logseries_taylor_envelope_expm1_elision");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements(SIZE as u64));
+    group.bench_function("rejected_taylor_model", |bench| {
+        bench.iter(|| {
+            black_box(
+                counted_logseries_control(
+                    &mut rejected_model,
+                    black_box(P),
+                    black_box(SIZE),
+                    LogseriesEnvelope::Taylor,
+                )
+                .unwrap(),
+            )
+        })
+    });
+    group.finish();
+}
+
+fn checksum_f64_rows(rows: &[Vec<f64>]) -> u64 {
+    rows.iter().fold(rows.len() as u64, |state, row| {
+        mix_checksum(state, checksum_f64(row))
+    })
+}
+
+fn time_multivariate_normal_diag_fixed_trace(
+    mean: &[f64],
+    cov_diag: &[f64],
+    size: usize,
+    candidate: bool,
+) -> TimedValue {
+    let mut generator = pcg64_generator();
+    let started = Instant::now();
+    let output = if candidate {
+        generator
+            .multivariate_normal_diag_cached_sqrt_control(mean, cov_diag, size)
+            .unwrap()
+    } else {
+        generator
+            .multivariate_normal_diag(mean, cov_diag, size)
+            .unwrap()
+    };
+    let mut elapsed = started.elapsed();
+    let checksum = mix_checksum(checksum_f64_rows(&output), generator.next_u64());
+    let drop_started = Instant::now();
+    drop(black_box(output));
+    elapsed += drop_started.elapsed();
+    TimedValue { elapsed, checksum }
+}
+
+fn bench_multivariate_normal_diag_sqrt_cache(c: &mut Criterion) {
+    const DIMENSIONS: usize = 64;
+    const SIZE: usize = 4_096;
+
+    let mean = vec![0.25; DIMENSIONS];
+    let cov_diag = (0..DIMENSIONS)
+        .map(|index| 0.25 + (index + 1) as f64 / DIMENSIONS as f64)
+        .collect::<Vec<_>>();
+
+    let mut former_proof = pcg64_generator();
+    let mut candidate_proof = pcg64_generator();
+    let former_output = former_proof
+        .multivariate_normal_diag(&mean, &cov_diag, SIZE)
+        .unwrap();
+    let candidate_output = candidate_proof
+        .multivariate_normal_diag_cached_sqrt_control(&mean, &cov_diag, SIZE)
+        .unwrap();
+    assert_eq!(
+        checksum_f64_rows(&former_output),
+        checksum_f64_rows(&candidate_output)
+    );
+    for (former_row, candidate_row) in former_output.iter().zip(&candidate_output) {
+        assert_eq!(
+            former_row
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            candidate_row
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(former_proof.next_u64(), candidate_proof.next_u64());
+
+    let former_sqrt_calls = DIMENSIONS * SIZE;
+    let candidate_sqrt_calls = DIMENSIONS;
+    println!(
+        "COUNTED_MECHANISM row=multivariate_normal_diag_sqrt_cache \
+         outputs={} former_sqrt_calls={former_sqrt_calls} \
+         candidate_sqrt_calls={candidate_sqrt_calls} removed={} removed_pct={:.5}",
+        DIMENSIONS * SIZE,
+        former_sqrt_calls - candidate_sqrt_calls,
+        (former_sqrt_calls - candidate_sqrt_calls) as f64 * 100.0 / former_sqrt_calls as f64,
+    );
+
+    let _ = run_median_ci_contract(
+        "multivariate_normal_diag_sqrt_cache",
+        || time_multivariate_normal_diag_fixed_trace(&mean, &cov_diag, SIZE, false),
+        || time_multivariate_normal_diag_fixed_trace(&mean, &cov_diag, SIZE, false),
+        || time_multivariate_normal_diag_fixed_trace(&mean, &cov_diag, SIZE, false),
+        || time_multivariate_normal_diag_fixed_trace(&mean, &cov_diag, SIZE, true),
+    );
+
+    let mut generator = pcg64_generator();
+    let mut group = c.benchmark_group("multivariate_normal_diag_sqrt_cache");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements((DIMENSIONS * SIZE) as u64));
+    group.bench_function("rejected_cached_sqrt_control", |bench| {
+        bench.iter(|| {
+            black_box(
+                generator
+                    .multivariate_normal_diag_cached_sqrt_control(
+                        black_box(&mean),
+                        black_box(&cov_diag),
+                        black_box(SIZE),
+                    )
+                    .unwrap(),
+            )
+        })
+    });
+    group.finish();
+}
+
 #[inline(never)]
 fn former_zipf_single(generator: &mut Generator, a: f64) -> i64 {
     if a >= 1025.0 {
@@ -1299,6 +1985,26 @@ fn rejected_cached_zipf(
         .collect())
 }
 
+fn time_generator_zipf(
+    generator: &mut Generator,
+    a: f64,
+    size: usize,
+    candidate: bool,
+) -> TimedValue {
+    let started = Instant::now();
+    let output = if candidate {
+        rejected_cached_zipf(generator, black_box(a), black_box(size)).unwrap()
+    } else {
+        former_zipf(generator, black_box(a), black_box(size)).unwrap()
+    };
+    let mut elapsed = started.elapsed();
+    let checksum = checksum_f64(&output);
+    let drop_started = Instant::now();
+    drop(black_box(output));
+    elapsed += drop_started.elapsed();
+    TimedValue { elapsed, checksum }
+}
+
 fn bench_zipf_parameter_cache(c: &mut Criterion) {
     const SIZE: usize = 100_000;
     const A: f64 = 2.5;
@@ -1320,101 +2026,30 @@ fn bench_zipf_parameter_cache(c: &mut Criterion) {
     assert_eq!(former_proof.next_u64(), candidate_proof.next_u64());
 
     let mut group = c.benchmark_group("zipf_parameter_cache");
-    group.sample_size(10);
+    group.sample_size(CONTRACT_ROUNDS);
     group.warm_up_time(Duration::from_millis(250));
     group.measurement_time(Duration::from_millis(750));
     group.throughput(Throughput::Elements(SIZE as u64));
 
-    let mut former_generator = pcg64_generator();
-    let mut candidate_generator = pcg64_generator();
-    let candidate_samples = RefCell::new(Vec::new());
-    let former_samples = RefCell::new(Vec::new());
-    let effect_order = Cell::new(0u64);
-    group.bench_function("paired_former_candidate", |bench| {
-        bench.iter_custom(|iterations| {
-            let mut candidate_total = Duration::ZERO;
-            let mut former_total = Duration::ZERO;
-            let time_candidate = |generator: &mut Generator| {
-                let started = Instant::now();
-                black_box(rejected_cached_zipf(generator, black_box(A), black_box(SIZE)).unwrap());
-                started.elapsed()
-            };
-            let time_former = |generator: &mut Generator| {
-                let started = Instant::now();
-                black_box(former_zipf(generator, black_box(A), black_box(SIZE)).unwrap());
-                started.elapsed()
-            };
-            for _ in 0..iterations {
-                if effect_order.get() & 1 == 0 {
-                    former_total += time_former(&mut former_generator);
-                    candidate_total += time_candidate(&mut candidate_generator);
-                    candidate_total += time_candidate(&mut candidate_generator);
-                    former_total += time_former(&mut former_generator);
-                } else {
-                    candidate_total += time_candidate(&mut candidate_generator);
-                    former_total += time_former(&mut former_generator);
-                    former_total += time_former(&mut former_generator);
-                    candidate_total += time_candidate(&mut candidate_generator);
-                }
-                effect_order.set(effect_order.get().wrapping_add(1));
-            }
-            candidate_samples
-                .borrow_mut()
-                .push(candidate_total.as_secs_f64() * 0.5e9 / iterations as f64);
-            former_samples
-                .borrow_mut()
-                .push(former_total.as_secs_f64() * 0.5e9 / iterations as f64);
-            candidate_total + former_total
-        })
-    });
-    report_ledger_pair(
-        "zipf_parameter_cache_effect",
-        &candidate_samples,
-        &former_samples,
+    let mut null_base_a = pcg64_generator();
+    let mut null_base_b = pcg64_generator();
+    let mut effect_base = pcg64_generator();
+    let mut effect_candidate = pcg64_generator();
+    let _ = run_median_ci_contract(
+        "zipf_parameter_cache",
+        || time_generator_zipf(&mut null_base_a, A, SIZE, false),
+        || time_generator_zipf(&mut null_base_b, A, SIZE, false),
+        || time_generator_zipf(&mut effect_base, A, SIZE, false),
+        || time_generator_zipf(&mut effect_candidate, A, SIZE, true),
     );
-
-    let mut null_lhs_generator = pcg64_generator();
-    let mut null_rhs_generator = pcg64_generator();
-    let null_lhs_samples = RefCell::new(Vec::new());
-    let null_rhs_samples = RefCell::new(Vec::new());
-    let null_order = Cell::new(0u64);
-    group.bench_function("null_candidate_aa", |bench| {
-        bench.iter_custom(|iterations| {
-            let mut lhs_total = Duration::ZERO;
-            let mut rhs_total = Duration::ZERO;
-            let time_candidate = |generator: &mut Generator| {
-                let started = Instant::now();
-                black_box(rejected_cached_zipf(generator, black_box(A), black_box(SIZE)).unwrap());
-                started.elapsed()
-            };
-            for _ in 0..iterations {
-                if null_order.get() & 1 == 0 {
-                    lhs_total += time_candidate(&mut null_lhs_generator);
-                    rhs_total += time_candidate(&mut null_rhs_generator);
-                    rhs_total += time_candidate(&mut null_rhs_generator);
-                    lhs_total += time_candidate(&mut null_lhs_generator);
-                } else {
-                    rhs_total += time_candidate(&mut null_rhs_generator);
-                    lhs_total += time_candidate(&mut null_lhs_generator);
-                    lhs_total += time_candidate(&mut null_lhs_generator);
-                    rhs_total += time_candidate(&mut null_rhs_generator);
-                }
-                null_order.set(null_order.get().wrapping_add(1));
-            }
-            null_lhs_samples
-                .borrow_mut()
-                .push(lhs_total.as_secs_f64() * 0.5e9 / iterations as f64);
-            null_rhs_samples
-                .borrow_mut()
-                .push(rhs_total.as_secs_f64() * 0.5e9 / iterations as f64);
-            lhs_total + rhs_total
-        })
+    group.bench_function("base_recomputed_parameters", |bench| {
+        let mut generator = pcg64_generator();
+        bench.iter(|| black_box(former_zipf(&mut generator, A, SIZE).unwrap()))
     });
-    report_ledger_pair(
-        "zipf_parameter_cache_null",
-        &null_lhs_samples,
-        &null_rhs_samples,
-    );
+    group.bench_function("candidate_cached_parameters", |bench| {
+        let mut generator = pcg64_generator();
+        bench.iter(|| black_box(rejected_cached_zipf(&mut generator, A, SIZE).unwrap()))
+    });
 
     group.finish();
 }
@@ -1504,6 +2139,34 @@ fn rejected_cached_random_state_zipf(
         .collect())
 }
 
+fn time_random_state_zipf_fixed_trace(
+    a: f64,
+    size: usize,
+    repeats: usize,
+    candidate: bool,
+) -> TimedValue {
+    let mut random_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
+    let started = Instant::now();
+    let mut outputs = Vec::with_capacity(repeats);
+    for _ in 0..repeats {
+        let output = if candidate {
+            rejected_cached_random_state_zipf(&mut random_state, black_box(a), black_box(size))
+        } else {
+            former_random_state_zipf(&mut random_state, black_box(a), black_box(size))
+        }
+        .unwrap();
+        outputs.push(output);
+    }
+    let mut elapsed = started.elapsed();
+    let checksum = outputs.iter().fold(0_u64, |state, output| {
+        mix_checksum(state, checksum_u64(output))
+    });
+    let drop_started = Instant::now();
+    drop(black_box(outputs));
+    elapsed += drop_started.elapsed();
+    TimedValue { elapsed, checksum }
+}
+
 fn bench_random_state_zipf_parameter_cache(c: &mut Criterion) {
     const SIZE: usize = 100_000;
     const REPEATS: usize = 6;
@@ -1518,7 +2181,7 @@ fn bench_random_state_zipf_parameter_cache(c: &mut Criterion) {
     assert_eq!(former_proof.next_u64(), candidate_proof.next_u64());
 
     let mut group = c.benchmark_group("random_state_zipf_parameter_cache");
-    group.sample_size(10);
+    group.sample_size(CONTRACT_ROUNDS);
     group.warm_up_time(Duration::from_millis(250));
     group.measurement_time(Duration::from_millis(750));
     group.throughput(Throughput::Elements((SIZE * REPEATS) as u64));
@@ -1528,118 +2191,226 @@ fn bench_random_state_zipf_parameter_cache(c: &mut Criterion) {
         bench.iter(|| black_box(random_state.zipf(black_box(A), black_box(SIZE)).unwrap()))
     });
 
-    let candidate_samples = RefCell::new(Vec::new());
-    let former_samples = RefCell::new(Vec::new());
-    let effect_order = Cell::new(0u64);
-    group.bench_function("fixed_trace_paired_former_candidate", |bench| {
-        bench.iter_custom(|iterations| {
-            let mut candidate_total = Duration::ZERO;
-            let mut former_total = Duration::ZERO;
-            let time_candidate = || {
-                let mut random_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
-                let started = Instant::now();
-                for _ in 0..REPEATS {
-                    black_box(
-                        rejected_cached_random_state_zipf(
-                            &mut random_state,
-                            black_box(A),
-                            black_box(SIZE),
-                        )
-                        .unwrap(),
-                    );
-                }
-                started.elapsed()
-            };
-            let time_former = || {
-                let mut random_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
-                let started = Instant::now();
-                for _ in 0..REPEATS {
-                    black_box(
-                        former_random_state_zipf(&mut random_state, black_box(A), black_box(SIZE))
-                            .unwrap(),
-                    );
-                }
-                started.elapsed()
-            };
-            for _ in 0..iterations {
-                if effect_order.get() & 1 == 0 {
-                    former_total += time_former();
-                    candidate_total += time_candidate();
-                    candidate_total += time_candidate();
-                    former_total += time_former();
-                } else {
-                    candidate_total += time_candidate();
-                    former_total += time_former();
-                    former_total += time_former();
-                    candidate_total += time_candidate();
-                }
-                effect_order.set(effect_order.get().wrapping_add(1));
-            }
-            candidate_samples
-                .borrow_mut()
-                .push(candidate_total.as_secs_f64() * 0.5e9 / iterations as f64);
-            former_samples
-                .borrow_mut()
-                .push(former_total.as_secs_f64() * 0.5e9 / iterations as f64);
-            candidate_total + former_total
-        })
-    });
-    report_ledger_pair(
-        "random_state_zipf_parameter_cache_effect",
-        &candidate_samples,
-        &former_samples,
+    let _ = run_median_ci_contract(
+        "random_state_zipf_parameter_cache",
+        || time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, false),
+        || time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, false),
+        || time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, false),
+        || time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, true),
     );
+    group.bench_function("fixed_trace_base", |bench| {
+        bench.iter(|| black_box(time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, false)))
+    });
+    group.bench_function("fixed_trace_candidate", |bench| {
+        bench.iter(|| black_box(time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, true)))
+    });
 
-    let null_lhs_samples = RefCell::new(Vec::new());
-    let null_rhs_samples = RefCell::new(Vec::new());
-    let null_order = Cell::new(0u64);
-    group.bench_function("fixed_trace_null_candidate_aa", |bench| {
-        bench.iter_custom(|iterations| {
-            let mut lhs_total = Duration::ZERO;
-            let mut rhs_total = Duration::ZERO;
-            let time_candidate = || {
-                let mut random_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
-                let started = Instant::now();
-                for _ in 0..REPEATS {
-                    black_box(
-                        rejected_cached_random_state_zipf(
-                            &mut random_state,
-                            black_box(A),
-                            black_box(SIZE),
-                        )
-                        .unwrap(),
-                    );
-                }
-                started.elapsed()
-            };
-            for _ in 0..iterations {
-                if null_order.get() & 1 == 0 {
-                    lhs_total += time_candidate();
-                    rhs_total += time_candidate();
-                    rhs_total += time_candidate();
-                    lhs_total += time_candidate();
-                } else {
-                    rhs_total += time_candidate();
-                    lhs_total += time_candidate();
-                    lhs_total += time_candidate();
-                    rhs_total += time_candidate();
-                }
-                null_order.set(null_order.get().wrapping_add(1));
+    group.finish();
+}
+
+#[derive(Clone, Copy)]
+enum LegacyGammaShapeCache {
+    Degenerate,
+    Small {
+        one_minus_shape: f64,
+        inv_shape: f64,
+    },
+    MarsagliaTsang {
+        d: f64,
+        c: f64,
+    },
+}
+
+impl LegacyGammaShapeCache {
+    fn new(shape: f64) -> Self {
+        if shape == 1.0 || shape == 0.0 || !shape.is_finite() {
+            Self::Degenerate
+        } else if shape < 1.0 {
+            Self::Small {
+                one_minus_shape: 1.0 - shape,
+                inv_shape: 1.0 / shape,
             }
-            null_lhs_samples
-                .borrow_mut()
-                .push(lhs_total.as_secs_f64() * 0.5e9 / iterations as f64);
-            null_rhs_samples
-                .borrow_mut()
-                .push(rhs_total.as_secs_f64() * 0.5e9 / iterations as f64);
-            lhs_total + rhs_total
+        } else {
+            let d = shape - 1.0 / 3.0;
+            Self::MarsagliaTsang {
+                d,
+                c: 1.0 / (9.0 * d).sqrt(),
+            }
+        }
+    }
+}
+
+fn cached_random_state_standard_gamma_one(
+    random_state: &mut RandomState,
+    shape: f64,
+    cache: LegacyGammaShapeCache,
+) -> f64 {
+    if shape == 1.0 {
+        return -(1.0 - random_state.next_f64()).ln();
+    }
+    if shape == 0.0 {
+        return 0.0;
+    }
+    if !shape.is_finite() {
+        let _ = random_state.legacy_gauss();
+        let _ = random_state.next_f64();
+        return shape;
+    }
+    if shape < 1.0 {
+        let LegacyGammaShapeCache::Small {
+            one_minus_shape,
+            inv_shape,
+        } = cache
+        else {
+            unreachable!("shape < 1 must use the small-shape cache");
+        };
+        loop {
+            let u = random_state.next_f64();
+            let v = -(1.0 - random_state.next_f64()).ln();
+            if u <= one_minus_shape {
+                let x = u.powf(inv_shape);
+                if x <= v {
+                    return x;
+                }
+            } else {
+                let y = -((1.0 - u) / shape).ln();
+                let x = (one_minus_shape + shape * y).powf(inv_shape);
+                if x <= v + y {
+                    return x;
+                }
+            }
+        }
+    }
+
+    let LegacyGammaShapeCache::MarsagliaTsang { d, c } = cache else {
+        unreachable!("shape > 1 must use the Marsaglia-Tsang cache");
+    };
+    loop {
+        let mut x;
+        let mut v;
+        loop {
+            x = random_state.legacy_gauss();
+            v = 1.0 + c * x;
+            if v > 0.0 {
+                break;
+            }
+        }
+        v = v * v * v;
+        let u = random_state.next_f64();
+        if u < 1.0 - 0.0331 * x * x * x * x {
+            return d * v;
+        }
+        if u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
+            return d * v;
+        }
+    }
+}
+
+fn cached_random_state_standard_gamma(
+    random_state: &mut RandomState,
+    shape: f64,
+    size: usize,
+) -> Result<Vec<f64>, RandomError> {
+    if shape < 0.0 || (shape == 0.0 && shape.is_sign_negative()) {
+        return Err(RandomError::ShapeNegative);
+    }
+    let cache = LegacyGammaShapeCache::new(shape);
+    Ok((0..size)
+        .map(|_| cached_random_state_standard_gamma_one(random_state, shape, cache))
+        .collect())
+}
+
+fn time_random_state_gamma(
+    random_state: &mut RandomState,
+    shape: f64,
+    size: usize,
+    candidate: bool,
+) -> TimedValue {
+    let started = Instant::now();
+    let output = if candidate {
+        cached_random_state_standard_gamma(random_state, shape, size).unwrap()
+    } else {
+        random_state.standard_gamma(shape, size).unwrap()
+    };
+    let mut elapsed = started.elapsed();
+    let checksum = checksum_f64(&output);
+    let drop_started = Instant::now();
+    drop(black_box(output));
+    elapsed += drop_started.elapsed();
+    TimedValue { elapsed, checksum }
+}
+
+fn bench_random_state_gamma_shape_cache(c: &mut Criterion) {
+    const SIZE: usize = 100_000;
+    const SHAPE: f64 = 5.0;
+
+    for shape in [0.0, 0.25, 0.5, 1.0, 2.5, 5.0, f64::NAN, f64::INFINITY] {
+        let mut former = RandomState::new(SeedMaterial::U64(42)).unwrap();
+        let mut candidate = RandomState::new(SeedMaterial::U64(42)).unwrap();
+        let former_output = former.standard_gamma(shape, 256).unwrap();
+        let candidate_output =
+            cached_random_state_standard_gamma(&mut candidate, shape, 256).unwrap();
+        assert_eq!(
+            former_output
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            candidate_output
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "legacy gamma output diverged at shape {shape}"
+        );
+        assert_eq!(
+            former, candidate,
+            "legacy gamma RNG position diverged at shape {shape}"
+        );
+    }
+    assert!(matches!(
+        cached_random_state_standard_gamma(
+            &mut RandomState::new(SeedMaterial::U64(42)).unwrap(),
+            -0.0,
+            1,
+        ),
+        Err(RandomError::ShapeNegative)
+    ));
+
+    let mut group = c.benchmark_group("random_state_gamma_shape_cache");
+    group.sample_size(CONTRACT_ROUNDS);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_millis(750));
+    group.throughput(Throughput::Elements(SIZE as u64));
+
+    let mut null_base_a = RandomState::new(SeedMaterial::U64(42)).unwrap();
+    let mut null_base_b = RandomState::new(SeedMaterial::U64(42)).unwrap();
+    let mut effect_base = RandomState::new(SeedMaterial::U64(42)).unwrap();
+    let mut effect_candidate = RandomState::new(SeedMaterial::U64(42)).unwrap();
+    let _ = run_median_ci_contract(
+        "random_state_gamma_shape_cache",
+        || time_random_state_gamma(&mut null_base_a, SHAPE, SIZE, false),
+        || time_random_state_gamma(&mut null_base_b, SHAPE, SIZE, false),
+        || time_random_state_gamma(&mut effect_base, SHAPE, SIZE, false),
+        || time_random_state_gamma(&mut effect_candidate, SHAPE, SIZE, true),
+    );
+    group.bench_function("base_recomputed_shape", |bench| {
+        let mut state = RandomState::new(SeedMaterial::U64(42)).unwrap();
+        bench.iter(|| {
+            black_box(
+                state
+                    .standard_gamma(black_box(SHAPE), black_box(SIZE))
+                    .unwrap(),
+            )
         })
     });
-    report_ledger_pair(
-        "random_state_zipf_parameter_cache_null",
-        &null_lhs_samples,
-        &null_rhs_samples,
-    );
+    group.bench_function("candidate_cached_shape", |bench| {
+        let mut state = RandomState::new(SeedMaterial::U64(42)).unwrap();
+        bench.iter(|| {
+            black_box(
+                cached_random_state_standard_gamma(&mut state, black_box(SHAPE), black_box(SIZE))
+                    .unwrap(),
+            )
+        })
+    });
 
     group.finish();
 }
@@ -1673,8 +2444,30 @@ criterion_group!(
     bench_bitgen_comparison,
     bench_pcg_fill_u64_large,
     bench_noncentral_f_fixed_shape_cache,
+    bench_noncentral_chisquare_fixed_shape_cache,
+    bench_hypergeometric_hrua_cache,
+    bench_geometric_inversion_cache,
+    bench_logseries_taylor_envelope,
+    bench_multivariate_normal_diag_sqrt_cache,
     bench_zipf_parameter_cache,
     bench_random_state_zipf_parameter_cache,
+    bench_random_state_gamma_shape_cache,
 );
 
-criterion_main!(benches);
+fn main() {
+    report_bench_identity();
+    if std::env::var_os("FNP_RANDOM_MVN_DIAG_PROFILE_ONLY").is_some() {
+        let mut criterion = Criterion::default().configure_from_args();
+        bench_multivariate_normal_diag_sqrt_cache(&mut criterion);
+        criterion.final_summary();
+        return;
+    }
+    if std::env::var_os("FNP_RANDOM_LOGSERIES_PROFILE_ONLY").is_some() {
+        let mut criterion = Criterion::default().configure_from_args();
+        bench_logseries_taylor_envelope(&mut criterion);
+        criterion.final_summary();
+        return;
+    }
+    benches();
+    Criterion::default().configure_from_args().final_summary();
+}

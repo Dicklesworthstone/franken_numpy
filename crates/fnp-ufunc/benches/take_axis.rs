@@ -334,4 +334,7 @@ criterion_group!(
     bench_put_duplicate_runs,
     bench_fftshift_singleton_axes
 );
-criterion_main!(benches);
+#[path = "../../bench_identity.rs"]
+mod bench_identity;
+
+criterion_main!(bench_identity::report_bench_identity, benches);

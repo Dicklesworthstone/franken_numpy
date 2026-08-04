@@ -7622,6 +7622,14 @@ fn f64_over_under_event(value: f64, result: f64) -> bool {
 // The native route is enabled only where that byte parity is proven; AVX-512
 // and non-x86-64 hosts keep the numpy passthrough. Permanent per-host
 // diagnostic: conformance_exp_log::f64_exp_log_numpy_vs_system_libm_byte_probe.
+//
+// ISA CONTROL 2026-07-31 (ledger row of that date): the AVX2 samples above ran
+// numpy 2.2.4/2.4.6 while the divergent AVX-512 sample ran 2.3.5, so ISA and
+// numpy version were confounded. Re-running the diagnostic body on hz1 (numpy
+// 2.3.5, avx512f=false) returned byte_equal 4/4 with 0 diffs, versus hz2 (numpy
+// 2.3.5, avx512f=true) byte_equal false 4/4. Holding the numpy version fixed
+// and varying only the ISA flips the relation, so this gate is keyed on the
+// correct variable. Do not relax it to a version check.
 #[cfg(target_arch = "x86_64")]
 fn numpy_explog_matches_libm() -> bool {
     static LIBM_BYTE_EQUAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -18896,8 +18904,25 @@ fn build_numpy_array_from_storage(
         // PyList construction, but without boxing each element into a Python bool.
         // Matters a lot for large boolean results (isin, comparisons, logical ops).
         ArrayStorage::Bool(values) => {
-            let bytes: Vec<u8> = values.iter().map(|&b| u8::from(b)).collect();
-            let u8_arr = numpy_array_from_slice(py, &numpy, &bytes, "uint8")?;
+            // The `u8` bytes this needs are the `Vec<bool>`'s own bytes. Rust
+            // guarantees `bool` is size 1, align 1, and only ever the bit patterns
+            // 0x00 and 0x01 — exactly what `u8::from(b)` was producing — so the
+            // former `.collect()` allocated a second full-size buffer and walked
+            // every element to reproduce bytes it already had. Reinterpret instead.
+            // At the measured 8M-element shape, the worker's allocator served that
+            // redundant allocation through mmap/munmap plus kernel page-zeroing.
+            // glibc's initial/default mmap threshold is 128 KiB, but it can adapt at
+            // runtime, so the threshold is measurement context rather than a
+            // universal size law. Byte-identity is structural, not empirical: the
+            // bytes are the same bytes.
+            //
+            // SAFETY: `bool` and `u8` share size 1 and align 1, and every valid
+            // `bool` is a valid `u8`, so `values`' allocation is a valid `[u8]` of
+            // the same length. The slice borrows `values`, which outlives the copy
+            // performed by `numpy_array_from_slice`.
+            let bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), values.len()) };
+            let u8_arr = numpy_array_from_slice(py, &numpy, bytes, "uint8")?;
             let bool_dtype = numpy.getattr("bool_")?;
             u8_arr.call_method1("view", (bool_dtype,))?
         }
@@ -22753,58 +22778,79 @@ fn count_nonzero_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
 // with an OR / zero-OR (both autovectorize) and only branching once per block
 // keeps SIMD throughput AND a coarse early-exit. Truthiness is order-independent,
 // so the result is identical to the short-circuit form.
-const ANY_ALL_BLK: usize = 8192;
+const ANY_ALL_PREFIX_BYTES: usize = 8192;
+const ANY_ALL_PAR_MIN_BYTES: usize = 1 << 24;
+const ANY_ALL_PAR_CHUNK_BYTES: usize = 1 << 20;
 
-fn block_any_u8(input: &[pyo3::buffer::ReadOnlyCell<u8>]) -> bool {
-    for chunk in input.chunks(ANY_ALL_BLK) {
-        let mut acc = 0u8;
-        for c in chunk {
-            acc |= c.get();
-        }
-        if acc != 0 {
+#[inline]
+fn any_nonzero_u8(input: &[u8]) -> bool {
+    let mut acc = 0u8;
+    for &value in input {
+        acc |= value;
+    }
+    acc != 0
+}
+
+#[inline]
+fn any_zero_u8(input: &[u8]) -> bool {
+    // Detect a zero byte eight lanes at a time. For each byte lane, subtracting
+    // 0x01 sets that lane's high bit exactly when the original byte was zero;
+    // masking with `!word` and 0x80 removes borrow/high-bit false positives.
+    // This is endian-independent because only the existence of a zero lane
+    // matters, and it remains correct for noncanonical NumPy bool bytes.
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    let (words, tail) = input.as_chunks::<8>();
+    for bytes in words {
+        let word = u64::from_ne_bytes(*bytes);
+        if word.wrapping_sub(ONES) & !word & HIGHS != 0 {
             return true;
         }
     }
-    false
+    tail.contains(&0)
+}
+
+fn block_any_u8(input: &[pyo3::buffer::ReadOnlyCell<u8>]) -> bool {
+    // SAFETY: `PyBuffer::as_slice` supplied `input` from a C-contiguous uint8
+    // view, so it covers `input.len()` initialized bytes. ReadOnlyCell<u8> is
+    // layout-compatible with u8, and the owning ndarray remains borrowed under
+    // the GIL for this entire reduction. The native view is read-only.
+    let data: &[u8] =
+        unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), input.len()) };
+    let prefix_len = data.len().min(ANY_ALL_PREFIX_BYTES);
+    if any_nonzero_u8(&data[..prefix_len]) {
+        return true;
+    }
+    let tail = &data[prefix_len..];
+    if tail.len() >= ANY_ALL_PAR_MIN_BYTES && rayon::current_num_threads() > 1 {
+        use rayon::prelude::*;
+        return tail.par_chunks(ANY_ALL_PAR_CHUNK_BYTES).any(any_nonzero_u8);
+    }
+    tail.chunks(ANY_ALL_PREFIX_BYTES).any(any_nonzero_u8)
 }
 
 fn block_all_u8(input: &[pyo3::buffer::ReadOnlyCell<u8>]) -> bool {
-    for chunk in input.chunks(ANY_ALL_BLK) {
-        let mut zero = 0u8;
-        for c in chunk {
-            zero |= (c.get() == 0) as u8;
-        }
-        if zero != 0 {
-            return false;
-        }
+    // SAFETY: same buffer/layout/lifetime argument as `block_any_u8` above.
+    let data: &[u8] =
+        unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), input.len()) };
+    let prefix_len = data.len().min(ANY_ALL_PREFIX_BYTES);
+    if any_zero_u8(&data[..prefix_len]) {
+        return false;
     }
-    true
+    let tail = &data[prefix_len..];
+    if tail.len() >= ANY_ALL_PAR_MIN_BYTES && rayon::current_num_threads() > 1 {
+        use rayon::prelude::*;
+        return !tail.par_chunks(ANY_ALL_PAR_CHUNK_BYTES).any(any_zero_u8);
+    }
+    !tail.chunks(ANY_ALL_PREFIX_BYTES).any(any_zero_u8)
 }
 
 fn block_any_f64(input: &[pyo3::buffer::ReadOnlyCell<f64>]) -> bool {
-    for chunk in input.chunks(ANY_ALL_BLK) {
-        let mut acc = false;
-        for c in chunk {
-            acc |= c.get() != 0.0;
-        }
-        if acc {
-            return true;
-        }
-    }
-    false
+    block_any_all(input, false, |value| value != 0.0)
 }
 
 fn block_all_f64(input: &[pyo3::buffer::ReadOnlyCell<f64>]) -> bool {
-    for chunk in input.chunks(ANY_ALL_BLK) {
-        let mut zero = false;
-        for c in chunk {
-            zero |= c.get() == 0.0;
-        }
-        if zero {
-            return false;
-        }
-    }
-    true
+    block_any_all(input, true, |value| value != 0.0)
 }
 
 // Per-axis any/all over a C-contiguous borrowed buffer. The generic
@@ -22930,27 +22976,61 @@ fn axis_any_all_fold<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
 // widths). Folds each fixed block with an OR (any) / falsy-OR (all) so the
 // no-early-exit case (any over all-zero, all over all-nonzero) still
 // autovectorizes, then branches once per block for a coarse short-circuit.
-fn block_any_all<T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
-    input: &[pyo3::buffer::ReadOnlyCell<T>],
-    is_all: bool,
-    truthy: F,
-) -> bool {
-    for chunk in input.chunks(ANY_ALL_BLK) {
+fn block_any_all<T, F>(input: &[pyo3::buffer::ReadOnlyCell<T>], is_all: bool, truthy: F) -> bool
+where
+    T: pyo3::buffer::Element + Copy + Send + Sync,
+    F: Fn(T) -> bool + Copy + Send + Sync,
+{
+    #[inline]
+    fn fold_chunk<T: Copy, F: Fn(T) -> bool + Copy>(input: &[T], is_all: bool, truthy: F) -> bool {
         let mut hit = 0u8;
         if is_all {
-            for c in chunk {
-                hit |= u8::from(!truthy(c.get()));
-            }
-            if hit != 0 {
-                return false;
+            for &value in input {
+                hit |= u8::from(!truthy(value));
             }
         } else {
-            for c in chunk {
-                hit |= u8::from(truthy(c.get()));
+            for &value in input {
+                hit |= u8::from(truthy(value));
             }
-            if hit != 0 {
-                return true;
-            }
+        }
+        if is_all { hit == 0 } else { hit != 0 }
+    }
+
+    // SAFETY: `PyBuffer::as_slice` supplied `input` from a C-contiguous native
+    // numeric ndarray and keeps the exporter borrowed under the GIL for this
+    // reduction. `ReadOnlyCell<T>` is `repr(transparent)` over `UnsafeCell<T>`,
+    // so it has T's size/alignment and every element is initialized. The view is
+    // read-only. Sharing it lets independent Rayon bands read disjoint elements;
+    // no worker calls Python or retains the view beyond this function.
+    let data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast(), input.len()) };
+    let item_bytes = std::mem::size_of::<T>();
+    debug_assert!(item_bytes > 0);
+    let prefix_elements = ANY_ALL_PREFIX_BYTES.div_ceil(item_bytes).min(data.len());
+    let prefix_value = fold_chunk(&data[..prefix_elements], is_all, truthy);
+    if prefix_value != is_all {
+        return prefix_value;
+    }
+
+    let tail = &data[prefix_elements..];
+    let parallel_min_elements = ANY_ALL_PAR_MIN_BYTES.div_ceil(item_bytes);
+    let parallel_chunk_elements = ANY_ALL_PAR_CHUNK_BYTES.div_ceil(item_bytes);
+    if tail.len() >= parallel_min_elements && rayon::current_num_threads() > 1 {
+        use rayon::prelude::*;
+        if is_all {
+            return tail
+                .par_chunks(parallel_chunk_elements)
+                .all(|chunk| fold_chunk(chunk, true, truthy));
+        }
+        return tail
+            .par_chunks(parallel_chunk_elements)
+            .any(|chunk| fold_chunk(chunk, false, truthy));
+    }
+
+    let serial_chunk_elements = ANY_ALL_PREFIX_BYTES.div_ceil(item_bytes);
+    for chunk in tail.chunks(serial_chunk_elements) {
+        let value = fold_chunk(chunk, is_all, truthy);
+        if value != is_all {
+            return value;
         }
     }
     is_all
@@ -22969,8 +23049,8 @@ fn zerocopy_any_all_buf<'py, T, F>(
     truthy: F,
 ) -> PyResult<Option<Py<PyAny>>>
 where
-    T: pyo3::buffer::Element + Copy,
-    F: Fn(T) -> bool + Copy,
+    T: pyo3::buffer::Element + Copy + Send + Sync,
+    F: Fn(T) -> bool + Copy + Send + Sync,
 {
     let Ok(buffer) = PyBuffer::<T>::get(a) else {
         return Ok(None);
@@ -28949,6 +29029,1571 @@ fn try_zerocopy_f64_heaviside_scalar(
     }
 }
 
+/// Arithmetic contract for fused element-wise chains.
+///
+/// Floating-point implementations deliberately spell this as two operations so
+/// they retain each of NumPy's intermediate roundings. Integer implementations
+/// use explicit wrapping operations because NumPy integer ufuncs are modular
+/// even in debug builds.
+trait MultiplyAddValue: pyo3::buffer::Element + Copy + Send + Sync {
+    fn multiply_add_numpy(self, multiplier: Self, addend: Self) -> Self;
+
+    fn subtract_multiply_add_numpy(self, subtrahend: Self, multiplier: Self, addend: Self) -> Self;
+
+    fn pairwise_multiply_add_numpy(
+        self,
+        multiplier: Self,
+        other: Self,
+        other_multiplier: Self,
+    ) -> Self;
+}
+
+impl MultiplyAddValue for f64 {
+    #[inline]
+    fn multiply_add_numpy(self, multiplier: Self, addend: Self) -> Self {
+        let product = self * multiplier;
+        product + addend
+    }
+
+    #[inline]
+    fn subtract_multiply_add_numpy(self, subtrahend: Self, multiplier: Self, addend: Self) -> Self {
+        let difference = self - subtrahend;
+        let product = difference * multiplier;
+        product + addend
+    }
+
+    #[inline]
+    fn pairwise_multiply_add_numpy(
+        self,
+        multiplier: Self,
+        other: Self,
+        other_multiplier: Self,
+    ) -> Self {
+        let first_product = self * multiplier;
+        let second_product = other * other_multiplier;
+        first_product + second_product
+    }
+}
+
+impl MultiplyAddValue for f32 {
+    #[inline]
+    fn multiply_add_numpy(self, multiplier: Self, addend: Self) -> Self {
+        let product = self * multiplier;
+        product + addend
+    }
+
+    #[inline]
+    fn subtract_multiply_add_numpy(self, subtrahend: Self, multiplier: Self, addend: Self) -> Self {
+        let difference = self - subtrahend;
+        let product = difference * multiplier;
+        product + addend
+    }
+
+    #[inline]
+    fn pairwise_multiply_add_numpy(
+        self,
+        multiplier: Self,
+        other: Self,
+        other_multiplier: Self,
+    ) -> Self {
+        let first_product = self * multiplier;
+        let second_product = other * other_multiplier;
+        first_product + second_product
+    }
+}
+
+macro_rules! impl_wrapping_multiply_add_value {
+    ($($integer:ty),+ $(,)?) => {
+        $(
+            impl MultiplyAddValue for $integer {
+                #[inline]
+                fn multiply_add_numpy(self, multiplier: Self, addend: Self) -> Self {
+                    self.wrapping_mul(multiplier).wrapping_add(addend)
+                }
+
+                #[inline]
+                fn subtract_multiply_add_numpy(
+                    self,
+                    subtrahend: Self,
+                    multiplier: Self,
+                    addend: Self,
+                ) -> Self {
+                    self.wrapping_sub(subtrahend)
+                        .wrapping_mul(multiplier)
+                        .wrapping_add(addend)
+                }
+
+                #[inline]
+                fn pairwise_multiply_add_numpy(
+                    self,
+                    multiplier: Self,
+                    other: Self,
+                    other_multiplier: Self,
+                ) -> Self {
+                    self.wrapping_mul(multiplier)
+                        .wrapping_add(other.wrapping_mul(other_multiplier))
+                }
+            }
+        )+
+    };
+}
+
+impl_wrapping_multiply_add_value!(i8, u8, i16, u16, i32, u32, i64, u64);
+
+/// Below this a Rayon split costs more than the fused pass saves. Shared by
+/// every `multiply_add` route so the parallel gate is one number, not four.
+/// One fused `a * b + c` pass over pre-sliced bands.
+///
+/// Shared by the allocating route and the `out=` route so both spellings run
+/// byte-identical arithmetic through exactly one implementation.
+fn multiply_add_into<T>(out: &mut [T], a: &[T], b: &[T], c: &[T])
+where
+    T: MultiplyAddValue,
+{
+    debug_assert_eq!(out.len(), a.len());
+    debug_assert_eq!(out.len(), b.len());
+    debug_assert_eq!(out.len(), c.len());
+
+    use rayon::prelude::*;
+    if out.len() >= MULTIPLY_ADD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        out.par_chunks_mut(MULTIPLY_ADD_CHUNK)
+            .zip(a.par_chunks(MULTIPLY_ADD_CHUNK))
+            .zip(b.par_chunks(MULTIPLY_ADD_CHUNK))
+            .zip(c.par_chunks(MULTIPLY_ADD_CHUNK))
+            .for_each(|(((slots, band_a), band_b), band_c)| {
+                for (((slot, &x), &y), &z) in slots
+                    .iter_mut()
+                    .zip(band_a.iter())
+                    .zip(band_b.iter())
+                    .zip(band_c.iter())
+                {
+                    *slot = x.multiply_add_numpy(y, z);
+                }
+            });
+    } else {
+        for (((slot, &x), &y), &z) in out.iter_mut().zip(a.iter()).zip(b.iter()).zip(c.iter()) {
+            *slot = x.multiply_add_numpy(y, z);
+        }
+    }
+}
+
+/// One fused `a * b + c` pass over raw `float16` bit patterns.
+///
+/// The intermediate narrow back to `float16` is LOAD-BEARING: NumPy rounds after
+/// EACH ufunc, so keeping the product in `f32` across the add changes output
+/// bits. Shared by the allocating and `out=` routes.
+fn multiply_add_f16_into(out: &mut [u16], a: &[u16], b: &[u16], c: &[u16]) {
+    debug_assert_eq!(out.len(), a.len());
+    debug_assert_eq!(out.len(), b.len());
+    debug_assert_eq!(out.len(), c.len());
+
+    #[inline]
+    fn kernel(x: u16, y: u16, z: u16) -> u16 {
+        let product = f16::from_f32(f16::from_bits(x).to_f32() * f16::from_bits(y).to_f32());
+        f16::from_f32(product.to_f32() + f16::from_bits(z).to_f32()).to_bits()
+    }
+
+    use rayon::prelude::*;
+    if out.len() >= MULTIPLY_ADD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        out.par_chunks_mut(MULTIPLY_ADD_CHUNK)
+            .zip(a.par_chunks(MULTIPLY_ADD_CHUNK))
+            .zip(b.par_chunks(MULTIPLY_ADD_CHUNK))
+            .zip(c.par_chunks(MULTIPLY_ADD_CHUNK))
+            .for_each(|(((slots, band_a), band_b), band_c)| {
+                for (((slot, &x), &y), &z) in slots
+                    .iter_mut()
+                    .zip(band_a.iter())
+                    .zip(band_b.iter())
+                    .zip(band_c.iter())
+                {
+                    *slot = kernel(x, y, z);
+                }
+            });
+    } else {
+        for (((slot, &x), &y), &z) in out.iter_mut().zip(a.iter()).zip(b.iter()).zip(c.iter()) {
+            *slot = kernel(x, y, z);
+        }
+    }
+}
+
+const MULTIPLY_ADD_PARALLEL_MIN: usize = 1 << 16;
+/// Each worker streams three inputs and one output inside a cache-resident
+/// band instead of sweeping the whole array.
+const MULTIPLY_ADD_CHUNK: usize = 1 << 14;
+
+/// One fused pass of `a * b + c` for `float16`.
+///
+/// NumPy has no `float16` ALU. Its `multiply` loop widens each half to `float`,
+/// multiplies, and narrows back; `add` then does the same again. So the
+/// incumbent pays two widen/narrow round trips AND materializes a whole
+/// `float16` intermediate, single-threaded.
+///
+/// BIT-EXACTNESS: rounding to `float16` happens after EACH ufunc, so the fused
+/// form must round the product to `float16` before adding — it is NOT an f32
+/// chain. Verified byte-exact against live NumPy over random operands: the
+/// intermediate narrow is load-bearing and dropping it changes results.
+fn zerocopy_multiply_add_f16(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    c: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let ndarray = numpy.getattr("ndarray")?;
+    for operand in [a, b, c] {
+        if !operand.is_exact_instance(&ndarray) {
+            return Ok(None);
+        }
+        let dtype = operand.getattr("dtype")?;
+        if dtype.getattr("kind")?.extract::<String>()? != "f"
+            || dtype.getattr("itemsize")?.extract::<usize>()? != 2
+        {
+            return Ok(None);
+        }
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    if shape.is_empty()
+        || b.getattr("shape")?.extract::<Vec<usize>>()? != shape
+        || c.getattr("shape")?.extract::<Vec<usize>>()? != shape
+    {
+        return Ok(None);
+    }
+    let n: usize = shape.iter().product();
+    if n == 0 {
+        return Ok(None);
+    }
+    // Reinterpret the halves as raw bit patterns; PyO3 has no f16 buffer element.
+    let u16_dtype = numpy.getattr("uint16")?;
+    let (Ok(raw_a), Ok(raw_b), Ok(raw_c)) = (
+        a.call_method1("view", (&u16_dtype,)),
+        b.call_method1("view", (&u16_dtype,)),
+        c.call_method1("view", (&u16_dtype,)),
+    ) else {
+        return Ok(None);
+    };
+    let (Ok(buf_a), Ok(buf_b), Ok(buf_c)) = (
+        PyBuffer::<u16>::get(&raw_a),
+        PyBuffer::<u16>::get(&raw_b),
+        PyBuffer::<u16>::get(&raw_c),
+    ) else {
+        return Ok(None);
+    };
+    if !buf_a.is_c_contiguous() || !buf_b.is_c_contiguous() || !buf_c.is_c_contiguous() {
+        return Ok(None);
+    }
+    let (Some(cells_a), Some(cells_b), Some(cells_c)) =
+        (buf_a.as_slice(py), buf_b.as_slice(py), buf_c.as_slice(py))
+    else {
+        return Ok(None);
+    };
+    if cells_a.len() != n || cells_b.len() != n || cells_c.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<u16> is repr(transparent) over u16; read-only under the GIL.
+    let va: &[u16] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<u16>(), n) };
+    let vb: &[u16] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<u16>(), n) };
+    let vc: &[u16] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<u16>(), n) };
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float16")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    {
+        let raw_out = flat.call_method1("view", (&u16_dtype,))?;
+        let Ok(out_buffer) = PyBuffer::<u16>::get(&raw_out) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: freshly allocated numpy.empty output, cannot alias the inputs;
+        // every slot is written exactly once below.
+        let out: &mut [u16] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u16, n) };
+
+        multiply_add_f16_into(out, va, vb, vc);
+    }
+    if shape.len() == 1 {
+        Ok(Some(flat.unbind()))
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        Ok(Some(
+            flat.call_method1("reshape", (&shape_tuple,))?.unbind(),
+        ))
+    }
+}
+
+/// One fused pass of complex `a * b + c` over an interleaved `[re, im, ...]` band.
+///
+/// NUMPY'S COMPLEX MULTIPLY CONTRACTS, and matching it is mandatory for the
+/// byte-exact claim. Measured against live NumPy 2.4.3 at every length from 1 to
+/// 100,000 and under non-contiguous strides, the exact per-element form is
+///
+/// ```text
+///   real = fma(ar, br, -(ai * bi))
+///   imag = fma(ar, bi,   ai * br)
+/// ```
+///
+/// — one rounding for the second product-and-accumulate. The naive schoolbook
+/// `ar*br - ai*bi` disagrees with NumPy on ~14% of components of random input,
+/// so this kernel MUST fuse. That is the exact opposite of the real `float64`
+/// route above, which must NOT fuse. The asymmetry is NumPy's, not ours: its
+/// complex loop is compiled with contraction enabled and its real ufuncs are
+/// two separate calls.
+///
+/// The addend stage is plain per-component addition (verified separately).
+///
+/// # Safety
+///
+/// Callers must have established `is_x86_feature_detected!("fma")`. The `fma`
+/// target feature is enabled on THIS FUNCTION ALONE so `mul_add` lowers to
+/// `vfmadd` rather than a libm call; it deliberately does not widen the
+/// workspace's global `+avx2`-only policy, which exists to stop LLVM contracting
+/// unrelated linalg kernels (`target-cpu=x86-64-v3` regresses 16 fnp-linalg
+/// conformance tests).
+macro_rules! impl_complex_multiply_add_band {
+    ($name:ident, $into:ident, $float:ty) => {
+        /// Banded parallel driver for the complex fused pass, shared by the
+        /// allocating and `out=` routes.
+        ///
+        /// Bands are split on complex-element boundaries (pairs of components),
+        /// never mid-element.
+        ///
+        /// # Safety
+        ///
+        /// Callers must have established `is_x86_feature_detected!("fma")`.
+        #[cfg(target_arch = "x86_64")]
+        unsafe fn $into(out: &mut [$float], a: &[$float], b: &[$float], c: &[$float]) {
+            debug_assert_eq!(out.len(), a.len());
+            debug_assert_eq!(out.len(), b.len());
+            debug_assert_eq!(out.len(), c.len());
+            debug_assert_eq!(out.len() % 2, 0);
+
+            use rayon::prelude::*;
+            let band = 2 * MULTIPLY_ADD_CHUNK;
+            let elements = out.len() / 2;
+            if elements >= MULTIPLY_ADD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+                out.par_chunks_mut(band)
+                    .zip(a.par_chunks(band))
+                    .zip(b.par_chunks(band))
+                    .zip(c.par_chunks(band))
+                    .for_each(|(((slots, band_a), band_b), band_c)| {
+                        // SAFETY: FMA availability is the caller's precondition.
+                        unsafe { $name(band_a, band_b, band_c, slots) };
+                    });
+            } else {
+                // SAFETY: FMA availability is the caller's precondition.
+                unsafe { $name(a, b, c, out) };
+            }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "fma")]
+        unsafe fn $name(a: &[$float], b: &[$float], c: &[$float], out: &mut [$float]) {
+            let (out_pairs, _) = out.as_chunks_mut::<2>();
+            let (a_pairs, _) = a.as_chunks::<2>();
+            let (b_pairs, _) = b.as_chunks::<2>();
+            let (c_pairs, _) = c.as_chunks::<2>();
+            for (((slots, pa), pb), pc) in out_pairs
+                .iter_mut()
+                .zip(a_pairs.iter())
+                .zip(b_pairs.iter())
+                .zip(c_pairs.iter())
+            {
+                let (ar, ai) = (pa[0], pa[1]);
+                let (br, bi) = (pb[0], pb[1]);
+                slots[0] = ar.mul_add(br, -(ai * bi)) + pc[0];
+                slots[1] = ar.mul_add(bi, ai * br) + pc[1];
+            }
+        }
+    };
+}
+
+impl_complex_multiply_add_band!(
+    complex_multiply_add_band_f64,
+    complex_multiply_add_into_f64,
+    f64
+);
+impl_complex_multiply_add_band!(
+    complex_multiply_add_band_f32,
+    complex_multiply_add_into_f32,
+    f32
+);
+
+/// One fused pass for complex `a * b + c`.
+///
+/// The incumbent is `numpy.multiply` then `numpy.add`, both single-threaded, with
+/// a full complex intermediate in between — 128 MiB at 8M `complex128`, twice the
+/// `float64` case. This route views the interleaved buffer as its component float
+/// and streams three inputs into one output in a single parallel pass.
+fn zerocopy_multiply_add_complex(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    c: &Bound<'_, PyAny>,
+    itemsize: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        // Without a runtime FMA unit we cannot reproduce NumPy's contracted
+        // complex multiply bit-for-bit, so defer rather than emit a silently
+        // different answer.
+        let _ = (py, numpy, a, b, c, itemsize);
+        Ok(None)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if !std::arch::is_x86_feature_detected!("fma") {
+            return Ok(None);
+        }
+        let ndarray = numpy.getattr("ndarray")?;
+        for operand in [a, b, c] {
+            if !operand.is_exact_instance(&ndarray) {
+                return Ok(None);
+            }
+            let dtype = operand.getattr("dtype")?;
+            if dtype.getattr("kind")?.extract::<String>()? != "c"
+                || dtype.getattr("itemsize")?.extract::<usize>()? != itemsize
+            {
+                return Ok(None);
+            }
+        }
+        let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+        if shape.is_empty()
+            || b.getattr("shape")?.extract::<Vec<usize>>()? != shape
+            || c.getattr("shape")?.extract::<Vec<usize>>()? != shape
+        {
+            return Ok(None);
+        }
+        let n: usize = shape.iter().product();
+        if n == 0 {
+            return Ok(None);
+        }
+        let (component, complex_name) = if itemsize == 16 {
+            ("float64", "complex128")
+        } else {
+            ("float32", "complex64")
+        };
+        let component_dtype = numpy.getattr(component)?;
+
+        macro_rules! run_complex {
+            ($float:ty, $band:ident) => {{
+                let (Ok(view_a), Ok(view_b), Ok(view_c)) = (
+                    a.call_method1("view", (&component_dtype,)),
+                    b.call_method1("view", (&component_dtype,)),
+                    c.call_method1("view", (&component_dtype,)),
+                ) else {
+                    return Ok(None);
+                };
+                let (Ok(buf_a), Ok(buf_b), Ok(buf_c)) = (
+                    PyBuffer::<$float>::get(&view_a),
+                    PyBuffer::<$float>::get(&view_b),
+                    PyBuffer::<$float>::get(&view_c),
+                ) else {
+                    return Ok(None);
+                };
+                if !buf_a.is_c_contiguous() || !buf_b.is_c_contiguous() || !buf_c.is_c_contiguous()
+                {
+                    return Ok(None);
+                }
+                let (Some(cells_a), Some(cells_b), Some(cells_c)) =
+                    (buf_a.as_slice(py), buf_b.as_slice(py), buf_c.as_slice(py))
+                else {
+                    return Ok(None);
+                };
+                let components = 2 * n;
+                if cells_a.len() != components
+                    || cells_b.len() != components
+                    || cells_c.len() != components
+                {
+                    return Ok(None);
+                }
+                // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+                let va: &[$float] = unsafe {
+                    std::slice::from_raw_parts(cells_a.as_ptr().cast::<$float>(), components)
+                };
+                let vb: &[$float] = unsafe {
+                    std::slice::from_raw_parts(cells_b.as_ptr().cast::<$float>(), components)
+                };
+                let vc: &[$float] = unsafe {
+                    std::slice::from_raw_parts(cells_c.as_ptr().cast::<$float>(), components)
+                };
+
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("dtype", complex_name)?;
+                let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+                {
+                    let view_out = flat.call_method1("view", (&component_dtype,))?;
+                    let Ok(out_buffer) = PyBuffer::<$float>::get(&view_out) else {
+                        return Ok(None);
+                    };
+                    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+                        return Ok(None);
+                    };
+                    // SAFETY: freshly allocated numpy.empty output, cannot alias the
+                    // inputs; every slot is written exactly once below.
+                    let out: &mut [$float] = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            out_cells.as_ptr() as *mut $float,
+                            components,
+                        )
+                    };
+                    // SAFETY: FMA availability established above.
+                    unsafe { $band(out, va, vb, vc) };
+                }
+                if shape.len() == 1 {
+                    Ok(Some(flat.unbind()))
+                } else {
+                    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+                    Ok(Some(
+                        flat.call_method1("reshape", (&shape_tuple,))?.unbind(),
+                    ))
+                }
+            }};
+        }
+
+        if itemsize == 16 {
+            run_complex!(f64, complex_multiply_add_into_f64)
+        } else {
+            run_complex!(f32, complex_multiply_add_into_f32)
+        }
+    }
+}
+
+/// One fused pass for `a * b + c`.
+///
+/// NumPy has no fused public form of this expression. `a * b + c` is two ufunc
+/// calls: `multiply` materializes a whole intermediate array, then `add` reads
+/// it back. At 8M `float64` that intermediate is 64 MiB — allocated, written,
+/// re-read, and freed, for a value nobody wants. Both ufuncs are also
+/// single-threaded. So the incumbent touches memory six times on one core where
+/// the job needs four touches, and it cannot fuse without a JIT.
+///
+/// BIT-EXACTNESS: this is deliberately NOT an FMA. `t = a * b` rounds, then
+/// `t + c` rounds again, exactly as NumPy's two ufuncs do. Rust does not
+/// contract `a * b + c` into a single-rounding `vfmadd` (and this workspace
+/// compiles without `+fma` anyway, verified by `objdump`: zero `vfmadd` sites),
+/// so every output bit matches the incumbent's two-call form.
+fn zerocopy_multiply_add_typed<T>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    c: &Bound<'_, PyAny>,
+    dtype: &str,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: MultiplyAddValue,
+{
+    let ndarray = numpy.getattr("ndarray")?;
+    for operand in [a, b, c] {
+        if !operand.is_exact_instance(&ndarray) {
+            return Ok(None);
+        }
+    }
+    let (Ok(buf_a), Ok(buf_b), Ok(buf_c)) = (
+        PyBuffer::<T>::get(a),
+        PyBuffer::<T>::get(b),
+        PyBuffer::<T>::get(c),
+    ) else {
+        return Ok(None);
+    };
+    // Identical shapes only. Broadcasting changes which elements pair up, and
+    // NumPy owns those rules; defer rather than reimplement them.
+    let shape: Vec<usize> = buf_a.shape().to_vec();
+    if shape.is_empty() || buf_b.shape() != shape.as_slice() || buf_c.shape() != shape.as_slice() {
+        return Ok(None);
+    }
+    if !buf_a.is_c_contiguous() || !buf_b.is_c_contiguous() || !buf_c.is_c_contiguous() {
+        return Ok(None);
+    }
+    let (Some(cells_a), Some(cells_b), Some(cells_c)) =
+        (buf_a.as_slice(py), buf_b.as_slice(py), buf_c.as_slice(py))
+    else {
+        return Ok(None);
+    };
+    let n = cells_a.len();
+    if n == 0 || cells_b.len() != n || cells_c.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+    let va: &[T] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<T>(), n) };
+    let vb: &[T] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<T>(), n) };
+    let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype)?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: freshly allocated numpy.empty output, cannot alias the inputs;
+        // every slot is written exactly once below.
+        let out: &mut [T] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+
+        multiply_add_into(out, va, vb, vc);
+    }
+    if shape.len() == 1 {
+        Ok(Some(flat.unbind()))
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        Ok(Some(
+            flat.call_method1("reshape", (&shape_tuple,))?.unbind(),
+        ))
+    }
+}
+
+/// One fused `a * b + c` pass into a CALLER-OWNED output, for the primitive
+/// numeric dtypes.
+///
+/// Even when a NumPy user supplies `out=`, the best explicit spelling of this
+/// expression — `numpy.multiply(a, b, out=out); numpy.add(out, c, out=out)` —
+/// still makes two single-threaded sweeps: it writes `out`, then reads `out`
+/// back to add `c`. Neither arm allocates, so the entire remaining gap is pass
+/// elimination (six element-stream touches down to four) plus parallelism.
+///
+/// The output must be byte-range DISJOINT from every input. Exact aliases and
+/// partial overlaps defer, because NumPy's two-call form has an observable
+/// intermediate mutation of `out` that a single fused pass would not reproduce.
+fn zerocopy_multiply_add_out_typed<T>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    c: &Bound<'_, PyAny>,
+    output: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: MultiplyAddValue,
+{
+    let ndarray = numpy.getattr("ndarray")?;
+    for operand in [a, b, c, output] {
+        if !operand.is_exact_instance(&ndarray) {
+            return Ok(None);
+        }
+    }
+    let (Ok(buf_a), Ok(buf_b), Ok(buf_c), Ok(buf_out)) = (
+        PyBuffer::<T>::get(a),
+        PyBuffer::<T>::get(b),
+        PyBuffer::<T>::get(c),
+        PyBuffer::<T>::get(output),
+    ) else {
+        return Ok(None);
+    };
+    let shape = buf_a.shape();
+    if shape.is_empty()
+        || buf_b.shape() != shape
+        || buf_c.shape() != shape
+        || buf_out.shape() != shape
+    {
+        return Ok(None);
+    }
+    if !buf_a.is_c_contiguous()
+        || !buf_b.is_c_contiguous()
+        || !buf_c.is_c_contiguous()
+        || !buf_out.is_c_contiguous()
+        || buf_out.readonly()
+    {
+        return Ok(None);
+    }
+    if [&buf_a, &buf_b, &buf_c]
+        .into_iter()
+        .any(|input| contiguous_buffers_overlap(input, &buf_out))
+    {
+        return Ok(None);
+    }
+    let (Some(cells_a), Some(cells_b), Some(cells_c), Some(out_cells)) = (
+        buf_a.as_slice(py),
+        buf_b.as_slice(py),
+        buf_c.as_slice(py),
+        buf_out.as_mut_slice(py),
+    ) else {
+        return Ok(None);
+    };
+    let n = cells_a.len();
+    if n == 0 || cells_b.len() != n || cells_c.len() != n || out_cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: the buffer protocol validated element formats and contiguity, and
+    // the explicit byte-range checks above prove the mutable output is disjoint
+    // from every read-only input for the whole fused pass.
+    let va: &[T] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<T>(), n) };
+    let vb: &[T] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<T>(), n) };
+    let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
+    let out: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+    multiply_add_into(out, va, vb, vc);
+    Ok(Some(output.clone().unbind()))
+}
+
+/// `float16` sibling of [`zerocopy_multiply_add_out_typed`]. NumPy has no f16
+/// ALU, so its `out=` spelling still pays two widen/narrow round trips.
+fn zerocopy_multiply_add_out_f16(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    c: &Bound<'_, PyAny>,
+    output: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let ndarray = numpy.getattr("ndarray")?;
+    for operand in [a, b, c, output] {
+        if !operand.is_exact_instance(&ndarray) {
+            return Ok(None);
+        }
+        let dtype = operand.getattr("dtype")?;
+        if dtype.getattr("kind")?.extract::<String>()? != "f"
+            || dtype.getattr("itemsize")?.extract::<usize>()? != 2
+        {
+            return Ok(None);
+        }
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    if shape.is_empty()
+        || b.getattr("shape")?.extract::<Vec<usize>>()? != shape
+        || c.getattr("shape")?.extract::<Vec<usize>>()? != shape
+        || output.getattr("shape")?.extract::<Vec<usize>>()? != shape
+    {
+        return Ok(None);
+    }
+    let n: usize = shape.iter().product();
+    if n == 0 {
+        return Ok(None);
+    }
+    let u16_dtype = numpy.getattr("uint16")?;
+    let (Ok(raw_a), Ok(raw_b), Ok(raw_c), Ok(raw_out)) = (
+        a.call_method1("view", (&u16_dtype,)),
+        b.call_method1("view", (&u16_dtype,)),
+        c.call_method1("view", (&u16_dtype,)),
+        output.call_method1("view", (&u16_dtype,)),
+    ) else {
+        return Ok(None);
+    };
+    let (Ok(buf_a), Ok(buf_b), Ok(buf_c), Ok(buf_out)) = (
+        PyBuffer::<u16>::get(&raw_a),
+        PyBuffer::<u16>::get(&raw_b),
+        PyBuffer::<u16>::get(&raw_c),
+        PyBuffer::<u16>::get(&raw_out),
+    ) else {
+        return Ok(None);
+    };
+    if !buf_a.is_c_contiguous()
+        || !buf_b.is_c_contiguous()
+        || !buf_c.is_c_contiguous()
+        || !buf_out.is_c_contiguous()
+        || buf_out.readonly()
+    {
+        return Ok(None);
+    }
+    if [&buf_a, &buf_b, &buf_c]
+        .into_iter()
+        .any(|input| contiguous_buffers_overlap(input, &buf_out))
+    {
+        return Ok(None);
+    }
+    let (Some(cells_a), Some(cells_b), Some(cells_c), Some(out_cells)) = (
+        buf_a.as_slice(py),
+        buf_b.as_slice(py),
+        buf_c.as_slice(py),
+        buf_out.as_mut_slice(py),
+    ) else {
+        return Ok(None);
+    };
+    if cells_a.len() != n || cells_b.len() != n || cells_c.len() != n || out_cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: contiguity validated by the buffer protocol; the byte-range checks
+    // above prove the mutable output is disjoint from every read-only input.
+    let va: &[u16] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<u16>(), n) };
+    let vb: &[u16] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<u16>(), n) };
+    let vc: &[u16] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<u16>(), n) };
+    let out: &mut [u16] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u16, n) };
+    multiply_add_f16_into(out, va, vb, vc);
+    Ok(Some(output.clone().unbind()))
+}
+
+/// Complex sibling of [`zerocopy_multiply_add_out_typed`]. Carries the same
+/// mandatory FMA contraction as the allocating complex route.
+fn zerocopy_multiply_add_out_complex(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    c: &Bound<'_, PyAny>,
+    output: &Bound<'_, PyAny>,
+    itemsize: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (py, numpy, a, b, c, output, itemsize);
+        Ok(None)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if !std::arch::is_x86_feature_detected!("fma") {
+            return Ok(None);
+        }
+        let ndarray = numpy.getattr("ndarray")?;
+        for operand in [a, b, c, output] {
+            if !operand.is_exact_instance(&ndarray) {
+                return Ok(None);
+            }
+            let dtype = operand.getattr("dtype")?;
+            if dtype.getattr("kind")?.extract::<String>()? != "c"
+                || dtype.getattr("itemsize")?.extract::<usize>()? != itemsize
+            {
+                return Ok(None);
+            }
+        }
+        let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+        if shape.is_empty()
+            || b.getattr("shape")?.extract::<Vec<usize>>()? != shape
+            || c.getattr("shape")?.extract::<Vec<usize>>()? != shape
+            || output.getattr("shape")?.extract::<Vec<usize>>()? != shape
+        {
+            return Ok(None);
+        }
+        let n: usize = shape.iter().product();
+        if n == 0 {
+            return Ok(None);
+        }
+        let component = if itemsize == 16 { "float64" } else { "float32" };
+        let component_dtype = numpy.getattr(component)?;
+
+        macro_rules! run_complex_out {
+            ($float:ty, $into:ident) => {{
+                let (Ok(view_a), Ok(view_b), Ok(view_c), Ok(view_out)) = (
+                    a.call_method1("view", (&component_dtype,)),
+                    b.call_method1("view", (&component_dtype,)),
+                    c.call_method1("view", (&component_dtype,)),
+                    output.call_method1("view", (&component_dtype,)),
+                ) else {
+                    return Ok(None);
+                };
+                let (Ok(buf_a), Ok(buf_b), Ok(buf_c), Ok(buf_out)) = (
+                    PyBuffer::<$float>::get(&view_a),
+                    PyBuffer::<$float>::get(&view_b),
+                    PyBuffer::<$float>::get(&view_c),
+                    PyBuffer::<$float>::get(&view_out),
+                ) else {
+                    return Ok(None);
+                };
+                if !buf_a.is_c_contiguous()
+                    || !buf_b.is_c_contiguous()
+                    || !buf_c.is_c_contiguous()
+                    || !buf_out.is_c_contiguous()
+                    || buf_out.readonly()
+                {
+                    return Ok(None);
+                }
+                if [&buf_a, &buf_b, &buf_c]
+                    .into_iter()
+                    .any(|input| contiguous_buffers_overlap(input, &buf_out))
+                {
+                    return Ok(None);
+                }
+                let (Some(cells_a), Some(cells_b), Some(cells_c), Some(out_cells)) = (
+                    buf_a.as_slice(py),
+                    buf_b.as_slice(py),
+                    buf_c.as_slice(py),
+                    buf_out.as_mut_slice(py),
+                ) else {
+                    return Ok(None);
+                };
+                let components = 2 * n;
+                if cells_a.len() != components
+                    || cells_b.len() != components
+                    || cells_c.len() != components
+                    || out_cells.len() != components
+                {
+                    return Ok(None);
+                }
+                // SAFETY: contiguity validated by the buffer protocol; the
+                // byte-range checks above prove the mutable output is disjoint
+                // from every read-only input.
+                let va: &[$float] = unsafe {
+                    std::slice::from_raw_parts(cells_a.as_ptr().cast::<$float>(), components)
+                };
+                let vb: &[$float] = unsafe {
+                    std::slice::from_raw_parts(cells_b.as_ptr().cast::<$float>(), components)
+                };
+                let vc: &[$float] = unsafe {
+                    std::slice::from_raw_parts(cells_c.as_ptr().cast::<$float>(), components)
+                };
+                let out: &mut [$float] = unsafe {
+                    std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut $float, components)
+                };
+                // SAFETY: FMA availability established above.
+                unsafe { $into(out, va, vb, vc) };
+                Ok(Some(output.clone().unbind()))
+            }};
+        }
+
+        if itemsize == 16 {
+            run_complex_out!(f64, complex_multiply_add_into_f64)
+        } else {
+            run_complex_out!(f32, complex_multiply_add_into_f32)
+        }
+    }
+}
+
+/// `multiply_add(a, b, c, out=None)` -> `a * b + c`, element-wise, in one pass.
+///
+/// Byte-identical to NumPy's `a * b + c` for the routed regime (matched
+/// fixed-width numeric dtype C-contiguous ndarrays of equal shape); every other
+/// input defers to the incumbent's own two-call form, so semantics never diverge.
+/// With `out=`, the fused pass writes a caller-owned array directly and neither
+/// arm allocates.
+/// Sum the elements of `a` selected by boolean `mask`, in one fused pass.
+///
+/// Equivalent to `a[mask].sum()`, which numpy cannot fuse: its API forces the
+/// compacted array to be materialised before it can be reduced, and that gather
+/// is single-threaded. The fused form allocates nothing and reproduces numpy's
+/// pairwise accumulation tree over the compacted sequence exactly, so the result
+/// is BYTE-identical to `a[mask].sum()` — not merely close. Non-f64 arrays,
+/// non-bool masks, shape mismatches and non-contiguous inputs defer to that same
+/// two-call form, so semantics never diverge.
+#[pyfunction]
+#[pyo3(signature = (a, mask))]
+fn masked_sum(py: Python<'_>, a: Py<PyAny>, mask: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(total) = try_zerocopy_f64_masked_sum(py, a.bind(py), mask.bind(py))? {
+        return Ok(total);
+    }
+    let numpy = py.import("numpy")?;
+    let array = numpy.getattr("asarray")?.call1((a.bind(py),))?;
+    let selector = numpy.getattr("asarray")?.call1((mask.bind(py),))?;
+    Ok(array.get_item(selector)?.call_method0("sum")?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, b, c, *, out=None))]
+fn multiply_add(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    c: Py<PyAny>,
+    out: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    if let Some(destination) = out.as_ref() {
+        let destination = destination.bind(py);
+        macro_rules! try_out_route {
+            ($primitive:ty) => {
+                if let Some(result) = zerocopy_multiply_add_out_typed::<$primitive>(
+                    py,
+                    &numpy,
+                    a.bind(py),
+                    b.bind(py),
+                    c.bind(py),
+                    destination,
+                )? {
+                    return Ok(result);
+                }
+            };
+        }
+        try_out_route!(f64);
+        try_out_route!(f32);
+        try_out_route!(i64);
+        try_out_route!(u64);
+        try_out_route!(i32);
+        try_out_route!(u32);
+        try_out_route!(i16);
+        try_out_route!(u16);
+        try_out_route!(i8);
+        try_out_route!(u8);
+        if let Some(result) = zerocopy_multiply_add_out_f16(
+            py,
+            &numpy,
+            a.bind(py),
+            b.bind(py),
+            c.bind(py),
+            destination,
+        )? {
+            return Ok(result);
+        }
+        for itemsize in [16, 8] {
+            if let Some(result) = zerocopy_multiply_add_out_complex(
+                py,
+                &numpy,
+                a.bind(py),
+                b.bind(py),
+                c.bind(py),
+                destination,
+                itemsize,
+            )? {
+                return Ok(result);
+            }
+        }
+        // Defer to `numpy.add(numpy.multiply(a, b), c, out=out)`, which is what
+        // `a * b + c` with an `out=` does. Deliberately NOT chained through
+        // `out`: when `a * b` broadcasts to a smaller shape than `a * b + c`,
+        // a ufunc's `out` must match ITS OWN broadcast shape, so the chained
+        // spelling raises where the expression is perfectly valid.
+        let product = numpy.getattr("multiply")?.call1((a.bind(py), b.bind(py)))?;
+        return Ok(numpy
+            .getattr("add")?
+            .call1((product, c.bind(py), destination))?
+            .unbind());
+    }
+    if let Some(out) = zerocopy_multiply_add_typed::<f64>(
+        py,
+        &numpy,
+        a.bind(py),
+        b.bind(py),
+        c.bind(py),
+        "float64",
+    )? {
+        return Ok(out);
+    }
+    if let Some(out) = zerocopy_multiply_add_typed::<f32>(
+        py,
+        &numpy,
+        a.bind(py),
+        b.bind(py),
+        c.bind(py),
+        "float32",
+    )? {
+        return Ok(out);
+    }
+    macro_rules! try_integer_route {
+        ($integer:ty, $dtype:literal) => {
+            if let Some(out) = zerocopy_multiply_add_typed::<$integer>(
+                py,
+                &numpy,
+                a.bind(py),
+                b.bind(py),
+                c.bind(py),
+                $dtype,
+            )? {
+                return Ok(out);
+            }
+        };
+    }
+    try_integer_route!(i64, "int64");
+    try_integer_route!(u64, "uint64");
+    try_integer_route!(i32, "int32");
+    try_integer_route!(u32, "uint32");
+    try_integer_route!(i16, "int16");
+    try_integer_route!(u16, "uint16");
+    try_integer_route!(i8, "int8");
+    try_integer_route!(u8, "uint8");
+    if let Some(out) = zerocopy_multiply_add_f16(py, &numpy, a.bind(py), b.bind(py), c.bind(py))? {
+        return Ok(out);
+    }
+    for itemsize in [16, 8] {
+        if let Some(out) =
+            zerocopy_multiply_add_complex(py, &numpy, a.bind(py), b.bind(py), c.bind(py), itemsize)?
+        {
+            return Ok(out);
+        }
+    }
+    // Defer: exactly the expression a NumPy user writes, so rounding matches.
+    let product = numpy.getattr("multiply")?.call1((a.bind(py), b.bind(py)))?;
+    Ok(numpy.getattr("add")?.call1((product, c.bind(py)))?.unbind())
+}
+
+/// One fused pass for `(a - b) * c + d`.
+///
+/// NumPy must execute three independent ufuncs for this expression, allocating
+/// and streaming two discarded full-size intermediates. This route reads four
+/// inputs and writes one output exactly once. Floating-point arithmetic keeps
+/// NumPy's subtract, multiply, then add rounding order; fixed-width integers use
+/// the same modular overflow semantics as the three NumPy ufuncs.
+fn subtract_multiply_add_into<T>(out: &mut [T], a: &[T], b: &[T], c: &[T], d: &[T])
+where
+    T: MultiplyAddValue,
+{
+    debug_assert_eq!(out.len(), a.len());
+    debug_assert_eq!(out.len(), b.len());
+    debug_assert_eq!(out.len(), c.len());
+    debug_assert_eq!(out.len(), d.len());
+
+    use rayon::prelude::*;
+    const SUBTRACT_MULTIPLY_ADD_PARALLEL_MIN: usize = 1 << 16;
+    // Five float64 streams occupy 320 KiB per band, fitting Zen 3's 512 KiB
+    // private L2 while leaving headroom for loop state and adjacent traffic.
+    const SUBTRACT_MULTIPLY_ADD_CHUNK: usize = 1 << 13;
+    if out.len() >= SUBTRACT_MULTIPLY_ADD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        out.par_chunks_mut(SUBTRACT_MULTIPLY_ADD_CHUNK)
+            .zip(a.par_chunks(SUBTRACT_MULTIPLY_ADD_CHUNK))
+            .zip(b.par_chunks(SUBTRACT_MULTIPLY_ADD_CHUNK))
+            .zip(c.par_chunks(SUBTRACT_MULTIPLY_ADD_CHUNK))
+            .zip(d.par_chunks(SUBTRACT_MULTIPLY_ADD_CHUNK))
+            .for_each(|((((slots, band_a), band_b), band_c), band_d)| {
+                for ((((slot, &x), &y), &z), &w) in slots
+                    .iter_mut()
+                    .zip(band_a.iter())
+                    .zip(band_b.iter())
+                    .zip(band_c.iter())
+                    .zip(band_d.iter())
+                {
+                    *slot = x.subtract_multiply_add_numpy(y, z, w);
+                }
+            });
+    } else {
+        for ((((slot, &x), &y), &z), &w) in out
+            .iter_mut()
+            .zip(a.iter())
+            .zip(b.iter())
+            .zip(c.iter())
+            .zip(d.iter())
+        {
+            *slot = x.subtract_multiply_add_numpy(y, z, w);
+        }
+    }
+}
+
+/// One fused pass for `a * b + c * d`.
+///
+/// NumPy must write two full-size product temporaries and then read both back
+/// for the final add. This kernel reads the four inputs and writes the result
+/// exactly once. The two products are explicitly named before the add so real
+/// arithmetic retains the three ufunc roundings; integer arithmetic wraps at
+/// each operation exactly as NumPy's fixed-width ufuncs do.
+fn pairwise_multiply_add_into<T>(out: &mut [T], a: &[T], b: &[T], c: &[T], d: &[T])
+where
+    T: MultiplyAddValue,
+{
+    debug_assert_eq!(out.len(), a.len());
+    debug_assert_eq!(out.len(), b.len());
+    debug_assert_eq!(out.len(), c.len());
+    debug_assert_eq!(out.len(), d.len());
+
+    use rayon::prelude::*;
+    const PAIRWISE_MULTIPLY_ADD_PARALLEL_MIN: usize = 1 << 16;
+    // Five float64 streams occupy 320 KiB per band, fitting Zen 3's 512 KiB
+    // private L2 while leaving headroom for loop state and adjacent traffic.
+    const PAIRWISE_MULTIPLY_ADD_CHUNK: usize = 1 << 13;
+    if out.len() >= PAIRWISE_MULTIPLY_ADD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        out.par_chunks_mut(PAIRWISE_MULTIPLY_ADD_CHUNK)
+            .zip(a.par_chunks(PAIRWISE_MULTIPLY_ADD_CHUNK))
+            .zip(b.par_chunks(PAIRWISE_MULTIPLY_ADD_CHUNK))
+            .zip(c.par_chunks(PAIRWISE_MULTIPLY_ADD_CHUNK))
+            .zip(d.par_chunks(PAIRWISE_MULTIPLY_ADD_CHUNK))
+            .for_each(|((((slots, band_a), band_b), band_c), band_d)| {
+                for ((((slot, &x), &y), &z), &w) in slots
+                    .iter_mut()
+                    .zip(band_a.iter())
+                    .zip(band_b.iter())
+                    .zip(band_c.iter())
+                    .zip(band_d.iter())
+                {
+                    *slot = x.pairwise_multiply_add_numpy(y, z, w);
+                }
+            });
+    } else {
+        for ((((slot, &x), &y), &z), &w) in out
+            .iter_mut()
+            .zip(a.iter())
+            .zip(b.iter())
+            .zip(c.iter())
+            .zip(d.iter())
+        {
+            *slot = x.pairwise_multiply_add_numpy(y, z, w);
+        }
+    }
+}
+
+fn contiguous_buffers_overlap<T>(left: &PyBuffer<T>, right: &PyBuffer<T>) -> bool
+where
+    T: pyo3::buffer::Element,
+{
+    let left_start = left.buf_ptr() as usize;
+    let right_start = right.buf_ptr() as usize;
+    let Some(left_end) = left_start.checked_add(left.len_bytes()) else {
+        return true;
+    };
+    let Some(right_end) = right_start.checked_add(right.len_bytes()) else {
+        return true;
+    };
+    left_start < right_end && right_start < left_end
+}
+
+fn zerocopy_subtract_multiply_add_typed<T>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    c: &Bound<'_, PyAny>,
+    d: &Bound<'_, PyAny>,
+    dtype: &str,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: MultiplyAddValue,
+{
+    let ndarray = numpy.getattr("ndarray")?;
+    for operand in [a, b, c, d] {
+        if !operand.is_exact_instance(&ndarray) {
+            return Ok(None);
+        }
+    }
+    let (Ok(buf_a), Ok(buf_b), Ok(buf_c), Ok(buf_d)) = (
+        PyBuffer::<T>::get(a),
+        PyBuffer::<T>::get(b),
+        PyBuffer::<T>::get(c),
+        PyBuffer::<T>::get(d),
+    ) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = buf_a.shape().to_vec();
+    if shape.is_empty()
+        || buf_b.shape() != shape.as_slice()
+        || buf_c.shape() != shape.as_slice()
+        || buf_d.shape() != shape.as_slice()
+    {
+        return Ok(None);
+    }
+    if !buf_a.is_c_contiguous()
+        || !buf_b.is_c_contiguous()
+        || !buf_c.is_c_contiguous()
+        || !buf_d.is_c_contiguous()
+    {
+        return Ok(None);
+    }
+    let (Some(cells_a), Some(cells_b), Some(cells_c), Some(cells_d)) = (
+        buf_a.as_slice(py),
+        buf_b.as_slice(py),
+        buf_c.as_slice(py),
+        buf_d.as_slice(py),
+    ) else {
+        return Ok(None);
+    };
+    let n = cells_a.len();
+    if n == 0 || cells_b.len() != n || cells_c.len() != n || cells_d.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; inputs remain
+    // borrowed read-only under the GIL for the duration of the pass.
+    let va: &[T] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<T>(), n) };
+    let vb: &[T] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<T>(), n) };
+    let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
+    let vd: &[T] = unsafe { std::slice::from_raw_parts(cells_d.as_ptr().cast::<T>(), n) };
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype)?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: numpy.empty produced a fresh output that cannot alias the
+        // inputs, and every slot is initialized exactly once below.
+        let out: &mut [T] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+
+        subtract_multiply_add_into(out, va, vb, vc, vd);
+    }
+    if shape.len() == 1 {
+        Ok(Some(flat.unbind()))
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        Ok(Some(
+            flat.call_method1("reshape", (&shape_tuple,))?.unbind(),
+        ))
+    }
+}
+
+fn zerocopy_pairwise_multiply_add_typed<T>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    c: &Bound<'_, PyAny>,
+    d: &Bound<'_, PyAny>,
+    dtype: &str,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: MultiplyAddValue,
+{
+    let ndarray = numpy.getattr("ndarray")?;
+    for operand in [a, b, c, d] {
+        if !operand.is_exact_instance(&ndarray) {
+            return Ok(None);
+        }
+    }
+    let (Ok(buf_a), Ok(buf_b), Ok(buf_c), Ok(buf_d)) = (
+        PyBuffer::<T>::get(a),
+        PyBuffer::<T>::get(b),
+        PyBuffer::<T>::get(c),
+        PyBuffer::<T>::get(d),
+    ) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = buf_a.shape().to_vec();
+    if shape.is_empty()
+        || buf_b.shape() != shape.as_slice()
+        || buf_c.shape() != shape.as_slice()
+        || buf_d.shape() != shape.as_slice()
+    {
+        return Ok(None);
+    }
+    if !buf_a.is_c_contiguous()
+        || !buf_b.is_c_contiguous()
+        || !buf_c.is_c_contiguous()
+        || !buf_d.is_c_contiguous()
+    {
+        return Ok(None);
+    }
+    let (Some(cells_a), Some(cells_b), Some(cells_c), Some(cells_d)) = (
+        buf_a.as_slice(py),
+        buf_b.as_slice(py),
+        buf_c.as_slice(py),
+        buf_d.as_slice(py),
+    ) else {
+        return Ok(None);
+    };
+    let n = cells_a.len();
+    if n == 0 || cells_b.len() != n || cells_c.len() != n || cells_d.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; inputs remain
+    // borrowed read-only under the GIL for the duration of the pass.
+    let va: &[T] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<T>(), n) };
+    let vb: &[T] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<T>(), n) };
+    let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
+    let vd: &[T] = unsafe { std::slice::from_raw_parts(cells_d.as_ptr().cast::<T>(), n) };
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype)?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: numpy.empty produced a fresh output that cannot alias the
+        // inputs, and every slot is initialized exactly once below.
+        let out: &mut [T] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+        pairwise_multiply_add_into(out, va, vb, vc, vd);
+    }
+    if shape.len() == 1 {
+        Ok(Some(flat.unbind()))
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        Ok(Some(
+            flat.call_method1("reshape", (&shape_tuple,))?.unbind(),
+        ))
+    }
+}
+
+/// Write `(a - b) * c + d` directly into a caller-owned NumPy array.
+///
+/// The byte-range test is deliberately stronger than object identity: distinct
+/// ndarray views may still overlap. Any overlap delegates to NumPy because each
+/// incumbent ufunc observes mutations made by the preceding in-place ufunc.
+fn zerocopy_subtract_multiply_add_out_typed<T>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    c: &Bound<'_, PyAny>,
+    d: &Bound<'_, PyAny>,
+    output: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: MultiplyAddValue,
+{
+    let ndarray = numpy.getattr("ndarray")?;
+    for operand in [a, b, c, d, output] {
+        if !operand.is_exact_instance(&ndarray) {
+            return Ok(None);
+        }
+    }
+    let (Ok(buf_a), Ok(buf_b), Ok(buf_c), Ok(buf_d), Ok(buf_out)) = (
+        PyBuffer::<T>::get(a),
+        PyBuffer::<T>::get(b),
+        PyBuffer::<T>::get(c),
+        PyBuffer::<T>::get(d),
+        PyBuffer::<T>::get(output),
+    ) else {
+        return Ok(None);
+    };
+    let shape = buf_a.shape();
+    if shape.is_empty()
+        || buf_b.shape() != shape
+        || buf_c.shape() != shape
+        || buf_d.shape() != shape
+        || buf_out.shape() != shape
+    {
+        return Ok(None);
+    }
+    if !buf_a.is_c_contiguous()
+        || !buf_b.is_c_contiguous()
+        || !buf_c.is_c_contiguous()
+        || !buf_d.is_c_contiguous()
+        || !buf_out.is_c_contiguous()
+        || buf_out.readonly()
+    {
+        return Ok(None);
+    }
+    if [&buf_a, &buf_b, &buf_c, &buf_d]
+        .into_iter()
+        .any(|input| contiguous_buffers_overlap(input, &buf_out))
+    {
+        return Ok(None);
+    }
+    let (Some(cells_a), Some(cells_b), Some(cells_c), Some(cells_d), Some(out_cells)) = (
+        buf_a.as_slice(py),
+        buf_b.as_slice(py),
+        buf_c.as_slice(py),
+        buf_d.as_slice(py),
+        buf_out.as_mut_slice(py),
+    ) else {
+        return Ok(None);
+    };
+    let n = cells_a.len();
+    if n == 0
+        || cells_b.len() != n
+        || cells_c.len() != n
+        || cells_d.len() != n
+        || out_cells.len() != n
+    {
+        return Ok(None);
+    }
+    // SAFETY: the buffer protocol validated element formats and contiguity.
+    // The explicit byte-range checks above prove the mutable output is disjoint
+    // from every read-only input for the complete duration of the fused pass.
+    let va: &[T] = unsafe { std::slice::from_raw_parts(cells_a.as_ptr().cast::<T>(), n) };
+    let vb: &[T] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<T>(), n) };
+    let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
+    let vd: &[T] = unsafe { std::slice::from_raw_parts(cells_d.as_ptr().cast::<T>(), n) };
+    let out: &mut [T] = unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
+    subtract_multiply_add_into(out, va, vb, vc, vd);
+    Ok(Some(output.clone().unbind()))
+}
+
+/// `subtract_multiply_add(a, b, c, d, out=None)` -> `(a - b) * c + d` in one pass.
+///
+/// Byte-identical to NumPy for matched fixed-width numeric, equal-shape,
+/// C-contiguous ndarrays. Every unsupported regime delegates to NumPy's exact
+/// three-ufunc expression.
+#[pyfunction]
+#[pyo3(signature = (a, b, c, d, *, out=None))]
+fn subtract_multiply_add(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    c: Py<PyAny>,
+    d: Py<PyAny>,
+    out: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    macro_rules! try_route {
+        ($value:ty, $dtype:literal) => {
+            if let Some(output) = out.as_ref() {
+                if let Some(result) = zerocopy_subtract_multiply_add_out_typed::<$value>(
+                    py,
+                    &numpy,
+                    a.bind(py),
+                    b.bind(py),
+                    c.bind(py),
+                    d.bind(py),
+                    output.bind(py),
+                )? {
+                    return Ok(result);
+                }
+            } else if let Some(result) = zerocopy_subtract_multiply_add_typed::<$value>(
+                py,
+                &numpy,
+                a.bind(py),
+                b.bind(py),
+                c.bind(py),
+                d.bind(py),
+                $dtype,
+            )? {
+                return Ok(result);
+            }
+        };
+    }
+    try_route!(f64, "float64");
+    try_route!(f32, "float32");
+    try_route!(i64, "int64");
+    try_route!(u64, "uint64");
+    try_route!(i32, "int32");
+    try_route!(u32, "uint32");
+    try_route!(i16, "int16");
+    try_route!(u16, "uint16");
+    try_route!(i8, "int8");
+    try_route!(u8, "uint8");
+
+    if let Some(output) = out.as_ref() {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("out", output.bind(py))?;
+        let difference = numpy
+            .getattr("subtract")?
+            .call((a.bind(py), b.bind(py)), Some(&kwargs))?;
+        let product = numpy
+            .getattr("multiply")?
+            .call((difference, c.bind(py)), Some(&kwargs))?;
+        return Ok(numpy
+            .getattr("add")?
+            .call((product, d.bind(py)), Some(&kwargs))?
+            .unbind());
+    }
+    let difference = numpy.getattr("subtract")?.call1((a.bind(py), b.bind(py)))?;
+    let product = numpy.getattr("multiply")?.call1((difference, c.bind(py)))?;
+    Ok(numpy.getattr("add")?.call1((product, d.bind(py)))?.unbind())
+}
+
+/// `pairwise_multiply_add(a, b, c, d)` -> `a * b + c * d` in one pass.
+///
+/// Matched fixed-width numeric, equal-shape C-contiguous ndarrays use the
+/// cache-banded parallel kernel. Broadcasting, mixed dtypes, views, scalars,
+/// and every other regime delegate to NumPy's exact three-ufunc expression.
+#[pyfunction]
+fn pairwise_multiply_add(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    c: Py<PyAny>,
+    d: Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    macro_rules! try_route {
+        ($value:ty, $dtype:literal) => {
+            if let Some(result) = zerocopy_pairwise_multiply_add_typed::<$value>(
+                py,
+                &numpy,
+                a.bind(py),
+                b.bind(py),
+                c.bind(py),
+                d.bind(py),
+                $dtype,
+            )? {
+                return Ok(result);
+            }
+        };
+    }
+    try_route!(f64, "float64");
+    try_route!(f32, "float32");
+    try_route!(i64, "int64");
+    try_route!(u64, "uint64");
+    try_route!(i32, "int32");
+    try_route!(u32, "uint32");
+    try_route!(i16, "int16");
+    try_route!(u16, "uint16");
+    try_route!(i8, "int8");
+    try_route!(u8, "uint8");
+
+    let first_product = numpy.getattr("multiply")?.call1((a.bind(py), b.bind(py)))?;
+    let second_product = numpy.getattr("multiply")?.call1((c.bind(py), d.bind(py)))?;
+    Ok(numpy
+        .getattr("add")?
+        .call1((first_product, second_product))?
+        .unbind())
+}
+
 #[pyfunction]
 fn sinc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // extract_numeric_array canonicalizes narrow widths to f64, so the native sinc
@@ -31657,7 +33302,7 @@ fn histogram(
     if a_bound.is_exact_instance(&ndarray_type) {
         let dtype = a_bound.getattr("dtype")?;
         if dtype.getattr("kind")?.extract::<String>()? == "f"
-            && dtype.getattr("itemsize")?.extract::<usize>()? == 4
+            && matches!(dtype.getattr("itemsize")?.extract::<usize>()?, 2 | 4)
         {
             return fallback(py);
         }
@@ -32102,6 +33747,193 @@ fn histogram_f32(
     Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()))
 }
 
+// NumPy has no half-precision histogram kernel: its uniform-bin path performs
+// f16 subtraction/division/multiplication over every input element before a
+// bincount. A finite half array has only 65,536 possible bit patterns, so count
+// those patterns once in parallel, reproduce NumPy's f16 linspace, classify
+// each occupied pattern against those exact returned edges, and accumulate the
+// pattern multiplicities. The returned counts and edges are byte-identical
+// while the expensive classification cost is bounded by the half domain
+// rather than N.
+//
+// Ambiguous or uncommon cases deliberately defer: non-native/non-contiguous
+// arrays, non-finite values, negative zero (NumPy's reduction can preserve its
+// sign according to encounter order), tiny inputs, and bin counts beyond the
+// exactly represented f16 integer range.
+fn try_zerocopy_histogram_f16(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    nbins: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    const MIN_N: usize = 1 << 20;
+    const MAX_EXACT_F16_BINS: usize = 1 << 11;
+
+    let dtype = a.getattr("dtype")?;
+    if !dtype.getattr("isnative")?.extract::<bool>()?
+        || !a
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+        || a.getattr("ndim")?.extract::<usize>()? != 1
+        || nbins == 0
+        || nbins > MAX_EXACT_F16_BINS
+    {
+        return Ok(None);
+    }
+    let n = a.getattr("size")?.extract::<usize>()?;
+    if n < MIN_N || n > i64::MAX as usize {
+        return Ok(None);
+    }
+
+    let bits_view = a.call_method1("view", (numpy.getattr("uint16")?,))?;
+    let Ok(bits_buffer) = PyBuffer::<u16>::get(&bits_view) else {
+        return Ok(None);
+    };
+    let Some(bits_cells) = bits_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if bits_cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<u16> is repr(transparent), the array is native-endian
+    // C-contiguous, and it remains read-only under the GIL for this call.
+    let bits: &[u16] = unsafe { std::slice::from_raw_parts(bits_cells.as_ptr().cast::<u16>(), n) };
+
+    use rayon::prelude::*;
+    let threads = rayon::current_num_threads().max(1);
+    let chunk = n.div_ceil(threads * 4).max(1);
+    let pattern_counts = bits
+        .par_chunks(chunk)
+        .map(|values| {
+            let mut local = vec![0_usize; 1 << 16];
+            for &value in values {
+                local[value as usize] += 1;
+            }
+            local
+        })
+        .reduce(
+            || vec![0_usize; 1 << 16],
+            |mut left, right| {
+                for (slot, count) in left.iter_mut().zip(right) {
+                    *slot += count;
+                }
+                left
+            },
+        );
+
+    // NumPy rejects non-finite autoranges. Negative zero is finite, but the
+    // sign of a min/max reduction over equal signed zeros is encounter-order
+    // sensitive, which a value-count table intentionally discards.
+    if pattern_counts[0x8000] != 0
+        || pattern_counts
+            .iter()
+            .enumerate()
+            .any(|(raw, &count)| count != 0 && ((raw as u16) & 0x7c00) == 0x7c00)
+    {
+        return Ok(None);
+    }
+
+    let raw_from_ordered_key = |key: u32| -> u16 {
+        if key < 0x8000 {
+            (0xffff - key) as u16
+        } else {
+            (key & 0x7fff) as u16
+        }
+    };
+    let first_raw = (0_u32..=u16::MAX as u32)
+        .map(raw_from_ordered_key)
+        .find(|&raw| pattern_counts[raw as usize] != 0)
+        .expect("non-empty f16 input must have a first pattern");
+    let last_raw = (0_u32..=u16::MAX as u32)
+        .rev()
+        .map(raw_from_ordered_key)
+        .find(|&raw| pattern_counts[raw as usize] != 0)
+        .expect("non-empty f16 input must have a last pattern");
+
+    let round_f16 = |value: f32| f16::from_f32(value);
+    let subtract_f16 = |left: f16, right: f16| round_f16(left.to_f32() - right.to_f32());
+    let add_f16 = |left: f16, right: f16| round_f16(left.to_f32() + right.to_f32());
+    let multiply_f16 = |left: f16, right: f16| round_f16(left.to_f32() * right.to_f32());
+    let divide_f16 = |left: f16, right: f16| round_f16(left.to_f32() / right.to_f32());
+
+    let mut first = f16::from_bits(first_raw);
+    let mut last = f16::from_bits(last_raw);
+    if first == last {
+        let half = f16::from_f32(0.5);
+        first = subtract_f16(first, half);
+        last = add_f16(last, half);
+    }
+    let denominator = subtract_f16(last, first);
+    let bin_count_f16 = f16::from_f32(nbins as f32);
+    if !denominator.is_finite() || denominator == f16::ZERO || !bin_count_f16.is_finite() {
+        return Ok(None);
+    }
+    let step = divide_f16(denominator, bin_count_f16);
+    if !step.is_finite() || step == f16::ZERO {
+        return Ok(None);
+    }
+
+    // np.linspace(start, stop, nbins + 1, dtype=float16) computes a float16
+    // arange, multiplies it in-place by the float16 step, adds start in-place,
+    // then overwrites the final element with stop.
+    let mut edge_values = Vec::with_capacity(nbins + 1);
+    for index in 0..=nbins {
+        let edge = if index == nbins {
+            last
+        } else {
+            let index_f16 = f16::from_f32(index as f32);
+            add_f16(first, multiply_f16(index_f16, step))
+        };
+        edge_values.push(edge);
+    }
+    if edge_values
+        .windows(2)
+        .any(|pair| pair[0].to_f32() >= pair[1].to_f32())
+    {
+        return Ok(None);
+    }
+
+    let mut histogram = vec![0_i64; nbins];
+    for (raw, &count) in pattern_counts.iter().enumerate() {
+        if count == 0 {
+            continue;
+        }
+        let value = f16::from_bits(raw as u16);
+        let value = value.to_f32();
+        // Histogram bins are [left, right), except for the final right-closed
+        // bin. Find the first edge strictly greater than the value, then use
+        // its predecessor; cap last-edge equality into the final bin. This is
+        // the semantic result NumPy's affine estimate plus ULP corrections is
+        // designed to produce, without depending on a worker's f16 ufunc loop.
+        let mut low = 0_usize;
+        let mut high = edge_values.len();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if edge_values[middle].to_f32() <= value {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        let index = low.saturating_sub(1).min(nbins - 1);
+        histogram[index] += count as i64;
+    }
+
+    let counts = numpy_array_from_slice(py, numpy, &histogram, "int64")?;
+    let edge_bits = edge_values
+        .iter()
+        .map(|value| value.to_bits())
+        .collect::<Vec<_>>();
+    let edges_u16 = numpy_array_from_slice(py, numpy, &edge_bits, "uint16")?;
+    let edges = edges_u16.call_method1("view", (numpy.getattr("float16")?,))?;
+    Ok(Some(
+        PyTuple::new(py, [counts.as_any(), edges.as_any()])?
+            .into_any()
+            .unbind(),
+    ))
+}
+
 // O(n) uniform-bin np.histogram for exact 1-D f64/f32/integer ndarrays with
 // bins=int and no range/weights/density. The f64/integer path mirrors NumPy's
 // uniform-bin affine index calculation and edge corrections; the f32 path bins
@@ -32288,6 +34120,7 @@ fn try_zerocopy_histogram(
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
     match (kind.as_str(), itemsize) {
+        ("f", 2) => try_zerocopy_histogram_f16(py, &numpy, a, nbins),
         ("f", 4) => histogram_f32(py, &numpy, a, nbins),
         ("f", 8) => histogram_typed::<f64>(py, &numpy, a, nbins, |x| x, true, |_| true),
         ("i", 1) => histogram_typed::<i8>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
@@ -38243,6 +40076,208 @@ fn pairwise_simd_f64(
     left + right
 }
 
+// Band width for the masked-sum count pass, and the size below which the whole
+// reduction stays serial. The count pass is a u8 scan (cheap); the bands exist
+// so a tree split point can be located in O(log bands + MASKED_SUM_BAND) instead
+// of rescanning the input, which was worth 3.9x in a standalone prototype
+// (84.0ms -> 21.6ms at 64M) and is the difference between bandwidth-bound and
+// not.
+const MASKED_SUM_BAND: usize = 1 << 14;
+const MASKED_SUM_PARALLEL_MIN: usize = 1 << 20;
+
+// A cursor over the SELECTED elements of `data`, in ascending index order. The
+// point of the cursor is that the compacted sequence is never materialised:
+// `a[mask].sum()` makes numpy allocate and fill a whole gathered array first,
+// which measured 64.7% of that whole job at 64M and runs single-threaded.
+struct MaskedStream<'a> {
+    mask: &'a [u8],
+    data: &'a [f64],
+    i: usize,
+}
+
+impl MaskedStream<'_> {
+    // Fill `out` with the next `out.len()` selected values. Callers only ever
+    // request a count that the subtree is known to contain, so the input index
+    // cannot run past the end; an out-of-range index would panic rather than
+    // silently return a short sum.
+    #[inline]
+    fn fill(&mut self, out: &mut [f64]) {
+        let mut w = 0usize;
+        while w < out.len() {
+            if self.mask[self.i] != 0 {
+                out[w] = self.data[self.i];
+                w += 1;
+            }
+            self.i += 1;
+        }
+    }
+}
+
+// numpy's pairwise tree over the COMPACTED sequence, evaluated without building
+// it: same base case (<=128) and same split rule (n/2 rounded DOWN to a multiple
+// of 8) as pairwise_simd_f64, with leaves pulled from the stream in order. The
+// tree shape depends only on the compacted length, so the accumulation order —
+// and therefore every bit of the result — matches `a[mask].sum()`.
+fn masked_pairwise_streamed(stream: &mut MaskedStream<'_>, n: usize, buf: &mut [f64; 128]) -> f64 {
+    if n <= 128 {
+        stream.fill(&mut buf[..n]);
+        return base_sum_simd(&buf[..n]);
+    }
+    let mut n2 = n / 2;
+    n2 -= n2 % 8;
+    let left = masked_pairwise_streamed(stream, n2, buf);
+    let right = masked_pairwise_streamed(stream, n - n2, buf);
+    left + right
+}
+
+// Input index holding selected element `c`, from the band prefix sums: binary
+// search for the owning band, then scan inside that band. `prefix[b]` is the
+// number of selected elements before band b, so prefix is non-decreasing and
+// empty bands repeat a value — land on the FIRST band carrying `c`.
+fn masked_locate(mask: &[u8], prefix: &[usize], c: usize) -> usize {
+    let band = match prefix.binary_search(&c) {
+        Ok(mut idx) => {
+            while idx > 0 && prefix[idx - 1] == c {
+                idx -= 1;
+            }
+            idx
+        }
+        Err(idx) => idx - 1,
+    };
+    let mut seen = prefix[band];
+    let mut i = band * MASKED_SUM_BAND;
+    while seen < c {
+        if mask[i] != 0 {
+            seen += 1;
+        }
+        i += 1;
+    }
+    // Park on the next selected element so a stream starting here reads it first.
+    while i < mask.len() && mask[i] == 0 {
+        i += 1;
+    }
+    i
+}
+
+// Split the SAME tree with the SAME rule down to `cut`, then stream each subtree.
+// Every split point is a genuine split point of the global tree, so parallelism
+// changes only which thread evaluates a subtree, never the accumulation order.
+fn masked_pairwise_parallel(
+    mask: &[u8],
+    data: &[f64],
+    prefix: &[usize],
+    base_c: usize,
+    start_input: usize,
+    n: usize,
+    cut: usize,
+) -> f64 {
+    if n <= cut {
+        let mut buf = [0.0f64; 128];
+        let mut stream = MaskedStream {
+            mask,
+            data,
+            i: start_input,
+        };
+        return masked_pairwise_streamed(&mut stream, n, &mut buf);
+    }
+    let mut n2 = n / 2;
+    n2 -= n2 % 8;
+    let mid_input = masked_locate(mask, prefix, base_c + n2);
+    let (left, right) = rayon::join(
+        || masked_pairwise_parallel(mask, data, prefix, base_c, start_input, n2, cut),
+        || masked_pairwise_parallel(mask, data, prefix, base_c + n2, mid_input, n - n2, cut),
+    );
+    left + right
+}
+
+// Fused `a[mask].sum()` for a C-contiguous f64 ndarray and a same-shape bool
+// mask: one parallel pass, no gathered temporary. numpy's API forces it to
+// materialise the compacted array before it can reduce, and its gather is
+// single-threaded (measured 1.01x cpu/wall). Bit-identical, not merely close:
+// the compacted pairwise tree is reproduced exactly (see masked_pairwise_*).
+// Returns None — caller defers to numpy — for any non-f64 / non-bool /
+// shape-mismatched / non-contiguous / non-ndarray input.
+fn try_zerocopy_f64_masked_sum(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    mask: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !mask.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    if mask
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?
+        != "b"
+    {
+        return Ok(None);
+    }
+    // numpy's boolean indexing requires the mask to match the array's shape
+    // exactly; anything else has different semantics, so defer it.
+    if a.getattr("shape")?.compare(mask.getattr("shape")?)? != std::cmp::Ordering::Equal {
+        return Ok(None);
+    }
+    let mask_u8 = mask.call_method1("view", (numpy.getattr("uint8")?,))?;
+    let (Ok(a_buffer), Ok(mask_buffer)) = (PyBuffer::<f64>::get(a), PyBuffer::<u8>::get(&mask_u8))
+    else {
+        return Ok(None);
+    };
+    if !a_buffer.is_c_contiguous() || !mask_buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let (Some(a_cells), Some(mask_cells)) = (a_buffer.as_slice(py), mask_buffer.as_slice(py))
+    else {
+        return Ok(None);
+    };
+    let n = a_cells.len();
+    if mask_cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<f64>/<u8> are repr(transparent) over their element
+    // type, and both arrays are read-only under the GIL for this call.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), n) };
+    let mask_raw: &[u8] =
+        unsafe { std::slice::from_raw_parts(mask_cells.as_ptr().cast::<u8>(), n) };
+
+    let total = if n >= MASKED_SUM_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        let counts: Vec<usize> = mask_raw
+            .par_chunks(MASKED_SUM_BAND)
+            .map(|band| band.iter().filter(|&&m| m != 0).count())
+            .collect();
+        let mut prefix = Vec::with_capacity(counts.len() + 1);
+        let mut acc = 0usize;
+        for count in &counts {
+            prefix.push(acc);
+            acc += count;
+        }
+        prefix.push(acc);
+        let selected = acc;
+        // ~4 subtrees per worker so a skewed mask still balances.
+        let cut = (selected / (rayon::current_num_threads() * 4)).max(1 << 12);
+        masked_pairwise_parallel(mask_raw, data, &prefix, 0, 0, selected, cut)
+    } else {
+        let selected = mask_raw.iter().filter(|&&m| m != 0).count();
+        let mut buf = [0.0f64; 128];
+        let mut stream = MaskedStream {
+            mask: mask_raw,
+            data,
+            i: 0,
+        };
+        masked_pairwise_streamed(&mut stream, selected, &mut buf)
+    };
+    Ok(Some(numpy.getattr("float64")?.call1((total,))?.unbind()))
+}
+
 // Zero-copy bit-exact nansum for the f64 full reduction (axis=None): numpy's
 // pairwise sum with NaN->0, run over the buffer with no whole-array allocation.
 // numpy returns 0.0 for both empty and all-NaN inputs (no warning), which the
@@ -38483,6 +40518,63 @@ fn base_sum_simd_f32(a: &[f32]) -> f32 {
         i += 1;
     }
     res
+}
+
+// NumPy's contiguous floating sum is a fixed pairwise tree: <=128-element
+// SIMD leaves, then n/2 rounded down to a multiple of eight at every internal
+// node.  Reproducing that exact tree makes the independent subtrees safe to
+// evaluate concurrently without changing a result bit.  The serial helpers
+// below operate directly on the borrowed NumPy buffer (unlike the older
+// ReadOnlyCell helper, no 128-element copy per leaf); the parallel drivers
+// merely choose which thread evaluates each subtree and retain every add edge.
+fn pairwise_sum_f64_slice(data: &[f64]) -> f64 {
+    if data.len() <= 128 {
+        return base_sum_simd(data);
+    }
+    let mut split = data.len() / 2;
+    split -= split % 8;
+    pairwise_sum_f64_slice(&data[..split]) + pairwise_sum_f64_slice(&data[split..])
+}
+
+fn par_pairwise_sum_f64(data: &[f64]) -> f64 {
+    // 512 KiB f64 leaves fit in a Zen 3 core's private L2 and expose at least
+    // two tasks per physical core for the 64 MiB incumbent workload.
+    const PAR_LEAF: usize = 1 << 16;
+    if data.len() <= PAR_LEAF {
+        return pairwise_sum_f64_slice(data);
+    }
+    let mut split = data.len() / 2;
+    split -= split % 8;
+    let (left, right) = rayon::join(
+        || par_pairwise_sum_f64(&data[..split]),
+        || par_pairwise_sum_f64(&data[split..]),
+    );
+    left + right
+}
+
+fn pairwise_sum_f32_slice(data: &[f32]) -> f32 {
+    if data.len() <= 128 {
+        return base_sum_simd_f32(data);
+    }
+    let mut split = data.len() / 2;
+    split -= split % 8;
+    pairwise_sum_f32_slice(&data[..split]) + pairwise_sum_f32_slice(&data[split..])
+}
+
+fn par_pairwise_sum_f32(data: &[f32]) -> f32 {
+    // 256 KiB f32 leaves balance cache locality with enough work to amortize
+    // each Rayon join.  The split points are still NumPy's exact tree nodes.
+    const PAR_LEAF: usize = 1 << 16;
+    if data.len() <= PAR_LEAF {
+        return pairwise_sum_f32_slice(data);
+    }
+    let mut split = data.len() / 2;
+    split -= split % 8;
+    let (left, right) = rayon::join(
+        || par_pairwise_sum_f32(&data[..split]),
+        || par_pairwise_sum_f32(&data[split..]),
+    );
+    left + right
 }
 
 // numpy sums float16 by WIDENING each value to f32, running the SAME f32 pairwise tree it uses for
@@ -38807,6 +40899,112 @@ fn try_zerocopy_f16_sum_lastaxis(
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1("reshape", (&output_shape,))?;
     Ok(Some(reshaped.unbind()))
+}
+
+// Native parallel unweighted f16 average along the LAST (contiguous) axis. With
+// no weights, numpy.average delegates to ndarray.mean. Each lane is therefore
+// float16(f32_pairwise_sum / float32(cols)): the same f32 tree reproduced by
+// pairwise_sum_f16_widen, followed by one f32 division and one final narrowing.
+// Lanes are independent, so parallelizing across them preserves the arithmetic
+// order exactly. Non-finite input defers so NumPy remains responsible for its
+// warning behavior.
+fn try_zerocopy_f16_average_lastaxis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: isize,
+) -> PyResult<Option<Py<PyAny>>> {
+    const F16_AVERAGE_AXIS_PARALLEL_MIN: usize = 1 << 20;
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 2
+        || !dtype.getattr("isnative")?.extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    if !a
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len();
+    if ndim < 2 {
+        return Ok(None);
+    }
+    let Some(normalized_axis) = (if axis < 0 {
+        axis.checked_add(ndim as isize)
+    } else {
+        Some(axis)
+    }) else {
+        return Ok(None);
+    };
+    if normalized_axis < 0 || normalized_axis as usize != ndim - 1 {
+        return Ok(None);
+    }
+    let cols = shape[ndim - 1];
+    let Some(outer) = shape[..ndim - 1]
+        .iter()
+        .try_fold(1usize, |product, &length| product.checked_mul(length))
+    else {
+        return Ok(None);
+    };
+    let Some(total) = outer.checked_mul(cols) else {
+        return Ok(None);
+    };
+    if !(2..=65_504).contains(&cols)
+        || outer < 2
+        || total < F16_AVERAGE_AXIS_PARALLEL_MIN
+        || rayon::current_num_threads() < 2
+    {
+        return Ok(None);
+    }
+
+    let Ok(raw_u16) = a.call_method1("view", (numpy.getattr("uint16")?,)) else {
+        return Ok(None);
+    };
+    let Ok(buffer) = PyBuffer::<u16>::get(&raw_u16) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if cells.len() != total {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<u16> is repr(transparent) over u16, the borrowed
+    // NumPy buffer is immutable for this call, and `buffer` lives until every
+    // parallel reader has joined.
+    let data: &[u16] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), total) };
+    use rayon::prelude::*;
+    if data.par_iter().any(|&bits| bits & 0x7c00 == 0x7c00) {
+        return Ok(None);
+    }
+
+    let denominator = cols as f32;
+    let mut output_bits = vec![0u16; outer];
+    output_bits
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(lane, output)| {
+            let mut buffer = [0.0f32; 128];
+            let sum = pairwise_sum_f16_widen(data, lane * cols, cols, &mut buffer);
+            *output = f16::from_f32(sum / denominator).to_bits();
+        });
+
+    let raw_output = numpy_array_from_slice(py, &numpy, &output_bits, "uint16")?;
+    let output = raw_output.call_method1("view", (numpy.getattr("float16")?,))?;
+    let output_shape = PyTuple::new(py, shape[..ndim - 1].iter().copied())?;
+    Ok(Some(
+        output.call_method1("reshape", (&output_shape,))?.unbind(),
+    ))
 }
 
 // Native parallel f16 nanmean along the LAST (contiguous) axis -> f16 array. numpy's per-lane f16 nanmean
@@ -56415,10 +58613,61 @@ fn tofile(
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let array = numpy.getattr("asarray")?.call1((a.bind(py),))?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("sep", sep)?;
-    kwargs.set_item("format", format)?;
-    array.call_method("tofile", (fid.bind(py),), Some(&kwargs))?;
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("sep", sep)?;
+        kwargs.set_item("format", format)?;
+        array.call_method("tofile", (fid.bind(py),), Some(&kwargs))?;
+        Ok(py.None())
+    };
+
+    // `fnp_io::tofile_text` is already the production formatter and has its
+    // own exact-output tests plus executed-ELF median-CI evidence. Keep this
+    // public route deliberately narrow: the helper's integral branch accepts
+    // exactly-representable f64 values below 1e15, so only C-contiguous int64
+    // arrays in that range can use it without losing integer precision.
+    if sep.is_empty() || format != "%s" {
+        return fallback();
+    }
+    let dtype_name = array
+        .getattr("dtype")?
+        .getattr("name")?
+        .extract::<String>()?;
+    let c_contiguous = array
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?;
+    if dtype_name != "int64" || !c_contiguous {
+        return fallback();
+    }
+
+    let path = match py
+        .import("os")?
+        .getattr("fspath")?
+        .call1((fid.bind(py),))
+        .and_then(|path| path.extract::<String>())
+    {
+        Ok(path) => path,
+        Err(_) => return fallback(),
+    };
+    let flat = array.call_method1("reshape", (-1,))?;
+    let values = match numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64") {
+        Ok(values) => values,
+        Err(_) => return fallback(),
+    };
+    const EXACT_INTEGER_LIMIT: u64 = 1_000_000_000_000_000;
+    if values
+        .iter()
+        .any(|value| value.unsigned_abs() >= EXACT_INTEGER_LIMIT)
+    {
+        return fallback();
+    }
+    let values = values
+        .into_iter()
+        .map(|value| value as f64)
+        .collect::<Vec<_>>();
+    let text = fnp_io::tofile_text(&values, sep);
+    std::fs::write(path, text.as_bytes()).map_err(|error| PyOSError::new_err(error.to_string()))?;
     Ok(py.None())
 }
 
@@ -56613,6 +58862,10 @@ fn loadtxt(
         Ok(value) if dtype_supported_by_numpy_export_bridge(value) => value,
         _ => return fallback(py),
     };
+    let native_f64_request = match dtype.as_ref() {
+        None => true,
+        Some(value) => value.bind(py).is(&numpy.getattr("float64")?),
+    };
 
     // Resolve usecols. None → all columns. Int → single col. List<int>.
     let use_columns: Option<Vec<i64>> = match usecols.as_ref() {
@@ -56630,6 +58883,76 @@ fn loadtxt(
             }
         }
     };
+
+    // Carry fnp_io's proven bounded tail-ring parser through the public
+    // compatibility surface. Keep the route deliberately narrow: measured
+    // native-f64 files, nonempty all-negative usecols whose farthest offset
+    // fits the core's 4,096-field budget, no unpack, and the same
+    // single-character delimiter/comment grammar. Mixed, nonnegative,
+    // oversized, non-native-endian, and unusual text configurations retain
+    // the generic parser below.
+    let bounded_negative_usecols = use_columns.as_ref().and_then(|cols| {
+        if cols.is_empty() || cols.iter().any(|&column| column >= 0) {
+            return None;
+        }
+        let signed = cols
+            .iter()
+            .copied()
+            .map(isize::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        let max_tail = signed
+            .iter()
+            .copied()
+            .map(|column| {
+                column
+                    .checked_neg()
+                    .and_then(|value| usize::try_from(value).ok())
+            })
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .max()?;
+        (max_tail <= 4_096).then_some(signed)
+    });
+    if let Some(cols) = bounded_negative_usecols.as_ref()
+        && !unpack
+        && parsed_dtype == DType::F64
+        && native_f64_request
+        && comments.chars().count() == 1
+    {
+        let comment_char = comments.chars().next().expect("guarded single char");
+        let delimiter_char = match delimiter {
+            None => Some(' '),
+            Some(sep) if sep.chars().all(char::is_whitespace) => Some(' '),
+            Some(sep) if sep.chars().count() == 1 => sep.chars().next(),
+            Some(_) => None,
+        };
+        if let Some(delimiter_char) = delimiter_char {
+            let skip_count = skiprows.max(0) as usize;
+            return match fnp_io::loadtxt_usecols_signed(
+                &text,
+                delimiter_char,
+                comment_char,
+                skip_count,
+                usize::MAX,
+                Some(cols),
+            ) {
+                // NumPy squeezes a one-row multi-column result to 1-D and a
+                // one-row single-column result to 0-D. The generic binding
+                // does not yet encode that distinction, so leave this narrow
+                // fast path only when its existing shape proof applies.
+                Ok(parsed) if parsed.nrows > 1 => {
+                    let shape = if parsed.ncols == 1 {
+                        vec![parsed.nrows]
+                    } else {
+                        vec![parsed.nrows, parsed.ncols]
+                    };
+                    build_numpy_array_from_storage(py, &shape, ArrayStorage::F64(parsed.values))
+                }
+                _ => fallback(py),
+            };
+        }
+    }
 
     // Float dtypes with no column selection delegate tokenize+parse to
     // fnp_io's single-pass reader instead of the Vec<Vec<String>> loop below
@@ -56845,6 +59168,81 @@ fn loadtxt(
         let Some(ncols) = ncols else {
             return fallback(py);
         };
+        let shape = if ncols == 1 {
+            vec![nrows]
+        } else {
+            vec![nrows, ncols]
+        };
+        return build_numpy_array_from_storage(py, &shape, ArrayStorage::Bool(values));
+    }
+
+    // Selected-bool files take the same borrowed-token transduction as the plain
+    // bool arm above, narrowed to positive `usecols`. The former path below
+    // materializes EVERY token as an owned String and then clones only the
+    // selected ones; this reads the row as borrowed slices and parses just the
+    // selection, so the unselected tokens are never allocated. They are still
+    // never *parsed* either -- the former dtype loop only walks the selected
+    // columns -- so an invalid token outside the selection keeps working exactly
+    // as NumPy does. Negative indices stay on the former path: they resolve
+    // against the row width, which this view deliberately does not hoist.
+    if let Some(cols) = use_columns.as_ref()
+        && !cols.is_empty()
+        && cols.iter().all(|&col| col >= 0)
+        && !unpack
+        && parsed_dtype == DType::Bool
+        && comments.chars().count() == 1
+        && delimiter
+            .is_none_or(|sep| sep.chars().all(char::is_whitespace) || sep.chars().count() == 1)
+    {
+        let skip_count = skiprows.max(0) as usize;
+        let ncols = cols.len();
+        let mut values: Vec<bool> = Vec::new();
+        let mut nrows = 0usize;
+        let mut tokens: Vec<&str> = Vec::new();
+
+        for (lineno, raw_line) in text.lines().enumerate() {
+            if lineno < skip_count {
+                continue;
+            }
+            let effective = match raw_line.split_once(comments) {
+                Some((lhs, _)) => lhs,
+                None => raw_line,
+            };
+            let trimmed = effective.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            tokens.clear();
+            match delimiter {
+                None => tokens.extend(trimmed.split_whitespace()),
+                Some(sep) if sep.chars().all(char::is_whitespace) => {
+                    tokens.extend(trimmed.split_whitespace());
+                }
+                Some(sep) => tokens.extend(trimmed.split(sep).map(str::trim)),
+            }
+
+            for &col in cols {
+                // Matches the former `idx >= tokens.len()` bail exactly.
+                let Some(token) = tokens.get(col as usize) else {
+                    return fallback(py);
+                };
+                // Former Bool conversion, preserved exactly: i64 parse then
+                // nonzero, with NO integral-f64 retry (numpy raises on "1.0"
+                // and "True" for dtype=bool, and the former arm reached that
+                // error through the fallback, which any parse failure here
+                // still does).
+                match token.parse::<i64>() {
+                    Ok(value) => values.push(value != 0),
+                    Err(_) => return fallback(py),
+                }
+            }
+            nrows += 1;
+        }
+
+        if nrows == 0 {
+            return fallback(py);
+        }
         let shape = if ncols == 1 {
             vec![nrows]
         } else {
@@ -57186,6 +59584,67 @@ fn genfromtxt(
         if let Some(delimiter_char) = delimiter_char {
             let skip_h = skip_header.max(0) as usize;
             return match fnp_io::genfromtxt(&text, delimiter_char, comment_char, skip_h, f64::NAN) {
+                Ok(parsed) if parsed.nrows > 0 => {
+                    let flat_storage = match parsed_dtype {
+                        DType::F16 => ArrayStorage::F16(
+                            parsed.values.into_iter().map(f16::from_f64).collect(),
+                        ),
+                        DType::F32 => {
+                            ArrayStorage::F32(parsed.values.into_iter().map(|v| v as f32).collect())
+                        }
+                        _ => ArrayStorage::F64(parsed.values),
+                    };
+                    let shape = if parsed.ncols == 1 {
+                        vec![parsed.nrows]
+                    } else {
+                        vec![parsed.nrows, parsed.ncols]
+                    };
+                    let arr = build_numpy_array_from_storage(py, &shape, flat_storage)?;
+                    if unpack == Some(true) {
+                        Ok(arr.bind(py).getattr("T")?.unbind())
+                    } else {
+                        Ok(arr)
+                    }
+                }
+                _ => fallback(py),
+            };
+        }
+    }
+
+    // skip_footer>0 float sibling of the .368 delegation above. That block uses
+    // fnp_io::genfromtxt (the direct-extend streaming reader, no footer
+    // support), so a nonzero skip_footer fell through to the generic
+    // Vec<Vec<String>> tokenizer below. fnp_io::genfromtxt_full is the
+    // collect-then-footer-trim reader that parses rows straight into the value
+    // buffer (no owned per-row token Vec), removing the same staging the
+    // .373/.376 loadtxt forks removed. It also fixes a latent parity gap: the
+    // generic path below counts skip_footer on RAW lines, but numpy (and
+    // genfromtxt_full) counts it on DATA rows after comment/blank stripping.
+    // Guards match the .368 block; max_rows is fallback-gated in the early
+    // guards, so skip_footer and max_rows can never collide here.
+    if use_columns.is_none()
+        && skip_footer.max(0) > 0
+        && matches!(parsed_dtype, DType::F16 | DType::F32 | DType::F64)
+        && comments.chars().count() == 1
+    {
+        let comment_char = comments.chars().next().expect("guarded single char");
+        let delimiter_char = match delimiter {
+            None => Some(' '),
+            Some(sep) if sep.chars().all(char::is_whitespace) => Some(' '),
+            Some(sep) if sep.chars().count() == 1 => sep.chars().next(),
+            Some(_) => None,
+        };
+        if let Some(delimiter_char) = delimiter_char {
+            let config = fnp_io::GenFromTxtConfig {
+                delimiter: delimiter_char,
+                comments: comment_char,
+                skip_header: skip_header.max(0) as usize,
+                skip_footer: skip_footer.max(0) as usize,
+                filling_values: f64::NAN,
+                usecols: None,
+                max_rows: usize::MAX,
+            };
+            return match fnp_io::genfromtxt_full(&text, &config) {
                 Ok(parsed) if parsed.nrows > 0 => {
                     let flat_storage = match parsed_dtype {
                         DType::F16 => ArrayStorage::F16(
@@ -59147,6 +61606,23 @@ fn average(
             .unbind())
     };
 
+    // NumPy has no f16 ALU. For a large, finite, C-contiguous last-axis
+    // reduction with no weights, reproduce ndarray.mean's exact per-lane f32
+    // pairwise tree and divide, then narrow once. Flat average deliberately
+    // remains delegated: NumPy casts the full element count through f16 there,
+    // including its overflow warning behavior for very large inputs.
+    if !keepdims
+        && !returned
+        && weights
+            .as_ref()
+            .is_none_or(|value| value.bind(py).is_none())
+        && let Some(axis_value) = axis.as_ref().filter(|value| !value.bind(py).is_none())
+        && let Ok(axis_value) = axis_value.bind(py).extract::<isize>()
+        && let Some(output) = try_zerocopy_f16_average_lastaxis(py, a.bind(py), axis_value)?
+    {
+        return Ok(output);
+    }
+
     if keepdims {
         return fallback();
     }
@@ -60666,23 +63142,71 @@ fn f64_axis_sort_native_is_profitable() -> bool {
     !numpy_f64_qsort_is_simd() || rayon::current_num_threads() >= F64_AXIS_SORT_SIMD_MIN_THREADS
 }
 
+// Separate the WIDER avx512 basis from the avx2 one. The 2026-07-13 sampling read
+// them differently — avx512 worker: numpy 92.9ms vs 96.1ms native at 8M (a wash),
+// avx2 worker: numpy 121.1ms vs 202.3ms native (a clear numpy win) — and the two
+// bases are not interchangeable evidence. No avx512f host has been sampled at a
+// high core count, so the avx512 arm keeps its prior surrender until someone
+// measures it; only the avx2 arm is re-decided below.
+#[cfg(target_arch = "x86_64")]
+fn numpy_f64_qsort_is_avx512() -> bool {
+    static QSORT_AVX512: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *QSORT_AVX512.get_or_init(|| std::arch::is_x86_feature_detected!("avx512f"))
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn numpy_f64_qsort_is_avx512() -> bool {
+    false
+}
+
+// FLAT f64 value-sort profitability. The arm used to refuse on ANY avx2 host,
+// which generalized a CORE-COUNT result to an ISA check and left the route dead
+// on essentially every x86-64 machine in the fleet. The prior gate's own numbers
+// show the confound: its numpy arm (121.1ms at 8M) reproduces almost exactly on
+// thinkstation1 (126.07ms), while its native arm (202.3ms) is 5.5x the 36.6ms the
+// SAME kernel turns in here — same NumPy, much smaller box.
+//
+// Flat and axis sort have different economics, so they get different floors: axis
+// sort pays a fan-out PER LANE against NumPy's efficient per-lane SIMD basis,
+// while flat sort amortizes ONE fan-out over the whole array. Kernel-only sweep on
+// thinkstation1 (5975WX, 32 physical cores) vs live single-threaded NumPy 2.4.3,
+// uniform [0,1), ratios vs the same NumPy arm at each size:
+//
+//   workers |   16M   |   64M
+//   --------+---------+--------
+//         2 |  0.94x  |  1.44x
+//         4 |  1.61x  |  2.36x
+//         8 |  2.79x  |  4.33x
+//        16 |  3.49x  |  6.06x
+//        32 |  4.52x  |  6.63x
+//
+// Floor at 8 workers: that margin (2.79x/4.33x) clears the route's own overheads —
+// the defer scan plus the numpy.empty allocation — with room to spare, while 2- and
+// 4-worker boxes keep the NumPy passthrough.
+const F64_FLAT_SORT_SIMD_MIN_THREADS: usize = 8;
+
+fn f64_flat_sort_native_is_profitable() -> bool {
+    if numpy_f64_qsort_is_avx512() {
+        return false; // unmeasured at high core count; keep the prior surrender
+    }
+    !numpy_f64_qsort_is_simd() || rayon::current_num_threads() >= F64_FLAT_SORT_SIMD_MIN_THREADS
+}
+
 // Parallel flat f64 sort. numpy.sort is single-threaded introsort; for a 1-D C-contiguous
 // f64 array (default kind) a rayon par_sort_unstable over a fresh numpy.empty copy beats it
 // once n amortizes the fan-out + export (the passthrough comment about "export overhead" was
 // for a SERIAL native sort — parallel offsets it). Bit-identical for no-NaN input: np.sort
 // returns ascending values, and ties are equal values so unstable order is irrelevant.
-// Defers (Ok(None) -> passthrough) for: avx512f hosts (numpy's SIMD qsort owns the flat
-// basis there — see numpy_f64_qsort_is_simd), not exact 1-D C-contiguous f64, below the
-// crossover, or ANY NaN (numpy's NaN-at-end ordering of mixed payloads is
-// algorithm-specific).
+// Defers (Ok(None) -> passthrough) for: avx512f hosts, avx2 hosts with too few workers
+// to out-run NumPy's SIMD qsort (see f64_flat_sort_native_is_profitable), not exact 1-D
+// C-contiguous f64, below the crossover, or ANY NaN (numpy's NaN-at-end ordering of
+// mixed payloads is algorithm-specific).
 fn try_zerocopy_f64_sort_flat(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
-    require_distinct: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if numpy_f64_qsort_is_simd() {
-        return Ok(None); // numpy's SIMD (avx2/avx512) qsort owns the flat f64 basis here
+    if !f64_flat_sort_native_is_profitable() {
+        return Ok(None); // avx512 host, or too few workers to beat numpy's SIMD qsort
     }
     if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
@@ -60706,6 +63230,12 @@ fn try_zerocopy_f64_sort_flat(
     // crossover is higher: at 256K it's noisy break-even (can regress), at 1M+ it cleanly
     // wins ~1.6-1.85x ON PRE-AVX2/NON-X86 HOSTS (see the ISA gate above). Gate at 1<<20;
     // below it the numpy passthrough is parity.
+    //
+    // 1<<20 re-verified for the newly-reachable AVX2 case, where NumPy's basis is its
+    // FASTER SIMD qsort, so the crossover could only have moved up. Kernel-only on
+    // thinkstation1 at 32 workers vs live NumPy 2.4.3: 1M 10.29->5.4ms (1.91x),
+    // 2M 21.10->9.4 (2.24x), 4M 43.09->18.3 (2.35x), 8M 126.07->36.6 (3.44x),
+    // 16M 266.43->64.5 (4.13x). Still a win at the existing floor, so it stands.
     const SORT_PARALLEL_MIN: usize = 1 << 20;
     if n < SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
@@ -60729,9 +63259,18 @@ fn try_zerocopy_f64_sort_flat(
     dst.copy_from_slice(src);
     // No NaN -> partial_cmp is a total order; unstable parallel sort matches numpy's values.
     dst.par_sort_unstable_by(|x, y| x.partial_cmp(y).expect("no NaN after check"));
-    if require_distinct && dst.par_windows(2).any(|w| w[0] == w[1]) {
-        return Ok(None);
-    }
+    // NO TIE-DEFER, matching the complex128 flat sibling below. Once
+    // f64_sort_values_defer has passed, equal VALUES are equal BITS: the only
+    // distinct-bits/equal-value pair in binary64 is +0.0 vs -0.0, and the
+    // predicate defers when both signs are present (NaN, the other special
+    // case, defers outright). So the sorted byte sequence is fixed by the input
+    // multiset alone and is independent of stability — every `kind` yields the
+    // same bytes, and an unstable parallel sort is byte-exact for all of them.
+    //
+    // The old `require_distinct` post-check sorted the whole array, scanned for
+    // ties, then THREW THE RESULT AWAY and re-sorted in NumPy. That cost was
+    // invisible while the AVX2 gate kept this arm dead; re-enabling the arm made
+    // it a live regression for `kind="stable"` on tie-heavy input.
     Ok(Some(out.unbind()))
 }
 
@@ -64047,10 +66586,12 @@ fn try_native_string_unique_full(
         let b = k as usize * itemsize;
         &in_data[b..b + itemsize]
     };
-    // Narrow Latin-1 records pack order-preservingly into a big-endian u64, so a gather-free (key, index)
-    // pair sort reproduces (record, orig-index) order exactly - preserving the first-occurrence (min original
-    // index per equal-record run) tie-break that return_index/inverse/counts depend on. Wider records keep the
-    // memcmp comparator. Downstream run-grouping/gather is unchanged.
+    // Latin-1 records up to 16 codepoints/bytes pack order-preservingly into one or two
+    // big-endian u64 words, so a (key, index) pair sort reproduces (record, orig-index)
+    // order exactly. That preserves the first-occurrence (minimum original index per
+    // equal-record run) tie-break that return_index/inverse/counts depend on. Records
+    // wider than two words keep the memcmp comparator. Downstream grouping/gather is
+    // unchanged.
     let perm: Vec<u32> = match packed_string_key_width(&kind, itemsize)
         .and_then(|kw| pack_fixed_width_string_keys(in_data, n, itemsize, kw, is_bytes))
     {
@@ -64059,18 +66600,28 @@ fn try_native_string_unique_full(
             pairs.par_sort_unstable();
             pairs.iter().map(|&(_, i)| i).collect()
         }
-        None => {
-            let mut p: Vec<u32> = (0..n as u32).collect();
-            p.par_sort_unstable_by(|&i, &j| {
-                let ord = rec(i).cmp(rec(j));
-                if ord == std::cmp::Ordering::Equal {
-                    i.cmp(&j)
-                } else {
-                    ord
-                }
-            });
-            p
-        }
+        None => match packed_wide_string_key_width(&kind, itemsize)
+            .and_then(|kw| pack_fixed_width_wide_string_keys(in_data, n, itemsize, kw, is_bytes))
+        {
+            Some(keys) => {
+                let mut pairs: Vec<(PackedWideStringKey, u32)> =
+                    (0..n as u32).map(|i| (keys[i as usize], i)).collect();
+                pairs.par_sort_unstable();
+                pairs.iter().map(|&(_, i)| i).collect()
+            }
+            None => {
+                let mut p: Vec<u32> = (0..n as u32).collect();
+                p.par_sort_unstable_by(|&i, &j| {
+                    let ord = rec(i).cmp(rec(j));
+                    if ord == std::cmp::Ordering::Equal {
+                        i.cmp(&j)
+                    } else {
+                        ord
+                    }
+                });
+                p
+            }
+        },
     };
     let mut srt = vec![0u8; nbytes];
     let mut orig = vec![0u32; n];
@@ -66195,7 +68746,7 @@ fn sort(
                 axis_spec,
                 None | Some(None) | Some(Some(-1)) | Some(Some(0))
             ) {
-                if let Some(out) = try_zerocopy_f64_sort_flat(py, &numpy, &a, require_distinct)? {
+                if let Some(out) = try_zerocopy_f64_sort_flat(py, &numpy, &a)? {
                     return Ok(out);
                 }
                 // 4-/8-byte integer flat sort (numpy simd-sort single-threaded; par 1.44-2.35x).
@@ -70686,6 +73237,158 @@ fn iscomplexobj(x: Py<PyAny>) -> PyResult<bool> {
     Python::attach(|py| python_is_complex_obj(x.bind(py)))
 }
 
+// Flat float16 multi-quantile over the complete 65,536-pattern half domain.
+// NumPy partitions the whole input for strong (float64 array) q, even though
+// half values occupy a bounded domain. Count raw half patterns once, walk the
+// IEEE float/ordered-int bijection for the two required ranks per q, then use
+// NumPy's exact two-sided f64 lerp. This removes the profiled O(n) partition
+// while preserving the public float64 result. NaN/Inf and mixed-sign zero
+// inputs defer because NumPy's partition/tie behavior is not a value-only
+// contract for those classes.
+fn try_native_f16_multi_quantile_histogram(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    q: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    const MIN_N: usize = 1 << 20;
+
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !f16_dtype_ok(a, &ndarray_type)? {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if !dtype.getattr("isnative")?.extract::<bool>()?
+        || !a
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let n = a.getattr("size")?.extract::<usize>()?;
+    if n < MIN_N || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+
+    // A Python float is a weak scalar in NumPy 2.x and preserves the input
+    // float width. This path is deliberately strong-q only: a 1-D native f64
+    // q array (including np.asarray(list[float])) has an unambiguous f64 result.
+    let q_array = numpy.call_method1("asarray", (q,))?;
+    let q_dtype = q_array.getattr("dtype")?;
+    if q_array.getattr("ndim")?.extract::<usize>()? != 1
+        || q_dtype.getattr("kind")?.extract::<String>()? != "f"
+        || q_dtype.getattr("itemsize")?.extract::<usize>()? != 8
+        || !q_dtype.getattr("isnative")?.extract::<bool>()?
+        || !q_array
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let q_buffer = PyBuffer::<f64>::get(&q_array)?;
+    let Some(q_cells) = q_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if q_cells.is_empty() {
+        return Ok(None);
+    }
+    let qs = q_cells.iter().map(|cell| cell.get()).collect::<Vec<_>>();
+    if !qs
+        .iter()
+        .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+    {
+        return Ok(None);
+    }
+
+    let u16_dtype = numpy.getattr("uint16")?;
+    let bits_view = a.call_method1("view", (&u16_dtype,))?;
+    let bits_buffer = PyBuffer::<u16>::get(&bits_view)?;
+    let Some(bits_cells) = bits_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if bits_cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<u16> is repr(transparent), the array is native-endian
+    // C-contiguous, and it remains read-only under the GIL for this call.
+    let bits: &[u16] =
+        unsafe { std::slice::from_raw_parts(bits_cells.as_ptr().cast::<u16>(), bits_cells.len()) };
+
+    use rayon::prelude::*;
+    let threads = rayon::current_num_threads().max(1);
+    let chunk = n.div_ceil(threads * 4).max(1);
+    let counts = bits
+        .par_chunks(chunk)
+        .map(|values| {
+            let mut local = vec![0_usize; 1 << 16];
+            for &value in values {
+                local[value as usize] += 1;
+            }
+            local
+        })
+        .reduce(
+            || vec![0_usize; 1 << 16],
+            |mut left, right| {
+                for (slot, count) in left.iter_mut().zip(right) {
+                    *slot += count;
+                }
+                left
+            },
+        );
+
+    // Any non-finite value or both signed-zero encodings keep NumPy's path.
+    if counts[0x0000] != 0 && counts[0x8000] != 0 {
+        return Ok(None);
+    }
+    if counts
+        .iter()
+        .enumerate()
+        .any(|(raw, &count)| count != 0 && ((raw as u16) & 0x7c00) == 0x7c00)
+    {
+        return Ok(None);
+    }
+
+    let value_at_rank = |rank: usize| -> Option<f64> {
+        let mut remaining = rank;
+        for key in 0_u32..=u16::MAX as u32 {
+            let raw = if key < 0x8000 {
+                (0xffff - key) as u16
+            } else {
+                (key & 0x7fff) as u16
+            };
+            let count = counts[raw as usize];
+            if remaining < count {
+                return Some(f64::from(f16::from_bits(raw).to_f32()));
+            }
+            remaining -= count;
+        }
+        None
+    };
+
+    let mut result = Vec::with_capacity(qs.len());
+    for fraction in qs {
+        let virtual_index = fraction * (n - 1) as f64;
+        let lower_rank = virtual_index.floor() as usize;
+        let upper_rank = virtual_index.ceil() as usize;
+        let lower = value_at_rank(lower_rank).expect("lower quantile rank must exist");
+        let upper = value_at_rank(upper_rank).expect("upper quantile rank must exist");
+        let gamma = virtual_index - lower_rank as f64;
+        let difference = upper - lower;
+        let interpolated = if gamma >= 0.5 {
+            upper - difference * (1.0 - gamma)
+        } else {
+            lower + difference * gamma
+        };
+        result.push(interpolated);
+    }
+
+    Ok(Some(
+        numpy_array_from_slice(py, numpy, &result, "float64")?.unbind(),
+    ))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=None, keepdims=false, weights=None))]
 #[allow(clippy::too_many_arguments)]
@@ -70728,6 +73431,17 @@ fn quantile(
     // order-statistics primitive as percentile, with q already in [0, 1].
     let axis_is_flatten = axis.as_ref().is_none_or(|v| v.bind(py).is_none());
     let out_is_none = out.as_ref().is_none_or(|v| v.bind(py).is_none());
+    if axis_is_flatten
+        && out_is_none
+        && !overwrite_input
+        && !keepdims
+        && weights.is_none()
+        && matches!(method.as_deref(), None | Some("linear"))
+        && let Some(result) =
+            try_native_f16_multi_quantile_histogram(py, &numpy, a.bind(py), q.bind(py))?
+    {
+        return Ok(result);
+    }
     if axis_is_flatten
         && out_is_none
         && !overwrite_input
@@ -75973,6 +78687,325 @@ fn try_zerocopy_f64_sum_lastaxis(
     Ok(Some(reshaped.unbind()))
 }
 
+// Large flat float32/float64 sum using NumPy's exact arithmetic tree across the
+// Rayon pool.  NumPy's contiguous add.reduce is single-threaded; here every
+// subtree reads a disjoint cache band, while the fixed parent-child add order
+// remains byte-identical.  Small arrays, subclasses, non-native byte order,
+// non-C layouts, and explicit reduction options stay on NumPy's mature path.
+/// One-time runtime PROOF that our pairwise tree is THIS NumPy's pairwise tree.
+///
+/// NumPy CHANGED its float reduction tree between 2.2.4 and 2.4.2. Verified
+/// directly: the same 100,000-element buffer sums to `9305c15effb55240` under
+/// 2.2.4 and `9205c15effb55240` under 2.4.2/2.4.3/2.4.6 — a last-ULP difference.
+/// So "bit-exact vs NumPy" for float reductions is scoped to a NumPy BUILD, not
+/// absolute, and a route that assumes one tree SILENTLY returns different bits
+/// on the other. Both NumPy generations are live in this project's worker fleet.
+///
+/// Gating on a version string would break the next time upstream retunes the
+/// reduction, so prove it empirically once per process instead: sum a
+/// deterministic probe whose result is sensitive to tree shape both ways and
+/// compare bits, deferring the whole route on disagreement.
+///
+/// THE PROBE MUST BE LARGE. The two trees agree for every length up to 32,768
+/// and only diverge from 65,536 upward, where NumPy switches reduction strategy
+/// — a 4,096-element probe was measured reporting a FALSE match on the 2.2.4
+/// host, letting the route engage on exactly the build it must exclude.
+fn float_pairwise_tree_matches_numpy(numpy: &Bound<'_, PyModule>) -> bool {
+    static MATCHES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MATCHES.get_or_init(|| {
+        // Mixed-sign, similar-magnitude values: a few large terms would absorb
+        // the low bits and hide the tree shape entirely (measured — a probe
+        // interleaving 1e8 failed to discriminate at any length).
+        const PROBE_LEN: usize = 1 << 17;
+        let mut state: u64 = 0x853c_49e6_748f_ea9b;
+        let mut probe = Vec::with_capacity(PROBE_LEN);
+        for _ in 0..PROBE_LEN {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            probe.push(((state >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0);
+        }
+        let ours = 0.0 + pairwise_sum_f64_slice(&probe);
+        let Ok(array) = numpy.call_method1("array", (probe,)) else {
+            return false;
+        };
+        let Ok(theirs) = array
+            .call_method0("sum")
+            .and_then(|total| total.extract::<f64>())
+        else {
+            return false;
+        };
+        ours.to_bits() == theirs.to_bits()
+    })
+}
+
+fn try_zerocopy_float_sum_flat(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    // The directional size matrix crossed decisively at 16 MiB for both
+    // dtypes; 8 MiB f64 was only 1.07x and is deliberately left to NumPy.
+    const FLOAT_SUM_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
+
+    let numpy = py.import("numpy")?;
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || !dtype.getattr("isnative")?.extract::<bool>()?
+        || !a
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+        || a.getattr("nbytes")?.extract::<usize>()? < FLOAT_SUM_PARALLEL_MIN_BYTES
+    {
+        return Ok(None);
+    }
+    // Refuse to route unless this NumPy's reduction tree is provably ours.
+    if !float_pairwise_tree_matches_numpy(&numpy) {
+        return Ok(None);
+    }
+
+    let scalar = match dtype.getattr("itemsize")?.extract::<usize>()? {
+        4 => {
+            let Ok(in_buffer) = PyBuffer::<f32>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = in_buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32.  The
+            // exact ndarray remains alive and read-only under the held GIL.
+            let data: &[f32] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), input.len()) };
+            // FOLD IN add.reduce's +0.0 IDENTITY. `0.0 + x == x` for every x
+            // EXCEPT `-0.0`, which becomes `+0.0`. A bare pairwise tree over an
+            // all-`-0.0` buffer yields `-0.0` (since `-0.0 + -0.0 == -0.0`)
+            // where NumPy yields `+0.0` — verified against NumPy 2.4.6 at
+            // 2,200,000 elements, inside this routed regime. Dropping this add
+            // diverges on that one degenerate input and nothing else.
+            let total = 0.0 + par_pairwise_sum_f32(data);
+            // SIMD NaN payload selection varies by ISA even when the arithmetic
+            // tree is identical.  Delegate the rare NaN-result case so NumPy
+            // remains the authority for payload/sign bits; finite hot jobs pay
+            // only this scalar branch after the reduction.
+            if total.is_nan() {
+                return Ok(None);
+            }
+            numpy.getattr("float32")?.call1((total,))?.unbind()
+        }
+        8 => {
+            let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = in_buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64.  The
+            // exact ndarray remains alive and read-only under the held GIL.
+            let data: &[f64] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+            // Same `+0.0` identity fold as the f32 arm above.
+            let total = 0.0 + par_pairwise_sum_f64(data);
+            if total.is_nan() {
+                return Ok(None);
+            }
+            numpy.getattr("float64")?.call1((total,))?.unbind()
+        }
+        _ => return Ok(None),
+    };
+    if keepdims {
+        return Ok(Some(keepdims_reshape_scalar(py, &numpy, a, scalar)?));
+    }
+    Ok(Some(scalar))
+}
+
+// Large flat float32/float64 mean: reuse NumPy's exact pairwise tree in
+// parallel, then perform only the scalar divide.  NumPy promotes the scalar
+// float32 sum / np.intp count operation to float64 and narrows the result back
+// to float32; spelling that conversion explicitly preserves the one-ULP cases
+// above 2^24 elements.  Eligibility mirrors the parallel sum route.
+fn try_zerocopy_float_mean_flat(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    const FLOAT_MEAN_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
+
+    let numpy = py.import("numpy")?;
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || !dtype.getattr("isnative")?.extract::<bool>()?
+        || !a
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+        || a.getattr("nbytes")?.extract::<usize>()? < FLOAT_MEAN_PARALLEL_MIN_BYTES
+    {
+        return Ok(None);
+    }
+
+    let scalar = match dtype.getattr("itemsize")?.extract::<usize>()? {
+        4 => {
+            let Ok(in_buffer) = PyBuffer::<f32>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = in_buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32.  The
+            // exact ndarray remains alive and read-only under the held GIL.
+            let data: &[f32] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), input.len()) };
+            let total = par_pairwise_sum_f32(data);
+            if total.is_nan() {
+                return Ok(None);
+            }
+            let mean = (f64::from(total) / data.len() as f64) as f32;
+            numpy.getattr("float32")?.call1((mean,))?.unbind()
+        }
+        8 => {
+            let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = in_buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64.  The
+            // exact ndarray remains alive and read-only under the held GIL.
+            let data: &[f64] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+            let total = par_pairwise_sum_f64(data);
+            if total.is_nan() {
+                return Ok(None);
+            }
+            let mean = total / data.len() as f64;
+            numpy.getattr("float64")?.call1((mean,))?.unbind()
+        }
+        _ => return Ok(None),
+    };
+    if keepdims {
+        return Ok(Some(keepdims_reshape_scalar(py, &numpy, a, scalar)?));
+    }
+    Ok(Some(scalar))
+}
+
+// Parallel full reduction for a large C-contiguous fixed-width integer array.
+// NumPy promotes signed inputs to int64 and unsigned inputs to uint64, then adds
+// modulo 2^64. Wrapping addition is associative, so independent cache-sized
+// partials can be reduced in any order without changing a single result bit.
+// Each Rayon task owns a 256 KiB input band: small enough to fit comfortably in
+// a Zen 3 core's private L2 while leaving enough bands to balance the full pool.
+fn integer_sum_typed<'py, T, A, FC, FA>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    out_dtype_name: &str,
+    identity: A,
+    convert: FC,
+    add: FA,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy + Send + Sync,
+    A: Copy + Send + Sync + IntoPyObject<'py>,
+    FC: Fn(T) -> A + Sync,
+    FA: Fn(A, A) -> A + Sync,
+{
+    const INTEGER_SUM_PARALLEL_MIN_BYTES: usize = 8 * 1024 * 1024;
+    const INTEGER_SUM_BLOCK_BYTES: usize = 256 * 1024;
+
+    let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
+        return Ok(None);
+    };
+    if !in_buffer.is_c_contiguous() || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let Some(input_bytes) = input.len().checked_mul(std::mem::size_of::<T>()) else {
+        return Ok(None);
+    };
+    if input_bytes < INTEGER_SUM_PARALLEL_MIN_BYTES {
+        return Ok(None);
+    }
+
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T. The exact typed
+    // PyBuffer remains alive and read-only under the GIL for this parallel fold.
+    let data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
+    let block_elements = (INTEGER_SUM_BLOCK_BYTES / std::mem::size_of::<T>()).max(1);
+    use rayon::prelude::*;
+    let total = data
+        .par_chunks(block_elements)
+        .map(|block| {
+            block
+                .iter()
+                .copied()
+                .fold(identity, |acc, value| add(acc, convert(value)))
+        })
+        .reduce(|| identity, &add);
+    Ok(Some(
+        numpy.getattr(out_dtype_name)?.call1((total,))?.unbind(),
+    ))
+}
+
+// Large flat integer sum across every fixed-width signed/unsigned dtype. The
+// gate deliberately excludes bool, explicit dtype/out/initial/where, subclasses,
+// non-native byte order, and non-C layouts; the caller preserves NumPy for all
+// of them. keepdims only reshapes the already-exact promoted scalar.
+fn try_zerocopy_integer_sum_flat(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if !matches!(kind.as_str(), "i" | "u") || !dtype.getattr("isnative")?.extract::<bool>()? {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    macro_rules! dispatch {
+        ($input:ty, $acc:ty, $dtype:literal, $convert:expr) => {
+            integer_sum_typed::<$input, $acc, _, _>(
+                py,
+                &numpy,
+                a,
+                $dtype,
+                0,
+                $convert,
+                |left: $acc, right: $acc| left.wrapping_add(right),
+            )
+        };
+    }
+    let scalar = match (kind.as_str(), itemsize) {
+        ("i", 1) => dispatch!(i8, i64, "int64", |value| value as i64)?,
+        ("i", 2) => dispatch!(i16, i64, "int64", |value| value as i64)?,
+        ("i", 4) => dispatch!(i32, i64, "int64", |value| value as i64)?,
+        ("i", 8) => dispatch!(i64, i64, "int64", |value| value)?,
+        ("u", 1) => dispatch!(u8, u64, "uint64", |value| value as u64)?,
+        ("u", 2) => dispatch!(u16, u64, "uint64", |value| value as u64)?,
+        ("u", 4) => dispatch!(u32, u64, "uint64", |value| value as u64)?,
+        ("u", 8) => dispatch!(u64, u64, "uint64", |value| value)?,
+        _ => None,
+    };
+    let Some(scalar) = scalar else {
+        return Ok(None);
+    };
+    if keepdims {
+        return Ok(Some(keepdims_reshape_scalar(py, &numpy, a, scalar)?));
+    }
+    Ok(Some(scalar))
+}
+
 // Reductions: passthrough to NumPy because our input extraction (extract_precise_numeric_array)
 // calls .tolist() which is O(n) Python object creation. NumPy's native C path is faster.
 // See perf bead franken_numpy-c6t1m.
@@ -75990,6 +79023,30 @@ fn sum(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
+    // Large flat float32/float64 sum: evaluate NumPy's exact pairwise tree on
+    // Rayon.  The incumbent pays one serial DOUBLE/FLOAT_pairwise_sum; every
+    // candidate subtree is independent and preserves the same combine edges.
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(o) = try_zerocopy_float_sum_flat(py, a.bind(py), keepdims)?
+    {
+        return Ok(o);
+    }
+    // Large flat integer sum: NumPy's ufunc reduction is single-threaded. A
+    // cache-banded wrapping reduction uses the full Rayon pool while preserving
+    // exact default promotion and overflow bits for all eight integer dtypes.
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(o) = try_zerocopy_integer_sum_flat(py, a.bind(py), keepdims)?
+    {
+        return Ok(o);
+    }
     // Native last-axis fast path: per-lane pairwise sum (bit-exact, the same tree numpy
     // uses on the contiguous fast axis) parallel across lanes beats numpy's single-threaded
     // sum(axis=-1). No out/dtype/initial, native single last-axis int, empty kwargs.
@@ -77016,6 +80073,17 @@ fn mean(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
+    // Native exact-tree parallel flat float32/float64 mean.  The incumbent's
+    // scalar division is negligible; its single-threaded pairwise reduction is
+    // the whole-job hotspot, so schedule those independent tree nodes on Rayon.
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(o) = try_zerocopy_float_mean_flat(py, a.bind(py), keepdims)?
+    {
+        return Ok(o);
+    }
     // Native parallel FLAT f16 mean (= float16(f32_pairwise_sum / n)): numpy's f16 mean is single-
     // threaded compute-bound like the sum. Flat only (axis None), no dtype/out/keepdims/extra-kwargs.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -77383,6 +80451,416 @@ fn var(
     Ok(var_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
 
+/// Below this NumPy's single-threaded scan is already at one core's memory
+/// bandwidth and the Rayon fan-out does not pay for itself. Expressed in bytes
+/// to match the sibling float-sum route.
+const FLOAT_EXTREMA_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
+
+/// Parallel flat `float64` argmin/argmax — EXACT, with NO deferral regimes.
+///
+/// The tie convention is the OPPOSITE of the min/max VALUE routes below and must
+/// not share their combine. Verified against live NumPy at 2,200,000 elements
+/// across band boundaries:
+///
+/// * Ties return the **FIRST** index (zero violations at every boundary tested),
+///   where the value routes keep a later element.
+/// * Signed zeros are NOT a hazard here at all: `argmin` returns index 100
+///   whether the `-0.0` sits at 100 or at 200, because the answer is an index
+///   and ties go to the lower one regardless of sign. The value routes had to
+///   defer on this; these do not.
+/// * A NaN anywhere makes BOTH `argmin` and `argmax` return the **first NaN's
+///   index**, not the extremum's.
+///
+/// Scanning in increasing index order with a STRICTLY-better test gives
+/// first-index-on-ties for free, and keeps NaN out of the running (every
+/// comparison against NaN is false), so the hot loop stays branchless and
+/// vectorizes. NaN presence is tracked as a branchless mask and resolved by a
+/// short early-exiting scan only when one is actually present.
+fn parallel_arg_extremum_f64(data: &[f64], want_min: bool) -> usize {
+    use std::simd::{Select, Simd, cmp::SimdPartialEq, cmp::SimdPartialOrd};
+    const LANES: usize = 8;
+
+    /// Best `(value, index)` for one band, plus whether the band held a NaN.
+    /// `None` value means the band was all-NaN or empty of candidates.
+    fn band(chunk: &[f64], base: usize, want_min: bool) -> (Option<(f64, usize)>, bool) {
+        let mut saw_nan = false;
+        if chunk.len() < LANES {
+            let mut best: Option<(f64, usize)> = None;
+            for (offset, &value) in chunk.iter().enumerate() {
+                if value.is_nan() {
+                    saw_nan = true;
+                    continue;
+                }
+                let better = match best {
+                    None => true,
+                    // STRICTLY better only: a tie leaves the earlier index.
+                    Some((b, _)) => {
+                        if want_min {
+                            value < b
+                        } else {
+                            value > b
+                        }
+                    }
+                };
+                if better {
+                    best = Some((value, base + offset));
+                }
+            }
+            return (best, saw_nan);
+        }
+
+        let (vectors, tail) = chunk.as_chunks::<LANES>();
+        let lane_offsets = Simd::<u64, LANES>::from_array([0, 1, 2, 3, 4, 5, 6, 7]);
+        let first = Simd::<f64, LANES>::from_array(vectors[0]);
+        let mut nan_seen = first.simd_ne(first);
+        let mut best = first;
+        let mut best_idx = lane_offsets;
+        for (block_index, block) in vectors.iter().enumerate().skip(1) {
+            let v = Simd::<f64, LANES>::from_array(*block);
+            nan_seen |= v.simd_ne(v);
+            let idx = lane_offsets + Simd::splat((block_index * LANES) as u64);
+            // Strictly-better keeps the earlier index on ties, and is always
+            // false against NaN so NaN never becomes a candidate.
+            let takes = if want_min {
+                v.simd_lt(best)
+            } else {
+                v.simd_gt(best)
+            };
+            best = takes.select(v, best);
+            best_idx = takes.select(idx, best_idx);
+        }
+        saw_nan |= nan_seen.any();
+
+        let values = best.to_array();
+        let indices = best_idx.to_array();
+        let mut winner: Option<(f64, usize)> = None;
+        for lane in 0..LANES {
+            let value = values[lane];
+            if value.is_nan() {
+                continue;
+            }
+            let index = indices[lane] as usize;
+            winner = Some(match winner {
+                None => (value, index),
+                Some((bv, bi)) => {
+                    let strictly_better = if want_min { value < bv } else { value > bv };
+                    // Lane order is not index order, so ties must compare the
+                    // INDEX and keep the lower one.
+                    if strictly_better || (value == bv && index < bi) {
+                        (value, index)
+                    } else {
+                        (bv, bi)
+                    }
+                }
+            });
+        }
+        let vector_len = vectors.len() * LANES;
+        for (offset, &value) in tail.iter().enumerate() {
+            if value.is_nan() {
+                saw_nan = true;
+                continue;
+            }
+            let index = vector_len + offset;
+            let better = match winner {
+                None => true,
+                Some((bv, _)) => {
+                    if want_min {
+                        value < bv
+                    } else {
+                        value > bv
+                    }
+                }
+            };
+            if better {
+                winner = Some((value, index));
+            }
+        }
+        (winner.map(|(value, index)| (value, base + index)), saw_nan)
+    }
+
+    const ARG_BAND: usize = 1 << 16;
+    let partials: Vec<(Option<(f64, usize)>, bool)> =
+        if data.len() <= ARG_BAND || rayon::current_num_threads() < 2 {
+            vec![band(data, 0, want_min)]
+        } else {
+            use rayon::prelude::*;
+            data.par_chunks(ARG_BAND)
+                .enumerate()
+                .map(|(band_index, chunk)| band(chunk, band_index * ARG_BAND, want_min))
+                .collect()
+        };
+
+    // A NaN anywhere wins outright: NumPy returns the FIRST NaN's index for both
+    // argmin and argmax. Resolve it with an early-exiting scan, which only runs
+    // when a NaN is actually present.
+    if partials.iter().any(|(_, saw_nan)| *saw_nan) {
+        return data
+            .iter()
+            .position(|value| value.is_nan())
+            .expect("a band reported a NaN, so one exists");
+    }
+
+    let mut winner: Option<(f64, usize)> = None;
+    for (candidate, _) in &partials {
+        let Some((value, index)) = *candidate else {
+            continue;
+        };
+        winner = Some(match winner {
+            None => (value, index),
+            Some((bv, bi)) => {
+                let strictly_better = if want_min { value < bv } else { value > bv };
+                if strictly_better {
+                    (value, index)
+                } else {
+                    (bv, bi)
+                }
+            }
+        });
+    }
+    winner
+        .expect("caller guarantees a non-empty, non-all-NaN buffer")
+        .1
+}
+
+/// Zero-copy parallel flat `float64` `argmin`/`argmax`.
+fn try_zerocopy_f64_arg_extremum_flat(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    want_min: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+        || !dtype.getattr("isnative")?.extract::<bool>()?
+        || !a
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+        || a.getattr("nbytes")?.extract::<usize>()? < FLOAT_EXTREMA_PARALLEL_MIN_BYTES
+    {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if input.is_empty() {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; the exact ndarray
+    // stays alive and read-only under the held GIL for the whole scan.
+    let data: &[f64] =
+        unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+    let index = parallel_arg_extremum_f64(data, want_min);
+    Ok(Some(numpy.getattr("intp")?.call1((index,))?.unbind()))
+}
+
+/// Parallel flat `float64` min/max — EXACT, and exact for a different reason
+/// than the sum route.
+///
+/// Selection is order-independent, so there is no accumulation tree to
+/// reproduce. The entire difficulty is tie semantics, verified against live
+/// NumPy:
+///
+/// * NumPy's `minimum(a, b)` is `(a < b || isnan(a)) ? a : b`, which returns the
+///   SECOND operand when the two compare equal. In a left-to-right reduce that
+///   means the LAST tied element wins. This is observable because `-0.0` and
+///   `+0.0` compare equal but differ in bits: measured
+///   `min([+0.0, -0.0]) == -0.0` and `min([-0.0, +0.0]) == +0.0`.
+/// * NaN wins and its payload is preserved; the first NaN encountered takes over
+///   and sticks.
+///
+/// Combining partials left-to-right with the same take-second-on-tie rule
+/// reproduces the sequential result exactly, so the parallel split is free.
+/// NOTE the opposite convention in the argmin/argmax siblings, which owe the
+/// FIRST index on a tie — sharing one combine rule between them would silently
+/// corrupt one of the two.
+///
+/// Returns the extremum together with whether ANY NaN was seen. The caller
+/// defers to NumPy on NaN, so the flag lets the vectorized hot loop skip
+/// per-element NaN handling entirely.
+fn parallel_extremum_f64(data: &[f64], want_min: bool) -> (f64, bool) {
+    // Sequential over a band, in index order, taking the later element on ties.
+    //
+    // VECTORIZED, and the enabling observation is that this route DEFERS
+    // whenever the result is NaN — so the hot loop does not need per-element NaN
+    // semantics at all. It can use a plain SIMD min/max and accumulate a
+    // BRANCHLESS NaN mask (`v != v`) checked once per band. The scalar version
+    // this replaces carried a NaN test plus a conditional on every element,
+    // which is a serial dependency chain that will not vectorize: measured
+    // ~53 GB/s against the sibling parallel sum's ~97 GB/s on the same host.
+    //
+    // Signed zeros are still safe: `simd_min(-0.0, +0.0)` may return either, but
+    // the caller defers whenever the extremum is a zero AND both signs are
+    // present, and a uniform-sign zero is returned unchanged by any tie rule.
+    fn band(chunk: &[f64], want_min: bool) -> (f64, bool) {
+        use std::simd::{Simd, cmp::SimdPartialEq, num::SimdFloat};
+        const LANES: usize = 8;
+
+        if chunk.len() < LANES {
+            let mut acc = chunk[0];
+            let mut saw_nan = acc.is_nan();
+            for &value in &chunk[1..] {
+                saw_nan |= value.is_nan();
+                acc = fold(acc, value, want_min);
+            }
+            return (acc, saw_nan);
+        }
+
+        let (vectors, tail) = chunk.as_chunks::<LANES>();
+        let mut acc = Simd::<f64, LANES>::from_array(vectors[0]);
+        let mut nan_seen = acc.simd_ne(acc);
+        for block in &vectors[1..] {
+            let v = Simd::<f64, LANES>::from_array(*block);
+            nan_seen |= v.simd_ne(v);
+            acc = if want_min {
+                acc.simd_min(v)
+            } else {
+                acc.simd_max(v)
+            };
+        }
+        let mut saw_nan = nan_seen.any();
+        let lanes = acc.to_array();
+        let mut result = lanes[0];
+        for &lane in &lanes[1..] {
+            result = fold(result, lane, want_min);
+        }
+        for &value in tail {
+            saw_nan |= value.is_nan();
+            result = fold(result, value, want_min);
+        }
+        (result, saw_nan)
+    }
+    // `acc` is the earlier element, `value` the later one. Ties fall through to
+    // `value`. NOTE this is OUR internal convention, not a reproduction of
+    // NumPy's: NumPy's tie choice is NOT positional (it follows internal
+    // blocking and SIMD lane order), which is exactly why the caller defers on
+    // an ambiguous mixed-sign-zero extremum instead of trying to match it.
+    #[inline]
+    fn fold(acc: f64, value: f64, want_min: bool) -> f64 {
+        if acc.is_nan() {
+            return acc;
+        }
+        if value.is_nan() {
+            return value;
+        }
+        let acc_wins = if want_min { acc < value } else { acc > value };
+        if acc_wins { acc } else { value }
+    }
+
+    const EXTREMUM_BAND: usize = 1 << 16;
+    if data.len() <= EXTREMUM_BAND || rayon::current_num_threads() < 2 {
+        return band(data, want_min);
+    }
+    use rayon::prelude::*;
+    // Collect one result per band and fold them SEQUENTIALLY in index order.
+    // Rayon's `reduce` only combines adjacent segments for indexed iterators and
+    // the ordering matters here, so rather than rest correctness on that library
+    // guarantee, make the ordering explicit. The partial vector is tiny — 1,024
+    // entries for a 64M-element input — so the sequential fold is free.
+    let partials: Vec<(f64, bool)> = data
+        .par_chunks(EXTREMUM_BAND)
+        .map(|chunk| band(chunk, want_min))
+        .collect();
+    let mut acc = partials[0].0;
+    let mut saw_nan = partials[0].1;
+    for &(value, band_nan) in &partials[1..] {
+        saw_nan |= band_nan;
+        acc = fold(acc, value, want_min);
+    }
+    (acc, saw_nan)
+}
+
+/// Zero-copy parallel flat `float64` `min`/`max`.
+///
+/// NumPy runs both single-threaded — measured `cpu/wall = 1.00x` at 64M
+/// `float64`, the same structural gap as every other reduction it owns.
+fn try_zerocopy_f64_extremum_flat(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    want_min: bool,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+        || !dtype.getattr("isnative")?.extract::<bool>()?
+        || !a
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+        || a.getattr("nbytes")?.extract::<usize>()? < FLOAT_EXTREMA_PARALLEL_MIN_BYTES
+    {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if input.is_empty() {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; the exact ndarray
+    // stays alive and read-only under the held GIL for the whole scan.
+    let data: &[f64] =
+        unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+    let (value, saw_nan) = parallel_extremum_f64(data, want_min);
+    // ANY NaN -> DELEGATE. NumPy's own answer here is a NaN whose PAYLOAD
+    // depends on which code path ran: measured, the scalar path preserves a
+    // planted payload (`0x7ff800000000dead`) while the SIMD path at n >= 8
+    // returns a bare `0x7ff8000000000000`. Reproducing that selection across
+    // ISAs is not something we can promise, so let NumPy stay the authority for
+    // payload and sign bits. Finite hot paths pay only this one branch. Same
+    // reasoning as the sibling float-sum route.
+    // The flag, not `value.is_nan()`: the vectorized scan uses `simd_min`, whose
+    // NaN handling differs from NumPy's, so a NaN anywhere in the buffer can
+    // leave a non-NaN `value`. Deferring on the flag covers every such case.
+    if saw_nan || value.is_nan() {
+        return Ok(None);
+    }
+    // MIXED-SIGN ZERO EXTREMUM -> DELEGATE. `-0.0` and `+0.0` compare EQUAL but
+    // differ in bits, so when the extremum is a zero the SIGN of the answer is
+    // decided purely by the reduction's tie rule. NumPy's is NOT positional:
+    // measured against live NumPy at 2,200,000 elements, its choice flips
+    // exactly when the planted zero sits at a 65,536-element boundary
+    // (positions 0 / 65,536 / 131,072 disagree with "last wins" while
+    // 1 / 65,535 / 65,537 agree), i.e. it follows NumPy's internal blocking and
+    // SIMD lane order rather than index order. That is not portably
+    // reproducible, so hand the case back.
+    //
+    // Only MIXED signs are ambiguous: if every zero in the buffer carries the
+    // same sign as our answer, any tie rule returns identical bits, so the
+    // common non-negative-data case keeps the fast path. The extra scan runs
+    // only when the extremum is exactly zero.
+    if value == 0.0 {
+        use rayon::prelude::*;
+        let answer_is_negative = value.is_sign_negative();
+        let mixed = data
+            .par_iter()
+            .any(|&v| v == 0.0 && v.is_sign_negative() != answer_is_negative);
+        if mixed {
+            return Ok(None);
+        }
+    }
+    let scalar = numpy.getattr("float64")?.call1((value,))?.unbind();
+    if keepdims {
+        return Ok(Some(keepdims_reshape_scalar(py, &numpy, a, scalar)?));
+    }
+    Ok(Some(scalar))
+}
+
 // Native Rust min with fallback for unsupported parameters.
 #[pyfunction]
 #[pyo3(name = "min", signature = (a, axis=None, out=None, keepdims=false, initial=None, **kwargs))]
@@ -77446,6 +80924,15 @@ fn py_min(
             .extract::<bool>()?
     {
         return fallback();
+    }
+
+    // Native parallel FLAT f64 min: NumPy's reduction is single-threaded, and
+    // selection is order-independent, so the parallel split is exact provided
+    // ties keep the LATER element (see `parallel_extremum_f64`). Flat only.
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(o) = try_zerocopy_f64_extremum_flat(py, a.bind(py), true, keepdims)?
+    {
+        return Ok(o);
     }
 
     // Parse axis: None, integer, or tuple → fallback for tuple
@@ -77610,6 +81097,14 @@ fn py_max(
             .extract::<bool>()?
     {
         return fallback();
+    }
+
+    // Native parallel FLAT f64 max: same structure and same take-later-on-tie
+    // rule as the min route above.
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(o) = try_zerocopy_f64_extremum_flat(py, a.bind(py), false, keepdims)?
+    {
+        return Ok(o);
     }
 
     // Parse axis: None, integer, or tuple → fallback for tuple
@@ -78813,8 +82308,9 @@ where
     Ok(Some(out.unbind()))
 }
 
-// Route a >=3-D C-contiguous complex ndarray nancum* along a MIDDLE axis (0 < axis < ndim-1, outer >= 2)
-// to the native per-block parallel nan-scan. axis-0 / last axis / below-crossover defer to numpy.
+// Route a >=2-D C-contiguous complex ndarray nancum* along a NON-last axis. The measured
+// complex128 nancumprod axis-0 case uses gather/scan/scatter; middle axes use the
+// per-outer-block slab scan for both widths and operations.
 fn try_zerocopy_complex_nancumulative_nonlast(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -78832,7 +82328,7 @@ fn try_zerocopy_complex_nancumulative_nonlast(
     }
     let itemsize = dt.getattr("itemsize")?.extract::<usize>()?;
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
-    if ndim < 3
+    if ndim < 2
         || !a
             .getattr("flags")?
             .getattr("c_contiguous")?
@@ -78848,22 +82344,53 @@ fn try_zerocopy_complex_nancumulative_nonlast(
     } else {
         ax_raw
     };
-    if norm <= 0 || norm >= ndim as isize - 1 {
-        return Ok(None); // only MIDDLE axes (outer >= 2); axis-0 and last defer
+    if norm < 0 || norm >= ndim as isize {
+        return Ok(None);
     }
     let ax = norm as usize;
+    if ax == ndim - 1 {
+        return Ok(None); // the dedicated last-axis route handles this case
+    }
     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
     let axis_len = shape[ax];
     let outer: usize = shape[..ax].iter().product();
     let inner: usize = shape[ax + 1..].iter().product();
     if axis_len == 0
         || inner == 0
-        || outer < 2
         || outer * axis_len * inner < COMPLEX_NANCUM_NONLAST_PARALLEL_MIN
         || rayon::current_num_threads() < 2
     {
         return Ok(None);
     }
+    if ax == 0 {
+        // The measured KEEP covered complex128 nancumprod only. Keep nancumsum
+        // and complex64 on NumPy until each earns this gather/scan/scatter route
+        // with its own hot-path profile and median-CI result.
+        if !is_prod || itemsize != 16 {
+            return Ok(None);
+        }
+        // NumPy's axis-0 scan is contiguous a row at a time, so gathering the
+        // independent columns repays its extra traffic at the measured 1M
+        // complex-element floor.
+        const COMPLEX_NANCUM_AXIS0_PARALLEL_MIN: usize = 1 << 20;
+        if inner < 2 || axis_len * inner < COMPLEX_NANCUM_AXIS0_PARALLEL_MIN {
+            return Ok(None);
+        }
+        return complex_nancumulative_axis0_typed::<f64>(
+            py,
+            &numpy,
+            a,
+            "float64",
+            "complex128",
+            &shape,
+            axis_len,
+            inner,
+            true,
+            1.0_f64,
+            f64::is_nan,
+        );
+    }
+    debug_assert!(outer >= 2);
     match itemsize {
         16 => complex_nancumulative_nonlast_typed::<f64>(
             py,
@@ -79081,6 +82608,116 @@ where
                 let v = (j * rows + i) * 2;
                 orow[2 * j] = vals[v];
                 orow[2 * j + 1] = vals[v + 1];
+            }
+        });
+    Ok(Some(out.unbind()))
+}
+
+// NaN-aware sibling of `complex_cumulative_axis0_typed`: gather each
+// independent column, replace any complex value with a NaN component by the
+// operation identity, scan in NumPy's top-to-bottom arithmetic order, then
+// scatter. Memory reordering does not change any lane's floating-point order.
+#[allow(clippy::too_many_arguments)]
+fn complex_nancumulative_axis0_typed<T>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    real_name: &str,
+    complex_name: &str,
+    shape: &[usize],
+    rows: usize,
+    cols: usize,
+    is_prod: bool,
+    ident: T,
+    is_nan: fn(T) -> bool,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element
+        + Copy
+        + Default
+        + Send
+        + Sync
+        + std::ops::Mul<Output = T>
+        + std::ops::Sub<Output = T>
+        + std::ops::Add<Output = T>,
+{
+    let total = rows * cols * 2;
+    let Ok(rview) = a.call_method1("view", (real_name,)) else {
+        return Ok(None);
+    };
+    let Ok(in_buf) = PyBuffer::<T>::get(&rview) else {
+        return Ok(None);
+    };
+    let Some(cells) = in_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    if cells.len() != total {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T and remains
+    // read-only under the GIL for this call.
+    let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
+    let zero = T::default();
+    let replace_nan = |re: T, im: T| {
+        if is_nan(re) || is_nan(im) {
+            (ident, zero)
+        } else {
+            (re, im)
+        }
+    };
+
+    use rayon::prelude::*;
+    let mut vals = vec![T::default(); total];
+    vals.par_chunks_mut(2 * rows)
+        .enumerate()
+        .for_each(|(column, lane)| {
+            for row in 0..rows {
+                let source = (row * cols + column) * 2;
+                let (re, im) = replace_nan(src[source], src[source + 1]);
+                lane[2 * row] = re;
+                lane[2 * row + 1] = im;
+            }
+            let mut re = lane[0];
+            let mut im = lane[1];
+            for row in 1..rows {
+                let xr = lane[2 * row];
+                let xi = lane[2 * row + 1];
+                if is_prod {
+                    let next_re = re * xr - im * xi;
+                    let next_im = re * xi + im * xr;
+                    re = next_re;
+                    im = next_im;
+                } else {
+                    re = re + xr;
+                    im = im + xi;
+                }
+                lane[2 * row] = re;
+                lane[2 * row + 1] = im;
+            }
+        });
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", complex_name)?;
+    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+    let out = numpy.call_method("empty", (shape_tuple,), Some(&kwargs))?;
+    let oview = out.call_method1("view", (real_name,))?;
+    let Ok(out_buf) = PyBuffer::<T>::get(&oview) else {
+        return Ok(None);
+    };
+    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: this is a fresh numpy.empty output viewed as its real type.
+    // Each parallel row writes a disjoint contiguous `2 * cols` range.
+    let dst: &mut [T] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, total) };
+    dst.par_chunks_mut(cols * 2)
+        .enumerate()
+        .for_each(|(row, output_row)| {
+            for column in 0..cols {
+                let value = (column * rows + row) * 2;
+                output_row[2 * column] = vals[value];
+                output_row[2 * column + 1] = vals[value + 1];
             }
         });
     Ok(Some(out.unbind()))
@@ -80583,6 +84220,16 @@ fn argmax(
         return fallback();
     }
 
+    // Native parallel FLAT f64 argmax: NumPy's reduction is single-threaded.
+    // Ties take the FIRST index and NaN anywhere returns the first NaN index —
+    // the OPPOSITE convention from the min/max value routes, so this must not
+    // share their combine. Flat only.
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(o) = try_zerocopy_f64_arg_extremum_flat(py, a.bind(py), false)?
+    {
+        return Ok(o);
+    }
+
     // Parse axis: None or integer
     let axis_val: Option<isize> = match &axis {
         None => None,
@@ -80780,6 +84427,16 @@ fn argmin(
         || keepdims
     {
         return fallback();
+    }
+
+    // Native parallel FLAT f64 argmin: NumPy's reduction is single-threaded.
+    // Ties take the FIRST index and NaN anywhere returns the first NaN index —
+    // the OPPOSITE convention from the min/max value routes, so this must not
+    // share their combine. Flat only.
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(o) = try_zerocopy_f64_arg_extremum_flat(py, a.bind(py), true)?
+    {
+        return Ok(o);
     }
 
     // Parse axis: None or integer
@@ -100339,8 +103996,8 @@ fn nancumprod(
         {
             return Ok(out);
         }
-        // complex middle-axis nancumprod: numpy non-last nancum* is strided + serial + per-elem isnan;
-        // per-outer-block parallel slab nan-scan is bit-exact.
+        // Complex non-last nancumprod: middle axes use the per-outer-block slab
+        // scan; only the measured complex128 axis-0 case uses gather/scan/scatter.
         if let Some(ax) = axis_val
             && let Some(out) = try_zerocopy_complex_nancumulative_nonlast(py, &a, Some(ax), true)?
         {
@@ -100392,8 +104049,8 @@ fn nancumsum(
         {
             return Ok(out);
         }
-        // complex middle-axis nancumsum: numpy non-last nancum* is strided + serial + per-elem isnan;
-        // per-outer-block parallel slab nan-scan is bit-exact.
+        // Complex middle-axis nancumsum uses the per-outer-block slab scan.
+        // Axis 0 deliberately delegates until separately measured.
         if let Some(ax) = axis_val
             && let Some(out) = try_zerocopy_complex_nancumulative_nonlast(py, &a, Some(ax), false)?
         {
@@ -101668,6 +105325,10 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(degrees, m)?)?;
     m.add_function(wrap_pyfunction!(radians, m)?)?;
     m.add_function(wrap_pyfunction!(sinc, m)?)?;
+    m.add_function(wrap_pyfunction!(masked_sum, m)?)?;
+    m.add_function(wrap_pyfunction!(multiply_add, m)?)?;
+    m.add_function(wrap_pyfunction!(subtract_multiply_add, m)?)?;
+    m.add_function(wrap_pyfunction!(pairwise_multiply_add, m)?)?;
     m.add_function(wrap_pyfunction!(copysign, m)?)?;
     m.add_function(wrap_pyfunction!(nextafter, m)?)?;
     m.add_function(wrap_pyfunction!(hypot, m)?)?;
@@ -103687,20 +107348,21 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        NarrowSetOp, PyFromPyFunc, PyVectorize, PythonNativeGemmOp, argwhere, bincount,
-        build_numpy_array_from_ufunc, ceil_native, choose, compress, copysign, count_nonzero,
-        degrees_native, diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize,
-        extract, extract_numeric_array, extract_precise_numeric_array, fill_diagonal, flatnonzero,
-        flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interp,
-        isfinite_native, isinf_native, isnan_native, isneginf_native, isposinf_native, ix_, ldexp,
-        logaddexp, logaddexp2, meshgrid, modf, nan_to_num, narrow_bitmap_setop, nextafter, place,
-        put, put_along_axis, putmask, python_native_gemm_f64_2d,
-        python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate,
-        radians_native, ravel_multi_index, required_dict_item, rfftfreq, rint_native, searchsorted,
-        select, sign, signbit_native, sinc, solve_triangular, spacing, take, take_along_axis,
-        tensorinv, tensorsolve, trapezoid, trapz, tri, tril_indices, tril_indices_from,
-        triu_indices, triu_indices_from, trunc_native, unravel_index, where_py,
-        wide_int_table_bounds,
+        MaskedStream, NarrowSetOp, PyFromPyFunc, PyVectorize, PythonNativeGemmOp, argwhere,
+        bincount, blas_is_single_threaded, build_numpy_array_from_ufunc, ceil_native, choose,
+        compress, copysign, count_nonzero, degrees_native, diag, diag_indices, diag_indices_from,
+        diagflat, diagonal, digitize, extract, extract_numeric_array,
+        extract_precise_numeric_array, fill_diagonal, flatnonzero, flip, fliplr, flipud,
+        floor_native, fnp_python, frexp, hypot, indices, interp, isfinite_native, isinf_native,
+        isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
+        masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
+        narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
+        python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
+        python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
+        required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
+        sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
+        trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc_native,
+        unravel_index, where_py, wide_int_table_bounds,
     };
     use fnp_dtype::{ArrayStorage, DType};
     use fnp_ufunc::UFuncArray;
@@ -103715,6 +107377,89 @@ mod tests {
     use std::time::Instant;
 
     static PY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // Reference: numpy's pairwise tree over an ALREADY-compacted slice — the
+    // same split rule as pairwise_simd_f64, spelled over a plain slice so the
+    // masked kernels can be checked without a Python buffer.
+    fn masked_sum_reference(picked: &[f64], off: usize, n: usize) -> f64 {
+        if n <= 128 {
+            return super::base_sum_simd(&picked[off..off + n]);
+        }
+        let mut n2 = n / 2;
+        n2 -= n2 % 8;
+        masked_sum_reference(picked, off, n2) + masked_sum_reference(picked, off + n2, n - n2)
+    }
+
+    /// The streamed and parallel masked reductions must be BIT-identical to
+    /// compacting first and then running the pairwise tree. This checks the
+    /// kernels directly, so it cannot pass vacuously by the Python route
+    /// deferring to numpy.
+    #[test]
+    fn masked_pairwise_matches_compacted_reference_bitwise() {
+        let mut state = 0x243f_6a88_85a3_08d3u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for &n in &[0usize, 1, 8, 127, 128, 129, 1000, 5000, 40_000] {
+            for &keep_in_1000 in &[0u64, 1, 250, 500, 999, 1000] {
+                let mut data = Vec::with_capacity(n);
+                let mut mask = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let bits = next();
+                    // Mixed magnitudes so any reordering shows up in the bits.
+                    let scale = match bits % 3 {
+                        0 => 1.0,
+                        1 => 1e6,
+                        _ => 1e-6,
+                    };
+                    data.push((f64::from_bits(0x3ff0_0000_0000_0000 | (bits >> 12)) - 1.5) * scale);
+                    mask.push(u8::from(next() % 1000 < keep_in_1000));
+                }
+                let picked: Vec<f64> = data
+                    .iter()
+                    .zip(&mask)
+                    .filter(|(_, m)| **m != 0)
+                    .map(|(v, _)| *v)
+                    .collect();
+                let expected = masked_sum_reference(&picked, 0, picked.len());
+
+                let mut buf = [0.0f64; 128];
+                let mut stream = MaskedStream {
+                    mask: &mask,
+                    data: &data,
+                    i: 0,
+                };
+                let streamed = masked_pairwise_streamed(&mut stream, picked.len(), &mut buf);
+                assert_eq!(
+                    streamed.to_bits(),
+                    expected.to_bits(),
+                    "streamed n={n} keep={keep_in_1000}"
+                );
+
+                // Same tree, split across threads at genuine split points.
+                const BAND: usize = super::MASKED_SUM_BAND;
+                let mut prefix = Vec::new();
+                let mut acc = 0usize;
+                for band in mask.chunks(BAND) {
+                    prefix.push(acc);
+                    acc += band.iter().filter(|m| **m != 0).count();
+                }
+                prefix.push(acc);
+                for &cut in &[1usize << 12, 64, 8] {
+                    let parallel =
+                        masked_pairwise_parallel(&mask, &data, &prefix, 0, 0, picked.len(), cut);
+                    assert_eq!(
+                        parallel.to_bits(),
+                        expected.to_bits(),
+                        "parallel n={n} keep={keep_in_1000} cut={cut}"
+                    );
+                }
+            }
+        }
+    }
 
     fn with_python(test: impl FnOnce(Python<'_>) -> PyResult<()>) {
         let _guard = PY_TEST_MUTEX
@@ -104080,6 +107825,16 @@ mod tests {
     fn native_matmul_dot_f64_gemm_gate_and_golden_sha256() {
         with_python(|py| {
             if !numpy_available(py) {
+                return Ok(());
+            }
+            // `python_native_gemm_f64_2d` delegates to numpy unconditionally
+            // when numpy's BLAS is multi-threaded — that check runs before the
+            // profile gate and is not bypassed by `require_profile_gate=false`.
+            // On such a host the helper returns None for every input, so the
+            // golden below is unreachable and the `.expect(...)` would fire on
+            // a correctly-behaving build. Skip the same way the test already
+            // skips a missing numpy.
+            if !blas_is_single_threaded() {
                 return Ok(());
             }
             let numpy = py.import("numpy")?;
@@ -108530,6 +112285,81 @@ mod tests {
             assert_random_sample_matches_numpy(
                 &ours.call_method1("noncentral_f", (5.0_f64, 7.0_f64, 1.25_f64, shape.clone()))?,
                 &theirs.call_method1("noncentral_f", (5.0_f64, 7.0_f64, 1.25_f64, shape))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_generator_incumbent_ratio_regimes_match_numpy_exact_bytes_and_next_stream() {
+        fn assert_exact_array(
+            label: &str,
+            actual: &Bound<'_, PyAny>,
+            expected: &Bound<'_, PyAny>,
+        ) -> PyResult<()> {
+            let actual_dtype = actual.getattr("dtype")?.str()?.extract::<String>()?;
+            let expected_dtype = expected.getattr("dtype")?.str()?.extract::<String>()?;
+            assert_eq!(actual_dtype, expected_dtype, "{label}: dtype differs");
+            let actual_shape = actual.getattr("shape")?.extract::<Vec<usize>>()?;
+            let expected_shape = expected.getattr("shape")?.extract::<Vec<usize>>()?;
+            assert_eq!(actual_shape, expected_shape, "{label}: shape differs");
+            let actual_bytes = actual.call_method0("tobytes")?.extract::<Vec<u8>>()?;
+            let expected_bytes = expected.call_method0("tobytes")?.extract::<Vec<u8>>()?;
+            assert_eq!(actual_bytes, expected_bytes, "{label}: output bytes differ");
+            Ok(())
+        }
+
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            const SIZE: usize = 100_000;
+            let module = PyModule::new(py, "fnp_python_generator_incumbent_ratio_regimes")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+
+            let generator_pair = |seed: u64| -> PyResult<(Bound<'_, PyAny>, Bound<'_, PyAny>)> {
+                let ours_bit_generator = random.getattr("PCG64")?.call1((seed,))?;
+                let theirs_bit_generator = numpy_random.getattr("PCG64")?.call1((seed,))?;
+                Ok((
+                    random.getattr("Generator")?.call1((ours_bit_generator,))?,
+                    numpy_random
+                        .getattr("Generator")?
+                        .call1((theirs_bit_generator,))?,
+                ))
+            };
+
+            let (ours, theirs) = generator_pair(42)?;
+            let ours_output = ours.call_method1("zipf", (2.5_f64, SIZE))?;
+            let theirs_output = theirs.call_method1("zipf", (2.5_f64, SIZE))?;
+            assert_exact_array(
+                "Generator.zipf at-scale output",
+                &ours_output,
+                &theirs_output,
+            )?;
+            let ours_next = ours.call_method1("random", (32_usize,))?;
+            let theirs_next = theirs.call_method1("random", (32_usize,))?;
+            assert_exact_array("Generator.zipf post-call stream", &ours_next, &theirs_next)?;
+
+            let (ours, theirs) = generator_pair(42)?;
+            let ours_output =
+                ours.call_method1("noncentral_chisquare", (5.0_f64, 1.0_f64, SIZE))?;
+            let theirs_output =
+                theirs.call_method1("noncentral_chisquare", (5.0_f64, 1.0_f64, SIZE))?;
+            assert_exact_array(
+                "Generator.noncentral_chisquare at-scale output",
+                &ours_output,
+                &theirs_output,
+            )?;
+            let ours_next = ours.call_method1("random", (32_usize,))?;
+            let theirs_next = theirs.call_method1("random", (32_usize,))?;
+            assert_exact_array(
+                "Generator.noncentral_chisquare post-call stream",
+                &ours_next,
+                &theirs_next,
             )?;
 
             Ok(())
@@ -132537,6 +136367,75 @@ mod tests {
     }
 
     #[test]
+    fn f16_multi_quantile_histogram_is_byte_exact_and_defers_ambiguous_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let namespace = PyDict::new(py);
+            py.run(
+                c"import numpy as np\nn = 1 << 20\nraw = (np.arange(n, dtype=np.uint32) * 37) % 60001\na = (raw.astype(np.float32) / 64.0 - 400.0).astype(np.float16)\nqs = np.array([0.0, 1e-7, 0.01, 0.123456789, 0.4999999, 0.5, 0.5000001, 0.9, 0.999999, 1.0], dtype=np.float64)\nwith_nan = a.copy(); with_nan[0] = np.nan\nmixed_zero = a.copy(); mixed_zero[0] = np.float16(0.0); mixed_zero[1] = np.float16(-0.0)\nswapped = np.ones(n, dtype='>f2')",
+                Some(&namespace),
+                Some(&namespace),
+            )?;
+            let input = namespace.get_item("a")?.expect("a present");
+            let qs = namespace.get_item("qs")?.expect("qs present");
+            let quantile = module.getattr("quantile")?;
+            let numpy_quantile = numpy.getattr("quantile")?;
+
+            let ours = quantile.call1((&input, &qs))?;
+            let expected = numpy_quantile.call1((&input, &qs))?;
+            assert_eq!(
+                ours.getattr("dtype")?.str()?.extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?,
+                "f16 multi-quantile dtype diverged"
+            );
+            assert_eq!(
+                ours.getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?,
+                "f16 multi-quantile shape diverged"
+            );
+            assert_eq!(
+                ours.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                expected.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                "f16 multi-quantile bytes diverged"
+            );
+            assert!(
+                crate::try_native_f16_multi_quantile_histogram(py, &numpy, &input, &qs)?.is_some(),
+                "finite native-endian f16 + strong f64 q must take the histogram path"
+            );
+
+            for name in ["with_nan", "mixed_zero", "swapped"] {
+                let ambiguous = namespace.get_item(name)?.expect("ambiguous input present");
+                assert!(
+                    crate::try_native_f16_multi_quantile_histogram(py, &numpy, &ambiguous, &qs,)?
+                        .is_none(),
+                    "{name} must defer to NumPy"
+                );
+                let ours = quantile.call1((&ambiguous, &qs))?;
+                let expected = numpy_quantile.call1((&ambiguous, &qs))?;
+                assert_eq!(
+                    ours.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    expected.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "{name} delegated bytes diverged"
+                );
+            }
+
+            let weak_q = 0.37_f64.into_pyobject(py)?;
+            assert!(
+                crate::try_native_f16_multi_quantile_histogram(py, &numpy, &input, &weak_q)?
+                    .is_none(),
+                "weak scalar q must preserve NumPy's narrow-float path"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
     fn percentile_matches_numpy_across_q_axis_method_and_dtype() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -135455,6 +139354,85 @@ mod tests {
                 )?,
             )?;
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn f16_histogram_pattern_table_is_byte_exact_and_defers_ambiguous_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let histogram_fn = module.getattr("histogram")?;
+            let numpy = py.import("numpy")?;
+            let numpy_histogram = numpy.getattr("histogram")?;
+            let namespace = PyDict::new(py);
+            py.run(
+                c"import numpy as np\nn = 1 << 20\nraw = (np.arange(n, dtype=np.uint32) * 37) % 60001\nmixed = ((raw.astype(np.float32) - 30000.0) / 64.0).astype(np.float16)\npositive = (raw.astype(np.float32) / 128.0 + 0.125).astype(np.float16)\npositive_patterns = np.arange(0x7c00, dtype=np.uint16).view(np.float16)\npositive_domain = np.resize(positive_patterns, n).copy()\nnegative_patterns = np.arange(0x8001, 0xfc00, dtype=np.uint16).view(np.float16)\nnegative_domain = np.resize(negative_patterns, n).copy()\nconstant = np.full(n, np.float16(7.25), dtype=np.float16)\nwith_inf = mixed.copy(); with_inf[0] = np.float16(np.inf)\nwith_negative_zero = mixed.copy(); with_negative_zero[0] = np.float16(-0.0)\nswapped = mixed.astype('>f2')",
+                Some(&namespace),
+                Some(&namespace),
+            )?;
+
+            // The two domain corpora together exhaust every finite f16 pattern
+            // except negative zero, which deliberately takes the fallback.
+            for name in ["mixed", "positive", "positive_domain", "negative_domain"] {
+                let input = namespace.get_item(name)?.expect("f16 input present");
+                for bins in [1_usize, 3, 10, 64, 257, 512] {
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("bins", bins)?;
+                    let actual = histogram_fn.call((&input,), Some(&kwargs))?;
+                    let expected = numpy_histogram.call((&input,), Some(&kwargs))?;
+                    let actual_edges = actual.get_item(1)?;
+                    let expected_edges = expected.get_item(1)?;
+                    assert_eq!(
+                        actual_edges.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        expected_edges
+                            .call_method0("tobytes")?
+                            .extract::<Vec<u8>>()?,
+                        "{name} with {bins} bins produced different edge bytes"
+                    );
+                    assert_index_tuple_matches_numpy(&actual, &expected)?;
+                    assert!(
+                        crate::try_zerocopy_histogram_f16(py, &numpy, &input, bins)?.is_some(),
+                        "{name} with {bins} bins must take the bounded-pattern path"
+                    );
+                }
+            }
+
+            let constant = namespace
+                .get_item("constant")?
+                .expect("constant input present");
+            let constant_kwargs = PyDict::new(py);
+            constant_kwargs.set_item("bins", 10_usize)?;
+            assert_index_tuple_matches_numpy(
+                &histogram_fn.call((&constant,), Some(&constant_kwargs))?,
+                &numpy_histogram.call((&constant,), Some(&constant_kwargs))?,
+            )?;
+            assert!(
+                crate::try_zerocopy_histogram_f16(py, &numpy, &constant, 10)?.is_some(),
+                "constant finite f16 input must take the bounded-pattern path"
+            );
+
+            for name in ["with_inf", "with_negative_zero", "swapped"] {
+                let ambiguous = namespace.get_item(name)?.expect("ambiguous input present");
+                assert!(
+                    crate::try_zerocopy_histogram_f16(py, &numpy, &ambiguous, 64)?.is_none(),
+                    "{name} must defer to NumPy"
+                );
+            }
+            let negative_zero = namespace
+                .get_item("with_negative_zero")?
+                .expect("negative-zero input present");
+            let negative_zero_kwargs = PyDict::new(py);
+            negative_zero_kwargs.set_item("bins", 64_usize)?;
+            assert_index_tuple_matches_numpy(
+                &histogram_fn.call((&negative_zero,), Some(&negative_zero_kwargs))?,
+                &numpy_histogram.call((&negative_zero,), Some(&negative_zero_kwargs))?,
+            )?;
             Ok(())
         });
     }
@@ -141311,6 +145289,82 @@ mod tests {
                 }
             }
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn average_f16_last_axis_fast_path_is_byte_exact() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let namespace = PyDict::new(py);
+            namespace.set_item("np", &numpy)?;
+            py.run(
+                c"rng = np.random.default_rng(20260727)\na = rng.uniform(-3.0, 3.0, size=(512, 2048)).astype(np.float16)",
+                Some(&namespace),
+                Some(&namespace),
+            )?;
+            let input = namespace
+                .get_item("a")?
+                .expect("test namespace must contain input");
+            let axis = PyDict::new(py);
+            axis.set_item("axis", -1_i64)?;
+
+            let ours = module
+                .getattr("average")?
+                .call((input.clone(),), Some(&axis))?;
+            let expected = numpy
+                .getattr("average")?
+                .call((input.clone(),), Some(&axis))?;
+            let ours_bytes = ours.call_method0("tobytes")?.extract::<Vec<u8>>()?;
+            let expected_bytes = expected.call_method0("tobytes")?.extract::<Vec<u8>>()?;
+
+            assert_eq!(
+                ours.getattr("dtype")?.str()?.extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?,
+                "f16 last-axis average dtype diverged"
+            );
+            assert_eq!(
+                ours.getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?,
+                "f16 last-axis average shape diverged"
+            );
+            assert_eq!(
+                ours_bytes, expected_bytes,
+                "f16 last-axis average bytes diverged"
+            );
+
+            // The raw-u16 path is native-endian only. A byte-swapped f16
+            // ndarray must retain NumPy's interpretation rather than treating
+            // its storage bytes as native half bits.
+            let swapped =
+                numpy.call_method1("ones", (PyTuple::new(py, [512_usize, 2_048_usize])?, ">f2"))?;
+            assert!(
+                !swapped
+                    .getattr("dtype")?
+                    .getattr("isnative")?
+                    .extract::<bool>()?,
+                "test corpus must be non-native-endian"
+            );
+            let ours_swapped = module
+                .getattr("average")?
+                .call((swapped.clone(),), Some(&axis))?;
+            let expected_swapped = numpy
+                .getattr("average")?
+                .call((swapped.clone(),), Some(&axis))?;
+            assert_eq!(
+                ours_swapped.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                expected_swapped
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                "non-native f16 average must retain NumPy semantics"
+            );
             Ok(())
         });
     }
@@ -147818,6 +151872,287 @@ mod tests {
                 oracle_err.unwrap_err().get_type(py).to_string()
             );
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn loadtxt_selected_bool_direct_path_matches_former_and_numpy_exactly() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let loadtxt = module.getattr("loadtxt")?;
+            let numpy = py.import("numpy")?;
+            let numpy_loadtxt = numpy.getattr("loadtxt")?;
+            let bool_dtype = numpy.getattr("bool_")?;
+
+            // Column 2 carries tokens the bool parser would REJECT. numpy never
+            // looks at unselected columns, and neither may the direct path --
+            // this is the case that proves the selection is honoured rather
+            // than the whole row being validated.
+            let path = std::env::temp_dir().join(format!(
+                "fnp_loadtxt_bool_selected_{}.csv",
+                std::process::id()
+            ));
+            std::fs::write(
+                &path,
+                concat!(
+                    "# ignored header\n",
+                    "1,0,not_a_bool,-2,9223372036854775807\n",
+                    "0,5,also_bad,-9223372036854775808,0 # tail\n",
+                    "\n",
+                    "7,0,,1,1\n"
+                ),
+            )?;
+            let path = path.to_str().expect("temporary path is UTF-8");
+
+            // Reordered AND duplicated columns, skipping the poisoned column 2.
+            for cols in [vec![3_i64, 0], vec![0_i64, 0, 4], vec![4_i64, 3, 1, 0]] {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("delimiter", ",")?;
+                kwargs.set_item("dtype", &bool_dtype)?;
+                kwargs.set_item("skiprows", 1_i64)?;
+                kwargs.set_item("usecols", cols.clone())?;
+                let candidate = loadtxt.call((path,), Some(&kwargs))?;
+                let oracle = numpy_loadtxt.call((path,), Some(&kwargs))?;
+                assert_array_matches_numpy(&candidate, &oracle)?;
+                assert_eq!(
+                    candidate.getattr("shape")?.extract::<Vec<usize>>()?,
+                    [3, cols.len()],
+                    "selected-bool shape for usecols={cols:?}"
+                );
+            }
+
+            // Positive indices exercise the direct path; their negative
+            // equivalents force the retained owned-token path while selecting
+            // the same columns in the same order.
+            let direct_kwargs = PyDict::new(py);
+            direct_kwargs.set_item("delimiter", ",")?;
+            direct_kwargs.set_item("dtype", &bool_dtype)?;
+            direct_kwargs.set_item("skiprows", 1_i64)?;
+            direct_kwargs.set_item("usecols", vec![4_i64, 0, 4])?;
+            let direct = loadtxt.call((path,), Some(&direct_kwargs))?;
+            let former_kwargs = PyDict::new(py);
+            former_kwargs.set_item("delimiter", ",")?;
+            former_kwargs.set_item("dtype", &bool_dtype)?;
+            former_kwargs.set_item("skiprows", 1_i64)?;
+            former_kwargs.set_item("usecols", vec![-1_i64, -5, -1])?;
+            let former = loadtxt.call((path,), Some(&former_kwargs))?;
+            assert_array_matches_numpy(&direct, &former)?;
+
+            // Single selected column squeezes to 1-D, like the former path.
+            let one_kwargs = PyDict::new(py);
+            one_kwargs.set_item("delimiter", ",")?;
+            one_kwargs.set_item("dtype", &bool_dtype)?;
+            one_kwargs.set_item("skiprows", 1_i64)?;
+            one_kwargs.set_item("usecols", vec![3_i64])?;
+            let one = loadtxt.call((path,), Some(&one_kwargs))?;
+            let one_oracle = numpy_loadtxt.call((path,), Some(&one_kwargs))?;
+            assert_array_matches_numpy(&one, &one_oracle)?;
+            assert_eq!(one.getattr("shape")?.extract::<Vec<usize>>()?, [3]);
+
+            // Negative indices keep the former owned-token path; both agree.
+            let neg_kwargs = PyDict::new(py);
+            neg_kwargs.set_item("delimiter", ",")?;
+            neg_kwargs.set_item("dtype", &bool_dtype)?;
+            neg_kwargs.set_item("skiprows", 1_i64)?;
+            neg_kwargs.set_item("usecols", vec![-1_i64, 0])?;
+            let neg = loadtxt.call((path,), Some(&neg_kwargs))?;
+            let neg_oracle = numpy_loadtxt.call((path,), Some(&neg_kwargs))?;
+            assert_array_matches_numpy(&neg, &neg_oracle)?;
+
+            // A SELECTED non-integer token must error, with numpy's own type.
+            let bad_kwargs = PyDict::new(py);
+            bad_kwargs.set_item("delimiter", ",")?;
+            bad_kwargs.set_item("dtype", &bool_dtype)?;
+            bad_kwargs.set_item("skiprows", 1_i64)?;
+            bad_kwargs.set_item("usecols", vec![2_i64])?;
+            let candidate_err = loadtxt.call((path,), Some(&bad_kwargs));
+            let oracle_err = numpy_loadtxt.call((path,), Some(&bad_kwargs));
+            assert!(candidate_err.is_err(), "selected non-bool token must error");
+            assert!(oracle_err.is_err(), "numpy rejects the selected token too");
+            assert_eq!(
+                candidate_err.unwrap_err().get_type(py).to_string(),
+                oracle_err.unwrap_err().get_type(py).to_string()
+            );
+
+            // Out-of-range selection falls through to numpy's own error type.
+            let oor_kwargs = PyDict::new(py);
+            oor_kwargs.set_item("delimiter", ",")?;
+            oor_kwargs.set_item("dtype", &bool_dtype)?;
+            oor_kwargs.set_item("skiprows", 1_i64)?;
+            oor_kwargs.set_item("usecols", vec![99_i64])?;
+            let oor_candidate = loadtxt.call((path,), Some(&oor_kwargs));
+            let oor_oracle = numpy_loadtxt.call((path,), Some(&oor_kwargs));
+            assert!(oor_candidate.is_err(), "out-of-range usecols must error");
+            assert!(oor_oracle.is_err(), "numpy rejects out-of-range usecols");
+            assert_eq!(
+                oor_candidate.unwrap_err().get_type(py).to_string(),
+                oor_oracle.unwrap_err().get_type(py).to_string()
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn loadtxt_negative_f64_tail_ring_matches_former_and_numpy_exactly() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let loadtxt = module.getattr("loadtxt")?;
+            let numpy = py.import("numpy")?;
+            let numpy_loadtxt = numpy.getattr("loadtxt")?;
+            let float64 = numpy.getattr("float64")?;
+
+            let mut text = String::from("# ignored header\n");
+            for row in 0..4_usize {
+                for column in 0..64_usize {
+                    if column > 0 {
+                        text.push(',');
+                    }
+                    if column == 2 {
+                        text.push_str("not_selected");
+                    } else {
+                        text.push_str(&format!("{row}.{column}"));
+                    }
+                }
+                text.push_str(" # tail\n");
+            }
+            let path = std::env::temp_dir().join(format!(
+                "fnp_loadtxt_negative_tail_{}.csv",
+                std::process::id()
+            ));
+            std::fs::write(&path, text)?;
+            let path = path.to_str().expect("temporary path is UTF-8");
+
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("delimiter", ",")?;
+            kwargs.set_item("dtype", &float64)?;
+            kwargs.set_item("skiprows", 1_i64)?;
+            kwargs.set_item("usecols", vec![-1_i64, -8, -32, -1])?;
+            let oracle = numpy_loadtxt.call((path,), Some(&kwargs))?;
+
+            // Prove the compatible call is native rather than a fast-looking
+            // round trip back into the incumbent.
+            let poison = PyModule::from_code(
+                py,
+                pyo3::ffi::c_str!(
+                    "def fail(*args, **kwargs):\n    raise RuntimeError('numpy.loadtxt passthrough called')\n"
+                ),
+                pyo3::ffi::c_str!("poison_loadtxt.py"),
+                pyo3::ffi::c_str!("poison_loadtxt"),
+            )?;
+            let guard = AttrGuard::new(&numpy, "loadtxt")?;
+            numpy.setattr("loadtxt", poison.getattr("fail")?)?;
+            let candidate = loadtxt.call((path,), Some(&kwargs))?;
+            assert_array_matches_numpy(&candidate, &oracle)?;
+            assert_eq!(candidate.getattr("shape")?.extract::<Vec<usize>>()?, [4, 4]);
+
+            // `unpack=true` deliberately stays on the retained generic route;
+            // transpose its result back to the candidate's shape and compare
+            // every output byte.
+            let former_kwargs = PyDict::new(py);
+            former_kwargs.set_item("delimiter", ",")?;
+            former_kwargs.set_item("dtype", &float64)?;
+            former_kwargs.set_item("skiprows", 1_i64)?;
+            former_kwargs.set_item("usecols", vec![-1_i64, -8, -32, -1])?;
+            former_kwargs.set_item("unpack", true)?;
+            let former = loadtxt.call((path,), Some(&former_kwargs))?.getattr("T")?;
+            assert_array_matches_numpy(&candidate, &former)?;
+            drop(guard);
+
+            // A selected out-of-range tail offset still reaches NumPy's own
+            // error path and preserves its exception type.
+            let out_of_range = PyDict::new(py);
+            out_of_range.set_item("delimiter", ",")?;
+            out_of_range.set_item("dtype", &float64)?;
+            out_of_range.set_item("skiprows", 1_i64)?;
+            out_of_range.set_item("usecols", vec![-65_i64])?;
+            let candidate_error = loadtxt.call((path,), Some(&out_of_range));
+            let oracle_error = numpy_loadtxt.call((path,), Some(&out_of_range));
+            assert!(candidate_error.is_err(), "out-of-range tail must error");
+            assert!(oracle_error.is_err(), "numpy rejects out-of-range tail");
+            assert_eq!(
+                candidate_error.unwrap_err().get_type(py).to_string(),
+                oracle_error.unwrap_err().get_type(py).to_string()
+            );
+
+            // One accepted row deliberately falls back because NumPy squeezes
+            // its shape differently from the retained generic FNP path.
+            let one_row_path = std::env::temp_dir().join(format!(
+                "fnp_loadtxt_negative_tail_one_row_{}.csv",
+                std::process::id()
+            ));
+            std::fs::write(&one_row_path, "1,2,3,4\n")?;
+            let one_row_path = one_row_path.to_str().expect("temporary path is UTF-8");
+            let one_row_kwargs = PyDict::new(py);
+            one_row_kwargs.set_item("delimiter", ",")?;
+            one_row_kwargs.set_item("dtype", &float64)?;
+            one_row_kwargs.set_item("usecols", vec![-1_i64, -2])?;
+            let one_row_candidate = loadtxt.call((one_row_path,), Some(&one_row_kwargs))?;
+            let one_row_oracle = numpy_loadtxt.call((one_row_path,), Some(&one_row_kwargs))?;
+            assert_array_matches_numpy(&one_row_candidate, &one_row_oracle)?;
+            assert_eq!(
+                one_row_candidate
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
+                [2]
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn genfromtxt_float_skip_footer_delegates_to_genfromtxt_full_and_matches_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let gt = module.getattr("genfromtxt")?;
+            let numpy = py.import("numpy")?;
+            let numpy_gt = numpy.getattr("genfromtxt")?;
+            let float64 = numpy.getattr("float64")?;
+            let string_io = py.import("io")?.getattr("StringIO")?;
+            let sio = |text: &str| string_io.call1((text,));
+
+            // Clean float corpus with skip_header + skip_footer: the
+            // genfromtxt_full delegation must match numpy exactly.
+            let clean = PyDict::new(py);
+            clean.set_item("delimiter", ",")?;
+            clean.set_item("skip_header", 1_i64)?;
+            clean.set_item("skip_footer", 2_i64)?;
+            clean.set_item("dtype", &float64)?;
+            let corpus = "h\n1.5,2.5\n3.5,4.5\n5.5,6.5\n7.5,8.5\n";
+            assert_array_matches_numpy(
+                &gt.call((sio(corpus)?,), Some(&clean))?,
+                &numpy_gt.call((sio(corpus)?,), Some(&clean))?,
+            )?;
+
+            // Footer region with a comment line and a trailing blank: numpy
+            // counts skip_footer as DATA rows (after comment/blank stripping), so
+            // the last real row is dropped. The former generic path raw-counted
+            // and diverged here; genfromtxt_full data-counts and matches numpy.
+            let dirty = PyDict::new(py);
+            dirty.set_item("delimiter", ",")?;
+            dirty.set_item("skip_footer", 1_i64)?;
+            dirty.set_item("dtype", &float64)?;
+            let corpus2 = "1.0,2.0\n3.0,4.0\n5.0,6.0\n# trailing comment\n\n";
+            assert_array_matches_numpy(
+                &gt.call((sio(corpus2)?,), Some(&dirty))?,
+                &numpy_gt.call((sio(corpus2)?,), Some(&dirty))?,
+            )?;
             Ok(())
         });
     }

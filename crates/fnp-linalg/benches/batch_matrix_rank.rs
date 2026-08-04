@@ -63,4 +63,7 @@ fn bench(c: &mut Criterion) {
     g.finish();
 }
 criterion_group!(benches, bench);
-criterion_main!(benches);
+#[path = "../../bench_identity.rs"]
+mod bench_identity;
+
+criterion_main!(bench_identity::report_bench_identity, benches);

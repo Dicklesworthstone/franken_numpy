@@ -350,6 +350,54 @@ fn sum_integer_dtypes_match_numpy() -> Result<(), String> {
 }
 
 #[test]
+fn sum_large_integer_flat_parallel_is_bit_exact() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+rng = np.random.default_rng(20260742)
+checks = []
+for dtype in [np.int8, np.uint8, np.int16, np.uint16,
+              np.int32, np.uint32, np.int64, np.uint64]:
+    dt = np.dtype(dtype)
+    n = (8 * 1024 * 1024) // dt.itemsize
+    a = np.frombuffer(rng.bytes(n * dt.itemsize), dtype=dt).copy()
+    ours = fnp.sum(a)
+    theirs = np.sum(a)
+    checks.append(type(ours) is type(theirs))
+    checks.append(ours.dtype == theirs.dtype)
+    checks.append(ours.tobytes() == theirs.tobytes())
+
+    shaped = a.reshape(8, -1)
+    ours_keep = fnp.sum(shaped, keepdims=True)
+    theirs_keep = np.sum(shaped, keepdims=True)
+    checks.append(ours_keep.shape == theirs_keep.shape)
+    checks.append(ours_keep.dtype == theirs_keep.dtype)
+    checks.append(ours_keep.tobytes() == theirs_keep.tobytes())
+
+# Explicit wraparound witnesses for both promoted accumulator classes.
+signed = np.full(2_000_000, np.iinfo(np.int64).max, dtype=np.int64)
+unsigned = np.full(2_000_000, np.iinfo(np.uint64).max, dtype=np.uint64)
+checks.append(fnp.sum(signed).tobytes() == np.sum(signed).tobytes())
+checks.append(fnp.sum(unsigned).tobytes() == np.sum(unsigned).tobytes())
+
+# Every unsupported boundary remains delegated.
+base = np.arange(4_000_000, dtype=np.int64)
+strided = base[::2]
+checks.append(fnp.sum(strided).tobytes() == np.sum(strided).tobytes())
+checks.append(fnp.sum(base, dtype=np.float64).tobytes() == np.sum(base, dtype=np.float64).tobytes())
+checks.append(fnp.sum(base, initial=17).tobytes() == np.sum(base, initial=17).tobytes())
+checks.append(fnp.sum(base.astype('>i8')).tobytes() == np.sum(base.astype('>i8')).tobytes())
+checks.append(fnp.sum(np.ones(9_000_000, dtype=np.bool_)).tobytes() ==
+              np.sum(np.ones(9_000_000, dtype=np.bool_)).tobytes())
+
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 55");
+    Ok(())
+}
+
+#[test]
 fn sum_nan_handling_matches_numpy() -> Result<(), String> {
     let test_cases = vec![
         "[1.0, np.nan, 3.0]",
@@ -872,5 +920,118 @@ print(ok)
         "True",
         "native last-axis sum parity should match numpy: {result}"
     );
+    Ok(())
+}
+
+#[test]
+fn sum_flat_parallel_float_pairwise_is_bitexact() -> Result<(), String> {
+    // Both arrays clear the 16 MiB native-route gate.  The adversarial values
+    // exercise cancellation, signed zero, infinities, NaN propagation, scalar
+    // dtype/type, and the keepdims reconstruction around the parallel tree.
+    let script = fnp_sum_script(
+        r#"
+def same(a, b):
+    aa = np.asarray(a)
+    bb = np.asarray(b)
+    return (
+        type(a) is type(b)
+        and aa.shape == bb.shape
+        and aa.dtype == bb.dtype
+        and aa.tobytes() == bb.tobytes()
+    )
+
+rng = np.random.default_rng(90210)
+f64 = rng.standard_normal(2_097_173, dtype=np.float64)
+f64[7:15] = [1e300, -1e300, 1.0, -0.0, np.inf, -np.inf, 3.0, -3.0]
+f32 = rng.standard_normal(4095 * 1025, dtype=np.float32).reshape(4095, 1025)
+f32.flat[9:17] = np.array([1e30, -1e30, 1.0, -0.0, np.inf, -np.inf, 7.0, -7.0], dtype=np.float32)
+
+cases = [
+    (f64, False),
+    (f64, True),
+    (f32, False),
+    (f32, True),
+]
+ok = True
+for arr, keepdims in cases:
+    got = fnp.sum(arr, keepdims=keepdims)
+    want = np.sum(arr, keepdims=keepdims)
+    if not same(got, want):
+        print("FAIL", arr.dtype, keepdims, type(got), type(want), np.asarray(got).tobytes().hex(), np.asarray(want).tobytes().hex())
+        ok = False
+
+# A native-endian contiguous NaN payload delegates to NumPy so ISA-specific
+# SIMD NaN selection cannot alter the observable payload bits.
+with_nan = f64.copy()
+with_nan[1_048_589] = np.float64(np.nan)
+ok = ok and same(fnp.sum(with_nan), np.sum(with_nan))
+
+# Explicit dtype and non-contiguous inputs deliberately fall through unchanged.
+view = f32[:, ::2]
+ok = ok and same(fnp.sum(f32, dtype=np.float64), np.sum(f32, dtype=np.float64))
+ok = ok and same(fnp.sum(view), np.sum(view))
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "parallel flat float sum must be byte-exact with NumPy: {result}"
+    );
+    Ok(())
+}
+
+/// REGRESSION: `add.reduce` folds in a `+0.0` identity, so summing an all-`-0.0`
+/// buffer yields `+0.0` in NumPy while a bare pairwise tree yields `-0.0`
+/// (because `-0.0 + -0.0 == -0.0`). Sized above the parallel gate so the native
+/// route is the one under test. One degenerate input, silently wrong without the
+/// identity fold, and invisible to every random-data test.
+#[test]
+fn sum_float_all_negative_zero_matches_numpy_sign() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+checks = []
+for dtype in (np.float64, np.float32):
+    n = 2_200_000 if dtype is np.float64 else 4_400_000
+    a = np.full(n, dtype(-0.0), dtype=dtype)
+    ours = dtype(fnp.sum(a))
+    theirs = dtype(a.sum())
+    checks.append(ours.tobytes() == theirs.tobytes())
+    # sanity: the discriminating condition is real — NumPy really does return +0.0
+    checks.append(theirs.tobytes() == dtype(0.0).tobytes())
+    checks.append(dtype(0.0).tobytes() != dtype(-0.0).tobytes())
+print(all(checks), len(checks))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 6");
+    Ok(())
+}
+
+/// The parallel float route reproduces ONE specific NumPy reduction tree, and
+/// NumPy changed that tree between 2.2.4 and 2.4.2 (same buffer, different last
+/// ULP). Whatever NumPy is live here, `fnp.sum` must agree with it bitwise —
+/// either because the tree matches and we route, or because the runtime
+/// self-check rejected it and we delegated.
+#[test]
+fn sum_float_flat_agrees_with_whatever_numpy_tree_is_live() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+rng = np.random.default_rng(20260731)
+bad = []
+for n in [2_200_000, 3_000_007, 8_388_608]:
+    a = rng.standard_normal(n)
+    if np.float64(fnp.sum(a)).tobytes() != np.float64(a.sum()).tobytes():
+        bad.append(n)
+    f = rng.standard_normal(2 * n).astype(np.float32)
+    if np.float32(fnp.sum(f)).tobytes() != np.float32(f.sum()).tobytes():
+        bad.append(('f32', n))
+print(len(bad) == 0, bad[:3])
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True []");
     Ok(())
 }

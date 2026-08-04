@@ -643,3 +643,54 @@ print(np.isnan(fnp_result) and np.isnan(np_result))
     );
     Ok(())
 }
+
+#[test]
+fn mean_flat_parallel_float_pairwise_is_bitexact() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+def same(a, b):
+    aa = np.asarray(a)
+    bb = np.asarray(b)
+    return (
+        type(a) is type(b)
+        and aa.shape == bb.shape
+        and aa.dtype == bb.dtype
+        and aa.tobytes() == bb.tobytes()
+    )
+
+rng = np.random.default_rng(217)
+f64 = rng.standard_normal(2_097_173, dtype=np.float64)
+f64[7:15] = [1e300, -1e300, 1.0, -0.0, np.inf, np.inf, 3.0, -3.0]
+f32 = rng.standard_normal(4095 * 1025, dtype=np.float32).reshape(4095, 1025)
+f32.flat[9:17] = np.array([1e30, -1e30, 1.0, -0.0, np.inf, np.inf, 7.0, -7.0], dtype=np.float32)
+
+ok = True
+for arr in (f64, f32):
+    for keepdims in (False, True):
+        got = fnp.mean(arr, keepdims=keepdims)
+        want = np.mean(arr, keepdims=keepdims)
+        if not same(got, want):
+            print("FAIL", arr.dtype, keepdims, np.asarray(got).tobytes().hex(), np.asarray(want).tobytes().hex())
+            ok = False
+
+# A NaN-result reduction delegates so NumPy owns ISA-specific NaN payload bits.
+with_nan = f64.copy()
+with_nan[1_048_589] = np.float64(np.nan)
+ok = ok and same(fnp.mean(with_nan), np.mean(with_nan))
+
+# Explicit dtype and non-contiguous inputs remain on the incumbent path.
+view = f32[:, ::2]
+ok = ok and same(fnp.mean(f32, dtype=np.float64), np.mean(f32, dtype=np.float64))
+ok = ok and same(fnp.mean(view), np.mean(view))
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "parallel flat float mean must be byte-exact with NumPy: {result}"
+    );
+    Ok(())
+}

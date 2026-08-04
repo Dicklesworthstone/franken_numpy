@@ -490,15 +490,15 @@ fn count_selected_indices(len: usize, index: &FlatIterIndex) -> Result<usize, Tr
 #[must_use]
 fn count_true_mask(mask: &[bool]) -> usize {
     let mut count = 0usize;
-    let mut chunks = mask.chunks_exact(128);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = mask.as_chunks::<128>();
+    for chunk in chunks {
         for &b in chunk {
             if b {
                 count += 1;
             }
         }
     }
-    for &b in chunks.remainder() {
+    for &b in remainder {
         if b {
             count += 1;
         }

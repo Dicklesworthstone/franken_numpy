@@ -214,4 +214,7 @@ criterion_group!(
     bench_flip,
     bench_flip_singleton_axis
 );
-criterion_main!(benches);
+#[path = "../../bench_identity.rs"]
+mod bench_identity;
+
+criterion_main!(bench_identity::report_bench_identity, benches);

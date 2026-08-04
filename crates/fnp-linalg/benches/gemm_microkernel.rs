@@ -567,4 +567,7 @@ criterion_group!(
     bench_sub_assign_tile,
     bench_sub_assign_strided_tile
 );
-criterion_main!(benches);
+#[path = "../../bench_identity.rs"]
+mod bench_identity;
+
+criterion_main!(bench_identity::report_bench_identity, benches);
