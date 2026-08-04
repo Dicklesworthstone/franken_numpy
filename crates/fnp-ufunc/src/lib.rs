@@ -57,7 +57,7 @@ const PLACE_PARALLEL_MIN_ELEMS: usize = 1 << 20;
 const PLACE_PARALLEL_CHUNK_ELEMS: usize = 1 << 12;
 
 #[inline(always)]
-fn bool_chunk8_bitmask(chunk: &[bool]) -> u8 {
+fn bool_chunk8_bitmask(chunk: &[bool; 8]) -> u8 {
     (chunk[0] as u8)
         | ((chunk[1] as u8) << 1)
         | ((chunk[2] as u8) << 2)
@@ -16264,10 +16264,9 @@ impl UFuncArray {
                     let bounded_values = &self.values[..bounded_len];
 
                     let mut values = Vec::with_capacity((bounded_len / 4 + LANES).min(bounded_len));
-                    let mut condition_chunks = bounded_condition.chunks_exact(LANES);
-                    let mut value_chunks = bounded_values.chunks_exact(LANES);
-                    for (condition_chunk, value_chunk) in
-                        condition_chunks.by_ref().zip(value_chunks.by_ref())
+                    let (condition_chunks, condition_tail) = bounded_condition.as_chunks::<LANES>();
+                    let (value_chunks, value_tail) = bounded_values.as_chunks::<LANES>();
+                    for (condition_chunk, value_chunk) in condition_chunks.iter().zip(value_chunks)
                     {
                         let mut mask = bool_chunk8_bitmask(condition_chunk);
                         while mask != 0 {
@@ -16276,11 +16275,7 @@ impl UFuncArray {
                             mask &= mask - 1;
                         }
                     }
-                    for (&selected, &value) in condition_chunks
-                        .remainder()
-                        .iter()
-                        .zip(value_chunks.remainder())
-                    {
+                    for (&selected, &value) in condition_tail.iter().zip(value_tail) {
                         if selected {
                             values.push(value);
                         }
@@ -16616,26 +16611,22 @@ impl UFuncArray {
 
             let zero = MaskVector::splat(0.0);
             let mut selected = 0usize;
-            let mut condition_chunks = condition.values.chunks_exact(LANES);
-            for chunk in condition_chunks.by_ref() {
-                selected += MaskVector::from_slice(chunk)
+            let (condition_chunks, condition_tail) = condition.values.as_chunks::<LANES>();
+            for chunk in condition_chunks {
+                selected += MaskVector::from_array(*chunk)
                     .simd_ne(zero)
                     .to_bitmask()
                     .count_ones() as usize;
             }
-            selected += condition_chunks
-                .remainder()
+            selected += condition_tail
                 .iter()
                 .filter(|&&condition| condition != 0.0)
                 .count();
 
             let mut values = Vec::with_capacity(selected);
-            let mut condition_chunks = condition.values.chunks_exact(LANES);
-            let mut value_chunks = arr.values.chunks_exact(LANES);
-            for (condition_chunk, value_chunk) in
-                condition_chunks.by_ref().zip(value_chunks.by_ref())
-            {
-                let mut mask = MaskVector::from_slice(condition_chunk)
+            let (value_chunks, value_tail) = arr.values.as_chunks::<LANES>();
+            for (condition_chunk, value_chunk) in condition_chunks.iter().zip(value_chunks) {
+                let mut mask = MaskVector::from_array(*condition_chunk)
                     .simd_ne(zero)
                     .to_bitmask();
                 while mask != 0 {
@@ -16644,11 +16635,7 @@ impl UFuncArray {
                     mask &= mask - 1;
                 }
             }
-            for (&condition, &value) in condition_chunks
-                .remainder()
-                .iter()
-                .zip(value_chunks.remainder())
-            {
+            for (&condition, &value) in condition_tail.iter().zip(value_tail) {
                 if condition != 0.0 {
                     values.push(value);
                 }
@@ -16741,10 +16728,10 @@ impl UFuncArray {
 
             let zero = MaskVector::splat(0.0);
             let mut value_index = 0usize;
-            let mut dst_chunks = self.values.chunks_exact_mut(LANES);
-            let mut mask_chunks = mask.values.chunks_exact(LANES);
-            for (dst_chunk, mask_chunk) in dst_chunks.by_ref().zip(mask_chunks.by_ref()) {
-                let mut bitmask = MaskVector::from_slice(mask_chunk)
+            let (dst_chunks, dst_tail) = self.values.as_chunks_mut::<LANES>();
+            let (mask_chunks, mask_tail) = mask.values.as_chunks::<LANES>();
+            for (dst_chunk, mask_chunk) in dst_chunks.iter_mut().zip(mask_chunks) {
+                let mut bitmask = MaskVector::from_array(*mask_chunk)
                     .simd_ne(zero)
                     .to_bitmask();
                 while bitmask != 0 {
@@ -16757,8 +16744,7 @@ impl UFuncArray {
                     bitmask &= bitmask - 1;
                 }
             }
-            let dst_remainder = dst_chunks.into_remainder();
-            for (dst, &m) in dst_remainder.iter_mut().zip(mask_chunks.remainder()) {
+            for (dst, &m) in dst_tail.iter_mut().zip(mask_tail) {
                 if m != 0.0 {
                     *dst = vals_values[value_index];
                     value_index += 1;
@@ -22751,7 +22737,13 @@ impl UFuncArray {
         fft_dit(&mut re, &mut im, false);
         // Interleave real/imag
         let mut values = vec![0.0; len * 2];
-        for ((pair, &real), &imag) in values.chunks_exact_mut(2).zip(re.iter()).zip(im.iter()) {
+        for ((pair, &real), &imag) in values
+            .as_chunks_mut::<2>()
+            .0
+            .iter_mut()
+            .zip(re.iter())
+            .zip(im.iter())
+        {
             pair[0] = real;
             pair[1] = imag;
         }
@@ -29937,10 +29929,10 @@ impl UFuncArray {
 
             let zero = MaskVector::splat(0.0);
             let mut value_index = 0usize;
-            let mut dst_chunks = self.values.chunks_exact_mut(LANES);
-            let mut mask_chunks = mask.values.chunks_exact(LANES);
-            for (dst_chunk, mask_chunk) in dst_chunks.by_ref().zip(mask_chunks.by_ref()) {
-                let mut bitmask = MaskVector::from_slice(mask_chunk)
+            let (dst_chunks, dst_tail) = self.values.as_chunks_mut::<LANES>();
+            let (mask_chunks, mask_tail) = mask.values.as_chunks::<LANES>();
+            for (dst_chunk, mask_chunk) in dst_chunks.iter_mut().zip(mask_chunks) {
+                let mut bitmask = MaskVector::from_array(*mask_chunk)
                     .simd_ne(zero)
                     .to_bitmask();
                 while bitmask != 0 {
@@ -29953,8 +29945,7 @@ impl UFuncArray {
                     bitmask &= bitmask - 1;
                 }
             }
-            let dst_remainder = dst_chunks.into_remainder();
-            for (dst, &m) in dst_remainder.iter_mut().zip(mask_chunks.remainder()) {
+            for (dst, &m) in dst_tail.iter_mut().zip(mask_tail) {
                 if m != 0.0 {
                     *dst = values[value_index];
                     value_index += 1;
@@ -38979,7 +38970,12 @@ pub fn chebroots(c: &[f64]) -> Result<Vec<f64>, UFuncError> {
     let eigenvalues = fnp_linalg::eig_nxn(&mat, deg)
         .map_err(|e| UFuncError::Msg(format!("chebroots eigenvalue error: {e}")))?;
     // Extract real parts (eigenvalues are interleaved [real, imag, ...])
-    let roots: Vec<f64> = eigenvalues.chunks_exact(2).map(|pair| pair[0]).collect();
+    let roots: Vec<f64> = eigenvalues
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| pair[0])
+        .collect();
     let mut sorted = roots;
     sorted.sort_by(|a, b| a.total_cmp(b));
     Ok(sorted)
@@ -39476,7 +39472,12 @@ pub fn legroots(c: &[f64]) -> Result<Vec<f64>, UFuncError> {
 
     let eigenvalues = fnp_linalg::eig_nxn(&comp, d)
         .map_err(|e| UFuncError::Msg(format!("legroots eigenvalue error: {e}")))?;
-    let mut roots: Vec<f64> = eigenvalues.chunks_exact(2).map(|pair| pair[0]).collect();
+    let mut roots: Vec<f64> = eigenvalues
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| pair[0])
+        .collect();
     roots.sort_by(|a, b| a.total_cmp(b));
     Ok(roots)
 }
@@ -39766,7 +39767,12 @@ pub fn hermroots(c: &[f64]) -> Result<Vec<f64>, UFuncError> {
     }
     let eigenvalues = fnp_linalg::eig_nxn(&comp, d)
         .map_err(|e| UFuncError::Msg(format!("hermroots eigenvalue error: {e}")))?;
-    let mut roots: Vec<f64> = eigenvalues.chunks_exact(2).map(|pair| pair[0]).collect();
+    let mut roots: Vec<f64> = eigenvalues
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| pair[0])
+        .collect();
     roots.sort_by(|a, b| a.total_cmp(b));
     Ok(roots)
 }
@@ -39971,7 +39977,12 @@ pub fn hermeroots(c: &[f64]) -> Result<Vec<f64>, UFuncError> {
     }
     let eigenvalues = fnp_linalg::eig_nxn(&comp, d)
         .map_err(|e| UFuncError::Msg(format!("hermeroots eigenvalue error: {e}")))?;
-    let mut roots: Vec<f64> = eigenvalues.chunks_exact(2).map(|pair| pair[0]).collect();
+    let mut roots: Vec<f64> = eigenvalues
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| pair[0])
+        .collect();
     roots.sort_by(|a, b| a.total_cmp(b));
     Ok(roots)
 }
@@ -40314,7 +40325,12 @@ pub fn lagroots(c: &[f64]) -> Result<Vec<f64>, UFuncError> {
     }
     let eigenvalues = fnp_linalg::eig_nxn(&comp, d)
         .map_err(|e| UFuncError::Msg(format!("lagroots eigenvalue error: {e}")))?;
-    let mut roots: Vec<f64> = eigenvalues.chunks_exact(2).map(|pair| pair[0]).collect();
+    let mut roots: Vec<f64> = eigenvalues
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| pair[0])
+        .collect();
     roots.sort_by(|a, b| a.total_cmp(b));
     Ok(roots)
 }
@@ -41852,7 +41868,12 @@ pub fn sort_complex(a: &UFuncArray) -> Result<UFuncArray, UFuncError> {
     // Determine if input is complex (trailing dim = 2)
     let is_complex = a.shape.last() == Some(&2) && a.shape.len() >= 2;
     let mut pairs: Vec<(f64, f64)> = if is_complex {
-        a.values.chunks_exact(2).map(|c| (c[0], c[1])).collect()
+        a.values
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| (c[0], c[1]))
+            .collect()
     } else {
         // Real input: treat as complex with imag=0
         a.values.iter().map(|&r| (r, 0.0)).collect()
@@ -63458,6 +63479,79 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn place_f64_serial_simd_path_matches_scalar_reference() {
+        // The parallel `place` arm is gated at PLACE_PARALLEL_MIN_ELEMS, so
+        // `place_f64_parallel_matches_serial_reference_and_golden_sha256`
+        // never reaches the serial 8-lane SIMD loop, and `place_cyclic` (n=4)
+        // is shorter than a single chunk so it only ever runs the tail. This
+        // covers the loop itself. `n` is deliberately NOT a multiple of
+        // LANES=8, so the run must cross the chunk/tail boundary while keeping
+        // the cyclic `vals` cursor continuous across it — the exact invariant
+        // a chunking mistake breaks. Mask values include NaN (!= 0.0, so
+        // SELECTED) and -0.0 (== 0.0, so NOT selected) to pin the truthiness
+        // rule the SIMD compare implements.
+        let n = 8 * 127 + 5;
+        assert!(n < super::PLACE_PARALLEL_MIN_ELEMS);
+        assert_ne!(n % 8, 0, "n must straddle the chunk/tail boundary");
+
+        let original: Vec<f64> = (0..n)
+            .map(|i| match i % 53 {
+                0 => f64::NEG_INFINITY,
+                7 => -0.0,
+                13 => f64::from_bits(0x7ff8_0000_0000_0000 | i as u64),
+                _ => i as f64 * 0.25 - 64.0,
+            })
+            .collect();
+        let mask_values: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 17 == 0 {
+                    f64::NAN
+                } else if i % 23 == 0 {
+                    -0.0
+                } else if matches!(i % 19, 3 | 7 | 11) {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let vals_values: Vec<f64> = (0..37)
+            .map(|i| match i {
+                0 => -0.0,
+                1 => f64::INFINITY,
+                _ => i as f64 * 1.5 - 11.0,
+            })
+            .collect();
+
+        let mut expected = original.clone();
+        let mut cursor = 0usize;
+        for (idx, &m) in mask_values.iter().enumerate() {
+            if m != 0.0 {
+                expected[idx] = vals_values[cursor % vals_values.len()];
+                cursor += 1;
+            }
+        }
+        assert!(
+            cursor > vals_values.len(),
+            "vals cursor must wrap at least once"
+        );
+
+        let mut actual = UFuncArray::new(vec![n], original, DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![n], mask_values, DType::Bool).unwrap();
+        let vals =
+            UFuncArray::new(vec![vals_values.len()], vals_values.clone(), DType::F64).unwrap();
+        actual.place(&mask, &vals).unwrap();
+
+        for (idx, (&got, &want)) in actual.values().iter().zip(&expected).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "serial place bit drift at index {idx}"
+            );
+        }
+    }
+
+    #[test]
     fn place_rejects_inexact_integer_bridge_values() {
         let mut arr = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 2])).unwrap();
         let mask = UFuncArray::new(vec![2], vec![1.0, 0.0], DType::Bool).unwrap();
@@ -72481,6 +72575,73 @@ print(json.dumps(payload))
             sidecar_dst.to_storage().unwrap(),
             ArrayStorage::I64(vec![1_i64 << 53, 2, (1_i64 << 53) - 2, 1_i64 << 53])
         );
+    }
+
+    #[test]
+    fn put_mask_f64_serial_simd_path_matches_scalar_reference() {
+        // Same coverage hole as `place`: the parallel arm is gated at
+        // PUT_MASK_PARALLEL_MIN_ELEMS so the golden test never reaches the
+        // serial 8-lane SIMD loop, and `put_mask_basic` / `put_mask_cycling`
+        // are shorter than one chunk. `n` is not a multiple of LANES=8, so the
+        // cyclic `values` cursor must stay continuous across the chunk/tail
+        // boundary.
+        let n = 8 * 91 + 3;
+        assert!(n < super::PUT_MASK_PARALLEL_MIN_ELEMS);
+        assert_ne!(n % 8, 0, "n must straddle the chunk/tail boundary");
+
+        let original: Vec<f64> = (0..n)
+            .map(|i| match i % 41 {
+                0 => f64::INFINITY,
+                5 => -0.0,
+                11 => f64::from_bits(0x7ff8_0000_0000_0000 | i as u64),
+                _ => i as f64 * -0.75 + 12.0,
+            })
+            .collect();
+        let mask_values: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 13 == 0 {
+                    f64::NAN
+                } else if i % 29 == 0 {
+                    -0.0
+                } else if matches!(i % 7, 2 | 5) {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let values: Vec<f64> = (0..23)
+            .map(|i| match i {
+                0 => -0.0,
+                1 => f64::NEG_INFINITY,
+                _ => i as f64 * 2.25 - 5.0,
+            })
+            .collect();
+
+        let mut expected = original.clone();
+        let mut cursor = 0usize;
+        for (idx, &m) in mask_values.iter().enumerate() {
+            if m != 0.0 {
+                expected[idx] = values[cursor % values.len()];
+                cursor += 1;
+            }
+        }
+        assert!(
+            cursor > values.len(),
+            "values cursor must wrap at least once"
+        );
+
+        let mut actual = UFuncArray::new(vec![n], original, DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![n], mask_values, DType::Bool).unwrap();
+        actual.put_mask(&mask, &values).unwrap();
+
+        for (idx, (&got, &want)) in actual.values().iter().zip(&expected).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "serial put_mask bit drift at index {idx}"
+            );
+        }
     }
 
     #[test]
