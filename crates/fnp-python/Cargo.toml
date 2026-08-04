@@ -79,6 +79,10 @@ name = "criterion_python_isin"
 harness = false
 
 [[bench]]
+name = "criterion_python_compress"
+harness = false
+
+[[bench]]
 name = "criterion_python_io_text"
 harness = false
 
