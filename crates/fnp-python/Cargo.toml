@@ -55,6 +55,10 @@ name = "criterion_python_surface"
 harness = false
 
 [[bench]]
+name = "criterion_python_extract"
+harness = false
+
+[[bench]]
 name = "criterion_python_io_text"
 harness = false
 
