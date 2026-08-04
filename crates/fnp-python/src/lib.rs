@@ -7641,6 +7641,92 @@ fn numpy_explog_matches_libm() -> bool {
     false
 }
 
+// Runtime BYTE-EQUALITY PROBE of a NumPy f64 unary kernel against the scalar
+// libm call fnp's native path makes for the same op. Where `numpy_explog_matches_libm`
+// above encodes a cross-host *finding* about exp/log as an ISA predicate, this
+// asks NumPy directly, because that finding does not generalize op-by-op:
+// NumPy's dispatch table is per-op, per-ISA AND per-version, and for `tanh` it is
+// already different. Measured 2026-08-04, thinkstation1, NumPy 2.4.3, AVX2
+// (`SIMD Extensions: baseline X86_V2, found X86_V3`, no AVX-512): `np.tanh`
+// differs from libm `tanh` on 9.9% (args in +-40), 26.7% (+-5), 34.1% (+-1e-3)
+// and 47.2% (+-1) of elements, by up to 3 ULP. An `!avx512f` guess would have
+// declared that host byte-equal and kept shipping a divergent `fnp.tanh`.
+//
+// Returns false (delegate to NumPy) on ANY probe failure: parity is the
+// fail-closed direction, matching the runtime's fail-closed doctrine for
+// unknown semantics.
+//
+// Cached per NumPy function name; the probe runs at most once per name per
+// process. Adding an op is one call site, which is what the AVX-512
+// transcendental sibling (deadlock-audit-fs5pu) needs.
+fn numpy_f64_unary_matches_libm(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    numpy_name: &'static str,
+    native: fn(f64) -> f64,
+) -> bool {
+    static PROBED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<&'static str, bool>>,
+    > = std::sync::OnceLock::new();
+    let cache = PROBED.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(&known) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(numpy_name)
+    {
+        return known;
+    }
+
+    // Long enough that NumPy runs its vector body rather than only a scalar
+    // tail, and spread across the argument regions where a SIMD polynomial
+    // kernel and libm diverge: the near-zero region, the mid range, the
+    // saturating tail, and negatives (kernels are often odd-symmetric by
+    // construction, so a positive-only probe can miss a sign-handling
+    // difference).
+    const PROBE_LEN: usize = 4096;
+    let samples: Vec<f64> = (0..PROBE_LEN)
+        .map(|i| {
+            let t = i as f64;
+            match i % 4 {
+                0 => t * 1.0e-6 - 2.0e-3,
+                1 => t / 512.0 - 4.0,
+                2 => t / 51.2 - 40.0,
+                _ => -(t / 128.0),
+            }
+        })
+        .collect();
+
+    let probe = || -> PyResult<bool> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "float64")?;
+        let arr = numpy.call_method("asarray", (samples.clone(),), Some(&kwargs))?;
+        let theirs: Vec<f64> = numpy
+            .getattr(numpy_name)?
+            .call1((&arr,))?
+            .call_method0("tolist")?
+            .extract()?;
+        if theirs.len() != samples.len() {
+            return Ok(false);
+        }
+        Ok(samples
+            .iter()
+            .zip(theirs.iter())
+            .all(|(&x, &t)| native(x).to_bits() == t.to_bits()))
+    };
+    let matches = probe().unwrap_or(false);
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(numpy_name, matches);
+    matches
+}
+
+// Named wrapper for the one op wired to the probe today, mirroring
+// `numpy_explog_matches_libm`'s shape at the call sites.
+fn numpy_f64_tanh_matches_libm(py: Python<'_>, numpy: &Bound<'_, PyModule>) -> bool {
+    numpy_f64_unary_matches_libm(py, numpy, "tanh", |v| UnaryOp::Tanh.apply(v))
+}
+
 // Fused single-pass transcendental map + float-error-event detection over the
 // borrowed numpy buffers (the sqrt pattern generalized). Computes the same
 // `UnaryOp::apply` scalar-libm call the UFuncArray path runs — bit-identical
@@ -26681,7 +26767,7 @@ fn matrix_rank(
     // ranking would silently return 0 on both. Defer so the observable behaviour
     // — value or exception — tracks whichever numpy is actually installed
     // instead of pinning one side of that upstream change.
-    if shape.iter().any(|&dim| dim == 0) {
+    if shape.contains(&0) {
         return fallback();
     }
     // Batched (stacked) square inputs: rank every lane natively via the parallel
@@ -53721,6 +53807,32 @@ fn native_unary_promoting(
         && let Some(out) = try_zerocopy_complex_unary(py, x, cop)?
     {
         return Ok(out);
+    }
+    // f64 tanh: NumPy dispatches a vectorized f64 kernel on AVX2 (X86_V3) hosts
+    // that is NOT the system libm, so `UnaryOp::Tanh.apply` — scalar libm — is
+    // not a drop-in for `np.tanh` there. Every native route below computes that
+    // same scalar call (the zero-copy buffer map, the direct-f64 bridge and the
+    // UFuncArray elementwise path alike), so the deferral has to happen here,
+    // above all three, rather than inside one of them.
+    //
+    // This probes instead of guessing the ISA: `numpy_explog_matches_libm`'s
+    // `!avx512f` predicate is right for exp/log — that relation was isolated by
+    // holding the NumPy version fixed and varying only the ISA — but it is
+    // WRONG for tanh, which diverges on plain AVX2 (9.9-47.2% of elements, up
+    // to 3 ULP, NumPy 2.4.3). Hosts whose NumPy tanh really is libm keep the
+    // parallel native path; only hosts where we would otherwise be wrong pay
+    // the passthrough. (deadlock-audit-d4mc2)
+    //
+    // This NARROWS the tanh column of the 2026-07-10 `f64 transcendental unary
+    // zero-copy fused-defer path (15 ops)` ledger row, and only that column —
+    // the other 14 ops keep the route. That row's own three-worker tanh spread
+    // is 0.757 LOSS / 1.372 / 1.613, and the LOSS came from an AVX2 host
+    // running NumPy 2.4.6: exactly the class this probe now defers, so there
+    // the deferral is not a give-up. The row itself is left untouched (the
+    // ledger_integrity pre-commit hook holds historical rows to the current
+    // evidence standard, which a 2026-07-10 row cannot retroactively meet).
+    if matches!(op, UnaryOp::Tanh) && !numpy_f64_tanh_matches_libm(py, &numpy) {
+        return fallback(py);
     }
     // Zero-copy fast path: exact float64 C-contiguous ndarray inputs skip the
     // cold extract Vec entirely (see zerocopy_f64_unary_flat). Integer inputs
@@ -107386,8 +107498,8 @@ mod tests {
         floor_native, fnp_python, frexp, hypot, indices, interp, isfinite_native, isinf_native,
         isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
         masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
-        narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
-        python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
+        narrow_bitmap_setop, nextafter, numpy_f64_tanh_matches_libm, place, put, put_along_axis,
+        putmask, python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
         required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
         sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
@@ -153055,6 +153167,107 @@ mod tests {
                 env!("CARGO_PKG_VERSION"),
                 "__version__ must track the fnp-python crate's Cargo.toml version"
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tanh_f64_is_byte_exact_with_numpy_on_every_input_route() {
+        // `allclose` cannot see this class of bug: NumPy's vectorized f64 tanh
+        // and the scalar libm tanh fnp's native routes call agree to ~3 ULP, so
+        // the existing hyperbolic conformance test passes while `fnp.tanh(a)`
+        // and `np.tanh(a)` return DIFFERENT BYTES on 9.9-47.2% of elements
+        // (AVX2, NumPy 2.4.3). Drop-in compatibility is a byte claim, so this
+        // asserts bytes. (deadlock-audit-d4mc2)
+        //
+        // Every input route is covered because the deferral sits above all
+        // three native f64 paths — the zero-copy buffer map (exact C-contiguous
+        // f64 ndarray), the direct-f64 bridge, and the UFuncArray elementwise
+        // path (non-contiguous views, lists, promoted integers).
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let fnp_tanh = module.getattr("tanh")?;
+            let np_tanh = numpy.getattr("tanh")?;
+            assert!(
+                !fnp_tanh.is(&np_tanh),
+                "dispatch trap: fnp.tanh resolved to the NumPy callable"
+            );
+
+            // Diagnostic, so a host where NumPy's tanh IS the system libm
+            // cannot make this test look like it proved the deferral. On such a
+            // host the native parallel path stays engaged and the bytes match
+            // for the opposite reason; both outcomes are correct, and the line
+            // says which one was exercised.
+            println!(
+                "NUMPY_F64_TANH_MATCHES_LIBM={}",
+                numpy_f64_tanh_matches_libm(py, &numpy)
+            );
+
+            let ns = PyDict::new(py);
+            py.run(
+                std::ffi::CString::new(
+                    "import numpy as np\n\
+                     rng = np.random.default_rng(20260804)\n\
+                     # Argument regions where a SIMD polynomial kernel and libm\n\
+                     # part ways: near zero, the mid range, and the saturating tail.\n\
+                     tiny = rng.uniform(-1e-3, 1e-3, 40_000)\n\
+                     unit = rng.uniform(-1.0, 1.0, 40_000)\n\
+                     mid = rng.uniform(-5.0, 5.0, 40_000)\n\
+                     tail = rng.uniform(-40.0, 40.0, 40_000)\n\
+                     strided = rng.uniform(-3.0, 3.0, 80_000)[::2]\n\
+                     ints = np.arange(-8, 9, dtype=np.int64)\n\
+                     edges = np.array([0.0, -0.0, np.inf, -np.inf, 1e-320, -1e-320])\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&ns),
+                Some(&ns),
+            )?;
+
+            for name in ["tiny", "unit", "mid", "tail", "strided", "ints", "edges"] {
+                let input = ns.get_item(name).expect("corpus present");
+                let ours = fnp_tanh.call1((&input,))?;
+                let theirs = np_tanh.call1((&input,))?;
+                assert_eq!(
+                    ours.getattr("dtype")?.str()?.to_string(),
+                    theirs.getattr("dtype")?.str()?.to_string(),
+                    "tanh({name}) dtype diverges from numpy"
+                );
+                assert_eq!(
+                    ours.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    theirs.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "tanh({name}) is not byte-exact vs numpy"
+                );
+            }
+
+            // Python list and bare scalar reach the same promoting path without
+            // ever being an ndarray, so they exercise the extract route.
+            let list_input = PyList::new(py, [-2.5_f64, -0.25, 0.0, 0.125, 7.5])?;
+            assert_eq!(
+                fnp_tanh
+                    .call1((&list_input,))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                np_tanh
+                    .call1((&list_input,))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                "tanh(list) is not byte-exact vs numpy"
+            );
+            let scalar_ours: f64 = fnp_tanh.call1((0.37_f64,))?.extract()?;
+            let scalar_theirs: f64 = np_tanh.call1((0.37_f64,))?.extract()?;
+            assert_eq!(
+                scalar_ours.to_bits(),
+                scalar_theirs.to_bits(),
+                "tanh(scalar) is not byte-exact vs numpy"
+            );
+
             Ok(())
         });
     }
