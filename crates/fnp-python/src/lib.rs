@@ -101529,7 +101529,7 @@ fn try_zerocopy_int_ptp_axis(
             numpy.getattr("ptp")?.call((a,), Some(&kwargs))?.unbind(),
         ));
     }
-    let result = match (kind.as_str(), itemsize) {
+    let Some((flat, out_shape)) = (match (kind.as_str(), itemsize) {
         ("i", 1) => ptp_axis_typed::<i8, _>(py, &numpy, a, axis, "int8", |x, y| x.wrapping_sub(y))?,
         ("i", 2) => {
             ptp_axis_typed::<i16, _>(py, &numpy, a, axis, "int16", |x, y| x.wrapping_sub(y))?
@@ -101553,8 +101553,7 @@ fn try_zerocopy_int_ptp_axis(
             ptp_axis_typed::<u64, _>(py, &numpy, a, axis, "uint64", |x, y| x.wrapping_sub(y))?
         }
         _ => return Ok(None),
-    };
-    let Some((flat, out_shape)) = result else {
+    }) else {
         return Ok(None);
     };
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;

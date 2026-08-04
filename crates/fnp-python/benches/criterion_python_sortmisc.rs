@@ -435,7 +435,341 @@ fn main() {
             "bench_flat_f64_sort_median_gate",
             bench_flat_f64_sort_median_gate,
         ),
+        (
+            "bench_flat_f64_unique_median_gate",
+            bench_flat_f64_unique_median_gate,
+        ),
     ]);
+}
+
+/// Flat `float64` `np.unique` against live NumPy, same invocation, swept across
+/// TIE DENSITY.
+///
+/// `try_zerocopy_f64_unique_flat` carries the same blanket AVX2 surrender the
+/// flat-sort route carried before its regate, and its recorded basis is
+/// `0.995x on distinct data and 0.547x on dense ties`. Those two numbers point
+/// at different mechanisms, so this group sweeps the axis the loss is claimed
+/// to vary with rather than inheriting the sort verdict
+/// (deadlock-audit-f64-unique-flat-avx2-surrender-hey9a).
+///
+/// Incumbent topology measured on this host before any candidate existed
+/// (numpy 2.4.3, host 9.5-11.4% busy): `numpy.unique` is single-threaded at
+/// EVERY size and tie density sampled — cpu/wall 0.997-1.000 at n = 4M/16M/64M
+/// across 4M/1M/64/2 distinct values — and the underlying `np.sort` is 73% of
+/// the job on distinct input and 87% on dense ties. So dense ties do not buy
+/// NumPy a threading layer; they only make its sort cheaper in absolute terms.
+///
+/// Route-qualified corpora only (no NaN, not both signed zeros, C-contiguous
+/// f64, n above `1<<20`); the deferral regimes are covered by conformance.
+fn bench_flat_f64_unique_median_gate(_c: &mut criterion::Criterion) {
+    const REQUIRED_BUILD_PROFILE: &str = "release-perf";
+    const CONTRACT_ROUNDS: usize = 21;
+    const CONTRACT_MIN_OF: usize = 1;
+    const THREAD_ACTIVITY_REPETITIONS: usize = 3;
+
+    assert_eq!(
+        std::env::var("FNP_BENCH_PROFILE").as_deref(),
+        Ok(REQUIRED_BUILD_PROFILE),
+        "ship-grade flat-unique evidence requires FNP_BENCH_PROFILE=release-perf"
+    );
+    let build_worker =
+        std::env::var("FNP_BUILD_WORKER").expect("FNP_BUILD_WORKER records the build origin");
+    assert!(
+        !build_worker.trim().is_empty(),
+        "FNP_BUILD_WORKER must be set"
+    );
+    let threads = std::env::var("RAYON_NUM_THREADS")
+        .expect("RAYON_NUM_THREADS must be explicitly pinned before flat-unique timing");
+    for variable in ["OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok("1"),
+            "{variable} must be one: neither unique arm calls BLAS"
+        );
+    }
+    let threads: usize = threads.parse().expect("thread count is numeric");
+    assert_eq!(
+        rayon::current_num_threads(),
+        threads,
+        "Rayon pool width does not match the pinned flat-unique configuration"
+    );
+    // Deliberately only 2, unlike the flat-sort sibling's 8: this group exists to
+    // FIND the worker floor for the unique route, so the low-thread rows are part
+    // of the measurement, not a misconfiguration. A row whose route defers reports
+    // ratio ~1.0 with tight nulls and can never be read as a win.
+    assert!(
+        threads >= 2,
+        "the flat-f64 unique arm requires at least 2 workers; below that the route \
+         defers by construction and the group would measure NumPy against itself"
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_flat_f64_unique").expect("flat-unique bench module");
+        fnp_python(&module).expect("initialize fnp_python flat-unique module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        // The candidate allocates its output through numpy.empty inside the timed
+        // region — NumPy code inside the candidate arm, disclosed rather than
+        // implied absent. The incumbent allocates its own result too, so the
+        // disclosure is conservative.
+        common::report_incumbent_topology_with_shared_component(
+            "fnp.unique",
+            "numpy.unique",
+            "numpy.empty_output_allocation",
+        );
+        println!("NUMPY_BUILD_CONFIG_BEGIN workload=flat_f64_unique");
+        numpy
+            .getattr("show_config")
+            .expect("numpy.show_config")
+            .call0()
+            .expect("report NumPy build configuration");
+        println!("NUMPY_BUILD_CONFIG_END workload=flat_f64_unique");
+        println!(
+            "BLAS_RELEVANCE workload=flat_f64_unique numpy_unique_uses_blas=false \
+             candidate_uses_blas=false blas_threads_pinned=1 reason=sort_dedup_no_gemm"
+        );
+
+        let np_unique = numpy.getattr("unique").expect("numpy.unique");
+        let fnp_unique = module.getattr("unique").expect("fnp.unique");
+        assert!(
+            !fnp_unique.is(&np_unique),
+            "dispatch trap: fnp.unique resolved to the NumPy callable"
+        );
+        common::report_numpy_incumbent_identity(py, "unique", &np_unique);
+
+        // Order-sensitive digest over a strided sample: full byte-exactness is
+        // asserted once per row before timing, so inside the contract this only
+        // has to detect drift.
+        let checksum_of = |result: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let n = result
+                .getattr("size")
+                .expect("result size")
+                .extract::<usize>()
+                .expect("result size value");
+            let stride = (n / 4096).max(1);
+            let sampled = result
+                .call_method1(
+                    "__getitem__",
+                    (pyo3::types::PySlice::new(
+                        result.py(),
+                        0,
+                        n as isize,
+                        stride as isize,
+                    ),),
+                )
+                .expect("strided digest slice")
+                .call_method0("tobytes")
+                .expect("strided digest tobytes")
+                .extract::<Vec<u8>>()
+                .expect("strided digest bytes");
+            sampled
+                .iter()
+                .chain(n.to_le_bytes().iter())
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+
+        // `distinct` is the number of distinct values the n elements are drawn
+        // from; ties_per_value = n / distinct. Spanning 4 orders of magnitude of
+        // tie density at fixed n is what makes the dense-ties claim decidable
+        // rather than inherited. Integer draws cast to f64 are exact and contain
+        // neither NaN nor -0.0, so every corpus clears the route's defer scan.
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(20260804)\n\
+uniform_4m = rng.random(4_000_000)\n\
+uniform_16m = rng.random(16_000_000)\n\
+uniform_64m = rng.random(64_000_000)\n\
+ties_1m_16m = rng.integers(0, 1_000_000, 16_000_000).astype(np.float64)\n\
+ties_64_16m = rng.integers(0, 64, 16_000_000).astype(np.float64)\n\
+ties_2_16m = rng.integers(0, 2, 16_000_000).astype(np.float64)\n\
+ties_64_64m = rng.integers(0, 64, 64_000_000).astype(np.float64)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("flat-unique corpus setup");
+
+        for (name, corpus, drawn_from) in [
+            ("uniform_4m", "distinct_uniform", 0_usize),
+            ("uniform_16m", "distinct_uniform", 0),
+            ("uniform_64m", "distinct_uniform", 0),
+            ("ties_1m_16m", "ties_1m_distinct", 1_000_000),
+            ("ties_64_16m", "ties_64_distinct", 64),
+            ("ties_2_16m", "ties_2_distinct", 2),
+            ("ties_64_64m", "ties_64_distinct", 64),
+        ] {
+            let input = ns.get_item(name).expect("corpus present");
+            let elements = input
+                .getattr("size")
+                .expect("corpus size")
+                .extract::<usize>()
+                .expect("corpus size value");
+            let input_bytes = input
+                .getattr("nbytes")
+                .expect("corpus nbytes")
+                .extract::<usize>()
+                .expect("corpus nbytes value");
+            assert!(
+                input
+                    .getattr("flags")
+                    .expect("corpus flags")
+                    .getattr("c_contiguous")
+                    .expect("corpus C-contiguous flag")
+                    .extract::<bool>()
+                    .expect("corpus C-contiguous value")
+            );
+
+            let run_incumbent = || {
+                np_unique
+                    .call1((black_box(&input),))
+                    .expect("NumPy unique arm")
+            };
+            let run_candidate = || {
+                fnp_unique
+                    .call1((black_box(&input),))
+                    .expect("FrankenNumPy unique arm")
+            };
+
+            // Full byte-exactness, once, before any timing.
+            let ours = run_candidate();
+            let theirs = run_incumbent();
+            assert!(
+                ours.get_type().is(theirs.get_type()),
+                "{name}: unique result type differs from NumPy"
+            );
+            assert_eq!(
+                ours.getattr("dtype").unwrap().str().unwrap().to_string(),
+                theirs.getattr("dtype").unwrap().str().unwrap().to_string(),
+                "{name}: unique dtype differs from NumPy"
+            );
+            assert_eq!(
+                ours.call_method0("tobytes")
+                    .expect("candidate tobytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate bytes"),
+                theirs
+                    .call_method0("tobytes")
+                    .expect("incumbent tobytes")
+                    .extract::<Vec<u8>>()
+                    .expect("incumbent bytes"),
+                "{name}: flat f64 unique is not byte-exact vs NumPy"
+            );
+            let distinct_out = theirs
+                .getattr("size")
+                .expect("distinct count")
+                .extract::<usize>()
+                .expect("distinct count value");
+
+            let row = format!("python_flat_f64_unique_{name}_vs_numpy");
+            println!(
+                "PARITY row={row} exact_bytes=passed exact_dtype=passed \
+                 corpus={corpus} input_elements={elements} input_bytes={input_bytes} \
+                 drawn_from_distinct={drawn_from} distinct_out={distinct_out} \
+                 checksum={:016x}",
+                checksum_of(&theirs)
+            );
+            println!(
+                "ROUTE_PRECONDITIONS row={row} axis=none dtype=float64 exact_ndarray=true \
+                 c_contiguous=true input_elements={elements} \
+                 parallel_min_elements=1048576 any_nan=false both_signed_zeros=false \
+                 host_avx2={} host_avx512f={} pinned_threads={threads} \
+                 candidate_route=try_zerocopy_f64_unique_flat",
+                std::arch::is_x86_feature_detected!("avx2"),
+                std::arch::is_x86_feature_detected!("avx512f"),
+            );
+            println!(
+                "COUNTED_MECHANISM row={row} class=parallel_sort_then_dedup \
+                 incumbent_algorithm=numpy_unique_sort_then_flag_compress_single_threaded \
+                 candidate_algorithm=rayon_par_sort_unstable_then_vec_dedup \
+                 incumbent_expected_threads=1 candidate_pinned_threads={threads} \
+                 candidate_extra_full_passes=1_defer_scan_plus_1_input_copy \
+                 shared_input=true"
+            );
+
+            common::report_observed_thread_activity(
+                &row,
+                "numpy",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    black_box(checksum_of(&run_incumbent()));
+                },
+            );
+            common::report_observed_thread_activity(
+                &row,
+                "fnp",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    black_box(checksum_of(&run_candidate()));
+                },
+            );
+
+            let mut observe_incumbent = || {
+                let started = std::time::Instant::now();
+                let result = run_incumbent();
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let mut observe_candidate = || {
+                let started = std::time::Instant::now();
+                let result = run_candidate();
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &row,
+                    &mut observe_incumbent,
+                    &mut observe_candidate,
+                    CONTRACT_ROUNDS,
+                    CONTRACT_MIN_OF,
+                );
+            let verdict =
+                common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+            println!(
+                "FLAT_UNIQUE_RESULT row={row} corpus={corpus} elements={elements} \
+                 drawn_from_distinct={drawn_from} threads={threads} \
+                 verdict={verdict} incumbent_median_ms={:.6} candidate_median_ms={:.6} \
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ratio={:.6} incumbent_null_ci95=[{:.6},{:.6}] \
+                 candidate_null_ratio={:.6} candidate_null_ci95=[{:.6},{:.6}] \
+                 corrected_dual_null_gate=true incumbent=numpy_live_same_invocation",
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                incumbent_null.ratio_ci_low,
+                incumbent_null.ratio_ci_high,
+                candidate_null.ratio_median,
+                candidate_null.ratio_ci_low,
+                candidate_null.ratio_ci_high,
+            );
+            let decision = if verdict == "DECIDABLE_WIN" {
+                "choose_fnp"
+            } else {
+                "choose_numpy"
+            };
+            println!(
+                "CHOOSER_STATEMENT workload=flat_f64_unique_{name} decision={decision} \
+                 verdict={verdict} incumbent=numpy_live_same_invocation \
+                 measured_scope={elements}_c_contiguous_float64_elements_drawn_from_{drawn_from}_distinct_at_{threads}_pinned_threads \
+                 outside_scope=run_same_contract_before_choosing"
+            );
+        }
+    });
 }
 
 /// Flat `float64` `np.sort` against live NumPy, same invocation.

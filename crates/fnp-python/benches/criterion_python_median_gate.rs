@@ -1492,12 +1492,16 @@ fn bench_f64_transcendental_median_gate(c: &mut Criterion) {
                     .extract()
                     .expect("base byte Vec");
                 let first_diff = candidate_bytes
-                    .chunks_exact(8)
-                    .zip(base_bytes.chunks_exact(8))
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .zip(base_bytes.as_chunks::<8>().0.iter())
                     .position(|(a, b)| a != b);
                 let diff_count = candidate_bytes
-                    .chunks_exact(8)
-                    .zip(base_bytes.chunks_exact(8))
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .zip(base_bytes.as_chunks::<8>().0.iter())
                     .filter(|(a, b)| a != b)
                     .count();
                 println!(
@@ -1639,8 +1643,10 @@ fn bench_f64_exp_log_probe(c: &mut Criterion) {
                 .expect("probe input bytes")
                 .extract()
                 .expect("probe input byte Vec");
-            raw.chunks_exact(8)
-                .map(|chunk| f64::from_ne_bytes(chunk.try_into().expect("one native f64")))
+            raw.as_chunks::<8>()
+                .0
+                .iter()
+                .map(|chunk| f64::from_ne_bytes(*chunk))
                 .collect()
         };
 
@@ -1664,9 +1670,14 @@ fn bench_f64_exp_log_probe(c: &mut Criterion) {
             let mut diff_elems = 0usize;
             let mut first_diff = None;
             let mut max_bitdiff: u64 = 0;
-            for (index, (np_chunk, &value)) in np_bytes.chunks_exact(8).zip(data.iter()).enumerate()
+            for (index, (np_chunk, &value)) in np_bytes
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .zip(data.iter())
+                .enumerate()
             {
-                let np_bits = u64::from_ne_bytes(np_chunk.try_into().expect("np f64 chunk"));
+                let np_bits = u64::from_ne_bytes(*np_chunk);
                 let mine_bits = rust_fn(value).to_bits();
                 if np_bits != mine_bits {
                     diff_elems += 1;
@@ -3858,10 +3869,10 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
                 .extract()
                 .expect("extract median bytes");
             let data: Vec<f64> = raw
-                .chunks_exact(8)
-                .map(|chunk| {
-                    f64::from_ne_bytes(chunk.try_into().expect("one native f64 per chunk"))
-                })
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|chunk| f64::from_ne_bytes(*chunk))
                 .collect();
             assert_eq!(data.len(), 16_000_000);
             let numpy_median = numpy.getattr("median").expect("numpy.median");
@@ -3941,10 +3952,10 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
                 .extract()
                 .expect("extract f16 bit bytes");
             let input_bits: Vec<u16> = bit_bytes
-                .chunks_exact(2)
-                .map(|chunk| {
-                    u16::from_ne_bytes(chunk.try_into().expect("one native u16 per chunk"))
-                })
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|chunk| u16::from_ne_bytes(*chunk))
                 .collect();
             assert_eq!(input_bits.len(), 4_000_000);
             let numpy_sort = numpy.getattr("sort").expect("numpy.sort");
@@ -4834,8 +4845,10 @@ fn bench_ledger_integrity_rejects(c: &mut Criterion) {
                 .extract()
                 .expect("extract f32 tie bytes");
             let data: Vec<f32> = raw
-                .chunks_exact(4)
-                .map(|chunk| f32::from_ne_bytes(chunk.try_into().expect("one native f32")))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| f32::from_ne_bytes(*chunk))
                 .collect();
             group.bench_function("f32_argsort_tie_precheck_selftime_2m", |bench| {
                 bench.iter(|| {
