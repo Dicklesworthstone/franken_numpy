@@ -2169,16 +2169,11 @@ fn time_random_state_zipf_fixed_trace(
 
 fn bench_random_state_zipf_parameter_cache(c: &mut Criterion) {
     const SIZE: usize = 100_000;
-    const REPEATS: usize = 6;
-    const A: f64 = 2.5;
-
-    let mut former_proof = RandomState::new(SeedMaterial::U64(42)).unwrap();
-    let mut candidate_proof = RandomState::new(SeedMaterial::U64(42)).unwrap();
-    assert_eq!(
-        former_random_state_zipf(&mut former_proof, A, 4096).unwrap(),
-        rejected_cached_random_state_zipf(&mut candidate_proof, A, 4096).unwrap()
-    );
-    assert_eq!(former_proof.next_u64(), candidate_proof.next_u64());
+    // The a=2.5 calibration was 46.6 ms per effect observation at six
+    // repetitions on the pinned worker. Sixty-four repetitions leave margin
+    // above the 250 ms retry-predicate floor for both parameter regimes.
+    const REPEATS: usize = 64;
+    const PARAMETERS: [(&str, f64); 2] = [("a_2_5", 2.5), ("a_17", 17.0)];
 
     let mut group = c.benchmark_group("random_state_zipf_parameter_cache");
     group.sample_size(CONTRACT_ROUNDS);
@@ -2186,24 +2181,40 @@ fn bench_random_state_zipf_parameter_cache(c: &mut Criterion) {
     group.measurement_time(Duration::from_millis(750));
     group.throughput(Throughput::Elements((SIZE * REPEATS) as u64));
 
-    let mut random_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
-    group.bench_function("baseline", |bench| {
-        bench.iter(|| black_box(random_state.zipf(black_box(A), black_box(SIZE)).unwrap()))
-    });
+    for (parameter_id, a) in PARAMETERS {
+        let mut former_proof = RandomState::new(SeedMaterial::U64(42)).unwrap();
+        let mut candidate_proof = RandomState::new(SeedMaterial::U64(42)).unwrap();
+        assert_eq!(
+            former_random_state_zipf(&mut former_proof, a, 4096).unwrap(),
+            rejected_cached_random_state_zipf(&mut candidate_proof, a, 4096).unwrap()
+        );
+        assert_eq!(former_proof.next_u64(), candidate_proof.next_u64());
 
-    let _ = run_median_ci_contract(
-        "random_state_zipf_parameter_cache",
-        || time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, false),
-        || time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, false),
-        || time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, false),
-        || time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, true),
-    );
-    group.bench_function("fixed_trace_base", |bench| {
-        bench.iter(|| black_box(time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, false)))
-    });
-    group.bench_function("fixed_trace_candidate", |bench| {
-        bench.iter(|| black_box(time_random_state_zipf_fixed_trace(A, SIZE, REPEATS, true)))
-    });
+        let mut random_state = RandomState::new(SeedMaterial::U64(42)).unwrap();
+        group.bench_function(BenchmarkId::new("baseline", parameter_id), |bench| {
+            bench.iter(|| black_box(random_state.zipf(black_box(a), black_box(SIZE)).unwrap()))
+        });
+
+        let row = format!("random_state_zipf_parameter_cache_{parameter_id}");
+        let _ = run_median_ci_contract(
+            &row,
+            || time_random_state_zipf_fixed_trace(a, SIZE, REPEATS, false),
+            || time_random_state_zipf_fixed_trace(a, SIZE, REPEATS, false),
+            || time_random_state_zipf_fixed_trace(a, SIZE, REPEATS, false),
+            || time_random_state_zipf_fixed_trace(a, SIZE, REPEATS, true),
+        );
+        group.bench_function(BenchmarkId::new("fixed_trace_base", parameter_id), |bench| {
+            bench.iter(|| black_box(time_random_state_zipf_fixed_trace(a, SIZE, REPEATS, false)))
+        });
+        group.bench_function(
+            BenchmarkId::new("fixed_trace_candidate", parameter_id),
+            |bench| {
+                bench.iter(|| {
+                    black_box(time_random_state_zipf_fixed_trace(a, SIZE, REPEATS, true))
+                })
+            },
+        );
+    }
 
     group.finish();
 }

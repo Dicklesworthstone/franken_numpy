@@ -49,7 +49,7 @@ use fnp_ufunc::{
     ma_mask_or, matmul_accumulate_serial, maximum as ufunc_maximum, minimum as ufunc_minimum,
     modf as ufunc_modf, not_equal as ufunc_not_equal, power as ufunc_power,
     reduce_frompyfunc_values, remainder as ufunc_remainder, right_shift as ufunc_right_shift,
-    signbit as ufunc_signbit, spacing as ufunc_spacing,
+    signbit as ufunc_signbit, spacing as ufunc_spacing, take_float_error_events, FloatErrorMode,
 };
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{
@@ -53812,6 +53812,21 @@ fn native_unary_promoting(
     Ok(output)
 }
 
+fn emit_native_float_warnings(py: Python<'_>) -> PyResult<()> {
+    let events = take_float_error_events();
+    if events.is_empty() {
+        return Ok(());
+    }
+    let warnings = py.import("warnings")?;
+    let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
+    for event in events {
+        if matches!(event.mode, FloatErrorMode::Warn) {
+            warnings.call_method1("warn", (event.message, &category))?;
+        }
+    }
+    Ok(())
+}
+
 fn native_unary_promoting_or_passthrough(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -53822,7 +53837,10 @@ fn native_unary_promoting_or_passthrough(
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
         let x = args.get_item(0)?;
-        native_unary_promoting(py, &x, op, numpy_name, context)
+        take_float_error_events();
+        let result = native_unary_promoting(py, &x, op, numpy_name, context);
+        emit_native_float_warnings(py)?;
+        result
     } else {
         core_numpy_passthrough(py, numpy_name, args, kwargs)
     }
@@ -152361,6 +152379,66 @@ mod tests {
                 &sqrt_fn.call1((transposed.clone(),))?,
                 &numpy_sqrt.call1((transposed.clone(),))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn native_unary_f64_float_errors_match_numpy_runtimewarnings() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let warnings = py.import("warnings")?;
+            let catch_warnings = warnings.getattr("catch_warnings")?;
+            let input = numpy.getattr("array")?.call1((vec![2.0_f64],))?;
+
+            let ours_ctx = catch_warnings.call0()?;
+            let ours_records = ours_ctx.call_method0("__enter__")?;
+            warnings.call_method1("simplefilter", ("always",))?;
+            let ours = module.getattr("arcsin")?.call1((input.clone(),))?;
+            ours_ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+
+            let numpy_ctx = catch_warnings.call0()?;
+            let numpy_records = numpy_ctx.call_method0("__enter__")?;
+            warnings.call_method1("simplefilter", ("always",))?;
+            let expected = numpy.getattr("arcsin")?.call1((input.clone(),))?;
+            numpy_ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+
+            assert_array_matches_numpy(&ours, &expected)?;
+            assert_eq!(
+                ours_records.call_method0("__len__")?.extract::<usize>()?,
+                numpy_records.call_method0("__len__")?.extract::<usize>()?,
+                "native f64 arcsin must emit the same warning count as NumPy"
+            );
+            assert_eq!(
+                ours_records
+                    .get_item(0)?
+                    .getattr("category")?
+                    .getattr("__name__")?
+                    .extract::<String>()?,
+                "RuntimeWarning"
+            );
+
+            // Draining after the native call prevents an invalid event from
+            // leaking into the next warning-free unary operation.
+            let clean_ctx = catch_warnings.call0()?;
+            let clean_records = clean_ctx.call_method0("__enter__")?;
+            warnings.call_method1("simplefilter", ("always",))?;
+            let _ = module
+                .getattr("sqrt")?
+                .call1((numpy.getattr("array")?.call1((vec![4.0_f64],))?,))?;
+            clean_ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+            assert_eq!(
+                clean_records.call_method0("__len__")?.extract::<usize>()?,
+                0,
+                "a prior native float error must not leak into a clean call"
+            );
 
             Ok(())
         });
