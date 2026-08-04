@@ -4,6 +4,97 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-04 - WIN (KEEP, INCUMBENT-WIN): flat f64 `np.unique` was dead code on every AVX2 host - regate on workers, 1.09-2.18x
+
+`CyanGrove`, bead `deadlock-audit-f64-unique-flat-avx2-surrender-hey9a`.
+`try_zerocopy_f64_unique_flat` opened with `if numpy_f64_qsort_is_simd() { return
+Ok(None) }`, and that predicate is a plain `is_x86_feature_detected!("avx2")`. The
+parallel sort+dedup arm was unreachable on essentially every x86-64 host in the fleet:
+`np.unique` on a 1-D f64 array ran 100% NumPy, single-threaded. Sibling of the flat-f64
+sort regate, and the same defect - a core-count result generalized to an ISA check.
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** incumbent NumPy/NumPy median 0.999759 CI95 [0.995464,1.018435], candidate FNP/FNP median 1.003338 CI95 [0.993717,1.009879], 21 rounds min-of-1, effect CI95 [1.484768,1.502088] disjoint from both (uniform 16M at 16 workers; every other row carries its own pair, incumbent nulls spanning 0.984-1.019 and candidate nulls 0.986-1.012 across the sweep).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=000000000000000018c88c83b4324969-000ad7f4 measured_ratio=1.492320x spelling=`numpy.unique`
+
+**Incumbent isolation proof:** candidate=fnp.unique incumbent=numpy.unique shared_timed_component=numpy.empty_output_allocation
+
+**Shared timed component disclosure:** components=numpy.empty_output_allocation direction=conservative_for_candidate share_of_candidate_pct=0.00672 measured_by=timing_numpy_empty_at_each_output_length note=the_candidate_allocates_its_result_through_numpy_empty_inside_the_timed_region_and_the_incumbent_allocates_its_own_result_too
+
+BOTH HALVES OF THE OLD GATE'S BASIS ARE REFUTED. It cited "0.995x on distinct data and
+0.547x on dense ties". Ratio vs live NumPy, dual-null median-CI gate, DW = DECIDABLE_WIN,
+UND = UNDECIDED (effect CI overlaps a null CI):
+
+| corpus (n, values drawn from) | 4T | 8T | 16T | 32T |
+|---|---:|---:|---:|---:|
+| uniform 4M, all distinct | 1.040 DW | 1.525 DW | 1.885 DW | 2.18 DW |
+| uniform 16M, all distinct | - | 1.326 DW | 1.492 DW | 1.51 DW |
+| uniform 64M, all distinct | - | - | 1.677 DW | 1.76 DW |
+| 16M from 1M distinct | - | 1.611 DW | 1.868 DW | 1.95 DW |
+| 16M from 64 distinct | 1.012 UND | 1.094 DW | 1.101 DW | 1.21 DW |
+| 64M from 64 distinct | - | 1.313 DW | 1.313 DW | 1.30 DW |
+| 16M from 2 distinct | 0.999 UND | 0.996 UND | 1.030 UND | 1.16 DW |
+
+INCUMBENT TOPOLOGY, measured before any candidate existed: `numpy.unique` is
+single-threaded at cpu/wall 0.997-1.000 at EVERY size and tie density sampled (n =
+4M/16M/64M crossed with 4M/1M/64/2 distinct), and its `np.sort` is 73% of the job on
+distinct input, 87% on dense ties. Dense ties buy NumPy no threading layer; they only make
+its sort cheaper in absolute terms.
+
+TWO MECHANISMS. Compute-bound rows scale with workers (1.04 -> 1.53 -> 1.89 -> 2.18);
+bandwidth-bound dense-tie rows are FLAT (64-distinct at 64M reads 1.313 / 1.313 / 1.302
+across 8/16/32) because with few distinct values `par_sort_unstable` is near-linear and the
+cost collapses onto the input copy and the defer scan, which no extra worker helps.
+
+FLOOR AT 8, the measured knee. Five of six corpora DECIDABLE_WIN at 1.09-1.61x there and
+the sixth a WASH, not a loss. At 4 both tie corpora are UNDECIDED and the one deciding row
+does so at 1.040x, inside the noise another host would produce. AVX-512 keeps the prior
+surrender, unmeasured in either direction, exactly as the sort sibling does.
+
+**THE 2-DISTINCT CORNER IS PARITY AND IS NOT CLAIMED AS A WIN.** 0.999 / 0.996 / 1.030
+UNDECIDED at 4/8/16; decided exactly once, at 32 (1.159x), unreplicated - and a different
+ELF read that same corpus at 16 as 1.169 and 1.125 DW, so 1.03-1.17 is its run-to-run
+spread rather than a trend. Enabling the route there costs nothing measurable, which is why
+the wash does not hold the floor hostage, but nothing here claims a speedup for `unique` on
+an array with a handful of distinct values.
+
+ENGAGEMENT PROVEN, not inferred: `OBSERVED_THREAD_ACTIVITY` in the same invocation reads
+arm=numpy threads_actually_used=1 against arm=fnp threads_actually_used=33. A silently
+deferred route would have read 1 on both arms and ~1.0x on every row. The conformance test
+prints `NATIVE_ARM_REACHABLE` and was verified in BOTH directions on this host: true at 32
+workers, false at 4 with every corpus still byte-exact.
+
+HARNESS TRAP FOUND AND FIXED BEFORE ANY NUMBER WAS BANKED (commit 8784bd35). The first tie
+corpora were `rng.integers(...).astype(np.float64)`, which `try_zerocopy_f64_unique_binary_grid`
+claims BEFORE the sort route - every tie row would have timed the O(n+range) bucket path
+while printing `candidate_route=try_zerocopy_f64_unique_flat`. Tie pools are now uniform
+doubles indexed by random integers, and each row asserts its corpus is off the 1/16 grid.
+
+PROVENANCE: three `release-perf` ELFs differing ONLY in bench corpus ORDER (chosen for
+survivability - the harness re-checks host quiescence before every contract and this box is
+shared): `bench_elf_sha256=5ccb8d9cc5af3b0f0fa1a45cbf8b3535873ae4fddc6cabd7b9fc07e8287e0eaa`
+(distinct rows), `dd0c0a048542a4a658822cb900c7aeca3cefdcaaeca30a28f566836e43b8c23b` (tie
+rows), `eda72f909a4bde13d41b760204fa313f825b624e21e0b81db935f686cb85d25b` (the 4/8/16-worker
+floor sweep, and the source of the incumbent-arm row above). Built locally because the
+strict-RCH builders link Python 3.14 and cannot execute on this Python 3.13 measurement
+host. Host `thinkstation1`, AMD Ryzen Threadripper PRO 5975WX, 32 physical / 64 logical,
+full 0-63 affinity. `ISA_BASELINE runtime_avx2=true runtime_avx512f=false`. NumPy 2.4.3.
+OPENBLAS/OMP/MKL pinned to 1; neither unique arm calls BLAS. **Maximum observed host busy
+fraction 0.167 against the 0.200 ceiling.** The SHIPPED constant is 8 while the measurement
+ELFs carried a floor of 2 so every width in the sweep could reach the arm; at >= 8 workers
+the two are the same route, and the 4-worker rows describe a configuration that now defers.
+
+SCOPE: exact 1-D-or-ravellable C-contiguous `float64` ndarrays, `n >= 1<<20`, no NaN, not
+both signed zeros, AVX2 without AVX-512, >= 8 Rayon workers. Everything else keeps the NumPy
+passthrough.
+
+Retry predicate: do not rerun this ELF on these regimes. Reopen if a many-core **avx512f**
+host becomes available (the one open direction, as for the sort sibling), if the route
+widens to another dtype/layout/axis, if the 2-distinct corner is wanted as a decided row
+rather than a disclosed parity, or if `numpy.unique` gains a threading layer.
+
 ## 2026-08-02 - WIN (KEEP, INCUMBENT-WIN): fuse `a*b+c*d` into one parallel pass - 2.67-3.86x vs live NumPy
 
 The new `fnp.pairwise_multiply_add(a, b, c, d)` route evaluates the two
