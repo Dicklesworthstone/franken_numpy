@@ -87,6 +87,10 @@ name = "criterion_python_f16_matmul"
 harness = false
 
 [[bench]]
+name = "criterion_python_roll"
+harness = false
+
+[[bench]]
 name = "criterion_python_io_text"
 harness = false
 
