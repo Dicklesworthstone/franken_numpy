@@ -71092,7 +71092,7 @@ fn complex_argsort_stable_counting_typed<
         .par_chunks(records_per_chunk * 2)
         .map(|ck| {
             let mut h = vec![0usize; bucket_count];
-            for z in ck.chunks_exact(2) {
+            for z in ck.as_chunks::<2>().0 {
                 let r = finite_integral_component_key(z[0].into())?;
                 let i = finite_integral_component_key(z[1].into())?;
                 h[bucket(r, i)?] += 1;
