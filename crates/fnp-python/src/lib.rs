@@ -91930,8 +91930,8 @@ fn try_zerocopy_f64_einsum_single_reduction_2d(
     let result = match kind {
         EinsumSingleReduction2dKind::All => {
             let mut acc = [0.0f64; 8];
-            let mut chunks = input.chunks_exact(8);
-            for group in chunks.by_ref() {
+            let (chunks, remainder) = input.as_chunks::<8>();
+            for group in chunks {
                 acc[0] += group[0].get();
                 acc[1] += group[1].get();
                 acc[2] += group[2].get();
@@ -91942,7 +91942,7 @@ fn try_zerocopy_f64_einsum_single_reduction_2d(
                 acc[7] += group[7].get();
             }
             let mut sum = acc.iter().sum::<f64>();
-            for value in chunks.remainder() {
+            for value in remainder {
                 sum += value.get();
             }
             return Ok(Some(build_f64_scalar(py, sum)?));
@@ -91954,8 +91954,8 @@ fn try_zerocopy_f64_einsum_single_reduction_2d(
                 let mut out = Vec::with_capacity(nrows);
                 for row in input.chunks_exact(ncols) {
                     let mut acc = [0.0f64; 8];
-                    let mut chunks = row.chunks_exact(8);
-                    for group in chunks.by_ref() {
+                    let (chunks, remainder) = row.as_chunks::<8>();
+                    for group in chunks {
                         acc[0] += group[0].get();
                         acc[1] += group[1].get();
                         acc[2] += group[2].get();
@@ -91966,7 +91966,7 @@ fn try_zerocopy_f64_einsum_single_reduction_2d(
                         acc[7] += group[7].get();
                     }
                     let mut sum = acc.iter().sum::<f64>();
-                    for value in chunks.remainder() {
+                    for value in remainder {
                         sum += value.get();
                     }
                     out.push(sum);
@@ -92064,9 +92064,9 @@ fn try_zerocopy_f64_einsum_full_contraction(
     // load-throughput bound, not add-latency bound (the PyBuffer cells are !Sync, so a
     // single serial streaming pass is the contiguous read — matching numpy's bandwidth).
     let mut acc = [0.0f64; 8];
-    let mut ca = va.chunks_exact(8);
-    let mut cb = vb.chunks_exact(8);
-    for (ga, gb) in ca.by_ref().zip(cb.by_ref()) {
+    let (ca, ca_remainder) = va.as_chunks::<8>();
+    let (cb, cb_remainder) = vb.as_chunks::<8>();
+    for (ga, gb) in ca.iter().zip(cb) {
         acc[0] += ga[0].get() * gb[0].get();
         acc[1] += ga[1].get() * gb[1].get();
         acc[2] += ga[2].get() * gb[2].get();
@@ -92077,7 +92077,7 @@ fn try_zerocopy_f64_einsum_full_contraction(
         acc[7] += ga[7].get() * gb[7].get();
     }
     let mut dot = acc.iter().sum::<f64>();
-    for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
+    for (x, y) in ca_remainder.iter().zip(cb_remainder) {
         dot += x.get() * y.get();
     }
     let result = match UFuncArray::new(vec![], vec![dot], DType::F64) {
@@ -92168,9 +92168,9 @@ fn try_zerocopy_f64_einsum_pair_partial(
     let block_dot =
         |ra: &[pyo3::buffer::ReadOnlyCell<f64>], rb: &[pyo3::buffer::ReadOnlyCell<f64>]| -> f64 {
             let mut acc = [0.0f64; 8];
-            let mut ca = ra.chunks_exact(8);
-            let mut cb = rb.chunks_exact(8);
-            for (ga, gb) in ca.by_ref().zip(cb.by_ref()) {
+            let (ca, ca_remainder) = ra.as_chunks::<8>();
+            let (cb, cb_remainder) = rb.as_chunks::<8>();
+            for (ga, gb) in ca.iter().zip(cb) {
                 acc[0] += ga[0].get() * gb[0].get();
                 acc[1] += ga[1].get() * gb[1].get();
                 acc[2] += ga[2].get() * gb[2].get();
@@ -92181,7 +92181,7 @@ fn try_zerocopy_f64_einsum_pair_partial(
                 acc[7] += ga[7].get() * gb[7].get();
             }
             let mut s = acc.iter().sum::<f64>();
-            for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
+            for (x, y) in ca_remainder.iter().zip(cb_remainder) {
                 s += x.get() * y.get();
             }
             s
@@ -92356,9 +92356,9 @@ fn try_zerocopy_f64_einsum_matvec(
         // matvec: each output is an 8-accumulator dot of a contiguous row against v.
         let row_dot = |row: &[pyo3::buffer::ReadOnlyCell<f64>]| -> f64 {
             let mut acc = [0.0f64; 8];
-            let mut ca = row.chunks_exact(8);
-            let mut cv = vvec.chunks_exact(8);
-            for (gr, gv) in ca.by_ref().zip(cv.by_ref()) {
+            let (ca, ca_remainder) = row.as_chunks::<8>();
+            let (cv, cv_remainder) = vvec.as_chunks::<8>();
+            for (gr, gv) in ca.iter().zip(cv) {
                 acc[0] += gr[0].get() * gv[0];
                 acc[1] += gr[1].get() * gv[1];
                 acc[2] += gr[2].get() * gv[2];
@@ -92369,7 +92369,7 @@ fn try_zerocopy_f64_einsum_matvec(
                 acc[7] += gr[7].get() * gv[7];
             }
             let mut s = acc.iter().sum::<f64>();
-            for (x, y) in ca.remainder().iter().zip(cv.remainder()) {
+            for (x, y) in ca_remainder.iter().zip(cv_remainder) {
                 s += x.get() * y;
             }
             s
@@ -150029,6 +150029,23 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                 let args = PyTuple::new(py, [subs_obj, a, v])?;
                 let ours = ours_fn.call1(&args)?;
                 let theirs = np_einsum.call1(&args)?;
+                let close: bool = allclose.call1((&ours, &theirs))?.extract()?;
+                assert!(close, "einsum '{subs}' diverges from numpy beyond allclose");
+                let our_dt: String = ours.getattr("dtype")?.str()?.extract()?;
+                let their_dt: String = theirs.getattr("dtype")?.str()?.extract()?;
+                assert_eq!(our_dt, their_dt, "einsum '{subs}' dtype mismatch");
+            }
+            // Single-operand reductions use the same eight-lane accumulation shape as
+            // the paired contractions, but have distinct scalar/row/column fast paths.
+            let single_reduction_cases: &[(&str, i64, &[i64])] = &[
+                ("ij->", 4002, &[58, 69]),
+                ("ij->i", 4002, &[58, 69]),
+                ("ij->j", 4002, &[58, 69]),
+            ];
+            for (subs, n, shape) in single_reduction_cases {
+                let a = mk(*n, shape)?;
+                let ours = ours_fn.call1((*subs, a.clone()))?;
+                let theirs = np_einsum.call1((*subs, a))?;
                 let close: bool = allclose.call1((&ours, &theirs))?.extract()?;
                 assert!(close, "einsum '{subs}' diverges from numpy beyond allclose");
                 let our_dt: String = ours.getattr("dtype")?.str()?.extract()?;
