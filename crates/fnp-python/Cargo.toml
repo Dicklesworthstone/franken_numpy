@@ -95,6 +95,10 @@ name = "criterion_python_f64_convolve"
 harness = false
 
 [[bench]]
+name = "criterion_python_int_convolve"
+harness = false
+
+[[bench]]
 name = "criterion_python_io_text"
 harness = false
 
