@@ -138,3 +138,64 @@ fn ptp_native_fnp_python_path_matches_numpy() {
         Ok(())
     });
 }
+
+/// Locks the zero-copy f64 per-axis path (try_zerocopy_f64_ptp_axis): a large
+/// contiguous float64 array reduced along axis 0 and axis 1, with NaN/inf/-0.0
+/// rows, must be BYTE-IDENTICAL to numpy.ptp (numpy is the oracle), plus an
+/// FNV-1a golden over the fnp bytes for drift. This exercises the borrowed-buffer
+/// reduction that replaced the extract_precise_numeric_array full-input copy.
+#[test]
+fn ptp_zerocopy_f64_axis_matches_numpy_bytes_and_golden() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        // Deterministic LCG f64 matrix (240x160) with embedded NaN/inf/-0.0.
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy)?;
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as _np\n\
+                 s=0x9E3779B9\n\
+                 r,c=240,160\n\
+                 M=_np.empty((r,c),dtype=_np.float64)\n\
+                 for i in range(r):\n\
+                 \x20 for j in range(c):\n\
+                 \x20  s=(s*6364136223846793005+1)&0xFFFFFFFFFFFFFFFF\n\
+                 \x20  M[i,j]=((s>>33)/4294967295.0)-0.5\n\
+                 M[3,7]=_np.nan; M[50,80]=_np.inf; M[110,20]=-_np.inf\n\
+                 M[200,100]=-0.0; M[200,101]=0.0\n",
+            )?
+            .as_c_str(),
+            None,
+            Some(&locals),
+        )?;
+        let m = locals.get_item("M")?.unwrap();
+
+        let mut h: u64 = 0xcbf29ce484222325;
+        for axis in [0i64, 1i64] {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("axis", axis)?;
+            let actual = module
+                .getattr("ptp")?
+                .call((&m,), Some(&kwargs))?
+                .call_method0("tobytes")?
+                .extract::<Vec<u8>>()?;
+            let expected = numpy
+                .getattr("ptp")?
+                .call((&m,), Some(&kwargs))?
+                .call_method0("tobytes")?
+                .extract::<Vec<u8>>()?;
+            assert_eq!(
+                actual, expected,
+                "zero-copy f64 ptp(axis={axis}) must be byte-identical to numpy.ptp"
+            );
+            for b in &actual {
+                h ^= u64::from(*b);
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+        assert_eq!(
+            h, 0x1df562ae07a2a4c0,
+            "ptp zero-copy f64 axis golden FNV drifted"
+        );
+        Ok(())
+    });
+}

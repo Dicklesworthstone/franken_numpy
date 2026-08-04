@@ -1,0 +1,29 @@
+   Compiling fnp-ufunc v0.1.0 (/data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 30.00s
+     Running benches/elementwise.rs (/data/projects/.rch-targets/franken_numpy-cod-a/release/deps/elementwise-bdcc39a09983876b)
+Gnuplot not found, using plotters backend
+Benchmarking extract_f64_masked/100000
+Benchmarking extract_f64_masked/100000: Warming up for 1.0000 s
+Benchmarking extract_f64_masked/100000: Collecting 20 samples in estimated 3.0000 s (37k iterations)
+Benchmarking extract_f64_masked/100000: Analyzing
+extract_f64_masked/100000
+                        time:   [77.976 µs 79.896 µs 82.014 µs]
+                        thrpt:  [1.2193 Gelem/s 1.2516 Gelem/s 1.2824 Gelem/s]
+                 change:
+                        time:   [−71.640% −70.262% −68.728%] (p = 0.00 < 0.05)
+                        thrpt:  [+219.77% +236.27% +252.60%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking extract_f64_masked/1000000
+Benchmarking extract_f64_masked/1000000: Warming up for 1.0000 s
+Benchmarking extract_f64_masked/1000000: Collecting 20 samples in estimated 3.2038 s (3150 iterations)
+Benchmarking extract_f64_masked/1000000: Analyzing
+extract_f64_masked/1000000
+                        time:   [907.08 µs 951.42 µs 987.66 µs]
+                        thrpt:  [1.0125 Gelem/s 1.0511 Gelem/s 1.1024 Gelem/s]
+                 change:
+                        time:   [+21.362% +29.090% +37.870%] (p = 0.00 < 0.05)
+                        thrpt:  [−27.468% −22.535% −17.602%]
+                        Performance has regressed.
+

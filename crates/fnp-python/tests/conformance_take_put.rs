@@ -42,6 +42,59 @@ fn fnp_script(body: String) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn take_python_container_modes_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def take_outcome(fn, a, indices, **kwargs):
+    try:
+        result = fn(a, indices, **kwargs)
+        arr = np.asarray(result)
+        return ("ok", type(result).__name__, str(arr.dtype), tuple(arr.shape), arr.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list payload list indices", lambda: ([4, 3, 5, 7, 6, 8], [0, 1, 4], {})),
+    ("tuple payload tuple indices", lambda: ((1.5, 2.5, 3.5), (2, 0), {})),
+    ("scalar index", lambda: ([10, 20, 30], 1, {})),
+    ("matrix indices shape", lambda: ([10, 20, 30], [[0, 2], [1, 1]], {})),
+    ("empty indices", lambda: ([10, 20, 30], [], {})),
+    ("bool payload", lambda: ([True, False, True], [2, 0], {})),
+    ("nested list axis zero", lambda: ([[1, 2], [3, 4], [5, 6]], [2, 0], {"axis": 0})),
+    ("nested list axis one", lambda: ([[1, 2, 3], [4, 5, 6]], [2, 0], {"axis": 1})),
+    ("nested list negative axis", lambda: ([[1, 2, 3], [4, 5, 6]], [2, 0], {"axis": -1})),
+    ("wrap mode", lambda: ([10, 20, 30], [-1, 3], {"mode": "wrap"})),
+    ("clip mode", lambda: ([10, 20, 30], [-1, 3], {"mode": "clip"})),
+    ("raise mode error", lambda: ([10, 20, 30], [0, 4], {})),
+    ("axis out of bounds error", lambda: ([[1, 2]], [0], {"axis": 2})),
+    ("string payload", lambda: (["alpha", "beta", "gamma"], [2, 0], {})),
+]
+
+ok = True
+for label, factory in cases:
+    a, indices, kwargs = factory()
+    actual = take_outcome(fnp.take, a, indices, **kwargs)
+    a, indices, kwargs = factory()
+    expected = take_outcome(np.take, a, indices, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "take Python-container modes should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn take_basic() -> Result<(), String> {
     let script = fnp_script(
         r#"
@@ -93,6 +146,55 @@ print(np.array_equal(result, expected))
 // ─────────────────────────────────────────────────────────────────────────────
 // take_along_axis
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn take_along_axis_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def take_along_axis_outcome(fn, arr, indices, **kwargs):
+    try:
+        result = fn(arr, indices, **kwargs)
+        out = np.asarray(result)
+        return ("ok", type(result).__name__, str(out.dtype), tuple(out.shape), out.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("nested list axis one", lambda: ([[10, 20, 30], [40, 50, 60]], [[0], [2]], {"axis": 1})),
+    ("tuple payload tuple indices", lambda: (((3, 1, 2), (6, 4, 5)), ((2, 1, 0), (0, 1, 2)), {"axis": 1})),
+    ("negative axis", lambda: ([[10, 20, 30], [40, 50, 60]], [[2, 1, 0], [0, 1, 2]], {"axis": -1})),
+    ("bool payload", lambda: ([[True, False], [False, True]], [[1], [0]], {"axis": 1})),
+    ("empty indices axis one", lambda: ([[1, 2], [3, 4]], [[], []], {"axis": 1})),
+    ("axis zero list indices", lambda: ([[10, 20, 30], [40, 50, 60]], [[1, 0, 1]], {"axis": 0})),
+    ("axis none flattening", lambda: ([3, 1, 2, 6], [3, 0], {"axis": None})),
+    ("axis out of bounds error", lambda: ([[1, 2, 3], [4, 5, 6]], [[0], [1]], {"axis": 2})),
+    ("index out of bounds error", lambda: ([[1, 2, 3], [4, 5, 6]], [[3], [0]], {"axis": 1})),
+    ("shape mismatch error", lambda: ([[1, 2, 3], [4, 5, 6]], [[0, 1], [1, 0], [0, 1]], {"axis": 1})),
+]
+
+ok = True
+for label, factory in cases:
+    arr, indices, kwargs = factory()
+    actual = take_along_axis_outcome(fnp.take_along_axis, arr, indices, **kwargs)
+    arr, indices, kwargs = factory()
+    expected = take_along_axis_outcome(np.take_along_axis, arr, indices, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "take_along_axis Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
 
 #[test]
 fn take_along_axis_basic() -> Result<(), String> {

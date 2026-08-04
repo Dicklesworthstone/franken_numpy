@@ -1,0 +1,6 @@
+Warning: Permanently added '212.90.121.76' (ED25519) to the list of known hosts.
+host vmi1149989
+numpy 2.2.4
+batch_cholesky/shape/500x64x64 median_ns 17885381 min_ns 13984131 max_ns 24919801
+batch_cholesky/shape/64x128x128 median_ns 15610095 min_ns 11695395 max_ns 16085967
+batch_cholesky/shape/16x256x256 median_ns 23468876 min_ns 18454885 max_ns 30186293

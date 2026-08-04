@@ -1,0 +1,6 @@
+op             fnp/np
+array_equal_T  0.996
+array_equiv_T  1.006
+allclose_T     1.002
+nextafter_T    1.002
+roll_T         0.985

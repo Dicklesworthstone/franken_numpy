@@ -1,0 +1,4 @@
+python=3.13.7
+numpy=2.4.3
+putmask_f64_masked/100000: median_ns=93991 p95_ns=114848 mean_ns=99111 cv_pct=11.47 min_ns=90348 max_ns=146972 samples=41 inner=3
+putmask_f64_masked/1000000: median_ns=1209271 p95_ns=1416744 mean_ns=1225371 cv_pct=8.94 min_ns=1073675 max_ns=1492618 samples=41 inner=1

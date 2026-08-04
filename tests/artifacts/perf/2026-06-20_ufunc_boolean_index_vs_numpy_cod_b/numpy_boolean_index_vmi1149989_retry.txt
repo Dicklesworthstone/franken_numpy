@@ -1,0 +1,4 @@
+  File "<stdin>", line 4
+    print(f"host={platform.node()} user={os.environ.get(\"USER\")} python={sys.version.split()[0]} numpy={np.__version__} load={os.getloadavg()}")
+                                                         ^
+SyntaxError: unexpected character after line continuation character

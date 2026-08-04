@@ -278,6 +278,60 @@ print(np.array_equal(fnp_result, np_result))
 }
 
 #[test]
+fn rounding_out_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def out_outcome(module, name, positional=False, bad_shape=False):
+    fn = getattr(module, name)
+    try:
+        x = np.array([-1.7, -0.2, -0.0, 0.0, 1.2], dtype=np.float64)
+        out = np.empty((2,), dtype=np.float64) if bad_shape else np.empty(5, dtype=np.float64)
+        if positional:
+            result = fn(x, out)
+        else:
+            result = fn(x, out=out)
+        return ("ok", result is out, out.dtype.str, tuple(out.shape), out.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc).splitlines()[0])
+
+cases = [
+    ("floor keyword out", "floor", False, False),
+    ("ceil keyword out", "ceil", False, False),
+    ("trunc keyword out", "trunc", False, False),
+    ("rint keyword out", "rint", False, False),
+    ("floor positional out", "floor", True, False),
+    ("ceil positional out", "ceil", True, False),
+    ("trunc positional out", "trunc", True, False),
+    ("rint positional out", "rint", True, False),
+    ("floor bad out shape", "floor", False, True),
+    ("ceil bad out shape", "ceil", False, True),
+    ("trunc bad out shape", "trunc", False, True),
+    ("rint bad out shape", "rint", False, True),
+]
+
+ok = True
+for label, name, positional, bad_shape in cases:
+    actual = out_outcome(fnp, name, positional, bad_shape)
+    expected = out_outcome(np, name, positional, bad_shape)
+    if actual[0] != expected[0] or actual[1] != expected[1]:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "rounding out keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn floor_large_values() -> Result<(), String> {
     let script = fnp_script(
         r#"

@@ -1,0 +1,2 @@
+    Checking fnp-ufunc v0.1.0 (/data/projects/franken_numpy/crates/fnp-ufunc)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.22s

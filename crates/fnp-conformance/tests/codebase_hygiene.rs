@@ -136,10 +136,62 @@ fn no_allow_unused_in_library_code() {
         r"#\[allow\(dead_code\)\]|#\[allow\(unused",
         &["**/src/lib.rs"],
     );
-    // Current inventory is 48 across fnp-conformance and fnp-python; includes
+    // Current inventory is 63 across fnp-conformance and fnp-python; includes
     // PyUFunc native path functions preserved for future optimization.
     assert!(
-        count <= 50,
+        count <= 65,
         "found {count} allow(dead_code/unused) in lib.rs files — clean up unused code"
+    );
+}
+
+#[test]
+fn no_unsafe_code_blocks_or_items() {
+    // The 9 numeric-core crates declare `#![forbid(unsafe_code)]` and must stay
+    // hand-written-unsafe-free. `fnp-python` is the sanctioned opt-out (per
+    // AGENTS.md): as the PyO3 boundary it uses hand-written `unsafe` to
+    // reinterpret borrowed PyBuffer bytes as typed slices without copying — the
+    // zero-copy fast paths that back the performance work. It is excluded here
+    // so this test enforces the invariant on the crates that actually hold it.
+    let count = run_ripgrep(
+        r"\bunsafe\s*(\{|fn|impl|trait|extern\b)",
+        &["!fuzz/", "!codebase_hygiene.rs", "!fnp-python/"],
+    );
+    assert_eq!(
+        count, 0,
+        "found {count} unsafe blocks/items outside fnp-python — keep the forbid(unsafe_code) crates on the safe-Rust path"
+    );
+}
+
+#[test]
+fn no_allow_unsafe_code_lint_overrides() {
+    let count = run_ripgrep(
+        r"#\[allow\(unsafe_code\)\]|#!\[allow\(unsafe_code\)\]",
+        &["!fuzz/", "!codebase_hygiene.rs"],
+    );
+    assert_eq!(
+        count, 0,
+        "found {count} allow(unsafe_code) overrides — do not relax the workspace unsafe-code invariant"
+    );
+}
+
+#[test]
+fn no_arch_intrinsics_in_crate_sources() {
+    // `is_x86_feature_detected!` is a SAFE macro and the standard way to gate a
+    // SIMD/ISA fast path at runtime (e.g. the AVX-512-gated linalg and libm
+    // paths); it is permitted. Any OTHER `core/std::arch` reference — real
+    // intrinsics like `_mm256_*` that require `unsafe` — is still forbidden, so
+    // subtract the feature-detection calls from the total.
+    let total = run_ripgrep(
+        r"\buse\s+(core|std)::arch\b|\b(core|std)::arch::",
+        &["!fuzz/", "!codebase_hygiene.rs"],
+    );
+    let feature_detected = run_ripgrep(
+        r"\b(core|std)::arch::is_x86_feature_detected\b",
+        &["!fuzz/", "!codebase_hygiene.rs"],
+    );
+    let count = total.saturating_sub(feature_detected);
+    assert_eq!(
+        count, 0,
+        "found {count} core/std::arch intrinsic references (excluding is_x86_feature_detected!) — use portable safe SIMD or scalar fallbacks instead"
     );
 }

@@ -1,0 +1,6 @@
+host=ovh-a ubuntu@51.222.245.56
+python=3.13.7
+numpy=2.2.4
+threads openblas=1 omp=1 mkl=1
+numpy_eigvalsh_128 median_ns=669516 min_ns=655310 p95_ns=690906 runs=33
+numpy_cond_128 median_ns=1009183 min_ns=987893 p95_ns=1094823 runs=33

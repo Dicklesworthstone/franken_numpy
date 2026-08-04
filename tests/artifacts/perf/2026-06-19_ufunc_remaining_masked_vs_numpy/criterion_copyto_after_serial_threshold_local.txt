@@ -1,0 +1,6 @@
+   Compiling fnp-ufunc v0.1.0 (/data/projects/franken_numpy/crates/fnp-ufunc)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 27.71s
+     Running benches/elementwise.rs (/data/projects/.rch-targets/franken_numpy-cod-b/release/deps/elementwise-36bd3df0e01f30c6)
+Gnuplot not found, using plotters backend
+test copyto_equal_shape_masked/100000 ... bench:      42,961 ns/iter (+/- 1,964)
+test copyto_equal_shape_masked/1000000 ... bench:   1,316,171 ns/iter (+/- 70,306)

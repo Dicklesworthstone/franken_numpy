@@ -1,0 +1,21 @@
+    Checking fnp-ndarray v0.1.0 (/data/projects/franken_numpy/crates/fnp-ndarray)
+    Checking fnp-runtime v0.1.0 (/data/projects/franken_numpy/crates/fnp-runtime)
+    Checking fnp-io v0.1.0 (/data/projects/franken_numpy/crates/fnp-io)
+    Checking fnp-iter v0.1.0 (/data/projects/franken_numpy/crates/fnp-iter)
+    Checking fnp-dtype v0.1.0 (/data/projects/franken_numpy/crates/fnp-dtype)
+    Checking fnp-linalg v0.1.0 (/data/projects/franken_numpy/crates/fnp-linalg)
+    Checking fnp-random v0.1.0 (/data/projects/franken_numpy/crates/fnp-random)
+    Checking fnp-ufunc v0.1.0 (/data/projects/franken_numpy/crates/fnp-ufunc)
+error: method `nan_filtered` is never used
+     --> crates/fnp-ufunc/src/lib.rs:25364:8
+      |
+ 4913 | impl UFuncArray {
+      | --------------- method in this implementation
+...
+25364 |     fn nan_filtered(&self) -> Self {
+      |        ^^^^^^^^^^^^
+      |
+      = note: `-D dead-code` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: could not compile `fnp-ufunc` (lib) due to 1 previous error

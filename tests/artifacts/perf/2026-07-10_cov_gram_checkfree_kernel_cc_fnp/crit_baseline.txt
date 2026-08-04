@@ -1,0 +1,24 @@
+python_cov_large_boundary/fnp_cov_rowvar_f64_2000x500
+                        time:   [23.023 ms 23.224 ms 23.671 ms]
+python_cov_large_boundary/numpy_cov_rowvar_f64_2000x500
+                        time:   [37.297 ms 39.186 ms 41.955 ms]
+python_cov_large_boundary/fnp_corrcoef_rowvar_f64_2000x500
+                        time:   [26.104 ms 26.346 ms 26.536 ms]
+python_cov_large_boundary/numpy_corrcoef_rowvar_f64_2000x500
+                        time:   [45.229 ms 47.854 ms 50.632 ms]
+python_cov_large_boundary/fnp_cov_rowvar_f64_1000x1000
+                        time:   [8.9063 ms 9.0151 ms 9.2244 ms]
+python_cov_large_boundary/numpy_cov_rowvar_f64_1000x1000
+                        time:   [16.809 ms 24.155 ms 37.757 ms]
+python_cov_large_boundary/fnp_corrcoef_rowvar_f64_1000x1000
+                        time:   [9.7093 ms 9.9887 ms 10.502 ms]
+python_cov_large_boundary/numpy_corrcoef_rowvar_f64_1000x1000
+                        time:   [33.718 ms 47.744 ms 61.692 ms]
+python_cov_large_boundary/fnp_cov_rowvar_f64_500x5000
+                        time:   [18.041 ms 18.424 ms 18.873 ms]
+python_cov_large_boundary/numpy_cov_rowvar_f64_500x5000
+                        time:   [31.016 ms 33.723 ms 36.846 ms]
+python_cov_large_boundary/fnp_corrcoef_rowvar_f64_500x5000
+                        time:   [18.108 ms 18.294 ms 18.545 ms]
+python_cov_large_boundary/numpy_corrcoef_rowvar_f64_500x5000
+                        time:   [33.487 ms 35.378 ms 38.153 ms]

@@ -1,0 +1,5 @@
+# sample-size 15, warm-up 2s, measurement 4s
+test python_cumsum_lastaxis_boundary/fnp_cumsum_f64_axis_last_8192x1024 ... bench:   2,780,644 ns/iter (+/- 400,278)
+test python_cumsum_lastaxis_boundary/numpy_cumsum_f64_axis_last_8192x1024 ... bench:  30,185,124 ns/iter (+/- 530,129)
+test python_cumsum_lastaxis_boundary/fnp_cumsum_f64_axis_last_65536x256 ... bench:   5,431,249 ns/iter (+/- 815,772)
+test python_cumsum_lastaxis_boundary/numpy_cumsum_f64_axis_last_65536x256 ... bench:  59,230,179 ns/iter (+/- 570,654)

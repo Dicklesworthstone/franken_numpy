@@ -159,6 +159,34 @@ fn nan_to_num_custom_nan_matches_numpy() -> Result<(), String> {
 }
 
 #[test]
+fn nan_to_num_copy_kwarg_matches_numpy() -> Result<(), String> {
+    // numpy signature: nan_to_num(x, copy=True, nan=0.0, posinf=None, neginf=None).
+    // copy=True returns a fresh array (input untouched); copy=False replaces NaN/+-inf
+    // IN PLACE on the input ndarray and returns that same object. Verify both the
+    // returned values and the aliasing/mutation behavior against the numpy oracle.
+    // Driver prints "<input_after>|<result>|<aliases>" for each engine.
+    let case = "np.array([np.nan, np.inf, -np.inf, 1.5])";
+
+    for (copy, nan) in [("True", "0.0"), ("False", "0.0"), ("False", "7.0")] {
+        let body = |engine: &str| {
+            format!(
+                "x = {case}\n\
+                 r = {engine}.nan_to_num(x, copy={copy}, nan={nan})\n\
+                 print(x.flatten().tolist(), '|', np.asarray(r).flatten().tolist(), '|', r is x)"
+            )
+        };
+        let numpy_out = numpy_oracle(&format!("import numpy as np\n{}", body("np")))?;
+        let rust_out = numpy_oracle(&fnp_script(body("fnp")))?;
+        assert_eq!(
+            numpy_out, rust_out,
+            "nan_to_num copy={copy} nan={nan} mismatch (input-after | result | aliases)\nnumpy: {numpy_out}\nrust:  {rust_out}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn nan_to_num_custom_nan_preserves_dtype_inf_defaults() -> Result<(), String> {
     let script = r#"
 import numpy as np
@@ -302,6 +330,39 @@ fn clip_basic_matches_numpy() -> Result<(), String> {
 }
 
 #[test]
+fn clip_min_max_kwargs_match_numpy() -> Result<(), String> {
+    // numpy 2.0 renamed a_min/a_max -> min/max (each independently optional);
+    // the legacy a_min/a_max spelling is still accepted but cannot be mixed with
+    // min/max. Verify values AND error-parity (mixed spellings raise) vs the
+    // oracle. Each case prints either the flattened result or "ERR".
+    let arr = "np.array([1.0, 2.0, 3.0, 4.0, 5.0])";
+    let calls = vec![
+        "min=2.0, max=4.0",
+        "min=2.0",
+        "max=4.0",
+        "a_min=2.0, a_max=4.0",
+        "a_min=None, a_max=4.0",
+        "min=2.0, a_max=4.0", // mixed -> numpy TypeError
+        "a_min=2.0, max=4.0", // mixed -> numpy TypeError
+    ];
+    for call in &calls {
+        let body = |engine: &str| {
+            format!(
+                "try:\n    r = {engine}.clip({arr}, {call})\n    print(np.asarray(r).flatten().tolist())\n\
+                 except TypeError:\n    print('ERR')\n"
+            )
+        };
+        let numpy_out = numpy_oracle(&format!("import numpy as np\n{}", body("np")))?;
+        let rust_out = numpy_oracle(&fnp_script(body("fnp")))?;
+        assert_eq!(
+            numpy_out, rust_out,
+            "clip kwargs mismatch for ({call})\nnumpy: {numpy_out}\nrust:  {rust_out}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn clip_nan_handling_matches_numpy() -> Result<(), String> {
     let test_cases = vec![
         ("np.array([np.nan, 1.0, 2.0, np.nan])", "0.5", "1.5"),
@@ -438,6 +499,35 @@ fn clip_dtype_preserved_matches_numpy() -> Result<(), String> {
 }
 
 #[test]
+fn clip_f32_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+n = (1 << 21) + 65
+x = np.linspace(-2000.5, 2000.5, n, dtype=np.float32)
+x[0] = np.float32(np.nan)
+x[1] = np.float32(-0.0)
+x[2] = np.float32(np.inf)
+x[3] = np.float32(-np.inf)
+actual = fnp.clip(x, np.float32(-1000.0), np.float32(1000.0))
+expected = np.clip(x, np.float32(-1000.0), np.float32(1000.0))
+print(
+    actual.dtype == expected.dtype
+    and actual.shape == expected.shape
+    and actual.tobytes() == expected.tobytes()
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large f32 clip parallel path must be bit-identical to numpy"
+    );
+    Ok(())
+}
+
+#[test]
 fn nan_to_num_dtype_preserved_matches_numpy() -> Result<(), String> {
     let test_cases = vec![
         "np.array([np.nan, 1.0, np.inf], dtype=np.float32)",
@@ -493,5 +583,61 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
         "nan_to_num scalar return type should match numpy: {result}"
     );
 
+    Ok(())
+}
+
+/// Locks nan_to_num on COMPLEX input (the parity fix that delegates complex to
+/// numpy): complex128/complex64 with NaN/+-inf in real and/or imag parts, default
+/// and custom nan/posinf/neginf, must be BYTE-identical to numpy.nan_to_num plus a
+/// sha256 golden over the result bytes.
+#[test]
+fn nan_to_num_complex_matches_numpy_bytes_and_golden() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+c128 = np.array([1+np.nan*1j, np.inf+2j, -np.inf-np.inf*1j, 3+4j,
+                 np.nan+np.nan*1j, 5-6j], dtype=np.complex128)
+c64 = c128.astype(np.complex64)
+big = np.empty((40, 30), dtype=np.complex128)
+s = 0x2545F4914F6CDD1D
+for x in np.ndindex(40, 30):
+    s = (s * 6364136223846793005 + 1) & 0xFFFFFFFFFFFFFFFF
+    re = ((s >> 11) / (1 << 53)) * 8.0 - 4.0
+    s = (s * 6364136223846793005 + 1) & 0xFFFFFFFFFFFFFFFF
+    im = ((s >> 11) / (1 << 53)) * 8.0 - 4.0
+    big[x] = complex(re, im)
+big.flat[::53] = np.nan
+big.flat[7::101] = np.inf + 1j * np.nan
+big.flat[11::97] = (-np.inf) * (1 + 1j)
+h = hashlib.sha256()
+allmatch = True
+specs = [
+    (c128, {}), (c128, dict(nan=7.0, posinf=100.0, neginf=-100.0)), (c128, dict(nan=-1.5)),
+    (c64, {}), (c64, dict(nan=2.0, posinf=9.0)),
+    (big, dict(nan=0.5)), (big, {}),
+]
+for arr, kw in specs:
+    r = np.asarray(fnp.nan_to_num(arr, **kw))
+    e = np.asarray(np.nan_to_num(arr, **kw))
+    if r.shape != e.shape or r.dtype != e.dtype or r.tobytes() != e.tobytes():
+        allmatch = False
+    h.update(r.tobytes())
+print(allmatch)
+print(h.hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "True",
+        "complex nan_to_num must be byte-identical to numpy.nan_to_num"
+    );
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "afec0558d929a14467c727f8aa576d4156f88a360e19e32d3725157550ba94a9",
+        "complex nan_to_num golden sha256 drifted"
+    );
     Ok(())
 }

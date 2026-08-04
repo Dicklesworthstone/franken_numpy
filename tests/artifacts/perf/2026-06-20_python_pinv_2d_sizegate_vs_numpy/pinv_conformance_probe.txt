@@ -1,0 +1,23 @@
+PASS square_invertible
+PASS rectangular_tall
+PASS rectangular_wide
+PASS singular
+PASS ApinvA~A
+PASS complex
+PASS gate(32, 32)
+PASS gate(33, 33)
+PASS gate(32, 33)
+PASS gate(33, 32)
+PASS gate(40, 8)
+PASS gate(8, 40)
+PASS gate(64, 64)
+PASS gate(600, 400)
+PASS gate(400, 600)
+PASS rcond_explicit
+PASS rtol_explicit
+PASS herm16
+PASS herm32
+PASS herm64
+PASS herm200
+PASS batched
+TOTAL FAILS: 0

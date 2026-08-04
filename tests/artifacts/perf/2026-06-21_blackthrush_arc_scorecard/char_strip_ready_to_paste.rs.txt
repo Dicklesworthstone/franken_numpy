@@ -1,0 +1,150 @@
+// READY-TO-PASTE (BlackThrush, disk-critical pre-write 2026-06-22) — char/strings strip family.
+// Build-free authored; paste into crates/fnp-python/src/lib.rs when disk recovers, then build+verify.
+// Mirrors the existing try_zerocopy_unicode_ascii_case / cap_title pattern (same-width '<U' output).
+//
+// PLACEMENT:
+//  - helper + wrapper: insert near unicode_ascii_cap_title_or_numpy (helpers ABOVE #[pyfunction]).
+//  - the 6 pyfunctions: after char_str_len/strings (i.e. with the other char/strings fns).
+//  - registration: in the char_mod / strings module-build block.
+
+// ---- helper (place above the #[pyfunction] attrs) ----
+// numpy.char/strings.strip/lstrip/rstrip delegate to slow per-element Python str methods (~33ns/el).
+// Output PRESERVES field width (<U6 in -> <U6 out, content left-justified + NUL-padded). Fast-path
+// only the default-whitespace form (chars=None); ASCII whitespace = {\t\n\v\f\r, \x1c-\x1f, space}.
+// Non-ASCII (>0x7f) -> delegate (numpy handles unicode whitespace). mode: 0=strip 1=lstrip 2=rstrip.
+fn try_zerocopy_unicode_ascii_strip(
+    py: Python<'_>,
+    input: &Bound<'_, PyAny>,
+    mode: u8,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    if !input.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let dtype = input.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "U" {
+        return Ok(None);
+    }
+    if !input
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    if itemsize == 0 || itemsize % 4 != 0 {
+        return Ok(None);
+    }
+    let w = itemsize / 4;
+    let uint32_dtype = numpy.getattr("uint32")?;
+    let codepoints = input.call_method1("view", (&uint32_dtype,))?;
+    let Ok(in_buffer) = PyBuffer::<u32>::get(&codepoints) else {
+        return Ok(None);
+    };
+    let Some(codepoints_in) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if codepoints_in.iter().any(|c| c.get() > 0x7f) {
+        return Ok(None); // non-ASCII -> delegate (unicode whitespace semantics)
+    }
+    if codepoints_in.len() % w != 0 {
+        return Ok(None);
+    }
+    let codepoints_out = numpy.call_method1("empty_like", (&codepoints,))?;
+    let Ok(out_buffer) = PyBuffer::<u32>::get(&codepoints_out) else {
+        return Ok(None);
+    };
+    let Some(output) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    let is_ws = |c: u32| matches!(c, 9..=13 | 28..=31 | 32);
+    for (slot_in, slot_out) in codepoints_in.chunks(w).zip(output.chunks(w)) {
+        // logical length: strip trailing NUL padding
+        let mut len = w;
+        while len > 0 && slot_in[len - 1].get() == 0 {
+            len -= 1;
+        }
+        let mut start = 0usize;
+        let mut end = len;
+        if mode != 2 {
+            while start < end && is_ws(slot_in[start].get()) {
+                start += 1;
+            }
+        }
+        if mode != 1 {
+            while end > start && is_ws(slot_in[end - 1].get()) {
+                end -= 1;
+            }
+        }
+        let n = end - start;
+        for k in 0..n {
+            slot_out[k].set(slot_in[start + k].get());
+        }
+        for s in slot_out.iter().take(w).skip(n) {
+            s.set(0);
+        }
+    }
+    Ok(Some(codepoints_out.call_method1("view", (&dtype,))?.unbind()))
+}
+
+// ---- wrapper (chars=None fast-paths; a non-None chars arg delegates to numpy) ----
+fn unicode_ascii_strip_or_numpy(
+    py: Python<'_>,
+    input: Py<PyAny>,
+    chars: Option<Py<PyAny>>,
+    namespace: &str,
+    method: &str,
+    mode: u8,
+) -> PyResult<Py<PyAny>> {
+    let chars_given = chars.as_ref().is_some_and(|c| !c.bind(py).is_none());
+    if !chars_given
+        && let Some(result) = try_zerocopy_unicode_ascii_strip(py, input.bind(py), mode)?
+    {
+        return Ok(result);
+    }
+    let func = py.import("numpy")?.getattr(namespace)?.getattr(method)?;
+    match chars {
+        Some(c) => Ok(func.call1((input.bind(py), c.bind(py)))?.unbind()),
+        None => Ok(func.call1((input.bind(py),))?.unbind()),
+    }
+}
+
+// ---- 6 pyfunctions (signatures match numpy: strip(a, chars=None)) ----
+#[pyfunction(name = "strip", signature = (a, chars=None))]
+fn char_strip_native(py: Python<'_>, a: Py<PyAny>, chars: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    unicode_ascii_strip_or_numpy(py, a, chars, "char", "strip", 0)
+}
+#[pyfunction(name = "lstrip", signature = (a, chars=None))]
+fn char_lstrip_native(py: Python<'_>, a: Py<PyAny>, chars: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    unicode_ascii_strip_or_numpy(py, a, chars, "char", "lstrip", 1)
+}
+#[pyfunction(name = "rstrip", signature = (a, chars=None))]
+fn char_rstrip_native(py: Python<'_>, a: Py<PyAny>, chars: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    unicode_ascii_strip_or_numpy(py, a, chars, "char", "rstrip", 2)
+}
+#[pyfunction(name = "strip", signature = (a, chars=None))]
+fn strings_strip_native(py: Python<'_>, a: Py<PyAny>, chars: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    unicode_ascii_strip_or_numpy(py, a, chars, "strings", "strip", 0)
+}
+#[pyfunction(name = "lstrip", signature = (a, chars=None))]
+fn strings_lstrip_native(py: Python<'_>, a: Py<PyAny>, chars: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    unicode_ascii_strip_or_numpy(py, a, chars, "strings", "lstrip", 1)
+}
+#[pyfunction(name = "rstrip", signature = (a, chars=None))]
+fn strings_rstrip_native(py: Python<'_>, a: Py<PyAny>, chars: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    unicode_ascii_strip_or_numpy(py, a, chars, "strings", "rstrip", 2)
+}
+
+// ---- registration (add into the respective module-build blocks) ----
+// strings.add_function(wrap_pyfunction!(strings_strip_native, &strings)?)?;
+// strings.add_function(wrap_pyfunction!(strings_lstrip_native, &strings)?)?;
+// strings.add_function(wrap_pyfunction!(strings_rstrip_native, &strings)?)?;
+// char_mod.add_function(wrap_pyfunction!(char_strip_native, &char_mod)?)?;
+// char_mod.add_function(wrap_pyfunction!(char_lstrip_native, &char_mod)?)?;
+// char_mod.add_function(wrap_pyfunction!(char_rstrip_native, &char_mod)?)?;
+
+// VERIFY (when disk recovers): conformance_strings_namespace; bit-exact vs numpy on ASCII
+// leading/trailing/both/all-ws/empty/no-ws/embedded-ws, widths U1/U6/U20, N-D, chars-arg-delegates,
+// non-ASCII-delegates; expect ~0.1-0.3x. RISK: the let-chain `&& let Some(..)` needs the same
+// edition as the existing nanargmax dispatch (codebase already uses let-chains, so OK).

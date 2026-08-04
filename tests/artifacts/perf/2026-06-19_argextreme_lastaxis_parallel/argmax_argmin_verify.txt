@@ -1,0 +1,4 @@
+cases=36 fails=0
+argmax_ax1       np=   6709.6us fnp=   2776.7us fnp/np=0.414
+argmin_ax1       np=  11442.2us fnp=   3883.3us fnp/np=0.339
+argmax_ax1_i64   np=   6828.7us fnp=   3213.1us fnp/np=0.471

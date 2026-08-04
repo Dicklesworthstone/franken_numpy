@@ -504,3 +504,57 @@ print(fnp_raised == np_raised == True)
     );
     Ok(())
 }
+
+#[test]
+fn max_bool_zero_copy_matches_numpy_and_golden() -> Result<(), String> {
+    let script = fnp_max_script(
+        r#"
+import hashlib
+
+cases = [
+    ("flat_mixed", fnp.max, np.max, np.array([[False, False, True], [False, True, False]], dtype=bool), {}),
+    ("flat_all_true", fnp.max, np.max, np.ones((4, 5), dtype=bool), {}),
+    ("flat_all_false", fnp.max, np.max, np.zeros((4, 5), dtype=bool), {}),
+    ("axis0", fnp.max, np.max, np.array([[False, False, True], [True, False, False]], dtype=bool), {"axis": 0}),
+    ("axis1", fnp.max, np.max, np.array([[False, False, True], [False, False, False]], dtype=bool), {"axis": 1}),
+    ("axis1_keepdims", fnp.max, np.max, np.array([[False, False, True], [False, False, False]], dtype=bool), {"axis": 1, "keepdims": True}),
+    ("neg_axis", fnp.max, np.max, np.array([[[False, False], [False, True]], [[False, False], [False, False]]], dtype=bool), {"axis": -1}),
+    ("alias_amax", fnp.amax, np.amax, np.array([[False, True], [False, False]], dtype=bool), {"axis": 0, "keepdims": True}),
+]
+
+chunks = []
+for name, fnp_op, np_op, arr, kwargs in cases:
+    ours = fnp_op(arr, **kwargs)
+    theirs = np_op(arr, **kwargs)
+    ours_arr = np.asarray(ours)
+    theirs_arr = np.asarray(theirs)
+    assert ours_arr.dtype == theirs_arr.dtype == np.dtype("bool"), (name, ours_arr.dtype, theirs_arr.dtype)
+    assert ours_arr.shape == theirs_arr.shape, (name, ours_arr.shape, theirs_arr.shape)
+    assert np.array_equal(ours_arr, theirs_arr), (name, ours_arr, theirs_arr)
+    chunks.append(name.encode())
+    chunks.append(str(ours_arr.dtype).encode())
+    chunks.append(np.asarray(ours_arr.shape, dtype=np.int64).tobytes())
+    chunks.append(np.ascontiguousarray(ours_arr).view(np.uint8).tobytes())
+
+for op in (fnp.max, fnp.amax):
+    try:
+        op(np.empty((0, 3), dtype=bool), axis=0)
+    except ValueError:
+        chunks.append(b"empty-axis-valueerror")
+    else:
+        raise AssertionError("empty bool max axis should defer to numpy ValueError")
+
+ours = hashlib.sha256(b"|".join(chunks)).hexdigest()
+print(ours)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let expected_sha = "ebf3e30b6d08bdd20bbd84b17249a7e973734cb6c18bd34ede1b6127db9db96a";
+    assert_eq!(
+        result.trim(),
+        expected_sha,
+        "bool max dtype/value/shape golden changed: {result}"
+    );
+    Ok(())
+}

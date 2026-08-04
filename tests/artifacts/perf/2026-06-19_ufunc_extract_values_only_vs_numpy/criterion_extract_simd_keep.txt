@@ -1,0 +1,24 @@
+Command:
+CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-ufunc --bench elementwise extract_f64_masked -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher
+
+Worker:
+hz2
+
+Rows:
+extract_f64_masked/100000  = 44,666 ns/iter (+/- 710)
+extract_f64_masked/1000000 = 496,772 ns/iter (+/- 55,271)
+
+Same-worker pre-change baseline from this run:
+extract_f64_masked/100000  = 88,754 ns/iter (+/- 1,522)
+extract_f64_masked/1000000 = 988,714 ns/iter (+/- 107,641)
+
+Local same-host confirmation:
+Command:
+CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b cargo bench -p fnp-ufunc --bench elementwise extract_f64_masked -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher
+
+Rows:
+extract_f64_masked/100000  = 42,327 ns/iter (+/- 2,746)
+extract_f64_masked/1000000 = 610,601 ns/iter (+/- 56,273)
+
+Reference:
+numpy_extract_local_baseline.txt

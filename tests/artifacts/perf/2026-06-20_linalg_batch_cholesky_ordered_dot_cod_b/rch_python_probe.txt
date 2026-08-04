@@ -1,0 +1,2 @@
+thinkstation1
+3.13.7 (main, Mar  3 2026, 12:19:54) [GCC 15.2.0]

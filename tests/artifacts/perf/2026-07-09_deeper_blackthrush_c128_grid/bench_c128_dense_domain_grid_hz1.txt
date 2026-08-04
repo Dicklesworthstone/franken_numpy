@@ -1,0 +1,12 @@
+python_c128_setops_boundary/fnp_union1d_c128_2m_2m
+                        time:   [98.022 ms 100.06 ms 103.99 ms]
+python_c128_setops_boundary/numpy_union1d_c128_2m_2m
+                        time:   [667.50 ms 681.10 ms 695.25 ms]
+python_c128_setops_boundary/fnp_intersect1d_c128_2m_2m
+                        time:   [61.263 ms 62.912 ms 64.314 ms]
+python_c128_setops_boundary/numpy_intersect1d_c128_2m_2m
+                        time:   [981.98 ms 993.88 ms 1.0071 s]
+python_c128_setops_boundary/fnp_setdiff1d_c128_2m_2m
+                        time:   [76.196 ms 79.104 ms 83.446 ms]
+python_c128_setops_boundary/numpy_setdiff1d_c128_2m_2m
+                        time:   [611.42 ms 616.77 ms 624.84 ms]

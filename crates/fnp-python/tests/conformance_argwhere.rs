@@ -77,6 +77,88 @@ fn parse_nested_int_list(s: &str) -> Vec<Vec<i64>> {
     result
 }
 
+fn argwhere_outcome_body(function_expr: &str, input_expr: &str) -> String {
+    format!(
+        "def outcome(fn):\n\
+         {I4}try:\n\
+         {I8}value = fn({input_expr})\n\
+         {I8}arr = np.asarray(value)\n\
+         {I8}print('ok')\n\
+         {I8}print(type(value).__name__)\n\
+         {I8}print(str(arr.dtype))\n\
+         {I8}print(tuple(arr.shape))\n\
+         {I8}print(arr.tolist())\n\
+         {I4}except Exception as exc:\n\
+         {I8}print('err')\n\
+         {I8}print(type(exc).__name__)\n\
+         {I8}print(str(exc))\n\
+         outcome({function_expr})",
+        I4 = "    ",
+        I8 = "        ",
+    )
+}
+
+fn numpy_argwhere_outcome_script(input_expr: &str) -> String {
+    format!(
+        "import numpy as np\n{}",
+        argwhere_outcome_body("np.argwhere", input_expr)
+    )
+}
+
+fn fnp_argwhere_outcome_script(input_expr: &str) -> String {
+    fnp_argwhere_script(argwhere_outcome_body("fnp.argwhere", input_expr))
+}
+
+#[test]
+fn argwhere_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let cases = [
+        ("list fallback", "[0, 2, 0, 3]"),
+        ("tuple fallback", "(0, 0, 5, 0)"),
+        ("bool list", "[False, True, False, True]"),
+        ("nested list", "[[0, 1], [2, 0]]"),
+        ("scalar nonzero", "7"),
+        ("scalar zero", "0"),
+        ("zero-d ndarray nonzero", "np.array(7)"),
+        ("zero-d ndarray zero", "np.array(0)"),
+        (
+            "bool ndarray fast path",
+            "np.array([False, True, False, True], dtype=np.bool_)",
+        ),
+        (
+            "uint16 ndarray fast path",
+            "np.array([0, 4, 0, 5], dtype=np.uint16)",
+        ),
+        (
+            "signed-zero nan float path",
+            "np.array([-0.0, np.nan, 2.5, 0.0])",
+        ),
+        (
+            "empty two-dimensional ndarray",
+            "np.zeros((0, 2), dtype=np.int64)",
+        ),
+        (
+            "object truthiness",
+            "np.array(['', 'x', '0'], dtype=object)",
+        ),
+        ("ragged list error", "[[1], [0, 2]]"),
+    ];
+
+    for (label, input_expr) in cases {
+        let numpy_script = numpy_argwhere_outcome_script(input_expr);
+        let numpy_result = numpy_oracle(&numpy_script)?;
+
+        let rust_script = fnp_argwhere_outcome_script(input_expr);
+        let rust_result = numpy_oracle(&rust_script)?;
+
+        assert_eq!(
+            numpy_result, rust_result,
+            "argwhere Python-container surface mismatch for {label}"
+        );
+    }
+
+    Ok(())
+}
+
 #[test]
 fn argwhere_1d_matches_numpy_across_50_cases() -> Result<(), String> {
     let test_cases = vec![
@@ -348,5 +430,71 @@ fn argwhere_complex_dtype_matches_numpy() -> Result<(), String> {
         );
     }
 
+    Ok(())
+}
+
+#[test]
+fn parallel_argwhere_bit_exact_matches_numpy() -> Result<(), String> {
+    // Large contiguous inputs take the blocked parallel two-pass with
+    // per-block odometer seeding (one divmod chain per block); coordinate
+    // rows must be byte-identical to numpy across ndim, dtypes, densities,
+    // non-block-multiple sizes, and degenerate shapes. Small and
+    // non-contiguous inputs keep the serial native / delegate.
+    let script = fnp_argwhere_script(
+        r#"
+import time
+rng = np.random.default_rng(71)
+verdicts = []
+cases = [
+    ("1-D int64", rng.integers(-5, 5, 4_000_003)),
+    ("2-D int64 dense", rng.integers(-5, 5, (2048, 1024))),
+    ("2-D bool 10%", rng.random((2048, 1024)) > 0.9),
+    ("2-D f64", np.where(rng.random((1024, 1024)) > 0.5, rng.standard_normal((1024, 1024)), 0.0)),
+    ("2-D odd", rng.integers(-2, 2, (999, 1237))),
+    ("3-D int64", rng.integers(-3, 3, (128, 128, 128))),
+    ("4-D int32", rng.integers(-2, 2, (16, 32, 64, 32)).astype(np.int32)),
+    ("tall", rng.integers(-2, 2, (1_000_000, 3))),
+    ("wide", rng.integers(-2, 2, (3, 1_000_000))),
+    ("all-zero", np.zeros((1024, 1024), dtype=np.int64)),
+    ("all-nonzero", np.ones((1024, 1024), dtype=np.uint16)),
+]
+for name, arr in cases:
+    r = fnp.argwhere(arr); e = np.argwhere(arr)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL {name}")
+# small + non-contiguous stay byte-identical via serial/delegate
+s = rng.integers(-2, 2, (40, 40))
+if fnp.argwhere(s).tobytes() != np.argwhere(s).tobytes():
+    verdicts.append("FAIL small serial")
+nc = rng.integers(-2, 2, (2048, 2048))[:, ::2]
+if fnp.argwhere(nc).tobytes() != np.argwhere(nc).tobytes():
+    verdicts.append("FAIL non-contig delegate")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W2 = rng.integers(-5, 5, (4096, 4096))
+tn = best(lambda: np.argwhere(W2)); tf = best(lambda: fnp.argwhere(W2))
+print(f"ARGWHERE_INT64_2D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+W3 = rng.integers(-5, 5, (256, 256, 256))
+tn = best(lambda: np.argwhere(W3)); tf = best(lambda: fnp.argwhere(W3))
+print(f"ARGWHERE_INT64_3D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+W2b = rng.random((4096, 4096)) > 0.9
+tn = best(lambda: np.argwhere(W2b)); tf = best(lambda: fnp.argwhere(W2b))
+print(f"ARGWHERE_BOOL_2D_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces ARGWHERE_*_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "parallel argwhere must be bit-identical to numpy: {result}"
+    );
     Ok(())
 }

@@ -1,0 +1,13 @@
+run_id=2026-06-21_linalg_matrix_norm_column_cod_b_pass2
+agent=YellowElk
+assignee=cod-b
+parent_bead=franken_numpy-ixs5y
+crate=fnp-linalg
+target=criterion_linalg::matrix_norm_nxn_orders/(one|neg_one)
+target_dir=/data/projects/.rch-targets/franken_numpy-cod-b
+authoritative_worker=vmi1152480
+authoritative_rust=current_matrix_norm_column_hz1_rerun.txt
+authoritative_numpy=numpy_matrix_norm_column_vmi1152480.txt
+focused_conformance=test_matrix_norm_column_bits_rch.txt
+release_build=build_fnp_linalg_release_rch.txt
+scorecard=scorecard.md

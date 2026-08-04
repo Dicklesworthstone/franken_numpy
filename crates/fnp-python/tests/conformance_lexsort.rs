@@ -35,6 +35,67 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+fn indent_python(body: &str) -> String {
+    body.lines()
+        .map(|line| {
+            if line.trim().is_empty() {
+                "    ".to_string()
+            } else {
+                format!("    {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn outcome_body(case_body: &str) -> String {
+    format!(
+        r#"
+import json
+import numpy as np
+
+def normalize(value):
+    if isinstance(value, np.ndarray):
+        return {{
+            "kind": "ndarray",
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+            "values": repr(value.tolist()),
+        }}
+    if isinstance(value, tuple):
+        return {{"kind": "tuple", "items": [normalize(item) for item in value]}}
+    if isinstance(value, list):
+        return {{"kind": "list", "items": [normalize(item) for item in value]}}
+    if isinstance(value, np.generic):
+        return {{
+            "kind": "scalar",
+            "type": type(value).__name__,
+            "dtype": str(value.dtype),
+            "value": repr(value.item()),
+        }}
+    return {{"kind": "object", "type": type(value).__name__, "value": repr(value)}}
+
+try:
+{case}
+    print(json.dumps({{"status": "ok", "result": normalize(result)}}, sort_keys=True))
+except Exception as error:
+    print(json.dumps({{"status": "error", "type": type(error).__name__}}, sort_keys=True))
+"#,
+        case = indent_python(case_body)
+    )
+}
+
+fn numpy_outcome_script(case_body: &str) -> String {
+    format!(
+        "import numpy as np\nMODULE = np\n{}",
+        outcome_body(case_body)
+    )
+}
+
+fn fnp_outcome_script(case_body: &str) -> String {
+    fnp_script(format!("MODULE = fnp\n{}", outcome_body(case_body)))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Basic lexsort
 // ─────────────────────────────────────────────────────────────────────────────
@@ -87,6 +148,44 @@ print(np.array_equal(fnp_result, np_result))
     );
     let output = numpy_oracle(&script)?;
     assert_eq!(output, "True", "lexsort three keys mismatch");
+    Ok(())
+}
+
+#[test]
+fn lexsort_keyword_and_error_outcomes_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "python list keys",
+            "result = MODULE.lexsort(([2, 1, 2, 1], [10, 10, 5, 5]))",
+        ),
+        (
+            "raw 2d list keys",
+            "result = MODULE.lexsort([[3, 1, 2], [0, 0, 0]])",
+        ),
+        (
+            "axis zero fallback",
+            "result = MODULE.lexsort(np.array([[3, 1, 2], [0, 0, 0]]), axis=0)",
+        ),
+        (
+            "string keys fallback",
+            "result = MODULE.lexsort((['b', 'a', 'b'], ['x', 'x', 'a']))",
+        ),
+        (
+            "mismatched key length error",
+            "result = MODULE.lexsort(([1, 2], [1, 2, 3]))",
+        ),
+        (
+            "axis none error",
+            "result = MODULE.lexsort(np.array([[3, 1, 2], [0, 0, 0]]), axis=None)",
+        ),
+    ];
+
+    for (name, case_body) in cases {
+        let expected = numpy_oracle(&numpy_outcome_script(case_body))?;
+        let actual = numpy_oracle(&fnp_outcome_script(case_body))?;
+        assert_eq!(actual, expected, "{name}");
+    }
+
     Ok(())
 }
 

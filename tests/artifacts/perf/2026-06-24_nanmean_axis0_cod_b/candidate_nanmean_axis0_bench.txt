@@ -1,0 +1,4 @@
+test python_var_axis0_boundary/fnp_nanmean_f64_axis0_4096x512 ... bench:   1,415,014 ns/iter (+/- 49,187)
+test python_var_axis0_boundary/numpy_nanmean_f64_axis0_4096x512 ... bench:   3,337,235 ns/iter (+/- 303,416)
+test python_var_axis0_boundary/fnp_nanmean_f64_axis0_50000x64 ... bench:   2,129,479 ns/iter (+/- 144,327)
+test python_var_axis0_boundary/numpy_nanmean_f64_axis0_50000x64 ... bench:   6,218,453 ns/iter (+/- 106,484)

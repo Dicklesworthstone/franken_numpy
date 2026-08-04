@@ -1,0 +1,13 @@
+shapes=(24,8,40,6) path=['einsum_path', (1, 2), (0, 1)] left(ab)c=False right a(bc)=False
+pairwise-via-np-einsum == optimize=True: False (step1 dtype=float16)
+numpy=2.4.3 fails=4/4
+=== path-faithful:
+(8,9,10,11) path=[(1, 2), (0, 1)] matmul-pairs=True
+(16,16,16,16) path=[(0, 1), (0, 1)] matmul-pairs=True
+(5,30,4,7) path=[(0, 1), (0, 1)] matmul-pairs=True
+(24,8,40,6) path=[(1, 2), (0, 1)] matmul-pairs=True
+(64,64,64,64) path=[(0, 1), (0, 1)] matmul-pairs=True
+numpy=2.4.3 ok=5/5
+numpy=2.4.6 ok=5/5
+numpy=2.2.4 ok=5/5
+numpy=2.3.5 ok=5/5

@@ -37,6 +37,108 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+#[test]
+fn shape_manip_python_container_and_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def clean(value):
+    if isinstance(value, float) and np.isnan(value):
+        return "nan"
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    return value
+
+def normalize_array(value):
+    array = np.asarray(value)
+    return (
+        str(array.dtype),
+        tuple(array.shape),
+        clean(array.tolist()),
+        bool(array.flags["WRITEABLE"]),
+    )
+
+def outcome(call_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize_array(call_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+object_arr = np.array([["a", None], ["b", "c"]], dtype=object)
+cases = [
+    (
+        "squeeze Python list tuple axis",
+        "squeeze",
+        lambda: (([[[1, 2, 3]]],), {"axis": (0, 1)}),
+    ),
+    ("squeeze scalar result", "squeeze", lambda: (([[[5]]],), {})),
+    ("squeeze non-unit axis error", "squeeze", lambda: (([[1, 2], [3, 4]],), {"axis": 0})),
+    (
+        "expand_dims tuple axes",
+        "expand_dims",
+        lambda: (([1, 2, 3],), {"axis": (0, 2)}),
+    ),
+    (
+        "expand_dims list axes",
+        "expand_dims",
+        lambda: ((np.array([1, 2, 3]), [0, -1]), {}),
+    ),
+    (
+        "expand_dims repeated axis error",
+        "expand_dims",
+        lambda: (([1, 2, 3],), {"axis": (0, 0)}),
+    ),
+    (
+        "transpose tuple input keyword axes",
+        "transpose",
+        lambda: ((((1, 2, 3), (4, 5, 6)),), {"axes": [1, 0]}),
+    ),
+    (
+        "transpose object array",
+        "transpose",
+        lambda: ((object_arr,), {"axes": (1, 0)}),
+    ),
+    (
+        "transpose axes length error",
+        "transpose",
+        lambda: (([[1, 2], [3, 4]],), {"axes": (0, 1, 2)}),
+    ),
+    (
+        "swapaxes Python list keyword axes",
+        "swapaxes",
+        lambda: (([[1, 2, 3], [4, 5, 6]],), {"axis1": 0, "axis2": 1}),
+    ),
+    (
+        "swapaxes object array negative axis",
+        "swapaxes",
+        lambda: ((object_arr,), {"axis1": 0, "axis2": -1}),
+    ),
+    ("swapaxes axis error", "swapaxes", lambda: (([[1, 2], [3, 4]], 0, 5), {})),
+]
+
+ok = True
+for label, name, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(getattr(fnp, name), *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(getattr(np, name), *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "shape-manip Python-container and keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // squeeze
 // ─────────────────────────────────────────────────────────────────────────────
@@ -483,5 +585,40 @@ print(np.array_equal(fnp_result, np_result))
         "True",
         "expand_dims complex should match numpy"
     );
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// reshape signature parity (numpy 2.1: reshape(a, shape, order='C', *, copy=None);
+// `newshape` removed, `shape`/`copy` added)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn reshape_shape_copy_kwargs_match_numpy() -> Result<(), String> {
+    // Each call prints the flattened result, or "ERR" if it raises TypeError.
+    // newshape= must now raise (numpy 2.1 removed it); shape=/copy= must work.
+    let arr = "np.arange(6)";
+    let calls = [
+        "shape=(2, 3)",
+        "(2, 3)",
+        "(2, 3), copy=True",
+        "(2, 3), copy=False",
+        "(2, 3), order='F'",
+        "newshape=(2, 3)", // removed in numpy 2.1 -> TypeError
+    ];
+    for call in &calls {
+        let body = |engine: &str| {
+            format!(
+                "try:\n    r = {engine}.reshape({arr}, {call})\n    print(np.asarray(r).flatten().tolist())\n\
+                 except TypeError:\n    print('ERR')\n"
+            )
+        };
+        let numpy_out = numpy_oracle(&format!("import numpy as np\n{}", body("np")))?;
+        let rust_out = numpy_oracle(&fnp_script(body("fnp")))?;
+        assert_eq!(
+            numpy_out, rust_out,
+            "reshape kwargs mismatch for ({call})\nnumpy: {numpy_out}\nrust:  {rust_out}"
+        );
+    }
     Ok(())
 }

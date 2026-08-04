@@ -37,6 +37,74 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+fn indent_python(body: &str) -> String {
+    body.lines().map(|line| format!("    {line}\n")).collect()
+}
+
+fn stats_outcome_body(body: &str) -> String {
+    let indented = indent_python(body);
+    r#"import json
+
+def normalize(value):
+    if isinstance(value, tuple):
+        return {"kind": "tuple", "items": [normalize(item) for item in value]}
+    if isinstance(value, np.ndarray):
+        return {
+            "kind": "ndarray",
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+            "values": value.tolist(),
+        }
+    if np.isscalar(value):
+        scalar_type = type(value).__name__
+        scalar_dtype = str(value.dtype) if hasattr(value, "dtype") else None
+        scalar_value = value.item() if hasattr(value, "item") else value
+        return {
+            "kind": "scalar",
+            "type": scalar_type,
+            "dtype": scalar_dtype,
+            "value": scalar_value,
+        }
+    return {"kind": "object", "type": type(value).__name__, "repr": repr(value)}
+
+try:
+__BODY__    print(json.dumps(
+        {"status": "ok", "result": normalize(result)},
+        sort_keys=True,
+        default=str,
+    ))
+except Exception as exc:
+    message = str(exc).splitlines()[0] if str(exc) else ""
+    print(json.dumps(
+        {"status": "err", "type": type(exc).__name__, "message": message},
+        sort_keys=True,
+        default=str,
+    ))
+"#
+    .replace("__BODY__", &indented)
+}
+
+fn numpy_average_outcome_script(body: &str) -> String {
+    numpy_stats_outcome_script(body)
+}
+
+fn fnp_average_outcome_script(body: &str) -> String {
+    fnp_stats_outcome_script(body)
+}
+
+fn numpy_stats_outcome_script(body: &str) -> String {
+    format!(
+        "import numpy as np\n\
+         MODULE = np\n\
+         {}",
+        stats_outcome_body(body)
+    )
+}
+
+fn fnp_stats_outcome_script(body: &str) -> String {
+    fnp_script(format!("MODULE = fnp\n{}", stats_outcome_body(body)))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // corrcoef
 // ─────────────────────────────────────────────────────────────────────────────
@@ -97,6 +165,55 @@ print(np.allclose(result, expected))
 // ─────────────────────────────────────────────────────────────────────────────
 // cov
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn cov_corrcoef_python_container_keyword_outcomes_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "cov rowvar false bias",
+            "result = MODULE.cov(((1.0, 2.0, 3.0), (2.0, 4.0, 6.0)), rowvar=False, bias=True)",
+        ),
+        (
+            "cov y ddof",
+            "result = MODULE.cov([1.0, 2.0, 4.0], y=[2.0, 1.0, 0.0], ddof=0)",
+        ),
+        (
+            "cov fweights aweights",
+            "result = MODULE.cov(
+    np.array([[1.0, 2.0, 3.0], [2.0, 4.0, 8.0]]),
+    fweights=[1, 2, 1],
+    aweights=[1.0, 0.5, 2.0],
+)",
+        ),
+        (
+            "cov weight shape error",
+            "result = MODULE.cov([1.0, 2.0], fweights=[1, 2, 3])",
+        ),
+        (
+            "corrcoef rowvar false dtype",
+            "result = MODULE.corrcoef(np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 8.0]]), rowvar=False, dtype=np.float32)",
+        ),
+        (
+            "corrcoef y ddof compatibility",
+            "result = MODULE.corrcoef([1.0, 2.0, 3.0], y=[3.0, 2.0, 1.0], ddof=0)",
+        ),
+        (
+            "corrcoef y shape error",
+            "result = MODULE.corrcoef([1.0, 2.0], y=[1.0, 2.0, 3.0])",
+        ),
+    ];
+
+    for (name, body) in cases {
+        let numpy_result = numpy_oracle(&numpy_stats_outcome_script(body))?;
+        let fnp_result = numpy_oracle(&fnp_stats_outcome_script(body))?;
+
+        assert_eq!(
+            fnp_result, numpy_result,
+            "cov/corrcoef outcome mismatch for {name}\nnumpy: {numpy_result}\nfnp:   {fnp_result}"
+        );
+    }
+    Ok(())
+}
 
 #[test]
 fn cov_1d() -> Result<(), String> {
@@ -166,6 +283,41 @@ print(np.allclose(result, expected))
 // ─────────────────────────────────────────────────────────────────────────────
 // average
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn average_python_container_keyword_outcomes_match_numpy() -> Result<(), String> {
+    let cases = [
+        ("list input scalar", "result = MODULE.average([1, 2, 3, 4])"),
+        (
+            "tuple input axis weights returned",
+            "result = MODULE.average(
+    ((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)),
+    axis=1,
+    weights=[1.0, 2.0, 3.0],
+    returned=True,
+)",
+        ),
+        (
+            "keepdims keyword",
+            "result = MODULE.average(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=0, keepdims=True)",
+        ),
+        (
+            "zero weights error type",
+            "result = MODULE.average([1.0, 2.0, 3.0], weights=[0.0, 0.0, 0.0])",
+        ),
+    ];
+
+    for (name, body) in cases {
+        let numpy_result = numpy_oracle(&numpy_average_outcome_script(body))?;
+        let fnp_result = numpy_oracle(&fnp_average_outcome_script(body))?;
+
+        assert_eq!(
+            fnp_result, numpy_result,
+            "average outcome mismatch for {name}\nnumpy: {numpy_result}\nfnp:   {fnp_result}"
+        );
+    }
+    Ok(())
+}
 
 #[test]
 fn average_basic() -> Result<(), String> {
@@ -480,6 +632,222 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         result.trim(),
         "True",
         "cov single observation should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn cov_native_fast_path_matches_numpy_across_shape_ddof_bias() -> Result<(), String> {
+    // Locks the zero-copy parallel-Gram fast path (rowvar=True, no y, contiguous f64):
+    // it must match numpy.cov within tolerance across variable/observation counts,
+    // ddof, and bias. (Reassociated dot sums -> allclose, not bit-exact, like the prior
+    // matmul path.)
+    let script = fnp_script(
+        r#"
+import hashlib
+ok = True
+proof = bytearray()
+rng = np.random.default_rng(3)
+for shape in [(50, 2000), (5, 30), (1, 100), (3, 3), (10, 11), (200, 500)]:
+    X = rng.standard_normal(shape)
+    for kw in [{}, {"bias": True}, {"ddof": 0}, {"ddof": 2}, {"rowvar": True}]:
+        f = np.asarray(fnp.cov(X, **kw)); n = np.asarray(np.cov(X, **kw))
+        if f.shape != n.shape or not np.allclose(f, n, rtol=1e-9, atol=1e-12, equal_nan=True):
+            ok = False
+        proof.extend(str(f.shape).encode())
+        proof.extend(str(f.dtype).encode())
+        proof.extend(np.ascontiguousarray(f).view(np.uint8).tobytes())
+print(ok)
+print(hashlib.sha256(proof).hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().next().unwrap_or_default(),
+        "True",
+        "cov fast path must match numpy across shape/ddof/bias"
+    );
+    assert_eq!(
+        result.lines().nth(1).unwrap_or_default(),
+        "80bb612d7fb9522ca878001af0fd6ba17a68eebb4a4e117006caf69a71fa3387",
+        "cov fast path golden sha256 drifted"
+    );
+    Ok(())
+}
+
+#[test]
+fn corrcoef_native_fast_path_matches_numpy_across_shapes() -> Result<(), String> {
+    // Locks the zero-copy parallel-Gram corrcoef fast path (rowvar=True, no y, f64):
+    // cov via the shared Gram core, then normalize by diagonal stddevs and clip to
+    // [-1, 1] — must match numpy.corrcoef within tolerance across variable/observation
+    // counts, including the 1-D (scalar 1.0) case.
+    let script = fnp_script(
+        r#"
+ok = True
+rng = np.random.default_rng(5)
+for shape in [(50, 2000), (5, 30), (1, 100), (3, 3), (10, 11), (200, 500)]:
+    X = rng.standard_normal(shape)
+    f = np.asarray(fnp.corrcoef(X)); n = np.asarray(np.corrcoef(X))
+    if f.shape != n.shape or not np.allclose(f, n, rtol=1e-9, atol=1e-12, equal_nan=True):
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "corrcoef fast path must match numpy across shapes"
+    );
+    Ok(())
+}
+
+#[test]
+fn cov_corrcoef_long_observation_ufunc_gate_matches_numpy_sha256() -> Result<(), String> {
+    // Locks the long-observation UFuncArray route for rowvar=True/no-y f64 inputs.
+    // The route intentionally changes the accumulation tree, so equality is by
+    // NumPy-compatible allclose and the deterministic fnp output bytes are pinned.
+    let script = fnp_script(
+        r#"
+import hashlib
+rng = np.random.default_rng(13)
+X = rng.standard_normal((50, 5000))
+f_cov = np.asarray(fnp.cov(X))
+n_cov = np.asarray(np.cov(X))
+f_corr = np.asarray(fnp.corrcoef(X))
+n_corr = np.asarray(np.corrcoef(X))
+ok = (
+    f_cov.shape == n_cov.shape
+    and f_corr.shape == n_corr.shape
+    and np.allclose(f_cov, n_cov, rtol=1e-9, atol=1e-12, equal_nan=True)
+    and np.allclose(f_corr, n_corr, rtol=1e-9, atol=1e-12, equal_nan=True)
+)
+proof = bytearray()
+for arr in (f_cov, f_corr):
+    proof.extend(str(arr.shape).encode())
+    proof.extend(str(arr.dtype).encode())
+    proof.extend(np.ascontiguousarray(arr).view(np.uint8).tobytes())
+print(ok)
+print(hashlib.sha256(proof).hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().next().unwrap_or_default(),
+        "True",
+        "long-observation cov/corrcoef route must match numpy"
+    );
+    assert_eq!(
+        result.lines().nth(1).unwrap_or_default(),
+        "72b7359608b619263e2194f0f0d802f27eb25cdbcf133acbecee0a2fa2919667",
+        "long-observation cov/corrcoef golden sha256 drifted"
+    );
+    Ok(())
+}
+
+#[test]
+fn cov_corrcoef_orientation_and_scalar_edge_cases_match_numpy() -> Result<(), String> {
+    // Regression for two parity gaps: (1) a genuine 2-D (1, N) input with rowvar=False
+    // is N variables -> (N, N), not a scalar (the old shape[0]!=1 guard wrongly skipped
+    // the transpose); a true 1-D input stays one variable. (2) cov/corrcoef of a single
+    // variable squeezes to a 0-d scalar, not (1, 1).
+    let script = fnp_script(
+        r#"
+ok = True
+rng = np.random.default_rng(0)
+for fn in ("cov", "corrcoef"):
+    ffn = getattr(fnp, fn); nfn = getattr(np, fn)
+    for shape in [(1, 5), (5, 1), (1, 100), (3, 5), (100,), (4, 4), (1, 1)]:
+        X = rng.standard_normal(shape)
+        for kw in ({}, {"rowvar": False}, {"rowvar": True}):
+            f = np.asarray(ffn(X, **kw)); n = np.asarray(nfn(X, **kw))
+            if f.shape != n.shape or not np.allclose(f, n, rtol=1e-9, atol=1e-12, equal_nan=True):
+                ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cov/corrcoef orientation + single-variable scalar must match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn int_cov_corrcoef_via_f64_conversion_bit_exact_matches_numpy() -> Result<(), String> {
+    // Integer/bool cov and corrcoef convert once to f64 (numpy's own chain
+    // converts to result_type(m, f64) before any arithmetic - pinned incl.
+    // 2^62-scale values) and ride the converged f64 Gram-lane kernels.
+    // Weights/dtype-override forms and small inputs keep prior behavior.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(223)
+verdicts = []
+M = rng.integers(-1000, 1000, (128, 20_000))
+Y = rng.integers(-1000, 1000, (128, 20_000))
+cases = [
+    ("cov", dict()), ("cov", dict(rowvar=False)), ("cov", dict(bias=True)),
+    ("cov", dict(ddof=0)), ("corrcoef", dict()), ("corrcoef", dict(rowvar=False)),
+]
+for fname, kw in cases:
+    ff = getattr(fnp, fname); nf = getattr(np, fname)
+    r = ff(M, **kw); e = nf(M, **kw)
+    ra = np.asarray(r); ea = np.asarray(e)
+    if ra.dtype != ea.dtype or ra.shape != ea.shape or ra.tobytes() != ea.tobytes():
+        verdicts.append(f"FAIL {fname} {kw}")
+# two-operand y: int stays on prior behavior (conversion is single-operand
+# only - the two-operand native Gram path is not byte-level for converted
+# inputs); parity asserted at the surface's established allclose level.
+r2 = np.asarray(fnp.cov(M, Y)); e2 = np.asarray(np.cov(M, Y))
+if r2.shape != e2.shape or not np.allclose(r2, e2, rtol=1e-10):
+    verdicts.append("FAIL cov two-operand allclose")
+r2 = np.asarray(fnp.corrcoef(M, Y)); e2 = np.asarray(np.corrcoef(M, Y))
+if r2.shape != e2.shape or not np.allclose(r2, e2, rtol=1e-10):
+    verdicts.append("FAIL corrcoef two-operand allclose")
+# bool + huge values (conversion unconditional)
+B = rng.random((64, 20_000)) > 0.6
+if np.asarray(fnp.cov(B)).tobytes() != np.asarray(np.cov(B)).tobytes():
+    verdicts.append("FAIL bool cov")
+H = rng.integers(-2**62, 2**62, (32, 10_000))
+if np.asarray(fnp.cov(H)).tobytes() != np.asarray(np.cov(H)).tobytes():
+    verdicts.append("FAIL huge-value cov")
+# fweights form stays byte-identical (conversion is numpy-transparent)
+fw = rng.integers(1, 5, 20_000)
+if np.asarray(fnp.cov(M, fweights=fw)).tobytes() != np.asarray(np.cov(M, fweights=fw)).tobytes():
+    verdicts.append("FAIL fweights parity")
+# small input keeps prior behavior
+S = rng.integers(-100, 100, (8, 50))
+if np.asarray(fnp.cov(S)).tobytes() != np.asarray(np.cov(S)).tobytes():
+    verdicts.append("FAIL small parity")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-1000, 1000, (256, 100_000))
+tn = best(lambda: np.cov(W)); tf = best(lambda: fnp.cov(W))
+print(f"COV_INT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.corrcoef(W)); tf = best(lambda: fnp.corrcoef(W))
+print(f"CORRCOEF_INT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces COV/CORRCOEF_INT_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "int cov/corrcoef via f64 conversion must be bit-identical to numpy: {result}"
     );
     Ok(())
 }

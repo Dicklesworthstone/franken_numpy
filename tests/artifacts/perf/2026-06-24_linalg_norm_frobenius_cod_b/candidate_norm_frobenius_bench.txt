@@ -1,0 +1,4 @@
+test python_norm_frobenius_boundary/fnp_norm_fro_f64_4096x16x16 ... bench:     136,826 ns/iter (+/- 28,299)
+test python_norm_frobenius_boundary/numpy_norm_fro_f64_4096x16x16 ... bench:     480,724 ns/iter (+/- 33,019)
+test python_norm_frobenius_boundary/fnp_norm_fro_f64_2048x32x32 ... bench:     155,441 ns/iter (+/- 19,568)
+test python_norm_frobenius_boundary/numpy_norm_fro_f64_2048x32x32 ... bench:   1,206,268 ns/iter (+/- 19,924)

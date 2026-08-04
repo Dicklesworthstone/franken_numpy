@@ -1,0 +1,5 @@
+Invalid capture note.
+
+The first release build invocation passed, but this file captured stdout only
+while the RCH/cargo stream was emitted on stderr. Use
+`build_fnp_linalg_release_rch.txt` for the captured release-build pass.

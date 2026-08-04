@@ -1,0 +1,5 @@
+op            np_us      fnp_us    fnp/np
+nanmax_ax1_kd     6243.2    2934.8  0.470
+nanmin_ax1_kd    10573.8    3126.8  0.296
+nansum_ax1_kd    93632.2   16094.5  0.172
+nanmean_ax1_kd   115616.9    7617.6  0.066

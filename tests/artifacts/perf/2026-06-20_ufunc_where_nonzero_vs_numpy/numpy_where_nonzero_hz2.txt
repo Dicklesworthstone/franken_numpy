@@ -1,0 +1,5 @@
+host=hetzner2
+python=3.14.4
+numpy=2.3.5
+where_nonzero_f64_2d_sparse/262144: median_ns=1162745 p95_ns=1235682 mean_ns=1192898 cv_pct=8.02 min_ns=1130062 max_ns=1626607 samples=41 inner=3 checksum=5506218
+where_nonzero_f64_2d_sparse/1048576: median_ns=4658292 p95_ns=4929602 mean_ns=4693275 cv_pct=2.77 min_ns=4500470 max_ns=5018633 samples=41 inner=1 checksum=7341788

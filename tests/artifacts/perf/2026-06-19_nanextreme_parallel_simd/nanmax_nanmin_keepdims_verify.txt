@@ -1,0 +1,3 @@
+cases=15 fails=0
+nanmin_kd  np=  1436.0us fnp=   158.4us fnp/np=0.110
+nanmax_kd  np=  1609.8us fnp=   143.8us fnp/np=0.089

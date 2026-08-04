@@ -15,6 +15,8 @@ description = "NumPy file format I/O: NPY/NPZ load and save, text I/O, with boun
 # used in NPY/NPZ load+save for transmuting raw bytes into f64/i64/etc. without
 # allocation. Only Pod-derived types are eligible (see ArrayStorage in fnp-dtype).
 bytemuck = "1.25.0"
+# crc32fast: hardware-accelerated IEEE CRC-32 for ZIP/NPZ entries.
+crc32fast = "1.5.0"
 # flate2: DEFLATE compression for NPZ archives (savez_compressed + load_npz).
 # Configured with the default backend; no native zlib system dependency.
 flate2 = "1.1.9"

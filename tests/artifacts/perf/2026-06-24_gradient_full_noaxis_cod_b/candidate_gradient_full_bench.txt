@@ -1,0 +1,5 @@
+# sample-size 20, warm-up 2s, measurement 4s
+test python_gradient_axis_boundary/fnp_gradient_f64_full_4096x1024 ... bench:   2,884,069 ns/iter (+/- 332,950)
+test python_gradient_axis_boundary/numpy_gradient_f64_full_4096x1024 ... bench:  17,502,646 ns/iter (+/- 473,593)
+test python_gradient_axis_boundary/fnp_gradient_f64_full_1024x4096 ... bench:   5,391,569 ns/iter (+/- 724,780)
+test python_gradient_axis_boundary/numpy_gradient_f64_full_1024x4096 ... bench:  15,893,558 ns/iter (+/- 279,246)

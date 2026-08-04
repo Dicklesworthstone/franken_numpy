@@ -1,0 +1,2 @@
+CONTRACT_VERIFY gram_muladd numpy=2.4.3 total=112 fails=0
+VERIFY_OK

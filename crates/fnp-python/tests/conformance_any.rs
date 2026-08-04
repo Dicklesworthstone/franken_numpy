@@ -55,6 +55,62 @@ fn parse_bool_list(s: &str) -> Vec<bool> {
 }
 
 #[test]
+fn any_large_bool_parallel_full_scan_and_early_exit_match_numpy() -> Result<(), String> {
+    let body = concat!(
+        "n = (1 << 24) + (1 << 13) + 1\n",
+        "a = np.zeros(n, dtype=np.bool_)\n",
+        "results = [bool(np.any(a))]\n",
+        "for index in (0, 8192, n // 2, n - 1):\n",
+        "    a[index] = True\n",
+        "    results.append(bool(np.any(a)))\n",
+        "    a[index] = False\n",
+        "noncanonical = np.full(n, 2, dtype=np.uint8).view(np.bool_)\n",
+        "results.append(bool(np.any(noncanonical)))\n",
+        "print(results)",
+    );
+    let numpy_result = numpy_oracle(&format!("import numpy as np\n{body}"))?;
+    let fnp_body = body.replace("np.any", "fnp.any");
+    let fnp_result = numpy_oracle(&fnp_any_script(format!(
+        "import os\nos.environ['RAYON_NUM_THREADS'] = '4'\n{fnp_body}"
+    )))?;
+    assert_eq!(fnp_result, numpy_result);
+    Ok(())
+}
+
+#[test]
+fn any_large_numeric_parallel_full_scan_and_early_exit_match_numpy() -> Result<(), String> {
+    let body = concat!(
+        "dtypes = (np.int8, np.uint8, np.int16, np.uint16, np.int32, np.uint32, ",
+        "np.int64, np.uint64, np.float32, np.float64)\n",
+        "target_bytes = (1 << 24) + (1 << 16)\n",
+        "results = []\n",
+        "for dtype in dtypes:\n",
+        "    itemsize = np.dtype(dtype).itemsize\n",
+        "    n = (target_bytes + itemsize - 1) // itemsize\n",
+        "    a = np.zeros(n, dtype=dtype)\n",
+        "    row = [np.dtype(dtype).name, type(np.any(a)).__name__, bool(np.any(a))]\n",
+        "    for index in (0, 8192 // itemsize, n // 2, n - 1):\n",
+        "        a[index] = dtype(1)\n",
+        "        row.append(bool(np.any(a)))\n",
+        "        a[index] = dtype(0)\n",
+        "    if np.issubdtype(dtype, np.floating):\n",
+        "        a[n // 3] = dtype(-0.0)\n",
+        "        row.append(bool(np.any(a)))\n",
+        "        a[n // 3] = dtype(np.nan)\n",
+        "        row.append(bool(np.any(a)))\n",
+        "    results.append(row)\n",
+        "print(results)",
+    );
+    let numpy_result = numpy_oracle(&format!("import numpy as np\n{body}"))?;
+    let fnp_body = body.replace("np.any", "fnp.any");
+    let fnp_result = numpy_oracle(&fnp_any_script(format!(
+        "import os\nos.environ['RAYON_NUM_THREADS'] = '4'\n{fnp_body}"
+    )))?;
+    assert_eq!(fnp_result, numpy_result);
+    Ok(())
+}
+
+#[test]
 fn any_flat_matches_numpy_across_50_cases() -> Result<(), String> {
     let test_cases = vec![
         // Has true elements
@@ -416,6 +472,113 @@ print(fnp_result == np_result and fnp_result == False)
         result.trim(),
         "True",
         "any negative zero should match numpy"
+    );
+    Ok(())
+}
+
+/// Locks the block-folded full-reduction any/all fast path (block_any/all_u8/f64):
+/// a battery of bool and float64 arrays — all-false, all-true, scattered-true,
+/// NaN (truthy), -0.0 (falsy), single-element, large — with both any() and all(),
+/// each result must equal numpy. The concatenated truth string is sha256-pinned.
+#[test]
+fn any_all_block_fold_full_reduction_matches_numpy_and_golden() -> Result<(), String> {
+    let script = fnp_any_script(
+        r#"
+import hashlib
+def mk(kind):
+    if kind == 'b_allfalse': return np.zeros(70001, bool)
+    if kind == 'b_alltrue':  return np.ones(70001, bool)
+    if kind == 'b_scatter':  a=np.zeros(70001,bool); a[40000]=True; return a
+    if kind == 'b_early':    a=np.zeros(70001,bool); a[3]=True; return a
+    if kind == 'f_allzero':  return np.zeros(70001)
+    if kind == 'f_nan':      a=np.zeros(70001); a[50000]=np.nan; return a
+    if kind == 'f_negzero':  a=np.full(70001,-0.0); a[10]=1.0; return a
+    if kind == 'f_mixed':    a=np.zeros(70001); a[12345]=2.5; return a
+    if kind == 'one_true':   return np.array([True])
+    if kind == 'one_zero':   return np.array([0.0])
+bits = []
+for kind in ('b_allfalse','b_alltrue','b_scatter','b_early','f_allzero','f_nan','f_negzero','f_mixed','one_true','one_zero'):
+    a = mk(kind)
+    for fn, nf in ((fnp.any, np.any), (fnp.all, np.all)):
+        r = bool(fn(a)); e = bool(nf(a))
+        bits.append('1' if r == e else '0')
+        bits.append('T' if r else 'F')
+s = ''.join(bits)
+print(s.count('0') == 0)        # every fnp result matched numpy
+print(hashlib.sha256(s.encode()).hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "True",
+        "block-folded any/all must match numpy on every case"
+    );
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "197f8d6fd5d3fab69542db049a4bfd91d454a35cdb964cbdbdd3142788eecc73",
+        "any/all block-fold golden sha256 drifted"
+    );
+    Ok(())
+}
+
+/// Locks the per-axis any/all fast path (axis_any_all_fold): bool and float64
+/// arrays reduced over axis 0 (non-last, row-sequential accumulator) and the
+/// contiguous last axis (per-lane block-fold), 2-D and 3-D, with all-false /
+/// all-true / scattered / NaN (truthy) / -0.0 (falsy) — each result byte-identical
+/// to numpy plus a sha256 golden over all the result bytes.
+#[test]
+fn any_all_axis_fast_path_matches_numpy_bytes_and_golden() -> Result<(), String> {
+    let script = fnp_any_script(
+        r#"
+import hashlib
+s = 0x9E3779B97F4A7C15
+def nxt():
+    global s
+    s = (s * 6364136223846793005 + 1) & 0xFFFFFFFFFFFFFFFF
+    return s
+F = np.empty((130, 71), dtype=np.float64)
+for i in range(130):
+    for j in range(71):
+        F[i, j] = ((nxt() >> 11) / (1 << 53)) * 8.0 - 4.0
+F[::13, 4] = 0.0        # falsy column
+F[7, ::9] = np.nan      # nan (truthy)
+F[9, ::11] = -0.0       # falsy
+B = (F > 0)
+B[:, 20] = False        # all-false column (axis 0)
+B[40, :] = True         # all-true row (axis 1)
+T3 = np.empty((11, 13, 9), dtype=np.float64)
+for x in np.ndindex(11, 13, 9):
+    T3[x] = ((nxt() >> 11) / (1 << 53)) * 4.0 - 2.0
+B3 = (T3 > 0)
+h = hashlib.sha256()
+allmatch = True
+for arr in (F, B, T3, B3):
+    for ax in range(arr.ndim):
+        for fn, nf in ((fnp.any, np.any), (fnp.all, np.all)):
+            r = np.asarray(fn(arr, axis=ax))
+            e = np.asarray(nf(arr, axis=ax))
+            if r.shape != e.shape or r.dtype != e.dtype or r.tobytes() != e.tobytes():
+                allmatch = False
+            h.update(r.tobytes())
+print(allmatch)
+print(h.hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "True",
+        "per-axis any/all must be byte-identical to numpy"
+    );
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "1d2281e04ffe332c20dec574941526b2aa0fc20c49a20880684df650a84a9b55",
+        "per-axis any/all golden sha256 drifted"
     );
     Ok(())
 }

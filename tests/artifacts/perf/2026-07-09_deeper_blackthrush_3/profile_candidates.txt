@@ -1,0 +1,371 @@
+[RCH] local (no admissible workers: insufficient_slots=10,active_project_exclusion=1)
+   Compiling pyo3-build-config v0.28.3
+warning: method `nan_filtered` is never used
+     --> crates/fnp-ufunc/src/lib.rs:25364:8
+      |
+ 4913 | impl UFuncArray {
+      | --------------- method in this implementation
+...
+25364 |     fn nan_filtered(&self) -> Self {
+      |        ^^^^^^^^^^^^
+      |
+      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `fnp-ufunc` (lib) generated 1 warning
+   Compiling pyo3-ffi v0.28.3
+   Compiling pyo3-macros-backend v0.28.3
+   Compiling pyo3 v0.28.3
+   Compiling pyo3-macros v0.28.3
+   Compiling fnp-python v0.1.0 (/data/projects/franken_numpy/crates/fnp-python)
+warning: unnecessary parentheses around closure body
+     --> crates/fnp-python/src/lib.rs:59969:29
+      |
+59969 |         .reduce_with(|a, b| (a.min(b)))
+      |                             ^        ^
+      |
+      = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+      |
+59969 -         .reduce_with(|a, b| (a.min(b)))
+59969 +         .reduce_with(|a, b| a.min(b))
+      |
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast`: use `Bound::cast` instead
+     --> crates/fnp-python/src/lib.rs:76346:34
+      |
+76346 |             let tup = t.bind(py).downcast::<PyTuple>()?;
+      |                                  ^^^^^^^^
+      |
+      = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast`: use `Bound::cast` instead
+     --> crates/fnp-python/src/lib.rs:77068:38
+      |
+77068 |             let tup = f_out.bind(py).downcast::<PyTuple>()?;
+      |                                      ^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast`: use `Bound::cast` instead
+     --> crates/fnp-python/src/lib.rs:77115:38
+      |
+77115 |                 let tup = t.bind(py).downcast::<PyTuple>()?;
+      |                                      ^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast`: use `Bound::cast` instead
+     --> crates/fnp-python/src/lib.rs:77180:38
+      |
+77180 |                 let tup = t.bind(py).downcast::<PyTuple>()?;
+      |                                      ^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast`: use `Bound::cast` instead
+     --> crates/fnp-python/src/lib.rs:77228:38
+      |
+77228 |                 let tup = t.bind(py).downcast::<PyTuple>()?;
+      |                                      ^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast`: use `Bound::cast` instead
+     --> crates/fnp-python/src/lib.rs:85290:33
+      |
+85290 |             let Ok(tup) = res_b.downcast::<PyTuple>() else {
+      |                                 ^^^^^^^^
+
+warning: unused variable: `py`
+     --> crates/fnp-python/src/lib.rs:43078:29
+      |
+43078 | fn struct_all_floats_finite(py: Python<'_>, numpy: &Bound<'_, PyModule>, arr: &Bound<'_, PyAny>) -> PyResult<bool> {
+      |                             ^^ help: if this is intentional, prefix it with an underscore: `_py`
+      |
+      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `py`
+     --> crates/fnp-python/src/lib.rs:59192:5
+      |
+59192 |     py: Python<'py>,
+      |     ^^ help: if this is intentional, prefix it with an underscore: `_py`
+
+warning: unused variable: `py`
+     --> crates/fnp-python/src/lib.rs:59512:5
+      |
+59512 |     py: Python<'py>,
+      |     ^^ help: if this is intentional, prefix it with an underscore: `_py`
+
+warning: unused variable: `kind`
+     --> crates/fnp-python/src/lib.rs:67045:9
+      |
+67045 |     let kind = arr_dtype.getattr("kind")?.extract::<String>()?;
+      |         ^^^^ help: if this is intentional, prefix it with an underscore: `_kind`
+
+warning: variable does not need to be mutable
+     --> crates/fnp-python/src/lib.rs:81398:9
+      |
+81398 |     let mut push = |b: u8, out: &mut [E], pos: &mut usize| {
+      |         ----^^^^
+      |         |
+      |         help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variants `Depth` and `Column` are never constructed
+    --> crates/fnp-python/src/lib.rs:2895:5
+     |
+2892 | enum StackHelperKind {
+     |      --------------- variants in this enum
+...
+2895 |     Depth,
+     |     ^^^^^
+2896 |     Column,
+     |     ^^^^^^
+     |
+     = note: `StackHelperKind` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `extract_mask_operand` is never used
+    --> crates/fnp-python/src/lib.rs:5527:4
+     |
+5527 | fn extract_mask_operand(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `count_valid_elements` is never used
+    --> crates/fnp-python/src/lib.rs:5549:4
+     |
+5549 | fn count_valid_elements(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: `fnp-python` (lib) generated 15 warnings (run `cargo fix --lib -p fnp-python` to apply 6 suggestions)
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:8162:67
+     |
+8162 |         let ft = fnp_u.call((&a,), Some(&kwf)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                   ^^^^^^^^^^^^^
+     |
+     = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:8163:71
+     |
+8163 |         let nt = numpy_u.call((&a,), Some(&kwf)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                       ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:8213:67
+     |
+8213 |         let ft = fnp_u.call((&a,), Some(&kwf)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                   ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:8214:71
+     |
+8214 |         let nt = numpy_u.call((&a,), Some(&kwf)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                       ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:8261:70
+     |
+8261 |         let ft = fnp_u.call((&a,), Some(&kwfull)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                      ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:8262:74
+     |
+8262 |         let nt = numpy_u.call((&a,), Some(&kwfull)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                          ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:8313:67
+     |
+8313 |         let ft = fnp_u.call((&a,), Some(&kwf)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                   ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:8314:71
+     |
+8314 |         let nt = numpy_u.call((&a,), Some(&kwf)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                       ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:9040:55
+     |
+9040 |             let f = fnp_fn.call1((&s,)).expect("fnp").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                       ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:9041:56
+     |
+9041 |             let n = np_fn.call1((&s,)).expect("numpy").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                        ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:9677:77
+     |
+9677 |         let ft = fnp_u.call((&a,), Some(&kwfull)).expect("fnp unique full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                             ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:9678:81
+     |
+9678 |         let nt = numpy_u.call((&a,), Some(&kwfull)).expect("numpy unique full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                                 ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:9811:70
+     |
+9811 |         let ft = fnp_u.call((&a,), Some(&kwfull)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                      ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:9812:74
+     |
+9812 |         let nt = numpy_u.call((&a,), Some(&kwfull)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                          ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:9865:70
+     |
+9865 |         let ft = fnp_u.call((&a,), Some(&kwfull)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                      ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:9866:74
+     |
+9866 |         let nt = numpy_u.call((&a,), Some(&kwfull)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                          ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:9963:67
+     |
+9963 |         let ft = fnp_u.call((&a,), Some(&kwf)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                   ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+    --> crates/fnp-python/benches/criterion_python_surface.rs:9964:71
+     |
+9964 |         let nt = numpy_u.call((&a,), Some(&kwf)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+     |                                                                       ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+     --> crates/fnp-python/benches/criterion_python_surface.rs:10009:70
+      |
+10009 |         let ft = fnp_u.call((&a,), Some(&kwfull)).expect("fnp full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+      |                                                                      ^^^^^^^^^^^^^
+
+warning: use of deprecated method `pyo3::types::PyAnyMethods::downcast_into`: use `Bound::cast_into` instead
+     --> crates/fnp-python/benches/criterion_python_surface.rs:10010:74
+      |
+10010 |         let nt = numpy_u.call((&a,), Some(&kwfull)).expect("numpy full").downcast_into::<pyo3::types::PyTuple>().unwrap();
+      |                                                                          ^^^^^^^^^^^^^
+
+warning: unused variable: `numpy`
+   --> crates/fnp-python/benches/criterion_python_surface.rs:199:13
+    |
+199 |         let numpy = py.import("numpy").expect("numpy oracle");
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_numpy`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `fnp-python` (bench "criterion_python_surface") generated 21 warnings (run `cargo fix --bench "criterion_python_surface" -p fnp-python` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 2m 41s
+     Running benches/criterion_python_surface.rs (/data/projects/.rch-targets/numpy-cod/release/deps/criterion_python_surface-39e55bf61c82d255)
+Gnuplot not found, using plotters backend
+
+Warning: Unable to complete 10 samples in 3.0s. You may wish to increase target time to 4.1s or enable flat sampling.
+test python_lexsort_boundary/fnp_lexsort_3int_2m ... bench:  80,394,387 ns/iter (+/- 9,324,305)
+test python_lexsort_boundary/fnp_lexsort_3f64_intvalued_2m ... bench: 124,585,758 ns/iter (+/- 21,634,804)
+
+test python_unique_rows_narrow_int_boundary/fnp_unique_rows_i32_500kx4 ... bench:  41,608,952 ns/iter (+/- 5,398,504)
+test python_unique_rows_narrow_int_boundary/fnp_unique_rows_i32_factorize_500kx4 ... bench:  41,411,942 ns/iter (+/- 2,083,583)
+
+
+Warning: Unable to complete 10 samples in 4.0s. You may wish to increase target time to 6.8s or enable flat sampling.
+test python_string_sort_boundary/fnp_sort_U8_2m ... bench: 112,987,489 ns/iter (+/- 8,015,344)
+test python_string_sort_boundary/fnp_sort_U4_2m ... bench:  64,773,328 ns/iter (+/- 1,779,258)
+
+test python_string_unique_boundary/fnp_unique_U8_2m ... bench: 172,623,196 ns/iter (+/- 9,909,418)
+
+Warning: Unable to complete 10 samples in 4.0s. You may wish to increase target time to 4.4s or enable flat sampling.
+test python_string_unique_boundary/fnp_unique_U4_dedup_2m ... bench:  75,973,876 ns/iter (+/- 2,951,593)
+
+
+Warning: Unable to complete 10 samples in 4.0s. You may wish to increase target time to 4.0s or enable flat sampling.
+test python_argsort_struct_stable_boundary/fnp_argsort_struct_i8f8_2m ... bench:  74,459,359 ns/iter (+/- 2,067,404)
+
+
+Warning: Unable to complete 10 samples in 4.0s. You may wish to increase target time to 4.8s or enable flat sampling.
+test python_argsort_string_stable_boundary/fnp_argsort_U6_stable_2m ... bench:  87,824,590 ns/iter (+/- 2,038,770)
+test python_argsort_string_stable_boundary/fnp_argsort_S6_stable_2m ... bench:  34,193,746 ns/iter (+/- 1,043,128)
+
+
+Warning: Unable to complete 10 samples in 4.0s. You may wish to increase target time to 7.7s or enable flat sampling.
+test python_unique_arrayapi_boundary/fnp_unique_counts_U8_2m ... bench: 141,321,281 ns/iter (+/- 3,275,353)
+test python_unique_arrayapi_boundary/fnp_unique_all_U8_2m ... bench: 283,570,519 ns/iter (+/- 104,442,717)
+
+
+Warning: Unable to complete 10 samples in 4.0s. You may wish to increase target time to 6.8s or enable flat sampling.
+test python_isin_struct_float_boundary/fnp_isin_struct_i8f8_1m_500k ... bench: 111,696,434 ns/iter (+/- 38,534,966)
+
+
+Warning: Unable to complete 10 samples in 4.0s. You may wish to increase target time to 5.1s or enable flat sampling.
+test python_searchsorted_struct_mixed_boundary/fnp_searchsorted_struct_i8f8_2m_2m ... bench:  94,176,296 ns/iter (+/- 26,541,683)
+
+test python_struct_mixed_setops_boundary/fnp_union1d_struct_i8f8_1m_1m ... bench: 207,139,403 ns/iter (+/- 44,188,647)
+test python_struct_mixed_setops_boundary/fnp_intersect1d_struct_i8f8_1m_1m ... bench: 358,914,596 ns/iter (+/- 76,850,225)
+test python_struct_mixed_setops_boundary/fnp_setdiff1d_struct_i8f8_1m_1m ... bench: 425,659,528 ns/iter (+/- 108,292,752)
+test python_struct_mixed_setops_boundary/fnp_setxor1d_struct_i8f8_1m_1m ... bench:  49,510,323 ns/iter (+/- 5,431,075)
+
+
+Warning: Unable to complete 10 samples in 4.0s. You may wish to increase target time to 4.6s or enable flat sampling.
+test python_c128_setops_boundary/fnp_union1d_c128_2m_2m ... bench:  81,624,881 ns/iter (+/- 3,093,301)
+test python_c128_setops_boundary/fnp_intersect1d_c128_2m_2m ... bench: 277,973,643 ns/iter (+/- 27,954,209)
+test python_c128_setops_boundary/fnp_setdiff1d_c128_2m_2m ... bench: 352,700,656 ns/iter (+/- 37,165,685)
+
+test python_f16_setops_boundary/fnp_union1d_f16_2m_2m ... bench:  25,416,408 ns/iter (+/- 882,598)
+test python_f16_setops_boundary/fnp_intersect1d_f16_2m_2m ... bench:  22,148,991 ns/iter (+/- 3,238,858)
+test python_f16_setops_boundary/fnp_setdiff1d_f16_2m_2m ... bench:  22,329,292 ns/iter (+/- 1,357,290)
+test python_f16_setops_boundary/fnp_setxor1d_f16_2m_2m ... bench:  22,934,383 ns/iter (+/- 1,518,664)
+
+test python_unique_rows_lexsort_boundary/fnp_unique_rows_i64_500kx3 ... bench:  27,971,989 ns/iter (+/- 2,824,108)
+
+test python_unique_rows_factorize_boundary/fnp_unique_rows_factorize_500kx3 ... bench:  39,847,672 ns/iter (+/- 7,391,027)
+
+test python_unique_rows_f64_boundary/fnp_unique_rows_f64_500kx4 ... bench:  35,781,372 ns/iter (+/- 2,208,461)
+
+test python_unique_rows_f32_boundary/fnp_unique_rows_f32_500kx4 ... bench:  25,009,196 ns/iter (+/- 833,555)
+
+test python_unique_rows_f64_factorize_boundary/fnp_unique_rows_f64_factorize_500kx4 ... bench:  33,434,563 ns/iter (+/- 1,477,289)
+
+test python_unique_rows_f32_factorize_boundary/fnp_unique_rows_f32_factorize_500kx4 ... bench:  29,348,508 ns/iter (+/- 1,004,050)
+
+test python_unique_rows_c128_boundary/fnp_unique_rows_c128_500kx3 ... bench:  39,141,859 ns/iter (+/- 1,063,125)
+
+test python_unique_rows_c64_boundary/fnp_unique_rows_c64_500kx3 ... bench:  29,547,059 ns/iter (+/- 814,796)
+
+test python_unique_rows_c128_factorize_boundary/fnp_unique_rows_c128_factorize_500kx3 ... bench:  44,940,018 ns/iter (+/- 4,014,573)
+
+test python_unique_cols_axis1_boundary/fnp_unique_cols_i64_3x500k ... bench:  35,058,259 ns/iter (+/- 1,737,348)
+
+test python_take_axis_boundary/fnp_take_axis1_f64_8m ... bench:   7,323,209 ns/iter (+/- 94,677)
+
+test python_take_along_axis_boundary/fnp_take_along_axis_f64_8m ... bench:   8,317,243 ns/iter (+/- 134,690)
+
+test python_take_dtype_boundary/fnp_take_flat_f32 ... bench:   2,378,536 ns/iter (+/- 116,595)
+
+test python_take_boundary/fnp_take_f64_8m ... bench:  12,538,341 ns/iter (+/- 317,070)
+
+test python_searchsorted_boundary/fnp_searchsorted_f64_4m ... bench:  62,773,028 ns/iter (+/- 2,115,347)
+
+Warning: Unable to complete 10 samples in 4.0s. You may wish to increase target time to 4.5s or enable flat sampling.
+test python_searchsorted_boundary/fnp_searchsorted_f64_4m_haystack4m ... bench:  88,306,995 ns/iter (+/- 143,895,019)
+
+Warning: Unable to complete 10 samples in 4.0s. You may wish to increase target time to 4.2s or enable flat sampling.
+test python_searchsorted_boundary/fnp_searchsorted_f32_4m_haystack4m ... bench:  76,770,355 ns/iter (+/- 5,633,361)
+
+Warning: Unable to complete 10 samples in 4.0s. You may wish to increase target time to 5.9s or enable flat sampling.
+test python_searchsorted_boundary/fnp_searchsorted_i64_4m_haystack4m ... bench: 104,245,709 ns/iter (+/- 3,612,086)
+
+test python_digitize_boundary/fnp_digitize_f64_4m ... bench:   6,282,894 ns/iter (+/- 601,527)
+
+test python_bincount_boundary/fnp_bincount_i64_mid_2m_k256 ... bench:   2,368,278 ns/iter (+/- 423,775)
+test python_bincount_boundary/fnp_bincount_i64_mid_4m_k1000 ... bench:   5,696,318 ns/iter (+/- 317,451)
+test python_bincount_boundary/fnp_bincount_i64_narrow_u8_4m ... bench:   1,581,260 ns/iter (+/- 72,915)
+
+Warning: Unable to complete 10 samples in 4.0s. You may wish to increase target time to 4.3s or enable flat sampling.
+test python_bincount_boundary/fnp_bincount_i64_big_64m_k512 ... bench:  76,065,879 ns/iter (+/- 2,030,475)
+test python_bincount_boundary/fnp_bincount_weighted_4m_k1000 ... bench:   7,188,934 ns/iter (+/- 757,805)

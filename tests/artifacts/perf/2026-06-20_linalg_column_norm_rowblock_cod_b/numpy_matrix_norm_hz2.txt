@@ -1,0 +1,10 @@
+host hz2
+python 3.14.4
+numpy 2.3.5
+processor 
+matrix_norm_nxn_orders/one/256: median_ns=33589 p95_ns=34551 mean_ns=33519 cv_pct=1.96 min_ns=32450 max_ns=34889 samples=31 inner=10
+matrix_norm_nxn_orders/neg_one/256: median_ns=33875 p95_ns=34823 mean_ns=33876 cv_pct=2.99 min_ns=32829 max_ns=38323 samples=31 inner=10
+matrix_norm_nxn_orders/one/512: median_ns=96297 p95_ns=108514 mean_ns=97080 cv_pct=6.24 min_ns=89240 max_ns=111217 samples=31 inner=3
+matrix_norm_nxn_orders/neg_one/512: median_ns=92790 p95_ns=109150 mean_ns=94844 cv_pct=5.98 min_ns=88924 max_ns=111094 samples=31 inner=3
+matrix_norm_nxn_orders/one/1024: median_ns=342892 p95_ns=375791 mean_ns=344988 cv_pct=3.93 min_ns=325701 max_ns=383152 samples=31 inner=1
+matrix_norm_nxn_orders/neg_one/1024: median_ns=341621 p95_ns=377213 mean_ns=345402 cv_pct=4.42 min_ns=328692 max_ns=385112 samples=31 inner=1

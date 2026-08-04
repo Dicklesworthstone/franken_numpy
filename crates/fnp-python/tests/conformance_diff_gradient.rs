@@ -40,6 +40,95 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+#[test]
+fn diff_gradient_ediff1d_python_container_and_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def values_match(actual, expected):
+    if isinstance(actual, (list, tuple)) or isinstance(expected, (list, tuple)):
+        if not isinstance(actual, type(expected)):
+            return False
+        if len(actual) != len(expected):
+            return False
+        return all(values_match(a, e) for a, e in zip(actual, expected))
+    actual_array = np.asarray(actual)
+    expected_array = np.asarray(expected)
+    if str(actual_array.dtype) != str(expected_array.dtype):
+        return False
+    if tuple(actual_array.shape) != tuple(expected_array.shape):
+        return False
+    if actual_array.dtype.kind in "fc":
+        return bool(np.allclose(actual_array, expected_array, equal_nan=True))
+    return bool(np.array_equal(actual_array, expected_array))
+
+def outcome(call_fn, *args, **kwargs):
+    try:
+        return ("ok", call_fn(*args, **kwargs))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+cases = [
+    (
+        "diff list prepend append",
+        "diff",
+        lambda: (([1, 2, 4, 7],), {"prepend": [0], "append": [11]}),
+    ),
+    ("diff tuple n axis", "diff", lambda: ((((1, 2, 4), (8, 16, 32)),), {"n": 2, "axis": 1})),
+    ("diff invalid axis error", "diff", lambda: (([[1, 2], [3, 4]],), {"axis": 2})),
+    ("diff negative n error", "diff", lambda: (([1, 2, 3],), {"n": -1})),
+    (
+        "gradient list axes edge_order",
+        "gradient",
+        lambda: (([[0.0, 1.0, 4.0], [1.0, 2.0, 5.0]],), {"axis": (0, 1), "edge_order": 1}),
+    ),
+    (
+        "gradient nonuniform spacing axis",
+        "gradient",
+        lambda: (([[0.0, 1.0, 4.0], [0.0, 1.0, 4.0]], [0.0, 1.0, 2.0]), {"axis": 1, "edge_order": 2}),
+    ),
+    ("gradient invalid edge_order error", "gradient", lambda: (([1.0, 2.0, 3.0],), {"edge_order": 3})),
+    (
+        "ediff1d tuple begin end",
+        "ediff1d",
+        lambda: (((1, 2, 4, 7),), {"to_begin": [0, -1], "to_end": [3, 4]}),
+    ),
+    ("ediff1d scalar input", "ediff1d", lambda: ((5,), {})),
+]
+
+ok = True
+for label, name, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(getattr(fnp, name), *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(getattr(np, name), *args, **kwargs)
+    if actual[0] != expected[0]:
+        print(label)
+        print(actual[0])
+        print(expected[0])
+        ok = False
+    elif actual[0] == "err" and actual[1] != expected[1]:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+    elif actual[0] == "ok" and not values_match(actual[1], expected[1]):
+        print(label)
+        print(type(actual[1]).__name__)
+        print(type(expected[1]).__name__)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diff/gradient/ediff1d Python-container and keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
 fn parse_float_list(s: &str) -> Result<Vec<f64>, String> {
     if s.is_empty() || s == "[]" {
         return Ok(vec![]);

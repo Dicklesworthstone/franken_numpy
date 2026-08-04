@@ -1,0 +1,20 @@
+Command:
+rch exec -- cargo bench -p fnp-python --profile release-perf --bench criterion_python_surface -- python_string_searchsorted_boundary
+
+Source state:
+pre-edit main after git pull --ff-only; try_native_string_searchsorted still used the parallel memcmp binary-search path.
+
+Worker:
+vmi1227854
+
+Rows:
+python_string_searchsorted_boundary/fnp_searchsorted_U8_left_2m
+time: [131.80 ms 133.88 ms 138.42 ms]
+
+python_string_searchsorted_boundary/numpy_searchsorted_U8_left_2m
+time: [2.9155 s 2.9578 s 3.0022 s]
+
+Notes:
+The RCH job completed successfully after a long artifact retrieval pause:
+Remote command finished exit=0 in 1025801 ms; [RCH] remote vmi1227854 (1067.4s).
+This is a pre-edit supporting baseline. The candidate-vs-NumPy keep row is in candidate_criterion.txt on worker ovh-a.

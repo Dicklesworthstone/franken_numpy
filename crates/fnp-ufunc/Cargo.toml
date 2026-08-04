@@ -17,10 +17,10 @@ description = "Elementwise and reduction operations: arithmetic, transcendentals
 # - fnp-linalg: bridge for ops that delegate to linalg (matmul fast paths, etc.)
 # - fnp-runtime: RuntimeMode + DecisionAction (consulted by the float-error
 #   machine and the hardened-mode validators)
-fnp-dtype = { path = "../fnp-dtype", version = "0.1.0" }
-fnp-ndarray = { path = "../fnp-ndarray", version = "0.1.0" }
-fnp-linalg = { path = "../fnp-linalg", version = "0.1.0" }
-fnp-runtime = { path = "../fnp-runtime", version = "0.1.0" }
+fnp-dtype = { path = "../fnp-dtype", version = "0.2.0" }
+fnp-ndarray = { path = "../fnp-ndarray", version = "0.2.0" }
+fnp-linalg = { path = "../fnp-linalg", version = "0.2.0" }
+fnp-runtime = { path = "../fnp-runtime", version = "0.2.0" }
 # rayon: data parallelism for compute-bound kernels (register-tiled GEMM). Output
 # row bands are independent, so parallelism keeps results bit-for-bit identical.
 rayon = { workspace = true }
@@ -45,4 +45,80 @@ harness = false
 
 [[bench]]
 name = "contraction"
+harness = false
+
+[[bench]]
+name = "searchsorted"
+harness = false
+
+[[bench]]
+name = "cumminmax"
+harness = false
+
+[[bench]]
+name = "transpose"
+harness = false
+
+[[bench]]
+name = "broadcast"
+harness = false
+
+[[bench]]
+name = "pad"
+harness = false
+
+[[bench]]
+name = "repeat"
+harness = false
+
+[[bench]]
+name = "pad_constant"
+harness = false
+
+[[bench]]
+name = "flip"
+harness = false
+
+[[bench]]
+name = "clip"
+harness = false
+
+[[bench]]
+name = "take_axis"
+harness = false
+
+[[bench]]
+name = "take_along_axis"
+harness = false
+
+[[bench]]
+name = "einsum_general"
+harness = false
+
+[[bench]]
+name = "histogram_full"
+harness = false
+
+[[bench]]
+name = "meshgrid"
+harness = false
+
+[[bench]]
+name = "triangle"
+harness = false
+
+[[bench]]
+name = "bincount"
+harness = false
+
+[[bench]]
+name = "set_ops"
+harness = false
+
+[[bench]]
+name = "cov"
+harness = false
+
+[[bench]]
+name = "convolve"
 harness = false

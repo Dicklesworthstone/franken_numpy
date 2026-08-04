@@ -4,7 +4,7 @@
   <img src="franken_numpy_illustration.webp" alt="FrankenNumPy — memory-safe clean-room NumPy reimplementation in Rust" width="400">
 
   **A memory-safe, clean-room reimplementation of NumPy in Rust.**<br>
-  100% of `numpy.__all__` (499/499) is reachable as `fnp_python.<name>`, structurally locked by a conformance test that fails CI on regression. Zero hand-written `unsafe` blocks across all 10 implementation crates (9 declare `#![forbid(unsafe_code)]`; `fnp-python` is opt-out only because PyO3 macros may expand to unsafe). 6,392 tests. Bit-exact PCG64DXSM RNG parity for explicit seeds; no-seed constructors source OS entropy like NumPy.
+  100% of `numpy.__all__` (499/499) is reachable as `fnp_python.<name>`, structurally locked by a conformance test that fails CI on regression. The 9 numeric-core crates declare `#![forbid(unsafe_code)]` and hold zero hand-written `unsafe`; `fnp-python`, the PyO3 boundary, confines hand-written `unsafe` to layout-checked zero-copy buffer views. 6,392 tests. Bit-exact PCG64DXSM RNG parity for explicit seeds; no-seed constructors source OS entropy like NumPy.
 
   ![Rust](https://img.shields.io/badge/Rust-nightly%202026--02--20-orange)
   ![Edition](https://img.shields.io/badge/edition-2024-blue)
@@ -61,7 +61,7 @@ FrankenNumPy is not trying to replace NumPy for every workload tomorrow. It targ
 
 | Audience | Why FrankenNumPy is useful |
 |---|---|
-| **Rust applications that want numerical arrays** without taking on `unsafe` C dependencies, calling out to BLAS, or shelling to Python. The 10 implementation crates have **zero hand-written unsafe blocks** and **zero external runtime C dependencies** in the numeric core. |
+| **Rust applications that want numerical arrays** without taking on `unsafe` C dependencies, calling out to BLAS, or shelling to Python. The 9 numeric-core crates have **zero hand-written unsafe blocks** (`fnp-python`, the PyO3 layer, uses `unsafe` only for zero-copy buffer views) and **zero external runtime C dependencies** in the numeric core. |
 | **Reproducibility-critical pipelines** (regulatory ML, scientific publication, financial backtesting) that need **bit-exact RNG and dtype-deterministic promotion** across machines and across NumPy versions. PCG64DXSM streams are bit-exact vs upstream NumPy; the 324-pair promotion table is exhaustively explicit. |
 | **Security-conscious systems** that read untrusted `.npy` / `.npz` from third parties. NumPy's C parsers are an attack surface; the `fnp-io` parsers are bounded, fail-closed, and fuzzed. |
 | **Embedded / kiosk-style Rust deployments** that want NumPy-shaped APIs without dragging a Python interpreter into the build. |
@@ -75,7 +75,7 @@ This is the wrong tool if your bottleneck is large dense matmul on >2,000×2,000
 
 | | NumPy (C / Cython) | FrankenNumPy (Rust) |
 |---|---|---|
-| Memory safety | Buffer overflows possible | 9 of 10 implementation crates declare `#![forbid(unsafe_code)]`; the 10th (`fnp-python`) contains zero unsafe blocks in its own source. The lint is opt-out only because PyO3 macros may expand into unsafe |
+| Memory safety | Buffer overflows possible | 9 of 10 implementation crates declare `#![forbid(unsafe_code)]` (numeric core is unsafe-free); the 10th (`fnp-python`, the PyO3 boundary) confines hand-written `unsafe` to layout-checked zero-copy buffer views |
 | `numpy.__all__` surface | Reference | 499/499 (100%), structurally locked by CI conformance test |
 | RNG parity | Reference | Bit-exact PCG64DXSM core stream, oracle-verified distributions |
 | NaN semantics | C-level behavior | Explicit propagation across reductions / sort / median / ptp |
@@ -252,7 +252,7 @@ cargo test  --workspace      # 6,392 tests
 cargo test  --workspace --all-features
 ```
 
-Requirements: **Rust nightly `nightly-2026-02-20`**, pinned in `rust-toolchain.toml` and mirrored in `.github/workflows/ci.yml` via the `RUST_TOOLCHAIN` env var (single source of truth).
+Requirements: **Rust nightly `nightly-2026-07-05`**, pinned in `rust-toolchain.toml` and mirrored in `.github/workflows/ci.yml` via the `RUST_TOOLCHAIN` env var (single source of truth).
 
 ### Python access via the `fnp_python` PyO3 extension
 
@@ -266,7 +266,7 @@ cargo build -p fnp-python --release --features python-extension
 
 ```python
 import fnp_python as np
-np.__version__              # workspace version (0.1.0)
+np.__version__              # workspace version (0.2.0)
 np.__numpy_version__        # version of numpy used as fallback oracle
 np.linalg.solve([[3, 1], [1, 2]], [9, 8])
 ```
@@ -365,7 +365,7 @@ See [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the complete live parity matrix
 
 ## Workspace and Crate Map
 
-10 implementation crates, all under `crates/fnp-*`. 9 of the 10 declare `#![forbid(unsafe_code)]`; `fnp-python` is the lone exception, because PyO3's procedural macros may expand into unsafe as part of generating the cdylib entry point. In practice, the current `fnp-python` source contains zero hand-written `unsafe` blocks (verified by ripgrep); the lint is opt-out, not invoked.
+10 implementation crates, all under `crates/fnp-*`. 9 of the 10 declare `#![forbid(unsafe_code)]` and stay entirely on the safe-Rust path (enforced by `no_unsafe_code_blocks_or_items` in `codebase_hygiene.rs`). `fnp-python` is the lone exception: PyO3's procedural macros may expand into unsafe, and its source additionally uses hand-written `unsafe` (chiefly `std::slice::from_raw_parts` on borrowed `PyBuffer` bytes) for the zero-copy fast paths — confined to `fnp-python` and excluded from the hygiene scan.
 
 External crate dependencies are pinned at the workspace root in `[workspace.dependencies]`: `serde 1.0.228` (3 consumer crates), `serde_json 1.0.149` (3 consumers), `criterion 0.6 with html_reports` (7 consumer bench crates), and `pyo3 0.28.3 with auto-initialize` (1 consumer — `fnp-python`). Each consumer references the pin via `.workspace = true`. Verified 2026-05-20 — no dead workspace deps.
 
@@ -398,7 +398,7 @@ F16  F32  F64  Complex64  Complex128
 Str  DateTime64  TimeDelta64  Structured
 ```
 
-Each dtype maps to a type-safe `ArrayStorage` variant with native Rust containers; no flattened `Vec<u8>` reinterpretation. `I64` values live in `Vec<i64>`, `Complex128` values live in `Vec<(f64, f64)>`, `F16` uses the `half` crate's `f16` type, structured dtypes are described by typed `StructuredField` / `StructuredStorage`. Integer fidelity is preserved (no silent truncation through f64 for i64 values > 2^53), f32 identity is maintained, and complex numbers are stored as native interleaved pairs.
+Each dtype maps to a type-safe `ArrayStorage` variant with native Rust containers rather than flattened byte storage. `I64` values live in `Vec<i64>`, `Complex128` values live in `Vec<(f64, f64)>`, `F16` uses the `half` crate's `f16` type, structured dtypes are described by typed `StructuredField` / `StructuredStorage`. Narrow, layout-checked byte views at the PyO3 boundary do not change those owning storage types. Integer fidelity is preserved (no silent truncation through f64 for i64 values > 2^53), f32 identity is maintained, and complex numbers are stored as native interleaved pairs.
 
 **Promotion table.** `promote(lhs, rhs)` is a deterministic `const fn`. All **324 dtype pairs are explicitly handled** with no catch-all fallback; adding a new dtype variant causes a compile error until promotion rules are added for it. Selected rules:
 
@@ -1081,7 +1081,7 @@ No public function in the implementation crates returns `Result<T, Box<dyn Error
 
 ## Threading and Concurrency Model
 
-FrankenNumPy operations are single-threaded by default. The choice merits precise description. Two integration test files exercise the model: `crates/fnp-ufunc/tests/concurrency_safety.rs` (verifies `UFuncArray` `Send`/`Sync` and parallel reduce/elementwise variants) and `crates/fnp-conformance/tests/concurrency_safety.rs` (verifies fnp-conformance's 4+ static `Mutex`/`OnceLock` combinations are thread-safe + deadlock-free).
+FrankenNumPy parallelizes per operation rather than globally: an op runs `rayon`-parallel when measurement showed a win at that size and dtype, and serial otherwise (see §Limitations for the policy). The choice merits precise description. Two integration test files exercise the model: `crates/fnp-ufunc/tests/concurrency_safety.rs` (verifies `UFuncArray` `Send`/`Sync` and parallel reduce/elementwise variants) and `crates/fnp-conformance/tests/concurrency_safety.rs` (verifies fnp-conformance's 4+ static `Mutex`/`OnceLock` combinations are thread-safe + deadlock-free).
 
 **`Send` / `Sync` for the core types.** `UFuncArray` owns its `Vec<f64>` and is `Send + Sync`; you can move an array between threads or share it behind an `Arc` for concurrent reads. `MaskedArray` and `StringArray` follow the same pattern. Datetime/timedelta arrays are `UFuncArray` instances and inherit the same `Send + Sync`.
 
@@ -1093,7 +1093,7 @@ FrankenNumPy operations are single-threaded by default. The choice merits precis
 
 **No global mutable state in numeric ops.** The one exception is `fnp-ufunc`'s thread-local `FloatErrorState`, which is, as the name implies, per-thread. Configuring `errstate(divide=Raise)` on one thread does not affect another thread.
 
-**No parallel array kernels.** No internal Rayon / SIMD / thread-pool dispatch inside reductions, broadcasts, or matmul. The `reduce_sum_parallel` and `elementwise_binary_parallel` methods exist as opt-in entry points, but the default execution is serial. Three conformance bins help decide when to opt in: `run_parallel_calibration_matrix` (sweeps workload sizes), `run_parallel_speedup_verdict` (per-op verdict), and `run_parallel_thread_recommendations` (per-machine thread-count suggestion) — all under `crates/fnp-conformance/src/bin/`. Multi-threaded execution by default is a Phase 3 candidate (ADR-001).
+**Parallelism is gated per operation.** Measured large-array paths use Rayon and targeted SIMD where their size and operation gates show a benefit; bandwidth-bound or small paths remain serial. The policy is encoded in `UFuncBinaryOp::is_parallel_worth`, `UFuncUnaryOp::is_parallel_worth`, and family-specific thresholds. Three conformance bins calibrate those choices: `run_parallel_calibration_matrix` (sweeps workload sizes), `run_parallel_speedup_verdict` (per-op verdict), and `run_parallel_thread_recommendations` (per-machine thread-count suggestion) — all under `crates/fnp-conformance/src/bin/`.
 
 **Async story is observability-only.** When the optional `asupersync` feature is enabled in `fnp-runtime`, it powers RaptorQ encoding, telemetry channels, and cancellation-safe oracle capture; it does **not** schedule numerical kernels.
 
@@ -1107,7 +1107,7 @@ FrankenNumPy operations are single-threaded by default. The choice merits precis
 | `numpy.__all__` parity | Tracked against the **live numpy on the build host**, whatever that version is. The structural lock-in test (`fnp_python_covers_full_numpy_all`) catches any new name that numpy adds to `__all__`. New names fail CI until explicitly added to the re-export block. |
 | RNG bit-exactness | Promised vs **PCG64DXSM** specifically, the algorithm NumPy 1.20+ ships as its high-quality default. Other bit generators (PCG64, MT19937, Philox, SFC64) match their upstream NumPy counterparts at the wire-stream level. |
 | `.npy` / `.npz` round-trip | Promised for NPY 1.0 and 2.0 formats with every supported dtype. NumPy 3.0 will introduce a new format version; FrankenNumPy will follow once the format is finalized. |
-| Rust toolchain | Pinned to `nightly-2026-02-20` in both `rust-toolchain.toml` and `.github/workflows/ci.yml` (`env.RUST_TOOLCHAIN`). Bumps are scheduled, coordinated, and CI-verified before merge. |
+| Rust toolchain | Pinned to `nightly-2026-07-05` in both `rust-toolchain.toml` and `.github/workflows/ci.yml` (`env.RUST_TOOLCHAIN`). Bumps are scheduled, coordinated, and CI-verified before merge. |
 | Edition | Rust 2024. |
 | MSRV vs MSRRust | The minimum is also the maximum. We pin a specific nightly rather than supporting a range, because some used features (`let-chains`, certain `const fn` capabilities) graduated through nightly during the project's lifetime. |
 | Public Rust API | Will likely receive a major reshape before `0.2.0`. Treat 0.x as exploratory; do not load-bear on `UFuncError` variant names or on undocumented method signatures yet. |
@@ -1119,7 +1119,7 @@ FrankenNumPy operations are single-threaded by default. The choice merits precis
 
 A concrete checklist for "make my numerical pipeline bit-reproducible from a fresh checkout, on any compatible machine, today and three years from now."
 
-1. **Pin the toolchain.** Add `rust-toolchain.toml` with a specific nightly. We use `nightly-2026-02-20`.
+1. **Pin the toolchain.** Add `rust-toolchain.toml` with a specific nightly. We use `nightly-2026-07-05`.
 2. **Pin every dependency.** Use exact `=x.y.z` constraints in `Cargo.toml`, not caret/tilde. Commit `Cargo.lock`.
 3. **Use an explicit RNG seed for reproducibility.** `Generator::from_pcg64_dxsm(seed)` for new code; `SeedMaterial::None` intentionally sources OS entropy like NumPy.
 4. **Spawn child streams for parallelism, not OS entropy.** `let mut parent = SeedSequence::new(&[seed])?; let children = parent.spawn(n_workers)?;` gives each worker a child stream. The full lineage is captured in the spawn counter, so child indices reproduce.
@@ -1256,7 +1256,7 @@ The 16 variants of `pub enum ArrayStorage` (in `crates/fnp-dtype/src/lib.rs`); t
 
 `DateTime64` and `TimeDelta64` dtypes are not separate `ArrayStorage` variants; they reuse `ArrayStorage::I64(Vec<i64>)` (8 bytes per element, ticks since epoch), with the time unit (`DateTimeUnit`) carried alongside the dtype. NaT is encoded as `i64::MIN`, matching NumPy.
 
-These are the natural Rust-side storage types; no `Vec<u8>` reinterpretation anywhere. A reader of `crates/fnp-dtype/src/lib.rs` can see exactly where each dtype's bytes live.
+These are the natural Rust-side owning storage types. A few PyO3-boundary fast paths take layout-checked borrowed byte views for copying into NumPy, but the arrays are not stored internally as flattened `Vec<u8>`. A reader of `crates/fnp-dtype/src/lib.rs` can see exactly where each dtype's values live.
 
 ### When operations copy vs view
 
@@ -1585,7 +1585,7 @@ For pipelines that need cryptographic non-repudiation, a serialized ledger snaps
 
 FrankenNumPy's security posture covers more than memory safety.
 
-- **Zero unsafe Rust in the workspace today.** 9 of the 10 implementation crates declare `#![forbid(unsafe_code)]`; the 10th (`fnp-python`) does not declare the lint because PyO3's procedural macros may expand to unsafe code as the cdylib entry point is generated. In practice, the current `fnp-python` source contains zero hand-written `unsafe` blocks (verified by ripgrep). The lint is opt-out, not invoked.
+- **Safe-Rust numeric core.** 9 of the 10 implementation crates declare `#![forbid(unsafe_code)]` and contain zero hand-written `unsafe`. The 10th (`fnp-python`) does not declare the lint — PyO3's procedural macros may expand to unsafe as the cdylib entry point is generated, and its source additionally uses hand-written `unsafe` (chiefly `std::slice::from_raw_parts` on borrowed `PyBuffer` bytes) for the zero-copy fast paths. That `unsafe` is confined to `fnp-python`; the `codebase_hygiene` tests enforce that the other 9 crates stay unsafe-free.
 - **Fail-closed by default.** Unknown wire formats, unrecognized dtype descriptors, future metadata-version markers, and metadata schema violations cause explicit errors, not silent fallbacks.
 - **Bounded resource consumption.** NPY header caps at 64 KB. NPZ archives cap at 4,096 members and 2 GiB uncompressed. Text I/O caps at 16,777,216 elements. Memmap validation retries cap at 64. These prevent denial of service via crafted inputs.
 - **Pickle rejection.** Object dtype arrays that could execute arbitrary code during deserialization require explicit `allow_pickle=true`, matching NumPy's security gate.
@@ -1848,6 +1848,48 @@ cargo run -p fnp-conformance --bin run_fnp_python_api_coverage -- --fail-on-miss
 
 FrankenNumPy is profile-driven: every optimization is paired with a baseline, a single targeted lever, and a proof-backed delta artifact.
 
+### Measured wins vs NumPy — the `v0.2.0` fast-path campaign (June–July 2026)
+
+The `0.1.x` line reached full `numpy.__all__` parity but delegated most hot
+operations to the fallback NumPy oracle. `v0.2.0` is the payoff of a six-week
+profile-driven campaign — roughly **1,230 landed `perf(...)` commits** — that
+replaced delegation with native safe-Rust `rayon`-parallel and `core::simd` kernels
+wherever NumPy leaves throughput on the table: NumPy's single-threaded ufuncs, its
+entirely absent `float16`/integer BLAS, its serial radix sorts, and compute-bound
+reductions. Every
+ratio below is a measured vs-NumPy speedup from the negative-evidence ledger; see
+[`CHANGELOG.md`](CHANGELOG.md) for the per-capability breakdown and representative
+commits.
+
+| Capability | Representative headline speedups vs NumPy |
+|---|---|
+| **`float16` (no f16 ALU/BLAS in NumPy)** | nan_to_num 91×, var/std/nanvar 23–101×, clip 39×, isnan/isinf 27–33×, floor/ceil/rint 37–40×, transcendentals 10–26× (bit-exact), 2-D f16 matmul 28.9× |
+| **Integer / GEMM (no integer BLAS in NumPy)** | 2-D int `matmul`/`dot` 27–35×, batched 10.6–12×, `inner`/`tensordot`/`matrix_power`/`multi_dot` 7–11× |
+| **Sort / argsort / unique / set-ops** | bool flat sort 37.8×, i16 flat sort 66×, gather-free radix argsort 12–15×, 2-D axis=0 `unique` 49–65×, `isin` hashed-set 134.5× (16M f64) |
+| **Reductions / scans / stats** | non-last-axis `nan*` 15–101×, native argmin/argmax/nanarg* 8.9–53×, integer `median` via histogram 31×, fused `gradient` stencils 8–30× |
+| **Complex / temporal dtypes** | complex `exp`/trig 3–13.7× (NumPy `cexp` is serial), datetime64/timedelta64 argsort up to 65.7×, `isin` 44.7× |
+| **Strings (`np.strings` / `np.char`)** | ASCII translate 183×, upper/lower 32–36×, replace/find/center 4–19.6× |
+| **Array construction / manipulation** | `tile`/`concatenate`/`stack` 2.8–6.2×, `pad` 2.1–4.1×, `cross` on (3,N) 12–27× |
+
+**Honesty methodology.** No win in this release trades accuracy for speed. Each
+kernel is:
+
+- **Isomorphism-preserving / byte-exact by construction** — bit-identical output
+  to the delegated path (same reduction order, tie-break, and rounding), many
+  additionally locked by `golden_sha256` conformance fixtures.
+- **Median-gated against a paired null control** — ratios come from a single
+  binary / single process / single `rch` invocation per read, ABBA/BAAB paired
+  against per-row NumPy A/A nulls with pre-timing byte-parity asserts; a candidate
+  must clear the median gate against its own null before it counts as a win.
+- **Recorded in an append-only negative-evidence ledger**
+  ([`docs/NEGATIVE_EVIDENCE.md`](docs/NEGATIVE_EVIDENCE.md)) — losses, no-ships,
+  reverts, and noisy discarded measurements are kept so dead ends are not
+  rediscovered, and a large fraction of campaign commits are regression *fixes*
+  that flip a default-regime loss back to parity rather than new kernels.
+
+The 2026-05-25 cross-engine baseline below predates this campaign; it is retained
+as the parity-era snapshot of the delegated engine.
+
 - **Release profile.** The workspace `Cargo.toml` does not override `[profile.release]`, so Cargo's defaults apply (`opt-level = 3`, `lto = false`, `codegen-units = 16`, `strip = false`). The workspace adds one custom profile, `release-perf`, defined explicitly: `inherits = "release"`, `lto = "thin"`, `codegen-units = 1`, `debug = "line-tables-only"`. That is the right profile for flamegraph profiling. Downstream consumers that want full LTO are free to add `[profile.release] lto = true` in their own top-level Cargo.toml.
 - **Contiguous reduction kernel.** Axis reductions on contiguous data avoid per-element index computation. A targeted optimization pass (commit `d9cfe90`, 2026-02-13) reduced axis-reduction latency by ~56% (p50/p95/p99 deltas of ~90% on contiguous workloads). See `artifacts/optimization/` and `artifacts/baselines/` for the proof bundle.
 - **Broadcast index mapping.** Output-to-source index mapping uses an incremental odometer instead of full unravel/remap per element.
@@ -1857,7 +1899,7 @@ FrankenNumPy is profile-driven: every optimization is paired with a baseline, a 
 
 The G7 budget gate (`run_performance_budget_gate`) measures p50/p95/p99 latencies for ufunc and reduction sentinel workloads and rejects regressions. The cross-engine benchmark (`run_cross_engine_benchmark`) compares directly against NumPy. A complementary per-crate Criterion layer also exists — 7 bench files (alphabetical by crate: `fnp-conformance/benches/criterion_core_ops.rs`, `fnp-dtype/benches/dtype_ops.rs`, `fnp-io/benches/criterion_io.rs`, `fnp-linalg/benches/criterion_linalg.rs`, `fnp-ndarray/benches/criterion_ndarray.rs`, `fnp-random/benches/random_ops.rs`, `fnp-ufunc/benches/elementwise.rs`) runnable via `cargo bench -p <crate>` for tracking within-FrankenNumPy regressions without going through NumPy. The naming is bimodal for historical reasons (4 `criterion_*` files vs 3 area-named like `elementwise`/`dtype_ops`/`random_ops`); when adding a new bench, prefer the `criterion_<area>` form to match the more recent files. HTML reports (Criterion's `html_reports` feature, lifted to `[workspace.dependencies]`) are emitted under `target/criterion/<bench>/report/index.html` for every benched operation — verified 2026-05-20 against `fnp-dtype/benches/dtype_ops.rs`.
 
-**Current cross-engine picture** (2026-05-25 baseline, 13 workloads at 1M-element scale, 10 runs each, p50 ratios):
+**2026-05-25 cross-engine snapshot** (13 workloads at 1M-element scale, 10 runs each, p50 ratios):
 
 | Op family | Ratio (FNP / NumPy) | Verdict |
 |---|---|---|
@@ -1888,7 +1930,7 @@ The cross-engine benchmark (`run_cross_engine_benchmark.sh`) is pedantic by desi
 - **No NumPy fallback for the FNP side.** When we benchmark a tier-1 wrapper (see Python attribute resolution model), the benchmark forces the fast path: a fast-path-skipped run would be silently measuring numpy, not FrankenNumPy, and would be discarded.
 - **Acceptable-degradation gates.** The G7 performance budget gate (`run_performance_budget_gate`) doesn't gate the ratio against NumPy; it gates the ratio against our *previous* baseline. A 5% regression on a sentinel workload fails the gate; new improvements are recorded as a new baseline. The proof bundle (`artifacts/optimization/<commit>.json`) is checked in.
 
-The 2026-04-10 cross-engine baseline currently published is the one ADR-001 quotes when discussing the case for Phase 3. A refresh after each major performance lever lands is part of the optimization governance pattern: baseline → profile → single lever → conformance check → re-baseline.
+The published cross-engine baseline is dated 2026-05-25. A refresh after each major performance lever lands is part of the optimization governance pattern: baseline → profile → single lever → conformance check → re-baseline.
 
 ---
 
@@ -1931,7 +1973,7 @@ Behavioral differences vs upstream NumPy that we accept either intentionally or 
 | ID | Disposition | Surface | Behavior |
 |---|---|---|---|
 
-Resolved note: `franken_numpy-iqo31` closed the prior `SeedMaterial::None` parity debt by sourcing no-seed constructors from OS entropy via `getrandom`.
+No-seed RNG constructors source OS entropy via `getrandom`, matching NumPy.
 
 The ledger gate is enforced by:
 
@@ -1958,7 +2000,7 @@ The workspace ships **7 fuzz crates** with **27 fuzz targets** and **~200 curate
 ```bash
 cargo install cargo-fuzz
 cd crates/fnp-io/fuzz
-cargo +nightly-2026-02-20 fuzz run fuzz_npy -- -max_total_time=300
+cargo +nightly-2026-07-05 fuzz run fuzz_npy -- -max_total_time=300
 ```
 
 ---
@@ -2016,7 +2058,7 @@ The three libraries above are excellent in their target domains; FrankenNumPy is
 ```
 franken_numpy/
 ├── Cargo.toml                         # Workspace root (10 crates)
-├── rust-toolchain.toml                # nightly-2026-02-20 (single source of truth)
+├── rust-toolchain.toml                # nightly-2026-07-05 (single source of truth)
 ├── FEATURE_PARITY.md                  # Live parity matrix + evidence links
 ├── CHANGELOG.md                       # Capability-area changelog
 ├── PROPOSED_ARCHITECTURE.md           # Architecture notes
@@ -2050,14 +2092,14 @@ franken_numpy/
 
 What doesn't work today.
 
-- **No `pip install frankennumpy` packaging story yet.** The Python surface is reached today by building the `fnp-python` PyO3 extension and putting the renamed cdylib on `PYTHONPATH`. The pyproject.toml + wheel + PyPI publishing flow is future work. *Surface coverage itself is no longer a limitation*: the `fnp_python` module reaches **100% of `numpy.__all__`** (499/499 names), structurally locked.
+- **No `pip install frankennumpy` packaging story yet.** The Python surface is reached today by building the `fnp-python` PyO3 extension and putting the renamed cdylib on `PYTHONPATH`. The pyproject.toml + wheel + PyPI publishing flow is future work. The `fnp_python` module reaches **100% of `numpy.__all__`** (499/499 names), structurally locked.
 - **No BLAS/LAPACK backend.** Linear algebra uses pure-Rust implementations (Householder QR, Golub–Kahan SVD, implicit shifted QR for eigenvalues). Competitive with BLAS for small matrices; slower for large ones. Optional BLAS linkage is a Phase 3 work-stream (ADR-001).
 - **Complex elementwise arithmetic uses interleaved storage.** Complex64/Complex128 dtypes store real/imaginary parts as interleaved floats. Elementwise `multiply` and `divide` apply true complex arithmetic `(a+bi)(c+di) = (ac−bd)+(ad+bc)i`, but the interleaved representation adds overhead vs native complex types.
 - **`multivariate_normal` uses Cholesky.** NumPy defaults to SVD. Switching would pull `fnp-linalg` into `fnp-random`'s dependency graph (currently `fnp-random` keeps only intra-workspace `fnp-ndarray` plus `getrandom` for OS entropy).
 - **`multivariate_hypergeometric` uses sequential draws.** NumPy uses the `random_mvhg_marginals` algorithm.
-- **Single-threaded.** All array operations are single-threaded. The `asupersync` integration is optional and used only for conformance pipeline orchestration, not parallel array computation. Multi-threading is a Phase 3 work-stream.
+- **Parallelism is per-op, not blanket.** Array operations are `rayon`-parallel where measurement showed it pays and deliberately serial where it did not — the policy is explicit in `UFuncBinaryOp::is_parallel_worth` / `UFuncUnaryOp::is_parallel_worth` and in per-op size gates. Compute-heavy ops (`power`, `hypot`, `arctan2`, `logaddexp`, the transcendental unaries, reductions, sorts, set-ops, GEMM) parallelize; `add`/`sub`/`mul`/`div` stay serial because they are memory-bandwidth-bound, where extra threads buy nothing. The `asupersync` integration is separate and orchestrates conformance pipelines, not array computation.
 - **f64 internal representation for `UFuncArray`.** Numeric values are stored as `Vec<f64>` internally for arithmetic. For i64/u64 values > 2^53, `IntegerSidecar` preserves exact integer values through storage round-trips; arithmetic on such values still uses f64 approximation. Native i64/u64 paths are a Phase 3 work-stream.
-- **Large-scale ufunc-elementwise / ufunc-broadcast hotspots.** Without SIMD or BLAS, these workloads sit in the 10–30× range vs NumPy at large array sizes. Small/medium and contiguous workloads are at or near parity.
+- **Large dense matmul vs a tuned BLAS.** Square GEMM above roughly 2000×2000 remains slower than NumPy on OpenBLAS. There is no C BLAS/LAPACK linkage today; an optional backend remains a Phase 3 candidate. Where NumPy has no BLAS path — `float16`, integer matmul, batched small matrices — FrankenNumPy wins outright (see §Performance).
 - **`std`-only — no `no_std` support.** All 10 crates link to the Rust standard library; there are zero `#![no_std]` declarations and no `panic_handler` attributes in the workspace (verified via grep). The codebase uses `std::sync::{Arc, Mutex, RwLock, OnceLock}`, `std::time::SystemTime`, `std::fs`, `std::process::Command`, etc. throughout. Embedded / `no_std` targets are out of scope for this project.
 
 ---
@@ -2113,7 +2155,7 @@ Concrete optimization passes that have landed, paired with what they bought. Eac
 | **Bluestein chirp-Z FFT for non-power-of-2** | Rewrites arbitrary-length DFT as power-of-2 convolution; uses Cooley–Tukey for the convolution | `fft_dit` in `fnp-ufunc/src/lib.rs` | Lets every FFT length go through a single fast path |
 | **Constant-time dtype promotion** | All 324 dtype pairs in a `const fn` match expression with no runtime allocation | `pub const fn promote(...)` in `fnp-dtype/src/lib.rs` | Promotion lookup is a couple of branches, not a hashmap |
 
-Optimizations on the list for future work (not landed yet) are the SIMD/BLAS/parallel-execution items in the [Roadmap](#roadmap-phase-3-candidates). Every closed bead with a perf lever has a proof artifact in `artifacts/optimization/`; the same baseline/profile/lever/conformance/re-baseline cycle continues to apply.
+Future work in the [Roadmap](#roadmap-phase-3-candidates) covers broader SIMD use, an optional BLAS backend, and further per-operation parallel refinements; targeted SIMD and Rayon paths have already landed. Every closed bead with a perf lever has a proof artifact in `artifacts/optimization/`; the same baseline/profile/lever/conformance/re-baseline cycle continues to apply.
 
 ---
 
@@ -2304,7 +2346,7 @@ Major milestones in the order they landed. For the full per-commit history, see 
 | 2026-02-14 → 2026-02-18 | CI gate topology (G1–G8) wired up; security gate, workflow scenario gate, RaptorQ durability gate all online. Differential conformance against real NumPy enforced on every CI run. |
 | 2026-02-15 → 2026-02-21 | First major operator wave: `fnp-ufunc` grows from stub to 35 binary ops + 22 unary ops + reductions; `fnp-linalg` adds SVD, QR, eig, LU; `fnp-random` ships PCG64DXSM + MT19937 + SeedSequence; `fnp-io` ships NPY 1.0/2.0 + NPZ + DEFLATE. |
 | 2026-02-26 | Structured dtype support; complex dtype I/O. Golub–Kahan SVD lands. |
-| 2026-03-02 → 2026-03-12 | `ArrayStorage` bridge eliminates `Vec<u8>` reinterpretation; F16 support via `half` crate; complex linalg; safe memmap. Copy-on-write views with fine-grained memory overlap detection. |
+| 2026-03-02 → 2026-03-12 | `ArrayStorage` bridge eliminates flattened `Vec<u8>` as the primary array storage; F16 support via `half` crate; complex linalg; safe memmap. Copy-on-write views with fine-grained memory overlap detection. |
 | 2026-03-15 → 2026-03-21 | NumPy-compatible BTPE binomial, HRUA hypergeometric, PTRS Poisson, Lemire bounded integers; NaN-propagation correctness sweep across all reductions, sorts, percentiles, ptp. Eigenvalue sort order fixed to ascending. Full `lstsq` 4-tuple. Philox bit generator. |
 | 2026-04-10 | First cross-engine benchmark baseline (37 workloads, ADR-001). Pivot proposal drafted but the parity track keeps going. |
 | 2026-04-22 | First `numpy.__all__` reality-check audit: 43.3% (216/499) reachable. Plan to close the gap is formed. |
@@ -2332,13 +2374,13 @@ Surface-wise yes: `fnp-python` exposes **100% of `numpy.__all__`** (499/499 name
 Oracle tests. We run the same operations with the same inputs in both NumPy and FrankenNumPy and compare outputs to floating-point tolerance. For RNG, the comparison is bit-exact. The G3 CI gate enforces `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` and rejects pure-Python fallback oracle output.
 
 **Why Rust nightly?**
-Rust Edition 2024. The toolchain is pinned to `nightly-2026-02-20` for reproducibility; see `rust-toolchain.toml` and the `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`, which is the single source of truth for the CI gates.
+Rust Edition 2024. The toolchain is pinned to `nightly-2026-07-05` for reproducibility; see `rust-toolchain.toml` and the `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`, which is the single source of truth for the CI gates.
 
 **Why zero unsafe code?**
-Memory safety is a core value. 9 of the 10 implementation crates declare `#![forbid(unsafe_code)]`. `fnp-python` is the one that doesn't, because PyO3 procedural macros may expand into unsafe as part of generating the cdylib entry point. In practice the current `fnp-python` source has zero hand-written unsafe blocks, so the workspace is unsafe-free today across all 10 crates. The lint is opt-out for `fnp-python`, not invoked.
+Memory safety is a core value. 9 of the 10 implementation crates declare `#![forbid(unsafe_code)]` and contain zero hand-written unsafe. `fnp-python` is the one that doesn't: PyO3 procedural macros may expand into unsafe as part of generating the cdylib entry point, and the boundary crate uses hand-written `unsafe` (chiefly `std::slice::from_raw_parts`) for layout-checked zero-copy views of borrowed Python buffers and a few native result buffers. That unsafe is confined to `fnp-python`; the `codebase_hygiene` tests enforce that the numeric core stays unsafe-free.
 
 **How fast is it?**
-Profile-driven. I/O, random, linalg, reductions, and sorting are at or near parity with NumPy. FFT is mixed (power-of-two fast, non-power-of-two slower). Large-scale elementwise/broadcast ufuncs are the main hotspot, with 10–30× ratios; the Phase 3 SIMD/BLAS work-streams target these. Small/medium array workloads are competitive across the board.
+The published 2026-05-25 cross-engine snapshot averages **1.06× FNP/NumPy latency** across 13 workloads, with rows ranging from **0.89× to 1.58×**. Large dense square GEMM above roughly 2,000×2,000 remains slower than NumPy linked to OpenBLAS. Campaign wins require NumPy and FrankenNumPy end-to-end in the same invocation; within-FrankenNumPy self-speedups are maintenance results.
 
 **Can I use just the RNG crate?**
 Yes. `fnp-random` keeps dependencies minimal (`fnp-ndarray` plus `getrandom` for no-seed OS entropy) and produces bit-exact NumPy-compatible random sequences from a given explicit seed.
@@ -2347,7 +2389,7 @@ Yes. `fnp-random` keeps dependencies minimal (`fnp-ndarray` plus `getrandom` for
 `fnp_python` is the parity oracle surface. Hot operations execute on the Rust engine for native speed; everything else falls back to numpy verbatim so behavior is identical (including version-gated and deprecation paths). You get one drop-in module, with Rust under the hood where it matters.
 
 **Is anything intentionally divergent from NumPy?**
-[`docs/DIVERGENCES.md`](docs/DIVERGENCES.md) is the machine-readable ledger. As of 2026-05-22 there are zero active rows; the prior `fnp-random` no-seed default parity debt is resolved. The ledger gate is enforced in CI.
+[`docs/DIVERGENCES.md`](docs/DIVERGENCES.md) is the machine-readable ledger. As of 2026-05-22 there are zero active rows. No-seed RNG constructors source OS entropy via `getrandom`, matching NumPy. The ledger gate is enforced in CI.
 
 **Are there any stubs, TODOs, or mock code in production?**
 No. The [`audit_numpy_mocks.md`](audit_numpy_mocks.md) automated audit shows zero `TODO` / `FIXME` / `HACK` / `STUB` / `unimplemented!()` / `todo!()` across the 10 production crates, and zero production `.unwrap()` outside `fnp-conformance` fixture-harness code.

@@ -37,6 +37,65 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+#[test]
+fn index_helper_python_container_and_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def normalize(value):
+    if isinstance(value, tuple):
+        return ("tuple", tuple(normalize(item) for item in value))
+    array = np.asarray(value)
+    return (
+        "array",
+        str(array.dtype),
+        tuple(array.shape),
+        array.tolist(),
+    )
+
+def outcome(call_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize(call_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+square_object = np.array([["a", "b", "c"], ["d", "e", "f"], ["g", "h", "i"]], dtype=object)
+rect_object = np.array([["a", "b", "c"], ["d", "e", "f"]], dtype=object)
+cases = [
+    ("diag_indices_from object", "diag_indices_from", lambda: ((square_object,), {})),
+    ("diag_indices_from rectangular error", "diag_indices_from", lambda: ((rect_object,), {})),
+    ("tril_indices_from object k", "tril_indices_from", lambda: ((rect_object,), {"k": 1})),
+    ("triu_indices_from object k", "triu_indices_from", lambda: ((rect_object,), {"k": -1})),
+    ("tril_indices m keyword", "tril_indices", lambda: ((3,), {"m": 5, "k": 1})),
+    ("triu_indices m keyword", "triu_indices", lambda: ((3,), {"m": 5, "k": -1})),
+    ("mask_indices triu k", "mask_indices", lambda: ((4, np.triu), {"k": 1})),
+    ("mask_indices tril negative k", "mask_indices", lambda: ((4, np.tril), {"k": -1})),
+    ("mask_indices negative n error", "mask_indices", lambda: ((-1, np.triu), {})),
+]
+
+ok = True
+for label, name, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(getattr(fnp, name), *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(getattr(np, name), *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "index-helper Python-container and keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // indices
 // ─────────────────────────────────────────────────────────────────────────────
@@ -436,6 +495,61 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     assert_eq!(
         fnp_hash, numpy_hash,
         "zero-copy triu/tril must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
+
+#[test]
+fn parallel_tri_indices_fill_bit_exact_matches_numpy() -> Result<(), String> {
+    // Large tril/triu_indices outputs fill in parallel over disjoint per-row
+    // ranges (rows constant-fill, cols iota); index tuples must be
+    // byte-identical to numpy across square/rect shapes, positive/negative/
+    // out-of-range k, the _from variants, and below-gate serial sizes.
+    let script = fnp_script(
+        r#"
+import time
+verdicts = []
+cases = [
+    (2048, None, 0), (2048, None, 3), (2048, None, -3),
+    (2048, 1024, 0), (1024, 2048, 5), (3000, 500, -20),
+    (2048, None, 2047), (2048, None, -2047),
+    (64, None, 0), (64, 32, -5),
+]
+for n, m, k in cases:
+    for fname in ("tril_indices", "triu_indices"):
+        r = getattr(fnp, fname)(n, k, m)
+        e = getattr(np, fname)(n, k, m)
+        if len(r) != 2 or r[0].dtype != e[0].dtype or r[0].tobytes() != e[0].tobytes() or r[1].tobytes() != e[1].tobytes():
+            verdicts.append(f"FAIL {fname} n={n} m={m} k={k}")
+A = np.zeros((1500, 900))
+for fname in ("tril_indices_from", "triu_indices_from"):
+    r = getattr(fnp, fname)(A, 2)
+    e = getattr(np, fname)(A, 2)
+    if r[0].tobytes() != e[0].tobytes() or r[1].tobytes() != e[1].tobytes():
+        verdicts.append(f"FAIL {fname}")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+tn = best(lambda: np.triu_indices(8192))
+tf = best(lambda: fnp.triu_indices(8192))
+print(f"TRIU_INDICES_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.tril_indices(8192, -1))
+tf = best(lambda: fnp.tril_indices(8192, -1))
+print(f"TRIL_INDICES_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces TRIU/TRIL_INDICES_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "parallel tri-indices fill must be bit-identical to numpy: {result}"
     );
     Ok(())
 }

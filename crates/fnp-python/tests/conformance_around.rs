@@ -35,6 +35,107 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+fn indent_python(body: &str) -> String {
+    body.lines().map(|line| format!("    {line}\n")).collect()
+}
+
+fn outcome_body(body: &str) -> String {
+    let indented = indent_python(body);
+    r#"import json
+
+def normalize(value):
+    if isinstance(value, np.ndarray):
+        return {
+            "kind": "ndarray",
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+            "values": value.tolist(),
+        }
+    if np.isscalar(value):
+        scalar_type = type(value).__name__
+        scalar_dtype = str(value.dtype) if hasattr(value, "dtype") else None
+        scalar_value = value.item() if hasattr(value, "item") else value
+        return {
+            "kind": "scalar",
+            "type": scalar_type,
+            "dtype": scalar_dtype,
+            "value": scalar_value,
+        }
+    return {"kind": "object", "type": type(value).__name__, "repr": repr(value)}
+
+try:
+__BODY__    payload = {"status": "ok", "result": normalize(result)}
+    if "out" in locals():
+        payload["out"] = normalize(out)
+        payload["result_is_out"] = result is out
+    print(json.dumps(payload, sort_keys=True, default=str))
+except Exception as exc:
+    message = str(exc).splitlines()[0] if str(exc) else ""
+    print(json.dumps(
+        {"status": "err", "type": type(exc).__name__, "message": message},
+        sort_keys=True,
+        default=str,
+    ))
+"#
+    .replace("__BODY__", &indented)
+}
+
+fn numpy_outcome_script(body: &str) -> String {
+    format!(
+        "import numpy as np\n\
+         MODULE = np\n\
+         {}",
+        outcome_body(body)
+    )
+}
+
+fn fnp_outcome_script(body: &str) -> String {
+    fnp_script(format!("MODULE = fnp\n{}", outcome_body(body)))
+}
+
+#[test]
+fn around_round_keyword_outcomes_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "list decimals",
+            "result = MODULE.around([1.25, 2.75, -3.125], decimals=1)",
+        ),
+        (
+            "round scalar decimals",
+            "result = MODULE.round(np.float64(1.567), decimals=2)",
+        ),
+        (
+            "around bool fallback dtype",
+            "result = MODULE.around(np.array([True, False]))",
+        ),
+        (
+            "around complex fallback",
+            "result = MODULE.around(np.array([1.25 + 2.75j, -3.125 - 4.5j]), decimals=1)",
+        ),
+        (
+            "around out forwarding",
+            "out = np.empty((3,), dtype=np.float32)
+result = MODULE.around(np.array([1.25, 2.75, -3.125]), decimals=1, out=out)",
+        ),
+        (
+            "round out shape error",
+            "out = np.empty((2,), dtype=np.float64)
+result = MODULE.round(np.array([1.25, 2.75, -3.125]), out=out)",
+        ),
+    ];
+
+    for (name, body) in cases {
+        let numpy_result = numpy_oracle(&numpy_outcome_script(body))?;
+        let fnp_result = numpy_oracle(&fnp_outcome_script(body))?;
+
+        assert_eq!(
+            fnp_result, numpy_result,
+            "around/round outcome mismatch for {name}\nnumpy: {numpy_result}\nfnp:   {fnp_result}"
+        );
+    }
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // around basic
 // ─────────────────────────────────────────────────────────────────────────────
@@ -304,6 +405,121 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     assert_eq!(
         fnp_hash, numpy_hash,
         "zero-copy around(decimals) must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
+
+#[test]
+fn around_f32_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+n = (1 << 21) + 17
+base = (np.arange(n, dtype=np.float32) - np.float32(n // 2)) * np.float32(0.12345)
+special = np.array([0.0, -0.0, 0.5, 1.5, 2.5, -0.5, -1.5, np.inf, -np.inf, np.nan], dtype=np.float32)
+a = np.concatenate([base, special])
+ok = True
+for decimals in [3, 0, -1]:
+    actual = fnp.around(a, decimals=decimals)
+    expected = np.around(a, decimals=decimals)
+    ok = (
+        ok
+        and actual.dtype == expected.dtype
+        and actual.shape == expected.shape
+        and actual.flags["C_CONTIGUOUS"]
+        and actual.flags["WRITEABLE"]
+        and actual.tobytes() == expected.tobytes()
+    )
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large f32 around parallel path should be byte-exact"
+    );
+    Ok(())
+}
+
+#[test]
+fn around_f16_chain_exhaustive_bit_exact_matches_numpy() -> Result<(), String> {
+    // f16 around (decimals != 0) via the per-step f16-narrowing multiply->rint->divide
+    // chain. The f16 domain is enumerable: every non-sNaN bit pattern is tiled over the
+    // 1<<20 engage gate and byte-compared for each gated decimals value. sNaN patterns
+    // and overflow-hazard elements defer to numpy inside the kernel, so the full-domain
+    // and overflow batteries below exercise the defer arm (parity including warnings).
+    let script = fnp_script(
+        r#"
+import warnings
+verdicts = []
+bits = np.arange(65536, dtype=np.uint16)
+is_snan = ((bits & 0x7C00) == 0x7C00) & ((bits & 0x03FF) != 0) & ((bits & 0x0200) == 0)
+dom = bits[~is_snan].view(np.float16)  # 65024 patterns incl +-0/+-inf/qNaN/subnormals
+for d in (-4, -3, -2, -1, 1, 2, 3, 4):
+    # keep only elements whose chain stays finite for this d (hazards tested separately)
+    f = np.float16(float(10 ** abs(d)))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        if d > 0:
+            hazard = np.isfinite(dom) & ~np.isfinite(dom * f)
+        else:
+            hazard = np.isfinite(dom) & ~np.isfinite(np.rint(dom / f) * f)
+    a = np.tile(dom[~hazard], 20)  # > 1<<20: engages the kernel
+    with warnings.catch_warnings(record=True) as wf:
+        warnings.simplefilter("always")
+        r = fnp.round(a, d)
+    with warnings.catch_warnings(record=True) as wn:
+        warnings.simplefilter("always")
+        e = np.round(a, d)
+    if r.dtype != e.dtype or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL bytes d={d}")
+    if len(wf) != len(wn):
+        verdicts.append(f"FAIL warnings d={d} fnp={len(wf)} np={len(wn)}")
+# overflow-hazard battery: kernel must defer and numpy's warning must surface
+for d, val in ((2, 656.0), (3, 66.0), (-3, 65504.0)):
+    a = np.full(1 << 21, np.float16(0.25))
+    a[12345] = np.float16(val)
+    with warnings.catch_warnings(record=True) as wf:
+        warnings.simplefilter("always")
+        r = fnp.round(a, d)
+    with warnings.catch_warnings(record=True) as wn:
+        warnings.simplefilter("always")
+        e = np.round(a, d)
+    if r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL hazard bytes d={d} val={val}")
+    if [str(w.message) for w in wf] != [str(w.message) for w in wn]:
+        verdicts.append(f"FAIL hazard warnings d={d} val={val}")
+# full domain incl sNaN (defer arm), 2-D shape, below-gate, |d|>=5, d=0
+full = np.tile(bits.view(np.float16), 17)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    if fnp.round(full, 2).tobytes() != np.round(full, 2).tobytes():
+        verdicts.append("FAIL full-domain snan defer")
+safe = dom[np.isfinite(dom) & (np.abs(dom) < 4)]
+m2 = np.tile(safe, (1 << 21) // safe.size + 1)[: 1 << 21].reshape(1 << 11, 1 << 10)
+r, e = fnp.round(m2, 2), np.round(m2, 2)
+if r.shape != e.shape or r.tobytes() != e.tobytes():
+    verdicts.append("FAIL 2-D")
+sm = dom[np.isfinite(dom)][:4096]
+if fnp.round(sm, 2).tobytes() != np.round(sm, 2).tobytes():
+    verdicts.append("FAIL below-gate")
+a5 = np.tile(np.array([1.5, 100.0, -7.25], dtype=np.float16), 1 << 20)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    if fnp.round(a5, 5).tobytes() != np.round(a5, 5).tobytes():
+        verdicts.append("FAIL d=5 defer")
+if fnp.round(a5, 0).tobytes() != np.round(a5, 0).tobytes():
+    verdicts.append("FAIL d=0")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 around chain must be bit-identical incl hazard-defer warning parity: {result}"
     );
     Ok(())
 }

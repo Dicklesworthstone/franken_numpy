@@ -241,6 +241,105 @@ fn modf_empty_array_matches_numpy() -> Result<(), String> {
 }
 
 #[test]
+fn modf_f64_zerocopy_bit_exact_golden_sha256() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+
+cases = [
+    np.array([], dtype=np.float64),
+    np.array([-0.0, 0.0, 1.5, -2.5, 8.0, -16.0], dtype=np.float64),
+    np.array(
+        [
+            1.0,
+            -1.0,
+            123456.75,
+            -123456.75,
+            np.nextafter(0.0, 1.0),
+            -np.nextafter(0.0, 1.0),
+        ],
+        dtype=np.float64,
+    ),
+    np.array(
+        [
+            [np.inf, -np.inf, np.nan],
+            [np.finfo(np.float64).tiny, np.finfo(np.float64).tiny / 2.0, -1.0e-308],
+        ],
+        dtype=np.float64,
+    ),
+    np.linspace(-1.0e6 - 0.75, 1.0e6 + 0.75, 257, dtype=np.float64).reshape(257, 1),
+]
+
+h = hashlib.sha256()
+for x in cases:
+    got_f, got_i = mod.modf(x)
+    expected_f, expected_i = np.modf(x)
+    for got, expected in [(got_f, expected_f), (got_i, expected_i)]:
+        assert got.dtype == expected.dtype, (got.dtype, expected.dtype)
+        assert got.shape == expected.shape, (got.shape, expected.shape)
+        assert got.flags["C_CONTIGUOUS"]
+        assert got.flags["WRITEABLE"]
+        assert got.tobytes() == expected.tobytes(), (got, expected)
+        h.update(str(got.dtype).encode())
+        h.update(str(got.shape).encode())
+        h.update(got.tobytes())
+
+print(h.hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "fnp.modf f64 array outputs must be bit-identical to numpy"
+    );
+    assert_eq!(
+        fnp_hash, "ee45bb6c4a9a21df366f3698b20d11a1a1fb41a91986f8b296c2fb7b56b3ec7b",
+        "golden sha256 of modf fractional/integral dtype/shape/raw-output bytes"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn modf_f64_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+n = (1 << 21) + 65
+x = np.linspace(-1.0e6 - 0.75, 1.0e6 + 0.75, n, dtype=np.float64)
+x[0] = -0.0
+x[1] = 0.0
+x[2] = np.inf
+x[3] = -np.inf
+x[4] = np.nan
+x[5] = np.nextafter(0.0, 1.0)
+actual_f, actual_i = fnp.modf(x)
+expected_f, expected_i = np.modf(x)
+print(
+    actual_f.dtype == expected_f.dtype
+    and actual_i.dtype == expected_i.dtype
+    and actual_f.shape == expected_f.shape
+    and actual_i.shape == expected_i.shape
+    and actual_f.tobytes() == expected_f.tobytes()
+    and actual_i.tobytes() == expected_i.tobytes()
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large f64 modf parallel path must be bit-identical to numpy"
+    );
+    Ok(())
+}
+
+#[test]
 fn frexp_dtype_matches_numpy() -> Result<(), String> {
     let script =
         "import numpy as np; m, e = np.frexp(np.array([1.0, 2.0])); print(m.dtype, e.dtype)";

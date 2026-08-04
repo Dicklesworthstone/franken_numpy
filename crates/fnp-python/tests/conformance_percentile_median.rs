@@ -37,6 +37,124 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+fn indent_python(body: &str) -> String {
+    body.lines().map(|line| format!("    {line}\n")).collect()
+}
+
+fn outcome_body(body: &str) -> String {
+    let indented = indent_python(body);
+    r#"import json
+
+def normalize(value):
+    if isinstance(value, tuple):
+        return {"kind": "tuple", "items": [normalize(item) for item in value]}
+    if isinstance(value, np.ndarray):
+        return {
+            "kind": "ndarray",
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+            "values": value.tolist(),
+        }
+    if np.isscalar(value):
+        scalar_type = type(value).__name__
+        scalar_dtype = str(value.dtype) if hasattr(value, "dtype") else None
+        scalar_value = value.item() if hasattr(value, "item") else value
+        return {
+            "kind": "scalar",
+            "type": scalar_type,
+            "dtype": scalar_dtype,
+            "value": scalar_value,
+        }
+    return {"kind": "object", "type": type(value).__name__, "repr": repr(value)}
+
+try:
+__BODY__    payload = {"status": "ok", "result": normalize(result)}
+    if "out" in locals():
+        payload["out"] = normalize(out)
+        payload["result_is_out"] = result is out
+    print(json.dumps(payload, sort_keys=True, default=str))
+except Exception as exc:
+    message = str(exc).splitlines()[0] if str(exc) else ""
+    print(json.dumps(
+        {"status": "err", "type": type(exc).__name__, "message": message},
+        sort_keys=True,
+        default=str,
+    ))
+"#
+    .replace("__BODY__", &indented)
+}
+
+fn numpy_outcome_script(body: &str) -> String {
+    format!(
+        "import numpy as np\n\
+         MODULE = np\n\
+         {}",
+        outcome_body(body)
+    )
+}
+
+fn fnp_outcome_script(body: &str) -> String {
+    fnp_script(format!("MODULE = fnp\n{}", outcome_body(body)))
+}
+
+#[test]
+fn percentile_quantile_median_keyword_outcomes_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "percentile list scalar q",
+            "result = MODULE.percentile([1, 2, 3, 4], 50)",
+        ),
+        (
+            "percentile q sequence method keepdims",
+            "result = MODULE.percentile(
+    np.array([[1, 2, 3], [4, 5, 6]]),
+    [25, 75],
+    axis=1,
+    method='nearest',
+    keepdims=True,
+)",
+        ),
+        (
+            "percentile out forwarding",
+            "out = np.empty((2,), dtype=np.float64)
+result = MODULE.percentile(np.array([[1.0, 2.0], [3.0, 4.0]]), 50, axis=0, out=out)",
+        ),
+        (
+            "quantile tuple q sequence axis",
+            "result = MODULE.quantile(((1, 2, 3), (4, 5, 6)), [0.25, 0.75], axis=0)",
+        ),
+        (
+            "quantile method fallback",
+            "result = MODULE.quantile(np.array([1, 2, 3, 4]), 0.5, method='lower')",
+        ),
+        (
+            "median tuple axis keepdims",
+            "result = MODULE.median(((1, 3, 2), (6, 4, 5)), axis=1, keepdims=True)",
+        ),
+        (
+            "median out forwarding",
+            "out = np.empty((2,), dtype=np.float64)
+result = MODULE.median(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=0, out=out)",
+        ),
+        (
+            "median axis error type",
+            "result = MODULE.median([1, 2, 3], axis=2)",
+        ),
+    ];
+
+    for (name, body) in cases {
+        let numpy_result = numpy_oracle(&numpy_outcome_script(body))?;
+        let fnp_result = numpy_oracle(&fnp_outcome_script(body))?;
+
+        assert_eq!(
+            fnp_result, numpy_result,
+            "percentile/quantile/median outcome mismatch for {name}\n\
+             numpy: {numpy_result}\nfnp:   {fnp_result}"
+        );
+    }
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // percentile
 // ─────────────────────────────────────────────────────────────────────────────
@@ -54,6 +172,42 @@ print(np.allclose(result, expected))
     );
     let result = numpy_oracle(&script)?;
     assert_eq!(result.trim(), "True", "percentile basic should match numpy");
+    Ok(())
+}
+
+#[test]
+fn percentile_quantile_large_bounded_integer_scalar_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20260708)
+n = (1 << 20) + 33
+cases = [
+    ("i64", rng.integers(-500, 500, n, dtype=np.int64), 12.5, 0.125),
+    ("u16", rng.integers(0, 30000, n, dtype=np.uint16), 75.0, 0.75),
+]
+ok = True
+for label, a, p, q in cases:
+    got_p = fnp.percentile(a, p)
+    exp_p = np.percentile(a, p)
+    got_q = fnp.quantile(a, q)
+    exp_q = np.quantile(a, q)
+    for op, got, exp in [("percentile", got_p, exp_p), ("quantile", got_q, exp_q)]:
+        if str(np.asarray(got).dtype) != str(np.asarray(exp).dtype):
+            print(("dtype", label, op, str(np.asarray(got).dtype), str(np.asarray(exp).dtype)))
+            ok = False
+        if not np.array_equal(np.asarray(got), np.asarray(exp)):
+            print(("value", label, op, repr(got), repr(exp)))
+            ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large bounded integer percentile/quantile scalar paths should match numpy: {result}"
+    );
     Ok(())
 }
 
@@ -472,6 +626,43 @@ print(type(fnp_result).__name__ == type(np_result).__name__)
     assert!(
         result.trim() == "True",
         "percentile scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+// Array-q WITH an axis is delegated to numpy (no native multi-q-axis path) — the delegation must be
+// byte-identical AND must happen BEFORE the whole-array extract (a perf fix: the wasted 32MB copy made
+// percentile([25,50,75], axis=1) a 0.64x loss). This locks in the byte-exact parity across q-forms/axes.
+#[test]
+fn percentile_quantile_array_q_with_axis_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import numpy as np
+ok = True
+rng = np.random.default_rng(20260701)
+m = rng.standard_normal((400, 500))
+t = rng.standard_normal((40, 50, 30))
+for q in ([25, 50, 75], [0, 100], [33.3, 66.6], np.array([10.0, 90.0])):
+    for ax in (0, 1, -1):
+        if not np.array_equal(np.asarray(fnp.percentile(m, q, axis=ax)),
+                              np.percentile(m, q, axis=ax), equal_nan=True):
+            ok = False
+        qq = np.asarray(q) / 100.0
+        if not np.array_equal(np.asarray(fnp.quantile(m, qq, axis=ax)),
+                              np.quantile(m, qq, axis=ax), equal_nan=True):
+            ok = False
+    if not np.array_equal(np.asarray(fnp.percentile(t, q, axis=1)),
+                          np.percentile(t, q, axis=1), equal_nan=True):
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "percentile/quantile array-q with axis must delegate byte-identically to numpy: {result}"
     );
     Ok(())
 }

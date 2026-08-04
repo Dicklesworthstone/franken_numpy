@@ -163,6 +163,27 @@ print(np.allclose(fnp_recon, a))
 }
 
 #[test]
+fn cholesky_stacked_small_spd_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+raw = np.arange(32, dtype=np.float64).reshape(2, 4, 4)
+a = raw @ np.swapaxes(raw, -1, -2) + 5000.0 * np.eye(4)
+fnp_l = fnp.linalg.cholesky(a)
+np_l = np.linalg.cholesky(a)
+print(np.allclose(fnp_l, np_l))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "stacked 4x4 cholesky should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
 fn cholesky_identity() -> Result<(), String> {
     let script = fnp_script(
         r#"

@@ -1,0 +1,11 @@
+command:
+AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo build -p fnp-linalg --release
+
+remote worker:
+vmi1152480
+
+result:
+Finished `release` profile [optimized] target(s) in 13.38s
+
+remote command:
+exit=0

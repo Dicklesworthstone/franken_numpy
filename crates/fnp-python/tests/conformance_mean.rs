@@ -38,6 +38,66 @@ fn fnp_mean_script(body: String) -> String {
     )
 }
 
+fn indent_python(body: &str) -> String {
+    body.lines().map(|line| format!("    {line}\n")).collect()
+}
+
+fn mean_outcome_body(body: &str) -> String {
+    let indented = indent_python(body);
+    r#"import json
+
+def normalize(value):
+    if isinstance(value, tuple):
+        return {"kind": "tuple", "items": [normalize(item) for item in value]}
+    if isinstance(value, np.ndarray):
+        return {
+            "kind": "ndarray",
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+            "values": value.tolist(),
+        }
+    if np.isscalar(value):
+        scalar_type = type(value).__name__
+        scalar_dtype = str(value.dtype) if hasattr(value, "dtype") else None
+        scalar_value = value.item() if hasattr(value, "item") else value
+        return {
+            "kind": "scalar",
+            "type": scalar_type,
+            "dtype": scalar_dtype,
+            "value": scalar_value,
+        }
+    return {"kind": "object", "type": type(value).__name__, "repr": repr(value)}
+
+try:
+__BODY__    payload = {"status": "ok", "result": normalize(result)}
+    if "out" in locals():
+        payload["out"] = normalize(out)
+        payload["result_is_out"] = result is out
+    print(json.dumps(payload, sort_keys=True, default=str))
+except Exception as exc:
+    message = str(exc).splitlines()[0] if str(exc) else ""
+    print(json.dumps(
+        {"status": "err", "type": type(exc).__name__, "message": message},
+        sort_keys=True,
+        default=str,
+    ))
+"#
+    .replace("__BODY__", &indented)
+}
+
+fn numpy_mean_outcome_script(body: &str) -> String {
+    format!(
+        "import numpy as np\n\
+         MODULE = np\n\
+         {}",
+        mean_outcome_body(body)
+    )
+}
+
+fn fnp_mean_outcome_script(body: &str) -> String {
+    fnp_mean_script(format!("MODULE = fnp\n{}", mean_outcome_body(body)))
+}
+
 fn parse_float(s: &str) -> f64 {
     s.trim().parse::<f64>().unwrap_or(f64::NAN)
 }
@@ -71,6 +131,45 @@ fn arrays_close(a: &[f64], b: &[f64], tol: f64) -> bool {
     a.iter()
         .zip(b.iter())
         .all(|(x, y)| floats_close(*x, *y, tol))
+}
+
+#[test]
+fn mean_python_container_keyword_outcomes_match_numpy() -> Result<(), String> {
+    let cases = [
+        ("list input scalar", "result = MODULE.mean([1, 2, 3])"),
+        (
+            "tuple input axis keepdims",
+            "result = MODULE.mean(((1, 2, 3), (4, 5, 6)), axis=1, keepdims=True)",
+        ),
+        (
+            "dtype keyword",
+            "result = MODULE.mean(np.array([1, 2, 3], dtype=np.int16), dtype=np.float32)",
+        ),
+        (
+            "where keyword",
+            "result = MODULE.mean(
+    np.array([[1.0, 2.0], [3.0, 4.0]]),
+    where=np.array([[True, False], [False, True]]),
+)",
+        ),
+        (
+            "out forwarding",
+            "out = np.empty((2,), dtype=np.float64)
+result = MODULE.mean(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=0, out=out)",
+        ),
+        ("axis error type", "result = MODULE.mean([1, 2, 3], axis=2)"),
+    ];
+
+    for (name, body) in cases {
+        let numpy_result = numpy_oracle(&numpy_mean_outcome_script(body))?;
+        let fnp_result = numpy_oracle(&fnp_mean_outcome_script(body))?;
+
+        assert_eq!(
+            fnp_result, numpy_result,
+            "mean outcome mismatch for {name}\nnumpy: {numpy_result}\nfnp:   {fnp_result}"
+        );
+    }
+    Ok(())
 }
 
 #[test]
@@ -541,6 +640,57 @@ print(np.isnan(fnp_result) and np.isnan(np_result))
         result.trim(),
         "True",
         "mean of empty array should return nan"
+    );
+    Ok(())
+}
+
+#[test]
+fn mean_flat_parallel_float_pairwise_is_bitexact() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+def same(a, b):
+    aa = np.asarray(a)
+    bb = np.asarray(b)
+    return (
+        type(a) is type(b)
+        and aa.shape == bb.shape
+        and aa.dtype == bb.dtype
+        and aa.tobytes() == bb.tobytes()
+    )
+
+rng = np.random.default_rng(217)
+f64 = rng.standard_normal(2_097_173, dtype=np.float64)
+f64[7:15] = [1e300, -1e300, 1.0, -0.0, np.inf, np.inf, 3.0, -3.0]
+f32 = rng.standard_normal(4095 * 1025, dtype=np.float32).reshape(4095, 1025)
+f32.flat[9:17] = np.array([1e30, -1e30, 1.0, -0.0, np.inf, np.inf, 7.0, -7.0], dtype=np.float32)
+
+ok = True
+for arr in (f64, f32):
+    for keepdims in (False, True):
+        got = fnp.mean(arr, keepdims=keepdims)
+        want = np.mean(arr, keepdims=keepdims)
+        if not same(got, want):
+            print("FAIL", arr.dtype, keepdims, np.asarray(got).tobytes().hex(), np.asarray(want).tobytes().hex())
+            ok = False
+
+# A NaN-result reduction delegates so NumPy owns ISA-specific NaN payload bits.
+with_nan = f64.copy()
+with_nan[1_048_589] = np.float64(np.nan)
+ok = ok and same(fnp.mean(with_nan), np.mean(with_nan))
+
+# Explicit dtype and non-contiguous inputs remain on the incumbent path.
+view = f32[:, ::2]
+ok = ok and same(fnp.mean(f32, dtype=np.float64), np.mean(f32, dtype=np.float64))
+ok = ok and same(fnp.mean(view), np.mean(view))
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "parallel flat float mean must be byte-exact with NumPy: {result}"
     );
     Ok(())
 }

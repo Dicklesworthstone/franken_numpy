@@ -41,6 +41,86 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+#[test]
+fn where_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def clean(value):
+    if isinstance(value, float) and np.isnan(value):
+        return "nan"
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(clean(item) for item in value)
+    return value
+
+def normalize(value):
+    if isinstance(value, tuple):
+        arrays = []
+        for item in value:
+            array = np.asarray(item)
+            arrays.append((str(array.dtype), tuple(array.shape), clean(array.tolist())))
+        return ("tuple", len(value), arrays)
+    array = np.asarray(value)
+    return ("array", type(value).__name__, str(array.dtype), tuple(array.shape), clean(array.tolist()))
+
+def where_outcome(where_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize(where_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("one arg list condition", lambda: (([False, True, False, True],), {})),
+    ("one arg nested tuple condition", lambda: ((((0, 1), (2, 0)),), {})),
+    ("list condition scalar choices", lambda: (([True, False, True], 1, 0), {})),
+    (
+        "tuple condition tuple choices",
+        lambda: (((True, False, True), (1.5, 2.5, 3.5), (10.5, 20.5, 30.5)), {}),
+    ),
+    (
+        "nested list string choices",
+        lambda: (([[True, False], [False, True]], [["a", "b"], ["c", "d"]], "fallback"), {}),
+    ),
+    (
+        "object none choices",
+        lambda: (([True, False, True], None, np.array([1, 2, 3], dtype=object)), {}),
+    ),
+    (
+        "broadcast scalar condition",
+        lambda: ((True, np.array([1, 2, 3]), np.array([10, 20, 30])), {}),
+    ),
+    (
+        "condition kwargs",
+        lambda: ((), {"condition": [True, False, True], "x": [1, 2, 3], "y": [10, 20, 30]}),
+    ),
+    ("partial args error", lambda: (([True, False], [1, 2]), {})),
+]
+
+ok = True
+for label, factory in cases:
+    args, kwargs = factory()
+    actual = where_outcome(fnp.where, *args, **kwargs)
+    args, kwargs = factory()
+    expected = where_outcome(np.where, *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // where(condition, x, y) - selection mode
 // ─────────────────────────────────────────────────────────────────────────────
@@ -610,5 +690,73 @@ print(np.array_equal(fnp_result, np_result))
     );
     let result = numpy_oracle(&script)?;
     assert_eq!(result.trim(), "True", "where complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn where_f32_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    // Above the 1<<24-byte gate (n*4 bytes) the f32 arr/arr select runs the parallel
+    // raw-slice path through a uint32 view. The blend is a verbatim bit-pattern copy,
+    // so NaN/-0.0/+-inf must be selected byte-for-byte from whichever side wins.
+    let script = fnp_script(
+        r#"
+n = (1 << 22) + 65
+cond = (np.arange(n) % 2 == 0)
+x = np.linspace(-2000.5, 2000.5, n, dtype=np.float32) * np.float32(2.0)
+y = np.linspace(2000.5, -2000.5, n, dtype=np.float32) + np.float32(1.0)
+x[0] = np.float32(np.nan)    # cond True  -> NaN from x
+y[1] = np.float32(-0.0)      # cond False -> -0.0 from y
+x[2] = np.float32(np.inf)    # cond True  -> +inf from x
+y[3] = np.float32(-np.inf)   # cond False -> -inf from y
+actual = fnp.where(cond, x, y)
+expected = np.where(cond, x, y)
+print(
+    actual.dtype == expected.dtype
+    and actual.shape == expected.shape
+    and actual.tobytes() == expected.tobytes()
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large f32 where parallel path must be bit-identical to numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn where_i32_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    // 4-byte int select takes the same parallel raw-slice path as f32 (above the
+    // 1<<24-byte gate). The blend is a verbatim copy, so extreme/min/max int values
+    // must be selected exactly from whichever side the bool condition picks.
+    let script = fnp_script(
+        r#"
+n = (1 << 22) + 65
+cond = (np.arange(n) % 2 == 0)
+x = (np.arange(n, dtype=np.int32) * np.int32(3)) - np.int32(7)
+y = np.int32(11) - (np.arange(n, dtype=np.int32) * np.int32(2))
+x[0] = np.iinfo(np.int32).max     # cond True  -> INT32_MAX from x
+y[1] = np.iinfo(np.int32).min     # cond False -> INT32_MIN from y
+x[2] = np.int32(0)
+y[3] = np.iinfo(np.int32).max
+actual = fnp.where(cond, x, y)
+expected = np.where(cond, x, y)
+print(
+    actual.dtype == expected.dtype
+    and actual.shape == expected.shape
+    and actual.tobytes() == expected.tobytes()
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large i32 where parallel path must be bit-identical to numpy"
+    );
     Ok(())
 }

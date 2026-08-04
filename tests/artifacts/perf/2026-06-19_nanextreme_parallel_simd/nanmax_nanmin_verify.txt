@@ -1,0 +1,5 @@
+cases=72 fails=0
+nanmax_nonan   np=  1013.4us fnp=   148.6us fnp/np=0.147
+nanmin_nonan   np=  1404.4us fnp=   149.9us fnp/np=0.107
+nanmax_nan     np=  1442.5us fnp=   134.3us fnp/np=0.093
+nanmin_nan     np=  1193.2us fnp=   133.2us fnp/np=0.112

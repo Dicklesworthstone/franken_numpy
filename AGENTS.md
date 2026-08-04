@@ -10,6 +10,28 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 ---
 
+## RULE 0.5 - SUITE-WIDE RULES LIVE IN /data/projects/AGENTS.md
+
+The suite-wide rules in **`/data/projects/AGENTS.md`** bind you here too. Read it. Two sections
+are load-bearing for perf work and are NOT duplicated below, so they cannot drift out of sync:
+
+- **`## Named Reward-Hacking Patterns (ALL FORBIDDEN)`** — 12 named patterns, several already
+  observed in this suite: gate self-weakening (and the exact price of a legitimate gate fix),
+  proof-class inflation, golden regeneration reflex, commit-stream pumping, tautological tests,
+  easy-lever cherry-picking, close-pump abuse, scope-splitting, spec-editing as progress,
+  conformance metastasis, dependency smuggling, bench-path hardcoding.
+- **`### Work-Graph Discipline`** — JSONL is truth and `beads.db` is disposable, `br sync
+  --import-only` after every pull, single-writer on graph structure, closure on cited evidence
+  with blocker beads gated on their named probe, `br dep cycles` stays empty.
+
+The three that most often decide whether a number here is real: a **self-speedup is
+MAINTENANCE, not a win** — a win needs the incumbent live in the SAME invocation; **never
+weaken a gate to land a change**, and if a gate is genuinely defective, meet the evidence
+standard and publish the win/lose split of what the fix admits; and **reporting a loss is a
+success** — one line, revert, next lever, no retraction narrative.
+
+---
+
 ## RULE NUMBER 1: NO FILE DELETION
 
 **YOU ARE NEVER ALLOWED TO DELETE A FILE WITHOUT EXPRESS PERMISSION.** Even a new file that you yourself created, such as a test code file. You have a horrible track record of deleting critically important files or otherwise throwing away tons of expensive work. As a result, you have permanently lost any and all rights to determine that a file or folder should be deleted.
@@ -58,10 +80,10 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 We only use **Cargo** in this project, NEVER any other package manager.
 
-- **Edition:** Rust 2024 (nightly required — pinned to `nightly-2026-02-20` in `rust-toolchain.toml`; CI mirrors the same via `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`)
+- **Edition:** Rust 2024 (nightly required — pinned to `nightly-2026-07-05` in `rust-toolchain.toml`; CI mirrors the same via `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`)
 - **Dependency versions:** Explicit versions for stability
 - **Configuration:** Cargo.toml workspace with `workspace = true` pattern
-- **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`) on 9 of 10 crates. `fnp-python` is the lone opt-out because PyO3 procedural macros may expand into unsafe as part of generating the cdylib entry point — but its source still contains zero hand-written `unsafe` blocks (verified by ripgrep). If narrow unsafe usage ever becomes unavoidable in any other crate, isolate it behind audited interfaces and tests.
+- **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`) on 9 of 10 crates — the numeric core stays entirely on the safe-Rust path, enforced by `no_unsafe_code_blocks_or_items` in `crates/fnp-conformance/tests/codebase_hygiene.rs`. `fnp-python` is the lone opt-out: as the PyO3 boundary it uses hand-written `unsafe` (chiefly `std::slice::from_raw_parts` on borrowed `PyBuffer` bytes, plus narrow layout-checked views of native result buffers) for zero-copy fast paths. Those blocks are confined to `fnp-python` and excluded from the hygiene scan; every other crate must stay unsafe-free. If narrow unsafe usage ever becomes unavoidable in one of the 9 core crates, isolate it behind audited interfaces and tests rather than relaxing the invariant.
 
 ### Key Dependencies
 
@@ -506,6 +528,198 @@ bv --robot-insights | jq '.Cycles'                         # Circular deps (must
 
 ---
 
+## Performance Ledger — preflight before you optimize, evidence before you reject
+
+`docs/NEGATIVE_EVIDENCE.md` is the append-only record of every performance
+hypothesis: wins, losses, and the retry predicate for each. It is 1,000+ entries
+and it is the authoritative record — not `cass`, not memory, not the commit log.
+
+**Ledger integrity decays.** The corrected 2026-07-27 hand audit classified 109
+actual rejected levers and found 71 (65.1%) **VOID**. Sixty-six of those 71 were
+an A/B rejected on a near-1.0 ratio with no A/A null control and no counted
+mechanism recorded. Two gates now exist so that class cannot grow. Use them.
+
+### Before you touch source for a perf candidate
+
+```bash
+RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- \
+  cargo run -q -p fnp-conformance --bin perf_ledger_preflight -- \
+  --lever "selected bool parse" --surface "loadtxt usecols"
+```
+
+| Exit | Meaning |
+|---|---|
+| `0` CLEAR | No prior ledger row matched. |
+| `2` BLOCKED | Prior evidence matched; the command prints each row and its retry predicate. Satisfy that predicate before reopening it. |
+| `64` | usage or tool error |
+
+`scripts/ledger_preflight.sh <keyword> ...` remains a fast heading-only triage
+helper, but its regex classification is not authoritative. Use the Rust
+preflight above for a real proposal and rely on its staged audit in pre-commit.
+
+### A/A null gate semantics — audited and corrected 2026-07-30
+
+The fleet found a defect in the mandated harness contract: an A/A null clause
+that vetoed a row unless the null's interval INCLUDED 1.0. That couples the
+verdict to the null's *precision* in the wrong direction — a tighter, better
+null is more likely to exclude 1.0 and veto a real effect.
+
+**This repo's live contract does not have that defect.**
+`report_dual_null_contract_gate` requires the EFFECT bootstrap median CI to
+exclude 1.0, compares the effect median against both null CI envelopes, and
+requires the effect-median deviation to exceed twice the larger null half-width
+(measured from 1.0). It never requires a null CI to contain 1.0. Proof from
+banked rows that the null-straddle veto is absent: the 2,048-account
+access-control incumbent null `[0.982472, 0.997568]`, the f16 telemetry
+candidate null `[1.069905, 1.179077]`, and the f16 vector-field candidate null
+`[0.931902, 0.994990]` all excluded 1.0 while their rows scored
+`DECIDABLE_WIN`.
+
+**Full-reasoning correction to the provisional audit:** commit `121d793c`
+correctly diagnosed the null-straddle defect as absent, but incorrectly claimed
+that the live gate already enforced effect-CI exclusion. At that commit the
+gate used only the effect median. The contract now enforces effect-CI exclusion
+explicitly and fail-fast checks that a synthetic effect whose CI crosses 1.0 is
+`UNDECIDED`, even when its point estimate would otherwise clear the null
+envelope and 2x margin.
+
+**A dormant copy of the defect survives** in the legacy
+`report_median_gate_pair` (`benches/common/mod.rs`, `verdict=BIASED_NULL`), used
+by 48 arms across 8 groups. Audited with two passes of one identical ELF on a
+drained host: effects reproduced within 1.6-8.9%, verdicts were WIN 6/6, no veto
+fired — those microbench nulls are wide (p10..p90 spans 4-24%). Verdict-stable
+gates get left alone, so it is unchanged, but the hazard comment at that line
+tells you what to do if you ever tighten those arms.
+
+**Before adopting a "null median within 2% of 1.0" clause, read this.** The
+effect-CI exclusion and 2x-null-margin clauses are enforced here. A bare 2%
+point-estimate clause was measured on this repo's workload surface and is NOT
+stable at 21 rounds: across two runs of the identical ELF the clause rejected a
+*different* size point each time (8,192 at 3.208% off unity in one run; 2,048 at
+5.241% in the other, with 8,192 then passing at 0.259%) while the end-to-end
+effect reproduced within 5.1%. A reproducible effect with a moving verdict is
+the same diagnostic that condemned the straddle clause — the coupling has just
+moved from the null's CI width to the null median's point-estimate noise. If you
+gate on arm-order bias, bound it against its OWN uncertainty or raise the round
+count until the null median's standard error is well under 2%; otherwise report
+it as telemetry. Note this clause would also make the f16 telemetry health
+report (candidate null 1.129564, 12.96% off unity) undecidable, so adopting it
+is a retroactive re-scoring decision, not a formatting change.
+
+### When you write a REJECT row
+
+`crates/fnp-conformance/tests/ledger_hygiene.rs` fails CI unless a REJECT row
+dated on/after its `ENFORCEMENT_DATE` records **either**:
+
+- an **A/A null control** measured in the *same invocation* as the A/B, or
+- a **counted mechanism** — instructions, cycles, syscalls, allocations, faults,
+  bandwidth — unchanged. A null cannot change the fact that no work was removed.
+
+It also requires a concrete retry predicate and a unique heading, and it caps
+the grandfathered historical debt so backdating a row to dodge the gate trips a
+second test instead.
+
+### What counts as a win
+
+These are different things and the ledger must say which one a row is.
+
+| Class | Base arm | Status |
+|---|---|---|
+| **`maintenance-self-speedup`** | our own former code | **Maintenance.** Land it and ledger it, but never quote it as a competitive claim. |
+| **`incumbent-win`** | the real NumPy call, timed **side-by-side in the same invocation** | Campaign output. |
+
+A same-binary former/candidate A/B is the right way to *isolate a lever* — it is
+the cleanest control we have — but it measures how much we improved on
+ourselves, which says nothing about NumPy. Only an arm that runs the incumbent
+in the same process, same round, alternating order, produces a number that may
+be quoted against NumPy.
+
+Rules:
+
+- **Put the exact class in the row body**:
+  `**Campaign result class:** maintenance-self-speedup` or
+  `**Campaign result class:** incumbent-win`. A heading alias does not count.
+- An `incumbent-win` must carry a numeric same-invocation A/A marker and one
+  same-line incumbent marker:
+  `**Legacy incumbent arm (same invocation):** name=NumPy version=<pin>
+  artifact_sha256=<64 lowercase hex> invocation_id=<shared id>
+  measured_ratio=<number>x`.
+- The incumbent artifact hash must identify NumPy and must not equal the
+  candidate process's `bench_elf_sha256`; equality is provenance substitution.
+- Two arms across two invocations, two binaries, or two workers is **not** a
+  campaign result. Cross-worker and cross-binary A/Bs are invalid.
+- Beating our own former path by 4× while still losing to NumPy is a
+  `maintenance-self-speedup`.
+
+### The six traps — all have already produced false wins in this fleet
+
+Check every one before you quote an `incumbent-win` ratio.
+
+1. **Dispatch trap.** Assert the incumbent arm's type and identity **at
+   runtime**, inside the measured binary. franken_networkx published a "2.6×"
+   whose baseline was already dispatched to their own code; genuine NetworkX was
+   **1.88× slower**. For us: assert `numpy.__name__ == "numpy"`, that the
+   callable is not one of ours, and print the incumbent's version.
+2. **Unmatched config.** frankensqlite compared `synchronous=FULL` against
+   `NORMAL`; franken_whisper compared its greedy decode against a default
+   beam-5. Both arms must receive identical dtype, shape, order, and options.
+3. **Non-interleaved arms.** Interleave both arms inside **one** measured
+   routine with alternating order. Host load degrades arms unequally —
+   frankenfs measured the C arm degrading ~3× harder, which biased the ratio
+   *in their own favour*.
+4. **Core contention.** Pin, and keep an A/A null between identical arms in the
+   same invocation. frankenredis invalidated an entire window after a peer
+   pinned 53% to one arm's core; their A/A between identical binaries read
+   **0.556**. If the null is not near unity the window is void, whatever the
+   effect says.
+5. **Client-bound harness.** Confirm the measured cost is the thing under test
+   and not harness/marshaling overhead shared by both arms.
+6. **Shared component as baseline.** If both arms call the same expensive
+   incumbent code, you are measuring yourself. This repo produced exactly that:
+   a bool-return arm where the *identical real NumPy allocation tail* ran in
+   both arms, so the 4.31× was fnp-old vs fnp-new — a self-speedup, not a
+   NumPy comparison. An `incumbent-win` arm must be **end-to-end**: our whole
+   call against their whole call.
+
+### Where domination actually lives
+
+The best frontier candidates are **missing-capability** surfaces — places NumPy
+has no fast path at all: `isin` on floats (its `table` method is int-only),
+`float16` ordering and GEMM (no f16 BLAS), integer matmul (no integer BLAS),
+ASCII `translate`, wide-key string set-ops. Hunt there, then earn any
+competitive claim through the `incumbent-win` contract.
+
+Do **not** open square compute-bound f64 GEMM against OpenBLAS. That is its
+strength, our kernel is bit-exactness-constrained to no-FMA and already at the
+no-FMA AVX2 peak, and the remaining gap is the price of reproducibility.
+
+### How to decide a perf claim
+
+**Gate on the median-CI, never on `cv`.** `cv < 5%` is unreachable on this
+hardware and rejects levers rather than measurements — it is what voided this
+repo's two highest-value rows, one of which later re-decided at 3.64× as a
+`maintenance-self-speedup` (own former path as base, not NumPy). Report `cv`
+as provenance only.
+
+The harness already exists — **do not build another one**:
+
+- `crates/fnp-python/benches/common/mod.rs` → `run_median_ci_contract` runs the
+  A/A null before the effect in the same invocation, retains 41 interleaved
+  min-of-three rounds, bootstraps the median-ratio CI, and gates on twice the
+  null-CI half-width. `cv` is provenance only.
+- `common::gated_main` prints `bench_elf_sha256=…` as line one of every bench,
+  hashing `current_exe()`. A hash computed by a shell step next to the run
+  proves nothing: rch builds into an opaque per-worker target dir you cannot
+  predict. Never move that print after `Criterion` is constructed — its backend
+  notice will bury it.
+- Prefer a **same-binary control** (both arms in one ELF) over comparing two
+  builds. Cross-worker and cross-binary A/Bs are invalid.
+
+Full taxonomy, the per-row audit, and the standing rules are in
+[`docs/LEDGER_RESURRECTION.md`](docs/LEDGER_RESURRECTION.md).
+
+---
+
 ## UBS — Ultimate Bug Scanner
 
 **Golden Rule:** `ubs <changed-files>` before every commit. Exit 0 = safe. Exit >0 = fix & re-run.
@@ -560,6 +774,112 @@ rch exec -- cargo build --release
 rch exec -- cargo test
 rch exec -- cargo clippy
 ```
+
+### DEFAULT BUILD INVOCATION: pin a clean baseline, or you pay a cold build every time
+
+**This is the fleet default as of 2026-07-30. Use it instead of a bare `rch exec`.**
+
+rch folds *working-tree state* into its project hash, and this checkout is shared
+by a `cc` agent and a `cod` agent. Every edit either of them makes moves the
+hash, the hash misses the remote target cache, and you pay a full cold build.
+Pinning a worker does not help: the cache key itself moved.
+
+```bash
+# You have uncommitted edits: transfer a clean commit plus ONLY your paths.
+RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec \
+  --base <commit-sha> --clean-overlay \
+  --overlay-path crates/fnp-python/benches -- \
+  cargo bench --profile release-perf --bench <target> --no-run
+
+# Everything you need is committed: the baseline IS your tree (most deterministic).
+RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec \
+  --base <commit-sha> --clean-overlay --no-overlay -- \
+  cargo bench --profile release-perf --bench <target> --no-run
+```
+
+`--no-overlay` still requires `--clean-overlay` on the command line; the two are
+declared together. Keep the overlay list **minimal** — a broad `--overlay-path`
+re-imports the churn you are excluding. If the build is still cold, report the
+two differing project hashes (visible as the
+`.rch-target-<worker>-pool-<hash>` directory in the build output).
+
+**`RCH_WORKER` pinning is currently refused for this repo** — every worker fails
+a hard preflight with `alias_wrong_target:/data` because each has a real
+`/data/projects/franken_numpy` directory rather than rch's expected alias
+symlink. Verified 2026-07-30 that the clean-baseline form does *not* change this,
+so build unpinned and choose your measurement host separately (below).
+`rch diagnose` shows a *simulated* selection succeeding; the hard preflight only
+runs on the real `rch exec`.
+
+### Getting a perf binary you can actually run and time
+
+`rch exec` has **no artifact-retrieval mechanism**, and it compiles *and runs*
+remotely. That is fine for `cargo test`, but a perf measurement needs the binary
+on a host you control.
+
+**Route 1 (preferred): scp it off the worker.** The build output names the ELF
+under `.rch-target-<worker>-pool-<hash>/<profile>/deps/<bench>-<hash>`. Pipe it
+to your measurement host and verify `sha256sum` on both ends. This is safe here:
+no repo sets `target-cpu=native`, and this repo's only ISA pin is the *portable*
+`target-feature=+avx2` (`x86-64-v3` is a correctness hazard — it breaks 16
+conformance tests), so runtime ISA dispatch resolves against the CPU that
+executes the binary.
+
+**Provenance requirement:** record WHICH worker built the binary and WHICH
+profile, next to the ELF SHA-256 the harness self-reports from inside the
+process. A binary of unknown origin or unknown profile is not evidence.
+
+**FOOTGUN INTRODUCED BY ROUTE 1: pass `--bench`.** When `cargo bench` runs a
+criterion binary it passes `--bench` for you. Running a scp'd ELF directly does
+not, so criterion silently enters *test mode*: each benchmark executes exactly
+one validation iteration, no samples are collected, `report_median_gate_pair`
+early-returns on the empty sample vectors, and the process **exits 0 having
+measured nothing and printed no gate line**. Measured 2026-07-30: five seconds
+and zero `NULL_MEDIAN_GATE` rows, with an exit code that looks like success.
+This is the "unregistered groups run green measuring nothing" trap wearing a new
+hat. Direct ELF invocation therefore needs BOTH:
+
+```bash
+FNP_BENCH_GROUPS=<group-fn-substrings> ./<elf> --bench
+```
+
+Also note the two group selectors are not interchangeable. The `fnp-group=<...>`
+argv token is ALSO consumed by criterion as a benchmark-name filter, which
+silently filters out every criterion-driven arm; it only works for
+self-timing workload groups that ignore criterion entirely. For criterion-driven
+arms use the `FNP_BENCH_GROUPS` environment variable, which criterion never
+sees.
+
+**Route 2 is FROZEN as of 2026-07-30 23:10 — do not start a local cargo build.**
+The 150G floor below has tripped: `/data` fell to 127G and then 114G free,
+because an unrelated build outside this swarm grew one target directory to 261G.
+The cause is not this campaign, but the guardrail is enforced regardless. Use
+Route 1 (a few MB) until told otherwise, keep `force_local = true` unset, and if
+a local build is already running let it finish rather than wasting the space
+already spent. The guardrails below are the standing policy for when the floor
+clears again.
+
+**Route 2 (guardrails): one bounded local build.** Local builds are not banned in
+principle — that ban was a disk-emergency measure and it was pushing people
+to measure on the wrong profile. Guardrails: reuse ONE target dir per repo (never
+mint a fresh `CARGO_TARGET_DIR` per task — that ballooned `/data/tmp` to 612G
+twice); **`df` precheck, and do not start a local build under 150G free on
+/data**; local builds are for the final measurement artifact only (edit loop,
+`cargo check`, clippy, and tests stay remote); and `force_local = true` remains
+banned as an rch *config* setting — if you need one local build, run that one
+command with `env -u CARGO_TARGET_DIR cargo build --profile release-perf ...`
+directly rather than editing rch config.
+
+### PROFILE: `bench` is triage-grade, `release-perf` is ship-grade
+
+`[profile.bench]` inherits stock `release` (`lto = false`,
+`codegen-units = 16`), i.e. the same optimization level as the `bench-fast`
+triage profile. A plain `cargo bench` therefore measures our arm **without**
+thin LTO or cross-crate inlining. Per this workspace's own profile comment,
+ship-grade fnp-vs-NumPy ratios must be confirmed under `--profile release-perf`.
+State the profile in every ledger row that publishes an absolute level. A ratio
+measured with the candidate at `bench` is conservative (release-perf can only
+speed our arm up) but it is still mislabeled if the row does not say so.
 
 Quick commands:
 ```bash

@@ -1,0 +1,6 @@
+host=hz1
+python 3.14.4
+numpy 2.3.5
+eigvalsh_nxn/size/64: median_ns=254157 min_ns=198792 mean_ns=250591 samples=15 inner=20 first=64.386429708557372 last=70.734705062490306
+eigvalsh_nxn/size/128: median_ns=1280690 min_ns=1179053 mean_ns=1267666 samples=15 inner=10 first=128.38632840067439 last=136.06661003375629
+eigvalsh_nxn/size/256: median_ns=7380748 min_ns=7127970 mean_ns=7334165 samples=10 inner=3 first=256.38630289685574 last=265.42379874810149

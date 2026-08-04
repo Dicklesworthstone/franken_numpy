@@ -868,7 +868,7 @@ impl Pcg64Rng {
     /// Fill a vector with `len` random u64 values.
     #[must_use]
     pub fn fill_u64(&mut self, len: usize) -> Vec<u64> {
-        (0..len).map(|_| self.next_u64()).collect()
+        parallel_pcg_u64_words(self, len)
     }
 
     /// Advance the state by `delta` steps (jump-ahead).
@@ -1037,7 +1037,7 @@ impl Pcg64DxsmRng {
     /// Fill a vector with `len` random u64 values.
     #[must_use]
     pub fn fill_u64(&mut self, len: usize) -> Vec<u64> {
-        (0..len).map(|_| self.next_u64()).collect()
+        parallel_pcg_u64_words(self, len)
     }
 
     /// Advance the state by `delta` steps (jump-ahead).
@@ -1632,7 +1632,7 @@ impl SeedSequence {
 
         let u32_words = self.generate_state_u32(doubled_words)?;
         let mut generated = Vec::with_capacity(words);
-        for pair in u32_words.chunks_exact(2) {
+        for pair in u32_words.as_chunks::<2>().0 {
             generated.push(u64::from(pair[0]) | (u64::from(pair[1]) << 32));
         }
         Ok(generated)
@@ -1977,12 +1977,32 @@ impl RngBackend {
     fn fill_u64(&mut self, len: usize) -> Vec<u64> {
         match self {
             Self::Deterministic(rng) => rng.fill_u64(len),
-            Self::Pcg64(rng) => (0..len).map(|_| rng.next_u64()).collect(),
-            Self::Pcg64Dxsm(rng) => (0..len).map(|_| rng.next_u64()).collect(),
+            Self::Pcg64(rng) => rng.fill_u64(len),
+            Self::Pcg64Dxsm(rng) => rng.fill_u64(len),
             Self::Mt19937(rng) => (0..len).map(|_| rng.next_u64()).collect(),
             Self::Philox(rng) => (0..len).map(|_| rng.next_u64()).collect(),
             Self::Sfc64(rng) => (0..len).map(|_| rng.next_u64()).collect(),
         }
+    }
+
+    fn try_fill_pcg_bytes(&mut self, out: &mut [u8]) -> Option<Option<u32>> {
+        match self {
+            Self::Pcg64(rng) => Some(fill_pcg_bytes_from_u64_words(rng, out)),
+            Self::Pcg64Dxsm(rng) => Some(fill_pcg_bytes_from_u64_words(rng, out)),
+            _ => None,
+        }
+    }
+
+    fn try_append_pcg_bytes(&mut self, out: &mut Vec<u8>, len: usize) -> Option<Option<u32>> {
+        match self {
+            Self::Pcg64(rng) => Some(append_pcg_bytes_serial(rng, out, len)),
+            Self::Pcg64Dxsm(rng) => Some(append_pcg_bytes_serial(rng, out, len)),
+            _ => None,
+        }
+    }
+
+    fn has_pcg_byte_fill(&self) -> bool {
+        matches!(self, Self::Pcg64(_) | Self::Pcg64Dxsm(_))
     }
 
     fn jump_ahead(&mut self, steps: u64) {
@@ -2068,6 +2088,602 @@ fn random_f64_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64
     (0..size).map(|_| rng.ziggurat_next_f64()).collect()
 }
 
+/// PCG-family cores that support O(log n) jump-ahead, enabling parallel
+/// fixed-consumption fills (one `next_u64` per output) with an identical stream.
+trait PcgAdvanceFill: Clone + Send + Sync {
+    fn advance_by(&mut self, delta: u128);
+    fn next_u64_word(&mut self) -> u64;
+    fn fill_uniform_f64(&mut self, out: &mut [f64]);
+}
+
+macro_rules! impl_pcg_advance_fill {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl PcgAdvanceFill for $ty {
+            #[inline]
+            fn advance_by(&mut self, delta: u128) {
+                self.advance(delta);
+            }
+            #[inline]
+            fn next_u64_word(&mut self) -> u64 {
+                self.next_u64()
+            }
+            #[inline]
+            fn fill_uniform_f64(&mut self, out: &mut [f64]) {
+                for slot in out.iter_mut() {
+                    *slot = self.next_f64();
+                }
+            }
+        }
+    )+};
+}
+impl_pcg_advance_fill!(Pcg64Rng, Pcg64DxsmRng);
+
+/// Minimum element count before parallelizing a PCG uniform fill. PCG step is a
+/// real 128-bit multiply + rotate per element (≈10 ns), so the rayon dispatch
+/// pays off well before the L3 cliff that gates pure memory-bound ops.
+const PCG_PARALLEL_MIN_LEN: usize = 1 << 16;
+const PCG_BYTES_DIRECT_MIN_LEN: usize = 1 << 18;
+
+/// Fill raw u64 words for PCG-family cores with the same jump-ahead chunking as
+/// fixed-consumption floating distributions. Each output consumes exactly one
+/// `next_u64`, so chunk `k` starts from the serial state after `k` draws.
+fn parallel_pcg_u64_words<R: PcgAdvanceFill>(rng: &mut R, len: usize) -> Vec<u64> {
+    use rayon::prelude::*;
+
+    let mut out = vec![0u64; len];
+    let threads = rayon::current_num_threads();
+    if len < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        for slot in &mut out {
+            *slot = rng.next_u64_word();
+        }
+        return out;
+    }
+
+    let chunk = len.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            for slot in slice {
+                *slot = local.next_u64_word();
+            }
+        });
+
+    rng.advance_by(len as u128);
+    out
+}
+
+fn fill_pcg_bytes_serial<R: PcgAdvanceFill>(rng: &mut R, out: &mut [u8]) -> Option<u32> {
+    let mut offset = 0usize;
+    let mut buffered = None;
+    while offset < out.len() {
+        let word = rng.next_u64_word();
+        let bytes = word.to_le_bytes();
+        let take = (out.len() - offset).min(8);
+        out[offset..offset + take].copy_from_slice(&bytes[..take]);
+        offset += take;
+        buffered = (take <= 4).then_some((word >> 32) as u32);
+    }
+    buffered
+}
+
+fn append_pcg_bytes_serial<R: PcgAdvanceFill>(
+    rng: &mut R,
+    out: &mut Vec<u8>,
+    len: usize,
+) -> Option<u32> {
+    let mut remaining = len;
+    let mut buffered = None;
+    while remaining > 0 {
+        let word = rng.next_u64_word();
+        let bytes = word.to_le_bytes();
+        let take = remaining.min(8);
+        out.extend_from_slice(&bytes[..take]);
+        remaining -= take;
+        buffered = (take <= 4).then_some((word >> 32) as u32);
+    }
+    buffered
+}
+
+fn fill_pcg_bytes_from_u64_words<R: PcgAdvanceFill>(rng: &mut R, out: &mut [u8]) -> Option<u32> {
+    use rayon::prelude::*;
+
+    let u32_count = out.len().div_ceil(4);
+    let words = u32_count.div_ceil(2);
+    let threads = rayon::current_num_threads();
+    if out.len() < PCG_BYTES_DIRECT_MIN_LEN || threads < 2 {
+        return fill_pcg_bytes_serial(rng, out);
+    }
+
+    let buffered = if u32_count % 2 == 1 {
+        let mut tail = rng.clone();
+        tail.advance_by((words - 1) as u128);
+        Some((tail.next_u64_word() >> 32) as u32)
+    } else {
+        None
+    };
+
+    let chunk_words = words.div_ceil(threads).max(1);
+    let chunk_bytes = chunk_words.saturating_mul(8).max(8);
+    out.par_chunks_mut(chunk_bytes)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start_word = chunk_idx * chunk_words;
+            let mut local = rng.clone();
+            local.advance_by(start_word as u128);
+            let mut offset = 0usize;
+            while offset < slice.len() {
+                let word = local.next_u64_word();
+                let bytes = word.to_le_bytes();
+                let take = (slice.len() - offset).min(8);
+                slice[offset..offset + take].copy_from_slice(&bytes[..take]);
+                offset += take;
+            }
+        });
+    rng.advance_by(words as u128);
+    buffered
+}
+
+/// Generate `size` uniform `[0,1)` doubles, parallelizing PCG/PCG-DXSM cores via
+/// jump-ahead. NumPy's RNG is single-threaded, so this both closes the serial gap
+/// and beats NumPy: the output [start..start+L) chunk is produced by a clone whose
+/// state is advanced by `start` draws, which is bit-for-bit identical to the serial
+/// fold (each f64 consumes exactly one `next_u64`). The original generator is then
+/// advanced by `size` so subsequent draws continue exactly where serial would.
+fn parallel_pcg_random_f64<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> Vec<f64> {
+    let mut out = vec![0.0f64; size];
+    parallel_pcg_fill_slice(rng, &mut out);
+    out
+}
+
+#[inline]
+fn random_f32_from_uint32(word: u32) -> f32 {
+    ((word >> 8) as f32) * (1.0_f32 / 16_777_216.0_f32)
+}
+
+#[inline]
+fn fill_pcg_random_f32_chunk<R: PcgAdvanceFill>(rng: &mut R, start: usize, out: &mut [f32]) {
+    rng.advance_by((start / 2) as u128);
+    let mut idx = 0usize;
+    if start % 2 == 1 && !out.is_empty() {
+        let word = rng.next_u64_word();
+        out[0] = random_f32_from_uint32((word >> 32) as u32);
+        idx = 1;
+    }
+    while idx + 1 < out.len() {
+        let word = rng.next_u64_word();
+        out[idx] = random_f32_from_uint32(word as u32);
+        out[idx + 1] = random_f32_from_uint32((word >> 32) as u32);
+        idx += 2;
+    }
+    if idx < out.len() {
+        let word = rng.next_u64_word();
+        out[idx] = random_f32_from_uint32(word as u32);
+    }
+}
+
+/// Generate `size` uniform `[0,1)` float32 values for PCG-family cores. NumPy's
+/// float32 path consumes u64 words as low-then-high u32 halves; this keeps that
+/// schedule exactly, including the buffered high half after odd-length fills.
+fn parallel_pcg_random_f32<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> (Vec<f32>, Option<u32>) {
+    use rayon::prelude::*;
+    let mut out = vec![0.0f32; size];
+    let words = size.div_ceil(2);
+    let threads = rayon::current_num_threads();
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        let mut idx = 0usize;
+        while idx + 1 < out.len() {
+            let word = rng.next_u64_word();
+            out[idx] = random_f32_from_uint32(word as u32);
+            out[idx + 1] = random_f32_from_uint32((word >> 32) as u32);
+            idx += 2;
+        }
+        let buffered = if idx < out.len() {
+            let word = rng.next_u64_word();
+            out[idx] = random_f32_from_uint32(word as u32);
+            Some((word >> 32) as u32)
+        } else {
+            None
+        };
+        return (out, buffered);
+    }
+
+    let buffered = if size % 2 == 1 {
+        let mut tail = rng.clone();
+        tail.advance_by((words - 1) as u128);
+        let word = tail.next_u64_word();
+        Some((word >> 32) as u32)
+    } else {
+        None
+    };
+
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            fill_pcg_random_f32_chunk(&mut local, start, slice);
+        });
+    rng.advance_by(words as u128);
+    (out, buffered)
+}
+
+/// `low + uniform[0,1) * range` for `size` samples, parallelizing the PCG draw
+/// exactly as [`parallel_pcg_random_f64`]. The affine map is FUSED into each
+/// parallel chunk right after that chunk's uniforms are generated — while they
+/// are still in cache — instead of as a second full sweep over the output. Each
+/// result still equals the serial `low + next_f64() * range` bit-for-bit (same
+/// draw via jump-ahead, same IEEE expression), so the byte-exact golden holds;
+/// the win is removing the second memory-bound DRAM round-trip over `out`.
+fn parallel_pcg_uniform<R: PcgAdvanceFill>(
+    rng: &mut R,
+    low: f64,
+    range: f64,
+    size: usize,
+) -> Vec<f64> {
+    use rayon::prelude::*;
+    let mut out = vec![0.0f64; size];
+    let threads = rayon::current_num_threads();
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        // Serial: fill uniforms then affine map (advances `rng` by `size` draws).
+        rng.fill_uniform_f64(&mut out);
+        for slot in out.iter_mut() {
+            *slot = low + *slot * range;
+        }
+        return out;
+    }
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            local.fill_uniform_f64(slice);
+            // Fused affine pass over the just-generated, in-cache chunk.
+            for slot in slice.iter_mut() {
+                *slot = low + *slot * range;
+            }
+        });
+    // Position the master state exactly where `size` serial draws would leave it.
+    rng.advance_by(size as u128);
+    out
+}
+
+/// Inverse-CDF standard exponential sampling for PCG-family cores. This method
+/// consumes exactly one f64 uniform per output, so jump-ahead chunking preserves
+/// the serial stream while fusing `-ln1p(-u)` into each cache-hot chunk.
+fn parallel_pcg_standard_exponential_inv<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> Vec<f64> {
+    use rayon::prelude::*;
+    let mut out = vec![0.0f64; size];
+    let threads = rayon::current_num_threads();
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        rng.fill_uniform_f64(&mut out);
+        for slot in out.iter_mut() {
+            *slot = -(-*slot).ln_1p();
+        }
+        return out;
+    }
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            local.fill_uniform_f64(slice);
+            for slot in slice.iter_mut() {
+                *slot = -(-*slot).ln_1p();
+            }
+        });
+    rng.advance_by(size as u128);
+    out
+}
+
+#[inline]
+fn logistic_transform(u: f64, loc: f64, scale: f64) -> f64 {
+    loc + scale * (u / (1.0 - u)).ln()
+}
+
+/// Inverse-CDF logistic sampling for PCG-family cores. The positive-scale path
+/// consumes exactly one f64 uniform per output, so jump-ahead chunking preserves
+/// the serial stream while fusing the logit transform into each cache-hot chunk.
+fn parallel_pcg_logistic<R: PcgAdvanceFill>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    use rayon::prelude::*;
+    let mut out = vec![0.0f64; size];
+    let threads = rayon::current_num_threads();
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        rng.fill_uniform_f64(&mut out);
+        for slot in out.iter_mut() {
+            *slot = logistic_transform(*slot, loc, scale);
+        }
+        return out;
+    }
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            local.fill_uniform_f64(slice);
+            for slot in slice.iter_mut() {
+                *slot = logistic_transform(*slot, loc, scale);
+            }
+        });
+    rng.advance_by(size as u128);
+    out
+}
+
+#[inline]
+fn laplace_transform(u: f64, loc: f64, scale: f64) -> Option<f64> {
+    if u >= 0.5 {
+        Some(loc - scale * (2.0 - u - u).ln())
+    } else if u > 0.0 {
+        Some(loc + scale * (u + u).ln())
+    } else {
+        None
+    }
+}
+
+fn pcg_laplace_serial<R: PcgAdvanceFill>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    let mut out = Vec::with_capacity(size);
+    let mut raw = [0.0f64; 1];
+    while out.len() < size {
+        rng.fill_uniform_f64(&mut raw);
+        if let Some(value) = laplace_transform(raw[0], loc, scale) {
+            out.push(value);
+        }
+    }
+    out
+}
+
+/// Inverse-CDF Laplace sampling for PCG-family cores. Accepted samples consume
+/// exactly one f64 uniform, so jump-ahead chunking preserves the scalar stream.
+/// The exact-zero uniform retry is handled by replaying the whole call through
+/// the saved serial state if any chunk observes that rare branch.
+fn parallel_pcg_laplace<R: PcgAdvanceFill>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let threads = rayon::current_num_threads();
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        return pcg_laplace_serial(rng, loc, scale, size);
+    }
+
+    let original = rng.clone();
+    let mut out = vec![0.0f64; size];
+    let rejected = AtomicBool::new(false);
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            local.fill_uniform_f64(slice);
+            for slot in slice.iter_mut() {
+                if let Some(value) = laplace_transform(*slot, loc, scale) {
+                    *slot = value;
+                } else {
+                    rejected.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+
+    if rejected.load(Ordering::Relaxed) {
+        let mut serial = original;
+        let out = pcg_laplace_serial(&mut serial, loc, scale, size);
+        *rng = serial;
+        return out;
+    }
+
+    rng.advance_by(size as u128);
+    out
+}
+
+fn pcg_gumbel_serial<R: PcgAdvanceFill>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    let mut out = Vec::with_capacity(size);
+    let mut raw = [0.0f64; 1];
+    while out.len() < size {
+        rng.fill_uniform_f64(&mut raw);
+        if let Some(value) = gumbel_transform(raw[0], loc, scale) {
+            out.push(value);
+        }
+    }
+    out
+}
+
+/// Inverse-CDF Gumbel sampling for PCG-family cores. Accepted samples consume
+/// exactly one f64 uniform, so jump-ahead chunking preserves the scalar stream.
+/// The sole rejection case is an exact zero raw uniform; if any chunk observes
+/// that branch, replay the call through the saved serial state so later draws
+/// still match NumPy's retry semantics.
+fn parallel_pcg_gumbel<R: PcgAdvanceFill>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let threads = rayon::current_num_threads();
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        return pcg_gumbel_serial(rng, loc, scale, size);
+    }
+
+    let original = rng.clone();
+    let mut out = vec![0.0f64; size];
+    let rejected = AtomicBool::new(false);
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            local.fill_uniform_f64(slice);
+            for slot in slice.iter_mut() {
+                if let Some(value) = gumbel_transform(*slot, loc, scale) {
+                    *slot = value;
+                } else {
+                    rejected.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+
+    if rejected.load(Ordering::Relaxed) {
+        let mut serial = original;
+        let out = pcg_gumbel_serial(&mut serial, loc, scale, size);
+        *rng = serial;
+        return out;
+    }
+
+    rng.advance_by(size as u128);
+    out
+}
+
+#[inline]
+fn triangular_transform(
+    u: f64,
+    left: f64,
+    ratio: f64,
+    leftprod: f64,
+    right: f64,
+    rightprod: f64,
+) -> f64 {
+    if u <= ratio {
+        left + (u * leftprod).sqrt()
+    } else {
+        right - ((1.0 - u) * rightprod).sqrt()
+    }
+}
+
+/// Triangular inverse-CDF sampling for PCG-family cores. This path consumes one
+/// f64 uniform per output with no rejection loop, so jump-ahead chunking exactly
+/// preserves the scalar PCG stream while each chunk performs the branchy
+/// transform while its uniforms are still cache-hot.
+fn parallel_pcg_triangular<R: PcgAdvanceFill>(
+    rng: &mut R,
+    left: f64,
+    ratio: f64,
+    leftprod: f64,
+    right: f64,
+    rightprod: f64,
+    size: usize,
+) -> Vec<f64> {
+    use rayon::prelude::*;
+    let mut out = vec![0.0f64; size];
+    let threads = rayon::current_num_threads();
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        rng.fill_uniform_f64(&mut out);
+        for slot in out.iter_mut() {
+            *slot = triangular_transform(*slot, left, ratio, leftprod, right, rightprod);
+        }
+        return out;
+    }
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            local.fill_uniform_f64(slice);
+            for slot in slice.iter_mut() {
+                *slot = triangular_transform(*slot, left, ratio, leftprod, right, rightprod);
+            }
+        });
+    rng.advance_by(size as u128);
+    out
+}
+
+#[inline]
+fn vonmises_uniform_transform(u: f64) -> f64 {
+    std::f64::consts::PI * (2.0 * u - 1.0)
+}
+
+/// Near-zero-kappa von Mises degenerates to a uniform angle. This branch
+/// consumes exactly one f64 uniform per output, so PCG jump-ahead can preserve
+/// the scalar stream while fusing the angle transform into each cache-hot chunk.
+fn parallel_pcg_vonmises_uniform<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> Vec<f64> {
+    use rayon::prelude::*;
+    let mut out = vec![0.0f64; size];
+    let threads = rayon::current_num_threads();
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        rng.fill_uniform_f64(&mut out);
+        for slot in out.iter_mut() {
+            *slot = vonmises_uniform_transform(*slot);
+        }
+        return out;
+    }
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            local.fill_uniform_f64(slice);
+            for slot in slice.iter_mut() {
+                *slot = vonmises_uniform_transform(*slot);
+            }
+        });
+    rng.advance_by(size as u128);
+    out
+}
+
+/// Fill a caller-provided slice with uniform `[0,1)` doubles, parallelizing the
+/// PCG jump-ahead exactly as [`parallel_pcg_random_f64`]. Filling an externally
+/// owned buffer (e.g. a NumPy output array via the buffer protocol) avoids the
+/// generate-into-Vec-then-copy round trip entirely — the generation and the
+/// page-fault of the output happen together, in parallel.
+fn parallel_pcg_fill_slice<R: PcgAdvanceFill>(rng: &mut R, out: &mut [f64]) {
+    use rayon::prelude::*;
+    let size = out.len();
+    let threads = rayon::current_num_threads();
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        // Serial fold advances `rng` by `size` draws naturally.
+        rng.fill_uniform_f64(out);
+        return;
+    }
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            local.fill_uniform_f64(slice);
+        });
+    // Position the master state exactly where `size` serial draws would leave it.
+    rng.advance_by(size as u128);
+}
+
 #[inline]
 fn uniform_from_core<R: ZigguratRngCore>(
     rng: &mut R,
@@ -2077,6 +2693,98 @@ fn uniform_from_core<R: ZigguratRngCore>(
 ) -> Vec<f64> {
     (0..size)
         .map(|_| low + rng.ziggurat_next_f64() * range)
+        .collect()
+}
+
+#[inline]
+fn standard_exponential_inv_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
+    (0..size)
+        .map(|_| -(-rng.ziggurat_next_f64()).ln_1p())
+        .collect()
+}
+
+#[inline]
+fn logistic_from_core<R: ZigguratRngCore>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    (0..size)
+        .map(|_| logistic_transform(rng.ziggurat_next_f64(), loc, scale))
+        .collect()
+}
+
+#[inline]
+fn laplace_from_core<R: ZigguratRngCore>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    let mut out = Vec::with_capacity(size);
+    while out.len() < size {
+        if let Some(value) = laplace_transform(rng.ziggurat_next_f64(), loc, scale) {
+            out.push(value);
+        }
+    }
+    out
+}
+
+#[inline]
+fn gumbel_transform(raw_uniform: f64, loc: f64, scale: f64) -> Option<f64> {
+    let u = 1.0 - raw_uniform;
+    if u < 1.0 {
+        Some(loc - scale * (-u.ln()).ln())
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn gumbel_from_core<R: ZigguratRngCore>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    let mut out = Vec::with_capacity(size);
+    while out.len() < size {
+        if let Some(value) = gumbel_transform(rng.ziggurat_next_f64(), loc, scale) {
+            out.push(value);
+        }
+    }
+    out
+}
+
+#[inline]
+fn triangular_from_core<R: ZigguratRngCore>(
+    rng: &mut R,
+    left: f64,
+    ratio: f64,
+    leftprod: f64,
+    right: f64,
+    rightprod: f64,
+    size: usize,
+) -> Vec<f64> {
+    (0..size)
+        .map(|_| {
+            triangular_transform(
+                rng.ziggurat_next_f64(),
+                left,
+                ratio,
+                leftprod,
+                right,
+                rightprod,
+            )
+        })
+        .collect()
+}
+
+#[inline]
+fn vonmises_uniform_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
+    (0..size)
+        .map(|_| vonmises_uniform_transform(rng.ziggurat_next_f64()))
         .collect()
 }
 
@@ -2104,6 +2812,45 @@ fn exponential_from_core<R: ZigguratRngCore>(rng: &mut R, scale: f64, size: usiz
     (0..size)
         .map(|_| scale * sample_ziggurat_exponential_core(rng))
         .collect()
+}
+
+/// Parameter-only terms of gamma sampling, computed once per batch. Every
+/// field holds the exact expression the sampling loops formerly evaluated in
+/// place, and none of them consumes an RNG draw, so hoisting them preserves
+/// the output stream bit-for-bit. Mirrors the Poisson parameter cache
+/// (franken_numpy-ixs5y.312).
+#[derive(Clone, Copy)]
+enum GammaShapeCache {
+    /// `shape == 1.0`, `shape == 0.0`, and non-finite shapes: the early
+    /// returns never read cached terms, so nothing is computed (matching the
+    /// former per-call cost exactly).
+    Degenerate,
+    /// `shape < 1.0` (uniform + exponential rejection).
+    Small {
+        one_minus_shape: f64,
+        inv_shape: f64,
+    },
+    /// Finite `shape > 1.0` (Marsaglia-Tsang).
+    MarsagliaTsang { d: f64, c: f64 },
+}
+
+impl GammaShapeCache {
+    fn new(shape_param: f64) -> Self {
+        if shape_param == 1.0 || shape_param == 0.0 || !shape_param.is_finite() {
+            Self::Degenerate
+        } else if shape_param < 1.0 {
+            Self::Small {
+                one_minus_shape: 1.0 - shape_param,
+                inv_shape: 1.0 / shape_param,
+            }
+        } else {
+            let d = shape_param - 1.0 / 3.0;
+            Self::MarsagliaTsang {
+                d,
+                c: 1.0 / (9.0 * d).sqrt(),
+            }
+        }
+    }
 }
 
 #[inline(always)]
@@ -2984,24 +3731,27 @@ impl RandomState {
         if a.is_nan() || a <= 1.0 {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| self.legacy_zipf_single(a) as u64)
-            .collect())
-    }
-
-    fn legacy_zipf_single(&mut self, a: f64) -> i64 {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
         if a >= 1025.0 {
-            return 1;
+            return Ok(vec![1; size]);
         }
         let am1 = a - 1.0;
         let b = 2.0_f64.powf(am1);
         let umin = (i64::MAX as f64).powf(-am1);
+        let exponent = -1.0 / am1;
+        Ok((0..size)
+            .map(|_| self.legacy_zipf_single(am1, b, umin, exponent) as u64)
+            .collect())
+    }
 
+    fn legacy_zipf_single(&mut self, am1: f64, b: f64, umin: f64, exponent: f64) -> i64 {
         loop {
             let u01 = self.next_f64();
             let u = u01 * umin + (1.0 - u01);
             let v = self.next_f64();
-            let x = u.powf(-1.0 / am1).floor();
+            let x = u.powf(exponent).floor();
 
             if x > (i64::MAX as f64) || x < 1.0 {
                 continue;
@@ -3172,6 +3922,94 @@ impl BinomialCache {
             p2: 0.0,
             p3: 0.0,
             p4: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PoissonPtrsCache {
+    lam: f64,
+    loglam: f64,
+    b: f64,
+    a: f64,
+    log_invalpha: f64,
+    vr: f64,
+}
+
+impl PoissonPtrsCache {
+    fn new(lam: f64) -> Self {
+        let b = 0.931 + 2.53 * lam.sqrt();
+        let a = -0.059 + 0.02483 * b;
+        Self {
+            lam,
+            loglam: lam.ln(),
+            b,
+            a,
+            log_invalpha: (1.1239 + 1.1328 / (b - 3.4)).ln(),
+            vr: 0.9277 - 3.6224 / (b - 2.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HypergeometricHruaCache {
+    good: i64,
+    bad: i64,
+    sample: i64,
+    computed_sample: i64,
+    mingoodbad: i64,
+    maxgoodbad: i64,
+    a: f64,
+    h: f64,
+    b: f64,
+    g: f64,
+}
+
+impl HypergeometricHruaCache {
+    #[expect(clippy::many_single_char_names)]
+    fn new(good: i64, bad: i64, sample: i64) -> Self {
+        // D1 = 2*sqrt(2/e), D2 = 3 - 2*sqrt(3/e)
+        const D1: f64 = 1.7155277699214135;
+        const D2: f64 = 0.8989161620588988;
+
+        let popsize = good + bad;
+        let computed_sample = sample.min(popsize - sample);
+        let mingoodbad = good.min(bad);
+        let maxgoodbad = good.max(bad);
+
+        let p = (mingoodbad as f64) / (popsize as f64);
+        let q = (maxgoodbad as f64) / (popsize as f64);
+
+        let mu = (computed_sample as f64) * p;
+        let a = mu + 0.5;
+
+        let var = ((popsize - computed_sample) as f64) * (computed_sample as f64) * p * q
+            / ((popsize - 1) as f64);
+        let c = (var + 0.5).sqrt();
+        let h = D1 * c + D2;
+
+        let m = (((computed_sample + 1) as f64) * ((mingoodbad + 1) as f64)
+            / ((popsize + 2) as f64))
+            .floor() as i64;
+
+        let g = logfactorial(m)
+            + logfactorial(mingoodbad - m)
+            + logfactorial(computed_sample - m)
+            + logfactorial(maxgoodbad - computed_sample + m);
+
+        let b = (((computed_sample.min(mingoodbad) + 1) as f64).min(a + 16.0 * c)).floor();
+
+        Self {
+            good,
+            bad,
+            sample,
+            computed_sample,
+            mingoodbad,
+            maxgoodbad,
+            a,
+            h,
+            b,
+            g,
         }
     }
 }
@@ -3458,6 +4296,114 @@ impl Generator {
         (m >> 64) as u64
     }
 
+    fn buffered_uint16(&mut self, bcnt: &mut u8, buf: &mut u32) -> u16 {
+        if *bcnt == 0 {
+            *buf = self.next_uint32();
+            *bcnt = 1;
+        } else {
+            *buf >>= 16;
+            *bcnt -= 1;
+        }
+        *buf as u16
+    }
+
+    fn buffered_uint8(&mut self, bcnt: &mut u8, buf: &mut u32) -> u8 {
+        if *bcnt == 0 {
+            *buf = self.next_uint32();
+            *bcnt = 3;
+        } else {
+            *buf >>= 8;
+            *bcnt -= 1;
+        }
+        *buf as u8
+    }
+
+    fn buffered_bounded_lemire_uint16(&mut self, rng: u16, bcnt: &mut u8, buf: &mut u32) -> u16 {
+        let rng_excl = u32::from(rng) + 1;
+        let mut m = u32::from(self.buffered_uint16(bcnt, buf)) * rng_excl;
+        let mut leftover = m as u16;
+
+        if u32::from(leftover) < rng_excl {
+            let threshold = ((u32::from(u16::MAX - rng)) % rng_excl) as u16;
+            while leftover < threshold {
+                m = u32::from(self.buffered_uint16(bcnt, buf)) * rng_excl;
+                leftover = m as u16;
+            }
+        }
+
+        (m >> 16) as u16
+    }
+
+    fn buffered_bounded_lemire_uint8(&mut self, rng: u8, bcnt: &mut u8, buf: &mut u32) -> u8 {
+        let rng_excl = u16::from(rng) + 1;
+        let mut m = u16::from(self.buffered_uint8(bcnt, buf)) * rng_excl;
+        let mut leftover = m as u8;
+
+        if u16::from(leftover) < rng_excl {
+            let threshold = ((u16::from(u8::MAX - rng)) % rng_excl) as u8;
+            while leftover < threshold {
+                m = u16::from(self.buffered_uint8(bcnt, buf)) * rng_excl;
+                leftover = m as u8;
+            }
+        }
+
+        (m >> 8) as u8
+    }
+
+    fn numpy_bounded_uint16(&mut self, off: u16, rng: u16, bcnt: &mut u8, buf: &mut u32) -> u16 {
+        if rng == 0 {
+            return off;
+        }
+        if rng == u16::MAX {
+            return off.wrapping_add(self.buffered_uint16(bcnt, buf));
+        }
+        off.wrapping_add(self.buffered_bounded_lemire_uint16(rng, bcnt, buf))
+    }
+
+    fn numpy_bounded_uint8(&mut self, off: u8, rng: u8, bcnt: &mut u8, buf: &mut u32) -> u8 {
+        if rng == 0 {
+            return off;
+        }
+        if rng == u8::MAX {
+            return off.wrapping_add(self.buffered_uint8(bcnt, buf));
+        }
+        off.wrapping_add(self.buffered_bounded_lemire_uint8(rng, bcnt, buf))
+    }
+
+    fn full_range_u8_from_byte_stream(&mut self, off: u8, size: usize) -> Vec<u8> {
+        if size >= PCG_PARALLEL_MIN_LEN && self.bit_generator.rng.has_pcg_byte_fill() {
+            let mut values = self.bytes(size);
+            if off != 0 {
+                for value in &mut values {
+                    *value = value.wrapping_add(off);
+                }
+            }
+            return values;
+        }
+
+        let mut values = Vec::with_capacity(size);
+        let mut remaining = size;
+        while remaining >= 4 {
+            let word = self.next_uint32();
+            values.push((word as u8).wrapping_add(off));
+            values.push(((word >> 8) as u8).wrapping_add(off));
+            values.push(((word >> 16) as u8).wrapping_add(off));
+            values.push(((word >> 24) as u8).wrapping_add(off));
+            remaining -= 4;
+        }
+        if remaining > 0 {
+            let word = self.next_uint32();
+            values.push((word as u8).wrapping_add(off));
+            if remaining > 1 {
+                values.push(((word >> 8) as u8).wrapping_add(off));
+            }
+            if remaining > 2 {
+                values.push(((word >> 16) as u8).wrapping_add(off));
+            }
+        }
+        values
+    }
+
     /// NumPy-compatible bounded uint64 with automatic 32/64-bit dispatch.
     ///
     /// Returns a value in `[0, rng]` (inclusive).
@@ -3535,8 +4481,10 @@ impl Generator {
         self.u32_buf_ready = false;
         match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => random_f64_from_core(rng, size),
-            RngBackend::Pcg64(rng) => random_f64_from_core(rng, size),
-            RngBackend::Pcg64Dxsm(rng) => random_f64_from_core(rng, size),
+            // PCG64 / PCG64-DXSM support jump-ahead, so a large uniform fill runs
+            // in parallel with a bit-identical stream (see parallel_pcg_random_f64).
+            RngBackend::Pcg64(rng) => parallel_pcg_random_f64(rng, size),
+            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_random_f64(rng, size),
             RngBackend::Mt19937(rng) => random_f64_from_core(rng, size),
             RngBackend::Philox(rng) => random_f64_from_core(rng, size),
             RngBackend::Sfc64(rng) => random_f64_from_core(rng, size),
@@ -3548,6 +4496,37 @@ impl Generator {
     /// Mimics `rng.random(size, dtype=np.float32)`.
     #[must_use]
     pub fn random_f32(&mut self, size: usize) -> Vec<f32> {
+        if size == 0 {
+            return Vec::new();
+        }
+
+        // If a prior scalar f32 draw left a high u32 buffered, preserve the
+        // exact NumPy half-word schedule by finishing on the serial path.
+        if !self.u32_buf_ready {
+            match &mut self.bit_generator.rng {
+                RngBackend::Pcg64(rng) => {
+                    let (values, buffered) = parallel_pcg_random_f32(rng, size);
+                    if let Some(buf) = buffered {
+                        self.u32_buf = buf;
+                        self.u32_buf_ready = true;
+                    }
+                    return values;
+                }
+                RngBackend::Pcg64Dxsm(rng) => {
+                    let (values, buffered) = parallel_pcg_random_f32(rng, size);
+                    if let Some(buf) = buffered {
+                        self.u32_buf = buf;
+                        self.u32_buf_ready = true;
+                    }
+                    return values;
+                }
+                RngBackend::Deterministic(_)
+                | RngBackend::Mt19937(_)
+                | RngBackend::Philox(_)
+                | RngBackend::Sfc64(_) => {}
+            }
+        }
+
         (0..size).map(|_| self.next_f32()).collect()
     }
 
@@ -3594,8 +4573,9 @@ impl Generator {
         self.u32_buf_ready = false;
         Ok(match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => uniform_from_core(rng, low, range, size),
-            RngBackend::Pcg64(rng) => uniform_from_core(rng, low, range, size),
-            RngBackend::Pcg64Dxsm(rng) => uniform_from_core(rng, low, range, size),
+            // PCG jump-ahead: parallel draw + affine map, bit-identical stream.
+            RngBackend::Pcg64(rng) => parallel_pcg_uniform(rng, low, range, size),
+            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_uniform(rng, low, range, size),
             RngBackend::Mt19937(rng) => uniform_from_core(rng, low, range, size),
             RngBackend::Philox(rng) => uniform_from_core(rng, low, range, size),
             RngBackend::Sfc64(rng) => uniform_from_core(rng, low, range, size),
@@ -3716,6 +4696,184 @@ impl Generator {
         Ok(shaped_output(size, values))
     }
 
+    fn narrow_integer_high_inclusive(
+        low: i64,
+        high: i64,
+        min: i64,
+        max: i64,
+        endpoint: bool,
+    ) -> Result<i64, RandomError> {
+        if low < min || low > max {
+            return Err(RandomError::InvalidParameter);
+        }
+        let high_limit = if endpoint { max } else { max + 1 };
+        if high < min || high > high_limit {
+            return Err(RandomError::InvalidParameter);
+        }
+        if endpoint {
+            if high < low {
+                return Err(RandomError::InvalidUpperBound);
+            }
+            Ok(high)
+        } else {
+            if high <= low {
+                return Err(RandomError::InvalidUpperBound);
+            }
+            Ok(high - 1)
+        }
+    }
+
+    pub fn integers_i8_endpoint_mode(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: usize,
+        endpoint: bool,
+    ) -> Result<Vec<i8>, RandomError> {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        let high = Self::narrow_integer_high_inclusive(
+            low,
+            high,
+            i64::from(i8::MIN),
+            i64::from(i8::MAX),
+            endpoint,
+        )?;
+        let off = (low as i8) as u8;
+        let rng = (high - low) as u8;
+        if rng == u8::MAX {
+            return Ok(self
+                .full_range_u8_from_byte_stream(off, size)
+                .into_iter()
+                .map(|value| value as i8)
+                .collect());
+        }
+        let mut bcnt = 0;
+        let mut buf = 0;
+        Ok((0..size)
+            .map(|_| self.numpy_bounded_uint8(off, rng, &mut bcnt, &mut buf) as i8)
+            .collect())
+    }
+
+    pub fn integers_i8_shaped(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: Option<&[usize]>,
+        endpoint: bool,
+    ) -> Result<ShapedRandomOutput<i8>, RandomError> {
+        let size = resolve_random_size(size)?;
+        let values = self.integers_i8_endpoint_mode(low, high, size.len, endpoint)?;
+        Ok(shaped_output(size, values))
+    }
+
+    pub fn integers_i16_endpoint_mode(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: usize,
+        endpoint: bool,
+    ) -> Result<Vec<i16>, RandomError> {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        let high = Self::narrow_integer_high_inclusive(
+            low,
+            high,
+            i64::from(i16::MIN),
+            i64::from(i16::MAX),
+            endpoint,
+        )?;
+        let off = (low as i16) as u16;
+        let rng = (high - low) as u16;
+        let mut bcnt = 0;
+        let mut buf = 0;
+        Ok((0..size)
+            .map(|_| self.numpy_bounded_uint16(off, rng, &mut bcnt, &mut buf) as i16)
+            .collect())
+    }
+
+    pub fn integers_i16_shaped(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: Option<&[usize]>,
+        endpoint: bool,
+    ) -> Result<ShapedRandomOutput<i16>, RandomError> {
+        let size = resolve_random_size(size)?;
+        let values = self.integers_i16_endpoint_mode(low, high, size.len, endpoint)?;
+        Ok(shaped_output(size, values))
+    }
+
+    pub fn integers_u8_endpoint_mode(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: usize,
+        endpoint: bool,
+    ) -> Result<Vec<u8>, RandomError> {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        let high = Self::narrow_integer_high_inclusive(low, high, 0, i64::from(u8::MAX), endpoint)?;
+        let off = low as u8;
+        let rng = (high - low) as u8;
+        if rng == u8::MAX {
+            return Ok(self.full_range_u8_from_byte_stream(off, size));
+        }
+        let mut bcnt = 0;
+        let mut buf = 0;
+        Ok((0..size)
+            .map(|_| self.numpy_bounded_uint8(off, rng, &mut bcnt, &mut buf))
+            .collect())
+    }
+
+    pub fn integers_u8_shaped(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: Option<&[usize]>,
+        endpoint: bool,
+    ) -> Result<ShapedRandomOutput<u8>, RandomError> {
+        let size = resolve_random_size(size)?;
+        let values = self.integers_u8_endpoint_mode(low, high, size.len, endpoint)?;
+        Ok(shaped_output(size, values))
+    }
+
+    pub fn integers_u16_endpoint_mode(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: usize,
+        endpoint: bool,
+    ) -> Result<Vec<u16>, RandomError> {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        let high =
+            Self::narrow_integer_high_inclusive(low, high, 0, i64::from(u16::MAX), endpoint)?;
+        let off = low as u16;
+        let rng = (high - low) as u16;
+        let mut bcnt = 0;
+        let mut buf = 0;
+        Ok((0..size)
+            .map(|_| self.numpy_bounded_uint16(off, rng, &mut bcnt, &mut buf))
+            .collect())
+    }
+
+    pub fn integers_u16_shaped(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: Option<&[usize]>,
+        endpoint: bool,
+    ) -> Result<ShapedRandomOutput<u16>, RandomError> {
+        let size = resolve_random_size(size)?;
+        let values = self.integers_u16_endpoint_mode(low, high, size.len, endpoint)?;
+        Ok(shaped_output(size, values))
+    }
+
     /// Generate standard normal (Gaussian, mean=0, std=1) samples using
     /// the Ziggurat method (matching NumPy's Generator.standard_normal).
     ///
@@ -3822,7 +4980,19 @@ impl Generator {
     /// Mimics `rng.standard_exponential(size, method="inv")`.
     #[must_use]
     pub fn standard_exponential_inv(&mut self, size: usize) -> Vec<f64> {
-        (0..size).map(|_| -(-self.next_f64()).ln_1p()).collect()
+        if size == 0 {
+            return Vec::new();
+        }
+
+        self.u32_buf_ready = false;
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => standard_exponential_inv_from_core(rng, size),
+            RngBackend::Pcg64(rng) => parallel_pcg_standard_exponential_inv(rng, size),
+            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_standard_exponential_inv(rng, size),
+            RngBackend::Mt19937(rng) => standard_exponential_inv_from_core(rng, size),
+            RngBackend::Philox(rng) => standard_exponential_inv_from_core(rng, size),
+            RngBackend::Sfc64(rng) => standard_exponential_inv_from_core(rng, size),
+        }
     }
 
     /// Generate standard gamma samples (scale=1).
@@ -3839,7 +5009,11 @@ impl Generator {
         if shape_param == 0.0 {
             return Ok(vec![0.0; size]);
         }
-        Ok((0..size).map(|_| self.sample_gamma(shape_param)).collect())
+        // Parameter-only terms once per batch (bit-identical hoist, .312 sibling).
+        let cache = GammaShapeCache::new(shape_param);
+        Ok((0..size)
+            .map(|_| self.sample_gamma_cached(shape_param, cache))
+            .collect())
     }
 
     /// Generate random bytes.
@@ -3847,6 +5021,64 @@ impl Generator {
     /// Mimics `rng.bytes(length)`. Returns `length` random bytes.
     #[must_use]
     pub fn bytes(&mut self, length: usize) -> Vec<u8> {
+        if length == 0 || !self.bit_generator.rng.has_pcg_byte_fill() {
+            return self.bytes_from_uint32_stream(length);
+        }
+
+        if length < PCG_BYTES_DIRECT_MIN_LEN + 4 {
+            let mut result = Vec::with_capacity(length);
+            if self.u32_buf_ready {
+                let bytes = self.u32_buf.to_le_bytes();
+                let take = length.min(4);
+                result.extend_from_slice(&bytes[..take]);
+                self.u32_buf_ready = false;
+            }
+            let remaining = length - result.len();
+            if remaining > 0
+                && let Some(buffered) = self
+                    .bit_generator
+                    .rng
+                    .try_append_pcg_bytes(&mut result, remaining)
+                && let Some(word) = buffered
+            {
+                self.u32_buf = word;
+                self.u32_buf_ready = true;
+            }
+            return result;
+        }
+
+        let mut result = vec![0u8; length];
+        let mut offset = 0usize;
+        if self.u32_buf_ready {
+            let bytes = self.u32_buf.to_le_bytes();
+            let take = length.min(4);
+            result[..take].copy_from_slice(&bytes[..take]);
+            self.u32_buf_ready = false;
+            offset = take;
+        }
+        if length - offset >= PCG_BYTES_DIRECT_MIN_LEN
+            && let Some(buffered) = self
+                .bit_generator
+                .rng
+                .try_fill_pcg_bytes(&mut result[offset..])
+        {
+            if let Some(word) = buffered {
+                self.u32_buf = word;
+                self.u32_buf_ready = true;
+            }
+            return result;
+        }
+        while offset < length {
+            let word = self.next_uint32();
+            let bytes = word.to_le_bytes();
+            let take = (length - offset).min(4);
+            result[offset..offset + take].copy_from_slice(&bytes[..take]);
+            offset += take;
+        }
+        result
+    }
+
+    fn bytes_from_uint32_stream(&mut self, length: usize) -> Vec<u8> {
         if length == 0 {
             let _ = self.next_uint32();
             return Vec::new();
@@ -3878,24 +5110,32 @@ impl Generator {
         if !(0.0..=POISSON_LAM_MAX).contains(&lam) {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size).map(|_| self.sample_poisson_single(lam)).collect())
+        if lam >= 10.0 {
+            let cache = PoissonPtrsCache::new(lam);
+            return Ok((0..size).map(|_| self.poisson_ptrs(cache) as u64).collect());
+        }
+        if lam == 0.0 {
+            Ok(vec![0; size])
+        } else {
+            let enlam = (-lam).exp();
+            Ok((0..size).map(|_| self.poisson_mult(enlam) as u64).collect())
+        }
     }
 
     /// Single Poisson sample matching NumPy's `random_poisson` dispatcher.
     fn sample_poisson_single(&mut self, lam: f64) -> u64 {
         if lam >= 10.0 {
-            self.poisson_ptrs(lam) as u64
+            self.poisson_ptrs(PoissonPtrsCache::new(lam)) as u64
         } else if lam == 0.0 {
             0
         } else {
-            self.poisson_mult(lam) as u64
+            self.poisson_mult((-lam).exp()) as u64
         }
     }
 
     /// Multiplicative (Knuth) method for small lambda.
     /// Matches `random_poisson_mult()` in NumPy's distributions.c.
-    fn poisson_mult(&mut self, lam: f64) -> i64 {
-        let enlam = (-lam).exp();
+    fn poisson_mult(&mut self, enlam: f64) -> i64 {
         let mut x: i64 = 0;
         let mut prod = 1.0;
         loop {
@@ -3913,28 +5153,21 @@ impl Generator {
     /// Matches `random_poisson_ptrs()` in NumPy's distributions.c.
     /// W. Hörmann, "The transformed rejection method for generating
     /// Poisson random variables", Insurance: Mathematics and Economics 12, 39-45 (1993).
-    fn poisson_ptrs(&mut self, lam: f64) -> i64 {
-        let slam = lam.sqrt();
-        let loglam = lam.ln();
-        let b = 0.931 + 2.53 * slam;
-        let a = -0.059 + 0.02483 * b;
-        let invalpha = 1.1239 + 1.1328 / (b - 3.4);
-        let vr = 0.9277 - 3.6224 / (b - 2.0);
-
+    fn poisson_ptrs(&mut self, cache: PoissonPtrsCache) -> i64 {
         loop {
             let u = self.next_f64() - 0.5;
             let v = self.next_f64();
             let us = 0.5 - u.abs();
-            let k = ((2.0 * a / us + b) * u + lam + 0.43).floor() as i64;
+            let k = ((2.0 * cache.a / us + cache.b) * u + cache.lam + 0.43).floor() as i64;
 
-            if us >= 0.07 && v <= vr {
+            if us >= 0.07 && v <= cache.vr {
                 return k;
             }
             if k < 0 || (us < 0.013 && v > us) {
                 continue;
             }
-            if v.ln() + invalpha.ln() - (a / (us * us) + b).ln()
-                <= -lam + (k as f64) * loglam - random_loggam((k + 1) as f64)
+            if v.ln() + cache.log_invalpha - (cache.a / (us * us) + cache.b).ln()
+                <= -cache.lam + (k as f64) * cache.loglam - random_loggam((k + 1) as f64)
             {
                 return k;
             }
@@ -4319,6 +5552,18 @@ impl Generator {
             return Err(RandomError::InvalidParameter);
         }
 
+        if replace && size == 1 {
+            let draw = self.next_f64();
+            let mut cumulative = 0.0;
+            for (&value, &prob) in a.iter().zip(p) {
+                cumulative += prob;
+                if cumulative > draw {
+                    return Ok(vec![value]);
+                }
+            }
+            return Ok(vec![a[n - 1]]);
+        }
+
         if replace {
             // Inverse-CDF sampling
             let mut cdf = Vec::with_capacity(n);
@@ -4390,6 +5635,20 @@ impl Generator {
         Ok(())
     }
 
+    /// In-place Fisher-Yates shuffle over a slice of any element type, drawing the
+    /// exact same `random_interval(i)` sequence as [`shuffle`]/[`permutation_range`].
+    /// The draw sequence depends only on the length and RNG state, never the payload,
+    /// so this is bit-exact with `rng.shuffle(x)` for whole-element rearrangement and
+    /// lets callers shuffle a numpy buffer in place (viewed by itemsize) instead of
+    /// shuffling an index vector and gathering — one random-access pass instead of two.
+    pub fn shuffle_slice<T>(&mut self, x: &mut [T]) {
+        let n = x.len();
+        for i in (1..n).rev() {
+            let j = self.random_interval(i as u64) as usize;
+            x.swap(i, j);
+        }
+    }
+
     /// Return a shuffled copy of the input (or a random permutation of integers).
     ///
     /// Mimics `rng.permutation(x)`.
@@ -4451,12 +5710,18 @@ impl Generator {
             }
             return Ok(vec![0.0; size]);
         }
+        // Parameter-only terms once per batch (bit-identical hoist, .312 sibling).
+        let cache = GammaShapeCache::new(shape_param);
         Ok((0..size)
-            .map(|_| self.sample_gamma(shape_param) * scale)
+            .map(|_| self.sample_gamma_cached(shape_param, cache) * scale)
             .collect())
     }
 
     fn sample_gamma(&mut self, shape_param: f64) -> f64 {
+        self.sample_gamma_cached(shape_param, GammaShapeCache::new(shape_param))
+    }
+
+    fn sample_gamma_cached(&mut self, shape_param: f64, cache: GammaShapeCache) -> f64 {
         if shape_param == 1.0 {
             // Special case: gamma(1) = exponential(1)
             return self.sample_ziggurat_exponential();
@@ -4471,18 +5736,27 @@ impl Generator {
         }
         if shape_param < 1.0 {
             // NumPy's exact algorithm for shape < 1 from distributions.c:
-            // Uses uniform + exponential rejection.
+            // Uses uniform + exponential rejection. The parameter-only terms
+            // come from the batch cache; the defensive arm re-evaluates the
+            // exact same expressions, so both sources are bit-identical.
+            let (one_minus_shape, inv_shape) = match cache {
+                GammaShapeCache::Small {
+                    one_minus_shape,
+                    inv_shape,
+                } => (one_minus_shape, inv_shape),
+                _ => (1.0 - shape_param, 1.0 / shape_param),
+            };
             loop {
                 let u = self.next_f64();
                 let v = self.sample_ziggurat_exponential();
-                if u <= 1.0 - shape_param {
-                    let x = u.powf(1.0 / shape_param);
+                if u <= one_minus_shape {
+                    let x = u.powf(inv_shape);
                     if x <= v {
                         return x;
                     }
                 } else {
                     let y = -((1.0 - u) / shape_param).ln();
-                    let x = (1.0 - shape_param + shape_param * y).powf(1.0 / shape_param);
+                    let x = (one_minus_shape + shape_param * y).powf(inv_shape);
                     if x <= v + y {
                         return x;
                     }
@@ -4490,8 +5764,13 @@ impl Generator {
             }
         }
         // Marsaglia and Tsang's method for shape >= 1
-        let d = shape_param - 1.0 / 3.0;
-        let c = 1.0 / (9.0 * d).sqrt();
+        let (d, c) = match cache {
+            GammaShapeCache::MarsagliaTsang { d, c } => (d, c),
+            _ => {
+                let d = shape_param - 1.0 / 3.0;
+                (d, 1.0 / (9.0 * d).sqrt())
+            }
+        };
         loop {
             let x = self.sample_standard_normal_single();
             let v = (1.0 + c * x).powi(3);
@@ -4573,10 +5852,13 @@ impl Generator {
                 })
                 .collect());
         }
+        // Fixed shapes: parameter-only gamma terms once per batch (.334 sibling).
+        let cache_a = GammaShapeCache::new(a);
+        let cache_b = GammaShapeCache::new(b);
         Ok((0..size)
             .map(|_| {
-                let x = self.sample_gamma(a);
-                let y = self.sample_gamma(b);
+                let x = self.sample_gamma_cached(a, cache_a);
+                let y = self.sample_gamma_cached(b, cache_b);
                 if x == 0.0 && y == 0.0 {
                     0.0
                 } else {
@@ -4601,6 +5883,7 @@ impl Generator {
                 })
                 .collect());
         }
+        let inversion_log_q = if p < 1.0 / 3.0 { (-p).ln_1p() } else { 0.0 };
         Ok((0..size)
             .map(|_| {
                 if p >= 1.0 / 3.0 {
@@ -4618,6 +5901,46 @@ impl Generator {
                     x
                 } else {
                     // Inversion via standard exponential
+                    let z = (-self.sample_ziggurat_exponential() / inversion_log_q).ceil();
+                    if z >= 9.223_372_036_854_776e18 {
+                        i64::MAX as u64
+                    } else {
+                        z as u64
+                    }
+                }
+            })
+            .collect())
+    }
+
+    #[cfg(test)]
+    #[inline(never)]
+    fn geometric_former_recompute(&mut self, p: f64, size: usize) -> Result<Vec<u64>, RandomError> {
+        if p <= 0.0 || p > 1.0 || p.is_nan() {
+            return Err(RandomError::InvalidParameter);
+        }
+        if p == 1.0 {
+            return Ok((0..size)
+                .map(|_| {
+                    let _ = self.next_f64();
+                    1
+                })
+                .collect());
+        }
+        Ok((0..size)
+            .map(|_| {
+                if p >= 1.0 / 3.0 {
+                    let q = 1.0 - p;
+                    let u = self.next_f64();
+                    let mut x = 1u64;
+                    let mut sum = p;
+                    let mut prod = p;
+                    while u > sum {
+                        prod *= q;
+                        sum += prod;
+                        x += 1;
+                    }
+                    x
+                } else {
                     let z = (-self.sample_ziggurat_exponential() / (-p).ln_1p()).ceil();
                     if z >= 9.223_372_036_854_776e18 {
                         i64::MAX as u64
@@ -4685,23 +6008,53 @@ impl Generator {
         let ratio = leftbase / base;
         let leftprod = leftbase * base;
         let rightprod = (right - mode) * base;
-        Ok((0..size)
-            .map(|_| {
-                let u = self.next_f64();
-                if u <= ratio {
-                    left + (u * leftprod).sqrt()
-                } else {
-                    right - ((1.0 - u) * rightprod).sqrt()
-                }
-            })
-            .collect())
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        self.u32_buf_ready = false;
+        Ok(match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => {
+                triangular_from_core(rng, left, ratio, leftprod, right, rightprod, size)
+            }
+            RngBackend::Pcg64(rng) => {
+                parallel_pcg_triangular(rng, left, ratio, leftprod, right, rightprod, size)
+            }
+            RngBackend::Pcg64Dxsm(rng) => {
+                parallel_pcg_triangular(rng, left, ratio, leftprod, right, rightprod, size)
+            }
+            RngBackend::Mt19937(rng) => {
+                triangular_from_core(rng, left, ratio, leftprod, right, rightprod, size)
+            }
+            RngBackend::Philox(rng) => {
+                triangular_from_core(rng, left, ratio, leftprod, right, rightprod, size)
+            }
+            RngBackend::Sfc64(rng) => {
+                triangular_from_core(rng, left, ratio, leftprod, right, rightprod, size)
+            }
+        })
     }
 
     /// Laplace (double exponential) distribution (matching NumPy's algorithm).
     ///
     /// NumPy requires `scale >= 0`.
     pub fn laplace(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        self.laplace_broadcast(&[loc], &[], &[scale], &[], Some(&[size]))
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        self.u32_buf_ready = false;
+        Ok(match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => laplace_from_core(rng, loc, scale, size),
+            RngBackend::Pcg64(rng) => parallel_pcg_laplace(rng, loc, scale, size),
+            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_laplace(rng, loc, scale, size),
+            RngBackend::Mt19937(rng) => laplace_from_core(rng, loc, scale, size),
+            RngBackend::Philox(rng) => laplace_from_core(rng, loc, scale, size),
+            RngBackend::Sfc64(rng) => laplace_from_core(rng, loc, scale, size),
+        })
     }
 
     /// Broadcasted Laplace (double exponential) distribution matching NumPy's
@@ -4768,16 +6121,19 @@ impl Generator {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                loop {
-                    let u = 1.0 - self.next_f64();
-                    if u < 1.0 {
-                        return loc - scale * (-u.ln()).ln();
-                    }
-                }
-            })
-            .collect())
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        self.u32_buf_ready = false;
+        Ok(match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => gumbel_from_core(rng, loc, scale, size),
+            RngBackend::Pcg64(rng) => parallel_pcg_gumbel(rng, loc, scale, size),
+            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_gumbel(rng, loc, scale, size),
+            RngBackend::Mt19937(rng) => gumbel_from_core(rng, loc, scale, size),
+            RngBackend::Philox(rng) => gumbel_from_core(rng, loc, scale, size),
+            RngBackend::Sfc64(rng) => gumbel_from_core(rng, loc, scale, size),
+        })
     }
 
     /// Weibull distribution (matching NumPy: uses standard_exponential).
@@ -4833,9 +6189,18 @@ impl Generator {
         if alpha.iter().any(|&a| a < 0.0) {
             return Err(RandomError::InvalidParameter);
         }
+        // The alpha vector is batch-fixed: build each component's
+        // parameter-only gamma terms once and reuse them across every draw
+        // (.334/.335 sibling; caches consume no RNG draws, so the output
+        // stream is bit-identical).
+        let caches: Vec<GammaShapeCache> = alpha.iter().map(|&a| GammaShapeCache::new(a)).collect();
         Ok((0..size)
             .map(|_| {
-                let gamma_samples: Vec<f64> = alpha.iter().map(|&a| self.sample_gamma(a)).collect();
+                let gamma_samples: Vec<f64> = alpha
+                    .iter()
+                    .zip(&caches)
+                    .map(|(&a, &cache)| self.sample_gamma_cached(a, cache))
+                    .collect();
                 let sum: f64 = gamma_samples.iter().sum();
                 if sum == 0.0 {
                     vec![0.0; gamma_samples.len()]
@@ -4868,6 +6233,37 @@ impl Generator {
             .collect())
     }
 
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn multivariate_normal_diag_cached_sqrt_control(
+        &mut self,
+        mean: &[f64],
+        cov_diag: &[f64],
+        size: usize,
+    ) -> Result<Vec<Vec<f64>>, RandomError> {
+        if cov_diag.iter().any(|&v| v < 0.0) {
+            return Err(RandomError::InvalidParameter);
+        }
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        let standard_deviations = cov_diag
+            .iter()
+            .take(mean.len())
+            .map(|value| value.sqrt())
+            .collect::<Vec<_>>();
+        Ok((0..size)
+            .map(|_| {
+                mean.iter()
+                    .zip(&standard_deviations)
+                    .map(|(&m, &standard_deviation)| {
+                        m + self.sample_standard_normal_single() * standard_deviation
+                    })
+                    .collect()
+            })
+            .collect())
+    }
+
     /// Negative binomial distribution (np.random.negative_binomial).
     /// Number of failures before `n` successes, with success probability `p`.
     ///
@@ -4885,9 +6281,11 @@ impl Generator {
         if !n.is_finite() || n <= 0.0 || p.is_nan() || p <= 0.0 || p > 1.0 {
             return Err(RandomError::InvalidParameter);
         }
+        // Fixed shape: parameter-only gamma terms once per batch (.334 sibling).
+        let cache_n = GammaShapeCache::new(n);
         Ok((0..size)
             .map(|_| {
-                let y = self.sample_gamma(n) * (1.0 - p) / p;
+                let y = self.sample_gamma_cached(n, cache_n) * (1.0 - p) / p;
                 self.sample_poisson_single(y)
             })
             .collect())
@@ -4904,10 +6302,16 @@ impl Generator {
         if dfnum <= 0.0 || dfden <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
+        // Fixed shapes: the hoisted `dfnum / 2.0` values are the identical f64s
+        // the loop formerly recomputed, so the streams are unchanged (.334 sibling).
+        let half_dfnum = dfnum / 2.0;
+        let half_dfden = dfden / 2.0;
+        let cache_num = GammaShapeCache::new(half_dfnum);
+        let cache_den = GammaShapeCache::new(half_dfden);
         Ok((0..size)
             .map(|_| {
-                let x1 = self.sample_gamma(dfnum / 2.0) * 2.0 / dfnum;
-                let x2 = self.sample_gamma(dfden / 2.0) * 2.0 / dfden;
+                let x1 = self.sample_gamma_cached(half_dfnum, cache_num) * 2.0 / dfnum;
+                let x2 = self.sample_gamma_cached(half_dfden, cache_den) * 2.0 / dfden;
                 x1 / x2
             })
             .collect())
@@ -4955,6 +6359,21 @@ impl Generator {
             return Err(RandomError::InvalidUpperBound);
         }
 
+        let axis_len = shape[axis];
+        if axis_len <= 1 {
+            return Ok(result);
+        }
+
+        if axis + 1 == shape.len() {
+            for lane in result.chunks_exact_mut(axis_len) {
+                for i in (1..axis_len).rev() {
+                    let j = self.random_interval(i as u64) as usize;
+                    lane.swap(i, j);
+                }
+            }
+            return Ok(result);
+        }
+
         // Compute strides for row-major layout
         let ndim = shape.len();
         let mut strides = vec![1usize; ndim];
@@ -4962,10 +6381,6 @@ impl Generator {
             strides[i] = strides[i + 1] * shape[i + 1];
         }
 
-        let axis_len = shape[axis];
-        if axis_len <= 1 {
-            return Ok(result);
-        }
         let axis_stride = strides[axis];
 
         // Number of independent 1-D slices to shuffle
@@ -4973,32 +6388,21 @@ impl Generator {
 
         // For each slice along the axis, perform Fisher-Yates shuffle
         for slice_idx in 0..n_slices {
-            // Compute multi-index excluding axis dimension
-            let mut multi_idx = vec![0usize; ndim];
             let mut rem = slice_idx;
+            let mut base_offset = 0;
             for d in (0..ndim).rev() {
                 if d == axis {
                     continue;
                 }
-                multi_idx[d] = rem % shape[d];
+                let coordinate = rem % shape[d];
                 rem /= shape[d];
-            }
-            let mut base_offset = 0;
-            for d in 0..ndim {
-                if d != axis {
-                    base_offset += multi_idx[d] * strides[d];
-                }
+                base_offset += coordinate * strides[d];
             }
 
-            // Gather indices along the axis
-            let indices: Vec<usize> = (0..axis_len)
-                .map(|k| base_offset + k * axis_stride)
-                .collect();
-
-            // Fisher-Yates shuffle on these indices (random_interval for generic arrays)
+            // Fisher-Yates shuffle at the strided addresses (random_interval for generic arrays)
             for i in (1..axis_len).rev() {
                 let j = self.random_interval(i as u64) as usize;
-                result.swap(indices[i], indices[j]);
+                result.swap(base_offset + i * axis_stride, base_offset + j * axis_stride);
             }
         }
 
@@ -5022,10 +6426,13 @@ impl Generator {
         if df <= 0.0 || df.is_sign_negative() {
             return Err(RandomError::InvalidParameter);
         }
+        // Fixed shape: parameter-only gamma terms once per batch (.334 sibling).
+        let half_df = df / 2.0;
+        let cache_df = GammaShapeCache::new(half_df);
         Ok((0..size)
             .map(|_| {
                 let z = self.sample_standard_normal_single();
-                let chi2 = self.sample_gamma(df / 2.0) * 2.0;
+                let chi2 = self.sample_gamma_cached(half_df, cache_df) * 2.0;
                 z / (chi2 / df).sqrt()
             })
             .collect())
@@ -5037,6 +6444,43 @@ impl Generator {
     /// or equivalently: Poisson(nonc/2) mixture of chi-squared variates.
     /// Uses the simpler additive method: sum of (Z + sqrt(nonc/df))² for each df.
     pub fn noncentral_chisquare(
+        &mut self,
+        df: f64,
+        nonc: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if df <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+
+        let central = nonc == 0.0;
+        let fixed_shape = if central {
+            Some(df / 2.0)
+        } else if !nonc.is_nan() && df > 1.0 {
+            Some((df - 1.0) / 2.0)
+        } else {
+            None
+        };
+        let fixed_cache = fixed_shape.map(GammaShapeCache::new);
+        Ok((0..size)
+            .map(|_| {
+                let Some((shape, cache)) = fixed_shape.zip(fixed_cache) else {
+                    return self.sample_noncentral_chisquare(df, nonc);
+                };
+                let chi2_part = self.sample_gamma_cached(shape, cache) * 2.0;
+                if central {
+                    chi2_part
+                } else {
+                    let z = self.sample_standard_normal_single() + nonc.sqrt();
+                    chi2_part + z * z
+                }
+            })
+            .collect())
+    }
+
+    /// Exact pre-cache implementation retained as a benchmark control.
+    #[doc(hidden)]
+    pub fn noncentral_chisquare_recomputed_control(
         &mut self,
         df: f64,
         nonc: f64,
@@ -5081,10 +6525,34 @@ impl Generator {
         if dfnum <= 0.0 || dfden <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
+
+        let denominator_shape = dfden / 2.0;
+        let denominator_cache = GammaShapeCache::new(denominator_shape);
+        let central_numerator = nonc == 0.0;
+        let numerator_cache = if central_numerator {
+            let shape = dfnum / 2.0;
+            Some((shape, GammaShapeCache::new(shape)))
+        } else if !nonc.is_nan() && dfnum > 1.0 {
+            let shape = (dfnum - 1.0) / 2.0;
+            Some((shape, GammaShapeCache::new(shape)))
+        } else {
+            None
+        };
+
         Ok((0..size)
             .map(|_| {
-                let nc_chi2 = self.sample_noncentral_chisquare(dfnum, nonc);
-                let chi2 = self.sample_gamma(dfden / 2.0) * 2.0;
+                let nc_chi2 = if let Some((shape, cache)) = numerator_cache {
+                    let chi2_part = self.sample_gamma_cached(shape, cache) * 2.0;
+                    if central_numerator {
+                        chi2_part
+                    } else {
+                        let z = self.sample_standard_normal_single() + nonc.sqrt();
+                        chi2_part + z * z
+                    }
+                } else {
+                    self.sample_noncentral_chisquare(dfnum, nonc)
+                };
+                let chi2 = self.sample_gamma_cached(denominator_shape, denominator_cache) * 2.0;
                 (nc_chi2 / dfnum) / (chi2 / dfden)
             })
             .collect())
@@ -5112,11 +6580,27 @@ impl Generator {
         if kappa.is_nan() {
             return Ok(vec![f64::NAN; size]);
         }
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        if kappa < 1e-8 {
+            self.u32_buf_ready = false;
+            return Ok(match &mut self.bit_generator.rng {
+                RngBackend::Deterministic(rng) => vonmises_uniform_from_core(rng, size),
+                RngBackend::Pcg64(rng) => parallel_pcg_vonmises_uniform(rng, size),
+                RngBackend::Pcg64Dxsm(rng) => parallel_pcg_vonmises_uniform(rng, size),
+                RngBackend::Mt19937(rng) => vonmises_uniform_from_core(rng, size),
+                RngBackend::Philox(rng) => vonmises_uniform_from_core(rng, size),
+                RngBackend::Sfc64(rng) => vonmises_uniform_from_core(rng, size),
+            });
+        }
+        // NOTE (2026-07-16 NO-SHIP, ledger + bench vonmises_kappa_cache):
+        // hoisting the kappa-only terms (Best-Fisher s, large-kappa scale)
+        // per batch is stream-safe but measured 1.02-1.04x, noise-level -
+        // the per-sample cos/ln/acos rejection body dominates. Do not re-hoist
+        // without a faster rejection body to expose the terms.
         Ok((0..size)
             .map(|_| {
-                if kappa < 1e-8 {
-                    return std::f64::consts::PI * (2.0 * self.next_f64() - 1.0);
-                }
                 if kappa > 1e6 {
                     return wrap_angle_to_pi(
                         mu + (1.0 / kappa).sqrt() * self.sample_standard_normal_single(),
@@ -5172,15 +6656,22 @@ impl Generator {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                if scale == 0.0 {
-                    return loc;
-                }
-                let u = self.next_f64();
-                loc + scale * (u / (1.0 - u)).ln()
-            })
-            .collect())
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        if scale == 0.0 {
+            return Ok(vec![loc; size]);
+        }
+
+        self.u32_buf_ready = false;
+        Ok(match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => logistic_from_core(rng, loc, scale, size),
+            RngBackend::Pcg64(rng) => parallel_pcg_logistic(rng, loc, scale, size),
+            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_logistic(rng, loc, scale, size),
+            RngBackend::Mt19937(rng) => logistic_from_core(rng, loc, scale, size),
+            RngBackend::Philox(rng) => logistic_from_core(rng, loc, scale, size),
+            RngBackend::Sfc64(rng) => logistic_from_core(rng, loc, scale, size),
+        })
     }
 
     /// Hypergeometric distribution: draws from a population of `ngood + nbad`
@@ -5212,6 +6703,12 @@ impl Generator {
         let good = ngood as i64;
         let bad = nbad as i64;
         let sample = nsample as i64;
+        if sample >= 10 && sample <= good + bad - 10 {
+            let cache = HypergeometricHruaCache::new(good, bad, sample);
+            return Ok((0..size)
+                .map(|_| self.hypergeometric_hrua(cache) as u64)
+                .collect());
+        }
         Ok((0..size)
             .map(|_| self.sample_hypergeometric(good, bad, sample) as u64)
             .collect())
@@ -5221,7 +6718,7 @@ impl Generator {
     fn sample_hypergeometric(&mut self, good: i64, bad: i64, sample: i64) -> i64 {
         let total = good + bad;
         if sample >= 10 && sample <= total - 10 {
-            self.hypergeometric_hrua(good, bad, sample)
+            self.hypergeometric_hrua(HypergeometricHruaCache::new(good, bad, sample))
         } else {
             self.hypergeometric_sample(good, bad, sample)
         }
@@ -5263,56 +6760,25 @@ impl Generator {
     /// HRUA (ratio-of-uniforms) hypergeometric sampling.
     /// Matches `hypergeometric_hrua()` in NumPy's `random_hypergeometric.c`.
     #[expect(clippy::many_single_char_names)]
-    fn hypergeometric_hrua(&mut self, good: i64, bad: i64, sample: i64) -> i64 {
-        // D1 = 2*sqrt(2/e), D2 = 3 - 2*sqrt(3/e)
-        const D1: f64 = 1.7155277699214135;
-        const D2: f64 = 0.8989161620588988;
-
-        let popsize = good + bad;
-        let computed_sample = sample.min(popsize - sample);
-        let mingoodbad = good.min(bad);
-        let maxgoodbad = good.max(bad);
-
-        let p = (mingoodbad as f64) / (popsize as f64);
-        let q = (maxgoodbad as f64) / (popsize as f64);
-
-        let mu = (computed_sample as f64) * p;
-        let a = mu + 0.5;
-
-        let var = ((popsize - computed_sample) as f64) * (computed_sample as f64) * p * q
-            / ((popsize - 1) as f64);
-        let c = (var + 0.5).sqrt();
-        let h = D1 * c + D2;
-
-        let m = (((computed_sample + 1) as f64) * ((mingoodbad + 1) as f64)
-            / ((popsize + 2) as f64))
-            .floor() as i64;
-
-        let g = logfactorial(m)
-            + logfactorial(mingoodbad - m)
-            + logfactorial(computed_sample - m)
-            + logfactorial(maxgoodbad - computed_sample + m);
-
-        let b = (((computed_sample.min(mingoodbad) + 1) as f64).min(a + 16.0 * c)).floor();
-
+    fn hypergeometric_hrua(&mut self, cache: HypergeometricHruaCache) -> i64 {
         let mut k;
         loop {
             let u = self.next_f64();
             let v = self.next_f64();
-            let x = a + h * (v - 0.5) / u;
+            let x = cache.a + cache.h * (v - 0.5) / u;
 
-            if x < 0.0 || x >= b {
+            if x < 0.0 || x >= cache.b {
                 continue;
             }
 
             k = x.floor() as i64;
 
             let gp = logfactorial(k)
-                + logfactorial(mingoodbad - k)
-                + logfactorial(computed_sample - k)
-                + logfactorial(maxgoodbad - computed_sample + k);
+                + logfactorial(cache.mingoodbad - k)
+                + logfactorial(cache.computed_sample - k)
+                + logfactorial(cache.maxgoodbad - cache.computed_sample + k);
 
-            let t = g - gp;
+            let t = cache.g - gp;
 
             if u * (4.0 - u) - 3.0 <= t {
                 break;
@@ -5325,11 +6791,11 @@ impl Generator {
             }
         }
 
-        if good > bad {
-            k = computed_sample - k;
+        if cache.good > cache.bad {
+            k = cache.computed_sample - k;
         }
-        if computed_sample < sample {
-            k = good - k;
+        if cache.computed_sample < cache.sample {
+            k = cache.good - k;
         }
 
         k
@@ -5343,24 +6809,27 @@ impl Generator {
         if a.is_nan() || a <= 1.0 {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| self.sample_zipf_single(a) as f64)
-            .collect())
-    }
-
-    fn sample_zipf_single(&mut self, a: f64) -> i64 {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
         if a >= 1025.0 {
-            return 1;
+            return Ok(vec![1.0; size]);
         }
         let am1 = a - 1.0;
         let b = 2.0_f64.powf(am1);
         let umin = (i64::MAX as f64).powf(-am1);
+        let exponent = -1.0 / am1;
+        Ok((0..size)
+            .map(|_| self.sample_zipf_single(am1, b, umin, exponent) as f64)
+            .collect())
+    }
 
+    fn sample_zipf_single(&mut self, am1: f64, b: f64, umin: f64, exponent: f64) -> i64 {
         loop {
             let u01 = self.next_f64();
             let u = u01 * umin + (1.0 - u01); // U in (Umin, 1]
             let v = self.next_f64();
-            let x = u.powf(-1.0 / am1).floor();
+            let x = u.powf(exponent).floor();
 
             if x > (i64::MAX as f64) || x < 1.0 {
                 continue;
@@ -5712,12 +7181,10 @@ fn os_entropy_u32_words(words: usize) -> Result<Vec<u32>, SeedSequenceError> {
     getrandom::fill(&mut bytes).map_err(|_| SeedSequenceError::GenerateStateContractViolation)?;
 
     Ok(bytes
-        .chunks_exact(std::mem::size_of::<u32>())
-        .map(|chunk| {
-            let mut word = [0_u8; std::mem::size_of::<u32>()];
-            word.copy_from_slice(chunk);
-            u32::from_ne_bytes(word)
-        })
+        .as_chunks::<{ std::mem::size_of::<u32>() }>()
+        .0
+        .iter()
+        .map(|word| u32::from_ne_bytes(*word))
         .collect())
 }
 
@@ -5848,7 +7315,8 @@ impl RandomLogRecord {
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
 
     use sha2::{Digest, Sha256};
 
@@ -5973,6 +7441,85 @@ for row in out:
             .collect()
     }
 
+    fn numpy_oracle_dirichlet_then_random(
+        alpha: &[f64],
+        size: usize,
+        random_size: usize,
+    ) -> Result<(Vec<Vec<f64>>, Vec<f64>), &'static str> {
+        let alpha_arg = alpha
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = r#"
+import sys
+import numpy as np
+
+alpha = [float(part) for part in sys.argv[1].split(",") if part]
+size = int(sys.argv[2])
+random_size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+out = rng.dirichlet(alpha, size=size)
+after = rng.random(random_size)
+for row in out:
+    print("row:" + ",".join(str(float(value)) for value in row.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let output = numpy_oracle_stdout_from_stdin(
+            script,
+            &[alpha_arg, size.to_string(), random_size.to_string()],
+        )?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut rows = Vec::new();
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("row:") {
+                rows.push(parse_oracle_f64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((rows, after.ok_or("oracle after stream missing")?))
+    }
+
+    fn numpy_oracle_multivariate_normal_cholesky(size: usize) -> Vec<Vec<f64>> {
+        let script = r#"
+import numpy as np
+import sys
+
+size = int(sys.argv[1])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+out = rng.multivariate_normal(
+    [0.0, 0.0],
+    [[1.0, 0.5], [0.5, 1.0]],
+    size=size,
+    method="cholesky",
+)
+for row in out:
+    print(",".join(str(float(value)) for value in row.tolist()))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(size.to_string())
+            .output()
+            .expect("python oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy multivariate_normal cholesky oracle must succeed"
+        );
+        String::from_utf8(output.stdout)
+            .expect("oracle stdout must be utf-8")
+            .lines()
+            .map(|line| {
+                line.split(',')
+                    .filter(|token| !token.is_empty())
+                    .map(|token| token.parse::<f64>().expect("oracle float"))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
     fn numpy_oracle_zipf_outcome(a: f64, size: usize) -> String {
         let a_arg = if a.is_nan() {
             "__nan__".to_string()
@@ -6051,6 +7598,1315 @@ except Exception as exc:
             .expect("oracle stdout must be utf-8")
             .trim()
             .to_string()
+    }
+
+    fn numpy_oracle_stdout_from_stdin(
+        script: &str,
+        args: &[String],
+    ) -> Result<Vec<u8>, &'static str> {
+        let mut command = Command::new(oracle_python_bin());
+        command.arg("-");
+        for arg in args {
+            command.arg(arg);
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|_| "python oracle failed to launch")?;
+        child
+            .stdin
+            .as_mut()
+            .ok_or("python oracle stdin unavailable")?
+            .write_all(script.as_bytes())
+            .map_err(|_| "python oracle script write failed")?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| "python oracle failed to finish")?;
+        if !output.status.success() {
+            return Err("NumPy oracle failed");
+        }
+        Ok(output.stdout)
+    }
+
+    fn numpy_oracle_integers_dtype(
+        dtype: &str,
+        low: i64,
+        high: i64,
+        size: &[usize],
+        endpoint: bool,
+    ) -> Result<Vec<i64>, &'static str> {
+        let size_arg = format!(
+            "[{}]",
+            size.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+dtype = np.dtype(sys.argv[1])
+low = int(sys.argv[2])
+high = int(sys.argv[3])
+size = tuple(json.loads(sys.argv[4]))
+endpoint = sys.argv[5] == "true"
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+out = rng.integers(low, high, size=size, dtype=dtype, endpoint=endpoint)
+print(",".join(str(int(value)) for value in out.reshape(-1).tolist()))
+"#;
+        let args = [
+            dtype.to_string(),
+            low.to_string(),
+            high.to_string(),
+            size_arg,
+            if endpoint { "true" } else { "false" }.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = Vec::new();
+        for token in stdout.trim().split(',').filter(|token| !token.is_empty()) {
+            let value = token
+                .parse::<i64>()
+                .map_err(|_| "oracle integer parse failed")?;
+            values.push(value);
+        }
+        Ok(values)
+    }
+
+    fn parse_oracle_f64_csv(csv: &str) -> Result<Vec<f64>, &'static str> {
+        let mut values = Vec::new();
+        for token in csv.split(',').filter(|token| !token.is_empty()) {
+            let value = token
+                .parse::<f64>()
+                .map_err(|_| "oracle float parse failed")?;
+            values.push(value);
+        }
+        Ok(values)
+    }
+
+    fn numpy_oracle_random_f32_bits(size: usize) -> Result<Vec<u32>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+size = int(sys.argv[1])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.random(size, dtype=np.float32)
+bits = values.view(np.uint32)
+print(",".join(str(int(value)) for value in bits.tolist()))
+"#;
+        let output = numpy_oracle_stdout_from_stdin(script, &[size.to_string()])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = Vec::new();
+        for token in stdout.trim().split(',').filter(|token| !token.is_empty()) {
+            values.push(
+                token
+                    .parse::<u32>()
+                    .map_err(|_| "oracle float32 bits parse failed")?,
+            );
+        }
+        Ok(values)
+    }
+
+    fn parse_oracle_u64_csv(csv: &str) -> Result<Vec<u64>, &'static str> {
+        let mut values = Vec::new();
+        for token in csv.split(',').filter(|token| !token.is_empty()) {
+            let value = token
+                .parse::<u64>()
+                .map_err(|_| "oracle integer parse failed")?;
+            values.push(value);
+        }
+        Ok(values)
+    }
+
+    fn numpy_oracle_poisson(lam: f64, size: usize) -> Result<Vec<u64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+lam = float(sys.argv[1])
+size = int(sys.argv[2])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.poisson(lam, size=size)
+print(",".join(str(int(value)) for value in values.tolist()))
+"#;
+        let args = [lam.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_u64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_binomial(n: u64, p: f64, size: usize) -> Result<Vec<u64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+n = int(sys.argv[1])
+p = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.binomial(n, p, size=size)
+print(",".join(str(int(value)) for value in values.tolist()))
+"#;
+        let args = [n.to_string(), p.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_u64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_f_distribution(
+        dfnum: f64,
+        dfden: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+dfnum = float(sys.argv[1])
+dfden = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.f(dfnum, dfden, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [dfnum.to_string(), dfden.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_f_distribution_then_random(
+        dfnum: f64,
+        dfden: f64,
+        f_size: usize,
+        random_size: usize,
+    ) -> Result<(Vec<f64>, Vec<f64>), &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+dfnum = float(sys.argv[1])
+dfden = float(sys.argv[2])
+f_size = int(sys.argv[3])
+random_size = int(sys.argv[4])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.f(dfnum, dfden, size=f_size)
+after = rng.random(random_size)
+print("values:" + ",".join(str(float(value)) for value in values.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let args = [
+            dfnum.to_string(),
+            dfden.to_string(),
+            f_size.to_string(),
+            random_size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = None;
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("values:") {
+                values = Some(parse_oracle_f64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((
+            values.ok_or("oracle f values missing")?,
+            after.ok_or("oracle after stream missing")?,
+        ))
+    }
+
+    fn numpy_oracle_noncentral_chisquare(
+        df: f64,
+        nonc: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+df = float(sys.argv[1])
+nonc = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.noncentral_chisquare(df, nonc, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [df.to_string(), nonc.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_noncentral_chisquare_then_random(
+        df: f64,
+        nonc: f64,
+        chisquare_size: usize,
+        random_size: usize,
+    ) -> Result<(Vec<f64>, Vec<f64>), &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+df = float(sys.argv[1])
+nonc = float(sys.argv[2])
+chisquare_size = int(sys.argv[3])
+random_size = int(sys.argv[4])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.noncentral_chisquare(df, nonc, size=chisquare_size)
+after = rng.random(random_size)
+print("values:" + ",".join(str(float(value)) for value in values.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let args = [
+            df.to_string(),
+            nonc.to_string(),
+            chisquare_size.to_string(),
+            random_size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = None;
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("values:") {
+                values = Some(parse_oracle_f64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((
+            values.ok_or("oracle noncentral_chisquare values missing")?,
+            after.ok_or("oracle after stream missing")?,
+        ))
+    }
+
+    fn numpy_oracle_noncentral_f(
+        dfnum: f64,
+        dfden: f64,
+        nonc: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+dfnum = float(sys.argv[1])
+dfden = float(sys.argv[2])
+nonc = float(sys.argv[3])
+size = int(sys.argv[4])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.noncentral_f(dfnum, dfden, nonc, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [
+            dfnum.to_string(),
+            dfden.to_string(),
+            nonc.to_string(),
+            size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_noncentral_f_then_random(
+        dfnum: f64,
+        dfden: f64,
+        nonc: f64,
+        f_size: usize,
+        random_size: usize,
+    ) -> Result<(Vec<f64>, Vec<f64>), &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+dfnum = float(sys.argv[1])
+dfden = float(sys.argv[2])
+nonc = float(sys.argv[3])
+f_size = int(sys.argv[4])
+random_size = int(sys.argv[5])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.noncentral_f(dfnum, dfden, nonc, size=f_size)
+after = rng.random(random_size)
+print("values:" + ",".join(str(float(value)) for value in values.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let args = [
+            dfnum.to_string(),
+            dfden.to_string(),
+            nonc.to_string(),
+            f_size.to_string(),
+            random_size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = None;
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("values:") {
+                values = Some(parse_oracle_f64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((
+            values.ok_or("oracle noncentral_f values missing")?,
+            after.ok_or("oracle after stream missing")?,
+        ))
+    }
+
+    fn numpy_oracle_standard_t(df: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+df = float(sys.argv[1])
+size = int(sys.argv[2])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.standard_t(df, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [df.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_standard_t_then_random(
+        df: f64,
+        standard_t_size: usize,
+        random_size: usize,
+    ) -> Result<(Vec<f64>, Vec<f64>), &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+df = float(sys.argv[1])
+standard_t_size = int(sys.argv[2])
+random_size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.standard_t(df, size=standard_t_size)
+after = rng.random(random_size)
+print("values:" + ",".join(str(float(value)) for value in values.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let args = [
+            df.to_string(),
+            standard_t_size.to_string(),
+            random_size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = None;
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("values:") {
+                values = Some(parse_oracle_f64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((
+            values.ok_or("oracle standard_t values missing")?,
+            after.ok_or("oracle after stream missing")?,
+        ))
+    }
+
+    fn numpy_oracle_chisquare(df: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+df = float(sys.argv[1])
+size = int(sys.argv[2])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.chisquare(df, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [df.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_chisquare_then_random(
+        df: f64,
+        chisquare_size: usize,
+        random_size: usize,
+    ) -> Result<(Vec<f64>, Vec<f64>), &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+df = float(sys.argv[1])
+chisquare_size = int(sys.argv[2])
+random_size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.chisquare(df, size=chisquare_size)
+after = rng.random(random_size)
+print("values:" + ",".join(str(float(value)) for value in values.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let args = [
+            df.to_string(),
+            chisquare_size.to_string(),
+            random_size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = None;
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("values:") {
+                values = Some(parse_oracle_f64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((
+            values.ok_or("oracle chisquare values missing")?,
+            after.ok_or("oracle after stream missing")?,
+        ))
+    }
+
+    fn numpy_oracle_beta(a: f64, b: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+a = float(sys.argv[1])
+b = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.beta(a, b, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [a.to_string(), b.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_beta_then_random(
+        a: f64,
+        b: f64,
+        beta_size: usize,
+        random_size: usize,
+    ) -> Result<(Vec<f64>, Vec<f64>), &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+a = float(sys.argv[1])
+b = float(sys.argv[2])
+beta_size = int(sys.argv[3])
+random_size = int(sys.argv[4])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.beta(a, b, size=beta_size)
+after = rng.random(random_size)
+print("values:" + ",".join(str(float(value)) for value in values.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let args = [
+            a.to_string(),
+            b.to_string(),
+            beta_size.to_string(),
+            random_size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = None;
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("values:") {
+                values = Some(parse_oracle_f64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((
+            values.ok_or("oracle beta values missing")?,
+            after.ok_or("oracle after stream missing")?,
+        ))
+    }
+
+    fn numpy_oracle_wald(mean: f64, scale: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+mean = float(sys.argv[1])
+scale = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.wald(mean, scale, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [mean.to_string(), scale.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_standard_gamma(shape: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+shape = float(sys.argv[1])
+size = int(sys.argv[2])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.standard_gamma(shape, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [shape.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_standard_gamma_then_random(
+        shape: f64,
+        gamma_size: usize,
+        random_size: usize,
+    ) -> Result<(Vec<f64>, Vec<f64>), &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+shape = float(sys.argv[1])
+gamma_size = int(sys.argv[2])
+random_size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.standard_gamma(shape, size=gamma_size)
+after = rng.random(random_size)
+print("values:" + ",".join(str(float(value)) for value in values.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let args = [
+            shape.to_string(),
+            gamma_size.to_string(),
+            random_size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = None;
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("values:") {
+                values = Some(parse_oracle_f64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((
+            values.ok_or("oracle standard_gamma values missing")?,
+            after.ok_or("oracle after stream missing")?,
+        ))
+    }
+
+    fn numpy_oracle_gamma(shape: f64, scale: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+shape = float(sys.argv[1])
+scale = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.gamma(shape, scale, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [shape.to_string(), scale.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_gamma_then_random(
+        shape: f64,
+        scale: f64,
+        gamma_size: usize,
+        random_size: usize,
+    ) -> Result<(Vec<f64>, Vec<f64>), &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+shape = float(sys.argv[1])
+scale = float(sys.argv[2])
+gamma_size = int(sys.argv[3])
+random_size = int(sys.argv[4])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.gamma(shape, scale, size=gamma_size)
+after = rng.random(random_size)
+print("values:" + ",".join(str(float(value)) for value in values.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let args = [
+            shape.to_string(),
+            scale.to_string(),
+            gamma_size.to_string(),
+            random_size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = None;
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("values:") {
+                values = Some(parse_oracle_f64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((
+            values.ok_or("oracle gamma values missing")?,
+            after.ok_or("oracle after stream missing")?,
+        ))
+    }
+
+    fn numpy_oracle_standard_cauchy(size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+size = int(sys.argv[1])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.standard_cauchy(size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let output = numpy_oracle_stdout_from_stdin(script, &[size.to_string()])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_rayleigh(scale: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+scale = float(sys.argv[1])
+size = int(sys.argv[2])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.rayleigh(scale, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [scale.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_pareto(a: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+a = float(sys.argv[1])
+size = int(sys.argv[2])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.pareto(a, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [a.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_power(a: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+a = float(sys.argv[1])
+size = int(sys.argv[2])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.power(a, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [a.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_triangular(
+        left: f64,
+        mode: f64,
+        right: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+left = float(sys.argv[1])
+mode = float(sys.argv[2])
+right = float(sys.argv[3])
+size = int(sys.argv[4])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.triangular(left, mode, right, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [
+            left.to_string(),
+            mode.to_string(),
+            right.to_string(),
+            size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_gumbel(loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+loc = float(sys.argv[1])
+scale = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.gumbel(loc, scale, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [loc.to_string(), scale.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_logistic(loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+loc = float(sys.argv[1])
+scale = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.logistic(loc, scale, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [loc.to_string(), scale.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_lognormal(
+        mean: f64,
+        sigma: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+mean = float(sys.argv[1])
+sigma = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.lognormal(mean, sigma, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [mean.to_string(), sigma.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_weibull(a: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+a = float(sys.argv[1])
+size = int(sys.argv[2])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.weibull(a, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [a.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_laplace(loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+loc = float(sys.argv[1])
+scale = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.laplace(loc, scale, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [loc.to_string(), scale.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_uniform(low: f64, high: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+low = float(sys.argv[1])
+high = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.uniform(low, high, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [low.to_string(), high.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_standard_normal(size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+size = int(sys.argv[1])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.standard_normal(size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_normal(loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+loc = float(sys.argv[1])
+scale = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.normal(loc, scale, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [loc.to_string(), scale.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_standard_exponential(size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+size = int(sys.argv[1])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.standard_exponential(size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_standard_exponential_inv(size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+size = int(sys.argv[1])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.standard_exponential(size=size, method="inv")
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_exponential(scale: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+scale = float(sys.argv[1])
+size = int(sys.argv[2])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.exponential(scale, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [scale.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_random(size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+size = int(sys.argv[1])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.random(size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_logseries_then_random(p: &str) -> Result<(Vec<u64>, Vec<f64>), &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+p = float(sys.argv[1])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.logseries(p, size=5)
+after = rng.random(5)
+print("values:" + ",".join(str(int(value)) for value in values.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let output = numpy_oracle_stdout_from_stdin(script, &[p.to_string()])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = None;
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("values:") {
+                values = Some(parse_oracle_u64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((
+            values.ok_or("oracle values missing")?,
+            after.ok_or("oracle after stream missing")?,
+        ))
+    }
+
+    fn numpy_oracle_permutation_f64(n: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+n = int(sys.argv[1])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.permutation(np.arange(n, dtype=float))
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let output = numpy_oracle_stdout_from_stdin(script, &[n.to_string()])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_permutation_range(n: usize) -> Result<Vec<u64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+n = int(sys.argv[1])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.permutation(n)
+print(",".join(str(int(value)) for value in values.tolist()))
+"#;
+        let output = numpy_oracle_stdout_from_stdin(script, &[n.to_string()])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_u64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_negative_binomial(
+        n: f64,
+        p: f64,
+        size: usize,
+    ) -> Result<Vec<u64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+n = float(sys.argv[1])
+p = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.negative_binomial(n, p, size=size)
+print(",".join(str(int(value)) for value in values.tolist()))
+"#;
+        let args = [n.to_string(), p.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_u64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_hypergeometric(
+        good: u64,
+        bad: u64,
+        sample: u64,
+        size: usize,
+    ) -> Result<Vec<u64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+good = int(sys.argv[1])
+bad = int(sys.argv[2])
+sample = int(sys.argv[3])
+size = int(sys.argv[4])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.hypergeometric(good, bad, sample, size=size)
+print(",".join(str(int(value)) for value in values.tolist()))
+"#;
+        let args = [
+            good.to_string(),
+            bad.to_string(),
+            sample.to_string(),
+            size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_u64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_multivariate_hypergeometric_count(
+        colors: &[u64],
+        nsample: u64,
+        size: usize,
+    ) -> Result<Vec<Vec<u64>>, &'static str> {
+        let colors_arg = format!(
+            "[{}]",
+            colors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+colors = json.loads(sys.argv[1])
+nsample = int(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.multivariate_hypergeometric(colors, nsample, size=size, method="count")
+for row in values.tolist():
+    print(",".join(str(int(value)) for value in row))
+"#;
+        let args = [colors_arg, nsample.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut rows = Vec::new();
+        for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+            rows.push(parse_oracle_u64_csv(line.trim())?);
+        }
+        Ok(rows)
+    }
+
+    fn numpy_oracle_multinomial(
+        n: u64,
+        pvals: &[f64],
+        size: usize,
+    ) -> Result<Vec<Vec<u64>>, &'static str> {
+        let pvals_arg = format!(
+            "[{}]",
+            pvals
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+n = int(sys.argv[1])
+pvals = json.loads(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.multinomial(n, pvals, size=size)
+for row in values.tolist():
+    print(",".join(str(int(value)) for value in row))
+"#;
+        let args = [n.to_string(), pvals_arg, size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut rows = Vec::new();
+        for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+            rows.push(parse_oracle_u64_csv(line.trim())?);
+        }
+        Ok(rows)
+    }
+
+    fn numpy_oracle_choice_weighted_no_replace() -> Result<(Vec<f64>, Vec<f64>), &'static str> {
+        let script = r#"
+import numpy as np
+
+a = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+p = np.array([0.4, 0.3, 0.2, 0.05, 0.05])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+samples = rng.choice(a, size=3, replace=False, p=p)
+after = rng.random(5)
+print("samples:" + ",".join(str(float(value)) for value in samples.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let output = numpy_oracle_stdout_from_stdin(script, &[])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut samples = None;
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("samples:") {
+                samples = Some(parse_oracle_f64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((
+            samples.ok_or("oracle samples missing")?,
+            after.ok_or("oracle after stream missing")?,
+        ))
+    }
+
+    fn numpy_oracle_choice_indices(
+        seed: u64,
+        pop_size: usize,
+        size: usize,
+        replace: bool,
+        shuffle: bool,
+    ) -> Result<Vec<u64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+seed = int(sys.argv[1])
+pop_size = int(sys.argv[2])
+size = int(sys.argv[3])
+replace = sys.argv[4] == "true"
+shuffle = sys.argv[5] == "true"
+rng = np.random.Generator(np.random.PCG64DXSM(seed))
+values = rng.choice(pop_size, size=size, replace=replace, shuffle=shuffle)
+print(",".join(str(int(value)) for value in values.tolist()))
+"#;
+        let args = [
+            seed.to_string(),
+            pop_size.to_string(),
+            size.to_string(),
+            if replace { "true" } else { "false" }.to_string(),
+            if shuffle { "true" } else { "false" }.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_u64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_choice_f64(
+        pool: &[f64],
+        size: usize,
+        replace: bool,
+    ) -> Result<Vec<f64>, &'static str> {
+        let pool_arg = pool
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = r#"
+import sys
+import numpy as np
+
+pool = np.array([float(part) for part in sys.argv[1].split(",") if part], dtype=float)
+size = int(sys.argv[2])
+replace = sys.argv[3] == "true"
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.choice(pool, size=size, replace=replace)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [
+            pool_arg,
+            size.to_string(),
+            if replace { "true" } else { "false" }.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_choice_f64_shaped(
+        pool: &[f64],
+        shape: &[usize],
+        replace: bool,
+    ) -> Result<Vec<f64>, &'static str> {
+        let pool_arg = pool
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let shape_arg = shape
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = r#"
+import sys
+import numpy as np
+
+pool = np.array([float(part) for part in sys.argv[1].split(",") if part], dtype=float)
+shape = tuple(int(part) for part in sys.argv[2].split(",") if part)
+replace = sys.argv[3] == "true"
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.choice(pool, size=shape, replace=replace)
+print(",".join(str(float(value)) for value in values.reshape(-1).tolist()))
+"#;
+        let args = [
+            pool_arg,
+            shape_arg,
+            if replace { "true" } else { "false" }.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_shuffle_f64(values: &[f64]) -> Result<Vec<f64>, &'static str> {
+        let values_arg = values
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = r#"
+import sys
+import numpy as np
+
+values = np.array([float(part) for part in sys.argv[1].split(",") if part], dtype=float)
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+rng.shuffle(values)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let output = numpy_oracle_stdout_from_stdin(script, &[values_arg])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
     }
 
     fn numpy_oracle_geometric_outcome(p: f64, size: usize) -> String {
@@ -8863,6 +11719,40 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn shaped_random_scalar_and_zero_dim_match_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_random(1)?;
+
+        let mut scalar_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let scalar = scalar_rng
+            .random_shaped(None)
+            .map_err(|_| "random_shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        assert_f64_seq(
+            "random_shaped_scalar_live_numpy",
+            scalar.values(),
+            &expected,
+        );
+
+        let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_dim = zero_dim_rng
+            .random_shaped(Some(&[]))
+            .map_err(|_| "random_shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        assert_f64_seq(
+            "random_shaped_zero_dim_live_numpy",
+            zero_dim.values(),
+            &expected,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn shaped_random_tuple_and_zero_axis_preserve_shape_and_stream() {
         let mut flat_rng = test_generator();
         let expected = flat_rng.standard_normal(6);
@@ -8878,6 +11768,28 @@ for child in rng.spawn(n_children):
         assert_eq!(zero_axis.shape(), &[2, 0, 3]);
         assert!(zero_axis.is_empty());
         assert_eq!(zero_axis_rng.random(1), test_generator().random(1));
+    }
+
+    #[test]
+    fn shaped_random_zero_axis_preserves_live_numpy_stream() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_axis = rng
+            .random_shaped(Some(&[2, 0, 3]))
+            .map_err(|_| "random_shaped zero-axis live oracle")?;
+        assert_eq!(zero_axis.shape(), &[2, 0, 3]);
+        assert!(zero_axis.is_empty());
+        let after = rng.random(1);
+        assert_f64_seq(
+            "random_shaped_zero_axis_after_live_numpy",
+            &after,
+            &expected_after,
+        );
+        Ok(())
     }
 
     #[test]
@@ -8917,6 +11829,297 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn shaped_scalar_distributions_match_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected_random = numpy_oracle_random(4)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let random = rng
+            .random_shaped(Some(&[2, 2]))
+            .map_err(|_| "random_shaped live oracle")?;
+        assert_eq!(random.shape(), &[2, 2]);
+        assert_f64_seq(
+            "random_shaped_live_numpy",
+            random.values(),
+            &expected_random,
+        );
+
+        let expected_standard_normal = numpy_oracle_standard_normal(6)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let standard_normal = rng
+            .standard_normal_shaped(Some(&[2, 3]))
+            .map_err(|_| "standard_normal_shaped live oracle")?;
+        assert_eq!(standard_normal.shape(), &[2, 3]);
+        assert_f64_seq(
+            "standard_normal_shaped_live_numpy",
+            standard_normal.values(),
+            &expected_standard_normal,
+        );
+
+        let expected_uniform = numpy_oracle_uniform(-1.0, 2.0, 4)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let uniform = rng
+            .uniform_shaped(-1.0, 2.0, Some(&[2, 2]))
+            .map_err(|_| "uniform_shaped live oracle")?;
+        assert_eq!(uniform.shape(), &[2, 2]);
+        assert_f64_seq(
+            "uniform_shaped_live_numpy",
+            uniform.values(),
+            &expected_uniform,
+        );
+
+        let expected_normal = numpy_oracle_normal(5.0, 2.0, 4)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let normal = rng
+            .normal_shaped(5.0, 2.0, Some(&[4]))
+            .map_err(|_| "normal_shaped live oracle")?;
+        assert_eq!(normal.shape(), &[4]);
+        assert_f64_seq(
+            "normal_shaped_live_numpy",
+            normal.values(),
+            &expected_normal,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn uniform_shaped_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_uniform(-1.0, 2.0, 1)?;
+
+        let mut scalar_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let scalar = scalar_rng
+            .uniform_shaped(-1.0, 2.0, None)
+            .map_err(|_| "uniform_shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        assert_f64_seq(
+            "uniform_shaped_scalar_live_numpy",
+            scalar.values(),
+            &expected,
+        );
+
+        let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_dim = zero_dim_rng
+            .uniform_shaped(-1.0, 2.0, Some(&[]))
+            .map_err(|_| "uniform_shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        assert_f64_seq(
+            "uniform_shaped_zero_dim_live_numpy",
+            zero_dim.values(),
+            &expected,
+        );
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut empty_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let empty = empty_rng
+            .uniform_shaped(-1.0, 2.0, Some(&[2, 0, 3]))
+            .map_err(|_| "uniform_shaped empty live oracle")?;
+        assert_eq!(empty.shape(), &[2, 0, 3]);
+        assert!(empty.is_empty());
+        let after = empty_rng.random(1);
+        assert_f64_seq(
+            "uniform_shaped_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn standard_normal_shaped_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_standard_normal(1)?;
+
+        let mut scalar_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let scalar = scalar_rng
+            .standard_normal_shaped(None)
+            .map_err(|_| "standard_normal_shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        assert_f64_seq(
+            "standard_normal_shaped_scalar_live_numpy",
+            scalar.values(),
+            &expected,
+        );
+
+        let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_dim = zero_dim_rng
+            .standard_normal_shaped(Some(&[]))
+            .map_err(|_| "standard_normal_shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        assert_f64_seq(
+            "standard_normal_shaped_zero_dim_live_numpy",
+            zero_dim.values(),
+            &expected,
+        );
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut empty_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let empty = empty_rng
+            .standard_normal_shaped(Some(&[2, 0, 3]))
+            .map_err(|_| "standard_normal_shaped empty live oracle")?;
+        assert_eq!(empty.shape(), &[2, 0, 3]);
+        assert!(empty.is_empty());
+        let after = empty_rng.random(1);
+        assert_f64_seq(
+            "standard_normal_shaped_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn normal_shaped_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_normal(5.0, 2.0, 1)?;
+
+        let mut scalar_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let scalar = scalar_rng
+            .normal_shaped(5.0, 2.0, None)
+            .map_err(|_| "normal_shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        assert_f64_seq(
+            "normal_shaped_scalar_live_numpy",
+            scalar.values(),
+            &expected,
+        );
+
+        let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_dim = zero_dim_rng
+            .normal_shaped(5.0, 2.0, Some(&[]))
+            .map_err(|_| "normal_shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        assert_f64_seq(
+            "normal_shaped_zero_dim_live_numpy",
+            zero_dim.values(),
+            &expected,
+        );
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut empty_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let empty = empty_rng
+            .normal_shaped(5.0, 2.0, Some(&[2, 0, 3]))
+            .map_err(|_| "normal_shaped empty live oracle")?;
+        assert_eq!(empty.shape(), &[2, 0, 3]);
+        assert!(empty.is_empty());
+        let after = empty_rng.random(1);
+        assert_f64_seq(
+            "normal_shaped_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn random_f32_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_random_f32_bits(6)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual = rng
+            .random_f32(6)
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+
+        let expected_shaped = numpy_oracle_random_f32_bits(4)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let shaped = rng
+            .random_f32_shaped(Some(&[2, 2]))
+            .map_err(|_| "random_f32_shaped live oracle")?;
+        assert_eq!(shaped.shape(), &[2, 2]);
+        let actual_shaped = shaped
+            .values()
+            .iter()
+            .copied()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(actual_shaped, expected_shaped);
+        Ok(())
+    }
+
+    #[test]
+    fn random_f32_scalar_and_zero_dim_match_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_random_f32_bits(1)?;
+
+        let mut scalar_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let scalar = scalar_rng
+            .random_f32_shaped(None)
+            .map_err(|_| "random_f32_shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        let scalar_bits = scalar
+            .values()
+            .iter()
+            .copied()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(scalar_bits, expected);
+
+        let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_dim = zero_dim_rng
+            .random_f32_shaped(Some(&[]))
+            .map_err(|_| "random_f32_shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        let zero_dim_bits = zero_dim
+            .values()
+            .iter()
+            .copied()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(zero_dim_bits, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn random_f32_zero_axis_preserves_live_numpy_stream() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected_after = numpy_oracle_random_f32_bits(1)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_axis = rng
+            .random_f32_shaped(Some(&[2, 0, 3]))
+            .map_err(|_| "random_f32_shaped zero-axis live oracle")?;
+        assert_eq!(zero_axis.shape(), &[2, 0, 3]);
+        assert!(zero_axis.is_empty());
+        let after_bits = rng
+            .random_f32(1)
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(after_bits, expected_after);
+        Ok(())
+    }
+
+    #[test]
     fn integers_in_range() {
         let mut rng = test_generator();
         let vals = rng.integers(0, 10, 100).unwrap();
@@ -8942,6 +12145,111 @@ for child in rng.spawn(n_children):
             .unwrap();
         assert_eq!(shaped_endpoint.shape(), &[2, 2]);
         assert_eq!(shaped_endpoint.values(), expected_endpoint.as_slice());
+    }
+
+    #[test]
+    fn shaped_generic_integers_match_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_integers_dtype("int64", 10, 20, &[2, 3], false)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual = rng
+            .integers_shaped(10, 20, Some(&[2, 3]))
+            .map_err(|_| "integers_shaped live oracle")?;
+        assert_eq!(actual.shape(), &[2, 3]);
+        assert_eq!(actual.values(), expected.as_slice());
+
+        let expected_endpoint = numpy_oracle_integers_dtype("int64", -2, 2, &[2, 2], true)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual_endpoint = rng
+            .integers_endpoint_shaped(-2, 2, Some(&[2, 2]))
+            .map_err(|_| "integers_endpoint_shaped live oracle")?;
+        assert_eq!(actual_endpoint.shape(), &[2, 2]);
+        assert_eq!(actual_endpoint.values(), expected_endpoint.as_slice());
+        Ok(())
+    }
+
+    #[test]
+    fn integers_shaped_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_integers_dtype("int64", 10, 20, &[], false)?;
+
+        let mut scalar_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let scalar = scalar_rng
+            .integers_shaped(10, 20, None)
+            .map_err(|_| "integers_shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        assert_eq!(scalar.values(), expected.as_slice());
+
+        let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_dim = zero_dim_rng
+            .integers_shaped(10, 20, Some(&[]))
+            .map_err(|_| "integers_shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        assert_eq!(zero_dim.values(), expected.as_slice());
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut empty_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let empty = empty_rng
+            .integers_shaped(10, 20, Some(&[2, 0, 3]))
+            .map_err(|_| "integers_shaped empty live oracle")?;
+        assert_eq!(empty.shape(), &[2, 0, 3]);
+        assert!(empty.is_empty());
+        let after = empty_rng.random(1);
+        assert_f64_seq(
+            "integers_shaped_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn integers_endpoint_shaped_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str>
+    {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_integers_dtype("int64", -2, 2, &[], true)?;
+
+        let mut scalar_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let scalar = scalar_rng
+            .integers_endpoint_shaped(-2, 2, None)
+            .map_err(|_| "integers_endpoint_shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        assert_eq!(scalar.values(), expected.as_slice());
+
+        let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_dim = zero_dim_rng
+            .integers_endpoint_shaped(-2, 2, Some(&[]))
+            .map_err(|_| "integers_endpoint_shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        assert_eq!(zero_dim.values(), expected.as_slice());
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut empty_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let empty = empty_rng
+            .integers_endpoint_shaped(-2, 2, Some(&[2, 0, 3]))
+            .map_err(|_| "integers_endpoint_shaped empty live oracle")?;
+        assert_eq!(empty.shape(), &[2, 0, 3]);
+        assert!(empty.is_empty());
+        let after = empty_rng.random(1);
+        assert_f64_seq(
+            "integers_endpoint_shaped_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
+        Ok(())
     }
 
     #[test]
@@ -9351,6 +12659,36 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn choice_values_match_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, pool, size, replace) in [
+            (
+                "choice_replace_live_numpy",
+                &[1.0, 2.0, 3.0][..],
+                10_usize,
+                true,
+            ),
+            (
+                "choice_no_replace_live_numpy",
+                &[1.0, 2.0, 3.0, 4.0, 5.0][..],
+                3_usize,
+                false,
+            ),
+        ] {
+            let expected = numpy_oracle_choice_f64(pool, size, replace)?;
+            let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+            let actual = rng
+                .choice(pool, size, replace)
+                .map_err(|_| "choice live oracle")?;
+            assert_f64_seq(label, &actual, &expected);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn choice_indices_match_numpy_integer_domain_oracles() {
         let cases = [
             (260_u64, 5_usize, 3_usize, true, &[1_u64, 2, 0][..]),
@@ -9384,6 +12722,34 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn choice_indices_match_live_numpy_integer_domain_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (seed, pop_size, size, replace, shuffle) in [
+            (260_u64, 5_usize, 3_usize, true, true),
+            (262_u64, 5_usize, 4_usize, false, true),
+            (263_u64, 0_usize, 0_usize, true, true),
+            (360_u64, 10_usize, 5_usize, false, false),
+        ] {
+            let expected = numpy_oracle_choice_indices(seed, pop_size, size, replace, shuffle)?;
+            let bit_generator =
+                BitGenerator::new(BitGeneratorKind::Pcg64Dxsm, SeedMaterial::U64(seed))
+                    .map_err(|_| "pcg64dxsm seed")?;
+            let mut rng = Generator::from_bit_generator(bit_generator);
+            let actual = rng
+                .choice_indices_with_shuffle(pop_size, size, replace, shuffle)
+                .map_err(|_| "choice indices live oracle")?;
+            assert_eq!(
+                actual, expected,
+                "seed={seed}, pop_size={pop_size}, size={size}, replace={replace}, shuffle={shuffle}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn choice_without_replacement_too_many() {
         let mut rng = test_generator();
         let pool = [1.0, 2.0];
@@ -9398,6 +12764,21 @@ for child in rng.spawn(n_children):
         let mut sorted = vals;
         sorted.sort_by(f64::total_cmp);
         assert_eq!(sorted, [1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn shuffle_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let mut values: Vec<f64> = (0..10).map(|value| value as f64).collect();
+        let expected = numpy_oracle_shuffle_f64(&values)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        rng.shuffle(&mut values)
+            .map_err(|_| "shuffle live oracle")?;
+        assert_f64_seq("shuffle_live_numpy", &values, &expected);
+        Ok(())
     }
 
     #[test]
@@ -9418,6 +12799,21 @@ for child in rng.spawn(n_children):
         let mut sorted = perm;
         sorted.sort();
         assert_eq!(sorted, [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn permutation_range_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_permutation_range(10)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual = rng
+            .permutation_range(10)
+            .map_err(|_| "permutation_range live oracle")?;
+        assert_eq!(actual, expected);
+        Ok(())
     }
 
     #[test]
@@ -9448,6 +12844,256 @@ for child in rng.spawn(n_children):
         let mut sorted = range.values().to_vec();
         sorted.sort();
         assert_eq!(sorted, [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn shaped_choice_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let pool = [10.0, 20.0, 30.0];
+        let expected = numpy_oracle_choice_f64_shaped(&pool, &[2, 2], true)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual = rng
+            .choice_shaped(&pool, Some(&[2, 2]), true)
+            .map_err(|_| "choice_shaped live oracle")?;
+        assert_eq!(actual.shape(), &[2, 2]);
+        assert_f64_seq("choice_shaped_live_numpy", actual.values(), &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn choice_shaped_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let pool = [10.0, 20.0, 30.0];
+        let expected = numpy_oracle_choice_f64(&pool, 1, true)?;
+
+        let mut scalar_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let scalar = scalar_rng
+            .choice_shaped(&pool, None, true)
+            .map_err(|_| "choice_shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        assert_f64_seq(
+            "choice_shaped_scalar_live_numpy",
+            scalar.values(),
+            &expected,
+        );
+
+        let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_dim = zero_dim_rng
+            .choice_shaped(&pool, Some(&[]), true)
+            .map_err(|_| "choice_shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        assert_f64_seq(
+            "choice_shaped_zero_dim_live_numpy",
+            zero_dim.values(),
+            &expected,
+        );
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut empty_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let empty = empty_rng
+            .choice_shaped(&pool, Some(&[2, 0, 3]), true)
+            .map_err(|_| "choice_shaped empty live oracle")?;
+        assert_eq!(empty.shape(), &[2, 0, 3]);
+        assert!(empty.is_empty());
+        let after = empty_rng.random(1);
+        assert_f64_seq(
+            "choice_shaped_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn choice_shaped_no_replace_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str>
+    {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let pool = [10.0, 20.0, 30.0];
+        let expected = numpy_oracle_choice_f64(&pool, 1, false)?;
+
+        let mut scalar_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let scalar = scalar_rng
+            .choice_shaped(&pool, None, false)
+            .map_err(|_| "choice_shaped no-replace scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        assert_f64_seq(
+            "choice_shaped_no_replace_scalar_live_numpy",
+            scalar.values(),
+            &expected,
+        );
+
+        let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_dim = zero_dim_rng
+            .choice_shaped(&pool, Some(&[]), false)
+            .map_err(|_| "choice_shaped no-replace zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        assert_f64_seq(
+            "choice_shaped_no_replace_zero_dim_live_numpy",
+            zero_dim.values(),
+            &expected,
+        );
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut empty_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let empty = empty_rng
+            .choice_shaped(&pool, Some(&[2, 0, 3]), false)
+            .map_err(|_| "choice_shaped no-replace empty live oracle")?;
+        assert_eq!(empty.shape(), &[2, 0, 3]);
+        assert!(empty.is_empty());
+        let after = empty_rng.random(1);
+        assert_f64_seq(
+            "choice_shaped_no_replace_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn choice_shaped_unshuffled_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str>
+    {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let pool = [10.0, 20.0, 30.0];
+        let expected_index = numpy_oracle_choice_indices(12345, pool.len(), 1, false, false)?
+            .into_iter()
+            .next()
+            .ok_or("choice index oracle empty")?;
+        let expected = vec![pool[usize::try_from(expected_index).map_err(|_| "choice index")?]];
+
+        let mut scalar_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let scalar = scalar_rng
+            .choice_shaped_with_shuffle(&pool, None, false, false)
+            .map_err(|_| "choice_shaped unshuffled scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        assert_f64_seq(
+            "choice_shaped_unshuffled_scalar_live_numpy",
+            scalar.values(),
+            &expected,
+        );
+
+        let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_dim = zero_dim_rng
+            .choice_shaped_with_shuffle(&pool, Some(&[]), false, false)
+            .map_err(|_| "choice_shaped unshuffled zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        assert_f64_seq(
+            "choice_shaped_unshuffled_zero_dim_live_numpy",
+            zero_dim.values(),
+            &expected,
+        );
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut empty_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let empty = empty_rng
+            .choice_shaped_with_shuffle(&pool, Some(&[2, 0, 3]), false, false)
+            .map_err(|_| "choice_shaped unshuffled empty live oracle")?;
+        assert_eq!(empty.shape(), &[2, 0, 3]);
+        assert!(empty.is_empty());
+        let after = empty_rng.random(1);
+        assert_f64_seq(
+            "choice_shaped_unshuffled_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn shaped_permutations_match_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let values = [0.0, 1.0, 2.0, 3.0];
+        let expected_values = numpy_oracle_permutation_f64(values.len())?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual_values = rng
+            .permutation_shaped(&values)
+            .map_err(|_| "permutation_shaped live oracle")?;
+        assert_eq!(actual_values.shape(), &[values.len()]);
+        assert_f64_seq(
+            "permutation_shaped_live_numpy",
+            actual_values.values(),
+            &expected_values,
+        );
+
+        let expected_range = numpy_oracle_permutation_range(5)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual_range = rng
+            .permutation_range_shaped(5)
+            .map_err(|_| "permutation_range_shaped live oracle")?;
+        assert_eq!(actual_range.shape(), &[5]);
+        assert_u64_seq(
+            "permutation_range_shaped_live_numpy",
+            actual_range.values(),
+            &expected_range,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn empty_shaped_permutations_preserve_live_numpy_stream() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected_values = numpy_oracle_permutation_f64(0)?;
+        let expected_after = numpy_oracle_random(1)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual_values = rng
+            .permutation_shaped(&[])
+            .map_err(|_| "empty permutation_shaped live oracle")?;
+        assert_eq!(actual_values.shape(), &[0]);
+        assert!(actual_values.is_empty());
+        assert_f64_seq(
+            "empty_permutation_shaped_live_numpy",
+            actual_values.values(),
+            &expected_values,
+        );
+        let after_values = rng.random(1);
+        assert_f64_seq(
+            "empty_permutation_shaped_after_live_numpy",
+            &after_values,
+            &expected_after,
+        );
+
+        let expected_range = numpy_oracle_permutation_range(0)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual_range = rng
+            .permutation_range_shaped(0)
+            .map_err(|_| "empty permutation_range_shaped live oracle")?;
+        assert_eq!(actual_range.shape(), &[0]);
+        assert!(actual_range.is_empty());
+        assert_u64_seq(
+            "empty_permutation_range_shaped_live_numpy",
+            actual_range.values(),
+            &expected_range,
+        );
+        let after_range = rng.random(1);
+        assert_f64_seq(
+            "empty_permutation_range_shaped_after_live_numpy",
+            &after_range,
+            &expected_after,
+        );
+        Ok(())
     }
 
     #[test]
@@ -9629,6 +13275,162 @@ for child in rng.spawn(n_children):
         assert_eq!(samples, vec![1; 8]);
         let zero_samples = rng.geometric(1.0, 0).expect("size=0 should succeed");
         assert!(zero_samples.is_empty());
+    }
+
+    #[test]
+    fn geometric_batch_matches_former_stream() {
+        for &p in &[0.1, 0.32, 1.0 / 3.0, 0.9, 1.0] {
+            let mut batch = test_generator();
+            let mut former = test_generator();
+            assert_eq!(
+                batch.geometric(p, 128).unwrap(),
+                former.geometric_former_recompute(p, 128).unwrap(),
+                "geometric output divergence at p={p}"
+            );
+            assert_eq!(
+                batch.next_u64(),
+                former.next_u64(),
+                "post-geometric stream divergence at p={p}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual same-binary performance audit"]
+    fn geometric_inversion_parameter_cache_perf_audit() -> Result<(), String> {
+        const OBSERVATIONS: usize = 10;
+        const REPEATS: usize = 2_048;
+        const SIZE: usize = 100_000;
+        const P: f64 = 0.1;
+
+        fn former_batch(generator: &mut Generator) -> Vec<u64> {
+            generator.geometric_former_recompute(P, SIZE).unwrap()
+        }
+
+        fn candidate_batch(generator: &mut Generator) -> Vec<u64> {
+            generator.geometric(P, SIZE).unwrap()
+        }
+
+        fn stats(samples: &[f64]) -> (f64, f64) {
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            let variance = samples
+                .iter()
+                .map(|sample| {
+                    let delta = sample - mean;
+                    delta * delta
+                })
+                .sum::<f64>()
+                / (samples.len() - 1) as f64;
+            (mean, variance.sqrt() * 100.0 / mean)
+        }
+
+        let mut former_proof = test_generator();
+        let mut candidate_proof = test_generator();
+        assert_eq!(
+            former_batch(&mut former_proof),
+            candidate_batch(&mut candidate_proof)
+        );
+        assert_eq!(former_proof.next_u64(), candidate_proof.next_u64());
+
+        if let Ok(arm) = std::env::var("FNP_GEOMETRIC_PERF_ARM") {
+            const SINGLE_ARM_REPEATS: usize = 512;
+            let mut generator = test_generator();
+            let started = std::time::Instant::now();
+            for _ in 0..SINGLE_ARM_REPEATS {
+                match arm.as_str() {
+                    "former" => std::hint::black_box(former_batch(&mut generator)),
+                    "candidate_a" | "candidate_b" | "candidate_c" => {
+                        std::hint::black_box(candidate_batch(&mut generator))
+                    }
+                    _ => return Err(format!("unknown FNP_GEOMETRIC_PERF_ARM value: {arm}")),
+                };
+            }
+            println!(
+                "LEDGER_AUDIT row=geometric_inversion_parameter_cache_single_arm \
+                 arm={arm} repeats={SINGLE_ARM_REPEATS} elapsed_ms={:.6}",
+                started.elapsed().as_secs_f64() * 1_000.0,
+            );
+            return Ok(());
+        }
+
+        let time_former = |generator: &mut Generator| {
+            let started = std::time::Instant::now();
+            std::hint::black_box(former_batch(generator));
+            started.elapsed()
+        };
+        let time_candidate = |generator: &mut Generator| {
+            let started = std::time::Instant::now();
+            std::hint::black_box(candidate_batch(generator));
+            started.elapsed()
+        };
+
+        let mut effect_former = Vec::with_capacity(OBSERVATIONS);
+        let mut effect_candidate = Vec::with_capacity(OBSERVATIONS);
+        for observation in 0..OBSERVATIONS {
+            let mut former_generator = test_generator();
+            let mut candidate_generator = test_generator();
+            let mut former = std::time::Duration::ZERO;
+            let mut candidate = std::time::Duration::ZERO;
+            for repeat in 0..REPEATS {
+                if (observation + repeat) & 1 == 0 {
+                    former += time_former(&mut former_generator);
+                    candidate += time_candidate(&mut candidate_generator);
+                    candidate += time_candidate(&mut candidate_generator);
+                    former += time_former(&mut former_generator);
+                } else {
+                    candidate += time_candidate(&mut candidate_generator);
+                    former += time_former(&mut former_generator);
+                    former += time_former(&mut former_generator);
+                    candidate += time_candidate(&mut candidate_generator);
+                }
+            }
+            effect_former.push(former.as_secs_f64() * 500.0 / REPEATS as f64);
+            effect_candidate.push(candidate.as_secs_f64() * 500.0 / REPEATS as f64);
+        }
+
+        let mut null_lhs = Vec::with_capacity(OBSERVATIONS);
+        let mut null_rhs = Vec::with_capacity(OBSERVATIONS);
+        for observation in 0..OBSERVATIONS {
+            let mut lhs_generator = test_generator();
+            let mut rhs_generator = test_generator();
+            let mut lhs = std::time::Duration::ZERO;
+            let mut rhs = std::time::Duration::ZERO;
+            for repeat in 0..REPEATS {
+                if (observation + repeat) & 1 == 0 {
+                    lhs += time_candidate(&mut lhs_generator);
+                    rhs += time_candidate(&mut rhs_generator);
+                    rhs += time_candidate(&mut rhs_generator);
+                    lhs += time_candidate(&mut lhs_generator);
+                } else {
+                    rhs += time_candidate(&mut rhs_generator);
+                    lhs += time_candidate(&mut lhs_generator);
+                    lhs += time_candidate(&mut lhs_generator);
+                    rhs += time_candidate(&mut rhs_generator);
+                }
+            }
+            null_lhs.push(lhs.as_secs_f64() * 500.0 / REPEATS as f64);
+            null_rhs.push(rhs.as_secs_f64() * 500.0 / REPEATS as f64);
+        }
+
+        let (former_mean, former_cv) = stats(&effect_former);
+        let (candidate_mean, candidate_cv) = stats(&effect_candidate);
+        let (null_lhs_mean, null_lhs_cv) = stats(&null_lhs);
+        let (null_rhs_mean, null_rhs_cv) = stats(&null_rhs);
+        println!(
+            "LEDGER_AUDIT row=geometric_inversion_parameter_cache_effect \
+             samples={OBSERVATIONS} candidate_mean_ms={candidate_mean:.6} \
+             candidate_cv_pct={candidate_cv:.3} orig_mean_ms={former_mean:.6} \
+             orig_cv_pct={former_cv:.3} orig_over_candidate={:.4}",
+            former_mean / candidate_mean,
+        );
+        println!(
+            "LEDGER_AUDIT row=geometric_inversion_parameter_cache_null \
+             samples={OBSERVATIONS} candidate_mean_ms={null_lhs_mean:.6} \
+             candidate_cv_pct={null_lhs_cv:.3} orig_mean_ms={null_rhs_mean:.6} \
+             orig_cv_pct={null_rhs_cv:.3} orig_over_candidate={:.4}",
+            null_rhs_mean / null_lhs_mean,
+        );
+        Ok(())
     }
 
     #[test]
@@ -9960,6 +13762,54 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn multivariate_normal_diag_hoisted_sqrt_matches_former_stream() {
+        let fixtures = [
+            (vec![0.0, 5.0, -2.0, 1.0], vec![1.0, 4.0, 0.25, 9.0], 4_096),
+            (
+                vec![1.0, 2.0, 3.0, 4.0],
+                vec![0.0, -0.0, f64::NAN, f64::INFINITY],
+                257,
+            ),
+            (vec![1.0, 2.0], vec![1.0, 4.0, 9.0], 31),
+            (vec![1.0, 2.0, 3.0], vec![1.0], 31),
+            (vec![1.0, 2.0], vec![1.0, 4.0], 0),
+        ];
+
+        for (mean, cov_diag, size) in fixtures {
+            let mut former = test_generator();
+            let mut candidate = test_generator();
+            let former_output = former
+                .multivariate_normal_diag(&mean, &cov_diag, size)
+                .unwrap();
+            let candidate_output = candidate
+                .multivariate_normal_diag_cached_sqrt_control(&mean, &cov_diag, size)
+                .unwrap();
+            assert_eq!(former_output.len(), candidate_output.len());
+            for (former_row, candidate_row) in former_output.iter().zip(&candidate_output) {
+                assert_eq!(
+                    former_row
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    candidate_row
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                );
+            }
+            assert_eq!(former.next_u64(), candidate.next_u64());
+        }
+
+        let mut former = test_generator();
+        let mut candidate = test_generator();
+        assert_eq!(
+            former.multivariate_normal_diag(&[0.0], &[-1.0], 1),
+            candidate.multivariate_normal_diag_cached_sqrt_control(&[0.0], &[-1.0], 1)
+        );
+        assert_eq!(former.next_u64(), candidate.next_u64());
+    }
+
+    #[test]
     fn negative_binomial_basic() {
         let mut rng = test_generator();
         let samples = rng.negative_binomial(5.0, 0.5, 100).unwrap();
@@ -10201,6 +14051,162 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn hypergeometric_batch_matches_singleton_stream() {
+        for &(good, bad, sample) in &[
+            (20_u64, 30_u64, 10_u64),
+            (20_000, 30_000, 10_000),
+            (5, 5, 3),
+            (5, 5, 8),
+        ] {
+            let mut batch = test_generator();
+            let mut singleton = test_generator();
+            let batch_values = batch.hypergeometric(good, bad, sample, 128).unwrap();
+            let singleton_values = (0..128)
+                .map(|_| singleton.hypergeometric(good, bad, sample, 1).unwrap()[0])
+                .collect::<Vec<_>>();
+            assert_eq!(
+                batch_values, singleton_values,
+                "batch/singleton divergence for ({good}, {bad}, {sample})"
+            );
+            assert_eq!(
+                batch.next_u64(),
+                singleton.next_u64(),
+                "post-batch stream divergence for ({good}, {bad}, {sample})"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual same-binary performance audit"]
+    fn hypergeometric_hrua_parameter_cache_perf_audit() {
+        const OBSERVATIONS: usize = 10;
+        const REPEATS: usize = 32;
+        const SIZE: usize = 100_000;
+        const GOOD: i64 = 20_000;
+        const BAD: i64 = 30_000;
+        const SAMPLE: i64 = 10_000;
+
+        fn former_batch(generator: &mut Generator) -> Vec<u64> {
+            (0..SIZE)
+                .map(|_| {
+                    generator
+                        .hypergeometric_hrua(super::HypergeometricHruaCache::new(GOOD, BAD, SAMPLE))
+                        as u64
+                })
+                .collect()
+        }
+
+        fn candidate_batch(generator: &mut Generator) -> Vec<u64> {
+            generator
+                .hypergeometric(GOOD as u64, BAD as u64, SAMPLE as u64, SIZE)
+                .unwrap()
+        }
+
+        fn stats(samples: &[f64]) -> (f64, f64) {
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            let variance = samples
+                .iter()
+                .map(|sample| {
+                    let delta = sample - mean;
+                    delta * delta
+                })
+                .sum::<f64>()
+                / (samples.len() - 1) as f64;
+            (mean, variance.sqrt() * 100.0 / mean)
+        }
+
+        let mut former_proof = test_generator();
+        let mut candidate_proof = test_generator();
+        assert_eq!(
+            former_batch(&mut former_proof),
+            candidate_batch(&mut candidate_proof)
+        );
+        assert_eq!(former_proof.next_u64(), candidate_proof.next_u64());
+
+        let time_former = || {
+            let mut generator = test_generator();
+            let started = std::time::Instant::now();
+            for _ in 0..REPEATS {
+                std::hint::black_box(former_batch(&mut generator));
+            }
+            started.elapsed()
+        };
+        let time_candidate = || {
+            let mut generator = test_generator();
+            let started = std::time::Instant::now();
+            for _ in 0..REPEATS {
+                std::hint::black_box(candidate_batch(&mut generator));
+            }
+            started.elapsed()
+        };
+
+        let mut effect_former = Vec::with_capacity(OBSERVATIONS);
+        let mut effect_candidate = Vec::with_capacity(OBSERVATIONS);
+        for observation in 0..OBSERVATIONS {
+            let (former, candidate) = if observation & 1 == 0 {
+                let former_first = time_former();
+                let candidate_first = time_candidate();
+                let candidate_second = time_candidate();
+                let former_second = time_former();
+                (
+                    former_first + former_second,
+                    candidate_first + candidate_second,
+                )
+            } else {
+                let candidate_first = time_candidate();
+                let former_first = time_former();
+                let former_second = time_former();
+                let candidate_second = time_candidate();
+                (
+                    former_first + former_second,
+                    candidate_first + candidate_second,
+                )
+            };
+            effect_former.push(former.as_secs_f64() * 500.0 / REPEATS as f64);
+            effect_candidate.push(candidate.as_secs_f64() * 500.0 / REPEATS as f64);
+        }
+
+        let mut null_lhs = Vec::with_capacity(OBSERVATIONS);
+        let mut null_rhs = Vec::with_capacity(OBSERVATIONS);
+        for observation in 0..OBSERVATIONS {
+            let (lhs, rhs) = if observation & 1 == 0 {
+                let lhs_first = time_candidate();
+                let rhs_first = time_candidate();
+                let rhs_second = time_candidate();
+                let lhs_second = time_candidate();
+                (lhs_first + lhs_second, rhs_first + rhs_second)
+            } else {
+                let rhs_first = time_candidate();
+                let lhs_first = time_candidate();
+                let lhs_second = time_candidate();
+                let rhs_second = time_candidate();
+                (lhs_first + lhs_second, rhs_first + rhs_second)
+            };
+            null_lhs.push(lhs.as_secs_f64() * 500.0 / REPEATS as f64);
+            null_rhs.push(rhs.as_secs_f64() * 500.0 / REPEATS as f64);
+        }
+
+        let (former_mean, former_cv) = stats(&effect_former);
+        let (candidate_mean, candidate_cv) = stats(&effect_candidate);
+        let (null_lhs_mean, null_lhs_cv) = stats(&null_lhs);
+        let (null_rhs_mean, null_rhs_cv) = stats(&null_rhs);
+        println!(
+            "LEDGER_AUDIT row=hypergeometric_hrua_parameter_cache_effect \
+             samples={OBSERVATIONS} candidate_mean_ms={candidate_mean:.6} \
+             candidate_cv_pct={candidate_cv:.3} orig_mean_ms={former_mean:.6} \
+             orig_cv_pct={former_cv:.3} orig_over_candidate={:.4}",
+            former_mean / candidate_mean,
+        );
+        println!(
+            "LEDGER_AUDIT row=hypergeometric_hrua_parameter_cache_null \
+             samples={OBSERVATIONS} candidate_mean_ms={null_lhs_mean:.6} \
+             candidate_cv_pct={null_lhs_cv:.3} orig_mean_ms={null_rhs_mean:.6} \
+             orig_cv_pct={null_rhs_cv:.3} orig_over_candidate={:.4}",
+            null_rhs_mean / null_lhs_mean,
+        );
+    }
+
+    #[test]
     fn zipf_values_are_positive_integers() {
         let mut rng = test_generator();
         let samples = rng.zipf(2.0, 5000).unwrap();
@@ -10363,6 +14369,35 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn noncentral_chisquare_fixed_cache_matches_recomputed_stream() {
+        for &(df, nonc, size) in &[
+            (5.0, 0.0, 64),
+            (5.0, 1.0, 64),
+            (0.5, 1.0, 64),
+            (5.0, f64::NAN, 64),
+            (5.0, 1.0, 0),
+        ] {
+            let mut former = test_generator();
+            let mut candidate = test_generator();
+            let former_output = former
+                .noncentral_chisquare_recomputed_control(df, nonc, size)
+                .unwrap();
+            let candidate_output = candidate.noncentral_chisquare(df, nonc, size).unwrap();
+            assert_eq!(
+                former_output
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                candidate_output
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(former.next_u64(), candidate.next_u64());
+        }
+    }
+
+    #[test]
     fn noncentral_f_positive_values() {
         let mut rng = test_generator();
         let samples = rng.noncentral_f(5.0, 10.0, 1.0, 1000).unwrap();
@@ -10395,6 +14430,31 @@ for child in rng.spawn(n_children):
         let actual = noncentral.noncentral_f(5.0, 10.0, 0.0, 8).unwrap();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn noncentral_f_batch_matches_singleton_stream() {
+        for &(dfnum, dfden, nonc) in &[
+            (5.0, 20.0, 2.0),
+            (0.5, 20.0, 2.0),
+            (5.0, 20.0, 0.0),
+            (2.0, 5.0, f64::NAN),
+        ] {
+            let mut batch = test_generator();
+            let mut singleton = test_generator();
+            let batch_values = batch.noncentral_f(dfnum, dfden, nonc, 64).unwrap();
+            let singleton_values = (0..64)
+                .map(|_| singleton.noncentral_f(dfnum, dfden, nonc, 1).unwrap()[0])
+                .collect::<Vec<_>>();
+            assert!(
+                batch_values
+                    .iter()
+                    .zip(&singleton_values)
+                    .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits()),
+                "batch/singleton mismatch for ({dfnum}, {dfden}, {nonc})"
+            );
+            assert_eq!(batch.next_u64(), singleton.next_u64());
+        }
     }
 
     #[test]
@@ -10482,6 +14542,19 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn bytes_shaped_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let expected = numpy_oracle_bytes_sequence(&[7]);
+        let mut rng = oracle_gen();
+        let output = rng.bytes_shaped(7);
+        assert_eq!(output.shape(), &[7]);
+        assert_eq!(output.values(), expected[0].as_slice());
+    }
+
+    #[test]
     fn bytes_empty() {
         let mut rng = test_generator();
         let data = rng.bytes(0);
@@ -10508,6 +14581,62 @@ for child in rng.spawn(n_children):
         let first = rng.bytes(3);
         let second = rng.bytes(3);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn bytes_large_calls_match_serial_uint32_stream_state() {
+        fn serial_bytes(rng: &mut Generator, length: usize) -> Vec<u8> {
+            if length == 0 {
+                let _ = rng.next_uint32();
+                return Vec::new();
+            }
+            let mut result = Vec::with_capacity(length);
+            let mut remaining = length;
+            while remaining > 0 {
+                let word = rng.next_uint32();
+                let bytes = word.to_le_bytes();
+                let take = remaining.min(4);
+                result.extend_from_slice(&bytes[..take]);
+                remaining -= take;
+            }
+            result
+        }
+
+        let n = 70_000usize;
+        for dxsm in [false, true] {
+            for prebuffered in [false, true] {
+                let mk = |seed: u64| {
+                    if dxsm {
+                        Generator::from_pcg64_dxsm(seed).unwrap()
+                    } else {
+                        Generator::from_pcg64(seed).unwrap()
+                    }
+                };
+
+                let mut parallel = mk(515151);
+                let mut serial = mk(515151);
+                if prebuffered {
+                    assert_eq!(parallel.next_uint32(), serial.next_uint32());
+                }
+
+                let mut got = parallel.bytes(n);
+                got.extend(parallel.bytes(n + 5));
+                let mut want = serial_bytes(&mut serial, n);
+                want.extend(serial_bytes(&mut serial, n + 5));
+
+                assert_eq!(
+                    got, want,
+                    "dxsm={dxsm} prebuffered={prebuffered}: bytes stream diverged"
+                );
+
+                let after_parallel: Vec<u32> = (0..17).map(|_| parallel.next_uint32()).collect();
+                let after_serial: Vec<u32> = (0..17).map(|_| serial.next_uint32()).collect();
+                assert_eq!(
+                    after_parallel, after_serial,
+                    "dxsm={dxsm} prebuffered={prebuffered}: post-bytes u32 state diverged"
+                );
+            }
+        }
     }
 
     #[test]
@@ -10553,6 +14682,35 @@ for child in rng.spawn(n_children):
         ];
         let after = rng.random(5);
         assert_f64_seq("choice_weighted_no_replace_after", &after, &expected_after);
+    }
+
+    #[test]
+    fn choice_weighted_no_replace_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let (expected_samples, expected_after) = numpy_oracle_choice_weighted_no_replace()?;
+        let mut rng = oracle_gen();
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let p = [0.4, 0.3, 0.2, 0.05, 0.05];
+
+        let samples = rng
+            .choice_weighted(&a, 3, false, &p)
+            .map_err(|_| "weighted choice live oracle case")?;
+        assert_f64_seq(
+            "choice_weighted_no_replace_live_numpy_samples",
+            &samples,
+            &expected_samples,
+        );
+
+        let after = rng.random(5);
+        assert_f64_seq(
+            "choice_weighted_no_replace_live_numpy_after",
+            &after,
+            &expected_after,
+        );
+        Ok(())
     }
 
     #[test]
@@ -10722,6 +14880,23 @@ for child in rng.spawn(n_children):
             samples,
             vec![vec![0, 1, 4], vec![0, 1, 4], vec![1, 2, 2], vec![1, 2, 2]]
         );
+    }
+
+    #[test]
+    fn multivariate_hypergeometric_count_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_multivariate_hypergeometric_count(&[10, 20, 30], 5, 4)?;
+        let mut rng = oracle_gen();
+        let actual = rng
+            .multivariate_hypergeometric_count(&[10, 20, 30], 5, 4)
+            .map_err(|_| "multivariate_hypergeometric count live oracle case")?;
+        if !actual.eq(&expected) {
+            return Err("multivariate_hypergeometric count live oracle mismatch");
+        }
+        Ok(())
     }
 
     #[test]
@@ -11467,6 +15642,23 @@ for child in rng.spawn(n_children):
         }
     }
 
+    fn assert_f64_seq_with_nan(label: &str, got: &[f64], expected: &[f64]) {
+        assert_eq!(got.len(), expected.len(), "{label}: length mismatch");
+        for (i, (&g, &e)) in got.iter().zip(expected.iter()).enumerate() {
+            if e.is_nan() {
+                assert!(g.is_nan(), "{label}[{i}]: got {g}, expected NaN");
+            } else if e.is_infinite() {
+                assert_eq!(g, e, "{label}[{i}]: got {g}, expected {e}");
+            } else {
+                assert!(
+                    (g - e).abs() < 1e-12,
+                    "{label}[{i}]: got {g}, expected {e}, diff {}",
+                    (g - e).abs()
+                );
+            }
+        }
+    }
+
     fn assert_u64_seq(label: &str, got: &[u64], expected: &[u64]) {
         assert_eq!(got.len(), expected.len(), "{label}: length mismatch");
         for (i, (&g, &e)) in got.iter().zip(expected.iter()).enumerate() {
@@ -11498,6 +15690,19 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn random_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_random(10)?;
+        let mut g = oracle_gen();
+        let actual = g.random(10);
+        assert_f64_seq("random_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
     fn oracle_uniform() {
         let mut g = oracle_gen();
         let vals = g.uniform(2.0, 5.0, 10).unwrap();
@@ -11514,6 +15719,19 @@ for child in rng.spawn(n_children):
             2.987775328664485,
         ];
         assert_f64_seq("uniform", &vals, &expected);
+    }
+
+    #[test]
+    fn uniform_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_uniform(2.0, 5.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g.uniform(2.0, 5.0, 10).map_err(|_| "uniform live oracle")?;
+        assert_f64_seq("uniform_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
@@ -11536,6 +15754,19 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn standard_normal_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_standard_normal(10)?;
+        let mut g = oracle_gen();
+        let actual = g.standard_normal(10);
+        assert_f64_seq("standard_normal_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
     fn oracle_normal() {
         let mut g = oracle_gen();
         let vals = g.normal(5.0, 2.0, 10).unwrap();
@@ -11552,6 +15783,19 @@ for child in rng.spawn(n_children):
             2.5763851611593207,
         ];
         assert_f64_seq("normal", &vals, &expected);
+    }
+
+    #[test]
+    fn normal_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_normal(5.0, 2.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g.normal(5.0, 2.0, 10).map_err(|_| "normal live oracle")?;
+        assert_f64_seq("normal_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
@@ -11574,6 +15818,19 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn standard_exponential_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_standard_exponential(10)?;
+        let mut g = oracle_gen();
+        let actual = g.standard_exponential(10);
+        assert_f64_seq("standard_exponential_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
     fn oracle_standard_exponential_inv() {
         let mut g = oracle_gen();
         let vals = g.standard_exponential_inv(10);
@@ -11593,6 +15850,19 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn standard_exponential_inv_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_standard_exponential_inv(10)?;
+        let mut g = oracle_gen();
+        let actual = g.standard_exponential_inv(10);
+        assert_f64_seq("standard_exponential_inv_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
     fn oracle_exponential() {
         let mut g = oracle_gen();
         let vals = g.exponential(2.5, 10).unwrap();
@@ -11609,6 +15879,21 @@ for child in rng.spawn(n_children):
             0.6935091163855989,
         ];
         assert_f64_seq("exponential", &vals, &expected);
+    }
+
+    #[test]
+    fn exponential_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_exponential(2.5, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .exponential(2.5, 10)
+            .map_err(|_| "exponential live oracle")?;
+        assert_f64_seq("exponential_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
@@ -11765,6 +16050,19 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn laplace_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_laplace(0.0, 1.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g.laplace(0.0, 1.0, 10).map_err(|_| "laplace live oracle")?;
+        assert_f64_seq("laplace_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
     fn oracle_laplace_broadcast() {
         let mut g = oracle_gen();
         let vals = g
@@ -11799,6 +16097,19 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn gumbel_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_gumbel(0.0, 1.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g.gumbel(0.0, 1.0, 10).map_err(|_| "gumbel live oracle")?;
+        assert_f64_seq("gumbel_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
     fn oracle_logistic() {
         let mut g = oracle_gen();
         let vals = g.logistic(0.0, 1.0, 10).unwrap();
@@ -11815,6 +16126,21 @@ for child in rng.spawn(n_children):
             -0.711540918907822,
         ];
         assert_f64_seq("logistic", &vals, &expected);
+    }
+
+    #[test]
+    fn logistic_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_logistic(0.0, 1.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .logistic(0.0, 1.0, 10)
+            .map_err(|_| "logistic live oracle")?;
+        assert_f64_seq("logistic_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
@@ -11837,6 +16163,21 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn lognormal_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_lognormal(0.0, 1.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .lognormal(0.0, 1.0, 10)
+            .map_err(|_| "lognormal live oracle")?;
+        assert_f64_seq("lognormal_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
     fn oracle_weibull() {
         let mut g = oracle_gen();
         let vals = g.weibull(2.0, 10).unwrap();
@@ -11853,6 +16194,19 @@ for child in rng.spawn(n_children):
             0.5266912250590848,
         ];
         assert_f64_seq("weibull", &vals, &expected);
+    }
+
+    #[test]
+    fn weibull_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_weibull(2.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g.weibull(2.0, 10).map_err(|_| "weibull live oracle")?;
+        assert_f64_seq("weibull_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
@@ -11875,6 +16229,19 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn rayleigh_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_rayleigh(1.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g.rayleigh(1.0, 10).map_err(|_| "rayleigh live oracle")?;
+        assert_f64_seq("rayleigh_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
     fn oracle_pareto() {
         let mut g = oracle_gen();
         let vals = g.pareto(3.0, 10).unwrap();
@@ -11891,6 +16258,19 @@ for child in rng.spawn(n_children):
             0.09687791167243072,
         ];
         assert_f64_seq("pareto", &vals, &expected);
+    }
+
+    #[test]
+    fn pareto_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_pareto(3.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g.pareto(3.0, 10).map_err(|_| "pareto live oracle")?;
+        assert_f64_seq("pareto_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
@@ -11913,6 +16293,19 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn power_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_power(5.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g.power(5.0, 10).map_err(|_| "power live oracle")?;
+        assert_f64_seq("power_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
     fn oracle_triangular() {
         let mut g = oracle_gen();
         let vals = g.triangular(-1.0, 0.0, 1.0, 10).unwrap();
@@ -11929,6 +16322,21 @@ for child in rng.spawn(n_children):
             -0.18850946661324297,
         ];
         assert_f64_seq("triangular", &vals, &expected);
+    }
+
+    #[test]
+    fn triangular_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_triangular(-1.0, 0.0, 1.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .triangular(-1.0, 0.0, 1.0, 10)
+            .map_err(|_| "triangular live oracle")?;
+        assert_f64_seq("triangular_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
@@ -11967,11 +16375,44 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn standard_cauchy_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_standard_cauchy(10)?;
+        let mut g = oracle_gen();
+        let actual = g.standard_cauchy(10);
+        assert_f64_seq("standard_cauchy_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
     fn oracle_geometric() {
         let mut g = oracle_gen();
         let vals = g.geometric(0.5, 10).unwrap();
         let expected: Vec<u64> = vec![4, 1, 1, 1, 2, 4, 4, 1, 1, 1];
         assert_u64_seq("geometric", &vals, &expected);
+    }
+
+    #[test]
+    fn geometric_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let expected = numpy_oracle_geometric_outcome(0.5, 10);
+        let mut g = oracle_gen();
+        let actual = g.geometric(0.5, 10).expect("p=0.5 should succeed");
+        let actual_payload = format!(
+            "ok:{}",
+            actual
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert_eq!(actual_payload, expected);
     }
 
     #[test]
@@ -11992,6 +16433,157 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn gamma_batch_matches_singleton_stream() {
+        // The per-batch GammaShapeCache must not change what a batched draw
+        // produces relative to repeated single draws with the same seed, and
+        // both must leave the raw stream in the same place. Covers the
+        // small-shape rejection, Marsaglia-Tsang, and every degenerate early
+        // return, for standard_gamma and scaled gamma.
+        let shapes = [0.25f64, 0.5, 1.0, 2.5, 5.0, 20.0, 0.0, f64::INFINITY];
+        let mut batch = oracle_gen();
+        let mut single = oracle_gen();
+        for &shape in &shapes {
+            let batched = batch.standard_gamma(shape, 32).unwrap();
+            let singles: Vec<f64> = (0..32)
+                .map(|_| single.standard_gamma(shape, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "standard_gamma batch/singleton divergence at shape {shape}"
+            );
+        }
+        assert_eq!(batch.next_u64(), single.next_u64());
+
+        let mut batch = oracle_gen();
+        let mut single = oracle_gen();
+        for &shape in &shapes {
+            let batched = batch.gamma(shape, 2.5, 32).unwrap();
+            let singles: Vec<f64> = (0..32)
+                .map(|_| single.gamma(shape, 2.5, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "gamma batch/singleton divergence at shape {shape}"
+            );
+        }
+        assert_eq!(batch.next_u64(), single.next_u64());
+    }
+
+    #[test]
+    fn gamma_consumers_batch_match_singleton_stream() {
+        // The fixed-shape cache hoists in beta/negative_binomial/f/standard_t
+        // must not change what a batched draw produces relative to repeated
+        // single draws with the same seed, including small-shape (< 1),
+        // Marsaglia-Tsang (> 1), and exponential (== 1 via shape 2.0/2) regimes.
+        let mut batch = oracle_gen();
+        let mut single = oracle_gen();
+        for &(a, b) in &[(2.5f64, 4.0f64), (0.5, 3.0), (1.5, 0.75), (1.0, 1.0)] {
+            let batched = batch.beta(a, b, 24).unwrap();
+            let singles: Vec<f64> = (0..24).map(|_| single.beta(a, b, 1).unwrap()[0]).collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "beta batch/singleton divergence at ({a}, {b})"
+            );
+        }
+        for &n in &[0.5f64, 1.0, 7.5] {
+            let batched = batch.negative_binomial(n, 0.35, 24).unwrap();
+            let singles: Vec<u64> = (0..24)
+                .map(|_| single.negative_binomial(n, 0.35, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched, singles,
+                "negative_binomial batch/singleton divergence at n {n}"
+            );
+        }
+        for &(dfnum, dfden) in &[(5.0f64, 8.0f64), (1.0, 2.0), (0.5, 3.5)] {
+            let batched = batch.f_distribution(dfnum, dfden, 24).unwrap();
+            let singles: Vec<f64> = (0..24)
+                .map(|_| single.f_distribution(dfnum, dfden, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "f batch/singleton divergence at ({dfnum}, {dfden})"
+            );
+        }
+        for &df in &[1.0f64, 2.0, 10.5] {
+            let batched = batch.standard_t(df, 24).unwrap();
+            let singles: Vec<f64> = (0..24)
+                .map(|_| single.standard_t(df, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "standard_t batch/singleton divergence at df {df}"
+            );
+        }
+        assert_eq!(batch.next_u64(), single.next_u64());
+    }
+
+    #[test]
+    fn dirichlet_batch_matches_singleton_stream() {
+        // The per-alpha cache vector must not change what a batched draw
+        // produces relative to repeated single draws with the same seed.
+        // Mixed regimes per component: sub-1, Marsaglia-Tsang, exponential
+        // (a == 1), zero, and NaN alphas.
+        let alphas_sets: &[&[f64]] = &[
+            &[2.5, 4.0, 1.5, 0.5, 3.0],
+            &[0.5, 0.0, 2.0],
+            &[1.0, 1.0],
+            &[f64::NAN, 2.0],
+        ];
+        let mut batch = oracle_gen();
+        let mut single = oracle_gen();
+        for &alphas in alphas_sets {
+            let batched = batch.dirichlet(alphas, 16).unwrap();
+            let singles: Vec<Vec<f64>> = (0..16)
+                .map(|_| {
+                    single
+                        .dirichlet(alphas, 1)
+                        .unwrap()
+                        .into_iter()
+                        .next()
+                        .unwrap()
+                })
+                .collect();
+            for (draw, (b, s)) in batched.iter().zip(singles.iter()).enumerate() {
+                assert_eq!(
+                    b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    s.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    "dirichlet batch/singleton divergence at draw {draw} for {alphas:?}"
+                );
+            }
+        }
+        assert_eq!(batch.next_u64(), single.next_u64());
+    }
+
+    #[test]
+    fn vonmises_batch_matches_singleton_stream() {
+        // The per-batch kappa-term hoist (and the batch-level split of the
+        // large-kappa normal approximation) must not change what a batched
+        // draw produces relative to repeated single draws with the same seed.
+        // Covers the small-s series (kappa < 1e-5), the Best-Fisher rejection
+        // loop, and the kappa > 1e6 normal approximation.
+        let mut batch = oracle_gen();
+        let mut single = oracle_gen();
+        for &kappa in &[5e-6f64, 0.5, 2.5, 4.0, 1e7] {
+            let batched = batch.vonmises(1.25, kappa, 24).unwrap();
+            let singles: Vec<f64> = (0..24)
+                .map(|_| single.vonmises(1.25, kappa, 1).unwrap()[0])
+                .collect();
+            assert_eq!(
+                batched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                singles.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "vonmises batch/singleton divergence at kappa {kappa}"
+            );
+        }
+        assert_eq!(batch.next_u64(), single.next_u64());
+    }
+
+    #[test]
     fn oracle_standard_gamma() {
         let mut g = oracle_gen();
         let vals = g.standard_gamma(3.0, 10).unwrap();
@@ -12008,6 +16600,47 @@ for child in rng.spawn(n_children):
             2.6281160439916977,
         ];
         assert_f64_seq("standard_gamma", &vals, &expected);
+    }
+
+    #[test]
+    fn standard_gamma_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_standard_gamma(3.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .standard_gamma(3.0, 10)
+            .map_err(|_| "standard_gamma live oracle")?;
+        assert_f64_seq("standard_gamma_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn standard_gamma_zero_size_preserves_live_numpy_stream() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let (expected_values, expected_after) = numpy_oracle_standard_gamma_then_random(3.0, 0, 1)?;
+        let mut g = oracle_gen();
+        let actual_values = g
+            .standard_gamma(3.0, 0)
+            .map_err(|_| "standard_gamma zero-size live oracle")?;
+        assert!(actual_values.is_empty());
+        assert_f64_seq(
+            "standard_gamma_zero_size_live_numpy",
+            &actual_values,
+            &expected_values,
+        );
+        let actual_after = g.random(1);
+        assert_f64_seq(
+            "standard_gamma_zero_size_after_live_numpy",
+            &actual_after,
+            &expected_after,
+        );
+        Ok(())
     }
 
     #[test]
@@ -12034,6 +16667,37 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn standard_gamma_nonfinite_shape_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, shape) in [
+            ("standard_gamma_nan_shape", f64::NAN),
+            ("standard_gamma_inf_shape", f64::INFINITY),
+        ] {
+            let (expected_values, expected_after) =
+                numpy_oracle_standard_gamma_then_random(shape, 3, 5)?;
+            let mut g = oracle_gen();
+            let actual_values = g
+                .standard_gamma(shape, 3)
+                .map_err(|_| "standard_gamma nonfinite live oracle")?;
+            assert_f64_seq_with_nan(
+                &format!("{label}_values_live_numpy"),
+                &actual_values,
+                &expected_values,
+            );
+            let actual_after = g.random(5);
+            assert_f64_seq(
+                &format!("{label}_after_live_numpy"),
+                &actual_after,
+                &expected_after,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn oracle_gamma() {
         let mut g = oracle_gen();
         let vals = g.gamma(2.0, 3.0, 10).unwrap();
@@ -12050,6 +16714,45 @@ for child in rng.spawn(n_children):
             4.908686593272669,
         ];
         assert_f64_seq("gamma", &vals, &expected);
+    }
+
+    #[test]
+    fn gamma_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_gamma(2.0, 3.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g.gamma(2.0, 3.0, 10).map_err(|_| "gamma live oracle")?;
+        assert_f64_seq("gamma_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn gamma_zero_size_preserves_live_numpy_stream() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let (expected_values, expected_after) = numpy_oracle_gamma_then_random(2.0, 3.0, 0, 1)?;
+        let mut g = oracle_gen();
+        let actual_values = g
+            .gamma(2.0, 3.0, 0)
+            .map_err(|_| "gamma zero-size live oracle")?;
+        assert!(actual_values.is_empty());
+        assert_f64_seq(
+            "gamma_zero_size_live_numpy",
+            &actual_values,
+            &expected_values,
+        );
+        let actual_after = g.random(1);
+        assert_f64_seq(
+            "gamma_zero_size_after_live_numpy",
+            &actual_after,
+            &expected_after,
+        );
+        Ok(())
     }
 
     #[test]
@@ -12111,6 +16814,40 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn gamma_special_scale_nonzero_shape_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, shape, scale) in [
+            ("gamma_zero_scale", 2.0, 0.0),
+            ("gamma_nan_scale", 2.0, f64::NAN),
+            ("gamma_infinite_scale", 2.0, f64::INFINITY),
+            ("gamma_nan_shape_zero_scale", f64::NAN, 0.0),
+            ("gamma_infinite_shape_zero_scale", f64::INFINITY, 0.0),
+        ] {
+            let (expected_values, expected_after) =
+                numpy_oracle_gamma_then_random(shape, scale, 3, 5)?;
+            let mut g = oracle_gen();
+            let actual_values = g
+                .gamma(shape, scale, 3)
+                .map_err(|_| "gamma special-scale live oracle")?;
+            assert_f64_seq_with_nan(
+                &format!("{label}_values_live_numpy"),
+                &actual_values,
+                &expected_values,
+            );
+            let actual_after = g.random(5);
+            assert_f64_seq(
+                &format!("{label}_after_live_numpy"),
+                &actual_after,
+                &expected_after,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn oracle_gamma_zero_shape_does_not_advance_stream() {
         let expected_after = [
             0.932_081_690_319_876_3,
@@ -12151,6 +16888,38 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn gamma_zero_shape_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, scale) in [
+            ("gamma_zero_shape_finite_scale", 2.0),
+            ("gamma_zero_shape_nan_scale", f64::NAN),
+            ("gamma_zero_shape_infinite_scale", f64::INFINITY),
+        ] {
+            let (expected_values, expected_after) =
+                numpy_oracle_gamma_then_random(0.0, scale, 3, 5)?;
+            let mut g = oracle_gen();
+            let actual_values = g
+                .gamma(0.0, scale, 3)
+                .map_err(|_| "gamma zero-shape live oracle")?;
+            assert_f64_seq_with_nan(
+                &format!("{label}_values_live_numpy"),
+                &actual_values,
+                &expected_values,
+            );
+            let actual_after = g.random(5);
+            assert_f64_seq(
+                &format!("{label}_after_live_numpy"),
+                &actual_after,
+                &expected_after,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn oracle_chisquare() {
         let mut g = oracle_gen();
         let vals = g.chisquare(5.0, 10).unwrap();
@@ -12170,6 +16939,45 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn chisquare_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_chisquare(5.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g.chisquare(5.0, 10).map_err(|_| "chisquare live oracle")?;
+        assert_f64_seq("chisquare_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn chisquare_zero_size_preserves_live_numpy_stream() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let (expected_values, expected_after) = numpy_oracle_chisquare_then_random(5.0, 0, 1)?;
+        let mut g = oracle_gen();
+        let actual_values = g
+            .chisquare(5.0, 0)
+            .map_err(|_| "chisquare zero-size live oracle")?;
+        assert!(actual_values.is_empty());
+        assert_f64_seq(
+            "chisquare_zero_size_live_numpy",
+            &actual_values,
+            &expected_values,
+        );
+        let actual_after = g.random(1);
+        assert_f64_seq(
+            "chisquare_zero_size_after_live_numpy",
+            &actual_after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn oracle_beta() {
         let mut g = oracle_gen();
         let vals = g.beta(2.0, 5.0, 10).unwrap();
@@ -12186,6 +16994,45 @@ for child in rng.spawn(n_children):
             0.10894170824615793,
         ];
         assert_f64_seq("beta", &vals, &expected);
+    }
+
+    #[test]
+    fn beta_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_beta(2.0, 5.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g.beta(2.0, 5.0, 10).map_err(|_| "beta live oracle")?;
+        assert_f64_seq("beta_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn beta_zero_size_preserves_live_numpy_stream() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let (expected_values, expected_after) = numpy_oracle_beta_then_random(2.0, 5.0, 0, 1)?;
+        let mut g = oracle_gen();
+        let actual_values = g
+            .beta(2.0, 5.0, 0)
+            .map_err(|_| "beta zero-size live oracle")?;
+        assert!(actual_values.is_empty());
+        assert_f64_seq(
+            "beta_zero_size_live_numpy",
+            &actual_values,
+            &expected_values,
+        );
+        let actual_after = g.random(1);
+        assert_f64_seq(
+            "beta_zero_size_after_live_numpy",
+            &actual_after,
+            &expected_after,
+        );
+        Ok(())
     }
 
     #[test]
@@ -12215,6 +17062,21 @@ for child in rng.spawn(n_children):
             0.725_100_797_231_033_2,
         ];
         assert_f64_seq("beta_johnk_after", &after, &expected_after);
+    }
+
+    #[test]
+    fn beta_johnk_small_shapes_match_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_beta(0.5, 0.75, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .beta(0.5, 0.75, 10)
+            .map_err(|_| "beta johnk live oracle")?;
+        assert_f64_seq("beta_johnk_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
@@ -12269,6 +17131,37 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn beta_nonfinite_parameters_match_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, a, b) in [
+            ("beta_inf_one", f64::INFINITY, 1.0),
+            ("beta_one_inf", 1.0, f64::INFINITY),
+            ("beta_nan_one", f64::NAN, 1.0),
+            ("beta_one_nan", 1.0, f64::NAN),
+            ("beta_inf_inf", f64::INFINITY, f64::INFINITY),
+        ] {
+            let (expected_values, expected_after) = numpy_oracle_beta_then_random(a, b, 3, 5)?;
+            let mut g = oracle_gen();
+            let actual_values = g.beta(a, b, 3).map_err(|_| "beta nonfinite live oracle")?;
+            assert_f64_seq_with_nan(
+                &format!("{label}_values_live_numpy"),
+                &actual_values,
+                &expected_values,
+            );
+            let actual_after = g.random(5);
+            assert_f64_seq(
+                &format!("{label}_after_live_numpy"),
+                &actual_after,
+                &expected_after,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn oracle_wald() {
         let mut g = oracle_gen();
         let vals = g.wald(3.0, 2.0, 10).unwrap();
@@ -12288,11 +17181,40 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn wald_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_wald(3.0, 2.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g.wald(3.0, 2.0, 10).map_err(|_| "wald live oracle")?;
+        assert_f64_seq("wald_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
     fn oracle_logseries() {
         let mut g = oracle_gen();
         let vals = g.logseries(0.6, 10).unwrap();
         let expected: Vec<u64> = vec![1, 1, 2, 1, 1, 2, 1, 2, 2, 1];
         assert_u64_seq("logseries", &vals, &expected);
+    }
+
+    #[test]
+    fn logseries_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let (expected_values, expected_after) = numpy_oracle_logseries_then_random("0.6")?;
+        let mut rng = oracle_gen();
+        let values = rng.logseries(0.6, 5).map_err(|_| "logseries live oracle")?;
+        assert_u64_seq("logseries_live_numpy_values", &values, &expected_values);
+
+        let after = rng.random(5);
+        assert_f64_seq("logseries_live_numpy_after", &after, &expected_after);
+        Ok(())
     }
 
     #[test]
@@ -12327,6 +17249,39 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn logseries_zero_probability_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (values_label, after_label, p_arg, p_value) in [
+            (
+                "logseries_zero_live_numpy_values",
+                "logseries_zero_live_numpy_after",
+                "0.0",
+                0.0,
+            ),
+            (
+                "logseries_negative_zero_live_numpy_values",
+                "logseries_negative_zero_live_numpy_after",
+                "-0.0",
+                -0.0,
+            ),
+        ] {
+            let (expected_values, expected_after) = numpy_oracle_logseries_then_random(p_arg)?;
+            let mut rng = oracle_gen();
+            let values = rng
+                .logseries(p_value, 5)
+                .map_err(|_| "logseries zero probability live oracle case")?;
+            assert_u64_seq(values_label, &values, &expected_values);
+
+            let after = rng.random(5);
+            assert_f64_seq(after_label, &after, &expected_after);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn oracle_permutation() {
         let mut g = oracle_gen();
         let arr: Vec<f64> = (0..10).map(|i| i as f64).collect();
@@ -12336,11 +17291,40 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn permutation_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_permutation_f64(10)?;
+        let mut g = oracle_gen();
+        let arr: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let actual = g.permutation(&arr).map_err(|_| "permutation live oracle")?;
+        assert_f64_seq("permutation_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
     fn oracle_binomial() {
         let mut g = oracle_gen();
         let vals = g.binomial(10, 0.5, 10).unwrap();
         let expected: Vec<u64> = vec![7, 4, 4, 4, 5, 7, 7, 4, 5, 4];
         assert_u64_seq("binomial", &vals, &expected);
+    }
+
+    #[test]
+    fn binomial_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_binomial(10, 0.5, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .binomial(10, 0.5, 10)
+            .map_err(|_| "binomial live oracle")?;
+        assert_u64_seq("binomial_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
@@ -12360,6 +17344,26 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn poisson_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, lam, size) in [
+            ("poisson_live_numpy", 3.0, 10),
+            ("poisson_large_live_numpy", 20.0, 10),
+        ] {
+            let expected = numpy_oracle_poisson(lam, size)?;
+            let mut g = oracle_gen();
+            let actual = g
+                .poisson(lam, size)
+                .map_err(|_| "poisson live oracle case")?;
+            assert_u64_seq(label, &actual, &expected);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn oracle_f_distribution() {
         let mut g = oracle_gen();
         let vals = g.f(5.0, 10.0, 10).unwrap();
@@ -12376,6 +17380,21 @@ for child in rng.spawn(n_children):
             0.34215986276681587,
         ];
         assert_f64_seq("f_distribution", &vals, &expected);
+    }
+
+    #[test]
+    fn f_distribution_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_f_distribution(5.0, 10.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .f(5.0, 10.0, 10)
+            .map_err(|_| "f distribution live oracle")?;
+        assert_f64_seq("f_distribution_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
@@ -12443,6 +17462,40 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn f_nonfinite_parameters_match_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, dfnum, dfden) in [
+            ("f_inf_one", f64::INFINITY, 1.0),
+            ("f_one_inf", 1.0, f64::INFINITY),
+            ("f_inf_inf", f64::INFINITY, f64::INFINITY),
+            ("f_nan_one", f64::NAN, 1.0),
+            ("f_one_nan", 1.0, f64::NAN),
+        ] {
+            let (expected_values, expected_after) =
+                numpy_oracle_f_distribution_then_random(dfnum, dfden, 3, 5)?;
+            let mut g = oracle_gen();
+            let actual_values = g
+                .f(dfnum, dfden, 3)
+                .map_err(|_| "f nonfinite live oracle")?;
+            assert_f64_seq_with_nan(
+                &format!("{label}_values_live_numpy"),
+                &actual_values,
+                &expected_values,
+            );
+            let actual_after = g.random(5);
+            assert_f64_seq(
+                &format!("{label}_after_live_numpy"),
+                &actual_after,
+                &expected_after,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn oracle_standard_t() {
         let mut g = oracle_gen();
         let vals = g.standard_t(5.0, 10).unwrap();
@@ -12462,6 +17515,47 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn standard_t_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_standard_t(5.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .standard_t(5.0, 10)
+            .map_err(|_| "standard_t live oracle")?;
+        assert_f64_seq("standard_t_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn standard_t_zero_size_preserves_live_numpy_stream() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let (expected_values, expected_after) = numpy_oracle_standard_t_then_random(5.0, 0, 1)?;
+        let mut g = oracle_gen();
+        let actual_values = g
+            .standard_t(5.0, 0)
+            .map_err(|_| "standard_t zero-size live oracle")?;
+        assert!(actual_values.is_empty());
+        assert_f64_seq(
+            "standard_t_zero_size_live_numpy",
+            &actual_values,
+            &expected_values,
+        );
+        let actual_after = g.random(1);
+        assert_f64_seq(
+            "standard_t_zero_size_after_live_numpy",
+            &actual_after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn oracle_vonmises() {
         let mut g = oracle_gen();
         let vals = g.vonmises(0.0, 4.0, 10).unwrap();
@@ -12478,6 +17572,18 @@ for child in rng.spawn(n_children):
             0.10288417897762203,
         ];
         assert_f64_seq("vonmises", &vals, &expected);
+    }
+
+    #[test]
+    fn vonmises_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let expected = numpy_oracle_vonmises(0.0, 4.0, 10);
+        let mut g = oracle_gen();
+        let actual = g.vonmises(0.0, 4.0, 10).unwrap();
+        assert_f64_seq("vonmises_live_numpy", &actual, &expected);
     }
 
     #[test]
@@ -12706,6 +17812,421 @@ for child in rng.spawn(n_children):
         assert_eq!(g.integers_endpoint(5, 4, 0).unwrap(), Vec::<i64>::new());
     }
 
+    /// Golden regression for the narrow-width integer samplers (int8/int16/uint8/
+    /// uint16). numpy draws these with a *buffered* bounded-Lemire stream that is
+    /// distinct from the 32/64-bit path (it reuses leftover bytes of a single uint32
+    /// draw across consecutive narrow samples) — a width-specific algorithm that is
+    /// easy to break silently. The expected sequences were captured from
+    /// `numpy.random.default_rng(424242).integers(...)` (numpy 2.4) and cross-checked
+    /// across 126 (dtype, range, size, endpoint) cases against the live oracle.
+    /// `default_rng(U64(424242))` here is the same PCG64 stream that fnp-python's
+    /// `default_rng(424242)` exposes, so this pins bit-exact numpy parity without a
+    /// live interpreter at test time, guarding the buffered narrow-width sampler.
+    #[test]
+    fn narrow_width_integers_match_numpy_golden() {
+        fn seeded() -> Generator {
+            default_rng(SeedMaterial::U64(424242)).expect("seed")
+        }
+        assert_eq!(
+            seeded()
+                .integers_i8_shaped(0, 100, Some(&[16]), false)
+                .unwrap()
+                .into_parts()
+                .1,
+            vec![
+                98i8, 34, 22, 48, 93, 17, 49, 47, 82, 84, 97, 68, 1, 90, 73, 18
+            ],
+        );
+        assert_eq!(
+            seeded()
+                .integers_u8_shaped(0, 100, Some(&[16]), false)
+                .unwrap()
+                .into_parts()
+                .1,
+            vec![
+                98u8, 34, 22, 48, 93, 17, 49, 47, 82, 84, 97, 68, 1, 90, 73, 18
+            ],
+        );
+        assert_eq!(
+            seeded()
+                .integers_i16_shaped(0, 100, Some(&[16]), false)
+                .unwrap()
+                .into_parts()
+                .1,
+            vec![
+                35i16, 48, 17, 47, 23, 97, 2, 10, 19, 30, 34, 28, 36, 66, 61, 24
+            ],
+        );
+        assert_eq!(
+            seeded()
+                .integers_u16_shaped(0, 100, Some(&[16]), false)
+                .unwrap()
+                .into_parts()
+                .1,
+            vec![
+                35u16, 48, 17, 47, 23, 97, 2, 10, 19, 30, 34, 28, 36, 66, 61, 24
+            ],
+        );
+        // endpoint=true with a negative low (int8), and a power-of-two range (uint16,
+        // the mask path with no Lemire rejection).
+        assert_eq!(
+            seeded()
+                .integers_i8_shaped(-50, 50, Some(&[12]), true)
+                .unwrap()
+                .into_parts()
+                .1,
+            vec![49i8, -28, -1, 44, -33, -3, 33, -27, 35, 48, 19, -49],
+        );
+        assert_eq!(
+            seeded()
+                .integers_u16_shaped(0, 256, Some(&[12]), false)
+                .unwrap()
+                .into_parts()
+                .1,
+            vec![89u16, 125, 45, 121, 59, 249, 5, 26, 48, 78, 89, 73],
+        );
+    }
+
+    #[test]
+    fn full_range_byte_integers_match_scalar_narrow_stream_and_state() {
+        for dxsm in [false, true] {
+            let mk = |seed: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(seed).unwrap()
+                } else {
+                    Generator::from_pcg64(seed).unwrap()
+                }
+            };
+
+            for n in [
+                super::PCG_PARALLEL_MIN_LEN,
+                100_000,
+                super::PCG_BYTES_DIRECT_MIN_LEN + 17,
+            ] {
+                let mut fast_u8 = mk(8181);
+                let got_u8 = fast_u8.integers_u8_endpoint_mode(0, 256, n, false).unwrap();
+                let after_fast_u8: Vec<u32> = (0..17).map(|_| fast_u8.next_uint32()).collect();
+
+                let mut scalar_u8 = mk(8181);
+                let mut bcnt = 0;
+                let mut buf = 0;
+                let want_u8: Vec<u8> = (0..n)
+                    .map(|_| scalar_u8.numpy_bounded_uint8(0, u8::MAX, &mut bcnt, &mut buf))
+                    .collect();
+                let after_scalar_u8: Vec<u32> = (0..17).map(|_| scalar_u8.next_uint32()).collect();
+
+                assert_eq!(
+                    got_u8, want_u8,
+                    "dxsm={dxsm}, n={n}: uint8 full range changed"
+                );
+                assert_eq!(
+                    after_fast_u8, after_scalar_u8,
+                    "dxsm={dxsm}, n={n}: uint8 post-call stream changed"
+                );
+
+                let mut fast_i8 = mk(9191);
+                let got_i8 = fast_i8
+                    .integers_i8_endpoint_mode(-128, 128, n, false)
+                    .unwrap();
+                let after_fast_i8: Vec<u32> = (0..17).map(|_| fast_i8.next_uint32()).collect();
+
+                let mut scalar_i8 = mk(9191);
+                let mut bcnt = 0;
+                let mut buf = 0;
+                let want_i8: Vec<i8> = (0..n)
+                    .map(|_| scalar_i8.numpy_bounded_uint8(128, u8::MAX, &mut bcnt, &mut buf) as i8)
+                    .collect();
+                let after_scalar_i8: Vec<u32> = (0..17).map(|_| scalar_i8.next_uint32()).collect();
+
+                assert_eq!(
+                    got_i8, want_i8,
+                    "dxsm={dxsm}, n={n}: int8 full range changed"
+                );
+                assert_eq!(
+                    after_fast_i8, after_scalar_i8,
+                    "dxsm={dxsm}, n={n}: int8 post-call stream changed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_width_integers_match_live_numpy_oracle_when_available() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected_i8 = numpy_oracle_integers_dtype("int8", -5, 5, &[2, 3], false)?;
+        let mut i8_rng = oracle_gen();
+        let actual_i8 = i8_rng
+            .integers_i8_shaped(-5, 5, Some(&[2, 3]), false)
+            .map_err(|_| "int8 narrow integer oracle case")?
+            .into_parts()
+            .1
+            .into_iter()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(actual_i8, expected_i8);
+
+        let expected_i16 = numpy_oracle_integers_dtype("int16", -300, 300, &[6], false)?;
+        let mut i16_rng = oracle_gen();
+        let actual_i16 = i16_rng
+            .integers_i16_shaped(-300, 300, Some(&[6]), false)
+            .map_err(|_| "int16 narrow integer oracle case")?
+            .into_parts()
+            .1
+            .into_iter()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(actual_i16, expected_i16);
+
+        let expected_u8 = numpy_oracle_integers_dtype("uint8", 0, 200, &[2, 3], false)?;
+        let mut u8_rng = oracle_gen();
+        let actual_u8 = u8_rng
+            .integers_u8_shaped(0, 200, Some(&[2, 3]), false)
+            .map_err(|_| "uint8 narrow integer oracle case")?
+            .into_parts()
+            .1
+            .into_iter()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(actual_u8, expected_u8);
+
+        let expected_u16 =
+            numpy_oracle_integers_dtype("uint16", 0, i64::from(u16::MAX), &[7], true)?;
+        let mut u16_rng = oracle_gen();
+        let actual_u16 = u16_rng
+            .integers_u16_shaped(0, i64::from(u16::MAX), Some(&[7]), true)
+            .map_err(|_| "uint16 endpoint narrow integer oracle case")?
+            .into_parts()
+            .1
+            .into_iter()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(actual_u16, expected_u16);
+
+        let expected_u8_full = numpy_oracle_integers_dtype("uint8", 0, 256, &[8], false)?;
+        let mut u8_full_rng = oracle_gen();
+        let actual_u8_full = u8_full_rng
+            .integers_u8_shaped(0, 256, Some(&[8]), false)
+            .map_err(|_| "uint8 full exclusive range oracle case")?
+            .into_parts()
+            .1
+            .into_iter()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(actual_u8_full, expected_u8_full);
+        Ok(())
+    }
+
+    #[test]
+    fn int8_integers_shaped_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_integers_dtype("int8", -5, 5, &[], false)?;
+
+        let mut scalar_rng = oracle_gen();
+        let scalar = scalar_rng
+            .integers_i8_shaped(-5, 5, None, false)
+            .map_err(|_| "int8 shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        let scalar_values = scalar
+            .values()
+            .iter()
+            .copied()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(scalar_values, expected);
+
+        let mut zero_dim_rng = oracle_gen();
+        let zero_dim = zero_dim_rng
+            .integers_i8_shaped(-5, 5, Some(&[]), false)
+            .map_err(|_| "int8 shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        let zero_dim_values = zero_dim
+            .values()
+            .iter()
+            .copied()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(zero_dim_values, expected);
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut empty_rng = oracle_gen();
+        let empty = empty_rng
+            .integers_i8_shaped(-5, 5, Some(&[2, 0, 3]), false)
+            .map_err(|_| "int8 shaped empty live oracle")?;
+        assert_eq!(empty.shape(), &[2, 0, 3]);
+        assert!(empty.is_empty());
+        let after = empty_rng.random(1);
+        assert_f64_seq(
+            "int8_integers_shaped_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn int16_integers_shaped_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_integers_dtype("int16", -300, 300, &[], false)?;
+
+        let mut scalar_rng = oracle_gen();
+        let scalar = scalar_rng
+            .integers_i16_shaped(-300, 300, None, false)
+            .map_err(|_| "int16 shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        let scalar_values = scalar
+            .values()
+            .iter()
+            .copied()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(scalar_values, expected);
+
+        let mut zero_dim_rng = oracle_gen();
+        let zero_dim = zero_dim_rng
+            .integers_i16_shaped(-300, 300, Some(&[]), false)
+            .map_err(|_| "int16 shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        let zero_dim_values = zero_dim
+            .values()
+            .iter()
+            .copied()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(zero_dim_values, expected);
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut empty_rng = oracle_gen();
+        let empty = empty_rng
+            .integers_i16_shaped(-300, 300, Some(&[2, 0, 3]), false)
+            .map_err(|_| "int16 shaped empty live oracle")?;
+        assert_eq!(empty.shape(), &[2, 0, 3]);
+        assert!(empty.is_empty());
+        let after = empty_rng.random(1);
+        assert_f64_seq(
+            "int16_integers_shaped_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn uint8_integers_shaped_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_integers_dtype("uint8", 0, 200, &[], false)?;
+
+        let mut scalar_rng = oracle_gen();
+        let scalar = scalar_rng
+            .integers_u8_shaped(0, 200, None, false)
+            .map_err(|_| "uint8 shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        let scalar_values = scalar
+            .values()
+            .iter()
+            .copied()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(scalar_values, expected);
+
+        let mut zero_dim_rng = oracle_gen();
+        let zero_dim = zero_dim_rng
+            .integers_u8_shaped(0, 200, Some(&[]), false)
+            .map_err(|_| "uint8 shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        let zero_dim_values = zero_dim
+            .values()
+            .iter()
+            .copied()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(zero_dim_values, expected);
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut empty_rng = oracle_gen();
+        let empty = empty_rng
+            .integers_u8_shaped(0, 200, Some(&[2, 0, 3]), false)
+            .map_err(|_| "uint8 shaped empty live oracle")?;
+        assert_eq!(empty.shape(), &[2, 0, 3]);
+        assert!(empty.is_empty());
+        let after = empty_rng.random(1);
+        assert_f64_seq(
+            "uint8_integers_shaped_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn uint16_integers_shaped_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_integers_dtype("uint16", 0, 1000, &[], false)?;
+
+        let mut scalar_rng = oracle_gen();
+        let scalar = scalar_rng
+            .integers_u16_shaped(0, 1000, None, false)
+            .map_err(|_| "uint16 shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        let scalar_values = scalar
+            .values()
+            .iter()
+            .copied()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(scalar_values, expected);
+
+        let mut zero_dim_rng = oracle_gen();
+        let zero_dim = zero_dim_rng
+            .integers_u16_shaped(0, 1000, Some(&[]), false)
+            .map_err(|_| "uint16 shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        let zero_dim_values = zero_dim
+            .values()
+            .iter()
+            .copied()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(zero_dim_values, expected);
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut empty_rng = oracle_gen();
+        let empty = empty_rng
+            .integers_u16_shaped(0, 1000, Some(&[2, 0, 3]), false)
+            .map_err(|_| "uint16 shaped empty live oracle")?;
+        assert_eq!(empty.shape(), &[2, 0, 3]);
+        assert!(empty.is_empty());
+        let after = empty_rng.random(1);
+        assert_f64_seq(
+            "uint16_integers_shaped_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
     #[test]
     fn integers_endpoint_extreme_ranges_match_live_numpy_oracle_when_available() {
         if !numpy_oracle_available() {
@@ -12845,6 +18366,26 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn negative_binomial_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, n, p, size) in [
+            ("negative_binomial_live_numpy", 5.0, 0.5, 10),
+            ("negative_binomial_large_n_live_numpy", 50.0, 0.3, 5),
+        ] {
+            let expected = numpy_oracle_negative_binomial(n, p, size)?;
+            let mut rng = oracle_gen();
+            let actual = rng
+                .negative_binomial(n, p, size)
+                .map_err(|_| "negative binomial live oracle case")?;
+            assert_u64_seq(label, &actual, &expected);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn oracle_noncentral_chisquare() {
         let mut g = oracle_gen();
         let vals = g.noncentral_chisquare(5.0, 1.0, 10).unwrap();
@@ -12861,6 +18402,21 @@ for child in rng.spawn(n_children):
             3.6265665029968828,
         ];
         assert_f64_seq("noncentral_chisquare", &vals, &expected);
+    }
+
+    #[test]
+    fn noncentral_chisquare_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_noncentral_chisquare(5.0, 1.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .noncentral_chisquare(5.0, 1.0, 10)
+            .map_err(|_| "noncentral_chisquare live oracle")?;
+        assert_f64_seq("noncentral_chisquare_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
@@ -12921,6 +18477,38 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn noncentral_chisquare_nan_stream_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, df, nonc) in [
+            ("noncentral_chisquare_nan_df_zero_nonc", f64::NAN, 0.0),
+            ("noncentral_chisquare_nan_df_finite_nonc", f64::NAN, 1.0),
+            ("noncentral_chisquare_nan_nonc", f64::NAN, f64::NAN),
+        ] {
+            let (expected_values, expected_after) =
+                numpy_oracle_noncentral_chisquare_then_random(df, nonc, 3, 5)?;
+            let mut g = oracle_gen();
+            let actual_values = g
+                .noncentral_chisquare(df, nonc, 3)
+                .map_err(|_| "noncentral_chisquare nan stream live oracle")?;
+            assert_f64_seq_with_nan(
+                &format!("{label}_values_live_numpy"),
+                &actual_values,
+                &expected_values,
+            );
+            let actual_after = g.random(5);
+            assert_f64_seq(
+                &format!("{label}_after_live_numpy"),
+                &actual_after,
+                &expected_after,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn oracle_noncentral_f() {
         let mut g = oracle_gen();
         let vals = g.noncentral_f(5.0, 10.0, 1.0, 10).unwrap();
@@ -12937,6 +18525,21 @@ for child in rng.spawn(n_children):
             0.39845145064667553,
         ];
         assert_f64_seq("noncentral_f", &vals, &expected);
+    }
+
+    #[test]
+    fn noncentral_f_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_noncentral_f(5.0, 10.0, 1.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .noncentral_f(5.0, 10.0, 1.0, 10)
+            .map_err(|_| "noncentral_f live oracle")?;
+        assert_f64_seq("noncentral_f_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
@@ -12995,11 +18598,58 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn noncentral_f_nan_stream_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, dfnum, dfden, nonc) in [
+            ("noncentral_f_dfnum_nan", f64::NAN, 5.0, 1.0),
+            ("noncentral_f_dfden_nan", 2.0, f64::NAN, 1.0),
+            ("noncentral_f_nonc_nan", 2.0, 5.0, f64::NAN),
+        ] {
+            let (expected_values, expected_after) =
+                numpy_oracle_noncentral_f_then_random(dfnum, dfden, nonc, 3, 5)?;
+            let mut g = oracle_gen();
+            let actual_values = g
+                .noncentral_f(dfnum, dfden, nonc, 3)
+                .map_err(|_| "noncentral_f nan stream live oracle")?;
+            assert_f64_seq_with_nan(
+                &format!("{label}_values_live_numpy"),
+                &actual_values,
+                &expected_values,
+            );
+            let actual_after = g.random(5);
+            assert_f64_seq(
+                &format!("{label}_after_live_numpy"),
+                &actual_after,
+                &expected_after,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn oracle_hypergeometric() {
         let mut g = oracle_gen();
         let vals = g.hypergeometric(20, 30, 10, 10).unwrap();
         let expected: Vec<u64> = vec![2, 6, 3, 3, 3, 4, 3, 7, 3, 2];
         assert_u64_seq("hypergeometric", &vals, &expected);
+    }
+
+    #[test]
+    fn hypergeometric_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_hypergeometric(20, 30, 10, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .hypergeometric(20, 30, 10, 10)
+            .map_err(|_| "hypergeometric live oracle case")?;
+        assert_u64_seq("hypergeometric_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
@@ -13015,6 +18665,32 @@ for child in rng.spawn(n_children):
         for (i, (got, exp)) in vals.iter().zip(expected.iter()).enumerate() {
             assert_eq!(got, exp, "multinomial[{i}]: got {got:?}, expected {exp:?}");
         }
+    }
+
+    #[test]
+    fn multinomial_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let pvals = [0.3, 0.5, 0.2];
+        let expected = numpy_oracle_multinomial(20, &pvals, 3)?;
+        let mut g = oracle_gen();
+        let actual = g.multinomial(20, &pvals, 3);
+        match actual.len().cmp(&expected.len()) {
+            std::cmp::Ordering::Equal => {}
+            _ => return Err("multinomial live oracle sample count mismatch"),
+        }
+        for (i, (got, exp)) in actual.iter().zip(expected.iter()).enumerate() {
+            let label = match i {
+                0 => "multinomial_live_numpy[0]",
+                1 => "multinomial_live_numpy[1]",
+                2 => "multinomial_live_numpy[2]",
+                _ => "multinomial_live_numpy",
+            };
+            assert_u64_seq(label, got, exp);
+        }
+        Ok(())
     }
 
     // NOTE: NumPy defaults to method='svd' for multivariate_normal. Our
@@ -13047,6 +18723,32 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn multivariate_normal_cholesky_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let cov = [1.0, 0.5, 0.5, 1.0];
+        let mut g = oracle_gen();
+        let actual = g.multivariate_normal(&[0.0, 0.0], &cov, 3);
+        let expected = numpy_oracle_multivariate_normal_cholesky(3);
+        assert_eq!(actual.len(), expected.len(), "mvn live sample count");
+        for (row_idx, (got_row, exp_row)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                got_row.len(),
+                exp_row.len(),
+                "mvn live oracle row {row_idx}: dim mismatch"
+            );
+            for (col_idx, (&got, &exp)) in got_row.iter().zip(exp_row.iter()).enumerate() {
+                assert!(
+                    (got - exp).abs() < 1e-12,
+                    "mvn live oracle[{row_idx}][{col_idx}]: got {got}, expected {exp}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn oracle_dirichlet() {
         let mut g = oracle_gen();
         let vals = g.dirichlet(&[1.0, 2.0, 3.0], 3).unwrap();
@@ -13071,6 +18773,32 @@ for child in rng.spawn(n_children):
                     (g_val - e_val).abs() < 1e-12,
                     "dirichlet[{i}][{j}]: got {g_val}, expected {e_val}, diff {}",
                     (g_val - e_val).abs()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dirichlet_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let alpha = [1.0, 2.0, 3.0];
+        let mut g = oracle_gen();
+        let actual = g.dirichlet(&alpha, 3).expect("dirichlet should succeed");
+        let expected = numpy_oracle_dirichlet(&alpha, 3);
+        assert_eq!(actual.len(), expected.len());
+        for (row_idx, (got_row, exp_row)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                got_row.len(),
+                exp_row.len(),
+                "dirichlet live oracle row {row_idx}: dim mismatch"
+            );
+            for (col_idx, (&got, &exp)) in got_row.iter().zip(exp_row.iter()).enumerate() {
+                assert!(
+                    (got - exp).abs() < 1e-12,
+                    "dirichlet live oracle[{row_idx}][{col_idx}]: got {got}, expected {exp}"
                 );
             }
         }
@@ -13184,6 +18912,48 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn dirichlet_nonfinite_alpha_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, alpha) in [
+            ("dirichlet_nan_one", [f64::NAN, 1.0]),
+            ("dirichlet_one_nan", [1.0, f64::NAN]),
+            ("dirichlet_inf_one", [f64::INFINITY, 1.0]),
+            ("dirichlet_one_inf", [1.0, f64::INFINITY]),
+            ("dirichlet_nan_inf", [f64::NAN, f64::INFINITY]),
+        ] {
+            let (expected_rows, expected_after) = numpy_oracle_dirichlet_then_random(&alpha, 3, 5)?;
+            let mut g = oracle_gen();
+            let actual_rows = g
+                .dirichlet(&alpha, 3)
+                .map_err(|_| "dirichlet nonfinite live oracle")?;
+            assert_eq!(
+                actual_rows.len(),
+                expected_rows.len(),
+                "{label}: row count mismatch"
+            );
+            for (row_idx, (actual_row, expected_row)) in
+                actual_rows.iter().zip(expected_rows.iter()).enumerate()
+            {
+                assert_f64_seq_with_nan(
+                    &format!("{label}_row_{row_idx}_live_numpy"),
+                    actual_row,
+                    expected_row,
+                );
+            }
+            let actual_after = g.random(5);
+            assert_f64_seq(
+                &format!("{label}_after_live_numpy"),
+                &actual_after,
+                &expected_after,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn dirichlet_zero_alpha_matches_live_numpy_oracle_when_available() {
         if !numpy_oracle_available() {
             return;
@@ -13242,6 +19012,182 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn permuted_shaped_matches_numpy_oracle_for_named_axis() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let data: Vec<f64> = (0..12).map(|value| value as f64).collect();
+        let mut rng = Generator::from_pcg64_dxsm(12345).unwrap();
+        let actual = rng.permuted_shaped(&data, &[3, 4], Some(1)).unwrap();
+        let expected = numpy_oracle_permuted(&[3, 4], Some(1));
+        assert_eq!(actual.shape(), &[3, 4]);
+        assert_eq!(actual.values(), expected.as_slice());
+    }
+
+    #[test]
+    fn permuted_last_axis_matches_former_output_and_stream() {
+        let shape = [257, 8];
+        let data: Vec<f64> = (0..shape.iter().product::<usize>())
+            .map(|value| value as f64)
+            .collect();
+        let mut former = Generator::from_pcg64(42).unwrap();
+        let mut candidate = Generator::from_pcg64(42).unwrap();
+
+        let mut expected = data.clone();
+        let ndim = shape.len();
+        let axis = ndim - 1;
+        let mut strides = vec![1usize; ndim];
+        for index in (0..ndim - 1).rev() {
+            strides[index] = strides[index + 1] * shape[index + 1];
+        }
+        let axis_len = shape[axis];
+        let axis_stride = strides[axis];
+        let n_slices = expected.len() / axis_len;
+        for slice_index in 0..n_slices {
+            let mut multi_index = vec![0usize; ndim];
+            let mut remainder = slice_index;
+            for dimension in (0..ndim).rev() {
+                if dimension == axis {
+                    continue;
+                }
+                multi_index[dimension] = remainder % shape[dimension];
+                remainder /= shape[dimension];
+            }
+            let mut base_offset = 0;
+            for dimension in 0..ndim {
+                if dimension != axis {
+                    base_offset += multi_index[dimension] * strides[dimension];
+                }
+            }
+            let indices: Vec<usize> = (0..axis_len)
+                .map(|index| base_offset + index * axis_stride)
+                .collect();
+            for index in (1..axis_len).rev() {
+                let swap_index = former.random_interval(index as u64) as usize;
+                expected.swap(indices[index], indices[swap_index]);
+            }
+        }
+
+        let actual = candidate.permuted(&data, &shape, Some(axis)).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(candidate.random(16), former.random(16));
+    }
+
+    #[test]
+    fn permuted_strided_axis_matches_former_output_and_stream() {
+        let shape = [17, 8, 5];
+        let axis = 1;
+        let data: Vec<f64> = (0..shape.iter().product::<usize>())
+            .map(|value| value as f64)
+            .collect();
+        let mut former = Generator::from_pcg64(42).unwrap();
+        let mut candidate = Generator::from_pcg64(42).unwrap();
+
+        let mut expected = data.clone();
+        let ndim = shape.len();
+        let mut strides = vec![1usize; ndim];
+        for index in (0..ndim - 1).rev() {
+            strides[index] = strides[index + 1] * shape[index + 1];
+        }
+        let axis_len = shape[axis];
+        let axis_stride = strides[axis];
+        let n_slices = expected.len() / axis_len;
+        for slice_index in 0..n_slices {
+            let mut multi_index = vec![0usize; ndim];
+            let mut remainder = slice_index;
+            for dimension in (0..ndim).rev() {
+                if dimension == axis {
+                    continue;
+                }
+                multi_index[dimension] = remainder % shape[dimension];
+                remainder /= shape[dimension];
+            }
+            let mut base_offset = 0;
+            for dimension in 0..ndim {
+                if dimension != axis {
+                    base_offset += multi_index[dimension] * strides[dimension];
+                }
+            }
+            let indices: Vec<usize> = (0..axis_len)
+                .map(|index| base_offset + index * axis_stride)
+                .collect();
+            for index in (1..axis_len).rev() {
+                let swap_index = former.random_interval(index as u64) as usize;
+                expected.swap(indices[index], indices[swap_index]);
+            }
+        }
+
+        let actual = candidate.permuted(&data, &shape, Some(axis)).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(candidate.random(16), former.random(16));
+    }
+
+    #[test]
+    fn permuted_shaped_matches_numpy_oracle_for_axis_none() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let data: Vec<f64> = (0..12).map(|value| value as f64).collect();
+        let mut rng = Generator::from_pcg64_dxsm(12345).unwrap();
+        let actual = rng.permuted_shaped(&data, &[3, 4], None).unwrap();
+        let expected = numpy_oracle_permuted(&[3, 4], None);
+        assert_eq!(actual.shape(), &[3, 4]);
+        assert_eq!(actual.values(), expected.as_slice());
+    }
+
+    #[test]
+    fn permuted_shaped_zero_size_preserves_live_numpy_stream() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_permuted(&[2, 0, 3], None);
+        let expected_after = numpy_oracle_random(1)?;
+        let data = Vec::new();
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual = rng
+            .permuted_shaped(&data, &[2, 0, 3], None)
+            .map_err(|_| "permuted_shaped zero-size live oracle")?;
+        assert_eq!(actual.shape(), &[2, 0, 3]);
+        assert!(actual.is_empty());
+        assert_eq!(actual.values(), expected.as_slice());
+        let after = rng.random(1);
+        assert_f64_seq(
+            "permuted_shaped_zero_size_after_live_numpy",
+            &after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn permuted_shaped_zero_size_named_axis_preserves_stream() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_permuted(&[2, 0, 3], Some(1));
+        let expected_after = numpy_oracle_random(1)?;
+        let data = Vec::new();
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual = rng
+            .permuted_shaped(&data, &[2, 0, 3], Some(1))
+            .map_err(|_| "permuted_shaped zero-size named-axis live oracle")?;
+        assert_eq!(actual.shape(), &[2, 0, 3]);
+        assert!(actual.is_empty());
+        assert_eq!(actual.values(), expected.as_slice());
+        let after = rng.random(1);
+        assert_f64_seq(
+            "permuted_shaped_zero_size_named_axis_after_live_numpy",
+            &after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn permuted_axis_out_of_bounds() {
         let mut rng = Generator::from_pcg64_dxsm(42).unwrap();
         let data = vec![1.0, 2.0, 3.0];
@@ -13295,5 +19241,540 @@ for child in rng.spawn(n_children):
             let expected = numpy_oracle_permuted(&[3, 4], axis);
             assert_eq!(actual, expected, "axis={axis:?}");
         }
+    }
+
+    #[test]
+    fn parallel_pcg_random_matches_serial_stream_state_and_golden() {
+        // The parallel jump-ahead uniform fill (PCG64 / PCG64-DXSM) must be
+        // BYTE-IDENTICAL to the serial stream, and must leave the generator state
+        // exactly where `size` serial draws would. n crosses PCG_PARALLEL_MIN_LEN
+        // so random(n) takes the parallel path; random(1) stays serial and is the
+        // independent reference.
+        let n = 70_000usize; // > 1<<16
+        assert!(n > super::PCG_PARALLEL_MIN_LEN);
+        for dxsm in [false, true] {
+            let mk = |s: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(s).unwrap()
+                } else {
+                    Generator::from_pcg64(s).unwrap()
+                }
+            };
+            // Parallel: two back-to-back fills (exercises post-call advance too).
+            let mut g_par = mk(42);
+            let mut combined = g_par.random(n);
+            combined.extend(g_par.random(n));
+            // Serial reference: 2n single draws, each below the parallel gate.
+            let mut g_ser = mk(42);
+            let serial: Vec<f64> = (0..2 * n).map(|_| g_ser.random(1)[0]).collect();
+            assert_eq!(combined.len(), serial.len());
+            for (i, (p, s)) in combined.iter().zip(&serial).enumerate() {
+                assert_eq!(
+                    p.to_bits(),
+                    s.to_bits(),
+                    "dxsm={dxsm}: parallel stream diverged from serial at index {i}"
+                );
+            }
+        }
+        // Golden digest locks the exact PCG64 uniform bytes for a fixed seed.
+        let mut g = Generator::from_pcg64(12345).unwrap();
+        let vals = g.random(n);
+        let mut hasher = Sha256::new();
+        for v in &vals {
+            hasher.update(v.to_bits().to_le_bytes());
+        }
+        let digest: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            digest, "e1c8d1e42f6c0539cb9abf781bc22c7c87dd6cca8ed14723488479cd2d3e6d0c",
+            "PCG64 uniform random golden stream changed"
+        );
+    }
+
+    #[test]
+    fn parallel_pcg_fill_u64_matches_serial_stream_state() {
+        let n = 70_000usize;
+        assert!(n > super::PCG_PARALLEL_MIN_LEN);
+
+        for dxsm in [false, true] {
+            let mk = |seed: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(seed).unwrap()
+                } else {
+                    Generator::from_pcg64(seed).unwrap()
+                }
+            };
+
+            let mut parallel = mk(1919);
+            let mut combined = parallel.fill_u64(n);
+            combined.extend(parallel.fill_u64(n + 3));
+            let after_parallel: Vec<u64> = (0..17).map(|_| parallel.next_u64()).collect();
+
+            let mut serial = mk(1919);
+            let expected: Vec<u64> = (0..combined.len()).map(|_| serial.next_u64()).collect();
+            let after_serial: Vec<u64> = (0..17).map(|_| serial.next_u64()).collect();
+
+            assert_eq!(
+                combined, expected,
+                "dxsm={dxsm}: raw fill_u64 stream diverged from serial next_u64"
+            );
+            assert_eq!(
+                after_parallel, after_serial,
+                "dxsm={dxsm}: post-fill_u64 state diverged"
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_pcg_uniform_matches_serial_stream_state_and_golden() {
+        // uniform(low, high) parallelizes the same PCG jump-ahead as random() and
+        // applies the affine map per element, so it must be BYTE-IDENTICAL to the
+        // serial `low + next_f64()*range` fold and leave the same generator state.
+        let (low, high) = (-3.5_f64, 9.25_f64);
+        let n = 70_000usize; // > PCG_PARALLEL_MIN_LEN
+        for dxsm in [false, true] {
+            let mk = |s: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(s).unwrap()
+                } else {
+                    Generator::from_pcg64(s).unwrap()
+                }
+            };
+            let mut g_par = mk(99);
+            let mut combined = g_par.uniform(low, high, n).unwrap();
+            combined.extend(g_par.uniform(low, high, n).unwrap());
+            let mut g_ser = mk(99);
+            let serial: Vec<f64> = (0..2 * n)
+                .map(|_| g_ser.uniform(low, high, 1).unwrap()[0])
+                .collect();
+            assert_eq!(combined.len(), serial.len());
+            for (i, (p, s)) in combined.iter().zip(&serial).enumerate() {
+                assert_eq!(
+                    p.to_bits(),
+                    s.to_bits(),
+                    "dxsm={dxsm}: parallel uniform diverged from serial at index {i}"
+                );
+            }
+        }
+        let mut g = Generator::from_pcg64(2024).unwrap();
+        let vals = g.uniform(low, high, n).unwrap();
+        let mut hasher = Sha256::new();
+        for v in &vals {
+            hasher.update(v.to_bits().to_le_bytes());
+        }
+        let digest: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            digest, "d0241aa054fc4a4a577d7e2acca371d43ababb4245875df2c1d77c3c118b1001",
+            "PCG64 uniform(low,high) golden stream changed"
+        );
+    }
+
+    #[test]
+    fn parallel_pcg_random_f32_matches_serial_stream_state_and_halfword_buffer() {
+        let n_even = 70_000usize;
+        let n_odd = 70_001usize;
+        assert!(n_even > super::PCG_PARALLEL_MIN_LEN);
+        assert!(n_odd > super::PCG_PARALLEL_MIN_LEN);
+
+        for n in [n_even, n_odd] {
+            for dxsm in [false, true] {
+                let mk = |seed: u64| {
+                    if dxsm {
+                        Generator::from_pcg64_dxsm(seed).unwrap()
+                    } else {
+                        Generator::from_pcg64(seed).unwrap()
+                    }
+                };
+
+                let mut parallel = mk(77);
+                let values = parallel.random_f32(n);
+                let after_parallel: Vec<u32> =
+                    (0..17).map(|_| parallel.next_f32().to_bits()).collect();
+
+                let mut serial = mk(77);
+                let expected: Vec<f32> = (0..n).map(|_| serial.random_f32(1)[0]).collect();
+                let after_serial: Vec<u32> = (0..17).map(|_| serial.next_f32().to_bits()).collect();
+
+                assert_eq!(values.len(), expected.len());
+                for (index, (got, want)) in values.iter().zip(&expected).enumerate() {
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "dxsm={dxsm} n={n}: f32 stream diverged at index {index}"
+                    );
+                }
+                assert_eq!(
+                    after_parallel, after_serial,
+                    "dxsm={dxsm} n={n}: post-fill f32 buffer state diverged"
+                );
+            }
+        }
+
+        let mut prebuffered = Generator::from_pcg64(99).unwrap();
+        let mut serial = Generator::from_pcg64(99).unwrap();
+        assert_eq!(
+            prebuffered.next_f32().to_bits(),
+            serial.next_f32().to_bits()
+        );
+        let got = prebuffered.random_f32(n_odd);
+        let want: Vec<f32> = (0..n_odd).map(|_| serial.random_f32(1)[0]).collect();
+        for (index, (got, want)) in got.iter().zip(&want).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "prebuffered fallback diverged at index {index}"
+            );
+        }
+        let after_got: Vec<u32> = (0..17).map(|_| prebuffered.next_f32().to_bits()).collect();
+        let after_want: Vec<u32> = (0..17).map(|_| serial.next_f32().to_bits()).collect();
+        assert_eq!(after_got, after_want);
+    }
+
+    #[test]
+    fn parallel_pcg_standard_exponential_inv_matches_serial_stream_state() {
+        let n = 70_000usize;
+        assert!(n > super::PCG_PARALLEL_MIN_LEN);
+
+        for dxsm in [false, true] {
+            let mk = |seed: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(seed).unwrap()
+                } else {
+                    Generator::from_pcg64(seed).unwrap()
+                }
+            };
+
+            let mut parallel = mk(31337);
+            let mut combined = parallel.standard_exponential_inv(n);
+            combined.extend(parallel.standard_exponential_inv(n));
+            let after_parallel: Vec<u64> = (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+
+            let mut serial = mk(31337);
+            let expected: Vec<f64> = (0..2 * n)
+                .map(|_| serial.standard_exponential_inv(1)[0])
+                .collect();
+            let after_serial: Vec<u64> = (0..17).map(|_| serial.next_f64().to_bits()).collect();
+
+            assert_eq!(combined.len(), expected.len());
+            for (index, (got, want)) in combined.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "dxsm={dxsm}: standard_exponential_inv diverged at index {index}"
+                );
+            }
+            assert_eq!(
+                after_parallel, after_serial,
+                "dxsm={dxsm}: post-fill f64 state diverged"
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_pcg_logistic_matches_serial_stream_state() {
+        let n = 70_000usize;
+        assert!(n > super::PCG_PARALLEL_MIN_LEN);
+        let loc = -2.25;
+        let scale = 3.5;
+
+        for dxsm in [false, true] {
+            let mk = |seed: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(seed).unwrap()
+                } else {
+                    Generator::from_pcg64(seed).unwrap()
+                }
+            };
+
+            let mut parallel = mk(4242);
+            let mut combined = parallel.logistic(loc, scale, n).unwrap();
+            combined.extend(parallel.logistic(loc, scale, n).unwrap());
+            let after_parallel: Vec<u64> = (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+
+            let mut serial = mk(4242);
+            let expected: Vec<f64> = (0..2 * n)
+                .map(|_| serial.logistic(loc, scale, 1).unwrap()[0])
+                .collect();
+            let after_serial: Vec<u64> = (0..17).map(|_| serial.next_f64().to_bits()).collect();
+
+            assert_eq!(combined.len(), expected.len());
+            for (index, (got, want)) in combined.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "dxsm={dxsm}: logistic diverged at index {index}"
+                );
+            }
+            assert_eq!(
+                after_parallel, after_serial,
+                "dxsm={dxsm}: post-logistic f64 state diverged"
+            );
+        }
+
+        let mut buffered = Generator::from_pcg64(777).unwrap();
+        let mut serial = Generator::from_pcg64(777).unwrap();
+        assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
+        let zero_scale = buffered.logistic(loc, 0.0, n).unwrap();
+        assert!(
+            zero_scale
+                .iter()
+                .all(|value| value.to_bits() == loc.to_bits())
+        );
+        assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
+    }
+
+    #[test]
+    fn parallel_pcg_laplace_matches_serial_stream_state() {
+        let n = 70_000usize;
+        assert!(n > super::PCG_PARALLEL_MIN_LEN);
+        let loc = 1.5;
+        let scale = 2.25;
+
+        for dxsm in [false, true] {
+            let mk = |seed: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(seed).unwrap()
+                } else {
+                    Generator::from_pcg64(seed).unwrap()
+                }
+            };
+
+            let mut parallel = mk(7373);
+            let mut combined = parallel.laplace(loc, scale, n).unwrap();
+            combined.extend(parallel.laplace(loc, scale, n).unwrap());
+            let after_parallel: Vec<u64> = (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+
+            let mut serial = mk(7373);
+            let expected: Vec<f64> = (0..2 * n)
+                .map(|_| serial.laplace(loc, scale, 1).unwrap()[0])
+                .collect();
+            let after_serial: Vec<u64> = (0..17).map(|_| serial.next_f64().to_bits()).collect();
+
+            assert_eq!(combined.len(), expected.len());
+            for (index, (got, want)) in combined.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "dxsm={dxsm}: laplace diverged at index {index}"
+                );
+            }
+            assert_eq!(
+                after_parallel, after_serial,
+                "dxsm={dxsm}: post-laplace f64 state diverged"
+            );
+        }
+
+        let mut zero_scale = Generator::from_pcg64(4040).unwrap();
+        let mut serial_zero_scale = Generator::from_pcg64(4040).unwrap();
+        let got = zero_scale.laplace(loc, 0.0, n).unwrap();
+        let want: Vec<f64> = (0..n)
+            .map(|_| serial_zero_scale.laplace(loc, 0.0, 1).unwrap()[0])
+            .collect();
+        for (index, (got, want)) in got.iter().zip(&want).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "zero-scale laplace diverged at index {index}"
+            );
+        }
+        let after_got: Vec<u64> = (0..17).map(|_| zero_scale.next_f64().to_bits()).collect();
+        let after_want: Vec<u64> = (0..17)
+            .map(|_| serial_zero_scale.next_f64().to_bits())
+            .collect();
+        assert_eq!(after_got, after_want);
+
+        let mut buffered = Generator::from_pcg64(5050).unwrap();
+        let mut serial = Generator::from_pcg64(5050).unwrap();
+        assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
+        assert!(buffered.laplace(loc, scale, 0).unwrap().is_empty());
+        assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
+    }
+
+    #[test]
+    fn parallel_pcg_gumbel_matches_serial_stream_state() {
+        let n = 70_000usize;
+        assert!(n > super::PCG_PARALLEL_MIN_LEN);
+        let loc = -1.25;
+        let scale = 2.75;
+
+        for dxsm in [false, true] {
+            let mk = |seed: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(seed).unwrap()
+                } else {
+                    Generator::from_pcg64(seed).unwrap()
+                }
+            };
+
+            let mut parallel = mk(9292);
+            let mut combined = parallel.gumbel(loc, scale, n).unwrap();
+            combined.extend(parallel.gumbel(loc, scale, n).unwrap());
+            let after_parallel: Vec<u64> = (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+
+            let mut serial = mk(9292);
+            let expected: Vec<f64> = (0..2 * n)
+                .map(|_| serial.gumbel(loc, scale, 1).unwrap()[0])
+                .collect();
+            let after_serial: Vec<u64> = (0..17).map(|_| serial.next_f64().to_bits()).collect();
+
+            assert_eq!(combined.len(), expected.len());
+            for (index, (got, want)) in combined.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "dxsm={dxsm}: gumbel diverged at index {index}"
+                );
+            }
+            assert_eq!(
+                after_parallel, after_serial,
+                "dxsm={dxsm}: post-gumbel f64 state diverged"
+            );
+        }
+
+        let mut zero_scale = Generator::from_pcg64(3030).unwrap();
+        let mut serial_zero_scale = Generator::from_pcg64(3030).unwrap();
+        let got = zero_scale.gumbel(loc, 0.0, n).unwrap();
+        let want: Vec<f64> = (0..n)
+            .map(|_| serial_zero_scale.gumbel(loc, 0.0, 1).unwrap()[0])
+            .collect();
+        for (index, (got, want)) in got.iter().zip(&want).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "zero-scale gumbel diverged at index {index}"
+            );
+        }
+        let after_got: Vec<u64> = (0..17).map(|_| zero_scale.next_f64().to_bits()).collect();
+        let after_want: Vec<u64> = (0..17)
+            .map(|_| serial_zero_scale.next_f64().to_bits())
+            .collect();
+        assert_eq!(after_got, after_want);
+    }
+
+    #[test]
+    fn parallel_pcg_triangular_matches_serial_stream_state() {
+        let n = 70_000usize;
+        assert!(n > super::PCG_PARALLEL_MIN_LEN);
+        let left = -3.0;
+        let mode = 0.25;
+        let right = 5.5;
+
+        for dxsm in [false, true] {
+            let mk = |seed: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(seed).unwrap()
+                } else {
+                    Generator::from_pcg64(seed).unwrap()
+                }
+            };
+
+            let mut parallel = mk(5150);
+            let mut combined = parallel.triangular(left, mode, right, n).unwrap();
+            combined.extend(parallel.triangular(left, mode, right, n).unwrap());
+            let after_parallel: Vec<u64> = (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+
+            let mut serial = mk(5150);
+            let expected: Vec<f64> = (0..2 * n)
+                .map(|_| serial.triangular(left, mode, right, 1).unwrap()[0])
+                .collect();
+            let after_serial: Vec<u64> = (0..17).map(|_| serial.next_f64().to_bits()).collect();
+
+            assert_eq!(combined.len(), expected.len());
+            for (index, (got, want)) in combined.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "dxsm={dxsm}: triangular diverged at index {index}"
+                );
+            }
+            assert_eq!(
+                after_parallel, after_serial,
+                "dxsm={dxsm}: post-triangular f64 state diverged"
+            );
+        }
+
+        let mut buffered = Generator::from_pcg64(888).unwrap();
+        let mut serial = Generator::from_pcg64(888).unwrap();
+        assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
+        assert!(
+            buffered
+                .triangular(left, mode, right, 0)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
+    }
+
+    #[test]
+    fn parallel_pcg_vonmises_uniform_matches_serial_stream_state() {
+        let n = 70_000usize;
+        assert!(n > super::PCG_PARALLEL_MIN_LEN);
+        let mu = 1.75;
+        let kappa = 0.0;
+
+        for dxsm in [false, true] {
+            let mk = |seed: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(seed).unwrap()
+                } else {
+                    Generator::from_pcg64(seed).unwrap()
+                }
+            };
+
+            let mut parallel = mk(6262);
+            let mut combined = parallel.vonmises(mu, kappa, n).unwrap();
+            combined.extend(parallel.vonmises(mu, kappa, n).unwrap());
+            let after_parallel: Vec<u64> = (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+
+            let mut serial = mk(6262);
+            let expected: Vec<f64> = (0..2 * n)
+                .map(|_| serial.vonmises(mu, kappa, 1).unwrap()[0])
+                .collect();
+            let after_serial: Vec<u64> = (0..17).map(|_| serial.next_f64().to_bits()).collect();
+
+            assert_eq!(combined.len(), expected.len());
+            for (index, (got, want)) in combined.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "dxsm={dxsm}: vonmises near-uniform diverged at index {index}"
+                );
+            }
+            assert_eq!(
+                after_parallel, after_serial,
+                "dxsm={dxsm}: post-vonmises f64 state diverged"
+            );
+        }
+
+        let mut buffered = Generator::from_pcg64(999).unwrap();
+        let mut serial = Generator::from_pcg64(999).unwrap();
+        assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
+        let got = buffered.vonmises(mu, kappa, n).unwrap();
+        let want: Vec<f64> = (0..n)
+            .map(|_| serial.vonmises(mu, kappa, 1).unwrap()[0])
+            .collect();
+        for (index, (got, want)) in got.iter().zip(&want).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "prebuffered vonmises diverged at index {index}"
+            );
+        }
+        let after_got: Vec<u32> = (0..17).map(|_| buffered.next_f32().to_bits()).collect();
+        let after_want: Vec<u32> = (0..17).map(|_| serial.next_f32().to_bits()).collect();
+        assert_eq!(after_got, after_want);
+
+        let mut zero = Generator::from_pcg64(123).unwrap();
+        let mut zero_serial = Generator::from_pcg64(123).unwrap();
+        assert_eq!(zero.next_f32().to_bits(), zero_serial.next_f32().to_bits());
+        assert!(zero.vonmises(mu, kappa, 0).unwrap().is_empty());
+        assert_eq!(zero.next_f32().to_bits(), zero_serial.next_f32().to_bits());
     }
 }

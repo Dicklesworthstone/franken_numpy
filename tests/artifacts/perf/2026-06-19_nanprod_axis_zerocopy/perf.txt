@@ -1,0 +1,2 @@
+nanprod_ax1 keepdims=False: np=98512.2us fnp=2880.1us fnp/np=0.029
+nanprod_ax1 keepdims=True: np=100641.3us fnp=3774.2us fnp/np=0.038

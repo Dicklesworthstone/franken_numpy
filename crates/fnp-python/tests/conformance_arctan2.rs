@@ -391,3 +391,49 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+/// Locks the zero-copy PARALLEL arctan2 path (len >= 16384): a large deterministic
+/// f64 array (above the parallel gate) with NaN/+-inf/+-0 must be byte-identical to
+/// numpy.arctan2, plus a sha256 golden over the fnp bytes. op.apply (parallel) is
+/// the same per-element atan2, so this is bit-identical to the serial path.
+#[test]
+fn arctan2_zerocopy_parallel_matches_numpy_bytes_and_golden() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+s = 0x2545F4914F6CDD1D
+def nxt():
+    global s
+    s = (s * 6364136223846793005 + 1) & 0xFFFFFFFFFFFFFFFF
+    return s
+n = 40000
+y = np.empty(n, dtype=np.float64)
+x = np.empty(n, dtype=np.float64)
+for i in range(n):
+    y[i] = ((nxt() >> 11) / (1 << 53)) * 12.0 - 6.0
+    x[i] = ((nxt() >> 11) / (1 << 53)) * 12.0 - 6.0
+for j, v in ((3, np.nan), (5, np.inf), (7, -np.inf), (9, 0.0), (11, -0.0)):
+    y[j] = v
+for j, v in ((13, 0.0), (17, -0.0), (19, np.inf), (23, -np.inf)):
+    x[j] = v
+r = np.asarray(fnp.arctan2(y, x))
+e = np.arctan2(y, x)
+print(r.shape == e.shape and r.tobytes() == e.tobytes())
+print(hashlib.sha256(r.tobytes()).hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "True",
+        "zero-copy parallel arctan2 must be byte-identical to numpy.arctan2"
+    );
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "77a1486c37a7a897e41503606d95014391778db6396963cfd1b27b8f31ff3c6e",
+        "arctan2 zero-copy parallel golden sha256 drifted"
+    );
+    Ok(())
+}

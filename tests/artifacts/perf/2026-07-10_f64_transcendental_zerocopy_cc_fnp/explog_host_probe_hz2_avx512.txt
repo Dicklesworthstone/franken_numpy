@@ -1,0 +1,10 @@
+EXPLOG_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True avx512_skx=True op=exp byte_equal=False diff_elems=9361
+EXPLOG_HOST_PROBE_DETAIL op=exp max_bitdiff=1 frac_diff=0.046805 example_x=np.float64(-1.6101636808490545) np=np.float64(0.19985489897824765) libm=np.float64(0.19985489897824768)
+EXPLOG_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True avx512_skx=True op=log byte_equal=False diff_elems=883
+EXPLOG_HOST_PROBE_DETAIL op=log max_bitdiff=1 frac_diff=0.004415 example_x=np.float64(1.1602711341587173) np=np.float64(0.1486537141499117) libm=np.float64(0.14865371414991171)
+EXPLOG_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True avx512_skx=True op=log2 byte_equal=False diff_elems=629
+EXPLOG_HOST_PROBE_DETAIL op=log2 max_bitdiff=1 frac_diff=0.003145 example_x=np.float64(1.0386004561928046) np=np.float64(0.05464076422499321) libm=np.float64(0.054640764224993206)
+EXPLOG_HOST_PROBE host=hetzner2 numpy=2.3.5 avx512f=True avx512_skx=True op=log10 byte_equal=False diff_elems=53545
+EXPLOG_HOST_PROBE_DETAIL op=log10 max_bitdiff=2 frac_diff=0.267725 example_x=np.float64(0.5866107684696972) np=np.float64(-0.23164996889716022) libm=np.float64(-0.23164996889716016)
+EXPLOG_HOST_PROBE_ENV glibc=2.43 machine=x86_64 python=3.14.4
+PROBE_OK

@@ -1,0 +1,502 @@
+[RCH] local (no admissible workers: critical_pressure=1,insufficient_slots=10)
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde_core v1.0.228
+   Compiling either v1.15.0
+   Compiling zerocopy v0.8.48
+   Compiling cfg-if v1.0.4
+   Compiling rayon-core v1.13.0
+   Compiling typenum v1.20.0
+   Compiling zmij v1.0.21
+   Compiling autocfg v1.5.0
+   Compiling serde v1.0.228
+   Compiling serde_json v1.0.149
+   Compiling memchr v2.8.0
+   Compiling regex-syntax v0.8.10
+   Compiling clap_lex v1.1.0
+   Compiling itoa v1.0.18
+   Compiling ciborium-io v0.2.2
+   Compiling anstyle v1.0.14
+   Compiling plotters-backend v0.3.7
+   Compiling same-file v1.0.6
+   Compiling const-oid v0.10.2
+   Compiling cast v0.3.0
+   Compiling fnp-ndarray v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T203135Z/crates/fnp-ndarray)
+   Compiling anes v0.1.6
+   Compiling cpufeatures v0.3.0
+   Compiling oorandom v11.1.5
+   Compiling walkdir v2.5.0
+   Compiling itertools v0.10.5
+   Compiling itertools v0.13.0
+   Compiling clap_builder v4.6.0
+   Compiling num-traits v0.2.19
+   Compiling plotters-svg v0.3.7
+   Compiling crossbeam-epoch v0.9.18
+   Compiling crossbeam-deque v0.8.6
+   Compiling syn v2.0.117
+   Compiling hybrid-array v0.4.10
+   Compiling plotters v0.3.7
+   Compiling regex-automata v0.4.14
+   Compiling block-buffer v0.12.0
+   Compiling crypto-common v0.2.1
+   Compiling rayon v1.12.0
+   Compiling criterion-plot v0.5.0
+   Compiling digest v0.11.2
+   Compiling sha2 v0.11.0
+   Compiling clap v4.6.1
+   Compiling zerocopy-derive v0.8.48
+   Compiling serde_derive v1.0.228
+   Compiling regex v1.12.3
+   Compiling fnp-linalg v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T203135Z/crates/fnp-linalg)
+   Compiling tinytemplate v1.2.1
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling ciborium v0.2.2
+   Compiling criterion v0.6.0
+    Finished `release` profile [optimized] target(s) in 17.84s
+     Running unittests src/lib.rs (/data/projects/.rch-targets/franken_numpy-cod-a/release/deps/fnp_linalg-0aeb7835af4f8b4b)
+
+running 329 tests
+test tests::batch_cholesky_scratch_ab_bench ... ignored, perf A/B bench; run with --release -- --ignored --nocapture
+test tests::backend_bridge_enforces_support_and_budget ... ok
+test tests::batch_det_shape_mismatch ... ok
+test tests::batch_inv_scratch_ab_bench ... ignored, perf A/B bench; run with --release -- --ignored --nocapture
+test tests::batch_inv_inv_roundtrip ... ok
+test tests::batch_solve_matrix_scratch_ab_bench ... ignored, perf A/B bench; run with --release -- --ignored --nocapture
+test tests::batch_solve_vector_scratch_ab_bench ... ignored, perf A/B bench; run with --release -- --ignored --nocapture
+test tests::batch_rejects_1d_input ... ok
+test tests::batch_solve_accepts_matrix_rhs ... ok
+test tests::blocked_cholesky_speedup_report ... ignored, perf timing; run with --release -- --ignored --nocapture
+test tests::blocked_lu_speedup_report ... ignored, perf timing; run with --release -- --ignored --nocapture
+test tests::blocked_qr_speedup_report ... ignored, perf timing; run with --release -- --ignored --nocapture
+test tests::blocked_tridiag_q_speedup ... ignored, perf timing; run with --release -- --ignored --nocapture
+test tests::blocked_tridiag_speedup_report ... ignored, perf timing; run with --release -- --ignored --nocapture
+test tests::blocked_trsm_speedup_report ... ignored, perf timing; run with --release -- --ignored --nocapture
+test tests::cholesky_2x2_lower_and_upper_reconstruct_matrix ... ok
+test tests::cholesky_2x2_fail_closed_for_invalid_inputs ... ok
+test tests::cholesky_diagonal_contract_is_enforced ... ok
+test tests::cholesky_nxn_index_hoist_preserves_scalar_reference_bits ... ok
+test tests::cholesky_nxn_reconstructs_matrix ... ok
+test tests::cholesky_solve_2x2_pd_system ... ok
+test tests::cholesky_nxn_rejects_non_pd ... ok
+test tests::cholesky_2x2_uses_selected_triangle_only ... ok
+test tests::cholesky_solve_3x3_pd_system ... ok
+test tests::cholesky_solve_identity_system ... ok
+test tests::cholesky_solve_multi_roundtrip ... ok
+test tests::cholesky_solve_rejects_singular ... ok
+test tests::complex_cholesky_rejects_non_pd ... ok
+test tests::complex_conjugate_transpose_basic ... ok
+test tests::complex_det_diagonal ... ok
+test tests::complex_det_singular ... ok
+test tests::complex_frobenius_norm ... ok
+test tests::complex_det_identity ... ok
+test tests::complex_solve_2x2 ... ok
+test tests::complex_solve_3x3 ... ok
+test tests::complex_solve_identity ... ok
+test tests::complex_trace_basic ... ok
+test tests::cond_mxn_nan_raises_svd_error ... ok
+test tests::cond_mxn_rectangular ... ok
+test tests::cond_nxn_identity_is_one ... ok
+test tests::cond_p_frobenius ... ok
+test tests::cond_p_non_spectral_nan_orders_match_numpy ... ok
+test tests::cond_p_one_norm ... ok
+test tests::cond_p_spectral_infinite_orders_match_numpy ... ok
+test tests::cond_p_spectral_symmetric_matches_svd_reference ... ok
+test tests::cond_p_spectral_symmetric_uses_absolute_eigenvalues ... ok
+test tests::cross_product_2d ... ok
+test tests::cross_product_2d_3d_mixed ... ok
+test tests::cross_product_anticommutative ... ok
+test tests::cross_product_rejects_wrong_size ... ok
+test tests::cross_product_self_is_zero ... ok
+test tests::cross_product_standard_basis ... ok
+test tests::det_and_slogdet_are_deterministic ... ok
+test tests::det_and_slogdet_match_numpy_non_finite_semantics ... ok
+test tests::det_empty_matrix_returns_one ... ok
+test tests::eig_eigh_phase_profile ... ignored, profiling; run with --release -- --ignored --nocapture
+test tests::det_nxn_scalar_and_3x3 ... ok
+test tests::eig_large_scale_matrix ... ok
+test tests::eig_non_finite_inputs_match_numpy_error_surface ... ok
+test tests::eig_nxn_complex_eigenvalues_rotation ... ok
+test tests::eig_nxn_diagonal_matrix ... ok
+test tests::eig_nxn_full_diagonal ... ok
+test tests::eig_nxn_full_rejects_empty ... ok
+test tests::eig_nxn_full_residual_check ... ok
+test tests::eig_nxn_full_rotation_complex_eigenvectors ... ok
+test tests::eig_nxn_full_symmetric_eigenvectors ... ok
+test tests::eig_nxn_rotation_gives_complex_eigenvalues ... ok
+test tests::eig_nxn_general_output_matches_golden_sha256 ... ok
+test tests::cond_p_inf_norm ... ok
+test tests::eigh_2x2_respects_uplo_branch_choice ... ok
+test tests::eig_nxn_symmetric_gives_real_eigenvalues ... ok
+test tests::eig_nxn_resolves_complex_pairs_fast ... ok
+test tests::eig_small_scale_matrix ... ok
+test tests::cond_nxn_singular_is_infinity ... ok
+test tests::cond_p_singular_non_spectral_orders_are_infinite ... ok
+test tests::cond_p_default_matches_cond ... ok
+test tests::eigvals_2x2_preserves_trace_and_determinant_relations ... ok
+test tests::eigh_2x2_returns_orthonormal_eigenvectors ... ok
+test tests::eigvalsh_10x10_residual_check ... ok
+test tests::eigvalsh_nxn_symmetric_3x3 ... ok
+test tests::eigvalsh_repeated_eigenvalues ... ok
+test tests::eigh_nxn_eigenvectors_reconstruct ... ok
+test tests::eigh_nxn_reconstructs_matrix ... ok
+test tests::eigvalsh_50x50_tridiagonal ... ok
+test tests::expm_diagonal_matrix ... ok
+test tests::expm_identity_is_e_times_identity ... ok
+test tests::expm_matches_scipy_non_finite_semantics ... ok
+test tests::batch_solve_broadcasts_matrix_rhs_across_stacked_lhs ... ok
+test tests::batch_svd_stacked_rectangular ... ok
+test tests::complex_cholesky_hermitian ... ok
+test tests::batch_cholesky_stacked ... ok
+test tests::expm_near_zero_matrix ... ok
+test tests::expm_zero_is_identity ... ok
+test tests::batch_det_singular_matrix ... ok
+test tests::funm_diagonal_applies_function ... ok
+test tests::funm_exp_matches_expm ... ok
+test tests::batch_solve_broadcasts_single_a ... ok
+test tests::funm_identity_with_square ... ok
+test tests::hessenberg_left_apply_speedup ... ignored, perf timing; run with --release -- --ignored --nocapture
+test tests::complex_cholesky_3x3_hermitian ... ok
+test tests::hessenberg_qr_double_vs_single_shift ... ignored, perf timing; run with --release -- --ignored --nocapture
+test tests::complex_inv_2x2 ... ok
+test tests::batch_trace_and_slogdet ... ok
+test tests::complex_matmul_row_parallel_matches_serial_reference_and_golden_sha256 ... ok
+test tests::batch_trace_basic ... ok
+test tests::complex_qr_3x2_tall ... ok
+test tests::hessenberg_reduce_values_matches_full_hessenberg_bits ... ok
+test tests::complex_qr_2x2_reconstruction ... ok
+test tests::inv_2x2_matches_identity_reconstruction ... ok
+test tests::batch_eigvalsh_stacked ... ok
+test tests::inv_nxn_identity_reconstruction ... ok
+test tests::complex_inv_general_3x3 ... ok
+test tests::complex_matmul_identity ... ok
+test tests::inv_nxn_rejects_singular ... ok
+test tests::kron_identity_identity ... ok
+test tests::kron_identity_rhs_fast_path_matches_dense_reference_and_fallbacks ... ok
+test tests::kron_scalar ... ok
+test tests::logm_diagonal ... ok
+test tests::batch_det_returns_scalar_per_matrix ... ok
+test tests::batch_inv_3d_stack ... ok
+test tests::logm_expm_roundtrip ... ok
+test tests::logm_identity_is_zero ... ok
+test tests::lstsq_2x2_fail_closed_policy_checks ... ok
+test tests::lstsq_2x2_reports_residual_for_inconsistent_rhs ... ok
+test tests::lstsq_2x2_runtime_outputs_match_contract ... ok
+test tests::lstsq_negative_rcond_matches_numpy_default_and_none ... ok
+test tests::lstsq_nxn_exact_system ... ok
+test tests::lstsq_rank_deficient_repro ... ok
+test tests::lstsq_tuple_shapes_cover_vector_and_matrix_rhs ... ok
+test tests::eigvalsh_values_only_reduction_matches_full_reduce_bits ... ok
+test tests::lu_factor_and_lu_solve_roundtrip ... ok
+test tests::lu_factor_rejects_singular ... ok
+test tests::batch_eig_complex_pairs ... ok
+test tests::batch_inv_identity ... ok
+test tests::batch_qr_stacked ... ok
+test tests::matrix_norm_2x2_neg_one_and_neg_inf ... ok
+test tests::matrix_norm_frobenius_fused_scan_preserves_non_finite_rejection ... ok
+test tests::matrix_norm_frobenius_matches_expected ... ok
+test tests::matrix_norm_column_reduction_matches_strided_reference_bits ... ok
+test tests::matrix_norm_fused_scan_preserves_reference_bits_and_sha256 ... ok
+test tests::matrix_norm_matches_numpy_non_finite_semantics ... ok
+test tests::matrix_norm_nxn_frobenius ... ok
+test tests::batch_matrix_norm_fro_direct_lane_fill_matches_per_lane_reference_bits ... ok
+test tests::matrix_norm_nxn_matches_numpy_non_finite_semantics ... ok
+test tests::matrix_norm_nxn_neg_one_and_neg_inf ... ok
+test tests::matrix_norm_nxn_neg_two ... ok
+test tests::matrix_norm_nxn_one_and_inf ... ok
+test tests::batch_trace_direct_lane_fill_matches_per_lane_reference_bits ... ok
+test tests::matrix_norm_nxn_rectangular_neg_two ... ok
+test tests::matrix_norm_nxn_rectangular_nuclear ... ok
+test tests::matrix_norm_nxn_rectangular_spectral ... ok
+test tests::matrix_norm_nxn_spectral ... ok
+test tests::matrix_norm_order_token_neg_variants ... ok
+test tests::matrix_norm_orders_match_first_wave_contracts ... ok
+test tests::matrix_power_identity_elision_falls_back_for_zero_and_nan_bits ... ok
+test tests::matrix_power_initial_identity_elision_matches_old_schedule_sha256 ... ok
+test tests::matrix_power_nxn_identity ... ok
+test tests::matrix_power_nxn_negative ... ok
+test tests::matrix_power_nxn_squared ... ok
+test tests::matrix_rank_matches_numpy_non_finite_semantics ... ok
+test tests::matrix_rank_2x2_detects_rank_profiles ... ok
+test tests::matrix_rank_nxn_detects_profiles ... ok
+test tests::matrix_rank_tol_matches_numpy_default_and_explicit_cases ... ok
+test tests::matrix_rank_tol_rejects_invalid_tolerances ... ok
+test tests::mat_mul_rect_row_parallel_matches_serial_reference_and_golden_sha256 ... ok
+test tests::matrix_shape_accepts_batched_square_shapes ... ok
+test tests::matrix_shape_fast_paths_are_isomorphic_with_legacy_path ... ok
+test tests::matrix_shape_rejects_invalid_rank_or_budget ... ok
+test tests::multi_dot_dimension_mismatch ... ok
+test tests::cholesky_mid_panel_256_output_golden_sha256 ... ok
+test tests::multi_dot_single_matrix ... ok
+test tests::multi_dot_three_matrices ... ok
+test tests::multi_dot_two_matrices ... ok
+test tests::norm_order_token_parsers_are_fail_closed ... ok
+test tests::numpy_oracle_cholesky_2x2 ... ok
+test tests::numpy_oracle_cond_2x2 ... ok
+test tests::numpy_oracle_det_2x2 ... ok
+test tests::numpy_oracle_det_3x3 ... ok
+test tests::numpy_oracle_eig_2x2 ... ok
+test tests::numpy_oracle_eigvalsh_3x3 ... ok
+test tests::numpy_oracle_inv_2x2 ... ok
+test tests::numpy_oracle_inv_3x3 ... ok
+test tests::numpy_oracle_lstsq ... ok
+test tests::numpy_oracle_matrix_rank ... ok
+test tests::numpy_oracle_matrix_rank_tol_reference ... ok
+test tests::numpy_oracle_qr_2x2 ... ok
+test tests::numpy_oracle_norm_frobenius ... ok
+test tests::numpy_oracle_slogdet_2x2 ... ok
+test tests::numpy_oracle_solve_2x2 ... ok
+test tests::packed_gemm_band_alignment_speedup ... ignored, perf timing; run with --release -- --ignored --nocapture
+test tests::numpy_oracle_solve_3x3 ... ok
+test tests::numpy_oracle_svd_2x2 ... ok
+test tests::packet008_log_record_is_replay_complete ... ok
+test tests::packet008_log_record_rejects_missing_fields ... ok
+test tests::packet008_reason_codes_round_trip_into_logs ... ok
+test tests::pinv_2x2_full_rank_and_rank_deficient_paths ... ok
+test tests::pinv_nxn_reconstructs_identity ... ok
+test tests::pinv_rank_deficient_repro ... ok
+test tests::pinv_tolerance_aliases_match_numpy_conflict_and_cutoff_semantics ... ok
+test tests::pinv_hermitian_uses_lower_triangle_like_numpy ... ok
+test tests::polar_3x3 ... ok
+test tests::polar_identity ... ok
+test tests::polar_p_is_symmetric ... ok
+test tests::qr_2x2_fail_closed_for_non_finite_and_raw_mode ... ok
+test tests::qr_2x2_handles_rank_deficient_input ... ok
+test tests::polar_p_positive_semidefinite ... ok
+test tests::polar_reconstruction ... ok
+test tests::qr_2x2_r_mode_and_complete_mode_contracts ... ok
+test tests::qr_2x2_reduced_reconstructs_input_and_is_orthonormal ... ok
+test tests::qr_mode_shapes_are_deterministic ... ok
+test tests::qr_mxn_q_orthogonal ... ok
+test tests::qr_mxn_tall_3x2 ... ok
+test tests::qr_mxn_tall_matrix_reconstructs ... ok
+test tests::packed_gemm_sub_assign_strided_matches_materialized_product_sha256 ... ok
+test tests::polar_u_is_orthogonal ... ok
+test tests::policy_metadata_is_fail_closed_for_unknowns ... ok
+test tests::qr_mxn_wide_2x3 ... ok
+test tests::packed_gemm_sub_assign_matches_materialized_product_sha256 ... ok
+test tests::qr_nxn_reconstructs_and_is_orthogonal ... ok
+test tests::qr_mxn_wide_matrix_reconstructs ... ok
+test tests::qr_nxn_reused_householder_workspace_preserves_reference_bits ... ok
+test tests::rank_and_pinv_still_reject_non_finite_inputs ... ok
+test tests::mat_mul_flat_row_parallel_matches_serial_reference_and_golden_sha256 ... ok
+test tests::reason_code_registry_matches_packet_contract ... ok
+test tests::batch_matrix_norm_column_sum_direct_lane_fill_matches_per_lane_reference_bits ... ok
+test tests::schur_diagonal_matrix ... ok
+test tests::schur_reconstructs_original ... ok
+test tests::schur_rejects_empty ... ok
+test tests::slogdet_empty_matrix_returns_sign_one_logdet_zero ... ok
+test tests::slogdet_nxn_agrees_with_det ... ok
+test tests::solve_2x2_reconstructs_rhs_across_seed_grid ... ok
+test tests::solve_2x2_rejects_singular_system ... ok
+test tests::batch_det_slogdet_scratch_paths_match_per_lane_reference_bits ... ok
+test tests::solve_and_inv_nxn_match_numpy_diagonal_nan_parity ... ok
+test tests::solve_and_inv_nxn_match_numpy_off_diagonal_nan_parity ... ok
+test tests::solve_and_inv_nxn_propagate_infinite_inputs ... ok
+test tests::solve_nxn_3x3_system ... ok
+test tests::solve_nxn_allows_non_finite_rhs ... ok
+test tests::solve_nxn_multi_matches_column_wise ... ok
+test tests::solve_nxn_multi_propagates_non_finite_inputs ... ok
+test tests::solve_nxn_rejects_singular ... ok
+test tests::solve_triangular_lower ... ok
+test tests::solve_triangular_rejects_singular ... ok
+test tests::solve_triangular_unit_diagonal ... ok
+test tests::solve_triangular_upper ... ok
+test tests::spectral_branch_is_fail_closed ... ok
+test tests::spectral_kernels_fail_closed_for_invalid_inputs ... ok
+test tests::sqrtm_diagonal ... ok
+test tests::sqrtm_identity_is_identity ... ok
+test tests::schur_20x20_reconstruction ... ok
+test tests::sqrtm_large_scale ... ok
+test tests::sqrtm_matches_scipy_non_finite_semantics ... ok
+test tests::sqrtm_squared_gives_original ... ok
+test tests::square_validation_rejects_non_square ... ok
+test tests::svd_2x2_handles_rank_deficient_and_fail_closed_paths ... ok
+test tests::svd_2x2_reconstructs_and_orders_singular_values ... ok
+test tests::svd_fallback_handles_wide_matrix_when_qr_budget_is_zero ... ok
+test tests::svd_fallback_preserves_high_condition_number_singular_values ... ok
+test tests::svd_fallback_reconstructs_when_qr_budget_is_zero ... ok
+test tests::sbr_stage1_compact_band_golden_sha256 ... ok
+test tests::svd_full_output_matches_clean_head_digest ... ok
+test tests::svd_full_tall_output_matches_clean_head_digest ... ok
+test tests::svd_high_condition_number_preserves_small_singular_values ... ok
+test tests::svd_mxn_full_identity ... ok
+test tests::svd_mxn_full_reconstruction ... ok
+test tests::svd_full_reconstructed_u_fast_path_reconstructs_and_hashes ... ok
+test tests::svd_mxn_full_reconstructs ... ok
+test tests::svd_mxn_rejects_invalid ... ok
+test tests::svd_mxn_tall_matrix_singular_values ... ok
+test tests::svd_mxn_tall_singular_values ... ok
+test tests::svd_mxn_wide_matrix_singular_values ... ok
+test tests::svd_mxn_wide_singular_values ... ok
+test tests::svd_nxn_diagonal_matrix ... ok
+test tests::svd_nxn_identity_singular_values ... ok
+test tests::svd_shapes_match_full_and_reduced_contracts ... ok
+test tests::tensorinv_4d_identity ... ok
+test tests::svd_values_only_matches_full_reference_bits ... ok
+test tests::tensorinv_matches_numpy_non_finite_semantics ... ok
+test tests::tensorinv_non_square_rejected ... ok
+test tests::tensorinv_rejects_invalid_ind ... ok
+test tests::tensorsolve_2d_is_standard_solve ... ok
+test tests::blocked_tridiag_matches_unblocked ... ok
+test tests::tensorsolve_matches_numpy_non_finite_semantics ... ok
+test tests::tensorsolve_preserves_tensor_output_shape ... ok
+test tests::tensorsolve_rejects_non_square ... ok
+test tests::tolerance_policy_enforces_bounds ... ok
+test tests::trace_nxn_general ... ok
+test tests::trace_nxn_identity ... ok
+test tests::tridiag_eig_qr_accum_speedup ... ignored, perf timing; run with --release -- --ignored --nocapture
+test tests::tridiag_eigvals_qr_perf_report ... ignored, perf timing; run with --release -- --ignored --nocapture
+test tests::tridiag_symmetric_matvec_serial_matches_full_row_dot_bits ... ok
+test tests::values_only_svd_in_place_sort_matches_former_index_schedule ... ok
+test tests::vector_norm_arbitrary_p ... ok
+test tests::vector_norm_matches_numpy_non_finite_semantics ... ok
+test tests::vector_norm_orders_match_first_wave_contracts ... ok
+test tests::vector_norm_p_token_parsing ... ok
+test tests::vector_norm_zero_counts_nonzero ... ok
+test tests::batch_matrix_norm_row_sum_direct_lane_fill_matches_per_lane_reference_bits ... ok
+test tests::tridiag_eigvals_qr_matches_eig_qr_to_allclose ... ok
+test tests::sbr_cross_wy_strided_update_matches_materialized_reference_and_golden_sha256 ... ok
+test tests::complex_matmul_packed_path_matches_serial_reference_and_golden_sha256 ... ok
+test tests::symmetric_rank2k_triangular_update_matches_full_reference_and_golden_sha256 ... ok
+test tests::kron_parallel_matches_serial_reference_and_golden ... ok
+test tests::blocked_lu_reconstructs_pivoted_matrix ... ok
+test tests::lu_panel_64_mid_size_keeps_pivots_logdet_and_golden_sha256 ... ok
+test tests::batch_inv_small_matrices_parallel_matches_serial_bits ... ok
+test tests::blocked_trsm_matches_unblocked_and_solves ... ok
+test tests::tridiag_rank2k_fused_update_preserves_spectra_and_golden_sha256 ... ok
+test tests::sbr_stage1_band_q_oracle_preserves_symmetric_spectra ... ok
+test tests::qr_nxn_serial_matches_reference_and_golden_sha256 ... ok
+test tests::batch_lanes_parallel_match_serial_reference_and_golden_sha256 ... ok
+test tests::cholesky_mid_panel_512_output_golden_sha256 ... ok
+test tests::blocked_lu_band_matches_serial_reference_within_tolerance ... ok
+test tests::batch_solve_matrix_scratch_matches_per_lane_solve_nxn_multi_bits ... ok
+test tests::batch_inv_scratch_matches_per_lane_inv_nxn_bits ... ok
+test tests::blocked_qr_reconstructs_and_matches_unblocked ... ok
+test tests::svd_full_512_right_vt_panel_reconstructs_and_hashes ... ok
+test tests::batch_solve_vector_scratch_matches_per_lane_solve_nxn_bits ... ok
+test tests::batch_cholesky_scratch_matches_per_lane_cholesky_nxn_bits ... ok
+test tests::pinv_hermitian_matches_live_numpy_oracle_when_available ... ok
+test tests::qr_nxn_blocked_512_path_matches_serial_within_tolerance_and_golden_sha256 ... ok
+test tests::blocked_tridiag_with_q_reconstructs ... ok
+test tests::inv_nxn_768_blocked_trsm_reconstructs_and_hashes ... ok
+test tests::pinv_tolerance_aliases_match_live_numpy_oracle_when_available ... ok
+test tests::matrix_rank_tol_matches_live_numpy_oracle_when_available ... ok
+test tests::qr_nxn_blocked_path_matches_serial_within_tolerance_and_golden_sha256 ... ok
+test tests::blocked_cholesky_reconstructs_and_matches_unblocked ... ok
+test tests::blocked_tridiag_parallel_matvec_matches_unblocked_large ... ok
+test tests::inv_nxn_1024_blocked_trsm_reconstructs_and_hashes ... ok
+
+test result: ok. 313 passed; 0 failed; 16 ignored; 0 measured; 0 filtered out; finished in 5.33s
+
+     Running tests/conformance_linalg.rs (/data/projects/.rch-targets/franken_numpy-cod-a/release/deps/conformance_linalg-1c9f71e3c795588b)
+
+running 37 tests
+test conformance_cholesky_identity_3x3 ... ok
+test conformance_cholesky_diagonal_3x3 ... ok
+test conformance_det_diagonal_2x2 ... ok
+test conformance_det_identity_2x2 ... ok
+test conformance_det_identity_3x3 ... ok
+test conformance_det_nearly_singular_2x2 ... ok
+test conformance_det_nearly_singular_3x3 ... ok
+test conformance_det_negative_2x2 ... ok
+test conformance_det_singular_2x2 ... ok
+test conformance_det_small_values_2x2 ... ok
+test conformance_det_large_values_2x2 ... ok
+test conformance_det_singular_3x3 ... ok
+test conformance_inv_diagonal_2x2 ... ok
+test conformance_inv_hilbert_3x3 ... ok
+test conformance_inv_identity_2x2 ... ok
+test conformance_inv_identity_3x3 ... ok
+test conformance_inv_singular_2x2_returns_error ... ok
+test conformance_qr_3x2 ... ok
+test conformance_slogdet_large_values_2x2 ... ok
+test conformance_solve_singular_2x2_returns_error ... ok
+test conformance_slogdet_negative_2x2 ... ok
+test conformance_det_2x2 ... ok
+test conformance_svd_2x3 ... ok
+test conformance_qr_3x3 ... ok
+test conformance_det_4x4 ... ok
+test conformance_svd_3x2 ... ok
+test conformance_slogdet_3x3 ... ok
+test conformance_inv_2x2 ... ok
+test conformance_inv_4x4 ... ok
+test conformance_det_3x3 ... ok
+test conformance_cholesky_3x3 ... ok
+test conformance_solve_4x4 ... ok
+test conformance_solve_3x3 ... ok
+test conformance_slogdet_2x2 ... ok
+test conformance_solve_2x2 ... ok
+test conformance_cholesky_4x4 ... ok
+test conformance_inv_3x3 ... ok
+
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests/golden_linalg.rs (/data/projects/.rch-targets/franken_numpy-cod-a/release/deps/golden_linalg-f44cf974c301c3d3)
+
+running 19 tests
+test golden_cholesky_identity ... ok
+test golden_cholesky_3x3 ... ok
+test golden_det_2x2_identity ... ok
+test golden_det_2x2_simple ... ok
+test golden_det_2x2_singular ... ok
+test golden_det_3x3 ... ok
+test golden_det_4x4 ... ok
+test golden_eigvalsh_2x2 ... ok
+test golden_eigvalsh_3x3_symmetric ... ok
+test golden_inv_2x2_identity ... ok
+test golden_inv_2x2_simple ... ok
+test golden_inv_3x3 ... ok
+test golden_qr_3x3_orthogonality ... ok
+test golden_qr_3x3_reconstruction ... ok
+test golden_eigvalsh_3x3_identity ... ok
+test golden_solve_2x2_simple ... ok
+test golden_solve_3x3 ... ok
+test golden_svd_3x3_diagonal ... ok
+test golden_svd_3x3_identity ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_linalg.rs (/data/projects/.rch-targets/franken_numpy-cod-a/release/deps/metamorphic_linalg-5084d948967976c5)
+
+running 19 tests
+test mr_a_times_inv_a_is_identity_2x2 ... ok
+test mr_a_times_inv_a_is_identity_nxn ... ok
+test mr_cholesky_reconstructs_original ... ok
+test mr_det_inv_is_reciprocal_2x2 ... ok
+test mr_det_inv_is_reciprocal_nxn ... ok
+test mr_det_product_is_product_det_2x2 ... ok
+test mr_frobenius_norm_is_sqrt_sum_squares ... ok
+test mr_frobenius_norm_squared_equals_trace_ata ... ok
+test mr_inv_inv_is_identity_2x2 ... ok
+test mr_inv_inv_is_identity_nxn ... ok
+test mr_norm_is_homogeneous ... ok
+test mr_q_is_orthogonal ... ok
+test mr_qr_reconstructs_original ... ok
+test mr_solve_a_ax_recovers_x_nxn ... ok
+test mr_solve_ax_equals_b_2x2 ... ok
+test mr_svd_singular_values_are_positive ... ok
+test mr_svd_singular_values_sorted_descending ... ok
+test mr_trace_is_additive ... ok
+test mr_trace_is_sum_of_diagonal ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/solve_perf.rs (/data/projects/.rch-targets/franken_numpy-cod-a/release/deps/solve_perf-d286e1a9e0f0881f)
+
+running 4 tests
+test cholesky_solve_multi_correctness_identity ... ok
+test cholesky_solve_multi_correctness_single_rhs ... ok
+test cholesky_solve_multi_correctness_spd ... ok
+test cholesky_solve_multi_perf_baseline ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests fnp_linalg
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

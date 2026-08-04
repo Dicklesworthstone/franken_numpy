@@ -1,0 +1,6 @@
+python=3.13.7
+numpy=2.4.3
+host=thinkstation1
+pid=4089140
+put_mask_f64_masked_cycling/100000: median_ns=31069 p95_ns=45195 mean_ns=34461 cv_pct=17.26 min_ns=30481 max_ns=49313 samples=41 inner=3
+put_mask_f64_masked_cycling/1000000: median_ns=686361 p95_ns=779116 mean_ns=693863 cv_pct=8.87 min_ns=621608 max_ns=983193 samples=41 inner=1

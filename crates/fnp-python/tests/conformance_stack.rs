@@ -42,6 +42,107 @@ fn fnp_script(body: String) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn stack_helpers_python_container_and_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def clean(value):
+    if isinstance(value, float) and np.isnan(value):
+        return "nan"
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    return value
+
+def normalize(value):
+    array = np.asarray(value)
+    return (str(array.dtype), tuple(array.shape), clean(array.tolist()))
+
+def outcome(call_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize(call_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+cases = [
+    ("stack tuple of Python lists", "stack", lambda: ((((1, 2), (3, 4)),), {})),
+    (
+        "stack axis minus one Python lists",
+        "stack",
+        lambda: (([[1, 2, 3], [4, 5, 6]],), {"axis": -1}),
+    ),
+    (
+        "stack dtype casting unsafe",
+        "stack",
+        lambda: (([np.array([1.25, 2.75]), np.array([3.5, 4.5])],), {"dtype": np.int64, "casting": "unsafe"}),
+    ),
+    ("vstack Python list rows", "vstack", lambda: ((((1, 2, 3), (4, 5, 6)),), {})),
+    (
+        "hstack mixed list ndarray one dimensional",
+        "hstack",
+        lambda: (([[1, 2], np.array([3, 4], dtype=np.int16)],), {}),
+    ),
+    ("dstack one dimensional lists", "dstack", lambda: ((((1, 2, 3), (4, 5, 6)),), {})),
+    (
+        "column_stack one dimensional lists",
+        "column_stack",
+        lambda: ((((1, 2, 3), (4, 5, 6)),), {}),
+    ),
+    ("stack empty sequence error", "stack", lambda: (([],), {})),
+    (
+        "stack shape mismatch error",
+        "stack",
+        lambda: (([np.array([1, 2]), np.array([[3, 4]])],), {}),
+    ),
+    (
+        "hstack shape mismatch error",
+        "hstack",
+        lambda: (([np.ones((2, 2)), np.ones((3, 2))],), {}),
+    ),
+    (
+        "vstack casting error",
+        "vstack",
+        lambda: (([np.array([1.5]), np.array([2.5])],), {"dtype": np.int64, "casting": "safe"}),
+    ),
+]
+
+ok = True
+for label, name, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(getattr(fnp, name), *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(getattr(np, name), *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+
+def stack_out_contract(stack_fn):
+    out = np.empty((2, 2), dtype=np.float64)
+    result = stack_fn([np.array([1.5, 2.5]), np.array([3.5, 4.5])], out=out)
+    return (normalize(result), normalize(out), result is out)
+
+actual_out = stack_out_contract(fnp.stack)
+expected_out = stack_out_contract(np.stack)
+if actual_out != expected_out:
+    print("stack out contract")
+    print(actual_out)
+    print(expected_out)
+    ok = False
+
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "stack helper Python-container and keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn stack_1d_arrays_default_axis() -> Result<(), String> {
     let script = fnp_script(
         r#"

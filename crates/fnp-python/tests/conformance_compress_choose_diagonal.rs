@@ -42,6 +42,60 @@ fn fnp_script(body: String) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn compress_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def compress_outcome(fn, condition, a, **kwargs):
+    try:
+        result = fn(condition, a, **kwargs)
+        arr = np.asarray(result)
+        return ("ok", type(result).__name__, str(arr.dtype), tuple(arr.shape), arr.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("empty condition", lambda: ([], [1, 2, 3], {})),
+    ("list condition list payload", lambda: ([True, False, True], [10, 20, 30], {})),
+    ("integer condition truthiness", lambda: ([1, 0, 2], [10, 20, 30], {})),
+    (
+        "bool ndarray condition",
+        lambda: (np.array([False, True, True], dtype=np.bool_), np.array([1, 2, 3], dtype=np.int16), {}),
+    ),
+    ("tuple condition tuple payload", lambda: ((False, True, True), (1.5, 2.5, 3.5), {})),
+    ("shorter condition truncates", lambda: ([True, False], [1, 2, 3, 4], {})),
+    ("nested list axis zero", lambda: ([True, False, True], [[1, 2], [3, 4], [5, 6]], {"axis": 0})),
+    ("nested list axis one", lambda: ([False, True], [[1, 2], [3, 4], [5, 6]], {"axis": 1})),
+    ("nested list axis minus one", lambda: ([True, False], [[1, 2], [3, 4], [5, 6]], {"axis": -1})),
+    ("empty axis result", lambda: ([False, False], [[1, 2], [3, 4]], {"axis": 1})),
+    ("string payload list", lambda: ([True, False, True], ["alpha", "beta", "gamma"], {})),
+    ("axis mismatch error", lambda: ([True, False, True], [[1, 2], [3, 4]], {"axis": 1})),
+]
+
+ok = True
+for label, factory in cases:
+    condition, a, kwargs = factory()
+    actual = compress_outcome(fnp.compress, condition, a, **kwargs)
+    condition, a, kwargs = factory()
+    expected = compress_outcome(np.compress, condition, a, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "compress Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn compress_1d_basic() -> Result<(), String> {
     let script = fnp_script(
         r#"
@@ -214,6 +268,56 @@ print(np.array_equal(result, expected))
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn choose_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def choose_outcome(fn, a, choices, **kwargs):
+    try:
+        result = fn(a, choices, **kwargs)
+        arr = np.asarray(result)
+        return ("ok", type(result).__name__, str(arr.dtype), tuple(arr.shape), arr.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("scalar index scalar choices", lambda: (1, [10, 20, 30], {})),
+    ("bool indices two choices", lambda: ([False, True, False], [[1, 1, 1], [9, 9, 9]], {})),
+    ("list indices list choices", lambda: ([0, 1, 2, 1], [[10, 10, 10, 10], [20, 20, 20, 20], [30, 30, 30, 30]], {})),
+    ("tuple indices tuple choices", lambda: ((0, 1, 0), ((1.5, 2.5, 3.5), (10.5, 20.5, 30.5)), {})),
+    ("scalar choice broadcasts", lambda: ([0, 1, 1], [5, [10, 20, 30]], {})),
+    ("string choices", lambda: ([0, 1, 0], [["a", "a", "a"], ["b", "b", "b"]], {})),
+    ("nested list choices", lambda: ([[0, 1], [1, 0]], [[[1, 2], [3, 4]], [[10, 20], [30, 40]]], {})),
+    ("wrap mode", lambda: ([-1, 0, 3], [[10, 10, 10], [20, 20, 20], [30, 30, 30]], {"mode": "wrap"})),
+    ("clip mode", lambda: ([-1, 0, 3], [[10, 10, 10], [20, 20, 20], [30, 30, 30]], {"mode": "clip"})),
+    ("invalid mode error", lambda: ([0, 1], [[10, 10], [20, 20]], {"mode": "bad"})),
+    ("raise mode error", lambda: ([0, 3], [[10, 10], [20, 20]], {})),
+]
+
+ok = True
+for label, factory in cases:
+    a, choices, kwargs = factory()
+    actual = choose_outcome(fnp.choose, a, choices, **kwargs)
+    a, choices, kwargs = factory()
+    expected = choose_outcome(np.choose, a, choices, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "choose Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn choose_basic() -> Result<(), String> {
     let script = fnp_script(
         r#"
@@ -271,6 +375,56 @@ print(np.allclose(result, expected))
 // ─────────────────────────────────────────────────────────────────────────────
 // diagonal
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn diagonal_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def diagonal_outcome(fn, a, **kwargs):
+    try:
+        result = fn(a, **kwargs)
+        arr = np.asarray(result)
+        return ("ok", type(result).__name__, str(arr.dtype), tuple(arr.shape), arr.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list 2d", lambda: ([[1, 2, 3], [4, 5, 6], [7, 8, 9]], {})),
+    ("bool list 2d", lambda: ([[True, False], [False, True]], {})),
+    ("string list 2d", lambda: ([["a", "b"], ["c", "d"]], {})),
+    ("tuple offset positive", lambda: (((1, 2, 3), (4, 5, 6), (7, 8, 9)), {"offset": 1})),
+    ("list offset negative", lambda: ([[1, 2, 3, 4], [5, 6, 7, 8]], {"offset": -1})),
+    ("rectangular empty positive offset", lambda: ([[1, 2], [3, 4]], {"offset": 3})),
+    ("nested list custom axes", lambda: (np.arange(24).reshape(2, 3, 4).tolist(), {"axis1": 0, "axis2": 2})),
+    ("ndarray negative axes", lambda: (np.arange(24).reshape(2, 3, 4), {"axis1": -1, "axis2": -2})),
+    ("scalar error", lambda: (5, {})),
+    ("repeated axis error", lambda: ([[1, 2], [3, 4]], {"axis1": 0, "axis2": 0})),
+    ("axis out of bounds error", lambda: ([[1, 2], [3, 4]], {"axis1": 0, "axis2": 2})),
+]
+
+ok = True
+for label, factory in cases:
+    a, kwargs = factory()
+    actual = diagonal_outcome(fnp.diagonal, a, **kwargs)
+    a, kwargs = factory()
+    expected = diagonal_outcome(np.diagonal, a, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diagonal Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
 
 #[test]
 fn diagonal_2d_basic() -> Result<(), String> {
@@ -482,6 +636,174 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     assert_eq!(
         fnp_hash, numpy_hash,
         "zero-copy compress must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
+
+/// Locks the zero-copy f64 per-axis compress (try_zerocopy_f64_compress_axis):
+/// deterministic 2-D and 3-D float64 arrays compressed along several axes with
+/// full / shorter / all-true / all-false conditions, byte-identical to
+/// numpy.compress plus a sha256 golden. Elements move verbatim, so it is
+/// bit-identical to numpy and the prior extract path.
+#[test]
+fn compress_f64_axis_matches_numpy_bytes_and_golden() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+s = 0x2545F4914F6CDD1D
+def nxt():
+    global s
+    s = (s * 6364136223846793005 + 1) & 0xFFFFFFFFFFFFFFFF
+    return s
+A = np.empty((130, 71), dtype=np.float64)
+for i in range(130):
+    for j in range(71):
+        A[i, j] = ((nxt() >> 11) / (1 << 53)) * 8.0 - 4.0
+B = np.empty((11, 13, 9), dtype=np.float64)
+for x in np.ndindex(11, 13, 9):
+    B[x] = ((nxt() >> 11) / (1 << 53)) * 6.0 - 3.0
+def mask(n, kind):
+    if kind == 'half':  return (np.arange(n) % 2 == 0)
+    if kind == 'short': return (np.arange(n * 2 // 3) % 3 != 0)
+    if kind == 'all':   return np.ones(n, bool)
+    if kind == 'none':  return np.zeros(n, bool)
+h = hashlib.sha256()
+allmatch = True
+specs = [(A, 0), (A, 1), (B, 0), (B, 1), (B, 2)]
+for (arr, ax) in specs:
+    for kind in ('half', 'short', 'all', 'none'):
+        c = mask(arr.shape[ax], kind)
+        r = np.asarray(fnp.compress(c, arr, axis=ax))
+        e = np.compress(c, arr, axis=ax)
+        if r.shape != e.shape or r.dtype != e.dtype or r.tobytes() != e.tobytes():
+            allmatch = False
+        h.update(r.tobytes())
+print(allmatch)
+print(h.hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "True",
+        "per-axis f64 compress must be byte-identical to numpy.compress"
+    );
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "699d33622306a9a32dbcf94b5596dffe824018d6d06f9b8c94c4a65375e9f770",
+        "per-axis f64 compress golden sha256 drifted"
+    );
+    Ok(())
+}
+
+#[test]
+fn parallel_compact_compress_extract_bit_exact_matches_numpy() -> Result<(), String> {
+    // Large bool-condition compress/extract take the blocked parallel two-pass
+    // (per-block counts -> prefix -> disjoint value gathers); kept values must
+    // be bit-identical to numpy across dtypes, densities, block boundaries,
+    // shorter-condition extract, and NaN/inf/signed-zero payloads.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(83)
+verdicts = []
+N = 4_000_003  # not a block multiple
+cond = rng.random(N) > 0.5
+for name, arr in [
+    ("f64", rng.standard_normal(N)),
+    ("f32", rng.standard_normal(N).astype(np.float32)),
+    ("int64", rng.integers(-2**60, 2**60, N)),
+    ("int8", rng.integers(-100, 100, N).astype(np.int8)),
+    ("uint16", rng.integers(0, 60000, N).astype(np.uint16)),
+    ("bool", rng.random(N) > 0.3),
+]:
+    r = fnp.compress(cond, arr); e = np.compress(cond, arr)
+    if r.dtype != e.dtype or r.shape != e.shape or r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL compress {name}")
+    r = fnp.extract(cond, arr); e = np.extract(cond, arr)
+    if r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL extract {name}")
+# density edges + special payloads
+f = rng.standard_normal(N)
+f[rng.integers(0, N, 30000)] = np.nan
+f[rng.integers(0, N, 30000)] = -0.0
+f[rng.integers(0, N, 30000)] = np.inf
+for dens_name, c in [("all-true", np.ones(N, dtype=bool)), ("all-false", np.zeros(N, dtype=bool)), ("sparse", rng.random(N) > 0.999)]:
+    if fnp.compress(c, f).tobytes() != np.compress(c, f).tobytes():
+        verdicts.append(f"FAIL {dens_name}")
+# extract with condition SHORTER than arr
+short = rng.random(2_000_000) > 0.5
+if fnp.extract(short, f).tobytes() != np.extract(short, f).tobytes():
+    verdicts.append("FAIL short-cond extract")
+# NON-BOOL conditions: truthiness per the condition dtype
+arrv = rng.standard_normal(N)
+for cname, c in [
+    ("int64", rng.integers(-3, 3, N)),
+    ("int8", rng.integers(-2, 2, N).astype(np.int8)),
+    ("uint32", rng.integers(0, 3, N).astype(np.uint32)),
+]:
+    r = fnp.extract(c, arrv); e = np.extract(c, arrv)
+    if r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL extract {cname} cond")
+    r = fnp.compress(c, arrv); e = np.compress(c, arrv)
+    if r.tobytes() != e.tobytes():
+        verdicts.append(f"FAIL compress {cname} cond")
+# float conditions: -0.0/+0.0 are False, NaN is True (value semantics, not bits)
+fc = np.where(rng.random(N) > 0.5, rng.standard_normal(N), 0.0)
+fc[::97] = -0.0
+fc[::89] = np.nan
+r = fnp.extract(fc, arrv); e = np.extract(fc, arrv)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL extract f64 cond zero/NaN truthiness")
+r = fnp.extract(fc.astype(np.float32), arrv); e = np.extract(fc.astype(np.float32), arrv)
+if r.tobytes() != e.tobytes():
+    verdicts.append("FAIL extract f32 cond")
+# below-gate non-bool cond takes the serial generalized path
+sc2 = rng.integers(-2, 2, 1000)
+sa2 = rng.standard_normal(1000)
+if fnp.extract(sc2, sa2).tobytes() != np.extract(sc2, sa2).tobytes():
+    verdicts.append("FAIL below-gate int cond")
+# 2-D arr ravels through extract
+M = rng.standard_normal((2048, 1024))
+cm = rng.random((2048, 1024)) > 0.5
+if fnp.extract(cm, M).tobytes() != np.extract(cm, M).tobytes():
+    verdicts.append("FAIL 2-D extract")
+# below-gate keeps the serial branchless path
+sc = rng.random(1000) > 0.5
+sa = rng.standard_normal(1000)
+if fnp.compress(sc, sa).tobytes() != np.compress(sc, sa).tobytes():
+    verdicts.append("FAIL below-gate")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.standard_normal(16_000_000)
+Wc = rng.random(16_000_000) > 0.5
+tn = best(lambda: np.compress(Wc, W)); tf = best(lambda: fnp.compress(Wc, W))
+print(f"COMPRESS_BOOL_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+tn = best(lambda: np.extract(Wc, W)); tf = best(lambda: fnp.extract(Wc, W))
+print(f"EXTRACT_BOOL_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+Wi = rng.integers(-5, 5, 16_000_000)
+tn = best(lambda: np.extract(Wi, W)); tf = best(lambda: fnp.extract(Wi, W))
+print(f"EXTRACT_INTCOND_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+Wff = np.where(rng.random(16_000_000) > 0.5, rng.standard_normal(16_000_000), 0.0)
+tn = best(lambda: np.extract(Wff, W)); tf = best(lambda: fnp.extract(Wff, W))
+print(f"EXTRACT_F64COND_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces COMPRESS/EXTRACT_BOOL_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "parallel compact compress/extract must be bit-identical to numpy: {result}"
     );
     Ok(())
 }

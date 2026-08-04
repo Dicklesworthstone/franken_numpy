@@ -1,0 +1,8 @@
+host_vmi1227854
+python 3.13.7
+numpy 2.4.6
+numpy_eigvalsh_128: min=365727 median=380630 p95=390966 max=432819 ns runs=15
+numpy_cond_64: min=106129 median=117136 p95=143775 max=144827 ns runs=15
+numpy_cond_128: min=1003223 median=1070705 p95=1170634 max=1173547 ns runs=15
+numpy_cond_256: min=4059723 median=4440063 p95=4627083 max=4966030 ns runs=15
+numpy_cond_512: min=50127120 median=96972744 p95=119216975 max=131030235 ns runs=15

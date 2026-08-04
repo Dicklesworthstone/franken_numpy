@@ -507,3 +507,46 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn polyval_native_horner_bitexact_matches_numpy() -> Result<(), String> {
+    // Exercises the native fused-Horner polyval fast path against numpy bit-exactly
+    // (atol=0, equal_nan=True) incl dtype/shape: various degrees, 1-D and 2-D x,
+    // integer coefficients (promote to f64), a single-coefficient (degree 0) poly,
+    // negative/large x, and a +-inf/NaN x (numpy's first 0*x+p[0] step makes 0*inf=NaN).
+    let script = fnp_script(
+        r#"
+def same(a, b):
+    a = np.asarray(a); b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.allclose(a, b, rtol=0, atol=0, equal_nan=True)
+
+rng = np.random.default_rng(29)
+x1 = rng.standard_normal(100000) * 3.0
+x2 = rng.standard_normal((512, 64))
+xspec = np.array([np.inf, -np.inf, np.nan, 0.0, 1.0, -2.5, 1e8], dtype=np.float64)
+cases = [
+    (rng.standard_normal(6), x1),
+    (rng.standard_normal(13), x1),
+    (rng.standard_normal(4), x2),
+    (np.array([3, -2, 5, 1], dtype=np.int64), x1),     # int coeffs -> f64
+    (np.array([7.0]), x1),                              # degree 0
+    (rng.standard_normal(5), xspec),                    # inf/nan x
+]
+ok = True
+for p, x in cases:
+    f = fnp.polyval(p, x)
+    n = np.polyval(p, x)
+    if not same(f, n):
+        print("FAIL", p.shape, x.shape, np.asarray(f).ravel()[:5], np.asarray(n).ravel()[:5]); ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native Horner polyval parity should match numpy: {result}"
+    );
+    Ok(())
+}

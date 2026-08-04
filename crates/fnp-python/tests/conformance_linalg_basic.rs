@@ -590,6 +590,232 @@ print(np.allclose(fnp_result, np_result))
 }
 
 #[test]
+fn norm_axis_vector_l2_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def same(a, b):
+    a = np.asarray(a)
+    b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.allclose(a, b, rtol=0, atol=0, equal_nan=True)
+
+base = np.linspace(-4.0, 6.0, 60, dtype=np.float64).reshape(3, 4, 5)
+cases = [
+    (base, None, -1, False),
+    (base, 2, -1, False),
+    (base, 2.0, -1, True),
+    (base, None, 1, False),
+    (base[0, 0], None, 0, False),
+    (np.array([[1.0, np.nan, 3.0], [1.0, np.inf, 2.0]], dtype=np.float64), None, -1, False),
+]
+all_pass = True
+for arr, ord_arg, axis, keepdims in cases:
+    if ord_arg is None:
+        fnp_result = fnp.linalg.norm(arr, axis=axis, keepdims=keepdims)
+        np_result = np.linalg.norm(arr, axis=axis, keepdims=keepdims)
+    else:
+        fnp_result = fnp.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+        np_result = np.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+    if not same(fnp_result, np_result):
+        print("FAIL", ord_arg, axis, keepdims, np.asarray(fnp_result), np.asarray(np_result))
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "norm axis vector L2 parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn norm_axis_vector_l1_matches_numpy() -> Result<(), String> {
+    // Exercises the native last-axis L1 (ord=1) fold against numpy bit-exactly
+    // (atol=0, equal_nan=True), including dtype/shape, ord=1 int vs 1.0 float,
+    // keepdims, a non-last axis fallthrough, a 1-D scalar axis, and a NaN/Inf lane.
+    let script = fnp_script(
+        r#"
+def same(a, b):
+    a = np.asarray(a)
+    b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.allclose(a, b, rtol=0, atol=0, equal_nan=True)
+
+base = np.linspace(-4.0, 6.0, 60, dtype=np.float64).reshape(3, 4, 5)
+cases = [
+    (base, 1, -1, False),
+    (base, 1.0, -1, True),
+    (base, 1, 1, False),
+    (base[0, 0], 1, 0, False),
+    (np.array([[1.0, np.nan, 3.0], [1.0, np.inf, 2.0]], dtype=np.float64), 1, -1, False),
+]
+all_pass = True
+for arr, ord_arg, axis, keepdims in cases:
+    fnp_result = fnp.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+    np_result = np.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+    if not same(fnp_result, np_result):
+        print("FAIL", ord_arg, axis, keepdims, np.asarray(fnp_result), np.asarray(np_result))
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "norm axis vector L1 parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn norm_axis_vector_inf_matches_numpy() -> Result<(), String> {
+    // Exercises the native last-axis +-inf folds (ord=np.inf -> max|x|, ord=-np.inf
+    // -> min|x|) against numpy bit-exactly (atol=0, equal_nan=True), including a
+    // non-last axis fallthrough, a 1-D scalar axis, keepdims, and a NaN/Inf lane.
+    let script = fnp_script(
+        r#"
+def same(a, b):
+    a = np.asarray(a)
+    b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.allclose(a, b, rtol=0, atol=0, equal_nan=True)
+
+base = np.linspace(-4.0, 6.0, 60, dtype=np.float64).reshape(3, 4, 5)
+cases = [
+    (base, np.inf, -1, False),
+    (base, -np.inf, -1, True),
+    (base, np.inf, 1, False),
+    (base[0, 0], -np.inf, 0, False),
+    (np.array([[1.0, np.nan, 3.0], [1.0, np.inf, 2.0]], dtype=np.float64), np.inf, -1, False),
+    (np.array([[1.0, np.nan, 3.0], [1.0, -np.inf, 2.0]], dtype=np.float64), -np.inf, -1, False),
+]
+all_pass = True
+for arr, ord_arg, axis, keepdims in cases:
+    fnp_result = fnp.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+    np_result = np.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+    if not same(fnp_result, np_result):
+        print("FAIL", ord_arg, axis, keepdims, np.asarray(fnp_result), np.asarray(np_result))
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "norm axis vector +-inf parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn norm_frobenius_lastaxes_matches_numpy() -> Result<(), String> {
+    // Exercises the native batched-Frobenius fold (ord None/'fro'/'f' over the
+    // trailing 2-tuple axis) against numpy bit-exactly (atol=0, equal_nan=True),
+    // incl dtype/shape: 3-D and 4-D stacks, plain 2-D with axis=(0,1), reversed
+    // axis order, keepdims, a non-trailing axis fallthrough, and a NaN/Inf block.
+    let script = fnp_script(
+        r#"
+def same(a, b):
+    a = np.asarray(a)
+    b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.allclose(a, b, rtol=0, atol=0, equal_nan=True)
+
+s3 = np.linspace(-4.0, 6.0, 4 * 5 * 6, dtype=np.float64).reshape(4, 5, 6)
+s4 = np.linspace(-2.0, 3.0, 2 * 3 * 4 * 5, dtype=np.float64).reshape(2, 3, 4, 5)
+m2 = np.linspace(-1.0, 2.0, 7 * 8, dtype=np.float64).reshape(7, 8)
+nanblk = np.array([[[1.0, np.nan], [3.0, 4.0]], [[1.0, np.inf], [2.0, 5.0]]], dtype=np.float64)
+cases = [
+    (s3, None, (-2, -1), False),
+    (s3, "fro", (-2, -1), True),
+    (s4, "f", (-2, -1), False),
+    (m2, None, (0, 1), False),
+    (s3, "fro", (-1, -2), False),
+    (s3, None, (0, 1), False),
+    (nanblk, "fro", (-2, -1), False),
+]
+all_pass = True
+for arr, ord_arg, axis, keepdims in cases:
+    if ord_arg is None:
+        fnp_result = fnp.linalg.norm(arr, axis=axis, keepdims=keepdims)
+        np_result = np.linalg.norm(arr, axis=axis, keepdims=keepdims)
+    else:
+        fnp_result = fnp.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+        np_result = np.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+    if not same(fnp_result, np_result):
+        print("FAIL", ord_arg, axis, keepdims, np.asarray(fnp_result), np.asarray(np_result))
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "norm Frobenius trailing-axes parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn norm_matrix_induced_lastaxes_matches_numpy() -> Result<(), String> {
+    // Exercises the native induced matrix p-norm fold (ord 1/-1/+inf/-inf over the
+    // trailing 2-tuple axis) against numpy bit-exactly (atol=0, equal_nan=True),
+    // incl dtype/shape: 3-D and 4-D stacks, plain 2-D axis=(0,1), keepdims, a
+    // reversed-axis (-1,-2) fallthrough (axis order matters for 1 vs inf), a
+    // non-trailing axis fallthrough, and a NaN/Inf block.
+    let script = fnp_script(
+        r#"
+def same(a, b):
+    a = np.asarray(a)
+    b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.allclose(a, b, rtol=0, atol=0, equal_nan=True)
+
+s3 = np.linspace(-4.0, 6.0, 4 * 5 * 6, dtype=np.float64).reshape(4, 5, 6)
+s4 = np.linspace(-2.0, 3.0, 2 * 3 * 4 * 5, dtype=np.float64).reshape(2, 3, 4, 5)
+m2 = np.linspace(-1.0, 2.0, 7 * 8, dtype=np.float64).reshape(7, 8)
+nanblk = np.array([[[1.0, np.nan], [3.0, 4.0]], [[1.0, np.inf], [2.0, 5.0]]], dtype=np.float64)
+cases = [
+    (s3, 1, (-2, -1), False),
+    (s3, -1, (-2, -1), True),
+    (s3, np.inf, (-2, -1), False),
+    (s3, -np.inf, (-2, -1), True),
+    (s4, 1, (-2, -1), False),
+    (s4, np.inf, (-2, -1), False),
+    (m2, 1, (0, 1), False),
+    (m2, np.inf, (0, 1), False),
+    (s3, 1, (-1, -2), False),
+    (s3, np.inf, (-1, -2), False),
+    (s3, 1, (0, 1), False),
+    (nanblk, 1, (-2, -1), False),
+    (nanblk, np.inf, (-2, -1), False),
+]
+all_pass = True
+for arr, ord_arg, axis, keepdims in cases:
+    fnp_result = fnp.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+    np_result = np.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+    if not same(fnp_result, np_result):
+        print("FAIL", ord_arg, axis, keepdims, np.asarray(fnp_result), np.asarray(np_result))
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "norm induced matrix p-norm parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn norm_vector_inf() -> Result<(), String> {
     let script = fnp_script(
         r#"
@@ -1184,6 +1410,59 @@ print(fnp_raised == np_raised)
         result.trim(),
         "True",
         "eig should raise error for Inf input similarly to numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn int_norm_via_f64_conversion_bit_exact_matches_numpy() -> Result<(), String> {
+    // Integer/bool norm converts once to f64 (numpy's own norm does
+    // x.astype(float) FIRST for every ord - pinned incl. 2^62-scale values)
+    // and rides the native f64 vector-norm axis kernels / numpy's BLAS flat
+    // path. All ords stay semantics-identical post-conversion.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(233)
+verdicts = []
+M = rng.integers(-1000, 1000, (2048, 1024))
+for kw in [dict(axis=1), dict(axis=0), dict(axis=1, keepdims=True), dict(), dict(ord=1, axis=1), dict(ord=np.inf, axis=1), dict(ord=3, axis=0)]:
+    r = fnp.norm(M, **kw); e = np.linalg.norm(M, **kw)
+    ra = np.asarray(r); ea = np.asarray(e)
+    if ra.dtype != ea.dtype or ra.shape != ea.shape or ra.tobytes() != ea.tobytes():
+        verdicts.append(f"FAIL {kw}")
+B = rng.random((2048, 1024)) > 0.7
+if np.asarray(fnp.norm(B, axis=1)).tobytes() != np.asarray(np.linalg.norm(B, axis=1)).tobytes():
+    verdicts.append("FAIL bool")
+H = rng.integers(-2**62, 2**62, (256, 1000))
+if np.asarray(fnp.norm(H, axis=1)).tobytes() != np.asarray(np.linalg.norm(H, axis=1)).tobytes():
+    verdicts.append("FAIL huge values")
+S = rng.integers(-100, 100, (10, 10))
+if np.asarray(fnp.norm(S, axis=1)).tobytes() != np.asarray(np.linalg.norm(S, axis=1)).tobytes():
+    verdicts.append("FAIL small parity")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-1000, 1000, (4096, 4096))
+tn = best(lambda: np.linalg.norm(W, axis=1)); tf = best(lambda: fnp.norm(W, axis=1))
+print(f"NORM_INT_AX1_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+# flat form stays a delegate (gate-measured 0.969x with conversion) - parity row
+if np.float64(fnp.norm(W)).tobytes() != np.float64(np.linalg.norm(W)).tobytes():
+    verdicts.append("FAIL flat delegate parity")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces NORM_INT_*_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "int norm via f64 conversion must be bit-identical to numpy: {result}"
     );
     Ok(())
 }

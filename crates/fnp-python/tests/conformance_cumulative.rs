@@ -334,3 +334,69 @@ print(np.allclose(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "cumprod complex should match numpy");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// cumulative_sum / cumulative_prod (NumPy 2.0 Array-API names, native-wired)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn cumulative_sum_prod_match_numpy_across_dtype_axis_and_include_initial() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+ok = True
+rng = np.random.default_rng(7)
+for op in ["cumulative_sum", "cumulative_prod"]:
+    ffn = getattr(fnp, op); nfn = getattr(np, op)
+    for dt in [np.float64, np.float32, np.int8, np.int32, np.uint8, np.int64, np.bool_]:
+        for shape in [(20,), (6, 5), (4, 3, 2)]:
+            if dt == np.bool_:
+                a = rng.integers(0, 2, shape).astype(dt)
+            elif np.issubdtype(dt, np.integer):
+                a = rng.integers(0, 4, shape).astype(dt)
+            else:
+                a = rng.standard_normal(shape).astype(dt)
+            axes = [None] if len(shape) == 1 else list(range(len(shape)))
+            for ax in axes:
+                for inc in (False, True):
+                    kw = {"include_initial": inc}
+                    if ax is not None:
+                        kw["axis"] = ax
+                    f = np.asarray(ffn(a, **kw)); n = np.asarray(nfn(a, **kw))
+                    if f.dtype != n.dtype or f.shape != n.shape or not np.allclose(f, n, rtol=1e-6, atol=1e-6, equal_nan=True):
+                        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cumulative_sum/prod must match numpy across dtype/axis/include_initial"
+    );
+    Ok(())
+}
+
+#[test]
+fn cumulative_sum_axis_none_on_nd_raises_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+ok = True
+for op in ["cumulative_sum", "cumulative_prod"]:
+    try:
+        getattr(fnp, op)(np.arange(12).reshape(3, 4))
+        ok = False  # numpy raises ValueError here
+    except ValueError:
+        pass
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cumulative_sum/prod with axis=None on ndim>1 must raise ValueError like numpy"
+    );
+    Ok(())
+}

@@ -106,3 +106,47 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+#[test]
+fn flat_int_cumsum_cumprod_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    // Above the 1<<21 gate the flat 1-D integer cumsum/cumprod runs the two-pass
+    // parallel prefix scan. Integer wrapping add/mul are associative, so the block
+    // scan must be byte-identical to numpy's serial wrapping accumulate — incl. the
+    // overflow-WRAP case (numpy promotes to int64/uint64 and wraps in 2's complement).
+    let script = fnp_script(
+        r#"
+n = (1 << 21) + 65
+ok = True
+
+# int64 cumsum that OVERFLOWS -> wraps (tests wrapping bit-exactness)
+x = np.full(n, 9_000_000_000_000_000_000, dtype=np.int64)
+a = fnp.cumsum(x); e = np.cumsum(x)
+ok = ok and a.dtype == e.dtype and a.shape == e.shape and a.tobytes() == e.tobytes()
+
+# int32 cumsum -> int64 accumulator (widening path)
+x32 = (np.arange(n, dtype=np.int32) % 1000) - 500
+a = fnp.cumsum(x32); e = np.cumsum(x32)
+ok = ok and a.dtype == e.dtype and a.tobytes() == e.tobytes()
+
+# uint64 cumsum wrap
+xu = np.full(n, 18_000_000_000_000_000_000, dtype=np.uint64)
+a = fnp.cumsum(xu); e = np.cumsum(xu)
+ok = ok and a.dtype == e.dtype and a.tobytes() == e.tobytes()
+
+# int64 cumprod that WRAPS (alternating sign + magnitude grows then wraps)
+xp = np.where(np.arange(n) % 7 == 0, np.int64(-3), np.int64(2))
+a = fnp.cumprod(xp); e = np.cumprod(xp)
+ok = ok and a.dtype == e.dtype and a.tobytes() == e.tobytes()
+
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large parallel flat int cumsum/cumprod must be bit-identical to numpy"
+    );
+    Ok(())
+}

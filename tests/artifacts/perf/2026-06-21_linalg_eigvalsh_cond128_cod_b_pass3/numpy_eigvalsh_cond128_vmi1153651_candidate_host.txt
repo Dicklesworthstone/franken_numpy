@@ -1,0 +1,6 @@
+host=vmi1153651 root@38.242.134.66
+python=3.13.7
+numpy=2.4.6
+threads openblas=1 omp=1 mkl=1
+numpy_eigvalsh_128 median_ns=803699 min_ns=639064 p95_ns=1240479 runs=33
+numpy_cond_128 median_ns=1541118 min_ns=1446342 p95_ns=2306656 runs=33

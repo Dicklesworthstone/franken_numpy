@@ -1,0 +1,6 @@
+cases=240 fails=0
+hist bins=   10: np=  26021.2us fnp=   3237.3us fnp/np=0.124
+hist bins=   50: np=  25701.2us fnp=   4571.8us fnp/np=0.178
+hist bins=  100: np=  26759.2us fnp=   4357.5us fnp/np=0.163
+hist bins=  256: np=  27235.7us fnp=   4590.8us fnp/np=0.169
+hist bins= 1000: np=  26644.1us fnp=   6917.2us fnp/np=0.260

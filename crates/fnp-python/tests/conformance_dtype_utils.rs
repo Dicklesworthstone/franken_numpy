@@ -50,6 +50,101 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+#[test]
+fn dtype_utils_python_container_and_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def normalize(value):
+    if isinstance(value, (bool, np.bool_)):
+        return ("bool", bool(value))
+    if isinstance(value, tuple):
+        return ("tuple", tuple(value))
+    if isinstance(value, np.dtype):
+        return ("dtype", str(value))
+    return ("other", type(value).__name__, str(value))
+
+def outcome(call_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize(call_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+cases = [
+    (
+        "broadcast_shapes list shape",
+        "broadcast_shapes",
+        lambda: (([2, 1], (3,)), {}),
+    ),
+    (
+        "broadcast_shapes scalar and empty shape",
+        "broadcast_shapes",
+        lambda: (((1,), (), (3, 1)), {}),
+    ),
+    (
+        "broadcast_shapes incompatible error",
+        "broadcast_shapes",
+        lambda: (((2,), (3,)), {}),
+    ),
+    (
+        "can_cast safe narrowing",
+        "can_cast",
+        lambda: ((np.dtype("int16"), "int8"), {"casting": "safe"}),
+    ),
+    (
+        "can_cast same kind int to uint",
+        "can_cast",
+        lambda: (("int16", "uint16"), {"casting": "same_kind"}),
+    ),
+    (
+        "can_cast invalid casting error",
+        "can_cast",
+        lambda: (("int16", "uint16"), {"casting": "not-a-casting"}),
+    ),
+    (
+        "common_type mixed precision arrays",
+        "common_type",
+        lambda: ((np.array([1], dtype=np.int16), np.array([1.0], dtype=np.float32)), {}),
+    ),
+    (
+        "common_type complex scalar array",
+        "common_type",
+        lambda: ((np.array([1 + 2j], dtype=np.complex64), np.array([1.0], dtype=np.float16)), {}),
+    ),
+    (
+        "promote_types byte order",
+        "promote_types",
+        lambda: ((">i2", "<i4"), {}),
+    ),
+    ("promote_types object", "promote_types", lambda: (("object", "float64"), {})),
+    ("promote_types invalid dtype error", "promote_types", lambda: (("not-a-dtype", "float64"), {})),
+    ("issubdtype tuple input error", "issubdtype", lambda: (((np.int32, np.integer),), {})),
+    ("isdtype invalid kind error", "isdtype", lambda: ((np.dtype("int32"), "not-a-kind"), {})),
+]
+
+ok = True
+for label, name, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(getattr(fnp, name), *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(getattr(np, name), *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "dtype utility Python-container and keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // broadcast_shapes
 // ─────────────────────────────────────────────────────────────────────────────

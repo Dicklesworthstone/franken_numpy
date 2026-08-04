@@ -42,6 +42,51 @@ fn fnp_script(body: String) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn apply_along_axis_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def apply_along_axis_outcome(fn, func1d, axis, arr):
+    try:
+        result = fn(func1d, axis, arr)
+        out = np.asarray(result)
+        return ("ok", type(result).__name__, str(out.dtype), tuple(out.shape), out.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list axis zero sum", lambda: (np.sum, 0, [[1, 2, 3], [4, 5, 6]])),
+    ("ndarray int16 axis zero sum", lambda: (np.sum, 0, np.array([[1, 2], [3, 4]], dtype=np.int16))),
+    ("tuple axis one mean", lambda: (np.mean, 1, ((1, 2, 3), (4, 5, 6)))),
+    ("list axis one vector result", lambda: (lambda x: [int(np.min(x)), int(np.max(x))], 1, [[1, 2, 3], [4, 5, 6]])),
+    ("list negative axis max", lambda: (np.max, -1, [[1, 9, 3], [4, 2, 6]])),
+    ("axis out of bounds", lambda: (np.sum, 3, [[1, 2, 3], [4, 5, 6]])),
+]
+
+ok = True
+for label, factory in cases:
+    func1d, axis, arr = factory()
+    actual = apply_along_axis_outcome(fnp.apply_along_axis, func1d, axis, arr)
+    func1d, axis, arr = factory()
+    expected = apply_along_axis_outcome(np.apply_along_axis, func1d, axis, arr)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "apply_along_axis Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn apply_along_axis_sum() -> Result<(), String> {
     let script = fnp_script(
         r#"
@@ -126,6 +171,51 @@ print(np.array_equal(result, expected))
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn apply_over_axes_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def apply_over_axes_outcome(fn, func, arr, axes):
+    try:
+        result = fn(func, arr, axes)
+        out = np.asarray(result)
+        return ("ok", type(result).__name__, str(out.dtype), tuple(out.shape), out.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list single axis", lambda: (np.sum, [[1, 2, 3], [4, 5, 6]], 0)),
+    ("negative axis", lambda: (np.sum, [[1, 2, 3], [4, 5, 6]], [-1])),
+    ("list multiple axes", lambda: (np.sum, np.arange(24).reshape(2, 3, 4).tolist(), [0, 2])),
+    ("ndarray int16 multiple axes", lambda: (np.sum, np.arange(12, dtype=np.int16).reshape(2, 2, 3), [0, 2])),
+    ("tuple mean axis", lambda: (np.mean, (((1, 2), (3, 4)), ((5, 6), (7, 8))), [1])),
+    ("axis out of bounds", lambda: (np.sum, [[1, 2, 3], [4, 5, 6]], [3])),
+]
+
+ok = True
+for label, factory in cases:
+    func, arr, axes = factory()
+    actual = apply_over_axes_outcome(fnp.apply_over_axes, func, arr, axes)
+    func, arr, axes = factory()
+    expected = apply_over_axes_outcome(np.apply_over_axes, func, arr, axes)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "apply_over_axes Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn apply_over_axes_sum_single() -> Result<(), String> {
     let script = fnp_script(
         r#"
@@ -207,6 +297,58 @@ print(callable(fnp.vectorize))
 // ─────────────────────────────────────────────────────────────────────────────
 // select
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn select_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def select_outcome(fn, condlist, choicelist, **kwargs):
+    try:
+        result = fn(condlist, choicelist, **kwargs)
+        arr = np.asarray(result)
+        return ("ok", type(result).__name__, str(arr.dtype), tuple(arr.shape), arr.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list conditions list choices", lambda: ([[True, False, True], [False, True, False]], [[1, 2, 3], [10, 20, 30]], {"default": 0})),
+    (
+        "ndarray conditions choices",
+        lambda: ([np.array([False, True, True]), np.array([True, False, False])], [np.array([1, 2, 3], dtype=np.int16), np.array([10, 20, 30], dtype=np.int16)], {"default": -5}),
+    ),
+    ("tuple conditions tuple choices", lambda: (((True, False, False), (False, True, True)), ((1.5, 2.5, 3.5), (10.5, 20.5, 30.5)), {})),
+    ("scalar choices default", lambda: ([[True, False, True], [False, True, False]], [1, 2], {"default": -1})),
+    ("scalar condition broadcasts", lambda: ([True, False], [np.array([1, 2, 3]), np.array([4, 5, 6])], {"default": 0})),
+    ("mixed numeric promotion", lambda: ([[False, True, False], [True, False, False]], [1.5, [1, 2, 3]], {"default": -1})),
+    ("nested list choices", lambda: ([[[True, False], [False, True]]], [[["a", "b"], ["c", "d"]]], {"default": "fallback"})),
+    ("string choices default", lambda: ([[True, False, True]], [["alpha", "beta", "gamma"]], {"default": "fallback"})),
+    ("non-bool condition error", lambda: ([[1, 0, 1]], [[1, 2, 3]], {})),
+    ("length mismatch error", lambda: ([[True, False, True], [False, True, False]], [[1, 2, 3]], {})),
+]
+
+ok = True
+for label, factory in cases:
+    condlist, choicelist, kwargs = factory()
+    actual = select_outcome(fnp.select, condlist, choicelist, **kwargs)
+    condlist, choicelist, kwargs = factory()
+    expected = select_outcome(np.select, condlist, choicelist, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "select Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
 
 #[test]
 fn select_basic() -> Result<(), String> {

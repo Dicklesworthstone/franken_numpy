@@ -1,0 +1,16 @@
+# `python_sum_lastaxis_boundary` on vmi1149989
+
+Command:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface -- python_sum_lastaxis_boundary`
+
+RCH selected `vmi1149989`; sample-size 15, warm-up 2 s, measurement 4 s.
+
+| Row | Low | Median | High | FNP/NumPy median |
+|---|---:|---:|---:|---:|
+| `fnp_sum_f64_axis_last_8192x1024` | 1.0781 ms | 1.1513 ms | 1.2334 ms | 0.255x |
+| `numpy_sum_f64_axis_last_8192x1024` | 4.2396 ms | 4.5198 ms | 4.9553 ms | baseline |
+| `fnp_sum_f64_axis_last_65536x256` | 2.2452 ms | 2.4695 ms | 2.6721 ms | 0.280x |
+| `numpy_sum_f64_axis_last_65536x256` | 8.6324 ms | 8.8303 ms | 9.1503 ms | baseline |
+
+Verdict: keep. Median speedups are 3.93x and 3.58x vs NumPy on the same worker run.

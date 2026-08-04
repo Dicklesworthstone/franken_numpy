@@ -42,6 +42,59 @@ fn fnp_script(body: String) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn extract_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def extract_outcome(fn, condition, arr):
+    try:
+        result = fn(condition, arr)
+        out = np.asarray(result)
+        return ("ok", type(result).__name__, str(out.dtype), tuple(out.shape), out.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("empty condition", lambda: ([], [1, 2, 3])),
+    ("all false condition", lambda: ([False, False], [10, 20])),
+    ("list condition list payload", lambda: ([True, False, True], [10, 20, 30])),
+    ("integer condition truthiness", lambda: ([1, 0, 2], [10, 20, 30])),
+    (
+        "bool ndarray condition",
+        lambda: (np.array([False, True, True], dtype=np.bool_), np.array([1, 2, 3], dtype=np.int16)),
+    ),
+    ("tuple condition tuple payload", lambda: ((False, True, True), (1.5, 2.5, 3.5))),
+    ("nested list flattening", lambda: ([[True, False], [False, True]], [[1, 2], [3, 4]])),
+    ("short condition", lambda: ([True, False], [1, 2, 3, 4])),
+    ("nan signed-zero payload", lambda: ([True, False, True], [np.nan, 0.0, -0.0])),
+    ("string payload", lambda: ([True, False, True], ["alpha", "beta", "gamma"])),
+    ("scalar payload mismatch", lambda: ([True, False], 5)),
+]
+
+ok = True
+for label, factory in cases:
+    condition, arr = factory()
+    actual = extract_outcome(fnp.extract, condition, arr)
+    condition, arr = factory()
+    expected = extract_outcome(np.extract, condition, arr)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "extract Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn extract_basic() -> Result<(), String> {
     let script = fnp_script(
         r#"
@@ -575,6 +628,86 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
         fnp_hash, numpy_hash,
         "zero-copy putmask must be bit-identical to numpy (sha256 of mutated array bytes)"
     );
+    Ok(())
+}
+
+/// Locks the same-width zero-copy in-place fast path for non-f64 `numpy.putmask`.
+/// The fast path views fixed-width bool/int/float arrays as same-width unsigned
+/// words and scatters values by flat index, so the proof hashes dtype, shape, and
+/// raw mutated bytes to catch signed-zero, NaN, and large-integer drift.
+#[test]
+fn putmask_zerocopy_same_dtype_all_widths_golden_sha256() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+
+cases = [
+    (
+        np.array([False, True, False, True, True, False, True], dtype=np.bool_),
+        np.array([True, False, True, True, False, True, False], dtype=np.bool_),
+        np.array([True, False, True], dtype=np.bool_),
+    ),
+    (
+        np.arange(257, dtype=np.uint8),
+        (np.arange(257) % 3) == 0,
+        np.array([0, 255, 17, 128], dtype=np.uint8),
+    ),
+    (
+        (np.arange(513, dtype=np.int16) - 300).astype(np.int16),
+        (np.arange(513) % 5) <= 1,
+        np.array([-32768, -1, 0, 32767], dtype=np.int16),
+    ),
+    (
+        (np.arange(1025, dtype=np.int64) * 100003 - 2_000_000_000).astype(np.int32),
+        (np.arange(1025) % 7) == 2,
+        np.array([-2_147_483_648, -12345, 0, 2_147_483_647], dtype=np.int32),
+    ),
+    (
+        np.array(
+            [0, 1, 2**53 + 17, 2**63 + 123, 2**64 - 1, 42, 99, 2**60 + 3],
+            dtype=np.uint64,
+        ),
+        np.array([True, False, True, True, False, True, False, True]),
+        np.array([2**63 + 1, 2**62 + 9, 2**64 - 5], dtype=np.uint64),
+    ),
+    (
+        np.array([-0.0, 0.0, 1.5, -2.5, np.inf, -np.inf, np.nan], dtype=np.float32),
+        np.array([True, True, False, True, True, False, True]),
+        np.array([0.0, -0.0, np.float32("nan"), np.float32("inf")], dtype=np.float32),
+    ),
+]
+
+h = hashlib.sha256()
+for base, mask, vals in cases:
+    got = base.copy()
+    expected = base.copy()
+    mod.putmask(got, mask, vals)
+    np.putmask(expected, mask, vals)
+    assert got.dtype == expected.dtype, (got.dtype, expected.dtype)
+    assert got.shape == expected.shape, (got.shape, expected.shape)
+    assert got.tobytes() == expected.tobytes(), (got, expected)
+    h.update(str(got.dtype).encode())
+    h.update(str(got.shape).encode())
+    h.update(got.tobytes())
+
+print(h.hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "same-dtype fixed-width putmask outputs must be bit-identical to numpy"
+    );
+    assert_eq!(
+        fnp_hash, "c0e0c54ade3ec56cb1c4eb82544e4d8726ddb86a7836dbd325b502294af5bd9c",
+        "golden sha256 of fixed-width putmask dtype/shape/raw mutated bytes"
+    );
+
     Ok(())
 }
 

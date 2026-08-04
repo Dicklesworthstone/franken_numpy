@@ -37,6 +37,94 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+#[test]
+fn tile_repeat_python_container_and_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def clean(value):
+    if isinstance(value, float) and np.isnan(value):
+        return "nan"
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    return value
+
+def normalize_array(value):
+    array = np.asarray(value)
+    return (
+        str(array.dtype),
+        tuple(array.shape),
+        clean(array.tolist()),
+        bool(array.flags["WRITEABLE"]),
+    )
+
+def outcome(call_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize_array(call_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+cases = [
+    ("tile Python list scalar reps", "tile", lambda: (([1, 2, 3], 2), {})),
+    ("tile tuple input tuple reps", "tile", lambda: ((((1, 2), (3, 4)), (2, 1)), {})),
+    (
+        "tile object list keyword reps",
+        "tile",
+        lambda: (([1, None, "x"],), {"reps": (2,)}),
+    ),
+    ("tile zero reps tuple", "tile", lambda: (([1, 2, 3], (2, 0)), {})),
+    ("tile negative reps error", "tile", lambda: (([1, 2, 3], (2, -1)), {})),
+    (
+        "repeat Python list scalar repeats",
+        "repeat",
+        lambda: (([1, 2, 3],), {"repeats": 2}),
+    ),
+    (
+        "repeat tuple input list repeats",
+        "repeat",
+        lambda: ((((1, 2, 3), (4, 5, 6)), [1, 0, 2]), {}),
+    ),
+    (
+        "repeat nested list axis keyword",
+        "repeat",
+        lambda: (([[1, 2], [3, 4]], [1, 2]), {"axis": 0}),
+    ),
+    (
+        "repeat object tuple axis keyword",
+        "repeat",
+        lambda: ((np.array([["a", None]], dtype=object), [2, 1]), {"axis": 1}),
+    ),
+    ("repeat negative repeats error", "repeat", lambda: (([1, 2, 3], [1, -1, 1]), {})),
+    (
+        "repeat axis out of bounds error",
+        "repeat",
+        lambda: (([[1, 2], [3, 4]], 2), {"axis": 4}),
+    ),
+]
+
+ok = True
+for label, name, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(getattr(fnp, name), *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(getattr(np, name), *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tile/repeat Python-container and keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // tile
 // ─────────────────────────────────────────────────────────────────────────────
@@ -495,6 +583,95 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     assert_eq!(
         fnp_hash, numpy_hash,
         "zero-copy tile must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
+
+// The native parallel scalar-repeat path (large output, axis=None / axis=0) must be byte-identical to
+// numpy for every fixed-width dtype (repeat moves whole elements verbatim, so a uint8-view byte copy over
+// row blocks is exact). Sizes are chosen to trip the ~4MB output gate; per-element repeats / axis=1 / small
+// sizes all defer to numpy and are covered by the pre-existing tests.
+#[test]
+fn repeat_scalar_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260701)
+chunks = []
+for dtn in ["float64", "float32", "int64", "int32", "int16", "int8", "uint16", "complex128", "bool"]:
+    dt = np.dtype(dtn)
+    if dt.kind in "fc":
+        base = (rng.standard_normal(600000) * 1.5).astype(dt)
+        base2 = (rng.standard_normal(2000 * 300) * 1.5).astype(dt).reshape(2000, 300)
+    elif dt.kind == "b":
+        base = rng.integers(0, 2, 600000).astype(dt)
+        base2 = rng.integers(0, 2, 2000 * 300).astype(dt).reshape(2000, 300)
+    else:
+        info = np.iinfo(dt)
+        base = rng.integers(info.min // 2, info.max // 2, 600000).astype(dt)
+        base2 = rng.integers(info.min // 2, info.max // 2, 2000 * 300).astype(dt).reshape(2000, 300)
+    for k in (1, 4, 9):
+        chunks.append(np.ascontiguousarray(mod.repeat(base, k)).tobytes())            # 1-D axis=None
+        chunks.append(np.ascontiguousarray(mod.repeat(base2, k, axis=0)).tobytes())    # 2-D axis=0
+        chunks.append(np.ascontiguousarray(mod.repeat(base2, k)).tobytes())            # 2-D axis=None (ravel)
+        chunks.append(np.ascontiguousarray(mod.repeat(base2, k, axis=-2)).tobytes())   # negative axis == 0
+# 3-D axis=0 leading-slice unit
+t = (rng.standard_normal(300 * 400 * 20)).reshape(300, 400, 20)
+chunks.append(np.ascontiguousarray(mod.repeat(t, 3, axis=0)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "native parallel scalar repeat must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
+
+// The native multidim tile path parallelizes over output super-rows for large outputs; the direct-unravel
+// super-index mapping must reproduce the serial odometer exactly. Byte-identical to numpy across dtypes and
+// reps shapes (2-D/3-D, scalar reps, reps-longer-than-ndim) at sizes that trip the ~4MB gate.
+#[test]
+fn tile_multidim_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260701)
+chunks = []
+for dtn in ["float64", "float32", "int64", "int16", "int8", "uint32", "bool"]:
+    dt = np.dtype(dtn)
+    if dt.kind == "f":
+        base = (rng.standard_normal(1500 * 1500) * 1.5).astype(dt).reshape(1500, 1500)
+        base3 = (rng.standard_normal(200 * 150 * 40)).astype(dt).reshape(200, 150, 40)
+    elif dt.kind == "b":
+        base = rng.integers(0, 2, 1500 * 1500).astype(dt).reshape(1500, 1500)
+        base3 = rng.integers(0, 2, 200 * 150 * 40).astype(dt).reshape(200, 150, 40)
+    else:
+        info = np.iinfo(dt)
+        base = rng.integers(info.min // 2, info.max // 2, 1500 * 1500).astype(dt).reshape(1500, 1500)
+        base3 = rng.integers(info.min // 2, info.max // 2, 200 * 150 * 40).astype(dt).reshape(200, 150, 40)
+    for reps in [(4, 1), (2, 3), (1, 4), 3, (2, 2, 2)]:
+        chunks.append(np.ascontiguousarray(mod.tile(base, reps)).tobytes())
+    for reps in [(2, 1, 3), (1, 2, 1), (3, 1, 1)]:
+        chunks.append(np.ascontiguousarray(mod.tile(base3, reps)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "native parallel multidim tile must be bit-identical to numpy (sha256 of raw output bytes)"
     );
     Ok(())
 }

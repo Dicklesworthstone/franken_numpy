@@ -129,6 +129,55 @@ print(np.array_equal(result, expected))
     Ok(())
 }
 
+/// Locks the dense-table integer isin path (and the hash fallback for wide ranges):
+/// deterministic int64 arrays — one small-range (table) and one huge-range (hash) —
+/// across invert, with the bool result BYTE-IDENTICAL to numpy.isin plus a sha256
+/// golden over the fnp bytes. Membership is exact either way, so the table path is
+/// bit-identical to both numpy and the prior hash path.
+#[test]
+fn isin_int_table_and_hash_paths_match_numpy_bytes_and_golden() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+s = 0x2545F4914F6CDD1D
+def nxt():
+    global s
+    s = (s * 6364136223846793005 + 1) & 0xFFFFFFFFFFFFFFFF
+    return s
+n = 4000
+small = np.array([nxt() % 1500 for _ in range(n)], dtype=np.int64)
+small_t = np.array([nxt() % 1500 for _ in range(700)], dtype=np.int64)
+wide = np.array([(nxt() % (1 << 60)) - (1 << 59) for _ in range(n)], dtype=np.int64)
+wide_t = np.array([(nxt() % (1 << 60)) - (1 << 59) for _ in range(700)], dtype=np.int64)
+h = hashlib.sha256()
+allmatch = True
+for (a, t) in ((small, small_t), (wide, wide_t)):
+    for inv in (False, True):
+        r = np.asarray(fnp.isin(a, t, invert=inv))
+        e = np.isin(a, t, invert=inv)
+        if r.shape != e.shape or r.dtype != e.dtype or r.tobytes() != e.tobytes():
+            allmatch = False
+        h.update(r.tobytes())
+print(allmatch)
+print(h.hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "True",
+        "isin int table/hash paths must be byte-identical to numpy.isin"
+    );
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "eba11167d3d5a8caeacb2d36cfd75cd01615590af5ffc635dba3b586e23bc9a1",
+        "isin int table/hash golden sha256 drifted"
+    );
+    Ok(())
+}
+
 // ────────────────────────────────────────���────────────────────────────────────
 // frombuffer
 // ─────────────────────────────────────────────────────────────────────────────
@@ -377,6 +426,76 @@ print(np.array_equal(result, original))
         result.trim(),
         "True",
         "frombuffer roundtrip should preserve values"
+    );
+    Ok(())
+}
+
+#[test]
+fn parallel_int_isin_lookup_bit_exact_matches_numpy() -> Result<(), String> {
+    // The isin membership lookup pass now parallelizes over output chunks for
+    // both regimes (dense table for small spans, hash set for wide ranges);
+    // per-element results are independent, so bytes must match numpy across
+    // regimes, dtypes, invert, empty test sets, and below-gate serial sizes.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(89)
+verdicts = []
+N = 4_000_003
+# wide-range (hash-set regime) across widths
+for dt in [np.int64, np.uint64, np.int32]:
+    info = np.iinfo(dt)
+    e = rng.integers(info.min // 2, info.max // 2, N).astype(dt)
+    t = rng.integers(info.min // 2, info.max // 2, 300_000).astype(dt)
+    t[:1000] = e[:1000]  # guarantee hits
+    r = fnp.isin(e, t); ex = np.isin(e, t)
+    if r.dtype != ex.dtype or r.shape != ex.shape or r.tobytes() != ex.tobytes():
+        verdicts.append(f"FAIL wide {dt.__name__}")
+    if fnp.isin(e, t, invert=True).tobytes() != np.isin(e, t, invert=True).tobytes():
+        verdicts.append(f"FAIL wide invert {dt.__name__}")
+# small-span (table regime)
+e = rng.integers(0, 100_000, N)
+t = rng.integers(0, 100_000, 50_000)
+if fnp.isin(e, t).tobytes() != np.isin(e, t).tobytes():
+    verdicts.append("FAIL table regime")
+# empty test set + below-gate
+if fnp.isin(e, np.array([], dtype=np.int64)).tobytes() != np.isin(e, np.array([], dtype=np.int64)).tobytes():
+    verdicts.append("FAIL empty test set")
+se = rng.integers(-2**60, 2**60, 1000)
+st = rng.integers(-2**60, 2**60, 100)
+if fnp.isin(se, st).tobytes() != np.isin(se, st).tobytes():
+    verdicts.append("FAIL below-gate")
+# 2-D element array keeps its shape
+e2 = rng.integers(0, 1000, (2048, 1024))
+t2 = rng.integers(0, 1000, 500)
+r = fnp.isin(e2, t2); ex = np.isin(e2, t2)
+if r.shape != ex.shape or r.tobytes() != ex.tobytes():
+    verdicts.append("FAIL 2-D shape")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+We = rng.integers(-2**62, 2**62, 16_000_000)
+Wt = rng.integers(-2**62, 2**62, 1_000_000)
+tn = best(lambda: np.isin(We, Wt)); tf = best(lambda: fnp.isin(We, Wt))
+print(f"ISIN_INT64_WIDE_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+Se = rng.integers(0, 100_000, 16_000_000)
+St = rng.integers(0, 100_000, 100_000)
+tn = best(lambda: np.isin(Se, St)); tf = best(lambda: fnp.isin(Se, St))
+print(f"ISIN_INT64_TABLE_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces ISIN_INT64_*_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "parallel int isin must be bit-identical to numpy: {result}"
     );
     Ok(())
 }

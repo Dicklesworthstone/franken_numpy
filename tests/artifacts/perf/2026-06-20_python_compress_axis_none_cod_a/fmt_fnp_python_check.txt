@@ -1,0 +1,2861 @@
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/benches/criterion_python_surface.rs:1382:
+         let logical_or = numpy.getattr("logical_or").expect("numpy.logical_or");
+
+         for size in [100_000_i64, 1_000_000_i64] {
+-            let index = numpy.call_method1("arange", (size,)).expect("compress index");
++            let index = numpy
++                .call_method1("arange", (size,))
++                .expect("compress index");
+             let arr = index
+                 .call_method1("astype", ("float64",))
+                 .expect("compress f64 input")
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:40:
+     FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError, MaskedArray, UFuncArray, UnaryOp,
+     arctan2 as ufunc_arctan2, bitwise_and as ufunc_bitwise_and,
+     bitwise_count as ufunc_bitwise_count, bitwise_or as ufunc_bitwise_or,
+-    bitwise_xor as ufunc_bitwise_xor, divide as ufunc_divide,
+-    divmod_arrays as ufunc_divmod, equal as ufunc_equal, fmax as ufunc_fmax,
+-    fmin as ufunc_fmin, frexp as ufunc_frexp,
+-    greater as ufunc_greater, greater_equal as ufunc_greater_equal,
+-    hypot as ufunc_hypot, isneginf as ufunc_isneginf,
+-    isposinf as ufunc_isposinf, left_shift as ufunc_left_shift,
++    bitwise_xor as ufunc_bitwise_xor, divide as ufunc_divide, divmod_arrays as ufunc_divmod,
++    equal as ufunc_equal, fmax as ufunc_fmax, fmin as ufunc_fmin, frexp as ufunc_frexp,
++    greater as ufunc_greater, greater_equal as ufunc_greater_equal, hypot as ufunc_hypot,
++    isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, left_shift as ufunc_left_shift,
+     less as ufunc_less, less_equal as ufunc_less_equal, logaddexp as ufunc_logaddexp,
+     logaddexp2 as ufunc_logaddexp2, logical_and as ufunc_logical_and,
+     logical_not as ufunc_logical_not, logical_or as ufunc_logical_or,
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:4271:
+         // layout) and reconstruct via f16::from_bits. The old astype->tolist->Vec<f32>
+         // path boxed one Python float per element — ~2500x slower than numpy on a 4M abs.
+         DType::F16 => ArrayStorage::F16(
+-            numpy_cast_contiguous_to_vec::<u16>(py, &flat.call_method1("view", ("uint16",))?, "uint16")?
+-                .into_iter()
+-                .map(f16::from_bits)
+-                .collect(),
++            numpy_cast_contiguous_to_vec::<u16>(
++                py,
++                &flat.call_method1("view", ("uint16",))?,
++                "uint16",
++            )?
++            .into_iter()
++            .map(f16::from_bits)
++            .collect(),
+         ),
+         DType::F32 => ArrayStorage::F32(numpy_cast_contiguous_to_vec::<f32>(py, &flat, "float32")?),
+         DType::F64 => ArrayStorage::F64(numpy_cast_contiguous_to_vec::<f64>(py, &flat, "float64")?),
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:5257:
+                 // all-False mask to nomask, matching numpy exactly.
+                 let kwargs = PyDict::new(py);
+                 kwargs.set_item("copy", copy)?;
+-                let result = numpy.getattr("ma")?.getattr("masked_where")?.call(
+-                    (mask.bind(py), x.bind(py)),
+-                    Some(&kwargs),
+-                )?;
++                let result = numpy
++                    .getattr("ma")?
++                    .getattr("masked_where")?
++                    .call((mask.bind(py), x.bind(py)), Some(&kwargs))?;
+                 if numpy_name == "masked_equal" {
+                     result.setattr("fill_value", v)?;
+                 }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:7954:
+         // (cannot be read from rayon threads), hence the one-time Vec copy.
+         let parallelizable = matches!(
+             op,
+-            BinaryOp::FloatPower
+-                | BinaryOp::Arctan2
+-                | BinaryOp::Logaddexp
+-                | BinaryOp::Logaddexp2
++            BinaryOp::FloatPower | BinaryOp::Arctan2 | BinaryOp::Logaddexp | BinaryOp::Logaddexp2
+         );
+-        if parallelizable
+-            && n >= FLOAT_POWER_PARALLEL_MIN_LEN
+-            && rayon::current_num_threads() >= 2
++        if parallelizable && n >= FLOAT_POWER_PARALLEL_MIN_LEN && rayon::current_num_threads() >= 2
+         {
+             use rayon::prelude::*;
+
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:9323:
+     }
+     let out_typed = out_u8.call_method1("view", (&a_dtype,))?;
+     let output_shape = PyTuple::new(py, shape.iter().copied())?;
+-    let output = out_typed.call_method1("reshape", (&output_shape,))?.unbind();
++    let output = out_typed
++        .call_method1("reshape", (&output_shape,))?
++        .unbind();
+     Ok(Some(output))
+ }
+
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:9505:
+     {
+         return Ok(None);
+     }
+-    if condition.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
++    if condition
++        .getattr("dtype")?
++        .getattr("kind")?
++        .extract::<String>()?
++        != "b"
++    {
+         return Ok(None);
+     }
+     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:9572:
+         }
+     }
+     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+-    Ok(Some(flat.call_method1("reshape", (&output_shape,))?.unbind()))
++    Ok(Some(
++        flat.call_method1("reshape", (&output_shape,))?.unbind(),
++    ))
+ }
+
+ // Generic typed core for boolean-mask stream compaction (np.compress / np.extract
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:9661:
+     if !arr.is_exact_instance(&ndarray_type) || !cond.is_exact_instance(&ndarray_type) {
+         return Ok(None);
+     }
+-    if cond.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
++    if cond
++        .getattr("dtype")?
++        .getattr("kind")?
++        .extract::<String>()?
++        != "b"
++    {
+         return Ok(None);
+     }
+     let a_dtype = arr.getattr("dtype")?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:10219:
+     {
+         return Ok(false);
+     }
+-    if mask.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
++    if mask
++        .getattr("dtype")?
++        .getattr("kind")?
++        .extract::<String>()?
++        != "b"
++    {
+         return Ok(false);
+     }
+     let a_dtype = a.getattr("dtype")?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:10324:
+     {
+         return Ok(false);
+     }
+-    if mask.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
++    if mask
++        .getattr("dtype")?
++        .getattr("kind")?
++        .extract::<String>()?
++        != "b"
++    {
+         return Ok(false);
+     }
+     let a_dtype = arr.getattr("dtype")?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:11006:
+     // bool -> int64 accumulator (uint8 view of the 0/1 bytes; see try_zerocopy_int_cumsum).
+     let result = if kind == "b" {
+         let viewed = a.call_method1("view", (numpy.getattr("uint8")?,))?;
+-        cumsum_axis_typed::<u8, i64, _, _>(py, &numpy, &viewed, axis, "int64", |v| v as i64, add_i64)?
++        cumsum_axis_typed::<u8, i64, _, _>(
++            py,
++            &numpy,
++            &viewed,
++            axis,
++            "int64",
++            |v| v as i64,
++            add_i64,
++        )?
+     } else {
+         match (kind.as_str(), itemsize) {
+-        ("i", 1) => cumsum_axis_typed::<i8, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, add_i64)?,
+-        ("i", 2) => cumsum_axis_typed::<i16, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, add_i64)?,
+-        ("i", 4) => cumsum_axis_typed::<i32, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, add_i64)?,
+-        ("i", 8) => cumsum_axis_typed::<i64, i64, _, _>(py, &numpy, a, axis, "int64", |v| v, add_i64)?,
+-        ("u", 1) => cumsum_axis_typed::<u8, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, add_u64)?,
+-        ("u", 2) => cumsum_axis_typed::<u16, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, add_u64)?,
+-        ("u", 4) => cumsum_axis_typed::<u32, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, add_u64)?,
+-        ("u", 8) => cumsum_axis_typed::<u64, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v, add_u64)?,
+-        _ => return Ok(None),
++            ("i", 1) => cumsum_axis_typed::<i8, i64, _, _>(
++                py,
++                &numpy,
++                a,
++                axis,
++                "int64",
++                |v| v as i64,
++                add_i64,
++            )?,
++            ("i", 2) => cumsum_axis_typed::<i16, i64, _, _>(
++                py,
++                &numpy,
++                a,
++                axis,
++                "int64",
++                |v| v as i64,
++                add_i64,
++            )?,
++            ("i", 4) => cumsum_axis_typed::<i32, i64, _, _>(
++                py,
++                &numpy,
++                a,
++                axis,
++                "int64",
++                |v| v as i64,
++                add_i64,
++            )?,
++            ("i", 8) => {
++                cumsum_axis_typed::<i64, i64, _, _>(py, &numpy, a, axis, "int64", |v| v, add_i64)?
++            }
++            ("u", 1) => cumsum_axis_typed::<u8, u64, _, _>(
++                py,
++                &numpy,
++                a,
++                axis,
++                "uint64",
++                |v| v as u64,
++                add_u64,
++            )?,
++            ("u", 2) => cumsum_axis_typed::<u16, u64, _, _>(
++                py,
++                &numpy,
++                a,
++                axis,
++                "uint64",
++                |v| v as u64,
++                add_u64,
++            )?,
++            ("u", 4) => cumsum_axis_typed::<u32, u64, _, _>(
++                py,
++                &numpy,
++                a,
++                axis,
++                "uint64",
++                |v| v as u64,
++                add_u64,
++            )?,
++            ("u", 8) => {
++                cumsum_axis_typed::<u64, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v, add_u64)?
++            }
++            _ => return Ok(None),
+         }
+     };
+     let Some((flat, shape)) = result else {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:11176:
+     // bool -> int64 accumulator (uint8 view of the 0/1 bytes; see try_zerocopy_int_cumprod).
+     let result = if kind == "b" {
+         let viewed = a.call_method1("view", (numpy.getattr("uint8")?,))?;
+-        cumsum_axis_typed::<u8, i64, _, _>(py, &numpy, &viewed, axis, "int64", |v| v as i64, mul_i64)?
++        cumsum_axis_typed::<u8, i64, _, _>(
++            py,
++            &numpy,
++            &viewed,
++            axis,
++            "int64",
++            |v| v as i64,
++            mul_i64,
++        )?
+     } else {
+         match (kind.as_str(), itemsize) {
+-        ("i", 1) => cumsum_axis_typed::<i8, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, mul_i64)?,
+-        ("i", 2) => cumsum_axis_typed::<i16, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, mul_i64)?,
+-        ("i", 4) => cumsum_axis_typed::<i32, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, mul_i64)?,
+-        ("i", 8) => cumsum_axis_typed::<i64, i64, _, _>(py, &numpy, a, axis, "int64", |v| v, mul_i64)?,
+-        ("u", 1) => cumsum_axis_typed::<u8, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, mul_u64)?,
+-        ("u", 2) => cumsum_axis_typed::<u16, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, mul_u64)?,
+-        ("u", 4) => cumsum_axis_typed::<u32, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, mul_u64)?,
+-        ("u", 8) => cumsum_axis_typed::<u64, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v, mul_u64)?,
+-        _ => return Ok(None),
++            ("i", 1) => cumsum_axis_typed::<i8, i64, _, _>(
++                py,
++                &numpy,
++                a,
++                axis,
++                "int64",
++                |v| v as i64,
++                mul_i64,
++            )?,
++            ("i", 2) => cumsum_axis_typed::<i16, i64, _, _>(
++                py,
++                &numpy,
++                a,
++                axis,
++                "int64",
++                |v| v as i64,
++                mul_i64,
++            )?,
++            ("i", 4) => cumsum_axis_typed::<i32, i64, _, _>(
++                py,
++                &numpy,
++                a,
++                axis,
++                "int64",
++                |v| v as i64,
++                mul_i64,
++            )?,
++            ("i", 8) => {
++                cumsum_axis_typed::<i64, i64, _, _>(py, &numpy, a, axis, "int64", |v| v, mul_i64)?
++            }
++            ("u", 1) => cumsum_axis_typed::<u8, u64, _, _>(
++                py,
++                &numpy,
++                a,
++                axis,
++                "uint64",
++                |v| v as u64,
++                mul_u64,
++            )?,
++            ("u", 2) => cumsum_axis_typed::<u16, u64, _, _>(
++                py,
++                &numpy,
++                a,
++                axis,
++                "uint64",
++                |v| v as u64,
++                mul_u64,
++            )?,
++            ("u", 4) => cumsum_axis_typed::<u32, u64, _, _>(
++                py,
++                &numpy,
++                a,
++                axis,
++                "uint64",
++                |v| v as u64,
++                mul_u64,
++            )?,
++            ("u", 8) => {
++                cumsum_axis_typed::<u64, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v, mul_u64)?
++            }
++            _ => return Ok(None),
+         }
+     };
+     let Some((flat, shape)) = result else {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:11414:
+     out_shape[last] = out_shape[last].saturating_mul(n_elems);
+     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+     Ok(Some(
+-        out_typed.call_method1("reshape", (&output_shape,))?.unbind(),
++        out_typed
++            .call_method1("reshape", (&output_shape,))?
++            .unbind(),
+     ))
+ }
+
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:11528:
+     let out_typed = out_u8.call_method1("view", (&dtype,))?;
+     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+     Ok(Some(
+-        out_typed.call_method1("reshape", (&output_shape,))?.unbind(),
++        out_typed
++            .call_method1("reshape", (&output_shape,))?
++            .unbind(),
+     ))
+ }
+
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:11970:
+ // Otherwise these extracted to an f64 Vec (~57x slower, lossy for wide ints).
+ // Returns None when to_begin/to_end are present (handled by the general path), a
+ // non-integer dtype, or a non-ndarray input.
+-fn try_zerocopy_int_ediff1d(
+-    py: Python<'_>,
+-    ary: &Bound<'_, PyAny>,
+-) -> PyResult<Option<Py<PyAny>>> {
++fn try_zerocopy_int_ediff1d(py: Python<'_>, ary: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+     let numpy = py.import("numpy")?;
+     let ndarray_type = numpy.getattr("ndarray")?;
+     if !ary.is_exact_instance(&ndarray_type) {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:12004:
+ // Vec (~311x slower). Reuses the generic ediff1d_typed core with plain IEEE-754
+ // single-precision subtraction x - y (bit-identical; nan/inf/-0.0 propagate exactly).
+ // Returns None for a non-float32 dtype or a non-ndarray input.
+-fn try_zerocopy_f32_ediff1d(
+-    py: Python<'_>,
+-    ary: &Bound<'_, PyAny>,
+-) -> PyResult<Option<Py<PyAny>>> {
++fn try_zerocopy_f32_ediff1d(py: Python<'_>, ary: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+     let numpy = py.import("numpy")?;
+     let ndarray_type = numpy.getattr("ndarray")?;
+     if !ary.is_exact_instance(&ndarray_type) {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:13352:
+                     let half = len / 2;
+                     let mid = left + half;
+                     let probe = bs[mid].get();
+-                    let cond = if right_probe { probe <= key } else { probe < key };
++                    let cond = if right_probe {
++                        probe <= key
++                    } else {
++                        probe < key
++                    };
+                     if cond {
+                         left = mid + 1;
+                         len -= half + 1;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:13385:
+     if !x.is_exact_instance(&ndarray_type) || !bins.is_exact_instance(&ndarray_type) {
+         return Ok(None);
+     }
+-    if x.getattr("ndim")?.extract::<usize>()? < 1
+-        || bins.getattr("ndim")?.extract::<usize>()? != 1
++    if x.getattr("ndim")?.extract::<usize>()? < 1 || bins.getattr("ndim")?.extract::<usize>()? != 1
+     {
+         return Ok(None);
+     }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:13529:
+     // float64 array (a no-op view when already f64). Defer on any cast failure.
+     let kw = PyDict::new(py);
+     kw.set_item("dtype", "float64")?;
+-    let Ok(w_arr) = numpy.getattr("ascontiguousarray")?.call((weights,), Some(&kw)) else {
++    let Ok(w_arr) = numpy
++        .getattr("ascontiguousarray")?
++        .call((weights,), Some(&kw))
++    else {
+         return Ok(None);
+     };
+     let Ok(w_buffer) = PyBuffer::<f64>::get(&w_arr) else {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:13705:
+         }
+         kwargs.set_item("dx", dx)?;
+         kwargs.set_item("axis", axis)?;
+-        return Ok(numpy.getattr(name)?.call((y.bind(py),), Some(&kwargs))?.unbind());
++        return Ok(numpy
++            .getattr(name)?
++            .call((y.bind(py),), Some(&kwargs))?
++            .unbind());
+     }
+     let y = extract_numeric_array(py, y.bind(py), &format!("{name}(y)"))?;
+     let result = match x {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:13878:
+     let count = input.iter().filter(|cell| pred(cell.get())).count();
+     let kwargs = PyDict::new(py);
+     kwargs.set_item("dtype", "int64")?;
+-    let out = numpy.call_method("empty", (count,), Some(&kwargs))?.unbind();
++    let out = numpy
++        .call_method("empty", (count,), Some(&kwargs))?
++        .unbind();
+     if count > 0 {
+         let Ok(out_buffer) = PyBuffer::<i64>::get(out.bind(py)) else {
+             return Ok(None);
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:14842:
+             // hazard), so the shared block / row-wise folds autovectorize. The
+             // fallback widened ints to an f64 Vec and ran the strided reduce
+             // (~17-23x slower). Dispatch by width to the right buffer element type.
+-            let itemsize = a.getattr("dtype")?.getattr("itemsize")?.extract::<usize>()?;
++            let itemsize = a
++                .getattr("dtype")?
++                .getattr("itemsize")?
++                .extract::<usize>()?;
+             match (kind.as_str(), itemsize) {
+-                ("i", 1) => zerocopy_any_all_buf::<i8, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0),
+-                ("i", 2) => zerocopy_any_all_buf::<i16, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0),
+-                ("i", 4) => zerocopy_any_all_buf::<i32, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0),
+-                ("i", 8) => zerocopy_any_all_buf::<i64, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0),
+-                ("u", 1) => zerocopy_any_all_buf::<u8, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0),
+-                ("u", 2) => zerocopy_any_all_buf::<u16, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0),
+-                ("u", 4) => zerocopy_any_all_buf::<u32, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0),
+-                ("u", 8) => zerocopy_any_all_buf::<u64, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0),
++                ("i", 1) => {
++                    zerocopy_any_all_buf::<i8, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0)
++                }
++                ("i", 2) => {
++                    zerocopy_any_all_buf::<i16, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0)
++                }
++                ("i", 4) => {
++                    zerocopy_any_all_buf::<i32, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0)
++                }
++                ("i", 8) => {
++                    zerocopy_any_all_buf::<i64, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0)
++                }
++                ("u", 1) => {
++                    zerocopy_any_all_buf::<u8, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0)
++                }
++                ("u", 2) => {
++                    zerocopy_any_all_buf::<u16, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0)
++                }
++                ("u", 4) => {
++                    zerocopy_any_all_buf::<u32, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0)
++                }
++                ("u", 8) => {
++                    zerocopy_any_all_buf::<u64, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0)
++                }
+                 _ => Ok(None),
+             }
+         }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:14859:
+             // float32 any/all (the f64 arm above is guarded): truthiness is v != 0.0
+             // (NaN truthy, -0.0 falsy, matching numpy). The fallback widened to an
+             // f64 Vec and ran the strided reduce (~28-40x slower).
+-            let itemsize = a.getattr("dtype")?.getattr("itemsize")?.extract::<usize>()?;
++            let itemsize = a
++                .getattr("dtype")?
++                .getattr("itemsize")?
++                .extract::<usize>()?;
+             if itemsize == 4 {
+                 zerocopy_any_all_buf::<f32, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0.0)
+             } else {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:15557:
+     // these dtypes through f64 (no PyBuffer Element) — ~680x slower for bool, ~2.7x for
+     // f16. Defer (the f64/int/f32 zero-copy paths below return None for them anyway).
+     if a.bind(py).is_exact_instance(&numpy.getattr("ndarray")?) {
+-        let kind = a.bind(py).getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+-        let itemsize = a.bind(py).getattr("dtype")?.getattr("itemsize")?.extract::<usize>()?;
++        let kind = a
++            .bind(py)
++            .getattr("dtype")?
++            .getattr("kind")?
++            .extract::<String>()?;
++        let itemsize = a
++            .bind(py)
++            .getattr("dtype")?
++            .getattr("itemsize")?
++            .extract::<usize>()?;
+         if kind == "b" || (kind == "f" && itemsize == 2) {
+             return fallback();
+         }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:15573:
+
+     // Zero-copy float32 clip with scalar bounds: clamp in f32, gated on a no-op
+     // promotion so result dtype matches numpy; skips the cold f64 round-trip.
+-    if let Some(out) =
+-        try_zerocopy_f32_clip(py, a.bind(py), a_min.bind(py), a_max.bind(py), min_val, max_val)?
+-    {
++    if let Some(out) = try_zerocopy_f32_clip(
++        py,
++        a.bind(py),
++        a_min.bind(py),
++        a_max.bind(py),
++        min_val,
++        max_val,
++    )? {
+         return Ok(out);
+     }
+
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:15728:
+             slot.set(src.get());
+         }
+     }
+-    Ok(Some(out_bytes.call_method1("view", (&arr_dtype,))?.unbind()))
++    Ok(Some(
++        out_bytes.call_method1("view", (&arr_dtype,))?.unbind(),
++    ))
+ }
+
+ #[pyfunction]
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:16041:
+     out_shape[ax] = out_axis;
+     let restored = flat.call_method1("view", (out_dtype,))?;
+     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+-    Ok(Some(restored.call_method1("reshape", (&output_shape,))?.unbind()))
++    Ok(Some(
++        restored.call_method1("reshape", (&output_shape,))?.unbind(),
++    ))
+ }
+
+ // Typed-by-itemsize concatenate for the dtypes the f64 helper leaves to the cold
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:16321:
+     let trim_f = mode.contains('f');
+     let trim_b = mode.contains('b');
+     let (lo, hi) = match bounds {
+-        Some((first, last)) => (if trim_f { first } else { 0 }, if trim_b { last } else { n }),
++        Some((first, last)) => (
++            if trim_f { first } else { 0 },
++            if trim_b { last } else { n },
++        ),
+         None => (0usize, 0usize), // all-zero / empty → empty result
+     };
+     let slice = pyo3::types::PySlice::new(py, lo as isize, hi as isize, 1);
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:16710:
+         let m = shape[shape.len() - 2];
+         let n = shape[shape.len() - 1];
+         let owned_shape = shape.to_vec();
+-        if let Ok(values) =
+-            fnp_linalg::batch_pinv(array.values(), &owned_shape, rcond.as_rcond(), rtol.as_rtol())
+-        {
++        if let Ok(values) = fnp_linalg::batch_pinv(
++            array.values(),
++            &owned_shape,
++            rcond.as_rcond(),
++            rtol.as_rtol(),
++        ) {
+             let mut out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
+             out_shape.push(n);
+             out_shape.push(m);
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:16719:
+-            let result =
+-                UFuncArray::new(out_shape, values, DType::F64).map_err(map_ufunc_error)?;
++            let result = UFuncArray::new(out_shape, values, DType::F64).map_err(map_ufunc_error)?;
+             return build_numpy_array_from_ufunc(py, &result);
+         }
+     }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:16823:
+         let n = shape[shape.len() - 1];
+         if let Some(rcond) = matrix_rank_default_rcond(array.dtype(), n) {
+             let owned_shape = shape.to_vec();
+-            if let Ok(ranks) =
+-                fnp_linalg::batch_matrix_rank(array.values(), &owned_shape, rcond)
+-            {
++            if let Ok(ranks) = fnp_linalg::batch_matrix_rank(array.values(), &owned_shape, rcond) {
+                 let out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
+                 let vals: Vec<i64> = ranks.iter().map(|&r| r as i64).collect();
+                 let result = UFuncArray::from_storage(out_shape, ArrayStorage::I64(vals))
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:16925:
+         && shape.len() == 2
+         && shape[0] == shape[1]
+         && shape[0] < SLOGDET_NATIVE_MIN_DIM
+-        && a
+-            .bind(py)
++        && a.bind(py)
+             .getattr("dtype")
+             .and_then(|d| d.getattr("kind"))
+             .and_then(|k| k.extract::<String>())
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:16951:
+     // parallel batch_slogdet, reducing the two matrix axes. On any Err (singular
+     // is still valid: sign=0, logabsdet=-inf; only shape errors out) fall back to
+     // numpy. Mirrors the 2-D guards.
+-    if shape.len() >= 3
+-        && shape[shape.len() - 1] == shape[shape.len() - 2]
+-        && real_f64_finite
+-    {
++    if shape.len() >= 3 && shape[shape.len() - 1] == shape[shape.len() - 2] && real_f64_finite {
+         let owned_shape = shape.to_vec();
+         if let Ok((signs, logs)) = fnp_linalg::batch_slogdet(array.values(), &owned_shape) {
+             let out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:16961:
+-            let sign_arr = UFuncArray::new(out_shape.clone(), signs, DType::F64)
+-                .map_err(map_ufunc_error)?;
+-            let log_arr =
+-                UFuncArray::new(out_shape, logs, DType::F64).map_err(map_ufunc_error)?;
++            let sign_arr =
++                UFuncArray::new(out_shape.clone(), signs, DType::F64).map_err(map_ufunc_error)?;
++            let log_arr = UFuncArray::new(out_shape, logs, DType::F64).map_err(map_ufunc_error)?;
+             return build_numpy_slogdet_result_arrays(py, &sign_arr, &log_arr);
+         }
+         return fallback();
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:17209:
+     // [n, k]. A defensive element-count check + Err fall back to numpy for any case
+     // batch_solve does not accept (non-trivial broadcast, singular, etc.). Mirrors the
+     // det/inv/eigh/matrix_rank batched wirings.
+-    if a_shape.len() >= 3 && a_shape[a_shape.len() - 1] == a_shape[a_shape.len() - 2] && real_f64_finite
++    if a_shape.len() >= 3
++        && a_shape[a_shape.len() - 1] == a_shape[a_shape.len() - 2]
++        && real_f64_finite
+     {
+         let n = a_shape[a_shape.len() - 1];
+         // NumPy 2.0+ treats `b` as a single vector ONLY when b.ndim == 1; any
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:17229:
+                     out_shape.push(b_shape[b_shape.len() - 1]);
+                 }
+                 let expected: usize = out_shape.iter().product();
+-                if let Ok(values) = fnp_linalg::batch_solve(
+-                    a.values(),
+-                    a_shape,
+-                    b.values(),
+-                    b_shape,
+-                    vector_rhs,
+-                ) && values.len() == expected
++                if let Ok(values) =
++                    fnp_linalg::batch_solve(a.values(), a_shape, b.values(), b_shape, vector_rhs)
++                    && values.len() == expected
+                     && let Ok(result) = UFuncArray::new(out_shape, values, DType::F64)
+                 {
+                     return build_numpy_array_from_ufunc(py, &result);
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:17245:
+         return fallback();
+     }
+
+-    if a_shape.len() != 2
+-        || a_shape[0] != a_shape[1]
+-        || !real_f64_finite
+-    {
++    if a_shape.len() != 2 || a_shape[0] != a_shape[1] || !real_f64_finite {
+         return fallback();
+     }
+
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:17335:
+         if let Ok(values) = fnp_linalg::batch_eigvalsh(&sym, &owned_shape) {
+             let mut out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
+             out_shape.push(n);
+-            let result =
+-                UFuncArray::new(out_shape, values, DType::F64).map_err(map_ufunc_error)?;
++            let result = UFuncArray::new(out_shape, values, DType::F64).map_err(map_ufunc_error)?;
+             return build_numpy_array_from_ufunc(py, &result);
+         }
+         return fallback();
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:17389:
+             .map(|k| k == "f")
+             .unwrap_or(false)
+     {
+-        return Ok(numpy.getattr("linalg")?.getattr("det")?.call1((bound,))?.unbind());
++        return Ok(numpy
++            .getattr("linalg")?
++            .getattr("det")?
++            .call1((bound,))?
++            .unbind());
+     }
+     if let Ok(array) = extract_numeric_array(py, bound, "det(a)") {
+         let shape = array.shape();
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:17438:
+     // before the extract — which would otherwise dominate a tiny inv — and delegate
+     // small systems to numpy. Mirrors the solve gesv-cliff size-gate.
+     if bound.is_exact_instance(&numpy.getattr("ndarray")?)
+-        && let Ok(shape) = bound.getattr("shape").and_then(|s| s.extract::<Vec<usize>>())
++        && let Ok(shape) = bound
++            .getattr("shape")
++            .and_then(|s| s.extract::<Vec<usize>>())
+         && shape.len() == 2
+         && shape[0] == shape[1]
+         && shape[0] < 100
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:17665:
+             let kind: String = x.getattr("dtype")?.getattr("kind")?.extract()?;
+             // int/uint canonicalize lossy; non-contiguous bails the fast path into the
+             // transpose-copy extract (~55x slower). Delegate both to numpy.
+-            let c_contiguous = x.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()?;
++            let c_contiguous = x
++                .getattr("flags")?
++                .getattr("c_contiguous")?
++                .extract::<bool>()?;
+             if kind == "i" || kind == "u" || !c_contiguous {
+                 return Ok(numpy.getattr("signbit")?.call1((x,))?.unbind());
+             }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:17685:
+ ) -> PyResult<Py<PyAny>> {
+     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+         let x_arg = args.get_item(0)?;
+-        signbit_native(py, &x_arg)
+-            .or_else(|_| core_numpy_passthrough(py, "signbit", args, kwargs))
++        signbit_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "signbit", args, kwargs))
+     } else {
+         core_numpy_passthrough(py, "signbit", args, kwargs)
+     }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:18069:
+     // native path maps every integer to float64 (widening int8/int16), so defer all
+     // non-float64 inputs to numpy for exact dtype + value parity.
+     if !numpy_dtype_is_f64(py, x) {
+-        return Ok(py.import("numpy")?.getattr(numpy_name)?.call1((x,))?.unbind());
++        return Ok(py
++            .import("numpy")?
++            .getattr(numpy_name)?
++            .call1((x,))?
++            .unbind());
+     }
+     let x = extract_precise_numeric_array(py, x, extract_label)?;
+     build_numpy_scalar_or_array(py, &x.elementwise_unary(op))
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:18088:
+ ) -> PyResult<Py<PyAny>> {
+     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+         let x_arg = args.get_item(0)?;
+-        degrees_native(py, &x_arg)
+-            .or_else(|_| core_numpy_passthrough(py, "degrees", args, kwargs))
++        degrees_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "degrees", args, kwargs))
+     } else {
+         core_numpy_passthrough(py, "degrees", args, kwargs)
+     }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:18108:
+ ) -> PyResult<Py<PyAny>> {
+     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+         let x_arg = args.get_item(0)?;
+-        radians_native(py, &x_arg)
+-            .or_else(|_| core_numpy_passthrough(py, "radians", args, kwargs))
++        radians_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "radians", args, kwargs))
+     } else {
+         core_numpy_passthrough(py, "radians", args, kwargs)
+     }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:18263:
+             .call1((x1.bind(py), x2.bind(py)))?
+             .unbind());
+     }
+-    if let Some(out) =
+-        try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Logaddexp)?
+-    {
++    if let Some(out) = try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Logaddexp)? {
+         return Ok(out);
+     }
+     if noncontiguous_ndarray(&numpy, x1.bind(py))? || noncontiguous_ndarray(&numpy, x2.bind(py))? {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:18303:
+             .call1((x1.bind(py), x2.bind(py)))?
+             .unbind());
+     }
+-    if let Some(out) =
+-        try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Logaddexp2)?
++    if let Some(out) = try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Logaddexp2)?
+     {
+         return Ok(out);
+     }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:18600:
+     {
+         let numpy = py.import("numpy")?;
+         if x.bind(py).is_exact_instance(&numpy.getattr("ndarray")?)
+-            && x.bind(py).getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b"
++            && x.bind(py)
++                .getattr("dtype")?
++                .getattr("kind")?
++                .extract::<String>()?
++                == "b"
+         {
+             let kwargs = PyDict::new(py);
+             kwargs.set_item("nan", nan)?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:19394:
+     }
+     let shape: Vec<usize> = v.getattr("shape")?.extract()?;
+     let output_shape = PyTuple::new(py, shape.iter().copied())?;
+-    Ok(Some(flat.call_method1("reshape", (&output_shape,))?.unbind()))
++    Ok(Some(
++        flat.call_method1("reshape", (&output_shape,))?.unbind(),
++    ))
+ }
+
+ // Typed binary-search core for np.searchsorted over a sorted haystack. For each
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:19632:
+         let kwargs = PyDict::new(py);
+         kwargs.set_item("dtype", "int64")?;
+         let counts = numpy.call_method("zeros", (nbins,), Some(&kwargs))?;
+-        return Ok(Some(
+-            PyTuple::new(py, [counts, edges])?.into_any().unbind(),
+-        ));
++        return Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()));
+     }
+     let Some(s) = buf.as_slice(py) else {
+         let histogram_fn = numpy.getattr("histogram")?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:19667:
+             .par_iter()
+             .map(|&raw| {
+                 let v = to_f64(raw);
+-                (
+-                    v,
+-                    v,
+-                    value_supported(raw),
+-                    !check_finite || v.is_finite(),
+-                )
++                (v, v, value_supported(raw), !check_finite || v.is_finite())
+             })
+             .reduce(
+                 || (f64::INFINITY, f64::NEG_INFINITY, true, true),
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:19741:
+         for (slot, value) in cs.iter().zip(local_counts) {
+             slot.set(value);
+         }
+-        return Ok(Some(
+-            PyTuple::new(py, [counts, edges])?.into_any().unbind(),
+-        ));
++        return Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()));
+     }
+
+     let mut mn = to_f64(s[0].get());
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:19819:
+             slot.set(slot.get() + 1);
+         }
+     }
+-    Ok(Some(
+-        PyTuple::new(py, [counts, edges])?.into_any().unbind(),
+-    ))
++    Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()))
+ }
+
+ fn histogram_f32(
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:19851:
+         let kwargs = PyDict::new(py);
+         kwargs.set_item("dtype", "int64")?;
+         let counts = numpy.call_method("zeros", (nbins,), Some(&kwargs))?;
+-        return Ok(Some(
+-            PyTuple::new(py, [counts, edges])?.into_any().unbind(),
+-        ));
++        return Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()));
+     }
+     let Some(s) = buf.as_slice(py) else {
+         let histogram_fn = numpy.getattr("histogram")?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:19975:
+             }
+         }
+     }
+-    Ok(Some(
+-        PyTuple::new(py, [counts, edges])?.into_any().unbind(),
+-    ))
++    Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()))
+ }
+
+ // O(n) uniform-bin np.histogram for exact 1-D f64/f32/integer ndarrays with
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:20002:
+     match (kind.as_str(), itemsize) {
+         ("f", 4) => histogram_f32(py, &numpy, a, nbins),
+         ("f", 8) => histogram_typed::<f64>(py, &numpy, a, nbins, |x| x, true, |_| true),
+-        ("i", 1) => {
+-            histogram_typed::<i8>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
++        ("i", 1) => histogram_typed::<i8>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
++        ("i", 2) => histogram_typed::<i16>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
++        ("i", 4) => histogram_typed::<i32>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
++        ("i", 8) => {
++            histogram_typed::<i64>(py, &numpy, a, nbins, |x| x as f64, false, i64_is_f64_exact)
+         }
+-        ("i", 2) => {
+-            histogram_typed::<i16>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
++        ("u", 1) => histogram_typed::<u8>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
++        ("u", 2) => histogram_typed::<u16>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
++        ("u", 4) => histogram_typed::<u32>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
++        ("u", 8) => {
++            histogram_typed::<u64>(py, &numpy, a, nbins, |x| x as f64, false, u64_is_f64_exact)
+         }
+-        ("i", 4) => {
+-            histogram_typed::<i32>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
+-        }
+-        ("i", 8) => histogram_typed::<i64>(
+-            py,
+-            &numpy,
+-            a,
+-            nbins,
+-            |x| x as f64,
+-            false,
+-            i64_is_f64_exact,
+-        ),
+-        ("u", 1) => {
+-            histogram_typed::<u8>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
+-        }
+-        ("u", 2) => {
+-            histogram_typed::<u16>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
+-        }
+-        ("u", 4) => {
+-            histogram_typed::<u32>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
+-        }
+-        ("u", 8) => histogram_typed::<u64>(
+-            py,
+-            &numpy,
+-            a,
+-            nbins,
+-            |x| x as f64,
+-            false,
+-            u64_is_f64_exact,
+-        ),
+         _ => Ok(None),
+     }
+ }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:20160:
+     // pass); the extract path below bridges bool->f64 and runs ~700x slower (85ms vs
+     // 122us @4M). numpy is the parity reference, so defer bool to it. (Checked only on
+     // the fallthrough — f64/int/f32 already returned.)
+-    if a
+-        .bind(py)
+-        .is_exact_instance(&numpy.getattr("ndarray")?)
+-        && a.bind(py).getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b"
++    if a.bind(py).is_exact_instance(&numpy.getattr("ndarray")?)
++        && a.bind(py)
++            .getattr("dtype")?
++            .getattr("kind")?
++            .extract::<String>()?
++            == "b"
+     {
+         return fallback();
+     }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:20569:
+     // view-semantics divergence). Delegate to numpy.rot90 for the exact view,
+     // dtype, and error surface.
+     let numpy = py.import("numpy")?;
+-    Ok(numpy.getattr("rot90")?.call1((m.bind(py), k, axes))?.unbind())
++    Ok(numpy
++        .getattr("rot90")?
++        .call1((m.bind(py), k, axes))?
++        .unbind())
+ }
+
+ #[pyfunction]
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:20919:
+     // Normalize indices to a contiguous int64 array; only integer index dtypes
+     // are accepted (float indices raise in numpy — defer).
+     let ind_arr = numpy.call_method1("asarray", (ind,))?;
+-    let ind_kind = ind_arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
++    let ind_kind = ind_arr
++        .getattr("dtype")?
++        .getattr("kind")?
++        .extract::<String>()?;
+     if ind_kind != "i" && ind_kind != "u" {
+         return Ok(None);
+     }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:21299:
+                 np_dt,
+             )
+         }
+-        _ => ("i".to_string(), 8, numpy.getattr("dtype")?.call1(("int64",))?),
++        _ => (
++            "i".to_string(),
++            8,
++            numpy.getattr("dtype")?.call1(("int64",))?,
++        ),
+     };
+     if kind != "i" && kind != "u" {
+         return Ok(None);
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:21847:
+             Err(_) => return Ok(None),
+         },
+     };
+-    let Ok(shape) = value.getattr("shape").and_then(|s| s.extract::<Vec<usize>>()) else {
++    let Ok(shape) = value
++        .getattr("shape")
++        .and_then(|s| s.extract::<Vec<usize>>())
++    else {
+         return Ok(None);
+     };
+     let total: usize = shape.iter().product();
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:21892:
+         }
+     }
+     let shape_tuple = PyTuple::new(py, shape)?;
+-    Ok(Some(flat.call_method1("reshape", (&shape_tuple,))?.unbind()))
++    Ok(Some(
++        flat.call_method1("reshape", (&shape_tuple,))?.unbind(),
++    ))
+ }
+
+ #[pyfunction]
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:21917:
+     // (out[i] = mask[i] ? fill : data[i]). Pure element selection, so bit-identical to the
+     // generic path. Non-f64 data, non-contiguous, structured/non-float fill, or any buffer
+     // failure fall through to the generic extraction.
+-    if let Some(out) = try_zerocopy_ma_filled_f64(py, a.bind(py), fill_value.as_ref().map(|v| v.bind(py)))? {
++    if let Some(out) =
++        try_zerocopy_ma_filled_f64(py, a.bind(py), fill_value.as_ref().map(|v| v.bind(py)))?
++    {
+         return Ok(out);
+     }
+
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:22856:
+         if (a_is_ma || a_b.is_exact_instance(&ndarray_type))
+             && (b_is_ma || b_b.is_exact_instance(&ndarray_type))
+         {
+-            let a_data = if a_is_ma { a_b.getattr("data")? } else { a_b.clone() };
+-            let b_data = if b_is_ma { b_b.getattr("data")? } else { b_b.clone() };
++            let a_data = if a_is_ma {
++                a_b.getattr("data")?
++            } else {
++                a_b.clone()
++            };
++            let b_data = if b_is_ma {
++                b_b.getattr("data")?
++            } else {
++                b_b.clone()
++            };
+             if numpy_dtype_is_f64(py, &a_data) && numpy_dtype_is_f64(py, &b_data) {
+                 let ashape = a_b.getattr("shape").and_then(|s| s.extract::<Vec<usize>>());
+                 let bshape = b_b.getattr("shape").and_then(|s| s.extract::<Vec<usize>>());
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:22884:
+                     } else {
+                         None
+                     };
+-                    let a_mask_buf = a_mask_view.as_ref().and_then(|v| PyBuffer::<u8>::get(v).ok());
+-                    let b_mask_buf = b_mask_view.as_ref().and_then(|v| PyBuffer::<u8>::get(v).ok());
++                    let a_mask_buf = a_mask_view
++                        .as_ref()
++                        .and_then(|v| PyBuffer::<u8>::get(v).ok());
++                    let b_mask_buf = b_mask_view
++                        .as_ref()
++                        .and_then(|v| PyBuffer::<u8>::get(v).ok());
+                     let a_mask = a_mask_buf.as_ref().and_then(|buf| buf.as_slice(py));
+                     let b_mask = b_mask_buf.as_ref().and_then(|buf| buf.as_slice(py));
+                     let n = ad.len();
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:22921:
+                             for i in 0..n {
+                                 let masked = a_mask.is_some_and(|s| s[i].get() != 0)
+                                     || b_mask.is_some_and(|s| s[i].get() != 0);
+-                                let res = if masked { fill_value } else { ad[i].get() == bd[i].get() };
++                                let res = if masked {
++                                    fill_value
++                                } else {
++                                    ad[i].get() == bd[i].get()
++                                };
+                                 if !res {
+                                     equal = false;
+                                     break;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:23179:
+     }
+     // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
+     // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
+-    if axis.as_ref().is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok()) {
++    if axis
++        .as_ref()
++        .is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok())
++    {
+         return fallback();
+     }
+     let a = match extract_numeric_array(py, a.bind(py), "nanmean(a)") {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:23362:
+ // Bit-exact flat mean (axis=None) = numpy's pairwise sum / n. numpy's unweighted
+ // np.average and np.mean both reduce to umr_sum (pairwise) / n, so this matches
+ // both. Empty input defers (numpy raises / warns). C-contiguous f64 only.
+-fn try_zerocopy_f64_mean_flat(
+-    py: Python<'_>,
+-    a: &Bound<'_, PyAny>,
+-) -> PyResult<Option<Py<PyAny>>> {
++fn try_zerocopy_f64_mean_flat(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+     let numpy = py.import("numpy")?;
+     let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+         return Ok(None);
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:23593:
+     }
+     // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
+     // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
+-    if axis.as_ref().is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok()) {
++    if axis
++        .as_ref()
++        .is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok())
++    {
+         return fallback();
+     }
+     let a = match extract_numeric_array(py, a.bind(py), "nansum(a)") {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:23709:
+     }
+     // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
+     // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
+-    if axis.as_ref().is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok()) {
++    if axis
++        .as_ref()
++        .is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok())
++    {
+         return fallback();
+     }
+     let a = match extract_numeric_array(py, a.bind(py), "nanprod(a)") {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:23841:
+             }
+             acc
+         };
+-        let parallel =
+-            outer >= 2 && outer * axis_len * inner >= (1 << 16) && rayon::current_num_threads() >= 2;
++        let parallel = outer >= 2
++            && outer * axis_len * inner >= (1 << 16)
++            && rayon::current_num_threads() >= 2;
+         let mut out = vec![0.0f64; outer * inner];
+         if parallel {
+             let planes: Vec<Vec<f64>> = (0..outer).into_par_iter().map(group_prod).collect();
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:23860:
+     let mut out_shape = shape.clone();
+     out_shape.remove(ax);
+     let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+-    let reshaped =
+-        flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
++    let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
+     if out_shape.is_empty() {
+         return Ok(Some(reshaped.get_item(())?.unbind()));
+     }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:23902:
+     while off < full {
+         let c = V::from_slice(&data[off..off + L]);
+         vsaw |= c.simd_eq(c); // non-NaN lanes (c == c)
+-        acc = if take_max { acc.simd_max(c) } else { acc.simd_min(c) };
++        acc = if take_max {
++            acc.simd_max(c)
++        } else {
++            acc.simd_min(c)
++        };
+         off += L;
+     }
+     let mut m = init;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:23946:
+             .reduce(
+                 || (init, false),
+                 |(am, asaw), (bm, bsaw)| {
+-                    (
+-                        if take_max { am.max(bm) } else { am.min(bm) },
+-                        asaw || bsaw,
+-                    )
++                    (if take_max { am.max(bm) } else { am.min(bm) }, asaw || bsaw)
+                 },
+             )
+     } else {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:24111:
+         // groups, fan across groups; a single group (2-D axis=0) privatizes across
+         // row-blocks and merges the planes elementwise.
+         let lane = axis_len * inner;
+-        let row_max = |mut acc: Vec<f64>, mut sw: Vec<bool>, base: usize| -> (Vec<f64>, Vec<bool>) {
+-            for r in 0..axis_len {
+-                let row = &data[base + r * inner..base + r * inner + inner];
+-                if take_max {
+-                    for ((a_acc, a_sw), &v) in acc.iter_mut().zip(sw.iter_mut()).zip(row) {
+-                        *a_acc = a_acc.max(v);
+-                        *a_sw |= v == v;
++        let row_max =
++            |mut acc: Vec<f64>, mut sw: Vec<bool>, base: usize| -> (Vec<f64>, Vec<bool>) {
++                for r in 0..axis_len {
++                    let row = &data[base + r * inner..base + r * inner + inner];
++                    if take_max {
++                        for ((a_acc, a_sw), &v) in acc.iter_mut().zip(sw.iter_mut()).zip(row) {
++                            *a_acc = a_acc.max(v);
++                            *a_sw |= v == v;
++                        }
++                    } else {
++                        for ((a_acc, a_sw), &v) in acc.iter_mut().zip(sw.iter_mut()).zip(row) {
++                            *a_acc = a_acc.min(v);
++                            *a_sw |= v == v;
++                        }
+                     }
+-                } else {
+-                    for ((a_acc, a_sw), &v) in acc.iter_mut().zip(sw.iter_mut()).zip(row) {
+-                        *a_acc = a_acc.min(v);
+-                        *a_sw |= v == v;
+-                    }
+                 }
+-            }
+-            (acc, sw)
++                (acc, sw)
++            };
++        let group_plane = |o: usize| -> (Vec<f64>, Vec<bool>) {
++            row_max(vec![init; inner], vec![false; inner], o * lane)
+         };
+-        let group_plane =
+-            |o: usize| -> (Vec<f64>, Vec<bool>) { row_max(vec![init; inner], vec![false; inner], o * lane) };
+         let mut out = vec![init; outer * inner];
+         let mut saw = vec![false; outer * inner];
+         if parallel && outer >= 2 {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:24437:
+         if keepdims.unwrap_or(false) {
+             let ndim = a.bind(py).getattr("ndim")?.extract::<usize>()?;
+             let arr = numpy.call_method1("asarray", (out.bind(py),))?;
+-            let reshaped =
+-                arr.call_method1("reshape", (PyTuple::new(py, vec![1usize; ndim])?,))?;
++            let reshaped = arr.call_method1("reshape", (PyTuple::new(py, vec![1usize; ndim])?,))?;
+             return Ok(reshaped.unbind());
+         }
+         return Ok(out);
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:24447:
+     // than the extract → native scan; all-NaN/±0 lanes defer to numpy).
+     if let Some(axis_val) = axis.as_ref()
+         && !axis_val.bind(py).is_none()
+-        && let Some(out) = try_zerocopy_f64_nanextreme_axis(py, a.bind(py), axis_val.bind(py), true)?
++        && let Some(out) =
++            try_zerocopy_f64_nanextreme_axis(py, a.bind(py), axis_val.bind(py), true)?
+     {
+         if keepdims.unwrap_or(false) {
+             let ndim = a.bind(py).getattr("ndim")?.extract::<usize>()?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:24471:
+     }
+     // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
+     // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
+-    if axis.as_ref().is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok()) {
++    if axis
++        .as_ref()
++        .is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok())
++    {
+         return fallback();
+     }
+     let a = match extract_numeric_array(py, a.bind(py), "nanmax(a)") {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:24542:
+         if keepdims.unwrap_or(false) {
+             let ndim = a.bind(py).getattr("ndim")?.extract::<usize>()?;
+             let arr = numpy.call_method1("asarray", (out.bind(py),))?;
+-            let reshaped =
+-                arr.call_method1("reshape", (PyTuple::new(py, vec![1usize; ndim])?,))?;
++            let reshaped = arr.call_method1("reshape", (PyTuple::new(py, vec![1usize; ndim])?,))?;
+             return Ok(reshaped.unbind());
+         }
+         return Ok(out);
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:24552:
+     // than the extract → native scan; all-NaN/±0 lanes defer to numpy).
+     if let Some(axis_val) = axis.as_ref()
+         && !axis_val.bind(py).is_none()
+-        && let Some(out) = try_zerocopy_f64_nanextreme_axis(py, a.bind(py), axis_val.bind(py), false)?
++        && let Some(out) =
++            try_zerocopy_f64_nanextreme_axis(py, a.bind(py), axis_val.bind(py), false)?
+     {
+         if keepdims.unwrap_or(false) {
+             let ndim = a.bind(py).getattr("ndim")?.extract::<usize>()?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:24576:
+     }
+     // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
+     // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
+-    if axis.as_ref().is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok()) {
++    if axis
++        .as_ref()
++        .is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok())
++    {
+         return fallback();
+     }
+     let a = match extract_numeric_array(py, a.bind(py), "nanmin(a)") {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:24703:
+     }
+     // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
+     // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
+-    if axis.as_ref().is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok()) {
++    if axis
++        .as_ref()
++        .is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok())
++    {
+         return fallback();
+     }
+     let a = match extract_numeric_array(py, a.bind(py), "nanstd(a)") {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:24844:
+     }
+     // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
+     // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
+-    if axis.as_ref().is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok()) {
++    if axis
++        .as_ref()
++        .is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok())
++    {
+         return fallback();
+     }
+     let a = match extract_numeric_array(py, a.bind(py), "nanvar(a)") {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:25637:
+     if !matches!(
+         parsed,
+         Some(
+-            DType::I8
+-                | DType::U8
+-                | DType::I16
+-                | DType::U16
+-                | DType::I32
+-                | DType::U32
+-                | DType::I64
++            DType::I8 | DType::U8 | DType::I16 | DType::U16 | DType::I32 | DType::U32 | DType::I64
+         )
+     ) {
+         return Ok(None);
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:25993:
+     }
+     // Fast hashed-set membership for matched integer dtypes — runs BEFORE the cold
+     // extract→UFuncArray path (~25x slower) so common id-membership skips it.
+-    if let Some(out) = try_zerocopy_int_isin(py, element.bind(py), test_elements.bind(py), invert)? {
++    if let Some(out) = try_zerocopy_int_isin(py, element.bind(py), test_elements.bind(py), invert)?
++    {
+         return Ok(out);
+     }
+     let ar1 = match extract_precise_numeric_array(py, element.bind(py), "isin(element)") {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:27578:
+         // straight off the borrowed buffers with a rayon-parallel atan2, skipping the
+         // extract_numeric_array copies (the serial extract+build marshalling, not the
+         // atan2, dominated the old path — ~26ms of a 47ms 1M call).
+-        if let Some(out) =
+-            try_zerocopy_f64_binary(py, &args.get_item(0)?, &args.get_item(1)?, BinaryOp::Arctan2)?
+-        {
++        if let Some(out) = try_zerocopy_f64_binary(
++            py,
++            &args.get_item(0)?,
++            &args.get_item(1)?,
++            BinaryOp::Arctan2,
++        )? {
+             return Ok(out);
+         }
+         let numpy = py.import("numpy")?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:28341:
+         }
+     }
+     let output_shape = PyTuple::new(py, shape.iter().copied())?;
+-    Ok(Some(flat.call_method1("reshape", (&output_shape,))?.unbind()))
++    Ok(Some(
++        flat.call_method1("reshape", (&output_shape,))?.unbind(),
++    ))
+ }
+
+ // Dispatch the narrow-width integer shift across i8/i16/i32 and u8/u16/u32/u64.
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:28364:
+     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+     match (kind.as_str(), itemsize, is_left) {
+         ("i", 1, true) => shift_typed_nw::<i8, _>(py, &numpy, a, b, "int8", "i", 1, |a, b| {
+-            if (0..8).contains(&b) { a.wrapping_shl(b as u32) } else { 0 }
++            if (0..8).contains(&b) {
++                a.wrapping_shl(b as u32)
++            } else {
++                0
++            }
+         }),
+         ("i", 1, false) => shift_typed_nw::<i8, _>(py, &numpy, a, b, "int8", "i", 1, |a, b| {
+-            if (0..8).contains(&b) { a.wrapping_shr(b as u32) } else if a < 0 { -1 } else { 0 }
++            if (0..8).contains(&b) {
++                a.wrapping_shr(b as u32)
++            } else if a < 0 {
++                -1
++            } else {
++                0
++            }
+         }),
+         ("i", 2, true) => shift_typed_nw::<i16, _>(py, &numpy, a, b, "int16", "i", 2, |a, b| {
+-            if (0..16).contains(&b) { a.wrapping_shl(b as u32) } else { 0 }
++            if (0..16).contains(&b) {
++                a.wrapping_shl(b as u32)
++            } else {
++                0
++            }
+         }),
+         ("i", 2, false) => shift_typed_nw::<i16, _>(py, &numpy, a, b, "int16", "i", 2, |a, b| {
+-            if (0..16).contains(&b) { a.wrapping_shr(b as u32) } else if a < 0 { -1 } else { 0 }
++            if (0..16).contains(&b) {
++                a.wrapping_shr(b as u32)
++            } else if a < 0 {
++                -1
++            } else {
++                0
++            }
+         }),
+         ("i", 4, true) => shift_typed_nw::<i32, _>(py, &numpy, a, b, "int32", "i", 4, |a, b| {
+-            if (0..32).contains(&b) { a.wrapping_shl(b as u32) } else { 0 }
++            if (0..32).contains(&b) {
++                a.wrapping_shl(b as u32)
++            } else {
++                0
++            }
+         }),
+         ("i", 4, false) => shift_typed_nw::<i32, _>(py, &numpy, a, b, "int32", "i", 4, |a, b| {
+-            if (0..32).contains(&b) { a.wrapping_shr(b as u32) } else if a < 0 { -1 } else { 0 }
++            if (0..32).contains(&b) {
++                a.wrapping_shr(b as u32)
++            } else if a < 0 {
++                -1
++            } else {
++                0
++            }
+         }),
+         ("u", 1, true) => shift_typed_nw::<u8, _>(py, &numpy, a, b, "uint8", "u", 1, |a, b| {
+             if b < 8 { a.wrapping_shl(b as u32) } else { 0 }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:28633:
+ ) -> PyResult<Py<PyAny>> {
+     // Bare call → native fast path; out=/where=/dtype= etc → numpy passthrough (full
+     // ufunc kwarg surface, matching np.square which accepts out=).
+-    native_unary_elementwise_or_passthrough(py, args, kwargs, UnaryOp::Square, "square", "square(x)")
++    native_unary_elementwise_or_passthrough(
++        py,
++        args,
++        kwargs,
++        UnaryOp::Square,
++        "square",
++        "square(x)",
++    )
+ }
+
+ #[pyfunction]
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:29064:
+     a2: &Bound<'_, PyAny>,
+ ) -> PyResult<Option<bool>> {
+     let u8t = numpy.getattr("uint8")?;
+-    let (Ok(v1), Ok(v2)) = (a1.call_method1("view", (&u8t,)), a2.call_method1("view", (&u8t,)))
+-    else {
++    let (Ok(v1), Ok(v2)) = (
++        a1.call_method1("view", (&u8t,)),
++        a2.call_method1("view", (&u8t,)),
++    ) else {
+         return Ok(None);
+     };
+     let (Ok(b1), Ok(b2)) = (PyBuffer::<u8>::get(&v1), PyBuffer::<u8>::get(&v2)) else {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:29077:
+     let (Some(s1), Some(s2)) = (b1.as_slice(py), b2.as_slice(py)) else {
+         return Ok(None);
+     };
+-    Ok(Some(s1.iter().zip(s2.iter()).all(|(x, y)| x.get() == y.get())))
++    Ok(Some(
++        s1.iter().zip(s2.iter()).all(|(x, y)| x.get() == y.get()),
++    ))
+ }
+
+ // Zero-copy np.array_equal for two SAME-dtype numeric ndarrays (int/uint/bool of
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:30681:
+     let ndarray_type = numpy.getattr("ndarray")?;
+     let a_arr = a.is_exact_instance(&ndarray_type) && numpy_dtype_is_f64(py, a);
+     let b_arr = b.is_exact_instance(&ndarray_type) && numpy_dtype_is_f64(py, b);
+-    let a_buf = if a_arr { PyBuffer::<f64>::get(a).ok() } else { None };
+-    let b_buf = if b_arr { PyBuffer::<f64>::get(b).ok() } else { None };
+-    let a_sc = if a_buf.is_none() { a.extract::<f64>().ok() } else { None };
+-    let b_sc = if b_buf.is_none() { b.extract::<f64>().ok() } else { None };
++    let a_buf = if a_arr {
++        PyBuffer::<f64>::get(a).ok()
++    } else {
++        None
++    };
++    let b_buf = if b_arr {
++        PyBuffer::<f64>::get(b).ok()
++    } else {
++        None
++    };
++    let a_sc = if a_buf.is_none() {
++        a.extract::<f64>().ok()
++    } else {
++        None
++    };
++    let b_sc = if b_buf.is_none() {
++        b.extract::<f64>().ok()
++    } else {
++        None
++    };
+     let verdict = match (&a_buf, &b_buf) {
+         (Some(ab), Some(bb)) => {
+             if ab.shape() != bb.shape() {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:30747:
+     if !a_arr && !b_arr {
+         return Ok(None); // need at least one f32 array
+     }
+-    let a_buf = if a_arr { PyBuffer::<f32>::get(a).ok() } else { None };
+-    let b_buf = if b_arr { PyBuffer::<f32>::get(b).ok() } else { None };
+-    let a_sc = if a_buf.is_none() { a.extract::<f64>().ok() } else { None };
+-    let b_sc = if b_buf.is_none() { b.extract::<f64>().ok() } else { None };
++    let a_buf = if a_arr {
++        PyBuffer::<f32>::get(a).ok()
++    } else {
++        None
++    };
++    let b_buf = if b_arr {
++        PyBuffer::<f32>::get(b).ok()
++    } else {
++        None
++    };
++    let a_sc = if a_buf.is_none() {
++        a.extract::<f64>().ok()
++    } else {
++        None
++    };
++    let b_sc = if b_buf.is_none() {
++        b.extract::<f64>().ok()
++    } else {
++        None
++    };
+     let verdict = match (&a_buf, &b_buf) {
+         (Some(ab), Some(bb)) => {
+             if ab.shape() != bb.shape() {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:30759:
+             let (Some(sa), Some(sb)) = (ab.as_slice(py), bb.as_slice(py)) else {
+                 return Ok(None);
+             };
+-            sa.iter().zip(sb.iter()).all(|(x, y)| {
+-                allclose_pair(x.get() as f64, y.get() as f64, rtol, atol, equal_nan)
+-            })
++            sa.iter()
++                .zip(sb.iter())
++                .all(|(x, y)| allclose_pair(x.get() as f64, y.get() as f64, rtol, atol, equal_nan))
+         }
+         (Some(ab), None) => {
+             let Some(bs) = b_sc else { return Ok(None) };
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:33520:
+     let svd_mode: Option<u8> = ord.as_ref().and_then(|ord_val| {
+         let bound = ord_val.bind(py);
+         if let Ok(text) = bound.extract::<String>() {
+-            if text == "nuc" {
+-                Some(2)
+-            } else {
+-                None
+-            }
++            if text == "nuc" { Some(2) } else { None }
+         } else if let Ok(f) = bound.extract::<f64>() {
+             if f == 2.0 {
+                 Some(0)
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:33567:
+                             out_shape.push(1);
+                             out_shape.push(1);
+                         }
+-                        let result = UFuncArray::new(out_shape, out, DType::F64)
+-                            .map_err(map_ufunc_error)?;
++                        let result =
++                            UFuncArray::new(out_shape, out, DType::F64).map_err(map_ufunc_error)?;
+                         return build_numpy_array_from_ufunc(py, &result);
+                     }
+                 }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:34147:
+         let out_shape: Vec<usize> = shape[..ax].to_vec();
+         let avg: Vec<f64> = pairs.iter().map(|(n, d)| n / d).collect();
+         let avg_flat = numpy_array_from_slice(py, &numpy, &avg, "float64")?;
+-        let avg_arr = avg_flat
+-            .call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
++        let avg_arr =
++            avg_flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
+         let avg_output = if out_shape.is_empty() {
+             avg_arr.get_item(())?
+         } else {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:34165:
+                 sow_arr
+             };
+             return Ok(Some(
+-                PyTuple::new(py, [avg_output, sow_output])?.into_any().unbind(),
++                PyTuple::new(py, [avg_output, sow_output])?
++                    .into_any()
++                    .unbind(),
+             ));
+         }
+         return Ok(Some(avg_output.unbind()));
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:34698:
+         if let Ok(values) = fnp_linalg::batch_svd(x.values(), &owned_shape) {
+             let mut out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
+             out_shape.push(k);
+-            let result =
+-                UFuncArray::new(out_shape, values, DType::F64).map_err(map_ufunc_error)?;
++            let result = UFuncArray::new(out_shape, values, DType::F64).map_err(map_ufunc_error)?;
+             return build_numpy_array_from_ufunc(py, &result);
+         }
+         return fallback();
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:35767:
+             && let Ok(mask) = arr.bind(py).getattr("mask")
+             && mask.is_instance(&numpy.getattr("ndarray")?)?
+             && let (Ok(mshape), Ok(dshape)) = (
+-                mask.getattr("shape").and_then(|s| s.extract::<Vec<usize>>()),
+-                arr.bind(py).getattr("shape").and_then(|s| s.extract::<Vec<usize>>()),
++                mask.getattr("shape")
++                    .and_then(|s| s.extract::<Vec<usize>>()),
++                arr.bind(py)
++                    .getattr("shape")
++                    .and_then(|s| s.extract::<Vec<usize>>()),
+             )
+             && mshape == dshape
+-            && mask.getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b"
++            && mask
++                .getattr("dtype")?
++                .getattr("kind")?
++                .extract::<String>()?
++                == "b"
+         {
+             return Ok(mask.unbind());
+         }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:35897:
+     if !numpy_dtype_is_f64(py, &data_obj) {
+         return Ok(None);
+     }
+-    let Ok(shape) = value.getattr("shape").and_then(|s| s.extract::<Vec<usize>>()) else {
++    let Ok(shape) = value
++        .getattr("shape")
++        .and_then(|s| s.extract::<Vec<usize>>())
++    else {
+         return Ok(None);
+     };
+     let total: usize = shape.iter().product();
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:36196:
+             val_shape.push(n);
+             let eval_arr =
+                 UFuncArray::new(val_shape, eigenvalues, DType::F64).map_err(map_ufunc_error)?;
+-            let evec_arr = UFuncArray::new(owned_shape, eigenvectors, DType::F64)
+-                .map_err(map_ufunc_error)?;
++            let evec_arr =
++                UFuncArray::new(owned_shape, eigenvectors, DType::F64).map_err(map_ufunc_error)?;
+             return build_numpy_eigh_result(py, &eval_arr, &evec_arr);
+         }
+         return fallback();
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:37380:
+                             // all-zero / fully singular matrix) to +Inf whenever the
+                             // input had no NaN entries. Our gate already requires
+                             // all-finite input, so every NaN here becomes Inf.
+-                            out.push(if ratio.is_nan() {
+-                                f64::INFINITY
+-                            } else {
+-                                ratio
+-                            });
++                            out.push(if ratio.is_nan() { f64::INFINITY } else { ratio });
+                         }
+-                        let out_shape: Vec<usize> =
+-                            owned_shape[..owned_shape.len() - 2].to_vec();
+-                        let result = UFuncArray::new(out_shape, out, DType::F64)
+-                            .map_err(map_ufunc_error)?;
++                        let out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
++                        let result =
++                            UFuncArray::new(out_shape, out, DType::F64).map_err(map_ufunc_error)?;
+                         return build_numpy_array_from_ufunc(py, &result);
+                     }
+                 }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:37409:
+ fn svd_matrix_norm_mode(py: Python<'_>, ord: &Py<PyAny>) -> Option<u8> {
+     let bound = ord.bind(py);
+     if let Ok(text) = bound.extract::<String>() {
+-        if text == "nuc" {
+-            Some(2)
+-        } else {
+-            None
+-        }
++        if text == "nuc" { Some(2) } else { None }
+     } else if let Ok(f) = bound.extract::<f64>() {
+         if f == 2.0 {
+             Some(0)
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:38997:
+     };
+     let restored = flat.call_method1("view", (numpy.getattr(orig_name.as_str())?,))?;
+     let output_shape = PyTuple::new(py, s_idx.iter().copied())?;
+-    Ok(Some(restored.call_method1("reshape", (&output_shape,))?.unbind()))
++    Ok(Some(
++        restored.call_method1("reshape", (&output_shape,))?.unbind(),
++    ))
+ }
+
+ #[pyfunction]
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:39044:
+     // indices); covers int/float/bool via a uintN bit-view. Skips the cold extract +
+     // rebuild. Bit-identical; broadcast, axis=None, OOB indices, and other layouts
+     // fall through.
+-    if let Some(out) =
+-        try_zerocopy_take_along_axis(py, arr.bind(py), indices.bind(py), axis)?
+-    {
++    if let Some(out) = try_zerocopy_take_along_axis(py, arr.bind(py), indices.bind(py), axis)? {
+         return Ok(out);
+     }
+
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:39822:
+         return Ok(Some(zerod.get_item(())?.unbind()));
+     }
+     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+-    let output = flat_bool.call_method1("reshape", (&output_shape,))?.unbind();
++    let output = flat_bool
++        .call_method1("reshape", (&output_shape,))?
++        .unbind();
+     Ok(Some(output))
+ }
+
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:40445:
+     // scalar fold. Delegate (axis=None bool and f64 stay native).
+     if axis_val.is_some()
+         && a.bind(py).is_exact_instance(&numpy.getattr("ndarray")?)
+-        && a.bind(py).getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b"
++        && a.bind(py)
++            .getattr("dtype")?
++            .getattr("kind")?
++            .extract::<String>()?
++            == "b"
+     {
+         return fallback();
+     }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:40539:
+     // scalar fold. Delegate (axis=None bool and f64 stay native).
+     if axis_val.is_some()
+         && a.bind(py).is_exact_instance(&numpy.getattr("ndarray")?)
+-        && a.bind(py).getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b"
++        && a.bind(py)
++            .getattr("dtype")?
++            .getattr("kind")?
++            .extract::<String>()?
++            == "b"
+     {
+         return fallback();
+     }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:41174:
+     if !a.is_exact_instance(&ndarray_type) {
+         return Ok(None);
+     }
+-    if !a.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()? {
++    if !a
++        .getattr("flags")?
++        .getattr("c_contiguous")?
++        .extract::<bool>()?
++    {
+         return Ok(None);
+     }
+     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:41216:
+             unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+         use rayon::prelude::*;
+         const ARGEXTREME_LASTAXIS_PARALLEL_MIN: usize = 1 << 16;
+-        let parallel = outer * lane >= ARGEXTREME_LASTAXIS_PARALLEL_MIN
+-            && rayon::current_num_threads() >= 2;
++        let parallel =
++            outer * lane >= ARGEXTREME_LASTAXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+         let per: Vec<Option<usize>> = if parallel {
+             data.par_chunks_exact(lane)
+                 .map(|l| simd_argextreme_f64(l, take_max))
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:41963:
+     // the result, so defer those.
+     if let Some(kw) = kwargs {
+         for key in kw.keys() {
+-            if key.extract::<String>().map(|k| k != "optimize").unwrap_or(true) {
++            if key
++                .extract::<String>()
++                .map(|k| k != "optimize")
++                .unwrap_or(true)
++            {
+                 return Ok(None);
+             }
+         }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:41976:
+     };
+     let inb: Vec<char> = inp.trim().chars().collect();
+     let oub: Vec<char> = outp.trim().chars().collect();
+-    let distinct = |s: &[char]| {
+-        s.iter().collect::<std::collections::HashSet<_>>().len() == s.len()
+-    };
++    let distinct = |s: &[char]| s.iter().collect::<std::collections::HashSet<_>>().len() == s.len();
+     // Must be a permutation of ALL labels: same length, all alphabetic, both sides
+     // distinct, and same label set.
+     if inb.is_empty()
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:42006:
+         .iter()
+         .map(|c| inb.iter().position(|x| x == c).unwrap())
+         .collect();
+-    Ok(Some(
+-        operand.call_method1("transpose", (perm,))?.unbind(),
+-    ))
++    Ok(Some(operand.call_method1("transpose", (perm,))?.unbind()))
+ }
+
+ #[pyfunction]
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:42588:
+     let outc: Vec<char> = out.chars().collect();
+     if !labels.iter().all(|c| c.is_ascii_alphabetic())
+         || outc.len() >= labels.len()
+-        || labels.iter().collect::<std::collections::HashSet<_>>().len() != labels.len()
++        || labels
++            .iter()
++            .collect::<std::collections::HashSet<_>>()
++            .len()
++            != labels.len()
+     {
+         return Ok(None);
+     }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:42631:
+         return Ok(None);
+     }
+     // Contiguous-block 8-accumulator dot — bit-stable per block, allclose vs numpy.
+-    let block_dot = |ra: &[pyo3::buffer::ReadOnlyCell<f64>],
+-                     rb: &[pyo3::buffer::ReadOnlyCell<f64>]|
+-     -> f64 {
+-        let mut acc = [0.0f64; 8];
+-        let mut ca = ra.chunks_exact(8);
+-        let mut cb = rb.chunks_exact(8);
+-        for (ga, gb) in ca.by_ref().zip(cb.by_ref()) {
+-            acc[0] += ga[0].get() * gb[0].get();
+-            acc[1] += ga[1].get() * gb[1].get();
+-            acc[2] += ga[2].get() * gb[2].get();
+-            acc[3] += ga[3].get() * gb[3].get();
+-            acc[4] += ga[4].get() * gb[4].get();
+-            acc[5] += ga[5].get() * gb[5].get();
+-            acc[6] += ga[6].get() * gb[6].get();
+-            acc[7] += ga[7].get() * gb[7].get();
+-        }
+-        let mut s = acc.iter().sum::<f64>();
+-        for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
+-            s += x.get() * y.get();
+-        }
+-        s
+-    };
++    let block_dot =
++        |ra: &[pyo3::buffer::ReadOnlyCell<f64>], rb: &[pyo3::buffer::ReadOnlyCell<f64>]| -> f64 {
++            let mut acc = [0.0f64; 8];
++            let mut ca = ra.chunks_exact(8);
++            let mut cb = rb.chunks_exact(8);
++            for (ga, gb) in ca.by_ref().zip(cb.by_ref()) {
++                acc[0] += ga[0].get() * gb[0].get();
++                acc[1] += ga[1].get() * gb[1].get();
++                acc[2] += ga[2].get() * gb[2].get();
++                acc[3] += ga[3].get() * gb[3].get();
++                acc[4] += ga[4].get() * gb[4].get();
++                acc[5] += ga[5].get() * gb[5].get();
++                acc[6] += ga[6].get() * gb[6].get();
++                acc[7] += ga[7].get() * gb[7].get();
++            }
++            let mut s = acc.iter().sum::<f64>();
++            for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
++                s += x.get() * y.get();
++            }
++            s
++        };
+     let (out_values, out_shape): (Vec<f64>, Vec<usize>) = if is_prefix {
+         // Keep leading outc.len() axes; sum the trailing (contiguous) block.
+         let n_groups: usize = sa[..outc.len()].iter().product();
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:42659:
+         let block = if n_groups == 0 { 0 } else { total / n_groups };
+         let vals = (0..n_groups)
+-            .map(|g| block_dot(&va[g * block..(g + 1) * block], &vb[g * block..(g + 1) * block]))
++            .map(|g| {
++                block_dot(
++                    &va[g * block..(g + 1) * block],
++                    &vb[g * block..(g + 1) * block],
++                )
++            })
+             .collect();
+         (vals, sa[..outc.len()].to_vec())
+     } else {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:42793:
+     ) else {
+         return Ok(None);
+     };
+-    let (nrows, ncols) = if sa.len() == 2 { (sa[0], sa[1]) } else { return Ok(None) };
++    let (nrows, ncols) = if sa.len() == 2 {
++        (sa[0], sa[1])
++    } else {
++        return Ok(None);
++    };
+     // Vector length must match the contracted axis: column→ncols, row→nrows.
+     let want_vlen = if contract_col { ncols } else { nrows };
+     if sb.len() != 1 || sb[0] != want_vlen {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:42833:
+             s
+         };
+         if keep_axis {
+-            ((0..nrows).map(|i| row_dot(&va[i * ncols..(i + 1) * ncols])).collect(), vec![nrows])
++            (
++                (0..nrows)
++                    .map(|i| row_dot(&va[i * ncols..(i + 1) * ncols]))
++                    .collect(),
++                vec![nrows],
++            )
+         } else {
+             let mut total = 0.0f64;
+             for i in 0..nrows {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:42908:
+         return Ok(Some(result));
+     }
+     if args.len() == 2
+-        && let Some(result) = try_zerocopy_f64_einsum_single_reduction_2d(
+-            py,
+-            &subscripts,
+-            &args.get_item(1)?,
+-        )?
++        && let Some(result) =
++            try_zerocopy_f64_einsum_single_reduction_2d(py, &subscripts, &args.get_item(1)?)?
+     {
+         return Ok(Some(result));
+     }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:42954:
+     }
+     // Two-operand matrix·vector contraction ('ij,j->i' / 'ij,j->'): zero-copy fused scan.
+     if args.len() == 3
+-        && let Some(result) = try_zerocopy_f64_einsum_matvec(
+-            py,
+-            &subscripts,
+-            &args.get_item(1)?,
+-            &args.get_item(2)?,
+-        )?
++        && let Some(result) =
++            try_zerocopy_f64_einsum_matvec(py, &subscripts, &args.get_item(1)?, &args.get_item(2)?)?
+     {
+         return Ok(Some(result));
+     }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:42994:
+         let op = &operands[0];
+         let inb: Vec<char> = inp.chars().collect();
+         let oub: Vec<char> = outp.chars().collect();
+-        let distinct = |s: &[char]| {
+-            s.iter()
+-                .collect::<std::collections::HashSet<_>>()
+-                .len()
+-                == s.len()
+-        };
++        let distinct =
++            |s: &[char]| s.iter().collect::<std::collections::HashSet<_>>().len() == s.len();
+         if op.dtype() == DType::F64
+             && !inp.contains('.')
+             && !outp.contains('.')
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:43180:
+ // (O(n+range) vs the sort path's O(n log n)). Gated to a C-contiguous integer
+ // ndarray; dispatched by (kind, itemsize). Wide ranges / non-contiguous / empty
+ // inputs return None so the caller keeps the existing sort path.
+-fn try_zerocopy_int_unique(
+-    py: Python<'_>,
+-    item: &Bound<'_, PyAny>,
+-) -> PyResult<Option<Py<PyAny>>> {
++fn try_zerocopy_int_unique(py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+     let numpy = py.import("numpy")?;
+     let ndarray_type = numpy.getattr("ndarray")?;
+     if !item.is_exact_instance(&ndarray_type) {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:43285:
+     }
+     let size = range as usize + 1;
+     let mut seen = vec![false; size];
+-    let mut first_idx = if want_index { vec![0i64; size] } else { Vec::new() };
++    let mut first_idx = if want_index {
++        vec![0i64; size]
++    } else {
++        Vec::new()
++    };
+     let mut counts = if want_counts || want_inverse {
+         vec![0i64; size]
+     } else {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:43307:
+     let mut uvals: Vec<i128> = Vec::new();
+     let mut idxv: Vec<i64> = Vec::new();
+     let mut cntv: Vec<i64> = Vec::new();
+-    let mut rank = if want_inverse { vec![0i64; size] } else { Vec::new() };
++    let mut rank = if want_inverse {
++        vec![0i64; size]
++    } else {
++        Vec::new()
++    };
+     let mut w: i64 = 0;
+     for (i, &b) in seen.iter().enumerate() {
+         if b {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:43771:
+     let kwargs = PyDict::new(py);
+     kwargs.set_item("dtype", "uint8")?;
+     let out = numpy.call_method("empty", (PyTuple::new(py, &shape)?,), Some(&kwargs))?;
+-    let out_buf =
+-        PyBuffer::<u8>::get(&out).map_err(|e| PyValueError::new_err(e.to_string()))?;
++    let out_buf = PyBuffer::<u8>::get(&out).map_err(|e| PyValueError::new_err(e.to_string()))?;
+     let Some(out_slice) = out_buf.as_mut_slice(py) else {
+         return Ok(None);
+     };
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:44455:
+         ("i", 1) => {
+             sign_typed::<i8, _>(py, &numpy, a, "int8", |v| i8::from(v > 0) - i8::from(v < 0))?
+         }
+-        ("i", 2) => {
+-            sign_typed::<i16, _>(py, &numpy, a, "int16", |v| i16::from(v > 0) - i16::from(v < 0))?
+-        }
+-        ("i", 4) => {
+-            sign_typed::<i32, _>(py, &numpy, a, "int32", |v| i32::from(v > 0) - i32::from(v < 0))?
+-        }
++        ("i", 2) => sign_typed::<i16, _>(py, &numpy, a, "int16", |v| {
++            i16::from(v > 0) - i16::from(v < 0)
++        })?,
++        ("i", 4) => sign_typed::<i32, _>(py, &numpy, a, "int32", |v| {
++            i32::from(v > 0) - i32::from(v < 0)
++        })?,
+         ("i", 8) => sign_typed::<i64, _>(py, &numpy, a, "int64", |v| {
+             i64::from(v > 0) - i64::from(v < 0)
+         })?,
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:44638:
+         let mul = |x: i64, y: i64| x.wrapping_mul(y);
+         return match axis {
+             None => prod_typed::<u8, i64, _, _>(py, &numpy, &viewed, "int64", 1, |v| v as i64, mul),
+-            Some(ax) => {
+-                prod_axis_typed::<u8, i64, _, _>(py, &numpy, &viewed, "int64", 1, |v| v as i64, mul, ax)
+-            }
++            Some(ax) => prod_axis_typed::<u8, i64, _, _>(
++                py,
++                &numpy,
++                &viewed,
++                "int64",
++                1,
++                |v| v as i64,
++                mul,
++                ax,
++            ),
+         };
+     }
+     // Dispatch each (input type T, accumulator type A) pair to either the full
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:44648:
+     macro_rules! dispatch {
+         ($t:ty, $a:ty, $dt:literal, $conv:expr) => {
+             match axis {
+-                None => prod_typed::<$t, $a, _, _>(
+-                    py,
+-                    &numpy,
+-                    a,
+-                    $dt,
+-                    1,
+-                    $conv,
+-                    |x: $a, y: $a| x.wrapping_mul(y),
+-                ),
++                None => prod_typed::<$t, $a, _, _>(py, &numpy, a, $dt, 1, $conv, |x: $a, y: $a| {
++                    x.wrapping_mul(y)
++                }),
+                 Some(ax) => prod_axis_typed::<$t, $a, _, _>(
+                     py,
+                     &numpy,
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:45092:
+     if itemsize <= 2 || size < (1 << 23) {
+         let kwargs = PyDict::new(py);
+         kwargs.set_item("axis", axis)?;
+-        return Ok(Some(numpy.getattr("ptp")?.call((a,), Some(&kwargs))?.unbind()));
++        return Ok(Some(
++            numpy.getattr("ptp")?.call((a,), Some(&kwargs))?.unbind(),
++        ));
+     }
+     let result = match (kind.as_str(), itemsize) {
+         ("i", 1) => ptp_axis_typed::<i8, _>(py, &numpy, a, axis, "int8", |x, y| x.wrapping_sub(y))?,
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:45099:
+-        ("i", 2) => ptp_axis_typed::<i16, _>(py, &numpy, a, axis, "int16", |x, y| x.wrapping_sub(y))?,
+-        ("i", 4) => ptp_axis_typed::<i32, _>(py, &numpy, a, axis, "int32", |x, y| x.wrapping_sub(y))?,
+-        ("i", 8) => ptp_axis_typed::<i64, _>(py, &numpy, a, axis, "int64", |x, y| x.wrapping_sub(y))?,
+-        ("u", 1) => ptp_axis_typed::<u8, _>(py, &numpy, a, axis, "uint8", |x, y| x.wrapping_sub(y))?,
+-        ("u", 2) => ptp_axis_typed::<u16, _>(py, &numpy, a, axis, "uint16", |x, y| x.wrapping_sub(y))?,
+-        ("u", 4) => ptp_axis_typed::<u32, _>(py, &numpy, a, axis, "uint32", |x, y| x.wrapping_sub(y))?,
+-        ("u", 8) => ptp_axis_typed::<u64, _>(py, &numpy, a, axis, "uint64", |x, y| x.wrapping_sub(y))?,
++        ("i", 2) => {
++            ptp_axis_typed::<i16, _>(py, &numpy, a, axis, "int16", |x, y| x.wrapping_sub(y))?
++        }
++        ("i", 4) => {
++            ptp_axis_typed::<i32, _>(py, &numpy, a, axis, "int32", |x, y| x.wrapping_sub(y))?
++        }
++        ("i", 8) => {
++            ptp_axis_typed::<i64, _>(py, &numpy, a, axis, "int64", |x, y| x.wrapping_sub(y))?
++        }
++        ("u", 1) => {
++            ptp_axis_typed::<u8, _>(py, &numpy, a, axis, "uint8", |x, y| x.wrapping_sub(y))?
++        }
++        ("u", 2) => {
++            ptp_axis_typed::<u16, _>(py, &numpy, a, axis, "uint16", |x, y| x.wrapping_sub(y))?
++        }
++        ("u", 4) => {
++            ptp_axis_typed::<u32, _>(py, &numpy, a, axis, "uint32", |x, y| x.wrapping_sub(y))?
++        }
++        ("u", 8) => {
++            ptp_axis_typed::<u64, _>(py, &numpy, a, axis, "uint64", |x, y| x.wrapping_sub(y))?
++        }
+         _ => return Ok(None),
+     };
+     let Some((flat, out_shape)) = result else {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:45188:
+             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+         use rayon::prelude::*;
+         const PTP_AXIS_PARALLEL_MIN: usize = 1 << 21;
+-        let parallel = outer * axis_len * inner >= PTP_AXIS_PARALLEL_MIN
+-            && rayon::current_num_threads() >= 2;
++        let parallel =
++            outer * axis_len * inner >= PTP_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+         let lane = axis_len * inner;
+         // ptp tracks NaN-presence SEPARATELY and emits NaN for any nan lane, so the
+         // running max/min can use branchless NaN-skipping f64::max/min (vectorizes;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:45230:
+             let group_plane = |obase: usize| -> (Vec<f64>, Vec<f64>, Vec<bool>) {
+                 let mut mxv = data[obase..obase + inner].to_vec();
+                 let mut mnv = mxv.clone();
+-                let mut nanv: Vec<bool> = data[obase..obase + inner].iter().map(|&v| v != v).collect();
++                let mut nanv: Vec<bool> =
++                    data[obase..obase + inner].iter().map(|&v| v != v).collect();
+                 for a_idx in 1..axis_len {
+                     let slab = &data[obase + a_idx * inner..obase + a_idx * inner + inner];
+                     for (((m, n), nf), &v) in mxv
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:45974:
+ // ndim>1 (axis=None raises a ValueError instead of flattening). Route the pure case to the
+ // native parallel `cum{sum,prod}` (which beats numpy's single-threaded scan ~3.7x at 4M
+ // f64), and defer `include_initial` / `dtype` / `out` / the axis=None-on-ND error to numpy.
+-type CumulativeNative =
+-    fn(Python<'_>, Py<PyAny>, Option<Py<PyAny>>, Option<Py<PyAny>>, Option<Py<PyAny>>) -> PyResult<Py<PyAny>>;
++type CumulativeNative = fn(
++    Python<'_>,
++    Py<PyAny>,
++    Option<Py<PyAny>>,
++    Option<Py<PyAny>>,
++    Option<Py<PyAny>>,
++) -> PyResult<Py<PyAny>>;
+
+ fn cumulative_dispatch(
+     py: Python<'_>,
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:49117:
+ #[cfg(test)]
+ mod tests {
+     use super::{
+-        PyFromPyFunc, PyVectorize, PythonNativeGemmOp, argwhere, bincount,
++        NarrowSetOp, PyFromPyFunc, PyVectorize, PythonNativeGemmOp, argwhere, bincount,
+         build_numpy_array_from_ufunc, ceil_native, choose, compress, copysign, count_nonzero,
+-        degrees_native, diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize, extract,
+-        extract_numeric_array, extract_precise_numeric_array, fill_diagonal, flatnonzero, flip,
+-        fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interp, isfinite_native,
+-        isinf_native, isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp,
+-        logaddexp2, meshgrid, modf, nan_to_num, NarrowSetOp, narrow_bitmap_setop,
++        degrees_native, diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize,
++        extract, extract_numeric_array, extract_precise_numeric_array, fill_diagonal, flatnonzero,
++        flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interp,
++        isfinite_native, isinf_native, isnan_native, isneginf_native, isposinf_native, ix_, ldexp,
++        logaddexp, logaddexp2, meshgrid, modf, nan_to_num, narrow_bitmap_setop, nextafter, place,
++        put, put_along_axis, putmask, python_native_gemm_f64_2d,
++        python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate,
++        radians_native, ravel_multi_index, required_dict_item, rfftfreq, rint_native, searchsorted,
++        select, sign, signbit_native, sinc, solve_triangular, spacing, take, take_along_axis,
++        tensorinv, tensorsolve, trapezoid, trapz, tri, tril_indices, tril_indices_from,
++        triu_indices, triu_indices_from, trunc_native, unravel_index, where_py,
+         wide_int_table_bounds,
+-        nextafter, place, put, put_along_axis, putmask, python_native_gemm_f64_2d,
+-        python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate, radians_native,
+-        ravel_multi_index, required_dict_item, rfftfreq, rint_native, searchsorted, select, sign,
+-        signbit_native, sinc, solve_triangular, spacing, take, take_along_axis, tensorinv,
+-        tensorsolve, trapezoid, trapz, tri, tril_indices, tril_indices_from, triu_indices,
+-        triu_indices_from, trunc_native, unravel_index, where_py,
+     };
+     use fnp_dtype::{ArrayStorage, DType};
+     use fnp_ufunc::UFuncArray;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:53622:
+             int16_kwargs.set_item("dtype", numpy.getattr("int16")?)?;
+             let (ours, theirs) = random_generator_pair(&random, &numpy_random, 275)?;
+             assert_random_sample_matches_numpy(
+-                &ours.call_method("integers", (-300_i64, 300_i64, 6_usize), Some(&int16_kwargs))?,
++                &ours.call_method(
++                    "integers",
++                    (-300_i64, 300_i64, 6_usize),
++                    Some(&int16_kwargs),
++                )?,
+                 &theirs.call_method(
+                     "integers",
+                     (-300_i64, 300_i64, 6_usize),
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:57576:
+             let np_where = numpy.getattr("where")?;
+             let fnp_where = module.getattr("where")?;
+             let array_equal = numpy.getattr("array_equal")?;
+-            let rng = numpy.getattr("random")?.getattr("default_rng")?.call1((8_u64,))?;
++            let rng = numpy
++                .getattr("random")?
++                .getattr("default_rng")?
++                .call1((8_u64,))?;
+             let v = rng.getattr("standard_normal")?.call1((4096_i64,))?;
+             let cond = v.call_method1("__gt__", (0.0,))?;
+             // (description, x, y) where x/y are arbitrary python objects.
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:57584:
+             let i = |x: i64| -> Py<PyAny> { x.into_pyobject(py).unwrap().into_any().unbind() };
+             let arr = || v.clone().unbind();
+             let cases: Vec<(Py<PyAny>, Py<PyAny>)> = vec![
+-                (arr(), f(0.0)),       // arr, float scalar -> f64
+-                (f(5.0), arr()),       // float scalar, arr -> f64
+-                (arr(), i(0)),         // arr, int scalar -> f64 (array dominates)
+-                (f(1.0), f(0.0)),      // float, float -> f64
+-                (f(1.0), i(0)),        // float, int -> f64
+-                (i(1), i(0)),          // int, int -> int64 (MUST defer / match numpy)
+-                (arr(), f(f64::NAN)),  // nan scalar
++                (arr(), f(0.0)),      // arr, float scalar -> f64
++                (f(5.0), arr()),      // float scalar, arr -> f64
++                (arr(), i(0)),        // arr, int scalar -> f64 (array dominates)
++                (f(1.0), f(0.0)),     // float, float -> f64
++                (f(1.0), i(0)),       // float, int -> f64
++                (i(1), i(0)),         // int, int -> int64 (MUST defer / match numpy)
++                (arr(), f(f64::NAN)), // nan scalar
+             ];
+             for (x, y) in cases {
+                 let ours = fnp_where.call1((cond.clone(), x.bind(py), y.bind(py)))?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:57849:
+                     h = h.wrapping_mul(0x100000001b3);
+                 }
+             }
+-            assert_eq!(h, 0x9c25806588f3a004, "argwhere zero-copy golden FNV drifted");
++            assert_eq!(
++                h, 0x9c25806588f3a004,
++                "argwhere zero-copy golden FNV drifted"
++            );
+             Ok(())
+         });
+     }
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:60149:
+             let a_stack = np_eye
+                 .call1((3_i64,))?
+                 .call_method1("__mul__", (2.0_f64,))?
+-                .call_method1("__add__", (np_arange.call1((9_i64,))?.call_method1(
+-                    "reshape",
+-                    ((3_i64, 3_i64),),
+-                )?.call_method1("__mul__", (0.1_f64,))?,))?;
++                .call_method1(
++                    "__add__",
++                    (np_arange
++                        .call1((9_i64,))?
++                        .call_method1("reshape", ((3_i64, 3_i64),))?
++                        .call_method1("__mul__", (0.1_f64,))?,),
++                )?;
+             let a_batched2 = numpy
+                 .getattr("stack")?
+                 .call1((vec![a_stack.clone(), a_stack.clone()],))?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:64055:
+             // (op, dtypes-to-check). Angle ops add narrow ints; sign adds float16;
+             // sinc/nanmedian cover narrow floats.
+             let cases: [(&str, &[&str]); 7] = [
+-                ("degrees", &["float32", "float16", "int8", "int16", "uint8", "int32"]),
+-                ("radians", &["float32", "float16", "int8", "int16", "uint8", "int32"]),
++                (
++                    "degrees",
++                    &["float32", "float16", "int8", "int16", "uint8", "int32"],
++                ),
++                (
++                    "radians",
++                    &["float32", "float16", "int8", "int16", "uint8", "int32"],
++                ),
+                 ("deg2rad", &["float32", "float16", "int8", "int16", "uint8"]),
+                 ("rad2deg", &["float32", "float16", "int8", "int16", "uint8"]),
+                 ("sinc", &["float32", "float16"]),
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:67823:
+                 h = h.wrapping_mul(0x100000001b3);
+             }
+             assert_eq!(
+-                h, 0x2a9a4ef553c1d16c,
++                h,
++                0x2a9a4ef553c1d16c,
+                 "extract f64 branchless golden FNV drifted (len={})",
+                 actual_bytes.len()
+             );
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:68050:
+             let numpy = py.import("numpy")?;
+             let np_select = numpy.getattr("select")?;
+             let fnp_select = module.getattr("select")?;
+-            let rng = numpy.getattr("random")?.getattr("default_rng")?.call1((4_u64,))?;
++            let rng = numpy
++                .getattr("random")?
++                .getattr("default_rng")?
++                .call1((4_u64,))?;
+             let v = rng.getattr("standard_normal")?.call1((5000_i64,))?;
+             // conditions and choices and the array default are all derived from v.
+-            let lt = |t: f64| -> PyResult<Bound<'_, PyAny>> {
+-                Ok(v.call_method1("__lt__", (t,))?)
+-            };
+-            let scaled = |s: f64| -> PyResult<Bound<'_, PyAny>> {
+-                Ok(v.call_method1("__mul__", (s,))?)
+-            };
++            let lt = |t: f64| -> PyResult<Bound<'_, PyAny>> { Ok(v.call_method1("__lt__", (t,))?) };
++            let scaled =
++                |s: f64| -> PyResult<Bound<'_, PyAny>> { Ok(v.call_method1("__mul__", (s,))?) };
+             let array_equal = numpy.getattr("array_equal")?;
+             for (conds, choices) in [
+                 (vec![lt(-1.0)?, lt(1.0)?], vec![scaled(2.0)?, scaled(3.0)?]),
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:70501:
+             let cases: &[(&str, Vec<i64>, Vec<i64>)] = &[
+                 ("int8", vec![100, 100], vec![100, 100]), // 20000 wraps int8 -> 32
+                 ("int16", vec![1, 2, 3], vec![4, 5, 6]),
+-                ("int32", vec![1 << 30, 1 << 30, 7], vec![1 << 30, 1 << 30, 3]), // 2^61+21 -> int32 21
++                (
++                    "int32",
++                    vec![1 << 30, 1 << 30, 7],
++                    vec![1 << 30, 1 << 30, 3],
++                ), // 2^61+21 -> int32 21
+                 ("uint8", vec![200, 200], vec![200, 200]),
+                 ("uint32", vec![1 << 30, 1 << 30], vec![4, 4]),
+             ];
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:77404:
+             // float32 nanstd previously returned a float64 scalar.
+             for narrow in ["float32", "float16"] {
+                 let dtype_obj = numpy.getattr(narrow)?;
+-                let base = numpy
+-                    .getattr("array")?
+-                    .call1((vec![1.0_f64, 2.0, f64::NAN, 4.0, 8.0],))?;
++                let base =
++                    numpy
++                        .getattr("array")?
++                        .call1((vec![1.0_f64, 2.0, f64::NAN, 4.0, 8.0],))?;
+                 let narrow_arr = base.call_method1("astype", (dtype_obj,))?;
+                 let ours_n = nanstd_fn.call1((narrow_arr.clone(),))?;
+                 let theirs_n = numpy_nanstd.call1((narrow_arr.clone(),))?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:77560:
+             // float32 nanvar previously returned a float64 scalar.
+             for narrow in ["float32", "float16"] {
+                 let dtype_obj = numpy.getattr(narrow)?;
+-                let base = numpy
+-                    .getattr("array")?
+-                    .call1((vec![1.0_f64, 2.0, f64::NAN, 4.0, 8.0],))?;
++                let base =
++                    numpy
++                        .getattr("array")?
++                        .call1((vec![1.0_f64, 2.0, f64::NAN, 4.0, 8.0],))?;
+                 let narrow_arr = base.call_method1("astype", (dtype_obj,))?;
+                 let ours_n = nanvar_fn.call1((narrow_arr.clone(),))?;
+                 let theirs_n = numpy_nanvar.call1((narrow_arr.clone(),))?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:79440:
+             (-5_000, 4096, DType::I64),
+         ];
+         let lanes: &[(NarrowSetOp, fn(&BTreeSet<i64>, &BTreeSet<i64>) -> Vec<i64>)] = &[
+-            (NarrowSetOp::Intersect, |a, b| a.intersection(b).copied().collect()),
++            (NarrowSetOp::Intersect, |a, b| {
++                a.intersection(b).copied().collect()
++            }),
+             (NarrowSetOp::Union, |a, b| a.union(b).copied().collect()),
+-            (NarrowSetOp::Setdiff, |a, b| a.difference(b).copied().collect()),
+-            (NarrowSetOp::Setxor, |a, b| a.symmetric_difference(b).copied().collect()),
++            (NarrowSetOp::Setdiff, |a, b| {
++                a.difference(b).copied().collect()
++            }),
++            (NarrowSetOp::Setxor, |a, b| {
++                a.symmetric_difference(b).copied().collect()
++            }),
+         ];
+         for &(min, size, dt) in dims {
+             let hi = min + size as i64;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:79582:
+                     }),
+                 )?;
+                 for &(op_name, _op) in &ops {
+-                    let ours = module.getattr(op_name)?.call1((left_arr.clone(), right_arr.clone()))?;
+-                    let theirs = numpy.getattr(op_name)?.call1((left_arr.clone(), right_arr.clone()))?;
++                    let ours = module
++                        .getattr(op_name)?
++                        .call1((left_arr.clone(), right_arr.clone()))?;
++                    let theirs = numpy
++                        .getattr(op_name)?
++                        .call1((left_arr.clone(), right_arr.clone()))?;
+                     assert_array_matches_numpy(&ours, &theirs)?;
+                     proof_bytes.extend_from_slice(case.as_bytes());
+                     proof_bytes.push(0);
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:79590:
+                     proof_bytes.extend_from_slice(op_name.as_bytes());
+                     proof_bytes.push(0);
+-                    proof_bytes.extend_from_slice(ours.getattr("dtype")?.str()?.to_string().as_bytes());
++                    proof_bytes
++                        .extend_from_slice(ours.getattr("dtype")?.str()?.to_string().as_bytes());
+                     proof_bytes.push(0);
+-                    proof_bytes.extend_from_slice(ours.getattr("shape")?.str()?.to_string().as_bytes());
++                    proof_bytes
++                        .extend_from_slice(ours.getattr("shape")?.str()?.to_string().as_bytes());
+                     proof_bytes.push(0);
+                     let raw: Vec<u8> = ours.call_method0("tobytes")?.extract()?;
+                     proof_bytes.extend_from_slice(&raw);
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:79601:
+
+             let digest = py_sha256_hex(py, &proof_bytes)?;
+             assert_eq!(
+-                digest,
+-                "acd30f91b7d4d0a28e13171ea131ce4f34cd24693be4b30372fd7329f4e05f0b",
++                digest, "acd30f91b7d4d0a28e13171ea131ce4f34cd24693be4b30372fd7329f4e05f0b",
+                 "wide-int range bitmap set-op golden sha256 changed",
+             );
+             Ok(())
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:79675:
+                     proof_bytes.push(0);
+                     proof_bytes.extend_from_slice(op_name.as_bytes());
+                     proof_bytes.push(0);
+-                    proof_bytes.extend_from_slice(
+-                        ours.getattr("dtype")?.str()?.to_string().as_bytes(),
+-                    );
++                    proof_bytes
++                        .extend_from_slice(ours.getattr("dtype")?.str()?.to_string().as_bytes());
+                     proof_bytes.push(0);
+-                    proof_bytes.extend_from_slice(
+-                        ours.getattr("shape")?.str()?.to_string().as_bytes(),
+-                    );
++                    proof_bytes
++                        .extend_from_slice(ours.getattr("shape")?.str()?.to_string().as_bytes());
+                     proof_bytes.push(0);
+                     let raw: Vec<u8> = ours.call_method0("tobytes")?.extract()?;
+                     proof_bytes.extend_from_slice(&raw);
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:79691:
+
+             let digest = py_sha256_hex(py, &proof_bytes)?;
+             assert_eq!(
+-                digest,
+-                "ec0d35d19fdfc33accacb0c9a96cfd020ccd007989c970f193948b449a5a1e4b",
++                digest, "ec0d35d19fdfc33accacb0c9a96cfd020ccd007989c970f193948b449a5a1e4b",
+                 "float set-op numpy passthrough golden sha256 changed",
+             );
+             Ok(())
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87326:
+
+             // Rectangular batched (5, 4, 3): exercises the parallel batch_svd path on
+             // tall lanes; output shape must be (5, 3) = batch dims + min(M,N).
+-            let rng = numpy.getattr("random")?.getattr("default_rng")?.call1((7_u64,))?;
+-            let rect = rng.getattr("standard_normal")?.call1(((5_i64, 4_i64, 3_i64),))?;
++            let rng = numpy
++                .getattr("random")?
++                .getattr("default_rng")?
++                .call1((7_u64,))?;
++            let rect = rng
++                .getattr("standard_normal")?
++                .call1(((5_i64, 4_i64, 3_i64),))?;
+             let ours_r = sv_fn.call1((rect.clone(),))?;
+             let theirs_r = numpy_sv.call1((rect.clone(),))?;
+             let ok_r: bool = allclose.call1((&ours_r, &theirs_r))?.extract()?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87336:
+             assert_eq!(r_shape, vec![5, 3], "svdvals(5,4,3) shape must be (5,3)");
+
+             // 4-D batched (2, 3, 6, 6): nested batch dims through the same path.
+-            let big = rng.getattr("standard_normal")?.call1(((2_i64, 3_i64, 6_i64, 6_i64),))?;
++            let big = rng
++                .getattr("standard_normal")?
++                .call1(((2_i64, 3_i64, 6_i64, 6_i64),))?;
+             let ours_g = sv_fn.call1((big.clone(),))?;
+             let theirs_g = numpy_sv.call1((big.clone(),))?;
+             let ok_g: bool = allclose.call1((&ours_g, &theirs_g))?.extract()?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87343:
+             assert!(ok_g, "svdvals 4-D batched mismatch");
+             let g_shape: Vec<usize> = ours_g.getattr("shape")?.extract()?;
+-            assert_eq!(g_shape, vec![2, 3, 6], "svdvals(2,3,6,6) shape must be (2,3,6)");
++            assert_eq!(
++                g_shape,
++                vec![2, 3, 6],
++                "svdvals(2,3,6,6) shape must be (2,3,6)"
++            );
+
+             // Complex input stays on the numpy fallback path but must still
+             // match exactly.
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87406:
+             // Integer lists must defer to numpy (int result dtype) and still work.
+             let ai = PyList::new(py, [1_i64, 2, 3])?;
+             let vi = PyList::new(py, [0_i64, 1, 2])?;
+-            let ours_i = module.getattr("convolve")?.call((ai.clone(), vi.clone(), "full"), None)?;
++            let ours_i = module
++                .getattr("convolve")?
++                .call((ai.clone(), vi.clone(), "full"), None)?;
+             let theirs_i = numpy.getattr("convolve")?.call1((ai.clone(), vi.clone()))?;
+             let eq_i: bool = numpy
+                 .getattr("array_equal")?
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87430:
+
+             // choose must accept array_like (Python list) choices, not just ndarrays
+             // — the int fast path used to read items[0].dtype unguarded.
+-            let idx = numpy.getattr("array")?.call1((PyList::new(py, [0_i64, 1, 2, 0])?,))?;
++            let idx = numpy
++                .getattr("array")?
++                .call1((PyList::new(py, [0_i64, 1, 2, 0])?,))?;
+             let choices = PyList::new(
+                 py,
+                 [
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87439:
+                     PyList::new(py, [30_i64, 31, 32, 33])?,
+                 ],
+             )?;
+-            let ours_ch = module.getattr("choose")?.call1((idx.clone(), choices.clone()))?;
+-            let theirs_ch = numpy.getattr("choose")?.call1((idx.clone(), choices.clone()))?;
++            let ours_ch = module
++                .getattr("choose")?
++                .call1((idx.clone(), choices.clone()))?;
++            let theirs_ch = numpy
++                .getattr("choose")?
++                .call1((idx.clone(), choices.clone()))?;
+             let okch: bool = numpy
+                 .getattr("array_equal")?
+                 .call1((&ours_ch, &theirs_ch))?
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87461:
+             fnp_python(&module)?;
+             let numpy = py.import("numpy")?;
+             let allclose = numpy.getattr("allclose")?;
+-            let rng = numpy.getattr("random")?.getattr("default_rng")?.call1((9_u64,))?;
++            let rng = numpy
++                .getattr("random")?
++                .getattr("default_rng")?
++                .call1((9_u64,))?;
+             let x = rng.getattr("standard_normal")?.call1((300_i64,))?;
+             let y = rng.getattr("standard_normal")?.call1((300_i64,))?;
+
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87468:
+             // histogram2d: numpy returns float64 counts even unweighted.
+-            let h2 = module.getattr("histogram2d")?.call((x.clone(), y.clone(), 7_i64), None)?;
++            let h2 = module
++                .getattr("histogram2d")?
++                .call((x.clone(), y.clone(), 7_i64), None)?;
+             let our_h = h2.get_item(0)?;
+             let np_h = numpy
+                 .getattr("histogram2d")?
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87481:
+             let sample = numpy
+                 .getattr("column_stack")?
+                 .call1((PyList::new(py, [&x, &y])?,))?;
+-            let hdd = module.getattr("histogramdd")?.call((sample.clone(), 6_i64), None)?;
++            let hdd = module
++                .getattr("histogramdd")?
++                .call((sample.clone(), 6_i64), None)?;
+             let our_hdd = hdd.get_item(0)?;
+             let np_hdd = numpy
+                 .getattr("histogramdd")?
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87508:
+             let numpy = py.import("numpy")?;
+             let numpy_cond = numpy.getattr("linalg")?.getattr("cond")?;
+             let allclose = numpy.getattr("allclose")?;
+-            let rng = numpy.getattr("random")?.getattr("default_rng")?.call1((11_u64,))?;
++            let rng = numpy
++                .getattr("random")?
++                .getattr("default_rng")?
++                .call1((11_u64,))?;
+
+             // Batched square / rectangular / 4-D, default p (None==2-norm).
+             for shp in [
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87525:
+             }
+
+             // Explicit p=2 and p=-2 selectors must also hit the native path.
+-            let a = rng.getattr("standard_normal")?.call1((vec![32_i64, 8, 8],))?;
++            let a = rng
++                .getattr("standard_normal")?
++                .call1((vec![32_i64, 8, 8],))?;
+             for p in [2_i64, -2] {
+                 let ours = cond_fn.call1((a.clone(), p))?;
+                 let theirs = numpy_cond.call1((a.clone(), p))?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87534:
+             }
+
+             // Non-2-norm p stays on numpy passthrough (p='fro', square only).
+-            let sq = rng.getattr("standard_normal")?.call1((vec![16_i64, 5, 5],))?;
++            let sq = rng
++                .getattr("standard_normal")?
++                .call1((vec![16_i64, 5, 5],))?;
+             let ours_f = cond_fn.call1((sq.clone(), "fro"))?;
+             let theirs_f = numpy_cond.call1((sq.clone(), "fro"))?;
+             let ok_f: bool = allclose.call1((&ours_f, &theirs_f))?.extract()?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87546:
+             let ours_z = cond_fn.call1((zeros.clone(),))?;
+             let theirs_z = numpy_cond.call1((zeros.clone(),))?;
+             let isinf = numpy.getattr("isinf")?;
+-            let all_inf_ours: bool = isinf
+-                .call1((&ours_z,))?
+-                .call_method0("all")?
+-                .extract()?;
++            let all_inf_ours: bool = isinf.call1((&ours_z,))?.call_method0("all")?.extract()?;
+             assert!(all_inf_ours, "cond(zeros) must be +Inf, got non-inf");
+             let eq_z: bool = numpy
+                 .getattr("array_equal")?
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87573:
+             let numpy = py.import("numpy")?;
+             let numpy_pinv = numpy.getattr("linalg")?.getattr("pinv")?;
+             let allclose = numpy.getattr("allclose")?;
+-            let rng = numpy.getattr("random")?.getattr("default_rng")?.call1((23_u64,))?;
++            let rng = numpy
++                .getattr("random")?
++                .getattr("default_rng")?
++                .call1((23_u64,))?;
+
+             // Square / tall / wide / 4-D batched. Output is (..., N, M).
+             for (shp, out) in [
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87593:
+             }
+
+             // hermitian=True batched stays on the numpy passthrough but must match.
+-            let sq = rng.getattr("standard_normal")?.call1((vec![8_i64, 5, 5],))?;
++            let sq = rng
++                .getattr("standard_normal")?
++                .call1((vec![8_i64, 5, 5],))?;
+             let kw = PyDict::new(py);
+             kw.set_item("hermitian", true)?;
+             let ours_h = pinv_fn.call((sq.clone(),), Some(&kw))?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87617:
+             let numpy = py.import("numpy")?;
+             let numpy_mn = numpy.getattr("linalg")?.getattr("matrix_norm")?;
+             let allclose = numpy.getattr("allclose")?;
+-            let rng = numpy.getattr("random")?.getattr("default_rng")?.call1((41_u64,))?;
++            let rng = numpy
++                .getattr("random")?
++                .getattr("default_rng")?
++                .call1((41_u64,))?;
+
+             // SVD-derived orders 2 / -2 / 'nuc' across square / tall / wide / 4-D.
+             for shp in [
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87641:
+             }
+
+             // keepdims=True must keep the reduced last two axes as (1, 1).
+-            let a = rng.getattr("standard_normal")?.call1((vec![4_i64, 3, 5, 5],))?;
++            let a = rng
++                .getattr("standard_normal")?
++                .call1((vec![4_i64, 3, 5, 5],))?;
+             let kw = PyDict::new(py);
+             kw.set_item("ord", 2_i64)?;
+             kw.set_item("keepdims", true)?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87680:
+             let numpy = py.import("numpy")?;
+             let numpy_norm = numpy.getattr("linalg")?.getattr("norm")?;
+             let allclose = numpy.getattr("allclose")?;
+-            let rng = numpy.getattr("random")?.getattr("default_rng")?.call1((57_u64,))?;
++            let rng = numpy
++                .getattr("random")?
++                .getattr("default_rng")?
++                .call1((57_u64,))?;
+
+             // ord 2 / -2 / 'nuc' over the trailing two axes, both axis orders.
+             for shp in [vec![32_i64, 6, 6], vec![16, 7, 4], vec![2, 3, 5, 5]] {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:87702:
+             }
+
+             // keepdims preserves the reduced trailing axes as (1, 1).
+-            let a = rng.getattr("standard_normal")?.call1((vec![4_i64, 3, 5, 5],))?;
++            let a = rng
++                .getattr("standard_normal")?
++                .call1((vec![4_i64, 3, 5, 5],))?;
+             let kw = PyDict::new(py);
+             kw.set_item("ord", 2_i64)?;
+             kw.set_item("axis", (-2_i64, -1_i64))?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:90427:
+
+             // (subscripts, operand (n, shape) list)
+             let cases: &[EinsumCase<'_>] = &[
+-                ("ij,jk,kl->il", &[(20, &[4, 5]), (30, &[5, 6]), (18, &[6, 3])]),
++                (
++                    "ij,jk,kl->il",
++                    &[(20, &[4, 5]), (30, &[5, 6]), (18, &[6, 3])],
++                ),
+                 ("ij,jk,ki->", &[(35, &[5, 7]), (42, &[7, 6]), (30, &[6, 5])]),
+-                ("ijk,jkl,kl->il", &[(24, &[2, 3, 4]), (24, &[3, 4, 2]), (8, &[4, 2])]),
+-                ("bij,bjk,bkl->bil", &[(24, &[2, 3, 4]), (16, &[2, 4, 2]), (12, &[2, 2, 3])]),
+-                ("ij,jk,kl,lm->im", &[(6, &[2, 3]), (6, &[3, 2]), (8, &[2, 4]), (8, &[4, 2])]),
++                (
++                    "ijk,jkl,kl->il",
++                    &[(24, &[2, 3, 4]), (24, &[3, 4, 2]), (8, &[4, 2])],
++                ),
++                (
++                    "bij,bjk,bkl->bil",
++                    &[(24, &[2, 3, 4]), (16, &[2, 4, 2]), (12, &[2, 2, 3])],
++                ),
++                (
++                    "ij,jk,kl,lm->im",
++                    &[(6, &[2, 3]), (6, &[3, 2]), (8, &[2, 4]), (8, &[4, 2])],
++                ),
+             ];
+             for (subs, ops) in cases {
+-                let built: Vec<Bound<'_, PyAny>> =
+-                    ops.iter().map(|(n, s)| mk(*n, s)).collect::<PyResult<_>>()?;
++                let built: Vec<Bound<'_, PyAny>> = ops
++                    .iter()
++                    .map(|(n, s)| mk(*n, s))
++                    .collect::<PyResult<_>>()?;
+                 let subs_obj = pyo3::types::PyString::new(py, subs).into_any();
+                 let mut args: Vec<Bound<'_, PyAny>> = vec![subs_obj];
+                 for b in &built {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:90443:
+                 }
+                 let ours = ours_fn.call1(PyTuple::new(py, &args)?)?;
+                 let theirs = np_einsum.call1(PyTuple::new(py, &args)?)?;
+-                let close: bool = allclose
+-                    .call1((ours, theirs))?
+-                    .extract()?;
++                let close: bool = allclose.call1((ours, theirs))?.extract()?;
+                 assert!(close, "einsum '{subs}' diverges from numpy beyond allclose");
+             }
+             Ok(())
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/src/lib.rs:90485:
+
+             // (subscripts, n, shape) — fast-path cases AND deferred cases (same harness).
+             let cases: &[(&str, i64, &[i64])] = &[
+-                ("ij,ij->", 4225, &[65, 65]),  // full contraction (fast path)
+-                ("i,i->", 9000, &[9000]),      // 1-D inner product (fast path)
+-                ("abc,abc->", 5040, &[14, 12, 30]), // 3-D full contraction (fast path)
+-                ("ij,ij->i", 4002, &[58, 69]), // 2-D partial keep-row (fast path)
+-                ("ij,ij->j", 4002, &[58, 69]), // 2-D partial keep-col (fast path)
+-                ("ijk,ijk->i", 1680, &[8, 14, 15]), // N-D prefix reduce keep-1 (fast path)
+-                ("ijk,ijk->ij", 1680, &[8, 14, 15]), // N-D prefix reduce keep-2 (fast path)
++                ("ij,ij->", 4225, &[65, 65]),            // full contraction (fast path)
++                ("i,i->", 9000, &[9000]),                // 1-D inner product (fast path)
++                ("abc,abc->", 5040, &[14, 12, 30]),      // 3-D full contraction (fast path)
++                ("ij,ij->i", 4002, &[58, 69]),           // 2-D partial keep-row (fast path)
++                ("ij,ij->j", 4002, &[58, 69]),           // 2-D partial keep-col (fast path)
++                ("ijk,ijk->i", 1680, &[8, 14, 15]),      // N-D prefix reduce keep-1 (fast path)
++                ("ijk,ijk->ij", 1680, &[8, 14, 15]),     // N-D prefix reduce keep-2 (fast path)
+                 ("ijkl,ijkl->ij", 1680, &[4, 6, 7, 10]), // 4-D prefix reduce (fast path)
+-                ("i,j->ij", 60, &[60]),        // outer product (fast path)
+-                ("ij,ji->", 4225, &[65, 65]),  // transpose contraction (deferred)
+-                ("ij,ji->i", 4225, &[65, 65]), // transposed partial (deferred)
+-                ("i,j->ji", 60, &[60]),        // transposed outer (deferred)
+-                ("ii,ii->", 2500, &[50, 50]),  // repeated labels (deferred)
++                ("i,j->ij", 60, &[60]),                  // outer product (fast path)
++                ("ij,ji->", 4225, &[65, 65]),            // transpose contraction (deferred)
++                ("ij,ji->i", 4225, &[65, 65]),           // transposed partial (deferred)
++                ("i,j->ji", 60, &[60]),                  // transposed outer (deferred)
++                ("ii,ii->", 2500, &[50, 50]),            // repeated labels (deferred)
+             ];
+             for (subs, n, shape) in cases {
+                 let a = mk(*n, shape)?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/tests/conformance_histogram_bincount.rs:279:
+     ];
+
+     for (label, setup, call_expr) in cases {
+-        let numpy_result =
+-            numpy_oracle(&numpy_outcome_script("np.histogram_bin_edges", setup, call_expr))?;
++        let numpy_result = numpy_oracle(&numpy_outcome_script(
++            "np.histogram_bin_edges",
++            setup,
++            call_expr,
++        ))?;
+         let rust_result =
+             numpy_oracle(&fnp_outcome_script("histogram_bin_edges", setup, call_expr))?;
+
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/tests/conformance_histogram_bincount.rs:312:
+             "",
+             "op([0.5, 1.5, 3.5], [4, 3, 2, 1], right=True)",
+         ),
+-        (
+-            "nonmonotonic bins error type",
+-            "",
+-            "op([1, 2], [0, 2, 1])",
+-        ),
++        ("nonmonotonic bins error type", "", "op([1, 2], [0, 2, 1])"),
+     ];
+
+     for (label, setup, call_expr) in cases {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/tests/conformance_integer_overflow.rs:54:
+     let g_bytes = g.call_method0("tobytes")?.extract::<Vec<u8>>()?;
+     let x_bytes = x.call_method0("tobytes")?.extract::<Vec<u8>>()?;
+     assert_eq!(
+-        g_bytes, x_bytes,
++        g_bytes,
++        x_bytes,
+         "{label}: bytes mismatch (fnp={:?} numpy={:?})",
+         g.call_method0("tolist")?.str()?.to_string(),
+         x.call_method0("tolist")?.str()?.to_string()
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/tests/conformance_integer_overflow.rs:126:
+         }
+
+         // ── cross: preserves the promoted integer dtype with wraparound ──
+-        for dt in ["int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"] {
++        for dt in [
++            "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
++        ] {
+             // Values fit int8 (so they construct for every dtype) but their cross
+             // component products (e.g. 120*110, 100*90) overflow int8/int16 → wrap.
+             let a = np_int_array(py, &numpy, &[120, 100, 3], &[3], dt)?;
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/tests/conformance_interp_trapz.rs:97:
+             "xp = np.array([0.0, 2.0, 4.0])\nfp = np.array([0.0, 20.0, 40.0])",
+             "op((1.0, 3.0), xp, fp)",
+         ),
+-        (
+-            "missing fp error type",
+-            "",
+-            "op([0.0], [0.0])",
+-        ),
++        ("missing fp error type", "", "op([0.0], [0.0])"),
+         (
+             "xp fp length mismatch error type",
+             "",
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/tests/conformance_mean.rs:136:
+ #[test]
+ fn mean_python_container_keyword_outcomes_match_numpy() -> Result<(), String> {
+     let cases = [
++        ("list input scalar", "result = MODULE.mean([1, 2, 3])"),
+         (
+-            "list input scalar",
+-            "result = MODULE.mean([1, 2, 3])",
+-        ),
+-        (
+             "tuple input axis keepdims",
+             "result = MODULE.mean(((1, 2, 3), (4, 5, 6)), axis=1, keepdims=True)",
+         ),
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/tests/conformance_mean.rs:160:
+             "out = np.empty((2,), dtype=np.float64)
+ result = MODULE.mean(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=0, out=out)",
+         ),
+-        (
+-            "axis error type",
+-            "result = MODULE.mean([1, 2, 3], axis=2)",
+-        ),
++        ("axis error type", "result = MODULE.mean([1, 2, 3], axis=2)"),
+     ];
+
+     for (name, body) in cases {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/tests/conformance_statistics.rs:287:
+ #[test]
+ fn average_python_container_keyword_outcomes_match_numpy() -> Result<(), String> {
+     let cases = [
+-        (
+-            "list input scalar",
+-            "result = MODULE.average([1, 2, 3, 4])",
+-        ),
++        ("list input scalar", "result = MODULE.average([1, 2, 3, 4])"),
+         (
+             "tuple input axis weights returned",
+             "result = MODULE.average(
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/tests/conformance_std.rs:138:
+ #[test]
+ fn std_python_container_keyword_outcomes_match_numpy() -> Result<(), String> {
+     let cases = [
++        ("list input scalar", "result = MODULE.std([1, 2, 3])"),
+         (
+-            "list input scalar",
+-            "result = MODULE.std([1, 2, 3])",
+-        ),
+-        (
+             "tuple input axis keepdims",
+             "result = MODULE.std(((1, 2, 3), (4, 5, 6)), axis=1, keepdims=True)",
+         ),
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/tests/conformance_std.rs:166:
+             "out = np.empty((2,), dtype=np.float64)
+ result = MODULE.std(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=0, out=out)",
+         ),
+-        (
+-            "axis error type",
+-            "result = MODULE.std([1, 2, 3], axis=2)",
+-        ),
++        ("axis error type", "result = MODULE.std([1, 2, 3], axis=2)"),
+     ];
+
+     for (name, body) in cases {
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/tests/conformance_trim_zeros.rs:18:
+         .stdin
+         .take()
+         .ok_or_else(|| format!("python3 stdin should be available\nScript: {script}"))?;
+-    stdin
+-        .write_all(script.as_bytes())
+-        .map_err(|error| format!("failed to write Python oracle script: {error}\nScript: {script}"))?;
++    stdin.write_all(script.as_bytes()).map_err(|error| {
++        format!("failed to write Python oracle script: {error}\nScript: {script}")
++    })?;
+     drop(stdin);
+
+-    let output = child
+-        .wait_with_output()
+-        .map_err(|error| format!("failed to read Python oracle output: {error}\nScript: {script}"))?;
++    let output = child.wait_with_output().map_err(|error| {
++        format!("failed to read Python oracle output: {error}\nScript: {script}")
++    })?;
+     if !output.status.success() {
+         let stderr = String::from_utf8_lossy(&output.stderr);
+         return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/tests/conformance_var.rs:138:
+ #[test]
+ fn var_python_container_keyword_outcomes_match_numpy() -> Result<(), String> {
+     let cases = [
++        ("list input scalar", "result = MODULE.var([1, 2, 3])"),
+         (
+-            "list input scalar",
+-            "result = MODULE.var([1, 2, 3])",
+-        ),
+-        (
+             "tuple input axis keepdims",
+             "result = MODULE.var(((1, 2, 3), (4, 5, 6)), axis=1, keepdims=True)",
+         ),
+Diff in /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python/tests/conformance_var.rs:166:
+             "out = np.empty((2,), dtype=np.float64)
+ result = MODULE.var(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=0, out=out)",
+         ),
+-        (
+-            "axis error type",
+-            "result = MODULE.var([1, 2, 3], axis=2)",
+-        ),
++        ("axis error type", "result = MODULE.var([1, 2, 3], axis=2)"),
+     ];
+
+     for (name, body) in cases {

@@ -1,0 +1,11 @@
+=== corrcoef(a,b) two-series PERF (was 5-12x loss) ===
+nobs=   10000 np=      65us fnp=      27us ratio= 0.41   WIN match=True
+nobs=  100000 np=     294us fnp=     240us ratio= 0.82   WIN match=True
+nobs= 1000000 np=    6870us fnp=    6474us ratio= 0.94   WIN match=True
+nobs= 4000000 np=   69120us fnp=   55536us ratio= 0.80   WIN match=True
+=== correctness: random + edge ===
+corrcoef(a,b) random bad: 0 /40
+corrcoef(M,b): True
+corrcoef(M,Y): True
+corrcoef(M) no-y unchanged: True
+cov(a,b) still correct: True

@@ -1010,7 +1010,16 @@ pub fn write_npy_bytes_with_version(
     Ok(encoded)
 }
 
-pub fn read_npy_bytes(payload: &[u8], allow_pickle: bool) -> Result<NpyArrayBytes, IOError> {
+struct ParsedNpyBytes<'a> {
+    version: (u8, u8),
+    header: NpyHeader,
+    payload: &'a [u8],
+}
+
+fn parse_npy_bytes_borrowed<'a>(
+    payload: &'a [u8],
+    allow_pickle: bool,
+) -> Result<ParsedNpyBytes<'a>, IOError> {
     let version = validate_magic_version(payload)?;
     let (header_offset, header_len) = read_header_span(payload, version)?;
     let header_end = header_offset
@@ -1031,10 +1040,19 @@ pub fn read_npy_bytes(payload: &[u8], allow_pickle: bool) -> Result<NpyArrayByte
         let _ = validate_read_payload(&header.shape, body.len(), header.descr)?;
     }
 
-    Ok(NpyArrayBytes {
+    Ok(ParsedNpyBytes {
         version,
         header,
-        payload: Arc::from(body),
+        payload: body,
+    })
+}
+
+pub fn read_npy_bytes(payload: &[u8], allow_pickle: bool) -> Result<NpyArrayBytes, IOError> {
+    let parsed = parse_npy_bytes_borrowed(payload, allow_pickle)?;
+    Ok(NpyArrayBytes {
+        version: parsed.version,
+        header: parsed.header,
+        payload: Arc::from(parsed.payload),
     })
 }
 
@@ -1619,6 +1637,29 @@ pub fn write_npz_bytes_with_compression(
 /// entries. Each entry must decode to a valid `.npy` file.
 /// `allow_pickle` controls whether object dtype payloads are permitted.
 pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, IOError> {
+    read_npz_bytes_impl(data, allow_pickle, NpzRangePolicy::Adaptive)
+}
+
+/// Benchmark control retaining the former linear covered-range scan.
+#[doc(hidden)]
+pub fn read_npz_bytes_linear_overlap_control(
+    data: &[u8],
+    allow_pickle: bool,
+) -> Result<Vec<NpzEntry>, IOError> {
+    read_npz_bytes_impl(data, allow_pickle, NpzRangePolicy::Linear)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NpzRangePolicy {
+    Adaptive,
+    Linear,
+}
+
+fn read_npz_bytes_impl(
+    data: &[u8],
+    allow_pickle: bool,
+    range_policy: NpzRangePolicy,
+) -> Result<Vec<NpzEntry>, IOError> {
     if data.len() < 22 {
         return Err(IOError::NpzArchiveContractViolation(
             "npz: data too short for a ZIP archive",
@@ -1730,8 +1771,18 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
     let mut entries = Vec::with_capacity(entry_count);
     let mut pos = cd_offset;
     let mut total_uncompressed_bytes = 0usize;
-    // Track covered ranges to prevent overlapping entries
-    let mut covered_ranges: Vec<(usize, usize)> = Vec::with_capacity(entry_count);
+    // A linear scan is cheaper for ordinary small archives. Metadata-heavy
+    // archives need ordered predecessor/successor checks so adversarially large
+    // valid member counts do not turn overlap validation into O(m^2) work.
+    const ORDERED_RANGE_MIN_MEMBERS: usize = 128;
+    let use_ordered_ranges =
+        range_policy == NpzRangePolicy::Adaptive && entry_count >= ORDERED_RANGE_MIN_MEMBERS;
+    let mut covered_ranges = if use_ordered_ranges {
+        Vec::new()
+    } else {
+        Vec::with_capacity(entry_count)
+    };
+    let mut ordered_ranges = BTreeMap::<usize, usize>::new();
 
     for _ in 0..entry_count {
         if pos.checked_add(46).is_none_or(|end| end > data.len()) {
@@ -2016,19 +2067,37 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
             ));
         }
 
-        // Check for overlapping entries
+        // Check for overlapping entries. The ordered representation maintains
+        // the same non-overlap invariant, so only the nearest range on either
+        // side can intersect the new range.
         let current_range = (local_offset, data_end);
-        for &(start, end) in &covered_ranges {
-            if (current_range.0 >= start && current_range.0 < end)
-                || (current_range.1 > start && current_range.1 <= end)
-                || (start >= current_range.0 && start < current_range.1)
-            {
-                return Err(IOError::NpzArchiveContractViolation(
-                    "npz: overlapping zip entries detected",
-                ));
-            }
+        let overlaps = if use_ordered_ranges {
+            let predecessor_overlaps = ordered_ranges
+                .range(..=current_range.0)
+                .next_back()
+                .is_some_and(|(_, &end)| current_range.0 < end);
+            let successor_overlaps = ordered_ranges
+                .range(current_range.0..)
+                .next()
+                .is_some_and(|(&start, _)| start < current_range.1);
+            predecessor_overlaps || successor_overlaps
+        } else {
+            covered_ranges.iter().any(|&(start, end)| {
+                (current_range.0 >= start && current_range.0 < end)
+                    || (current_range.1 > start && current_range.1 <= end)
+                    || (start >= current_range.0 && start < current_range.1)
+            })
+        };
+        if overlaps {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: overlapping zip entries detected",
+            ));
         }
-        covered_ranges.push(current_range);
+        if use_ordered_ranges {
+            let _ = ordered_ranges.insert(current_range.0, current_range.1);
+        } else {
+            covered_ranges.push(current_range);
+        }
 
         total_uncompressed_bytes = total_uncompressed_bytes
             .checked_add(uncompressed_size)
@@ -2116,42 +2185,16 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
 }
 
 /// IEEE 802.3 CRC-32 (used by ZIP format).
-/// Uses a table-based implementation for performance.
 fn crc32_ieee(data: &[u8]) -> u32 {
-    !crc32_ieee_update(0xFFFF_FFFF, data)
+    crc32fast::hash(data)
 }
 
 fn crc32_ieee_three(first: &[u8], second: &[u8], third: &[u8]) -> u32 {
-    let crc = crc32_ieee_update(0xFFFF_FFFF, first);
-    let crc = crc32_ieee_update(crc, second);
-    !crc32_ieee_update(crc, third)
-}
-
-fn crc32_ieee_update(mut crc: u32, data: &[u8]) -> u32 {
-    const TABLE: [u32; 256] = {
-        let mut table = [0u32; 256];
-        let mut i = 0;
-        while i < 256 {
-            let mut c = i as u32;
-            let mut j = 0;
-            while j < 8 {
-                if c & 1 != 0 {
-                    c = 0xEDB8_8320 ^ (c >> 1);
-                } else {
-                    c >>= 1;
-                }
-                j += 1;
-            }
-            table[i] = c;
-            i += 1;
-        }
-        table
-    };
-
-    for &byte in data {
-        crc = TABLE[(crc as u8 ^ byte) as usize] ^ (crc >> 8);
-    }
-    crc
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(first);
+    hasher.update(second);
+    hasher.update(third);
+    hasher.finalize()
 }
 
 // ── loadtxt / savetxt ────────
@@ -2218,6 +2261,9 @@ pub fn loadtxt_usecols(
     max_rows: usize,
     usecols: Option<&[usize]>,
 ) -> Result<TextArrayData, IOError> {
+    // The selection is invariant across rows: build the column plan once
+    // instead of once per accepted row (x6teb retry).
+    let plan = usecols.map(build_usecols_plan);
     let mut values = Vec::new();
     let mut ncols: Option<usize> = None;
     let mut nrows = 0usize;
@@ -2232,27 +2278,54 @@ pub fn loadtxt_usecols(
         if nrows >= max_rows {
             break;
         }
-        let row_vals = if let Some(cols) = usecols {
-            parse_loadtxt_row_usecols(trimmed, delimiter, cols)?
-        } else {
-            parse_loadtxt_row(trimmed, delimiter)?
-        };
-
-        match ncols {
-            None => ncols = Some(row_vals.len()),
-            Some(expected) if row_vals.len() != expected => {
+        if let Some(plan) = &plan {
+            // NOTE (2026-07-16 REJECT, ledger + bench loadtxt_usecols_scatter):
+            // scattering selected rows directly into `values` measured
+            // 0.86-0.95x - the per-row 32B `selected` Vec is thread-cache
+            // cheap, and bounds-checked random-access writes into the large
+            // output cost more than the removed alloc+copy. Sequential
+            // direct-extend pays (.346/.347/.348); scatter-shaped rows do not.
+            let row_vals = parse_loadtxt_row_usecols_planned(trimmed, delimiter, plan)?;
+            match ncols {
+                None => ncols = Some(row_vals.len()),
+                Some(expected) if row_vals.len() != expected => {
+                    return Err(IOError::ReadPayloadIncomplete(
+                        "loadtxt: inconsistent number of columns",
+                    ));
+                }
+                _ => {}
+            }
+            if values.len() + row_vals.len() > MAX_TEXT_ELEMENTS {
                 return Err(IOError::ReadPayloadIncomplete(
-                    "loadtxt: inconsistent number of columns",
+                    "loadtxt: text exceeds MAX_TEXT_ELEMENTS budget",
                 ));
             }
-            _ => {}
+            values.extend(row_vals);
+        } else {
+            // Unselected rows parse directly into the output (no per-row Vec,
+            // no row copy - the .346 genfromtxt lever). Error precedence is
+            // loadtxt's own: parse short-circuit, then ncols, then budget
+            // (`values.len() > MAX` is the former `row_start + row_len > MAX`
+            // verbatim); every error discards `values`, so partial extension
+            // is unobservable.
+            let row_start = values.len();
+            parse_loadtxt_row_into(&mut values, trimmed, delimiter)?;
+            let row_len = values.len() - row_start;
+            match ncols {
+                None => ncols = Some(row_len),
+                Some(expected) if row_len != expected => {
+                    return Err(IOError::ReadPayloadIncomplete(
+                        "loadtxt: inconsistent number of columns",
+                    ));
+                }
+                _ => {}
+            }
+            if values.len() > MAX_TEXT_ELEMENTS {
+                return Err(IOError::ReadPayloadIncomplete(
+                    "loadtxt: text exceeds MAX_TEXT_ELEMENTS budget",
+                ));
+            }
         }
-        if values.len() + row_vals.len() > MAX_TEXT_ELEMENTS {
-            return Err(IOError::ReadPayloadIncomplete(
-                "loadtxt: text exceeds MAX_TEXT_ELEMENTS budget",
-            ));
-        }
-        values.extend(row_vals);
         nrows += 1;
     }
     Ok(TextArrayData {
@@ -2273,6 +2346,56 @@ pub fn loadtxt_usecols_signed(
     max_rows: usize,
     usecols: Option<&[isize]>,
 ) -> Result<TextArrayData, IOError> {
+    const SIGNED_TAIL_RING_MAX_FIELDS: usize = 4_096;
+
+    let negative_offsets = usecols.and_then(|cols| {
+        if cols.is_empty() || cols.iter().any(|&column| column >= 0) {
+            return None;
+        }
+        let offsets = cols
+            .iter()
+            .map(|&column| {
+                column
+                    .checked_neg()
+                    .and_then(|value| usize::try_from(value).ok())
+            })
+            .collect::<Option<Vec<_>>>()?;
+        offsets
+            .iter()
+            .copied()
+            .max()
+            .filter(|&max_tail| max_tail <= SIGNED_TAIL_RING_MAX_FIELDS)
+            .map(|_| offsets)
+    });
+
+    if let Some(cols) = usecols {
+        // Positive signed selections are row-invariant. Partially evaluate
+        // that case once, then reuse the unsigned call-level plan instead of
+        // splitting every row and resolving every requested index per row.
+        // Any negative index keeps the width-relative generic path below.
+        let unsigned = cols
+            .iter()
+            .copied()
+            .map(usize::try_from)
+            .collect::<Result<Vec<_>, _>>();
+        if let Ok(unsigned) = unsigned
+            && let Ok(parsed) = loadtxt_usecols(
+                text,
+                delimiter,
+                comments,
+                skiprows,
+                max_rows,
+                Some(&unsigned),
+            )
+        {
+            return Ok(parsed);
+        }
+        // Replay conversion or specialized parsing failures through the
+        // former resolver so a selected parse error versus a later bounds
+        // error retains the signed API's request-order precedence and exact
+        // message.
+    }
+
     let mut values = Vec::new();
     let mut ncols: Option<usize> = None;
     let mut nrows = 0usize;
@@ -2288,7 +2411,11 @@ pub fn loadtxt_usecols_signed(
             break;
         }
         let row_vals = if let Some(cols) = usecols {
-            parse_loadtxt_row_usecols_signed(trimmed, delimiter, cols)?
+            if let Some(offsets) = &negative_offsets {
+                parse_loadtxt_row_negative_tail(trimmed, delimiter, offsets)?
+            } else {
+                parse_loadtxt_row_usecols_signed(trimmed, delimiter, cols)?
+            }
         } else {
             parse_loadtxt_row(trimmed, delimiter)?
         };
@@ -2377,6 +2504,33 @@ pub fn loadtxt_quotechar(
     })
 }
 
+/// Parse one row's tokens directly into `out` (the .346 direct-extend shape),
+/// preserving [`parse_loadtxt_row`]'s exact token iteration, trimming, and
+/// first-error short-circuit.
+fn parse_loadtxt_row_into(
+    out: &mut Vec<f64>,
+    trimmed: &str,
+    delimiter: char,
+) -> Result<(), IOError> {
+    if delimiter == ' ' {
+        for s in trimmed.split_whitespace() {
+            out.push(
+                s.parse::<f64>()
+                    .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?,
+            );
+        }
+    } else {
+        for s in trimmed.split(delimiter) {
+            out.push(
+                s.trim()
+                    .parse::<f64>()
+                    .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?,
+            );
+        }
+    }
+    Ok(())
+}
+
 fn parse_loadtxt_row(trimmed: &str, delimiter: char) -> Result<Vec<f64>, IOError> {
     let parsed: Result<Vec<f64>, _> = if delimiter == ' ' {
         trimmed
@@ -2392,15 +2546,17 @@ fn parse_loadtxt_row(trimmed: &str, delimiter: char) -> Result<Vec<f64>, IOError
     parsed.map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))
 }
 
-fn parse_loadtxt_row_usecols(
-    trimmed: &str,
-    delimiter: char,
-    cols: &[usize],
-) -> Result<Vec<f64>, IOError> {
-    if cols.is_empty() {
-        return Ok(Vec::new());
-    }
+/// Immutable per-call column-selection plan: `usecols` never changes between
+/// rows, so the column -> output-position map (with duplicate and
+/// out-of-order selections preserved) is built once and shared by every row
+/// (retry of the x6teb no-ship under its predeclared measurement predicate).
+struct UsecolsPlan {
+    positions: BTreeMap<usize, Vec<usize>>,
+    max_col: usize,
+    n_out: usize,
+}
 
+fn build_usecols_plan(cols: &[usize]) -> UsecolsPlan {
     let mut positions: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     let mut max_col = 0usize;
     for (pos, &col) in cols.iter().enumerate() {
@@ -2409,8 +2565,25 @@ fn parse_loadtxt_row_usecols(
             max_col = col;
         }
     }
+    UsecolsPlan {
+        positions,
+        max_col,
+        n_out: cols.len(),
+    }
+}
 
-    let mut selected = vec![0.0; cols.len()];
+fn parse_loadtxt_row_usecols_planned(
+    trimmed: &str,
+    delimiter: char,
+    plan: &UsecolsPlan,
+) -> Result<Vec<f64>, IOError> {
+    if plan.n_out == 0 {
+        return Ok(Vec::new());
+    }
+
+    let positions = &plan.positions;
+    let max_col = plan.max_col;
+    let mut selected = vec![0.0; plan.n_out];
     let mut col_idx = 0usize;
 
     if delimiter == ' ' {
@@ -2622,6 +2795,50 @@ fn parse_loadtxt_row_usecols_signed(
         selected.push(value);
     }
 
+    Ok(selected)
+}
+
+/// Resolve an all-negative signed selection while retaining only the bounded
+/// suffix that can be addressed. Parsing remains in request order after the
+/// full width is known, preserving the generic resolver's bounds/parse error
+/// precedence and duplicate-column behavior.
+fn parse_loadtxt_row_negative_tail(
+    trimmed: &str,
+    delimiter: char,
+    offsets: &[usize],
+) -> Result<Vec<f64>, IOError> {
+    let Some(max_tail) = offsets.iter().copied().max() else {
+        return Ok(Vec::new());
+    };
+
+    let mut tail = vec![""; max_tail];
+    let mut row_width = 0usize;
+    if delimiter == ' ' {
+        for field in trimmed.split_whitespace() {
+            tail[row_width % max_tail] = field;
+            row_width += 1;
+        }
+    } else {
+        for field in trimmed.split(delimiter) {
+            tail[row_width % max_tail] = field;
+            row_width += 1;
+        }
+    }
+
+    let mut selected = Vec::with_capacity(offsets.len());
+    for &offset in offsets {
+        if offset == 0 || offset > row_width {
+            return Err(IOError::ReadPayloadIncomplete(
+                "loadtxt: usecols index out of bounds",
+            ));
+        }
+        let index = row_width - offset;
+        let value = tail[index % max_tail]
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?;
+        selected.push(value);
+    }
     Ok(selected)
 }
 
@@ -3632,40 +3849,49 @@ pub fn genfromtxt(
         if trimmed.is_empty() || trimmed.starts_with(comments) {
             continue;
         }
-        let row_vals: Vec<f64> = if delimiter == ' ' {
-            trimmed
-                .split_whitespace()
-                .map(|s| s.trim().parse::<f64>().unwrap_or(filling_values))
-                .collect()
-        } else {
-            trimmed
-                .split(delimiter)
-                .map(|s| s.trim().parse::<f64>().unwrap_or(filling_values))
-                .collect()
-        };
-
-        let current_ncols = row_vals.len();
-        let target_ncols = ncols.unwrap_or(current_ncols);
-
-        if values.len() + target_ncols > MAX_TEXT_ELEMENTS {
+        // Rows parse directly into the output (no per-row Vec, no row copy).
+        // Error precedence is preserved exactly: for established columns the
+        // budget check uses the expected width - the same condition the
+        // former code evaluated after collecting - and every error discards
+        // `values`, so parsing before the ragged check is unobservable.
+        let row_start = values.len();
+        if let Some(expected) = ncols
+            && row_start + expected > MAX_TEXT_ELEMENTS
+        {
             return Err(IOError::ReadPayloadIncomplete(
                 "genfromtxt: text exceeds MAX_TEXT_ELEMENTS budget",
             ));
         }
+        if delimiter == ' ' {
+            values.extend(
+                trimmed
+                    .split_whitespace()
+                    .map(|s| s.trim().parse::<f64>().unwrap_or(filling_values)),
+            );
+        } else {
+            values.extend(
+                trimmed
+                    .split(delimiter)
+                    .map(|s| s.trim().parse::<f64>().unwrap_or(filling_values)),
+            );
+        }
+        let current_ncols = values.len() - row_start;
 
         match ncols {
             None => {
+                if current_ncols > MAX_TEXT_ELEMENTS {
+                    return Err(IOError::ReadPayloadIncomplete(
+                        "genfromtxt: text exceeds MAX_TEXT_ELEMENTS budget",
+                    ));
+                }
                 ncols = Some(current_ncols);
-                values.extend(row_vals);
             }
             Some(expected) if current_ncols != expected => {
                 return Err(IOError::ReadPayloadIncomplete(
                     "genfromtxt: inconsistent number of columns",
                 ));
             }
-            Some(_) => {
-                values.extend(row_vals);
-            }
+            Some(_) => {}
         }
         nrows += 1;
     }
@@ -3719,24 +3945,23 @@ pub fn genfromtxt_full(
     let mut nrows = 0usize;
 
     for &trimmed in all_lines.iter().take(effective_len) {
-        let row_vals: Vec<f64> = if config.delimiter == ' ' {
-            trimmed
-                .split_whitespace()
-                .map(|s| s.parse::<f64>().unwrap_or(config.filling_values))
-                .collect()
-        } else {
-            trimmed
-                .split(config.delimiter)
-                .map(|s| s.trim().parse::<f64>().unwrap_or(config.filling_values))
-                .collect()
-        };
-
-        let raw_ncols = row_vals.len();
-
-        // Apply usecols filter. NumPy permits row-width drift when the
-        // selected columns are still present, but fails if a selected column is
-        // missing from an offending row.
-        let row_vals: Vec<f64> = if let Some(cols) = config.usecols {
+        if let Some(cols) = config.usecols {
+            // The usecols filter needs the materialized row for indexed
+            // selection with NumPy's width-drift tolerance: row-width drift is
+            // permitted while every selected column is present, but a row
+            // missing a selected column fails.
+            let row_vals: Vec<f64> = if config.delimiter == ' ' {
+                trimmed
+                    .split_whitespace()
+                    .map(|s| s.parse::<f64>().unwrap_or(config.filling_values))
+                    .collect()
+            } else {
+                trimmed
+                    .split(config.delimiter)
+                    .map(|s| s.trim().parse::<f64>().unwrap_or(config.filling_values))
+                    .collect()
+            };
+            let raw_ncols = row_vals.len();
             let mut selected = Vec::with_capacity(cols.len());
             for &c in cols {
                 if c >= raw_ncols {
@@ -3746,8 +3971,38 @@ pub fn genfromtxt_full(
                 }
                 selected.push(row_vals[c]);
             }
-            selected
+            let current_ncols = selected.len();
+            let target_ncols = ncols.unwrap_or(current_ncols);
+            if values.len() + target_ncols > MAX_TEXT_ELEMENTS {
+                return Err(IOError::ReadPayloadIncomplete(
+                    "genfromtxt: text exceeds MAX_TEXT_ELEMENTS budget",
+                ));
+            }
+            if ncols.is_none() {
+                ncols = Some(current_ncols);
+            }
+            values.extend(selected);
         } else {
+            // Unselected rows parse directly into the output (the .346/.347
+            // direct-extend lever). Precedence preserved: parse (filling
+            // substitution, never errors), then ncols, then budget - where
+            // `values.len() > MAX` is the former `row_start + target` verbatim
+            // because target equals the current width in every reachable case.
+            let row_start = values.len();
+            if config.delimiter == ' ' {
+                values.extend(
+                    trimmed
+                        .split_whitespace()
+                        .map(|s| s.parse::<f64>().unwrap_or(config.filling_values)),
+                );
+            } else {
+                values.extend(
+                    trimmed
+                        .split(config.delimiter)
+                        .map(|s| s.trim().parse::<f64>().unwrap_or(config.filling_values)),
+                );
+            }
+            let raw_ncols = values.len() - row_start;
             if let Some(expected) = ncols
                 && raw_ncols != expected
             {
@@ -3755,25 +4010,13 @@ pub fn genfromtxt_full(
                     "genfromtxt: inconsistent number of columns",
                 ));
             }
-            row_vals
-        };
-
-        let current_ncols = row_vals.len();
-        let target_ncols = ncols.unwrap_or(current_ncols);
-
-        if values.len() + target_ncols > MAX_TEXT_ELEMENTS {
-            return Err(IOError::ReadPayloadIncomplete(
-                "genfromtxt: text exceeds MAX_TEXT_ELEMENTS budget",
-            ));
-        }
-
-        match ncols {
-            None => {
-                ncols = Some(current_ncols);
-                values.extend(row_vals);
+            if values.len() > MAX_TEXT_ELEMENTS {
+                return Err(IOError::ReadPayloadIncomplete(
+                    "genfromtxt: text exceeds MAX_TEXT_ELEMENTS budget",
+                ));
             }
-            Some(_) => {
-                values.extend(row_vals);
+            if ncols.is_none() {
+                ncols = Some(raw_ncols);
             }
         }
         nrows += 1;
@@ -3840,40 +4083,109 @@ fn split_text_with_sep<'a>(text: &'a str, sep: &str) -> Vec<&'a str> {
 }
 
 fn split_with_space_wildcards<'a>(text: &'a str, sep: &str) -> Vec<&'a str> {
-    let tokens: Vec<SepToken> = sep
-        .chars()
-        .map(|c| {
-            if c.is_whitespace() {
-                SepToken::SpaceWildcard
-            } else {
-                SepToken::Literal(c)
-            }
-        })
-        .collect();
-    if tokens.is_empty() {
+    if sep.is_empty() {
         return vec![text];
     }
+    SpaceWildcardFields::new(text, sep).collect()
+}
 
-    let mut parts = Vec::new();
-    let mut field_start = 0usize;
-    let mut idx = 0usize;
-
-    while idx <= text.len() {
-        if let Some(end) = match_space_wildcard_sep(text, idx, &tokens) {
-            parts.push(&text[field_start..idx]);
-            field_start = end;
-            idx = end;
-            continue;
-        }
-        if idx == text.len() {
+/// Shared bounded-prefix parse loop (the general path's loop verbatim, minus
+/// eager tokenization): stops pulling fields once `max` values are parsed, so
+/// lazy field sources never scan the discarded suffix. Empty fields are
+/// tolerated only as the final trailing token; the element budget keeps its
+/// precedence over the count break.
+fn parse_bounded_text_prefix<'a, I: Iterator<Item = &'a str>>(
+    fields: I,
+    max: usize,
+    max_elements: usize,
+) -> Result<Vec<f64>, IOError> {
+    let mut values = Vec::new();
+    let mut iter = fields.peekable();
+    while let Some(field) = iter.next() {
+        if values.len() >= max {
             break;
         }
-        let ch = text[idx..].chars().next().expect("valid utf-8");
-        idx += ch.len_utf8();
+        if values.len() >= max_elements {
+            return Err(IOError::ReadPayloadIncomplete(
+                "fromfile_text: text exceeds MAX_TEXT_ELEMENTS budget",
+            ));
+        }
+        let field = field.trim();
+        if field.is_empty() {
+            if iter.peek().is_none() {
+                continue;
+            }
+            return Err(IOError::ReadPayloadIncomplete("fromfile_text: parse error"));
+        }
+        let parsed = field
+            .parse::<f64>()
+            .map_err(|_| IOError::ReadPayloadIncomplete("fromfile_text: could not parse float"))?;
+        values.push(parsed);
     }
+    Ok(values)
+}
 
-    parts.push(&text[field_start..]);
-    parts
+/// Lazy field iterator with the exact scan and emission order the eager
+/// [`split_with_space_wildcards`] collect produces (that function now
+/// collects this iterator, so the two cannot diverge): the field before each
+/// separator match, then the tail exactly once. Every separator match
+/// consumes at least one byte - a literal character is mandatory because
+/// whitespace-only separators route to the whitespace path - so the scan
+/// always advances and bounded consumers can stop pulling mid-input.
+struct SpaceWildcardFields<'a> {
+    text: &'a str,
+    tokens: Vec<SepToken>,
+    field_start: usize,
+    idx: usize,
+    finished: bool,
+}
+
+impl<'a> SpaceWildcardFields<'a> {
+    fn new(text: &'a str, sep: &str) -> Self {
+        debug_assert!(!sep.is_empty());
+        let tokens = sep
+            .chars()
+            .map(|c| {
+                if c.is_whitespace() {
+                    SepToken::SpaceWildcard
+                } else {
+                    SepToken::Literal(c)
+                }
+            })
+            .collect();
+        Self {
+            text,
+            tokens,
+            field_start: 0,
+            idx: 0,
+            finished: false,
+        }
+    }
+}
+
+impl<'a> Iterator for SpaceWildcardFields<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        if self.finished {
+            return None;
+        }
+        while self.idx <= self.text.len() {
+            if let Some(end) = match_space_wildcard_sep(self.text, self.idx, &self.tokens) {
+                let field = &self.text[self.field_start..self.idx];
+                self.field_start = end;
+                self.idx = end;
+                return Some(field);
+            }
+            if self.idx == self.text.len() {
+                break;
+            }
+            let ch = self.text[self.idx..].chars().next().expect("valid utf-8");
+            self.idx += ch.len_utf8();
+        }
+        self.finished = true;
+        Some(&self.text[self.field_start..])
+    }
 }
 
 fn match_space_wildcard_sep(text: &str, start: usize, tokens: &[SepToken]) -> Option<usize> {
@@ -3922,8 +4234,53 @@ pub fn fromfile(
     let max_elems = data.len() / item_size;
     let n = clamp_count(count, max_elems);
 
+    if dtype_is_native_endian_u64(dtype) {
+        return fromfile_native_endian_u64(data, count);
+    }
+    if dtype_is_non_native_endian_u64(dtype) {
+        return fromfile_non_native_endian_u64(data, count);
+    }
+    if dtype_is_native_endian_i64(dtype) {
+        return fromfile_native_endian_i64(data, count);
+    }
+    if dtype_is_non_native_endian_i64(dtype) {
+        return fromfile_non_native_endian_i64(data, count);
+    }
+    if dtype_is_native_endian_i16(dtype) {
+        return fromfile_native_endian_i16(data, count);
+    }
+    if dtype_is_non_native_endian_i16(dtype) {
+        return fromfile_non_native_endian_i16(data, count);
+    }
+    if dtype_is_native_endian_u16(dtype) {
+        return fromfile_native_endian_u16(data, count);
+    }
+    if dtype_is_non_native_endian_u16(dtype) {
+        return fromfile_non_native_endian_u16(data, count);
+    }
+    if dtype_is_native_endian_u32(dtype) {
+        return fromfile_native_endian_u32(data, count);
+    }
+    if dtype_is_non_native_endian_u32(dtype) {
+        return fromfile_non_native_endian_u32(data, count);
+    }
+    if dtype_is_native_endian_i32(dtype) {
+        return fromfile_native_endian_i32(data, count);
+    }
+    if dtype_is_non_native_endian_i32(dtype) {
+        return fromfile_non_native_endian_i32(data, count);
+    }
+    if dtype_is_native_endian_f32(dtype) {
+        return fromfile_native_endian_f32(data, count);
+    }
+    if dtype_is_non_native_endian_f32(dtype) {
+        return fromfile_non_native_endian_f32(data, count);
+    }
     if dtype_is_native_endian_f64(dtype) {
         return fromfile_native_endian_f64(data, count);
+    }
+    if dtype_is_non_native_endian_f64(dtype) {
+        return fromfile_non_native_endian_f64(data, count);
     }
 
     let mut values = Vec::with_capacity(n);
@@ -3979,6 +4336,38 @@ fn fromfile_text_with_budget(
         ));
     }
 
+    if let Some(max) = count.filter(|_| sep_is_only_spaces(sep)) {
+        let mut values = Vec::new();
+        for field in text.split_whitespace().take(max) {
+            if values.len() >= max_elements {
+                return Err(IOError::ReadPayloadIncomplete(
+                    "fromfile_text: text exceeds MAX_TEXT_ELEMENTS budget",
+                ));
+            }
+            let parsed = field.parse::<f64>().map_err(|_| {
+                IOError::ReadPayloadIncomplete("fromfile_text: could not parse float")
+            })?;
+            values.push(parsed);
+        }
+        return Ok(values);
+    }
+
+    // Bounded non-whitespace separators stream the prefix lazily: the lazy
+    // iterators yield the exact token sequence `split_text_with_sep` would
+    // collect (pure literals via `str::split`; space-wildcard separators via
+    // `SpaceWildcardFields`, which the eager splitter itself now collects),
+    // so the trim/empty-field/trailing-separator/budget semantics are
+    // unchanged - only the whole-input tokenization and its `Vec<&str>` are
+    // skipped once `max` values are parsed (.332 whitespace precedent; .339
+    // literal precedent; unbounded reads keep the eager path).
+    if let Some(max) = count.filter(|_| !sep_is_only_spaces(sep)) {
+        return if sep_has_space(sep) {
+            parse_bounded_text_prefix(SpaceWildcardFields::new(text, sep), max, max_elements)
+        } else {
+            parse_bounded_text_prefix(text.split(sep), max, max_elements)
+        };
+    }
+
     let max = count.unwrap_or(usize::MAX);
     let mut values = Vec::new();
 
@@ -4011,6 +4400,27 @@ fn fromfile_text_with_budget(
 /// Write array values as text with a separator (np.ndarray.tofile with sep parameter).
 ///
 /// When `sep` is non-empty, `tofile` writes elements as text separated by `sep`.
+fn push_i64_decimal(out: &mut String, value: i64) {
+    let negative = value.is_negative();
+    let mut magnitude = value.unsigned_abs();
+    let mut digits = [0_u8; 20];
+    let mut cursor = digits.len();
+    loop {
+        cursor -= 1;
+        digits[cursor] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if negative {
+        out.push('-');
+    }
+    out.push_str(
+        std::str::from_utf8(&digits[cursor..]).expect("decimal digits are valid ASCII UTF-8"),
+    );
+}
+
 pub fn tofile_text(values: &[f64], sep: &str) -> String {
     use std::fmt::Write;
 
@@ -4024,7 +4434,9 @@ pub fn tofile_text(values: &[f64], sep: &str) -> String {
             && v.abs() < 1e15
             && !(*v == 0.0 && v.is_sign_negative())
         {
-            let _ = write!(&mut out, "{}", *v as i64);
+            // Re-decided under the executed-ELF A/A median-CI contract after
+            // the 2026-07-16 rejection was classified VOID-NONULL.
+            push_i64_decimal(&mut out, *v as i64);
         } else {
             let _ = write!(&mut out, "{v}");
         }
@@ -4125,6 +4537,50 @@ fn encode_element(v: f64, dtype: IOSupportedDType, buf: &mut Vec<u8>) -> Result<
     Ok(())
 }
 
+fn dtype_is_native_endian_u64(dtype: IOSupportedDType) -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        matches!(dtype, IOSupportedDType::U64)
+    }
+    #[cfg(target_endian = "big")]
+    {
+        matches!(dtype, IOSupportedDType::U64Be)
+    }
+}
+
+fn dtype_is_non_native_endian_u64(dtype: IOSupportedDType) -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        matches!(dtype, IOSupportedDType::U64Be)
+    }
+    #[cfg(target_endian = "big")]
+    {
+        matches!(dtype, IOSupportedDType::U64)
+    }
+}
+
+fn dtype_is_native_endian_i64(dtype: IOSupportedDType) -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        matches!(dtype, IOSupportedDType::I64)
+    }
+    #[cfg(target_endian = "big")]
+    {
+        matches!(dtype, IOSupportedDType::I64Be)
+    }
+}
+
+fn dtype_is_non_native_endian_i64(dtype: IOSupportedDType) -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        matches!(dtype, IOSupportedDType::I64Be)
+    }
+    #[cfg(target_endian = "big")]
+    {
+        matches!(dtype, IOSupportedDType::I64)
+    }
+}
+
 fn dtype_is_native_endian_f64(dtype: IOSupportedDType) -> bool {
     #[cfg(target_endian = "little")]
     {
@@ -4133,6 +4589,127 @@ fn dtype_is_native_endian_f64(dtype: IOSupportedDType) -> bool {
     #[cfg(target_endian = "big")]
     {
         matches!(dtype, IOSupportedDType::F64Be)
+    }
+}
+
+fn dtype_is_non_native_endian_f64(dtype: IOSupportedDType) -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        matches!(dtype, IOSupportedDType::F64Be)
+    }
+    #[cfg(target_endian = "big")]
+    {
+        matches!(dtype, IOSupportedDType::F64)
+    }
+}
+
+fn dtype_is_native_endian_f32(dtype: IOSupportedDType) -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        matches!(dtype, IOSupportedDType::F32)
+    }
+    #[cfg(target_endian = "big")]
+    {
+        matches!(dtype, IOSupportedDType::F32Be)
+    }
+}
+
+fn dtype_is_non_native_endian_f32(dtype: IOSupportedDType) -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        matches!(dtype, IOSupportedDType::F32Be)
+    }
+    #[cfg(target_endian = "big")]
+    {
+        matches!(dtype, IOSupportedDType::F32)
+    }
+}
+
+fn dtype_is_native_endian_i32(dtype: IOSupportedDType) -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        matches!(dtype, IOSupportedDType::I32)
+    }
+    #[cfg(target_endian = "big")]
+    {
+        matches!(dtype, IOSupportedDType::I32Be)
+    }
+}
+
+fn dtype_is_non_native_endian_i32(dtype: IOSupportedDType) -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        matches!(dtype, IOSupportedDType::I32Be)
+    }
+    #[cfg(target_endian = "big")]
+    {
+        matches!(dtype, IOSupportedDType::I32)
+    }
+}
+
+fn dtype_is_native_endian_u32(dtype: IOSupportedDType) -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        matches!(dtype, IOSupportedDType::U32)
+    }
+    #[cfg(target_endian = "big")]
+    {
+        matches!(dtype, IOSupportedDType::U32Be)
+    }
+}
+
+fn dtype_is_non_native_endian_u32(dtype: IOSupportedDType) -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        matches!(dtype, IOSupportedDType::U32Be)
+    }
+    #[cfg(target_endian = "big")]
+    {
+        matches!(dtype, IOSupportedDType::U32)
+    }
+}
+
+fn dtype_is_native_endian_i16(dtype: IOSupportedDType) -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        matches!(dtype, IOSupportedDType::I16)
+    }
+    #[cfg(target_endian = "big")]
+    {
+        matches!(dtype, IOSupportedDType::I16Be)
+    }
+}
+
+fn dtype_is_non_native_endian_i16(dtype: IOSupportedDType) -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        matches!(dtype, IOSupportedDType::I16Be)
+    }
+    #[cfg(target_endian = "big")]
+    {
+        matches!(dtype, IOSupportedDType::I16)
+    }
+}
+
+fn dtype_is_native_endian_u16(dtype: IOSupportedDType) -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        matches!(dtype, IOSupportedDType::U16)
+    }
+    #[cfg(target_endian = "big")]
+    {
+        matches!(dtype, IOSupportedDType::U16Be)
+    }
+}
+
+fn dtype_is_non_native_endian_u16(dtype: IOSupportedDType) -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        matches!(dtype, IOSupportedDType::U16Be)
+    }
+    #[cfg(target_endian = "big")]
+    {
+        matches!(dtype, IOSupportedDType::U16)
     }
 }
 
@@ -4161,6 +4738,88 @@ fn write_native_endian_f64_npy_bytes(
     Ok(encoded)
 }
 
+fn fromfile_native_endian_u64(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let item_size = core::mem::size_of::<u64>();
+    let max_elems = data.len() / item_size;
+    let n = clamp_count(count, max_elems);
+    let payload = &data[..n * item_size];
+    if let Ok(values) = try_cast_slice::<u8, u64>(payload) {
+        return Ok(values.iter().map(|&value| value as f64).collect());
+    }
+
+    Ok(payload
+        .chunks_exact(item_size)
+        .map(|chunk| {
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(chunk);
+            u64::from_ne_bytes(bytes) as f64
+        })
+        .collect())
+}
+
+fn fromfile_non_native_endian_u64(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let item_size = core::mem::size_of::<u64>();
+    let max_elems = data.len() / item_size;
+    let n = clamp_count(count, max_elems);
+    let payload = &data[..n * item_size];
+    if let Ok(values) = try_cast_slice::<u8, u64>(payload) {
+        return Ok(values
+            .iter()
+            .map(|&value| value.swap_bytes() as f64)
+            .collect());
+    }
+
+    Ok(payload
+        .chunks_exact(item_size)
+        .map(|chunk| {
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(chunk);
+            u64::from_ne_bytes(bytes).swap_bytes() as f64
+        })
+        .collect())
+}
+
+fn fromfile_native_endian_i64(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let item_size = core::mem::size_of::<i64>();
+    let max_elems = data.len() / item_size;
+    let n = clamp_count(count, max_elems);
+    let payload = &data[..n * item_size];
+    if let Ok(values) = try_cast_slice::<u8, i64>(payload) {
+        return Ok(values.iter().map(|&value| value as f64).collect());
+    }
+
+    Ok(payload
+        .chunks_exact(item_size)
+        .map(|chunk| {
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(chunk);
+            i64::from_ne_bytes(bytes) as f64
+        })
+        .collect())
+}
+
+fn fromfile_non_native_endian_i64(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let item_size = core::mem::size_of::<i64>();
+    let max_elems = data.len() / item_size;
+    let n = clamp_count(count, max_elems);
+    let payload = &data[..n * item_size];
+    if let Ok(values) = try_cast_slice::<u8, i64>(payload) {
+        return Ok(values
+            .iter()
+            .map(|&value| value.swap_bytes() as f64)
+            .collect());
+    }
+
+    Ok(payload
+        .chunks_exact(item_size)
+        .map(|chunk| {
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(chunk);
+            i64::from_ne_bytes(bytes).swap_bytes() as f64
+        })
+        .collect())
+}
+
 fn fromfile_native_endian_f64(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
     let item_size = core::mem::size_of::<f64>();
     let max_elems = data.len() / item_size;
@@ -4177,6 +4836,233 @@ fn fromfile_native_endian_f64(data: &[u8], count: Option<usize>) -> Result<Vec<f
         values.push(f64::from_ne_bytes(bytes));
     }
     Ok(values)
+}
+
+fn fromfile_non_native_endian_f64(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let item_size = core::mem::size_of::<f64>();
+    let max_elems = data.len() / item_size;
+    let n = clamp_count(count, max_elems);
+    let payload = &data[..n * item_size];
+    if let Ok(values) = try_cast_slice::<u8, u64>(payload) {
+        return Ok(values
+            .iter()
+            .map(|&bits| f64::from_bits(bits.swap_bytes()))
+            .collect());
+    }
+
+    Ok(payload
+        .chunks_exact(item_size)
+        .map(|chunk| {
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(chunk);
+            f64::from_bits(u64::from_ne_bytes(bytes).swap_bytes())
+        })
+        .collect())
+}
+
+fn fromfile_native_endian_f32(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let item_size = core::mem::size_of::<f32>();
+    let max_elems = data.len() / item_size;
+    let n = clamp_count(count, max_elems);
+    let payload = &data[..n * item_size];
+    if let Ok(values) = try_cast_slice::<u8, f32>(payload) {
+        return Ok(values.iter().map(|&value| f64::from(value)).collect());
+    }
+
+    Ok(payload
+        .chunks_exact(item_size)
+        .map(|chunk| {
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(chunk);
+            f64::from(f32::from_ne_bytes(bytes))
+        })
+        .collect())
+}
+
+fn fromfile_non_native_endian_f32(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let item_size = core::mem::size_of::<f32>();
+    let max_elems = data.len() / item_size;
+    let n = clamp_count(count, max_elems);
+    let payload = &data[..n * item_size];
+    if let Ok(values) = try_cast_slice::<u8, u32>(payload) {
+        return Ok(values
+            .iter()
+            .map(|&bits| f64::from(f32::from_bits(bits.swap_bytes())))
+            .collect());
+    }
+
+    Ok(payload
+        .chunks_exact(item_size)
+        .map(|chunk| {
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(chunk);
+            f64::from(f32::from_bits(u32::from_ne_bytes(bytes).swap_bytes()))
+        })
+        .collect())
+}
+
+fn fromfile_native_endian_i32(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let item_size = core::mem::size_of::<i32>();
+    let max_elems = data.len() / item_size;
+    let n = clamp_count(count, max_elems);
+    let payload = &data[..n * item_size];
+    if let Ok(values) = try_cast_slice::<u8, i32>(payload) {
+        return Ok(values.iter().map(|&value| f64::from(value)).collect());
+    }
+
+    Ok(payload
+        .chunks_exact(item_size)
+        .map(|chunk| {
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(chunk);
+            f64::from(i32::from_ne_bytes(bytes))
+        })
+        .collect())
+}
+
+fn fromfile_non_native_endian_i32(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let item_size = core::mem::size_of::<i32>();
+    let max_elems = data.len() / item_size;
+    let n = clamp_count(count, max_elems);
+    let payload = &data[..n * item_size];
+    if let Ok(values) = try_cast_slice::<u8, i32>(payload) {
+        return Ok(values
+            .iter()
+            .map(|&value| f64::from(value.swap_bytes()))
+            .collect());
+    }
+
+    Ok(payload
+        .chunks_exact(item_size)
+        .map(|chunk| {
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(chunk);
+            f64::from(i32::from_ne_bytes(bytes).swap_bytes())
+        })
+        .collect())
+}
+
+fn fromfile_native_endian_u32(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let item_size = core::mem::size_of::<u32>();
+    let max_elems = data.len() / item_size;
+    let n = clamp_count(count, max_elems);
+    let payload = &data[..n * item_size];
+    if let Ok(values) = try_cast_slice::<u8, u32>(payload) {
+        return Ok(values.iter().map(|&value| f64::from(value)).collect());
+    }
+
+    Ok(payload
+        .chunks_exact(item_size)
+        .map(|chunk| {
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(chunk);
+            f64::from(u32::from_ne_bytes(bytes))
+        })
+        .collect())
+}
+
+fn fromfile_non_native_endian_u32(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let item_size = core::mem::size_of::<u32>();
+    let max_elems = data.len() / item_size;
+    let n = clamp_count(count, max_elems);
+    let payload = &data[..n * item_size];
+    if let Ok(values) = try_cast_slice::<u8, u32>(payload) {
+        return Ok(values
+            .iter()
+            .map(|&value| f64::from(value.swap_bytes()))
+            .collect());
+    }
+
+    Ok(payload
+        .chunks_exact(item_size)
+        .map(|chunk| {
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(chunk);
+            f64::from(u32::from_ne_bytes(bytes).swap_bytes())
+        })
+        .collect())
+}
+
+fn fromfile_native_endian_i16(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let item_size = core::mem::size_of::<i16>();
+    let max_elems = data.len() / item_size;
+    let n = clamp_count(count, max_elems);
+    let payload = &data[..n * item_size];
+    if let Ok(values) = try_cast_slice::<u8, i16>(payload) {
+        return Ok(values.iter().map(|&value| f64::from(value)).collect());
+    }
+
+    Ok(payload
+        .chunks_exact(item_size)
+        .map(|chunk| {
+            let mut bytes = [0u8; 2];
+            bytes.copy_from_slice(chunk);
+            f64::from(i16::from_ne_bytes(bytes))
+        })
+        .collect())
+}
+
+fn fromfile_non_native_endian_i16(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let item_size = core::mem::size_of::<i16>();
+    let max_elems = data.len() / item_size;
+    let n = clamp_count(count, max_elems);
+    let payload = &data[..n * item_size];
+    if let Ok(values) = try_cast_slice::<u8, i16>(payload) {
+        return Ok(values
+            .iter()
+            .map(|&value| f64::from(value.swap_bytes()))
+            .collect());
+    }
+
+    Ok(payload
+        .chunks_exact(item_size)
+        .map(|chunk| {
+            let mut bytes = [0u8; 2];
+            bytes.copy_from_slice(chunk);
+            f64::from(i16::from_ne_bytes(bytes).swap_bytes())
+        })
+        .collect())
+}
+
+fn fromfile_native_endian_u16(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let item_size = core::mem::size_of::<u16>();
+    let max_elems = data.len() / item_size;
+    let n = clamp_count(count, max_elems);
+    let payload = &data[..n * item_size];
+    if let Ok(values) = try_cast_slice::<u8, u16>(payload) {
+        return Ok(values.iter().map(|&value| f64::from(value)).collect());
+    }
+
+    Ok(payload
+        .chunks_exact(item_size)
+        .map(|chunk| {
+            let mut bytes = [0u8; 2];
+            bytes.copy_from_slice(chunk);
+            f64::from(u16::from_ne_bytes(bytes))
+        })
+        .collect())
+}
+
+fn fromfile_non_native_endian_u16(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let item_size = core::mem::size_of::<u16>();
+    let max_elems = data.len() / item_size;
+    let n = clamp_count(count, max_elems);
+    let payload = &data[..n * item_size];
+    if let Ok(values) = try_cast_slice::<u8, u16>(payload) {
+        return Ok(values
+            .iter()
+            .map(|&value| f64::from(value.swap_bytes()))
+            .collect());
+    }
+
+    Ok(payload
+        .chunks_exact(item_size)
+        .map(|chunk| {
+            let mut bytes = [0u8; 2];
+            bytes.copy_from_slice(chunk);
+            f64::from(u16::from_ne_bytes(bytes).swap_bytes())
+        })
+        .collect())
 }
 
 /// Read raw binary data from bytes into a flat array of complex values.
@@ -4470,13 +5356,13 @@ pub fn save(shape: &[usize], values: &[f64], dtype: IOSupportedDType) -> Result<
 ///
 /// Returns (shape, values, dtype).
 pub fn load(data: &[u8]) -> Result<(Vec<usize>, Vec<f64>, IOSupportedDType), IOError> {
-    let npy = read_npy_bytes(data, false)?;
+    let npy = parse_npy_bytes_borrowed(data, false)?;
     let dtype = npy.header.descr;
     let shape = npy.header.shape;
     let values = if dtype_is_native_endian_f64(dtype) {
-        fromfile_native_endian_f64(&npy.payload, None)?
+        fromfile_native_endian_f64(npy.payload, None)?
     } else {
-        fromfile(&npy.payload, dtype, None)?
+        fromfile(npy.payload, dtype, None)?
     };
     Ok((shape, values, dtype))
 }
@@ -5289,6 +6175,15 @@ pub fn fromfile_structured(
     let n = clamp_count(count, max_records);
 
     let offsets = descriptor.field_offsets()?;
+    if descriptor.fields.len() == 1 {
+        return Ok(StructuredNpyData {
+            shape: vec![n],
+            fortran_order: false,
+            descriptor: descriptor.clone(),
+            columns: vec![data[..n * record_size].to_vec()],
+        });
+    }
+
     let mut columns: Vec<Vec<u8>> = descriptor
         .fields
         .iter()
@@ -5541,7 +6436,7 @@ fn decode_bytes_element(chunk: &[u8]) -> String {
 /// null-padded. Little-endian if `is_le`, big-endian otherwise.
 fn decode_unicode_element(chunk: &[u8], is_le: bool) -> Result<String, IOError> {
     let mut chars = Vec::with_capacity(chunk.len() / 4);
-    for code_unit in chunk.chunks_exact(4) {
+    for code_unit in chunk.as_chunks::<4>().0 {
         let cp = if is_le {
             u32::from_le_bytes([code_unit[0], code_unit[1], code_unit[2], code_unit[3]])
         } else {
@@ -6575,6 +7470,37 @@ mm.flush()
     // ── loadtxt / savetxt tests ────────
 
     #[test]
+    fn loadtxt_direct_extend_preserves_contract() {
+        // The direct-into-output row parse must preserve exact bits (negative
+        // zero), both delimiter paths, parse-error short-circuit with the
+        // exact message, ragged errors in BOTH directions, and the usecols
+        // path's independence from the restructure.
+        let text = "-0,2.5,3\n7,8,9\n";
+        let result = loadtxt(text, ',', '#', 0, usize::MAX).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.values[0].to_bits(), (-0.0f64).to_bits());
+
+        let parse_err = loadtxt("1,2\nbad,4\n", ',', '#', 0, usize::MAX).unwrap_err();
+        assert_eq!(parse_err.to_string(), "loadtxt: parse error in row");
+
+        let longer = loadtxt("1 2\n3 4 5\n", ' ', '#', 0, usize::MAX).unwrap_err();
+        assert_eq!(
+            longer.to_string(),
+            "loadtxt: inconsistent number of columns"
+        );
+        let shorter = loadtxt("1 2 3\n4\n", ' ', '#', 0, usize::MAX).unwrap_err();
+        assert_eq!(
+            shorter.to_string(),
+            "loadtxt: inconsistent number of columns"
+        );
+
+        // usecols path unchanged by the restructure.
+        let selected =
+            loadtxt_usecols("1,2,3\n4,5,6\n", ',', '#', 0, usize::MAX, Some(&[2, 0])).unwrap();
+        assert_eq!(selected.values, vec![3.0, 1.0, 6.0, 4.0]);
+    }
+
+    #[test]
     fn loadtxt_basic() {
         let text = "1.0 2.0 3.0\n4.0 5.0 6.0\n";
         let result = loadtxt(text, ' ', '#', 0, usize::MAX).unwrap();
@@ -7454,6 +8380,32 @@ mm.flush()
     }
 
     #[test]
+    fn genfromtxt_direct_extend_preserves_contract() {
+        // The direct-into-output row parse must preserve exact bits (negative
+        // zero), the whitespace path, filling substitution position, ragged
+        // errors in BOTH directions (shorter and longer rows), and the exact
+        // error message.
+        let text = "-0,2.5,bad\n7,n/a,9\n";
+        let result = genfromtxt(text, ',', '#', 0, -1.25).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 3);
+        assert_eq!(result.values[0].to_bits(), (-0.0f64).to_bits());
+        assert_eq!(result.values[2].to_bits(), (-1.25f64).to_bits());
+        assert_eq!(result.values[4].to_bits(), (-1.25f64).to_bits());
+
+        let longer = genfromtxt("1 2\n3 4 5\n", ' ', '#', 0, 0.0).unwrap_err();
+        assert_eq!(
+            longer.to_string(),
+            "genfromtxt: inconsistent number of columns"
+        );
+        let shorter = genfromtxt("1 2 3\n4\n", ' ', '#', 0, 0.0).unwrap_err();
+        assert_eq!(
+            shorter.to_string(),
+            "genfromtxt: inconsistent number of columns"
+        );
+    }
+
+    #[test]
     fn genfromtxt_rejects_inconsistent_columns_like_numpy() {
         let text = "1 2 3\n4 5\n";
         let err = genfromtxt(text, ' ', '#', 0, f64::NAN).unwrap_err();
@@ -7479,6 +8431,53 @@ mm.flush()
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 2);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn genfromtxt_full_direct_extend_preserves_contract() {
+        // The unselected direct-extend must preserve exact bits (negative
+        // zero), filling substitution positions, both ragged directions with
+        // the exact message, and the usecols branch's independence (incl.
+        // width drift and out-of-bounds).
+        let config = GenFromTxtConfig {
+            delimiter: ',',
+            filling_values: -1.25,
+            ..Default::default()
+        };
+        let result = genfromtxt_full("-0,2.5,bad\n7,n/a,9\n", &config).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 3);
+        assert_eq!(result.values[0].to_bits(), (-0.0f64).to_bits());
+        assert_eq!(result.values[2].to_bits(), (-1.25f64).to_bits());
+        assert_eq!(result.values[4].to_bits(), (-1.25f64).to_bits());
+
+        let space_config = GenFromTxtConfig::default();
+        let longer = genfromtxt_full("1 2\n3 4 5\n", &space_config).unwrap_err();
+        assert_eq!(
+            longer.to_string(),
+            "genfromtxt: inconsistent number of columns"
+        );
+        let shorter = genfromtxt_full("1 2 3\n4\n", &space_config).unwrap_err();
+        assert_eq!(
+            shorter.to_string(),
+            "genfromtxt: inconsistent number of columns"
+        );
+
+        // usecols branch unchanged: width drift tolerated, OOB still errors.
+        let usecols_config = GenFromTxtConfig {
+            delimiter: ',',
+            usecols: Some(&[1, 0]),
+            ..Default::default()
+        };
+        let drift = genfromtxt_full("1,2,3\n4,5\n", &usecols_config).unwrap();
+        assert_eq!(drift.values, vec![2.0, 1.0, 5.0, 4.0]);
+        let oob_config = GenFromTxtConfig {
+            delimiter: ',',
+            usecols: Some(&[2]),
+            ..Default::default()
+        };
+        let oob = genfromtxt_full("1,2,3\n4,5\n", &oob_config).unwrap_err();
+        assert_eq!(oob.to_string(), "genfromtxt: usecols index out of bounds");
     }
 
     #[test]
@@ -7690,6 +8689,127 @@ mm.flush()
     }
 
     #[test]
+    fn fromfile_text_bounded_literal_streams_exact_prefix() {
+        // The lazy literal-separator branch must match the eager path's
+        // semantics exactly: prefix equality with the unbounded parse, exact
+        // bits including negative zero, count-stop before a malformed suffix,
+        // trailing-separator tolerance, internal-empty errors inside the
+        // prefix, count beyond available tokens, count zero, and multi-char
+        // separators.
+        let text = "-0,2.5,3,4.25,5";
+        let bounded = fromfile_text(text, ",", Some(3)).unwrap();
+        let unbounded = fromfile_text(text, ",", None).unwrap();
+        assert_eq!(
+            bounded.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            unbounded[..3]
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(bounded[0].to_bits(), (-0.0f64).to_bits());
+
+        // Malformed suffix beyond the count is never inspected (former path
+        // broke before parsing it too).
+        assert_eq!(
+            fromfile_text("1,2,3,junk", ",", Some(3)).unwrap(),
+            vec![1.0, 2.0, 3.0]
+        );
+        // Internal empty field INSIDE the prefix still errors.
+        let err = fromfile_text("1,,2", ",", Some(3)).expect_err("empty field should fail");
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+        // Trailing separator with count beyond available tokens.
+        assert_eq!(fromfile_text("1,2,", ",", Some(5)).unwrap(), vec![1.0, 2.0]);
+        // Count zero parses nothing, even from a malformed input.
+        assert_eq!(
+            fromfile_text("junk,junk", ",", Some(0)).unwrap(),
+            Vec::<f64>::new()
+        );
+        // Multi-char literal separator.
+        assert_eq!(
+            fromfile_text("1<>2<>3", "<>", Some(2)).unwrap(),
+            vec![1.0, 2.0]
+        );
+        // Fields with surrounding plain spaces still trim (former behavior).
+        assert_eq!(
+            fromfile_text(" 1 , 2 ,junk", ",", Some(2)).unwrap(),
+            vec![1.0, 2.0]
+        );
+    }
+
+    #[test]
+    fn fromfile_text_bounded_wildcard_streams_exact_prefix() {
+        // The lazy space-wildcard branch must match the eager scanner's
+        // semantics exactly (the eager splitter now collects the same
+        // iterator, so unbounded reads double as the reference).
+        let text = "-0, 2.5,\t3, 4.25, 5";
+        let bounded = fromfile_text(text, ", ", Some(3)).unwrap();
+        let unbounded = fromfile_text(text, ", ", None).unwrap();
+        assert_eq!(
+            bounded.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            unbounded[..3]
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(bounded[0].to_bits(), (-0.0f64).to_bits());
+
+        // Malformed suffix beyond the count is never inspected.
+        assert_eq!(
+            fromfile_text("1, 2, 3, junk", ", ", Some(3)).unwrap(),
+            vec![1.0, 2.0, 3.0]
+        );
+        // Adjacent separators create an internal empty field, which still
+        // errors inside the prefix ("1, , 2": ','+wildcard eats one space,
+        // the next ',' starts a new match with an empty field between).
+        let err = fromfile_text("1, , 2", ", ", Some(3)).expect_err("empty field should fail");
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+        // Trailing separator with count beyond available tokens.
+        assert_eq!(
+            fromfile_text("1, 2, ", ", ", Some(5)).unwrap(),
+            vec![1.0, 2.0]
+        );
+        // Count zero parses nothing, even from a malformed input.
+        assert_eq!(
+            fromfile_text("junk, junk", ", ", Some(0)).unwrap(),
+            Vec::<f64>::new()
+        );
+        // Wildcard runs: the whitespace position may match zero or many chars.
+        assert_eq!(
+            fromfile_text("1,2,     3,junk", ", ", Some(3)).unwrap(),
+            vec![1.0, 2.0, 3.0]
+        );
+        // Tab in the separator is a wildcard too.
+        assert_eq!(
+            fromfile_text("1,\t2,3, x", ",\t", Some(3)).unwrap(),
+            vec![1.0, 2.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn fromfile_text_bounded_whitespace_stops_at_exact_prefix() {
+        let result = fromfile_text("-0\t2.5\n3 invalid suffix", "\t", Some(3)).unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].to_bits(), (-0.0f64).to_bits());
+        assert_eq!(result[1].to_bits(), 2.5f64.to_bits());
+        assert_eq!(result[2].to_bits(), 3.0f64.to_bits());
+        assert_eq!(
+            fromfile_text("invalid suffix", " ", Some(0)).unwrap(),
+            Vec::<f64>::new()
+        );
+    }
+
+    #[test]
+    fn fromfile_text_bounded_whitespace_preserves_budget_precedence() {
+        assert_eq!(
+            fromfile_text_with_budget("1 2 invalid", " ", Some(2), 2).unwrap(),
+            vec![1.0, 2.0]
+        );
+        let err = fromfile_text_with_budget("1 2 invalid", " ", Some(3), 2)
+            .expect_err("budget must fire before parsing the next field");
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+    }
+
+    #[test]
     fn fromfile_text_enforces_max_text_elements_budget() {
         let text = "1 2 3 4 5";
         let err = fromfile_text_with_budget(text, " ", None, 3)
@@ -7733,6 +8853,48 @@ mm.flush()
     fn tofile_text_comma_sep() {
         let result = tofile_text(&[10.0, 20.0, 30.0], ",");
         assert_eq!(result, "10,20,30");
+    }
+
+    #[test]
+    fn tofile_text_manual_integer_formatter_matches_display() {
+        for value in [
+            i64::MIN,
+            i64::MIN + 1,
+            -1_000_000_000_000_000,
+            -10,
+            -1,
+            0,
+            1,
+            10,
+            1_000_000_000_000_000,
+            i64::MAX - 1,
+            i64::MAX,
+        ] {
+            let mut actual = String::new();
+            super::push_i64_decimal(&mut actual, value);
+            assert_eq!(actual, value.to_string());
+        }
+        for value in -10_000_i64..=10_000 {
+            let mut actual = String::new();
+            super::push_i64_decimal(&mut actual, value);
+            assert_eq!(actual, value.to_string());
+        }
+
+        let values = [
+            -999_999_999_999_999.0,
+            -10.0,
+            -1.0,
+            0.0,
+            1.0,
+            10.0,
+            999_999_999_999_999.0,
+            -0.0,
+            3.5,
+        ];
+        assert_eq!(
+            tofile_text(&values, ","),
+            "-999999999999999,-10,-1,0,1,10,999999999999999,-0,3.5"
+        );
     }
 
     #[test]
@@ -7815,11 +8977,95 @@ mm.flush()
     }
 
     #[test]
+    fn loadtxt_signed_all_negative_tail_ring_preserves_order_duplicates_and_bits() {
+        let text = "header\n1,-0,3,4.5 # comment\ninf,6,7,-8.25\n";
+        let result =
+            loadtxt_usecols_signed(text, ',', '#', 1, usize::MAX, Some(&[-1, -3, -1])).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 3);
+        let expected = [4.5_f64, -0.0, 4.5, -8.25, 6.0, -8.25];
+        assert!(
+            result
+                .values
+                .iter()
+                .zip(expected)
+                .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+        );
+    }
+
+    #[test]
+    fn loadtxt_signed_all_negative_tail_ring_preserves_error_precedence() {
+        let parse_first =
+            loadtxt_usecols_signed("1,2,bad\n", ',', '#', 0, usize::MAX, Some(&[-1, -5]))
+                .unwrap_err();
+        assert_eq!(parse_first.to_string(), "loadtxt: parse error in row");
+
+        let bounds_first =
+            loadtxt_usecols_signed("1,2,bad\n", ',', '#', 0, usize::MAX, Some(&[-5, -1]))
+                .unwrap_err();
+        assert_eq!(
+            bounds_first.to_string(),
+            "loadtxt: usecols index out of bounds"
+        );
+    }
+
+    #[test]
+    fn loadtxt_signed_large_negative_offset_uses_generic_fallback() {
+        let mut text = String::new();
+        for column in 0..4_097 {
+            if column > 0 {
+                text.push(' ');
+            }
+            text.push_str(&column.to_string());
+        }
+        text.push('\n');
+        let result =
+            loadtxt_usecols_signed(&text, ' ', '#', 0, usize::MAX, Some(&[-4_097, -1])).unwrap();
+        assert_eq!(result.nrows, 1);
+        assert_eq!(result.ncols, 2);
+        assert_eq!(result.values, vec![0.0, 4_096.0]);
+    }
+
+    #[test]
     fn loadtxt_signed_usecols_rejects_negative_out_of_bounds_like_numpy() {
         let text = "1 2\n3 4 5\n";
         let err = loadtxt_usecols_signed(text, ' ', '#', 0, usize::MAX, Some(&[-3]))
             .expect_err("negative usecols out of bounds");
         assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+    }
+
+    #[test]
+    fn loadtxt_signed_nonnegative_usecols_are_bit_identical_to_unsigned_plan() {
+        let text = "ignored header\n1,skip,-0,4.5 # comment\n2,nope,inf,-7.25\n";
+        let signed =
+            loadtxt_usecols_signed(text, ',', '#', 1, usize::MAX, Some(&[3, 0, 3])).unwrap();
+        let unsigned = loadtxt_usecols(text, ',', '#', 1, usize::MAX, Some(&[3, 0, 3])).unwrap();
+
+        assert_eq!(signed.nrows, unsigned.nrows);
+        assert_eq!(signed.ncols, unsigned.ncols);
+        assert_eq!(signed.values.len(), unsigned.values.len());
+        assert!(
+            signed
+                .values
+                .iter()
+                .zip(&unsigned.values)
+                .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+        );
+    }
+
+    #[test]
+    fn loadtxt_signed_nonnegative_specialization_replays_former_error_precedence() {
+        let text = "bad,2,3\n";
+        let bounds_first =
+            loadtxt_usecols_signed(text, ',', '#', 0, usize::MAX, Some(&[5, 0])).unwrap_err();
+        assert_eq!(
+            bounds_first.to_string(),
+            "loadtxt: usecols index out of bounds"
+        );
+
+        let parse_first =
+            loadtxt_usecols_signed(text, ',', '#', 0, usize::MAX, Some(&[0, 5])).unwrap_err();
+        assert_eq!(parse_first.to_string(), "loadtxt: parse error in row");
     }
 
     #[test]
@@ -7927,6 +9173,73 @@ mm.flush()
         let decoded_u8 = read_npy_bytes(&encoded_u8, false).expect("read u8");
         assert_eq!(decoded_u8.header.descr, IOSupportedDType::U8);
         assert_eq!(decoded_u8.payload, payload_u8.into());
+    }
+
+    #[test]
+    fn npy_float_complex_bool_int32_64_roundtrip() {
+        // Round-trip the dtypes the existing npy roundtrip tests do not cover:
+        // i32/i64, f32/f64 (incl. inf/nan/-0 bytes), complex64/128, and bool. The
+        // write/read path is byte-level, so special float bit patterns must survive.
+        let roundtrip = |descr: IOSupportedDType, shape: Vec<usize>, payload: Vec<u8>| {
+            let header = NpyHeader {
+                shape,
+                fortran_order: false,
+                descr,
+            };
+            let encoded = write_npy_bytes(&header, &payload, false).expect("write");
+            let decoded = read_npy_bytes(&encoded, false).expect("read");
+            assert_eq!(decoded.header.descr, header.descr);
+            assert_eq!(decoded.payload, payload.into());
+        };
+        roundtrip(
+            IOSupportedDType::I32,
+            vec![3],
+            [1_i32, -2, 2_000_000]
+                .into_iter()
+                .flat_map(i32::to_le_bytes)
+                .collect(),
+        );
+        roundtrip(
+            IOSupportedDType::I64,
+            vec![2],
+            [-5_i64, 9_000_000_000]
+                .into_iter()
+                .flat_map(i64::to_le_bytes)
+                .collect(),
+        );
+        roundtrip(
+            IOSupportedDType::F32,
+            vec![4],
+            [1.5_f32, -2.25, f32::INFINITY, f32::NAN]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect(),
+        );
+        roundtrip(
+            IOSupportedDType::F64,
+            vec![3],
+            [std::f64::consts::PI, -0.0, f64::NEG_INFINITY]
+                .into_iter()
+                .flat_map(f64::to_le_bytes)
+                .collect(),
+        );
+        roundtrip(
+            IOSupportedDType::Complex64,
+            vec![2],
+            [1.0_f32, 2.0, -3.0, 4.0]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect(),
+        );
+        roundtrip(
+            IOSupportedDType::Complex128,
+            vec![1],
+            [1.5_f64, -2.5]
+                .into_iter()
+                .flat_map(f64::to_le_bytes)
+                .collect(),
+        );
+        roundtrip(IOSupportedDType::Bool, vec![4], vec![1_u8, 0, 1, 0]);
     }
 
     #[test]
@@ -9067,6 +10380,50 @@ mm.flush()
     }
 
     #[test]
+    fn load_borrowed_body_matches_owned_control_on_misaligned_input_and_errors() {
+        let shape = &[7];
+        let values = &[
+            f64::from_bits(0x7ff8_0000_0000_1234),
+            -0.0,
+            f64::from_bits(1),
+            f64::MIN_POSITIVE,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1.25,
+        ];
+        let encoded = save(shape, values, native_endian_f64_dtype()).unwrap();
+        let mut padded = Vec::with_capacity(encoded.len() + 1);
+        padded.push(0);
+        padded.extend_from_slice(&encoded);
+        let misaligned = &padded[1..];
+
+        let owned = read_npy_bytes(misaligned, false).unwrap();
+        let owned_dtype = owned.header.descr;
+        let owned_shape = owned.header.shape;
+        let owned_values = fromfile(owned.payload.as_ref(), owned_dtype, None).unwrap();
+        let (borrowed_shape, borrowed_values, borrowed_dtype) = load(misaligned).unwrap();
+
+        assert_eq!(borrowed_shape, owned_shape);
+        assert_eq!(borrowed_dtype, owned_dtype);
+        assert_eq!(borrowed_values.len(), owned_values.len());
+        for (borrowed, owned) in borrowed_values.iter().zip(&owned_values) {
+            assert_eq!(borrowed.to_bits(), owned.to_bits());
+        }
+
+        let invalid_magic = [0u8; 8];
+        assert_eq!(
+            load(&invalid_magic).unwrap_err(),
+            read_npy_bytes(&invalid_magic, false).unwrap_err()
+        );
+        let mut truncated = encoded;
+        let _ = truncated.pop();
+        assert_eq!(
+            load(&truncated).unwrap_err(),
+            read_npy_bytes(&truncated, false).unwrap_err()
+        );
+    }
+
+    #[test]
     fn save_load_i32_dtype_roundtrip() {
         let shape = &[4];
         let values = &[-2.0_f64, -1.0, 0.0, 1.0];
@@ -9743,6 +11100,50 @@ mm.flush()
         assert_eq!(result.shape, vec![2]);
         assert_eq!(result.columns[0], col_x);
         assert_eq!(result.columns[1], col_y);
+    }
+
+    #[test]
+    fn fromfile_structured_single_field_copies_the_selected_record_prefix() {
+        let desc = StructuredIODescriptor {
+            fields: vec![StructuredIOField {
+                name: "payload".to_string(),
+                dtype: IOSupportedDType::Bytes(7),
+            }],
+        };
+        let records: Vec<u8> = (0..21).map(|value| (value * 17 + 3) as u8).collect();
+        let mut data = records.clone();
+        data.extend_from_slice(&[0xde, 0xad, 0xbe]);
+
+        let all = fromfile_structured(&data, &desc, None).expect("all complete records");
+        assert_eq!(all.shape, vec![3]);
+        assert!(!all.fortran_order);
+        assert_eq!(all.descriptor, desc);
+        assert_eq!(all.columns, vec![records.clone()]);
+
+        let bounded = fromfile_structured(&data, &desc, Some(2)).expect("bounded records");
+        assert_eq!(bounded.shape, vec![2]);
+        assert_eq!(bounded.columns, vec![records[..14].to_vec()]);
+
+        let excess = fromfile_structured(&data, &desc, Some(99)).expect("clamped records");
+        assert_eq!(excess.shape, vec![3]);
+        assert_eq!(excess.columns, vec![records]);
+
+        let empty = fromfile_structured(&[], &desc, None).expect("empty input");
+        assert_eq!(empty.shape, vec![0]);
+        assert_eq!(empty.columns, vec![Vec::<u8>::new()]);
+
+        for invalid_dtype in [IOSupportedDType::Bytes(0), IOSupportedDType::Object] {
+            let invalid = StructuredIODescriptor {
+                fields: vec![StructuredIOField {
+                    name: "invalid".to_string(),
+                    dtype: invalid_dtype,
+                }],
+            };
+            assert_eq!(
+                fromfile_structured(&[], &invalid, None).unwrap_err(),
+                IOError::DTypeDescriptorInvalid
+            );
+        }
     }
 
     #[test]

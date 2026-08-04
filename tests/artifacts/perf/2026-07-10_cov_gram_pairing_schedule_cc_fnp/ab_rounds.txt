@@ -1,0 +1,213 @@
+== native fault modes (no knobs) ==
+base: 33.83 ms/call, 15794 minor faults/call
+cand: 34.38 ms/call, 15790 minor faults/call
+== round 1 base ==
+fnp-base cov 2000x500: 18.54
+fnp-base corrcoef 2000x500: 20.32
+fnp-base cov 1000x1000: 7.11
+fnp-base corrcoef 1000x1000: 7.24
+fnp-base cov 500x5000: 13.38
+fnp-base corrcoef 500x5000: 12.34
+fnp-base cov 200x1000: 0.97
+fnp-base corrcoef 200x1000: 1.02
+fnp-base gauge matmul2048: 41.9
+== round 1 cand ==
+fnp-cand cov 2000x500: 18.89
+fnp-cand corrcoef 2000x500: 21.98
+fnp-cand cov 1000x1000: 7.42
+fnp-cand corrcoef 1000x1000: 7.57
+fnp-cand cov 500x5000: 13.99
+fnp-cand corrcoef 500x5000: 14.07
+fnp-cand cov 200x1000: 0.97
+fnp-cand corrcoef 200x1000: 1.17
+fnp-cand gauge matmul2048: 50.6
+== round 1 numpy control ==
+np cov 2000x500: 20.12
+np corrcoef 2000x500: 30.54
+np cov 1000x1000: 7.26
+np corrcoef 1000x1000: 8.32
+np cov 500x5000: 28.13
+np corrcoef 500x5000: 29.53
+np cov 200x1000: 0.92
+np corrcoef 200x1000: 0.98
+np gauge matmul2048: 52.0
+== round 2 base ==
+fnp-base cov 2000x500: 19.21
+fnp-base corrcoef 2000x500: 20.21
+fnp-base cov 1000x1000: 6.74
+fnp-base corrcoef 1000x1000: 7.05
+fnp-base cov 500x5000: 12.86
+fnp-base corrcoef 500x5000: 12.44
+fnp-base cov 200x1000: 0.96
+fnp-base corrcoef 200x1000: 1.00
+fnp-base gauge matmul2048: 51.0
+== round 2 cand ==
+fnp-cand cov 2000x500: 20.19
+fnp-cand corrcoef 2000x500: 20.55
+fnp-cand cov 1000x1000: 6.92
+fnp-cand corrcoef 1000x1000: 7.37
+fnp-cand cov 500x5000: 13.59
+fnp-cand corrcoef 500x5000: 12.25
+fnp-cand cov 200x1000: 0.93
+fnp-cand corrcoef 200x1000: 1.00
+fnp-cand gauge matmul2048: 69.5
+== round 2 numpy control ==
+np cov 2000x500: 21.34
+np corrcoef 2000x500: 30.14
+np cov 1000x1000: 13.04
+np corrcoef 1000x1000: 9.79
+np cov 500x5000: 28.94
+np corrcoef 500x5000: 27.68
+np cov 200x1000: 0.92
+np corrcoef 200x1000: 0.98
+np gauge matmul2048: 78.3
+== round 3 base ==
+fnp-base cov 2000x500: 19.09
+fnp-base corrcoef 2000x500: 20.17
+fnp-base cov 1000x1000: 6.91
+fnp-base corrcoef 1000x1000: 7.38
+fnp-base cov 500x5000: 12.47
+fnp-base corrcoef 500x5000: 13.24
+fnp-base cov 200x1000: 0.98
+fnp-base corrcoef 200x1000: 1.05
+fnp-base gauge matmul2048: 54.0
+== round 3 cand ==
+fnp-cand cov 2000x500: 18.79
+fnp-cand corrcoef 2000x500: 21.37
+fnp-cand cov 1000x1000: 7.40
+fnp-cand corrcoef 1000x1000: 7.06
+fnp-cand cov 500x5000: 13.60
+fnp-cand corrcoef 500x5000: 13.11
+fnp-cand cov 200x1000: 0.96
+fnp-cand corrcoef 200x1000: 1.01
+fnp-cand gauge matmul2048: 71.0
+== round 3 numpy control ==
+np cov 2000x500: 27.56
+np corrcoef 2000x500: 33.65
+np cov 1000x1000: 11.55
+np corrcoef 1000x1000: 10.14
+np cov 500x5000: 27.98
+np corrcoef 500x5000: 27.73
+np cov 200x1000: 0.95
+np corrcoef 200x1000: 1.00
+np gauge matmul2048: 46.9
+== round 4 base ==
+fnp-base cov 2000x500: 17.80
+fnp-base corrcoef 2000x500: 21.22
+fnp-base cov 1000x1000: 6.57
+fnp-base corrcoef 1000x1000: 7.45
+fnp-base cov 500x5000: 13.25
+fnp-base corrcoef 500x5000: 12.57
+fnp-base cov 200x1000: 0.96
+fnp-base corrcoef 200x1000: 1.03
+fnp-base gauge matmul2048: 45.8
+== round 4 cand ==
+fnp-cand cov 2000x500: 20.97
+fnp-cand corrcoef 2000x500: 21.98
+fnp-cand cov 1000x1000: 7.03
+fnp-cand corrcoef 1000x1000: 8.05
+fnp-cand cov 500x5000: 13.09
+fnp-cand corrcoef 500x5000: 13.80
+fnp-cand cov 200x1000: 0.92
+fnp-cand corrcoef 200x1000: 0.99
+fnp-cand gauge matmul2048: 45.9
+== round 4 numpy control ==
+np cov 2000x500: 23.51
+np corrcoef 2000x500: 31.24
+np cov 1000x1000: 7.32
+np corrcoef 1000x1000: 10.62
+np cov 500x5000: 27.81
+np corrcoef 500x5000: 27.13
+np cov 200x1000: 0.93
+np corrcoef 200x1000: 0.99
+np gauge matmul2048: 84.8
+== round 5 base ==
+fnp-base cov 2000x500: 18.67
+fnp-base corrcoef 2000x500: 20.18
+fnp-base cov 1000x1000: 6.97
+fnp-base corrcoef 1000x1000: 7.81
+fnp-base cov 500x5000: 11.61
+fnp-base corrcoef 500x5000: 13.14
+fnp-base cov 200x1000: 0.96
+fnp-base corrcoef 200x1000: 1.05
+fnp-base gauge matmul2048: 43.6
+== round 5 cand ==
+fnp-cand cov 2000x500: 19.16
+fnp-cand corrcoef 2000x500: 21.74
+fnp-cand cov 1000x1000: 7.78
+fnp-cand corrcoef 1000x1000: 7.42
+fnp-cand cov 500x5000: 13.84
+fnp-cand corrcoef 500x5000: 14.04
+fnp-cand cov 200x1000: 0.93
+fnp-cand corrcoef 200x1000: 1.02
+fnp-cand gauge matmul2048: 63.7
+== round 5 numpy control ==
+np cov 2000x500: 26.09
+np corrcoef 2000x500: 32.43
+np cov 1000x1000: 11.17
+np corrcoef 1000x1000: 8.84
+np cov 500x5000: 28.13
+np corrcoef 500x5000: 29.06
+np cov 200x1000: 0.96
+np corrcoef 200x1000: 1.04
+np gauge matmul2048: 83.0
+== round 6 base ==
+fnp-base cov 2000x500: 18.51
+fnp-base corrcoef 2000x500: 19.80
+fnp-base cov 1000x1000: 6.74
+fnp-base corrcoef 1000x1000: 7.61
+fnp-base cov 500x5000: 12.89
+fnp-base corrcoef 500x5000: 13.27
+fnp-base cov 200x1000: 1.02
+fnp-base corrcoef 200x1000: 1.27
+fnp-base gauge matmul2048: 45.9
+== round 6 cand ==
+fnp-cand cov 2000x500: 18.33
+fnp-cand corrcoef 2000x500: 19.98
+fnp-cand cov 1000x1000: 7.57
+fnp-cand corrcoef 1000x1000: 8.07
+fnp-cand cov 500x5000: 12.73
+fnp-cand corrcoef 500x5000: 13.72
+fnp-cand cov 200x1000: 0.93
+fnp-cand corrcoef 200x1000: 0.98
+fnp-cand gauge matmul2048: 96.0
+== round 6 numpy control ==
+np cov 2000x500: 29.06
+np corrcoef 2000x500: 31.42
+np cov 1000x1000: 7.21
+np corrcoef 1000x1000: 8.22
+np cov 500x5000: 27.69
+np corrcoef 500x5000: 28.76
+np cov 200x1000: 0.98
+np corrcoef 200x1000: 1.05
+np gauge matmul2048: 37.9
+== round 7 base ==
+fnp-base cov 2000x500: 19.70
+fnp-base corrcoef 2000x500: 20.67
+fnp-base cov 1000x1000: 7.17
+fnp-base corrcoef 1000x1000: 7.43
+fnp-base cov 500x5000: 12.07
+fnp-base corrcoef 500x5000: 13.82
+fnp-base cov 200x1000: 0.95
+fnp-base corrcoef 200x1000: 1.01
+fnp-base gauge matmul2048: 44.0
+== round 7 cand ==
+fnp-cand cov 2000x500: 18.87
+fnp-cand corrcoef 2000x500: 20.46
+fnp-cand cov 1000x1000: 7.90
+fnp-cand corrcoef 1000x1000: 7.13
+fnp-cand cov 500x5000: 14.32
+fnp-cand corrcoef 500x5000: 13.46
+fnp-cand cov 200x1000: 0.93
+fnp-cand corrcoef 200x1000: 1.03
+fnp-cand gauge matmul2048: 54.0
+== round 7 numpy control ==
+np cov 2000x500: 25.78
+np corrcoef 2000x500: 36.33
+np cov 1000x1000: 7.71
+np corrcoef 1000x1000: 8.95
+np cov 500x5000: 27.48
+np corrcoef 500x5000: 27.65
+np cov 200x1000: 0.95
+np corrcoef 200x1000: 1.02
+np gauge matmul2048: 38.4

@@ -42,6 +42,85 @@ fn fnp_script(body: String) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn reshape_ravel_python_container_and_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def clean(value):
+    if isinstance(value, float) and np.isnan(value):
+        return "nan"
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    return value
+
+def normalize(value):
+    array = np.asarray(value)
+    return (str(array.dtype), tuple(array.shape), clean(array.tolist()))
+
+def outcome(call_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize(call_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+cases = [
+    ("reshape Python list tuple shape", "reshape", lambda: (([1, 2, 3, 4], (2, 2)), {})),
+    ("reshape scalar empty shape", "reshape", lambda: ((7, ()), {})),
+    (
+        "reshape list shape order F",
+        "reshape",
+        lambda: ((np.arange(6).reshape(2, 3), [3, 2]), {"order": "F"}),
+    ),
+    (
+        "reshape newshape keyword",
+        "reshape",
+        lambda: ((np.arange(6),), {"newshape": (3, 2)}),
+    ),
+    (
+        "reshape copy false view-compatible",
+        "reshape",
+        lambda: ((np.arange(6), (2, 3)), {"copy": False}),
+    ),
+    ("ravel Python list", "ravel", lambda: (([[1, 2], [3, 4]],), {})),
+    ("ravel scalar", "ravel", lambda: ((7,), {})),
+    (
+        "ravel Fortran order array",
+        "ravel",
+        lambda: ((np.asfortranarray(np.arange(6).reshape(2, 3)),), {"order": "F"}),
+    ),
+    ("reshape missing shape error", "reshape", lambda: ((np.arange(3),), {})),
+    (
+        "reshape invalid order error",
+        "reshape",
+        lambda: ((np.arange(4), (2, 2)), {"order": "K"}),
+    ),
+    ("ravel invalid order error", "ravel", lambda: ((np.arange(4),), {"order": "Z"})),
+]
+
+ok = True
+for label, name, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(getattr(fnp, name), *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(getattr(np, name), *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "reshape/ravel Python-container and keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn reshape_1d_to_2d() -> Result<(), String> {
     let script = fnp_script(
         r#"

@@ -1,0 +1,2 @@
+average_ax1_fullweights returned=False: np=89162.0us fnp=4432.9us fnp/np=0.050
+average_ax1_fullweights returned=True: np=87014.5us fnp=5127.6us fnp/np=0.059

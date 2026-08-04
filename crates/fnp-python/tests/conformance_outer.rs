@@ -269,3 +269,42 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+// The parallel outer path (total elements >= the row-block gate) must be byte-identical to numpy. Each
+// output element is one independent ai*bj store, so distributing rows across the rayon pool cannot change
+// the result — this locks that in for f64/f32 and the integer dtypes at sizes that trip the gate.
+#[test]
+fn outer_zerocopy_parallel_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260701)
+chunks = []
+# f64 / f32: sizes above the ~32MB byte gate (2048^2 f64 = 32MB; 3000^2 f32 = 36MB) plus a non-square case
+for dt in (np.float64, np.float32):
+    for n, m in [(2100, 2100), (3000, 3000), (1000, 40000)]:
+        u = (rng.standard_normal(n) * 1.0007).astype(dt)
+        v = (rng.standard_normal(m) * 1.0003).astype(dt)
+        chunks.append(np.ascontiguousarray(mod.outer(u, v)).tobytes())
+# integer dtypes (wrapping product) above the byte gate
+for dt in (np.int64, np.int32, np.uint16, np.int8):
+    info = np.iinfo(dt)
+    n = 2100 if dt == np.int64 else (2100 if dt == np.int32 else 6000)
+    u = rng.integers(info.min // 2, info.max // 2, n).astype(dt)
+    v = rng.integers(info.min // 2, info.max // 2, n).astype(dt)
+    chunks.append(np.ascontiguousarray(mod.outer(u, v)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "parallel outer must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}

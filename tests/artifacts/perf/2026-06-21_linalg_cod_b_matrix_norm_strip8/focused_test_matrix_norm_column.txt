@@ -1,0 +1,20 @@
+command:
+AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-linalg matrix_norm_column_reduction_matches_strided_reference_bits -- --nocapture
+
+remote worker:
+vmi1153651
+
+result:
+running 1 test
+test tests::matrix_norm_column_reduction_matches_strided_reference_bits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 325 filtered out; finished in 0.00s
+
+integration shards:
+conformance_linalg.rs: 0 matching tests, no failures
+golden_linalg.rs: 0 matching tests, no failures
+metamorphic_linalg.rs: 0 matching tests, no failures
+solve_perf.rs: 0 matching tests, no failures
+
+remote command:
+exit=0

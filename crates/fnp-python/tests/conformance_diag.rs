@@ -244,3 +244,47 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "diagonal 3d should match numpy");
     Ok(())
 }
+
+/// Locks the zero-copy 1-D diag construction path (try_zerocopy_f64_diagflat via
+/// diag): a deterministic f64 vector with NaN/inf/-0.0, built into a diagonal
+/// matrix across several k offsets, must be BYTE-IDENTICAL to numpy.diag (numpy
+/// is the oracle), plus a sha256 golden over the fnp output bytes for drift.
+#[test]
+fn diag_1d_construct_zerocopy_matches_numpy_bytes_and_golden() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+s = 0x9E3779B97F4A7C15
+n = 257
+v = np.empty(n, dtype=np.float64)
+for i in range(n):
+    s = (s * 6364136223846793005 + 1) & 0xFFFFFFFFFFFFFFFF
+    v[i] = ((s >> 33) / 4294967295.0) - 0.5
+v[3] = np.nan; v[10] = np.inf; v[20] = -np.inf; v[30] = -0.0; v[31] = 0.0
+h = hashlib.sha256()
+allmatch = True
+for k in (0, 1, -1, 7, -7, n, -n):
+    r = np.asarray(fnp.diag(v, k))
+    e = np.diag(v, k)
+    if r.shape != e.shape or r.tobytes() != e.tobytes():
+        allmatch = False
+    h.update(r.tobytes())
+print(allmatch)
+print(h.hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "True",
+        "1-D diag must be byte-identical to numpy.diag across k offsets"
+    );
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "3ef89b038d261e7cf219620121a849a4ad1aa9833a23ac572d21b492c17dec67",
+        "diag 1-D zero-copy golden sha256 drifted"
+    );
+    Ok(())
+}

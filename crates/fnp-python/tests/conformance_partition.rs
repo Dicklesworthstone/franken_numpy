@@ -37,6 +37,67 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+fn indent_python(body: &str) -> String {
+    body.lines()
+        .map(|line| {
+            if line.trim().is_empty() {
+                "    ".to_string()
+            } else {
+                format!("    {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn outcome_body(case_body: &str) -> String {
+    format!(
+        r#"
+import json
+import numpy as np
+
+def normalize(value):
+    if isinstance(value, np.ndarray):
+        return {{
+            "kind": "ndarray",
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+            "values": repr(value.tolist()),
+        }}
+    if isinstance(value, tuple):
+        return {{"kind": "tuple", "items": [normalize(item) for item in value]}}
+    if isinstance(value, list):
+        return {{"kind": "list", "items": [normalize(item) for item in value]}}
+    if isinstance(value, np.generic):
+        return {{
+            "kind": "scalar",
+            "type": type(value).__name__,
+            "dtype": str(value.dtype),
+            "value": repr(value.item()),
+        }}
+    return {{"kind": "object", "type": type(value).__name__, "value": repr(value)}}
+
+try:
+{case}
+    print(json.dumps({{"status": "ok", "result": normalize(result)}}, sort_keys=True))
+except Exception as error:
+    print(json.dumps({{"status": "error", "type": type(error).__name__}}, sort_keys=True))
+"#,
+        case = indent_python(case_body)
+    )
+}
+
+fn numpy_outcome_script(case_body: &str) -> String {
+    format!(
+        "import numpy as np\nMODULE = np\n{}",
+        outcome_body(case_body)
+    )
+}
+
+fn fnp_outcome_script(case_body: &str) -> String {
+    fnp_script(format!("MODULE = fnp\n{}", outcome_body(case_body)))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // partition
 // ─────────────────────────────────────────────────────────────────────────────
@@ -190,6 +251,48 @@ print(result == expected and result[0] != "ok")
         "True",
         "partition invalid kind should preserve numpy error behavior"
     );
+    Ok(())
+}
+
+#[test]
+fn partition_argpartition_keyword_outcomes_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "partition list kth sequence",
+            "result = MODULE.partition([9, 4, 1, 7, 3, 6], [1, 4])",
+        ),
+        (
+            "partition axis none flattens",
+            "result = MODULE.partition(np.array([[3, 1], [2, 4]]), 2, axis=None)",
+        ),
+        (
+            "partition structured order",
+            "arr = np.array([(2, 1.0), (1, 3.0), (2, 0.5)], dtype=[('a', 'i4'), ('b', 'f8')])\nresult = MODULE.partition(arr, 1, order=['a', 'b'])",
+        ),
+        (
+            "argpartition tuple kth sequence axis",
+            "result = MODULE.argpartition(((9, 4, 1), (7, 3, 6)), [0, 2], axis=1)",
+        ),
+        (
+            "argpartition axis none flattens",
+            "result = MODULE.argpartition(np.array([[3, 1], [2, 4]]), 2, axis=None)",
+        ),
+        (
+            "partition kth out of bounds error",
+            "result = MODULE.partition([1, 2, 3], 5)",
+        ),
+        (
+            "argpartition axis error",
+            "result = MODULE.argpartition([[1, 2], [3, 4]], 1, axis=3)",
+        ),
+    ];
+
+    for (name, case_body) in cases {
+        let expected = numpy_oracle(&numpy_outcome_script(case_body))?;
+        let actual = numpy_oracle(&fnp_outcome_script(case_body))?;
+        assert_eq!(actual, expected, "{name}");
+    }
+
     Ok(())
 }
 

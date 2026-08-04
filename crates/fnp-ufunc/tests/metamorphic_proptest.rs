@@ -186,9 +186,15 @@ proptest! {
         let sorted = arr.sort(Some(-1), None).expect("sort");
         let sum_sorted = sorted.reduce_sum(None, false).expect("sum sorted");
 
-        // Use relative tolerance
+        // Tolerance must scale with the CONDITIONING of the summation, not its
+        // result. Reordering f64 additions perturbs the sum by ~eps * Σ|x_i|
+        // (the magnitude that bounds floating accumulation error), so a sum with
+        // catastrophic cancellation (|Σx_i| << Σ|x_i|) can drift far more than its
+        // own tiny value. Scaling by |Σx_i|.max(1) understated this and failed on
+        // near-cancelling inputs; scale by Σ|x_i| instead.
         let n = arr.values().len() as f64;
-        let rel_tol = n.sqrt() * 1e-12 * sum_original.values()[0].abs().max(1.0);
+        let sum_abs: f64 = arr.values().iter().map(|v| v.abs()).sum();
+        let rel_tol = n.sqrt() * 1e-12 * sum_abs.max(1.0);
         prop_assert!(
             approx_eq_f64(
                 sum_original.values()[0],

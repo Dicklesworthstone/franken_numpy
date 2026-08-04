@@ -1,0 +1,2 @@
+numpy 2.4.3
+fnp_python import failed ModuleNotFoundError("No module named 'fnp_python'")

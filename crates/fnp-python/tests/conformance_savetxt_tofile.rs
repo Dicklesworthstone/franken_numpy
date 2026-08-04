@@ -264,6 +264,81 @@ print(a == b)
 }
 
 #[test]
+fn tofile_text_int64_native_path_matches_numpy_without_passthrough() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import tempfile, os
+base = np.array(
+    [0, 1, -2, 9_999, -98_765_432, 999_999_999_999_999, -999_999_999_999_999],
+    dtype=np.int64,
+)
+class PoisonTofile(np.ndarray):
+    def tofile(self, *args, **kwargs):
+        raise AssertionError("eligible fnp.tofile call delegated to NumPy")
+probe = base.view(PoisonTofile)
+original_asarray = np.asarray
+def preserve_probe(value, *args, **kwargs):
+    if isinstance(value, PoisonTofile):
+        return value
+    return original_asarray(value, *args, **kwargs)
+with tempfile.TemporaryDirectory() as td:
+    path_a = os.path.join(td, 'a.txt')
+    path_b = os.path.join(td, 'b.txt')
+    np.asarray = preserve_probe
+    try:
+        fnp.tofile(probe, path_a, sep=',')
+    finally:
+        np.asarray = original_asarray
+    base.tofile(path_b, sep=',')
+    with open(path_a, 'rb') as f: a = f.read()
+    with open(path_b, 'rb') as f: b = f.read()
+print(a == b)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "eligible int64 text export must be native and byte-identical to NumPy"
+    );
+    Ok(())
+}
+
+#[test]
+fn tofile_text_int64_guard_edges_fall_back_with_numpy_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import tempfile, os
+fixtures = [
+    (np.array([999_999_999_999_999, 1_000_000_000_000_000], dtype=np.int64), ',', '%s'),
+    (np.arange(20, dtype=np.int64)[::2], ',', '%s'),
+    (np.array([1, -2, 30], dtype=np.int64), ' ', '%05d'),
+]
+matches = []
+with tempfile.TemporaryDirectory() as td:
+    for index, (arr, sep, fmt) in enumerate(fixtures):
+        path_a = os.path.join(td, f'a-{index}.txt')
+        path_b = os.path.join(td, f'b-{index}.txt')
+        fnp.tofile(arr, path_a, sep=sep, format=fmt)
+        arr.tofile(path_b, sep=sep, format=fmt)
+        with open(path_a, 'rb') as f: a = f.read()
+        with open(path_b, 'rb') as f: b = f.read()
+        matches.append(a == b)
+print(all(matches))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "int64 precision, layout, and format guard edges must retain NumPy parity"
+    );
+    Ok(())
+}
+
+#[test]
 fn tofile_text_format_matches_numpy() -> Result<(), String> {
     let script = fnp_script(
         r#"

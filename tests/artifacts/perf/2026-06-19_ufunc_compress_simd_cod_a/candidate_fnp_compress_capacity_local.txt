@@ -1,0 +1,11 @@
+   Compiling fnp-ndarray v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260619-134547/crates/fnp-ndarray)
+   Compiling fnp-runtime v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260619-134547/crates/fnp-runtime)
+   Compiling fnp-dtype v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260619-134547/crates/fnp-dtype)
+   Compiling fnp-linalg v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260619-134547/crates/fnp-linalg)
+   Compiling fnp-ufunc v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260619-134547/crates/fnp-ufunc)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 31.66s
+     Running benches/elementwise.rs (/data/projects/.rch-targets/franken_numpy-cod-a/release/deps/elementwise-bdcc39a09983876b)
+Gnuplot not found, using plotters backend
+test compress_f64_bool_flat_sparse/100000 ... bench:      44,374 ns/iter (+/- 4,141)
+test compress_f64_bool_flat_sparse/1000000 ... bench:     410,823 ns/iter (+/- 58,079)
+

@@ -1,0 +1,44 @@
+# Ranked frame tables (perf, malloc-knobs, symbolized storm-mode HEAD build)
+== cov2000x500 ==
+    70.36%    69.32%  python3.13  fnp_python.so                                      [.] fnp_python::cov_gram_from_centered::{closure#2}
+     7.64%     0.03%  python3.13  [unknown]                                          [k] 0xffffffffaf60012b
+     6.43%     0.09%  python3.13  libc.so.6                                          [.] __sched_yield
+     5.74%     0.00%  python3.13  libc.so.6                                          [.] __GI___clone3
+     5.72%     5.67%  python3.13  libscipy_openblas64_-ff84a88b.so                   [.] blas_thread_server
+     5.60%     0.01%  python3.13  [unknown]                                          [k] 0xffffffffb0c20551
+     5.24%     2.61%  python3.13  fnp_python.so                                      [.] crossbeam_epoch::default::with_handle::<crossbeam_epoch::default::pin::{closure#0}, crossbeam_epoch::guard::Guard>
+     3.89%     0.03%  python3.13  [unknown]                                          [.] 0xffffffffb0c2f947
+== cc2000x500 ==
+    67.74%    66.66%  python3.13  fnp_python.so                                      [.] fnp_python::cov_gram_from_centered::{closure#2}
+     7.50%     0.02%  python3.13  [unknown]                                          [k] 0xffffffffaf60012b
+     7.33%     0.00%  python3.13  libc.so.6                                          [.] __GI___clone3
+     7.31%     7.24%  python3.13  libscipy_openblas64_-ff84a88b.so                   [.] blas_thread_server
+     6.31%     0.09%  python3.13  libc.so.6                                          [.] __sched_yield
+     5.50%     0.02%  python3.13  [unknown]                                          [k] 0xffffffffb0c20551
+     5.28%     2.68%  python3.13  fnp_python.so                                      [.] crossbeam_epoch::default::with_handle::<crossbeam_epoch::default::pin::{closure#0}, crossbeam_epoch::guard::Guard>
+     3.79%     0.02%  python3.13  [unknown]                                          [.] 0xffffffffb0c2f947
+== cov500x5000 ==
+    67.28%    66.22%  python3.13  fnp_python.so                                      [.] fnp_python::cov_gram_from_centered::{closure#2}
+     9.43%     0.04%  python3.13  [unknown]                                          [k] 0xffffffffaf60012b
+     7.69%     0.13%  python3.13  libc.so.6                                          [.] __sched_yield
+     6.93%     3.41%  python3.13  fnp_python.so                                      [.] crossbeam_epoch::default::with_handle::<crossbeam_epoch::default::pin::{closure#0}, crossbeam_epoch::guard::Guard>
+     6.85%     0.02%  python3.13  [unknown]                                          [k] 0xffffffffb0c20551
+     5.05%     0.00%  python3.13  libc.so.6                                          [.] __GI___clone3
+     5.04%     5.00%  python3.13  libscipy_openblas64_-ff84a88b.so                   [.] blas_thread_server
+     4.68%     0.04%  python3.13  [unknown]                                          [.] 0xffffffffb0c2f947
+
+# perf annotate top instructions in cov_gram_from_centered::{closure#2} (cov 2000x500)
+    2.65 :   5ac6e1: vmulpd 0x20(%rsi,%rbx,8),%ymm14,%ymm12
+    2.64 :   5ac6c0: cmp    %r13,%r14
+    2.63 :   5ac6bc: lea    (%r15,%rbx,1),%r14
+    2.63 :   5ac6b2: cmp    $0x7,%r9
+    2.59 :   5ac738: mov    0x60(%rsp),%rsi
+    2.55 :   5ac77e: lea    (%rsi,%rbx,1),%r14
+    2.55 :   5ac678: vmovapd %ymm4,%ymm10
+    2.54 :   5ac73d: lea    (%rsi,%rbx,1),%r14
+    2.53 :   5ac69c: add    $0xfffffffffffffff8,%rcx
+    2.51 :   5ac779: mov    0x48(%rsp),%rsi
+    2.51 :   5ac6a0: dec    %rbp
+    2.49 :   5ac6fc: lea    (%rsi,%rbx,1),%r14
+    1.78 :   5ac762: vmulpd (%rsi,%rbx,8),%ymm15,%ymm2
+    1.78 :   5ac74a: cmp    $0x8,%r8

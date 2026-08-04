@@ -1,0 +1,26 @@
+== worker ==
+vmi1149989
+== candidate diff files ==
+crates/fnp-linalg/benches/criterion_linalg.rs
+crates/fnp-linalg/src/lib.rs
+== capture source patch ==
+3480 /tmp/fnp_eigvalsh_tridiag_src.patch
+== baseline: reverse source fast path only ==
+   Compiling fnp-linalg v0.1.0 (/data/projects/franken_numpy/crates/fnp-linalg)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 14.52s
+     Running benches/criterion_linalg.rs (.rch-target-vmi1149989-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/release/deps/criterion_linalg-ddbfbb6482365a23)
+Gnuplot not found, using plotters backend
+test eigvalsh_tridiagonal_nxn/size/128 ... bench:   1,477,437 ns/iter (+/- 50,388)
+test eigvalsh_tridiagonal_nxn/size/256 ... bench:   9,305,490 ns/iter (+/- 647,192)
+
+Warning: Unable to complete 10 samples in 2.0s. You may wish to increase target time to 2.9s or enable flat sampling.
+test eigvalsh_tridiagonal_nxn/size/512 ... bench:  49,845,148 ns/iter (+/- 3,235,710)
+
+== candidate: reapply source fast path ==
+   Compiling fnp-linalg v0.1.0 (/data/projects/franken_numpy/crates/fnp-linalg)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 13.60s
+     Running benches/criterion_linalg.rs (.rch-target-vmi1149989-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/release/deps/criterion_linalg-ddbfbb6482365a23)
+Gnuplot not found, using plotters backend
+test eigvalsh_tridiagonal_nxn/size/128 ... bench:     417,718 ns/iter (+/- 15,550)
+test eigvalsh_tridiagonal_nxn/size/256 ... bench:   1,721,791 ns/iter (+/- 172,651)
+test eigvalsh_tridiagonal_nxn/size/512 ... bench:   6,320,658 ns/iter (+/- 300,893)

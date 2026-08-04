@@ -37,9 +37,92 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+fn outcome_body(setup: &str, call_expr: &str) -> String {
+    // A `\` line-continuation eats the SOURCE indentation, so the Python indent must
+    // be injected via {I4}/{I8} placeholders (substituted after the eaten whitespace);
+    // writing the indent as plain source spaces would emit a flat script -> the numpy
+    // oracle raises IndentationError and every case fails (was a harness bug).
+    format!(
+        "{setup}\n\
+         def outcome(op):\n\
+         {I4}try:\n\
+         {I8}value = {call_expr}\n\
+         {I8}arr = np.asarray(value)\n\
+         {I8}print('ok')\n\
+         {I8}print(type(value).__name__)\n\
+         {I8}print(str(arr.dtype))\n\
+         {I8}print(tuple(arr.shape))\n\
+         {I8}print(repr(arr.tolist()))\n\
+         {I4}except Exception as exc:\n\
+         {I8}print('err')\n\
+         {I8}print(type(exc).__name__)\n\
+         outcome(op)",
+        I4 = "    ",
+        I8 = "        ",
+    )
+}
+
+fn numpy_outcome_script(function_expr: &str, setup: &str, call_expr: &str) -> String {
+    format!(
+        "import numpy as np\nop = {function_expr}\n{}",
+        outcome_body(setup, call_expr)
+    )
+}
+
+fn fnp_outcome_script(function_name: &str, setup: &str, call_expr: &str) -> String {
+    fnp_script(format!(
+        "op = fnp.{function_name}\n{}",
+        outcome_body(setup, call_expr)
+    ))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // interp
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn interp_python_container_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "scalar tuple inputs with left/right keywords",
+            "",
+            "op(0.0, (1, 2, 3), (10, 20, 30), left=-5, right=99)",
+        ),
+        (
+            "list inputs preserve ndarray metadata",
+            "",
+            "op([0.0, 1.5, 3.0], [1, 2, 3], [10, 20, 30], left=-1, right=100)",
+        ),
+        (
+            "period keyword delegates angular interpolation",
+            "",
+            "op([0, 90, 270, 360], [0, 180, 360], [0.0, 1.0, 0.0], period=360)",
+        ),
+        (
+            "tuple probe with ndarray xp fp",
+            "xp = np.array([0.0, 2.0, 4.0])\nfp = np.array([0.0, 20.0, 40.0])",
+            "op((1.0, 3.0), xp, fp)",
+        ),
+        ("missing fp error type", "", "op([0.0], [0.0])"),
+        (
+            "xp fp length mismatch error type",
+            "",
+            "op([0.0, 1.0], [0.0, 1.0], [10.0])",
+        ),
+    ];
+
+    for (label, setup, call_expr) in cases {
+        let numpy_result = numpy_oracle(&numpy_outcome_script("np.interp", setup, call_expr))?;
+        let rust_result = numpy_oracle(&fnp_outcome_script("interp", setup, call_expr))?;
+
+        assert_eq!(
+            numpy_result, rust_result,
+            "interp Python-container keyword surface mismatch for {label}"
+        );
+    }
+
+    Ok(())
+}
 
 #[test]
 fn interp_basic() -> Result<(), String> {
@@ -144,6 +227,46 @@ print(np.allclose(result, expected))
 // ─────────────────────────────────────────────────────────────────────────────
 // trapz
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn trapz_python_container_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let cases = [
+        ("list y default scalar", "", "op([1, 2, 3, 4])"),
+        (
+            "tuple y with x list",
+            "",
+            "op((1, 2, 3, 4), x=[0, 1, 3, 6])",
+        ),
+        (
+            "nested list axis zero",
+            "",
+            "op([[1, 2, 3], [4, 5, 6]], axis=0)",
+        ),
+        (
+            "nested tuple axis one dx keyword",
+            "",
+            "op(((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)), dx=0.5, axis=1)",
+        ),
+        (
+            "ndarray y with broadcast x spacing",
+            "y = np.array([[1.0, 2.0, 4.0], [2.0, 3.0, 5.0]])\nx = np.array([0.0, 0.5, 2.0])",
+            "op(y, x=x, axis=-1)",
+        ),
+        ("axis type error parity", "", "op([1, 2, 3], axis='bad')"),
+    ];
+
+    for (label, setup, call_expr) in cases {
+        let numpy_result = numpy_oracle(&numpy_outcome_script("np.trapezoid", setup, call_expr))?;
+        let rust_result = numpy_oracle(&fnp_outcome_script("trapz", setup, call_expr))?;
+
+        assert_eq!(
+            numpy_result, rust_result,
+            "trapz Python-container keyword surface mismatch for {label}"
+        );
+    }
+
+    Ok(())
+}
 
 #[test]
 fn trapz_basic() -> Result<(), String> {
@@ -306,6 +429,73 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     assert!(
         result.trim().starts_with("True"),
         "interp scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn int_trapezoid_via_f64_conversion_matches_numpy() -> Result<(), String> {
+    // Integer y/x within +-2^51 convert once to f64 and ride the existing
+    // paths. The fnp f64 FAST path is an allclose-level surface by design
+    // (different summation order, ~1e-14) - int rows assert the same
+    // tolerance the f64 surface already carries; DELEGATED forms (huge
+    // values, non-contig) stay byte-exact since the conversion is
+    // value-transparent to numpy's own chain in range.
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(163)
+verdicts = []
+# half-range-safe values per width (in-dtype pairwise adds cannot wrap)
+for dt, lo, hi in [(np.int64, -1000, 1000), (np.int32, -1000, 1000), (np.int16, -1000, 1000), (np.uint8, 0, 100)]:
+    y = rng.integers(lo, hi, 4_000_000).astype(dt)
+    r = fnp.trapezoid(y); e = np.trapezoid(y)
+    if not np.allclose(np.asarray(r, dtype=np.float64), np.asarray(e, dtype=np.float64), rtol=1e-12, atol=1e-6):
+        verdicts.append(f"FAIL 1-D {dt.__name__}")
+# FULL-range uint8 can wrap in-dtype -> must DELEGATE, byte-exact
+yw = rng.integers(0, 256, 2_000_000).astype(np.uint8)
+if np.asarray(fnp.trapezoid(yw)).tobytes() != np.asarray(np.trapezoid(yw)).tobytes():
+    verdicts.append("FAIL full-range uint8 delegate bytes")
+# int y with int x coordinates
+y = rng.integers(-1000, 1000, 2_000_000)
+x = np.arange(2_000_000) * 2
+r = fnp.trapezoid(y, x); e = np.trapezoid(y, x)
+if not np.allclose(float(r), float(e), rtol=1e-12, atol=1e-6):
+    verdicts.append("FAIL int x coords")
+# dx scalar
+r = fnp.trapezoid(y, dx=0.5); e = np.trapezoid(y, dx=0.5)
+if not np.allclose(float(r), float(e), rtol=1e-12, atol=1e-6):
+    verdicts.append("FAIL dx scalar")
+# 2-D axis
+y2 = rng.integers(-1000, 1000, (2048, 1024))
+for ax in (0, 1):
+    r = fnp.trapezoid(y2, axis=ax); e = np.trapezoid(y2, axis=ax)
+    if not np.allclose(r, e, rtol=1e-12, atol=1e-6):
+        verdicts.append(f"FAIL 2-D ax={ax}")
+# huge values keep the delegate: BYTE-exact
+big = rng.integers(2**60, 2**62, 300_000)
+if np.asarray(fnp.trapezoid(big)).tobytes() != np.asarray(np.trapezoid(big)).tobytes():
+    verdicts.append("FAIL huge-value delegate bytes")
+
+def best(fn, reps=3):
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); ts.append((time.perf_counter() - t0) * 1e3)
+    return min(ts)
+
+W = rng.integers(-1000, 1000, 16_000_000)
+tn = best(lambda: np.trapezoid(W)); tf = best(lambda: fnp.trapezoid(W))
+print(f"TRAPEZOID_INT_AB numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces TRAPEZOID_INT_AB under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "int trapezoid via f64 conversion must match numpy: {result}"
     );
     Ok(())
 }

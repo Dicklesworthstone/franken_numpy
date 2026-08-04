@@ -1,0 +1,37 @@
+Artifact set for 2026-06-21 fnp-ufunc percentile_method medium gate check
+
+Agent: YellowElk / cod-b
+Parent: franken_numpy-ixs5y
+Target dir: CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b
+
+Files:
+- baseline_percentile_method_gate_rch.txt
+  Current-tree ignored Rust timing probe on RCH worker ovh-a.
+- numpy_percentile_method_ovh_a.txt
+  Same-host NumPy comparator on fmd/ovh-a.
+- candidate_percentile_method_gate_rch.txt
+  Rejected 1 << 19 cutoff trial; not counted because RCH moved it to hz1.
+- scorecard.md
+  Human-readable win/loss/neutral table and validation summary.
+- final_cargo_check_fnp_ufunc.txt
+  Initial cargo check before the clippy cleanup.
+- final_cargo_clippy_fnp_ufunc.txt
+  Initial clippy run showing the current-tree trapezoid needless_range_loop.
+- final_cargo_check_fnp_ufunc_after_clippy_fix.txt
+  Final cargo check after the iterator-equivalent trapezoid cleanup.
+- final_cargo_clippy_fnp_ufunc_after_clippy_fix.txt
+  Final clippy pass after the iterator-equivalent trapezoid cleanup.
+- final_test_percentile_release.txt
+  Focused percentile release test before the clippy cleanup.
+- final_test_percentile_release_after_clippy_fix.txt
+  Focused percentile release test on the final source state.
+- final_test_trapezoid_release_after_clippy_fix.txt
+  Focused trapezoid release test for the small clippy cleanup.
+- final_fmt_fnp_ufunc.txt
+  Earlier fmt check artifact showing broad pre-existing fnp-ufunc formatting drift.
+- final_fmt_fnp_ufunc_after_clippy_fix.txt
+  Final fmt check artifact; still blocked by pre-existing formatting drift.
+- final_git_diff_check.txt
+  Earlier whitespace check artifact.
+- final_ubs_changed_files.txt
+  UBS artifact for the touched files, including broad existing fnp-ufunc inventory.

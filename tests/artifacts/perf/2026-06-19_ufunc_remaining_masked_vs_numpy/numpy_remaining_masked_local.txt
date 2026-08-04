@@ -1,0 +1,14 @@
+python=3.13.7
+numpy=2.4.3
+host=thinkstation1
+pid=3185122
+where_nonzero_f64_2d_sparse/262144: median_ns=1151481 p95_ns=1210673 mean_ns=1113144 cv_pct=8.81 min_ns=965636 max_ns=1373882 samples=41 inner=3
+where_nonzero_f64_2d_sparse/1048576: median_ns=3874881 p95_ns=5145637 mean_ns=4189816 cv_pct=12.78 min_ns=3828352 max_ns=5786742 samples=41 inner=1
+copyto_equal_shape_masked/100000: median_ns=198643 p95_ns=204030 mean_ns=198666 cv_pct=1.68 min_ns=193136 max_ns=207192 samples=41 inner=3
+copyto_equal_shape_masked/1000000: median_ns=2253369 p95_ns=2882420 mean_ns=2395451 cv_pct=12.74 min_ns=2055393 max_ns=3085675 samples=41 inner=1
+putmask_f64_masked/100000: median_ns=93467 p95_ns=101412 mean_ns=94568 cv_pct=3.48 min_ns=91099 max_ns=105179 samples=41 inner=3
+putmask_f64_masked/1000000: median_ns=1034359 p95_ns=1586435 mean_ns=1122093 cv_pct=17.83 min_ns=876942 max_ns=1907363 samples=41 inner=1
+place_f64_masked_cycling/100000: median_ns=75540 p95_ns=82553 mean_ns=72960 cv_pct=10.14 min_ns=62295 max_ns=85058 samples=41 inner=3
+place_f64_masked_cycling/1000000: median_ns=803241 p95_ns=888172 mean_ns=838468 cv_pct=17.73 min_ns=722759 max_ns=1725950 samples=41 inner=1
+put_mask_f64_masked_cycling/100000: median_ns=61396 p95_ns=68807 mean_ns=62852 cv_pct=4.93 min_ns=60735 max_ns=73252 samples=41 inner=3
+put_mask_f64_masked_cycling/1000000: median_ns=671352 p95_ns=737447 mean_ns=679429 cv_pct=7.63 min_ns=629061 max_ns=942445 samples=41 inner=1

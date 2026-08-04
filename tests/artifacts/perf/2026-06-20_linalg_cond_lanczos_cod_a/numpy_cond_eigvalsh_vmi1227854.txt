@@ -1,0 +1,43 @@
+  [2m2026-06-20T20:36:21.927050Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: bash -lc 'python3 - <<'\''PY'\''
+import time, statistics, platform
+import numpy as np
+print("python", platform.python_version())
+print("numpy", np.__version__)
+
+def generate_spd_matrix(n):
+    a = np.empty((n,n), dtype=np.float64)
+    for i in range(n):
+        for j in range(n):
+            a[i,j] = (n + 1.0) if i == j else 1.0 / (abs(float(i)-float(j)) + 1.0)
+    return a
+
+def generate_invertible_matrix(n):
+    a = np.empty((n,n), dtype=np.float64)
+    for i in range(n):
+        for j in range(n):
+            a[i,j] = (n*2.0) if i == j else ((i+j) % 5) * 0.1
+    return a
+
+def bench(label, fn, warm=3, runs=15):
+    for _ in range(warm):
+        fn()
+    vals=[]
+    for _ in range(runs):
+        t0=time.perf_counter_ns(); fn(); vals.append(time.perf_counter_ns()-t0)
+    vals.sort()
+    print(f"{label}: min={vals[0]} median={int(statistics.median(vals))} p95={vals[int(0.95*(len(vals)-1))]} max={vals[-1]} ns runs={runs}")
+
+bench("numpy_eigvalsh_128", lambda: np.linalg.eigvalsh(generate_spd_matrix(128)))
+for n in (64,128,256,512):
+    a = generate_invertible_matrix(n)
+    bench(f"numpy_cond_{n}", lambda a=a: np.linalg.cond(a))
+PY'[0m
+    [2;3mat[0m rch/src/hook.rs:749 [2;3mon[0m ThreadId(1)
+
+python 3.13.7
+numpy 2.4.3
+numpy_eigvalsh_128: min=2466913 median=2538708 p95=2619141 max=2760779 ns runs=15
+numpy_cond_64: min=135607 median=138432 p95=148261 max=153571 ns runs=15
+numpy_cond_128: min=1650557 median=1966615 p95=2050424 max=2244341 ns runs=15
+numpy_cond_256: min=6483490 median=6616262 p95=6847681 max=6879621 ns runs=15
+numpy_cond_512: min=30881954 median=31994372 p95=33052155 max=33089726 ns runs=15

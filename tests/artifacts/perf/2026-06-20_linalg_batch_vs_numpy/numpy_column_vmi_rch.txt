@@ -1,0 +1,22 @@
+  [2m2026-06-20T04:07:36.146081Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: bash -lc 'python3 - <<'\''PY'\''
+import time, statistics, numpy as np
+print(numpy_version, np.__version__)
+for n in (128, 256, 512, 1024):
+    a = (((np.arange(n*n, dtype=np.float64) * 29 + 17) % 113) - 56.0) / 13.0
+    a = a.reshape(n, n)
+    for name, ordv in ((one, 1), (neg_one, -1)):
+        np.linalg.norm(a, ord=ordv)
+        samples = []
+        for _ in range(25):
+            t0 = time.perf_counter_ns()
+            for _ in range(25):
+                np.linalg.norm(a, ord=ordv)
+            t1 = time.perf_counter_ns()
+            samples.append((t1 - t0) / 25.0)
+        print(f"matrix_norm_nxn_orders/{name}/{n} {statistics.median(samples):.0f} ns")
+PY'[0m
+    [2;3mat[0m rch/src/hook.rs:749 [2;3mon[0m ThreadId(1)
+
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+NameError: name 'numpy_version' is not defined

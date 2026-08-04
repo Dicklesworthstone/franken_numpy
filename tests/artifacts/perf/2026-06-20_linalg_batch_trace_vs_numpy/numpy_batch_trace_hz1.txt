@@ -1,0 +1,5 @@
+host hz1
+python 3.14.4
+numpy 2.3.5
+batch_trace/shape/4096x8x8: median_ns=102977 min_ns=101347 p95_ns=104736 max_ns=106219 mean_ns=103000 cv_pct=1.08 inner=40 samples=31
+batch_trace/shape/1024x32x32: median_ns=61381 min_ns=58282 p95_ns=64394 max_ns=66518 mean_ns=61525 cv_pct=3.02 inner=40 samples=31

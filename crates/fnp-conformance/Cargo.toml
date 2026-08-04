@@ -11,14 +11,14 @@ categories.workspace = true
 description = "Differential conformance harness: numpy oracle capture, fixtures, drift detection."
 
 [dependencies]
-fnp-dtype = { path = "../fnp-dtype", version = "0.1.0" }
-fnp-io = { path = "../fnp-io", version = "0.1.0" }
-fnp-iter = { path = "../fnp-iter", version = "0.1.0" }
-fnp-linalg = { path = "../fnp-linalg", version = "0.1.0" }
-fnp-ndarray = { path = "../fnp-ndarray", version = "0.1.0" }
-fnp-random = { path = "../fnp-random", version = "0.1.0" }
-fnp-runtime = { path = "../fnp-runtime", version = "0.1.0" }
-fnp-ufunc = { path = "../fnp-ufunc", version = "0.1.0" }
+fnp-dtype = { path = "../fnp-dtype", version = "0.2.0" }
+fnp-io = { path = "../fnp-io", version = "0.2.0" }
+fnp-iter = { path = "../fnp-iter", version = "0.2.0" }
+fnp-linalg = { path = "../fnp-linalg", version = "0.2.0" }
+fnp-ndarray = { path = "../fnp-ndarray", version = "0.2.0" }
+fnp-random = { path = "../fnp-random", version = "0.2.0" }
+fnp-runtime = { path = "../fnp-runtime", version = "0.2.0" }
+fnp-ufunc = { path = "../fnp-ufunc", version = "0.2.0" }
 # asupersync inherits default-features=false from the workspace pin (set that way
 # so fnp-runtime can use the dep as optional). Verified 2026-05-20 by running
 # `cargo test -p fnp-conformance --lib`: 215 tests pass without asupersync default

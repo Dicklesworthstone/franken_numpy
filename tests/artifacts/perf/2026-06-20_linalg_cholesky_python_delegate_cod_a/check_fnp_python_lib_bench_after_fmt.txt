@@ -1,0 +1,37 @@
+    Checking fnp-ndarray v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-cholesky-pydelegate-20260620/crates/fnp-ndarray)
+    Checking fnp-runtime v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-cholesky-pydelegate-20260620/crates/fnp-runtime)
+    Checking fnp-io v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-cholesky-pydelegate-20260620/crates/fnp-io)
+    Checking fnp-iter v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-cholesky-pydelegate-20260620/crates/fnp-iter)
+    Checking fnp-dtype v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-cholesky-pydelegate-20260620/crates/fnp-dtype)
+    Checking fnp-linalg v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-cholesky-pydelegate-20260620/crates/fnp-linalg)
+    Checking fnp-random v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-cholesky-pydelegate-20260620/crates/fnp-random)
+    Checking fnp-ufunc v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-cholesky-pydelegate-20260620/crates/fnp-ufunc)
+    Checking fnp-python v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-cholesky-pydelegate-20260620/crates/fnp-python)
+warning: variants `Depth` and `Column` are never constructed
+    --> crates/fnp-python/src/lib.rs:2519:5
+     |
+2516 | enum StackHelperKind {
+     |      --------------- variants in this enum
+...
+2519 |     Depth,
+     |     ^^^^^
+2520 |     Column,
+     |     ^^^^^^
+     |
+     = note: `StackHelperKind` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `extract_mask_operand` is never used
+    --> crates/fnp-python/src/lib.rs:5151:4
+     |
+5151 | fn extract_mask_operand(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `count_valid_elements` is never used
+    --> crates/fnp-python/src/lib.rs:5173:4
+     |
+5173 | fn count_valid_elements(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: `fnp-python` (lib) generated 3 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 15.90s

@@ -1,11 +1,8 @@
-//! Profiling-only golden + timing harness for the parallel transcendental unary
-//! ufunc lever (bead franken_numpy-hnkn0).
+//! Profiling-only golden + timing harness for large unary ufunc maps.
 //!
-//! Compares the live `elementwise_unary` (now rayon-parallel for transcendental
-//! ops over large arrays) against an inlined *serial* `op.apply` map. Asserts the
-//! outputs are bit-for-bit identical (the isomorphism proof — per-element libm
-//! results are unchanged), prints an FNV-1a checksum, and reports the median
-//! wall-clock of each plus the speedup.
+//! Compares the live `elementwise_unary` against an inlined *serial* `op.apply`
+//! map. Asserts the outputs are bit-for-bit identical, prints a SHA-256 golden
+//! digest, and reports the median wall-clock of each plus the speedup.
 //!
 //! Run: `cargo run --release --example perf_unary_parallel -p fnp-ufunc -- 4000000`
 
@@ -13,16 +10,18 @@ use std::time::Instant;
 
 use fnp_dtype::DType;
 use fnp_ufunc::{UFuncArray, UnaryOp};
+use sha2::{Digest, Sha256};
 
-fn fnv1a(values: &[f64]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
+fn sha256_hex(values: &[f64]) -> String {
+    let mut digest = Sha256::new();
     for v in values {
-        for byte in v.to_bits().to_le_bytes() {
-            h ^= u64::from(byte);
-            h = h.wrapping_mul(0x100000001b3);
-        }
+        digest.update(v.to_bits().to_le_bytes());
     }
-    h
+    digest
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn median(mut xs: Vec<f64>) -> f64 {
@@ -49,7 +48,16 @@ fn main() {
     // Spread of finite inputs so libm does real work (no fast NaN/inf paths).
     let data: Vec<f64> = (0..n).map(|i| ((i % 1000) as f64) * 0.001 + 0.5).collect();
 
-    for op in [UnaryOp::Exp, UnaryOp::Sin, UnaryOp::Log] {
+    for op in [
+        UnaryOp::Abs,
+        UnaryOp::Square,
+        UnaryOp::Floor,
+        UnaryOp::Rint,
+        UnaryOp::Reciprocal,
+        UnaryOp::Exp,
+        UnaryOp::Sin,
+        UnaryOp::Log,
+    ] {
         let arr = UFuncArray::new(vec![n], data.clone(), DType::F64).unwrap();
         let parallel = arr.elementwise_unary(op);
         let serial: Vec<f64> = data.iter().map(|&v| op.apply(v)).collect();
@@ -59,7 +67,7 @@ fn main() {
             "{:?}: parallel != serial",
             op
         );
-        let checksum = fnv1a(parallel.values());
+        let sha256 = sha256_hex(parallel.values());
 
         for _ in 0..2 {
             std::hint::black_box(arr.elementwise_unary(op));
@@ -71,7 +79,7 @@ fn main() {
         let speedup = ser_ms / par_ms;
         let melem_s = (n as f64) / (par_ms * 1e-3) / 1e6;
         println!(
-            "unary_{:?}_n{n} fnv1a=0x{checksum:016x} serial_ms={ser_ms:.4} parallel_ms={par_ms:.4} speedup={speedup:.2}x throughput_Melem_s={melem_s:.1}",
+            "unary_{:?}_n{n} sha256={sha256} serial_ms={ser_ms:.4} parallel_ms={par_ms:.4} speedup={speedup:.2}x throughput_Melem_s={melem_s:.1}",
             op
         );
     }

@@ -1,0 +1,2 @@
+test polyval_native_horner_bitexact_matches_numpy ... ok
+test result: ok. 24 passed; 0 failed

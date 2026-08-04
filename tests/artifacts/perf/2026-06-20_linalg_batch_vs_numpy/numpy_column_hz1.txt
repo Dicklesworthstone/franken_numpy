@@ -1,0 +1,11 @@
+host hetzner1
+python 3.14.4
+numpy 2.3.5
+matrix_norm_nxn_orders/one/128: median_ns=13806 p95_ns=14967 mean_ns=13715 cv_pct=5.62 min_ns=12858 max_ns=15964 samples=31 inner=20
+matrix_norm_nxn_orders/neg_one/128: median_ns=14020 p95_ns=15366 mean_ns=14171 cv_pct=7.43 min_ns=13118 max_ns=18285 samples=31 inner=20
+matrix_norm_nxn_orders/one/256: median_ns=40921 p95_ns=46383 mean_ns=42134 cv_pct=11.63 min_ns=39395 max_ns=65249 samples=31 inner=10
+matrix_norm_nxn_orders/neg_one/256: median_ns=40940 p95_ns=43230 mean_ns=41128 cv_pct=3.03 min_ns=39496 max_ns=44479 samples=31 inner=10
+matrix_norm_nxn_orders/one/512: median_ns=147264 p95_ns=168552 mean_ns=157901 cv_pct=29.19 min_ns=140636 max_ns=406791 samples=31 inner=3
+matrix_norm_nxn_orders/neg_one/512: median_ns=145528 p95_ns=155250 mean_ns=146973 cv_pct=4.12 min_ns=140933 max_ns=168121 samples=31 inner=3
+matrix_norm_nxn_orders/one/1024: median_ns=506356 p95_ns=613988 mean_ns=580128 cv_pct=57.46 min_ns=489182 max_ns=2386754 samples=31 inner=1
+matrix_norm_nxn_orders/neg_one/1024: median_ns=503971 p95_ns=518479 mean_ns=504121 cv_pct=2.08 min_ns=485986 max_ns=526112 samples=31 inner=1

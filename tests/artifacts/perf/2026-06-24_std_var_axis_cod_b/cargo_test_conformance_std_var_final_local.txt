@@ -1,0 +1,144 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling cfg-if v1.0.4
+   Compiling either v1.15.0
+   Compiling memchr v2.8.0
+   Compiling itoa v1.0.18
+   Compiling simd-adler32 v0.3.9
+   Compiling fnp-ndarray v0.1.0 (/data/projects/franken_numpy/crates/fnp-ndarray)
+   Compiling adler2 v2.0.1
+   Compiling anstyle v1.0.14
+   Compiling regex-syntax v0.8.10
+   Compiling ciborium-io v0.2.2
+   Compiling plotters-backend v0.3.7
+   Compiling clap_lex v1.1.0
+   Compiling once_cell v1.21.4
+   Compiling fnp-runtime v0.1.0 (/data/projects/franken_numpy/crates/fnp-runtime)
+   Compiling bytemuck v1.25.0
+   Compiling same-file v1.0.6
+   Compiling cast v0.3.0
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde_core v1.0.228
+   Compiling zmij v1.0.21
+   Compiling libc v0.2.185
+   Compiling crc32fast v1.5.0
+   Compiling num-traits v0.2.19
+   Compiling zerocopy v0.8.48
+   Compiling walkdir v2.5.0
+   Compiling miniz_oxide v0.8.9
+   Compiling itertools v0.10.5
+   Compiling itertools v0.13.0
+   Compiling clap_builder v4.6.0
+   Compiling plotters-svg v0.3.7
+   Compiling crossbeam-epoch v0.9.18
+   Compiling flate2 v1.1.9
+   Compiling crossbeam-deque v0.8.6
+   Compiling rayon-core v1.13.0
+   Compiling plotters v0.3.7
+   Compiling fnp-io v0.1.0 (/data/projects/franken_numpy/crates/fnp-io)
+   Compiling pyo3-ffi v0.28.3
+   Compiling getrandom v0.3.4
+   Compiling regex-automata v0.4.14
+   Compiling rayon v1.12.0
+   Compiling criterion-plot v0.5.0
+   Compiling pyo3 v0.28.3
+   Compiling clap v4.6.1
+   Compiling serde v1.0.228
+   Compiling serde_json v1.0.149
+   Compiling regex v1.12.3
+   Compiling tinytemplate v1.2.1
+   Compiling fnp-iter v0.1.0 (/data/projects/franken_numpy/crates/fnp-iter)
+   Compiling fnp-linalg v0.1.0 (/data/projects/franken_numpy/crates/fnp-linalg)
+   Compiling fnp-random v0.1.0 (/data/projects/franken_numpy/crates/fnp-random)
+   Compiling half v2.7.1
+   Compiling fnp-dtype v0.1.0 (/data/projects/franken_numpy/crates/fnp-dtype)
+   Compiling ciborium-ll v0.2.2
+   Compiling ciborium v0.2.2
+   Compiling criterion v0.6.0
+   Compiling fnp-ufunc v0.1.0 (/data/projects/franken_numpy/crates/fnp-ufunc)
+warning: method `nan_filtered` is never used
+     --> crates/fnp-ufunc/src/lib.rs:25364:8
+      |
+ 4913 | impl UFuncArray {
+      | --------------- method in this implementation
+...
+25364 |     fn nan_filtered(&self) -> Self {
+      |        ^^^^^^^^^^^^
+      |
+      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `fnp-ufunc` (lib) generated 1 warning
+   Compiling fnp-python v0.1.0 (/data/projects/franken_numpy/crates/fnp-python)
+warning: variants `Depth` and `Column` are never constructed
+    --> crates/fnp-python/src/lib.rs:2600:5
+     |
+2597 | enum StackHelperKind {
+     |      --------------- variants in this enum
+...
+2600 |     Depth,
+     |     ^^^^^
+2601 |     Column,
+     |     ^^^^^^
+     |
+     = note: `StackHelperKind` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `extract_mask_operand` is never used
+    --> crates/fnp-python/src/lib.rs:5232:4
+     |
+5232 | fn extract_mask_operand(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `count_valid_elements` is never used
+    --> crates/fnp-python/src/lib.rs:5254:4
+     |
+5254 | fn count_valid_elements(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: `fnp-python` (lib) generated 3 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 46.36s
+     Running tests/conformance_std.rs (/data/projects/.rch-targets/franken_numpy-cod-b/debug/deps/conformance_std-0bc7e4671c03b59b)
+
+running 15 tests
+test std_complex ... ok
+test std_scalar_return_type_matches_numpy ... ok
+test std_empty_array_returns_nan ... ok
+test std_single_element_is_zero ... ok
+test std_out_parameter_matches_numpy ... ok
+test std_non_integral_ddof_matches_numpy ... ok
+test std_inf_handling_matches_numpy ... ok
+test std_nan_handling_matches_numpy ... ok
+test std_python_container_keyword_outcomes_match_numpy ... ok
+test std_keepdims_matches_numpy ... ok
+test std_integer_dtypes_match_numpy ... ok
+test std_ddof_matches_numpy ... ok
+test std_3d_axis_matches_numpy ... ok
+test std_2d_axis_matches_numpy ... ok
+test std_flat_matches_numpy_across_50_cases ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.79s
+
+     Running tests/conformance_var.rs (/data/projects/.rch-targets/franken_numpy-cod-b/debug/deps/conformance_var-b79976960544161b)
+
+running 15 tests
+test var_single_element_is_zero ... ok
+test var_complex ... ok
+test var_empty_array_returns_nan ... ok
+test var_out_parameter_matches_numpy ... ok
+test var_scalar_return_type_matches_numpy ... ok
+test var_inf_handling_matches_numpy ... ok
+test var_non_integral_ddof_matches_numpy ... ok
+test var_nan_handling_matches_numpy ... ok
+test var_python_container_keyword_outcomes_match_numpy ... ok
+test var_keepdims_matches_numpy ... ok
+test var_integer_dtypes_match_numpy ... ok
+test var_ddof_matches_numpy ... ok
+test var_3d_axis_matches_numpy ... ok
+test var_2d_axis_matches_numpy ... ok
+test var_flat_matches_numpy_across_50_cases ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.88s
+
