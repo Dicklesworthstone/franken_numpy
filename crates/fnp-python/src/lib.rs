@@ -96727,7 +96727,7 @@ fn unpackbits(
             .par_chunks_mut(8 * chunk)
             .zip(in_raw.par_chunks(chunk))
             .for_each(|(o, ic)| {
-                for (group, &b) in o.chunks_exact_mut(8).zip(ic) {
+                for (group, &b) in o.as_chunks_mut::<8>().0.iter_mut().zip(ic) {
                     // MSB-first (numpy's default bitorder='big'): bit 7 -> position 0.
                     for (j, slot) in group.iter_mut().enumerate() {
                         *slot = (b >> (7 - j)) & 1;
@@ -129021,6 +129021,41 @@ mod tests {
                 "outer out= diverged"
             );
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn unpackbits_large_contiguous_uint8_matches_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_unpackbits_test")?;
+            fnp_python(&module)?;
+            let unpackbits_fn = module.getattr("unpackbits")?;
+            let numpy = py.import("numpy")?;
+            let input_seed = numpy.getattr("array")?.call(
+                (PyList::new(py, [0_i64, 1, 3, 17, 85, 128, 170, 255])?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "uint8")?;
+                    kwargs
+                }),
+            )?;
+            // This reaches the native contiguous uint8 path above its parallel threshold.
+            let input = numpy
+                .getattr("resize")?
+                .call1((input_seed, 1_i64 << 22))?;
+            let ours = unpackbits_fn.call1((input.clone(),))?;
+            let theirs = numpy.getattr("unpackbits")?.call1((input,))?;
+            assert!(
+                numpy
+                    .getattr("array_equal")?
+                    .call1((&ours, &theirs))?
+                    .extract::<bool>()?,
+                "large contiguous uint8 unpackbits diverged from numpy"
+            );
             Ok(())
         });
     }
