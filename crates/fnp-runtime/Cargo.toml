@@ -25,4 +25,4 @@ asupersync = { workspace = true, optional = true }
 # observability surface for parity-drift and performance-delta dashboards.
 # Default-features=false to avoid pulling the full TUI runtime when only the
 # typed capability snapshots are needed by the evidence-ledger types.
-ftui = { version = "0.3.1", default-features = false, optional = true }
+ftui = { version = "0.5.0", default-features = false, optional = true }

@@ -34,22 +34,22 @@ categories = ["science", "mathematics", "data-structures"]
 
 [workspace.dependencies]
 # Shared JSON encoding for conformance fixtures, reports, and evidence ledgers.
-serde_json = "1.0.149"
+serde_json = "1.0.151"
 # Property-based testing for metamorphic test suites.
-proptest = "1.5"
+proptest = "1.11.0"
 # Derive-backed serialization for cross-crate contract and artifact data models.
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 # Workspace benchmark harness for performance baselines and regression gates.
-criterion = { version = "0.6", features = ["html_reports"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 # OS entropy source for NumPy-compatible unseeded RNG constructors.
-getrandom = "0.3.4"
+getrandom = "0.4.3"
 # CPython bridge used by the NumPy oracle wrappers and Python-facing parity tests.
 pyo3 = { version = "0.28.3", features = ["auto-initialize"] }
 # Optional structured async runtime for long-running conformance/artifact jobs.
-asupersync = { version = "=0.3.4", default-features = false }
+asupersync = { version = "=0.3.9", default-features = false }
 # Safe-Rust data parallelism (work-stealing pool) for compute-bound numeric
 # kernels (e.g. the register-tiled GEMM). Pure safe Rust — no C BLAS linkage.
-rayon = "1.10"
+rayon = "1.12.0"
 
 # Profiling profile: optimized + debug symbols + frame pointers for flamegraphs.
 # Build with: RUSTFLAGS="-C force-frame-pointers=yes" cargo build --profile release-perf

@@ -27,7 +27,7 @@ fnp-ufunc = { path = "../fnp-ufunc", version = "0.2.0" }
 asupersync.workspace = true
 # base64: RaptorQ sidecar payloads (artifact source + repair symbols are encoded
 # as base64 in the sidecar JSON; see crates/fnp-conformance/src/raptorq_artifacts.rs).
-base64 = "0.22.1"
+base64 = "0.23.0"
 # serde / serde_json: oracle capture, fixture I/O, differential reports,
 # divergence ledger, P2C packet manifests — every artifact in the harness is JSON.
 serde = { workspace = true, features = ["derive"] }
