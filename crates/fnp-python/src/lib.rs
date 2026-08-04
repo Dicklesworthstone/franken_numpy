@@ -129044,9 +129044,7 @@ mod tests {
                 }),
             )?;
             // This reaches the native contiguous uint8 path above its parallel threshold.
-            let input = numpy
-                .getattr("resize")?
-                .call1((input_seed, 1_i64 << 22))?;
+            let input = numpy.getattr("resize")?.call1((input_seed, 1_i64 << 22))?;
             let ours = unpackbits_fn.call1((input.clone(),))?;
             let theirs = numpy.getattr("unpackbits")?.call1((input,))?;
             assert!(

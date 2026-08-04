@@ -2203,15 +2203,17 @@ fn bench_random_state_zipf_parameter_cache(c: &mut Criterion) {
             || time_random_state_zipf_fixed_trace(a, SIZE, REPEATS, false),
             || time_random_state_zipf_fixed_trace(a, SIZE, REPEATS, true),
         );
-        group.bench_function(BenchmarkId::new("fixed_trace_base", parameter_id), |bench| {
-            bench.iter(|| black_box(time_random_state_zipf_fixed_trace(a, SIZE, REPEATS, false)))
-        });
+        group.bench_function(
+            BenchmarkId::new("fixed_trace_base", parameter_id),
+            |bench| {
+                bench
+                    .iter(|| black_box(time_random_state_zipf_fixed_trace(a, SIZE, REPEATS, false)))
+            },
+        );
         group.bench_function(
             BenchmarkId::new("fixed_trace_candidate", parameter_id),
             |bench| {
-                bench.iter(|| {
-                    black_box(time_random_state_zipf_fixed_trace(a, SIZE, REPEATS, true))
-                })
+                bench.iter(|| black_box(time_random_state_zipf_fixed_trace(a, SIZE, REPEATS, true)))
             },
         );
     }
