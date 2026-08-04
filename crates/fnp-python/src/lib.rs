@@ -26671,6 +26671,18 @@ fn matrix_rank(
         Err(_) => return fallback(),
     };
     let shape = array.shape();
+    // Zero-size input has no error surface of its own here: numpy's matrix_rank
+    // reduces the (empty) singular-value vector with `S.max(axis=-1)`, and every
+    // released numpy (checked 1.26.4 and 2.4.3) passes no `initial`, so it raises
+    // ValueError("zero-size array to reduction operation maximum which has no
+    // identity"). Upstream main (2.5.0.dev0, the vendored oracle in
+    // legacy_numpy_code) added `initial=0` and will return 0 instead. Native
+    // ranking would silently return 0 on both. Defer so the observable behaviour
+    // — value or exception — tracks whichever numpy is actually installed
+    // instead of pinning one side of that upstream change.
+    if shape.iter().any(|&dim| dim == 0) {
+        return fallback();
+    }
     // Batched (stacked) square inputs: rank every lane natively via the parallel
     // batch_matrix_rank instead of passing the whole stack through to numpy (whose
     // batched matrix_rank is a serial per-lane SVD in C). rank is a deterministic
@@ -118337,6 +118349,49 @@ mod tests {
                     .extract::<bool>()?,
                 "matrix_rank batched diverged"
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn matrix_rank_zero_size_error_surface_matches_numpy() {
+        // Zero-size input is the one matrix_rank case where numpy's own
+        // behaviour is not stable across releases: every released numpy
+        // (1.26.4 and 2.4.3 both checked) raises ValueError out of
+        // `S.max(axis=-1)` over the empty singular-value vector, while upstream
+        // main (2.5.0.dev0, the vendored oracle) passes `initial=0` and returns
+        // 0. fnp must pin neither side — it must reproduce whatever numpy is
+        // installed. A native ranking path that quietly returns 0 fails this on
+        // every released numpy, which is exactly the divergence
+        // `linalg_error_surface_probe` caught
+        // (deadlock-audit-linalg-matrix-rank-error-surface-pdrxy).
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let matrix_rank_fn = module.getattr("matrix_rank")?;
+            let numpy = py.import("numpy")?;
+            let numpy_matrix_rank = numpy.getattr("linalg")?.getattr("matrix_rank")?;
+            let zeros = numpy.getattr("zeros")?;
+
+            // 2-D zero-size in both orientations, the square 0x0 case, a batched
+            // stack whose lanes are themselves zero-size, a zero-length batch of
+            // well-formed lanes, and the 1-D empty vector.
+            let shapes: [&[i64]; 6] = [&[0, 3], &[3, 0], &[0, 0], &[2, 0, 0], &[0, 3, 3], &[0]];
+            for shape in shapes {
+                let arr = zeros.call1((PyTuple::new(py, shape.iter().copied())?,))?;
+                let ours =
+                    call_outcome(py, &matrix_rank_fn, &PyTuple::new(py, [arr.clone()])?, None)?;
+                let theirs = call_outcome(py, &numpy_matrix_rank, &PyTuple::new(py, [arr])?, None)?;
+                assert_eq!(
+                    ours, theirs,
+                    "matrix_rank(zeros({shape:?})) diverged from numpy"
+                );
+            }
 
             Ok(())
         });
