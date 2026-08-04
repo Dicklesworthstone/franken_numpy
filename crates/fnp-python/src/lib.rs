@@ -19195,13 +19195,14 @@ fn build_numpy_eigvals_vector_from_flat_interleaved(
     }
 
     let numpy = py.import("numpy")?;
-    let all_real = values.chunks_exact(2).all(|chunk| chunk[1] == 0.0);
+    let values_as_pairs = values.as_chunks::<2>().0;
+    let all_real = values_as_pairs.iter().all(|chunk| chunk[1] == 0.0);
     if all_real {
         let kwargs = PyDict::new(py);
         match input_dtype {
             DType::F32 => {
-                let real_values = values
-                    .chunks_exact(2)
+                let real_values = values_as_pairs
+                    .iter()
                     .map(|chunk| chunk[0] as f32)
                     .collect::<Vec<_>>();
                 kwargs.set_item("dtype", numpy.getattr("float32")?)?;
@@ -19214,8 +19215,8 @@ fn build_numpy_eigvals_vector_from_flat_interleaved(
                     .unbind());
             }
             _ => {
-                let real_values = values
-                    .chunks_exact(2)
+                let real_values = values_as_pairs
+                    .iter()
                     .map(|chunk| chunk[0])
                     .collect::<Vec<_>>();
                 kwargs.set_item("dtype", numpy.getattr("float64")?)?;
@@ -19231,8 +19232,8 @@ fn build_numpy_eigvals_vector_from_flat_interleaved(
     }
 
     let builtins = py.import("builtins")?;
-    let complex_values = values
-        .chunks_exact(2)
+    let complex_values = values_as_pairs
+        .iter()
         .map(|chunk| builtins.getattr("complex")?.call1((chunk[0], chunk[1])))
         .collect::<PyResult<Vec<_>>>()?;
     let kwargs = PyDict::new(py);
