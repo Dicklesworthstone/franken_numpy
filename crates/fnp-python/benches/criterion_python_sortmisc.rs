@@ -609,13 +609,23 @@ ties_64_64m = pool_64[rng.integers(0, 64, 64_000_000)]\n";
         .expect("flat-unique corpus setup");
 
         for (name, corpus, drawn_from) in [
-            ("uniform_4m", "distinct_uniform", 0_usize),
+            // TIE-DENSITY ROWS FIRST, cheapest first. Each row is self-contained
+            // — its own incumbent arm, its own two A/A nulls, all in the same
+            // invocation — so the order is free to be chosen for survivability,
+            // and on a shared box that matters: the harness re-checks host
+            // quiescence before EVERY contract, so a run can clear the process
+            // preflight and still be killed partway through by a peer waking up.
+            // The dense-ties regime is the one this bead exists to re-decide
+            // (the surrender's basis is `0.547x on dense ties`), and the 64M
+            // distinct row alone costs ~1.5s per observation, so leading with
+            // distinct spent the survivable window on the rows already banked.
+            ("ties_2_16m", "ties_2_distinct", 2_usize),
+            ("ties_64_16m", "ties_64_distinct", 64),
+            ("ties_1m_16m", "ties_1m_distinct", 1_000_000),
+            ("ties_64_64m", "ties_64_distinct", 64),
+            ("uniform_4m", "distinct_uniform", 0),
             ("uniform_16m", "distinct_uniform", 0),
             ("uniform_64m", "distinct_uniform", 0),
-            ("ties_1m_16m", "ties_1m_distinct", 1_000_000),
-            ("ties_64_16m", "ties_64_distinct", 64),
-            ("ties_2_16m", "ties_2_distinct", 2),
-            ("ties_64_64m", "ties_64_distinct", 64),
         ] {
             let input = ns.get_item(name).expect("corpus present");
             let elements = input
