@@ -36398,3 +36398,40 @@ Reopen for another dtype/layout, a lower parallel floor, axis scheduling, or if
 an exact-output boundary/float-special-value test fails. Any replacement claim
 must retain exact scalar checks, observed threads, host quiescence, live NumPy,
 both same-invocation nulls, and the corrected median-CI rule.
+
+## 2026-08-04 - REJECT (measured, no production ship): RandomState Zipf cache retry clears median-CI but misses its historical CV predicate
+
+`TealCedar`, bead `franken_numpy-ixs5y.404`. Authoritative remote ledger
+preflight was CLEAR for lever `RandomState Zipf parameter caching retry` and
+surface `RandomState Zipf a=2.5 and a=17`. Production remains unchanged: this
+retry only retained the former and rejected cache arms in `random_ops.rs`, added
+the previously missing `a=17` arm, and raised the fixed trace to 64 batches so
+every timed observation clears the 250 ms retry-predicate floor.
+
+One strict-remote, CPU-pinned invocation ran on `hz1` under `taskset -c 0`.
+The executing release-perf ELF was
+`e7651f9eb01d7b0250aa176af3831edc7ec58386b3a50e1dc58a35fd3f7f3862`.
+Both exact 4,096-output-and-next-word comparisons passed before timing.
+The 41-round, min-of-three, same-invocation results were:
+
+**A/A null control:** the `a=2.5` former/former pair was 756.243 ms versus
+759.960 ms (0.999889x, CI95 [0.994821, 1.005804]); the `a=17` pair was
+897.630 ms versus 911.563 ms (1.002772x, CI95 [0.991232, 1.007927]).
+
+| parameter | A/A median ms | effect median ms (former/cached) | A/A CV | effect CV | effect CI95 | median-CI gate |
+|---|---:|---:|---:|---:|---:|---|
+| `a=2.5` | 756.243 / 759.960 | 965.469 / 803.841 = 1.203009x | 7.982% | 6.424% | [1.191361, 1.209775] | DECIDABLE_WIN |
+| `a=17` | 897.630 / 911.563 | 655.575 / 527.074 = 1.241391x | 2.911% | 4.521% | [1.239218, 1.245729] | DECIDABLE_WIN |
+
+All four effect observations exceed 250 ms; both effect CIs exclude unity and
+clear the same-invocation A/A envelope. However, the original `.375` retry
+predicate requires every A/A and effect CV to be strictly below 5% in two
+independent runs. The first `a=2.5` invocation already fails that condition, so
+the required second invocation was not run. This is a measured rejection, not
+a performance regression or a reason to alter the corrected median-CI gate.
+
+Retry predicate: reopen only after a fresh CPU-pinned pilot demonstrates both
+`a=2.5` A/A and former/cached CVs below 5% at the same >=250 ms observation
+floor. A reopened campaign must then run two independent same-ELF invocations
+with both `a=2.5` and `a=17`, exact output plus next-state proof, an A/A null,
+and the existing median-CI gate; otherwise leave the retained benchmark only.
