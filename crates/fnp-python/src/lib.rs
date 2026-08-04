@@ -50961,7 +50961,7 @@ fn try_native_c128_union1d_dense_integral(
     };
     let mut present = vec![0u8; domain];
     let mut mark = |data: &[f64]| -> Option<()> {
-        for z in data.chunks_exact(2) {
+        for z in data.as_chunks::<2>().0 {
             let r = c128_dense_integral_component_key(z[0])?;
             let i = c128_dense_integral_component_key(z[1])?;
             present[bucket(r, i)?] = 1;
@@ -51098,7 +51098,7 @@ fn try_native_c128_setxor_dense_integral(
     // bit0 = present in a, bit1 = present in b.
     let mut state = vec![0u8; domain];
     let mark = |data: &[f64], bit: u8, state: &mut [u8]| -> Option<()> {
-        for z in data.chunks_exact(2) {
+        for z in data.as_chunks::<2>().0 {
             let r = c128_dense_integral_component_key(z[0])?;
             let i = c128_dense_integral_component_key(z[1])?;
             state[bucket(r, i)?] |= bit;
@@ -51358,7 +51358,7 @@ fn try_native_c128_intersect_setdiff_dense_integral(
     // bit0 = present in a, bit1 = present in b.
     let mut state = vec![0u8; domain];
     let mark = |data: &[f64], bit: u8, state: &mut [u8]| -> Option<()> {
-        for z in data.chunks_exact(2) {
+        for z in data.as_chunks::<2>().0 {
             let r = c128_dense_integral_component_key(z[0])?;
             let i = c128_dense_integral_component_key(z[1])?;
             state[bucket(r, i)?] |= bit;
@@ -138687,6 +138687,39 @@ mod tests {
                 digest, "ec0d35d19fdfc33accacb0c9a96cfd020ccd007989c970f193948b449a5a1e4b",
                 "float set-op numpy passthrough golden sha256 changed",
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn complex128_dense_integral_setops_match_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_complex_setops_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let namespace = PyDict::new(py);
+            py.run(
+                std::ffi::CString::new(
+                    "import numpy as np\n\
+a = np.array([3 + 2j, 1 + 0j, 3 + 2j, -1 + 4j], dtype=np.complex128)\n\
+b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
+                )?
+                .as_c_str(),
+                Some(&namespace),
+                Some(&namespace),
+            )?;
+            let a = namespace.get_item("a")?.expect("complex lhs");
+            let b = namespace.get_item("b")?.expect("complex rhs");
+
+            for operation in ["union1d", "intersect1d", "setdiff1d", "setxor1d"] {
+                let ours = module.getattr(operation)?.call1((&a, &b))?;
+                let theirs = numpy.getattr(operation)?.call1((&a, &b))?;
+                assert_array_matches_numpy(&ours, &theirs)?;
+            }
             Ok(())
         });
     }
