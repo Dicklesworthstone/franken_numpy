@@ -573,20 +573,33 @@ fn bench_flat_f64_unique_median_gate(_c: &mut criterion::Criterion) {
                 })
         };
 
-        // `distinct` is the number of distinct values the n elements are drawn
-        // from; ties_per_value = n / distinct. Spanning 4 orders of magnitude of
+        // `drawn_from` is the number of distinct values the n elements are drawn
+        // from; ties_per_value = n / drawn_from. Spanning 6 orders of magnitude of
         // tie density at fixed n is what makes the dense-ties claim decidable
-        // rather than inherited. Integer draws cast to f64 are exact and contain
-        // neither NaN nor -0.0, so every corpus clears the route's defer scan.
+        // rather than inherited.
+        //
+        // ROUTE TRAP, and why the tie pools are random doubles rather than the
+        // obvious `rng.integers(...).astype(np.float64)`: `unique` tries
+        // `try_zerocopy_f64_unique_binary_grid` BEFORE the sort route, and that
+        // path claims any finite f64 corpus whose values are exact multiples of
+        // 1/16 within a range under `max(4n, 1<<16)`. Integer-valued ties are
+        // exactly that, so an integer-drawn tie corpus would have measured the
+        // O(n+range) bucket path while the row claimed
+        // `candidate_route=try_zerocopy_f64_unique_flat`. Uniform doubles are off
+        // the 1/16 grid, so the grid scan bails at its first element and the sort
+        // route is the one under test. Asserted below, not assumed.
         let setup = "import numpy as np\n\
 rng = np.random.default_rng(20260804)\n\
 uniform_4m = rng.random(4_000_000)\n\
 uniform_16m = rng.random(16_000_000)\n\
 uniform_64m = rng.random(64_000_000)\n\
-ties_1m_16m = rng.integers(0, 1_000_000, 16_000_000).astype(np.float64)\n\
-ties_64_16m = rng.integers(0, 64, 16_000_000).astype(np.float64)\n\
-ties_2_16m = rng.integers(0, 2, 16_000_000).astype(np.float64)\n\
-ties_64_64m = rng.integers(0, 64, 64_000_000).astype(np.float64)\n";
+pool_1m = rng.random(1_000_000)\n\
+pool_64 = rng.random(64)\n\
+pool_2 = rng.random(2)\n\
+ties_1m_16m = pool_1m[rng.integers(0, 1_000_000, 16_000_000)]\n\
+ties_64_16m = pool_64[rng.integers(0, 64, 16_000_000)]\n\
+ties_2_16m = pool_2[rng.integers(0, 2, 16_000_000)]\n\
+ties_64_64m = pool_64[rng.integers(0, 64, 64_000_000)]\n";
         let ns = PyDict::new(py);
         py.run(
             std::ffi::CString::new(setup).unwrap().as_c_str(),
@@ -624,6 +637,26 @@ ties_64_64m = rng.integers(0, 64, 64_000_000).astype(np.float64)\n";
                     .extract::<bool>()
                     .expect("corpus C-contiguous value")
             );
+            // Prove the earlier `try_zerocopy_f64_unique_binary_grid` route cannot
+            // claim this corpus: it requires EVERY value to be an exact multiple of
+            // 1/16. One off-grid element is enough to make it defer, and it scans
+            // from index 0, so check the first few. Without this the row could
+            // silently time the bucket path under the sort route's name.
+            {
+                let first_16: Vec<f64> = input
+                    .call_method1("__getitem__", (pyo3::types::PySlice::new(py, 0, 16, 1),))
+                    .expect("corpus head slice")
+                    .call_method0("tolist")
+                    .expect("corpus head tolist")
+                    .extract()
+                    .expect("corpus head values");
+                assert!(
+                    first_16.iter().any(|v| (v * 16.0).fract() != 0.0),
+                    "{name}: corpus is on the 1/16 binary grid, so \
+                     try_zerocopy_f64_unique_binary_grid would claim it before the \
+                     sort route this group claims to measure"
+                );
+            }
 
             let run_incumbent = || {
                 np_unique
