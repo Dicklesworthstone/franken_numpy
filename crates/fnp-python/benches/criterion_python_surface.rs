@@ -14,55 +14,6 @@ use std::time::Duration;
 mod common;
 use common::*;
 
-fn bench_sort_complex_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_sort_complex_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(3));
-    group.warm_up_time(Duration::from_secs(1));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_sort_complex = module.getattr("sort_complex").expect("fnp sort_complex");
-        let numpy_sort_complex = numpy.getattr("sort_complex").expect("numpy sort_complex");
-
-        for size in [200_000_i64, 1_000_000_i64] {
-            let values = numpy
-                .call_method1("arange", (size,))
-                .expect("sort_complex arange")
-                .call_method1("__mul__", (1_103_515_245_i64,))
-                .expect("sort_complex mix")
-                .call_method1("__mod__", (size,))
-                .expect("sort_complex modulo")
-                .call_method1("astype", ("float64",))
-                .expect("sort_complex f64 input");
-
-            group.bench_function(format!("fnp_sort_complex_real_f64_{size}"), |bench| {
-                bench.iter(|| {
-                    let result = fnp_sort_complex
-                        .call1((&values,))
-                        .expect("fnp sort_complex benchmark call");
-                    black_box(result);
-                });
-            });
-
-            group.bench_function(format!("numpy_sort_complex_real_f64_{size}"), |bench| {
-                bench.iter(|| {
-                    let result = numpy_sort_complex
-                        .call1((&values,))
-                        .expect("numpy sort_complex benchmark call");
-                    black_box(result);
-                });
-            });
-        }
-    });
-
-    group.finish();
-}
-
 // complex128 exp/sin/cos/sinh/cosh/sign: numpy computes these per-element single-threaded
 // (~180-420ms@8M). The native parallel real-libm composition is bit-exact (system libm ==
 // numpy's npy_c*) and wins on core count. RAYON_NUM_THREADS=1 vs default isolates the
@@ -3114,7 +3065,6 @@ fn main() {
             "bench_f16_binary_transcendental_boundary",
             bench_f16_binary_transcendental_boundary,
         ),
-        ("bench_sort_complex_boundary", bench_sort_complex_boundary),
         ("bench_f16_matmul_boundary", bench_f16_matmul_boundary),
         (
             "bench_flat_sort_dtype_boundary",

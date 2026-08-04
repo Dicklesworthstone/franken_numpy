@@ -63,6 +63,10 @@ name = "criterion_python_unique_medium"
 harness = false
 
 [[bench]]
+name = "criterion_python_sort_complex"
+harness = false
+
+[[bench]]
 name = "criterion_python_io_text"
 harness = false
 
