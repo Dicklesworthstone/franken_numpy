@@ -131,6 +131,132 @@ fn assert_workload_outputs_equal<const N: usize>(
     );
 }
 
+/// Linux process resources sampled around one materialized Python result.  The
+/// benchmark deliberately keeps this outside the timed interval: these are
+/// mechanism counters for the result-buffer lifecycle, not a timing shortcut.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProcessResourceSnapshot {
+    minor_faults: u64,
+    major_faults: u64,
+    rss_kib: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResultBufferLifecycle {
+    minor_faults: u64,
+    major_faults: u64,
+    rss_while_live_kib: i64,
+    rss_after_release_kib: i64,
+}
+
+fn parse_proc_stat_faults(stat: &str) -> Result<(u64, u64), String> {
+    // `/proc/self/stat` wraps the potentially space-containing command name in
+    // parentheses.  Fields after its final `)` start at process state (#3), so
+    // minflt (#10) and majflt (#12) are indexes 7 and 9 respectively.
+    let (_, fields) = stat
+        .rsplit_once(')')
+        .ok_or_else(|| "missing closing process-name delimiter in /proc/self/stat".to_owned())?;
+    let fields = fields.split_ascii_whitespace().collect::<Vec<_>>();
+    let parse = |index: usize, name: &str| {
+        fields
+            .get(index)
+            .ok_or_else(|| format!("missing {name} in /proc/self/stat"))?
+            .parse::<u64>()
+            .map_err(|error| format!("invalid {name} in /proc/self/stat: {error}"))
+    };
+    Ok((parse(7, "minflt")?, parse(9, "majflt")?))
+}
+
+fn parse_proc_status_rss_kib(status: &str) -> Result<u64, String> {
+    let rss = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
+        .ok_or_else(|| "missing VmRSS in /proc/self/status".to_owned())?;
+    rss.split_ascii_whitespace()
+        .next()
+        .ok_or_else(|| "missing VmRSS value in /proc/self/status".to_owned())?
+        .parse::<u64>()
+        .map_err(|error| format!("invalid VmRSS in /proc/self/status: {error}"))
+}
+
+fn process_resource_snapshot() -> ProcessResourceSnapshot {
+    let stat = std::fs::read_to_string("/proc/self/stat")
+        .expect("read Linux process fault counters from /proc/self/stat");
+    let status = std::fs::read_to_string("/proc/self/status")
+        .expect("read Linux process RSS from /proc/self/status");
+    let (minor_faults, major_faults) =
+        parse_proc_stat_faults(&stat).expect("parse Linux process fault counters");
+    let rss_kib = parse_proc_status_rss_kib(&status).expect("parse Linux process RSS");
+    ProcessResourceSnapshot {
+        minor_faults,
+        major_faults,
+        rss_kib,
+    }
+}
+
+fn result_buffer_lifecycle(
+    before: ProcessResourceSnapshot,
+    while_live: ProcessResourceSnapshot,
+    after_release: ProcessResourceSnapshot,
+) -> ResultBufferLifecycle {
+    assert!(
+        while_live.minor_faults >= before.minor_faults,
+        "minor fault counter regressed while materializing a result"
+    );
+    assert!(
+        while_live.major_faults >= before.major_faults,
+        "major fault counter regressed while materializing a result"
+    );
+    ResultBufferLifecycle {
+        minor_faults: while_live.minor_faults - before.minor_faults,
+        major_faults: while_live.major_faults - before.major_faults,
+        rss_while_live_kib: while_live.rss_kib as i64 - before.rss_kib as i64,
+        rss_after_release_kib: after_release.rss_kib as i64 - before.rss_kib as i64,
+    }
+}
+
+fn median_result_buffer_lifecycle(samples: &[ResultBufferLifecycle]) -> ResultBufferLifecycle {
+    assert!(
+        !samples.is_empty(),
+        "result-buffer lifecycle measurement needs at least one observation"
+    );
+    let median_u64 = |values: Vec<u64>| {
+        let mut values = values;
+        values.sort_unstable();
+        values[values.len() / 2]
+    };
+    let median_i64 = |values: Vec<i64>| {
+        let mut values = values;
+        values.sort_unstable();
+        values[values.len() / 2]
+    };
+    ResultBufferLifecycle {
+        minor_faults: median_u64(samples.iter().map(|sample| sample.minor_faults).collect()),
+        major_faults: median_u64(samples.iter().map(|sample| sample.major_faults).collect()),
+        rss_while_live_kib: median_i64(
+            samples
+                .iter()
+                .map(|sample| sample.rss_while_live_kib)
+                .collect(),
+        ),
+        rss_after_release_kib: median_i64(
+            samples
+                .iter()
+                .map(|sample| sample.rss_after_release_kib)
+                .collect(),
+        ),
+    }
+}
+
+fn verify_process_resource_snapshot_parser() {
+    let stat = "4242 (criterion python worker) R 1 2 3 4 5 6 7 8 9 10 11";
+    assert_eq!(parse_proc_stat_faults(stat), Ok((7, 9)));
+    assert_eq!(
+        parse_proc_status_rss_kib("Name:\tcriterion\nVmRSS:\t4242 kB\n"),
+        Ok(4242)
+    );
+}
+
 struct EventAttributionArm<'py> {
     add_at: Bound<'py, PyAny>,
     maximum_at: Bound<'py, PyAny>,
@@ -965,6 +1091,28 @@ impl<'py> ClickstreamSessionizationArm<'py> {
             median(&mut transitions_ms),
         ]
     }
+}
+
+fn observe_inter_event_gap_result_lifecycle(
+    numpy: &Bound<'_, PyModule>,
+    diff: &Bound<'_, PyAny>,
+    ordered_times: &Bound<'_, PyAny>,
+    lifecycles: &RefCell<Vec<ResultBufferLifecycle>>,
+) -> common::ContractObservation {
+    let before = process_resource_snapshot();
+    let started = Instant::now();
+    let output = diff
+        .call1((black_box(ordered_times),))
+        .expect("materialize inter-event gap result");
+    let elapsed = started.elapsed();
+    let while_live = process_resource_snapshot();
+    let checksum = workload_checksum(numpy, &[output.clone()]);
+    drop(output);
+    let after_release = process_resource_snapshot();
+    lifecycles
+        .borrow_mut()
+        .push(result_buffer_lifecycle(before, while_live, after_release));
+    common::ContractObservation { elapsed, checksum }
 }
 
 fn bench_median_gate_python_binary<'py>(
@@ -14037,6 +14185,8 @@ fn bench_realistic_clickstream_sessionization_vs_numpy_median_gate(c: &mut Crite
     const THREADS: &str = "4";
     const REQUIRED_BUILD_PROFILE: &str = "release-perf";
 
+    verify_process_resource_snapshot_parser();
+
     assert_eq!(
         std::env::var("FNP_BENCH_PROFILE").as_deref(),
         Ok(REQUIRED_BUILD_PROFILE),
@@ -14385,6 +14535,78 @@ diff_user_boundary,diff_inter_event_gap,count_nonzero_user_transitions \
                 "PARITY row={row} outputs=6 dtype_shape_byte_identity=passed \
                  stable_tie_order_matches_numpy_lexsort=passed checksum={:016x}",
                 workload_checksum(&numpy, &candidate_output),
+            );
+            let incumbent_ordered_times = incumbent_output[2].clone();
+            let candidate_ordered_times = candidate_output[2].clone();
+            drop(incumbent_output);
+            drop(candidate_output);
+
+            // This is the exact `diff(ordered_times)` result path from the
+            // whole job above, not a synthetic allocation microbenchmark.  Its
+            // input is produced independently by the candidate and incumbent
+            // arms and was byte-compared just above.  Keep both arms live in
+            // this invocation, including their A/A controls, so the fault/RSS
+            // evidence remains tied to the same timing contract.
+            let gap_row = format!("{row}_inter_event_gap_result_buffer");
+            let incumbent_gap_lifecycles = RefCell::new(Vec::new());
+            let candidate_gap_lifecycles = RefCell::new(Vec::new());
+            let mut observe_incumbent_gap = || {
+                observe_inter_event_gap_result_lifecycle(
+                    &numpy,
+                    &incumbent.diff,
+                    &incumbent_ordered_times,
+                    &incumbent_gap_lifecycles,
+                )
+            };
+            let mut observe_candidate_gap = || {
+                observe_inter_event_gap_result_lifecycle(
+                    &numpy,
+                    &candidate.diff,
+                    &candidate_ordered_times,
+                    &candidate_gap_lifecycles,
+                )
+            };
+            let (gap_effect, gap_incumbent_null, gap_candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &gap_row,
+                    &mut observe_incumbent_gap,
+                    &mut observe_candidate_gap,
+                    WORKLOAD_CONTRACT_ROUNDS,
+                    WORKLOAD_CONTRACT_MIN_OF,
+                );
+            let gap_verdict = common::dual_null_contract_verdict(
+                gap_effect,
+                gap_incumbent_null,
+                gap_candidate_null,
+            );
+            let incumbent_gap_lifecycle =
+                median_result_buffer_lifecycle(&incumbent_gap_lifecycles.borrow());
+            let candidate_gap_lifecycle =
+                median_result_buffer_lifecycle(&candidate_gap_lifecycles.borrow());
+            println!(
+                "RESULT_BUFFER_LIFECYCLE row={gap_row} stage=inter_event_gap \
+                 source=linux_proc_self_stat_and_status allocator=rust_default_system \
+                 input=independently_materialized_ordered_times byte_parity=passed \
+                 incumbent_live_same_invocation=true aa_nulls=true timing_ratio_median={:.6} \
+                 timing_ratio_ci95=[{:.6},{:.6}] timing_verdict={gap_verdict} \
+                 incumbent_samples={} candidate_samples={} \
+                 incumbent_minor_faults_median={} candidate_minor_faults_median={} \
+                 incumbent_major_faults_median={} candidate_major_faults_median={} \
+                 incumbent_rss_while_live_kib_median={} candidate_rss_while_live_kib_median={} \
+                 incumbent_rss_after_release_kib_median={} candidate_rss_after_release_kib_median={}",
+                gap_effect.ratio_median,
+                gap_effect.ratio_ci_low,
+                gap_effect.ratio_ci_high,
+                incumbent_gap_lifecycles.borrow().len(),
+                candidate_gap_lifecycles.borrow().len(),
+                incumbent_gap_lifecycle.minor_faults,
+                candidate_gap_lifecycle.minor_faults,
+                incumbent_gap_lifecycle.major_faults,
+                candidate_gap_lifecycle.major_faults,
+                incumbent_gap_lifecycle.rss_while_live_kib,
+                candidate_gap_lifecycle.rss_while_live_kib,
+                incumbent_gap_lifecycle.rss_after_release_kib,
+                candidate_gap_lifecycle.rss_after_release_kib,
             );
 
             common::report_observed_thread_activity(
