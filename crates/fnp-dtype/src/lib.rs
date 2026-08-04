@@ -2062,15 +2062,20 @@ impl ArrayStorage {
     }
 
     /// Element-wise complex power: z^w = exp(w * log(z)).
-    #[must_use]
-    pub fn complex_pow(&self, exponent: &Self) -> Self {
+    pub fn complex_pow(&self, exponent: &Self) -> Result<Self, StorageError> {
+        if self.len() != exponent.len() {
+            return Err(StorageError::UnsupportedCast {
+                from: self.dtype(),
+                to: exponent.dtype(),
+            });
+        }
+
         // Complex pairs avoid input materialization: Complex128 borrows,
-        // Complex64 widens inline (the .360 family). `.zip()` truncates to
-        // the shorter operand, preserving the existing min-length semantics
-        // verbatim (deadlock-audit-ljt7c tracks whether that contract should
-        // instead error like the other binary complex ops). All paths share
-        // one kernel fn, so bit divergence between them is impossible.
-        match (self, exponent) {
+        // Complex64 widens inline (the .360 family). The shared length check
+        // keeps this binary operation aligned with the other complex kernels.
+        // All paths share one kernel fn, so bit divergence between them is
+        // impossible.
+        Ok(match (self, exponent) {
             (Self::Complex128(a), Self::Complex128(b)) => Self::Complex128(
                 a.iter()
                     .zip(b)
@@ -2110,7 +2115,7 @@ impl ArrayStorage {
                         .collect(),
                 )
             }
-        }
+        })
     }
 
     /// Element-wise complex sin: sin(a+bi) = sin(a)*cosh(b) + i*cos(a)*sinh(b).
@@ -3372,8 +3377,7 @@ mod tests {
     #[test]
     fn storage_complex_pow_pairs_match_converted_path_bits() {
         // All four complex pair combinations must be bit-for-bit the former
-        // convert-both path, and the min-length truncation semantics must be
-        // preserved exactly (zip == min) for complex pairs and the fallback.
+        // convert-both path for equal-length operands.
         let c128 = ArrayStorage::Complex128(vec![
             (0.0, -0.0),
             (f64::NEG_INFINITY, 4.5e-300),
@@ -3389,11 +3393,10 @@ mod tests {
         for (lhs, rhs) in [(&c128, &c128), (&c64, &c64), (&c64, &c128), (&c128, &c64)] {
             let bases = lhs.to_complex128_vec();
             let exps = rhs.to_complex128_vec();
-            let n = bases.len().min(exps.len());
-            let former: Vec<_> = (0..n)
+            let former: Vec<_> = (0..bases.len())
                 .map(|idx| crate::complex_pow_kernel(bases[idx], exps[idx]))
                 .collect();
-            let direct = lhs.complex_pow(rhs).to_complex128_vec();
+            let direct = lhs.complex_pow(rhs).unwrap().to_complex128_vec();
             assert_eq!(direct.len(), former.len());
             for (actual, expected) in direct.iter().zip(&former) {
                 assert_eq!(actual.0.to_bits(), expected.0.to_bits());
@@ -3401,13 +3404,32 @@ mod tests {
             }
         }
 
-        // Min-length truncation preserved for complex pairs and the fallback.
+        // Length mismatch follows the same error contract as the other binary
+        // complex operations; silent zip truncation would discard data.
         let short = ArrayStorage::Complex128(vec![(2.0, 0.0)]);
         let long = ArrayStorage::Complex128(vec![(3.0, 0.0), (4.0, 0.0)]);
-        assert_eq!(short.complex_pow(&long).len(), 1);
-        assert_eq!(long.complex_pow(&short).len(), 1);
+        assert!(matches!(
+            short.complex_pow(&long),
+            Err(StorageError::UnsupportedCast {
+                from: DType::Complex128,
+                to: DType::Complex128,
+            })
+        ));
+        assert!(matches!(
+            long.complex_pow(&short),
+            Err(StorageError::UnsupportedCast {
+                from: DType::Complex128,
+                to: DType::Complex128,
+            })
+        ));
         let real = ArrayStorage::F64(vec![2.0, 3.0, 4.0]);
-        assert_eq!(real.complex_pow(&short).len(), 1);
+        assert!(matches!(
+            real.complex_pow(&short),
+            Err(StorageError::UnsupportedCast {
+                from: DType::F64,
+                to: DType::Complex128,
+            })
+        ));
     }
 
     #[test]
@@ -3961,7 +3983,7 @@ mod tests {
         // (1+1i)^2 = 0+2i
         let base = ArrayStorage::from_complex128_vec(vec![(1.0, 1.0)]);
         let exp = ArrayStorage::from_complex128_vec(vec![(2.0, 0.0)]);
-        let r = base.complex_pow(&exp);
+        let r = base.complex_pow(&exp).unwrap();
         let v = r.to_complex128_vec();
         assert!(v[0].0.abs() < 1e-10);
         assert!((v[0].1 - 2.0).abs() < 1e-10);
