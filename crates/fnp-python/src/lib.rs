@@ -28083,6 +28083,111 @@ fn inv(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     fallback()
 }
 
+// Native TSQR route for the full-rank tall-skinny f64 regime of
+// numpy.linalg.lstsq. NumPy runs LAPACK dgelsd, an SVD of the whole m×n matrix;
+// TSQR reduces A to a tiny n×n R in one streaming, embarrassingly-parallel pass
+// over the rows, then x = R⁻¹(Qᵀb)_top by back substitution, with the singular
+// values and rank taken from an n×n SVD of R since σ(A) = σ(R).
+//
+// Every element of the 4-tuple is invariant to TSQR's Q/R sign choice — x is the
+// unique minimiser, σ(A) = σ(R), and the residual is a norm — so this is
+// allclose to numpy with none of the sign divergence that makes qr(mode='r')
+// unroutable.
+//
+// Returns Ok(None), i.e. "use numpy", for everything outside the gate: a
+// non-ndarray or non-f64 or non-C-contiguous operand, a.ndim != 2, b.ndim != 1
+// (numpy's (M, K) multi-RHS form), m < n, non-finite entries, an rcond numpy
+// would hand to LAPACK's own machine-precision rule rather than the
+// eps·max(M, N) one, or a rank-deficient A. That last case must go to numpy
+// rather than to fnp_linalg::lstsq_tsqr's own fallback: lstsq_svd forms a full
+// m×m U, which at the m this route targets is unallocatable.
+fn try_native_lstsq_tsqr(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    rcond: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_t = numpy.getattr("ndarray")?;
+    for operand in [a, b] {
+        if !operand.is_exact_instance(&ndarray_t)
+            || !numpy_dtype_is_f64(py, operand)
+            || !operand
+                .getattr("flags")?
+                .getattr("c_contiguous")?
+                .extract::<bool>()?
+        {
+            return Ok(None);
+        }
+    }
+    let a_shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let b_shape: Vec<usize> = b.getattr("shape")?.extract()?;
+    if a_shape.len() != 2 || b_shape.len() != 1 {
+        return Ok(None);
+    }
+    let (m, n) = (a_shape[0], a_shape[1]);
+    if b_shape[0] != m || m < n || n == 0 {
+        return Ok(None);
+    }
+
+    // numpy maps rcond=None onto eps·max(M, N), which is exactly the kernel's
+    // negative-rcond rule. A caller-supplied negative rcond means something else
+    // (LAPACK substitutes bare machine precision), so leave that to numpy.
+    let rcond_value = match rcond {
+        None => -1.0,
+        Some(value) if value.is_none() => -1.0,
+        Some(value) => match value.extract::<f64>() {
+            Ok(v) if v >= 0.0 => v,
+            _ => return Ok(None),
+        },
+    };
+
+    let (Ok(a_buf), Ok(b_buf)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(b)) else {
+        return Ok(None);
+    };
+    let (Some(a_cells), Some(b_cells)) = (a_buf.as_slice(py), b_buf.as_slice(py)) else {
+        return Ok(None);
+    };
+    if a_cells.len() != m * n || b_cells.len() != m {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64, both buffers are
+    // C-contiguous f64 ndarrays held read-only under the GIL for this call, and
+    // the lengths were checked against the declared shapes above.
+    let a_data: &[f64] = unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), m * n) };
+    let b_data: &[f64] = unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<f64>(), m) };
+
+    let Ok(Some((x, residuals, rank, singular_values))) =
+        fnp_linalg::lstsq_tsqr_full_rank(a_data, b_data, m, n, rcond_value)
+    else {
+        // Err (non-finite entries, degenerate shape) or Ok(None) (rank < n):
+        // numpy owns both, with its LinAlgError text and its minimum-norm path.
+        return Ok(None);
+    };
+
+    let float64 = numpy.getattr("float64")?;
+    let as_f64_array = |values: Vec<f64>| -> PyResult<Bound<'_, PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", &float64)?;
+        numpy.call_method("array", (values,), Some(&kwargs))
+    };
+    // rank is a numpy.int32 scalar in numpy's own return, not a Python int.
+    let rank_scalar = numpy.getattr("int32")?.call1((rank,))?;
+    Ok(Some(
+        PyTuple::new(
+            py,
+            [
+                as_f64_array(x)?,
+                as_f64_array(residuals)?,
+                rank_scalar,
+                as_f64_array(singular_values)?,
+            ],
+        )?
+        .into_any()
+        .unbind(),
+    ))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, b, rcond=None))]
 fn lstsq(
@@ -28091,19 +28196,25 @@ fn lstsq(
     b: Py<PyAny>,
     rcond: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.linalg.lstsq so the 4-tuple return
+    let bound_a = a.bind(py);
+    let bound_b = b.bind(py);
+    let bound_rcond = rcond.as_ref().map(|value| value.bind(py));
+    // Full-rank tall-skinny real 2-D systems go through TSQR; see
+    // try_native_lstsq_tsqr for the gate and why everything else must not.
+    if let Some(result) = try_native_lstsq_tsqr(py, bound_a, bound_b, bound_rcond)? {
+        return Ok(result);
+    }
+    // Everything else passes through to np.linalg.lstsq so the 4-tuple return
     // (solution, residuals, rank, singular_values) and the rcond
     // default-handling path match numpy exactly across real/complex,
     // rank-deficient, and broadcasting inputs.
     let numpy = py.import("numpy")?;
     let lstsq_fn = numpy.getattr("linalg")?.getattr("lstsq")?;
     let kwargs = PyDict::new(py);
-    if let Some(value) = rcond {
-        kwargs.set_item("rcond", value.bind(py))?;
+    if let Some(value) = bound_rcond {
+        kwargs.set_item("rcond", value)?;
     }
-    Ok(lstsq_fn
-        .call((a.bind(py), b.bind(py)), Some(&kwargs))?
-        .unbind())
+    Ok(lstsq_fn.call((bound_a, bound_b), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -107632,7 +107743,7 @@ mod tests {
         required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
         sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
         trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc_native,
-        unravel_index, where_py, wide_int_table_bounds,
+        try_native_lstsq_tsqr, unravel_index, where_py, wide_int_table_bounds,
     };
     use fnp_dtype::{ArrayStorage, DType};
     use fnp_ufunc::UFuncArray;
@@ -119569,6 +119680,229 @@ mod tests {
             rk8.set_item("rcond", 1e-8_f64)?;
             let expected_r = numpy_lstsq.call((tall_a.clone(), tall_b.clone()), Some(&rk8))?;
             tuple_close(&actual_r, &expected_r)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn lstsq_tsqr_route_engages_only_on_full_rank_tall_skinny_f64_and_matches_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let numpy = py.import("numpy")?;
+            let numpy_lstsq = numpy.getattr("linalg")?.getattr("lstsq")?;
+            let allclose = numpy.getattr("allclose")?;
+            let rng = numpy
+                .getattr("random")?
+                .call_method1("default_rng", (12345_u64,))?;
+            // Multiblock: 4096 rows exercises the parallel leaf/fold tree rather
+            // than the single-leaf shortcut.
+            let a = rng.call_method1("standard_normal", ((4096_usize, 8_usize),))?;
+            let b = rng.call_method1("standard_normal", (4096_usize,))?;
+
+            fn numpy_expected<'py>(
+                py: Python<'py>,
+                numpy_lstsq: &Bound<'py, PyAny>,
+                a: &Bound<'py, PyAny>,
+                b: &Bound<'py, PyAny>,
+                rcond: Option<&Bound<'py, PyAny>>,
+            ) -> PyResult<Bound<'py, PyAny>> {
+                let kwargs = PyDict::new(py);
+                match rcond {
+                    Some(value) => kwargs.set_item("rcond", value)?,
+                    None => kwargs.set_item("rcond", py.None())?,
+                }
+                numpy_lstsq.call((a, b), Some(&kwargs))
+            }
+
+            // ENGAGEMENT PROOF: a green parity assertion says nothing unless the
+            // native arm was actually selected, so assert selection directly.
+            let native = try_native_lstsq_tsqr(py, &a, &b, None)?
+                .expect("full-rank tall-skinny f64 with 1-D b must take the TSQR route");
+            // Without this the whole test is skippable-green: numpy_available()
+            // returns early and silently when numpy is missing, so a run with no
+            // numpy would report ok having compared nothing. Seeing this line
+            // under --nocapture proves numpy was live AND the native arm ran.
+            println!(
+                "NATIVE_ARM_REACHABLE lstsq_tsqr numpy={}",
+                numpy.getattr("__version__")?.extract::<String>()?
+            );
+            let native = native.bind(py);
+            let native = native.cast::<PyTuple>()?;
+            let expected = numpy_expected(py, &numpy_lstsq, &a, &b, None)?;
+            let expected = expected.cast::<PyTuple>()?;
+
+            assert_eq!(native.len()?, 4);
+            assert!(
+                allclose
+                    .call1((native.get_item(0)?, expected.get_item(0)?))?
+                    .extract::<bool>()?,
+                "TSQR solution diverged from numpy"
+            );
+            assert!(
+                allclose
+                    .call1((native.get_item(1)?, expected.get_item(1)?))?
+                    .extract::<bool>()?,
+                "TSQR residuals diverged from numpy"
+            );
+            assert_eq!(
+                native.get_item(2)?.extract::<i64>()?,
+                expected.get_item(2)?.extract::<i64>()?,
+                "TSQR rank diverged from numpy"
+            );
+            assert!(
+                allclose
+                    .call1((native.get_item(3)?, expected.get_item(3)?))?
+                    .extract::<bool>()?,
+                "TSQR singular values diverged from numpy"
+            );
+            // numpy returns rank as an int32 scalar, not a Python int; a wrapper
+            // that hands back a plain int passes allclose but breaks callers that
+            // read .dtype off the tuple.
+            assert_eq!(
+                native.get_item(2)?.getattr("dtype")?.str()?.extract::<String>()?,
+                expected
+                    .get_item(2)?
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                "rank scalar dtype must match numpy"
+            );
+            // m > n and full rank: residuals is a 1-element array, not empty.
+            assert_eq!(
+                native.get_item(1)?.getattr("shape")?.extract::<Vec<usize>>()?,
+                vec![1_usize],
+                "overdetermined full-rank residuals must have shape (1,)"
+            );
+            for index in [0_usize, 3] {
+                assert_eq!(
+                    native
+                        .get_item(index)?
+                        .getattr("dtype")?
+                        .str()?
+                        .extract::<String>()?,
+                    "float64"
+                );
+            }
+
+            // Explicit non-negative rcond is numpy's own cutoff rule, so it routes.
+            let rcond = 1e-10_f64.into_pyobject(py)?.into_any();
+            let native_rcond = try_native_lstsq_tsqr(py, &a, &b, Some(&rcond))?
+                .expect("explicit non-negative rcond must still take the TSQR route");
+            let native_rcond = native_rcond.bind(py);
+            let expected_rcond = numpy_expected(py, &numpy_lstsq, &a, &b, Some(&rcond))?;
+            assert!(
+                allclose
+                    .call1((
+                        native_rcond.cast::<PyTuple>()?.get_item(0)?,
+                        expected_rcond.cast::<PyTuple>()?.get_item(0)?
+                    ))?
+                    .extract::<bool>()?,
+                "TSQR solution diverged from numpy under explicit rcond"
+            );
+
+            // NEGATIVE CASES. Each of these produces a wrong answer, a wrong
+            // shape, or an unallocatable m*m intermediate if the gate lets it
+            // through, so each must decline and leave the call to numpy.
+            let rejects = |a: &Bound<'_, PyAny>,
+                           b: &Bound<'_, PyAny>,
+                           rcond: Option<&Bound<'_, PyAny>>,
+                           why: &str|
+             -> PyResult<()> {
+                assert!(
+                    try_native_lstsq_tsqr(py, a, b, rcond)?.is_none(),
+                    "TSQR route must decline: {why}"
+                );
+                Ok(())
+            };
+
+            // 2-D b is numpy's (M, K) multi-RHS form; the kernel solves one RHS.
+            let multi_b = rng.call_method1("standard_normal", ((4096_usize, 2_usize),))?;
+            rejects(&a, &multi_b, None, "2-D right-hand side")?;
+            // Underdetermined: TSQR requires m >= n.
+            let wide_a = rng.call_method1("standard_normal", ((8_usize, 16_usize),))?;
+            let wide_b = rng.call_method1("standard_normal", (8_usize,))?;
+            rejects(&wide_a, &wide_b, None, "wide (m < n) system")?;
+            // Non-f64 would be reinterpreted as f64 by the buffer view.
+            rejects(
+                &a.call_method1("astype", ("float32",))?,
+                &b.call_method1("astype", ("float32",))?,
+                None,
+                "float32 operands",
+            )?;
+            // F-order has the same buffer length but transposed element order.
+            rejects(
+                &numpy.call_method1("asfortranarray", (&a,))?,
+                &b,
+                None,
+                "non-C-contiguous a",
+            )?;
+            // Rank-deficient: must reach numpy's minimum-norm path, NOT
+            // lstsq_tsqr's internal lstsq_svd fallback, which forms an m*m U.
+            let concat_kwargs = PyDict::new(py);
+            concat_kwargs.set_item("axis", 1_usize)?;
+            let rank_deficient = numpy.call_method(
+                "concatenate",
+                (PyTuple::new(py, [&a, &a])?,),
+                Some(&concat_kwargs),
+            )?;
+            rejects(&rank_deficient, &b, None, "rank-deficient a")?;
+            // Negative rcond means bare machine precision in LAPACK, not the
+            // eps*max(M, N) rule the kernel implements for rcond < 0.
+            let negative_rcond = (-1.0_f64).into_pyobject(py)?.into_any();
+            rejects(&a, &b, Some(&negative_rcond), "negative rcond")?;
+            // Non-finite entries: numpy owns the LinAlgError surface.
+            let b_inf = b.call_method0("copy")?;
+            b_inf.set_item(0, f64::INFINITY)?;
+            rejects(&a, &b_inf, None, "non-finite b")?;
+            // Not an ndarray at all.
+            let list_a = PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 0.0])?,
+                    PyList::new(py, [0.0_f64, 1.0])?,
+                ],
+            )?;
+            let list_b = PyList::new(py, [1.0_f64, 2.0])?;
+            rejects(
+                list_a.as_any(),
+                list_b.as_any(),
+                None,
+                "python list operands",
+            )?;
+
+            // The declined cases must still be correct end to end through the
+            // public wrapper, which is what the numpy fallback is for.
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let lstsq_fn = module.getattr("lstsq")?;
+            for (a_arg, b_arg, label) in [
+                (&rank_deficient, &b, "rank-deficient"),
+                (&wide_a, &wide_b, "wide"),
+                (&a, &multi_b, "multi-RHS"),
+            ] {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("rcond", py.None())?;
+                let actual = lstsq_fn.call((a_arg, b_arg), Some(&kwargs))?;
+                let expected = numpy_expected(py, &numpy_lstsq, a_arg, b_arg, None)?;
+                assert!(
+                    allclose
+                        .call1((
+                            actual.cast::<PyTuple>()?.get_item(0)?,
+                            expected.cast::<PyTuple>()?.get_item(0)?
+                        ))?
+                        .extract::<bool>()?,
+                    "fallback solution diverged from numpy: {label}"
+                );
+                assert_eq!(
+                    actual.cast::<PyTuple>()?.get_item(2)?.extract::<i64>()?,
+                    expected.cast::<PyTuple>()?.get_item(2)?.extract::<i64>()?,
+                    "fallback rank diverged from numpy: {label}"
+                );
+            }
 
             Ok(())
         });
