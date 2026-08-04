@@ -813,53 +813,6 @@ fn bench_int32_flat_sort_small_pool_regate(c: &mut Criterion) {
     group.finish();
 }
 
-// np.isin over matched real-float dtypes (f64/f32). numpy can't use its fast
-// integer 'table' method for floats, so it falls back to a serial sort of
-// |element|+|test| (~3 s for 16M f64). The native zero-copy parallel hashed-set
-// path is O(n+m). RAYON_NUM_THREADS=1 vs default isolates the parallel gain (the
-// serial hash already crushes numpy's sort ~45x; parallel adds ~10x more).
-fn bench_float_isin_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_float_isin_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let fnp_isin = module.getattr("isin").expect("fnp isin");
-        let numpy_isin = numpy.getattr("isin").expect("numpy isin");
-        let setup = "import numpy as np\n\
-rng = np.random.default_rng(0)\n\
-A64 = rng.standard_normal(8_000_000)\n\
-B64 = rng.standard_normal(65_536)\n\
-A32 = A64.astype(np.float32)\n\
-B32 = B64.astype(np.float32)\n";
-        let ns = PyDict::new(py);
-        py.run(
-            std::ffi::CString::new(setup).unwrap().as_c_str(),
-            Some(&ns),
-            Some(&ns),
-        )
-        .expect("isin setup");
-        for (a_key, b_key, label) in [("A64", "B64", "f64"), ("A32", "B32", "f32")] {
-            let a = ns.get_item(a_key).expect("a");
-            let b = ns.get_item(b_key).expect("b");
-            group.bench_function(format!("fnp_isin_{label}_8m"), |bench| {
-                bench.iter(|| black_box(fnp_isin.call1((&a, &b)).expect("fnp isin")));
-            });
-            group.bench_function(format!("numpy_isin_{label}_8m"), |bench| {
-                bench.iter(|| black_box(numpy_isin.call1((&a, &b)).expect("np isin")));
-            });
-        }
-    });
-
-    group.finish();
-}
-
 // np.compress(cond, 2-D, axis=1): the native f64 compress-axis path did a scalar per-element column
 // gather for the last axis (inner==1) and LOST 0.4-0.8x to numpy's SIMD strided gather. Now delegates
 // the inner==1 case -> parity (regression guard: this should track numpy, not the old native loss).
@@ -2915,7 +2868,6 @@ fn main() {
             "bench_unary_parallel_boundary",
             bench_unary_parallel_boundary,
         ),
-        ("bench_float_isin_boundary", bench_float_isin_boundary),
         ("bench_f16_matmul_boundary", bench_f16_matmul_boundary),
         (
             "bench_flat_sort_dtype_boundary",
