@@ -36,20 +36,21 @@ use fnp_random::{
     SeedMaterial, SeedSequence, SeedSequenceSnapshot, ShapedRandomOutput,
 };
 use fnp_ufunc::{
-    BinaryOp, FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
-    FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError, MaskedArray, UFuncArray, UnaryOp,
-    bitwise_and as ufunc_bitwise_and, bitwise_count as ufunc_bitwise_count,
-    bitwise_or as ufunc_bitwise_or, bitwise_xor as ufunc_bitwise_xor, divide as ufunc_divide,
-    divmod_arrays as ufunc_divmod, equal as ufunc_equal, fmax as ufunc_fmax, fmin as ufunc_fmin,
-    frexp as ufunc_frexp, greater as ufunc_greater, greater_equal as ufunc_greater_equal,
-    isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, left_shift as ufunc_left_shift,
-    less as ufunc_less, less_equal as ufunc_less_equal, logaddexp2 as ufunc_logaddexp2,
+    BinaryOp, FloatErrorMode, FromPyFuncReduceAxisSpec, FromPyFuncReduceError,
+    FromPyFuncReduceIdentity, FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError,
+    MaskedArray, UFuncArray, UnaryOp, bitwise_and as ufunc_bitwise_and,
+    bitwise_count as ufunc_bitwise_count, bitwise_or as ufunc_bitwise_or,
+    bitwise_xor as ufunc_bitwise_xor, divide as ufunc_divide, divmod_arrays as ufunc_divmod,
+    equal as ufunc_equal, fmax as ufunc_fmax, fmin as ufunc_fmin, frexp as ufunc_frexp,
+    greater as ufunc_greater, greater_equal as ufunc_greater_equal, isneginf as ufunc_isneginf,
+    isposinf as ufunc_isposinf, left_shift as ufunc_left_shift, less as ufunc_less,
+    less_equal as ufunc_less_equal, logaddexp2 as ufunc_logaddexp2,
     logical_and as ufunc_logical_and, logical_not as ufunc_logical_not,
     logical_or as ufunc_logical_or, logical_xor as ufunc_logical_xor, ma_is_masked, ma_make_mask,
     ma_mask_or, matmul_accumulate_serial, maximum as ufunc_maximum, minimum as ufunc_minimum,
     modf as ufunc_modf, not_equal as ufunc_not_equal, power as ufunc_power,
     reduce_frompyfunc_values, remainder as ufunc_remainder, right_shift as ufunc_right_shift,
-    signbit as ufunc_signbit, spacing as ufunc_spacing, take_float_error_events, FloatErrorMode,
+    signbit as ufunc_signbit, spacing as ufunc_spacing, take_float_error_events,
 };
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{
