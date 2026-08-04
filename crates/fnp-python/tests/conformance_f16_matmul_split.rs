@@ -14,42 +14,37 @@ fn float16_matrix_batch_and_broadcast_matmul_match_numpy() {
         let array = numpy.getattr("array").expect("numpy array");
         let dtype = numpy.getattr("float16").expect("numpy float16");
         let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", dtype).expect("float16 dtype keyword");
+        kwargs
+            .set_item("dtype", dtype)
+            .expect("float16 dtype keyword");
 
         let matrix_a = array
-            .call((vec![vec![1.0_f64, -2.0, 3.0], vec![4.0, 5.0, -6.0]],), Some(&kwargs))
+            .call(
+                (vec![vec![1.0_f64, -2.0, 3.0], vec![4.0, 5.0, -6.0]],),
+                Some(&kwargs),
+            )
             .expect("float16 matrix lhs");
         let matrix_b = array
             .call(
-                (
-                    vec![
-                        vec![1.0_f64, 2.0],
-                        vec![-3.0, 4.0],
-                        vec![5.0, -6.0],
-                    ],
-                ),
+                (vec![vec![1.0_f64, 2.0], vec![-3.0, 4.0], vec![5.0, -6.0]],),
                 Some(&kwargs),
             )
             .expect("float16 matrix rhs");
         let batch_a = array
             .call(
-                (
-                    vec![
-                        vec![vec![1.0_f64, -2.0, 3.0], vec![4.0, 5.0, -6.0]],
-                        vec![vec![-1.0, 2.0, 0.5], vec![3.0, -4.0, 6.0]],
-                    ],
-                ),
+                (vec![
+                    vec![vec![1.0_f64, -2.0, 3.0], vec![4.0, 5.0, -6.0]],
+                    vec![vec![-1.0, 2.0, 0.5], vec![3.0, -4.0, 6.0]],
+                ],),
                 Some(&kwargs),
             )
             .expect("float16 batch lhs");
         let batch_b = array
             .call(
-                (
-                    vec![
-                        vec![vec![1.0_f64, 2.0], vec![-3.0, 4.0], vec![5.0, -6.0]],
-                        vec![vec![-2.0, 1.0], vec![3.0, -4.0], vec![0.5, 6.0]],
-                    ],
-                ),
+                (vec![
+                    vec![vec![1.0_f64, 2.0], vec![-3.0, 4.0], vec![5.0, -6.0]],
+                    vec![vec![-2.0, 1.0], vec![3.0, -4.0], vec![0.5, 6.0]],
+                ],),
                 Some(&kwargs),
             )
             .expect("float16 batch rhs");

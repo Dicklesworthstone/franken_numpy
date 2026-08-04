@@ -29,7 +29,9 @@ a = rng.standard_normal(1 << 20).astype(np.float64)\n\
 v = rng.standard_normal(256).astype(np.float64)\n";
         let namespace = PyDict::new(py);
         py.run(
-            std::ffi::CString::new(setup).expect("convolve setup source").as_c_str(),
+            std::ffi::CString::new(setup)
+                .expect("convolve setup source")
+                .as_c_str(),
             Some(&namespace),
             Some(&namespace),
         )
