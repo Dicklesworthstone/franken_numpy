@@ -71,6 +71,10 @@ name = "criterion_python_structural"
 harness = false
 
 [[bench]]
+name = "criterion_python_f16_transcendental"
+harness = false
+
+[[bench]]
 name = "criterion_python_io_text"
 harness = false
 

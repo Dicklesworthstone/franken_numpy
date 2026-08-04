@@ -813,64 +813,6 @@ fn bench_int32_flat_sort_small_pool_regate(c: &mut Criterion) {
     group.finish();
 }
 
-// f16 arctan2/hypot/logaddexp/logaddexp2: numpy has no f16 ALU, so it widens f16->f32, applies
-// the f32 transcendental single-threaded, and narrows (~290/~170/~350/~276ms @16M). The
-// native parallel widen-op-narrow is bit-exact for the finite fast-path domains and wins big.
-// RAYON_NUM_THREADS=1 vs default isolates the parallel gain.
-fn bench_f16_binary_transcendental_boundary(c: &mut Criterion) {
-    let mut group = c.benchmark_group("python_f16_binary_transcendental_boundary");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(4));
-    group.warm_up_time(Duration::from_secs(2));
-
-    Python::initialize();
-    Python::attach(|py| {
-        ensure_numpy_available(py).expect("numpy available");
-        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
-        fnp_python(&module).expect("initialize fnp_python bench module");
-        let numpy = py.import("numpy").expect("numpy oracle");
-        let setup = "import numpy as np\n\
-rng = np.random.default_rng(0)\n\
-x = rng.standard_normal(16_000_000).astype(np.float16)\n\
-y = rng.standard_normal(16_000_000).astype(np.float16)\n\
-pbase = (np.abs(rng.standard_normal(16_000_000)) + 0.5).astype(np.float16)\n\
-pexp = (rng.standard_normal(16_000_000) * 0.5).astype(np.float16)\n";
-        let ns = PyDict::new(py);
-        py.run(
-            std::ffi::CString::new(setup).unwrap().as_c_str(),
-            Some(&ns),
-            Some(&ns),
-        )
-        .expect("f16 binary setup");
-        let x = ns.get_item("x").expect("x");
-        let y = ns.get_item("y").expect("y");
-        for name in ["arctan2", "hypot", "logaddexp", "logaddexp2"] {
-            let fnp_fn = module.getattr(name).expect("fnp fn");
-            let numpy_fn = numpy.getattr(name).expect("numpy fn");
-            group.bench_function(format!("fnp_{name}_f16_16m"), |b| {
-                b.iter(|| black_box(fnp_fn.call1((&x, &y)).expect("fnp f16 binary")));
-            });
-            group.bench_function(format!("numpy_{name}_f16_16m"), |b| {
-                b.iter(|| black_box(numpy_fn.call1((&x, &y)).expect("np f16 binary")));
-            });
-        }
-        // power uses positive bases + bounded exponents so it engages the native path
-        // (negative base / overflow cases defer to numpy by design).
-        let pbase = ns.get_item("pbase").expect("pbase");
-        let pexp = ns.get_item("pexp").expect("pexp");
-        let fnp_pow = module.getattr("power").expect("fnp power");
-        let numpy_pow = numpy.getattr("power").expect("numpy power");
-        group.bench_function("fnp_power_f16_16m", |b| {
-            b.iter(|| black_box(fnp_pow.call1((&pbase, &pexp)).expect("fnp f16 power")));
-        });
-        group.bench_function("numpy_power_f16_16m", |b| {
-            b.iter(|| black_box(numpy_pow.call1((&pbase, &pexp)).expect("np f16 power")));
-        });
-    });
-
-    group.finish();
-}
-
 // np.isin over matched real-float dtypes (f64/f32). numpy can't use its fast
 // integer 'table' method for floats, so it falls back to a serial sort of
 // |element|+|test| (~3 s for 16M f64). The native zero-copy parallel hashed-set
@@ -2974,10 +2916,6 @@ fn main() {
             bench_unary_parallel_boundary,
         ),
         ("bench_float_isin_boundary", bench_float_isin_boundary),
-        (
-            "bench_f16_binary_transcendental_boundary",
-            bench_f16_binary_transcendental_boundary,
-        ),
         ("bench_f16_matmul_boundary", bench_f16_matmul_boundary),
         (
             "bench_flat_sort_dtype_boundary",
