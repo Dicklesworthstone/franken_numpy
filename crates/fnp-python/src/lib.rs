@@ -40270,6 +40270,10 @@ fn masked_pairwise_parallel(
     n: usize,
     cut: usize,
 ) -> f64 {
+    // The pairwise reduction's leaf is 128 elements.  A smaller caller cutoff
+    // would eventually reach 9..15 elements, whose rounded split is zero and
+    // therefore cannot make recursive progress.
+    let cut = cut.max(128);
     if n <= cut {
         let mut buf = [0.0f64; 128];
         let mut stream = MaskedStream {
@@ -107601,6 +107605,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn masked_pairwise_parallel_clamps_subleaf_cutoff() {
+        let data: Vec<f64> = (0..129).map(|i| i as f64 - 64.0).collect();
+        let mask = vec![1u8; data.len()];
+        let prefix = vec![0, data.len()];
+        let expected = masked_sum_reference(&data, 0, data.len());
+
+        let actual = masked_pairwise_parallel(&mask, &data, &prefix, 0, 0, data.len(), 8);
+
+        assert_eq!(actual.to_bits(), expected.to_bits());
     }
 
     fn with_python(test: impl FnOnce(Python<'_>) -> PyResult<()>) {
