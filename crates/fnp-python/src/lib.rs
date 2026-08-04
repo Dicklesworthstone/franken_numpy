@@ -63332,6 +63332,61 @@ fn f64_flat_sort_native_is_profitable() -> bool {
     !numpy_f64_qsort_is_simd() || rayon::current_num_threads() >= F64_FLAT_SORT_SIMD_MIN_THREADS
 }
 
+// FLAT f64 `np.unique`, re-decided 2026-08-04 from a blanket AVX2 surrender to a
+// worker floor (deadlock-audit-f64-unique-flat-avx2-surrender-hey9a). BOTH halves
+// of the old gate's recorded basis — "0.995x on distinct data and 0.547x on dense
+// ties" — were small-worker artifacts, the same core-count-vs-ISA confound the
+// flat-sort sibling above carried.
+//
+// Incumbent topology measured BEFORE any candidate existed: numpy.unique is
+// single-threaded at cpu/wall 0.997-1.000 at every size and tie density sampled
+// (n = 4M/16M/64M crossed with 4M/1M/64/2 distinct), and its np.sort is 73% of the
+// job on distinct input, 87% on dense ties. Dense ties buy NumPy no threading;
+// they only make its sort cheaper in absolute terms.
+//
+// Ratio vs live NumPy 2.4.3, same invocation, dual-null median-CI gate, on a
+// 32-physical/64-logical Threadripper PRO 5975WX (AVX2, no AVX-512). DW =
+// DECIDABLE_WIN, UND = UNDECIDED (effect CI overlaps a null CI):
+//
+//   corpus (n, values drawn from) |    4T    |    8T    |   16T    |   32T
+//   -----------------------------+----------+----------+----------+---------
+//   uniform  4M, all distinct     | 1.040 DW | 1.525 DW | 1.885 DW | 2.18 DW
+//   uniform 16M, all distinct     |     -    | 1.326 DW | 1.492 DW | 1.51 DW
+//   uniform 64M, all distinct     |     -    |     -    | 1.677 DW | 1.76 DW
+//   16M from 1M distinct          |     -    | 1.611 DW | 1.868 DW | 1.95 DW
+//   16M from 64 distinct          | 1.012 UND| 1.094 DW | 1.101 DW | 1.21 DW
+//   64M from 64 distinct          |     -    | 1.313 DW | 1.313 DW | 1.30 DW
+//   16M from 2 distinct           | 0.999 UND| 0.996 UND| 1.030 UND| 1.16 DW
+//
+// TWO MECHANISMS, and they behave differently in the worker count. The
+// compute-bound rows (distinct, and 1M-distinct) scale: 1.04 -> 1.53 -> 1.89 ->
+// 2.18. The bandwidth-bound dense-tie rows are FLAT: 64-distinct at 64M reads
+// 1.313 / 1.313 / 1.302 across 8/16/32. With few distinct values
+// `par_sort_unstable` is near-linear and the cost collapses onto the input copy
+// and the defer scan, which no extra worker helps.
+//
+// FLOOR AT 8, where the knee is. At 8 workers five of the six measured corpora
+// are DECIDABLE_WIN at 1.09-1.61x and the sixth is a measured WASH, not a loss.
+// At 4 workers the route has essentially no margin anywhere: both tie corpora are
+// UNDECIDED and the one row that decides does so at 1.040x, inside the noise a
+// different host would produce.
+//
+// THE 2-DISTINCT CORNER IS PARITY, NOT A WIN, AND IS NOT SOLD AS ONE. It reads
+// 0.999 / 0.996 / 1.030 UNDECIDED at 4/8/16 and decided exactly once, at 32
+// (1.159x), unreplicated; a separate ELF measured the same corpus at 16 as 1.169
+// and 1.125 DW, so 1.03-1.17 is its run-to-run spread. Enabling the route there
+// costs nothing measurable, which is why the wash does not hold the floor
+// hostage — but nothing here claims a speedup for `unique` on an array with a
+// handful of distinct values.
+const F64_UNIQUE_SIMD_MIN_THREADS: usize = 8;
+
+fn f64_unique_native_is_profitable() -> bool {
+    if numpy_f64_qsort_is_avx512() {
+        return false; // unmeasured in either direction; keep the prior surrender
+    }
+    !numpy_f64_qsort_is_simd() || rayon::current_num_threads() >= F64_UNIQUE_SIMD_MIN_THREADS
+}
+
 // Parallel flat f64 sort. numpy.sort is single-threaded introsort; for a 1-D C-contiguous
 // f64 array (default kind) a rayon par_sort_unstable over a fresh numpy.empty copy beats it
 // once n amortizes the fan-out + export (the passthrough comment about "export overhead" was
@@ -92670,13 +92725,14 @@ fn try_zerocopy_f64_unique_flat(
     py: Python<'_>,
     item: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    // Stale-basis regate (2026-07-14, sibling of the flat f64 sort regate):
-    // numpy 2.x's SIMD introsort saturates the f64 unique basis on avx2+
-    // hosts - gate-measured 0.995x on distinct data and 0.547x on dense ties
-    // (numpy's sort+flags+compress beats the par_sort+dedup outright there).
-    // Pre-AVX2/non-x86 hosts keep the arm and its original margin. The
-    // binary-grid bucket path above is O(n+range), not sort-based - unaffected.
-    if numpy_f64_qsort_is_simd() {
+    // Worker floor, not a blanket AVX2 surrender: the 2026-07-14 regate's basis
+    // ("0.995x on distinct data and 0.547x on dense ties") was measured on a
+    // small worker and does not survive at 8+ (see F64_UNIQUE_SIMD_MIN_THREADS
+    // for the full 4/8/16/32-worker table and the two mechanisms behind it).
+    // Pre-AVX2 / non-x86 hosts keep the arm unconditionally as before, and the
+    // binary-grid bucket path earlier in this file is O(n+range) rather than
+    // sort-based, so it is unaffected either way.
+    if !f64_unique_native_is_profitable() {
         return Ok(None);
     }
     let numpy = py.import("numpy")?;
@@ -153175,6 +153231,115 @@ mod tests {
                 env!("CARGO_PKG_VERSION"),
                 "__version__ must track the fnp-python crate's Cargo.toml version"
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn flat_f64_unique_woken_route_is_byte_exact_and_defers_correctly() {
+        // `try_zerocopy_f64_unique_flat` was dead on every AVX2 host until the
+        // blanket ISA surrender became a worker floor
+        // (deadlock-audit-f64-unique-flat-avx2-surrender-hey9a). Two things have
+        // to hold for that to be safe, and only one of them is about bytes.
+        //
+        // 1. The woken body must be byte-exact where it ENGAGES. Waking a
+        //    dormant route is how the flat-sort sibling discovered a regression
+        //    hiding inside its own body, so the engaging cases are checked
+        //    against live NumPy rather than assumed correct.
+        // 2. It must still DEFER on everything its preconditions exclude — NaN,
+        //    both signed zeros present, non-contiguous, below the size gate —
+        //    and NumPy's answer must come back unchanged through the
+        //    passthrough.
+        //
+        // NATIVE_ARM_REACHABLE is printed because a green run here proves
+        // nothing on its own: on a host below the floor every case below takes
+        // the NumPy passthrough and the whole test passes while measuring
+        // NumPy against itself.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let fnp_unique = module.getattr("unique")?;
+            let np_unique = numpy.getattr("unique")?;
+            assert!(
+                !fnp_unique.is(&np_unique),
+                "dispatch trap: fnp.unique resolved to the NumPy callable"
+            );
+            println!(
+                "NATIVE_ARM_REACHABLE={} host_avx2={} host_avx512f={} rayon_workers={} floor={}",
+                super::f64_unique_native_is_profitable(),
+                std::arch::is_x86_feature_detected!("avx2"),
+                std::arch::is_x86_feature_detected!("avx512f"),
+                rayon::current_num_threads(),
+                super::F64_UNIQUE_SIMD_MIN_THREADS,
+            );
+
+            // Corpora are built off the 1/16 binary grid so the earlier
+            // `try_zerocopy_f64_unique_binary_grid` route cannot claim them —
+            // integer-valued f64 would silently be handled there instead, which
+            // would make this test say nothing about the sort route.
+            let ns = PyDict::new(py);
+            py.run(
+                std::ffi::CString::new(
+                    "import numpy as np\n\
+                     rng = np.random.default_rng(20260804)\n\
+                     n = (1 << 20) + 3\n\
+                     engages_distinct = rng.random(n)\n\
+                     pool = rng.random(37)\n\
+                     engages_dense_ties = pool[rng.integers(0, 37, n)]\n\
+                     engages_all_same = np.full(n, float(pool[0]))\n\
+                     engages_plus_zero = np.concatenate([np.zeros(n // 2), pool[rng.integers(0, 37, n - n // 2)]])\n\
+                     engages_minus_zero = np.concatenate([np.full(n // 2, -0.0), pool[rng.integers(0, 37, n - n // 2)]])\n\
+                     engages_extremes = np.concatenate([rng.random(n - 4), np.array([np.inf, -np.inf, 5e-324, 1.7976931348623157e308])])\n\
+                     engages_2d = rng.random((1024, 1024 + 1))\n\
+                     defers_nan = np.concatenate([rng.random(n - 2), np.array([np.nan, np.nan])])\n\
+                     defers_both_zeros = np.concatenate([np.zeros(2), np.full(2, -0.0), rng.random(n - 4)])\n\
+                     defers_strided = rng.random(2 * n)[::2]\n\
+                     defers_small = rng.random(1024)\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&ns),
+                Some(&ns),
+            )?;
+
+            for name in [
+                "engages_distinct",
+                "engages_dense_ties",
+                "engages_all_same",
+                "engages_plus_zero",
+                "engages_minus_zero",
+                "engages_extremes",
+                "engages_2d",
+                "defers_nan",
+                "defers_both_zeros",
+                "defers_strided",
+                "defers_small",
+            ] {
+                let input = ns.get_item(name).expect("corpus present");
+                let ours = fnp_unique.call1((&input,))?;
+                let theirs = np_unique.call1((&input,))?;
+                assert_eq!(
+                    ours.getattr("dtype")?.str()?.to_string(),
+                    theirs.getattr("dtype")?.str()?.to_string(),
+                    "unique({name}) dtype diverges from numpy"
+                );
+                assert_eq!(
+                    ours.getattr("shape")?.extract::<Vec<usize>>()?,
+                    theirs.getattr("shape")?.extract::<Vec<usize>>()?,
+                    "unique({name}) shape diverges from numpy"
+                );
+                assert_eq!(
+                    ours.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    theirs.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "unique({name}) is not byte-exact vs numpy"
+                );
+            }
+
             Ok(())
         });
     }
