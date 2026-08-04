@@ -7664,6 +7664,8 @@ fn numpy_f64_unary_matches_libm(
     numpy: &Bound<'_, PyModule>,
     numpy_name: &'static str,
     native: fn(f64) -> f64,
+    low: f64,
+    high: f64,
 ) -> bool {
     static PROBED: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<&'static str, bool>>,
@@ -7678,22 +7680,18 @@ fn numpy_f64_unary_matches_libm(
     }
 
     // Long enough that NumPy runs its vector body rather than only a scalar
-    // tail, and spread across the argument regions where a SIMD polynomial
-    // kernel and libm diverge: the near-zero region, the mid range, the
-    // saturating tail, and negatives (kernels are often odd-symmetric by
-    // construction, so a positive-only probe can miss a sign-handling
-    // difference).
+    // tail, and swept across the op's whole DOMAIN so a kernel that only parts
+    // from libm in one region is still caught.
+    //
+    // The domain is per-op and must stay inside it. Sampling `arccosh` below 1
+    // or `arcsin` outside [-1, 1] yields NaN on both sides, and NaN payload bits
+    // are not required to agree between NumPy and libm — the probe would read
+    // that as a divergence and defer an op that is in fact byte-exact, costing
+    // the native path for nothing.
     const PROBE_LEN: usize = 4096;
+    let span = high - low;
     let samples: Vec<f64> = (0..PROBE_LEN)
-        .map(|i| {
-            let t = i as f64;
-            match i % 4 {
-                0 => t * 1.0e-6 - 2.0e-3,
-                1 => t / 512.0 - 4.0,
-                2 => t / 51.2 - 40.0,
-                _ => -(t / 128.0),
-            }
-        })
+        .map(|i| low + span * (i as f64) / ((PROBE_LEN - 1) as f64))
         .collect();
 
     let probe = || -> PyResult<bool> {
@@ -7721,10 +7719,75 @@ fn numpy_f64_unary_matches_libm(
     matches
 }
 
-// Named wrapper for the one op wired to the probe today, mirroring
-// `numpy_explog_matches_libm`'s shape at the call sites.
-fn numpy_f64_tanh_matches_libm(py: Python<'_>, numpy: &Bound<'_, PyModule>) -> bool {
-    numpy_f64_unary_matches_libm(py, numpy, "tanh", |v| UnaryOp::Tanh.apply(v))
+// The scalar-libm transcendental set fnp routes natively for f64, each with the
+// NumPy name to probe and an argument range inside its domain.
+//
+// Every one of these is a candidate for the same defect `tanh` had: NumPy may
+// dispatch a vectorized kernel that is not the system libm, and fnp's native
+// routes all compute the scalar libm call, so where they differ fnp is not a
+// drop-in. Which ops actually diverge is per-op AND per-ISA AND per-NumPy-version
+// — on this AVX2 host (NumPy 2.4.3) only `tanh` does, while
+// deadlock-audit-fs5pu records twelve more diverging on an AVX-512 host with
+// NumPy 2.3.5. Rather than encode either host's answer, probe every op and let
+// the host decide: where NumPy is libm the native parallel path is kept at no
+// cost, and where it is not the call delegates and stays byte-exact.
+//
+// exp/exp2/log/log2/log10 are deliberately absent: they carry their own
+// `numpy_explog_matches_libm` ISA gate, whose cross-host control isolated the
+// relation properly (NumPy version held fixed, ISA varied). Folding them in here
+// is deadlock-audit-gkznn's call, not this one's.
+/// A probed op: the NumPy function name, the scalar call fnp's native routes
+/// make, and the closed argument range to sweep (inside the op's domain).
+struct ProbedUnary {
+    numpy_name: &'static str,
+    native: fn(f64) -> f64,
+    low: f64,
+    high: f64,
+}
+
+fn probed_f64_unary(op: UnaryOp) -> Option<ProbedUnary> {
+    let (numpy_name, native, low, high): (&'static str, fn(f64) -> f64, f64, f64) = match op {
+        UnaryOp::Sin => ("sin", |v| UnaryOp::Sin.apply(v), -5.0, 5.0),
+        UnaryOp::Cos => ("cos", |v| UnaryOp::Cos.apply(v), -5.0, 5.0),
+        UnaryOp::Tan => ("tan", |v| UnaryOp::Tan.apply(v), -1.5, 1.5),
+        UnaryOp::Arcsin => ("arcsin", |v| UnaryOp::Arcsin.apply(v), -1.0, 1.0),
+        UnaryOp::Arccos => ("arccos", |v| UnaryOp::Arccos.apply(v), -1.0, 1.0),
+        UnaryOp::Arctan => ("arctan", |v| UnaryOp::Arctan.apply(v), -40.0, 40.0),
+        UnaryOp::Sinh => ("sinh", |v| UnaryOp::Sinh.apply(v), -5.0, 5.0),
+        UnaryOp::Cosh => ("cosh", |v| UnaryOp::Cosh.apply(v), -5.0, 5.0),
+        UnaryOp::Tanh => ("tanh", |v| UnaryOp::Tanh.apply(v), -4.0, 4.0),
+        UnaryOp::Arcsinh => ("arcsinh", |v| UnaryOp::Arcsinh.apply(v), -40.0, 40.0),
+        UnaryOp::Arccosh => ("arccosh", |v| UnaryOp::Arccosh.apply(v), 1.000_1, 40.0),
+        UnaryOp::Arctanh => ("arctanh", |v| UnaryOp::Arctanh.apply(v), -0.99, 0.99),
+        UnaryOp::Cbrt => ("cbrt", |v| UnaryOp::Cbrt.apply(v), -40.0, 40.0),
+        UnaryOp::Expm1 => ("expm1", |v| UnaryOp::Expm1.apply(v), -5.0, 5.0),
+        UnaryOp::Log1p => ("log1p", |v| UnaryOp::Log1p.apply(v), -0.9, 40.0),
+        _ => return None,
+    };
+    Some(ProbedUnary {
+        numpy_name,
+        native,
+        low,
+        high,
+    })
+}
+
+fn numpy_f64_native_unary_is_byte_exact(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    op: UnaryOp,
+) -> bool {
+    match probed_f64_unary(op) {
+        Some(probed) => numpy_f64_unary_matches_libm(
+            py,
+            numpy,
+            probed.numpy_name,
+            probed.native,
+            probed.low,
+            probed.high,
+        ),
+        None => true, // not a probed scalar-libm op; nothing to decide here
+    }
 }
 
 // Fused single-pass transcendental map + float-error-event detection over the
@@ -53806,30 +53869,37 @@ fn native_unary_promoting(
     {
         return Ok(out);
     }
-    // f64 tanh: NumPy dispatches a vectorized f64 kernel on AVX2 (X86_V3) hosts
-    // that is NOT the system libm, so `UnaryOp::Tanh.apply` — scalar libm — is
-    // not a drop-in for `np.tanh` there. Every native route below computes that
-    // same scalar call (the zero-copy buffer map, the direct-f64 bridge and the
-    // UFuncArray elementwise path alike), so the deferral has to happen here,
-    // above all three, rather than inside one of them.
+    // SCALAR-LIBM TRANSCENDENTALS: delegate wherever NumPy's f64 kernel is not
+    // the system libm. Every native route below computes the same scalar
+    // `UnaryOp::apply` call — the zero-copy buffer map, the direct-f64 bridge
+    // and the UFuncArray elementwise path alike — so where NumPy has dispatched
+    // a vectorized kernel instead, none of them is a drop-in and the deferral
+    // has to happen here, above all three, rather than inside one of them.
     //
-    // This probes instead of guessing the ISA: `numpy_explog_matches_libm`'s
-    // `!avx512f` predicate is right for exp/log — that relation was isolated by
-    // holding the NumPy version fixed and varying only the ISA — but it is
-    // WRONG for tanh, which diverges on plain AVX2 (9.9-47.2% of elements, up
-    // to 3 ULP, NumPy 2.4.3). Hosts whose NumPy tanh really is libm keep the
-    // parallel native path; only hosts where we would otherwise be wrong pay
-    // the passthrough. (deadlock-audit-d4mc2)
+    // WHICH ops diverge is per-op AND per-ISA AND per-NumPy-version, so this
+    // asks the host rather than guessing (`probed_f64_unary` carries the set and
+    // each op's domain). Two measured points, and they disagree, which is the
+    // whole reason this is a probe: on this AVX2 host with NumPy 2.4.3 only
+    // `tanh` differs — 9.9-47.2% of elements by up to 3 ULP depending on the
+    // argument range (deadlock-audit-d4mc2) — while an AVX-512 host with NumPy
+    // 2.3.5 has twelve more diverging by 1-3 ULP (deadlock-audit-fs5pu).
+    // `numpy_explog_matches_libm`'s `!avx512f` predicate is right for exp/log,
+    // whose relation was isolated properly by holding the NumPy version fixed
+    // and varying only the ISA, but it does NOT generalize op-by-op: tanh
+    // diverges on plain AVX2, where that predicate says byte-equal.
     //
-    // This NARROWS the tanh column of the 2026-07-10 `f64 transcendental unary
-    // zero-copy fused-defer path (15 ops)` ledger row, and only that column —
-    // the other 14 ops keep the route. That row's own three-worker tanh spread
-    // is 0.757 LOSS / 1.372 / 1.613, and the LOSS came from an AVX2 host
-    // running NumPy 2.4.6: exactly the class this probe now defers, so there
-    // the deferral is not a give-up. The row itself is left untouched (the
-    // ledger_integrity pre-commit hook holds historical rows to the current
-    // evidence standard, which a 2026-07-10 row cannot retroactively meet).
-    if matches!(op, UnaryOp::Tanh) && !numpy_f64_tanh_matches_libm(py, &numpy) {
+    // Hosts whose NumPy kernel really is libm keep the parallel native path at
+    // no cost; only hosts where we would otherwise be wrong pay the passthrough.
+    //
+    // For `tanh` this NARROWS the tanh column of the 2026-07-10 `f64
+    // transcendental unary zero-copy fused-defer path (15 ops)` ledger row, and
+    // only that column. That row's own three-worker tanh spread is
+    // 0.757 LOSS / 1.372 / 1.613, and the LOSS came from an AVX2 host running
+    // NumPy 2.4.6 — exactly the class this probe defers, so there the deferral
+    // is not a give-up. The row itself is left untouched (the ledger_integrity
+    // pre-commit hook holds historical rows to the current evidence standard,
+    // which a 2026-07-10 row cannot retroactively meet).
+    if !numpy_f64_native_unary_is_byte_exact(py, &numpy, op) {
         return fallback(py);
     }
     // Zero-copy fast path: exact float64 C-contiguous ndarray inputs skip the
@@ -107550,8 +107620,8 @@ mod tests {
         floor_native, fnp_python, frexp, hypot, indices, interp, isfinite_native, isinf_native,
         isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
         masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
-        narrow_bitmap_setop, nextafter, numpy_f64_tanh_matches_libm, place, put, put_along_axis,
-        putmask, python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
+        narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
+        python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
         required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
         sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
@@ -153345,6 +153415,139 @@ mod tests {
     }
 
     #[test]
+    fn every_probed_f64_transcendental_is_byte_exact_with_numpy() {
+        // The whole scalar-libm transcendental set, not just the one op that
+        // happens to diverge on this host. `tanh` is the AVX2 case
+        // (deadlock-audit-d4mc2); deadlock-audit-fs5pu records twelve more
+        // diverging on an AVX-512 host with NumPy 2.3.5, which THIS host cannot
+        // reproduce — it is AVX2-only. The probe is what makes that fixable from
+        // here: it decides per host, so the AVX-512 divergence is handled
+        // without an AVX-512 box, and the assertion below is what proves the
+        // decision was right on whatever host runs it.
+        //
+        // Each op is sampled inside its own domain. Sampling out of domain
+        // (arccosh below 1, arcsin outside [-1,1]) gives NaN on both sides, and
+        // NaN payload bits need not agree between NumPy and libm — that would
+        // read as a divergence and defer an op that is actually byte-exact.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            // (fnp name, numpy name, domain) — the domains match
+            // `probed_f64_unary`'s, which is the point: the test exercises the
+            // same regions the probe judges on.
+            let ops: [(&str, &str, f64, f64); 20] = [
+                ("sin", "sin", -5.0, 5.0),
+                ("cos", "cos", -5.0, 5.0),
+                ("tan", "tan", -1.5, 1.5),
+                ("arcsin", "arcsin", -1.0, 1.0),
+                ("arccos", "arccos", -1.0, 1.0),
+                ("arctan", "arctan", -40.0, 40.0),
+                ("sinh", "sinh", -5.0, 5.0),
+                ("cosh", "cosh", -5.0, 5.0),
+                ("tanh", "tanh", -4.0, 4.0),
+                ("arcsinh", "arcsinh", -40.0, 40.0),
+                ("arccosh", "arccosh", 1.000_1, 40.0),
+                ("arctanh", "arctanh", -0.99, 0.99),
+                ("cbrt", "cbrt", -40.0, 40.0),
+                ("expm1", "expm1", -5.0, 5.0),
+                ("log1p", "log1p", -0.9, 40.0),
+                // The exp/log five are NOT in `probed_f64_unary` — they ride
+                // `numpy_explog_matches_libm`'s ISA gate, which is bead
+                // deadlock-audit-gkznn's territory. They are asserted here
+                // anyway: that gate lets them take the NATIVE path on this
+                // AVX2 host, so if Rust's libm parted from the system libm for
+                // them the way it does for arctanh and cbrt, the gate would be
+                // unsound and this assertion is what would say so.
+                ("exp", "exp", -5.0, 5.0),
+                ("exp2", "exp2", -5.0, 5.0),
+                ("log", "log", 1.0e-3, 40.0),
+                ("log2", "log2", 1.0e-3, 40.0),
+                ("log10", "log10", 1.0e-3, 40.0),
+            ];
+
+            let mut delegated: Vec<&str> = Vec::new();
+            for (fnp_name, np_name, low, high) in ops {
+                let linspace = numpy.getattr("linspace")?;
+                // 40_001 points: past the zero-copy path's 1<<15 parallel gate,
+                // and an odd count so the parallel band split has a ragged tail.
+                let input = linspace.call1((low, high, 40_001_usize))?;
+                let ours = module.getattr(fnp_name)?.call1((&input,))?;
+                let theirs = numpy.getattr(np_name)?.call1((&input,))?;
+                assert_eq!(
+                    ours.getattr("dtype")?.str()?.to_string(),
+                    theirs.getattr("dtype")?.str()?.to_string(),
+                    "{fnp_name} dtype diverges from numpy"
+                );
+                assert_eq!(
+                    ours.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    theirs.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "{fnp_name} is not byte-exact vs numpy over [{low}, {high}]"
+                );
+                let unary_op = match fnp_name {
+                    "sin" => super::UnaryOp::Sin,
+                    "cos" => super::UnaryOp::Cos,
+                    "tan" => super::UnaryOp::Tan,
+                    "arcsin" => super::UnaryOp::Arcsin,
+                    "arccos" => super::UnaryOp::Arccos,
+                    "arctan" => super::UnaryOp::Arctan,
+                    "sinh" => super::UnaryOp::Sinh,
+                    "cosh" => super::UnaryOp::Cosh,
+                    "tanh" => super::UnaryOp::Tanh,
+                    "arcsinh" => super::UnaryOp::Arcsinh,
+                    "arccosh" => super::UnaryOp::Arccosh,
+                    "arctanh" => super::UnaryOp::Arctanh,
+                    "cbrt" => super::UnaryOp::Cbrt,
+                    "expm1" => super::UnaryOp::Expm1,
+                    "log1p" => super::UnaryOp::Log1p,
+                    "exp" => super::UnaryOp::Exp,
+                    "exp2" => super::UnaryOp::Exp2,
+                    "log" => super::UnaryOp::Log,
+                    "log2" => super::UnaryOp::Log2,
+                    "log10" => super::UnaryOp::Log10,
+                    other => unreachable!("unmapped probed op name: {other}"),
+                };
+                let probed = super::probed_f64_unary(unary_op);
+                if !super::numpy_f64_native_unary_is_byte_exact(py, &numpy, unary_op) {
+                    delegated.push(fnp_name);
+                    // Name the first disagreeing sample with both bit patterns.
+                    // "This op delegated" is not a finding on its own — the
+                    // useful question is WHICH value parts them and by how much,
+                    // and whether the cause is NumPy's kernel or Rust's libm.
+                    let native = probed.expect("probed op has an entry").native;
+                    let theirs_values: Vec<f64> = theirs.call_method0("tolist")?.extract()?;
+                    let inputs: Vec<f64> = input.call_method0("tolist")?.extract()?;
+                    if let Some((x, t)) = inputs
+                        .iter()
+                        .zip(theirs_values.iter())
+                        .find(|&(&x, &t)| native(x).to_bits() != t.to_bits())
+                    {
+                        println!(
+                            "  FIRST_DIVERGENCE op={fnp_name} x={x:.17e} \
+                             fnp_native_bits={:#018x} numpy_bits={:#018x} ulp_gap={}",
+                            native(*x).to_bits(),
+                            t.to_bits(),
+                            (native(*x).to_bits() as i64 - t.to_bits() as i64).abs(),
+                        );
+                    }
+                }
+            }
+
+            // Which ops the host delegated is the interesting half: on a machine
+            // where NumPy is libm throughout this is empty and every assertion
+            // above passed through the NATIVE path, which is a different (and
+            // also correct) outcome from passing because everything delegated.
+            println!("NUMPY_F64_DIVERGENT_OPS_DELEGATED={delegated:?}");
+            Ok(())
+        });
+    }
+
+    #[test]
     fn tanh_f64_is_byte_exact_with_numpy_on_every_input_route() {
         // `allclose` cannot see this class of bug: NumPy's vectorized f64 tanh
         // and the scalar libm tanh fnp's native routes call agree to ~3 ULP, so
@@ -153379,7 +153582,7 @@ mod tests {
             // says which one was exercised.
             println!(
                 "NUMPY_F64_TANH_MATCHES_LIBM={}",
-                numpy_f64_tanh_matches_libm(py, &numpy)
+                super::numpy_f64_native_unary_is_byte_exact(py, &numpy, super::UnaryOp::Tanh)
             );
 
             let ns = PyDict::new(py);
