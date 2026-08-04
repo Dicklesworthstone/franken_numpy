@@ -1106,7 +1106,7 @@ fn observe_inter_event_gap_result_lifecycle(
         .expect("materialize inter-event gap result");
     let elapsed = started.elapsed();
     let while_live = process_resource_snapshot();
-    let checksum = workload_checksum(numpy, &[output.clone()]);
+    let checksum = workload_checksum(numpy, std::array::from_ref(&output));
     drop(output);
     let after_release = process_resource_snapshot();
     lifecycles
@@ -7467,7 +7467,7 @@ fn bench_integer_flat_sum_matrix_vs_numpy_median_gate(c: &mut Criterion) {
             let ours = run_candidate();
             let theirs = run_incumbent();
             assert!(
-                ours.get_type().is(&theirs.get_type()),
+                ours.get_type().is(theirs.get_type()),
                 "integer flat-sum {dtype} scalar type differs from NumPy"
             );
             let ours_dtype = ours
