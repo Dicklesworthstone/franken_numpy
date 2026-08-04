@@ -44780,15 +44780,13 @@ fn try_zerocopy_f64_vector_norm_axis(
     // above ~1e5 total elements.
     const NORM_AXIS_PARALLEL_MIN: usize = 98_304;
     let total = data.len();
-    let out: Vec<f64>;
-    let out_shape: Vec<usize>;
-    if ax == ndim - 1 {
+    let (out, out_shape) = if ax == ndim - 1 {
         // Contiguous last-axis lanes (inner == 1): each lane is one chunk; the pairwise
         // tree (L2/L1) is bit-identical to numpy's add.reduce over the materialized temp.
         let outer: usize = shape[..ax].iter().product();
         let parallel =
             outer * axis_len >= NORM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
-        out = if parallel {
+        let out: Vec<f64> = if parallel {
             data.par_chunks_exact(axis_len).map(lane_norm).collect()
         } else {
             data.chunks_exact(axis_len).map(lane_norm).collect()
@@ -44797,7 +44795,7 @@ fn try_zerocopy_f64_vector_norm_axis(
         if keepdims {
             s.push(1);
         }
-        out_shape = s;
+        (out, s)
     } else {
         // Non-last single axis (inner > 1, strided lanes): numpy's per-axis reduce uses a
         // different summation order than a per-lane gather, so an ORDER-DEPENDENT reduce
@@ -44931,15 +44929,14 @@ fn try_zerocopy_f64_vector_norm_axis(
         } else {
             reduce_rows(data, &mut out_vec, alen);
         }
-        out = out_vec;
         let mut s: Vec<usize> = Vec::with_capacity(ndim);
         s.extend_from_slice(&shape[..ax]);
         if keepdims {
             s.push(1);
         }
         s.extend_from_slice(&shape[ax + 1..]);
-        out_shape = s;
-    }
+        (out_vec, s)
+    };
     let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
     let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
     if out_shape.is_empty() {
@@ -45030,13 +45027,11 @@ fn try_zerocopy_f32_vector_norm_axis(
             _ => unreachable!(),
         }
     };
-    let out: Vec<f32>;
-    let out_shape: Vec<usize>;
-    if ax == ndim - 1 {
+    let (out, out_shape) = if ax == ndim - 1 {
         let outer: usize = shape[..ax].iter().product();
         let parallel =
             outer * axis_len >= NORM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
-        out = if parallel {
+        let out: Vec<f32> = if parallel {
             data.par_chunks_exact(axis_len).map(lane_norm).collect()
         } else {
             data.chunks_exact(axis_len).map(lane_norm).collect()
@@ -45045,7 +45040,7 @@ fn try_zerocopy_f32_vector_norm_axis(
         if keepdims {
             s.push(1);
         }
-        out_shape = s;
+        (out, s)
     } else {
         let inner: usize = shape[ax + 1..].iter().product();
         let outer: usize = shape[..ax].iter().product();
@@ -45160,15 +45155,14 @@ fn try_zerocopy_f32_vector_norm_axis(
         } else {
             reduce_rows(data, &mut out_vec, alen);
         }
-        out = out_vec;
         let mut s: Vec<usize> = Vec::with_capacity(ndim);
         s.extend_from_slice(&shape[..ax]);
         if keepdims {
             s.push(1);
         }
         s.extend_from_slice(&shape[ax + 1..]);
-        out_shape = s;
-    }
+        (out_vec, s)
+    };
     let flat = numpy_array_from_slice(py, &numpy, &out, "float32")?;
     let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
     if out_shape.is_empty() {
@@ -104855,11 +104849,9 @@ fn try_native_datetime_as_string_day(
                 return Ok(None);
             }
         }
-        2 => {
-            if cin.par_iter().any(|&v| v > i64::MAX - 1970) {
-                return Ok(None);
-            }
-        }
+        // Guard rather than an `if` inside the arm: with the guard false this
+        // falls through to `_ => {}`, exactly as the inner `if` did.
+        2 if cin.par_iter().any(|&v| v > i64::MAX - 1970) => return Ok(None),
         _ => {}
     }
     let kwargs = PyDict::new(py);
