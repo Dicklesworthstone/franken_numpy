@@ -8487,7 +8487,7 @@ fn fft_manual_complex_dft(values: &[f64], inverse: bool) -> Result<Vec<f64>, Fft
     let direction = if inverse { 1.0 } else { -1.0 };
     let scale = if inverse { n as f64 } else { 1.0 };
     let mut output = vec![0.0; values.len()];
-    for (k, out_pair) in output.chunks_exact_mut(2).enumerate() {
+    for (k, out_pair) in output.as_chunks_mut::<2>().0.iter_mut().enumerate() {
         let mut sum_re = 0.0;
         let mut sum_im = 0.0;
         for (t, in_pair) in values.as_chunks::<2>().0.iter().enumerate() {

@@ -655,8 +655,10 @@ fn bench_int32_flat_sort_small_pool_regate(c: &mut Criterion) {
             .extract()
             .expect("extract input bytes");
         let native_input: Vec<i32> = input_bytes
-            .chunks_exact(std::mem::size_of::<i32>())
-            .map(|bytes| i32::from_ne_bytes(bytes.try_into().expect("i32 bytes")))
+            .as_chunks::<{ std::mem::size_of::<i32>() }>()
+            .0
+            .iter()
+            .map(|bytes| i32::from_ne_bytes(*bytes))
             .collect();
         assert_eq!(native_input.len(), n);
 
