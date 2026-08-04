@@ -8290,7 +8290,9 @@ fn evaluate_fft_metamorphic_relation(case: &FftMetamorphicCase) -> Result<(), Ff
                 .sum::<f64>();
             let freq_energy = transformed
                 .values()
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| pair[0] * pair[0] + pair[1] * pair[1])
                 .sum::<f64>()
                 / sample_count as f64;
@@ -8488,7 +8490,7 @@ fn fft_manual_complex_dft(values: &[f64], inverse: bool) -> Result<Vec<f64>, Fft
     for (k, out_pair) in output.chunks_exact_mut(2).enumerate() {
         let mut sum_re = 0.0;
         let mut sum_im = 0.0;
-        for (t, in_pair) in values.chunks_exact(2).enumerate() {
+        for (t, in_pair) in values.as_chunks::<2>().0.iter().enumerate() {
             let angle = direction * std::f64::consts::TAU * k as f64 * t as f64 / n as f64;
             let cos = angle.cos();
             let sin = angle.sin();
@@ -8523,7 +8525,7 @@ fn fft_metamorphic_assert_real_inverse(
         ));
     }
     let mut real_parts = Vec::with_capacity(input_values.len());
-    for (index, pair) in recovered.values().chunks_exact(2).enumerate() {
+    for (index, pair) in recovered.values().as_chunks::<2>().0.iter().enumerate() {
         real_parts.push(pair[0]);
         fft_metamorphic_assert_scalar_equal(
             case,
@@ -9815,7 +9817,9 @@ fn signal_metamorphic_complex_pairs(
         ));
     }
     Ok(values
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| (pair[0], pair[1]))
         .collect())
 }
@@ -9844,7 +9848,9 @@ fn signal_metamorphic_complex_correlate(a: &[(f64, f64)], b: &[(f64, f64)]) -> V
 
 fn signal_metamorphic_conjugate_reversed(values: &[f64]) -> Vec<f64> {
     values
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .rev()
         .flat_map(|pair| [pair[0], -pair[1]])
         .collect()
