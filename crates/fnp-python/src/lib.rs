@@ -117654,10 +117654,23 @@ mod tests {
                                 .push(format!("{name}: ours={ours_type}, theirs={theirs_type}"));
                         }
                     }
-                    (Ok(_), _) => divergences.push(format!("{name}: ours=OK, theirs raises")),
+                    // Both sides returning a value is AGREEMENT, not a
+                    // divergence. This arm used to be `(Ok(_), _)`, a wildcard
+                    // that also swallowed `(Ok, Ok)` and reported "theirs
+                    // raises" about a NumPy call that had just succeeded — so
+                    // the probe could only pass while NumPy kept raising, and it
+                    // started failing the moment NumPy stopped. That is what it
+                    // did for `matrix_rank(zeros((0, 3)))` on NumPy 2.4.6.
+                    (Ok(_), Ok(_)) => {}
+                    (Ok(_), Err(theirs)) => {
+                        let theirs_type = theirs.get_type(py).name()?.extract::<String>()?;
+                        divergences.push(format!(
+                            "{name}: ours=OK, theirs raises {theirs_type}: {theirs}"
+                        ));
+                    }
                     (Err(our), Ok(_)) => {
                         let ours_type = our.get_type(py).name()?.extract::<String>()?;
-                        divergences.push(format!("{name}: ours={ours_type}, theirs=OK"));
+                        divergences.push(format!("{name}: ours={ours_type} ({our}), theirs=OK"));
                     }
                 }
             }
@@ -117682,10 +117695,21 @@ mod tests {
                         ));
                     }
                 }
-                (Ok(_), _) => divergences.push("solve(singular): ours=OK, theirs raises".into()),
+                // Same wildcard defect as the loop above: `(Ok(_), _)` also
+                // matched `(Ok, Ok)` and accused NumPy of raising when it had
+                // agreed with us.
+                (Ok(_), Ok(_)) => {}
+                (Ok(_), Err(theirs)) => {
+                    let theirs_type = theirs.get_type(py).name()?.extract::<String>()?;
+                    divergences.push(format!(
+                        "solve(singular): ours=OK, theirs raises {theirs_type}: {theirs}"
+                    ));
+                }
                 (Err(our), Ok(_)) => {
                     let ours_type = our.get_type(py).name()?.extract::<String>()?;
-                    divergences.push(format!("solve(singular): ours={ours_type}, theirs=OK"));
+                    divergences.push(format!(
+                        "solve(singular): ours={ours_type} ({our}), theirs=OK"
+                    ));
                 }
             }
 
