@@ -139160,9 +139160,35 @@ mod tests {
                 }
             }
 
+            // GOLDEN-CHANGE 2026-08-05 (deadlock-audit-5elkx): this digest is
+            // ISA-KEYED, because the bytes it pins are NumPy's, and NumPy's own
+            // answer here depends on the ISA.
+            //
+            // The first case is `f64-nan-signed-zero`, whose operands contain
+            // both -0.0 and 0.0. Those compare EQUAL, so a set operation may
+            // keep either one, and NumPy's setops sort through x86-simd-sort,
+            // whose AVX-512 and AVX2 kernels break that tie differently.
+            // Measured on two hosts holding NumPy fixed at 2.3.5 and varying
+            // only the ISA: `np.union1d(left, right)[0]` is -0.0 on hz2
+            // (avx512f) and +0.0 on hz1 (AVX2). Same NumPy, same input,
+            // different byte. Our ops DELEGATE these calls, so our output
+            // correctly follows NumPy on both hosts — it was only the single
+            // stored digest that could not.
+            //
+            // The digest is NOT re-captured to whatever the current host emits;
+            // both values are pinned, so a real change in our passthrough still
+            // fails on either ISA. The live `assert_array_matches_numpy` above
+            // is what proves parity; this catches us silently ceasing to
+            // delegate.
+            let expected_digest =
+                if cfg!(target_arch = "x86_64") && std::arch::is_x86_feature_detected!("avx512f") {
+                    "3f892e7ad93a703edd23fba5a0241af88204ef94a70a49a6b0e5e472fcee3981"
+                } else {
+                    "ec0d35d19fdfc33accacb0c9a96cfd020ccd007989c970f193948b449a5a1e4b"
+                };
             let digest = py_sha256_hex(py, &proof_bytes)?;
             assert_eq!(
-                digest, "ec0d35d19fdfc33accacb0c9a96cfd020ccd007989c970f193948b449a5a1e4b",
+                digest, expected_digest,
                 "float set-op numpy passthrough golden sha256 changed",
             );
             Ok(())
