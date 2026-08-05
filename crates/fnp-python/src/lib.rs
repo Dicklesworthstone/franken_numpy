@@ -7690,9 +7690,38 @@ fn numpy_f64_unary_matches_libm(
     // the native path for nothing.
     const PROBE_LEN: usize = 4096;
     let span = high - low;
-    let samples: Vec<f64> = (0..PROBE_LEN)
+    let mut samples: Vec<f64> = (0..PROBE_LEN)
         .map(|i| low + span * (i as f64) / ((PROBE_LEN - 1) as f64))
         .collect();
+
+    // The sweep above covers a BOUNDED range, but the native route it clears is
+    // then taken for EVERY argument. Measured 2026-08-05 on hz1 (AVX2, NumPy
+    // 2.3.5): `arcsinh` and `arccosh` agree with libm across their whole probed
+    // range and still diverge by 1 ULP at f64::MAX (710.4758600739439 vs
+    // 710.475860073944), failing `ufunc_special_value_parity_matches_numpy`. So
+    // the magnitude extremes and denormals are probed too — they are exactly the
+    // arguments the conformance surface asserts on, and they are where a
+    // vectorized kernel's range reduction is most likely to part from libm.
+    //
+    // Signed values are only added where the op's domain admits them, since a
+    // NaN on both sides would compare unequal on payload bits alone and would
+    // defer an op that is in fact byte-exact.
+    for magnitude in [
+        f64::MAX,
+        f64::MIN_POSITIVE,
+        f64::MIN_POSITIVE / 2.0, // subnormal
+        1.0,
+        0.0,
+    ] {
+        samples.push(magnitude);
+        samples.push(-magnitude);
+    }
+    // Domain filter, applied to the extremes as well as the sweep: an argument
+    // outside the op's domain answers NaN on both sides, and NaN payload bits
+    // are not required to agree, so keeping it would defer an op that is in fact
+    // byte-exact. `native` is the same scalar call the native route makes, so
+    // "native answers NaN" is exactly "outside this op's domain".
+    samples.retain(|value| !native(*value).is_nan());
 
     let probe = || -> PyResult<bool> {
         let kwargs = PyDict::new(py);
@@ -7772,11 +7801,42 @@ fn probed_f64_unary(op: UnaryOp) -> Option<ProbedUnary> {
     })
 }
 
+/// A SAMPLED probe cannot certify byte-equality, only fail to refute it, so on
+/// hosts where NumPy is known to dispatch SIMD transcendental kernels the ISA
+/// answer wins outright.
+///
+/// MEASURED 2026-08-05 on hz2 (AMD EPYC-Genoa, avx512f, NumPy 2.3.5): over
+/// `[-40, 40]`, `np.arcsinh` and libm `asinh` differ on **0 of the probe's own
+/// 4,096 sample points** but on **3 of the 40,001 points** the conformance test
+/// asserts. The probe therefore returned "byte-equal", the native route ran, and
+/// `every_probed_f64_transcendental_is_byte_exact_with_numpy` failed on arcsinh
+/// — a divergence inside the very interval the probe had just cleared. Making
+/// the grid denser cannot fix this: no finite sample proves equality over a
+/// continuum, and NumPy's SIMD kernels part from libm on a sparse point set by
+/// construction.
+///
+/// So the AVX-512 condition is applied first and independently, matching what
+/// [`numpy_explog_matches_libm`] already does for exp/log/log2/log10 — that
+/// comment's finding, that NumPy dispatches AVX-512-SKX f64 kernels which are
+/// not byte-equal to the system libm, is a statement about NumPy's dispatch
+/// table and was never specific to those four ops. The probe still runs on
+/// non-AVX-512 hosts, because the ISA condition alone is NOT sufficient there:
+/// `np.tanh` already parts from libm on an AVX2 box, which is why the probe
+/// exists at all. The two conditions catch different failures and both are
+/// necessary.
+///
+/// Cost: AVX-512 hosts lose the native scalar-libm fast path for these fifteen
+/// ops and take the NumPy passthrough. That is the fail-closed direction the
+/// runtime doctrine requires, and it is the same trade the exp/log gate already
+/// makes.
 fn numpy_f64_native_unary_is_byte_exact(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     op: UnaryOp,
 ) -> bool {
+    if probed_f64_unary(op).is_some() && !numpy_explog_matches_libm() {
+        return false;
+    }
     match probed_f64_unary(op) {
         Some(probed) => numpy_f64_unary_matches_libm(
             py,
@@ -28154,7 +28214,8 @@ fn try_native_lstsq_tsqr(
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64, both buffers are
     // C-contiguous f64 ndarrays held read-only under the GIL for this call, and
     // the lengths were checked against the declared shapes above.
-    let a_data: &[f64] = unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), m * n) };
+    let a_data: &[f64] =
+        unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), m * n) };
     let b_data: &[f64] = unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<f64>(), m) };
 
     let Ok(Some((x, residuals, rank, singular_values))) =
@@ -119763,7 +119824,11 @@ mod tests {
             // that hands back a plain int passes allclose but breaks callers that
             // read .dtype off the tuple.
             assert_eq!(
-                native.get_item(2)?.getattr("dtype")?.str()?.extract::<String>()?,
+                native
+                    .get_item(2)?
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
                 expected
                     .get_item(2)?
                     .getattr("dtype")?
@@ -119773,7 +119838,10 @@ mod tests {
             );
             // m > n and full rank: residuals is a 1-element array, not empty.
             assert_eq!(
-                native.get_item(1)?.getattr("shape")?.extract::<Vec<usize>>()?,
+                native
+                    .get_item(1)?
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
                 vec![1_usize],
                 "overdetermined full-rank residuals must have shape (1,)"
             );
@@ -153966,6 +154034,70 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             // above passed through the NATIVE path, which is a different (and
             // also correct) outcome from passing because everything delegated.
             println!("NUMPY_F64_DIVERGENT_OPS_DELEGATED={delegated:?}");
+            Ok(())
+        });
+    }
+
+    /// On an AVX-512 host every probed scalar-libm unary op must decline the
+    /// native route, regardless of what the sampled probe says.
+    ///
+    /// A sampled probe cannot certify byte-equality over an interval, only fail
+    /// to refute it, and on 2026-08-05 it failed exactly that way: on hz2
+    /// (avx512f, NumPy 2.3.5) `np.arcsinh` and libm `asinh` agree on all 4,096
+    /// of the probe's own points across [-40, 40] but differ on 3 of the 40,001
+    /// points the sibling test asserts. The probe cleared the route and the
+    /// route then diverged inside the interval the probe had just approved.
+    ///
+    /// A probe-only implementation FAILS this test on AVX-512 hardware, which
+    /// is the negative case. On a non-AVX-512 host the ISA branch is vacuous by
+    /// construction — the printed line says which of the two it was, so a green
+    /// run cannot be mistaken for coverage it did not have.
+    #[test]
+    fn probed_f64_unary_ops_decline_the_native_route_on_avx512_hosts() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let probed_ops = [
+                super::UnaryOp::Sin,
+                super::UnaryOp::Cos,
+                super::UnaryOp::Tan,
+                super::UnaryOp::Arcsin,
+                super::UnaryOp::Arccos,
+                super::UnaryOp::Arctan,
+                super::UnaryOp::Sinh,
+                super::UnaryOp::Cosh,
+                super::UnaryOp::Tanh,
+                super::UnaryOp::Arcsinh,
+                super::UnaryOp::Arccosh,
+                super::UnaryOp::Arctanh,
+                super::UnaryOp::Cbrt,
+                super::UnaryOp::Expm1,
+                super::UnaryOp::Log1p,
+            ];
+            let avx512 =
+                cfg!(target_arch = "x86_64") && std::arch::is_x86_feature_detected!("avx512f");
+            println!(
+                "AVX512_DEFERRAL_INVARIANT host_avx512f={avx512} probed_ops={} \
+                 branch={}",
+                probed_ops.len(),
+                if avx512 { "enforced" } else { "vacuous" }
+            );
+            for op in probed_ops {
+                assert!(
+                    super::probed_f64_unary(op).is_some(),
+                    "op list drifted from probed_f64_unary"
+                );
+                if avx512 {
+                    assert!(
+                        !super::numpy_f64_native_unary_is_byte_exact(py, &numpy, op),
+                        "{op:?} took the native route on an AVX-512 host, where \
+                         NumPy dispatches SIMD kernels the sampled probe cannot \
+                         certify against"
+                    );
+                }
+            }
             Ok(())
         });
     }
