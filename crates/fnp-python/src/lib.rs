@@ -51678,6 +51678,70 @@ fn einsum_spec_is_transposed_full_contraction(spec: &str, n_operands: usize) -> 
     true // same distinct label set, different order, full contraction
 }
 
+// True for a HUB-CONTRACTION einsum (>=3 operands): one operand C is a "hub" whose label set
+// contains EVERY other operand's labels AND the output's labels — i.e. all the other operands
+// are vectors / sub-tensors selecting or weighting along axes of C, and the result keeps a
+// subset of C's axes. numpy's default (optimize=False) contracts this in a single efficient
+// pass over C's index space (~|C| work), but the native generic kernel runs the same work
+// ~10-20x slower scalar: "i,ij,j->" 15x, "a,abc,c->b" 20x, "bi,bij,bj->b" 12x, "ij,j,i->" 11x.
+// GEMM-chains ("ij,jk,kl->il") and outer-introducing forms ("i,ij,k->jk") have NO single hub
+// (some operand/output index is absent from every candidate hub) and are EXCLUDED — those win
+// natively (the native kernel path-optimizes the chain, beating numpy's naive optimize=False
+// default by ~680x). Repeated labels within an operand (diagonal), ellipsis, and the implicit
+// no-"->" form are excluded. (BlackThrush 2026-06-27.)
+fn einsum_spec_is_hub_contraction(spec: &str, n_operands: usize) -> bool {
+    if n_operands < 3 {
+        return false;
+    }
+    let spec: String = spec.chars().filter(|c| !c.is_whitespace()).collect();
+    if spec.contains("...") {
+        return false;
+    }
+    let Some((inp, out)) = spec.split_once("->") else {
+        return false; // require an explicit output
+    };
+    let groups: Vec<&str> = inp.split(',').collect();
+    if groups.len() != n_operands {
+        return false;
+    }
+    // Build a per-group label set; reject a repeated label within a group (diagonal) or any
+    // non-alphabetic label.
+    let group_set = |g: &str| -> Option<[bool; 256]> {
+        let mut s = [false; 256];
+        for &b in g.as_bytes() {
+            if !b.is_ascii_alphabetic() || s[b as usize] {
+                return None;
+            }
+            s[b as usize] = true;
+        }
+        Some(s)
+    };
+    let mut sets: Vec<[bool; 256]> = Vec::with_capacity(groups.len());
+    for g in &groups {
+        match group_set(g) {
+            Some(s) => sets.push(s),
+            None => return false,
+        }
+    }
+    let Some(out_set) = group_set(out) else {
+        return false;
+    };
+    let subset = |a: &[bool; 256], b: &[bool; 256]| -> bool { (0..256).all(|i| !a[i] || b[i]) };
+    // There must exist a hub C: the output is a subset of C and every OTHER operand is a
+    // subset of C (so the union of all indices == C's set).
+    for (ci, cs) in sets.iter().enumerate() {
+        if subset(&out_set, cs)
+            && sets
+                .iter()
+                .enumerate()
+                .all(|(j, sj)| j == ci || subset(sj, cs))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 // True for a NO-CONTRACTION einsum: explicit output, no ellipsis, no index repeated within
 // an operand (no diagonal) or within the output, and every operand label appears in the
 // output (nothing summed away). This is the broadcasted elementwise PRODUCT of the operands:
