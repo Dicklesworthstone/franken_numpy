@@ -52301,6 +52301,18 @@ fn geomspace(
         return fallback(py);
     }
 
+    // NumPy builds geomspace out of log10 and power, so on a host where its
+    // transcendental kernels are NOT the system libm this native path — which
+    // computes with libm — is not byte-identical to it. Measured 2026-08-05 on
+    // hz2 (avx512f, NumPy 2.3.5): 4 of 50 elements of `geomspace(1, 1000)`
+    // differed in the last ULP, failing the live differential in
+    // `geomspace_matches_numpy_across_scalar_negative_complex_dtype_and_axis`.
+    // The same predicate that gates exp/log decides it here, for the same
+    // reason and in the same fail-closed direction.
+    if !numpy_explog_matches_libm() {
+        return fallback(py);
+    }
+
     let Ok(start_f) = start.bind(py).extract::<f64>() else {
         return fallback(py);
     };
@@ -63378,6 +63390,13 @@ fn logspace(
     // 1.37x, ~parity to ~1M) but loses for large ones where the extra ~num*8-byte copy dominates (5M 0.85x,
     // 20M 0.84x). Delegate large num to numpy's direct 10**linspace (faster AND byte-identical, it's the ref).
     if axis != 0 || num < 0 || base.to_bits() != 10.0_f64.to_bits() || num as usize > (1 << 21) {
+        return fallback(py);
+    }
+    // Same hazard as geomspace above: numpy's reference here is `10 ** linspace`,
+    // so where its power kernel is not the system libm the native path this
+    // function takes is not byte-identical to it. Gated on the same predicate,
+    // fail-closed, rather than waiting for an AVX-512 host to be drawn again.
+    if !numpy_explog_matches_libm() {
         return fallback(py);
     }
     if dtype
