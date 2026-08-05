@@ -36657,3 +36657,88 @@ RETRY PREDICATE for re-opening this as a loss: a same-invocation dual-null
 contract on a host-exclusive box showing the ratio at or below 1.0 at any of the
 three measured shapes, or a NumPy release whose lstsq stops using gelsd.
 AGENT_NAME=SilentBadger.
+
+## 2026-08-05 - WIN (KEEP, INCUMBENT-WIN): fused `a[mask].sum()` re-measured under the full contract with a committed harness - 8.54x at 16.7M, 29.43x at 64M (`deadlock-audit-5jk8g`)
+
+`SilentBadger`. The 2026-08-02 masked-sum row above banks this capability, but it
+was measured by an **uncommitted** harness: nothing under
+`crates/fnp-python/benches/` referenced `masked_sum`, so the row carries no
+incumbent `artifact_sha256`, no shared `invocation_id`, and no re-runnable
+subject. A claim whose harness cannot be re-run is not re-checkable, whatever its
+number. This row supplies the missing instrument and a fresh measurement through
+it; the arm is `bench_masked_sum_f64_median_gate` in
+`crates/fnp-python/benches/criterion_python_reductions.rs`.
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 1.056746x, CI95 [0.862349,1.160910], 21 rounds, min_of=1 at the 67,108,864-element headline size; the table records both sizes.
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio 0.998768x, CI95 [0.818978,1.180231], 21 rounds, min_of=1 at the 67,108,864-element headline size.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c8c144bc0a9ed6-000631c8 measured_ratio=29.426207x median=2096.594801ms
+
+**Incumbent isolation proof:** candidate=fnp.masked_sum incumbent=numpy.ndarray.sum shared_timed_component=none
+
+`bench_elf_sha256=3eaf513719057942cb72b9f9cbbd93bef92531f1b9326dffe2e3eedddae8ba0c`
+(225,292,728 bytes), self-reported from inside the timed process.
+`--profile release-perf`, built and run on `vmi1153651` (10 cores, Python 3.13,
+NumPy 2.4.6, AVX2, no AVX-512), `RAYON_NUM_THREADS=10` with OpenBLAS/OMP/MKL
+pinned to 1 (neither a boolean gather nor a pairwise sum calls BLAS).
+Host-exclusive: `maximum_observed_busy_fraction` 0.033 at process preflight and
+0.032 / 0.065 at the two contract preflights, affinity = all 10 CPUs.
+
+| elements | selected | NumPy/NumPy null (CI95) | FNP/FNP null (CI95) | NumPy median | FNP median | ratio (CI95) | verdict |
+|---:|---:|---|---|---:|---:|---|---|
+| 16,777,216 | 6,425,212 | 1.008178 `[0.951767,1.020469]` | 0.982058 `[0.823540,1.121588]` | 143.372005 ms | 15.577141 ms | **8.538270x** `[7.707728,9.736108]` | DECIDABLE_WIN |
+| 67,108,864 | 25,701,538 | 1.056746 `[0.862349,1.160910]` | 0.998768 `[0.818978,1.180231]` | 2096.594801 ms | 70.629347 ms | **29.426207x** `[24.170328,38.259465]` | DECIDABLE_WIN |
+
+### This is NOT a replication of the 17.9-20.9x figures, and must not be quoted as one
+
+Different host, different pool width. Both arms are slower here than on the
+2026-08-02 box - candidate 70.63 ms vs 17.87 ms, incumbent 2096.59 ms vs
+326.91 ms - so the ratio is not comparable across the two entries in either
+direction, and the fact that 29.43x exceeds 20.93x is NOT evidence that the
+earlier number was conservative. Cross-entry ratio comparison is invalid on this
+fleet; only same-invocation rows compare. What both entries independently
+establish is the sign and the order of magnitude, and that is all that should be
+carried forward.
+
+One corroboration does survive the host change: at 64M with this band the
+incumbent's forced temporary is 205,612,304 bytes, which matches the earlier
+row's "196 MB at this density" almost exactly. The mechanism is the same
+mechanism.
+
+### Parity is byte-exact, and it is asserted before timing
+
+`exact_bits=passed` at both sizes - `to_bits()` equality between
+`fnp.masked_sum(a, mask)` and `a[mask].sum()`, not `allclose`. The candidate
+evaluates NumPy's own pairwise tree over the selected elements (same `<= 128`
+base case, same split at `n/2` rounded down to a multiple of 8, same
+`base_sum_simd` leaf) from a cursor rather than from a materialised array, so
+identical bits are the design, not a coincidence.
+
+### Engagement proof is the thread report, NOT the bits
+
+Byte-equality cannot prove the route ran, because `masked_sum`'s own fallback IS
+`a[mask].sum()`: a declined route would match bits while measuring NumPy against
+NumPy and would read ~1.0x. `OBSERVED_THREAD_ACTIVITY` is the evidence -
+`threads_actually_used=1` for the incumbent at both sizes against
+`threads_actually_used=10` for the candidate, and the candidate's total CPU ticks
+are LOWER than the incumbent's (126 vs 746 at 64M over 3 repetitions), i.e. it is
+not merely spending more cores on the same work, it is doing less work.
+
+**COUNTED_MECHANISM** `class=materialization_elimination_and_parallelism`:
+incumbent allocates a 205,612,304-byte temporary per call and touches the
+selected elements twice; candidate allocates nothing and touches them once.
+
+### Scope
+
+MEASURED: 1-D C-contiguous float64 values with a 1-D C-contiguous bool mask,
+band density ~38%, 16.7M and 67.1M elements, 10 threads, AVX2. NOT measured:
+other densities (the incumbent's temporary and the candidate's tree both scale
+with k, so the ratio is density-dependent and a very sparse mask is the
+interesting adversarial case), other dtypes, multi-dimensional inputs, or axis
+forms. RETRY PREDICATE for re-opening as a loss: the same contract on a
+host-exclusive box returning a ratio at or below 1.0 at either measured size, or
+a NumPy release that threads or fuses boolean-gather-then-reduce.
+AGENT_NAME=SilentBadger.

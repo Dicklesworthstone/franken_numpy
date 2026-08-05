@@ -1706,8 +1706,247 @@ x = rng.standard_normal(8_000_000)\n";
     group.finish();
 }
 
+/// `fnp.masked_sum(a, mask)` against the only NumPy spelling of the same intent,
+/// `a[mask].sum()`, live in the same invocation.
+///
+/// NumPy's API forces the compacted array to exist before it can be reduced:
+/// there is no fused spelling, so the gather allocates a k-element temporary and
+/// walks it once, then `sum` walks it again. The candidate never materialises it
+/// — it evaluates NumPy's own pairwise tree over the selected elements straight
+/// from a cursor, so the result is BYTE-identical rather than merely close, and
+/// that byte-equality is asserted here before any timing.
+///
+/// This arm exists because the 2026-08-02 ledger row banking this win had no
+/// committed harness, and therefore no incumbent artifact hash or shared
+/// invocation id (bead deadlock-audit-5jk8g). A claim whose harness cannot be
+/// re-run is not re-checkable.
+///
+/// ENGAGEMENT: byte-equality cannot prove the route ran here, because
+/// `masked_sum`'s own fallback IS `a[mask].sum()` — a declined route would match
+/// bits while measuring NumPy against NumPy and would read ~1.0x. The
+/// observed-thread-activity report is the engagement evidence: the candidate
+/// spreads across the pinned pool where the incumbent stays at one thread.
+fn bench_masked_sum_f64_median_gate(_c: &mut Criterion) {
+    const REQUIRED_BUILD_PROFILE: &str = "release-perf";
+    const CONTRACT_ROUNDS: usize = 21;
+    const CONTRACT_MIN_OF: usize = 1;
+    const THREAD_ACTIVITY_REPETITIONS: usize = 3;
+
+    assert_eq!(
+        std::env::var("FNP_BENCH_PROFILE").as_deref(),
+        Ok(REQUIRED_BUILD_PROFILE),
+        "ship-grade masked-sum evidence requires FNP_BENCH_PROFILE=release-perf"
+    );
+    let build_worker =
+        std::env::var("FNP_BUILD_WORKER").expect("FNP_BUILD_WORKER records the build origin");
+    assert!(
+        !build_worker.trim().is_empty(),
+        "FNP_BUILD_WORKER must be set"
+    );
+    let threads = std::env::var("RAYON_NUM_THREADS")
+        .expect("RAYON_NUM_THREADS must be explicitly pinned before masked-sum timing");
+    for variable in ["OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"] {
+        assert_eq!(
+            std::env::var(variable).as_deref(),
+            Ok("1"),
+            "{variable} must be one: neither a boolean gather nor a sum calls BLAS"
+        );
+    }
+    let threads: usize = threads.parse().expect("thread count is numeric");
+    assert_eq!(
+        rayon::current_num_threads(),
+        threads,
+        "Rayon pool width does not match the pinned masked-sum configuration"
+    );
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_masked_sum").expect("masked-sum bench module");
+        fnp_python(&module).expect("initialize fnp_python masked-sum module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+
+        common::report_incumbent_topology("fnp.masked_sum", "numpy.ndarray.sum");
+        println!("NUMPY_BUILD_CONFIG_BEGIN workload=masked_sum_f64");
+        numpy
+            .getattr("show_config")
+            .expect("numpy.show_config")
+            .call0()
+            .expect("report NumPy build configuration");
+        println!("NUMPY_BUILD_CONFIG_END workload=masked_sum_f64");
+        println!(
+            "BLAS_RELEVANCE workload=masked_sum_f64 numpy_uses_blas=false \
+             candidate_uses_blas=false blas_threads_pinned=1 \
+             reason=boolean_gather_and_pairwise_sum_have_no_gemm"
+        );
+
+        let numpy_sum = numpy
+            .getattr("ndarray")
+            .expect("numpy.ndarray")
+            .getattr("sum")
+            .expect("numpy.ndarray.sum");
+        common::report_numpy_incumbent_identity(py, "ndarray.sum", &numpy_sum);
+        let fnp_masked_sum = module.getattr("masked_sum").expect("fnp.masked_sum");
+        assert!(
+            !fnp_masked_sum.is(&numpy_sum),
+            "dispatch trap: fnp.masked_sum resolved to a NumPy callable"
+        );
+
+        let rng = numpy
+            .getattr("random")
+            .expect("numpy.random")
+            .call_method1("default_rng", (20260802_u64,))
+            .expect("seeded generator");
+
+        for elements in [16_777_216_usize, 67_108_864] {
+            let values = rng
+                .call_method1("standard_normal", (elements,))
+                .expect("f64 corpus");
+            // Band selection, the spelling the ledger row profiled. The mask is
+            // built OUTSIDE the timer: the measured scope is the gather and the
+            // reduction, which is where the incumbent's forced materialisation
+            // lives, not the two comparisons that produce the mask.
+            let mask = values
+                .call_method1("__gt__", (-0.5_f64,))
+                .expect("lower band")
+                .call_method1(
+                    "__and__",
+                    (values
+                        .call_method1("__lt__", (0.5_f64,))
+                        .expect("upper band"),),
+                )
+                .expect("band mask");
+            let selected: usize = mask
+                .call_method0("sum")
+                .expect("selected count")
+                .extract()
+                .expect("selected count value");
+
+            let run_incumbent = || {
+                numpy
+                    .call_method1("asarray", (black_box(&values),))
+                    .expect("incumbent asarray")
+                    .get_item(black_box(&mask))
+                    .expect("incumbent gather")
+                    .call_method0("sum")
+                    .expect("incumbent sum")
+            };
+            let run_candidate = || {
+                fnp_masked_sum
+                    .call1((black_box(&values), black_box(&mask)))
+                    .expect("candidate masked_sum")
+            };
+
+            let ours: f64 = run_candidate().extract().expect("candidate scalar");
+            let theirs: f64 = run_incumbent().extract().expect("incumbent scalar");
+            assert_eq!(
+                ours.to_bits(),
+                theirs.to_bits(),
+                "masked_sum at {elements} elements is not BYTE-identical to a[mask].sum()"
+            );
+
+            let row = format!("python_masked_sum_f64_{elements}_vs_numpy");
+            println!(
+                "PARITY row={row} exact_bits=passed elements={elements} \
+                 selected={selected} input_bytes={} \
+                 incumbent_temporary_bytes={} checksum={:016x}",
+                elements * 8,
+                selected * 8,
+                theirs.to_bits()
+            );
+            println!(
+                "ROUTE_PRECONDITIONS row={row} dtype=float64 mask_dtype=bool \
+                 exact_ndarray=true c_contiguous=true ndim=1 elements={elements} \
+                 selected={selected} pinned_threads={threads} host_avx2={} \
+                 host_avx512f={} candidate_route=try_zerocopy_f64_masked_sum",
+                std::arch::is_x86_feature_detected!("avx2"),
+                std::arch::is_x86_feature_detected!("avx512f"),
+            );
+            println!(
+                "COUNTED_MECHANISM row={row} class=materialization_elimination_and_parallelism \
+                 incumbent_algorithm=numpy_boolean_gather_to_k_element_temporary_then_pairwise_sum \
+                 candidate_algorithm=streamed_pairwise_tree_over_selected_elements_no_temporary \
+                 incumbent_allocated_bytes={} candidate_allocated_bytes=0 \
+                 incumbent_passes_over_selected=2 candidate_passes_over_selected=1 \
+                 incumbent_expected_threads=1 candidate_pinned_threads={threads} \
+                 shared_input=true",
+                selected * 8
+            );
+
+            common::report_observed_thread_activity(
+                &row,
+                "numpy",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    black_box(run_incumbent().extract::<f64>().expect("incumbent scalar"));
+                },
+            );
+            common::report_observed_thread_activity(
+                &row,
+                "fnp",
+                THREAD_ACTIVITY_REPETITIONS,
+                || {
+                    black_box(run_candidate().extract::<f64>().expect("candidate scalar"));
+                },
+            );
+
+            let mut observe_incumbent = || {
+                let started = Instant::now();
+                let result = run_incumbent();
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: result.extract::<f64>().expect("incumbent scalar").to_bits(),
+                }
+            };
+            let mut observe_candidate = || {
+                let started = Instant::now();
+                let result = run_candidate();
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: result.extract::<f64>().expect("candidate scalar").to_bits(),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &row,
+                    &mut observe_incumbent,
+                    &mut observe_candidate,
+                    CONTRACT_ROUNDS,
+                    CONTRACT_MIN_OF,
+                );
+            let verdict =
+                common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+            println!(
+                "MASKED_SUM_RESULT row={row} elements={elements} selected={selected} \
+                 threads={threads} verdict={verdict} incumbent_median_ms={:.6} \
+                 candidate_median_ms={:.6} ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 incumbent_null_ratio={:.6} incumbent_null_ci95=[{:.6},{:.6}] \
+                 candidate_null_ratio={:.6} candidate_null_ci95=[{:.6},{:.6}] \
+                 corrected_dual_null_gate=true incumbent=numpy_live_same_invocation",
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                incumbent_null.ratio_ci_low,
+                incumbent_null.ratio_ci_high,
+                candidate_null.ratio_median,
+                candidate_null.ratio_ci_low,
+                candidate_null.ratio_ci_high,
+            );
+        }
+    });
+}
+
 fn main() {
     common::gated_main(&[
+        (
+            "bench_masked_sum_f64_median_gate",
+            bench_masked_sum_f64_median_gate,
+        ),
         (
             "bench_cov_gram_pairing_contract",
             bench_cov_gram_pairing_contract,
