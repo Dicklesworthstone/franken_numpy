@@ -152,12 +152,32 @@ dtypes under a newly clean same-invocation contract.
 
 ---
 
-## 2026-08-02 - WIN (LANDED): fused `a[mask].sum()` in one parallel pass, no gathered temporary - 17.9x/20.9x REPLICATED
+## 2026-08-02 - SUPERSEDED (uncommitted harness, provenance not re-checkable; superseded by the 2026-08-05 row): fused `a[mask].sum()` in one parallel pass, no gathered temporary - 17.9x/20.9x
 
 `deadlock-audit-v94ol`. New `fnp.masked_sum(a, mask)` computes `a[mask].sum()` without
 ever materialising the compacted array.
 
-**Campaign result class:** structural-gap
+**NOT A CITABLE CAMPAIGN RESULT — carries no result class by design** (`deadlock-audit-6j4o8`,
+`deadlock-audit-5jk8g`). The ratios below were measured against a live NumPy arm and the
+engineering they describe is real and shipped, but this row was produced by a harness that was
+never committed: nothing under `crates/fnp-python/benches/` referenced `masked_sum`, so the run
+emitted no incumbent `artifact_sha256` and no shared `invocation_id`, and no surviving log
+contains them. That is not a formatting defect that unwrapping the markers could repair — the
+tokens were never generated, so they cannot be supplied now without inventing provenance.
+
+Neither canonical class is both true and passing. `maintenance-self-speedup` is false: the base
+arm was real NumPy, not our own former path. `incumbent-win` is true in substance but fails the
+same-invocation contract, which exists precisely so that a quoted competitive number is
+re-checkable. **Widening the enum to admit this row was considered and refused** — the two-class
+split is what forces every KEEP to declare whether it was measured against NumPy, and relaxing it
+to clear a red is a loosening, not a fix. So the row keeps every measurement it recorded and
+forfeits its KEEP status instead.
+
+**Cite the 2026-08-05 row instead**, which supplies the missing instrument
+(`bench_masked_sum_f64_median_gate`) and re-measures through it under the complete contract.
+Note the two entries are **not comparable**: different host and pool width, with both arms slower
+on the 2026-08-05 box, so 29.43x > 20.93x is *not* evidence that the figures below were
+conservative.
 
 WHY THIS IS A GAP AND NOT A SHARED COST. Whole-job profile of
 `vals[(a > lo) & (a < hi)].sum()` at 64M f64 against live NumPy 2.4.3, stage by stage:
