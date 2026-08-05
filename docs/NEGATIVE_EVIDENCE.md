@@ -36526,3 +36526,134 @@ Retry predicate: reopen only after a fresh CPU-pinned pilot demonstrates both
 floor. A reopened campaign must then run two independent same-ELF invocations
 with both `a=2.5` and `a=17`, exact output plus next-state proof, an A/A null,
 and the existing median-CI gate; otherwise leave the retained benchmark only.
+
+## 2026-08-04 - WIN (KEEP, INCUMBENT-WIN): native TSQR lstsq at the Python surface, 2.08-2.56x vs live NumPy - the 2026-07-24 REJECT's retry predicate discharged in full (`deadlock-audit-i546h`)
+
+`SilentBadger`. This is the retry of the 2026-07-24 REJECT row above ("native
+TSQR lstsq at the Python surface has no win"). That row named a retry predicate
+with TWO conditions and said explicitly that a kernel-only speedup could not
+close the gap because the wall was Python-surface overhead. Both conditions are
+now implemented, and the direction reversed.
+
+**Campaign result class:** incumbent-win
+
+### What the retry predicate asked for, and what landed
+
+1. *"zero-copy PyBuffer extraction"* - `try_native_lstsq_tsqr`
+   (`crates/fnp-python/src/lib.rs`) takes A and b as `PyBuffer::<f64>` slices off
+   the live ndarrays instead of `extract_numeric_array`'s asarray+cast copy. At
+   1e6x8 that copy was 64 MB per call; at 2e6x8, 128 MB.
+2. *"dropping the residual recompute (accumulate ||Qtb_bottom||^2 through the
+   TSQR tree instead of a second matrix pass)"* - `tsqr_qtb`
+   (`crates/fnp-linalg/src/lib.rs`) now returns a third element `residual_sq`,
+   summing the squared norms of the b-components each node drops: the tail below
+   row n at every leaf, and the bottom n at every combine. Q is orthogonal, so
+   that sum IS ||b - Ax||^2 for full-rank A, it is a sum of positive squares
+   (no ||b||^2 - ||c||^2 cancellation), and it costs nothing extra because the
+   reduction already touches those values. `lstsq_tsqr` no longer makes a second
+   O(mn) pass over A.
+
+Both conditions were required together and both are present; this is not a
+partial retry.
+
+### The result
+
+`bench_elf_sha256=083464e4ffbf7b9dfb54d35be30d50a55126be26f15dc57947b95b6e0f1ca66c`
+(215,687,720 bytes), self-reported from `/proc/self/exe` inside the timed
+process and independently `sha256sum`-confirmed on disk. Built and run on
+`vmi1153651` (10 cores, glibc 2.42, Python 3.13, AVX2, no AVX-512),
+`--profile release-perf`, 21 interleaved rounds, min_of=1.
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 0.968601x, CI95 [0.915656,1.056754], 21 rounds, min_of=1 at the 2,000,000x8 headline shape; the table records all three shapes.
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio 1.038474x, CI95 [0.980109,1.076757], 21 rounds, min_of=1 at the 2,000,000x8 headline shape.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c8be916f01c7a1-00057925 measured_ratio=2.563752x median=724.730357ms
+
+**Incumbent isolation proof:** candidate=fnp.lstsq incumbent=numpy.linalg.lstsq shared_timed_component=numpy.array_small_output_construction shared_component_direction=conservative_for_candidate
+
+**Shared timed component disclosure:** components=numpy.array_small_output_construction direction=conservative_for_candidate share_of_candidate_pct=0.003289
+
+The candidate builds its four small result arrays (n, 1, and n elements) through
+`numpy.array`; that is NumPy code inside the candidate arm and is disclosed
+rather than implied absent. The share above is measured, not asserted: on the
+same host and interpreter, one call's worth of that construction
+(`np.array` of 8 f64, of 1 f64, of 8 f64, plus `np.int32`) timed at 4.147 us
+over 20,000 repetitions, which is 0.003289% of the 126.061803 ms candidate
+median at 1e6x8 and 0.001510% at 2e6x8. The incumbent allocates its own outputs
+too, so the disclosure is conservative for the candidate.
+`dispatch_assert=passed` - the harness asserts at runtime that `fnp.lstsq` is not
+the NumPy callable.
+
+| shape | NumPy/NumPy null (CI95) | FNP/FNP null (CI95) | NumPy median | FNP median | ratio (CI95) | required 2x null delta | verdict |
+|---|---|---|---|---|---|---|---|
+| 1,000,000x8 | 0.977781 `[0.920739,1.019068]` | 0.944036 `[0.877042,1.113723]` | 301.178549 ms | 126.061803 ms | **2.313648x** `[2.037348,2.843819]` | 0.245917 | DECIDABLE_WIN |
+| 1,000,000x16 | 1.054846 `[0.971437,1.060006]` | 1.031229 `[0.898695,1.181909]` | 694.455755 ms | 336.404174 ms | **2.080063x** `[1.960678,2.132735]` | 0.363818 | DECIDABLE_WIN |
+| 2,000,000x8 | 0.968601 `[0.915656,1.056754]` | 1.038474 `[0.980109,1.076757]` | 724.730357 ms | 274.582760 ms | **2.563752x** `[2.427633,3.070256]` | 0.153514 | DECIDABLE_WIN |
+
+Compare the same three shapes on 2026-07-24: 1.02x, 1.006x, and 0.87x. The
+shape that was the LOSS - 2e6x8, the one the old row said got "RELATIVELY WORSE
+as m grows" - is now the BEST ratio. That is the signature the mechanism
+predicts: the two removed costs were both O(m) per call, so their removal must
+pay most where m is largest. A kernel-only change could not have produced that
+pattern, which is exactly what the old row argued.
+
+### Matched configuration, and the honest reading of the thread counts
+
+`RAYON_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS`, and
+`MKL_NUM_THREADS` were all pinned to 10 - equal, not one-vs-many. NumPy's gelsd
+is threaded, and starving it to one thread while the candidate keeps a full
+Rayon pool would be trap 2 (unmatched config) and would have inflated this
+ratio.
+
+Under that equal budget, `OBSERVED_THREAD_ACTIVITY` reports NumPy actually using
+2 threads at 1e6x8, 4 at 1e6x16, and **10 at 2e6x8**, against 11 for the
+candidate throughout. NumPy chose its own width at each size; it was not capped.
+The size where NumPy used the full pool is the size where it lost by the largest
+margin (2.56x), so the win is not a thread-count artifact.
+
+### Correctness
+
+`allclose_4tuple=passed exact_dtype=passed` on every measured shape, checked
+before entering the timer, covering solution, residuals, rank, and singular
+values. `byte_identical=false` is asserted, not tolerated: if the gate had
+declined, `fnp.lstsq` would have returned NumPy's own object and the arms would
+be byte-equal, measuring a passthrough against itself. Byte-INEQUALITY plus
+allclose is the route-engagement proof.
+
+Rank determination and the returned singular values come from an n x n SVD of R
+(sigma(A) = sigma(R)), and every returned element is invariant to TSQR's Q/R sign
+choice - which is why lstsq is routable where `qr(mode='r')` is not (see the
+2026-07-22 BLOCKER above).
+
+Unit coverage: `tsqr_qtb_residual_matches_direct_norm_across_fold_shapes` checks
+the tree-accumulated residual against a directly computed ||b - Ax||^2 at 64x4,
+4096x8, 12295x8, and 20481x6 - the last two chosen because an odd leaf count
+makes the fold carry an unpaired node forward, the place a double-count or a
+dropped combine would hide. `lstsq_tsqr_route_engages_only_on_full_rank_tall_skinny_f64_and_matches_numpy`
+asserts the route is SELECTED and then declines on eight negative cases (2-D rhs,
+wide, float32, F-order, rank-deficient, negative rcond, non-finite, Python list),
+each of which must fall through to NumPy. fnp-linalg: 331/331 lib tests pass.
+
+### The gate, and why rank-deficient MUST decline
+
+Rank-deficient input is routed to NumPy, not to `lstsq_tsqr`'s own fallback.
+`lstsq_svd` forms a full m x m U; at m = 1e6 that is 8 TB. The new
+`lstsq_tsqr_full_rank` entry point reports rank deficiency (`Ok(None)`) instead
+of falling back, so the binding can defer. `lstsq_tsqr` keeps its old
+fall-back-to-SVD behaviour for in-crate callers with modest m.
+
+### Scope and retry predicate for anyone widening this
+
+MEASURED SCOPE: 2-D C-contiguous float64 A with m >= n, 1-D C-contiguous float64
+b, full rank, finite, rcond None or non-negative, at 10 matched threads on an
+AVX2 host. NOT measured: the (M, K) multi-RHS form, complex, float32,
+rank-deficient, wide systems, or non-contiguous input - all of which the gate
+declines today. Widening to multi-RHS is the obvious next lever (fold K columns
+of b through the same tree); it needs its own contract run, because a K-column
+right-hand side changes the arithmetic intensity of both arms.
+
+RETRY PREDICATE for re-opening this as a loss: a same-invocation dual-null
+contract on a host-exclusive box showing the ratio at or below 1.0 at any of the
+three measured shapes, or a NumPy release whose lstsq stops using gelsd.
+AGENT_NAME=SilentBadger.
