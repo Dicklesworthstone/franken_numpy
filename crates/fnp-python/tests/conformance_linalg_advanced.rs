@@ -553,25 +553,113 @@ print(np.allclose(fnp_result, np_result))
     Ok(())
 }
 
+/// `solve_triangular` on a complex lower-triangular system.
+///
+/// This was the ONLY test in the crate that took scipy as its oracle, and on any
+/// worker without scipy it failed with ModuleNotFoundError — a permanent red that
+/// trains people to ignore the shard (bead deadlock-audit-o1p3g).
+///
+/// It is fixed in two parts, because "don't fail" and "don't silently skip" are
+/// different requirements and only doing the first is the vacuous-green trap:
+///
+///  1. THE ASSERTION NEVER DEGRADES TO NOTHING. NumPy — this project's declared
+///     oracle — can decide this case on its own: for an exactly lower-triangular
+///     `a`, `np.linalg.solve(a, b)` is the same solution as a triangular solve.
+///     Verified against forward substitution and against scipy, all three agree.
+///     So the numpy arm always runs and always asserts, scipy or no scipy.
+///  2. THE SCIPY CROSS-CHECK IS OPTIONAL AND ITS ABSENCE IS ANNOUNCED. When scipy
+///     is missing the script emits a `SKIPPED_ORACLE` line naming exactly what
+///     was not compared, and the Rust side re-emits it as a banner on stderr.
+///
+/// Honest limitation: libtest captures output for PASSING tests, so the banner is
+/// visible under `--nocapture`, in any run where the shard fails for another
+/// reason, and to a log scan grepping `SKIPPED_ORACLE`. That token is the durable
+/// signal — it is deliberately distinctive so coverage loss is greppable rather
+/// than invisible.
 #[test]
 fn solve_triangular_complex() -> Result<(), String> {
     let script = fnp_script(
         r#"
-import scipy.linalg
+bad = []
+
+def check(name, a, b, **kw):
+    got = fnp.solve_triangular(a, b, **kw)
+    # NumPy is the declared oracle and settles a triangular system by itself, so
+    # long as the matrix handed to it is the triangle the call names.
+    tri = np.tril(a) if kw.get('lower') else np.triu(a)
+    if kw.get('unit_diagonal'):
+        tri = tri.copy()
+        np.fill_diagonal(tri, 1)
+    want = np.linalg.solve(tri, b)
+    if not np.allclose(got, want):
+        bad.append((name, repr(got), repr(want)))
+    return got
+
 a = np.array([[2+1j, 0, 0], [1, 3-1j, 0], [2, 1, 4+1j]], dtype=np.complex128)
 b = np.array([1+1j, 2-1j, 3], dtype=np.complex128)
-fnp_result = fnp.solve_triangular(a, b, lower=True)
-sp_result = scipy.linalg.solve_triangular(a, b, lower=True)
-print(np.allclose(fnp_result, sp_result))
+fnp_result = check('lower 1-D', a, b, lower=True)
+
+# The rest of the substitution's surface, each of which a naive implementation
+# gets wrong in a different way.
+u = np.array([[2+1j, 5, 1], [0, 3-1j, 2], [0, 0, 4+1j]], dtype=np.complex128)
+check('upper 1-D', u, b, lower=False)
+check('lower unit_diagonal', a, b, lower=True, unit_diagonal=True)
+check('upper unit_diagonal', u, b, lower=False, unit_diagonal=True)
+# Multiple right-hand sides: catches a column/row indexing slip.
+B2 = np.array([[1+1j, 2], [2-1j, 0], [3, 1-3j]], dtype=np.complex128)
+check('lower 2-D rhs', a, B2, lower=True)
+check('upper 2-D rhs', u, B2, lower=False)
+# The OPPOSITE triangle must be IGNORED, not read: poisoning it must not move
+# the answer. A solver that reads the whole matrix fails here.
+poisoned = a.copy(); poisoned[0, 2] = 999 - 7j; poisoned[0, 1] = -42j
+check('lower ignores upper triangle', poisoned, b, lower=True)
+# complex64 must stay complex64 on the way out.
+a32 = a.astype(np.complex64); b32 = b.astype(np.complex64)
+r32 = fnp.solve_triangular(a32, b32, lower=True)
+if r32.dtype != np.complex64:
+    bad.append(('complex64 dtype', str(r32.dtype), 'complex64'))
+if not np.allclose(r32, np.linalg.solve(np.tril(a32), b32), rtol=1e-5, atol=1e-6):
+    bad.append(('complex64 value', repr(r32), 'numpy solve'))
+# A zero diagonal is singular and must raise, not return inf/nan.
+sing = a.copy(); sing[1, 1] = 0
+try:
+    fnp.solve_triangular(sing, b, lower=True)
+    bad.append(('singular', 'returned normally', 'LinAlgError'))
+except Exception as exc:
+    if 'LinAlgError' not in type(exc).__name__:
+        bad.append(('singular', type(exc).__name__, 'LinAlgError'))
+
+print('True' if not bad else f'MISMATCH {bad}')
+
+try:
+    import scipy.linalg
+except ImportError as exc:
+    print(f"SKIPPED_ORACLE scipy.linalg.solve_triangular ({type(exc).__name__}: {exc}) "
+          f"- NOT cross-checked: scipy's lower=True triangular solve. The numpy arm above "
+          f"DID run and did assert; only the second opinion is missing.")
+else:
+    sp_result = scipy.linalg.solve_triangular(a, b, lower=True)
+    print("SCIPY_CROSSCHECK " + ("ok" if np.allclose(fnp_result, sp_result) else "MISMATCH"))
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    let numpy_arm = lines.next().unwrap_or_default().trim();
+    let scipy_arm = lines.next().unwrap_or_default().trim();
+
     assert_eq!(
-        result.trim(),
-        "True",
-        "solve_triangular complex should match scipy"
+        numpy_arm, "True",
+        "solve_triangular complex must match numpy's own solve; output: {result}"
     );
+    if let Some(note) = scipy_arm.strip_prefix("SKIPPED_ORACLE") {
+        eprintln!("SKIPPED_ORACLE [solve_triangular_complex]{note}");
+    } else {
+        assert_eq!(
+            scipy_arm, "SCIPY_CROSSCHECK ok",
+            "scipy cross-check ran and disagreed; output: {result}"
+        );
+    }
     Ok(())
 }
 
