@@ -107178,6 +107178,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "packbits",
             // "unpackbits" is registered as a native parallel pyfunction (above) — must NOT be
             // re-exported here or the numpy version would override it (m.add overwrites).
+            // unpackbits_is_native_not_a_numpy_reexport (conformance_remaining_top_level_attrs)
+            // fails if this is re-added; the behavioural round-trip test does NOT catch it.
             "fromfunction",
             "pow",
             "typecodes",
