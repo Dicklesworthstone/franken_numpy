@@ -42,16 +42,32 @@ fn fnp_script(body: String) -> String {
 
 #[test]
 fn strings_namespace_attached_and_preserves_numpy_surface() -> Result<(), String> {
+    // The old form asserted `fnp.strings.add is np.strings.add`, which is False
+    // on a healthy build: strings_add_native is registered as `add`, so `add` is
+    // one of the OVERRIDDEN names, not a copied one. `startswith` is genuinely
+    // untouched by the overlay and is the correct probe for "copied verbatim".
+    // The overridden side is asserted in the opposite direction so a silent
+    // replacement of the native path by numpy's own function fails here.
     let script = fnp_script(
         r#"
-print(hasattr(fnp.strings, 'upper') and fnp.strings.add is np.strings.add)
+checks = {
+    'overlay_present': hasattr(fnp.strings, 'upper'),
+    'copied_surface_is_numpys': fnp.strings.startswith is np.strings.startswith,
+    'overridden_add_is_native': fnp.strings.add is not np.strings.add,
+    'overridden_add_still_matches_numpy': np.array_equal(
+        fnp.strings.add(np.array(['a']), np.array(['b'])),
+        np.strings.add(np.array(['a']), np.array(['b']))),
+}
+print({k: v for k, v in checks.items() if not v} or 'ALL_OK')
+print(all(checks.values()))
 "#
         .into(),
     );
+    let result = numpy_oracle(&script)?;
     assert_eq!(
-        numpy_oracle(&script)?.trim(),
+        result.lines().last().unwrap_or("").trim(),
         "True",
-        "fnp.strings must expose the native overlay plus copied numpy.strings surface"
+        "fnp.strings must expose the native overlay plus copied numpy.strings surface; output: {result}"
     );
     Ok(())
 }

@@ -361,7 +361,22 @@ not zero-substitution either (verified — `np.sum(v, where=m)` diverges from
 tracking NumPy's masked-loop internals, which are version-dependent. `a[mask].sum()` is
 the byte-equivalent incumbent and is what the claim is made against.
 
-PARITY: `conformance_masked_sum.rs` — sizes {0,1,7,8,127,128,129,1000,4096,100k,1<<20-1,
+PARITY — **BYTE-IDENTITY IS PER-NUMPY-BUILD, NOT UNCONDITIONAL. Read this before quoting
+the claim.** Measured 2026-08-06 under `deadlock-audit-m8z69`: the sweep below is
+byte-identical against **NumPy 2.4.3** (the build named in PROVENANCE), and is **KNOWN TO
+DIVERGE on NumPy 2.2.4** above roughly 25k selected elements. On a 2.2.4 worker
+(vmi1149989) 13 of the 78 size x density cells differ. The divergence is NOT ours: the
+test now computes NumPy's documented pairwise tree in pure NumPy and classifies each
+mismatch, and all 13 return `NUMPY_DIFFERS` — our kernel reproduces the documented tree
+bit-for-bit and 2.2.4's own `a[mask].sum()` departs from it. Cells with <= 4096 selected
+still agree on 2.2.4, so that build changes reduction strategy above a size 2.4.x does
+not. **This is the retry predicate at the bottom of this row firing exactly as written**
+("or if its pairwise tree changes — the parity sweep detects it"); it fired across builds
+rather than across versions of NumPy going forward. Any quotation of this row's ratio or
+its byte-identity must name NumPy 2.4.3.
+
+PARITY SWEEP (against NumPy 2.4.3): `conformance_masked_sum.rs` — sizes
+{0,1,7,8,127,128,129,1000,4096,100k,1<<20-1,
 1<<20,1.5M} x densities {0,0.001,0.25,0.5,0.75,1.0} all byte-identical, with magnitudes
 mixed by 1e6/1e-6 so ANY reordering shows in the bits rather than hiding in rounding.
 Skewed masks (front/back/middle/stride-7/single/none/all) on the parallel path, signed
@@ -375,6 +390,14 @@ PROVENANCE: `bench_elf_sha256=2716f8d4613dcd79ad35d0d64f1604e2c2bcca9235487e03b2
 (44,889,688 bytes), built and measured on the SAME host (AMD Ryzen Threadripper PRO
 5975WX, 32 physical / 64 logical, no AVX-512), Python 3.13.7, NumPy 2.4.3,
 scipy-openblas 0.3.31.dev.
+
+ELF IS STALE RELATIVE TO HEAD — the ratio is NOT re-checkable at HEAD without a rebuild.
+As of 2026-08-06 that binary predates HEAD by three changes to `crates/fnp-python/src/lib.rs`:
+`47b8ad17` (divide defers its FP exceptions), `ff67019a` (unpackbits identity), `7b4f4313`
+(numpy submodule resolution). None of them touch `masked_sum` or the pairwise kernels, so
+there is no reason to expect the ratio moved — but "no reason to expect" is not a
+measurement, and the banked number belongs to the ELF above, not to HEAD. Re-measure
+before re-quoting it as a current figure.
 
 BUILD-GRADE CAVEAT (understates, does not inflate): built `--release` with
 `CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16` because the full

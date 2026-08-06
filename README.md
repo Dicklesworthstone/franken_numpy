@@ -144,6 +144,29 @@ rng = np.random.default_rng(12345)
 print(rng.standard_normal(5))      # bit-exact NumPy parity
 ```
 
+### Supported NumPy oracle: **2.3 or newer**
+
+FrankenNumPy's parity claims — including every bit-exactness claim — are defined
+against **NumPy >= 2.3**. Older NumPy is not a supported oracle, and the
+conformance harness fails fast with a named reason rather than emitting byte
+mismatches across unrelated suites.
+
+The floor exists because NumPy's own observable behaviour changed at 2.3 in ways
+that no single implementation can satisfy on both sides at once. Measured on
+NumPy 2.2.4:
+
+| Surface | NumPy 2.2.4 | NumPy >= 2.3 |
+|---|---|---|
+| `count_nonzero(...)` (no axis) | returns a Python `int` | returns `int64` |
+| `inspect.signature(np.add)` | no `x1` / `x2` parameters | exposes `x1`, `x2` |
+| `a[mask].sum()` | reduces in an order departing from NumPy's own documented pairwise tree above ~25k elements | follows the documented tree |
+| `import numpy.char` | **fails** — `numpy.strings` has no `slice` | imports |
+
+In every case FrankenNumPy matches the newer NumPy. The alternative — keying each
+expectation to a NumPy version inside the test suite — would have meant encoding
+two contradictory answers per surface and weakening the gates that make the parity
+claims worth anything, so the project declares a floor instead.
+
 ---
 
 ## More Worked Examples

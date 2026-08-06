@@ -69,13 +69,21 @@ fn expect_equal(actual: &str, expected: &str, context: &str) -> Result<(), Strin
 
 #[test]
 fn remaining_top_level_attrs_identity_equal_to_numpy() -> Result<(), String> {
-    // The bulk safety check: every attribute we set is `is`-equal to its
+    // The bulk safety check: every attribute we RE-EXPORT is `is`-equal to its
     // numpy counterpart. Identity equality is enough to prove the re-export
     // is genuine; semantic equivalence is then numpy's own contract.
+    //
+    // `unpackbits` is deliberately NOT in this list. It is a native parallel
+    // pyfunction (lib.rs `fn unpackbits`, registered via wrap_pyfunction!), and
+    // the verbatim re-export list omits it on purpose because `m.add` overwrites
+    // — re-exporting it would silently replace the native path with numpy's.
+    // Identity is therefore the WRONG contract for it; the right one is asserted
+    // in unpackbits_is_native_not_a_numpy_reexport below, and its behaviour is
+    // pinned by packbits_unpackbits_round_trip_matches_numpy.
     let script = fnp_script(
         r#"
 names = [
-    'iterable', 'ndim', 'size', 'packbits', 'unpackbits', 'fromfunction',
+    'iterable', 'ndim', 'size', 'packbits', 'fromfunction',
     'pow', 'typecodes', 'typename', 'sctypeDict', 'ScalarType',
     '__array_namespace_info__', 'typing', 'ctypeslib', 'test',
     'getbufsize', 'nested_iters', 'from_dlpack',
@@ -100,6 +108,45 @@ print(mismatches == [])
         &format!(
             "all remaining top-level attributes must be identity-equal to numpy; output: {result}"
         ),
+    )
+}
+
+#[test]
+fn unpackbits_is_native_not_a_numpy_reexport() -> Result<(), String> {
+    // The regression this exists to catch: adding "unpackbits" back to the
+    // verbatim re-export list in lib.rs would silently overwrite the native
+    // parallel pyfunction with numpy's (`m.add` overwrites), killing the fast
+    // path with no other test noticing — every behavioural test would still
+    // pass, because numpy's answer is the one we compare against.
+    //
+    // So identity is asserted in the NEGATIVE direction, and "not identity" is
+    // not allowed to pass vacuously: it would also be satisfied by the
+    // attribute being missing or broken, so presence, callability and
+    // agreement with numpy are all required in the same script. `packbits` is
+    // checked alongside as the contrast case — it IS a genuine re-export, so
+    // the deliberate asymmetry between the two is what gets pinned here.
+    let script = fnp_script(
+        r#"
+checks = []
+checks.append(('unpackbits present', hasattr(fnp, 'unpackbits')))
+checks.append(('unpackbits is native, not numpy', fnp.unpackbits is not np.unpackbits))
+checks.append(('packbits is a genuine re-export', fnp.packbits is np.packbits))
+a = np.array([0, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 1, 1], dtype=np.uint8)
+packed = np.packbits(a)
+checks.append(('native unpackbits matches numpy', np.array_equal(fnp.unpackbits(packed), np.unpackbits(packed))))
+checks.append(('native unpackbits round-trips', np.array_equal(fnp.unpackbits(packed)[:len(a)], a)))
+failed = [name for name, ok in checks if not ok]
+print(failed)
+print(failed == [])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    expect_equal(
+        last,
+        "True",
+        &format!("unpackbits must stay native and numpy-equivalent; output: {result}"),
     )
 }
 

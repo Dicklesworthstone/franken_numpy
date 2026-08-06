@@ -115,10 +115,12 @@ storage.sqlite3-shm.corrupt-*
 storage.sqlite3-wal.corrupt-*
 .beads/*.corrupt*
 .beads/*.pre_repair_*
+.beads/*.pre_reindex_*
 .beads/*.repair_candidate_*
 .beads/*.rebuild_*
 .beads/*.bak-corrupt
 .beads/*.bad_*
+.beads/.beads.db.schema-migration-*
 .beads/recovery/
 .beads/recovery_*/
 .beads_snapshot_*/

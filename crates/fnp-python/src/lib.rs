@@ -28438,6 +28438,147 @@ fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: usize) -> PyResult<Py<PyAny>> {
     build_numpy_array_from_ufunc(py, &result)
 }
 
+/// Complex triangular solve by substitution — the native replacement for the
+/// former `scipy.linalg.solve_triangular` delegation (deadlock-audit-o1p3g).
+///
+/// Works in complex128 regardless of input width and casts the result back to
+/// `promote_types(a.dtype, b.dtype)`, which is what scipy's return dtype is for
+/// these inputs. For complex64 that means the substitution runs WIDER than
+/// scipy's `ctrtrs` and is then rounded once, so it is at least as accurate.
+///
+/// Only the named triangle is read. `unit_diagonal` treats the diagonal as 1
+/// without reading it, matching scipy. A zero diagonal (when it IS read) raises
+/// `numpy.linalg.LinAlgError` naming the offending row, as scipy does.
+fn native_complex_solve_triangular(
+    py: Python<'_>,
+    arr_a: &Bound<'_, PyAny>,
+    arr_b: &Bound<'_, PyAny>,
+    lower: bool,
+    unit_diagonal: bool,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let c128 = numpy.getattr("complex128")?;
+    let out_dtype = numpy.call_method1(
+        "promote_types",
+        (arr_a.getattr("dtype")?, arr_b.getattr("dtype")?),
+    )?;
+
+    let shape_a: Vec<usize> = arr_a.getattr("shape")?.extract()?;
+    let shape_b: Vec<usize> = arr_b.getattr("shape")?.extract()?;
+    if shape_a.len() != 2 || shape_a[0] != shape_a[1] || shape_a[0] == 0 {
+        return Err(PyValueError::new_err(
+            "solve_triangular: a must be a non-empty square 2-D array",
+        ));
+    }
+    let n = shape_a[0];
+    if shape_b.is_empty() || shape_b[0] != n || shape_b.len() > 2 {
+        return Err(PyValueError::new_err(
+            "solve_triangular: b must have the same leading dimension as a",
+        ));
+    }
+    let rhs = if shape_b.len() == 1 { 1 } else { shape_b[1] };
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", &c128)?;
+    let a_c = numpy.call_method("ascontiguousarray", (arr_a,), Some(&kwargs))?;
+    let b_c = numpy.call_method("ascontiguousarray", (arr_b,), Some(&kwargs))?;
+
+    let f64_dtype = numpy.getattr("float64")?;
+    let a_view = a_c.call_method1("view", (&f64_dtype,))?;
+    let b_view = b_c.call_method1("view", (&f64_dtype,))?;
+    let (Ok(a_buf), Ok(b_buf)) = (PyBuffer::<f64>::get(&a_view), PyBuffer::<f64>::get(&b_view))
+    else {
+        return Err(PyValueError::new_err(
+            "solve_triangular: could not read complex operands",
+        ));
+    };
+    let (Some(a_cells), Some(b_cells)) = (a_buf.as_slice(py), b_buf.as_slice(py)) else {
+        return Err(PyValueError::new_err(
+            "solve_triangular: complex operands must be contiguous",
+        ));
+    };
+    let av: Vec<f64> = a_cells.iter().map(|c| c.get()).collect();
+    let mut x: Vec<f64> = b_cells.iter().map(|c| c.get()).collect();
+    if av.len() != 2 * n * n || x.len() != 2 * n * rhs {
+        return Err(PyValueError::new_err(
+            "solve_triangular: complex operand shape mismatch",
+        ));
+    }
+
+    // Smith's algorithm, the same complex division the elementwise complex path
+    // uses, so a divide by a small-magnitude diagonal is no worse here.
+    #[inline]
+    fn cdiv(ar: f64, ai: f64, br: f64, bi: f64) -> (f64, f64) {
+        if br.abs() >= bi.abs() {
+            let r = bi / br;
+            let s = 1.0 / (br + bi * r);
+            ((ar + ai * r) * s, (ai - ar * r) * s)
+        } else {
+            let r = br / bi;
+            let s = 1.0 / (bi + br * r);
+            ((ar * r + ai) * s, (ai * r - ar) * s)
+        }
+    }
+
+    for col in 0..rhs {
+        // Row order: forward for lower, backward for upper.
+        for step in 0..n {
+            let i = if lower { step } else { n - 1 - step };
+            let (mut sr, mut si) = (0.0f64, 0.0f64);
+            let (lo, hi) = if lower { (0, i) } else { (i + 1, n) };
+            for j in lo..hi {
+                let (ar, ai) = (av[2 * (i * n + j)], av[2 * (i * n + j) + 1]);
+                let (xr, xi) = (x[2 * (j * rhs + col)], x[2 * (j * rhs + col) + 1]);
+                sr += ar * xr - ai * xi;
+                si += ar * xi + ai * xr;
+            }
+            let br = x[2 * (i * rhs + col)] - sr;
+            let bi = x[2 * (i * rhs + col) + 1] - si;
+            let (vr, vi) = if unit_diagonal {
+                (br, bi)
+            } else {
+                let (dr, di) = (av[2 * (i * n + i)], av[2 * (i * n + i) + 1]);
+                if dr == 0.0 && di == 0.0 {
+                    let linalg_error = numpy.getattr("linalg")?.getattr("LinAlgError")?;
+                    return Err(PyErr::from_value(linalg_error.call1((format!(
+                        "singular matrix: resolution failed at diagonal {i}"
+                    ),))?));
+                }
+                cdiv(br, bi, dr, di)
+            };
+            x[2 * (i * rhs + col)] = vr;
+            x[2 * (i * rhs + col) + 1] = vi;
+        }
+    }
+
+    let out_kwargs = PyDict::new(py);
+    out_kwargs.set_item("dtype", &f64_dtype)?;
+    let flat = numpy.call_method("empty", (2 * n * rhs,), Some(&out_kwargs))?;
+    {
+        let Ok(out_buf) = PyBuffer::<f64>::get(&flat) else {
+            return Err(PyValueError::new_err(
+                "solve_triangular: could not build result buffer",
+            ));
+        };
+        let Some(cells) = out_buf.as_mut_slice(py) else {
+            return Err(PyValueError::new_err(
+                "solve_triangular: result buffer was not writable",
+            ));
+        };
+        for (cell, value) in cells.iter().zip(x.iter()) {
+            cell.set(*value);
+        }
+    }
+    let complex_flat = flat.call_method1("view", (&c128,))?;
+    let shaped = if shape_b.len() == 1 {
+        complex_flat
+    } else {
+        let dims = PyTuple::new(py, [n, rhs])?;
+        complex_flat.call_method1("reshape", (&dims,))?
+    };
+    Ok(shaped.call_method1("astype", (&out_dtype,))?.unbind())
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, b, lower=false, unit_diagonal=false))]
 fn solve_triangular(
@@ -28459,16 +28600,21 @@ fn solve_triangular(
         .getattr("kind")?
         .extract::<String>()?;
 
-    // Complex arrays must fall back to scipy
+    // Complex arrays are solved NATIVELY by substitution.
+    //
+    // This used to `py.import("scipy.linalg")` — the only scipy import in the
+    // crate — which made a PUBLIC fnp entry point raise ModuleNotFoundError on
+    // every host without scipy, and routed a core linalg operation through
+    // LAPACK. Both are unacceptable: scipy is not a declared dependency of this
+    // project, and the suite's premise is owning the implementation
+    // (deadlock-audit-o1p3g).
+    //
+    // A triangular system needs no factorisation — forward substitution for
+    // `lower`, back substitution for upper — so this is exact, O(n^2), and has
+    // the same semantics scipy documents: only the named triangle is read, and
+    // `unit_diagonal` treats the diagonal as 1 without reading it.
     if kind_a == "c" || kind_b == "c" {
-        let scipy_linalg = py.import("scipy.linalg")?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("lower", lower)?;
-        kwargs.set_item("unit_diagonal", unit_diagonal)?;
-        return Ok(scipy_linalg
-            .getattr("solve_triangular")?
-            .call((a.bind(py), b.bind(py)), Some(&kwargs))?
-            .unbind());
+        return native_complex_solve_triangular(py, &arr_a, &arr_b, lower, unit_diagonal);
     }
 
     let a_arr = extract_numeric_array(py, a.bind(py), "solve_triangular(a)")?;
@@ -29624,7 +29770,31 @@ fn multiply_add_f16_into(out: &mut [u16], a: &[u16], b: &[u16], c: &[u16]) {
     #[inline]
     fn kernel(x: u16, y: u16, z: u16) -> u16 {
         let product = f16::from_f32(f16::from_bits(x).to_f32() * f16::from_bits(y).to_f32());
-        f16::from_f32(product.to_f32() + f16::from_bits(z).to_f32()).to_bits()
+        // WHICH NaN SURVIVES THE ADD IS NOT A LANGUAGE GUARANTEE, and the two
+        // sides disagree. When BOTH addends are NaN, NumPy's f16 add returns the
+        // SECOND operand VERBATIM — measured across signs and payloads
+        // (0x7e00/0xfe00/0x7e01/0xff00 in every ordered pair, second operand
+        // every time, payload bits preserved). Rust's `p + z` lowers to an
+        // addss whose operand order is the compiler's choice, and on x86 it
+        // yields the PRODUCT's NaN instead, so `0 * inf + nan` returned the
+        // invalid product's negative default QNaN (0xfe00) where NumPy returns
+        // the addend (0x7e00). Spell the rule out rather than inherit whatever
+        // the backend picked (deadlock-audit-oo52g).
+        //
+        // Only the both-NaN case needs this. With exactly one NaN operand both
+        // sides already agree, payload included, so those fall through.
+        //
+        // "Verbatim" means verbatim AFTER QUIETING: a SIGNALLING addend comes
+        // back quieted, so 0x7c01 must return 0x7e01, not 0x7c01. Setting the
+        // mantissa MSB is a no-op on an already-quiet NaN, so one OR covers
+        // both. (Returning z untouched passed the single-payload grid and still
+        // corrupted every signalling payload — hence the dedicated payload test.)
+        const F16_QUIET_BIT: u16 = 0x0200;
+        let addend = f16::from_bits(z);
+        if product.is_nan() && addend.is_nan() {
+            return z | F16_QUIET_BIT;
+        }
+        f16::from_f32(product.to_f32() + addend.to_f32()).to_bits()
     }
 
     use rayon::prelude::*;
@@ -101148,6 +101318,36 @@ fn strings_istitle_native(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     unicode_ispredicate_or_numpy(py, a, 6, "istitle", "strings")
 }
 
+// Resolve a numpy submodule (`numpy.char`, `numpy.strings`, ...) for re-export.
+//
+// `numpy.char` and `numpy.strings` are LAZY: after `import numpy` neither is in
+// `sys.modules`, so plain attribute access depends on numpy's module-level
+// `__getattr__` firing correctly from inside a C-extension module init. That is
+// exactly what fails on the numpy-2.2.4 worker class, where fnp shipped with no
+// `char` attribute at all and the only signal was a conformance failure
+// elsewhere (bead deadlock-audit-smr32).
+//
+// So try the explicit `import numpy.<name>` FIRST — the form the neighbouring
+// fft/linalg blocks in this same function already use, and the one that does not
+// depend on numpy's `__getattr__` dispatch table — then fall back to attribute
+// access for anything only reachable that way. Returning the error text rather
+// than swallowing it is the point: the caller records it so a missing submodule
+// reports its CAUSE instead of vanishing silently.
+fn resolve_numpy_submodule<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    name: &str,
+) -> Result<Bound<'py, PyAny>, String> {
+    match py.import(format!("numpy.{name}").as_str()) {
+        Ok(module) => Ok(module.into_any()),
+        Err(import_err) => numpy.getattr(name).map_err(|attr_err| {
+            format!(
+                "import numpy.{name} failed ({import_err}); getattr fallback also failed ({attr_err})"
+            )
+        }),
+    }
+}
+
 fn copy_numpy_module_attrs(from: &Bound<'_, PyAny>, to: &Bound<'_, PyModule>) -> PyResult<()> {
     let dict_any = from.getattr("__dict__")?;
     let dict = dict_any.cast::<PyDict>()?;
@@ -107040,11 +107240,19 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     //   numpy.matrixlib - matrix-class helpers (asmatrix, bmat, ...)
     //
     // Doing this in one block keeps the pattern auditable and the failure mode
-    // graceful (a missing submodule on older numpys silently no-ops instead of
-    // breaking the whole pymodule init).
+    // graceful (a missing submodule on older numpys no-ops instead of breaking
+    // the whole pymodule init) — but NOT silent: every failure is recorded with
+    // its cause in `__submodule_import_errors__`, so a run that ships without
+    // `char` reports why instead of leaving the next agent to guess
+    // (deadlock-audit-smr32).
     {
         let numpy = py.import("numpy")?;
-        if let Ok(strings_upstream) = numpy.getattr("strings") {
+        let submodule_errors = PyDict::new(py);
+        if let Ok(strings_upstream) =
+            resolve_numpy_submodule(py, &numpy, "strings").inspect_err(|why| {
+                let _ = submodule_errors.set_item("strings", why);
+            })
+        {
             let strings = PyModule::new(py, "strings")?;
             copy_numpy_module_attrs(&strings_upstream, &strings)?;
             strings.add_function(wrap_pyfunction!(strings_upper_ascii, &strings)?)?;
@@ -107084,7 +107292,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.add_submodule(&strings)?;
             m.add("strings", strings)?;
         }
-        if let Ok(char_upstream) = numpy.getattr("char") {
+        if let Ok(char_upstream) = resolve_numpy_submodule(py, &numpy, "char").inspect_err(|why| {
+            let _ = submodule_errors.set_item("char", why);
+        }) {
             let char_mod = PyModule::new(py, "char")?;
             copy_numpy_module_attrs(&char_upstream, &char_mod)?;
             char_mod.add_function(wrap_pyfunction!(char_upper_ascii, &char_mod)?)?;
@@ -107136,10 +107346,14 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.add("char", char_mod)?;
         }
         for name in ["rec", "emath", "matrixlib"] {
-            if let Ok(submod) = numpy.getattr(name) {
-                m.add(name, &submod)?;
+            match resolve_numpy_submodule(py, &numpy, name) {
+                Ok(submod) => m.add(name, &submod)?,
+                Err(why) => submodule_errors.set_item(name, why)?,
             }
         }
+        // Empty on a healthy build. Non-empty is the loud version of the failure
+        // this used to hide: name -> why that submodule could not be resolved.
+        m.add("__submodule_import_errors__", &submodule_errors)?;
         // np.mgrid / np.ogrid are class instances supporting bracket-indexing
         // syntax (np.mgrid[0:3, 0:3]). Re-export them verbatim so
         // fnp_python.mgrid[...] / fnp_python.ogrid[...] resolve identically.
@@ -107178,6 +107392,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "packbits",
             // "unpackbits" is registered as a native parallel pyfunction (above) — must NOT be
             // re-exported here or the numpy version would override it (m.add overwrites).
+            // unpackbits_is_native_not_a_numpy_reexport (conformance_remaining_top_level_attrs)
+            // fails if this is re-added; the behavioural round-trip test does NOT catch it.
             "fromfunction",
             "pow",
             "typecodes",
