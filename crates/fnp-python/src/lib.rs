@@ -28182,11 +28182,16 @@ fn try_native_lstsq_tsqr(
     }
     let a_shape: Vec<usize> = a.getattr("shape")?.extract()?;
     let b_shape: Vec<usize> = b.getattr("shape")?.extract()?;
-    if a_shape.len() != 2 || b_shape.len() != 1 {
+    if a_shape.len() != 2 || b_shape.is_empty() || b_shape.len() > 2 {
         return Ok(None);
     }
     let (m, n) = (a_shape[0], a_shape[1]);
-    if b_shape[0] != m || m < n || n == 0 {
+    // numpy's own `is_1d` distinction: a 1-D b yields a squeezed (n,) solution,
+    // a 2-D (M, K) b yields (n, K). K == 0 is a legal numpy input but not a
+    // right-hand side the kernel reduces, so it stays with numpy.
+    let b_is_1d = b_shape.len() == 1;
+    let k = if b_is_1d { 1 } else { b_shape[1] };
+    if b_shape[0] != m || m < n || n == 0 || k == 0 {
         return Ok(None);
     }
 
@@ -28208,7 +28213,7 @@ fn try_native_lstsq_tsqr(
     let (Some(a_cells), Some(b_cells)) = (a_buf.as_slice(py), b_buf.as_slice(py)) else {
         return Ok(None);
     };
-    if a_cells.len() != m * n || b_cells.len() != m {
+    if a_cells.len() != m * n || b_cells.len() != m * k {
         return Ok(None);
     }
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64, both buffers are
@@ -28216,10 +28221,11 @@ fn try_native_lstsq_tsqr(
     // the lengths were checked against the declared shapes above.
     let a_data: &[f64] =
         unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), m * n) };
-    let b_data: &[f64] = unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<f64>(), m) };
+    let b_data: &[f64] =
+        unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<f64>(), m * k) };
 
     let Ok(Some((x, residuals, rank, singular_values))) =
-        fnp_linalg::lstsq_tsqr_full_rank(a_data, b_data, m, n, rcond_value)
+        fnp_linalg::lstsq_tsqr_full_rank(a_data, b_data, m, n, k, rcond_value)
     else {
         // Err (non-finite entries, degenerate shape) or Ok(None) (rank < n):
         // numpy owns both, with its LinAlgError text and its minimum-norm path.
@@ -28234,11 +28240,21 @@ fn try_native_lstsq_tsqr(
     };
     // rank is a numpy.int32 scalar in numpy's own return, not a Python int.
     let rank_scalar = numpy.getattr("int32")?.call1((rank,))?;
+    // The kernel hands back x row-major n×k. numpy squeezes the solution to (n,)
+    // only for a 1-D b; for a 2-D b it stays (n, K). It deliberately does NOT
+    // squeeze residuals in either case — _linalg.py says squeezing them would
+    // break compatibility — so residuals ship as the kernel's length-K vector
+    // (or empty when m == n) without reshaping.
+    let solution = if b_is_1d {
+        as_f64_array(x)?
+    } else {
+        as_f64_array(x)?.call_method1("reshape", ((n, k),))?
+    };
     Ok(Some(
         PyTuple::new(
             py,
             [
-                as_f64_array(x)?,
+                solution,
                 as_f64_array(residuals)?,
                 rank_scalar,
                 as_f64_array(singular_values)?,
@@ -119915,6 +119931,104 @@ mod tests {
                 "TSQR solution diverged from numpy under explicit rcond"
             );
 
+            // MULTI-RHS (M, K). numpy's 2-D b returns x with shape (n, K) and,
+            // when full rank and m > n, one residual PER COLUMN — and it does not
+            // squeeze residuals. Shapes and dtypes are asserted alongside values
+            // because a (K, n) solution or a summed scalar residual both pass an
+            // allclose that only looks at the numbers. The 1e6-row shapes this
+            // widening targets live in the bench; these sizes exercise the same
+            // parallel leaf/fold tree at unit-test cost.
+            for &(rows, cols) in &[(4096_usize, 8_usize), (4096, 16)] {
+                let wide_a = rng.call_method1("standard_normal", ((rows, cols),))?;
+                for k in [2_usize, 3, 8] {
+                    let multi_b = rng.call_method1("standard_normal", ((rows, k),))?;
+                    let native_multi = try_native_lstsq_tsqr(py, &wide_a, &multi_b, None)?
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "full-rank tall-skinny f64 with (M,{k}) b must take the TSQR route"
+                            )
+                        });
+                    let native_multi = native_multi.bind(py);
+                    let native_multi = native_multi.cast::<PyTuple>()?;
+                    let expected_multi = numpy_expected(py, &numpy_lstsq, &wide_a, &multi_b, None)?;
+                    let expected_multi = expected_multi.cast::<PyTuple>()?;
+
+                    for (index, what) in [(0, "solution"), (1, "residuals"), (3, "singular values")]
+                    {
+                        assert!(
+                            allclose
+                                .call1((
+                                    native_multi.get_item(index)?,
+                                    expected_multi.get_item(index)?
+                                ))?
+                                .extract::<bool>()?,
+                            "multi-RHS {what} diverged from numpy at {rows}x{cols} K={k}"
+                        );
+                        assert_eq!(
+                            native_multi
+                                .get_item(index)?
+                                .getattr("shape")?
+                                .extract::<Vec<usize>>()?,
+                            expected_multi
+                                .get_item(index)?
+                                .getattr("shape")?
+                                .extract::<Vec<usize>>()?,
+                            "multi-RHS {what} shape diverged at {rows}x{cols} K={k}"
+                        );
+                        assert_eq!(
+                            native_multi
+                                .get_item(index)?
+                                .getattr("dtype")?
+                                .str()?
+                                .extract::<String>()?,
+                            expected_multi
+                                .get_item(index)?
+                                .getattr("dtype")?
+                                .str()?
+                                .extract::<String>()?,
+                            "multi-RHS {what} dtype diverged at {rows}x{cols} K={k}"
+                        );
+                    }
+                    assert_eq!(
+                        native_multi.get_item(2)?.extract::<i64>()?,
+                        expected_multi.get_item(2)?.extract::<i64>()?,
+                        "multi-RHS rank diverged at {rows}x{cols} K={k}"
+                    );
+                    assert_eq!(
+                        native_multi
+                            .get_item(2)?
+                            .getattr("dtype")?
+                            .str()?
+                            .extract::<String>()?,
+                        expected_multi
+                            .get_item(2)?
+                            .getattr("dtype")?
+                            .str()?
+                            .extract::<String>()?,
+                        "multi-RHS rank dtype diverged at {rows}x{cols} K={k}"
+                    );
+                    // Pin the two shapes the bead calls out explicitly, so a
+                    // future change cannot satisfy the comparison above by
+                    // degrading BOTH arms in the same direction.
+                    assert_eq!(
+                        native_multi
+                            .get_item(0)?
+                            .getattr("shape")?
+                            .extract::<Vec<usize>>()?,
+                        vec![cols, k],
+                        "multi-RHS solution must be (n, K)"
+                    );
+                    assert_eq!(
+                        native_multi
+                            .get_item(1)?
+                            .getattr("shape")?
+                            .extract::<Vec<usize>>()?,
+                        vec![k],
+                        "multi-RHS residuals must be (K,) and must not be squeezed"
+                    );
+                }
+            }
+
             // NEGATIVE CASES. Each of these produces a wrong answer, a wrong
             // shape, or an unallocatable m*m intermediate if the gate lets it
             // through, so each must decline and leave the call to numpy.
@@ -119930,9 +120044,13 @@ mod tests {
                 Ok(())
             };
 
-            // 2-D b is numpy's (M, K) multi-RHS form; the kernel solves one RHS.
-            let multi_b = rng.call_method1("standard_normal", ((4096_usize, 2_usize),))?;
-            rejects(&a, &multi_b, None, "2-D right-hand side")?;
+            // K == 0 is a legal numpy input but not a right-hand side to reduce;
+            // 3-D b is not an lstsq operand at all. Both stay with numpy.
+            let empty_b = rng.call_method1("standard_normal", ((4096_usize, 0_usize),))?;
+            rejects(&a, &empty_b, None, "zero-column right-hand side")?;
+            let three_d_b =
+                rng.call_method1("standard_normal", ((4096_usize, 2_usize, 2_usize),))?;
+            rejects(&a, &three_d_b, None, "3-D right-hand side")?;
             // Underdetermined: TSQR requires m >= n.
             let wide_a = rng.call_method1("standard_normal", ((8_usize, 16_usize),))?;
             let wide_b = rng.call_method1("standard_normal", (8_usize,))?;
@@ -119985,15 +120103,20 @@ mod tests {
                 "python list operands",
             )?;
 
-            // The declined cases must still be correct end to end through the
-            // public wrapper, which is what the numpy fallback is for.
+            // End to end through the PUBLIC wrapper: the declined cases must be
+            // correct via the numpy fallback, and the now-routed multi-RHS case
+            // must be correct via the native path. Both matter — the assertions
+            // above call try_native_lstsq_tsqr directly, so only this loop proves
+            // `fnp.lstsq` itself returns the right answer for a 2-D b.
+            let routed_multi_b = rng.call_method1("standard_normal", ((4096_usize, 3_usize),))?;
             let module = PyModule::new(py, "fnp_python_test")?;
             fnp_python(&module)?;
             let lstsq_fn = module.getattr("lstsq")?;
             for (a_arg, b_arg, label) in [
                 (&rank_deficient, &b, "rank-deficient"),
                 (&wide_a, &wide_b, "wide"),
-                (&a, &multi_b, "multi-RHS"),
+                (&a, &empty_b, "zero-column"),
+                (&a, &routed_multi_b, "multi-RHS"),
             ] {
                 let kwargs = PyDict::new(py);
                 kwargs.set_item("rcond", py.None())?;

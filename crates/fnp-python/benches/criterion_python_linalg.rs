@@ -147,17 +147,34 @@ fn bench_lstsq_tsqr_tall_skinny(_c: &mut Criterion) {
             state
         };
 
-        for (rows, cols, label) in [
-            (1_000_000_usize, 8_usize, "1000000x8"),
-            (1_000_000, 16, "1000000x16"),
-            (2_000_000, 8, "2000000x8"),
+        // K = 1 keeps the three banked 1-D rows exactly as they were measured
+        // (1-D b, not an (M,1) panel — those are different NumPy inputs and the
+        // banked ratios belong to the 1-D spelling). The K > 1 rows are the
+        // multi-RHS widening under test: gelsd amortises ONE divide-and-conquer
+        // SVD across all K columns while our leaf work grows with K, so the 1-D
+        // win does not transfer by assumption and the sweep exists to find the K
+        // where it turns.
+        for (rows, cols, k, label) in [
+            (1_000_000_usize, 8_usize, 1_usize, "1000000x8_k1"),
+            (1_000_000, 16, 1, "1000000x16_k1"),
+            (2_000_000, 8, 1, "2000000x8_k1"),
+            (1_000_000, 8, 2, "1000000x8_k2"),
+            (1_000_000, 8, 3, "1000000x8_k3"),
+            (1_000_000, 8, 8, "1000000x8_k8"),
+            (1_000_000, 16, 2, "1000000x16_k2"),
+            (1_000_000, 16, 3, "1000000x16_k3"),
+            (1_000_000, 16, 8, "1000000x16_k8"),
         ] {
             let a = rng
                 .call_method1("standard_normal", ((rows, cols),))
                 .expect("operand a");
-            let b = rng
-                .call_method1("standard_normal", (rows,))
-                .expect("operand b");
+            let b = if k == 1 {
+                rng.call_method1("standard_normal", (rows,))
+                    .expect("operand b")
+            } else {
+                rng.call_method1("standard_normal", ((rows, k),))
+                    .expect("operand b")
+            };
 
             let run_incumbent = || {
                 numpy_lstsq
@@ -235,17 +252,20 @@ fn bench_lstsq_tsqr_tall_skinny(_c: &mut Criterion) {
             let row = format!("python_lstsq_tsqr_{label}_vs_numpy");
             println!(
                 "PARITY row={row} allclose_4tuple=passed exact_dtype=passed \
-                 byte_identical=false rows={rows} cols={cols} \
-                 input_bytes={} checksum={:016x}",
+                 byte_identical=false rows={rows} cols={cols} rhs_columns={k} \
+                 input_bytes={} rhs_bytes={} checksum={:016x}",
                 rows * cols * 8,
+                rows * k * 8,
                 checksum_of(&theirs)
             );
             println!(
                 "ROUTE_PRECONDITIONS row={row} dtype=float64 exact_ndarray=true \
-                 c_contiguous=true a_ndim=2 b_ndim=1 rows={rows} cols={cols} \
+                 c_contiguous=true a_ndim=2 b_ndim={} rhs_columns={k} \
+                 rows={rows} cols={cols} \
                  tall_skinny=true full_rank=true rcond=default_none \
                  pinned_threads={threads} host_avx2={} host_avx512f={} \
                  candidate_route=try_native_lstsq_tsqr",
+                if k == 1 { 1 } else { 2 },
                 std::arch::is_x86_feature_detected!("avx2"),
                 std::arch::is_x86_feature_detected!("avx512f"),
             );
