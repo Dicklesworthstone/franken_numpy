@@ -32470,22 +32470,55 @@ fn choose_float_via_unsigned<'py, U: pyo3::buffer::Element + Copy>(
 #[pyfunction]
 #[pyo3(signature = (a, choices, mode="raise"))]
 fn choose(py: Python<'_>, a: Py<PyAny>, choices: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
-    // Check if any choices array is complex dtype and fallback to numpy
+    // DEFER EVERYTHING THE NATIVE PATH CANNOT REPRODUCE EXACTLY. The native
+    // reduction below handles an integer index array over numeric choices and
+    // returns an ndarray; numpy's `choose` is wider than that in three ways it
+    // used to get wrong (deadlock-audit-41nl1), all of which now defer:
+    //
+    //   * a BOOL index array. numpy reads it as a 0/1 selector; the native path
+    //     raised `choose(a): expected an integer index array, got dtype bool`,
+    //     rejecting input numpy accepts.
+    //   * NON-NUMERIC choices (strings, datetimes, objects; complex was already
+    //     handled here). numpy selects among them fine and returns their dtype;
+    //     the native path raised `choose(choices)[0]: expected a
+    //     bool/int/uint/float array`.
+    //   * a 0-d result. numpy returns a SCALAR (numpy.int64), while
+    //     build_numpy_array_from_ufunc returns a 0-d ndarray - same dtype, same
+    //     shape, different type, which any caller reading type() can see.
+    //
+    // Deferring a 0-d index costs nothing: the native path exists to accelerate
+    // bulk selection, and a scalar index selects exactly one element.
     let numpy = py.import("numpy")?;
     let choices_bound = choices.bind(py);
-    if let Ok(choices_list) = choices_bound.cast::<pyo3::types::PyList>() {
-        for item in choices_list.iter() {
+    let index_array = numpy.call_method1("asarray", (a.bind(py),))?;
+    let index_kind = index_array
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?;
+    let index_is_scalar = index_array.getattr("ndim")?.extract::<usize>()? == 0;
+    let mut defer_to_numpy = index_is_scalar || !matches!(index_kind.as_str(), "i" | "u");
+    if !defer_to_numpy {
+        let choice_items: Vec<Bound<'_, PyAny>> = if let Ok(sequence) = choices_bound.try_iter() {
+            sequence.collect::<PyResult<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
+        for item in choice_items {
             let arr = numpy.call_method1("asarray", (item,))?;
             let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
-            if dtype_kind == "c" {
-                let kwargs = PyDict::new(py);
-                kwargs.set_item("mode", mode)?;
-                return Ok(numpy
-                    .getattr("choose")?
-                    .call((a.bind(py), choices_bound), Some(&kwargs))?
-                    .unbind());
+            if !matches!(dtype_kind.as_str(), "b" | "i" | "u" | "f") {
+                defer_to_numpy = true;
+                break;
             }
         }
+    }
+    if defer_to_numpy {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("mode", mode)?;
+        return Ok(numpy
+            .getattr("choose")?
+            .call((a.bind(py), choices_bound), Some(&kwargs))?
+            .unbind());
     }
 
     // Zero-copy multi-way select for integer index + same-shape same-int-dtype
@@ -32496,12 +32529,29 @@ fn choose(py: Python<'_>, a: Py<PyAny>, choices: Py<PyAny>, mode: &str) -> PyRes
         return Ok(result);
     }
 
-    let a = extract_integer_array(py, a.bind(py), "choose(a)")?;
-    let choices = extract_numeric_array_sequence(py, choices_bound, "choose(choices)")?;
-    let result = a
-        .choose_with_mode(&choices, mode)
-        .map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    let index = extract_integer_array(py, a.bind(py), "choose(a)")?;
+    let extracted_choices = extract_numeric_array_sequence(py, choices_bound, "choose(choices)")?;
+    // ERROR CASES BELONG TO NUMPY, exactly as for `searchsorted`'s invalid side.
+    // The native path raises its own house-style strings - `choose: unsupported
+    // mode 'bad'` where numpy says `clipmode must be one of 'clip', 'raise', or
+    // 'wrap' (got 'bad')`, and `choose: index 3 out of range for 2 choices` for
+    // an out-of-range index under mode='raise'. Same exception TYPE, different
+    // text, which a caller matching on the message can see. Rather than pin
+    // numpy's literals in Rust - which silently re-break on every numpy
+    // rewording - hand any failing case back to numpy so it raises its own.
+    // This cannot mask a wrong ANSWER: it only runs when the native path
+    // produced no answer at all.
+    match index.choose_with_mode(&extracted_choices, mode) {
+        Ok(result) => build_numpy_array_from_ufunc(py, &result),
+        Err(_) => {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("mode", mode)?;
+            Ok(numpy
+                .getattr("choose")?
+                .call((a.bind(py), choices_bound), Some(&kwargs))?
+                .unbind())
+        }
+    }
 }
 
 #[pyfunction]
@@ -127479,27 +127529,56 @@ mod tests {
         });
     }
 
+    /// An unknown `mode` must raise NUMPY's error, not a house-style one.
+    ///
+    /// This previously asserted our own `unsupported mode` wording, which was a
+    /// real divergence: numpy says `clipmode must be one of 'clip', 'raise', or
+    /// 'wrap' (got 'invalid')` (deadlock-audit-41nl1). The assertion is
+    /// DIFFERENTIAL rather than a pinned literal - it compares against whatever
+    /// the installed numpy raises for the identical call - so it verifies parity
+    /// without re-breaking on the next numpy rewording, which is the same reason
+    /// `searchsorted` defers its invalid `side`.
     #[test]
-    fn choose_rejects_unknown_mode() {
+    fn choose_unknown_mode_raises_numpys_own_error() {
         with_python(|py| {
             if !numpy_available(py) {
                 return Ok(());
             }
 
-            let a = numeric_array(py, vec![0_i64, 1_i64], "int64");
-            let choices = PyTuple::new(
-                py,
-                [numeric_array(py, vec![10.0, 20.0], "float64")
-                    .into_any()
-                    .unbind()]
-                .iter()
-                .map(|item| item.bind(py)),
-            )?;
+            let build_operands = |py: Python<'_>| -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+                let a = numeric_array(py, vec![0_i64, 1_i64], "int64");
+                let choices = PyTuple::new(
+                    py,
+                    [numeric_array(py, vec![10.0, 20.0], "float64")
+                        .into_any()
+                        .unbind()]
+                    .iter()
+                    .map(|item| item.bind(py)),
+                )?;
+                Ok((a.into_any().unbind(), choices.into_any().unbind()))
+            };
 
-            let err = choose(py, a.unbind(), choices.into_any().unbind(), "invalid").unwrap_err();
-            assert!(
-                err.to_string().contains("unsupported mode"),
-                "unexpected error: {err}"
+            let (a, choices) = build_operands(py)?;
+            let ours = choose(py, a, choices, "invalid").unwrap_err();
+
+            let (a, choices) = build_operands(py)?;
+            let numpy = py.import("numpy")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("mode", "invalid")?;
+            let theirs = numpy
+                .getattr("choose")?
+                .call((a.bind(py), choices.bind(py)), Some(&kwargs))
+                .unwrap_err();
+
+            assert_eq!(
+                ours.get_type(py).name()?.to_string(),
+                theirs.get_type(py).name()?.to_string(),
+                "choose(mode=invalid) exception TYPE must match numpy"
+            );
+            assert_eq!(
+                ours.value(py).str()?.extract::<String>()?,
+                theirs.value(py).str()?.extract::<String>()?,
+                "choose(mode=invalid) exception MESSAGE must match numpy"
             );
             Ok(())
         });
