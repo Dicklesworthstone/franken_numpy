@@ -106,7 +106,10 @@ fn count_nonzero_python_container_surfaces_match_numpy() -> Result<(), String> {
         ("signed zero and nan list", "[-0.0, float('nan'), 2.5, 0.0]"),
         // NaN is truthy and -0.0 is falsy; a naive `!= 0` on the raw objects and
         // a bool-cast disagree here, so this case separates them.
-        ("object truthiness", "np.array(['', 'x', '0'], dtype=object)"),
+        (
+            "object truthiness",
+            "np.array(['', 'x', '0'], dtype=object)",
+        ),
         // Scalars COUNT (unlike numpy.nonzero, which rejects 0-d input).
         ("scalar nonzero", "7"),
         ("scalar zero", "0"),
@@ -168,9 +171,10 @@ fn count_nonzero_oracle_shape_of_the_contract_is_what_we_think() -> Result<(), S
     );
 
     // Both negative cases really raise.
-    for (args_expr, expected_exception) in
-        [("[[1], [0, 2]]", "ValueError"), ("[0, 1], axis=1", "AxisError")]
-    {
+    for (args_expr, expected_exception) in [
+        ("[[1], [0, 2]]", "ValueError"),
+        ("[0, 1], axis=1", "AxisError"),
+    ] {
         let outcome = numpy_oracle(&numpy_outcome_script(args_expr))?;
         let mut lines = outcome.lines();
         assert_eq!(
