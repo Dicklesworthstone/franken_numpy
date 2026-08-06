@@ -101148,6 +101148,39 @@ fn strings_istitle_native(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     unicode_ispredicate_or_numpy(py, a, 6, "istitle", "strings")
 }
 
+// Resolve a numpy submodule (`numpy.char`, `numpy.strings`, ...) for re-export.
+//
+// `numpy.char` and `numpy.strings` are LAZY: after `import numpy` neither is in
+// `sys.modules`, so plain attribute access depends on numpy's module-level
+// `__getattr__` firing correctly from inside a C-extension module init. That is
+// exactly what fails on the numpy-2.2.4 worker class, where fnp shipped with no
+// `char` attribute at all and the only signal was a conformance failure
+// elsewhere (bead deadlock-audit-smr32).
+//
+// So try the explicit `import numpy.<name>` FIRST — the form the neighbouring
+// fft/linalg blocks in this same function already use, and the one that does not
+// depend on numpy's `__getattr__` dispatch table — then fall back to attribute
+// access for anything only reachable that way. Returning the error text rather
+// than swallowing it is the point: the caller records it so a missing submodule
+// reports its CAUSE instead of vanishing silently.
+fn resolve_numpy_submodule<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    name: &str,
+) -> Result<Bound<'py, PyAny>, String> {
+    match py.import(format!("numpy.{name}").as_str()) {
+        Ok(module) => return Ok(module.into_any()),
+        Err(import_err) => match numpy.getattr(name) {
+            Ok(value) => return Ok(value),
+            Err(attr_err) => {
+                return Err(format!(
+                    "import numpy.{name} failed ({import_err}); getattr fallback also failed ({attr_err})"
+                ));
+            }
+        },
+    }
+}
+
 fn copy_numpy_module_attrs(from: &Bound<'_, PyAny>, to: &Bound<'_, PyModule>) -> PyResult<()> {
     let dict_any = from.getattr("__dict__")?;
     let dict = dict_any.cast::<PyDict>()?;
@@ -107040,11 +107073,19 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     //   numpy.matrixlib - matrix-class helpers (asmatrix, bmat, ...)
     //
     // Doing this in one block keeps the pattern auditable and the failure mode
-    // graceful (a missing submodule on older numpys silently no-ops instead of
-    // breaking the whole pymodule init).
+    // graceful (a missing submodule on older numpys no-ops instead of breaking
+    // the whole pymodule init) — but NOT silent: every failure is recorded with
+    // its cause in `__submodule_import_errors__`, so a run that ships without
+    // `char` reports why instead of leaving the next agent to guess
+    // (deadlock-audit-smr32).
     {
         let numpy = py.import("numpy")?;
-        if let Ok(strings_upstream) = numpy.getattr("strings") {
+        let submodule_errors = PyDict::new(py);
+        if let Ok(strings_upstream) =
+            resolve_numpy_submodule(py, &numpy, "strings").inspect_err(|why| {
+                let _ = submodule_errors.set_item("strings", why);
+            })
+        {
             let strings = PyModule::new(py, "strings")?;
             copy_numpy_module_attrs(&strings_upstream, &strings)?;
             strings.add_function(wrap_pyfunction!(strings_upper_ascii, &strings)?)?;
@@ -107084,7 +107125,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.add_submodule(&strings)?;
             m.add("strings", strings)?;
         }
-        if let Ok(char_upstream) = numpy.getattr("char") {
+        if let Ok(char_upstream) = resolve_numpy_submodule(py, &numpy, "char").inspect_err(|why| {
+            let _ = submodule_errors.set_item("char", why);
+        }) {
             let char_mod = PyModule::new(py, "char")?;
             copy_numpy_module_attrs(&char_upstream, &char_mod)?;
             char_mod.add_function(wrap_pyfunction!(char_upper_ascii, &char_mod)?)?;
@@ -107136,10 +107179,14 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.add("char", char_mod)?;
         }
         for name in ["rec", "emath", "matrixlib"] {
-            if let Ok(submod) = numpy.getattr(name) {
-                m.add(name, &submod)?;
+            match resolve_numpy_submodule(py, &numpy, name) {
+                Ok(submod) => m.add(name, &submod)?,
+                Err(why) => submodule_errors.set_item(name, why)?,
             }
         }
+        // Empty on a healthy build. Non-empty is the loud version of the failure
+        // this used to hide: name -> why that submodule could not be resolved.
+        m.add("__submodule_import_errors__", &submodule_errors)?;
         // np.mgrid / np.ogrid are class instances supporting bracket-indexing
         // syntax (np.mgrid[0:3, 0:3]). Re-export them verbatim so
         // fnp_python.mgrid[...] / fnp_python.ogrid[...] resolve identically.
