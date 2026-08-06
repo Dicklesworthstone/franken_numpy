@@ -103,3 +103,51 @@ print(fnp.__numpy_version__ == np.__version__)
     );
     Ok(())
 }
+
+/// THE SUPPORTED-ORACLE FLOOR. Conformance is defined against NumPy >= 2.3.
+///
+/// This exists so a below-floor host fails HERE, once, with a sentence that
+/// names the reason — instead of scattering confusing byte mismatches across
+/// unrelated shards. Every symptom below was measured on the 2.2.4 worker class
+/// (ovh-a, vmi1149989), and in each one fnp matched the NEWER NumPy while 2.2.4
+/// was the outlier; not once the reverse (bead deadlock-audit-1jqrw):
+///
+///   * `count_nonzero` returns a Python `int` on 2.2.4, `int64` from 2.3 on.
+///   * `inspect.signature(np.add)` exposes x1/x2 from 2.3 on, not on 2.2.4.
+///   * `a[mask].sum()` reduces in an order that departs from NumPy's own
+///     documented pairwise tree above ~25k elements on 2.2.4, so the fused
+///     masked reduction's byte-identity holds only at or above the floor.
+///   * `import numpy.char` FAILS outright on 2.2.4 ("module 'numpy.strings'
+///     has no attribute 'slice'" — `slice` landed in 2.3), so that build cannot
+///     import its own char module.
+///
+/// The floor is a declared, checkable contract. The rejected alternative was
+/// version-keying expectations inside individual test files, which is gate
+/// self-weakening wearing a compatibility hat.
+#[test]
+fn numpy_oracle_meets_the_supported_version_floor() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+parts = []
+for piece in np.__version__.split('.')[:2]:
+    digits = ''.join(c for c in piece if c.isdigit())
+    parts.append(int(digits) if digits else 0)
+major, minor = (parts + [0, 0])[:2]
+print("OK" if (major, minor) >= (2, 3) else "BELOW_FLOOR")
+print(np.__version__)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    let verdict = lines.next().unwrap_or_default().trim();
+    let found = lines.next().unwrap_or_default().trim();
+    assert_eq!(
+        verdict, "OK",
+        "UNSUPPORTED NUMPY ORACLE: found {found}, but FrankenNumPy conformance requires \
+         numpy >= 2.3 (deadlock-audit-1jqrw). Below the floor, byte-level parity failures \
+         in count_nonzero, masked_sum, ufunc signatures and numpy.char are EXPECTED and are \
+         NOT fnp defects — upgrade the oracle rather than chasing them."
+    );
+    Ok(())
+}
