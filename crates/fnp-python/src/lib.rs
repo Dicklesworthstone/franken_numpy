@@ -32537,6 +32537,24 @@ fn searchsorted(
     // whole call to numpy.searchsorted so it returns the right index (and the
     // right scalar-vs-array shape) instead of being rejected as non-numeric.
     let mut a_arr = numpy.call_method1("asarray", (a.bind(py),))?;
+    // A non-1-D haystack is a pure error case, and it takes the same treatment as
+    // an invalid `side` above: numpy raises `ValueError: object too deep for
+    // desired array`, while the native path bottoms out in the stride engine and
+    // reports its own house-style `shape error: rank mismatch expected=1
+    // actual=2`. Same exception TYPE, different message — which a caller matching
+    // on the text can see. Defer so numpy owns the wording rather than pinning
+    // its literal here, where every numpy rewording would silently re-break it.
+    if a_arr.getattr("ndim")?.extract::<usize>()? != 1 {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("side", side)?;
+        if let Some(sorter) = sorter.as_ref() {
+            kwargs.set_item("sorter", sorter.bind(py))?;
+        }
+        return Ok(numpy
+            .getattr("searchsorted")?
+            .call((a.bind(py), v.bind(py)), Some(&kwargs))?
+            .unbind());
+    }
     let mut a = a;
     let mut sorter = sorter;
     // sorter=: numpy runs an INDIRECT binary search through the permutation
