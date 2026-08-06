@@ -4,6 +4,130 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-06 - WIN (KEEP, INCUMBENT-WIN): native TSQR lstsq widened to the (M,K) multi-RHS form, 2.01-3.41x - the ratio RISES with K and no turning point exists in K <= 8 (`deadlock-audit-inzah`)
+
+`SandySpring`. `try_native_lstsq_tsqr` declined `b.ndim != 1`, handing numpy's whole
+`(M, K)` multi-RHS surface back to gelsd. `tsqr_qtb` now carries a K-column panel:
+the leaf applies its reflector sequence to a `rows x K` block, the fold stacks two
+`n x K` panels, `residual_sq` becomes one dropped squared norm per column, and back
+substitution runs per column against the same R.
+
+**Campaign result class:** incumbent-win
+
+### The bead's own hypothesis was that this might not pay, and that is REFUTED
+
+The bead said the 1-D win "does NOT transfer by assumption" because a K-column
+right-hand side changes the arithmetic intensity of BOTH arms - gelsd amortises one
+divide-and-conquer SVD across all K columns while our leaf work grows with K - and
+asked for the K at which the ratio turns. **There is no such K at or below 8.** The
+ratio does not merely hold, it RISES with K at both widths:
+
+| shape | K=1 | K=2 | K=3 | K=8 |
+|---|---:|---:|---:|---:|
+| 1,000,000 x 8 | 2.950300 | 3.272613 | 3.413012 | 3.307969 |
+| 1,000,000 x 16 | 1.832338 | 2.005968 | 2.571477 | 2.367713 |
+
+Every one of the nine rows is `DECIDABLE_WIN` under the corrected dual-null gate.
+Full detail, medians in ms:
+
+| row | K | NumPy median | FNP median | ratio (CI95) | NumPy/NumPy null (CI95) | FNP/FNP null (CI95) | verdict |
+|---|---:|---:|---:|---|---|---|---|
+| 1000000x8 | 1 | 114.965493 | 39.128621 | **2.950300** `[2.774568,3.678541]` | 1.000840 `[0.973221,1.008448]` | 1.096760 `[1.007014,1.164871]` | DECIDABLE_WIN |
+| 1000000x8 | 2 | 135.629085 | 43.742033 | **3.272613** `[2.912101,3.760217]` | 1.007375 `[0.973978,1.038500]` | 0.935514 `[0.861180,0.954341]` | DECIDABLE_WIN |
+| 1000000x8 | 3 | 142.739370 | 45.497190 | **3.413012** `[3.089102,3.767523]` | 1.017229 `[0.960375,1.061267]` | 0.946395 `[0.894532,1.054178]` | DECIDABLE_WIN |
+| 1000000x8 | 8 | 208.141059 | 61.060904 | **3.307969** `[3.207071,3.687029]` | 0.987089 `[0.954526,1.030199]` | 1.021463 `[0.928895,1.041785]` | DECIDABLE_WIN |
+| 1000000x16 | 1 | 234.278102 | 126.415783 | **1.832338** `[1.721034,1.966972]` | 1.007991 `[0.981392,1.053048]` | 1.101221 `[0.919686,1.248438]` | DECIDABLE_WIN |
+| 1000000x16 | 2 | 266.941803 | 129.132786 | **2.005968** `[1.749253,2.153624]` | 0.969301 `[0.944782,1.023625]` | 1.015999 `[0.887987,1.082785]` | DECIDABLE_WIN |
+| 1000000x16 | 3 | 287.787344 | 118.982396 | **2.571477** `[2.370232,2.718237]` | 1.005079 `[0.950619,1.067679]` | 1.009584 `[0.935766,1.071367]` | DECIDABLE_WIN |
+| 1000000x16 | 8 | 353.260830 | 156.820603 | **2.367713** `[2.199361,2.693086]` | 0.991710 `[0.949283,1.049138]` | 1.098885 `[0.999138,1.154929]` | DECIDABLE_WIN |
+| 2000000x8 | 1 | 251.283257 | 108.850554 | **2.308516** `[2.100196,2.483031]` | 1.052006 `[0.985079,1.106444]` | 0.964534 `[0.880054,1.030422]` | DECIDABLE_WIN |
+
+WHY IT RISES INSTEAD OF TURNING. The bead's model counted our leaf growth but not
+gelsd's. The O(mn²) reduction over A is the dominant cost and is paid ONCE no matter
+how many right-hand sides ride along; our only marginal cost per extra column is the
+`m x K` b-panel carried through the same reflectors. gelsd's per-column work also
+grows - it applies its factorisation to each of the K columns - so both arms grow,
+and ours grows more slowly. NumPy's absolute time climbs 114.97 -> 208.14 ms from
+K=1 to K=8 at n=8 while ours climbs only 39.13 -> 61.06 ms.
+
+**A/A null control (same invocation):** NumPy/NumPy median ratio 1.017229x, CI95 [0.960375,1.061267], 21 rounds, min_of=1 at the headline 1,000,000x8 K=3 row; every row's own pair is in the table above.
+
+**Candidate A/A null control (same invocation):** FNP/FNP median ratio 0.946395x, CI95 [0.894532,1.054178], 21 rounds, min_of=1 at the headline 1,000,000x8 K=3 row.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.6 artifact_sha256=d527de761a83209d571d666d215696d9c9540acc5c4e96753b1dca59694516fa invocation_id=000000000000000018c90f52173df530-003d8555 measured_ratio=3.413012x median=142.739370ms
+
+**Incumbent isolation proof:** candidate=fnp.lstsq incumbent=numpy.linalg.lstsq shared_timed_component=numpy.array_small_output_construction
+
+**Shared timed component disclosure:** components=numpy.array_small_output_construction direction=conservative_for_candidate share_of_candidate_pct=0.005252 measured_by=timing_numpy_array_construction_of_the_four_small_outputs_on_the_measurement_host note=the_candidate_builds_x_residuals_rank_and_s_through_numpy_array_inside_the_timed_region_and_the_incumbent_allocates_its_own_outputs_too
+
+ROUTE ENGAGEMENT PROVEN, not inferred. `byte_identical=false` on every row: TSQR and
+gelsd apply different orthogonal sequences, so a declined route would have returned
+NumPy's exact bytes and measured a passthrough against itself at ~1.0x.
+`OBSERVED_THREAD_ACTIVITY` in the same invocation reads arm=numpy
+threads_actually_used=4 against arm=fnp threads_actually_used=9 - gelsd IS threaded
+here, which is why both arms were given the same budget.
+
+MATCHED CONFIG. `RAYON_NUM_THREADS=8` with `OPENBLAS/OMP/MKL_NUM_THREADS=8`, i.e. the
+incumbent's threaded LAPACK got exactly the pool width our Rayon reduction got.
+Starving gelsd to 1 thread would have biased the ratio in our favour; the harness
+asserts the equality rather than trusting the operator, and it rejected a first
+attempt that passed 1.
+
+COUNTED_MECHANISM: `class=streaming_qr_vs_full_svd`. Incumbent is LAPACK gelsd
+(divide-and-conquer SVD of the m×n system); candidate is a parallel Householder TSQR
+to an n×n R plus per-column back substitution, zero input copies (`PyBuffer`), one
+full pass over A, and the residual accumulated in the tree with no second O(mn) pass.
+
+PARITY: `allclose` on the whole 4-tuple with EXACT dtypes and EXACT shapes at every
+row. Unit coverage adds K in {2,3,8} at n=8 and n=16: x is `(n,K)` for 2-D b and
+stays squeezed `(n,)` for 1-D; residuals are one per column when full rank and m > n,
+empty otherwise, and are NOT squeezed (numpy's own `_linalg.py` says squeezing them
+breaks compatibility); rank stays an int32 scalar; s stays `(min(m,n),)`.
+
+BIT-IDENTITY OF THE BANKED K=1 ROUTE, asserted rather than assumed: R never sees b,
+and each column's reflector application accumulates only its own values in the
+original order, so column j of a K-column solve is bit-for-bit the K=1 solve for b_j
+- checked over R, s, Qᵀb, x and the dropped residual at four shapes including a
+multi-block one. The b application deliberately does NOT skip `vi == 0.0` rows the
+way the trailing block update does; adding that skip would change a signed zero
+reaching the accumulator and silently break K=1 parity.
+
+PROVENANCE: `bench_elf_sha256=6992566c54e05686d678bc0536280d41f23f7edda37865af4dad123576c51174`
+(216,317,720 bytes), self-reported from inside the timed process and
+`sha256sum`-confirmed identical on all three hosts it passed through. Built by strict
+RCH on `ovh-a` under `--profile release-perf`, then copied to and measured on
+`vmi1152480` (hostname `frankenlibc-test`, 10 cores, Python 3.13.7, NumPy 2.4.6,
+AVX2, no AVX-512) because the build fleet was saturated. 21 interleaved rounds,
+min_of=1. The worker was `rch workers drain`-ed before the run.
+
+CONTENTION DISCLOSURE. All ten per-contract `HOST_WIDE_QUIESCENCE` preflights
+returned `verdict=clear`; the **maximum observed busy fraction across the whole run
+was 0.172** against the 0.200 ceiling, and seven of the ten read 0.033 or below. A
+`ps` check before the run was clean, but the check AFTER the run found an unrelated
+`rustc` at 225% that had appeared on the box - drain stops rch routing but does not
+stop an agent ssh-ing in directly. The per-contract preflight is what actually
+guards each row, and the last row's preflight read 0.000, but the tail of this run
+was not provably exclusive and that is disclosed rather than implied absent.
+
+NOT COMPARABLE TO THE BANKED 1-D ROW. The K=1 rows here (2.950/1.832/2.309) sit above
+the 2026-08-04 row's 2.08-2.56x, but that row was measured on `vmi1153651` and this
+one on `vmi1152480`. Host moves ratios by ~35% in this fleet, so the two entries must
+not be differenced; the K=1 rows above exist only as the in-invocation baseline the
+K>1 rows are compared against.
+
+SCOPE: full-rank tall-skinny C-contiguous `float64` with `m >= n`, `b` 1-D or 2-D
+`(M, K)` with K >= 1, default or explicit non-negative rcond. NOT measured: K > 8,
+complex, float32, non-contiguous, and wide (m < n). Rank-deficient multi-RHS is
+REPORTED rather than solved - the minimum-norm fallback is single-RHS and its m×m U
+is unallocatable at this m - so it defers to numpy, as do K == 0 and 3-D b.
+
+Retry predicate: reopen if a K sweep beyond 8 (or an n beyond 16) shows the ratio
+crossing 1.0, if the rank-deficient multi-RHS path gains a minimum-norm solver that
+does not form U, if numpy's lstsq gains a blocked multi-RHS path, or to extend the
+route to float32/complex. Do not re-run these exact shapes on this ELF.
+
+---
+
 ## 2026-08-04 - WIN (KEEP, INCUMBENT-WIN): flat f64 `np.unique` was dead code on every AVX2 host - regate on workers, 1.09-2.18x
 
 `CyanGrove`, bead `deadlock-audit-f64-unique-flat-avx2-surrender-hey9a`.
