@@ -80,36 +80,53 @@ fn submodules_identity_or_overlay_match_numpy() -> Result<(), String> {
     // set. (`split` is not usable — numpy.char has it but numpy.strings does not.)
     // The overridden names get the opposite assertion, which is what actually
     // protects the native fast paths from a silent verbatim re-export.
+    // THE DIAGNOSTIC PRINTS FIRST, and nothing below may raise before it does.
+    // An earlier version built one dict literal whose values touched
+    // `fnp.char.startswith` directly; on a host where `char` is missing that
+    // raised AttributeError during dict construction, killing the script before
+    // it could report WHY char was missing — the instrument defeated by the very
+    // failure it exists to explain. Every probe is now a lambda evaluated behind
+    // a guard, so a missing submodule yields a False check and a printed reason
+    // instead of a traceback.
     let script = fnp_script(
         r#"
+print("SUBMODULE_IMPORT_ERRORS", fnp.__submodule_import_errors__)
+print("numpy", np.__version__)
+
+def probe(fn):
+    try:
+        return bool(fn())
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+
 checks = {
-    # The submodules resolved at all. Empty dict is the healthy state; a
-    # non-empty one names the submodule and the reason it could not be imported.
-    'no_submodule_import_errors': fnp.__submodule_import_errors__ == {},
-    'strings_reachable': hasattr(fnp.strings, 'upper'),
-    'char_reachable': hasattr(fnp.char, 'upper'),
+    # Empty dict is the healthy state; a non-empty one names the submodule and
+    # the reason it could not be imported.
+    'no_submodule_import_errors': lambda: fnp.__submodule_import_errors__ == {},
+    'strings_reachable': lambda: hasattr(fnp.strings, 'upper'),
+    'char_reachable': lambda: hasattr(fnp.char, 'upper'),
     # Attributes the overlay does NOT touch must be numpy's own objects.
-    'strings_untouched_identity': fnp.strings.startswith is np.strings.startswith,
-    'strings_untouched_identity_2': fnp.strings.encode is np.strings.encode,
-    'char_untouched_identity': fnp.char.startswith is np.char.startswith,
-    'char_untouched_identity_2': fnp.char.encode is np.char.encode,
+    'strings_untouched_identity': lambda: fnp.strings.startswith is np.strings.startswith,
+    'strings_untouched_identity_2': lambda: fnp.strings.encode is np.strings.encode,
+    'char_untouched_identity': lambda: fnp.char.startswith is np.char.startswith,
+    'char_untouched_identity_2': lambda: fnp.char.encode is np.char.encode,
     # Attributes the overlay DOES override must NOT be numpy's — otherwise the
     # native ASCII fast path has been silently replaced by a verbatim re-export.
-    'strings_upper_is_native': fnp.strings.upper is not np.strings.upper,
-    'char_upper_is_native': fnp.char.upper is not np.char.upper,
-    'char_add_is_native': fnp.char.add is not np.char.add,
+    'strings_upper_is_native': lambda: fnp.strings.upper is not np.strings.upper,
+    'char_upper_is_native': lambda: fnp.char.upper is not np.char.upper,
+    'char_add_is_native': lambda: fnp.char.add is not np.char.add,
     # ...and overriding must not have changed the answer.
-    'char_upper_matches_numpy': np.array_equal(
+    'char_upper_matches_numpy': lambda: np.array_equal(
         fnp.char.upper(np.array(['ab', 'Cd'])), np.char.upper(np.array(['ab', 'Cd']))),
-    'char_add_matches_numpy': np.array_equal(
+    'char_add_matches_numpy': lambda: np.array_equal(
         fnp.char.add(np.array(['a']), np.array(['b'])), np.char.add(np.array(['a']), np.array(['b']))),
-    'rec':       fnp.rec       is np.rec,
-    'emath':     fnp.emath     is np.emath,
-    'matrixlib': fnp.matrixlib is np.matrixlib,
+    'rec':       lambda: fnp.rec       is np.rec,
+    'emath':     lambda: fnp.emath     is np.emath,
+    'matrixlib': lambda: fnp.matrixlib is np.matrixlib,
 }
-print({k: v for k, v in checks.items() if not v} or 'ALL_OK')
-print(fnp.__submodule_import_errors__)
-print(all(checks.values()))
+results = {k: probe(v) for k, v in checks.items()}
+print({k: v for k, v in results.items() if v is not True} or 'ALL_OK')
+print(all(v is True for v in results.values()))
 "#
         .into(),
     );
