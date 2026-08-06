@@ -541,11 +541,26 @@ A, B, C = (g.ravel().copy() for g in np.meshgrid(vals, vals, vals, indexing='ij'
 with np.errstate(all='ignore'):
     ours = fnp.multiply_add(A, B, C)
     theirs = A * B + C
-print(ours.dtype == theirs.dtype, ours.tobytes() == theirs.tobytes(), A.size)
+same = ours.tobytes() == theirs.tobytes()
+print(ours.dtype == theirs.dtype, same, A.size)
+if not same:
+    # Name the diverging triples instead of just reporting "False". Compared on
+    # RAW BITS, so a NaN payload or a signed-zero difference is visible rather
+    # than being swallowed by nan != nan / -0.0 == 0.0.
+    ob = ours.view(np.uint16); tb = theirs.view(np.uint16)
+    idx = np.nonzero(ob != tb)[0]
+    print(f"differing={idx.size}")
+    for i in idx[:12]:
+        print(f"  a={A[i]!r} b={B[i]!r} c={C[i]!r} ours=0x{ob[i]:04x} numpy=0x{tb[i]:04x}")
 "#
         .to_string(),
     );
-    assert_eq!(numpy_oracle(&script)?, "True True 1331");
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().next().unwrap_or_default(),
+        "True True 1331",
+        "f16 multiply_add special values must be byte-identical; output: {result}"
+    );
     Ok(())
 }
 
