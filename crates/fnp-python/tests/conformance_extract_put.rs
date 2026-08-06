@@ -49,7 +49,20 @@ def extract_outcome(fn, condition, arr):
     try:
         result = fn(condition, arr)
         out = np.asarray(result)
-        return ("ok", type(result).__name__, str(out.dtype), tuple(out.shape), out.tolist())
+        # Compare RAW BYTES, not tolist(). tolist() was both too weak and too
+        # strong on the "nan signed-zero payload" case: nan != nan made two
+        # byte-identical results compare unequal (a false FAILURE), while
+        # -0.0 == 0.0 meant the signed zero that case exists to check was never
+        # actually verified (a false PASS). tobytes() is exact on both. repr of
+        # the values rides along so a mismatch is still readable.
+        return (
+            "ok",
+            type(result).__name__,
+            str(out.dtype),
+            tuple(out.shape),
+            out.tobytes(),
+            repr(out.tolist()),
+        )
     except Exception as exc:
         return ("err", type(exc).__name__, str(exc))
 
@@ -68,6 +81,15 @@ cases = [
     ("nan signed-zero payload", lambda: ([True, False, True], [np.nan, 0.0, -0.0])),
     ("string payload", lambda: ([True, False, True], ["alpha", "beta", "gamma"])),
     ("scalar payload mismatch", lambda: ([True, False], 5)),
+    # extract's condition selects on TRUTHINESS, so a float 0.0 rejects and 2.5
+    # selects; an integer "!= 0" coercion and a bool cast agree here only by
+    # accident and diverge on the negative case below.
+    ("float condition truthiness", lambda: ([0.0, 2.5, 0.0], [1, 2, 3])),
+    ("negative condition is truthy", lambda: ([-1, 0, -2], [1, 2, 3])),
+    # A condition SHORTER than the payload truncates silently, but a LONGER one
+    # is an IndexError - the asymmetry is easy to implement as symmetric.
+    ("over-long condition raises", lambda: ([True, True, True, True], [1, 2])),
+    ("scalar payload scalar condition", lambda: (1, 5)),
 ]
 
 ok = True
