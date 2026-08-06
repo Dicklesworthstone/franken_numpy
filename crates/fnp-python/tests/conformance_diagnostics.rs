@@ -118,6 +118,80 @@ cases = [
             lambda: np.divide(np.array([1.0]), np.array([0.0])),
         ),
     ),
+    # The remaining IEEE division exceptions numpy turns into RuntimeWarnings.
+    # fnp.divide is a native f64 kernel whose VALUES are bit-identical; it has no
+    # way to raise an FE flag into numpy's error state, so each of these must
+    # defer the whole call back to numpy (deadlock-audit-2nmd1).
+    (
+        "divide_float_zero_over_zero_invalid_warning",
+        "arithmetic",
+        lambda: compare(
+            lambda: fnp.divide(np.array([0.0]), np.array([0.0])),
+            lambda: np.divide(np.array([0.0]), np.array([0.0])),
+        ),
+    ),
+    (
+        "divide_float_inf_over_inf_invalid_warning",
+        "arithmetic",
+        lambda: compare(
+            lambda: fnp.divide(np.array([np.inf]), np.array([np.inf])),
+            lambda: np.divide(np.array([np.inf]), np.array([np.inf])),
+        ),
+    ),
+    (
+        "divide_float_overflow_warning",
+        "arithmetic",
+        lambda: compare(
+            lambda: fnp.divide(np.array([1e308]), np.array([1e-10])),
+            lambda: np.divide(np.array([1e308]), np.array([1e-10])),
+        ),
+    ),
+    (
+        "divide_float_underflow_warning",
+        "arithmetic",
+        lambda: compare(
+            lambda: fnp.divide(np.array([1e-300]), np.array([1e100])),
+            lambda: np.divide(np.array([1e-300]), np.array([1e100])),
+        ),
+    ),
+    # Same deferral, but long enough to take the rayon-parallel branch of the
+    # kernel (>= 1<<21 elements) with the only zero divisor in the LAST chunk, so
+    # a per-chunk hazard flag that never reaches the caller is caught here.
+    (
+        "divide_float_zero_warning_parallel_tail",
+        "arithmetic",
+        lambda: compare(
+            lambda: fnp.divide(np.ones(1 << 21), np.concatenate([np.ones((1 << 21) - 1), np.zeros(1)])),
+            lambda: np.divide(np.ones(1 << 21), np.concatenate([np.ones((1 << 21) - 1), np.zeros(1)])),
+        ),
+    ),
+    # NEGATIVE cases: divides that raise NOTHING must stay silent on both arms.
+    # A NaN operand propagates quietly, inf/finite is an exact inf, and finite/inf
+    # is an exact zero — warning on any of them would be a fresh divergence.
+    (
+        "divide_float_nan_operand_no_warning",
+        "arithmetic",
+        lambda: compare(
+            lambda: fnp.divide(np.array([np.nan, 1.0]), np.array([2.0, np.nan])),
+            lambda: np.divide(np.array([np.nan, 1.0]), np.array([2.0, np.nan])),
+        ),
+    ),
+    (
+        "divide_float_infinite_operand_no_warning",
+        "arithmetic",
+        lambda: compare(
+            lambda: fnp.divide(np.array([np.inf, 1.0]), np.array([2.0, np.inf])),
+            lambda: np.divide(np.array([np.inf, 1.0]), np.array([2.0, np.inf])),
+        ),
+    ),
+    (
+        "divide_float_clean_no_warning",
+        "arithmetic",
+        lambda: compare(
+            lambda: fnp.divide(np.array([1.0, -7.0, 0.0]), np.array([2.0, 3.0, 5.0])),
+            lambda: np.divide(np.array([1.0, -7.0, 0.0]), np.array([2.0, 3.0, 5.0])),
+        ),
+    ),
     (
         "remainder_float_zero_warning",
         "arithmetic",

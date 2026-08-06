@@ -352,11 +352,12 @@ impl PyUFunc {
                 let a = x1.bind(py);
                 let b = x2.bind(py);
                 // remainder by zero must defer to numpy so its RuntimeWarning + nan surface
-                // exactly; scan the divisor buffer zero-copy (no extract). divide (BinaryOp::Div)
-                // deliberately does NOT scan: a/0->±inf, 0/0->nan are the EXACT IEEE values numpy
-                // produces (op.apply=lhs/rhs is bit-identical), and the divide tests ignore the
-                // RuntimeWarning (warnings.filterwarnings('ignore') / inf-nan-pattern checks). A
-                // scan would add a full divisor read and erase the modest divide win.
+                // exactly; scan the divisor buffer zero-copy (no extract). divide
+                // (BinaryOp::Div) needs the same deferral for the same reason — bit-identical
+                // values are not parity when numpy also raises a RuntimeWarning we cannot
+                // (deadlock-audit-2nmd1) — but it does NOT scan here: its check is FUSED into
+                // the divide kernel in zerocopy_f64_binary_flat, which returns None on a
+                // hazard, so a clean divide never pays a second read of the divisor.
                 let zero_divisor = if matches!(op, BinaryOp::Remainder) {
                     if let Ok(b_buf) = PyBuffer::<f64>::get(b)
                         && let Some(b_slice) = b_buf.as_slice(py)
@@ -9324,6 +9325,54 @@ fn try_zerocopy_f64_isclose(
     Ok(Some(output))
 }
 
+// True when `a / b` would raise an IEEE floating-point exception, given the
+// already-computed quotient `q`. Bit-identical VALUES are not enough for
+// `np.divide` parity: numpy's loops raise FE flags that its error state turns
+// into RuntimeWarnings (or errors, under `np.seterr` / `np.errstate`), and a
+// pure-Rust kernel has no way to push a flag into that state. Any element that
+// would raise one therefore defers the whole call back to numpy, which re-divides
+// and owns both the value and the warning (bead deadlock-audit-2nmd1).
+//
+// The four division exceptions, by IEEE 754 / numpy's `divide` loop:
+//   FE_DIVBYZERO  finite nonzero / ±0             -> ±inf
+//   FE_INVALID    ±0 / ±0, ±inf / ±inf            -> nan
+//   FE_OVERFLOW   finite / finite, result infinite
+//   FE_UNDERFLOW  finite nonzero / finite nonzero, result tiny
+// A NaN operand propagates quietly and raises nothing, so it is NOT a hazard.
+//
+// The underflow arm is deliberately conservative: it treats every subnormal or
+// flushed-to-zero quotient as a hazard, including the exact ones (`1e-320 / 1.0`)
+// that raise no flag. Over-deferring only costs a numpy recompute on operands
+// that are already subnormal; it can never diverge, because the arm we defer to
+// is the oracle itself.
+#[inline]
+fn f64_divide_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
+    // Fast accept, and the only test a clean divide pays: a NORMAL quotient is
+    // finite, nonzero and not subnormal, which rules out all four exceptions at
+    // once — every one of them lands on ±inf, nan, ±0 or a subnormal. Everything
+    // below is off the hot path.
+    if q.is_normal() {
+        return false;
+    }
+    if a.is_nan() || b.is_nan() {
+        return false;
+    }
+    if b == 0.0 {
+        // ±0/±0 is invalid, finite nonzero/±0 is divide-by-zero, ±inf/±0 is
+        // exactly ±inf and raises nothing.
+        return a.is_finite();
+    }
+    if a.is_infinite() {
+        return b.is_infinite();
+    }
+    if b.is_infinite() {
+        // finite / ±inf is an exact ±0.
+        return false;
+    }
+    // Both operands finite, divisor nonzero.
+    q.is_infinite() || (a != 0.0 && q.abs() < f64::MIN_POSITIVE)
+}
+
 // Two-input f64-output counterpart of zerocopy_f64_unary_flat. When a and b are
 // exact same-shape C-contiguous float64 ndarrays, read both buffers and write
 // `op.apply(a[i], b[i])` straight into the output buffer — no intermediate Rust
@@ -9332,7 +9381,8 @@ fn try_zerocopy_f64_isclose(
 // SAME BinaryOp kernel the extract path uses, so output is bit-identical by
 // construction. Returns Ok(None) — fall through to the extract path, all other
 // inputs unchanged — for non-float64, broadcasting/shape-mismatch, scalar, or
-// non-ndarray operands.
+// non-ndarray operands, and for a `Div` whose input would raise a
+// floating-point exception we cannot reproduce (see f64_divide_raises_fp_error).
 fn zerocopy_f64_binary_flat<'py>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
@@ -9361,6 +9411,11 @@ fn zerocopy_f64_binary_flat<'py>(
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "float64")?;
     let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    // Set by the Div arms below when an element would raise an FE flag that numpy
+    // turns into a warning. Detection is FUSED into the pass we already make over a
+    // and b, so hazard-free input pays one predictable branch per element instead of
+    // a second full read of the divisor.
+    let divide_hazard = std::sync::atomic::AtomicBool::new(false);
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -9424,15 +9479,43 @@ fn zerocopy_f64_binary_flat<'py>(
                 .zip(lhs.par_chunks(chunk))
                 .zip(rhs.par_chunks(chunk))
                 .for_each(|((o, l), r)| {
+                    if matches!(op, BinaryOp::Div) {
+                        let mut chunk_hazard = false;
+                        for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
+                            let q = x / y;
+                            chunk_hazard |= f64_divide_raises_fp_error(x, y, q);
+                            *s = q;
+                        }
+                        if chunk_hazard {
+                            divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        return;
+                    }
                     for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
                         *s = op.apply(x, y);
                     }
                 });
+        } else if matches!(op, BinaryOp::Div) {
+            let mut hazard = false;
+            for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
+                let (x, y) = (a_cell.get(), b_cell.get());
+                let q = x / y;
+                hazard |= f64_divide_raises_fp_error(x, y, q);
+                slot.set(q);
+            }
+            if hazard {
+                divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         } else {
             for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
                 slot.set(op.apply(a_cell.get(), b_cell.get()));
             }
         }
+    }
+    if divide_hazard.load(std::sync::atomic::Ordering::Relaxed) {
+        // Defer the WHOLE call: numpy re-divides, producing the same bits plus the
+        // RuntimeWarning (or seterr/errstate outcome) this kernel cannot raise.
+        return Ok(None);
     }
     Ok(Some((flat, shape)))
 }
@@ -107897,11 +107980,11 @@ mod tests {
         bincount, blas_is_single_threaded, build_numpy_array_from_ufunc, ceil_native, choose,
         compress, copysign, count_nonzero, degrees_native, diag, diag_indices, diag_indices_from,
         diagflat, diagonal, digitize, extract, extract_numeric_array,
-        extract_precise_numeric_array, fill_diagonal, flatnonzero, flip, fliplr, flipud,
-        floor_native, fnp_python, frexp, hypot, indices, interp, isfinite_native, isinf_native,
-        isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
-        masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
-        narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
+        extract_precise_numeric_array, f64_divide_raises_fp_error, fill_diagonal, flatnonzero,
+        flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interp,
+        isfinite_native, isinf_native, isnan_native, isneginf_native, isposinf_native, ix_, ldexp,
+        logaddexp, logaddexp2, masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf,
+        nan_to_num, narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
         python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
         required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
@@ -107922,6 +108005,72 @@ mod tests {
     use std::time::Instant;
 
     static PY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The divide fast path may only keep a result whose FE surface it can
+    /// reproduce, and it must keep the ones it can — a predicate that always
+    /// returned true would silence the warning gap by surrendering every divide
+    /// to numpy. Both directions are asserted here, on the pure predicate, so
+    /// neither can pass vacuously through a Python-level deferral.
+    #[test]
+    fn f64_divide_hazard_predicate_flags_exactly_the_ieee_exceptions() {
+        let hazard = |a: f64, b: f64| f64_divide_raises_fp_error(a, b, a / b);
+        let tiny = f64::MIN_POSITIVE;
+
+        // FE_DIVBYZERO — finite nonzero over either signed zero.
+        for &(a, b) in &[(1.0, 0.0), (1.0, -0.0), (-3.5, 0.0), (f64::MAX, -0.0)] {
+            assert!(hazard(a, b), "{a} / {b} must flag divide-by-zero");
+        }
+        // FE_INVALID — 0/0 and inf/inf, in every sign combination.
+        for &(a, b) in &[
+            (0.0, 0.0),
+            (-0.0, 0.0),
+            (0.0, -0.0),
+            (f64::INFINITY, f64::INFINITY),
+            (f64::NEG_INFINITY, f64::INFINITY),
+            (f64::INFINITY, f64::NEG_INFINITY),
+        ] {
+            assert!(hazard(a, b), "{a} / {b} must flag invalid");
+        }
+        // FE_OVERFLOW / FE_UNDERFLOW — finite operands, unrepresentable quotient.
+        assert!(hazard(f64::MAX, tiny), "overflow to inf must flag");
+        assert!(hazard(-f64::MAX, tiny), "signed overflow must flag");
+        assert!(hazard(tiny, f64::MAX), "underflow to zero must flag");
+        assert!(hazard(tiny, 4.0), "underflow to subnormal must flag");
+
+        // NEGATIVE CASES. A quiet NaN operand propagates and raises nothing —
+        // deferring on it would be wrong, not merely slow.
+        for &(a, b) in &[
+            (f64::NAN, 2.0),
+            (2.0, f64::NAN),
+            (f64::NAN, 0.0),
+            (f64::NAN, f64::NAN),
+        ] {
+            assert!(!hazard(a, b), "NaN operand in {a} / {b} raises nothing");
+        }
+        // Exact results at the edges: inf/0 is inf, inf/finite is inf, finite/inf
+        // is an exact zero, and 0/finite is an exact zero. None raise.
+        for &(a, b) in &[
+            (f64::INFINITY, 0.0),
+            (f64::NEG_INFINITY, -0.0),
+            (f64::INFINITY, 2.0),
+            (1.0, f64::INFINITY),
+            (tiny, f64::INFINITY),
+            (0.0, 5.0),
+            (-0.0, -5.0),
+        ] {
+            assert!(!hazard(a, b), "{a} / {b} is exact and must NOT flag");
+        }
+        // Ordinary arithmetic keeps the fast path.
+        for &(a, b) in &[
+            (1.0, 2.0),
+            (-7.0, 3.0),
+            (f64::MAX, 2.0),
+            (tiny, 0.5),
+            (1.0, tiny),
+        ] {
+            assert!(!hazard(a, b), "{a} / {b} is clean and must NOT flag");
+        }
+    }
 
     // Reference: numpy's pairwise tree over an ALREADY-compacted slice — the
     // same split rule as pairwise_simd_f64, spelled over a plain slice so the
