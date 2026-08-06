@@ -53,9 +53,45 @@ fn fnp_script(body: String) -> String {
 /// additions shows up as differing bits rather than being masked by rounding.
 #[test]
 fn masked_sum_is_byte_identical_across_sizes_and_densities() -> Result<(), String> {
+    // On a mismatch, classify it instead of just reporting the pair. `ref_pw`
+    // is NumPy's DOCUMENTED pairwise tree (<8 sequential, <=128 eight
+    // accumulators, else split at n/2 rounded down to a multiple of 8) written
+    // in pure NumPy, so it depends on no fnp code at all. That turns an
+    // otherwise-unfalsifiable "the bits differ" into a verdict:
+    //   OURS_WRONG   -- the reference agrees with this NumPy build, we do not,
+    //                   so the fused kernel genuinely mis-orders its additions.
+    //   NUMPY_DIFFERS-- we agree with the documented tree and this NumPy build
+    //                   does not, i.e. the installed build reduces in a
+    //                   different order and byte-identity is per-build.
+    //   BOTH_DIFFER  -- neither matches; treat as OURS_WRONG plus a build note.
+    // The reference is only evaluated for failing cases, so the common path
+    // costs nothing.
     let script = fnp_script(
         r#"
 rng = np.random.default_rng(20260802)
+
+def ref_pw(a, off, n):
+    if n < 8:
+        r = 0.0
+        for i in range(n):
+            r += a[off + i]
+        return r
+    if n <= 128:
+        body = n - (n % 8)
+        r = a[off:off + 8].copy()
+        for i in range(8, body, 8):
+            r += a[off + i:off + i + 8]
+        res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]))
+        for i in range(body, n):
+            res += a[off + i]
+        return res
+    n2 = n // 2
+    n2 -= n2 % 8
+    return ref_pw(a, off, n2) + ref_pw(a, off + n2, n - n2)
+
+def bits(x):
+    return np.float64(x).view(np.uint64)
+
 bad = []
 for n in [0, 1, 7, 8, 127, 128, 129, 1000, 4096, 100_000, 1_048_575, 1_048_576, 1_500_000]:
     for dens in [0.0, 0.001, 0.25, 0.5, 0.75, 1.0]:
@@ -63,8 +99,18 @@ for n in [0, 1, 7, 8, 127, 128, 129, 1000, 4096, 100_000, 1_048_575, 1_048_576, 
         m = rng.random(n) < dens
         ours = fnp.masked_sum(a, m)
         theirs = a[m].sum()
-        if np.float64(ours).view(np.uint64) != np.float64(theirs).view(np.uint64):
-            bad.append((n, dens))
+        if bits(ours) != bits(theirs):
+            picked = np.ascontiguousarray(a[m])
+            reference = ref_pw(picked, 0, picked.shape[0])
+            if bits(reference) == bits(theirs):
+                verdict = "OURS_WRONG"
+            elif bits(reference) == bits(ours):
+                verdict = "NUMPY_DIFFERS"
+            else:
+                verdict = "BOTH_DIFFER"
+            bad.append((n, dens, int(picked.shape[0]), verdict))
+if bad:
+    print(f"numpy={np.__version__} verdicts={sorted(set(v for *_, v in bad))}")
 print("CASES_OK" if not bad else f"MISMATCH {bad}")
 "#
         .to_string(),
