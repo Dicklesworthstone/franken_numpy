@@ -29624,7 +29624,31 @@ fn multiply_add_f16_into(out: &mut [u16], a: &[u16], b: &[u16], c: &[u16]) {
     #[inline]
     fn kernel(x: u16, y: u16, z: u16) -> u16 {
         let product = f16::from_f32(f16::from_bits(x).to_f32() * f16::from_bits(y).to_f32());
-        f16::from_f32(product.to_f32() + f16::from_bits(z).to_f32()).to_bits()
+        // WHICH NaN SURVIVES THE ADD IS NOT A LANGUAGE GUARANTEE, and the two
+        // sides disagree. When BOTH addends are NaN, NumPy's f16 add returns the
+        // SECOND operand VERBATIM — measured across signs and payloads
+        // (0x7e00/0xfe00/0x7e01/0xff00 in every ordered pair, second operand
+        // every time, payload bits preserved). Rust's `p + z` lowers to an
+        // addss whose operand order is the compiler's choice, and on x86 it
+        // yields the PRODUCT's NaN instead, so `0 * inf + nan` returned the
+        // invalid product's negative default QNaN (0xfe00) where NumPy returns
+        // the addend (0x7e00). Spell the rule out rather than inherit whatever
+        // the backend picked (deadlock-audit-oo52g).
+        //
+        // Only the both-NaN case needs this. With exactly one NaN operand both
+        // sides already agree, payload included, so those fall through.
+        //
+        // "Verbatim" means verbatim AFTER QUIETING: a SIGNALLING addend comes
+        // back quieted, so 0x7c01 must return 0x7e01, not 0x7c01. Setting the
+        // mantissa MSB is a no-op on an already-quiet NaN, so one OR covers
+        // both. (Returning z untouched passed the single-payload grid and still
+        // corrupted every signalling payload — hence the dedicated payload test.)
+        const F16_QUIET_BIT: u16 = 0x0200;
+        let addend = f16::from_bits(z);
+        if product.is_nan() && addend.is_nan() {
+            return z | F16_QUIET_BIT;
+        }
+        f16::from_f32(product.to_f32() + addend.to_f32()).to_bits()
     }
 
     use rayon::prelude::*;
@@ -101169,15 +101193,12 @@ fn resolve_numpy_submodule<'py>(
     name: &str,
 ) -> Result<Bound<'py, PyAny>, String> {
     match py.import(format!("numpy.{name}").as_str()) {
-        Ok(module) => return Ok(module.into_any()),
-        Err(import_err) => match numpy.getattr(name) {
-            Ok(value) => return Ok(value),
-            Err(attr_err) => {
-                return Err(format!(
-                    "import numpy.{name} failed ({import_err}); getattr fallback also failed ({attr_err})"
-                ));
-            }
-        },
+        Ok(module) => Ok(module.into_any()),
+        Err(import_err) => numpy.getattr(name).map_err(|attr_err| {
+            format!(
+                "import numpy.{name} failed ({import_err}); getattr fallback also failed ({attr_err})"
+            )
+        }),
     }
 }
 

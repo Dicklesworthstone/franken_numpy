@@ -529,6 +529,41 @@ print(ours.tobytes() == theirs.tobytes(), discriminating)
     Ok(())
 }
 
+/// When BOTH the product and the addend are NaN, NumPy's f16 add returns the
+/// ADDEND VERBATIM — sign and payload bits included. The special-values grid
+/// above uses only `np.nan` (0x7e00), so it cannot tell "return the addend"
+/// apart from "return a canonical positive quiet NaN": a fix that hard-coded
+/// 0x7e00 would pass it while silently destroying every other payload. This
+/// test carries distinct payloads (0x7e01, 0xff00, 0xfe00) so only the correct
+/// rule survives, and compares against NumPy rather than a hard-coded table.
+#[test]
+fn multiply_add_f16_both_nan_keeps_the_addend_payload() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Product is the invalid 0 * inf, so it is NaN for every row; the addend carries
+# a different payload each time.
+payloads = [0x7e00, 0xfe00, 0x7e01, 0xff00, 0x7c01]
+A = np.zeros(len(payloads), dtype=np.float16)
+B = np.full(len(payloads), np.inf, dtype=np.float16)
+C = np.array(payloads, dtype=np.uint16).view(np.float16)
+with np.errstate(all='ignore'):
+    ours = fnp.multiply_add(A, B, C)
+    theirs = A * B + C
+ob = ours.view(np.uint16); tb = theirs.view(np.uint16)
+print(ours.tobytes() == theirs.tobytes())
+print(" ".join(f"{o:04x}/{t:04x}" for o, t in zip(ob, tb)))
+"#
+        .to_string(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().next().unwrap_or_default(),
+        "True",
+        "f16 multiply_add must keep NumPy's addend NaN payload; ours/numpy: {result}"
+    );
+    Ok(())
+}
+
 /// f16 special values: inf, -inf, nan, signed zeros, and overflow of the narrow
 /// range (f16 maxes out near 65504, so ordinary products saturate to inf).
 #[test]
