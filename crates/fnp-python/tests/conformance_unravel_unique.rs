@@ -3165,3 +3165,107 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+/// The three `numpy.unique` return-flag surfaces that were NOT already locked
+/// elsewhere (deadlock-audit-d0mmf).
+///
+/// An audit of this bead found its fourth named surface — axis=0 row uniqueness
+/// with counts — already covered by an existing ndarray test, and the
+/// return_index/inverse/counts flags covered on ndarray inputs in
+/// `conformance_sort_search`. What remained unlocked was specifically:
+///
+///   1. NON-ndarray inputs carrying the return flags. The existing coverage is
+///      all ndarray; a list or tuple takes a different entry path, and this bead
+///      scopes itself to non-ndarray public surfaces.
+///   2. An int16 input, which is where the native small-range counting return
+///      path engages. A wide-dtype test never reaches it.
+///   3. `equal_nan`, which appears nowhere in any unique-related shard — the
+///      token is common in `allclose`/`isclose` tests, so a bare grep for it
+///      looks like coverage when the unique pairing is absent.
+///
+/// Comparison is on the FULL tuple: values, and each requested index array. A
+/// values-only assertion would pass while the index/inverse/counts arrays — the
+/// entire point of the flags — went unchecked.
+#[test]
+fn unique_return_flag_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def eq(g, w):
+    # NaN != NaN, so array_equal on a float result containing NaN reports a
+    # mismatch between two IDENTICAL arrays. That bit this test on its first run
+    # against the equal_nan cases, which exist precisely to produce NaN output.
+    g = np.asarray(g)
+    w = np.asarray(w)
+    if g.shape != w.shape or g.dtype != w.dtype:
+        return False
+    if np.issubdtype(g.dtype, np.inexact):
+        return np.array_equal(g, w, equal_nan=True)
+    return np.array_equal(g, w)
+
+def same(got, want):
+    if isinstance(want, tuple):
+        return len(got) == len(want) and all(eq(g, w) for g, w in zip(got, want))
+    return eq(got, want)
+
+ok = True
+bad = []
+
+# 1. Non-ndarray inputs with the return flags. list and tuple, each carrying a
+#    different subset, so no single flag combination stands in for the rest.
+for label, payload, kwargs in [
+    ("list all flags", [3, 1, 2, 1, 3],
+     {"return_index": True, "return_inverse": True, "return_counts": True}),
+    ("tuple index only", (5, 4, 5, 6),
+     {"return_index": True}),
+    ("nested list counts", [[2, 1], [1, 2]],
+     {"return_counts": True}),
+    ("list inverse only", [7, 7, 8],
+     {"return_inverse": True}),
+]:
+    got = fnp.unique(payload, **kwargs)
+    want = np.unique(payload, **kwargs)
+    if not same(got, want):
+        ok = False
+        bad.append((label, repr(got), repr(want)))
+
+# 2. int16 — the native small-range counting return path. Values are kept in a
+#    narrow band on purpose: that is the regime the counting path serves, and a
+#    wide-range int16 array would fall back to the generic route.
+narrow = np.array([5, 3, 5, 4, 3, 5], dtype=np.int16)
+got = fnp.unique(narrow, return_index=True, return_inverse=True, return_counts=True)
+want = np.unique(narrow, return_index=True, return_inverse=True, return_counts=True)
+if not same(got, want):
+    ok = False
+    bad.append(("int16 narrow range all flags", repr(got), repr(want)))
+if got[0].dtype != want[0].dtype:
+    ok = False
+    bad.append(("int16 dtype preserved", str(got[0].dtype), str(want[0].dtype)))
+
+# 3. equal_nan, both directions. With equal_nan=True numpy collapses the NaNs to
+#    one; with False it keeps every NaN distinct, so the two spellings return
+#    DIFFERENT lengths and a test fixing only one would not notice a wrong default.
+nans = np.array([1.0, np.nan, 2.0, np.nan])
+for flag in (True, False):
+    got = fnp.unique(nans, equal_nan=flag, return_counts=True)
+    want = np.unique(nans, equal_nan=flag, return_counts=True)
+    if not same(got, want):
+        ok = False
+        bad.append((f"equal_nan {flag}", repr(got), repr(want)))
+if len(np.unique(nans, equal_nan=True)) == len(np.unique(nans, equal_nan=False)):
+    ok = False
+    bad.append(("equal_nan probe is degenerate",
+                "True and False gave the same length",
+                "they must differ or this case proves nothing"))
+
+print("True" if ok else f"MISMATCH {bad}")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unique return-flag container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
