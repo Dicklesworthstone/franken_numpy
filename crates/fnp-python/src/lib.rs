@@ -9354,45 +9354,6 @@ fn try_zerocopy_f64_isclose(
 // `benches/criterion_python_elementwise.rs`, which the bench asserts before it
 // times anything. Change an arm of this predicate and both must move, or the
 // bench silently measures a branch we do not ship.
-/// Block width for the divide hazard pre-filter. 8 f64 is one AVX-512 register
-/// and two AVX2 ones; the reduction below lowers to a handful of integer vector
-/// ops either way.
-const DIVIDE_HAZARD_BLOCK: usize = 8;
-
-/// True when EVERY quotient in the block is normal, i.e. none of them can raise.
-///
-/// This is exactly `f64::is_normal()` per lane, written as an integer test on the
-/// raw bits: a normal f64 is precisely one whose biased exponent lies in
-/// `1..=0x7FE` (0 is zero-or-subnormal, 0x7FF is inf-or-nan), and
-/// `exp.wrapping_sub(1) < 0x7FE` is that range check in one comparison.
-///
-/// WHY THIS EXISTS, because the source-level fast accept inside
-/// [`f64_divide_raises_fp_error`] looks like it should already do the job and
-/// does not. LLVM if-converts that whole predicate into branchless vector masks
-/// and evaluates EVERY arm on EVERY element — the NaN checks, the `b == 0` test,
-/// both infinity tests and the subnormal comparison — for elements that will
-/// never need them. Measured on the release-perf bench ELF (deadlock-audit-ae85t):
-/// the former divide loop is 40 instructions / 7 vector, the fused one 186 / 91,
-/// both around a single `vdivpd`. Vectorisation was never lost; the rare arms
-/// were simply always running. `q.is_normal()` returning early in the source
-/// buys nothing once there is no branch left to take.
-///
-/// So this returns ONE bool for a whole block, and the caller branches on it. The
-/// taken path does no further work at all; only a block that actually contains a
-/// non-normal quotient pays for the full predicate. It is a conservative
-/// pre-filter — the unchanged scalar predicate remains the only thing that
-/// decides a hazard, so over-entering the slow path costs time and never changes
-/// an answer.
-#[inline]
-fn f64_divide_block_all_normal(quotients: &[f64; DIVIDE_HAZARD_BLOCK]) -> bool {
-    let mut all_normal = true;
-    for &q in quotients {
-        let exponent = (q.to_bits() >> 52) & 0x7FF;
-        all_normal &= exponent.wrapping_sub(1) < 0x7FE;
-    }
-    all_normal
-}
-
 #[inline]
 fn f64_divide_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
     // Fast accept, and the only test a clean divide pays: a NORMAL quotient is
@@ -9528,33 +9489,8 @@ fn zerocopy_f64_binary_flat<'py>(
                 .zip(rhs.par_chunks(chunk))
                 .for_each(|((o, l), r)| {
                     if matches!(op, BinaryOp::Div) {
-                        // Same blocking as the serial arm below, same reason.
                         let mut chunk_hazard = false;
-                        let mut quotients = [0.0_f64; DIVIDE_HAZARD_BLOCK];
-                        let (out_blocks, out_tail) = o.as_chunks_mut::<DIVIDE_HAZARD_BLOCK>();
-                        let (l_blocks, l_tail) = l.as_chunks::<DIVIDE_HAZARD_BLOCK>();
-                        let (r_blocks, r_tail) = r.as_chunks::<DIVIDE_HAZARD_BLOCK>();
-                        for ((out_block, l_block), r_block) in
-                            out_blocks.iter_mut().zip(l_blocks).zip(r_blocks)
-                        {
-                            for index in 0..DIVIDE_HAZARD_BLOCK {
-                                let q = l_block[index] / r_block[index];
-                                quotients[index] = q;
-                                out_block[index] = q;
-                            }
-                            if !f64_divide_block_all_normal(&quotients) {
-                                for index in 0..DIVIDE_HAZARD_BLOCK {
-                                    chunk_hazard |= f64_divide_raises_fp_error(
-                                        l_block[index],
-                                        r_block[index],
-                                        quotients[index],
-                                    );
-                                }
-                            }
-                        }
-                        for ((s, &x), &y) in
-                            out_tail.iter_mut().zip(l_tail.iter()).zip(r_tail.iter())
-                        {
+                        for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
                             let q = x / y;
                             chunk_hazard |= f64_divide_raises_fp_error(x, y, q);
                             *s = q;
@@ -9569,32 +9505,8 @@ fn zerocopy_f64_binary_flat<'py>(
                     }
                 });
         } else if matches!(op, BinaryOp::Div) {
-            // Blocked so the rare arms of the hazard predicate stay OUT of the hot
-            // loop — see f64_divide_block_all_normal for why the source-level fast
-            // accept does not achieve that on its own.
             let mut hazard = false;
-            let mut quotients = [0.0_f64; DIVIDE_HAZARD_BLOCK];
-            let (out_blocks, out_tail) = output.as_chunks::<DIVIDE_HAZARD_BLOCK>();
-            let (a_blocks, a_tail) = a_in.as_chunks::<DIVIDE_HAZARD_BLOCK>();
-            let (b_blocks, b_tail) = b_in.as_chunks::<DIVIDE_HAZARD_BLOCK>();
-            for ((out_block, a_block), b_block) in out_blocks.iter().zip(a_blocks).zip(b_blocks) {
-                for index in 0..DIVIDE_HAZARD_BLOCK {
-                    let q = a_block[index].get() / b_block[index].get();
-                    quotients[index] = q;
-                    out_block[index].set(q);
-                }
-                if !f64_divide_block_all_normal(&quotients) {
-                    for index in 0..DIVIDE_HAZARD_BLOCK {
-                        hazard |= f64_divide_raises_fp_error(
-                            a_block[index].get(),
-                            b_block[index].get(),
-                            quotients[index],
-                        );
-                    }
-                }
-            }
-            // Tail shorter than one block: the per-element form, unchanged.
-            for ((slot, a_cell), b_cell) in out_tail.iter().zip(a_tail).zip(b_tail) {
+            for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
                 let (x, y) = (a_cell.get(), b_cell.get());
                 let q = x / y;
                 hazard |= f64_divide_raises_fp_error(x, y, q);
@@ -108385,16 +108297,15 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DIVIDE_HAZARD_BLOCK, MaskedStream, NarrowSetOp, PyFromPyFunc, PyVectorize,
-        PythonNativeGemmOp, argwhere, bincount, blas_is_single_threaded,
-        build_numpy_array_from_ufunc, ceil_native, choose, compress, copysign, count_nonzero,
-        degrees_native, diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize,
-        extract, extract_numeric_array, extract_precise_numeric_array, f64_divide_block_all_normal,
-        f64_divide_raises_fp_error, fill_diagonal, flatnonzero, flip, fliplr, flipud, floor_native,
-        fnp_python, frexp, hypot, indices, interp, isfinite_native, isinf_native, isnan_native,
-        isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
-        masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
-        narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
+        MaskedStream, NarrowSetOp, PyFromPyFunc, PyVectorize, PythonNativeGemmOp, argwhere,
+        bincount, blas_is_single_threaded, build_numpy_array_from_ufunc, ceil_native, choose,
+        compress, copysign, count_nonzero, degrees_native, diag, diag_indices, diag_indices_from,
+        diagflat, diagonal, digitize, extract, extract_numeric_array,
+        extract_precise_numeric_array, f64_divide_raises_fp_error, fill_diagonal, flatnonzero,
+        flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interp,
+        isfinite_native, isinf_native, isnan_native, isneginf_native, isposinf_native, ix_, ldexp,
+        logaddexp, logaddexp2, masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf,
+        nan_to_num, narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
         python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
         required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
@@ -108479,53 +108390,6 @@ mod tests {
             (1.0, tiny),
         ] {
             assert!(!hazard(a, b), "{a} / {b} is clean and must NOT flag");
-        }
-    }
-
-    /// The block pre-filter may only skip the full predicate when NOTHING in the
-    /// block can raise, and it must catch a lone hazard in EVERY lane position.
-    ///
-    /// Off-by-one in the block loop is the obvious failure mode of the blocked
-    /// divide kernel and no Python-level test reaches it: a dropped lane would
-    /// only show up as a missing RuntimeWarning on one element in eight, which
-    /// every value-comparison test would still call a pass (deadlock-audit-ae85t).
-    #[test]
-    fn f64_divide_block_prefilter_catches_a_hazard_in_every_lane() {
-        let clean = [6.0_f64 / 3.0; DIVIDE_HAZARD_BLOCK];
-        assert!(
-            f64_divide_block_all_normal(&clean),
-            "an all-normal block must take the fast path"
-        );
-
-        // One representative of each thing the fast accept must NOT wave through:
-        // ±inf (divide-by-zero, overflow), nan (invalid), ±0 and a subnormal.
-        for poison in [
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-            f64::NAN,
-            0.0,
-            -0.0,
-            f64::MIN_POSITIVE / 2.0,
-        ] {
-            for lane in 0..DIVIDE_HAZARD_BLOCK {
-                let mut block = clean;
-                block[lane] = poison;
-                assert!(
-                    !f64_divide_block_all_normal(&block),
-                    "a {poison:?} quotient in lane {lane} must force the full predicate"
-                );
-            }
-        }
-
-        // The pre-filter is only a conservative gate: it agrees with is_normal()
-        // lane for lane, so it can never skip a block the scalar arm would flag.
-        for lane in 0..DIVIDE_HAZARD_BLOCK {
-            let mut block = clean;
-            block[lane] = f64::MIN_POSITIVE;
-            assert!(
-                f64_divide_block_all_normal(&block),
-                "MIN_POSITIVE is normal and must not be treated as a hazard in lane {lane}"
-            );
         }
     }
 
