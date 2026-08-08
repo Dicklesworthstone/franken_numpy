@@ -41,11 +41,10 @@ fn indent_python(body: &str) -> String {
     body.lines().map(|line| format!("    {line}\n")).collect()
 }
 
-fn stats_outcome_body(body: &str) -> String {
-    let indented = indent_python(body);
-    r#"import json
-
-def normalize(value):
+/// The outcome normalizer, shared by the verbatim-comparison scripts and by the
+/// FMA-bounded value comparison below, so the two can never drift apart in what
+/// they capture from a result.
+const NORMALIZE_PY: &str = r#"def normalize(value):
     if isinstance(value, tuple):
         return {"kind": "tuple", "items": [normalize(item) for item in value]}
     if isinstance(value, np.ndarray):
@@ -66,7 +65,13 @@ def normalize(value):
             "value": scalar_value,
         }
     return {"kind": "object", "type": type(value).__name__, "repr": repr(value)}
+"#;
 
+fn stats_outcome_body(body: &str) -> String {
+    let indented = indent_python(body);
+    r#"import json
+
+__NORMALIZE__
 try:
 __BODY__    print(json.dumps(
         {"status": "ok", "result": normalize(result)},
@@ -81,6 +86,7 @@ except Exception as exc:
         default=str,
     ))
 "#
+    .replace("__NORMALIZE__", NORMALIZE_PY)
     .replace("__BODY__", &indented)
 }
 
@@ -103,6 +109,127 @@ fn numpy_stats_outcome_script(body: &str) -> String {
 
 fn fnp_stats_outcome_script(body: &str) -> String {
     fnp_script(format!("MODULE = fnp\n{}", stats_outcome_body(body)))
+}
+
+/// Builds a single-process script that evaluates `body` against BOTH numpy and
+/// fnp and reports the comparison in four lines:
+///
+/// 1. `STRUCT_OK` / `STRUCT_MISMATCH` — status, error type/message, kind, dtype,
+///    shape and leaf count compared verbatim. None of those are FMA-affected, so
+///    exactness there is correct and is retained.
+/// 2. worst deviation over the numeric leaves, expressed in ULPs of the result
+///    dtype (`inf` when a leaf is not comparable at all).
+/// 3. how many numeric leaves were actually compared.
+/// 4. both skeletons (two lines), so a failure names what diverged.
+///
+/// Both arms run in one interpreter against one numpy build: the ULP figure is a
+/// property of the two implementations, not of two processes.
+fn stats_value_comparison_script(body: &str) -> String {
+    let indented: String = body
+        .lines()
+        .map(|line| format!("        {line}\n"))
+        .collect();
+    fnp_script(
+        r#"import json
+import math
+
+__NORMALIZE__
+def outcome(MODULE):
+    try:
+__BODY__        return {"status": "ok", "result": normalize(result)}
+    except Exception as exc:
+        message = str(exc).splitlines()[0] if str(exc) else ""
+        return {"status": "err", "type": type(exc).__name__, "message": message}
+
+def leaves_of(node):
+    kind = node.get("kind")
+    if kind == "ndarray":
+        found = []
+        def walk(value):
+            if isinstance(value, list):
+                for item in value:
+                    walk(item)
+            else:
+                found.append((value, node["dtype"]))
+        walk(node["values"])
+        return (
+            {
+                "kind": "ndarray",
+                "dtype": node["dtype"],
+                "shape": node["shape"],
+                "leaf_count": len(found),
+            },
+            found,
+        )
+    if kind == "scalar":
+        return (
+            {"kind": "scalar", "type": node["type"], "dtype": node["dtype"]},
+            [(node["value"], node["dtype"])],
+        )
+    if kind == "tuple":
+        skeletons = []
+        found = []
+        for item in node["items"]:
+            skeleton, items = leaves_of(item)
+            skeletons.append(skeleton)
+            found.extend(items)
+        return ({"kind": "tuple", "items": skeletons}, found)
+    return (node, [])
+
+def split_outcome(out):
+    if out.get("status") != "ok":
+        return (out, [])
+    skeleton, found = leaves_of(out["result"])
+    return ({"status": "ok", "result": skeleton}, found)
+
+def eps_of(dtype):
+    # Integer, bool and object leaves have no rounding budget: None means the
+    # comparison falls back to exact equality rather than a tolerance.
+    try:
+        return float(np.finfo(np.dtype(dtype)).eps)
+    except Exception:
+        return None
+
+def deviation_ulps(ours, theirs, dtype):
+    eps = eps_of(dtype)
+    numeric = (
+        eps is not None
+        and not isinstance(ours, bool)
+        and not isinstance(theirs, bool)
+        and isinstance(ours, (int, float))
+        and isinstance(theirs, (int, float))
+    )
+    if not numeric:
+        return 0.0 if ours == theirs else float("inf")
+    if math.isnan(ours) and math.isnan(theirs):
+        return 0.0
+    if not math.isfinite(ours) or not math.isfinite(theirs):
+        return 0.0 if ours == theirs else float("inf")
+    scale = max(abs(theirs), 1e-300)
+    return abs(ours - theirs) / scale / eps
+
+numpy_skeleton, numpy_leaves = split_outcome(outcome(np))
+fnp_skeleton, fnp_leaves = split_outcome(outcome(fnp))
+numpy_json = json.dumps(numpy_skeleton, sort_keys=True, default=str)
+fnp_json = json.dumps(fnp_skeleton, sort_keys=True, default=str)
+
+if numpy_json != fnp_json:
+    print("STRUCT_MISMATCH")
+    print("inf")
+    print(0)
+else:
+    print("STRUCT_OK")
+    worst = 0.0
+    for (ours, _), (theirs, dtype) in zip(fnp_leaves, numpy_leaves):
+        worst = max(worst, deviation_ulps(ours, theirs, dtype))
+    print(repr(worst))
+    print(len(numpy_leaves))
+print("numpy: " + numpy_json)
+print("fnp:   " + fnp_json)
+"#
+        .replace("__NORMALIZE__", NORMALIZE_PY)
+        .replace("__BODY__", &indented),
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -166,16 +293,54 @@ print(np.allclose(result, expected))
 // cov
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// What a container-keyword case is allowed to assert.
+#[derive(Clone, Copy)]
+enum StatsCaseContract {
+    /// Compare the whole normalized outcome verbatim. Correct for error surfaces:
+    /// an exception type and message are not FMA-affected, so exactness there
+    /// costs nothing and catches a wrong error class immediately.
+    ExactOutcome,
+    /// Numeric cov/corrcoef output. Status, dtype, shape and leaf count are still
+    /// compared exactly; only the numbers get the tolerance. `leaf_count` pins how
+    /// many numbers actually get compared, so a `normalize` regression that emits
+    /// an empty value list cannot make the case pass having checked nothing.
+    FmaBoundedValues { leaf_count: usize },
+}
+
+/// Deviation budget for the container-keyword numeric cases, in ULPs of the
+/// RESULT dtype.
+///
+/// These cases go through the same FMA-contracted path as the sweeps guarded by
+/// [`COV_FMA_RELATIVE_BOUND`] — numpy's `cov` computes `dot(X, X.T)` as a 2-D
+/// matmul, which reaches BLAS dgemm and contracts, while our Gram accumulates in
+/// plain no-FMA Rust. On `cov([1,2,4], y=[2,1,0], ddof=0)` entry `[0][0]` that is
+/// one rounding per term versus two: 1.5555555555555554 (ours) against
+/// 1.5555555555555556 (numpy). Bit-equality is not merely unachieved here, it is
+/// not well-defined — BLAS picks micro-kernels by shape, so the "correct" bytes
+/// move with shape, BLAS build and host. This test failed on vmi1227854 and
+/// passed on hz2 with no change to it.
+///
+/// The budget is expressed in ULPs rather than reusing `COV_FMA_RELATIVE_BOUND`
+/// directly because one case returns float32, where 1e-12 sits five orders BELOW
+/// the dtype's own resolution and would silently re-impose the bit-equality
+/// demand this contract exists to remove. 64 ULPs is ~20x the couple of
+/// contraction roundings reachable at these sizes (every case here has 2-3
+/// observations) and ~11 orders below where a wrong formula lands, so a real
+/// defect still fails loudly. The observed worst is printed on every run.
+const COV_CONTAINER_VALUE_ULP_BOUND: f64 = 64.0;
+
 #[test]
 fn cov_corrcoef_python_container_keyword_outcomes_match_numpy() -> Result<(), String> {
     let cases = [
         (
             "cov rowvar false bias",
             "result = MODULE.cov(((1.0, 2.0, 3.0), (2.0, 4.0, 6.0)), rowvar=False, bias=True)",
+            StatsCaseContract::FmaBoundedValues { leaf_count: 9 },
         ),
         (
             "cov y ddof",
             "result = MODULE.cov([1.0, 2.0, 4.0], y=[2.0, 1.0, 0.0], ddof=0)",
+            StatsCaseContract::FmaBoundedValues { leaf_count: 4 },
         ),
         (
             "cov fweights aweights",
@@ -184,33 +349,80 @@ fn cov_corrcoef_python_container_keyword_outcomes_match_numpy() -> Result<(), St
     fweights=[1, 2, 1],
     aweights=[1.0, 0.5, 2.0],
 )",
+            StatsCaseContract::FmaBoundedValues { leaf_count: 4 },
         ),
         (
             "cov weight shape error",
             "result = MODULE.cov([1.0, 2.0], fweights=[1, 2, 3])",
+            StatsCaseContract::ExactOutcome,
         ),
         (
             "corrcoef rowvar false dtype",
             "result = MODULE.corrcoef(np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 8.0]]), rowvar=False, dtype=np.float32)",
+            StatsCaseContract::FmaBoundedValues { leaf_count: 4 },
         ),
         (
+            // numpy removed corrcoef's `ddof` in 2.0, so on every supported oracle
+            // this is an error surface, not a value: fnp must reject it the same way.
             "corrcoef y ddof compatibility",
             "result = MODULE.corrcoef([1.0, 2.0, 3.0], y=[3.0, 2.0, 1.0], ddof=0)",
+            StatsCaseContract::ExactOutcome,
         ),
         (
             "corrcoef y shape error",
             "result = MODULE.corrcoef([1.0, 2.0], y=[1.0, 2.0, 3.0])",
+            StatsCaseContract::ExactOutcome,
         ),
     ];
 
-    for (name, body) in cases {
-        let numpy_result = numpy_oracle(&numpy_stats_outcome_script(body))?;
-        let fnp_result = numpy_oracle(&fnp_stats_outcome_script(body))?;
+    for (name, body, contract) in cases {
+        match contract {
+            StatsCaseContract::ExactOutcome => {
+                let numpy_result = numpy_oracle(&numpy_stats_outcome_script(body))?;
+                let fnp_result = numpy_oracle(&fnp_stats_outcome_script(body))?;
 
-        assert_eq!(
-            fnp_result, numpy_result,
-            "cov/corrcoef outcome mismatch for {name}\nnumpy: {numpy_result}\nfnp:   {fnp_result}"
-        );
+                assert_eq!(
+                    fnp_result, numpy_result,
+                    "cov/corrcoef outcome mismatch for {name}\n\
+                     numpy: {numpy_result}\nfnp:   {fnp_result}"
+                );
+            }
+            StatsCaseContract::FmaBoundedValues { leaf_count } => {
+                let output = numpy_oracle(&stats_value_comparison_script(body))?;
+                let mut lines = output.lines();
+
+                assert_eq!(
+                    lines.next().unwrap_or_default(),
+                    "STRUCT_OK",
+                    "cov/corrcoef outcome structure mismatch for {name} — status, error \
+                     type/message, dtype, shape and leaf count are compared exactly and \
+                     one of them differs, which the FMA bound does not excuse\n{output}"
+                );
+
+                let worst_ulps: f64 = lines.next().unwrap_or_default().parse().map_err(|e| {
+                    format!("could not parse worst ULP deviation for {name}: {e}; output: {output}")
+                })?;
+                let compared: usize = lines.next().unwrap_or_default().parse().map_err(|e| {
+                    format!("could not parse compared leaf count for {name}: {e}; output: {output}")
+                })?;
+
+                assert_eq!(
+                    compared, leaf_count,
+                    "{name} compared {compared} numbers, expected {leaf_count} — the tolerance \
+                     is only meaningful over the values it actually reaches\n{output}"
+                );
+                assert!(
+                    worst_ulps <= COV_CONTAINER_VALUE_ULP_BOUND,
+                    "{name} exceeded the named FMA-contraction budget: observed \
+                     {worst_ulps:.3} ULP > {COV_CONTAINER_VALUE_ULP_BOUND} ULP of the result \
+                     dtype. That is far more than a contraction difference, so suspect the \
+                     formula, not the rounding\n{output}"
+                );
+                eprintln!(
+                    "cov/corrcoef container case {name}: worst {worst_ulps:.3} ULP over {compared} values"
+                );
+            }
+        }
     }
     Ok(())
 }
