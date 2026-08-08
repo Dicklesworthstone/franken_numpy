@@ -59427,24 +59427,41 @@ fn argpartition(
 }
 
 #[pyfunction]
-#[pyo3(signature = (file, arr, allow_pickle=true, fix_imports=true))]
+// `fix_imports` is Option, not a defaulted bool, and is forwarded ONLY when the
+// caller actually supplied it. numpy REMOVED it from save in 2.4
+// (inspect.signature reads (file, arr, allow_pickle=True)), while np.load still
+// takes it. Sending it unconditionally - which is what a defaulted bool made
+// this fallback do - turned every fnp.save() with a string path into a
+// TypeError on 2.4, because a str has no .write and so always takes the
+// fallback. Forwarding only what was passed keeps numpy <= 2.3 behaving exactly
+// as before and lets 2.4+ raise its own error for the spelling it removed -
+// the same shape corrcoef/reshape/nanpercentile use for their removed keywords.
+#[pyo3(signature = (file, arr, allow_pickle=true, fix_imports=None))]
 fn save(
     py: Python<'_>,
     file: Py<PyAny>,
     arr: Py<PyAny>,
     allow_pickle: bool,
-    fix_imports: bool,
+    fix_imports: Option<bool>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("allow_pickle", allow_pickle)?;
-        kwargs.set_item("fix_imports", fix_imports)?;
+        if let Some(fix_imports_val) = fix_imports {
+            kwargs.set_item("fix_imports", fix_imports_val)?;
+        }
         Ok(numpy
             .getattr("save")?
             .call((file.bind(py), arr.bind(py)), Some(&kwargs))?
             .unbind())
     };
+
+    // A supplied fix_imports has to reach numpy so numpy decides whether it is
+    // still legal on this build; the native writer below cannot make that call.
+    if fix_imports.is_some() {
+        return fallback();
+    }
 
     let file_bound = file.bind(py);
     if !file_bound.hasattr("write")? {

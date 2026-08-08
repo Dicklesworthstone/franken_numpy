@@ -488,3 +488,116 @@ print(np.array_equal(result, expected))
     );
     Ok(())
 }
+
+// Every other save test in this file writes to a BytesIO, which has .write and
+// so takes fnp's native writer. A STRING PATH does not, and takes the numpy
+// fallback - which used to forward fix_imports unconditionally and therefore
+// raised TypeError on numpy >= 2.4, where save dropped that parameter. This
+// covers the path-string form for its own sake, and asserts fix_imports=
+// produces whatever the INSTALLED numpy produces (accepted on <= 2.3, TypeError
+// on 2.4+) rather than pinning one build's verdict. np.load is deliberately
+// exercised with fix_imports= too, because numpy did NOT remove it there and a
+// blanket "strip fix_imports" fix would have broken load.
+#[test]
+fn save_path_string_roundtrips_and_tracks_numpys_fix_imports_contract() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+import os
+import tempfile
+
+values = np.array([1.5, -2.0, 3.25, 4.0], dtype=np.float64)
+
+def save_path_string(module, path):
+    module.save(path, values)
+    return np.load(path).tolist()
+
+def save_path_string_allow_pickle(module, path):
+    module.save(path, values, allow_pickle=True)
+    return np.load(path).tolist()
+
+def save_path_no_suffix(module, path):
+    # numpy appends .npy when the name lacks it; the fallback must keep that.
+    stem = path[:-4]
+    module.save(stem, values)
+    return (os.path.exists(stem + ".npy"), np.load(stem + ".npy").tolist())
+
+def save_file_object(module, path):
+    with open(path, "wb") as handle:
+        module.save(handle, values)
+    return np.load(path).tolist()
+
+def save_int_array(module, path):
+    module.save(path, np.array([[1, 2], [3, 4]], dtype=np.int32))
+    restored = np.load(path)
+    return (str(restored.dtype), restored.tolist())
+
+def save_fix_imports_true(module, path):
+    module.save(path, values, fix_imports=True)
+    return np.load(path).tolist()
+
+def save_fix_imports_false(module, path):
+    module.save(path, values, fix_imports=False)
+    return np.load(path).tolist()
+
+def load_fix_imports(module, path):
+    np.save(path, values)
+    return module.load(path, fix_imports=True).tolist()
+
+cases = [
+    ("save(path_string)", save_path_string),
+    ("save(path_string, allow_pickle=True)", save_path_string_allow_pickle),
+    ("save(name without .npy)", save_path_no_suffix),
+    ("save(file object)", save_file_object),
+    ("save int32 via path", save_int_array),
+    ("save fix_imports=True", save_fix_imports_true),
+    ("save fix_imports=False", save_fix_imports_false),
+    ("load fix_imports=True", load_fix_imports),
+]
+
+def outcome(module, call):
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "data.npy")
+        try:
+            return ("ok", call(module, path))
+        except Exception as exc:
+            return ("err", type(exc).__name__)
+
+ok = True
+for label, call in cases:
+    actual = outcome(fnp, call)
+    expected = outcome(np, call)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+
+# The regression itself, stated independently of numpy: a plain path save must
+# simply work.
+try:
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "plain.npy")
+        fnp.save(path, values)
+        if not np.array_equal(np.load(path), values):
+            print("fnp.save(path) round-trip lost values")
+            ok = False
+except Exception as exc:
+    print(f"fnp.save(path) raised {type(exc).__name__}: {exc}")
+    ok = False
+
+print(ok)
+print("oracle", platform.node(), np.__version__)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "save path-string and fix_imports contract should match numpy ({provenance}): {result}"
+    );
+    Ok(())
+}
