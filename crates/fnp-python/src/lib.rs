@@ -104296,7 +104296,24 @@ fn unique_values(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    array_api_unique_route(py, args, kwargs, "unique_values", false, false, false, None)
+    // numpy's array-API `unique_values` leaves the RESULT ORDER UNSPECIFIED, and
+    // numpy 2.4.3 does not sort: `np.unique_values([3, 1, 2, 1, 3])` is
+    // `[2, 1, 3]`. The shared native route returns the SORTED set — numpy.unique's
+    // contract, not this function's — so it diverged on any input whose sorted
+    // order differs from numpy's (deadlock-audit-poqjt).
+    //
+    // Reproducing an order upstream has explicitly reserved the right to change
+    // is the trap deadlock-audit-hp9u2 named: where the contract says
+    // "unspecified", the installed numpy IS the contract, so ask it. Delegating
+    // also makes this correct across numpy versions for free.
+    //
+    // NOT VERIFIED for the siblings: unique_all, unique_counts and unique_inverse
+    // share the same array-API order guarantee and the same native route. Their
+    // tests pass today, but that may only mean their inputs do not discriminate
+    // sorted order from numpy's — check them with an input like [3, 1, 2, 1, 3]
+    // before assuming they are safe.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("unique_values")?.call(args, kwargs)?.unbind())
 }
 
 // Zero-copy short-kernel convolve/correlate. The fnp-ufunc `convolve_mode` SIMD
