@@ -36909,3 +36909,97 @@ forms. RETRY PREDICATE for re-opening as a loss: the same contract on a
 host-exclusive box returning a ratio at or below 1.0 at either measured size, or
 a NumPy release that threads or fuses boolean-gather-then-reduce.
 AGENT_NAME=SilentBadger.
+
+## 2026-08-08 - MEASURED (maintenance-self-speedup, a REGRESSION): the f64 divide FE-hazard branch costs 1.96-3.39x of the former kernel serially (`deadlock-audit-jw7vk`)
+
+`deadlock-audit-2nmd1` made the f64 divide fast path defer to NumPy on any element
+that would raise an IEEE FP exception, because bit-identical VALUES are not parity
+when NumPy also emits a RuntimeWarning a pure-Rust kernel cannot raise into its
+error state. That landed UNMEASURED - the fleet was saturated - and this row closes
+that gap.
+
+**Campaign result class:** maintenance-self-speedup
+
+This is NOT a competitive claim and must never be quoted against NumPy. The base arm
+is OUR OWN FORMER CODE (the pre-2nmd1 unfused divide loop), so the number says how
+much a correctness fix cost us against ourselves. The deferral is a correctness
+requirement with a named probe (`cargo test -p fnp-python --test conformance_diagnostics`)
+and is not reopened by any of this.
+
+Instrument: `crates/fnp-python/benches/criterion_python_elementwise.rs`, groups
+`bench_divide_fe_hazard_serial` and `bench_divide_fe_hazard_parallel`, built at
+`--profile release-perf`, timed by `common::run_median_ci_contract` with the A/A
+null run in the SAME invocation. Operands are hazard-free by construction (every
+quotient in (0.5, 2), hence normal), which is deliberately the worst case: the path
+that pays the added test on every element and never gets to skip work.
+
+Ratio is former/candidate, so BELOW 1.0 means the shipped code is slower.
+
+vmi1293453 (8 logical, EPYC-IBPB), serial n=1<<20:
+null_base_aa ratio_median=0.997901 ci95=[0.960594,1.013642] cv=8.390
+effect ratio_median=0.511247 ci95=[0.461884,0.531033] cv=19.012
+arm medians former=0.745165ms candidate=1.331632ms
+
+hz1 (8 logical, EPYC-Milan), serial n=1<<20:
+null_base_aa ratio_median=1.002236 ci95=[0.994719,1.009837] cv=10.505
+effect ratio_median=0.295495 ci95=[0.267860,0.305764] cv=11.847
+MEDIAN_CI_GATE verdict=DECIDABLE_REGRESSION null_half_width=0.009837 required_2x_delta=0.019675
+
+vmi1293453, parallel n=1<<22 (PROVISIONAL, single sample - hz1 blocked before reaching it):
+null_base_aa ratio_median=1.019391 ci95=[0.930542,1.062053]
+effect ratio_median=0.702888 ci95=[0.667230,0.771515]
+
+DIRECTION AND DECIDABILITY REPLICATE across two quiet hosts; MAGNITUDE DOES NOT
+(1.96x vs 3.39x for the same source). Quote each host separately; do not average
+them. Checksums matched former vs candidate in every round, so the cost buys
+bit-identical output.
+
+ROUTE SHARE, so the kernel ratio is not misread as the whole call's:
+serial kernel_share=0.941 (vmi1293453) and 0.615 (hz1); parallel kernel_share=0.601.
+A kernel ratio without its share is a FRAME % masquerading as a REMOVABLE %.
+
+SCOPE LIMIT: the bench arms operate on plain slices. The shipped PARALLEL path does
+too, so the parallel figure transfers. The shipped SERIAL path iterates `Cell<f64>`,
+so the serial figures are the cost of the LOOP SHAPE, not a measured property of the
+shipped serial loop.
+
+RETRY PREDICATE: re-open only with a lever that removes the per-element predicate
+without breaking the divide loop's vectorisation - see the REJECT row below for what
+does not work. Removing or narrowing the deferral itself is not on the table.
+AGENT_NAME=CoralOak.
+
+## 2026-08-08 - REJECT (measured, reverted): per-block normality pre-filter for the divide FE-hazard check made the emitted code worse (`deadlock-audit-ae85t`)
+
+Hypothesis: LLVM if-converts `f64_divide_raises_fp_error` into branchless vector
+masks and evaluates every rare arm on every element, so hoisting the fast accept to
+a per-block reduction with a REAL branch would keep those arms out of the hot loop
+and recover the cost measured in the row above.
+
+REJECTED. The blocked form destroyed the packed divide instead of protecting it, and
+was reverted in commit 05217aa9.
+
+COUNTED_MECHANISM: insns 1440 -> 2211, vector 187 -> 319, vdivpd 1 -> 0, vdivsd 1 -> 15 (`class=vectorisation_destroyed_by_block_roundtrip`).
+Instruction counts for `zerocopy_f64_binary_flat`, both halves built in the SAME environment (one
+bounded local release-perf build each, distinct binaries, sha256 prefixes 61a1e5e3
+and a813742d): commit 2ff37d87 (per-element) insns=1440 vector=187 vdivpd=1 vdivsd=1;
+commit 4c3dada7 (blocked) insns=2211 vector=319 vdivpd=0 vdivsd=15. The blocked form
+grew the function 54% in instructions and 71% in vector ops while dropping the packed
+divide entirely.
+
+MECHANISM: copying each block's quotients into a local `[f64; 8]` and re-reading them
+for the normality reduction broke the divide loop's own vectorisation. The rare-arm
+masking the hypothesis targeted is real - the disassembly that motivated it showed 7
+vector instructions becoming 91 around a single `vdivpd` - but this particular hoist
+costs more than it saves.
+
+ENVIRONMENT WARNING that invalidated three earlier attempts at this measurement:
+local and remote toolchains here emit different code for identical source (local read
+2211 where every remote build read 2207), so any before/after instruction comparison
+MUST build both halves in the same environment.
+
+RETRY PREDICATE: do not re-attempt a per-block pre-filter that round-trips quotients
+through a stack array - that is the thing that broke vectorisation. Untried directions
+are widening the fast accept, or a reduction operating on the quotients in place.
+Correctness gate for any attempt: `conformance_diagnostics` green with the deferral
+still firing (flip it off, watch the 6 divergence rows return, flip it on).
+AGENT_NAME=CoralOak.
