@@ -807,3 +807,150 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+// numpy gives take/choose/compress/fix an out= parameter, and for take and
+// choose it sits BEFORE mode - so np.take(a, idx, 0, buf) is a positional out=,
+// and a wrapper that omits out entirely both rejects the keyword AND binds a
+// positional buffer to `mode`. This walks both spellings, the `result is out`
+// identity numpy guarantees, the values actually written, a dtype numpy is
+// allowed to cast into, and the bad-shape error class.
+#[test]
+fn take_choose_compress_fix_out_parameter_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+
+values = np.array([10.0, 20.0, 30.0, 40.0])
+grid = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+
+def take_keyword(module):
+    out = np.zeros(2)
+    result = module.take(values, [0, 2], out=out)
+    return (result is out, out.tolist())
+
+def take_positional_out(module):
+    # numpy's 4th positional IS out; a wrapper missing out would bind this to mode.
+    out = np.zeros(2)
+    result = module.take(values, [0, 2], None, out)
+    return (result is out, out.tolist())
+
+def take_out_with_mode(module):
+    out = np.zeros(2)
+    result = module.take(values, [0, 7], out=out, mode="clip")
+    return (result is out, out.tolist())
+
+def take_axis_out(module):
+    out = np.zeros((2, 2))
+    result = module.take(grid, [0, 2], axis=1, out=out)
+    return (result is out, out.tolist())
+
+def take_int_out(module):
+    source = np.array([1, 2, 3, 4], dtype=np.int64)
+    out = np.zeros(2, dtype=np.int64)
+    result = module.take(source, [1, 3], out=out)
+    return (result is out, str(out.dtype), out.tolist())
+
+def take_cast_out(module):
+    out = np.zeros(2, dtype=np.int32)
+    result = module.take(values, [0, 2], out=out)
+    return (result is out, str(out.dtype), out.tolist())
+
+def take_bad_out_shape(module):
+    out = np.zeros(5)
+    result = module.take(values, [0, 2], out=out)
+    return (result is out, out.tolist())
+
+def choose_keyword(module):
+    out = np.zeros(3)
+    result = module.choose([0, 1, 0], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], out=out)
+    return (result is out, out.tolist())
+
+def choose_positional_out(module):
+    # numpy's 3rd positional IS out.
+    out = np.zeros(3)
+    result = module.choose([0, 1, 0], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], out)
+    return (result is out, out.tolist())
+
+def choose_int_out(module):
+    out = np.zeros(3, dtype=np.int64)
+    result = module.choose([1, 0, 1], [[1, 2, 3], [4, 5, 6]], out=out)
+    return (result is out, str(out.dtype), out.tolist())
+
+def compress_keyword(module):
+    out = np.zeros(2)
+    result = module.compress([True, False, True, False], values, out=out)
+    return (result is out, out.tolist())
+
+def compress_positional_out(module):
+    out = np.zeros(2)
+    result = module.compress([True, False, True, False], values, None, out)
+    return (result is out, out.tolist())
+
+def compress_axis_out(module):
+    out = np.zeros((2, 2))
+    result = module.compress([True, False, True], grid, axis=1, out=out)
+    return (result is out, out.tolist())
+
+def fix_keyword(module):
+    out = np.zeros(4)
+    result = module.fix(np.array([1.7, -1.7, 2.5, -2.5]), out=out)
+    return (result is out, out.tolist())
+
+def fix_positional_out(module):
+    out = np.zeros(4)
+    result = module.fix(np.array([1.7, -1.7, 2.5, -2.5]), out)
+    return (result is out, out.tolist())
+
+def fix_no_out(module):
+    result = module.fix(np.array([1.7, -1.7, 2.5, -2.5]))
+    return (str(np.asarray(result).dtype), np.asarray(result).tolist())
+
+cases = [
+    ("take out=", take_keyword),
+    ("take positional out", take_positional_out),
+    ("take out= with mode=clip", take_out_with_mode),
+    ("take axis + out=", take_axis_out),
+    ("take int64 out=", take_int_out),
+    ("take casting out=", take_cast_out),
+    ("take bad out shape", take_bad_out_shape),
+    ("choose out=", choose_keyword),
+    ("choose positional out", choose_positional_out),
+    ("choose int64 out=", choose_int_out),
+    ("compress out=", compress_keyword),
+    ("compress positional out", compress_positional_out),
+    ("compress axis + out=", compress_axis_out),
+    ("fix out=", fix_keyword),
+    ("fix positional out", fix_positional_out),
+    ("fix without out", fix_no_out),
+]
+
+def outcome(module, call):
+    try:
+        return ("ok",) + tuple(call(module))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+ok = True
+for label, call in cases:
+    actual = outcome(fnp, call)
+    expected = outcome(np, call)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+print("oracle", platform.node(), np.__version__)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "take/choose/compress/fix out= surfaces should match numpy ({provenance}): {result}"
+    );
+    Ok(())
+}

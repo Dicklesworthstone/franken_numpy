@@ -22675,22 +22675,31 @@ fn argwhere(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     build_numpy_array_from_ufunc(py, &result)
 }
 
+// `out` sits BEFORE `mode` because that is numpy's own order
+// (take(a, indices, axis=None, out=None, mode='raise')). Putting it anywhere
+// else would leave np.take(a, idx, 0, buf) binding buf to `mode` instead of
+// `out` - a silent mis-binding, not just a missing keyword.
 #[pyfunction]
-#[pyo3(signature = (a, indices, axis=None, mode="raise"))]
+#[pyo3(signature = (a, indices, axis=None, out=None, mode="raise"))]
 fn take(
     py: Python<'_>,
     a: Py<PyAny>,
     indices: Py<PyAny>,
     axis: Option<isize>,
+    out: Option<Py<PyAny>>,
     mode: &str,
 ) -> PyResult<Py<PyAny>> {
     let a_for_fallback = a.clone_ref(py);
     let indices_for_fallback = indices.clone_ref(py);
+    let out_for_fallback = out.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
         let kwargs = PyDict::new(py);
         if let Some(axis) = axis {
             kwargs.set_item("axis", axis)?;
+        }
+        if let Some(out_val) = out_for_fallback.as_ref() {
+            kwargs.set_item("out", out_val.bind(py))?;
         }
         kwargs.set_item("mode", mode)?;
         Ok(numpy
@@ -22701,6 +22710,12 @@ fn take(
             )?
             .unbind())
     };
+
+    // No native gather here writes into a caller-supplied buffer, so an out=
+    // delegates whole, the way the nan reductions do.
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+        return fallback();
+    }
 
     // numpy.take is a pure gather that preserves the input dtype exactly. The zero-copy flat/axis
     // helpers below do a value-agnostic byte gather (view as the matching-width uint, gather, view
@@ -32328,20 +32343,25 @@ fn nan_to_num(
 }
 
 #[pyfunction]
-#[pyo3(signature = (condition, a, axis=None))]
+#[pyo3(signature = (condition, a, axis=None, out=None))]
 fn compress(
     py: Python<'_>,
     condition: Py<PyAny>,
     a: Py<PyAny>,
     axis: Option<isize>,
+    out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let condition_for_fallback = condition.clone_ref(py);
     let a_for_fallback = a.clone_ref(py);
+    let out_for_fallback = out.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
         let kwargs = PyDict::new(py);
         if let Some(axis) = axis {
             kwargs.set_item("axis", axis)?;
+        }
+        if let Some(out_val) = out_for_fallback.as_ref() {
+            kwargs.set_item("out", out_val.bind(py))?;
         }
         Ok(numpy
             .getattr("compress")?
@@ -32351,6 +32371,11 @@ fn compress(
             )?
             .unbind())
     };
+    // No native compaction writes into a caller-supplied buffer, so an out=
+    // delegates whole.
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+        return fallback();
+    }
     // Zero-copy branchless compaction for the flat case (axis=None, bool
     // condition) over every fixed-width numeric dtype — all 8 integer widths,
     // float32/float64, bool. Skips the cold extract_numeric_array path that
@@ -32749,9 +32774,18 @@ fn choose_float_via_unsigned<'py, U: pyo3::buffer::Element + Copy>(
     }
 }
 
+// `out` sits BEFORE `mode`, matching numpy's choose(a, choices, out=None,
+// mode='raise'): np.choose(a, choices, buf) is a positional out=, and any other
+// placement would bind buf to `mode` instead.
 #[pyfunction]
-#[pyo3(signature = (a, choices, mode="raise"))]
-fn choose(py: Python<'_>, a: Py<PyAny>, choices: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (a, choices, out=None, mode="raise"))]
+fn choose(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    choices: Py<PyAny>,
+    out: Option<Py<PyAny>>,
+    mode: &str,
+) -> PyResult<Py<PyAny>> {
     // DEFER EVERYTHING THE NATIVE PATH CANNOT REPRODUCE EXACTLY. The native
     // reduction below handles an integer index array over numeric choices and
     // returns an ndarray; numpy's `choose` is wider than that in three ways it
@@ -32778,7 +32812,11 @@ fn choose(py: Python<'_>, a: Py<PyAny>, choices: Py<PyAny>, mode: &str) -> PyRes
         .getattr("kind")?
         .extract::<String>()?;
     let index_is_scalar = index_array.getattr("ndim")?.extract::<usize>()? == 0;
-    let mut defer_to_numpy = index_is_scalar || !matches!(index_kind.as_str(), "i" | "u");
+    // No native select writes into a caller-supplied buffer, so an out= joins
+    // the list of things that defer whole.
+    let out_supplied = out.as_ref().is_some_and(|value| !value.bind(py).is_none());
+    let mut defer_to_numpy =
+        out_supplied || index_is_scalar || !matches!(index_kind.as_str(), "i" | "u");
     if !defer_to_numpy {
         let choice_items: Vec<Bound<'_, PyAny>> = if let Ok(sequence) = choices_bound.try_iter() {
             sequence.collect::<PyResult<Vec<_>>>()?
@@ -32796,12 +32834,17 @@ fn choose(py: Python<'_>, a: Py<PyAny>, choices: Py<PyAny>, mode: &str) -> PyRes
     }
     if defer_to_numpy {
         let kwargs = PyDict::new(py);
+        if let Some(out_val) = out.as_ref() {
+            kwargs.set_item("out", out_val.bind(py))?;
+        }
         kwargs.set_item("mode", mode)?;
         return Ok(numpy
             .getattr("choose")?
             .call((a.bind(py), choices_bound), Some(&kwargs))?
             .unbind());
     }
+    // Past this point out is None (a supplied one deferred above), so the
+    // error-path delegate below does not need to forward it.
 
     // Zero-copy multi-way select for integer index + same-shape same-int-dtype
     // ndarray choices (the common case); skips the cold extract + rebuild. Bit-
@@ -58456,8 +58499,8 @@ fn allclose(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn fix(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (x, out=None))]
+fn fix(py: Python<'_>, x: Py<PyAny>, out: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     // Native fix via UFuncArray::fix — round toward zero (truncate the
     // fractional part); equivalent to ceil for negatives and floor for
     // positives. Integer input passes through unchanged; NaN propagates.
@@ -58466,8 +58509,23 @@ fn fix(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let fix_fn = numpy.getattr("fix")?;
     let x_for_fallback = x.clone_ref(py);
-    let fallback =
-        || -> PyResult<Py<PyAny>> { Ok(fix_fn.call1((x_for_fallback.bind(py),))?.unbind()) };
+    let out_for_fallback = out.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        match out_for_fallback.as_ref() {
+            // numpy.fix's second parameter is positional-or-keyword `out`, and it
+            // returns that same object; forward it verbatim.
+            Some(out_val) => Ok(fix_fn
+                .call1((x_for_fallback.bind(py), out_val.bind(py)))?
+                .unbind()),
+            None => Ok(fix_fn.call1((x_for_fallback.bind(py),))?.unbind()),
+        }
+    };
+
+    // No native trunc path writes into a caller-supplied buffer, so an out=
+    // delegates whole.
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+        return fallback();
+    }
 
     // np.fix rounds toward zero, which is exactly np.trunc on real values; reuse
     // the zero-copy unary trunc path for f64 ndarrays to skip the cold
@@ -124953,6 +125011,7 @@ mod tests {
                 arr.clone().unbind(),
                 indices.clone().unbind(),
                 None,
+                None,
                 "raise",
             )?;
             let numpy = py.import("numpy")?;
@@ -124988,6 +125047,7 @@ mod tests {
                 arr.clone().unbind(),
                 index.clone_ref(py).into(),
                 Some(1),
+                None,
                 "raise",
             )?;
             let numpy = py.import("numpy")?;
@@ -125031,6 +125091,7 @@ mod tests {
                 arr.clone().unbind(),
                 indices.clone().unbind(),
                 Some(1),
+                None,
                 "raise",
             )?;
             let numpy = py.import("numpy")?;
@@ -125070,6 +125131,7 @@ mod tests {
                 py,
                 arr.clone().unbind(),
                 indices.clone().unbind(),
+                None,
                 None,
                 "raise",
             )?;
@@ -127476,7 +127538,14 @@ mod tests {
             // string take
             let s = arr(vec!["a", "b", "c"], "<U1")?;
             let idx = numeric_array(py, vec![0_i64, 2_i64], "int64");
-            let got = take(py, s.clone().unbind(), idx.clone().unbind(), None, "raise")?;
+            let got = take(
+                py,
+                s.clone().unbind(),
+                idx.clone().unbind(),
+                None,
+                None,
+                "raise",
+            )?;
             same(got.bind(py), &numpy.call_method1("take", (s.clone(), idx))?)?;
 
             // string flip / flipud / fliplr
@@ -127570,6 +127639,7 @@ mod tests {
                     grid.clone().unbind(),
                     idx.clone().unbind(),
                     Some(0),
+                    None,
                     "raise",
                 )?;
                 let kw = PyDict::new(py);
@@ -127824,7 +127894,13 @@ mod tests {
             let condition = numeric_array(py, vec![0_i64, 1_i64], "int64");
             let arr = numeric_array(py, vec![10.0, 20.0, 30.0], "float64");
 
-            let actual = compress(py, condition.clone().unbind(), arr.clone().unbind(), None)?;
+            let actual = compress(
+                py,
+                condition.clone().unbind(),
+                arr.clone().unbind(),
+                None,
+                None,
+            )?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("compress", (condition, arr))?;
 
@@ -127855,6 +127931,7 @@ mod tests {
                 condition.clone().unbind(),
                 arr.clone().unbind(),
                 Some(0),
+                None,
             )?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("compress", (condition, arr, 0))?;
@@ -127882,7 +127959,13 @@ mod tests {
             let condition = numeric_array(py, vec![1_i64, 0_i64, 1_i64, 0_i64], "int64");
             let arr = numeric_array(py, vec![large, 3_u64, large - 1, 7_u64], "uint64");
 
-            let actual = compress(py, condition.clone().unbind(), arr.clone().unbind(), None)?;
+            let actual = compress(
+                py,
+                condition.clone().unbind(),
+                arr.clone().unbind(),
+                None,
+                None,
+            )?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("compress", (condition, arr))?;
 
@@ -128014,6 +128097,7 @@ mod tests {
                 py,
                 a.clone().unbind(),
                 choices.clone().into_any().unbind(),
+                None,
                 "raise",
             )?;
             let numpy = py.import("numpy")?;
@@ -128054,6 +128138,7 @@ mod tests {
                 py,
                 a.clone().unbind(),
                 choices.clone().into_any().unbind(),
+                None,
                 "raise",
             )?;
             let numpy = py.import("numpy")?;
@@ -128096,6 +128181,7 @@ mod tests {
                 py,
                 a.clone().unbind(),
                 choices.clone().into_any().unbind(),
+                None,
                 "wrap",
             )?;
             let numpy = py.import("numpy")?;
@@ -128146,6 +128232,7 @@ mod tests {
                 py,
                 a.clone().unbind(),
                 choices.clone().into_any().unbind(),
+                None,
                 "clip",
             )?;
             let numpy = py.import("numpy")?;
@@ -128197,7 +128284,7 @@ mod tests {
             };
 
             let (a, choices) = build_operands(py)?;
-            let ours = choose(py, a, choices, "invalid").unwrap_err();
+            let ours = choose(py, a, choices, None, "invalid").unwrap_err();
 
             let (a, choices) = build_operands(py)?;
             let numpy = py.import("numpy")?;
