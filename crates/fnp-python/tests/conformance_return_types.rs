@@ -174,3 +174,136 @@ print("oracle", platform.node(), np.__version__)
     );
     Ok(())
 }
+
+/// Output DTYPE across the dtype grid - the same question as the sweep above
+/// (what comes back from a call), one attribute over.
+///
+/// fnp's generic extraction path canonicalises to an f64 Vec, and the source
+/// says so wherever someone hit it: "extract_numeric_array canonicalizes to an
+/// f64 Vec element-wise (~49x slower than numpy for int32)" (signbit), "the
+/// cold extract residual below still widens narrow widths, so it is guarded to
+/// bool/8-byte only" (take), "the native path extracted the whole array to a
+/// widened-f64 UFuncArray" (isposinf). Each of those was a path that would have
+/// returned float64 where numpy returns int8/int32/float32, and each was fixed
+/// by adding a guard or a zero-copy route BY HAND. A missed guard is a silently
+/// wrong output dtype - a memory blow-up, a broken astype round trip, or an
+/// integer that stops wrapping.
+///
+/// bool and float16 are in the grid deliberately: they are what the f64
+/// canonicalisation mangles most visibly.
+#[test]
+fn output_dtype_parity_across_the_dtype_grid() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+import warnings
+
+warnings.simplefilter("ignore")
+
+dtypes = ["int8", "int16", "int32", "int64",
+          "uint8", "uint16", "uint32", "uint64",
+          "float16", "float32", "float64",
+          "complex64", "complex128", "bool"]
+
+def sample(name):
+    if name == "bool":
+        return np.array([True, False, True, True])
+    if name.startswith("complex"):
+        return np.array([1 + 2j, 3 - 1j, 2 + 0j, 0 + 4j], dtype=name)
+    if name.startswith("uint"):
+        return np.array([1, 2, 3, 4], dtype=name)
+    return np.array([1, -2, 3, -4], dtype=name)
+
+# Structural ops must preserve the input dtype EXACTLY - no promotion rules
+# apply, so any divergence here is unambiguous.
+structural = [
+    ("reshape", lambda m, x: m.reshape(x, (2, 2))),
+    ("transpose", lambda m, x: m.transpose(m.reshape(x, (2, 2)))),
+    ("sort", lambda m, x: m.sort(x)),
+    ("unique", lambda m, x: m.unique(x)),
+    ("concatenate", lambda m, x: m.concatenate([x, x])),
+    ("repeat", lambda m, x: m.repeat(x, 2)),
+    ("tile", lambda m, x: m.tile(x, 2)),
+    ("flip", lambda m, x: m.flip(x)),
+    ("roll", lambda m, x: m.roll(x, 1)),
+    ("ravel", lambda m, x: m.ravel(m.reshape(x, (2, 2)))),
+    ("take", lambda m, x: m.take(x, [0, 2])),
+    ("compress", lambda m, x: m.compress([True, False, True, False], x)),
+    ("where", lambda m, x: m.where(np.array([True, False, True, False]), x, x)),
+    ("append", lambda m, x: m.append(x, x)),
+]
+
+# Elementwise and reductions follow numpy's own promotion/accumulator rules;
+# the point is that fnp reproduces THOSE, not that the dtype is preserved.
+elementwise = [
+    ("abs", lambda m, x: m.abs(x)),
+    ("negative", lambda m, x: m.negative(x)),
+    ("square", lambda m, x: m.square(x)),
+    ("sign", lambda m, x: m.sign(x)),
+    ("add python int", lambda m, x: m.add(x, 1)),
+    ("add python float", lambda m, x: m.add(x, 1.0)),
+    ("maximum self", lambda m, x: m.maximum(x, x)),
+]
+
+reductions = [
+    ("sum", lambda m, x: m.sum(x)),
+    ("prod", lambda m, x: m.prod(x)),
+    ("mean", lambda m, x: m.mean(x)),
+    ("min", lambda m, x: m.min(x)),
+    ("max", lambda m, x: m.max(x)),
+    ("cumsum", lambda m, x: m.cumsum(x)),
+]
+
+def outcome(module, call, x):
+    try:
+        return ("ok", str(np.asarray(call(module, x)).dtype))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+ok = True
+compared = 0
+for group, cases in (("structural", structural),
+                     ("elementwise", elementwise),
+                     ("reduction", reductions)):
+    for name in dtypes:
+        for label, call in cases:
+            x = sample(name)
+            actual = outcome(fnp, call, x)
+            expected = outcome(np, call, x)
+            compared += 1
+            if actual != expected:
+                print(f"{group}/{name}: {label}")
+                print(f"  fnp   {actual}")
+                print(f"  numpy {expected}")
+                ok = False
+
+# Preconditions. The grid is only meaningful if numpy itself is NOT returning
+# float64 everywhere - otherwise "matches numpy" would be satisfied by the very
+# f64 canonicalisation this sweep exists to catch.
+narrow = str(np.asarray(np.sort(sample("int8"))).dtype)
+if narrow != "int8":
+    print(f"PRECONDITION LOST: numpy's sort(int8) returned {narrow}")
+    ok = False
+half = str(np.asarray(np.abs(sample("float16"))).dtype)
+if half != "float16":
+    print(f"PRECONDITION LOST: numpy's abs(float16) returned {half}")
+    ok = False
+if compared < 300:
+    print(f"PRECONDITION LOST: only {compared} comparisons ran")
+    ok = False
+
+print(ok)
+print("oracle", platform.node(), np.__version__, compared)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "output dtypes should match numpy ({provenance}): {result}"
+    );
+    Ok(())
+}

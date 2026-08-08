@@ -22765,7 +22765,15 @@ fn take(
     // byte-gather helpers above already cover every 1/2/4/8-byte dtype; only reach the residual
     // for bool/8-byte (where extract preserves the dtype). A relaxed-gate narrow dtype that slipped
     // past the fast paths (e.g. a non-int64 index array) delegates to numpy so the dtype round-trips.
-    if !(dtype_kind == "b" || itemsize == 8) {
+    //
+    // COMPLEX64 must be excluded explicitly even though it is 8 bytes: its
+    // itemsize coincides with f64/i64/u64, so `itemsize == 8` let it through to
+    // extract_numeric_array, which does not accept complex and raised TypeError
+    // where numpy returns a complex64 array. Only the byte-gather helpers above
+    // handle complex, and when they decline (a Python-list index, say) the call
+    // has to reach numpy, not the residual
+    // (deadlock-audit-output-dtype-parity-sweep-liz1c).
+    if !(dtype_kind == "b" || (itemsize == 8 && dtype_kind != "c")) {
         return fallback();
     }
     let a = extract_numeric_array(py, a.bind(py), "take(a)")?;
