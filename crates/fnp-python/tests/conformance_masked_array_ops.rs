@@ -317,3 +317,123 @@ print(match)
     );
     Ok(())
 }
+
+// numpy.ma re-export lock.
+//
+// Several numpy.ma names collide with an fnp TOP-LEVEL wrapper while being a
+// different, masked-aware function: ma.cov, ma.corrcoef, ma.allclose, ma.ptp,
+// ma.choose, ma.put. fnp registers them by pulling the objects straight out of
+// numpy.ma (`np_ma.getattr(name)`), which is correct - but nothing asserted it,
+// and swapping in the same-named top-level wrapper is exactly the mistake that
+// was live in the linalg namespace until
+// deadlock-audit-linalg-aliases-toplevel-wrappers-mi3k6. There it returned the
+// wrong array for ndim > 2; here it would silently drop the MASK.
+//
+// Each case is compared against numpy.ma, and the test additionally asserts the
+// PRECONDITIONS that make the comparison meaningful: ma.cov and np.cov must
+// actually disagree on masked input, and the ma-only keywords must be rejected
+// by the top-level functions. Without those, an alias regression could leave
+// every case still passing.
+#[test]
+fn ma_namespace_is_numpy_ma_not_the_toplevel_wrappers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+import numpy.ma as npma
+
+def masked():
+    return npma.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], mask=[[0, 0, 1], [0, 0, 0]])
+
+def described(value):
+    array = np.asarray(value)
+    return (str(array.dtype), tuple(array.shape), np.round(array, 9).tolist())
+
+def ma_cov(module):
+    return described(module.ma.cov(masked()))
+
+def ma_cov_allow_masked(module):
+    return described(module.ma.cov(masked(), allow_masked=True))
+
+def ma_corrcoef(module):
+    return described(module.ma.corrcoef(masked()))
+
+def ma_allclose_masked_equal(module):
+    return bool(module.ma.allclose(masked(), masked(), masked_equal=True))
+
+def ma_ptp(module):
+    return described(module.ma.ptp(masked()))
+
+def ma_count(module):
+    return described(module.ma.count(masked()))
+
+def ma_average_returned(module):
+    value, weight = module.ma.average(masked(), axis=0, returned=True)
+    return (described(value), described(weight))
+
+def ma_masked_is_singleton(module):
+    return module.ma.masked is npma.masked
+
+def ma_maskedarray_is_type(module):
+    return module.ma.MaskedArray is npma.MaskedArray
+
+cases = [
+    ("ma.cov on masked input", ma_cov),
+    ("ma.cov allow_masked=", ma_cov_allow_masked),
+    ("ma.corrcoef on masked input", ma_corrcoef),
+    ("ma.allclose masked_equal=", ma_allclose_masked_equal),
+    ("ma.ptp on masked input", ma_ptp),
+    ("ma.count on masked input", ma_count),
+    ("ma.average returned=", ma_average_returned),
+    ("ma.masked singleton identity", ma_masked_is_singleton),
+    ("ma.MaskedArray type identity", ma_maskedarray_is_type),
+]
+
+def outcome(module, call):
+    try:
+        return ("ok", call(module))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+ok = True
+for label, call in cases:
+    actual = outcome(fnp, call)
+    expected = outcome(np, call)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+
+# Preconditions. If these ever stop holding, the cases above can no longer
+# distinguish numpy.ma's function from the same-named top-level one, and this
+# test has quietly stopped testing what it exists for.
+x = masked()
+if np.array_equal(np.asarray(npma.cov(x)), np.asarray(np.cov(x))):
+    print("PRECONDITION LOST: ma.cov and np.cov agree on masked input")
+    ok = False
+for name, kwargs in [("cov", {"allow_masked": True}), ("allclose", {"masked_equal": True})]:
+    try:
+        if name == "cov":
+            getattr(np, name)(x, **kwargs)
+        else:
+            getattr(np, name)(x, x, **kwargs)
+        print(f"PRECONDITION LOST: top-level np.{name} accepted {list(kwargs)[0]}")
+        ok = False
+    except TypeError:
+        pass
+
+print(ok)
+print("oracle", platform.node(), np.__version__)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "ma namespace should be numpy.ma's own objects ({provenance}): {result}"
+    );
+    Ok(())
+}
