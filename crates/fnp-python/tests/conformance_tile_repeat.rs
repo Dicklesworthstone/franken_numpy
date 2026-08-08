@@ -675,3 +675,73 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+// numpy names tile's array parameter `A`, so np.tile(A=x, reps=2) is a valid
+// documented call. A wrapper spelling it `a` rejects that with a TypeError while
+// numpy accepts it, which is invisible to every positional test in this file.
+#[test]
+fn tile_array_keyword_is_capital_a_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+
+def keyword_both(fn, x, reps):
+    return fn(A=x, reps=reps)
+
+def keyword_reps_only(fn, x, reps):
+    return fn(x, reps=reps)
+
+def positional(fn, x, reps):
+    return fn(x, reps)
+
+def lowercase_keyword(fn, x, reps):
+    return fn(a=x, reps=reps)
+
+inputs = [
+    ("1-D float64", np.array([1.0, -2.5, 3.0]), 2),
+    ("1-D int32 tuple reps", np.array([1, 2, 3], dtype=np.int32), (2, 2)),
+    ("2-D float64", np.array([[1.0, 2.0], [3.0, 4.0]]), (2, 3)),
+    ("python list", [1.0, 2.0], 3),
+    ("scalar", 7, 4),
+    ("empty", np.array([], dtype=np.float64), 3),
+]
+calls = [
+    ("A= keyword", keyword_both),
+    ("reps keyword", keyword_reps_only),
+    ("positional", positional),
+    ("lowercase a=", lowercase_keyword),
+]
+
+def outcome(module, call, x, reps):
+    try:
+        result = np.asarray(call(module.tile, x, reps))
+        return ("ok", str(result.dtype), tuple(result.shape), result.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+ok = True
+for label, x, reps in inputs:
+    for call_label, call in calls:
+        actual = outcome(fnp, call, x, reps)
+        expected = outcome(np, call, x, reps)
+        if actual != expected:
+            print(f"{label} / {call_label}")
+            print(actual)
+            print(expected)
+            ok = False
+print(ok)
+print("oracle", platform.node(), np.__version__)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "tile array keyword should match numpy ({provenance}): {result}"
+    );
+    Ok(())
+}
+

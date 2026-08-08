@@ -38009,37 +38009,40 @@ fn try_zerocopy_tri(
 }
 
 #[pyfunction]
-#[pyo3(signature = (n, m=None, k=0, dtype=None))]
+#[pyo3(signature = (N, M=None, k=0, dtype=None))]
+#[allow(non_snake_case)]
 fn tri(
     py: Python<'_>,
-    n: usize,
-    m: Option<usize>,
+    N: usize,
+    M: Option<usize>,
     k: i64,
     dtype: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
-    // Native parallel per-row fill for the large fresh (n,m) grid (page-fault wall). Resolve the dtype
+    // `N` / `M` carry numpy's capital spelling: np.tri(N=3, M=2) is the documented
+    // call and PyO3 derives the Python keyword from the Rust identifier.
+    // Native parallel per-row fill for the large fresh (N,M) grid (page-fault wall). Resolve the dtype
     // (default float64, matching numpy.tri) then fan the rows across the pool. Small / unusual dtypes fall
     // through to the numpy delegate below (whose serial build was 18-178x slower for the old native path).
-    let mm = m.unwrap_or(n);
+    let mm = M.unwrap_or(N);
     let dt_obj: Bound<'_, PyAny> = match dtype.as_ref() {
         Some(d) if !d.bind(py).is_none() => numpy.getattr("dtype")?.call1((d.bind(py),))?,
         _ => numpy.getattr("dtype")?.call1(("float64",))?,
     };
-    if let Some(out) = try_zerocopy_tri(py, &numpy, n, mm, k, &dt_obj)? {
+    if let Some(out) = try_zerocopy_tri(py, &numpy, N, mm, k, &dt_obj)? {
         return Ok(out);
     }
     // numpy.tri creates the boolean/typed lower-triangle directly; the native
     // UFuncArray build-then-convert path was 18-178x slower (int8 178x). Delegate.
     let kwargs = PyDict::new(py);
     kwargs.set_item("k", k)?;
-    if let Some(mm) = m {
-        kwargs.set_item("M", mm)?;
+    if let Some(columns) = M {
+        kwargs.set_item("M", columns)?;
     }
     if let Some(dtype_val) = dtype.as_ref() {
         kwargs.set_item("dtype", dtype_val.bind(py))?;
     }
-    Ok(numpy.getattr("tri")?.call((n,), Some(&kwargs))?.unbind())
+    Ok(numpy.getattr("tri")?.call((N,), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -54068,43 +54071,53 @@ fn angle(py: Python<'_>, z: Py<PyAny>, deg: bool) -> PyResult<Py<PyAny>> {
     Ok(angle_fn.call((z.bind(py),), Some(&kwargs))?.unbind())
 }
 
+// The window functions spell their length parameter `M`, not `m`: numpy's own
+// signature is bartlett(M) and its docs write np.bartlett(M=51), so a lowercase
+// Rust parameter would make the documented keyword call a TypeError here while
+// it succeeds on numpy. PyO3 takes the Python keyword straight from the Rust
+// identifier, so the identifier has to carry the capital and the lint has to be
+// allowed at the site.
 #[pyfunction]
-#[pyo3(signature = (m,))]
-fn bartlett(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (M,))]
+#[allow(non_snake_case)]
+fn bartlett(py: Python<'_>, M: i64) -> PyResult<Py<PyAny>> {
     // Rust-owned port of np.bartlett. NumPy maps negative lengths to an
     // empty float64 array, keeps M <= 1 special-cased, and otherwise
     // emits the triangular Bartlett window.
-    let result = UFuncArray::bartlett(m.max(0) as usize);
+    let result = UFuncArray::bartlett(M.max(0) as usize);
     build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
-#[pyo3(signature = (m,))]
-fn hanning(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (M,))]
+#[allow(non_snake_case)]
+fn hanning(py: Python<'_>, M: i64) -> PyResult<Py<PyAny>> {
     // Rust-owned port of np.hanning. NumPy maps negative lengths to an
     // empty float64 array, keeps M <= 1 special-cased, and otherwise
     // emits the Hann window.
-    let result = UFuncArray::hanning(m.max(0) as usize);
+    let result = UFuncArray::hanning(M.max(0) as usize);
     build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
-#[pyo3(signature = (m,))]
-fn hamming(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (M,))]
+#[allow(non_snake_case)]
+fn hamming(py: Python<'_>, M: i64) -> PyResult<Py<PyAny>> {
     // Rust-owned port of np.hamming. NumPy maps negative lengths to an
     // empty float64 array, keeps M <= 1 special-cased, and otherwise
     // emits the Hamming window.
-    let result = UFuncArray::hamming(m.max(0) as usize);
+    let result = UFuncArray::hamming(M.max(0) as usize);
     build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
-#[pyo3(signature = (m,))]
-fn blackman(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (M,))]
+#[allow(non_snake_case)]
+fn blackman(py: Python<'_>, M: i64) -> PyResult<Py<PyAny>> {
     // Rust-owned port of np.blackman. NumPy maps negative lengths to an
     // empty float64 array, keeps M <= 1 special-cased, and otherwise
     // emits the Blackman window.
-    let result = UFuncArray::blackman(m.max(0) as usize);
+    let result = UFuncArray::blackman(M.max(0) as usize);
     build_numpy_array_from_ufunc(py, &result)
 }
 
@@ -56366,15 +56379,17 @@ fn polyint(py: Python<'_>, p: Py<PyAny>, m: i64, k: Option<Py<PyAny>>) -> PyResu
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, reps))]
-fn tile(py: Python<'_>, a: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (A, reps))]
+#[allow(non_snake_case)]
+fn tile(py: Python<'_>, A: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Native tile via UFuncArray::tile for real numeric arrays with
     // non-negative integer reps. Complex / structured / object / negative
     // reps / non-integer reps fall back to np.tile so numpy's broader
     // dispatch surface (scalar reps, batched handling, object dtype) is
-    // preserved exactly.
+    // preserved exactly. `A` carries numpy's capital spelling so the
+    // documented np.tile(A=..., reps=...) keyword call ports verbatim.
     let numpy = py.import("numpy")?;
-    let a_for_fallback = a.clone_ref(py);
+    let a_for_fallback = A.clone_ref(py);
     let reps_for_fallback = reps.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         Ok(numpy
@@ -56402,28 +56417,28 @@ fn tile(py: Python<'_>, a: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Zero-copy block copy for the common case (1-D f64 ndarray, scalar reps);
     // skips the cold extract/build Vecs. Bit-identical; multi-dim inputs and
     // multi-element reps tuples fall through to the general path.
-    if let Some(out) = try_zerocopy_f64_tile(py, a.bind(py), &reps_vec)? {
+    if let Some(out) = try_zerocopy_f64_tile(py, A.bind(py), &reps_vec)? {
         return Ok(out);
     }
 
     // Dtype-agnostic 1-D tile (byte replication) for every other dtype — int (all
     // widths), float32, complex, bool. Bit-identical (elements move verbatim) and
     // skips the cold, for-ints-lossy extract Vec.
-    if let Some(out) = try_zerocopy_any_tile(py, a.bind(py), &reps_vec)? {
+    if let Some(out) = try_zerocopy_any_tile(py, A.bind(py), &reps_vec)? {
         return Ok(out);
     }
 
-    // Dtype-agnostic multi-dim tile (a.ndim >= 2): byte row-block replication with a
+    // Dtype-agnostic multi-dim tile (A.ndim >= 2): byte row-block replication with a
     // modular source-row mapping. Bit-identical; complex / non-contiguous fall through.
-    if let Some(out) = try_zerocopy_any_tile_multidim(py, a.bind(py), &reps_vec)? {
+    if let Some(out) = try_zerocopy_any_tile_multidim(py, A.bind(py), &reps_vec)? {
         return Ok(out);
     }
 
     // Non-contiguous (transposed/strided) ndarrays bail into the cold extract; delegate.
-    if noncontiguous_ndarray(&numpy, a.bind(py))? {
+    if noncontiguous_ndarray(&numpy, A.bind(py))? {
         return fallback();
     }
-    let array = match extract_precise_numeric_array(py, a.bind(py), "tile(a)") {
+    let array = match extract_precise_numeric_array(py, A.bind(py), "tile(A)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
@@ -58632,12 +58647,14 @@ fn triangular_impl(
 }
 
 #[pyfunction]
-#[pyo3(signature = (m, beta))]
-fn kaiser(py: Python<'_>, m: i64, beta: f64) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (M, beta))]
+#[allow(non_snake_case)]
+fn kaiser(py: Python<'_>, M: i64, beta: f64) -> PyResult<Py<PyAny>> {
     // Rust-owned port of np.kaiser. NumPy maps negative lengths to an
     // empty float64 array, keeps M <= 1 special-cased, and otherwise
-    // emits the Kaiser window parameterized by beta.
-    let result = UFuncArray::kaiser(m.max(0) as usize, beta);
+    // emits the Kaiser window parameterized by beta. `M` carries numpy's
+    // capital spelling so np.kaiser(M=..., beta=...) ports verbatim.
+    let result = UFuncArray::kaiser(M.max(0) as usize, beta);
     build_numpy_array_from_ufunc(py, &result)
 }
 
@@ -59379,7 +59396,7 @@ fn load_via_numpy_bytes(
 #[pyfunction]
 #[pyo3(signature = (
     fname,
-    x,
+    X,
     fmt=None,
     delimiter=" ",
     newline="\n",
@@ -59389,10 +59406,13 @@ fn load_via_numpy_bytes(
     encoding=None,
 ))]
 #[allow(clippy::too_many_arguments)]
+#[allow(non_snake_case)]
+// `X` is numpy's own spelling for the array parameter (np.savetxt(fname, X=...)),
+// and PyO3 derives the Python keyword from the Rust identifier.
 fn savetxt(
     py: Python<'_>,
     fname: Py<PyAny>,
-    x: Py<PyAny>,
+    X: Py<PyAny>,
     fmt: Option<Py<PyAny>>,
     delimiter: &str,
     newline: &str,
@@ -59416,7 +59436,7 @@ fn savetxt(
     }
     numpy
         .getattr("savetxt")?
-        .call((fname.bind(py), x.bind(py)), Some(&kwargs))?;
+        .call((fname.bind(py), X.bind(py)), Some(&kwargs))?;
     Ok(py.None())
 }
 

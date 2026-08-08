@@ -386,3 +386,76 @@ print(np.array_equal(arr, restored))
     );
     Ok(())
 }
+
+// numpy names savetxt's array parameter `X` (np.savetxt(fname, X=arr)). A
+// wrapper spelling it `x` rejects the documented keyword call with a TypeError,
+// which no positional test in this file can see. Compares the written text as
+// well as the call outcome, since a wrong parameter binding could otherwise
+// "succeed" while writing the wrong operand.
+#[test]
+fn savetxt_array_keyword_is_capital_x_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+import os
+import tempfile
+
+arr = np.array([[1.5, -2.0], [3.25, 4.0]], dtype=np.float64)
+
+def keyword_array(module, path):
+    module.savetxt(path, X=arr)
+
+def keyword_array_and_fmt(module, path):
+    module.savetxt(path, X=arr, fmt="%.3f")
+
+def keyword_fname_and_array(module, path):
+    module.savetxt(fname=path, X=arr)
+
+def positional(module, path):
+    module.savetxt(path, arr)
+
+def lowercase_keyword(module, path):
+    module.savetxt(path, x=arr)
+
+cases = [
+    ("X= keyword", keyword_array),
+    ("X= with fmt", keyword_array_and_fmt),
+    ("fname= and X=", keyword_fname_and_array),
+    ("positional", positional),
+    ("lowercase x=", lowercase_keyword),
+]
+
+def outcome(module, call):
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "out.txt")
+        try:
+            call(module, path)
+        except Exception as exc:
+            return ("err", type(exc).__name__)
+        with open(path, "rb") as handle:
+            return ("ok", handle.read().decode())
+
+ok = True
+for label, call in cases:
+    actual = outcome(fnp, call)
+    expected = outcome(np, call)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+print("oracle", platform.node(), np.__version__)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "savetxt array keyword should match numpy ({provenance}): {result}"
+    );
+    Ok(())
+}

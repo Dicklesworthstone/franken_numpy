@@ -270,3 +270,105 @@ print(np.argmax(ham) == mid and np.argmax(hann) == mid)
     );
     Ok(())
 }
+
+// numpy spells the window length `M`, and its docs write np.hamming(M=51). A
+// wrapper that names the parameter `m` turns that documented call into a
+// TypeError, so this pins the keyword spelling for all five windows alongside
+// the positional form and the negative/zero lengths numpy special-cases.
+//
+// Two levels of strictness, deliberately: fnp(M=k) must be BYTE-identical to
+// fnp(k), because that is the keyword-binding claim and it is exact; fnp vs
+// numpy is compared on dtype/shape/error-class exactly and on values to
+// float64 tolerance, because the kernels currently differ from numpy in the
+// last ULP (fnp evaluates 0.5 - 0.5*cos(2*pi*i/(M-1)) where numpy evaluates
+// 0.5 + 0.5*cos(pi*n/(M-1)) over n = arange(1-M, M, 2), which is also why
+// numpy's window is exactly symmetric and fnp's is not). That divergence is
+// its own defect, tracked in deadlock-audit-window-ulp-asymmetry-sdcoh, and
+// tightening this comparison to bytes is what closes it.
+#[test]
+fn window_length_keyword_is_capital_m_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+
+def keyword_call(fn, length):
+    return fn(M=length)
+
+def positional_call(fn, length):
+    return fn(length)
+
+def lowercase_keyword_call(fn, length):
+    return fn(m=length)
+
+cases = []
+for name in ["bartlett", "blackman", "hamming", "hanning"]:
+    for length in [-3, 0, 1, 2, 7, 12]:
+        cases.append((f"{name} M={length}", name, keyword_call, length))
+        cases.append((f"{name} positional {length}", name, positional_call, length))
+    cases.append((f"{name} lowercase m=", name, lowercase_keyword_call, 7))
+
+def kaiser_keyword(fn, length):
+    return fn(M=length, beta=8.6)
+
+def kaiser_positional(fn, length):
+    return fn(length, 8.6)
+
+def kaiser_lowercase(fn, length):
+    return fn(m=length, beta=8.6)
+
+for length in [-3, 0, 1, 2, 7, 12]:
+    cases.append((f"kaiser M={length}", "kaiser", kaiser_keyword, length))
+    cases.append((f"kaiser positional {length}", "kaiser", kaiser_positional, length))
+cases.append(("kaiser lowercase m=", "kaiser", kaiser_lowercase, 7))
+
+def outcome(module, name, call, length):
+    try:
+        result = call(getattr(module, name), length)
+        return ("ok", str(result.dtype), tuple(result.shape), result)
+    except Exception as exc:
+        return ("err", type(exc).__name__, None, None)
+
+ok = True
+for label, name, call, length in cases:
+    actual = outcome(fnp, name, call, length)
+    expected = outcome(np, name, call, length)
+    if actual[:3] != expected[:3]:
+        print(label)
+        print(actual[:3])
+        print(expected[:3])
+        ok = False
+    elif actual[0] == "ok" and not np.allclose(actual[3], expected[3], rtol=0, atol=1e-15):
+        print(label + " values")
+        print(actual[3].tolist())
+        print(expected[3].tolist())
+        ok = False
+
+# The keyword binding itself is exact: passing the length by keyword must
+# produce the identical bytes to passing it positionally.
+for name in ["bartlett", "blackman", "hamming", "hanning"]:
+    for length in [-3, 0, 1, 2, 7, 12, 33]:
+        by_keyword = getattr(fnp, name)(M=length).tobytes()
+        by_position = getattr(fnp, name)(length).tobytes()
+        if by_keyword != by_position:
+            print(f"{name} M={length} keyword/positional byte mismatch")
+            ok = False
+for length in [-3, 0, 1, 2, 7, 12, 33]:
+    if fnp.kaiser(M=length, beta=8.6).tobytes() != fnp.kaiser(length, 8.6).tobytes():
+        print(f"kaiser M={length} keyword/positional byte mismatch")
+        ok = False
+
+print(ok)
+print("oracle", platform.node(), np.__version__)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "window length keyword should match numpy ({provenance}): {result}"
+    );
+    Ok(())
+}

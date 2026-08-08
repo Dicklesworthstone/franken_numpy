@@ -553,3 +553,82 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+// numpy.tri spells its dimensions `N` and `M` (np.tri(N=3, M=2, k=-1)), so a
+// wrapper naming them `n`/`m` rejects the documented keyword call. This also
+// pins copyto's `where=` keyword, declared here as the Rust raw identifier
+// `r#where` - PyO3 is expected to strip the `r#` when it builds the Python
+// name, and this is what proves it rather than assuming it.
+#[test]
+fn tri_and_copyto_keywords_match_numpy_spelling() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+
+def tri_keyword_dims(module):
+    return module.tri(N=4, M=3)
+
+def tri_keyword_all(module):
+    return module.tri(N=4, M=3, k=-1, dtype=np.int32)
+
+def tri_keyword_n_only(module):
+    return module.tri(N=3)
+
+def tri_positional(module):
+    return module.tri(4, 3, -1)
+
+def tri_lowercase(module):
+    return module.tri(n=4, m=3)
+
+def copyto_keyword_where(module):
+    dst = np.zeros(4, dtype=np.float64)
+    module.copyto(dst, np.array([1.0, 2.0, 3.0, 4.0]), where=np.array([True, False, True, False]))
+    return dst
+
+def copyto_all_keywords(module):
+    dst = np.zeros(4, dtype=np.float64)
+    module.copyto(dst=dst, src=np.array([5.0, 6.0, 7.0, 8.0]), casting="same_kind",
+                  where=np.array([False, True, False, True]))
+    return dst
+
+cases = [
+    ("tri N=/M=", tri_keyword_dims),
+    ("tri N=/M=/k=/dtype=", tri_keyword_all),
+    ("tri N= only", tri_keyword_n_only),
+    ("tri positional", tri_positional),
+    ("tri lowercase n=/m=", tri_lowercase),
+    ("copyto where=", copyto_keyword_where),
+    ("copyto all keywords", copyto_all_keywords),
+]
+
+def outcome(module, call):
+    try:
+        result = np.asarray(call(module))
+        return ("ok", str(result.dtype), tuple(result.shape), result.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+ok = True
+for label, call in cases:
+    actual = outcome(fnp, call)
+    expected = outcome(np, call)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+print("oracle", platform.node(), np.__version__)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "tri/copyto keyword spelling should match numpy ({provenance}): {result}"
+    );
+    Ok(())
+}
