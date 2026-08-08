@@ -107769,7 +107769,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 }
             }
             if let Ok(all_names) = np_ma.getattr("__all__") {
-                ma.setattr("__all__", copied_all_names(&all_names)?)?;
                 for item in all_names.try_iter()? {
                     let name = item?.extract::<String>()?;
                     if ma.getattr(name.as_str()).is_err()
@@ -107778,6 +107777,15 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                         ma.add(name.as_str(), value)?;
                     }
                 }
+                // Bound AFTER the last `add`, not before it. PyO3's `add` appends
+                // the added name to `__all__`, so binding first left fnp.ma.__all__
+                // carrying names numpy.ma does not export. That was invisible while
+                // the two were the SAME list object — the equality assertion in
+                // `ma_core_classes_constants_helpers_match_numpy_oracles` was
+                // comparing an object with itself. Copying the list (335rd) made it
+                // a real comparison, and it failed. Same ordering fix as the
+                // top-level module (deadlock-audit-wolfm).
+                ma.setattr("__all__", copied_all_names(&all_names)?)?;
             }
         }
         let ma_getattr_src = pyo3::ffi::c_str!(
