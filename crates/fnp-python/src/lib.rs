@@ -21539,6 +21539,28 @@ fn try_zerocopy_f32_trapezoid(
     ))
 }
 
+/// Resolve the numpy function to delegate a trapezoid call to.
+///
+/// numpy RENAMED `trapz` to `trapezoid` and REMOVED the old name in 2.0, so
+/// delegating under OUR entry-point name raises
+/// `AttributeError: module 'numpy' has no attribute 'trapz'` on every currently
+/// supported numpy — which is exactly what `fnp.trapz(y, axis=...)` did
+/// (deadlock-audit-vmo78). fnp keeps exposing `trapz` because callers still use
+/// it; only the delegate has to follow the rename.
+///
+/// Prefer the current name and fall back to the caller's, so a numpy old enough
+/// to have only `trapz` still resolves. The installed numpy decides, same
+/// doctrine as the corrcoef bias/ddof removal (deadlock-audit-hp9u2).
+fn numpy_trapezoid_delegate<'py>(
+    numpy: &Bound<'py, PyModule>,
+    name: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    match numpy.getattr("trapezoid") {
+        Ok(current) => Ok(current),
+        Err(_) => numpy.getattr(name),
+    }
+}
+
 fn trapezoid_impl(
     py: Python<'_>,
     name: &str,
@@ -21588,8 +21610,7 @@ fn trapezoid_impl(
         }
         kwargs.set_item("dx", dx)?;
         kwargs.set_item("axis", axis)?;
-        return Ok(numpy
-            .getattr(name)?
+        return Ok(numpy_trapezoid_delegate(&numpy, name)?
             .call((y.bind(py),), Some(&kwargs))?
             .unbind());
     }
@@ -21605,8 +21626,7 @@ fn trapezoid_impl(
         }
         kwargs.set_item("dx", dx)?;
         kwargs.set_item("axis", axis)?;
-        return Ok(numpy
-            .getattr(name)?
+        return Ok(numpy_trapezoid_delegate(&numpy, name)?
             .call((y.bind(py),), Some(&kwargs))?
             .unbind());
     }
