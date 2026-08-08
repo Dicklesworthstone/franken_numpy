@@ -961,3 +961,154 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+// numpy.linalg.diagonal / trace / outer / tensordot share a NAME with a
+// top-level numpy function but are NOT the same function - they are Array-API
+// variants. diagonal and trace take the LAST TWO axes where np.diagonal and
+// np.trace take axes 0 and 1, so aliasing the top-level wrapper under the
+// linalg name returned the wrong array for ndim > 2 while looking correct for
+// 2-D. This pins all four against numpy.linalg, pins the top-level four as
+// UNCHANGED, and - critically - asserts the two conventions actually DIFFER on
+// the 3-D input used, without which the whole test could pass on an alias.
+#[test]
+fn linalg_namespace_functions_are_not_the_toplevel_ones() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+
+cube = np.arange(24).reshape(2, 3, 4)
+square = np.arange(9).reshape(3, 3)
+vec = np.array([1.0, 2.0, 3.0])
+mat = np.ones((2, 2))
+
+def described(value):
+    array = np.asarray(value)
+    return (str(array.dtype), tuple(array.shape), array.tolist())
+
+def linalg_diagonal_3d(module):
+    return described(module.linalg.diagonal(cube))
+
+def linalg_diagonal_offset(module):
+    return described(module.linalg.diagonal(cube, offset=1))
+
+def linalg_diagonal_2d(module):
+    return described(module.linalg.diagonal(square))
+
+def linalg_diagonal_positional_offset(module):
+    # numpy makes offset keyword-only, so this must raise on both sides.
+    return described(module.linalg.diagonal(cube, 1))
+
+def linalg_diagonal_axis1(module):
+    return described(module.linalg.diagonal(cube, axis1=0))
+
+def linalg_trace_3d(module):
+    return described(module.linalg.trace(cube))
+
+def linalg_trace_offset(module):
+    return described(module.linalg.trace(cube, offset=1))
+
+def linalg_trace_out(module):
+    return described(module.linalg.trace(cube, out=None))
+
+def linalg_trace_axes(module):
+    return described(module.linalg.trace(cube, axis1=0, axis2=1))
+
+def linalg_outer_1d(module):
+    return described(module.linalg.outer(vec, vec))
+
+def linalg_outer_2d_rejected(module):
+    # np.outer flattens 2-D input; np.linalg.outer REQUIRES 1-D.
+    return described(module.linalg.outer(mat, mat))
+
+def linalg_outer_out(module):
+    return described(module.linalg.outer(vec, vec, out=None))
+
+def linalg_tensordot_keyword(module):
+    return described(module.linalg.tensordot(mat, mat, axes=2))
+
+def linalg_tensordot_positional(module):
+    # numpy makes axes keyword-only under linalg.
+    return described(module.linalg.tensordot(mat, mat, 2))
+
+def linalg_matrix_rank_capital(module):
+    return described(module.linalg.matrix_rank(A=square))
+
+def linalg_matrix_rank_lowercase(module):
+    return described(module.linalg.matrix_rank(a=square))
+
+# The top-level four must be untouched by the linalg fix.
+def toplevel_diagonal(module):
+    return described(module.diagonal(cube))
+
+def toplevel_trace(module):
+    return described(module.trace(cube))
+
+def toplevel_outer_2d(module):
+    return described(module.outer(mat, mat))
+
+def toplevel_tensordot_positional(module):
+    return described(module.tensordot(mat, mat, 2))
+
+cases = [
+    ("linalg.diagonal 3-D", linalg_diagonal_3d),
+    ("linalg.diagonal offset=", linalg_diagonal_offset),
+    ("linalg.diagonal 2-D", linalg_diagonal_2d),
+    ("linalg.diagonal positional offset", linalg_diagonal_positional_offset),
+    ("linalg.diagonal axis1=", linalg_diagonal_axis1),
+    ("linalg.trace 3-D", linalg_trace_3d),
+    ("linalg.trace offset=", linalg_trace_offset),
+    ("linalg.trace out=", linalg_trace_out),
+    ("linalg.trace axis1=/axis2=", linalg_trace_axes),
+    ("linalg.outer 1-D", linalg_outer_1d),
+    ("linalg.outer 2-D rejected", linalg_outer_2d_rejected),
+    ("linalg.outer out=", linalg_outer_out),
+    ("linalg.tensordot axes= keyword", linalg_tensordot_keyword),
+    ("linalg.tensordot positional axes", linalg_tensordot_positional),
+    ("linalg.matrix_rank A=", linalg_matrix_rank_capital),
+    ("linalg.matrix_rank a=", linalg_matrix_rank_lowercase),
+    ("top-level diagonal 3-D", toplevel_diagonal),
+    ("top-level trace 3-D", toplevel_trace),
+    ("top-level outer 2-D", toplevel_outer_2d),
+    ("top-level tensordot positional", toplevel_tensordot_positional),
+]
+
+def outcome(module, call):
+    try:
+        return ("ok", call(module))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+ok = True
+for label, call in cases:
+    actual = outcome(fnp, call)
+    expected = outcome(np, call)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+
+# Guard against the whole test passing on an alias: the linalg and top-level
+# conventions MUST differ on this input, or every case above is vacuous.
+if np.array_equal(np.linalg.diagonal(cube), np.diagonal(cube)):
+    print("PRECONDITION LOST: linalg.diagonal and np.diagonal agree on the 3-D input")
+    ok = False
+if np.array_equal(np.linalg.trace(cube), np.trace(cube)):
+    print("PRECONDITION LOST: linalg.trace and np.trace agree on the 3-D input")
+    ok = False
+
+print(ok)
+print("oracle", platform.node(), np.__version__)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "linalg namespace functions should match numpy.linalg ({provenance}): {result}"
+    );
+    Ok(())
+}

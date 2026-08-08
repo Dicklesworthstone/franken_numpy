@@ -26976,17 +26976,21 @@ fn eigvals(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, tol=None, hermitian=false, *, rtol=None))]
+// numpy.linalg.matrix_rank spells its first parameter `A`, so
+// np.linalg.matrix_rank(A=m) is a documented call; a lowercase `a` made it a
+// TypeError here. PyO3 takes the Python keyword from the Rust identifier.
+#[pyo3(signature = (A, tol=None, hermitian=false, *, rtol=None))]
+#[allow(non_snake_case)]
 fn matrix_rank(
     py: Python<'_>,
-    a: Py<PyAny>,
+    A: Py<PyAny>,
     tol: Option<Py<PyAny>>,
     hermitian: bool,
     rtol: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let matrix_rank_fn = numpy.getattr("linalg")?.getattr("matrix_rank")?;
-    let a_for_fallback = a.clone_ref(py);
+    let a_for_fallback = A.clone_ref(py);
     let tol_for_fallback = tol.as_ref().map(|value| value.clone_ref(py));
     let rtol_for_fallback = rtol.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -27015,8 +27019,8 @@ fn matrix_rank(
     // of numpy's runtime at n~32-128). Non-ndarray / batched / tiny inputs fall
     // through to the extraction path below, which re-applies the same crossover.
     const MATRIX_RANK_NATIVE_MAX_DIM: usize = 16;
-    if a.bind(py).is_instance(&numpy.getattr("ndarray")?)?
-        && let Ok(sh) = a
+    if A.bind(py).is_instance(&numpy.getattr("ndarray")?)?
+        && let Ok(sh) = A
             .bind(py)
             .getattr("shape")
             .and_then(|s| s.extract::<Vec<usize>>())
@@ -27026,7 +27030,7 @@ fn matrix_rank(
         return fallback();
     }
 
-    let array = match extract_precise_numeric_array(py, a.bind(py), "matrix_rank(a)") {
+    let array = match extract_precise_numeric_array(py, A.bind(py), "matrix_rank(A)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
@@ -103483,6 +103487,66 @@ fn linalg_cross(
     Ok(np_linalg.getattr("cross")?.call(args, kwargs)?.unbind())
 }
 
+// linalg.diagonal / linalg.trace / linalg.outer / linalg.tensordot
+// passthroughs — SAME NAME AS THE TOP-LEVEL FUNCTION, DIFFERENT FUNCTION.
+// These four are Array-API variants under numpy.linalg and aliasing our
+// top-level wrappers to them (which is what the registration table used to do)
+// is not a signature nit, it returns the WRONG ARRAY:
+//
+//   a = np.arange(24).reshape(2, 3, 4)
+//   np.diagonal(a).shape -> (4, 2)      np.linalg.diagonal(a).shape -> (2, 3)
+//   np.trace(a) -> [16,18,20,22]        np.linalg.trace(a) -> [15, 51]
+//
+// np.diagonal/np.trace take axes 0 and 1; the linalg pair take the LAST TWO.
+// They coincide only for 2-D input, which is why the alias survived. outer and
+// tensordot differ in accepted surface rather than value - linalg.outer
+// REQUIRES 1-D where np.outer flattens, linalg.tensordot makes axes
+// keyword-only, and neither takes out=. Same lazy-delegation shape as
+// linalg_cross above, and for the same reason.
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn linalg_diagonal(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let np_linalg = py.import("numpy.linalg")?;
+    Ok(np_linalg.getattr("diagonal")?.call(args, kwargs)?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn linalg_trace(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let np_linalg = py.import("numpy.linalg")?;
+    Ok(np_linalg.getattr("trace")?.call(args, kwargs)?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn linalg_outer(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let np_linalg = py.import("numpy.linalg")?;
+    Ok(np_linalg.getattr("outer")?.call(args, kwargs)?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn linalg_tensordot(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let np_linalg = py.import("numpy.linalg")?;
+    Ok(np_linalg.getattr("tensordot")?.call(args, kwargs)?.unbind())
+}
+
 // linalg.vector_norm passthrough — Array-API spec name, only exists
 // under numpy.linalg (not at top level).
 #[pyfunction]
@@ -107678,11 +107742,12 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             ("eigh", "eigh"),
             ("eigvals", "eigvals"),
             ("eigvalsh", "eigvalsh"),
-            ("tensordot", "tensordot"),
             ("matmul", "matmul"),
-            ("diagonal", "diagonal"),
-            ("outer", "outer"),
-            ("trace", "trace"),
+            // diagonal / trace / outer / tensordot are NOT here on purpose:
+            // numpy.linalg's are Array-API variants, not the top-level
+            // functions, and aliasing ours returned the wrong array for
+            // ndim > 2 (see the linalg_diagonal passthrough for the numbers).
+            // They are registered below, like cross and vector_norm.
         ] {
             if let Ok(value) = m.getattr(flat_name) {
                 linalg.add(numpy_name, value)?;
@@ -107701,6 +107766,21 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         linalg.add_function(wrap_pyfunction!(linalg_vector_norm, &linalg)?)?;
         linalg.setattr("vector_norm", linalg.getattr("linalg_vector_norm")?)?;
         linalg.delattr("linalg_vector_norm")?;
+        // diagonal / trace / outer / tensordot — same name as a top-level
+        // function but a DIFFERENT function under numpy.linalg (Array-API
+        // variants over the last two axes, stricter arity). Same lazy pattern.
+        linalg.add_function(wrap_pyfunction!(linalg_diagonal, &linalg)?)?;
+        linalg.setattr("diagonal", linalg.getattr("linalg_diagonal")?)?;
+        linalg.delattr("linalg_diagonal")?;
+        linalg.add_function(wrap_pyfunction!(linalg_trace, &linalg)?)?;
+        linalg.setattr("trace", linalg.getattr("linalg_trace")?)?;
+        linalg.delattr("linalg_trace")?;
+        linalg.add_function(wrap_pyfunction!(linalg_outer, &linalg)?)?;
+        linalg.setattr("outer", linalg.getattr("linalg_outer")?)?;
+        linalg.delattr("linalg_outer")?;
+        linalg.add_function(wrap_pyfunction!(linalg_tensordot, &linalg)?)?;
+        linalg.setattr("tensordot", linalg.getattr("linalg_tensordot")?)?;
+        linalg.delattr("linalg_tensordot")?;
         // Re-export numpy.linalg-owned objects so users catching
         // fnp_python.linalg.LinAlgError and callers of linalg.test see the
         // exact NumPy objects. Lazy __getattr__ keeps resolution working for
