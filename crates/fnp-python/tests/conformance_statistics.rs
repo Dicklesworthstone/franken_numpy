@@ -362,11 +362,41 @@ fn cov_corrcoef_python_container_keyword_outcomes_match_numpy() -> Result<(), St
             StatsCaseContract::FmaBoundedValues { leaf_count: 4 },
         ),
         (
-            // numpy removed corrcoef's `ddof` in 2.0, so on every supported oracle
-            // this is an error surface, not a value: fnp must reject it the same way.
+            // corrcoef's bias/ddof were REMOVED in numpy 2.4 (2.3.5 still accepts
+            // them, warns, and ignores them). The two behaviours are incompatible
+            // and the fleet runs both, so the contract is not a fixed outcome — it
+            // is "whatever the installed numpy does", which is why these compare
+            // exactly rather than under a tolerance. fnp forwards the call the
+            // moment either is supplied, so numpy's own TypeError or its own bytes
+            // are what comes back (deadlock-audit-hp9u2). Before that fix fnp
+            // accepted ddof and returned a value on every build.
             "corrcoef y ddof compatibility",
             "result = MODULE.corrcoef([1.0, 2.0, 3.0], y=[3.0, 2.0, 1.0], ddof=0)",
             StatsCaseContract::ExactOutcome,
+        ),
+        (
+            // bias travels with ddof through the same removal, and the native path
+            // ignored it the same way. Covered separately so a fix that forwards
+            // only ddof is caught.
+            "corrcoef bias compatibility",
+            "result = MODULE.corrcoef([1.0, 2.0, 3.0], y=[3.0, 2.0, 1.0], bias=True)",
+            StatsCaseContract::ExactOutcome,
+        ),
+        (
+            // The 2-D rowvar form takes a different route inside fnp than the
+            // two-1-D-operand form above, so it needs its own case: forwarding must
+            // not depend on which fast path the input would otherwise have hit.
+            "corrcoef rowvar ddof compatibility",
+            "result = MODULE.corrcoef(np.array([[1.0, 2.0, 3.0], [3.0, 2.0, 1.0]]), ddof=1)",
+            StatsCaseContract::ExactOutcome,
+        ),
+        (
+            // The contrast case that keeps the change honest: cov KEEPS bias and
+            // ddof on every numpy including the vendored 2.5.0.dev0 oracle, so it
+            // must still compute them, not inherit corrcoef's forwarding.
+            "cov bias still supported",
+            "result = MODULE.cov([1.0, 2.0, 3.0], y=[3.0, 2.0, 1.0], bias=True)",
+            StatsCaseContract::FmaBoundedValues { leaf_count: 4 },
         ),
         (
             "corrcoef y shape error",

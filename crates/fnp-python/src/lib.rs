@@ -39980,6 +39980,47 @@ fn corrcoef(
     dtype: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
+    // `bias` / `ddof`: hand the WHOLE call to numpy the moment either is supplied.
+    //
+    // numpy deprecated both on corrcoef long ago and REMOVED them in 2.4. The two
+    // live behaviours are incompatible: 2.3.5 emits a DeprecationWarning, ignores
+    // them and returns a value, while 2.4.x raises TypeError. We do not get to pick
+    // one — the installed numpy is the contract, and a fleet runs both. Reproducing
+    // either side here would be an invented semantic that is wrong on the other half
+    // of the fleet, and reproducing "accept and ignore" (what this function used to
+    // do silently, without even reaching the fallback below) is what made
+    // fnp.corrcoef return a value where numpy 2.4 raises — deadlock-audit-hp9u2.
+    //
+    // Forwarding makes the observable behaviour numpy's own by construction: its
+    // exception type, message and warning on the rejecting builds; its exact bytes
+    // on the accepting ones. Note this is deliberately NOT done for `cov`, which
+    // still takes bias/ddof legitimately on every numpy including 2.5.0.dev0.
+    //
+    // Residual, stated rather than hidden: PyO3 maps an explicitly-passed Python
+    // None to Rust None, so `corrcoef(x, ddof=None)` is indistinguishable from not
+    // passing it and stays native. numpy 2.4 raises for that spelling. Closing it
+    // needs a **kwargs signature, which costs the positional forms numpy 2.3 still
+    // accepts, so it is not obviously a net win.
+    if bias.is_some() || ddof.is_some() {
+        let kwargs = PyDict::new(py);
+        if let Some(y_val) = y.as_ref() {
+            kwargs.set_item("y", y_val.bind(py))?;
+        }
+        kwargs.set_item("rowvar", rowvar)?;
+        if let Some(bias_val) = bias.as_ref() {
+            kwargs.set_item("bias", bias_val.bind(py))?;
+        }
+        if let Some(ddof_val) = ddof.as_ref() {
+            kwargs.set_item("ddof", ddof_val.bind(py))?;
+        }
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        return Ok(numpy
+            .getattr("corrcoef")?
+            .call((x.bind(py),), Some(&kwargs))?
+            .unbind());
+    }
     // INT/BOOL input: corrcoef runs through cov's result_type(m, f64)
     // conversion - byte-transparent unconditionally; see the cov twin.
     // dtype= override defers (the helper checks it).
@@ -39999,12 +40040,8 @@ fn corrcoef(
             kwargs.set_item("y", y_val.bind(py))?;
         }
         kwargs.set_item("rowvar", rowvar)?;
-        if let Some(bias_val) = bias.as_ref() {
-            kwargs.set_item("bias", bias_val.bind(py))?;
-        }
-        if let Some(ddof_val) = ddof.as_ref() {
-            kwargs.set_item("ddof", ddof_val.bind(py))?;
-        }
+        // bias/ddof are not forwarded here because they cannot reach this point:
+        // supplying either returns above, straight to numpy.
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item("dtype", dtype_val.bind(py))?;
         }
