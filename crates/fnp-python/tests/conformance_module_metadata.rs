@@ -151,3 +151,99 @@ print(np.__version__)
     );
     Ok(())
 }
+
+/// Importing fnp_python must leave the real numpy module unmodified.
+///
+/// We bind numpy's `__all__` into our own module and its submodules. Binding the
+/// LIST OBJECT rather than a copy made that list shared, and PyO3's
+/// `PyModule::add` appends every added name to `__all__` — so each fnp-only name
+/// we registered was silently appended to NUMPY's `__all__` too. Any
+/// `from numpy import *` in the same interpreter then raised AttributeError on a
+/// name only we define. That is a process-wide corruption of a third-party
+/// module, and it is how scipy broke: `scipy._lib.array_api_compat` star-imports
+/// numpy, so `import scipy.linalg` died with
+/// "module 'numpy' has no attribute '__submodule_import_errors__'"
+/// (deadlock-audit-335rd).
+///
+/// The star-import assertion is the load-bearing one. `is not` catches today's
+/// mechanism; the star-import catches the CONTRACT downstream code depends on,
+/// and stays meaningful if `__all__` is ever populated a different way.
+///
+/// The leak baseline is taken from a SUBPROCESS that never imports fnp. An
+/// earlier draft snapshotted `np.__all__` at the top of this script, which runs
+/// after fnp is loaded: it compared the corrupted list with itself and reported
+/// 0 leaked names in the same run whose star-import assertion was failing. Two
+/// of four assertions were structurally unable to fail. Verified against the
+/// pre-fix build after the change: all four now fire.
+#[test]
+fn importing_fnp_does_not_mutate_numpy_all() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import json, subprocess, sys
+
+# The baseline MUST come from an interpreter that never loaded fnp. Snapshotting
+# np.__all__ here would snapshot the already-corrupted list and compare it with
+# itself — measured: that spelling reported 0 leaked names in the very run whose
+# star-import was already broken.
+pristine = json.loads(subprocess.run(
+    [sys.executable, "-c", "import json, numpy; print(json.dumps(list(numpy.__all__)))"],
+    capture_output=True, text=True, check=True).stdout)
+
+# The real symptom: a star-import of numpy must still work once fnp is loaded.
+namespace = {}
+try:
+    exec("from numpy import *", namespace)
+    star_import = "ok"
+except Exception as exc:
+    star_import = f"{type(exc).__name__}: {exc}"
+
+# And the aliasing itself, for whichever module bound it.
+shared = [
+    name
+    for name, ours, theirs in (
+        ("fnp", fnp.__all__, np.__all__),
+        ("fnp.random", getattr(fnp.random, "__all__", None), np.random.__all__),
+        ("fnp.linalg", getattr(fnp.linalg, "__all__", None), np.linalg.__all__),
+        ("fnp.fft", getattr(fnp.fft, "__all__", None), np.fft.__all__),
+        ("fnp.ma", getattr(fnp.ma, "__all__", None), np.ma.__all__),
+    )
+    if ours is theirs
+]
+
+# Names fnp added to numpy's list, against the clean-interpreter baseline.
+# Empty on a healthy build. Sorted so the failure message is stable.
+leaked = sorted(set(np.__all__) - set(pristine))
+print(star_import)
+print(shared)
+print(leaked)
+print(len(np.__all__) - len(pristine))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+
+    assert_eq!(
+        lines.next().unwrap_or_default(),
+        "ok",
+        "`from numpy import *` must still work after importing fnp_python; \
+         this is what breaks scipy. Output: {result}"
+    );
+    assert_eq!(
+        lines.next().unwrap_or_default(),
+        "[]",
+        "these fnp modules bound numpy's __all__ LIST rather than a copy, so \
+         PyO3's module `add` appends our names to numpy's. Output: {result}"
+    );
+    assert_eq!(
+        lines.next().unwrap_or_default(),
+        "[]",
+        "fnp leaked names into numpy.__all__. Output: {result}"
+    );
+    assert_eq!(
+        lines.next().unwrap_or_default(),
+        "0",
+        "numpy.__all__ changed length while fnp_python was imported. Output: {result}"
+    );
+    Ok(())
+}

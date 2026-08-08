@@ -105878,6 +105878,26 @@ fn get_include(
     core_numpy_passthrough(py, "get_include", args, kwargs)
 }
 
+/// Copy another module's `__all__` into a fresh list before binding it to one
+/// of ours. Never bind the original object.
+///
+/// PyO3's `PyModule::add` APPENDS the added name to that module's `__all__`. So
+/// binding numpy's own list means every fnp-only name registered afterwards is
+/// appended to NUMPY's `__all__` as well. Most are duplicates of names numpy
+/// already exports, which is why this went unnoticed; the fnp-only ones are not.
+/// Once `__submodule_import_errors__` joined the list, any `from numpy import *`
+/// in the same interpreter raised AttributeError on a name only we define —
+/// which is precisely how this was found, via scipy's array_api_compat
+/// star-importing numpy (deadlock-audit-335rd).
+///
+/// This is a process-wide corruption of a third-party module, not a test
+/// artifact: it breaks any program that imports fnp_python and then star-imports
+/// numpy, in either order.
+fn copied_all_names<'py>(all_names: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyList>> {
+    let items = all_names.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+    PyList::new(all_names.py(), items)
+}
+
 #[pymodule]
 pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
@@ -106012,7 +106032,10 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         if let Ok(np_random) = py.import("numpy.random")
             && let Ok(all_names) = np_random.getattr("__all__")
         {
-            random.setattr("__all__", all_names.clone())?;
+            // Copy, not the object — see `copied_all_names`. `.clone()` on a
+            // Bound clones the HANDLE, so the list stayed shared with
+            // numpy.random's.
+            random.setattr("__all__", copied_all_names(&all_names)?)?;
             for item in all_names.try_iter()? {
                 let name = item?.extract::<String>()?;
                 if random.getattr(name.as_str()).is_err()
@@ -106108,7 +106131,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 }
             }
             if let Ok(all_names) = np_poly.getattr("__all__") {
-                polynomial.setattr("__all__", all_names.clone())?;
+                polynomial.setattr("__all__", copied_all_names(&all_names)?)?;
                 for item in all_names.try_iter()? {
                     let name = item?.extract::<String>()?;
                     if polynomial.getattr(name.as_str()).is_err()
@@ -106937,9 +106960,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         && let Ok(ver) = numpy.getattr("__version__")
     {
         m.setattr("__numpy_version__", &ver)?;
-        if let Ok(all_names) = numpy.getattr("__all__") {
-            m.setattr("__all__", all_names)?;
-        }
+        // `__all__` used to be bound here, which is what corrupted numpy's copy:
+        // hundreds of `m.add` calls follow, and PyO3 appends each name to it.
+        // It is now bound at the very END of this function instead.
     }
 
     // numpy top-level constants (numpy.__all__ reality-check). Values
@@ -107107,7 +107130,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         if let Ok(np_fft) = py.import("numpy.fft")
             && let Ok(all_names) = np_fft.getattr("__all__")
         {
-            fft_module.setattr("__all__", all_names)?;
+            fft_module.setattr("__all__", copied_all_names(&all_names)?)?;
         } else {
             fft_module.setattr("__all__", PyList::new(py, fft_names)?)?;
         }
@@ -107238,7 +107261,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 }
             }
             if let Ok(all_names) = np_linalg.getattr("__all__") {
-                linalg.setattr("__all__", all_names.clone())?;
+                linalg.setattr("__all__", copied_all_names(&all_names)?)?;
                 for item in all_names.try_iter()? {
                     let name = item?.extract::<String>()?;
                     if linalg.getattr(name.as_str()).is_err()
@@ -107635,7 +107658,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 }
             }
             if let Ok(all_names) = np_ma.getattr("__all__") {
-                ma.setattr("__all__", all_names.clone())?;
+                ma.setattr("__all__", copied_all_names(&all_names)?)?;
                 for item in all_names.try_iter()? {
                     let name = item?.extract::<String>()?;
                     if ma.getattr(name.as_str()).is_err()
@@ -108221,6 +108244,20 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         }
         m.add_submodule(&lib_module)?;
         m.add("lib", lib_module)?;
+    }
+
+    // `__all__` is bound LAST, deliberately. PyO3's `PyModule::add` appends the
+    // added name to `__all__`, so binding it early meant every subsequent `add`
+    // grew the list — 133 entries by the end of this function, including the
+    // fnp-only `__submodule_import_errors__` and `matrixlib`, which are not
+    // numpy names. Setting it here, after the last `add`, makes fnp's `__all__`
+    // exactly numpy's, which is what `fnp_python_top_level_all_matches_numpy_verbatim`
+    // has always claimed to check — while the list was shared with numpy's that
+    // test was comparing an object with itself (deadlock-audit-335rd).
+    if let Ok(numpy) = py.import("numpy")
+        && let Ok(all_names) = numpy.getattr("__all__")
+    {
+        m.setattr("__all__", copied_all_names(&all_names)?)?;
     }
 
     Ok(())
