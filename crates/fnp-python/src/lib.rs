@@ -9345,6 +9345,15 @@ fn try_zerocopy_f64_isclose(
 // that raise no flag. Over-deferring only costs a numpy recompute on operands
 // that are already subnormal; it can never diverge, because the arm we defer to
 // is the oracle itself.
+//
+// The benchmark that measures this branch's cost (deadlock-audit-jw7vk) carries a
+// REPLICA of this body, because a bench crate cannot reach a crate-root item here.
+// Both are pinned: this one by
+// `f64_divide_hazard_predicate_flags_exactly_the_ieee_exceptions` in this file's
+// `mod tests`, the replica by `DIVIDE_HAZARD_TRUTH_TABLE` in
+// `benches/criterion_python_elementwise.rs`, which the bench asserts before it
+// times anything. Change an arm of this predicate and both must move, or the
+// bench silently measures a branch we do not ship.
 #[inline]
 fn f64_divide_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
     // Fast accept, and the only test a clean divide pays: a NORMAL quotient is

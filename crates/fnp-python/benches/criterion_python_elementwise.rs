@@ -13,8 +13,9 @@ use criterion::Criterion;
 use fnp_python::fnp_python;
 use pyo3::Python;
 use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyTuple};
+use rayon::prelude::*;
 use std::hint::black_box;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn bench_select_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_select_boundary");
@@ -1235,5 +1236,295 @@ fn main() {
         ),
         ("bench_histogram_boundary", bench_histogram_boundary),
         ("bench_setops_boundary", bench_setops_boundary),
+        (
+            "bench_divide_fe_hazard_serial",
+            bench_divide_fe_hazard_serial,
+        ),
+        (
+            "bench_divide_fe_hazard_parallel",
+            bench_divide_fe_hazard_parallel,
+        ),
     ]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// f64 divide FE-hazard branch — deadlock-audit-jw7vk
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// deadlock-audit-2nmd1 made the f64 divide fast path defer to numpy on any
+// element that would raise an IEEE FP exception, because bit-identical VALUES
+// are not parity when numpy also emits a RuntimeWarning a pure-Rust kernel
+// cannot raise into numpy's error state. That fix landed UNMEASURED (no
+// admissible rch workers at the time). These two arms close that gap.
+//
+// RESULT CLASS IS FIXED IN ADVANCE: the base arm is OUR OWN FORMER CODE, so any
+// number here is `maintenance-self-speedup` — it says nothing about NumPy and
+// must never be quoted as a competitive claim. The expected sign is a small
+// REGRESSION, and a measured regression reported plainly is the success
+// condition. The deferral is a correctness requirement with a named probe
+// (`cargo test -p fnp-python --test conformance_diagnostics`) and is not on the
+// table whatever these arms say.
+//
+// WHAT ACTUALLY DIFFERS, from reading commit 47b8ad17 rather than its summary:
+// the `Div` arm is a SEPARATE loop from the generic `op.apply` loop, not the old
+// loop plus a branch. So the former arm here reproduces the old loop's shape —
+// `*s = op.apply(x, y)` with `apply` monomorphised to a divide — and the
+// candidate reproduces the new one. The predicate itself is a REPLICA — a bench
+// crate cannot reach a crate-root item in fnp-python — so it is pinned to the
+// shipped body by DIVIDE_HAZARD_TRUTH_TABLE below, which is asserted before any
+// timing runs. lib.rs carries the same table in its own unit test, and the
+// comment at the shipped predicate says both must move together.
+//
+// THIS IS A KERNEL-ONLY A/B, and this repo has already retracted one kernel-only
+// row that overstated a ratio by omitting route overhead. So each arm also
+// measures the END-TO-END `fnp.divide(a, b)` call at the same size and prints
+// the kernel's share of it. A kernel ratio without that share is a FRAME %
+// masquerading as a REMOVABLE %; read them together.
+
+/// Byte-for-byte replica of `f64_divide_raises_fp_error` in
+/// `crates/fnp-python/src/lib.rs`. A bench crate cannot reach that crate-root
+/// item, so the body is duplicated and pinned by `DIVIDE_HAZARD_TRUTH_TABLE`,
+/// which is asserted before any timing runs. If this drifts from the shipped
+/// predicate, the measurement is of something we do not ship.
+#[inline]
+fn bench_divide_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
+    if q.is_normal() {
+        return false;
+    }
+    if a.is_nan() || b.is_nan() {
+        return false;
+    }
+    if b == 0.0 {
+        return a.is_finite();
+    }
+    if a.is_infinite() {
+        return b.is_infinite();
+    }
+    if b.is_infinite() {
+        return false;
+    }
+    q.is_infinite() || (a != 0.0 && q.abs() < f64::MIN_POSITIVE)
+}
+
+/// (a, b, expected_hazard). Every arm of the predicate, both directions. The same
+/// table lives beside the shipped predicate in lib.rs; they must move together.
+const DIVIDE_HAZARD_TRUTH_TABLE: &[(f64, f64, bool)] = &[
+    (6.0, 3.0, false),                    // normal quotient: fast accept
+    (f64::NAN, 1.0, false),               // NaN operand propagates quietly
+    (1.0, f64::NAN, false),               // ditto, other side
+    (1.0, 0.0, true),                     // FE_DIVBYZERO
+    (-1.0, 0.0, true),                    // FE_DIVBYZERO, signed
+    (0.0, 0.0, true),                     // FE_INVALID
+    (f64::INFINITY, 0.0, false),          // exact +inf, raises nothing
+    (f64::INFINITY, f64::INFINITY, true), // FE_INVALID
+    (f64::INFINITY, 2.0, false),          // exact inf
+    (1.0, f64::INFINITY, false),          // exact zero
+    (f64::MAX, f64::MIN_POSITIVE, true),  // FE_OVERFLOW
+    (f64::MIN_POSITIVE, f64::MAX, true),  // FE_UNDERFLOW (conservative)
+    (0.0, 2.0, false),                    // exact zero, not underflow
+];
+
+fn assert_divide_hazard_replica_matches_contract() {
+    for &(a, b, expected) in DIVIDE_HAZARD_TRUTH_TABLE {
+        let got = bench_divide_raises_fp_error(a, b, a / b);
+        assert_eq!(
+            got, expected,
+            "bench replica of f64_divide_raises_fp_error disagrees with the pinned \
+             contract at a={a:?} b={b:?}: got {got}, expected {expected}. The measured \
+             branch is not the shipped one — fix the replica before trusting any ratio."
+        );
+    }
+}
+
+const DIVIDE_SERIAL_N: usize = 1 << 20; // below the kernel's 1<<21 rayon threshold
+const DIVIDE_PARALLEL_N: usize = 1 << 22; // above it
+
+/// Hazard-free operands: every quotient lands in (0.5, 2), i.e. normal, so the
+/// candidate's fast accept (`q.is_normal()`) is taken on every element. That is
+/// deliberately the WORST case for this measurement — it is the path that pays
+/// the added test and never gets to skip work.
+fn divide_hazard_free_operands(n: usize) -> (Vec<f64>, Vec<f64>) {
+    let a = (0..n)
+        .map(|i| 1.0 + ((i % 1000) as f64) / 1000.0)
+        .collect::<Vec<f64>>();
+    let b = (0..n)
+        .map(|i| 1.25 + ((i % 997) as f64) / 997.0)
+        .collect::<Vec<f64>>();
+    (a, b)
+}
+
+fn divide_checksum(out: &[f64]) -> u64 {
+    out[0].to_bits()
+        ^ out[out.len() / 2].to_bits().rotate_left(17)
+        ^ out[out.len() - 1].to_bits().rotate_left(37)
+}
+
+/// The pre-2nmd1 serial loop: a plain divide, no hazard test.
+#[inline(never)]
+fn divide_former_serial(a: &[f64], b: &[f64], out: &mut [f64]) {
+    for ((s, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
+        *s = x / y;
+    }
+}
+
+/// The shipped serial loop: quotient computed once, hazard test fused in.
+#[inline(never)]
+fn divide_candidate_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
+    let mut hazard = false;
+    for ((s, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
+        let q = x / y;
+        hazard |= bench_divide_raises_fp_error(x, y, q);
+        *s = q;
+    }
+    hazard
+}
+
+/// Same chunking the kernel uses: `n.div_ceil(rayon::current_num_threads())`.
+#[inline(never)]
+fn divide_former_parallel(a: &[f64], b: &[f64], out: &mut [f64]) {
+    let chunk = out.len().div_ceil(rayon::current_num_threads());
+    out.par_chunks_mut(chunk)
+        .zip(a.par_chunks(chunk))
+        .zip(b.par_chunks(chunk))
+        .for_each(|((o, l), r)| {
+            for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
+                *s = x / y;
+            }
+        });
+}
+
+#[inline(never)]
+fn divide_candidate_parallel(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
+    let hazard = std::sync::atomic::AtomicBool::new(false);
+    let chunk = out.len().div_ceil(rayon::current_num_threads());
+    out.par_chunks_mut(chunk)
+        .zip(a.par_chunks(chunk))
+        .zip(b.par_chunks(chunk))
+        .for_each(|((o, l), r)| {
+            let mut chunk_hazard = false;
+            for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
+                let q = x / y;
+                chunk_hazard |= bench_divide_raises_fp_error(x, y, q);
+                *s = q;
+            }
+            if chunk_hazard {
+                hazard.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+    hazard.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Times the real `fnp.divide(a, b)` end to end and prints the kernel's share of
+/// it, so the kernel ratio above is read against the call it actually sits in.
+fn report_divide_route_share(n: usize, label: &str, kernel_ns: f64) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let b = locals.get_item("b").expect("b operand");
+        let divide = module.getattr("divide").expect("fnp.divide");
+        // TRAP 1 (dispatch): this arm times OUR route, so assert it is ours and
+        // not numpy's re-export before quoting a share.
+        let numpy_divide = numpy.getattr("divide").expect("numpy.divide");
+        assert!(
+            !divide.is(&numpy_divide),
+            "fnp.divide is numpy's object — the route under test is not ours"
+        );
+        let args = PyTuple::new(py, [&a, &b]).expect("args");
+        for _ in 0..8 {
+            black_box(divide.call1(&args).expect("warm divide"));
+        }
+        const ROUNDS: usize = 24;
+        let mut best = f64::INFINITY;
+        for _ in 0..ROUNDS {
+            let started = std::time::Instant::now();
+            black_box(divide.call1(&args).expect("divide"));
+            best = best.min(started.elapsed().as_secs_f64() * 1.0e9);
+        }
+        println!(
+            "DIVIDE_ROUTE_SHARE label={label} n={n} end_to_end_ns={best:.1} \
+             kernel_ns={kernel_ns:.1} kernel_share={:.3}",
+            kernel_ns / best
+        );
+    });
+}
+
+fn bench_divide_fe_hazard_serial(_c: &mut Criterion) {
+    assert_divide_hazard_replica_matches_contract();
+    let n = DIVIDE_SERIAL_N;
+    let (a, b) = divide_hazard_free_operands(n);
+    let mut former_out = vec![0.0_f64; n];
+    let mut candidate_out = vec![0.0_f64; n];
+
+    let time_former = || {
+        let started = Instant::now();
+        divide_former_serial(&a, &b, &mut former_out);
+        let elapsed = started.elapsed();
+        let checksum = divide_checksum(&former_out);
+        black_box(&former_out);
+        common::ContractObservation { elapsed, checksum }
+    };
+    let time_candidate = || {
+        let started = Instant::now();
+        let hazard = divide_candidate_serial(&a, &b, &mut candidate_out);
+        let elapsed = started.elapsed();
+        assert!(!hazard, "operands must be hazard-free for this measurement");
+        let checksum = divide_checksum(&candidate_out);
+        black_box(&candidate_out);
+        common::ContractObservation { elapsed, checksum }
+    };
+    let (effect, _null) = common::run_median_ci_contract(
+        "divide_fe_hazard_branch_serial_1m",
+        time_former,
+        time_candidate,
+    );
+    report_divide_route_share(n, "serial", effect.arm_b_median_ns);
+}
+
+fn bench_divide_fe_hazard_parallel(_c: &mut Criterion) {
+    assert_divide_hazard_replica_matches_contract();
+    let n = DIVIDE_PARALLEL_N;
+    let (a, b) = divide_hazard_free_operands(n);
+    let mut former_out = vec![0.0_f64; n];
+    let mut candidate_out = vec![0.0_f64; n];
+
+    let time_former = || {
+        let started = Instant::now();
+        divide_former_parallel(&a, &b, &mut former_out);
+        let elapsed = started.elapsed();
+        let checksum = divide_checksum(&former_out);
+        black_box(&former_out);
+        common::ContractObservation { elapsed, checksum }
+    };
+    let time_candidate = || {
+        let started = Instant::now();
+        let hazard = divide_candidate_parallel(&a, &b, &mut candidate_out);
+        let elapsed = started.elapsed();
+        assert!(!hazard, "operands must be hazard-free for this measurement");
+        let checksum = divide_checksum(&candidate_out);
+        black_box(&candidate_out);
+        common::ContractObservation { elapsed, checksum }
+    };
+    let (effect, _null) = common::run_median_ci_contract(
+        "divide_fe_hazard_branch_parallel_4m",
+        time_former,
+        time_candidate,
+    );
+    report_divide_route_share(n, "parallel", effect.arm_b_median_ns);
 }
