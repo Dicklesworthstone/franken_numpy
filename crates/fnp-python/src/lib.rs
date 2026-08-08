@@ -40565,7 +40565,7 @@ fn try_zerocopy_f64_nansum_axis(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false, r#where=None))]
 fn nanmean(
     py: Python<'_>,
     a: Py<PyAny>,
@@ -40573,6 +40573,7 @@ fn nanmean(
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     keepdims: bool,
+    r#where: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let nanmean_fn = numpy.getattr("nanmean")?;
@@ -40589,13 +40590,21 @@ fn nanmean(
             kwargs.set_item("out", out_val.bind(py))?;
         }
         kwargs.set_item("keepdims", keepdims)?;
+        if let Some(where_val) = r#where.as_ref() {
+            kwargs.set_item("where", where_val.bind(py))?;
+        }
         Ok(nanmean_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
+    // where= belongs to numpy's signature (nanmean has no initial=) and no
+    // native path here implements it, so a non-None value delegates as out= does.
     if dtype
         .as_ref()
         .is_some_and(|value| !value.bind(py).is_none())
         || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        || r#where
+            .as_ref()
+            .is_some_and(|value| !value.bind(py).is_none())
     {
         return fallback();
     }
@@ -42629,7 +42638,8 @@ fn compute_f64_var_flat(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false, initial=None, r#where=None))]
+#[allow(clippy::too_many_arguments)]
 fn nansum(
     py: Python<'_>,
     a: Py<PyAny>,
@@ -42637,6 +42647,8 @@ fn nansum(
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     keepdims: bool,
+    initial: Option<Py<PyAny>>,
+    r#where: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let nansum_fn = numpy.getattr("nansum")?;
@@ -42653,13 +42665,28 @@ fn nansum(
             kwargs.set_item("out", out_val.bind(py))?;
         }
         kwargs.set_item("keepdims", keepdims)?;
+        if let Some(initial_val) = initial.as_ref() {
+            kwargs.set_item("initial", initial_val.bind(py))?;
+        }
+        if let Some(where_val) = r#where.as_ref() {
+            kwargs.set_item("where", where_val.bind(py))?;
+        }
         Ok(nansum_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
+    // initial= / where= are part of numpy's signature and no native path here
+    // implements them, so a non-None value delegates exactly as dtype= and out=
+    // already do (the shape nanprod below already uses).
     if dtype
         .as_ref()
         .is_some_and(|value| !value.bind(py).is_none())
         || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        || initial
+            .as_ref()
+            .is_some_and(|value| !value.bind(py).is_none())
+        || r#where
+            .as_ref()
+            .is_some_and(|value| !value.bind(py).is_none())
     {
         return fallback();
     }
@@ -46037,13 +46064,15 @@ fn try_zerocopy_f64_matrix_norm_lastaxes(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, out=None, keepdims=None))]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=None, initial=None, r#where=None))]
 fn nanmax(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     keepdims: Option<bool>,
+    initial: Option<Py<PyAny>>,
+    r#where: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let nanmax_fn = numpy.getattr("nanmax")?;
@@ -46059,10 +46088,25 @@ fn nanmax(
         if let Some(keepdims_val) = keepdims {
             kwargs.set_item("keepdims", keepdims_val)?;
         }
+        if let Some(initial_val) = initial.as_ref() {
+            kwargs.set_item("initial", initial_val.bind(py))?;
+        }
+        if let Some(where_val) = r#where.as_ref() {
+            kwargs.set_item("where", where_val.bind(py))?;
+        }
         Ok(nanmax_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
-    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+    // initial= / where= belong to numpy's signature and no native path here
+    // implements them, so a non-None value delegates just as out= does.
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        || initial
+            .as_ref()
+            .is_some_and(|value| !value.bind(py).is_none())
+        || r#where
+            .as_ref()
+            .is_some_and(|value| !value.bind(py).is_none())
+    {
         return fallback();
     }
 
@@ -46188,13 +46232,15 @@ fn nanmax(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, out=None, keepdims=None))]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=None, initial=None, r#where=None))]
 fn nanmin(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     keepdims: Option<bool>,
+    initial: Option<Py<PyAny>>,
+    r#where: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let nanmin_fn = numpy.getattr("nanmin")?;
@@ -46210,10 +46256,25 @@ fn nanmin(
         if let Some(keepdims_val) = keepdims {
             kwargs.set_item("keepdims", keepdims_val)?;
         }
+        if let Some(initial_val) = initial.as_ref() {
+            kwargs.set_item("initial", initial_val.bind(py))?;
+        }
+        if let Some(where_val) = r#where.as_ref() {
+            kwargs.set_item("where", where_val.bind(py))?;
+        }
         Ok(nanmin_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
-    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+    // initial= / where= belong to numpy's signature and no native path here
+    // implements them, so a non-None value delegates just as out= does.
+    if initial
+        .as_ref()
+        .is_some_and(|value| !value.bind(py).is_none())
+        || r#where
+            .as_ref()
+            .is_some_and(|value| !value.bind(py).is_none())
+        || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
+    {
         return fallback();
     }
 

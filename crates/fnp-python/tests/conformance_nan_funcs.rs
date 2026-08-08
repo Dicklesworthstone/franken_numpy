@@ -1491,3 +1491,88 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+// numpy's nan reductions take initial= and where= (nanmean takes where= only).
+// fnp did not declare them, so the documented call raised TypeError here while
+// numpy answered - and the native kernels do not implement either, so a
+// non-None value has to delegate the same way dtype=/out= already do. This walks
+// both the values and the surfaces where numpy is deliberately awkward: an
+// all-False where= (nansum gives 0.0, nanmean gives nan + a RuntimeWarning),
+// and nanmax(where=) WITHOUT initial=, which numpy rejects because fmax has no
+// identity - fnp must reproduce that ValueError rather than inventing an answer.
+#[test]
+fn nan_reduction_initial_and_where_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+import warnings
+
+x = np.array([1.0, 2.0, np.nan, 4.0])
+mask = np.array([True, False, True, True])
+all_false = np.zeros(4, dtype=bool)
+y = np.array([[1.0, np.nan], [3.0, 4.0]])
+mask_2d = np.array([[True, True], [False, True]])
+
+cases = [
+    ("nansum where", "nansum", (x,), {"where": mask}),
+    ("nansum initial", "nansum", (x,), {"initial": 10.0}),
+    ("nansum initial+where", "nansum", (x,), {"where": mask, "initial": 10.0}),
+    ("nansum where all-false", "nansum", (x,), {"where": all_false}),
+    ("nansum where keepdims", "nansum", (x,), {"where": mask, "keepdims": True}),
+    ("nansum 2-D axis where", "nansum", (y,), {"axis": 1, "where": mask_2d}),
+    ("nanmax initial", "nanmax", (x,), {"initial": 99.0}),
+    ("nanmax initial+where", "nanmax", (x,), {"where": mask, "initial": -np.inf}),
+    ("nanmax where without initial", "nanmax", (x,), {"where": mask}),
+    ("nanmin initial", "nanmin", (x,), {"initial": -99.0}),
+    ("nanmin initial+where", "nanmin", (x,), {"where": mask, "initial": np.inf}),
+    ("nanmin where without initial", "nanmin", (x,), {"where": mask}),
+    ("nanmean where", "nanmean", (x,), {"where": mask}),
+    ("nanmean where all-false", "nanmean", (x,), {"where": all_false}),
+    ("nanmean 2-D axis where", "nanmean", (y,), {"axis": 0, "where": mask_2d}),
+    ("nanmean where keepdims", "nanmean", (x,), {"where": mask, "keepdims": True}),
+    # initial=None IS "not passed at all" for numpy (nanmax(initial=None) ==
+    # nanmax(x)), so this case belongs here. where=None is NOT - numpy reads it
+    # as an all-False mask (nansum -> 0.0, nanmean -> nan) while fnp cannot tell
+    # it from an omitted argument, because PyO3 extracts Python None into Rust
+    # None for an Option<T> parameter. That divergence is measured and tracked in
+    # deadlock-audit-where-none-vs-absent-sentinel-bbk62; adding the where=None
+    # cases here is that bead's closing move, and they are left out rather than
+    # asserted loosely.
+    ("nanmax initial=None", "nanmax", (x,), {"initial": None}),
+    ("nanmin initial=None", "nanmin", (x,), {"initial": None}),
+    ("nansum initial=None", "nansum", (x,), {"initial": None}),
+]
+
+def outcome(module, name, args, kwargs):
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = np.asarray(getattr(module, name)(*args, **kwargs))
+        return ("ok", str(result.dtype), tuple(result.shape), result.tobytes().hex())
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+ok = True
+for label, name, args, kwargs in cases:
+    actual = outcome(fnp, name, args, kwargs)
+    expected = outcome(np, name, args, kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+print("oracle", platform.node(), np.__version__)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "nan reduction initial=/where= surfaces should match numpy ({provenance}): {result}"
+    );
+    Ok(())
+}
