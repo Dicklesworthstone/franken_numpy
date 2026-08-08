@@ -744,4 +744,3 @@ print("oracle", platform.node(), np.__version__)
     );
     Ok(())
 }
-

@@ -276,15 +276,14 @@ print(np.argmax(ham) == mid and np.argmax(hann) == mid)
 // TypeError, so this pins the keyword spelling for all five windows alongside
 // the positional form and the negative/zero lengths numpy special-cases.
 //
-// Two levels of strictness, deliberately: fnp(M=k) must be BYTE-identical to
-// fnp(k), because that is the keyword-binding claim and it is exact; fnp vs
-// numpy is compared on dtype/shape/error-class exactly and on values to
-// float64 tolerance, because the kernels currently differ from numpy in the
-// last ULP (fnp evaluates 0.5 - 0.5*cos(2*pi*i/(M-1)) where numpy evaluates
-// 0.5 + 0.5*cos(pi*n/(M-1)) over n = arange(1-M, M, 2), which is also why
-// numpy's window is exactly symmetric and fnp's is not). That divergence is
-// its own defect, tracked in deadlock-audit-window-ulp-asymmetry-sdcoh, and
-// tightening this comparison to bytes is what closes it.
+// Everything here is compared on BYTES, not tolerance: dtype, shape, error
+// class and the raw output buffer, plus an exact fnp(M=k) == fnp(k) check for
+// the keyword binding itself and an explicit window == window[::-1] symmetry
+// assertion. The tolerance version of this test is what caught
+// deadlock-audit-window-ulp-asymmetry-sdcoh (the kernels evaluated
+// 0.5 - 0.5*cos(2*pi*i/(M-1)) where numpy evaluates 0.5 + 0.5*cos(pi*n/(M-1))
+// over n = arange(1-M, M, 2), leaving them 1 ULP off and asymmetric); the byte
+// comparison is what keeps it closed.
 #[test]
 fn window_length_keyword_is_capital_m_like_numpy() -> Result<(), String> {
     let script = fnp_script(
@@ -324,23 +323,18 @@ cases.append(("kaiser lowercase m=", "kaiser", kaiser_lowercase, 7))
 def outcome(module, name, call, length):
     try:
         result = call(getattr(module, name), length)
-        return ("ok", str(result.dtype), tuple(result.shape), result)
+        return ("ok", str(result.dtype), tuple(result.shape), result.tobytes().hex())
     except Exception as exc:
-        return ("err", type(exc).__name__, None, None)
+        return ("err", type(exc).__name__)
 
 ok = True
 for label, name, call, length in cases:
     actual = outcome(fnp, name, call, length)
     expected = outcome(np, name, call, length)
-    if actual[:3] != expected[:3]:
+    if actual != expected:
         print(label)
-        print(actual[:3])
-        print(expected[:3])
-        ok = False
-    elif actual[0] == "ok" and not np.allclose(actual[3], expected[3], rtol=0, atol=1e-15):
-        print(label + " values")
-        print(actual[3].tolist())
-        print(expected[3].tolist())
+        print(actual)
+        print(expected)
         ok = False
 
 # The keyword binding itself is exact: passing the length by keyword must
@@ -356,6 +350,35 @@ for length in [-3, 0, 1, 2, 7, 12, 33]:
     if fnp.kaiser(M=length, beta=8.6).tobytes() != fnp.kaiser(length, 8.6).tobytes():
         print(f"kaiser M={length} keyword/positional byte mismatch")
         ok = False
+
+# numpy's windows are symmetric BY CONSTRUCTION (it evaluates them over the
+# symmetric index arange(1-M, M, 2), and cos is even). A window that is merely
+# close to numpy can still be asymmetric, which is what this catches - and
+# asymmetry is a property loss in its own right for overlap-add reconstruction.
+for name in ["bartlett", "blackman", "hamming", "hanning"]:
+    for length in [2, 3, 4, 5, 7, 8, 12, 17, 33, 64, 101, 255]:
+        window = getattr(fnp, name)(length)
+        if window.tobytes() != window[::-1].copy().tobytes():
+            print(f"{name}({length}) is not symmetric")
+            ok = False
+for length in [2, 3, 4, 5, 7, 8, 12, 17, 33, 64, 101, 255]:
+    window = fnp.kaiser(length, 8.6)
+    if window.tobytes() != window[::-1].copy().tobytes():
+        print(f"kaiser({length}) is not symmetric")
+        ok = False
+
+# Byte parity across a wider size sweep than the keyword grid above, since the
+# ULP divergence only showed up from M >= 4 and grew with M.
+for name in ["bartlett", "blackman", "hamming", "hanning"]:
+    for length in [2, 3, 4, 5, 7, 8, 12, 17, 33, 64, 101, 255, 1024]:
+        if getattr(fnp, name)(length).tobytes() != getattr(np, name)(length).tobytes():
+            print(f"{name}({length}) bytes differ from numpy")
+            ok = False
+for length in [2, 3, 4, 5, 7, 8, 12, 17, 33, 64, 101, 255, 1024]:
+    for beta in [0.0, 2.5, 8.6, 14.0]:
+        if fnp.kaiser(length, beta).tobytes() != np.kaiser(length, beta).tobytes():
+            print(f"kaiser({length}, {beta}) bytes differ from numpy")
+            ok = False
 
 print(ok)
 print("oracle", platform.node(), np.__version__)

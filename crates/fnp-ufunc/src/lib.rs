@@ -22565,12 +22565,20 @@ impl UFuncArray {
                 integer_sidecar: None,
             };
         }
+        // numpy evaluates the window over the SYMMETRIC index n = arange(1-M, M, 2)
+        // as 0.54 + 0.46*cos(pi*n/(M-1)), not over i as 0.54 - 0.46*cos(2*pi*i/(M-1)).
+        // The two are equal in exact arithmetic and differ in f64: because cos is even
+        // and n comes in +/- pairs, numpy's form is exactly symmetric, while the
+        // i-indexed form rounds the two halves differently — it was 1 ULP off numpy AND
+        // asymmetric at every M >= 4. Keep numpy's association order (pi*n first, then
+        // divided by M-1) — that is what makes it byte-identical.
         // Parallelize the per-point cos map: numpy runs hamming single-threaded, so its
         // vectorized cos edges out our serial cos at cache-resident sizes (1.1x@100K) while we
         // already win at 4M; multi-threaded chunks win across the board. Bit-identical (same
         // per-point formula; collect from a parallel map preserves index order).
         let point = |i: usize| {
-            0.54 - 0.46 * (2.0 * std::f64::consts::PI * i as f64 / (m as f64 - 1.0)).cos()
+            let n = 1.0 - m as f64 + 2.0 * i as f64;
+            0.54 + 0.46 * (std::f64::consts::PI * n / (m as f64 - 1.0)).cos()
         };
         // Serial cos-map is par-or-WIN vs numpy at ALL practical sizes (BlackThrush 2026-06-22:
         // 100K-4M = 0.80-1.06x, load-independent); the rayon path gave NO benefit and was a
@@ -22600,10 +22608,14 @@ impl UFuncArray {
                 integer_sidecar: None,
             };
         }
+        // Symmetric index n = arange(1-M, M, 2), matching numpy exactly (see hamming
+        // for why the i-indexed form was both 1 ULP off and asymmetric).
         // Parallelize the per-point cos map (see hamming): bit-identical, wins cache-resident
         // sizes where numpy's single-threaded vectorized cos otherwise edged out our serial one.
-        let point =
-            |i: usize| 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / (m as f64 - 1.0)).cos();
+        let point = |i: usize| {
+            let n = 1.0 - m as f64 + 2.0 * i as f64;
+            0.5 + 0.5 * (std::f64::consts::PI * n / (m as f64 - 1.0)).cos()
+        };
         // Serial is par-or-WIN at all practical sizes; rayon path = swarm-contention landmine
         // (see hamming). Keep serial for practical M.
         const HANNING_PARALLEL_MIN: usize = 1 << 24;
@@ -22631,10 +22643,15 @@ impl UFuncArray {
                 integer_sidecar: None,
             };
         }
+        // Symmetric index n = arange(1-M, M, 2), matching numpy exactly (see hamming).
+        // numpy forms the second harmonic as cos(2.0*pi*n/(M-1)) — a fresh quotient, not
+        // cos(2*x) of the first argument, and the two round differently.
         // Parallelize the per-point cos map (see hamming): bit-identical.
         let point = |i: usize| {
-            let x = 2.0 * std::f64::consts::PI * i as f64 / (m as f64 - 1.0);
-            0.42 - 0.5 * x.cos() + 0.08 * (2.0 * x).cos()
+            let n = 1.0 - m as f64 + 2.0 * i as f64;
+            let span = m as f64 - 1.0;
+            0.42 + 0.5 * (std::f64::consts::PI * n / span).cos()
+                + 0.08 * (2.0 * std::f64::consts::PI * n / span).cos()
         };
         // Serial is par-or-WIN at all practical sizes; rayon path = swarm-contention landmine
         // (see hamming). Keep serial for practical M.
@@ -22663,6 +22680,10 @@ impl UFuncArray {
                 integer_sidecar: None,
             };
         }
+        // Unlike the three cosine windows, this form IS already byte-identical to numpy
+        // and exactly symmetric (verified against np.bartlett at M = 2..1024): the
+        // triangle is exact in f64 wherever (i - half)/half is, so there is no rounding
+        // asymmetry to remove. Left as is deliberately.
         let half = (m as f64 - 1.0) / 2.0;
         let values: Vec<f64> = (0..m)
             .map(|i| 1.0 - ((i as f64 - half) / half).abs())
