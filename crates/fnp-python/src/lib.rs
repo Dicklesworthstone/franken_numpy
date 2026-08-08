@@ -70277,6 +70277,16 @@ fn try_zerocopy_c128_argsort_lastaxis(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
+    // Type FIRST. argsort's fast-path block calls every probe unconditionally, so
+    // this ran on whatever the caller passed — and reading `ndim` off a Python
+    // list raised AttributeError out of a routine whose contract is to decline
+    // and defer. An INT list died inside a COMPLEX probe, before dispatch ever
+    // decided the dtype was not complex (deadlock-audit-nkvau). Same remedy as
+    // deadlock-audit-3fvvr: a fast-path probe must decline what it does not
+    // recognise, never raise.
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
     if ndim < 2 {
         return Ok(None);
@@ -70367,6 +70377,16 @@ fn try_zerocopy_c128_argsort_axis0(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
+    // Type FIRST. argsort's fast-path block calls every probe unconditionally, so
+    // this ran on whatever the caller passed — and reading `ndim` off a Python
+    // list raised AttributeError out of a routine whose contract is to decline
+    // and defer. An INT list died inside a COMPLEX probe, before dispatch ever
+    // decided the dtype was not complex (deadlock-audit-nkvau). Same remedy as
+    // deadlock-audit-3fvvr: a fast-path probe must decline what it does not
+    // recognise, never raise.
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
     if ndim < 2 || !axis_spec_is_first(axis_spec, ndim) {
         return Ok(None);
@@ -70473,6 +70493,16 @@ fn try_zerocopy_c128_argsort_midaxis(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
+    // Type FIRST. argsort's fast-path block calls every probe unconditionally, so
+    // this ran on whatever the caller passed — and reading `ndim` off a Python
+    // list raised AttributeError out of a routine whose contract is to decline
+    // and defer. An INT list died inside a COMPLEX probe, before dispatch ever
+    // decided the dtype was not complex (deadlock-audit-nkvau). Same remedy as
+    // deadlock-audit-3fvvr: a fast-path probe must decline what it does not
+    // recognise, never raise.
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
     if ndim < 3 {
         return Ok(None);
@@ -70620,6 +70650,16 @@ fn try_zerocopy_c64_argsort_axis0(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
+    // Type FIRST. argsort's fast-path block calls every probe unconditionally, so
+    // this ran on whatever the caller passed — and reading `ndim` off a Python
+    // list raised AttributeError out of a routine whose contract is to decline
+    // and defer. An INT list died inside a COMPLEX probe, before dispatch ever
+    // decided the dtype was not complex (deadlock-audit-nkvau). Same remedy as
+    // deadlock-audit-3fvvr: a fast-path probe must decline what it does not
+    // recognise, never raise.
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
     if ndim < 2 || !axis_spec_is_first(axis_spec, ndim) {
         return Ok(None);
@@ -70723,6 +70763,16 @@ fn try_zerocopy_c64_argsort_midaxis(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
+    // Type FIRST. argsort's fast-path block calls every probe unconditionally, so
+    // this ran on whatever the caller passed — and reading `ndim` off a Python
+    // list raised AttributeError out of a routine whose contract is to decline
+    // and defer. An INT list died inside a COMPLEX probe, before dispatch ever
+    // decided the dtype was not complex (deadlock-audit-nkvau). Same remedy as
+    // deadlock-audit-3fvvr: a fast-path probe must decline what it does not
+    // recognise, never raise.
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
     if ndim < 3 {
         return Ok(None);
