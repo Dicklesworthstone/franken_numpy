@@ -37,6 +37,16 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+// The signbit surface scripts below close with a provenance line (host + numpy
+// version) after the parity verdict, so a red run names the environment it was
+// measured in instead of leaving the reader to guess which worker ran it.
+fn split_verdict(output: &str) -> (&str, &str) {
+    let mut lines = output.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    (verdict, provenance)
+}
+
 #[test]
 fn sign_basic() -> Result<(), String> {
     let script = fnp_script(
@@ -351,6 +361,204 @@ print(np.array_equal(fnp_result, np_result))
         result.trim(),
         "True",
         "signbit subnormal numbers should match numpy"
+    );
+    Ok(())
+}
+
+// fnp.signbit keeps a native one-argument fast path and delegates every other
+// arity/keyword surface to numpy. This walks that boundary: out= as keyword,
+// positional, tuple, None, a strided view, a dtype numpy is allowed to cast
+// into, where= partial writes, and the two shapes that must raise. Each case
+// compares fnp's outcome against numpy's outcome computed in the same
+// interpreter, so nothing is pinned to a build.
+#[test]
+fn signbit_out_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+
+def keyword_bool(fn):
+    x = np.array([-2.0, -0.0, 0.0, 3.5], dtype=np.float64)
+    out = np.ones(4, dtype=bool)
+    result = fn(x, out=out)
+    return (result is out, out.dtype.str, tuple(out.shape), out.tolist())
+
+def positional_bool(fn):
+    x = np.array([-2.0, -0.0, 0.0, 3.5], dtype=np.float64)
+    out = np.ones(4, dtype=bool)
+    result = fn(x, out)
+    return (result is out, out.dtype.str, tuple(out.shape), out.tolist())
+
+def tuple_out(fn):
+    x = np.array([-2.0, -0.0, 0.0, 3.5], dtype=np.float64)
+    out = np.ones(4, dtype=bool)
+    result = fn(x, out=(out,))
+    return (result is out, out.tolist())
+
+def none_out(fn):
+    x = np.array([-2.0, -0.0, 0.0, 3.5], dtype=np.float64)
+    result = fn(x, out=None)
+    return (str(result.dtype), result.tolist())
+
+def float_out(fn):
+    # numpy casts the bool result into a float out buffer; it must not refuse.
+    x = np.array([-2.0, -0.0, 0.0, 3.5], dtype=np.float64)
+    out = np.full(4, 9.0, dtype=np.float64)
+    result = fn(x, out=out)
+    return (result is out, out.dtype.str, out.tolist())
+
+def strided_out(fn):
+    # Writing through a non-contiguous view must leave the untouched slots alone.
+    x = np.array([-2.0, -0.0, 0.0, 3.5], dtype=np.float64)
+    big = np.zeros(8, dtype=bool)
+    fn(x, out=big[::2])
+    return (big.tolist(),)
+
+def where_partial(fn):
+    x = np.array([-2.0, -0.0, 0.0, 3.5], dtype=np.float64)
+    out = np.zeros(4, dtype=bool)
+    result = fn(x, out=out, where=np.array([True, False, True, False]))
+    return (result is out, out.tolist())
+
+def int_input_out(fn):
+    x = np.array([-2, -1, 0, 3], dtype=np.int32)
+    out = np.ones(4, dtype=bool)
+    result = fn(x, out=out)
+    return (result is out, out.tolist())
+
+def float16_input_out(fn):
+    x = np.array([-2.0, -0.0, 0.0, 3.5], dtype=np.float16)
+    out = np.ones(4, dtype=bool)
+    result = fn(x, out=out)
+    return (result is out, out.tolist())
+
+def two_dimensional_out(fn):
+    x = np.array([[-1.0, 2.0], [0.0, -0.0]], dtype=np.float64)
+    out = np.ones((2, 2), dtype=bool)
+    result = fn(x, out=out)
+    return (result is out, out.tolist())
+
+def bad_out_shape(fn):
+    x = np.array([-2.0, -0.0, 0.0, 3.5], dtype=np.float64)
+    out = np.ones(2, dtype=bool)
+    result = fn(x, out=out)
+    return (result is out, out.tolist())
+
+def complex_input_out(fn):
+    x = np.array([1 + 2j, -1 - 2j], dtype=np.complex128)
+    out = np.ones(2, dtype=bool)
+    result = fn(x, out=out)
+    return (result is out, out.tolist())
+
+def extra_positional(fn):
+    x = np.array([-2.0, 3.5], dtype=np.float64)
+    out = np.ones(2, dtype=bool)
+    result = fn(x, out, None)
+    return (result is out, out.tolist())
+
+cases = [
+    ("keyword bool out", keyword_bool),
+    ("positional bool out", positional_bool),
+    ("tuple out", tuple_out),
+    ("out=None", none_out),
+    ("float out buffer", float_out),
+    ("strided out view", strided_out),
+    ("where= partial write", where_partial),
+    ("int32 input with out", int_input_out),
+    ("float16 input with out", float16_input_out),
+    ("2-D out", two_dimensional_out),
+    ("bad out shape", bad_out_shape),
+    ("complex input with out", complex_input_out),
+    ("extra positional argument", extra_positional),
+]
+
+def outcome(fn, case):
+    try:
+        return ("ok",) + case(fn)
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+ok = True
+for label, case in cases:
+    actual = outcome(fnp.signbit, case)
+    expected = outcome(np.signbit, case)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+print("oracle", platform.node(), np.__version__)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (verdict, provenance) = split_verdict(&result);
+    assert_eq!(
+        verdict, "True",
+        "signbit out keyword surfaces should match numpy ({provenance}): {result}"
+    );
+    Ok(())
+}
+
+// The one-argument fast path is not one path: it branches on dtype (f64 / f32 /
+// f16 bit test / constant-False for unsigned and bool / delegate for signed int)
+// and on C-contiguity. This walks every branch, since a value defect in one of
+// them is invisible to the float64-contiguous tests above.
+#[test]
+fn signbit_native_dtype_and_layout_grid_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+
+def described(value):
+    array = np.asarray(value)
+    return (str(array.dtype), tuple(array.shape), array.tolist())
+
+cases = []
+for dtype in [np.float64, np.float32, np.float16]:
+    cases.append((f"{np.dtype(dtype).name} values",
+                  np.array([-2.0, -0.0, 0.0, 3.5, np.inf, -np.inf, np.nan], dtype=dtype)))
+for dtype in [np.int8, np.int16, np.int32, np.int64]:
+    cases.append((f"{np.dtype(dtype).name} values", np.array([-3, -1, 0, 1, 7], dtype=dtype)))
+for dtype in [np.uint8, np.uint16, np.uint32, np.uint64]:
+    cases.append((f"{np.dtype(dtype).name} values", np.array([0, 1, 7], dtype=dtype)))
+cases.append(("bool values", np.array([True, False, True])))
+cases.append(("float64 2-D", np.array([[-1.0, 2.0], [0.0, -0.0]], dtype=np.float64)))
+cases.append(("float64 transposed view", np.array([[-1.0, 2.0], [0.0, -0.0]], dtype=np.float64).T))
+cases.append(("float32 strided view", np.array([-1.0, 2.0, -3.0, 4.0], dtype=np.float32)[::2]))
+cases.append(("int32 strided view", np.array([-1, 2, -3, 4], dtype=np.int32)[::2]))
+cases.append(("float64 empty", np.array([], dtype=np.float64)))
+cases.append(("uint8 empty", np.array([], dtype=np.uint8)))
+cases.append(("python float scalar", -0.0))
+cases.append(("python int scalar", -7))
+cases.append(("nested list", [[-1.0, 0.0], [2.0, -3.0]]))
+
+ok = True
+for label, x in cases:
+    try:
+        actual = ("ok",) + described(fnp.signbit(x))
+    except Exception as exc:
+        actual = ("err", type(exc).__name__)
+    try:
+        expected = ("ok",) + described(np.signbit(x))
+    except Exception as exc:
+        expected = ("err", type(exc).__name__)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+print("oracle", platform.node(), np.__version__)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (verdict, provenance) = split_verdict(&result);
+    assert_eq!(
+        verdict, "True",
+        "signbit dtype/layout grid should match numpy ({provenance}): {result}"
     );
     Ok(())
 }
