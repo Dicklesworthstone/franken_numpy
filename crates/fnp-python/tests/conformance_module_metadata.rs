@@ -247,3 +247,97 @@ print(len(np.__all__) - len(pristine))
     );
     Ok(())
 }
+
+/// The converse of the test above: every name fnp's OWN submodule `__all__`
+/// advertises must actually resolve on that submodule.
+///
+/// `importing_fnp_does_not_mutate_numpy_all` guards the numpy direction (the
+/// scipy breakage, deadlock-audit-335rd). Nothing guarded this one, and two
+/// mechanisms in the module-init block make it fail silently:
+///
+/// 1. `__all__` is COPIED FROM NUMPY while the attributes are a HARDCODED LIST.
+///    numpy.fft's block does
+///    `fft_module.setattr("__all__", copied_all_names(&all_names)?)` from
+///    numpy.fft.__all__ but only adds the 18 names in its own `fft_names`
+///    array, and its `__getattr__` handles only `'test'`. Those sets match on
+///    today's numpy, so there is no live gap - the day numpy adds an fft name,
+///    `__all__` advertises a name `getattr` refuses.
+/// 2. The registration loops are `if let Ok(value) = m.getattr(flat_name)`, a
+///    SILENT SKIP. Rename or drop the fnp function behind a mapped name and the
+///    name is quietly not added while `__all__` still advertises it.
+///
+/// The star-import half is the load-bearing assertion, for the same reason the
+/// test above gives: it survives `__all__` being populated a different way.
+#[test]
+fn submodule_all_names_resolve_and_star_import_works() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import sys
+
+# Register the importlib-loaded module so the REAL star-import spelling
+# (`from fnp_python.fft import *`) can be exercised, not just getattr.
+sys.modules.setdefault("fnp_python", fnp)
+
+subs = [
+    name
+    for name in ("random", "linalg", "fft", "ma", "char", "strings",
+                 "polynomial", "rec", "testing", "lib", "dtypes", "exceptions")
+    if hasattr(fnp, name)
+]
+
+unresolved = []
+star_failures = []
+checked = 0
+for name in subs:
+    module = getattr(fnp, name)
+    advertised = list(getattr(module, "__all__", []) or [])
+    if not advertised:
+        continue
+    checked += 1
+    sys.modules.setdefault(f"fnp_python.{name}", module)
+    for attr in advertised:
+        try:
+            getattr(module, attr)
+        except Exception as exc:
+            unresolved.append(f"{name}.{attr} ({type(exc).__name__})")
+    namespace = {}
+    try:
+        exec(f"from fnp_python.{name} import *", namespace)
+    except Exception as exc:
+        star_failures.append(f"{name}: {type(exc).__name__}: {exc}")
+
+print(sorted(unresolved)[:20])
+print(star_failures[:6])
+# Guard: if no submodule declared a non-empty __all__, the two lines above are
+# empty for the wrong reason and this test proves nothing.
+print(checked)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next().unwrap_or_default(),
+        "[]",
+        "these names are advertised in an fnp submodule's __all__ but do not \
+         resolve on it - a star-import of that submodule raises AttributeError. \
+         Output: {result}"
+    );
+    assert_eq!(
+        lines.next().unwrap_or_default(),
+        "[]",
+        "`from fnp_python.<sub> import *` failed. Output: {result}"
+    );
+    let checked: usize = lines
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .parse()
+        .map_err(|_| format!("could not read the checked-submodule count: {result}"))?;
+    assert!(
+        checked >= 3,
+        "only {checked} submodule(s) declared a non-empty __all__, so the two \
+         assertions above passed for the wrong reason. Output: {result}"
+    );
+    Ok(())
+}
