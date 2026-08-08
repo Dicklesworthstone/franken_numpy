@@ -26529,13 +26529,29 @@ fn try_zerocopy_trim_zeros(
 }
 
 #[pyfunction]
-#[pyo3(signature = (filt, trim="fb"))]
-fn trim_zeros(py: Python<'_>, filt: Py<PyAny>, trim: &str) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (filt, trim="fb", axis=None))]
+fn trim_zeros(
+    py: Python<'_>,
+    filt: Py<PyAny>,
+    trim: &str,
+    axis: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
     let filt_for_fallback = filt.clone_ref(py);
     let trim_owned = trim.to_string();
+    let axis_for_fallback = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
         let trim_zeros_fn = numpy.getattr("trim_zeros")?;
+        if let Some(axis_val) = axis_for_fallback.as_ref() {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("axis", axis_val.bind(py))?;
+            return Ok(trim_zeros_fn
+                .call(
+                    (filt_for_fallback.bind(py), trim_owned.as_str()),
+                    Some(&kwargs),
+                )?
+                .unbind());
+        }
         if trim_owned == "fb" {
             Ok(trim_zeros_fn.call1((filt_for_fallback.bind(py),))?.unbind())
         } else {
@@ -26544,6 +26560,12 @@ fn trim_zeros(py: Python<'_>, filt: Py<PyAny>, trim: &str) -> PyResult<Py<PyAny>
                 .unbind())
         }
     };
+    // axis= is not a keyword the 1-D native trim can absorb: with an axis numpy
+    // trims a 2-D array along that axis, which is a different operation, so it
+    // delegates whole.
+    if axis.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+        return fallback();
+    }
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
     if !filt.bind(py).is_instance(&ndarray_type)? {
@@ -37918,12 +37940,28 @@ fn try_zerocopy_indices(
 }
 
 #[pyfunction]
-#[pyo3(signature = (dimensions, dtype=None))]
+#[pyo3(signature = (dimensions, dtype=None, sparse=false))]
 fn indices(
     py: Python<'_>,
     dimensions: Vec<usize>,
     dtype: Option<Py<PyAny>>,
+    sparse: bool,
 ) -> PyResult<Py<PyAny>> {
+    // sparse=True changes the RETURN TYPE - numpy hands back a tuple of
+    // broadcastable arrays, one per dimension, not a single stacked grid - so it
+    // cannot be layered onto the native dense build; delegate.
+    if sparse {
+        let numpy = py.import("numpy")?;
+        let kwargs = PyDict::new(py);
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        kwargs.set_item("sparse", true)?;
+        return Ok(numpy
+            .getattr("indices")?
+            .call((dimensions,), Some(&kwargs))?
+            .unbind());
+    }
     if let Some(out) = try_zerocopy_indices(py, &dimensions, dtype.as_ref().map(|d| d.bind(py)))? {
         return Ok(out);
     }
@@ -38052,7 +38090,7 @@ fn try_zerocopy_tri(
 }
 
 #[pyfunction]
-#[pyo3(signature = (N, M=None, k=0, dtype=None))]
+#[pyo3(signature = (N, M=None, k=0, dtype=None, *, like=None))]
 #[allow(non_snake_case)]
 fn tri(
     py: Python<'_>,
@@ -38060,8 +38098,23 @@ fn tri(
     M: Option<usize>,
     k: i64,
     dtype: Option<Py<PyAny>>,
+    like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
+    // `like` is keyword-only in numpy and selects __array_function__ dispatch,
+    // which only numpy can perform; delegate the whole call when it is given.
+    if like.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+        let kwargs = PyDict::new(py);
+        if let Some(columns) = M {
+            kwargs.set_item("M", columns)?;
+        }
+        kwargs.set_item("k", k)?;
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        kwargs.set_item("like", like.as_ref().map(|v| v.bind(py)))?;
+        return Ok(numpy.getattr("tri")?.call((N,), Some(&kwargs))?.unbind());
+    }
     // `N` / `M` carry numpy's capital spelling: np.tri(N=3, M=2) is the documented
     // call and PyO3 derives the Python keyword from the Rust identifier.
     // Native parallel per-row fill for the large fresh (N,M) grid (page-fault wall). Resolve the dtype
@@ -39877,7 +39930,9 @@ fn cov_gram_should_delegate(
 }
 
 #[pyfunction]
-#[pyo3(signature = (m, y=None, rowvar=true, bias=false, ddof=None, fweights=None, aweights=None))]
+// `dtype` is KEYWORD-ONLY in numpy (it sits after the `*`), so it takes the same
+// spelling here rather than becoming an eighth positional slot.
+#[pyo3(signature = (m, y=None, rowvar=true, bias=false, ddof=None, fweights=None, aweights=None, *, dtype=None))]
 #[allow(clippy::too_many_arguments)]
 fn cov(
     py: Python<'_>,
@@ -39888,6 +39943,7 @@ fn cov(
     ddof: Option<Py<PyAny>>,
     fweights: Option<Py<PyAny>>,
     aweights: Option<Py<PyAny>>,
+    dtype: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     // INT/BOOL input (dtype-gap audit): numpy's cov converts to
@@ -39924,13 +39980,21 @@ fn cov(
         if let Some(aweights_val) = aweights.as_ref() {
             kwargs.set_item("aweights", aweights_val.bind(py))?;
         }
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
         Ok(cov_fn.call((m.bind(py),), Some(&kwargs))?.unbind())
     };
 
+    // dtype= forces the accumulation and result type; the native Gram path is
+    // f64-only, so a supplied dtype delegates alongside fweights/aweights.
     if fweights
         .as_ref()
         .is_some_and(|value| !value.bind(py).is_none())
         || aweights
+            .as_ref()
+            .is_some_and(|value| !value.bind(py).is_none())
+        || dtype
             .as_ref()
             .is_some_and(|value| !value.bind(py).is_none())
     {
@@ -53669,11 +53733,12 @@ fn asanyarray(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, dtype=None))]
+#[pyo3(signature = (a, dtype=None, *, like=None))]
 fn ascontiguousarray(
     py: Python<'_>,
     a: Py<PyAny>,
     dtype: Option<Py<PyAny>>,
+    like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
@@ -53682,9 +53747,16 @@ fn ascontiguousarray(
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item("dtype", dtype_val.bind(py))?;
         }
+        if let Some(like_val) = like.as_ref() {
+            kwargs.set_item("like", like_val.bind(py))?;
+        }
         Ok(asc_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
+    // `like` selects __array_function__ dispatch, which only numpy can perform.
+    if like.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+        return fallback(py);
+    }
     let a_bound = a.bind(py);
     let ndarray_type = numpy.getattr("ndarray")?;
     let source_array = numpy.call_method1("asarray", (a_bound,))?;
@@ -58778,17 +58850,24 @@ fn kaiser(py: Python<'_>, M: i64, beta: f64) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, dtype=None))]
+#[pyo3(signature = (a, dtype=None, order=None))]
 fn asarray_chkfinite(
     py: Python<'_>,
     a: Py<PyAny>,
     dtype: Option<Py<PyAny>>,
+    order: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let asarray_fn = numpy.getattr("asarray")?;
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype.as_ref() {
         kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    // numpy.asarray_chkfinite forwards `order` straight to asarray, so
+    // order="F" really does produce an F-contiguous result; forward it the same
+    // way rather than dropping it (the finiteness sweep below is unaffected).
+    if let Some(order_val) = order.as_ref() {
+        kwargs.set_item("order", order_val.bind(py))?;
     }
     // Perform the coercion first (this may raise TypeError if dtype is
     // invalid), then use Rust to sweep the values for NaN/Inf. numpy's
@@ -59739,7 +59818,7 @@ fn fromfile(
 }
 
 #[pyfunction]
-#[pyo3(signature = (fname, dtype=None, comments="#", delimiter=None, converters=None, skiprows=0_i64, usecols=None, unpack=false, ndmin=0_i64, encoding=None, max_rows=None, *, like=None))]
+#[pyo3(signature = (fname, dtype=None, comments="#", delimiter=None, converters=None, skiprows=0_i64, usecols=None, unpack=false, ndmin=0_i64, encoding=None, max_rows=None, quotechar=None, *, like=None))]
 #[allow(clippy::too_many_arguments)]
 fn loadtxt(
     py: Python<'_>,
@@ -59754,6 +59833,7 @@ fn loadtxt(
     ndmin: i64,
     encoding: Option<&str>,
     max_rows: Option<i64>,
+    quotechar: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
@@ -59781,6 +59861,9 @@ fn loadtxt(
         if let Some(mr) = max_rows {
             kwargs.set_item("max_rows", mr)?;
         }
+        if let Some(quotechar_val) = quotechar.as_ref() {
+            kwargs.set_item("quotechar", quotechar_val.bind(py))?;
+        }
         if let Some(like_val) = like.as_ref() {
             kwargs.set_item("like", like_val.bind(py))?;
         }
@@ -59790,11 +59873,14 @@ fn loadtxt(
             .unbind())
     };
 
-    // Native path: support the common tutorial surface.
+    // Native path: support the common tutorial surface. quotechar= turns on
+    // numpy's quoted-field parser (a quoted field may CONTAIN the delimiter),
+    // which the plain splitter here does not implement, so it delegates.
     if converters.is_some()
         || encoding.is_some()
         || max_rows.is_some()
         || like.is_some()
+        || quotechar.is_some()
         || ndmin != 0
     {
         return fallback(py);
@@ -62403,8 +62489,13 @@ fn i0(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, dtype=None))]
-fn asfortranarray(py: Python<'_>, a: Py<PyAny>, dtype: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (a, dtype=None, *, like=None))]
+fn asfortranarray(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+    like: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let asf_fn = numpy.getattr("asfortranarray")?;
@@ -62412,9 +62503,16 @@ fn asfortranarray(py: Python<'_>, a: Py<PyAny>, dtype: Option<Py<PyAny>>) -> PyR
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item("dtype", dtype_val.bind(py))?;
         }
+        if let Some(like_val) = like.as_ref() {
+            kwargs.set_item("like", like_val.bind(py))?;
+        }
         Ok(asf_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
+    // `like` selects __array_function__ dispatch, which only numpy can perform.
+    if like.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+        return fallback(py);
+    }
     let a_bound = a.bind(py);
     // Fast path: already an F-contig ndarray with the right dtype → numpy
     // returns the same object. Preserve that identity contract.
@@ -63865,9 +63963,17 @@ fn eye(
     fallback()
 }
 
+// `like` is KEYWORD-ONLY in numpy (after the `*`). It selects
+// __array_function__ dispatch, which only numpy can perform, so supplying it
+// delegates.
 #[pyfunction]
-#[pyo3(signature = (n, dtype=None))]
-fn identity(py: Python<'_>, n: i64, dtype: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (n, dtype=None, *, like=None))]
+fn identity(
+    py: Python<'_>,
+    n: i64,
+    dtype: Option<Py<PyAny>>,
+    like: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let id_fn = numpy.getattr("identity")?;
     let dtype_for_parse = dtype.as_ref().map(|value| value.clone_ref(py));
@@ -63876,8 +63982,15 @@ fn identity(py: Python<'_>, n: i64, dtype: Option<Py<PyAny>>) -> PyResult<Py<PyA
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item("dtype", dtype_val.bind(py))?;
         }
+        if let Some(like_val) = like.as_ref() {
+            kwargs.set_item("like", like_val.bind(py))?;
+        }
         Ok(id_fn.call((n,), Some(&kwargs))?.unbind())
     };
+
+    if like.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+        return fallback();
+    }
 
     if n < 0 {
         return fallback();
@@ -125530,13 +125643,13 @@ mod tests {
                 return Ok(());
             }
 
-            let actual_default = indices(py, vec![2, 3], None)?;
+            let actual_default = indices(py, vec![2, 3], None, false)?;
             let numpy = py.import("numpy")?;
             let expected_default = numpy.call_method1("indices", ((2, 3),))?;
             assert_array_matches_numpy(actual_default.bind(py), &expected_default)?;
 
             let int32 = numpy.getattr("int32")?;
-            let actual_typed = indices(py, vec![2, 3], Some(int32.clone().unbind()))?;
+            let actual_typed = indices(py, vec![2, 3], Some(int32.clone().unbind()), false)?;
             let expected_typed = numpy.call_method1("indices", ((2, 3), int32))?;
             assert_array_matches_numpy(actual_typed.bind(py), &expected_typed)?;
             Ok(())
@@ -126988,11 +127101,18 @@ mod tests {
 
             let numpy = py.import("numpy")?;
 
-            let actual_default = tri(py, 3, None, 0, None)?;
+            let actual_default = tri(py, 3, None, 0, None, None)?;
             let expected_default = numpy.call_method1("tri", (3,))?;
             assert_array_matches_numpy(actual_default.bind(py), &expected_default)?;
 
-            let actual_neg = tri(py, 3, Some(5), -1, Some(numpy.getattr("int32")?.unbind()))?;
+            let actual_neg = tri(
+                py,
+                3,
+                Some(5),
+                -1,
+                Some(numpy.getattr("int32")?.unbind()),
+                None,
+            )?;
             let expected_neg = numpy.call_method(
                 "tri",
                 (3, 5),
@@ -127005,7 +127125,14 @@ mod tests {
             )?;
             assert_array_matches_numpy(actual_neg.bind(py), &expected_neg)?;
 
-            let actual_pos = tri(py, 4, Some(2), 1, Some(numpy.getattr("bool_")?.unbind()))?;
+            let actual_pos = tri(
+                py,
+                4,
+                Some(2),
+                1,
+                Some(numpy.getattr("bool_")?.unbind()),
+                None,
+            )?;
             let expected_pos = numpy.call_method(
                 "tri",
                 (4, 2),

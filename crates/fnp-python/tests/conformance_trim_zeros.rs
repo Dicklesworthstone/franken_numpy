@@ -361,3 +361,153 @@ fn trim_zeros_no_zeros_matches_numpy() -> Result<(), String> {
 
     Ok(())
 }
+
+// The remaining MISSING-keyword class from the fnp-python signature audit: nine
+// parameters numpy declares that fnp did not, so the documented call raised
+// TypeError here and answered there. Two of them change the RESULT, not just the
+// accepted spelling - indices(sparse=True) returns a TUPLE of broadcastable
+// arrays instead of one stacked grid, and trim_zeros(axis=) accepts 2-D input
+// the 1-D path cannot express - so neither can be accepted and quietly ignored.
+// Each case is computed for fnp and numpy in the same interpreter, and the
+// omitted-keyword spelling is asserted alongside so the default path is proven
+// unchanged.
+#[test]
+fn audit_missing_keywords_match_numpy() -> Result<(), String> {
+    let script = fnp_trim_zeros_script(
+        r#"
+import platform
+import io
+
+def described(value):
+    if isinstance(value, tuple):
+        return ("tuple",) + tuple(described(item) for item in value)
+    array = np.asarray(value)
+    return (str(array.dtype), tuple(array.shape), array.tolist())
+
+def trim_zeros_axis0(module):
+    return module.trim_zeros(np.array([[0, 1], [0, 0]]), "fb", 0)
+
+def trim_zeros_axis_keyword(module):
+    return module.trim_zeros(np.array([[0, 0, 0], [0, 1, 0]]), axis=1)
+
+def trim_zeros_axis_none(module):
+    return module.trim_zeros(np.array([0, 1, 2, 0]), axis=None)
+
+def trim_zeros_no_axis(module):
+    return module.trim_zeros(np.array([0, 0, 1, 2, 0]))
+
+def trim_zeros_front_only(module):
+    return module.trim_zeros(np.array([0, 0, 1, 2, 0]), "f")
+
+def indices_sparse(module):
+    return module.indices((2, 3), sparse=True)
+
+def indices_sparse_dtype(module):
+    return module.indices((2, 3), np.int32, True)
+
+def indices_dense(module):
+    return module.indices((2, 3))
+
+# cov's native Gram path is allclose to numpy but not bit-identical - an
+# FMA/BLAS-dependent last-ULP difference established by
+# deadlock-audit-keqog, which is why the cov goldens elsewhere use a relative
+# bound rather than byte pins. So the cov cases here report dtype and shape
+# exactly (dtype IS what proves dtype= took effect: float32 vs float64) and
+# round the values, rather than asserting bits this bead does not own.
+def cov_described(result):
+    return f"{result.dtype}|{result.shape}|{np.round(result, 9).tolist()}"
+
+def cov_dtype(module):
+    return cov_described(module.cov(np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 7.0]]), dtype=np.float32))
+
+def cov_no_dtype(module):
+    return cov_described(module.cov(np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 7.0]])))
+
+def identity_like(module):
+    return module.identity(3, like=np.array([1.0]))
+
+def identity_plain(module):
+    return module.identity(3)
+
+def tri_like(module):
+    return module.tri(3, 2, like=np.array([1.0]))
+
+def ascontiguousarray_like(module):
+    return module.ascontiguousarray([[1.0, 2.0], [3.0, 4.0]], like=np.array([1.0]))
+
+def asfortranarray_like(module):
+    return module.asfortranarray([[1.0, 2.0], [3.0, 4.0]], like=np.array([1.0]))
+
+def chkfinite_order_f(module):
+    result = module.asarray_chkfinite([[1.0, 2.0], [3.0, 4.0]], order="F")
+    return (bool(result.flags.f_contiguous), described(result))
+
+def chkfinite_order_c(module):
+    result = module.asarray_chkfinite([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32, order="C")
+    return (bool(result.flags.c_contiguous), described(result))
+
+def chkfinite_no_order(module):
+    return described(module.asarray_chkfinite([[1.0, 2.0], [3.0, 4.0]]))
+
+def loadtxt_quotechar(module):
+    return module.loadtxt(io.StringIO('"a,b",2\n'), delimiter=",", quotechar='"', dtype=object)
+
+def loadtxt_no_quotechar(module):
+    return module.loadtxt(io.StringIO("1,2\n3,4\n"), delimiter=",")
+
+cases = [
+    ("trim_zeros positional axis=0", trim_zeros_axis0),
+    ("trim_zeros axis= keyword", trim_zeros_axis_keyword),
+    ("trim_zeros axis=None", trim_zeros_axis_none),
+    ("trim_zeros without axis", trim_zeros_no_axis),
+    ("trim_zeros trim='f'", trim_zeros_front_only),
+    ("indices sparse=True", indices_sparse),
+    ("indices positional sparse", indices_sparse_dtype),
+    ("indices dense", indices_dense),
+    ("cov dtype=float32", cov_dtype),
+    ("cov without dtype", cov_no_dtype),
+    ("identity like=", identity_like),
+    ("identity without like", identity_plain),
+    ("tri like=", tri_like),
+    ("ascontiguousarray like=", ascontiguousarray_like),
+    ("asfortranarray like=", asfortranarray_like),
+    ("asarray_chkfinite order='F'", chkfinite_order_f),
+    ("asarray_chkfinite order='C' + dtype", chkfinite_order_c),
+    ("asarray_chkfinite without order", chkfinite_no_order),
+    ("loadtxt quotechar=", loadtxt_quotechar),
+    ("loadtxt without quotechar", loadtxt_no_quotechar),
+]
+
+def outcome(module, call):
+    try:
+        result = call(module)
+        if isinstance(result, tuple) and result and isinstance(result[0], bool):
+            return ("ok",) + result
+        return ("ok", described(result))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+ok = True
+for label, call in cases:
+    actual = outcome(fnp, call)
+    expected = outcome(np, call)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+print("oracle", platform.node(), np.__version__)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "audit missing keywords should match numpy ({provenance}): {result}"
+    );
+    Ok(())
+}
