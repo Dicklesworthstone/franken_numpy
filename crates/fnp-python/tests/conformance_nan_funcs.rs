@@ -1531,16 +1531,33 @@ cases = [
     ("nanmean 2-D axis where", "nanmean", (y,), {"axis": 0, "where": mask_2d}),
     ("nanmean where keepdims", "nanmean", (x,), {"where": mask, "keepdims": True}),
     # initial=None IS "not passed at all" for numpy (nanmax(initial=None) ==
-    # nanmax(x)), so this case belongs here. where=None is NOT - numpy reads it
-    # as an all-False mask (nansum -> 0.0, nanmean -> nan) while fnp cannot tell
-    # it from an omitted argument, because PyO3 extracts Python None into Rust
-    # None for an Option<T> parameter. That divergence is measured and tracked in
-    # deadlock-audit-where-none-vs-absent-sentinel-bbk62; adding the where=None
-    # cases here is that bead's closing move, and they are left out rather than
-    # asserted loosely.
+    # nanmax(x)), so those cases sit alongside the where=None ones below.
     ("nanmax initial=None", "nanmax", (x,), {"initial": None}),
     ("nanmin initial=None", "nanmin", (x,), {"initial": None}),
     ("nansum initial=None", "nansum", (x,), {"initial": None}),
+    # where=None is NOT "not passed": numpy reads it as a mask that selects
+    # nothing, and the answer differs per function - nansum 0.0, nanprod 1.0,
+    # nanmean/nanstd/nanvar nan, nanmax/nanmin a ValueError because fmax/fmin
+    # have no identity. Telling it from an omitted argument is what
+    # deadlock-audit-where-none-vs-absent-sentinel-bbk62 added the three-state
+    # WhereArg for; these cases are that bead's closing probe and would all have
+    # returned the UNMASKED answer before it.
+    ("nansum where=None", "nansum", (x,), {"where": None}),
+    ("nanmean where=None", "nanmean", (x,), {"where": None}),
+    ("nanprod where=None", "nanprod", (x,), {"where": None}),
+    ("nanstd where=None", "nanstd", (x,), {"where": None}),
+    ("nanvar where=None", "nanvar", (x,), {"where": None}),
+    ("nanmax where=None", "nanmax", (x,), {"where": None}),
+    ("nanmin where=None", "nanmin", (x,), {"where": None}),
+    ("nansum where=None keepdims", "nansum", (x,), {"where": None, "keepdims": True}),
+    ("nanstd where=None ddof", "nanstd", (x,), {"where": None, "ddof": 1}),
+    # And the omitted spelling for the same functions, so the fix is proven to
+    # have changed only the explicit-None case.
+    ("nansum omitted", "nansum", (x,), {}),
+    ("nanmean omitted", "nanmean", (x,), {}),
+    ("nanprod omitted", "nanprod", (x,), {}),
+    ("nanstd omitted", "nanstd", (x,), {}),
+    ("nanvar omitted", "nanvar", (x,), {}),
 ]
 
 def outcome(module, name, args, kwargs):

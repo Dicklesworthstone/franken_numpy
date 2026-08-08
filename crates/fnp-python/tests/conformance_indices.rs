@@ -591,6 +591,26 @@ def copyto_all_keywords(module):
                   where=np.array([False, True, False, True]))
     return dst
 
+def copyto_where_none(module):
+    # numpy reads an explicit where=None as a mask selecting NOTHING, so dst is
+    # left untouched. Treating it as "not passed" copies everything - a silent
+    # wrong answer, which is what deadlock-audit-where-none-vs-absent-sentinel-bbk62
+    # fixed by giving where= a three-state argument type.
+    dst = np.zeros(4, dtype=np.float64)
+    module.copyto(dst, np.array([1.0, 2.0, 3.0, 4.0]), where=None)
+    return dst
+
+def copyto_omitted_where(module):
+    # The control: without where=, the copy must still happen in full.
+    dst = np.zeros(4, dtype=np.float64)
+    module.copyto(dst, np.array([1.0, 2.0, 3.0, 4.0]))
+    return dst
+
+def copyto_where_true_scalar(module):
+    dst = np.zeros(4, dtype=np.float64)
+    module.copyto(dst, np.array([1.0, 2.0, 3.0, 4.0]), where=True)
+    return dst
+
 cases = [
     ("tri N=/M=", tri_keyword_dims),
     ("tri N=/M=/k=/dtype=", tri_keyword_all),
@@ -599,6 +619,9 @@ cases = [
     ("tri lowercase n=/m=", tri_lowercase),
     ("copyto where=", copyto_keyword_where),
     ("copyto all keywords", copyto_all_keywords),
+    ("copyto where=None", copyto_where_none),
+    ("copyto without where", copyto_omitted_where),
+    ("copyto where=True", copyto_where_true_scalar),
 ]
 
 def outcome(module, call):

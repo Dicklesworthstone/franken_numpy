@@ -37617,22 +37617,90 @@ fn try_zerocopy_copyto(
     Ok(true)
 }
 
+/// A `where=` argument that can tell "not passed" from "passed as None".
+///
+/// `Option<Py<PyAny>>` cannot: PyO3 extracts a Python `None` into Rust `None`,
+/// so a wrapper sees the same thing whether the caller omitted the keyword or
+/// wrote `where=None`. numpy does NOT treat those alike - it reads an explicit
+/// `None` as a mask that selects nothing:
+///
+/// ```text
+/// np.nansum(x)                 -> 7.0     np.nansum(x, where=None)  -> 0.0
+/// np.nanmean(x)                -> 2.333   np.nanmean(x, where=None) -> nan
+/// np.copyto(dst, src)          -> copies  np.copyto(dst, src, where=None) -> copies NOTHING
+/// ```
+///
+/// PyO3 only runs an argument's extractor when the argument is actually
+/// supplied, so a default of `WhereArg::Absent` marks the omitted case and the
+/// `FromPyObject` impl below distinguishes the two supplied cases.
+///
+/// NOTE the ufunc `__call__` binding is deliberately NOT converted: measured on
+/// numpy 2.4.3, `np.add(y, y, where=None)` equals `np.add(y, y)`, so `Option`
+/// is already correct there and switching it would invent a divergence.
+enum WhereArg {
+    /// The caller did not pass `where=` at all.
+    Absent,
+    /// The caller passed `where=None`, which numpy reads as "select nothing".
+    ExplicitNone,
+    /// The caller passed a mask.
+    Value(Py<PyAny>),
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for WhereArg {
+    type Error = PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'a, 'py, PyAny>) -> Result<Self, Self::Error> {
+        if obj.is_none() {
+            Ok(WhereArg::ExplicitNone)
+        } else {
+            Ok(WhereArg::Value(obj.to_owned().unbind()))
+        }
+    }
+}
+
+impl WhereArg {
+    /// Add `where=` to `kwargs` exactly when the caller supplied it, preserving
+    /// an explicit `None`.
+    fn apply(&self, py: Python<'_>, kwargs: &Bound<'_, PyDict>) -> PyResult<()> {
+        match self {
+            WhereArg::Absent => Ok(()),
+            WhereArg::ExplicitNone => kwargs.set_item("where", py.None()),
+            WhereArg::Value(value) => kwargs.set_item("where", value.bind(py)),
+        }
+    }
+
+    /// True when the caller supplied anything at all - including `None`, which
+    /// is precisely the case a plain `Option` used to lose. Native paths that
+    /// do not implement masking must delegate on this.
+    fn is_supplied(&self) -> bool {
+        !matches!(self, WhereArg::Absent)
+    }
+
+    /// The mask object, if the caller passed a real one.
+    fn mask<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
+        match self {
+            WhereArg::Value(value) => Some(value.bind(py).clone()),
+            _ => None,
+        }
+    }
+}
+
 #[pyfunction]
-#[pyo3(signature = (dst, src, casting="same_kind", r#where=None))]
+#[pyo3(signature = (dst, src, casting="same_kind", r#where=WhereArg::Absent))]
 fn copyto(
     py: Python<'_>,
     dst: Py<PyAny>,
     src: Py<PyAny>,
     casting: &str,
-    r#where: Option<Py<PyAny>>,
+    r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
     // Native parallel masked in-place write for the f64 + bool-mask common case (casting is a no-op for
-    // f64->f64, so it needn't be threaded through); everything else delegates to numpy below.
-    if let Some(w) = r#where.as_ref() {
-        let wb = w.bind(py);
-        if !wb.is_none() && try_zerocopy_copyto(py, dst.bind(py), src.bind(py), wb)? {
-            return Ok(py.None());
-        }
+    // f64->f64, so it needn't be threaded through); everything else delegates to numpy below. An
+    // explicit where=None is NOT a mask and must not reach this path - numpy copies nothing for it.
+    if let Some(wb) = r#where.mask(py)
+        && try_zerocopy_copyto(py, dst.bind(py), src.bind(py), &wb)?
+    {
+        return Ok(py.None());
     }
     // Delegate to NumPy so in-place broadcasted writes, boolean-mask
     // selection, casting policy checks, and shape-mismatch errors stay
@@ -37641,9 +37709,7 @@ fn copyto(
     let copyto_fn = numpy.getattr("copyto")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("casting", casting)?;
-    if let Some(where_val) = r#where {
-        kwargs.set_item("where", where_val.bind(py))?;
-    }
+    r#where.apply(py, &kwargs)?;
     Ok(copyto_fn
         .call((dst.bind(py), src.bind(py)), Some(&kwargs))?
         .unbind())
@@ -40672,7 +40738,7 @@ fn try_zerocopy_f64_nansum_axis(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false, r#where=None))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false, r#where=WhereArg::Absent))]
 fn nanmean(
     py: Python<'_>,
     a: Py<PyAny>,
@@ -40680,7 +40746,7 @@ fn nanmean(
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     keepdims: bool,
-    r#where: Option<Py<PyAny>>,
+    r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let nanmean_fn = numpy.getattr("nanmean")?;
@@ -40697,9 +40763,7 @@ fn nanmean(
             kwargs.set_item("out", out_val.bind(py))?;
         }
         kwargs.set_item("keepdims", keepdims)?;
-        if let Some(where_val) = r#where.as_ref() {
-            kwargs.set_item("where", where_val.bind(py))?;
-        }
+        r#where.apply(py, &kwargs)?;
         Ok(nanmean_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
@@ -40709,9 +40773,7 @@ fn nanmean(
         .as_ref()
         .is_some_and(|value| !value.bind(py).is_none())
         || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
-        || r#where
-            .as_ref()
-            .is_some_and(|value| !value.bind(py).is_none())
+        || r#where.is_supplied()
     {
         return fallback();
     }
@@ -42745,7 +42807,7 @@ fn compute_f64_var_flat(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false, initial=None, r#where=None))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false, initial=None, r#where=WhereArg::Absent))]
 #[allow(clippy::too_many_arguments)]
 fn nansum(
     py: Python<'_>,
@@ -42755,7 +42817,7 @@ fn nansum(
     out: Option<Py<PyAny>>,
     keepdims: bool,
     initial: Option<Py<PyAny>>,
-    r#where: Option<Py<PyAny>>,
+    r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let nansum_fn = numpy.getattr("nansum")?;
@@ -42775,9 +42837,7 @@ fn nansum(
         if let Some(initial_val) = initial.as_ref() {
             kwargs.set_item("initial", initial_val.bind(py))?;
         }
-        if let Some(where_val) = r#where.as_ref() {
-            kwargs.set_item("where", where_val.bind(py))?;
-        }
+        r#where.apply(py, &kwargs)?;
         Ok(nansum_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
@@ -42791,9 +42851,7 @@ fn nansum(
         || initial
             .as_ref()
             .is_some_and(|value| !value.bind(py).is_none())
-        || r#where
-            .as_ref()
-            .is_some_and(|value| !value.bind(py).is_none())
+        || r#where.is_supplied()
     {
         return fallback();
     }
@@ -42913,7 +42971,7 @@ fn nansum(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=None, initial=None, r#where=None))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=None, initial=None, r#where=WhereArg::Absent))]
 #[allow(clippy::too_many_arguments)]
 fn nanprod(
     py: Python<'_>,
@@ -42923,7 +42981,7 @@ fn nanprod(
     out: Option<Py<PyAny>>,
     keepdims: Option<bool>,
     initial: Option<Py<PyAny>>,
-    r#where: Option<Py<PyAny>>,
+    r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let nanprod_fn = numpy.getattr("nanprod")?;
@@ -42945,9 +43003,7 @@ fn nanprod(
         if let Some(initial_val) = initial.as_ref() {
             kwargs.set_item("initial", initial_val.bind(py))?;
         }
-        if let Some(where_val) = r#where.as_ref() {
-            kwargs.set_item("where", where_val.bind(py))?;
-        }
+        r#where.apply(py, &kwargs)?;
         Ok(nanprod_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
@@ -42958,9 +43014,7 @@ fn nanprod(
         || initial
             .as_ref()
             .is_some_and(|value| !value.bind(py).is_none())
-        || r#where
-            .as_ref()
-            .is_some_and(|value| !value.bind(py).is_none())
+        || r#where.is_supplied()
     {
         return fallback();
     }
@@ -46171,7 +46225,7 @@ fn try_zerocopy_f64_matrix_norm_lastaxes(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, out=None, keepdims=None, initial=None, r#where=None))]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=None, initial=None, r#where=WhereArg::Absent))]
 fn nanmax(
     py: Python<'_>,
     a: Py<PyAny>,
@@ -46179,7 +46233,7 @@ fn nanmax(
     out: Option<Py<PyAny>>,
     keepdims: Option<bool>,
     initial: Option<Py<PyAny>>,
-    r#where: Option<Py<PyAny>>,
+    r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let nanmax_fn = numpy.getattr("nanmax")?;
@@ -46198,9 +46252,7 @@ fn nanmax(
         if let Some(initial_val) = initial.as_ref() {
             kwargs.set_item("initial", initial_val.bind(py))?;
         }
-        if let Some(where_val) = r#where.as_ref() {
-            kwargs.set_item("where", where_val.bind(py))?;
-        }
+        r#where.apply(py, &kwargs)?;
         Ok(nanmax_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
@@ -46210,9 +46262,7 @@ fn nanmax(
         || initial
             .as_ref()
             .is_some_and(|value| !value.bind(py).is_none())
-        || r#where
-            .as_ref()
-            .is_some_and(|value| !value.bind(py).is_none())
+        || r#where.is_supplied()
     {
         return fallback();
     }
@@ -46339,7 +46389,7 @@ fn nanmax(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, out=None, keepdims=None, initial=None, r#where=None))]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=None, initial=None, r#where=WhereArg::Absent))]
 fn nanmin(
     py: Python<'_>,
     a: Py<PyAny>,
@@ -46347,7 +46397,7 @@ fn nanmin(
     out: Option<Py<PyAny>>,
     keepdims: Option<bool>,
     initial: Option<Py<PyAny>>,
-    r#where: Option<Py<PyAny>>,
+    r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let nanmin_fn = numpy.getattr("nanmin")?;
@@ -46366,9 +46416,7 @@ fn nanmin(
         if let Some(initial_val) = initial.as_ref() {
             kwargs.set_item("initial", initial_val.bind(py))?;
         }
-        if let Some(where_val) = r#where.as_ref() {
-            kwargs.set_item("where", where_val.bind(py))?;
-        }
+        r#where.apply(py, &kwargs)?;
         Ok(nanmin_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
@@ -46377,9 +46425,7 @@ fn nanmin(
     if initial
         .as_ref()
         .is_some_and(|value| !value.bind(py).is_none())
-        || r#where
-            .as_ref()
-            .is_some_and(|value| !value.bind(py).is_none())
+        || r#where.is_supplied()
         || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
     {
         return fallback();
@@ -46506,7 +46552,7 @@ fn nanmin(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=None, keepdims=None, r#where=None, mean=None, correction=None))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=None, keepdims=None, r#where=WhereArg::Absent, mean=None, correction=None))]
 #[allow(clippy::too_many_arguments)]
 fn nanstd(
     py: Python<'_>,
@@ -46516,7 +46562,7 @@ fn nanstd(
     out: Option<Py<PyAny>>,
     ddof: Option<Py<PyAny>>,
     keepdims: Option<bool>,
-    r#where: Option<Py<PyAny>>,
+    r#where: WhereArg,
     mean: Option<Py<PyAny>>,
     correction: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
@@ -46540,9 +46586,7 @@ fn nanstd(
         if let Some(keepdims_val) = keepdims {
             kwargs.set_item("keepdims", keepdims_val)?;
         }
-        if let Some(where_val) = r#where.as_ref() {
-            kwargs.set_item("where", where_val.bind(py))?;
-        }
+        r#where.apply(py, &kwargs)?;
         if let Some(mean_val) = mean.as_ref() {
             kwargs.set_item("mean", mean_val.bind(py))?;
         }
@@ -46554,7 +46598,7 @@ fn nanstd(
 
     // INT/BOOL input: numpy's nanstd short-circuits non-float dtypes to std
     // (pinned byte-exact); route to fnp's py_std - see the nanvar twin.
-    if r#where.is_none()
+    if !r#where.is_supplied()
         && mean.is_none()
         && correction.is_none()
         && out.is_none()
@@ -46585,7 +46629,7 @@ fn nanstd(
 
     if dtype.is_some()
         || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
-        || r#where.is_some()
+        || r#where.is_supplied()
         || mean.is_some()
         || correction.is_some()
     {
@@ -46796,7 +46840,7 @@ fn nanstd(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=None, keepdims=None, r#where=None, mean=None, correction=None))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=None, keepdims=None, r#where=WhereArg::Absent, mean=None, correction=None))]
 #[allow(clippy::too_many_arguments)]
 fn nanvar(
     py: Python<'_>,
@@ -46806,7 +46850,7 @@ fn nanvar(
     out: Option<Py<PyAny>>,
     ddof: Option<Py<PyAny>>,
     keepdims: Option<bool>,
-    r#where: Option<Py<PyAny>>,
+    r#where: WhereArg,
     mean: Option<Py<PyAny>>,
     correction: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
@@ -46830,9 +46874,7 @@ fn nanvar(
         if let Some(keepdims_val) = keepdims {
             kwargs.set_item("keepdims", keepdims_val)?;
         }
-        if let Some(where_val) = r#where.as_ref() {
-            kwargs.set_item("where", where_val.bind(py))?;
-        }
+        r#where.apply(py, &kwargs)?;
         if let Some(mean_val) = mean.as_ref() {
             kwargs.set_item("mean", mean_val.bind(py))?;
         }
@@ -46847,7 +46889,7 @@ fn nanvar(
     // byte-exact), so route to fnp's var - whose int conversion arm + f64
     // axis kernels apply (numpy basis 102.8ms at 4096^2 axis=1). Extra
     // kwargs (where/mean/correction/out/dtype) keep the delegate.
-    if r#where.is_none()
+    if !r#where.is_supplied()
         && mean.is_none()
         && correction.is_none()
         && out.is_none()
@@ -46878,7 +46920,7 @@ fn nanvar(
 
     if dtype.is_some()
         || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
-        || r#where.is_some()
+        || r#where.is_supplied()
         || mean.is_some()
         || correction.is_some()
     {
