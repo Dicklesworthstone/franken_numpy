@@ -11,7 +11,7 @@ and for the on-recovery verification after a build freeze.
 |---|---|---|---|
 | `correctness_sweep_vs_numpy.py` | correctness regression guard — encodes the *subtle comparators* the Rust conformance suite lacked (see below). exit = #fails. | `PYTHONPATH=.probe python3 scripts/correctness_sweep_vs_numpy.py` | 0 fails / 27 |
 | `perf_gap_sweep_vs_numpy.py` | vs-NumPy perf-regression sweep over the characterized op families + view-op `shares_memory` check. exit = #losses. | `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONPATH=.probe python3 scripts/perf_gap_sweep_vs_numpy.py [--full]` | API-validated (25/25 ops) |
-| `on_recovery_check_linalg_delegates.sh` | one-command build + conformance + re-measure of the 4 code-only 2-D linalg delegates (eigvalsh/eigh/cholesky/matrix_power). | `scripts/on_recovery_check_linalg_delegates.sh` | bash-syntax-checked |
+| `on_recovery_check_linalg_delegates.sh` | one-command build + conformance + re-measure of the 4 code-only 2-D linalg delegates (eigvalsh/eigh/cholesky/matrix_power). Exits non-zero on a failed shard, a shard that never ran, a failed deploy, or an unloadable module. | `scripts/on_recovery_check_linalg_delegates.sh` (set `CARGO` to drive it under a stub) | negative-tested: 4 fault scenarios exit 1, all-pass exits 0 (deadlock-audit-8hzmg) |
 
 (Other scripts here — `*_compliance_matrix.py`, `check_compliance_matrices.sh`,
 `regen_raptorq.sh`, `e2e/` — predate this work.)

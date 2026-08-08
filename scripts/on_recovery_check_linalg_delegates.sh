@@ -17,33 +17,80 @@
 # Env (optional):
 #   CARGO_TARGET_DIR  (default: /data/projects/.rch-targets/franken_numpy-cod-b)
 #   PROBE_DIR         (default: .probe)
+#   CARGO             (default: cargo) — the seam the negative test below drives.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/projects/.rch-targets/franken_numpy-cod-b}"
 PROBE_DIR="${PROBE_DIR:-.probe}"
+CARGO="${CARGO:-cargo}"
 fail=0
+
+# Run one cargo test invocation and classify it as PASSED / FAILED / NEVER RAN.
+#
+# The three states are distinct and this script used to collapse two of them.
+# The old form was `if cargo test ... | grep -E "test result"; then :; else
+# echo NO RESULT; fi`: a shard printing "test result: FAILED. 0 passed; 3 failed"
+# MATCHES that grep, so the then-branch ran, nothing was printed, and neither
+# branch ever set fail=1. All three linalg conformance suites could be red and
+# this script still exited 0 looking like it had verified them — which matters
+# because it is the designated verifier for four build- and conformance-
+# unverified delegate commits. pipefail does not save it either: a completed
+# test binary reporting FAILED exits non-zero, so under pipefail the else-branch
+# fires and prints "NO RESULT" for what is really a test failure.
+#
+# A shard that emitted no `test result:` line at all did not run — a different
+# problem needing a different fix — so it is reported as such, with the tail of
+# its output, rather than silently.
+run_test_shard() {
+  local label="$1"
+  shift
+  local log results
+  log="$(RCH_MIN_LOCAL_TIME_MS=999999999 "$@" 2>&1)"
+  results="$(printf '%s\n' "$log" | grep -E '^test result:' || true)"
+
+  if [ -z "$results" ]; then
+    echo "  $label: NO RESULT — the shard never reported, so it did not run"
+    printf '%s\n' "$log" | tail -20 | sed 's/^/    | /'
+    fail=1
+    return
+  fi
+
+  printf '%s\n' "$results" | sed "s/^/  $label: /"
+
+  if printf '%s\n' "$results" | grep -q '^test result: FAILED'; then
+    echo "  $label: FAILED"
+    printf '%s\n' "$log" | grep -E '^(failures:|    [A-Za-z_][A-Za-z0-9_:]*)$' | head -40 |
+      sed 's/^/    | /'
+    fail=1
+  fi
+}
 
 echo "== [1/4] build fnp-python cdylib (LOCAL — links local libpython) =="
 # RCH_MIN_LOCAL_TIME_MS forces a local build; hz-remote builds give undefined-symbol
 # ImportError because Py_TYPE is external against the worker's python headers.
-if RCH_MIN_LOCAL_TIME_MS=999999999 cargo build -p fnp-python --release --lib 2>&1 | tail -3; then
-  cp "$CARGO_TARGET_DIR/release/libfnp_python.so" "$PROBE_DIR/fnp_python.so" \
-    && echo "  deployed -> $PROBE_DIR/fnp_python.so"
+if RCH_MIN_LOCAL_TIME_MS=999999999 "$CARGO" build -p fnp-python --release --lib 2>&1 | tail -3; then
+  if cp "$CARGO_TARGET_DIR/release/libfnp_python.so" "$PROBE_DIR/fnp_python.so"; then
+    echo "  deployed -> $PROBE_DIR/fnp_python.so"
+  else
+    # Every step below imports that .so. Without this, a failed deploy left the
+    # stale copy in place and steps 2-4 silently measured the PREVIOUS build.
+    echo "  DEPLOY FAILED — $PROBE_DIR/fnp_python.so is stale or missing"; fail=1
+  fi
 else
   echo "  BUILD FAILED"; fail=1
 fi
 
 echo "== [2/4] linalg conformance suites =="
 for t in conformance_linalg conformance_linalg_advanced conformance_linalg_decomp; do
-  if RCH_MIN_LOCAL_TIME_MS=999999999 cargo test -p fnp-python --release --test "$t" 2>&1 | grep -E "test result"; then :; else echo "  $t: NO RESULT"; fi
+  run_test_shard "$t" "$CARGO" test -p fnp-python --release --test "$t"
 done
 
 echo "== [3/4] fnp-ufunc + fnp-linalg crate tests (kernels behind the delegates) =="
-RCH_MIN_LOCAL_TIME_MS=999999999 cargo test -p fnp-linalg --release 2>&1 | grep -E "test result" | tail -1
+run_test_shard fnp-linalg "$CARGO" test -p fnp-linalg --release
 
 echo "== [4/4] re-measure the 4 delegated ops vs NumPy (expect ~parity 2-D; batched WIN) =="
-OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONPATH="$PROBE_DIR" python3 - <<'PY'
+if ! OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONPATH="$PROBE_DIR" python3 - <<'PY'
 import numpy as np, fnp_python as f, time
 def b(fn, n=7):
     for _ in range(2): fn()
@@ -70,5 +117,12 @@ A3=rng.standard_normal((200,16,16)); S3=np.einsum('...ij,...kj->...ik',A3,A3)+16
 print("-- batched (expect WIN) --")
 tn=b(lambda:np.linalg.eigvalsh(S3)); tf=b(lambda:f.eigvalsh(S3)); print(f"{'eigvalsh_batch':18} {'16':>5} {tf/tn:7.2f}  {'WIN' if tf<tn else 'check'}")
 PY
+then
+  # This block imports the freshly deployed .so. An ImportError or a raised
+  # exception here used to leave fail at 0, so the script reported success for a
+  # module it could not even load.
+  echo "  MEASUREMENT BLOCK FAILED — see the traceback above"; fail=1
+fi
+
 echo "== done (fail=$fail) =="
 exit $fail
