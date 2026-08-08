@@ -86,6 +86,27 @@ cases = [
         "column_stack",
         lambda: ((((1, 2, 3), (4, 5, 6)),), {}),
     ),
+    # dstack, column_stack and stack(axis=1) all enter the SAME native
+    # column-interleave probe, which used to read `.dtype` off the first item
+    # before checking it was an ndarray. The two cases above covered two of those
+    # three doors; this one covers the third (deadlock-audit-3fvvr).
+    (
+        "stack axis one Python lists",
+        "stack",
+        lambda: (([[1, 2, 3], [4, 5, 6]],), {"axis": 1}),
+    ),
+    # Mixed sequences, both orders: a fix that only type-checks items[0] passes
+    # the all-lists cases above and still raises on these.
+    (
+        "dstack mixed ndarray then list",
+        "dstack",
+        lambda: (([np.array([1, 2, 3]), [4, 5, 6]],), {}),
+    ),
+    (
+        "column_stack mixed list then ndarray",
+        "column_stack",
+        lambda: (([[1, 2, 3], np.array([4, 5, 6])],), {}),
+    ),
     ("stack empty sequence error", "stack", lambda: (([],), {})),
     (
         "stack shape mismatch error",

@@ -36994,6 +36994,20 @@ fn try_native_column_interleave(
         return Ok(None);
     }
     let ndarray_type = numpy.getattr("ndarray")?;
+    // TYPE CHECK FIRST. Everything below reads ndarray-only attributes, and this
+    // probe is reached with whatever the caller passed: a sequence of plain
+    // Python lists has no `.dtype`, so reading it raised AttributeError straight
+    // out of a routine whose whole contract is "return None and let numpy
+    // handle it". fnp.dstack, fnp.column_stack and fnp.stack(axis=1) all share
+    // this probe, so all three raised where numpy returns an array
+    // (deadlock-audit-3fvvr). A fast-path probe must DECLINE on anything it does
+    // not recognise, never raise.
+    if !items
+        .iter()
+        .all(|item| item.is_exact_instance(&ndarray_type))
+    {
+        return Ok(None);
+    }
     let dtype = items[0].getattr("dtype")?;
     if !matches!(
         dtype.getattr("kind")?.extract::<String>()?.as_str(),
@@ -37010,8 +37024,8 @@ fn try_native_column_interleave(
         s[0]
     };
     for it in items {
-        if !it.is_exact_instance(&ndarray_type)
-            || it.getattr("ndim")?.extract::<usize>()? != 1
+        // Type already established above; this checks the shape/dtype contract.
+        if it.getattr("ndim")?.extract::<usize>()? != 1
             || !dtype.eq(&it.getattr("dtype")?)?
             || it.getattr("shape")?.extract::<Vec<usize>>()?[0] != n
             || !it
