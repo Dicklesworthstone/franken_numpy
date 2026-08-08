@@ -1,4 +1,11 @@
-//! Cross-cutting RETURN-TYPE parity sweep.
+//! Cross-cutting result-parity sweeps: what comes back from a call.
+//!
+//! Three sweeps live here, one per attribute of the result - its TYPE (numpy
+//! scalar vs 0-d ndarray), its DTYPE, and, when the call fails, the EXCEPTION
+//! CLASS. Each compares fnp against numpy in the same interpreter, and each
+//! carries preconditions so it cannot go quietly slack.
+//!
+//! ## Return type
 //!
 //! numpy returns a numpy SCALAR (np.float64, np.int64, np.bool_) for a full
 //! reduction, not a 0-d ndarray. Same dtype, same shape, different type - and
@@ -304,6 +311,124 @@ print("oracle", platform.node(), np.__version__, compared)
     assert_eq!(
         verdict, "True",
         "output dtypes should match numpy ({provenance}): {result}"
+    );
+    Ok(())
+}
+
+/// EXCEPTION CLASS for a bad input - what comes back when the call fails.
+///
+/// fnp's wrappers reach numpy's error surface three different ways, chosen per
+/// site: delegate the whole call so numpy raises its own error; let a native
+/// path raise a house-style error (the `choose` wrapper's comment records
+/// exactly that - "the native path raises its own house-style strings ...
+/// `choose: unsupported mode 'bad'` where numpy says `clipmode must be one of
+/// ...`" - and resolves it by handing failing cases back); or map a UFuncError
+/// through `map_ufunc_error`, which picks the Python class.
+///
+/// Getting the CLASS wrong is worse than getting the message wrong: an
+/// `except IndexError` silently stops catching. numpy is specific here -
+/// out-of-bounds indexing is IndexError, a bad axis is
+/// numpy.exceptions.AxisError (which subclasses BOTH ValueError and
+/// IndexError), a singular matrix is numpy.linalg.LinAlgError.
+///
+/// The exception's defining MODULE is asserted alongside its name: a
+/// hand-rolled AxisError and numpy's would both print "AxisError", and only the
+/// module tells them apart.
+#[test]
+fn exception_class_parity_for_bad_inputs() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+import warnings
+
+warnings.simplefilter("ignore")
+
+flat = np.array([1.0, 2.0, 3.0])
+singular = np.array([[1.0, 2.0], [2.0, 4.0]])
+square = np.array([[1.0, 2.0], [3.0, 4.0]])
+
+bad_calls = [
+    ("take out of range", lambda m: m.take(flat, [9])),
+    ("delete out of range", lambda m: m.delete(flat, 9)),
+    ("insert out of range", lambda m: m.insert(flat, 9, 1.0)),
+    ("sum bad axis", lambda m: m.sum(flat, axis=5)),
+    ("unique bad axis", lambda m: m.unique(flat, axis=3)),
+    ("expand_dims bad axis", lambda m: m.expand_dims(flat, axis=7)),
+    ("squeeze bad axis", lambda m: m.squeeze(flat, axis=1)),
+    ("reshape incompatible", lambda m: m.reshape(flat, (2, 2))),
+    ("concatenate of nothing", lambda m: m.concatenate([])),
+    ("percentile q out of range", lambda m: m.percentile(flat, 150)),
+    ("searchsorted bad side", lambda m: m.searchsorted(flat, 1, side="middle")),
+    ("choose bad mode", lambda m: m.choose([0], [flat], mode="bad")),
+    ("linalg.inv singular", lambda m: m.linalg.inv(singular)),
+    ("linalg.solve non-square", lambda m: m.linalg.solve(np.ones((2, 3)), np.ones(2))),
+    ("sqrt on string array", lambda m: m.sqrt(np.array(["a", "b"]))),
+    ("astype nonsense dtype", lambda m: m.asarray(flat).astype("notadtype")),
+    ("matmul shape mismatch", lambda m: m.matmul(square, np.ones((3, 3)))),
+    ("dot shape mismatch", lambda m: m.dot(flat, np.ones(5))),
+    ("diag on 3-D", lambda m: m.diag(np.ones((2, 2, 2)))),
+]
+
+# MUST NOT RAISE. Without this group the sweep could pass with every call
+# raising the same class - or with fnp raising where numpy succeeds, which is
+# the failure mode liz1c actually found (take(complex64) raised TypeError while
+# numpy returned an array).
+must_succeed = [
+    ("take in range", lambda m: m.take(flat, [0, 2])),
+    ("take complex64 list index", lambda m: m.take(np.array([1 + 2j, 3 - 1j], dtype=np.complex64), [0])),
+    ("sum axis 0", lambda m: m.sum(flat, axis=0)),
+    ("reshape compatible", lambda m: m.reshape(flat, (3, 1))),
+    ("percentile q in range", lambda m: m.percentile(flat, 50)),
+    ("linalg.inv non-singular", lambda m: m.linalg.inv(square)),
+    ("searchsorted valid side", lambda m: m.searchsorted(flat, 1, side="right")),
+]
+
+def raised(module, call):
+    try:
+        call(module)
+        return ("no raise",)
+    except Exception as exc:
+        # The MODULE matters: a hand-rolled AxisError and numpy's would both
+        # print "AxisError".
+        return ("raised", f"{type(exc).__module__}.{type(exc).__name__}")
+
+ok = True
+for label, call in bad_calls + must_succeed:
+    actual = raised(fnp, call)
+    expected = raised(np, call)
+    if actual != expected:
+        print(label)
+        print(f"  fnp   {actual}")
+        print(f"  numpy {expected}")
+        ok = False
+
+# Preconditions: numpy must really raise for the bad group and really succeed
+# for the control group, and the classes must not all collapse to one - if numpy
+# ever raised plain ValueError everywhere, matching it would prove nothing about
+# AxisError or LinAlgError.
+numpy_classes = {raised(np, call)[-1] for _, call in bad_calls if raised(np, call)[0] == "raised"}
+if len(numpy_classes) < 4:
+    print(f"PRECONDITION LOST: numpy raised only {len(numpy_classes)} distinct classes: {sorted(numpy_classes)}")
+    ok = False
+if any(raised(np, call)[0] == "no raise" for _, call in bad_calls):
+    print("PRECONDITION LOST: a bad-input case no longer raises on numpy")
+    ok = False
+if any(raised(np, call)[0] == "raised" for _, call in must_succeed):
+    print("PRECONDITION LOST: a control case now raises on numpy")
+    ok = False
+
+print(ok)
+print("oracle", platform.node(), np.__version__, sorted(numpy_classes))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "exception classes should match numpy ({provenance}): {result}"
     );
     Ok(())
 }
