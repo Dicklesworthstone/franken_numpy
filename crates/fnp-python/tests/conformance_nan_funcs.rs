@@ -1510,6 +1510,8 @@ import warnings
 x = np.array([1.0, 2.0, np.nan, 4.0])
 mask = np.array([True, False, True, True])
 all_false = np.zeros(4, dtype=bool)
+finite = np.array([1.0, 2.0, 3.0, 4.0])
+with_zero = np.array([1.0, 0.0, 3.0])
 y = np.array([[1.0, np.nan], [3.0, 4.0]])
 mask_2d = np.array([[True, True], [False, True]])
 
@@ -1558,6 +1560,35 @@ cases = [
     ("nanprod omitted", "nanprod", (x,), {}),
     ("nanstd omitted", "nanstd", (x,), {}),
     ("nanvar omitted", "nanvar", (x,), {}),
+    # The NON-nan reductions have the same numpy semantic - where=None reduces
+    # over nothing, so sum gives 0.0, prod 1.0, mean/std/var raise, max/min
+    # raise, any gives False and all gives the identity True. These wrappers
+    # take **kwargs and gate every native path on the kwargs dict being empty,
+    # so a supplied where= (None included) already delegates - but nothing
+    # asserted that, and the assumption is exactly what
+    # deadlock-audit-nonnan-reductions-where-none-nh23c was filed over. These
+    # cases hold it.
+    #
+    # `all` uses an input CONTAINING A ZERO on purpose: all(where=None) returns
+    # the identity True regardless of input, which coincides with the unmasked
+    # answer whenever that answer is already True. An all-nonzero input would
+    # make this case vacuous.
+    ("sum where=None", "sum", (finite,), {"where": None}),
+    ("sum omitted", "sum", (finite,), {}),
+    ("prod where=None", "prod", (finite,), {"where": None}),
+    ("prod omitted", "prod", (finite,), {}),
+    ("mean where=None", "mean", (finite,), {"where": None}),
+    ("mean omitted", "mean", (finite,), {}),
+    ("std where=None", "std", (finite,), {"where": None}),
+    ("var where=None", "var", (finite,), {"where": None}),
+    ("max where=None", "max", (finite,), {"where": None}),
+    ("min where=None", "min", (finite,), {"where": None}),
+    ("any where=None", "any", (finite,), {"where": None}),
+    ("any omitted", "any", (finite,), {}),
+    ("all where=None with a zero", "all", (with_zero,), {"where": None}),
+    ("all omitted with a zero", "all", (with_zero,), {}),
+    ("sum where=mask", "sum", (finite,), {"where": mask}),
+    ("all where=mask with a zero", "all", (with_zero,), {"where": np.array([True, False, True])}),
 ]
 
 def outcome(module, name, args, kwargs):

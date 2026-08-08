@@ -81210,7 +81210,13 @@ fn prod(
         || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || initial.as_ref().is_some_and(|v| !v.bind(py).is_none())
-        || where_.as_ref().is_some_and(|v| !v.is_none())
+        // Gate on the KEY BEING PRESENT, not on the value being non-None: numpy
+        // reads an explicit where=None as a mask that selects nothing (prod -> 1.0,
+        // any -> False, all -> the identity True, max/min -> ValueError because
+        // fmax/fmin have no identity), so it must delegate exactly like a real mask.
+        // Testing `!v.is_none()` let where=None through to the native path and
+        // returned the UNMASKED answer - deadlock-audit-nonnan-reductions-where-none-nh23c.
+        || where_.is_some()
     {
         return fallback();
     }
@@ -82147,7 +82153,13 @@ fn py_min(
     if has_unrecognized_kwargs(kwargs, &["where"])?
         || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || initial.as_ref().is_some_and(|v| !v.bind(py).is_none())
-        || where_.as_ref().is_some_and(|v| !v.is_none())
+        // Gate on the KEY BEING PRESENT, not on the value being non-None: numpy
+        // reads an explicit where=None as a mask that selects nothing (prod -> 1.0,
+        // any -> False, all -> the identity True, max/min -> ValueError because
+        // fmax/fmin have no identity), so it must delegate exactly like a real mask.
+        // Testing `!v.is_none()` let where=None through to the native path and
+        // returned the UNMASKED answer - deadlock-audit-nonnan-reductions-where-none-nh23c.
+        || where_.is_some()
     {
         return fallback();
     }
@@ -82320,7 +82332,13 @@ fn py_max(
     if has_unrecognized_kwargs(kwargs, &["where"])?
         || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || initial.as_ref().is_some_and(|v| !v.bind(py).is_none())
-        || where_.as_ref().is_some_and(|v| !v.is_none())
+        // Gate on the KEY BEING PRESENT, not on the value being non-None: numpy
+        // reads an explicit where=None as a mask that selects nothing (prod -> 1.0,
+        // any -> False, all -> the identity True, max/min -> ValueError because
+        // fmax/fmin have no identity), so it must delegate exactly like a real mask.
+        // Testing `!v.is_none()` let where=None through to the native path and
+        // returned the UNMASKED answer - deadlock-audit-nonnan-reductions-where-none-nh23c.
+        || where_.is_some()
     {
         return fallback();
     }
@@ -82518,7 +82536,13 @@ fn all(
     if has_unrecognized_kwargs(kwargs, &["where"])?
         || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || keepdims
-        || where_.as_ref().is_some_and(|v| !v.is_none())
+        // Gate on the KEY BEING PRESENT, not on the value being non-None: numpy
+        // reads an explicit where=None as a mask that selects nothing (prod -> 1.0,
+        // any -> False, all -> the identity True, max/min -> ValueError because
+        // fmax/fmin have no identity), so it must delegate exactly like a real mask.
+        // Testing `!v.is_none()` let where=None through to the native path and
+        // returned the UNMASKED answer - deadlock-audit-nonnan-reductions-where-none-nh23c.
+        || where_.is_some()
     {
         return fallback();
     }
@@ -82616,7 +82640,13 @@ fn any(
     if has_unrecognized_kwargs(kwargs, &["where"])?
         || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || keepdims
-        || where_.as_ref().is_some_and(|v| !v.is_none())
+        // Gate on the KEY BEING PRESENT, not on the value being non-None: numpy
+        // reads an explicit where=None as a mask that selects nothing (prod -> 1.0,
+        // any -> False, all -> the identity True, max/min -> ValueError because
+        // fmax/fmin have no identity), so it must delegate exactly like a real mask.
+        // Testing `!v.is_none()` let where=None through to the native path and
+        // returned the UNMASKED answer - deadlock-audit-nonnan-reductions-where-none-nh23c.
+        || where_.is_some()
     {
         return fallback();
     }
