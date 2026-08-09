@@ -61087,6 +61087,133 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn polynomial_basis_conversion_randomised_differential_matches_numpy() {
+        // 50prg established that poly2X at high degree is the ill-conditioned step - it is
+        // what made *mul's power-basis round trip lose eight digits by degree 16, and what
+        // leaves *div unharmed because its outputs are lower degree. That makes the
+        // conversions themselves the thing worth pinning directly: numpy carries the same
+        // conditioning, so any divergence here is OUR arithmetic, not the problem's.
+        //
+        // Degrees deliberately reach 16, where the conditioning bites, because a
+        // small-degree sweep would show nothing either way.
+        if !numpy_oracle_available() {
+            return;
+        }
+        let mut state: u64 = 0x7A1D_3C5E_9B2F_4068;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut cases: Vec<Vec<f64>> = Vec::new();
+        for len in [3usize, 6, 10, 13, 16] {
+            for _ in 0..4 {
+                // Values in [-2, 2) with a deterministic spread; magnitudes stay modest so
+                // a divergence means conditioning, not overflow.
+                let v: Vec<f64> = (0..len)
+                    .map(|_| ((next() >> 11) as f64 / (1u64 << 53) as f64) * 4.0 - 2.0)
+                    .collect();
+                cases.push(v);
+            }
+        }
+        let py_list = |v: &[f64]| -> String {
+            let items: Vec<String> = v.iter().map(|x| format!("{x:?}")).collect();
+            format!("[{}]", items.join(", "))
+        };
+        let case_literals: Vec<String> = cases.iter().map(|c| py_list(c)).collect();
+        let script = format!(
+            r#"
+import numpy as np
+from numpy.polynomial import chebyshev as C, legendre as L, hermite as H
+from numpy.polynomial import hermite_e as He, laguerre as La
+fams = [("cheb", C), ("leg", L), ("herm", H), ("herme", He), ("lag", La)]
+cases = [{}]
+out = []
+for c in cases:
+    for prefix, mod in fams:
+        f = getattr(mod, prefix + "2poly")(c)
+        out.append(",".join(repr(float(v)) for v in f))
+        g = getattr(mod, "poly2" + prefix)(c)
+        out.append(",".join(repr(float(v)) for v in g))
+print("\n".join(out))
+"#,
+            case_literals.join(", ")
+        );
+        let output = Command::new(oracle_python_bin())
+            .args(["-c", &script])
+            .output()
+            .expect("numpy oracle should run");
+        assert!(
+            output.status.success(),
+            "numpy oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("oracle output should be UTF-8");
+        let expected: Vec<&str> = stdout.lines().collect();
+        assert_eq!(
+            expected.len(),
+            cases.len() * 10,
+            "oracle returned {} rows, expected {}",
+            expected.len(),
+            cases.len() * 10
+        );
+
+        type ConvFn = fn(&[f64]) -> Vec<f64>;
+        let families: [(&str, ConvFn, ConvFn); 5] = [
+            ("cheb", cheb2poly, poly2cheb),
+            ("leg", leg2poly, poly2leg),
+            ("herm", herm2poly, poly2herm),
+            ("herme", herme2poly, poly2herme),
+            ("lag", lag2poly, poly2lag),
+        ];
+        let mut row = 0usize;
+        let mut worst = 0.0_f64;
+        let mut worst_label = String::new();
+        for c in &cases {
+            for (name, to_poly, from_poly) in families {
+                for (what, got) in [
+                    (format!("{name}2poly"), to_poly(c)),
+                    (format!("poly2{name}"), from_poly(c)),
+                ] {
+                    let want: Vec<f64> = expected[row]
+                        .split(',')
+                        .map(|s| s.parse::<f64>().unwrap())
+                        .collect();
+                    assert_eq!(
+                        got.len(),
+                        want.len(),
+                        "{what} at degree {}: length {} vs numpy {}",
+                        c.len() - 1,
+                        got.len(),
+                        want.len()
+                    );
+                    let scale = want.iter().fold(1.0_f64, |acc, v| acc.max(v.abs()));
+                    for (g, w) in got.iter().zip(want.iter()) {
+                        let rel = (g - w).abs() / scale;
+                        if rel > worst {
+                            worst = rel;
+                            worst_label = format!("{what} at degree {}", c.len() - 1);
+                        }
+                    }
+                    row += 1;
+                }
+            }
+        }
+        println!("worst basis-conversion deviation vs numpy: {worst:e} ({worst_label})");
+        // 1e-11, not 1e-12: the observed worst is 6.08e-13 (poly2lag, degree 15) and a
+        // bound 1.6x above an observation flakes on an unlucky draw. That 6.08e-13 is a
+        // KNOWN GAP rather than conditioning — numpy's own float64 poly2lag is within
+        // 4e-16 of a longdouble reference at these degrees, so the distance is our
+        // algorithm's. Tracked as deadlock-audit-xf93e; tightening this bound toward
+        // 1e-15 is that bead's acceptance test.
+        assert!(
+            worst <= 1e-11,
+            "basis conversions drifted from numpy: worst {worst:e} at {worst_label}"
+        );
+    }
+
+    #[test]
     fn polynomial_div_randomised_differential_matches_numpy() {
         // Targeted follow-up to 50prg. That bead was about *mul computing
         // X2poly -> convolve -> poly2X; every *div here still does exactly that round trip
