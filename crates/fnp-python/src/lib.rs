@@ -110258,33 +110258,40 @@ mod tests {
                 pyo3::ffi::c_str!("poison_hermite_e"),
             )?;
 
-            let _der_guard = AttrGuard::new(&np_hermite_e, "hermeder")?;
-            let _int_guard = AttrGuard::new(&np_hermite_e, "hermeint")?;
-            np_hermite_e.setattr("hermeder", poison.getattr("fail")?)?;
-            np_hermite_e.setattr("hermeint", poison.getattr("fail")?)?;
-
             let c = vec![1.0_f64, 2.0, 3.0, 4.0, 5.0];
-            let der_kwargs = PyDict::new(py);
-            der_kwargs.set_item("scl", 2.0_f64)?;
-            let der = module
-                .getattr("hermeder")?
-                .call((c.clone(), 1_i64), Some(&der_kwargs))?;
-            assert_eq!(der.extract::<Vec<f64>>()?, vec![4.0, 12.0, 24.0, 40.0]);
+            // One guard at a time: AttrGuard holds the process-wide POISON_MUTEX for its
+            // whole lifetime, and std's Mutex is not reentrant, so holding two of them on
+            // this thread deadlocks the test against itself.
+            {
+                let _der_guard = AttrGuard::new(&np_hermite_e, "hermeder")?;
+                np_hermite_e.setattr("hermeder", poison.getattr("fail")?)?;
 
-            let int_kwargs = PyDict::new(py);
-            int_kwargs.set_item("k", vec![1.0_f64])?;
-            let int = module
-                .getattr("hermeint")?
-                .call((c, 1_i64), Some(&int_kwargs))?;
-            assert_eq!(
-                int.extract::<Vec<f64>>()?,
-                vec![-1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-            );
+                let der_kwargs = PyDict::new(py);
+                der_kwargs.set_item("scl", 2.0_f64)?;
+                let der = module
+                    .getattr("hermeder")?
+                    .call((c.clone(), 1_i64), Some(&der_kwargs))?;
+                assert_eq!(der.extract::<Vec<f64>>()?, vec![4.0, 12.0, 24.0, 40.0]);
 
-            // Integer input widens to double natively too — it must not fall back.
-            let ints = py.import("numpy")?.call_method1("arange", (5_i64,))?;
-            let der_int = module.getattr("hermeder")?.call1((ints,))?;
-            assert_eq!(der_int.extract::<Vec<f64>>()?, vec![1.0, 4.0, 9.0, 16.0]);
+                // Integer input widens to double natively too — it must not fall back.
+                let ints = py.import("numpy")?.call_method1("arange", (5_i64,))?;
+                let der_int = module.getattr("hermeder")?.call1((ints,))?;
+                assert_eq!(der_int.extract::<Vec<f64>>()?, vec![1.0, 4.0, 9.0, 16.0]);
+            }
+            {
+                let _int_guard = AttrGuard::new(&np_hermite_e, "hermeint")?;
+                np_hermite_e.setattr("hermeint", poison.getattr("fail")?)?;
+
+                let int_kwargs = PyDict::new(py);
+                int_kwargs.set_item("k", vec![1.0_f64])?;
+                let int = module
+                    .getattr("hermeint")?
+                    .call((c, 1_i64), Some(&int_kwargs))?;
+                assert_eq!(
+                    int.extract::<Vec<f64>>()?,
+                    vec![-1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+                );
+            }
             Ok(())
         });
     }
