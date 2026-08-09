@@ -794,6 +794,149 @@ mod tests {
     };
 
     #[test]
+    fn broadcast_and_strides_match_live_numpy_across_shape_pairs() {
+        // The SCE is called the non-negotiable compatibility kernel in AGENTS.md, and this
+        // crate had ZERO numpy oracle references — 105 tests, all pinning the engine to
+        // itself or to hand-written expectations. The neighbouring test is literally named
+        // "matches_numpy_style": it encodes what numpy is believed to do, which is a
+        // different claim from what numpy does.
+        //
+        // This compares against np.broadcast_shapes and ndarray.strides directly, over
+        // pairs chosen to hit the rules that actually differ between implementations:
+        // right-alignment of ranks, size-1 stretching, zero-length axes, and scalars.
+        use std::process::Command;
+        let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string());
+        if !Command::new(&python)
+            .args(["-c", "import numpy"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let pairs: Vec<(Vec<usize>, Vec<usize>)> = vec![
+            (vec![8, 1, 6, 1], vec![7, 1, 5]),
+            (vec![5, 4], vec![1]),
+            (vec![5, 4], vec![4]),
+            (vec![15, 3, 5], vec![15, 1, 5]),
+            (vec![15, 3, 5], vec![3, 5]),
+            (vec![15, 3, 5], vec![3, 1]),
+            (vec![], vec![3, 4]),
+            (vec![3, 4], vec![]),
+            (vec![1, 1], vec![1]),
+            (vec![0, 3], vec![1, 3]),
+            (vec![2, 0, 4], vec![2, 1, 4]),
+            (vec![0], vec![1]),
+        ];
+        let py_pairs = pairs
+            .iter()
+            .map(|(a, b)| {
+                let f = |v: &Vec<usize>| {
+                    format!(
+                        "({})",
+                        v.iter()
+                            .map(|d| format!("{d},"))
+                            .collect::<Vec<_>>()
+                            .join("")
+                    )
+                };
+                format!("({}, {})", f(a), f(b))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let script = format!(
+            r#"
+import numpy as np
+out = []
+for a, b in [{py_pairs}]:
+    try:
+        s = np.broadcast_shapes(a, b)
+        out.append("ok:" + ",".join(str(d) for d in s))
+    except Exception as exc:
+        out.append("err:" + type(exc).__name__)
+# strides of a C- and F-ordered array of the broadcast-independent shapes
+for shp in [(3,), (2, 3), (2, 3, 4), (1, 5), (5, 1), (2, 0, 4)]:
+    c = np.empty(shp, dtype=np.float64, order="C").strides
+    f = np.empty(shp, dtype=np.float64, order="F").strides
+    out.append("strides:" + ",".join(str(x) for x in c) + "|" + ",".join(str(x) for x in f))
+print("\n".join(out))
+"#
+        );
+        let out = Command::new(&python)
+            .args(["-c", &script])
+            .output()
+            .expect("numpy SCE oracle should run");
+        assert!(
+            out.status.success(),
+            "oracle failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).expect("utf-8");
+        let rows: Vec<&str> = stdout.trim().lines().collect();
+        assert_eq!(rows.len(), pairs.len() + 6, "oracle row count");
+
+        let mut failures: Vec<String> = Vec::new();
+        for ((a, b), row) in pairs.iter().zip(rows.iter()) {
+            let got = broadcast_shape(a, b);
+            match (row.strip_prefix("ok:"), got) {
+                (Some(csv), Ok(shape)) => {
+                    let want: Vec<usize> = if csv.is_empty() {
+                        Vec::new()
+                    } else {
+                        csv.split(',').map(|t| t.parse().unwrap()).collect()
+                    };
+                    if shape != want {
+                        failures.push(format!(
+                            "  broadcast({a:?}, {b:?}) = {shape:?}, numpy {want:?}"
+                        ));
+                    }
+                }
+                (None, Err(_)) => {} // both reject
+                (Some(csv), Err(e)) => failures.push(format!(
+                    "  broadcast({a:?}, {b:?}) errored ({e:?}) where numpy gives [{csv}]"
+                )),
+                (None, Ok(shape)) => failures.push(format!(
+                    "  broadcast({a:?}, {b:?}) = {shape:?} where numpy raises {row}"
+                )),
+            }
+        }
+        let stride_shapes: [Vec<usize>; 6] = [
+            vec![3],
+            vec![2, 3],
+            vec![2, 3, 4],
+            vec![1, 5],
+            vec![5, 1],
+            vec![2, 0, 4],
+        ];
+        for (shape, row) in stride_shapes.iter().zip(rows[pairs.len()..].iter()) {
+            let body = row.strip_prefix("strides:").expect("strides row");
+            let (c_csv, f_csv) = body.split_once('|').expect("c|f");
+            let parse = |s: &str| -> Vec<isize> {
+                if s.is_empty() {
+                    Vec::new()
+                } else {
+                    s.split(',').map(|t| t.parse().unwrap()).collect()
+                }
+            };
+            for (order, want_csv) in [(MemoryOrder::C, c_csv), (MemoryOrder::F, f_csv)] {
+                let want = parse(want_csv);
+                let got = contiguous_strides(shape, 8, order).expect("strides");
+                if got != want {
+                    failures.push(format!(
+                        "  contiguous_strides({shape:?}, 8, {order:?}) = {got:?}, numpy {want:?}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} SCE case(s) disagree with numpy:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
     fn broadcast_shape_matches_numpy_style() {
         let out = broadcast_shape(&[8, 1, 6, 1], &[7, 1, 5]).expect("broadcast should succeed");
         assert_eq!(out, vec![8, 7, 6, 5]);
