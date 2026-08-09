@@ -16752,6 +16752,128 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn geometric_hypergeometric_chisquare_boundary_sweep_matches_live_numpy_oracle()
+    -> Result<(), &'static str> {
+        // Third pass over jo22s. Binomial's BTPE arm turned out to be genuinely broken
+        // (36ilk), so the remaining documented algorithm splits are treated as suspect
+        // rather than assumed fine:
+        //   geometric       p < 1/3            -> inversion, else search      (lib.rs:5915)
+        //   hypergeometric  10 <= sample <= total-10 -> HRUA, else counting   (lib.rs:6735)
+        //   chisquare       routes through gamma(df/2), inheriting its shape=1 split at
+        //                   df = 2
+        // Values straddle each threshold and sit exactly on it.
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+        const GEOM_PS: [f64; 7] = [0.05, 0.25, 0.333_333_332, 1.0 / 3.0, 0.4, 0.75, 1.0];
+        // (ngood, nbad, nsample); total = 60, so sample 9 counts, 10 is the HRUA edge,
+        // 50 is total-10 (still HRUA) and 51 falls back to counting.
+        const HYPERGEOM: [(u64, u64, u64); 5] = [
+            (35, 25, 9),
+            (35, 25, 10),
+            (35, 25, 30),
+            (35, 25, 50),
+            (35, 25, 51),
+        ];
+        const CHI_DFS: [f64; 6] = [0.5, 1.0, 1.999_999_999, 2.0, 2.000_000_001, 5.0];
+
+        let join = |v: Vec<String>| v.join(", ");
+        let script = format!(
+            r#"
+import numpy as np
+out = []
+for p in [{}]:
+    rng = np.random.Generator(np.random.PCG64DXSM(12345))
+    out.append(",".join(str(int(x)) for x in rng.geometric(p, size=30).tolist()))
+for ng, nb, ns in [{}]:
+    rng = np.random.Generator(np.random.PCG64DXSM(12345))
+    out.append(",".join(str(int(x)) for x in rng.hypergeometric(ng, nb, ns, size=30).tolist()))
+for df in [{}]:
+    rng = np.random.Generator(np.random.PCG64DXSM(12345))
+    out.append(",".join(repr(float(x)) for x in rng.chisquare(df, size=20).tolist()))
+print("\n".join(out))
+"#,
+            join(GEOM_PS.iter().map(|p| format!("{p:?}")).collect()),
+            join(
+                HYPERGEOM
+                    .iter()
+                    .map(|(a, b, c)| format!("({a}, {b}, {c})"))
+                    .collect()
+            ),
+            join(CHI_DFS.iter().map(|d| format!("{d:?}")).collect()),
+        );
+        let output = numpy_oracle_stdout_from_stdin(&script, &[])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let rows: Vec<&str> = stdout.trim().lines().collect();
+        assert_eq!(
+            rows.len(),
+            GEOM_PS.len() + HYPERGEOM.len() + CHI_DFS.len(),
+            "oracle row count"
+        );
+        let parse_u64 = |row: &str| -> Vec<u64> {
+            row.split(',')
+                .filter(|t| !t.is_empty())
+                .map(|t| t.parse::<u64>().expect("oracle integer should parse"))
+                .collect()
+        };
+
+        let mut failures: Vec<String> = Vec::new();
+        for (i, &p) in GEOM_PS.iter().enumerate() {
+            let expected = parse_u64(rows[i]);
+            let mut g = oracle_gen();
+            let actual = g.geometric(p, 30).map_err(|_| "geometric sweep")?;
+            if actual != expected {
+                failures.push(format!(
+                    "  geometric(p={p}) [{}]\n    ours  {actual:?}\n    numpy {expected:?}",
+                    if p < 1.0 / 3.0 { "inversion" } else { "search" }
+                ));
+            }
+        }
+        for (i, &(ng, nb, ns)) in HYPERGEOM.iter().enumerate() {
+            let expected = parse_u64(rows[GEOM_PS.len() + i]);
+            let mut g = oracle_gen();
+            let actual = g
+                .hypergeometric(ng, nb, ns, 30)
+                .map_err(|_| "hypergeometric sweep")?;
+            if actual != expected {
+                let arm = if ns >= 10 && ns <= ng + nb - 10 {
+                    "HRUA"
+                } else {
+                    "counting"
+                };
+                failures.push(format!(
+                    "  hypergeometric({ng}, {nb}, {ns}) [{arm}]\n    ours  {actual:?}\n    numpy {expected:?}"
+                ));
+            }
+        }
+        for (i, &df) in CHI_DFS.iter().enumerate() {
+            let expected = parse_oracle_f64_csv(rows[GEOM_PS.len() + HYPERGEOM.len() + i])?;
+            let mut g = oracle_gen();
+            let actual = g.chisquare(df, 20).map_err(|_| "chisquare sweep")?;
+            // Bit-exact: PCG64DXSM parity is the contract, and chisquare inherits gamma's
+            // arm split at df = 2, so a tolerance would hide a switched algorithm.
+            let mismatch = actual.len() != expected.len()
+                || actual
+                    .iter()
+                    .zip(expected.iter())
+                    .any(|(a, e)| a.to_bits() != e.to_bits());
+            if mismatch {
+                failures.push(format!(
+                    "  chisquare(df={df}) [gamma shape={}]\n    ours  {actual:?}\n    numpy {expected:?}",
+                    df / 2.0
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} parameter set(s) diverge from numpy:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn poisson_binomial_boundary_sweep_matches_live_numpy_oracle() -> Result<(), &'static str> {
         // Continues jo22s. These two have the sharpest documented switch points in
         // numpy's distributions.c, so the boundary is known exactly rather than inferred:
