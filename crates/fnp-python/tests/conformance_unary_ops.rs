@@ -4,6 +4,12 @@
 
 use std::process::Command;
 
+// The out= probe is shared so that its strictness is decided in one place; see the
+// module docs for the three shards whose hand-rolled copies silently discarded the
+// mutated values (deadlock-audit-au3z4).
+#[path = "common/out_keyword.rs"]
+mod out_keyword;
+
 fn numpy_oracle(script: &str) -> Result<String, String> {
     let output = Command::new("python3")
         .args(["-c", script])
@@ -71,34 +77,10 @@ print(np.array_equal(result, expected))
 
 #[test]
 fn sign_unary_out_keyword_surfaces_match_numpy() -> Result<(), String> {
-    let script = fnp_script(
-        r#"
-def out_outcome(module, name, positional=False, bad_shape=False):
-    fn = getattr(module, name)
-    try:
-        x = np.array([-2.0, -0.0, 0.0, 3.5], dtype=np.float64)
-        out = np.empty((2,), dtype=np.float64) if bad_shape else np.empty(4, dtype=np.float64)
-        if positional:
-            result = fn(x, out)
-        else:
-            result = fn(x, out=out)
-        # signbit is carried explicitly: -0.0 == 0.0 in Python, so list equality alone
-        # cannot see the sign of a zero, and negative(-0.0) is exactly the case that
-        # turns on it.
-        return (
-            "ok",
-            result is out,
-            out.dtype.str,
-            tuple(out.shape),
-            out.tolist(),
-            tuple(bool(b) for b in np.signbit(out)),
-        )
-    except Exception as exc:
-        # Exception TYPE only: numpy rewords its messages between releases and the
-        # supported floor spans several, so pinning text would make this shard version
-        # dependent for no parity gain.
-        return ("err", type(exc).__name__)
-
+    // -0.0 sits in the input on purpose: negative(-0.0) is +0.0, and the shared probe's
+    // signbit tuple is what makes that observable at all.
+    let script = fnp_script(format!(
+        r#"{probe}
 cases = [
     ("positive keyword out", "positive", False, False),
     ("negative keyword out", "negative", False, False),
@@ -108,24 +90,14 @@ cases = [
     ("negative bad out shape", "negative", False, True),
 ]
 
-ok = True
-for label, name, positional, bad_shape in cases:
-    actual = out_outcome(fnp, name, positional, bad_shape)
-    expected = out_outcome(np, name, positional, bad_shape)
-    # Compare the WHOLE outcome, not just the ok/err tag and the aliasing flag. The
-    # values written into `out` are the mutation half of this contract: a wrapper that
-    # returned the right object while filling it with the wrong numbers used to pass.
-    # -0.0 is in the input on purpose: negative(-0.0) is +0.0, and the signbit tuple
-    # above is what makes that observable.
-    if actual != expected:
-        print(label)
-        print(actual)
-        print(expected)
-        ok = False
-print(ok)
-"#
-        .into(),
-    );
+run_out_cases(cases)
+"#,
+        probe = out_keyword::out_keyword_probe_py(
+            "np.array([-2.0, -0.0, 0.0, 3.5], dtype=np.float64)",
+            "np.float64",
+            4,
+        )
+    ));
     let result = numpy_oracle(&script)?;
     assert_eq!(
         result.trim(),
