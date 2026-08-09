@@ -804,3 +804,186 @@ print("oracle", platform.node(), np.__version__, compared)
     );
     Ok(())
 }
+
+/// Keyword INTERACTIONS - the first sweep here that crosses parameters instead
+/// of varying one attribute.
+///
+/// Every keyword touched this session is handled per-site by hand: `out=`
+/// forces delegation in one wrapper and is forwarded in another; `keepdims` is
+/// reconstructed by `keepdims_expand_axis` at some sites and by reshaping to
+/// `vec![1usize; ndim]` at others; `where=` gates the native path in five
+/// reductions and is forwarded in the rest; `dtype=` forces an accumulator
+/// type. Each was verified ALONE.
+///
+/// The combination is where that hand-rolled arithmetic has to agree, because
+/// **`out=`'s required shape is a function of `axis` AND `keepdims`**. A
+/// wrapper that computes its own return shape correctly but derives the `out=`
+/// check or the write from a different expression is wrong only in the crossed
+/// case - which no single-keyword test can reach.
+#[test]
+fn keyword_interactions_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+import warnings
+
+warnings.simplefilter("ignore")
+
+cube = np.arange(24, dtype=np.float64).reshape(2, 3, 4)
+mask3 = (cube % 3.0) != 0.0
+
+reductions = ["sum", "prod", "mean", "min", "max", "any", "all"]
+nan_reductions = ["nansum", "nanprod", "nanmean", "nanmin", "nanmax"]
+axes = [None, 0, 1, -1, (0, 1)]
+
+def described(value):
+    # NaN must be substituted before comparison: nan != nan, so a plain tuple
+    # compare reports a divergence whenever BOTH sides legitimately produce NaN.
+    # where= on a fully-masked position does exactly that for mean, and the
+    # first run of this sweep "failed" four such cases while printing identical
+    # values on both sides. That is the probe lying, not fnp - the keepdims
+    # sweep above already carries the same nan_to_num for the same reason.
+    array = np.asarray(value)
+    finite = np.nan_to_num(np.asarray(array, dtype=np.float64), nan=-987654.0,
+                           posinf=1e300, neginf=-1e300) if array.dtype.kind == "f" else array
+    return (str(array.dtype), tuple(array.shape), np.round(finite, 9).tolist())
+
+def run(module, body):
+    try:
+        return ("ok",) + tuple(body(module))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+ok = True
+compared = 0
+
+# ---- out= x axis x keepdims -------------------------------------------------
+# The out buffer is allocated at the shape NUMPY says the result has for that
+# (axis, keepdims) pair, so a wrapper deriving the shape differently fails here
+# and only here.
+for name in reductions + nan_reductions:
+    for axis in axes:
+        for keepdims in (False, True):
+            kwargs = {"keepdims": keepdims}
+            if axis is not None:
+                kwargs["axis"] = axis
+            try:
+                reference = getattr(np, name)(cube, **kwargs)
+            except Exception:
+                continue
+            reference = np.asarray(reference)
+
+            def with_out(module, name=name, kwargs=kwargs, reference=reference):
+                out = np.zeros(reference.shape, dtype=reference.dtype)
+                result = getattr(module, name)(cube, out=out, **kwargs)
+                return (result is out, described(out))
+
+            actual, expected = run(fnp, with_out), run(np, with_out)
+            compared += 1
+            if actual != expected:
+                print(f"out x axis x keepdims: {name} axis={axis} keepdims={keepdims}")
+                print(f"  fnp   {str(actual)[:150]}")
+                print(f"  numpy {str(expected)[:150]}")
+                ok = False
+
+            # And an out buffer that is WRONG for this (axis, keepdims) pair:
+            # both sides must reject it the same way.
+            def with_bad_out(module, name=name, kwargs=kwargs):
+                out = np.zeros((7, 5), dtype=np.float64)
+                result = getattr(module, name)(cube, out=out, **kwargs)
+                return (result is out, described(out))
+
+            actual, expected = run(fnp, with_bad_out), run(np, with_bad_out)
+            compared += 1
+            if actual != expected:
+                print(f"bad-out x axis x keepdims: {name} axis={axis} keepdims={keepdims}")
+                print(f"  fnp   {str(actual)[:150]}")
+                print(f"  numpy {str(expected)[:150]}")
+                ok = False
+
+# ---- where= x axis x keepdims, and where= x dtype= --------------------------
+for name in ["sum", "prod", "mean", "min", "max", "any", "all"]:
+    for axis in axes:
+        for keepdims in (False, True):
+            def with_where(module, name=name, axis=axis, keepdims=keepdims):
+                kwargs = {"where": mask3, "keepdims": keepdims}
+                if axis is not None:
+                    kwargs["axis"] = axis
+                if name in ("min", "max"):
+                    kwargs["initial"] = 0.0 if name == "max" else 1e9
+                return (described(getattr(module, name)(cube, **kwargs)),)
+
+            actual, expected = run(fnp, with_where), run(np, with_where)
+            compared += 1
+            if actual != expected:
+                print(f"where x axis x keepdims: {name} axis={axis} keepdims={keepdims}")
+                print(f"  fnp   {str(actual)[:150]}")
+                print(f"  numpy {str(expected)[:150]}")
+                ok = False
+
+for name in ["sum", "prod", "mean"]:
+    for dtype in ["float32", "float64"]:
+        for axis in (None, 0, 1):
+            def with_where_dtype(module, name=name, dtype=dtype, axis=axis):
+                kwargs = {"where": mask3, "dtype": dtype}
+                if axis is not None:
+                    kwargs["axis"] = axis
+                return (described(getattr(module, name)(cube, **kwargs)),)
+
+            actual, expected = run(fnp, with_where_dtype), run(np, with_where_dtype)
+            compared += 1
+            if actual != expected:
+                print(f"where x dtype x axis: {name} dtype={dtype} axis={axis}")
+                print(f"  fnp   {str(actual)[:150]}")
+                print(f"  numpy {str(expected)[:150]}")
+                ok = False
+
+# ---- dtype= x axis x keepdims x out= ---------------------------------------
+for name in ["sum", "prod", "mean", "nansum", "nanmean"]:
+    for axis in (None, 0, -1):
+        for keepdims in (False, True):
+            def with_dtype_out(module, name=name, axis=axis, keepdims=keepdims):
+                kwargs = {"dtype": "float32", "keepdims": keepdims}
+                if axis is not None:
+                    kwargs["axis"] = axis
+                reference = np.asarray(getattr(np, name)(cube, **kwargs))
+                out = np.zeros(reference.shape, dtype=np.float32)
+                result = getattr(module, name)(cube, out=out, **kwargs)
+                return (result is out, described(out))
+
+            actual, expected = run(fnp, with_dtype_out), run(np, with_dtype_out)
+            compared += 1
+            if actual != expected:
+                print(f"dtype x axis x keepdims x out: {name} axis={axis} keepdims={keepdims}")
+                print(f"  fnp   {str(actual)[:150]}")
+                print(f"  numpy {str(expected)[:150]}")
+                ok = False
+
+# Preconditions: the cross must actually cross. If numpy's required out shape
+# were the same with and without keepdims, every out= case above would collapse
+# into the single-keyword case the earlier sweeps already cover.
+if np.sum(cube, axis=0, keepdims=True).shape == np.sum(cube, axis=0).shape:
+    print("PRECONDITION LOST: keepdims no longer changes the required out shape")
+    ok = False
+if np.sum(cube, axis=0, where=mask3).tolist() == np.sum(cube, axis=0).tolist():
+    print("PRECONDITION LOST: the where= mask no longer changes the result")
+    ok = False
+if compared < 200:
+    print(f"PRECONDITION LOST: only {compared} comparisons ran")
+    ok = False
+
+print(ok)
+print("oracle", platform.node(), np.__version__, compared)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "keyword interactions should match numpy ({provenance}): {result}"
+    );
+    Ok(())
+}
