@@ -63146,6 +63146,173 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn window_functions_are_exactly_symmetric_across_lengths() {
+        // The window family previously shipped values that were both 1 ULP off and
+        // ASYMMETRIC. The existing goldens compare at 1e-7 relative, which is far too loose
+        // to see either. numpy's own windows are symmetric to the BIT at every length
+        // checked here, so asserting bit symmetry holds fnp to the oracle's own property
+        // rather than to an invented one.
+        for m in [2_usize, 3, 5, 7, 8, 9, 16, 17, 33, 64, 65] {
+            let windows: [(&str, Vec<f64>); 5] = [
+                ("hamming", UFuncArray::hamming(m).values().to_vec()),
+                ("hanning", UFuncArray::hanning(m).values().to_vec()),
+                ("blackman", UFuncArray::blackman(m).values().to_vec()),
+                ("bartlett", UFuncArray::bartlett(m).values().to_vec()),
+                ("kaiser", UFuncArray::kaiser(m, 14.0).values().to_vec()),
+            ];
+            for (name, w) in windows {
+                assert_eq!(w.len(), m, "{name}({m}): length");
+                for i in 0..m {
+                    let lo = w[i];
+                    let hi = w[m - 1 - i];
+                    assert_eq!(
+                        lo.to_bits(),
+                        hi.to_bits(),
+                        "{name}({m}) is asymmetric at {i}/{}: {lo:e} vs {hi:e}",
+                        m - 1 - i
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn window_and_special_functions_hold_numpy_edge_values() {
+        // Tight comparator: the shared poly_close admits 1e-7, which cannot distinguish
+        // numpy's operation-order artifacts (blackman(2) = -1.39e-17, not 0.0) from a
+        // differently-ordered implementation that lands on a clean zero.
+        fn tight(got: f64, want: f64, what: &str) {
+            let tol = 1e-12 * (1.0 + got.abs().max(want.abs()));
+            assert!(
+                (got - want).abs() <= tol,
+                "{what}: got {got:e}, want {want:e} (tol {tol:e})"
+            );
+        }
+
+        // M = 0 is empty and M = 1 is exactly [1.0] for every window.
+        for (name, w0, w1) in [
+            ("hamming", UFuncArray::hamming(0), UFuncArray::hamming(1)),
+            ("hanning", UFuncArray::hanning(0), UFuncArray::hanning(1)),
+            ("blackman", UFuncArray::blackman(0), UFuncArray::blackman(1)),
+            ("bartlett", UFuncArray::bartlett(0), UFuncArray::bartlett(1)),
+            (
+                "kaiser",
+                UFuncArray::kaiser(0, 14.0),
+                UFuncArray::kaiser(1, 14.0),
+            ),
+        ] {
+            assert_eq!(w0.values(), &[] as &[f64], "{name}(0) must be empty");
+            assert_eq!(w1.values(), &[1.0], "{name}(1) must be exactly [1.0]");
+        }
+
+        // M = 2 is the shortest length that actually evaluates the window expression, and
+        // it is where numpy's operation order shows through most clearly.
+        tight(
+            UFuncArray::hamming(2).values()[0],
+            0.080_000_000_000_000_02,
+            "hamming(2)",
+        );
+        tight(UFuncArray::hanning(2).values()[0], 0.0, "hanning(2)");
+        // blackman's expression evaluates to a real zero here, but numpy's operation order
+        // (0.42 - 0.5*c1 + 0.08*c2, left to right) lands on a tiny NEGATIVE residue. fnp
+        // reproduces it bit-for-bit, so pin the bits: a differently-ordered rewrite that
+        // produced a clean 0.0 would be a silent behavioural change, and every tolerance
+        // loose enough to be useful elsewhere would wave it through.
+        assert_eq!(
+            UFuncArray::blackman(2).values()[0].to_bits(),
+            (-1.387_778_780_781_445_7e-17f64).to_bits(),
+            "blackman(2) must match numpy's residue, got {:e}",
+            UFuncArray::blackman(2).values()[0]
+        );
+        // Same story at the odd-length midpoint: numpy's blackman(7)[3] is one ULP under
+        // 1.0, unlike every other window's exact 1.0 midpoint.
+        assert_eq!(
+            UFuncArray::blackman(7).values()[3].to_bits(),
+            0.999_999_999_999_999_9f64.to_bits(),
+            "blackman(7) midpoint must match numpy, got {:?}",
+            UFuncArray::blackman(7).values()[3]
+        );
+        tight(UFuncArray::bartlett(2).values()[0], 0.0, "bartlett(2)");
+        tight(
+            UFuncArray::kaiser(2, 14.0).values()[0],
+            7.726_866_835_270_368e-6,
+            "kaiser(2, 14)",
+        );
+
+        // Odd lengths take the exact-midpoint path that the even-M goldens never reach.
+        tight(
+            UFuncArray::hamming(7).values()[3],
+            1.0,
+            "hamming(7) midpoint",
+        );
+        tight(
+            UFuncArray::hanning(7).values()[1],
+            0.250_000_000_000_000_1,
+            "hanning(7)[1]",
+        );
+        tight(
+            UFuncArray::bartlett(7).values()[1],
+            0.333_333_333_333_333_37,
+            "bartlett(7)[1]",
+        );
+        tight(
+            UFuncArray::blackman(7).values()[2],
+            0.630_000_000_000_000_1,
+            "blackman(7)[2]",
+        );
+        tight(
+            UFuncArray::kaiser(7, 14.0).values()[2],
+            0.462_716_497_800_791_16,
+            "kaiser(7, 14)[2]",
+        );
+        // beta = 0 degenerates to a rectangular window, exactly.
+        for (i, &v) in UFuncArray::kaiser(7, 0.0).values().iter().enumerate() {
+            assert_eq!(v, 1.0, "kaiser(7, 0)[{i}] must be exactly 1.0");
+        }
+        tight(
+            UFuncArray::kaiser(7, 2.5).values()[0],
+            0.303_966_229_415_368_7,
+            "kaiser(7, 2.5)[0]",
+        );
+
+        // i0 is even, and grows fast enough that a series cutoff shows up by x = 10.
+        let i0 = UFuncArray::new(
+            vec![7],
+            vec![0.0, 0.5, 1.0, 2.0, 5.0, 10.0, -3.0],
+            DType::F64,
+        )
+        .unwrap()
+        .i0();
+        let i0_want = [
+            1.0,
+            1.063_483_370_741_323_4,
+            1.266_065_877_752_008_2,
+            2.279_585_302_336_067,
+            27.239_871_823_604_442,
+            2815.716_628_466_254,
+            4.880_792_585_865_024,
+        ];
+        for (i, (&got, &want)) in i0.values().iter().zip(i0_want.iter()).enumerate() {
+            tight(got, want, &format!("i0[{i}]"));
+        }
+
+        // sinc at an integer is a near-zero residue, not a clean zero, and just off the
+        // origin it is just under 1 — both are lost by an endpoint-only test.
+        let sinc = UFuncArray::new(vec![5], vec![1.0, 2.5, -3.25, 1e-8, -0.5], DType::F64)
+            .unwrap()
+            .sinc();
+        tight(sinc.values()[1], 0.127_323_954_473_516_27, "sinc(2.5)");
+        tight(sinc.values()[2], -0.069_255_101_242_854_35, "sinc(-3.25)");
+        tight(sinc.values()[3], 0.999_999_999_999_999_8, "sinc(1e-8)");
+        tight(sinc.values()[4], 0.636_619_772_367_581_4, "sinc(-0.5)");
+        assert!(
+            sinc.values()[0].abs() < 1e-15,
+            "sinc(1.0) must be a near-zero residue, got {:e}",
+            sinc.values()[0]
+        );
+    }
+
+    #[test]
     fn convolve_correlate_match_numpy_golden() {
         // numpy.convolve / numpy.correlate of [1,2,3,4] with [0.5,1,-1] across modes.
         let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
