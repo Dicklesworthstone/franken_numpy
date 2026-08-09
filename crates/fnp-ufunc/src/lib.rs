@@ -61087,6 +61087,139 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn polynomial_der_int_val_randomised_differential_matches_numpy() {
+        // Companion to the add/sub/mul differential. That one found 50prg on its first
+        // run, so the same treatment is owed to the rest of the family surface — der, int
+        // and val — which until now had only hand-picked goldens. This also puts the
+        // hermeder/hermeint/hermeval work from mlz0s under random shapes rather than the
+        // cases I happened to choose when writing it.
+        if !numpy_oracle_available() {
+            return;
+        }
+        let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        const POOL: [f64; 8] = [0.0, -0.0, 1.0, -1.5, 2.5, -3.25, 0.75, 4.0];
+        let mut cases: Vec<Vec<f64>> = Vec::new();
+        for _ in 0..30 {
+            let len = 1 + (next() % 6) as usize;
+            let mut v: Vec<f64> = (0..len).map(|_| POOL[(next() % 8) as usize]).collect();
+            if next().is_multiple_of(3) {
+                let last = v.len() - 1;
+                v[last] = 0.0;
+            }
+            cases.push(v);
+        }
+        // Evaluation points include 0 (where the Clenshaw seed matters) and a negative.
+        const XS: [f64; 4] = [0.0, 1.0, -0.75, 2.5];
+
+        let py_list = |v: &[f64]| -> String {
+            let items: Vec<String> = v.iter().map(|x| format!("{x:?}")).collect();
+            format!("[{}]", items.join(", "))
+        };
+        let case_literals: Vec<String> = cases.iter().map(|c| py_list(c)).collect();
+        let script = format!(
+            r#"
+import numpy as np
+from numpy.polynomial import chebyshev as C, legendre as L, hermite as H
+from numpy.polynomial import hermite_e as He, laguerre as La
+fams = [("cheb", C), ("leg", L), ("herm", H), ("herme", He), ("lag", La)]
+cases = [{}]
+xs = {}
+out = []
+for c in cases:
+    for prefix, mod in fams:
+        for m in (0, 1, 2):
+            r = getattr(mod, prefix + "der")(c, m)
+            out.append(str(len(r)) + "|" + ",".join(repr(float(v)) for v in r))
+            r = getattr(mod, prefix + "int")(c, m)
+            out.append(str(len(r)) + "|" + ",".join(repr(float(v)) for v in r))
+        r = [float(getattr(mod, prefix + "val")(x, c)) for x in xs]
+        out.append(str(len(r)) + "|" + ",".join(repr(v) for v in r))
+print("\n".join(out))
+"#,
+            case_literals.join(", "),
+            py_list(&XS)
+        );
+        let output = Command::new(oracle_python_bin())
+            .args(["-c", &script])
+            .output()
+            .expect("numpy oracle should run");
+        assert!(
+            output.status.success(),
+            "numpy oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("oracle output should be UTF-8");
+        let expected: Vec<&str> = stdout.lines().collect();
+        // 5 families x (3 der + 3 int + 1 val) rows per case.
+        assert_eq!(
+            expected.len(),
+            cases.len() * 5 * 7,
+            "oracle returned {} rows, expected {}",
+            expected.len(),
+            cases.len() * 5 * 7
+        );
+
+        type DerFn = fn(&[f64], usize) -> Vec<f64>;
+        type ValFn = fn(&[f64], &[f64]) -> Vec<f64>;
+        // hermeder/hermeint carry numpy's scl/k/lbnd keywords (mlz0s); the others do not,
+        // so they are adapted here to the shared shape at numpy's defaults.
+        fn hermeder_default(c: &[f64], m: usize) -> Vec<f64> {
+            hermeder(c, m, 1.0)
+        }
+        fn hermeint_default(c: &[f64], m: usize) -> Vec<f64> {
+            hermeint(c, m, &[], 0.0, 1.0).expect("hermeint on a non-empty series")
+        }
+        let families: [(&str, DerFn, DerFn, ValFn); 5] = [
+            ("cheb", chebder, chebint, chebval),
+            ("leg", legder, legint, legval),
+            ("herm", hermder, hermint, hermval),
+            ("herme", hermeder_default, hermeint_default, hermeval),
+            ("lag", lagder, lagint, lagval),
+        ];
+
+        let mut row = 0usize;
+        let check = |label: String, got: &[f64], want_row: &str| {
+            let (len_str, values_str) = want_row
+                .split_once('|')
+                .expect("oracle row should be len|values");
+            let want_len: usize = len_str.parse().expect("length should parse");
+            assert_eq!(got.len(), want_len, "{label}: length vs numpy, got {got:?}");
+            if values_str.is_empty() {
+                return;
+            }
+            for (i, (g, w)) in got
+                .iter()
+                .zip(values_str.split(',').map(|s| s.parse::<f64>().unwrap()))
+                .enumerate()
+            {
+                assert!(
+                    (g - w).abs() <= 1e-13 * (1.0 + g.abs().max(w.abs())),
+                    "{label}[{i}]: got {g:?} want {w:?}"
+                );
+            }
+        };
+        for c in &cases {
+            for (name, der, int, val) in families {
+                for m in 0..3usize {
+                    check(format!("{name}der({c:?}, {m})"), &der(c, m), expected[row]);
+                    row += 1;
+                    check(format!("{name}int({c:?}, {m})"), &int(c, m), expected[row]);
+                    row += 1;
+                }
+                let vals: Vec<f64> = XS.iter().map(|&x| val(&[x], c)[0]).collect();
+                check(format!("{name}val({c:?})"), &vals, expected[row]);
+                row += 1;
+            }
+        }
+    }
+
+    #[test]
     fn legmul_stays_accurate_at_high_degree_after_the_in_basis_rewrite() {
         // The randomised differential runs lengths 1..=5, but 50prg's defect grew with
         // DEGREE: the power-basis round trip legmul used to take was 1.2e-08 relative at
