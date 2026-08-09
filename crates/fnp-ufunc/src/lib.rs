@@ -21567,14 +21567,24 @@ impl UFuncArray {
                 "second array argument cannot be empty".to_string(),
             ));
         }
-        // correlate(a, v) = convolve(a, v[::-1])
-        let reversed = Self {
-            shape: kernel.shape.clone(),
-            values: kernel.values.iter().rev().copied().collect(),
-            dtype: kernel.dtype,
+        // correlate(a, v) = convolve(a, v[::-1]) -- but ONLY while `a` is the longer
+        // operand. numpy swaps its inputs so the longer one leads, computes there, and
+        // reverts the whole result when it swapped. For 'full' and 'valid' the two orders
+        // coincide because their trims are symmetric, but 'same' drops an uneven number of
+        // elements from the two ends, so computing in the unswapped orientation shifts the
+        // window by one: correlate([1,2], [0.5,1,-1,2,3], "same") is numpy's
+        // [8, 3, -1, 2.5, 1] and the unswapped identity yields [3, 8, 3, -1, 2.5].
+        let reverse_of = |a: &Self| Self {
+            shape: a.shape.clone(),
+            values: a.values.iter().rev().copied().collect(),
+            dtype: a.dtype,
             integer_sidecar: None,
         };
-        self.convolve_mode(&reversed, mode)
+        if kernel.shape[0] > self.shape[0] {
+            let swapped = kernel.convolve_mode(&reverse_of(self), mode)?;
+            return Ok(reverse_of(&swapped));
+        }
+        self.convolve_mode(&reverse_of(kernel), mode)
     }
 
     /// 2-D convolution (full mode). Equivalent to scipy.signal.convolve2d(mode='full').
@@ -63470,6 +63480,147 @@ print(json.dumps(payload))
             sinc.values()[0].abs() < 1e-15,
             "sinc(1.0) must be a near-zero residue, got {:e}",
             sinc.values()[0]
+        );
+    }
+
+    #[test]
+    fn convolve_correlate_match_numpy_when_the_second_operand_is_longer() {
+        // The existing golden only ever passes a kernel SHORTER than the signal. When v is
+        // longer than a, numpy swaps them internally, so 'same' returns max(M,N) elements
+        // - five here, not the two that "same length as a" would suggest - and 'valid'
+        // returns |M-N|+1. That asymmetry is the classic place a reimplementation is off.
+        let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let v = UFuncArray::new(vec![5], vec![0.5, 1.0, -1.0, 2.0, 3.0], DType::F64).unwrap();
+        for (mode, conv_golden, corr_golden) in [
+            (
+                "full",
+                vec![0.5, 2.0, 1.0, 0.0, 7.0, 6.0],
+                vec![3.0, 8.0, 3.0, -1.0, 2.5, 1.0],
+            ),
+            (
+                "same",
+                vec![0.5, 2.0, 1.0, 0.0, 7.0],
+                vec![8.0, 3.0, -1.0, 2.5, 1.0],
+            ),
+            ("valid", vec![2.0, 1.0, 0.0, 7.0], vec![8.0, 3.0, -1.0, 2.5]),
+        ] {
+            let conv = a.convolve_mode(&v, mode).unwrap();
+            assert_eq!(
+                conv.values().len(),
+                conv_golden.len(),
+                "convolve {mode} with a longer v: length {} vs numpy {}",
+                conv.values().len(),
+                conv_golden.len()
+            );
+            poly_close_vec(conv.values(), &conv_golden, &format!("convolve {mode} v>a"));
+            let corr = a.correlate_mode(&v, mode).unwrap();
+            assert_eq!(
+                corr.values().len(),
+                corr_golden.len(),
+                "correlate {mode} with a longer v: length {} vs numpy {}",
+                corr.values().len(),
+                corr_golden.len()
+            );
+            poly_close_vec(
+                corr.values(),
+                &corr_golden,
+                &format!("correlate {mode} v>a"),
+            );
+        }
+    }
+
+    #[test]
+    fn convolve_correlate_match_numpy_across_kernel_shapes() {
+        let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+
+        // Even-length kernel: 'same' has no exact centre, so the trim offset is a
+        // convention numpy fixes and an implementation can easily place one slot off.
+        let even = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        for (mode, conv_golden, corr_golden) in [
+            (
+                "full",
+                vec![1.0, 4.0, 7.0, 10.0, 8.0],
+                vec![2.0, 5.0, 8.0, 11.0, 4.0],
+            ),
+            ("same", vec![1.0, 4.0, 7.0, 10.0], vec![2.0, 5.0, 8.0, 11.0]),
+            ("valid", vec![4.0, 7.0, 10.0], vec![5.0, 8.0, 11.0]),
+        ] {
+            poly_close_vec(
+                a.convolve_mode(&even, mode).unwrap().values(),
+                &conv_golden,
+                &format!("convolve {mode} even kernel"),
+            );
+            poly_close_vec(
+                a.correlate_mode(&even, mode).unwrap().values(),
+                &corr_golden,
+                &format!("correlate {mode} even kernel"),
+            );
+        }
+
+        // Equal lengths: 'valid' collapses to a single element.
+        let p = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let q = UFuncArray::new(vec![3], vec![4.0, 5.0, 6.0], DType::F64).unwrap();
+        for (mode, conv_golden, corr_golden) in [
+            (
+                "full",
+                vec![4.0, 13.0, 28.0, 27.0, 18.0],
+                vec![6.0, 17.0, 32.0, 23.0, 12.0],
+            ),
+            ("same", vec![13.0, 28.0, 27.0], vec![17.0, 32.0, 23.0]),
+            ("valid", vec![28.0], vec![32.0]),
+        ] {
+            poly_close_vec(
+                p.convolve_mode(&q, mode).unwrap().values(),
+                &conv_golden,
+                &format!("convolve {mode} equal lengths"),
+            );
+            poly_close_vec(
+                p.correlate_mode(&q, mode).unwrap().values(),
+                &corr_golden,
+                &format!("correlate {mode} equal lengths"),
+            );
+        }
+
+        // A one-element kernel is a pure scale and is identical in all three modes.
+        let one = UFuncArray::new(vec![1], vec![2.0], DType::F64).unwrap();
+        for mode in ["full", "same", "valid"] {
+            poly_close_vec(
+                a.convolve_mode(&one, mode).unwrap().values(),
+                &[2.0, 4.0, 6.0, 8.0],
+                &format!("convolve {mode} scalar kernel"),
+            );
+            poly_close_vec(
+                a.correlate_mode(&one, mode).unwrap().values(),
+                &[2.0, 4.0, 6.0, 8.0],
+                &format!("correlate {mode} scalar kernel"),
+            );
+        }
+    }
+
+    #[test]
+    fn convolve_is_commutative_and_correlate_reverses_under_swap() {
+        // Two oracle-free laws that pin the operand roles: convolution commutes, while
+        // correlation does NOT - swapping its arguments reverses the output. An
+        // implementation that quietly treats correlate as a convolution with a flipped
+        // kernel passes the first law and fails the second.
+        let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![0.5, 1.0, -1.0], DType::F64).unwrap();
+
+        let ab = a.convolve_mode(&b, "full").unwrap();
+        let ba = b.convolve_mode(&a, "full").unwrap();
+        poly_close_vec(ab.values(), ba.values(), "convolve commutes");
+
+        let cab = a.correlate_mode(&b, "full").unwrap();
+        let cba = b.correlate_mode(&a, "full").unwrap();
+        let reversed: Vec<f64> = cba.values().iter().rev().copied().collect();
+        poly_close_vec(cab.values(), &reversed, "correlate reverses under swap");
+        // And the two are genuinely different, so the law above is not vacuous.
+        assert!(
+            cab.values()
+                .iter()
+                .zip(ab.values().iter())
+                .any(|(c, v)| (c - v).abs() > 1e-9),
+            "correlate must not equal convolve on this input"
         );
     }
 
