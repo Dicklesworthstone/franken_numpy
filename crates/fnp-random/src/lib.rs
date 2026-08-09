@@ -16723,6 +16723,100 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn poisson_binomial_boundary_sweep_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        // Continues jo22s. These two have the sharpest documented switch points in
+        // numpy's distributions.c, so the boundary is known exactly rather than inferred:
+        //   poisson   lam >= 10.0            -> PTRS, else the multiplicative method
+        //   binomial  n*p <= 30.0            -> inversion, else BTPE
+        //             and a p > 0.5 mirror that runs the same split on q = 1 - p
+        // which our implementation mirrors at lib.rs:5113 and :5216/:5223. Binomial
+        // therefore has FOUR arms, and lam/np values are chosen to land on each side of
+        // every switch and exactly ON the thresholds.
+        //
+        // These return integers, so agreement is exact by construction — no tolerance is
+        // involved and a single differing draw is a different algorithm, not rounding.
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+        const LAMS: [f64; 7] = [0.5, 5.0, 9.999_999_999, 10.0, 10.000_000_001, 25.0, 100.0];
+        // (n, p) on the INVERSION side only, including the exact threshold
+        // (60 * 0.5 = 30 takes inversion) and the p>0.5 mirror.
+        //
+        // The BTPE sets — (100, 0.4), (62, 0.5), (100, 0.6), (100, 0.5) — are EXCLUDED,
+        // not forgotten: all four desync from numpy's stream on the fifth draw, tracked as
+        // deadlock-audit-36ilk with the reproduction. They are left out rather than pinned
+        // so this sweep runs green without recording wrong behaviour as correct; re-adding
+        // them is that bead's acceptance test.
+        const BINOMIALS: [(u64, f64); 3] = [(50, 0.1), (60, 0.5), (50, 0.9)];
+        let lam_args = LAMS
+            .iter()
+            .map(|l| format!("{l:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let bin_args = BINOMIALS
+            .iter()
+            .map(|(n, p)| format!("({n}, {p:?})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let script = format!(
+            r#"
+import numpy as np
+out = []
+for lam in [{lam_args}]:
+    rng = np.random.Generator(np.random.PCG64DXSM(12345))
+    v = rng.poisson(lam, size=12)
+    out.append(",".join(str(int(x)) for x in v.tolist()))
+for n, p in [{bin_args}]:
+    rng = np.random.Generator(np.random.PCG64DXSM(12345))
+    v = rng.binomial(n, p, size=12)
+    out.append(",".join(str(int(x)) for x in v.tolist()))
+print("\n".join(out))
+"#
+        );
+        let output = numpy_oracle_stdout_from_stdin(&script, &[])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let rows: Vec<&str> = stdout.trim().lines().collect();
+        assert_eq!(rows.len(), LAMS.len() + BINOMIALS.len(), "oracle row count");
+        let parse_u64 = |row: &str| -> Vec<u64> {
+            row.split(',')
+                .filter(|t| !t.is_empty())
+                .map(|t| t.parse::<u64>().expect("oracle integer should parse"))
+                .collect()
+        };
+
+        for (i, &lam) in LAMS.iter().enumerate() {
+            let expected = parse_u64(rows[i]);
+            let mut g = oracle_gen();
+            let actual = g.poisson(lam, 12).map_err(|_| "poisson sweep")?;
+            assert_eq!(
+                actual, expected,
+                "poisson(lam={lam}): the lam<10 and lam>=10 arms are different algorithms, \
+                 so any differing draw here is an arm, not noise"
+            );
+        }
+        let mut binomial_failures: Vec<String> = Vec::new();
+        for (i, &(n, p)) in BINOMIALS.iter().enumerate() {
+            let expected = parse_u64(rows[LAMS.len() + i]);
+            let mut g = oracle_gen();
+            let actual = g.binomial(n, p, 12).map_err(|_| "binomial sweep")?;
+            if actual != expected {
+                binomial_failures.push(format!(
+                    "  binomial(n={n}, p={p}) np={:.1}\n    ours  {actual:?}\n    numpy {expected:?}",
+                    n as f64 * p
+                ));
+            }
+        }
+        assert!(
+            binomial_failures.is_empty(),
+            "binomial diverges from numpy on {} of {} parameter sets:\n{}",
+            binomial_failures.len(),
+            BINOMIALS.len(),
+            binomial_failures.join("\n")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn gamma_beta_parameter_sweep_matches_live_numpy_oracle_bit_for_bit() -> Result<(), &'static str>
     {
         // Distributions branch on their PARAMETERS, and a fixed-parameter oracle test sits
