@@ -14075,6 +14075,160 @@ mod tests {
     }
 
     #[test]
+    fn eig_nxn_recovers_known_spectra_across_randomised_triangular_matrices() {
+        // eig_nxn had no randomised or property sweep, and it underpins every polynomial
+        // *roots in fnp-ufunc — one of which (chebroots) was silently returning wrong
+        // roots at degree >= 5 until a randomised differential caught it
+        // (deadlock-audit-xb1ue). This pins the engine itself.
+        //
+        // Triangular matrices are used deliberately: their eigenvalues ARE the diagonal,
+        // exactly and by construction, so this needs no oracle and no tolerance on the
+        // expected values — only on how well the solver recovers them. A general random
+        // matrix would require an oracle to say what the right answer is.
+        let mut state: u64 = 0x3C7A_91E5_D204_86BF;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut worst: f64 = 0.0;
+        for n in [2usize, 3, 4, 5, 6, 8, 10] {
+            for trial in 0..4 {
+                // Upper triangular, with a well-separated diagonal so the recovery is
+                // about the solver rather than about clustered-eigenvalue conditioning.
+                let mut a = vec![0.0f64; n * n];
+                let mut want: Vec<f64> = Vec::with_capacity(n);
+                for i in 0..n {
+                    let jitter = ((next() >> 11) as f64 / (1u64 << 53) as f64) * 0.4 - 0.2;
+                    let lambda = -3.0 + 1.7 * i as f64 + jitter;
+                    a[i * n + i] = lambda;
+                    want.push(lambda);
+                    for j in (i + 1)..n {
+                        a[i * n + j] = ((next() >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0;
+                    }
+                }
+                let eig = eig_nxn(&a, n).expect("triangular eig should succeed");
+                assert_eq!(
+                    eig.len(),
+                    2 * n,
+                    "n={n} trial={trial}: eigenvalue pair count"
+                );
+                let mut got: Vec<f64> = eig
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| {
+                        // A real triangular matrix has a purely real spectrum; a non-zero
+                        // imaginary part would itself be a defect.
+                        assert!(
+                            pair[1].abs() <= 1e-9,
+                            "n={n} trial={trial}: triangular matrix produced a complex \
+                             eigenvalue {:?}+{:?}i",
+                            pair[0],
+                            pair[1]
+                        );
+                        pair[0]
+                    })
+                    .collect();
+                got.sort_by(|x, y| x.partial_cmp(y).expect("no NaN eigenvalues"));
+                want.sort_by(|x, y| x.partial_cmp(y).expect("no NaN"));
+                for (g, w) in got.iter().zip(want.iter()) {
+                    let dev = (g - w).abs();
+                    worst = worst.max(dev);
+                    assert!(
+                        dev <= 1e-9,
+                        "n={n} trial={trial}: eig_nxn recovered {g:?} for a diagonal entry \
+                         of {w:?} — the spectrum of a triangular matrix is its diagonal"
+                    );
+                }
+            }
+        }
+        println!("eig_nxn worst deviation from a known triangular spectrum: {worst:e}");
+        // That worst is 0e0, and it is worth saying WHY rather than celebrating it: a
+        // triangular matrix is already in real Schur form, so the Francis iteration
+        // converges immediately and reads the diagonal off unchanged. This half therefore
+        // pins the contract (real spectrum, right multiset) but exercises none of the
+        // iteration. The general-matrix half below is what tests the solver.
+        assert_eq!(
+            worst, 0.0,
+            "triangular input should need no iteration at all"
+        );
+
+        if !numpy_oracle_available() {
+            return;
+        }
+        let mut worst_general: f64 = 0.0;
+        for n in [2usize, 3, 4, 5, 6, 8] {
+            for _ in 0..3 {
+                let a: Vec<f64> = (0..n * n)
+                    .map(|_| ((next() >> 11) as f64 / (1u64 << 53) as f64) * 4.0 - 2.0)
+                    .collect();
+                let matrix_arg = format!(
+                    "[{}]",
+                    a.iter()
+                        .map(|v| format!("{v:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                let script = r#"
+import json, sys
+import numpy as np
+data = json.loads(sys.argv[1]); n = int(sys.argv[2])
+w = np.linalg.eigvals(np.array(data, dtype=float).reshape((n, n)))
+w = w[np.lexsort((w.imag, w.real))]
+print(",".join(f"{float(z.real)!r}:{float(z.imag)!r}" for z in w))
+"#;
+                let out = Command::new(oracle_python_bin())
+                    .args(["-c", script, &matrix_arg, &n.to_string()])
+                    .output()
+                    .expect("numpy oracle should run");
+                assert!(out.status.success(), "numpy eigvals oracle failed");
+                let stdout = String::from_utf8(out.stdout).expect("utf-8");
+                let mut want: Vec<(f64, f64)> = stdout
+                    .trim()
+                    .split(',')
+                    .map(|t| {
+                        let (re, im) = t.split_once(':').expect("re:im");
+                        (re.parse::<f64>().unwrap(), im.parse::<f64>().unwrap())
+                    })
+                    .collect();
+                let eig = eig_nxn(&a, n).expect("general eig should succeed");
+                let mut got: Vec<(f64, f64)> = eig
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|p| (p[0], p[1]))
+                    .collect();
+                // Eigenvalues carry no inherent order, so both sides are sorted the same
+                // way (by real part, then imaginary) before comparison.
+                let key = |x: &(f64, f64), y: &(f64, f64)| {
+                    x.0.partial_cmp(&y.0)
+                        .expect("no NaN")
+                        .then(x.1.partial_cmp(&y.1).expect("no NaN"))
+                };
+                got.sort_by(key);
+                want.sort_by(key);
+                assert_eq!(got.len(), want.len(), "n={n}: eigenvalue count");
+                for ((gr, gi), (wr, wi)) in got.iter().zip(want.iter()) {
+                    let dev = ((gr - wr).powi(2) + (gi - wi).powi(2)).sqrt();
+                    worst_general = worst_general.max(dev);
+                    assert!(
+                        dev <= 1e-8,
+                        "n={n}: eig_nxn gave {gr:?}{gi:+?}i where numpy gives {wr:?}{wi:+?}i"
+                    );
+                }
+            }
+        }
+        println!("eig_nxn worst deviation from numpy on general matrices: {worst_general:e}");
+        assert!(
+            worst_general > 0.0,
+            "a general random matrix should NOT match numpy exactly — if it does, this \
+             half is not exercising the iteration either"
+        );
+    }
+
+    #[test]
     fn eig_nxn_complex_eigenvalues_rotation() {
         // 2x2 rotation matrix: eigenvalues e^(±iθ) = cos(θ) ± i*sin(θ)
         let theta = std::f64::consts::FRAC_PI_4; // 45 degrees
