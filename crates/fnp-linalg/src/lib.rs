@@ -11769,6 +11769,96 @@ mod tests {
     }
 
     #[test]
+    fn det_and_slogdet_non_finite_semantics_verified_against_live_numpy() {
+        // det_and_slogdet_match_numpy_non_finite_semantics asserts very specific things —
+        // that slogdet's sign is +1 for a NaN on the diagonal and -1 for a NaN off it —
+        // but invokes no numpy. It encodes what numpy is believed to do. An audit found 95
+        // such tests across five crates: the name claims a live relationship that does not
+        // exist, which is what makes a surface look covered.
+        //
+        // The assumptions turned out to be right; this makes them CHECKED, so drift on
+        // either side is caught rather than assumed away.
+        if !numpy_oracle_available() {
+            return;
+        }
+        let cases: [(&str, [[f64; 2]; 2]); 7] = [
+            ("nan_diag", [[f64::NAN, 1.0], [2.0, 3.0]]),
+            ("nan_offdiag", [[1.0, f64::NAN], [2.0, 3.0]]),
+            ("nan_both", [[f64::NAN, f64::NAN], [2.0, 3.0]]),
+            ("inf_diag", [[f64::INFINITY, 1.0], [2.0, 3.0]]),
+            ("neg_inf_diag", [[f64::NEG_INFINITY, 1.0], [2.0, 3.0]]),
+            ("inf_offdiag", [[1.0, f64::INFINITY], [2.0, 3.0]]),
+            ("singular", [[1.0, 2.0], [2.0, 4.0]]),
+        ];
+        let mut failures: Vec<String> = Vec::new();
+        for (label, m) in cases {
+            // Rust renders these as NaN / inf, which are NameErrors in Python; only
+            // float('nan') and float('inf') survive the round trip.
+            let py = |v: f64| -> String {
+                if v.is_nan() {
+                    "float('nan')".to_string()
+                } else if v.is_infinite() {
+                    format!("float('{}inf')", if v < 0.0 { "-" } else { "" })
+                } else {
+                    format!("{v:?}")
+                }
+            };
+            let flat = format!(
+                "[[{}, {}], [{}, {}]]",
+                py(m[0][0]),
+                py(m[0][1]),
+                py(m[1][0]),
+                py(m[1][1])
+            );
+            let script = format!(
+                "import numpy as np\n\
+                 np.seterr(all='ignore')\n\
+                 a = np.array({flat}, dtype=float)\n\
+                 d = float(np.linalg.det(a))\n\
+                 s, l = np.linalg.slogdet(a)\n\
+                 print(repr(d) + '|' + repr(float(s)) + '|' + repr(float(l)))\n"
+            );
+            let out = Command::new(oracle_python_bin())
+                .args(["-c", &script])
+                .output()
+                .expect("numpy det oracle should run");
+            assert!(out.status.success(), "oracle failed for {label}");
+            let stdout = String::from_utf8(out.stdout).expect("utf-8");
+            let parts: Vec<&str> = stdout.trim().split('|').collect();
+            assert_eq!(
+                parts.len(),
+                3,
+                "{label}: oracle should emit det|sign|logabsdet"
+            );
+            let parse = |s: &str| -> f64 { s.parse::<f64>().expect("oracle float") };
+            let (w_det, w_sign, w_log) = (parse(parts[0]), parse(parts[1]), parse(parts[2]));
+
+            let got_det = det_2x2(m).expect("det");
+            let (got_sign, got_log) = slogdet_2x2(m).expect("slogdet");
+            // NaN never equals itself, so compare NaN-ness and value separately —
+            // otherwise every non-finite case would silently pass.
+            let same = |a: f64, b: f64| (a.is_nan() && b.is_nan()) || a == b;
+            if !same(got_det, w_det) {
+                failures.push(format!("  {label}: det {got_det:?} vs numpy {w_det:?}"));
+            }
+            if !same(got_sign, w_sign) {
+                failures.push(format!("  {label}: sign {got_sign:?} vs numpy {w_sign:?}"));
+            }
+            if !same(got_log, w_log) {
+                failures.push(format!(
+                    "  {label}: logabsdet {got_log:?} vs numpy {w_log:?}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} non-finite det/slogdet case(s) diverge from numpy:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
     fn det_and_slogdet_match_numpy_non_finite_semantics() {
         let nan_diag = [[f64::NAN, 1.0], [2.0, 3.0]];
         assert!(det_2x2(nan_diag).expect("nan det").is_nan());
