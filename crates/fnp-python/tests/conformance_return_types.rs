@@ -676,3 +676,131 @@ print("oracle", platform.node(), np.__version__, compared)
     );
     Ok(())
 }
+
+/// EXOTIC dtype families - datetime64, timedelta64, structured/void, unicode,
+/// bytes, object - against numpy.
+///
+/// The mechanical prior is `deadlock-audit-output-dtype-parity-sweep-liz1c`
+/// exactly: take's residual guard read `itemsize == 8 || kind == "b"`, and
+/// complex64's itemsize is 8 - the same width as f64/i64/u64 - so it satisfied
+/// a guard written for the numeric widths, reached `extract_numeric_array`,
+/// which cannot represent complex, and raised TypeError where numpy returned an
+/// array. That was fixed at one site by adding `kind != "c"`.
+///
+/// datetime64 and timedelta64 are ALSO itemsize 8, with kinds 'M' and 'm'. Any
+/// guard spelled as a WIDTH test rather than a KIND test has the same hole for
+/// them; a structured `[('a','i4')]` is itemsize 4 and '<U2' is itemsize 8, so
+/// the collision is not confined to 8 bytes.
+///
+/// These are the families the numeric extract path cannot represent at all, so
+/// every wrapper must delegate them - which makes the expected behaviour easy
+/// to state and any divergence unambiguous. Exception class is compared
+/// alongside values, because for several of these pairs numpy itself raises and
+/// reproducing the raise IS the contract.
+#[test]
+fn exotic_dtype_families_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+import warnings
+
+warnings.simplefilter("ignore")
+
+structured = np.array([(1, 1.5), (2, 2.5), (3, 3.5), (4, 4.5)],
+                      dtype=[("a", "i4"), ("b", "f8")])
+
+samples = [
+    ("float64_control", np.array([3.0, 1.0, 4.0, 1.0])),
+    ("datetime64_D", np.array(["2026-01-01", "2026-01-03", "2026-01-02", "2026-01-02"],
+                              dtype="datetime64[D]")),
+    ("datetime64_ns", np.array([1, 3, 2, 2], dtype="datetime64[ns]")),
+    ("timedelta64_D", np.array([1, 3, 2, 2], dtype="timedelta64[D]")),
+    ("structured", structured),
+    ("unicode_U3", np.array(["ab", "cd", "aa", "cd"], dtype="<U3")),
+    ("bytes_S3", np.array([b"ab", b"cd", b"aa", b"cd"], dtype="S3")),
+    ("object", np.array([3, 1, 4, 1], dtype=object)),
+]
+
+ops = [
+    ("take list index", lambda m, x: m.take(x, [0, 2])),
+    ("take array index", lambda m, x: m.take(x, np.array([0, 2]))),
+    ("compress", lambda m, x: m.compress([True, False, True, False], x)),
+    ("concatenate", lambda m, x: m.concatenate([x, x])),
+    ("repeat", lambda m, x: m.repeat(x, 2)),
+    ("tile", lambda m, x: m.tile(x, 2)),
+    ("sort", lambda m, x: m.sort(x)),
+    ("argsort", lambda m, x: m.argsort(x)),
+    ("unique", lambda m, x: m.unique(x)),
+    ("flip", lambda m, x: m.flip(x)),
+    ("ravel", lambda m, x: m.ravel(x)),
+    ("reshape", lambda m, x: m.reshape(x, (2, 2))),
+    ("where self", lambda m, x: m.where(np.array([True, False, True, False]), x, x)),
+    ("count_nonzero", lambda m, x: m.count_nonzero(x)),
+    ("nonzero", lambda m, x: m.nonzero(x)),
+    ("min", lambda m, x: m.min(x)),
+    ("max", lambda m, x: m.max(x)),
+    ("sum", lambda m, x: m.sum(x)),
+    ("equal self", lambda m, x: m.equal(x, x)),
+    ("isnan", lambda m, x: m.isnan(x)),
+    ("signbit", lambda m, x: m.signbit(x)),
+    ("astype str", lambda m, x: m.asarray(x).astype("<U24")),
+]
+
+def describe(value):
+    if isinstance(value, tuple):
+        return ("tuple",) + tuple(describe(item) for item in value)
+    array = np.asarray(value)
+    # repr of the values keeps datetimes/structured comparable without
+    # depending on tolist()'s type mapping.
+    return (str(array.dtype), tuple(array.shape), repr(array.tolist())[:400])
+
+def outcome(module, call, x):
+    try:
+        return ("ok", describe(call(module, x)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+ok = True
+compared = 0
+for dtype_label, sample in samples:
+    for op_label, call in ops:
+        actual = outcome(fnp, call, sample)
+        expected = outcome(np, call, sample)
+        compared += 1
+        if actual != expected:
+            print(f"{dtype_label}: {op_label}")
+            print(f"  fnp   {str(actual)[:170]}")
+            print(f"  numpy {str(expected)[:170]}")
+            ok = False
+
+# Preconditions: the exotic dtypes must really be exotic, and must really
+# collide on width with the numeric families - that collision is the whole
+# reason this sweep exists.
+if np.dtype("datetime64[D]").itemsize != 8:
+    print("PRECONDITION LOST: datetime64[D] is no longer itemsize 8")
+    ok = False
+if np.dtype("timedelta64[D]").itemsize != 8:
+    print("PRECONDITION LOST: timedelta64[D] is no longer itemsize 8")
+    ok = False
+if structured.dtype.kind != "V":
+    print(f"PRECONDITION LOST: structured dtype kind is {structured.dtype.kind}, not V")
+    ok = False
+if compared < 150:
+    print(f"PRECONDITION LOST: only {compared} comparisons ran")
+    ok = False
+
+print(ok)
+print("oracle", platform.node(), np.__version__, compared)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "exotic dtype families should match numpy ({provenance}): {result}"
+    );
+    Ok(())
+}
