@@ -57921,16 +57921,16 @@ fn hermeint(
             Err(_) => kv.extract::<Vec<f64>>().ok(),
         },
     };
-    if let Some(constants) = constants {
-        if let Some(series) = herme_native_series(&numpy, c_bound, m, axis)? {
-            // An empty series is an IndexError inside numpy's own loop; defer so the caller
-            // sees numpy's exception rather than one of ours.
-            if !series.is_empty() {
-                let integrated = ufunc_hermeint(&series, m as usize, &constants, lbnd, scl)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-                return herme_native_result(py, &numpy, integrated);
-            }
-        }
+    // The empty-series arm is part of the condition on purpose: an empty coefficient array
+    // is an IndexError inside numpy's own loop, so it has to fall through to the delegation
+    // below and let the caller see numpy's exception rather than one of ours.
+    if let Some(constants) = constants
+        && let Some(series) = herme_native_series(&numpy, c_bound, m, axis)?
+        && !series.is_empty()
+    {
+        let integrated = ufunc_hermeint(&series, m as usize, &constants, lbnd, scl)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        return herme_native_result(py, &numpy, integrated);
     }
     let kwargs = PyDict::new(py);
     if let Some(k_val) = k {
