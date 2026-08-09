@@ -39980,7 +39980,9 @@ pub fn hermeint(
     scl: f64,
 ) -> Result<Vec<f64>, UFuncError> {
     if k.len() > m {
-        return Err(UFuncError::Msg("Too many integration constants".to_string()));
+        return Err(UFuncError::Msg(
+            "Too many integration constants".to_string(),
+        ));
     }
     if m == 0 {
         return Ok(c.to_vec());
@@ -61055,7 +61057,11 @@ print(json.dumps(payload))
         );
         // A one-element all-zero series absorbs the constant without growing (numpy's
         // `if n == 1 and np.all(c[0] == 0)` branch), then integrates normally afterwards.
-        poly_close_vec(&hermeint(&[0.0], 1, &[], 0.0, 1.0).unwrap(), &[0.0], "int 0");
+        poly_close_vec(
+            &hermeint(&[0.0], 1, &[], 0.0, 1.0).unwrap(),
+            &[0.0],
+            "int 0",
+        );
         poly_close_vec(
             &hermeint(&[0.0], 3, &[3.0], 0.0, 1.0).unwrap(),
             &[1.5, 0.0, 1.5],
