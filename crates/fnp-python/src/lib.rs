@@ -42,7 +42,8 @@ use fnp_ufunc::{
     bitwise_count as ufunc_bitwise_count, bitwise_or as ufunc_bitwise_or,
     bitwise_xor as ufunc_bitwise_xor, divide as ufunc_divide, divmod_arrays as ufunc_divmod,
     equal as ufunc_equal, fmax as ufunc_fmax, fmin as ufunc_fmin, frexp as ufunc_frexp,
-    greater as ufunc_greater, greater_equal as ufunc_greater_equal, isneginf as ufunc_isneginf,
+    greater as ufunc_greater, greater_equal as ufunc_greater_equal,
+    hermeder as ufunc_hermeder, hermeint as ufunc_hermeint, isneginf as ufunc_isneginf,
     isposinf as ufunc_isposinf, left_shift as ufunc_left_shift, less as ufunc_less,
     less_equal as ufunc_less_equal, logaddexp2 as ufunc_logaddexp2,
     logical_and as ufunc_logical_and, logical_not as ufunc_logical_not,
@@ -57824,10 +57825,69 @@ fn hermetrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
         .unbind())
 }
 
+/// Extract a 1-D HermiteE coefficient series that the native kernels can reproduce
+/// bit-for-bit, or `None` when the call must go back to numpy.
+///
+/// numpy keeps the input dtype (`float32` in, `float32` out; complex stays complex) and
+/// only widens the boolean/integer kinds to double. The native kernels are f64-only, so
+/// anything that is not already f64 — or not already 1-D, or laid out along another axis —
+/// defers rather than silently changing the result dtype or the arithmetic precision.
+fn herme_native_series(
+    numpy: &Bound<'_, PyModule>,
+    c: &Bound<'_, PyAny>,
+    m: i64,
+    axis: i64,
+) -> PyResult<Option<Vec<f64>>> {
+    // numpy raises for a negative order; let it, so the message and type are numpy's.
+    if m < 0 {
+        return Ok(None);
+    }
+    let arr = numpy.call_method1("array", (c,))?;
+    if arr.getattr("ndim")?.extract::<usize>()? != 1 {
+        return Ok(None);
+    }
+    // 1-D admits axis 0 and -1; any other value is an AxisError numpy should raise.
+    if axis != 0 && axis != -1 {
+        return Ok(None);
+    }
+    let dtype = arr.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    let widens_to_double = matches!(kind.as_str(), "b" | "i" | "u");
+    let is_f64 = kind == "f" && dtype.getattr("itemsize")?.extract::<usize>()? == 8;
+    if !widens_to_double && !is_f64 {
+        return Ok(None);
+    }
+    match arr
+        .call_method1("astype", ("float64",))
+        .and_then(|a| a.extract::<Vec<f64>>())
+    {
+        Ok(values) => Ok(Some(values)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Materialise a native coefficient vector as the `float64` ndarray numpy would return.
+fn herme_native_result(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    values: Vec<f64>,
+) -> PyResult<Py<PyAny>> {
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    Ok(numpy
+        .call_method("array", (values,), Some(&kwargs))?
+        .unbind())
+}
+
 #[pyfunction]
 #[pyo3(signature = (c, m=1, scl=1.0, axis=0))]
 fn hermeder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
+    let c_bound = c.bind(py);
+    if let Some(series) = herme_native_series(&numpy, c_bound, m, axis)? {
+        let der = ufunc_hermeder(&series, m as usize, scl);
+        return herme_native_result(py, &numpy, der);
+    }
     let kwargs = PyDict::new(py);
     kwargs.set_item("scl", scl)?;
     kwargs.set_item("axis", axis)?;
@@ -57835,7 +57895,7 @@ fn hermeder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResu
         .getattr("polynomial")?
         .getattr("hermite_e")?
         .getattr("hermeder")?
-        .call((c.bind(py), m), Some(&kwargs))?
+        .call((c_bound, m), Some(&kwargs))?
         .unbind())
 }
 
@@ -57851,6 +57911,27 @@ fn hermeint(
     axis: i64,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
+    let c_bound = c.bind(py);
+    // The native kernel needs the constants as f64; a scalar counts as a one-element list
+    // exactly as numpy's `if not np.iterable(k): k = [k]` does. Anything else defers.
+    let constants: Option<Vec<f64>> = match k.as_ref().map(|kv| kv.bind(py)) {
+        None => Some(Vec::new()),
+        Some(kv) => match kv.extract::<f64>() {
+            Ok(scalar) => Some(vec![scalar]),
+            Err(_) => kv.extract::<Vec<f64>>().ok(),
+        },
+    };
+    if let Some(constants) = constants {
+        if let Some(series) = herme_native_series(&numpy, c_bound, m, axis)? {
+            // An empty series is an IndexError inside numpy's own loop; defer so the caller
+            // sees numpy's exception rather than one of ours.
+            if !series.is_empty() {
+                let integrated = ufunc_hermeint(&series, m as usize, &constants, lbnd, scl)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                return herme_native_result(py, &numpy, integrated);
+            }
+        }
+    }
     let kwargs = PyDict::new(py);
     if let Some(k_val) = k {
         kwargs.set_item("k", k_val.bind(py))?;
@@ -57862,7 +57943,7 @@ fn hermeint(
         .getattr("polynomial")?
         .getattr("hermite_e")?
         .getattr("hermeint")?
-        .call((c.bind(py), m), Some(&kwargs))?
+        .call((c_bound, m), Some(&kwargs))?
         .unbind())
 }
 
@@ -110020,6 +110101,189 @@ mod tests {
                 .getattr("hermeline")?
                 .call1((1.0_f64, 2.0_f64))?;
             assert_eq!(repr_string(&ours_line), repr_string(&theirs_line));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn hermeder_hermeint_native_path_matches_numpy_bit_for_bit() {
+        // hermeder/hermeint used to be pure numpy passthroughs. They now run the native
+        // fnp-ufunc kernels for 1-D real series, so parity has to be asserted on the RAW
+        // BYTES — repr() rounds to 8 significant digits and would hide the last-ULP
+        // differences that a re-implemented integration constant is most likely to produce.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_herme_native")?;
+            fnp_python(&module)?;
+            let np_hermite_e = py.import("numpy.polynomial.hermite_e")?;
+            let numpy = py.import("numpy")?;
+
+            let coeff_sets: Vec<Vec<f64>> = vec![
+                vec![1.0, 2.0, 3.0],
+                vec![1.0, 2.0, 3.0, 4.0, 5.0],
+                vec![0.0],
+                vec![7.5],
+                vec![0.0, 0.0, 0.0],
+                vec![-1.5, 0.0, 2.25, -3.125],
+                vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+                vec![],
+            ];
+            let bytes_of = |value: &pyo3::Bound<'_, pyo3::types::PyAny>| -> PyResult<(String, Vec<u8>)> {
+                Ok((
+                    repr_string(&value.getattr("dtype")?),
+                    value.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                ))
+            };
+
+            let mut compared = 0_usize;
+            for coeffs in &coeff_sets {
+                for m in [0_i64, 1, 2, 3, 5] {
+                    for scl in [1.0_f64, 2.0, -0.5, 0.0] {
+                        let ours_kwargs = PyDict::new(py);
+                        ours_kwargs.set_item("scl", scl)?;
+                        let ours = module
+                            .getattr("hermeder")?
+                            .call((coeffs.clone(), m), Some(&ours_kwargs))?;
+                        let theirs = np_hermite_e
+                            .getattr("hermeder")?
+                            .call((coeffs.clone(), m), Some(&ours_kwargs))?;
+                        assert_eq!(
+                            bytes_of(&ours)?,
+                            bytes_of(&theirs)?,
+                            "hermeder(c={coeffs:?}, m={m}, scl={scl}) diverges from numpy"
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+
+            for coeffs in &coeff_sets {
+                for m in [0_i64, 1, 2, 3] {
+                    for k in [vec![], vec![1.0_f64], vec![1.0, 2.0], vec![-3.5]] {
+                        if k.len() as i64 > m {
+                            continue;
+                        }
+                        for lbnd in [0.0_f64, -1.0, 2.5] {
+                            for scl in [1.0_f64, 2.0, -0.5] {
+                                let kwargs = PyDict::new(py);
+                                kwargs.set_item("k", k.clone())?;
+                                kwargs.set_item("lbnd", lbnd)?;
+                                kwargs.set_item("scl", scl)?;
+                                let ours = module
+                                    .getattr("hermeint")?
+                                    .call((coeffs.clone(), m), Some(&kwargs));
+                                let theirs = np_hermite_e
+                                    .getattr("hermeint")?
+                                    .call((coeffs.clone(), m), Some(&kwargs));
+                                match (ours, theirs) {
+                                    (Ok(ours), Ok(theirs)) => {
+                                        assert_eq!(
+                                            bytes_of(&ours)?,
+                                            bytes_of(&theirs)?,
+                                            "hermeint(c={coeffs:?}, m={m}, k={k:?}, \
+                                             lbnd={lbnd}, scl={scl}) diverges from numpy"
+                                        );
+                                    }
+                                    (Err(ours_err), Err(theirs_err)) => {
+                                        let ours_ty = ours_err.get_type(py);
+                                        let theirs_ty = theirs_err.get_type(py);
+                                        assert!(
+                                            ours_ty.is(&theirs_ty),
+                                            "hermeint(c={coeffs:?}, m={m}, k={k:?}) raises {} \
+                                             where numpy raises {}",
+                                            repr_string(&ours_ty),
+                                            repr_string(&theirs_ty)
+                                        );
+                                    }
+                                    (ours, theirs) => panic!(
+                                        "hermeint(c={coeffs:?}, m={m}, k={k:?}, lbnd={lbnd}, \
+                                         scl={scl}): one side raised and the other did not \
+                                         (ours ok={}, numpy ok={})",
+                                        ours.is_ok(),
+                                        theirs.is_ok()
+                                    ),
+                                }
+                                compared += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(compared > 500, "grid collapsed to {compared} comparisons");
+
+            // dtypes numpy does NOT widen to double must keep numpy's own result dtype,
+            // which the f64-only native kernels cannot produce — those calls have to defer.
+            for (dtype, expected) in [
+                ("float32", "dtype('float32')"),
+                ("complex128", "dtype('complex128')"),
+                ("int64", "dtype('float64')"),
+                ("bool", "dtype('float64')"),
+            ] {
+                let arr = numpy.call_method1("array", (vec![1.0_f64, 2.0, 3.0],))?;
+                let arr = arr.call_method1("astype", (dtype,))?;
+                let ours = module.getattr("hermeder")?.call1((arr.clone(),))?;
+                let theirs = np_hermite_e.getattr("hermeder")?.call1((arr,))?;
+                assert_eq!(
+                    repr_string(&ours.getattr("dtype")?),
+                    expected,
+                    "hermeder on {dtype} must keep numpy's result dtype"
+                );
+                assert_eq!(bytes_of(&ours)?, bytes_of(&theirs)?);
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn hermeder_hermeint_do_not_delegate_to_numpy_for_real_1d_series() {
+        // Engagement proof: byte parity alone cannot distinguish a native kernel from a
+        // passthrough. Poison numpy's own hermeder/hermeint; a correct answer afterwards can
+        // only have come from the fnp-ufunc kernels.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_herme_engagement")?;
+            fnp_python(&module)?;
+            let np_hermite_e = py.import("numpy.polynomial.hermite_e")?;
+            let poison = PyModule::from_code(
+                py,
+                pyo3::ffi::c_str!(
+                    "def fail(*args, **kwargs):\n    raise RuntimeError('numpy.polynomial.hermite_e should not be called')\n"
+                ),
+                pyo3::ffi::c_str!("poison_hermite_e.py"),
+                pyo3::ffi::c_str!("poison_hermite_e"),
+            )?;
+
+            let _der_guard = AttrGuard::new(&np_hermite_e, "hermeder")?;
+            let _int_guard = AttrGuard::new(&np_hermite_e, "hermeint")?;
+            np_hermite_e.setattr("hermeder", poison.getattr("fail")?)?;
+            np_hermite_e.setattr("hermeint", poison.getattr("fail")?)?;
+
+            let c = vec![1.0_f64, 2.0, 3.0, 4.0, 5.0];
+            let der_kwargs = PyDict::new(py);
+            der_kwargs.set_item("scl", 2.0_f64)?;
+            let der = module
+                .getattr("hermeder")?
+                .call((c.clone(), 1_i64), Some(&der_kwargs))?;
+            assert_eq!(der.extract::<Vec<f64>>()?, vec![4.0, 12.0, 24.0, 40.0]);
+
+            let int_kwargs = PyDict::new(py);
+            int_kwargs.set_item("k", vec![1.0_f64])?;
+            let int = module
+                .getattr("hermeint")?
+                .call((c, 1_i64), Some(&int_kwargs))?;
+            assert_eq!(
+                int.extract::<Vec<f64>>()?,
+                vec![-1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+            );
+
+            // Integer input widens to double natively too — it must not fall back.
+            let ints = py.import("numpy")?.call_method1("arange", (5_i64,))?;
+            let der_int = module.getattr("hermeder")?.call1((ints,))?;
+            assert_eq!(der_int.extract::<Vec<f64>>()?, vec![1.0, 4.0, 9.0, 16.0]);
             Ok(())
         });
     }

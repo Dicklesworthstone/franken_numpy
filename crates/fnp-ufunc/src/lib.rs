@@ -39641,23 +39641,31 @@ pub fn hermval(x: &[f64], c: &[f64]) -> Vec<f64> {
 /// Recurrence: He_0=1, He_1=x, He_{n+1} = x He_n - n He_{n-1}
 pub fn hermeval(x: &[f64], c: &[f64]) -> Vec<f64> {
     if c.is_empty() {
+        // numpy would IndexError here (it indexes c[-2] unconditionally); an empty series
+        // is treated as the zero polynomial internally, and the fnp-python surface never
+        // reaches this arm because it delegates empty input.
         return vec![0.0; x.len()];
     }
-    if c.len() == 1 {
-        return vec![c[0]; x.len()];
-    }
+    let n = c.len();
     x.iter()
         .map(|&xi| {
-            let mut p_prev = 1.0;
-            let mut p_curr = xi;
-            let mut result = c[0] * p_prev + c[1] * p_curr;
-            for (k, &ck) in c.iter().enumerate().skip(2) {
-                let p_next = xi * p_curr - (k as f64 - 1.0) * p_prev;
-                result += ck * p_next;
-                p_prev = p_curr;
-                p_curr = p_next;
+            // numpy's Clenshaw recursion, in its exact operation order — a forward
+            // three-term recurrence accumulates the terms in the opposite order and lands
+            // one ULP away from numpy on ordinary inputs, which hermeint would then bake
+            // into its integration constant.
+            let (mut c0, mut c1) = if n == 1 {
+                (c[0], 0.0)
+            } else {
+                (c[n - 2], c[n - 1])
+            };
+            let mut nd = n;
+            for i in 3..=n {
+                let tmp = c0;
+                nd -= 1;
+                c0 = c[n - i] - c1 * (nd - 1) as f64;
+                c1 = tmp + c1 * xi;
             }
-            result
+            c0 + c1 * xi
         })
         .collect()
 }
@@ -39926,47 +39934,84 @@ pub fn hermediv(c1: &[f64], c2: &[f64]) -> Result<(Vec<f64>, Vec<f64>), UFuncErr
 ///
 /// He_n'(x) = n·He_{n-1}(x), so the derivative coefficients are der[k] = (k+1)·c[k+1]
 /// (the physicist Hermite recurrence without the factor of 2). Mirrors numpy's
-/// hermite_e.hermeder; the other four families already have a native der, herme did
-/// not (fnp-python only passed it through to numpy).
-pub fn hermeder(c: &[f64], m: usize) -> Vec<f64> {
+/// hermite_e.hermeder on a 1-D coefficient array, bit-for-bit: `scl` multiplies the
+/// coefficient before the degree factor does, and differentiating a series at least as
+/// many times as it has coefficients returns numpy's `c[:1] * 0` — one **sign-preserving**
+/// zero (`-0.0` for a negative leading coefficient), or nothing at all for empty input.
+pub fn hermeder(c: &[f64], m: usize, scl: f64) -> Vec<f64> {
     if m == 0 {
         return c.to_vec();
     }
+    if m >= c.len() {
+        return match c.first() {
+            Some(&first) => vec![first * 0.0],
+            None => Vec::new(),
+        };
+    }
     let mut coeffs = c.to_vec();
     for _ in 0..m {
-        let n = coeffs.len();
-        if n <= 1 {
-            return vec![0.0];
-        }
-        let mut der = vec![0.0; n - 1];
-        for k in 0..n - 1 {
-            der[k] = (k as f64 + 1.0) * coeffs[k + 1];
+        let n = coeffs.len() - 1;
+        let mut der = vec![0.0; n];
+        for j in (1..=n).rev() {
+            der[j - 1] = j as f64 * (coeffs[j] * scl);
         }
         coeffs = der;
     }
     coeffs
 }
 
-/// Integrate a probabilist's Hermite (HermiteE) series `m` times (constant=0).
+/// Integrate a probabilist's Hermite (HermiteE) series `m` times.
 ///
-/// ∫He_n dx = He_{n+1}/(n+1), so int[k+1] = c[k]/(k+1). numpy picks the integration
-/// constant so the antiderivative is 0 at the default lower bound lbnd=0:
-/// int[0] = -hermeval(0, int). Mirrors numpy's hermite_e.hermeint.
-pub fn hermeint(c: &[f64], m: usize) -> Vec<f64> {
+/// ∫He_n dx = He_{n+1}/(n+1), so int[k+1] = c[k]/(k+1). Each integration first scales the
+/// series by `scl`, then picks the integration constant so the antiderivative takes the
+/// value `k[i]` at the lower bound `lbnd`: int[0] += k[i] - hermeval(lbnd, int). Mirrors
+/// numpy's hermite_e.hermeint on a 1-D coefficient array, bit-for-bit, including its two
+/// quirks: a one-element all-zero series absorbs the constant **without growing**, and
+/// fewer constants than integrations pads the rest with zero.
+///
+/// Errors when `k` supplies more constants than there are integrations. An empty
+/// coefficient array is an error here (numpy raises `IndexError` from indexing `c[0]`);
+/// the fnp-python surface delegates that case so the caller sees numpy's own exception.
+pub fn hermeint(
+    c: &[f64],
+    m: usize,
+    k: &[f64],
+    lbnd: f64,
+    scl: f64,
+) -> Result<Vec<f64>, UFuncError> {
+    if k.len() > m {
+        return Err(UFuncError::Msg("Too many integration constants".to_string()));
+    }
     if m == 0 {
-        return c.to_vec();
+        return Ok(c.to_vec());
+    }
+    if c.is_empty() {
+        return Err(UFuncError::Msg(
+            "hermeint: coefficient array is empty".to_string(),
+        ));
     }
     let mut coeffs = c.to_vec();
-    for _ in 0..m {
+    for i in 0..m {
+        let ki = k.get(i).copied().unwrap_or(0.0);
         let n = coeffs.len();
-        let mut int = vec![0.0; n + 1];
-        for k in 0..n {
-            int[k + 1] = coeffs[k] / (k as f64 + 1.0);
+        for v in coeffs.iter_mut() {
+            *v *= scl;
         }
-        int[0] = -hermeval(&[0.0], &int)[0];
+        if n == 1 && coeffs[0] == 0.0 {
+            coeffs[0] += ki;
+            continue;
+        }
+        let mut int = vec![0.0; n + 1];
+        // numpy seeds this as `c[0] * 0`, which carries a NaN or a signed zero through.
+        int[0] = coeffs[0] * 0.0;
+        int[1] = coeffs[0];
+        for j in 1..n {
+            int[j + 1] = coeffs[j] / (j as f64 + 1.0);
+        }
+        int[0] += ki - hermeval(&[lbnd], &int)[0];
         coeffs = int;
     }
-    coeffs
+    Ok(coeffs)
 }
 
 /// Find roots of a probabilist's Hermite series.
@@ -60917,23 +60962,128 @@ print(json.dumps(payload))
 
     #[test]
     fn hermeder_hermeint_match_numpy_golden() {
-        // Native HermiteE der/int (newly added; fnp-python previously only passed
-        // these through to numpy). Goldens from numpy.polynomial.hermite_e.
+        // Native HermiteE der/int. Goldens from numpy.polynomial.hermite_e (identical on
+        // numpy 1.26.4 and 2.4.3).
         let c = [1.0, 2.0, 3.0, 4.0, 5.0];
-        poly_close_vec(&hermeder(&c, 1), &[2.0, 6.0, 12.0, 20.0], "hermeder1");
-        poly_close_vec(&hermeder(&c, 2), &[6.0, 24.0, 60.0], "hermeder2");
+        poly_close_vec(&hermeder(&c, 1, 1.0), &[2.0, 6.0, 12.0, 20.0], "hermeder1");
+        poly_close_vec(&hermeder(&c, 2, 1.0), &[6.0, 24.0, 60.0], "hermeder2");
+        poly_close_vec(&hermeder(&c, 3, 1.0), &[24.0, 120.0], "hermeder3");
         poly_close_vec(
-            &hermeint(&c, 1),
+            &hermeint(&c, 1, &[], 0.0, 1.0).unwrap(),
             &[-2.0, 1.0, 1.0, 1.0, 1.0, 1.0],
             "hermeint1",
         );
         poly_close_vec(
-            &hermeint(&c, 2),
+            &hermeint(&c, 2, &[], 0.0, 1.0).unwrap(),
             &[2.25, -2.0, 0.5, 0.333_333_33, 0.25, 0.2, 0.166_666_67],
             "hermeint2",
         );
         // der undoes int (the constant is removed by differentiation).
-        poly_close_vec(&hermeder(&hermeint(&c, 1), 1), &c, "herme der∘int");
+        poly_close_vec(
+            &hermeder(&hermeint(&c, 1, &[], 0.0, 1.0).unwrap(), 1, 1.0),
+            &c,
+            "herme der∘int",
+        );
+    }
+
+    #[test]
+    fn hermeder_hermeint_keyword_surface_matches_numpy_golden() {
+        // scl / k / lbnd are the keywords numpy exposes; fnp-python routes them into these
+        // kernels rather than deferring, so each needs its own golden.
+        let c = [1.0, 2.0, 3.0, 4.0, 5.0];
+        poly_close_vec(&hermeder(&c, 1, 2.0), &[4.0, 12.0, 24.0, 40.0], "der scl=2");
+        poly_close_vec(
+            &hermeder(&c, 2, -0.5),
+            &[1.5, 6.0, 15.0],
+            "der m=2 scl=-0.5",
+        );
+        poly_close_vec(
+            &hermeint(&c, 1, &[1.0], 0.0, 1.0).unwrap(),
+            &[-1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "int k=[1]",
+        );
+        poly_close_vec(
+            &hermeint(&c, 1, &[], -1.0, 1.0).unwrap(),
+            &[7.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "int lbnd=-1",
+        );
+        poly_close_vec(
+            &hermeint(&c, 1, &[], 0.0, 2.0).unwrap(),
+            &[-4.0, 2.0, 2.0, 2.0, 2.0, 2.0],
+            "int scl=2",
+        );
+        poly_close_vec(
+            &hermeint(&c, 2, &[1.0, 2.0], 2.5, 2.0).unwrap(),
+            &[
+                31.781_249_999_999_99,
+                4.625,
+                2.0,
+                1.333_333_333_333_333_3,
+                1.0,
+                0.8,
+                0.666_666_666_666_666_6,
+            ],
+            "int m=2 k=[1,2] lbnd=2.5 scl=2",
+        );
+    }
+
+    #[test]
+    fn hermeder_hermeint_edge_cases_match_numpy() {
+        // Differentiating away every coefficient yields numpy's `c[:1] * 0`, which keeps the
+        // sign of the leading coefficient — a plain 0.0 would be the wrong bit pattern.
+        let truncated = hermeder(&[-1.5, 0.0, 2.25], 3, 1.0);
+        assert_eq!(truncated.len(), 1, "truncated der length");
+        assert_eq!(
+            truncated[0].to_bits(),
+            (-0.0f64).to_bits(),
+            "numpy returns -0.0 for a negative leading coefficient, got {}",
+            truncated[0]
+        );
+        assert_eq!(
+            hermeder(&[1.5, 0.0, 2.25], 5, 1.0)[0].to_bits(),
+            0.0f64.to_bits(),
+            "positive leading coefficient keeps +0.0"
+        );
+        // Empty input differentiates to numpy's empty array, not to a zero.
+        assert!(hermeder(&[], 1, 1.0).is_empty(), "empty der stays empty");
+        // m == 0 is the identity for both.
+        poly_close_vec(&hermeder(&[3.0, 4.0], 0, 9.0), &[3.0, 4.0], "der m=0");
+        poly_close_vec(
+            &hermeint(&[3.0, 4.0], 0, &[], 7.0, 9.0).unwrap(),
+            &[3.0, 4.0],
+            "int m=0",
+        );
+        // A one-element all-zero series absorbs the constant without growing (numpy's
+        // `if n == 1 and np.all(c[0] == 0)` branch), then integrates normally afterwards.
+        poly_close_vec(&hermeint(&[0.0], 1, &[], 0.0, 1.0).unwrap(), &[0.0], "int 0");
+        poly_close_vec(
+            &hermeint(&[0.0], 3, &[3.0], 0.0, 1.0).unwrap(),
+            &[1.5, 0.0, 1.5],
+            "int 0 m=3 k=[3]",
+        );
+        // Error surfaces: more constants than integrations, and an empty series.
+        assert!(
+            hermeint(&[1.0, 2.0], 1, &[1.0, 2.0], 0.0, 1.0).is_err(),
+            "too many integration constants must be rejected"
+        );
+        assert!(
+            hermeint(&[], 1, &[], 0.0, 1.0).is_err(),
+            "empty series has no numpy-representable integral"
+        );
+    }
+
+    #[test]
+    fn hermeval_uses_numpy_clenshaw_order() {
+        // numpy evaluates a HermiteE series by Clenshaw recursion; a forward three-term
+        // recurrence lands one ULP away on ordinary inputs and hermeint bakes that into its
+        // integration constant. These goldens are numpy's exact f64 bits.
+        let c = [1.0, 2.0, 3.0, 4.0, 5.0];
+        for (x, want) in [(0.0, 13.0), (1.0, -15.0), (-1.0, -3.0), (2.5, 77.062_5)] {
+            let got = hermeval(&[x], &c)[0];
+            assert!(poly_close(got, want), "hermeval({x}) = {got}, want {want}");
+        }
+        // He_0..He_2 at x = 2: 1, 2, 3.
+        poly_close_vec(&hermeval(&[2.0], &[0.0, 0.0, 1.0]), &[3.0], "He_2(2)");
     }
 
     #[test]
