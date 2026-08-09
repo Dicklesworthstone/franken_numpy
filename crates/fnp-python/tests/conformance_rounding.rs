@@ -4,6 +4,11 @@
 
 use std::process::Command;
 
+// Shared so that this contract's strictness lives in one file rather than in each
+// shard's hand-rolled copy (deadlock-audit-au3z4).
+#[path = "common/out_keyword.rs"]
+mod out_keyword;
+
 fn numpy_oracle(script: &str) -> Result<String, String> {
     let output = Command::new("python3")
         .args(["-c", script])
@@ -279,24 +284,10 @@ print(np.array_equal(fnp_result, np_result))
 
 #[test]
 fn rounding_out_keyword_surfaces_match_numpy() -> Result<(), String> {
-    let script = fnp_script(
-        r#"
-def out_outcome(module, name, positional=False, bad_shape=False):
-    fn = getattr(module, name)
-    try:
-        x = np.array([-1.7, -0.2, -0.0, 0.0, 1.2], dtype=np.float64)
-        out = np.empty((2,), dtype=np.float64) if bad_shape else np.empty(5, dtype=np.float64)
-        if positional:
-            result = fn(x, out)
-        else:
-            result = fn(x, out=out)
-        return ("ok", result is out, out.dtype.str, tuple(out.shape), out.tolist())
-    except Exception as exc:
-        # Exception TYPE only: numpy rewords its messages between releases and the
-        # supported floor spans several, so pinning text would make this shard version
-        # dependent for no parity gain.
-        return ("err", type(exc).__name__)
-
+    // -0.2 and -0.0 are both present on purpose: rint(-0.2) is -0.0, so the shared
+    // probe's signbit tuple is what keeps that distinguishable from +0.0.
+    let script = fnp_script(format!(
+        r#"{probe}
 cases = [
     ("floor keyword out", "floor", False, False),
     ("ceil keyword out", "ceil", False, False),
@@ -312,22 +303,14 @@ cases = [
     ("rint bad out shape", "rint", False, True),
 ]
 
-ok = True
-for label, name, positional, bad_shape in cases:
-    actual = out_outcome(fnp, name, positional, bad_shape)
-    expected = out_outcome(np, name, positional, bad_shape)
-    # Compare the WHOLE outcome, not just the ok/err tag and the aliasing flag. The
-    # values written into `out` are the mutation half of this contract: a wrapper that
-    # returned the right object while filling it with the wrong numbers used to pass.
-    if actual != expected:
-        print(label)
-        print(actual)
-        print(expected)
-        ok = False
-print(ok)
-"#
-        .into(),
-    );
+run_out_cases(cases)
+"#,
+        probe = out_keyword::out_keyword_probe_py(
+            "np.array([-1.7, -0.2, -0.0, 0.0, 1.2], dtype=np.float64)",
+            "np.float64",
+            5,
+        )
+    ));
     let result = numpy_oracle(&script)?;
     assert_eq!(
         result.trim(),
