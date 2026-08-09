@@ -39459,21 +39459,73 @@ pub fn legsub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
 /// where c(m,n,k) are the Clebsch-Gordan-like linearization coefficients.
 ///
 /// For simplicity, we convert to power basis, multiply, and convert back.
+/// Multiply a Legendre series by x, using the three-term recurrence
+/// `x·P_n = (n+1)/(2n+1)·P_{n+1} + n/(2n+1)·P_{n-1}`. Mirrors numpy's legmulx,
+/// including its special case for the zero series (which must not grow).
+pub fn legmulx(c: &[f64]) -> Vec<f64> {
+    let c = trim_polynomial_seq(c.to_vec());
+    if c.is_empty() {
+        return c;
+    }
+    if c.len() == 1 && c[0] == 0.0 {
+        return c;
+    }
+    let n = c.len();
+    let mut prd = vec![0.0; n + 1];
+    prd[0] = c[0] * 0.0;
+    prd[1] = c[0];
+    for (i, &ci) in c.iter().enumerate().skip(1) {
+        let (j, k, s) = (i + 1, i - 1, i + i + 1);
+        prd[j] = (ci * j as f64) / s as f64;
+        prd[k] += (ci * i as f64) / s as f64;
+    }
+    prd
+}
+
+/// Multiply two Legendre coefficient arrays.
+///
+/// Uses numpy's in-basis Clenshaw-style recurrence rather than converting to the power
+/// basis and back. The round trip through `leg2poly`/`poly2leg` is ill-conditioned: it
+/// loses accuracy exponentially with degree (1.2e-08 relative at degree 16, versus the
+/// 1e-16 the recurrence holds), which a randomised differential against numpy caught as
+/// deadlock-audit-50prg.
 pub fn legmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     if c1.is_empty() || c2.is_empty() {
         return Vec::new();
     }
-    let p1 = leg2poly(c1);
-    let p2 = leg2poly(c2);
-    // Standard polynomial multiplication
-    let len = p1.len() + p2.len() - 1;
-    let mut prod = vec![0.0; len];
-    for (i, &a) in p1.iter().enumerate() {
-        for (j, &b) in p2.iter().enumerate() {
-            prod[i + j] += a * b;
+    let a = trim_polynomial_seq(c1.to_vec());
+    let b = trim_polynomial_seq(c2.to_vec());
+    // numpy drives the recurrence with the SHORTER series and scales by the longer one.
+    let (c, xs) = if a.len() > b.len() { (b, a) } else { (a, b) };
+    let scaled = |v: &[f64], k: f64| -> Vec<f64> { v.iter().map(|x| x * k).collect() };
+    // numpy computes `(c1 * k) / d` in that order; folding it into one multiply by k/d
+    // would land on different bits.
+    let scaled_div =
+        |v: &[f64], k: f64, d: f64| -> Vec<f64> { v.iter().map(|x| (x * k) / d).collect() };
+
+    let (c0, c1v) = match c.len() {
+        1 => (scaled(&xs, c[0]), vec![0.0]),
+        2 => (scaled(&xs, c[0]), scaled(&xs, c[1])),
+        n => {
+            let mut nd = n;
+            let mut c0 = scaled(&xs, c[n - 2]);
+            let mut c1v = scaled(&xs, c[n - 1]);
+            for i in 3..=n {
+                let tmp = c0;
+                nd -= 1;
+                c0 = legsub(
+                    &scaled(&xs, c[n - i]),
+                    &scaled_div(&c1v, (nd - 1) as f64, nd as f64),
+                );
+                c1v = legadd(
+                    &tmp,
+                    &scaled_div(&legmulx(&c1v), (2 * nd - 1) as f64, nd as f64),
+                );
+            }
+            (c0, c1v)
         }
-    }
-    trim_polynomial_seq(poly2leg(&prod))
+    };
+    trim_polynomial_seq(legadd(&c0, &legmulx(&c1v)))
 }
 
 /// Divide Legendre coefficient arrays. Returns (quotient, remainder).
@@ -60931,6 +60983,62 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn legmul_stays_accurate_at_high_degree_after_the_in_basis_rewrite() {
+        // The randomised differential runs lengths 1..=5, but 50prg's defect grew with
+        // DEGREE: the power-basis round trip legmul used to take was 1.2e-08 relative at
+        // degree 16 while numpy's in-basis recurrence holds ~1e-16. This pins the fix at
+        // the degree where the old code was worst - a short-series test cannot see it.
+        if !numpy_oracle_available() {
+            return;
+        }
+        let n = 16usize;
+        // Deterministic, and deliberately mixed in magnitude so cancellation is in play.
+        let coeffs: Vec<f64> = (0..n)
+            .map(|i| ((i as f64) * 0.7).sin() * 3.0 - 0.25)
+            .collect();
+        let other: Vec<f64> = (0..n)
+            .map(|i| ((i as f64) * 1.3).cos() * 2.0 + 0.5)
+            .collect();
+        let py_list = |v: &[f64]| -> String {
+            let items: Vec<String> = v.iter().map(|x| format!("{x:?}")).collect();
+            format!("[{}]", items.join(", "))
+        };
+        let script = format!(
+            "import numpy as np\n\
+             from numpy.polynomial import legendre as L\n\
+             r = L.legmul({}, {})\n\
+             print(\",\".join(repr(float(v)) for v in r))\n",
+            py_list(&coeffs),
+            py_list(&other)
+        );
+        let output = Command::new(oracle_python_bin())
+            .args(["-c", &script])
+            .output()
+            .expect("numpy oracle should run");
+        assert!(output.status.success(), "numpy oracle failed");
+        let stdout = String::from_utf8(output.stdout).expect("utf8");
+        let want: Vec<f64> = stdout
+            .trim()
+            .split(',')
+            .map(|s| s.parse::<f64>().expect("oracle value should parse"))
+            .collect();
+        let got = legmul(&coeffs, &other);
+        assert_eq!(got.len(), want.len(), "legmul degree-{n} length");
+        let scale = want.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+        let worst = got
+            .iter()
+            .zip(want.iter())
+            .fold(0.0_f64, |acc, (g, w)| acc.max((g - w).abs()));
+        assert!(
+            worst <= 1e-13 * scale,
+            "legmul at degree {n}: worst absolute deviation {worst:e} against a largest \
+             coefficient of {scale:e} (relative {:e}) — the power-basis round trip this \
+             replaced reached 1.2e-08 here",
+            worst / scale
+        );
+    }
+
+    #[test]
     fn polynomial_add_sub_mul_randomised_differential_matches_numpy() {
         // Adversarial check of the trim contract landed in 730aaa56. The goldens beside it
         // only cover shapes I thought of; this drives ~600 comparisons at pseudo-random
@@ -61067,8 +61175,13 @@ print("\n".join(out))
                         // tightening this line to bit-exact is that bead's acceptance
                         // test. The loose bound still catches shape and logic errors,
                         // which is what this differential is for.
+                        // legmul now runs numpy's in-basis recurrence (50prg), so it is
+                        // held to the same bound as add/sub. The three families still on
+                        // the power-basis round trip keep the loose bound until they are
+                        // converted; tightening each is that conversion's acceptance test.
+                        let mul_tol = if name == "leg" { 1e-14 } else { 1e-9 };
                         let ok = if op == "mul" {
-                            (g - w).abs() <= 1e-9 * (1.0 + g.abs().max(w.abs()))
+                            (g - w).abs() <= mul_tol * (1.0 + g.abs().max(w.abs()))
                         } else {
                             g.to_bits() == w.to_bits() || (g == 0.0 && w == 0.0)
                         };
