@@ -39820,20 +39820,51 @@ pub fn hermsub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
 }
 
 /// Multiply two physicist's Hermite coefficient arrays via power basis.
+/// Multiply a physicist's Hermite series by x: `x·H_n = H_{n+1}/2 + n·H_{n-1}`.
+/// Mirrors numpy's hermmulx, zero-series special case included.
+pub fn hermmulx(c: &[f64]) -> Vec<f64> {
+    let c = trim_polynomial_seq(c.to_vec());
+    if c.is_empty() || (c.len() == 1 && c[0] == 0.0) {
+        return c;
+    }
+    let mut prd = vec![0.0; c.len() + 1];
+    prd[0] = c[0] * 0.0;
+    prd[1] = c[0] / 2.0;
+    for (i, &ci) in c.iter().enumerate().skip(1) {
+        prd[i + 1] = ci / 2.0;
+        prd[i - 1] += ci * i as f64;
+    }
+    prd
+}
+
+/// Multiply two physicist's Hermite coefficient arrays via numpy's in-basis recurrence.
+/// See [`legmul`] for why the power-basis round trip this replaced was a defect
+/// (deadlock-audit-50prg).
 pub fn hermmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     if c1.is_empty() || c2.is_empty() {
         return Vec::new();
     }
-    let p1 = herm2poly(c1);
-    let p2 = herm2poly(c2);
-    let len = p1.len() + p2.len() - 1;
-    let mut prod = vec![0.0; len];
-    for (i, &a) in p1.iter().enumerate() {
-        for (j, &b) in p2.iter().enumerate() {
-            prod[i + j] += a * b;
+    let a = trim_polynomial_seq(c1.to_vec());
+    let b = trim_polynomial_seq(c2.to_vec());
+    let (c, xs) = if a.len() > b.len() { (b, a) } else { (a, b) };
+    let scaled = |v: &[f64], k: f64| -> Vec<f64> { v.iter().map(|x| x * k).collect() };
+    let (c0, c1v) = match c.len() {
+        1 => (scaled(&xs, c[0]), vec![0.0]),
+        2 => (scaled(&xs, c[0]), scaled(&xs, c[1])),
+        n => {
+            let mut nd = n;
+            let mut c0 = scaled(&xs, c[n - 2]);
+            let mut c1v = scaled(&xs, c[n - 1]);
+            for i in 3..=n {
+                let tmp = c0;
+                nd -= 1;
+                c0 = hermsub(&scaled(&xs, c[n - i]), &scaled(&c1v, (2 * (nd - 1)) as f64));
+                c1v = hermadd(&tmp, &scaled(&hermmulx(&c1v), 2.0));
+            }
+            (c0, c1v)
         }
-    }
-    trim_polynomial_seq(poly2herm(&prod))
+    };
+    trim_polynomial_seq(hermadd(&c0, &scaled(&hermmulx(&c1v), 2.0)))
 }
 
 /// Divide physicist's Hermite coefficient arrays. Returns (quotient, remainder).
@@ -39983,20 +40014,51 @@ pub fn hermesub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
 }
 
 /// Multiply two probabilist's Hermite coefficient arrays via power basis.
+/// Multiply a probabilist's Hermite series by x: `x·He_n = He_{n+1} + n·He_{n-1}`.
+/// Mirrors numpy's hermemulx, zero-series special case included.
+pub fn hermemulx(c: &[f64]) -> Vec<f64> {
+    let c = trim_polynomial_seq(c.to_vec());
+    if c.is_empty() || (c.len() == 1 && c[0] == 0.0) {
+        return c;
+    }
+    let mut prd = vec![0.0; c.len() + 1];
+    prd[0] = c[0] * 0.0;
+    prd[1] = c[0];
+    for (i, &ci) in c.iter().enumerate().skip(1) {
+        prd[i + 1] = ci;
+        prd[i - 1] += ci * i as f64;
+    }
+    prd
+}
+
+/// Multiply two probabilist's Hermite coefficient arrays via numpy's in-basis recurrence.
+/// See [`legmul`] for why the power-basis round trip this replaced was a defect
+/// (deadlock-audit-50prg).
 pub fn hermemul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     if c1.is_empty() || c2.is_empty() {
         return Vec::new();
     }
-    let p1 = herme2poly(c1);
-    let p2 = herme2poly(c2);
-    let len = p1.len() + p2.len() - 1;
-    let mut prod = vec![0.0; len];
-    for (i, &a) in p1.iter().enumerate() {
-        for (j, &b) in p2.iter().enumerate() {
-            prod[i + j] += a * b;
+    let a = trim_polynomial_seq(c1.to_vec());
+    let b = trim_polynomial_seq(c2.to_vec());
+    let (c, xs) = if a.len() > b.len() { (b, a) } else { (a, b) };
+    let scaled = |v: &[f64], k: f64| -> Vec<f64> { v.iter().map(|x| x * k).collect() };
+    let (c0, c1v) = match c.len() {
+        1 => (scaled(&xs, c[0]), vec![0.0]),
+        2 => (scaled(&xs, c[0]), scaled(&xs, c[1])),
+        n => {
+            let mut nd = n;
+            let mut c0 = scaled(&xs, c[n - 2]);
+            let mut c1v = scaled(&xs, c[n - 1]);
+            for i in 3..=n {
+                let tmp = c0;
+                nd -= 1;
+                c0 = hermesub(&scaled(&xs, c[n - i]), &scaled(&c1v, (nd - 1) as f64));
+                c1v = hermeadd(&tmp, &hermemulx(&c1v));
+            }
+            (c0, c1v)
         }
-    }
-    trim_polynomial_seq(poly2herme(&prod))
+    };
+    trim_polynomial_seq(hermeadd(&c0, &hermemulx(&c1v)))
 }
 
 /// Divide probabilist's Hermite coefficient arrays. Returns (quotient, remainder).
@@ -40417,20 +40479,62 @@ pub fn lagsub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
 }
 
 /// Multiply two Laguerre coefficient arrays via power basis.
+/// Multiply a Laguerre series by x: `x·L_n = -(n+1)L_{n+1} + (2n+1)L_n - n·L_{n-1}`.
+/// Mirrors numpy's lagmulx. Note the writes overlap — `prd[i+1]` is assigned and
+/// `prd[i]` accumulated in the same iteration — so the order below is load-bearing.
+pub fn lagmulx(c: &[f64]) -> Vec<f64> {
+    let c = trim_polynomial_seq(c.to_vec());
+    if c.is_empty() || (c.len() == 1 && c[0] == 0.0) {
+        return c;
+    }
+    let mut prd = vec![0.0; c.len() + 1];
+    prd[0] = c[0];
+    prd[1] = -c[0];
+    for (i, &ci) in c.iter().enumerate().skip(1) {
+        prd[i + 1] = -ci * (i + 1) as f64;
+        prd[i] += ci * (2 * i + 1) as f64;
+        prd[i - 1] -= ci * i as f64;
+    }
+    prd
+}
+
+/// Multiply two Laguerre coefficient arrays via numpy's in-basis recurrence.
+/// See [`legmul`] for why the power-basis round trip this replaced was a defect
+/// (deadlock-audit-50prg).
 pub fn lagmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     if c1.is_empty() || c2.is_empty() {
         return Vec::new();
     }
-    let p1 = lag2poly(c1);
-    let p2 = lag2poly(c2);
-    let len = p1.len() + p2.len() - 1;
-    let mut prod = vec![0.0; len];
-    for (i, &a) in p1.iter().enumerate() {
-        for (j, &b) in p2.iter().enumerate() {
-            prod[i + j] += a * b;
+    let a = trim_polynomial_seq(c1.to_vec());
+    let b = trim_polynomial_seq(c2.to_vec());
+    let (c, xs) = if a.len() > b.len() { (b, a) } else { (a, b) };
+    let scaled = |v: &[f64], k: f64| -> Vec<f64> { v.iter().map(|x| x * k).collect() };
+    let divided = |v: &[f64], d: f64| -> Vec<f64> { v.iter().map(|x| x / d).collect() };
+    let scaled_div =
+        |v: &[f64], k: f64, d: f64| -> Vec<f64> { v.iter().map(|x| (x * k) / d).collect() };
+    let (c0, c1v) = match c.len() {
+        1 => (scaled(&xs, c[0]), vec![0.0]),
+        2 => (scaled(&xs, c[0]), scaled(&xs, c[1])),
+        n => {
+            let mut nd = n;
+            let mut c0 = scaled(&xs, c[n - 2]);
+            let mut c1v = scaled(&xs, c[n - 1]);
+            for i in 3..=n {
+                let tmp = c0;
+                nd -= 1;
+                c0 = lagsub(
+                    &scaled(&xs, c[n - i]),
+                    &scaled_div(&c1v, (nd - 1) as f64, nd as f64),
+                );
+                // numpy: lagadd(tmp, lagsub((2*nd - 1)*c1, lagmulx(c1)) / nd) — the divide
+                // applies to the whole difference, not to either operand.
+                let inner = lagsub(&scaled(&c1v, (2 * nd - 1) as f64), &lagmulx(&c1v));
+                c1v = lagadd(&tmp, &divided(&inner, nd as f64));
+            }
+            (c0, c1v)
         }
-    }
-    trim_polynomial_seq(poly2lag(&prod))
+    };
+    trim_polynomial_seq(lagadd(&c0, &lagsub(&c1v, &lagmulx(&c1v))))
 }
 
 /// Divide Laguerre coefficient arrays. Returns (quotient, remainder).
@@ -61005,11 +61109,15 @@ print(json.dumps(payload))
         };
         let script = format!(
             "import numpy as np\n\
-             from numpy.polynomial import legendre as L\n\
-             r = L.legmul({}, {})\n\
-             print(\",\".join(repr(float(v)) for v in r))\n",
+             from numpy.polynomial import legendre as L, hermite as H\n\
+             from numpy.polynomial import hermite_e as He, laguerre as La\n\
+             a, b = {}, {}\n\
+             for mod, pre in ((L, 'leg'), (H, 'herm'), (He, 'herme'), (La, 'lag')):\n\
+             {I4}r = getattr(mod, pre + 'mul')(a, b)\n\
+             {I4}print(\",\".join(repr(float(v)) for v in r))\n",
             py_list(&coeffs),
-            py_list(&other)
+            py_list(&other),
+            I4 = "    "
         );
         let output = Command::new(oracle_python_bin())
             .args(["-c", &script])
@@ -61017,25 +61125,36 @@ print(json.dumps(payload))
             .expect("numpy oracle should run");
         assert!(output.status.success(), "numpy oracle failed");
         let stdout = String::from_utf8(output.stdout).expect("utf8");
-        let want: Vec<f64> = stdout
-            .trim()
-            .split(',')
-            .map(|s| s.parse::<f64>().expect("oracle value should parse"))
-            .collect();
-        let got = legmul(&coeffs, &other);
-        assert_eq!(got.len(), want.len(), "legmul degree-{n} length");
-        let scale = want.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
-        let worst = got
-            .iter()
-            .zip(want.iter())
-            .fold(0.0_f64, |acc, (g, w)| acc.max((g - w).abs()));
-        assert!(
-            worst <= 1e-13 * scale,
-            "legmul at degree {n}: worst absolute deviation {worst:e} against a largest \
-             coefficient of {scale:e} (relative {:e}) — the power-basis round trip this \
-             replaced reached 1.2e-08 here",
-            worst / scale
-        );
+        let rows: Vec<&str> = stdout.lines().collect();
+        assert_eq!(rows.len(), 4, "oracle should return one row per family");
+
+        let families: [(&str, fn(&[f64], &[f64]) -> Vec<f64>); 4] = [
+            ("leg", legmul),
+            ("herm", hermmul),
+            ("herme", hermemul),
+            ("lag", lagmul),
+        ];
+        for (row, (name, mul)) in rows.iter().zip(families) {
+            let want: Vec<f64> = row
+                .trim()
+                .split(',')
+                .map(|s| s.parse::<f64>().expect("oracle value should parse"))
+                .collect();
+            let got = mul(&coeffs, &other);
+            assert_eq!(got.len(), want.len(), "{name}mul degree-{n} length");
+            let scale = want.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+            let worst = got
+                .iter()
+                .zip(want.iter())
+                .fold(0.0_f64, |acc, (g, w)| acc.max((g - w).abs()));
+            assert!(
+                worst <= 1e-13 * scale,
+                "{name}mul at degree {n}: worst absolute deviation {worst:e} against a \
+                 largest coefficient of {scale:e} (relative {:e}) — the power-basis round \
+                 trip this replaced reached 1e-08..1e-11 here",
+                worst / scale
+            );
+        }
     }
 
     #[test]
@@ -61175,13 +61294,13 @@ print("\n".join(out))
                         // tightening this line to bit-exact is that bead's acceptance
                         // test. The loose bound still catches shape and logic errors,
                         // which is what this differential is for.
-                        // legmul now runs numpy's in-basis recurrence (50prg), so it is
-                        // held to the same bound as add/sub. The three families still on
-                        // the power-basis round trip keep the loose bound until they are
-                        // converted; tightening each is that conversion's acceptance test.
-                        let mul_tol = if name == "leg" { 1e-14 } else { 1e-9 };
+                        // All five families now multiply with numpy's own in-basis
+                        // recurrence (50prg), so mul is held near the add/sub standard.
+                        // The residual 1e-14 rather than bit-exactness is ordinary float
+                        // error in a shared recurrence, not the exponential degree-driven
+                        // loss the power-basis round trip had.
                         let ok = if op == "mul" {
-                            (g - w).abs() <= mul_tol * (1.0 + g.abs().max(w.abs()))
+                            (g - w).abs() <= 1e-14 * (1.0 + g.abs().max(w.abs()))
                         } else {
                             g.to_bits() == w.to_bits() || (g == 0.0 && w == 0.0)
                         };
