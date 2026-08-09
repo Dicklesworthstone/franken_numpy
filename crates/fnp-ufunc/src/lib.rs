@@ -38820,6 +38820,26 @@ pub fn chebval(x: &[f64], c: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+/// numpy's `polyutils.trimseq`: drop trailing zero coefficients, keeping at least one
+/// element so a wholly-zero series collapses to `[0.0]` rather than to nothing.
+///
+/// Every `add`/`sub`/`mul` in `numpy.polynomial` returns a trimmed series, so a result that
+/// keeps its trailing zeros has the wrong SHAPE even when every value it holds is right —
+/// `chebsub([1,2,3], [1,2,3])` is `[0.]`, not `[0., 0., 0.]`. `-0.0 == 0.0` here, matching
+/// numpy's `!= 0` test, so a negative trailing zero trims too.
+///
+/// An empty input stays empty. numpy instead raises `ValueError("Coefficient array is
+/// empty")` from `as_series` before any arithmetic happens; reproducing that needs these
+/// 15 functions to become fallible and is tracked separately.
+fn trim_polynomial_seq(mut c: Vec<f64>) -> Vec<f64> {
+    let mut end = c.len();
+    while end > 1 && c[end - 1] == 0.0 {
+        end -= 1;
+    }
+    c.truncate(end);
+    c
+}
+
 /// Add two Chebyshev coefficient arrays.
 pub fn chebadd(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     let len = c1.len().max(c2.len());
@@ -38830,7 +38850,7 @@ pub fn chebadd(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     for (i, &v) in c2.iter().enumerate() {
         result[i] += v;
     }
-    result
+    trim_polynomial_seq(result)
 }
 
 /// Subtract two Chebyshev coefficient arrays.
@@ -38843,7 +38863,7 @@ pub fn chebsub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     for (i, &v) in c2.iter().enumerate() {
         result[i] -= v;
     }
-    result
+    trim_polynomial_seq(result)
 }
 
 /// Multiply two Chebyshev coefficient arrays.
@@ -38862,7 +38882,7 @@ pub fn chebmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
             result[i.abs_diff(j)] += prod;
         }
     }
-    result
+    trim_polynomial_seq(result)
 }
 
 /// Divide Chebyshev coefficient arrays. Returns (quotient, remainder).
@@ -39406,7 +39426,7 @@ pub fn legadd(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     for (i, &v) in c2.iter().enumerate() {
         result[i] += v;
     }
-    result
+    trim_polynomial_seq(result)
 }
 
 /// Subtract two Legendre coefficient arrays.
@@ -39419,7 +39439,7 @@ pub fn legsub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     for (i, &v) in c2.iter().enumerate() {
         result[i] -= v;
     }
-    result
+    trim_polynomial_seq(result)
 }
 
 /// Multiply two Legendre coefficient arrays.
@@ -39443,7 +39463,7 @@ pub fn legmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
             prod[i + j] += a * b;
         }
     }
-    poly2leg(&prod)
+    trim_polynomial_seq(poly2leg(&prod))
 }
 
 /// Divide Legendre coefficient arrays. Returns (quotient, remainder).
@@ -39721,7 +39741,7 @@ pub fn hermadd(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     for (i, &v) in c2.iter().enumerate() {
         result[i] += v;
     }
-    result
+    trim_polynomial_seq(result)
 }
 
 /// Subtract two physicist's Hermite coefficient arrays.
@@ -39734,7 +39754,7 @@ pub fn hermsub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     for (i, &v) in c2.iter().enumerate() {
         result[i] -= v;
     }
-    result
+    trim_polynomial_seq(result)
 }
 
 /// Multiply two physicist's Hermite coefficient arrays via power basis.
@@ -39751,7 +39771,7 @@ pub fn hermmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
             prod[i + j] += a * b;
         }
     }
-    poly2herm(&prod)
+    trim_polynomial_seq(poly2herm(&prod))
 }
 
 /// Divide physicist's Hermite coefficient arrays. Returns (quotient, remainder).
@@ -39914,7 +39934,7 @@ pub fn hermemul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
             prod[i + j] += a * b;
         }
     }
-    poly2herme(&prod)
+    trim_polynomial_seq(poly2herme(&prod))
 }
 
 /// Divide probabilist's Hermite coefficient arrays. Returns (quotient, remainder).
@@ -40318,7 +40338,7 @@ pub fn lagadd(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     for (i, &v) in c2.iter().enumerate() {
         result[i] += v;
     }
-    result
+    trim_polynomial_seq(result)
 }
 
 /// Subtract two Laguerre coefficient arrays.
@@ -40331,7 +40351,7 @@ pub fn lagsub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     for (i, &v) in c2.iter().enumerate() {
         result[i] -= v;
     }
-    result
+    trim_polynomial_seq(result)
 }
 
 /// Multiply two Laguerre coefficient arrays via power basis.
@@ -40348,7 +40368,7 @@ pub fn lagmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
             prod[i + j] += a * b;
         }
     }
-    poly2lag(&prod)
+    trim_polynomial_seq(poly2lag(&prod))
 }
 
 /// Divide Laguerre coefficient arrays. Returns (quotient, remainder).
@@ -60898,6 +60918,126 @@ print(json.dumps(payload))
         poly_close_vec(&hermesub(&a, &b), &sub_g, "hermesub");
         poly_close_vec(&lagadd(&a, &b), &add_g, "lagadd");
         poly_close_vec(&lagsub(&a, &b), &sub_g, "lagsub");
+    }
+
+    #[test]
+    fn polynomial_add_sub_mul_trim_trailing_zeros_like_numpy() {
+        // Every numpy.polynomial add/sub/mul returns a TRIMMED series (polyutils.trimseq),
+        // so the result's length is part of the contract, not an artifact of how the
+        // operands were padded. Goldens read off numpy 1.26.4 and 2.4.3 (identical).
+        let families: [(
+            &str,
+            fn(&[f64], &[f64]) -> Vec<f64>,
+            fn(&[f64], &[f64]) -> Vec<f64>,
+        ); 5] = [
+            ("cheb", chebadd, chebsub),
+            ("leg", legadd, legsub),
+            ("herm", hermadd, hermsub),
+            ("herme", hermeadd, hermesub),
+            ("lag", lagadd, lagsub),
+        ];
+        // add/sub are basis-independent, so one golden covers all five families.
+        for (name, add, sub) in families {
+            // Trailing zeros created by the operation are dropped.
+            poly_close_vec(
+                &add(&[1.0, 2.0, 3.0], &[0.0, 0.0, -3.0]),
+                &[1.0, 2.0],
+                &format!("{name}add trims the zero it creates"),
+            );
+            // Cancelling a series against itself collapses to a single zero, not to a
+            // run of zeros and not to an empty array.
+            poly_close_vec(
+                &sub(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]),
+                &[0.0],
+                &format!("{name}sub of equal series is [0.]"),
+            );
+            // Trailing zeros already present in an operand do not pad the result.
+            poly_close_vec(
+                &add(&[1.0, 2.0], &[1.0, 2.0, 0.0, 0.0]),
+                &[2.0, 4.0],
+                &format!("{name}add ignores operand padding"),
+            );
+            poly_close_vec(
+                &sub(&[1.0, 2.0], &[1.0, 2.0, 0.0, 0.0]),
+                &[0.0],
+                &format!("{name}sub ignores operand padding"),
+            );
+            // An all-zero pair stays one zero.
+            poly_close_vec(
+                &add(&[0.0, 0.0], &[0.0, 0.0]),
+                &[0.0],
+                &format!("{name}add of zeros is [0.]"),
+            );
+            // Unequal lengths keep the longer operand's tail.
+            poly_close_vec(
+                &add(&[1.0, 2.0, 3.0], &[5.0]),
+                &[6.0, 2.0, 3.0],
+                &format!("{name}add with a constant"),
+            );
+            poly_close_vec(
+                &sub(&[1.0, 2.0, 3.0], &[5.0]),
+                &[-4.0, 2.0, 3.0],
+                &format!("{name}sub with a constant"),
+            );
+        }
+
+        // mul is basis-dependent, so each family carries its own goldens. Multiplying by a
+        // constant is basis-independent, and a zero operand collapses to [0.].
+        let muls: [(&str, fn(&[f64], &[f64]) -> Vec<f64>); 5] = [
+            ("cheb", chebmul),
+            ("leg", legmul),
+            ("herm", hermmul),
+            ("herme", hermemul),
+            ("lag", lagmul),
+        ];
+        for (name, mul) in muls {
+            poly_close_vec(
+                &mul(&[1.0, 2.0, 3.0], &[5.0]),
+                &[5.0, 10.0, 15.0],
+                &format!("{name}mul by a constant"),
+            );
+            poly_close_vec(
+                &mul(&[0.0, 0.0], &[0.0, 0.0]),
+                &[0.0],
+                &format!("{name}mul of zeros is [0.]"),
+            );
+        }
+        // Operand padding must not inflate the product's degree: numpy trims [1,2,0,0] to
+        // [1,2] first, so every family returns 2 + 2 - 1 = 3 coefficients here.
+        for (name, mul) in muls {
+            let padded = mul(&[1.0, 2.0], &[1.0, 2.0, 0.0, 0.0]);
+            assert_eq!(
+                padded.len(),
+                3,
+                "{name}mul returned {} coefficients for a padded operand, numpy returns 3: {padded:?}",
+                padded.len()
+            );
+        }
+        poly_close_vec(
+            &chebmul(&[1.0, 2.0], &[1.0, 2.0, 0.0, 0.0]),
+            &[3.0, 4.0, 2.0],
+            "chebmul padded operand",
+        );
+        poly_close_vec(
+            &hermmul(&[1.0, 2.0], &[1.0, 2.0, 0.0, 0.0]),
+            &[9.0, 4.0, 4.0],
+            "hermmul padded operand",
+        );
+        poly_close_vec(
+            &legmul(&[1.0, 2.0], &[1.0, 2.0, 0.0, 0.0]),
+            &[2.333_333_333_333_333, 4.0, 2.666_666_666_666_666_5],
+            "legmul padded operand",
+        );
+        poly_close_vec(
+            &hermemul(&[1.0, 2.0], &[1.0, 2.0, 0.0, 0.0]),
+            &[5.0, 4.0, 4.0],
+            "hermemul padded operand",
+        );
+        poly_close_vec(
+            &lagmul(&[1.0, 2.0], &[1.0, 2.0, 0.0, 0.0]),
+            &[5.0, -4.0, 8.0],
+            "lagmul padded operand",
+        );
     }
 
     #[test]
