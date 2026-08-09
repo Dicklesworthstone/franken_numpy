@@ -38995,26 +38995,28 @@ pub fn chebroots(c: &[f64]) -> Result<Vec<f64>, UFuncError> {
         return Ok(vec![-coeffs[0] / coeffs[1]]);
     }
 
-    // Build Chebyshev companion matrix (n-1 x n-1)
+    // numpy's chebcompanion: a SYMMETRISED companion, scaled by sqrt(1/2), with the
+    // coefficient column subtracted from the LAST COLUMN.
+    //
+    // The previous construction here wrote the coefficients into the last ROW of an
+    // unscaled matrix. That is not numpy's matrix and it does not share its eigenvalues
+    // beyond low degree: at six roots it recovered -2.0823697396464427 where the true
+    // root, which numpy returns, is -1.335143916125675. Degrees up to four happened to
+    // agree, which is why every existing golden passed.
     let deg = n - 1;
     let mut mat = vec![0.0; deg * deg];
-    // First row: special
-    mat[1] = 1.0; // mat[0][1] = 1
-    // Middle rows: T_{k+1} = 2x*T_k - T_{k-1} → x*T_k = (T_{k+1} + T_{k-1})/2
-    for k in 1..deg - 1 {
-        mat[k * deg + k - 1] = 0.5;
-        mat[k * deg + k + 1] = 0.5;
+    let half_sqrt = 0.5_f64.sqrt();
+    // scl = [1, sqrt(1/2), sqrt(1/2), ...]; only scl[i]/scl[deg-1] is ever needed.
+    let scl = |i: usize| if i == 0 { 1.0 } else { half_sqrt };
+    for i in 0..deg - 1 {
+        let v = if i == 0 { half_sqrt } else { 0.5 };
+        mat[i * deg + (i + 1)] = v;
+        mat[(i + 1) * deg + i] = v;
     }
-    // Last row: from the equation sum c_k T_k = 0, express T_{n-1} in terms of lower T_k
-    // x*T_{n-2} = T_{n-1}/2 + T_{n-3}/2 (or similar)
-    // Standard companion: last row adjusts for c[k]/c[n-1]
     let cn = coeffs[deg];
-    for k in 0..deg {
-        mat[(deg - 1) * deg + k] -= coeffs[k] / (2.0 * cn);
-    }
-    // Adjust the [n-2][n-1] -> add 0.5 for the standard recurrence
-    if deg >= 2 {
-        mat[(deg - 1) * deg + deg - 2] += 0.5;
+    let scl_last = scl(deg - 1);
+    for (i, &ci) in coeffs.iter().take(deg).enumerate() {
+        mat[i * deg + (deg - 1)] -= (ci / cn) * (scl(i) / scl_last) * 0.5;
     }
 
     // Find eigenvalues using fnp-linalg
@@ -61041,6 +61043,140 @@ print(json.dumps(payload))
         poly_close_vec(&hermesub(&a, &b), &sub_g, "hermesub");
         poly_close_vec(&lagadd(&a, &b), &add_g, "lagadd");
         poly_close_vec(&lagsub(&a, &b), &sub_g, "lagsub");
+    }
+
+    #[test]
+    fn polynomial_fromroots_roots_randomised_differential_matches_numpy() {
+        // Last untested corner of the family surface. Roots are driven through
+        // fromroots first so the input is guaranteed REAL-rooted: our *roots return
+        // Vec<f64> while numpy returns complex when the roots are, and a differential
+        // that tripped over that would be testing the return type, not the arithmetic.
+        if !numpy_oracle_available() {
+            return;
+        }
+        let mut state: u64 = 0x5D2C_8E71_A3F0_49B6;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Distinct, well-separated roots: clustered roots make the companion-matrix
+        // eigenvalue solve genuinely ill-conditioned on BOTH sides, which would measure
+        // the problem rather than our agreement with numpy.
+        let mut cases: Vec<Vec<f64>> = Vec::new();
+        for count in [2usize, 3, 4, 6] {
+            for _ in 0..3 {
+                let mut roots: Vec<f64> = Vec::new();
+                for k in 0..count {
+                    let jitter = ((next() >> 11) as f64 / (1u64 << 53) as f64) * 0.4 - 0.2;
+                    roots.push(-1.5 + 0.9 * k as f64 + jitter);
+                }
+                cases.push(roots);
+            }
+        }
+        let py_list = |v: &[f64]| -> String {
+            let items: Vec<String> = v.iter().map(|x| format!("{x:?}")).collect();
+            format!("[{}]", items.join(", "))
+        };
+        let case_literals: Vec<String> = cases.iter().map(|c| py_list(c)).collect();
+        let script = format!(
+            r#"
+import numpy as np
+from numpy.polynomial import chebyshev as C, legendre as L, hermite as H
+from numpy.polynomial import hermite_e as He, laguerre as La
+fams = [("cheb", C), ("leg", L), ("herm", H), ("herme", He), ("lag", La)]
+cases = [{}]
+out = []
+for r in cases:
+    for prefix, mod in fams:
+        coef = getattr(mod, prefix + "fromroots")(r)
+        rec = np.sort(np.real(getattr(mod, prefix + "roots")(coef)))
+        out.append(",".join(repr(float(v)) for v in coef) + ";"
+                   + ",".join(repr(float(v)) for v in rec))
+print("\n".join(out))
+"#,
+            case_literals.join(", ")
+        );
+        let output = Command::new(oracle_python_bin())
+            .args(["-c", &script])
+            .output()
+            .expect("numpy oracle should run");
+        assert!(
+            output.status.success(),
+            "numpy oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("oracle output should be UTF-8");
+        let expected: Vec<&str> = stdout.lines().collect();
+        assert_eq!(
+            expected.len(),
+            cases.len() * 5,
+            "oracle returned {} rows, expected {}",
+            expected.len(),
+            cases.len() * 5
+        );
+
+        type FromRootsFn = fn(&[f64]) -> Vec<f64>;
+        type RootsFn = fn(&[f64]) -> Result<Vec<f64>, UFuncError>;
+        let families: [(&str, FromRootsFn, RootsFn); 5] = [
+            ("cheb", chebfromroots, chebroots),
+            ("leg", legfromroots, legroots),
+            ("herm", hermfromroots, hermroots),
+            ("herme", hermefromroots, hermeroots),
+            ("lag", lagfromroots, lagroots),
+        ];
+        let parse =
+            |s: &str| -> Vec<f64> { s.split(',').map(|v| v.parse::<f64>().unwrap()).collect() };
+        let mut row = 0usize;
+        let (mut worst_coef, mut worst_root) = (0.0_f64, 0.0_f64);
+        for r in &cases {
+            for (name, from_roots, roots_of) in families {
+                let (want_coef, want_roots) = expected[row]
+                    .split_once(';')
+                    .expect("oracle row should be coef;roots");
+                let (want_coef, want_roots) = (parse(want_coef), parse(want_roots));
+
+                let got_coef = from_roots(r);
+                assert_eq!(
+                    got_coef.len(),
+                    want_coef.len(),
+                    "{name}fromroots({r:?}): length vs numpy"
+                );
+                let cscale = want_coef.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
+                for (i, (g, w)) in got_coef.iter().zip(want_coef.iter()).enumerate() {
+                    let rel = (g - w).abs() / cscale;
+                    worst_coef = worst_coef.max(rel);
+                    assert!(
+                        rel <= 1e-12,
+                        "{name}fromroots({r:?})[{i}]: got {g:?} want {w:?} (rel {rel:e})"
+                    );
+                }
+
+                let mut got_roots = roots_of(&got_coef).expect("real-rooted series");
+                got_roots.sort_by(|a, b| a.partial_cmp(b).expect("no NaN roots"));
+                assert_eq!(
+                    got_roots.len(),
+                    want_roots.len(),
+                    "{name}roots recovered {} roots, numpy {}",
+                    got_roots.len(),
+                    want_roots.len()
+                );
+                for (i, (g, w)) in got_roots.iter().zip(want_roots.iter()).enumerate() {
+                    let dev = (g - w).abs();
+                    worst_root = worst_root.max(dev);
+                    // Absolute: the roots here live in [-1.7, 3.5], and an eigenvalue
+                    // solve is not expected to agree to the last bit across two
+                    // implementations.
+                    assert!(
+                        dev <= 1e-9,
+                        "{name}roots(fromroots({r:?}))[{i}]: got {g:?} want {w:?}"
+                    );
+                }
+                row += 1;
+            }
+        }
+        println!("fromroots worst relative {worst_coef:e}; roots worst absolute {worst_root:e}");
     }
 
     #[test]
