@@ -71061,6 +71061,145 @@ print("\n".join(out))
     }
 
     #[test]
+    fn einsum_results_match_live_numpy_across_subscript_forms() {
+        // The only live-numpy einsum test in this crate checks the contraction PATH
+        // (einsum_path_greedy_matches_live_numpy_oracle_when_available). A path is a
+        // performance decision; it says nothing about whether the contraction produces
+        // numpy's numbers. Nothing here compared einsum VALUES against np.einsum, so a
+        // wrong index mapping in any single subscript form would have been invisible to
+        // all 75 einsum tests as long as it was self-consistent.
+        if !numpy_oracle_available() {
+            return;
+        }
+        // (subscripts, operand shapes) — one per structurally distinct form: pure
+        // transpose, full reduction, diagonal extraction, trace, outer product, matmul,
+        // batched matmul, a two-index contraction, and an ellipsis form.
+        let cases: Vec<(&str, Vec<Vec<usize>>)> = vec![
+            ("ij->ji", vec![vec![3, 4]]),
+            ("ij->", vec![vec![3, 4]]),
+            ("ij->i", vec![vec![3, 4]]),
+            ("ii->i", vec![vec![4, 4]]),
+            ("ii->", vec![vec![4, 4]]),
+            ("i,j->ij", vec![vec![3], vec![4]]),
+            ("ij,jk->ik", vec![vec![3, 4], vec![4, 2]]),
+            ("bij,bjk->bik", vec![vec![2, 3, 4], vec![2, 4, 2]]),
+            ("ijk,jkl->il", vec![vec![2, 3, 4], vec![3, 4, 5]]),
+            ("...ij,...jk->...ik", vec![vec![2, 3, 4], vec![2, 4, 3]]),
+        ];
+        let mut state: u64 = 0x2E9B_57C1_D8A0_463F;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut failures: Vec<String> = Vec::new();
+        for (subscripts, shapes) in &cases {
+            let operands: Vec<(Vec<usize>, Vec<f64>)> = shapes
+                .iter()
+                .map(|shape| {
+                    let len: usize = shape.iter().product();
+                    let data: Vec<f64> = (0..len)
+                        .map(|_| ((next() >> 11) as f64 / (1u64 << 53) as f64) * 4.0 - 2.0)
+                        .collect();
+                    (shape.clone(), data)
+                })
+                .collect();
+            let py_operands = operands
+                .iter()
+                .map(|(shape, data)| {
+                    format!(
+                        "np.array([{}]).reshape({})",
+                        data.iter()
+                            .map(|v| format!("{v:?}"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        shape
+                            .iter()
+                            .map(|d| d.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let script = format!(
+                "import numpy as np\n\
+                 r = np.einsum('{subscripts}', {py_operands})\n\
+                 r = np.atleast_1d(r)\n\
+                 print(\",\".join(str(d) for d in r.shape))\n\
+                 print(\",\".join(repr(float(v)) for v in r.ravel()))\n"
+            );
+            let out = Command::new(oracle_python_bin())
+                .args(["-c", &script])
+                .output()
+                .expect("numpy einsum oracle should run");
+            assert!(
+                out.status.success(),
+                "numpy einsum oracle failed for '{subscripts}': {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let stdout = String::from_utf8(out.stdout).expect("utf-8");
+            let mut lines = stdout.trim().lines();
+            let want_shape: Vec<usize> = lines
+                .next()
+                .expect("shape line")
+                .split(',')
+                .map(|t| t.parse::<usize>().expect("shape dim"))
+                .collect();
+            let want: Vec<f64> = lines
+                .next()
+                .expect("values line")
+                .split(',')
+                .map(|t| t.parse::<f64>().expect("value"))
+                .collect();
+
+            let arrays: Vec<UFuncArray> = operands
+                .iter()
+                .map(|(shape, data)| {
+                    UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap()
+                })
+                .collect();
+            let refs: Vec<&UFuncArray> = arrays.iter().collect();
+            let got = match UFuncArray::einsum(subscripts, &refs) {
+                Ok(g) => g,
+                Err(e) => {
+                    failures.push(format!("  '{subscripts}': einsum returned an error: {e:?}"));
+                    continue;
+                }
+            };
+            // A scalar result is shape [] here and [1] after atleast_1d on the numpy side,
+            // so compare the element count rather than the shape vector for that case.
+            let got_len: usize = got.values().len();
+            if got_len != want.len() {
+                failures.push(format!(
+                    "  '{subscripts}': {got_len} elements, numpy {} (numpy shape {want_shape:?}, ours {:?})",
+                    want.len(),
+                    got.shape()
+                ));
+                continue;
+            }
+            let scale = want.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
+            for (i, (g, w)) in got.values().iter().zip(want.iter()).enumerate() {
+                let rel = (g - w).abs() / scale;
+                if rel > 1e-12 {
+                    failures.push(format!(
+                        "  '{subscripts}'[{i}]: got {g:?} want {w:?} (rel {rel:e})"
+                    ));
+                    break;
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of {} einsum forms diverge from numpy:\n{}",
+            failures.len(),
+            cases.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
     fn einsum_path_greedy_matches_live_numpy_oracle_when_available() {
         if !numpy_oracle_available() {
             return;
