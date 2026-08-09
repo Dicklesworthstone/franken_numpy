@@ -1639,7 +1639,25 @@ fn plan_external_loop(
 
     match options.order {
         NditerOrder::C => (Vec::new(), None, element_count),
-        NditerOrder::F => (shape[1..].to_vec(), Some(0), shape[0]),
+        NditerOrder::F => {
+            // numpy COLLAPSES unit axes before deciding the chunk, so the inner loop is
+            // the extent of the first NON-UNIT axis rather than of axis 0. Taking
+            // shape[0] unconditionally gave chunks of 1 for [1,5] where numpy gives a
+            // single chunk of 5 (deadlock-audit-rkf2t).
+            //
+            // Measured against numpy rather than reasoned about, because a leading unit
+            // axis is not the only shape that matters:
+            //   (1,5) -> [5]      (1,1,5) -> [5]     (1,5,3) -> [5,5,5]
+            //   (5,1,3) -> [5,5,5]                   (2,1,3) -> [2,2,2]
+            //   (1,2,3) -> [2,2,2]                   (3,1) -> [3]
+            // i.e. unit axes drop out wherever they sit, and the first surviving extent
+            // becomes the chunk. A shape that is all unit axes has a single element.
+            let non_unit: Vec<usize> = shape.iter().copied().filter(|&d| d != 1).collect();
+            match non_unit.split_first() {
+                Some((&inner, rest)) => (rest.to_vec(), Some(0), inner),
+                None => (Vec::new(), None, element_count),
+            }
+        }
     }
 }
 
@@ -2852,12 +2870,21 @@ mod tests {
         let Some(python) = python_with_numpy() else {
             return;
         };
-        let shapes: [Vec<usize>; 6] = [
+        // Unit axes in every position, because that is what rkf2t turned on: numpy drops
+        // them before chunking, so [1,5] and [1,5,3] and [5,1,3] each chunk differently
+        // from what a naive shape[0] rule produces, while [3,1] and [2,3] agree with it by
+        // coincidence and would not have caught the defect.
+        let shapes: [Vec<usize>; 11] = [
             vec![4],
             vec![2, 3],
             vec![3, 1],
             vec![2, 3, 4],
             vec![1, 5],
+            vec![1, 1, 5],
+            vec![1, 5, 3],
+            vec![5, 1, 3],
+            vec![2, 1, 3],
+            vec![1, 1],
             vec![2, 0, 3],
         ];
         let mut failures: Vec<String> = Vec::new();
@@ -2876,20 +2903,6 @@ mod tests {
                     let mut seeks = vec![0usize];
                     if total >= 4 && !external_loop {
                         seeks.push(total / 2);
-                    }
-                    // EXCLUDED, not forgotten: a LEADING unit axis under F-order
-                    // external_loop diverges — numpy collapses unit axes and yields one
-                    // chunk of 5 for [1,5] where plan_external_loop always takes shape[0]
-                    // and yields chunks of 1. Tracked as deadlock-audit-rkf2t with the
-                    // numpy ground truth; re-including this configuration is that bead's
-                    // acceptance test. It is left out rather than pinned so this sweep
-                    // runs green without recording the wrong behaviour as correct.
-                    if external_loop
-                        && order == NditerOrder::F
-                        && shape.first() == Some(&1)
-                        && shape.len() > 1
-                    {
-                        continue;
                     }
                     for seek in seeks {
                         let bridge = match nditer_python_with_interpreter(
