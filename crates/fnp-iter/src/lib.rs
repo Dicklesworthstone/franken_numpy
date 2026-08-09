@@ -1270,11 +1270,6 @@ fn run_nditer_python_bridge(
         NditerError::PythonBridgeFailure(format!("failed to parse python bridge response: {err}"))
     })?;
 
-    let chunk_len = if plan.external_loop() {
-        plan.inner_loop_len()
-    } else {
-        1
-    };
     response
         .states
         .into_iter()
@@ -1286,36 +1281,24 @@ fn run_nditer_python_bridge(
                     plan.shape().len()
                 )));
             }
-            if state.linear_indices.len() != chunk_len {
-                return Err(NditerError::PythonBridgeFailure(format!(
-                    "python bridge emitted chunk length {}, expected {chunk_len}",
-                    state.linear_indices.len()
-                )));
-            }
-            let expected_iterindex = plan.multi_index_to_linear_index(&state.multi_index)?;
-            if expected_iterindex != state.iterindex {
-                return Err(NditerError::PythonBridgeFailure(format!(
-                    "python bridge emitted iterindex {} for multi-index {:?}, expected {expected_iterindex}",
-                    state.iterindex, state.multi_index
-                )));
-            }
-
-            let expected_first_linear_index =
-                plan.operand_linear_index_for_iterindex(state.iterindex)?;
-            if state.linear_indices.first().copied() != Some(expected_first_linear_index) {
-                return Err(NditerError::PythonBridgeFailure(format!(
-                    "python bridge emitted first linear index {:?}, expected {expected_first_linear_index}",
-                    state.linear_indices.first()
-                )));
-            }
-
-            let expected_linear_indices =
-                plan.operand_linear_indices_for_chunk(state.iterindex, chunk_len)?;
-            if state.linear_indices != expected_linear_indices {
-                return Err(NditerError::PythonBridgeFailure(format!(
-                    "python bridge emitted linear indices {:?}, expected {:?}",
-                    state.linear_indices, expected_linear_indices
-                )));
+            // STRUCTURAL checks only, deliberately. This bridge exists to report what
+            // numpy's nditer did; it is an oracle, and an oracle that validates its answer
+            // against our model is not one.
+            //
+            // It previously also compared numpy's chunk length, iterindex, first linear
+            // index and full linear-index list against this plan, erroring on any
+            // disagreement. Two consequences: a genuine parity defect surfaced as
+            // PythonBridgeFailure rather than as a mismatch (that is how
+            // deadlock-audit-rkf2t appeared, and it read as broken infrastructure), and
+            // the one test comparing bridge steps to our iterator was near-tautological,
+            // since every step it received had already been forced to agree with us.
+            //
+            // Callers compare. An empty chunk is still malformed, since numpy always
+            // yields at least one element per step.
+            if state.linear_indices.is_empty() {
+                return Err(NditerError::PythonBridgeFailure(
+                    "python bridge emitted a step with no linear indices".to_string(),
+                ));
             }
 
             Ok(NditerStep {
