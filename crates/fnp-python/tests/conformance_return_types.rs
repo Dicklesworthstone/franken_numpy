@@ -432,3 +432,115 @@ print("oracle", platform.node(), np.__version__, sorted(numpy_classes))
     );
     Ok(())
 }
+
+/// keepdims x axis SHAPE parity across the reduction surface.
+///
+/// fnp's native reduction paths do not get keepdims from numpy - they
+/// reconstruct the output shape themselves, via `keepdims_expand_axis` or by
+/// reshaping to `vec![1usize; ndim]`, once per site, over axis=None, a single
+/// positive axis, a NEGATIVE axis, and a TUPLE of axes. That arithmetic has
+/// been wrong before: nanpercentile's comment names the class outright,
+/// "(keepdims-on-axis class, BlackThrush 2026-06-22)".
+///
+/// A wrong keepdims shape is silent enough to matter - values and dtype are
+/// right, and it only surfaces when the result is broadcast back against the
+/// input, which is the entire reason keepdims exists. So the sweep also asserts
+/// that broadcast: `a / result` must succeed and match numpy's.
+#[test]
+fn keepdims_and_axis_shapes_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+import warnings
+
+warnings.simplefilter("ignore")
+
+cube = np.arange(24, dtype=np.float64).reshape(2, 3, 4)
+cube[0, 0, 0] = np.nan
+
+plain = ["sum", "prod", "mean", "std", "var", "min", "max", "median",
+         "any", "all", "argmin", "argmax"]
+nanned = ["nansum", "nanprod", "nanmean", "nanstd", "nanvar", "nanmin",
+          "nanmax", "nanmedian"]
+axes = [None, 0, 1, 2, -1, -2, (0, 1), (0, -1), (1, 2)]
+
+def describe(value):
+    array = np.asarray(value)
+    return (tuple(array.shape), str(array.dtype),
+            np.round(np.nan_to_num(array, nan=-12345.0), 9).tolist())
+
+def call(module, name, axis, keepdims):
+    fn = getattr(module, name)
+    source = np.nan_to_num(cube, nan=0.5) if name in ("median",) else cube
+    if axis is None:
+        return fn(source, keepdims=keepdims)
+    return fn(source, axis=axis, keepdims=keepdims)
+
+ok = True
+compared = 0
+for name in plain + nanned:
+    for axis in axes:
+        for keepdims in (False, True):
+            # argmin/argmax take a single axis or None, never a tuple.
+            if name.endswith(("argmin", "argmax")) and isinstance(axis, tuple):
+                continue
+            try:
+                actual = ("ok",) + describe(call(fnp, name, axis, keepdims))
+            except Exception as exc:
+                actual = ("err", type(exc).__name__)
+            try:
+                expected = ("ok",) + describe(call(np, name, axis, keepdims))
+            except Exception as exc:
+                expected = ("err", type(exc).__name__)
+            compared += 1
+            if actual != expected:
+                print(f"{name} axis={axis} keepdims={keepdims}")
+                print(f"  fnp   {actual[:3]}")
+                print(f"  numpy {expected[:3]}")
+                ok = False
+
+# The property keepdims exists FOR: a keepdims=True result must broadcast back
+# against the input. A shape that is merely "some tuple with ones in it" can
+# still pass a shape comparison if both sides are wrong in the same way; this
+# cannot.
+for name in ("sum", "mean", "max", "nansum", "nanmean"):
+    for axis in (0, 1, 2, -1, (0, 1)):
+        try:
+            fnp_ratio = describe(np.nan_to_num(cube, nan=1.0) / call(fnp, name, axis, True))
+        except Exception as exc:
+            fnp_ratio = ("err", type(exc).__name__)
+        try:
+            np_ratio = describe(np.nan_to_num(cube, nan=1.0) / call(np, name, axis, True))
+        except Exception as exc:
+            np_ratio = ("err", type(exc).__name__)
+        compared += 1
+        if fnp_ratio != np_ratio:
+            print(f"broadcast-back {name} axis={axis}")
+            print(f"  fnp   {str(fnp_ratio)[:120]}")
+            print(f"  numpy {str(np_ratio)[:120]}")
+            ok = False
+
+# Preconditions: numpy must actually DIFFER between keepdims False and True
+# (otherwise the grid proves nothing), and the sweep must have run.
+if np.sum(cube, axis=0, keepdims=True).shape == np.sum(cube, axis=0).shape:
+    print("PRECONDITION LOST: numpy's keepdims no longer changes the shape")
+    ok = False
+if compared < 300:
+    print(f"PRECONDITION LOST: only {compared} comparisons ran")
+    ok = False
+
+print(ok)
+print("oracle", platform.node(), np.__version__, compared)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "keepdims/axis shapes should match numpy ({provenance}): {result}"
+    );
+    Ok(())
+}
