@@ -61087,6 +61087,127 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn polynomial_div_randomised_differential_matches_numpy() {
+        // Targeted follow-up to 50prg. That bead was about *mul computing
+        // X2poly -> convolve -> poly2X; every *div here still does exactly that round trip
+        // (X2poly -> poly_div -> poly2X), while numpy's *div works IN BASIS, driving
+        // repeated *mul/*sub. Same suspect mechanism, adjacent function - so it gets the
+        // same differential rather than an assumption either way.
+        if !numpy_oracle_available() {
+            return;
+        }
+        let mut state: u64 = 0x0F1E_2D3C_4B5A_6978;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        const POOL: [f64; 6] = [1.0, -1.5, 2.5, -3.25, 0.75, 4.0];
+        // Divisors keep a non-zero leading coefficient: a zero one is a ZeroDivisionError
+        // in numpy and a UFuncError here, an error-surface question this test is not about.
+        let mut cases: Vec<(Vec<f64>, Vec<f64>)> = Vec::new();
+        for _ in 0..25 {
+            let n1 = 2 + (next() % 5) as usize;
+            let n2 = 1 + (next() % 3) as usize;
+            let a: Vec<f64> = (0..n1).map(|_| POOL[(next() % 6) as usize]).collect();
+            let b: Vec<f64> = (0..n2).map(|_| POOL[(next() % 6) as usize]).collect();
+            cases.push((a, b));
+        }
+        let py_list = |v: &[f64]| -> String {
+            let items: Vec<String> = v.iter().map(|x| format!("{x:?}")).collect();
+            format!("[{}]", items.join(", "))
+        };
+        let case_literals: Vec<String> = cases
+            .iter()
+            .map(|(a, b)| format!("({}, {})", py_list(a), py_list(b)))
+            .collect();
+        let script = format!(
+            r#"
+import numpy as np
+from numpy.polynomial import chebyshev as C, legendre as L, hermite as H
+from numpy.polynomial import hermite_e as He, laguerre as La
+fams = [("cheb", C), ("leg", L), ("herm", H), ("herme", He), ("lag", La)]
+cases = [{}]
+out = []
+for a, b in cases:
+    for prefix, mod in fams:
+        q, r = getattr(mod, prefix + "div")(a, b)
+        out.append(",".join(repr(float(v)) for v in q) + ";" + ",".join(repr(float(v)) for v in r))
+print("\n".join(out))
+"#,
+            case_literals.join(", ")
+        );
+        let output = Command::new(oracle_python_bin())
+            .args(["-c", &script])
+            .output()
+            .expect("numpy oracle should run");
+        assert!(
+            output.status.success(),
+            "numpy oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("oracle output should be UTF-8");
+        let expected: Vec<&str> = stdout.lines().collect();
+        assert_eq!(
+            expected.len(),
+            cases.len() * 5,
+            "oracle returned {} rows, expected {}",
+            expected.len(),
+            cases.len() * 5
+        );
+
+        type DivFn = fn(&[f64], &[f64]) -> Result<(Vec<f64>, Vec<f64>), UFuncError>;
+        let families: [(&str, DivFn); 5] = [
+            ("cheb", chebdiv),
+            ("leg", legdiv),
+            ("herm", hermdiv),
+            ("herme", hermediv),
+            ("lag", lagdiv),
+        ];
+        let parse = |s: &str| -> Vec<f64> {
+            if s.is_empty() {
+                Vec::new()
+            } else {
+                s.split(',').map(|v| v.parse::<f64>().unwrap()).collect()
+            }
+        };
+        let mut row = 0usize;
+        let mut worst_seen = 0.0_f64;
+        for (a, b) in &cases {
+            for (name, div) in families {
+                let (want_q, want_r) = expected[row]
+                    .split_once(';')
+                    .expect("oracle row should be quo;rem");
+                let (want_q, want_r) = (parse(want_q), parse(want_r));
+                let (got_q, got_r) = div(a, b).expect("non-zero divisor should divide");
+                for (what, got, want) in [("quo", &got_q, &want_q), ("rem", &got_r, &want_r)] {
+                    assert_eq!(
+                        got.len(),
+                        want.len(),
+                        "{name}div({a:?}, {b:?}) {what}: length {} vs numpy {}",
+                        got.len(),
+                        want.len()
+                    );
+                    for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+                        let rel = (g - w).abs() / (1.0 + g.abs().max(w.abs()));
+                        worst_seen = worst_seen.max(rel);
+                        assert!(
+                            rel <= 1e-11,
+                            "{name}div({a:?}, {b:?}) {what}[{i}]: got {g:?} want {w:?} \
+                             (relative {rel:e})"
+                        );
+                    }
+                }
+                row += 1;
+            }
+        }
+        // Surfaced under --nocapture so the headroom against the bound is visible rather
+        // than inferred; if a future change starts drifting this is the early warning.
+        println!("polynomial div worst relative deviation vs numpy: {worst_seen:e}");
+    }
+
+    #[test]
     fn polynomial_der_int_val_randomised_differential_matches_numpy() {
         // Companion to the add/sub/mul differential. That one found 50prg on its first
         // run, so the same treatment is owed to the rest of the family surface — der, int
