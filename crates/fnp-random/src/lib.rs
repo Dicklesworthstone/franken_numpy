@@ -6339,9 +6339,13 @@ impl Generator {
         let cache_den = GammaShapeCache::new(half_dfden);
         Ok((0..size)
             .map(|_| {
-                let x1 = self.sample_gamma_cached(half_dfnum, cache_num) * 2.0 / dfnum;
-                let x2 = self.sample_gamma_cached(half_dfden, cache_den) * 2.0 / dfden;
-                x1 / x2
+                // numpy: subexpr1 = chisquare(dfnum) * dfden, subexpr2 = chisquare(dfden)
+                // * dfnum, then ONE division — where chisquare(df) is 2.0 * gamma(df/2).
+                // Dividing each chi-square by its own df first, as this used to, is the
+                // same value with different rounding and broke bit-exact parity.
+                let subexpr1 = (2.0 * self.sample_gamma_cached(half_dfnum, cache_num)) * dfden;
+                let subexpr2 = (2.0 * self.sample_gamma_cached(half_dfden, cache_den)) * dfnum;
+                subexpr1 / subexpr2
             })
             .collect())
     }
@@ -6460,9 +6464,13 @@ impl Generator {
         let cache_df = GammaShapeCache::new(half_df);
         Ok((0..size)
             .map(|_| {
-                let z = self.sample_standard_normal_single();
-                let chi2 = self.sample_gamma_cached(half_df, cache_df) * 2.0;
-                z / (chi2 / df).sqrt()
+                // numpy: sqrt(df/2) * num / sqrt(denom), where denom is the RAW
+                // standard_gamma(df/2) — not scaled to a chi-square first. Forming
+                // chi2 = 2*gamma and then z / sqrt(chi2/df) is the same value with
+                // different rounding, and broke bit-exact parity.
+                let num = self.sample_standard_normal_single();
+                let denom = self.sample_gamma_cached(half_df, cache_df);
+                half_df.sqrt() * num / denom.sqrt()
             })
             .collect())
     }
@@ -6582,7 +6590,13 @@ impl Generator {
                     self.sample_noncentral_chisquare(dfnum, nonc)
                 };
                 let chi2 = self.sample_gamma_cached(denominator_shape, denominator_cache) * 2.0;
-                (nc_chi2 / dfnum) / (chi2 / dfden)
+                // numpy: t = noncentral_chisquare(dfnum, nonc) * dfden, then
+                // t / (chisquare(dfden) * dfnum) — the same single-division shape as
+                // random_f. Dividing each chi-square by its own df first is the same
+                // value with different rounding, and it is what kept
+                // noncentral_f(nonc=0) agreeing with f() before both were corrected.
+                let t = nc_chi2 * dfden;
+                t / (chi2 * dfnum)
             })
             .collect())
     }
@@ -16749,6 +16763,128 @@ for child in rng.spawn(n_children):
             4.908686593272669,
         ];
         assert_f64_seq("gamma", &vals, &expected);
+    }
+
+    #[test]
+    fn chisquare_derived_boundary_sweep_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        // Final pass over jo22s: the distributions that inherit gamma's shape=1 arm split
+        // through one or two levels, plus the noncentral pair's own arms. numpy:
+        //   standard_t  -> chisquare(df), so the split arrives at df = 2
+        //   f           -> chisquare(dfnum) / chisquare(dfden), TWO independent boundaries
+        //   noncentral_chisquare  three arms: nonc == 0 delegates to chisquare;
+        //                         1 < df uses chisquare(df-1) + normal^2;
+        //                         df <= 1 uses poisson(nonc/2) then chisquare(df + 2i)
+        //   noncentral_f          built on the above
+        // The df <= 1 arm is the interesting one: it consumes a POISSON draw, so getting
+        // the arm wrong desyncs the stream rather than merely shifting a value — the same
+        // failure mode as 36ilk.
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+        const T_DFS: [f64; 6] = [0.5, 1.0, 1.999_999_999, 2.0, 2.000_000_001, 8.0];
+        const F_PAIRS: [(f64, f64); 5] =
+            [(1.0, 1.0), (1.5, 3.0), (2.0, 2.0), (3.0, 1.5), (8.0, 5.0)];
+        // (df, nonc) covering all three arms and both sides of df = 1.
+        const NCX2: [(f64, f64); 6] = [
+            (3.0, 0.0),
+            (0.5, 0.0),
+            (2.0, 1.5),
+            (1.000_000_001, 2.0),
+            (1.0, 2.0),
+            (0.5, 3.0),
+        ];
+        let join = |v: Vec<String>| v.join(", ");
+        let script = format!(
+            r#"
+import numpy as np
+out = []
+for df in [{}]:
+    rng = np.random.Generator(np.random.PCG64DXSM(12345))
+    out.append(",".join(repr(float(x)) for x in rng.standard_t(df, size=20).tolist()))
+for a, b in [{}]:
+    rng = np.random.Generator(np.random.PCG64DXSM(12345))
+    out.append(",".join(repr(float(x)) for x in rng.f(a, b, size=20).tolist()))
+for df, nonc in [{}]:
+    rng = np.random.Generator(np.random.PCG64DXSM(12345))
+    out.append(",".join(repr(float(x)) for x in rng.noncentral_chisquare(df, nonc, size=20).tolist()))
+print("\n".join(out))
+"#,
+            join(T_DFS.iter().map(|d| format!("{d:?}")).collect()),
+            join(
+                F_PAIRS
+                    .iter()
+                    .map(|(a, b)| format!("({a:?}, {b:?})"))
+                    .collect()
+            ),
+            join(
+                NCX2.iter()
+                    .map(|(d, n)| format!("({d:?}, {n:?})"))
+                    .collect()
+            ),
+        );
+        let output = numpy_oracle_stdout_from_stdin(&script, &[])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let rows: Vec<&str> = stdout.trim().lines().collect();
+        assert_eq!(
+            rows.len(),
+            T_DFS.len() + F_PAIRS.len() + NCX2.len(),
+            "oracle row count"
+        );
+        let bitwise_mismatch = |actual: &[f64], expected: &[f64]| -> bool {
+            actual.len() != expected.len()
+                || actual
+                    .iter()
+                    .zip(expected.iter())
+                    .any(|(a, e)| a.to_bits() != e.to_bits())
+        };
+
+        let mut failures: Vec<String> = Vec::new();
+        for (i, &df) in T_DFS.iter().enumerate() {
+            let expected = parse_oracle_f64_csv(rows[i])?;
+            let mut g = oracle_gen();
+            let actual = g.standard_t(df, 20).map_err(|_| "standard_t sweep")?;
+            if bitwise_mismatch(&actual, &expected) {
+                failures.push(format!(
+                    "  standard_t(df={df})\n    ours  {actual:?}\n    numpy {expected:?}"
+                ));
+            }
+        }
+        for (i, &(a, b)) in F_PAIRS.iter().enumerate() {
+            let expected = parse_oracle_f64_csv(rows[T_DFS.len() + i])?;
+            let mut g = oracle_gen();
+            let actual = g.f_distribution(a, b, 20).map_err(|_| "f sweep")?;
+            if bitwise_mismatch(&actual, &expected) {
+                failures.push(format!(
+                    "  f({a}, {b})\n    ours  {actual:?}\n    numpy {expected:?}"
+                ));
+            }
+        }
+        for (i, &(df, nonc)) in NCX2.iter().enumerate() {
+            let expected = parse_oracle_f64_csv(rows[T_DFS.len() + F_PAIRS.len() + i])?;
+            let mut g = oracle_gen();
+            let actual = g
+                .noncentral_chisquare(df, nonc, 20)
+                .map_err(|_| "noncentral_chisquare sweep")?;
+            if bitwise_mismatch(&actual, &expected) {
+                let arm = if nonc == 0.0 {
+                    "nonc==0 -> chisquare"
+                } else if df > 1.0 {
+                    "df>1 -> chisquare(df-1)+normal^2"
+                } else {
+                    "df<=1 -> poisson then chisquare"
+                };
+                failures.push(format!(
+                    "  noncentral_chisquare(df={df}, nonc={nonc}) [{arm}]\n    ours  {actual:?}\n    numpy {expected:?}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} parameter set(s) diverge from numpy:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+        Ok(())
     }
 
     #[test]
