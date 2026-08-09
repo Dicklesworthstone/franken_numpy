@@ -544,3 +544,135 @@ print("oracle", platform.node(), np.__version__, compared)
     );
     Ok(())
 }
+
+/// NON-CONTIGUOUS INPUT parity - the first sweep here that varies the INPUT
+/// rather than the result attribute.
+///
+/// Nearly every fnp fast path gates on C-contiguity and bails when it fails:
+/// "Non-contiguous (transposed/strided) source ndarrays bail into the cold
+/// extract; delegate" (take); "non-contiguous bails the fast path into the
+/// transpose-copy extract (~55x slower). Delegate both to numpy" (signbit);
+/// "A size-changing uintN view requires C-contiguous data; otherwise defer"
+/// (concatenate). So for an awkward layout the answer comes from a DIFFERENT
+/// path than the one every contiguous test exercises - numpy itself, or a cold
+/// extract that rebuilds through a Vec - and the contiguous tests cannot see a
+/// defect in either.
+///
+/// The nastiest layout is a BROADCAST view: 0-stride and read-only. A buffer
+/// consumer that assumes `stride == itemsize` reads one element repeatedly or
+/// walks off the end. liz1c showed fnp reaching an extract path for a dtype its
+/// guard did not intend; a 0-stride input is the layout equivalent.
+#[test]
+fn non_contiguous_input_layouts_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+import warnings
+
+warnings.simplefilter("ignore")
+
+base = np.arange(24, dtype=np.float64).reshape(4, 6)
+
+layouts = [
+    ("c_contiguous", lambda: base.copy()),                 # control
+    ("transposed", lambda: base.copy().T),
+    ("fortran_order", lambda: np.asfortranarray(base)),
+    ("strided_rows", lambda: base.copy()[::2]),
+    ("negative_stride", lambda: base.copy()[::-1]),
+    ("strided_2d_slice", lambda: base.copy()[1:, ::2]),
+    ("broadcast_view", lambda: np.broadcast_to(np.arange(6, dtype=np.float64), (4, 6))),
+]
+
+ops = [
+    ("sum", lambda m, x: m.sum(x)),
+    ("sum axis0", lambda m, x: m.sum(x, axis=0)),
+    ("sum axis1", lambda m, x: m.sum(x, axis=1)),
+    ("mean", lambda m, x: m.mean(x)),
+    ("min", lambda m, x: m.min(x)),
+    ("max", lambda m, x: m.max(x)),
+    ("argmin", lambda m, x: m.argmin(x)),
+    ("argmax", lambda m, x: m.argmax(x)),
+    ("cumsum", lambda m, x: m.cumsum(x)),
+    ("sort", lambda m, x: m.sort(x)),
+    ("sort axis0", lambda m, x: m.sort(x, axis=0)),
+    ("unique", lambda m, x: m.unique(x)),
+    ("take", lambda m, x: m.take(x, [0, 2])),
+    ("take axis1", lambda m, x: m.take(x, [0, 1], axis=1)),
+    ("compress", lambda m, x: m.compress([True, False, True, False], x, axis=0)),
+    ("count_nonzero", lambda m, x: m.count_nonzero(x)),
+    ("nonzero", lambda m, x: m.nonzero(x)),
+    ("clip", lambda m, x: m.clip(x, 5.0, 15.0)),
+    ("abs", lambda m, x: m.abs(x)),
+    ("sqrt", lambda m, x: m.sqrt(x)),
+    ("negative", lambda m, x: m.negative(x)),
+    ("signbit", lambda m, x: m.signbit(x)),
+    ("flip", lambda m, x: m.flip(x)),
+    ("ravel", lambda m, x: m.ravel(x)),
+    ("reshape", lambda m, x: m.reshape(x, (-1,))),
+    ("repeat", lambda m, x: m.repeat(x, 2)),
+    ("diff", lambda m, x: m.diff(x)),
+    ("concatenate self", lambda m, x: m.concatenate([x, x])),
+    ("where", lambda m, x: m.where(x > 10.0, x, 0.0)),
+    ("transpose", lambda m, x: m.transpose(x)),
+]
+
+def describe(value):
+    if isinstance(value, tuple):          # nonzero returns a tuple of arrays
+        return ("tuple",) + tuple(describe(item) for item in value)
+    array = np.asarray(value)
+    return (str(array.dtype), tuple(array.shape),
+            np.round(array, 9).tolist())
+
+def outcome(module, call, make):
+    try:
+        return ("ok", describe(call(module, make())))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+ok = True
+compared = 0
+for layout_name, make in layouts:
+    for op_name, call in ops:
+        actual = outcome(fnp, call, make)
+        expected = outcome(np, call, make)
+        compared += 1
+        if actual != expected:
+            print(f"{layout_name}: {op_name}")
+            print(f"  fnp   {str(actual)[:150]}")
+            print(f"  numpy {str(expected)[:150]}")
+            ok = False
+
+# Preconditions: the layouts must ACTUALLY be non-contiguous, or this sweep is
+# six spellings of the same contiguous array.
+checks = {
+    "transposed": lambda a: not a.flags.c_contiguous,
+    "fortran_order": lambda a: a.flags.f_contiguous and not a.flags.c_contiguous,
+    "strided_rows": lambda a: not a.flags.c_contiguous,
+    "negative_stride": lambda a: not a.flags.c_contiguous,
+    "strided_2d_slice": lambda a: not a.flags.c_contiguous,
+    "broadcast_view": lambda a: 0 in a.strides,
+}
+for layout_name, make in layouts:
+    check = checks.get(layout_name)
+    if check is not None and not check(make()):
+        print(f"PRECONDITION LOST: layout {layout_name} is not what it claims to be")
+        ok = False
+if compared < 200:
+    print(f"PRECONDITION LOST: only {compared} comparisons ran")
+    ok = False
+
+print(ok)
+print("oracle", platform.node(), np.__version__, compared)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "non-contiguous input layouts should match numpy ({provenance}): {result}"
+    );
+    Ok(())
+}
