@@ -987,3 +987,174 @@ print("oracle", platform.node(), np.__version__, compared)
     );
     Ok(())
 }
+
+/// SEEDED RANDOMISED differential - the only non-curated test in this file.
+///
+/// Every other sweep here is a hand-written grid, so its blind spot is exactly
+/// its author's blind spot. Randomised inputs do not share that: they reach
+/// zero-size shapes, 0-d arrays, all-NaN and mixed NaN/inf inputs, denormals,
+/// extreme magnitudes and high-rank shapes that no case list contains. Zero-size
+/// input especially has never been swept here, and numpy's behaviour on it is
+/// branch-heavy - sum of empty is 0.0, max of empty RAISES, mean of empty warns
+/// and returns nan.
+///
+/// The seed is FIXED. A test whose inputs change per run is not a gate: it fails
+/// for one agent, passes for the next, and the failure cannot be reproduced.
+/// This is a differential regression test over a large arbitrary CONSTANT
+/// corpus - genuine fuzzing lives in the `fuzz/` crates (docs/FUZZING.md).
+/// Divergences print the iteration index and the full case so they replay.
+#[test]
+fn seeded_random_differential_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import platform
+import warnings
+
+warnings.simplefilter("ignore")
+
+SEED = 20260809
+rng = np.random.default_rng(SEED)
+
+dtypes = ["float64", "float32", "int64", "int32", "int16", "uint8", "bool",
+          "complex128", "float16"]
+profiles = ["ordinary", "with_nan", "with_inf", "denormal", "extreme", "zeros"]
+
+def make_array(dtype, shape, profile):
+    size = int(np.prod(shape)) if shape else 1
+    if dtype == "bool":
+        data = rng.integers(0, 2, size=size).astype(bool)
+    elif dtype.startswith(("int", "uint")):
+        info = np.iinfo(dtype)
+        if profile == "extreme":
+            data = rng.choice([info.min, info.max, 0, 1, -1 if info.min < 0 else 1],
+                              size=size).astype(dtype)
+        elif profile == "zeros":
+            data = np.zeros(size, dtype=dtype)
+        else:
+            lo = max(info.min, -1000)
+            hi = min(info.max, 1000)
+            data = rng.integers(lo, hi, size=size, endpoint=True).astype(dtype)
+    else:
+        base = rng.standard_normal(size)
+        if profile == "with_nan" and size:
+            base[rng.integers(0, size, size=max(1, size // 3))] = np.nan
+        elif profile == "with_inf" and size:
+            base[rng.integers(0, size, size=max(1, size // 3))] = np.inf
+            if size > 1:
+                base[0] = -np.inf
+        elif profile == "denormal":
+            base = base * 5e-324
+        elif profile == "extreme":
+            base = base * 1e308
+        elif profile == "zeros":
+            base = np.zeros(size)
+            if size:
+                base[0] = -0.0
+        data = base.astype(dtype)
+    return data.reshape(shape) if shape else np.asarray(data[0], dtype=dtype)
+
+unary = ["sum", "prod", "mean", "min", "max", "any", "all", "argmin", "argmax",
+         "cumsum", "sort", "unique", "ravel", "flip", "abs", "negative",
+         "sign", "count_nonzero", "nonzero", "isnan", "isfinite", "signbit",
+         "trim_zeros", "diff", "square", "conj"]
+
+def described(value):
+    if isinstance(value, tuple):
+        return ("tuple",) + tuple(described(item) for item in value)
+    array = np.asarray(value)
+    if array.dtype.kind in "fc":
+        finite = np.nan_to_num(array.astype("complex128" if array.dtype.kind == "c"
+                                            else "float64"),
+                               nan=-987654.0, posinf=1e300, neginf=-1e300)
+        # Round hard: fnp and numpy may associate a reduction differently, and
+        # this test is about SHAPE/DTYPE/branch parity, not last-ULP accuracy -
+        # which the byte-exact goldens elsewhere already own.
+        return (str(array.dtype), tuple(array.shape),
+                repr(np.round(finite, 6).tolist())[:300])
+    return (str(array.dtype), tuple(array.shape), repr(array.tolist())[:300])
+
+cases = []
+for i in range(400):
+    dtype = str(rng.choice(dtypes))
+    profile = str(rng.choice(profiles))
+    ndim = int(rng.integers(0, 4))
+    if ndim == 0:
+        shape = ()
+    else:
+        shape = tuple(int(rng.integers(0, 5)) for _ in range(ndim))
+    op = str(rng.choice(unary))
+    axis = None
+    if shape and rng.integers(0, 2):
+        axis = int(rng.integers(-len(shape), len(shape)))
+    cases.append((i, dtype, profile, shape, op, axis))
+
+def invoke(module, x, op, axis):
+    # The array is built ONCE per case and handed to both sides. Building it
+    # inside invoke() drew fresh values from the shared rng for each module, so
+    # fnp and numpy were compared on DIFFERENT inputs - the first run of this
+    # test reported 131 of 400 "failures" that way, none of them real.
+    fn = getattr(module, op)
+    if axis is not None and op in ("sum", "prod", "mean", "min", "max", "any",
+                                   "all", "argmin", "argmax", "cumsum", "sort",
+                                   "flip", "diff"):
+        return fn(x, axis=axis)
+    return fn(x)
+
+ok = True
+failures = 0
+zero_size = zero_dim = nan_bearing = 0
+for index, dtype, profile, shape, op, axis in cases:
+    if shape and 0 in shape:
+        zero_size += 1
+    if shape == ():
+        zero_dim += 1
+    if profile == "with_nan":
+        nan_bearing += 1
+    sample = make_array(dtype, shape, profile)
+    try:
+        actual = ("ok", described(invoke(fnp, sample.copy(), op, axis)))
+    except Exception as exc:
+        actual = ("err", type(exc).__name__)
+    try:
+        expected = ("ok", described(invoke(np, sample.copy(), op, axis)))
+    except Exception as exc:
+        expected = ("err", type(exc).__name__)
+    if actual != expected:
+        failures += 1
+        if failures <= 8:
+            print(f"case {index}: {op} dtype={dtype} profile={profile} "
+                  f"shape={shape} axis={axis}")
+            print(f"  fnp   {str(actual)[:190]}")
+            print(f"  numpy {str(expected)[:190]}")
+        ok = False
+
+# Preconditions: the generated corpus must actually contain the interesting
+# shapes. A generator that silently degenerated into 3-element float64 vectors
+# would pass every case above while testing none of what this bead is for.
+if zero_size < 5:
+    print(f"PRECONDITION LOST: only {zero_size} zero-size cases generated")
+    ok = False
+if zero_dim < 5:
+    print(f"PRECONDITION LOST: only {zero_dim} 0-d cases generated")
+    ok = False
+if nan_bearing < 5:
+    print(f"PRECONDITION LOST: only {nan_bearing} NaN-bearing cases generated")
+    ok = False
+
+print(ok)
+print("oracle", platform.node(), np.__version__,
+      f"cases={len(cases)} zero_size={zero_size} zero_dim={zero_dim} "
+      f"nan={nan_bearing} failures={failures} seed={SEED}")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "seeded random differential should match numpy ({provenance}): {result}"
+    );
+    Ok(())
+}

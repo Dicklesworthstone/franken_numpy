@@ -26605,6 +26605,19 @@ fn trim_zeros(
     if let Some(out) = try_zerocopy_trim_zeros(py, filt.bind(py), trim_mode.as_str())? {
         return Ok(out);
     }
+    // NON-1-D MUST DELEGATE. The zero-copy path above is 1-D only, and the
+    // extract residual below flattens to a 1-D Vec and canonicalises the dtype -
+    // so a 0-d, 2-D or 3-D input came back with BOTH the wrong shape and a
+    // widened dtype, silently. numpy preserves them: trim_zeros of a (2,2)
+    // float32 is a (2,2) float32, and of a 0-d float32 is that same 0-d scalar.
+    // Found by the seeded random differential
+    // (deadlock-audit-seeded-random-differential-zgsrh), which generated the
+    // 0-d and N-D cases no curated list contained. Same class as liz1c's
+    // take(complex64): a residual reached by input it cannot represent - by
+    // SHAPE here rather than dtype.
+    if filt.bind(py).getattr("ndim")?.extract::<usize>()? != 1 {
+        return fallback();
+    }
     let array = match extract_numeric_array(py, filt.bind(py), "trim_zeros(filt)") {
         Ok(a) => a,
         Err(_) => return fallback(),
