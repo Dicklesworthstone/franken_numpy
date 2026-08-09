@@ -1,6 +1,6 @@
 use fnp_io::{
     IOSupportedDType, LoadBytes, load, load_auto, load_complex, load_npz, read_npy_bytes, savez,
-    savez_compressed,
+    savez_compressed, write_npy_bytes,
 };
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -82,6 +82,34 @@ elif case == "complex128":
     emit_npy(np.array([1 + 2j, -3 + 0.5j], dtype=np.dtype("<c16")))
 elif case == "u8_empty":
     emit_npy(np.array([], dtype=np.dtype("|u1")))
+elif case == "bool_mixed":
+    emit_npy(np.array([True, False, True, True], dtype=np.dtype("|b1")))
+elif case == "i32_range":
+    emit_npy(np.array([-2147483648, -1, 0, 1, 2147483647], dtype=np.dtype("<i4")))
+elif case == "i64_range":
+    emit_npy(
+        np.array(
+            [-9223372036854775808, -1, 0, 1, 9223372036854775807], dtype=np.dtype("<i8")
+        )
+    )
+elif case == "f32_specials":
+    emit_npy(np.array([np.inf, -np.inf, np.nan, -0.0, 0.0, 1.5], dtype=np.dtype("<f4")))
+elif case == "f64_specials":
+    emit_npy(np.array([np.inf, -np.inf, np.nan, -0.0, 0.0, 1.5], dtype=np.dtype("<f8")))
+elif case == "complex64_specials":
+    emit_npy(
+        np.array(
+            [complex(np.inf, -0.0), complex(np.nan, 1.5), complex(-0.0, -np.inf)],
+            dtype=np.dtype("<c8"),
+        )
+    )
+elif case == "complex128_specials":
+    emit_npy(
+        np.array(
+            [complex(np.inf, -0.0), complex(np.nan, 1.5), complex(-0.0, -np.inf)],
+            dtype=np.dtype("<c16"),
+        )
+    )
 elif case == "npz_store":
     emit_npz(False)
 elif case == "npz_deflate":
@@ -381,6 +409,139 @@ fn numpy_generated_npy_payloads_parse_with_matching_headers_and_values() -> Resu
         ensure_eq(dtype, expected_dtype, format!("{case_id}: loaded dtype"))?;
         assert_close(&values, &oracle.values)?;
     }
+    Ok(())
+}
+
+#[test]
+fn uncovered_dtypes_and_special_floats_round_trip_byte_exactly() -> Result<(), String> {
+    // The existing conformance cases compare decimal `values=` lines, which cannot
+    // distinguish -0.0 from 0.0 and cannot see a NaN's payload bits at all. These dtypes
+    // (bool/i32/i64/f32/f64/complex64/complex128) are checked on RAW BYTES in both
+    // directions: NumPy's payload must survive our parse untouched, and re-serialising the
+    // parsed header + payload must reproduce NumPy's whole .npy file byte for byte.
+    let cases = [
+        ("bool_mixed", IOSupportedDType::Bool),
+        ("i32_range", IOSupportedDType::I32),
+        ("i64_range", IOSupportedDType::I64),
+        ("f32_specials", IOSupportedDType::F32),
+        ("f64_specials", IOSupportedDType::F64),
+        ("complex64_specials", IOSupportedDType::Complex64),
+        ("complex128_specials", IOSupportedDType::Complex128),
+    ];
+
+    for (case_id, expected_dtype) in cases {
+        let oracle = numpy_npy_oracle(case_id)?;
+        ensure_eq(
+            IOSupportedDType::decode(&oracle.dtype_descr)
+                .map_err(|err| format!("{case_id}: oracle dtype should decode: {err}"))?,
+            expected_dtype,
+            format!("{case_id}: dtype descriptor sanity check"),
+        )?;
+
+        let parsed = read_npy_bytes(&oracle.npy_bytes, false)
+            .map_err(|err| format!("{case_id}: NumPy NPY should parse: {err}"))?;
+        ensure_eq(
+            parsed.header.descr,
+            expected_dtype,
+            format!("{case_id}: dtype"),
+        )?;
+        ensure_eq(
+            parsed.header.shape.clone(),
+            oracle.shape.clone(),
+            format!("{case_id}: shape"),
+        )?;
+        ensure_eq(
+            bytes_to_hex(parsed.payload.as_ref()),
+            bytes_to_hex(&oracle.payload),
+            format!("{case_id}: raw payload bytes"),
+        )?;
+
+        // Round trip: our writer must reproduce NumPy's file exactly, header padding and
+        // all — not merely a file NumPy would accept.
+        let rewritten = write_npy_bytes(&parsed.header, parsed.payload.as_ref(), false)
+            .map_err(|err| format!("{case_id}: re-serialisation should succeed: {err}"))?;
+        ensure_eq(
+            bytes_to_hex(&rewritten),
+            bytes_to_hex(&oracle.npy_bytes),
+            format!("{case_id}: re-serialised .npy bytes"),
+        )?;
+    }
+
+    // Signed zero and the non-finite patterns, asserted on the exact bytes NumPy wrote.
+    // Layout is [inf, -inf, nan, -0.0, 0.0, 1.5] in both float widths.
+    let f64_specials = numpy_npy_oracle("f64_specials")?;
+    let f64_words: Vec<u64> = f64_specials
+        .payload
+        .chunks_exact(8)
+        .map(|w| u64::from_le_bytes(w.try_into().expect("8-byte chunk")))
+        .collect();
+    ensure_eq(f64_words.len(), 6, "f64_specials: word count")?;
+    ensure_eq(
+        f64_words[0],
+        f64::INFINITY.to_bits(),
+        "f64_specials: +inf bits",
+    )?;
+    ensure_eq(
+        f64_words[1],
+        f64::NEG_INFINITY.to_bits(),
+        "f64_specials: -inf bits",
+    )?;
+    ensure(
+        f64::from_bits(f64_words[2]).is_nan(),
+        "f64_specials: slot 2 must be NaN",
+    )?;
+    ensure_eq(
+        f64_words[3],
+        (-0.0f64).to_bits(),
+        "f64_specials: -0.0 must keep its sign bit, not collapse to +0.0",
+    )?;
+    ensure_eq(f64_words[4], 0.0f64.to_bits(), "f64_specials: +0.0 bits")?;
+    ensure(
+        f64_words[3] != f64_words[4],
+        "f64_specials: -0.0 and +0.0 must not share a bit pattern",
+    )?;
+
+    let f32_specials = numpy_npy_oracle("f32_specials")?;
+    let f32_words: Vec<u32> = f32_specials
+        .payload
+        .chunks_exact(4)
+        .map(|w| u32::from_le_bytes(w.try_into().expect("4-byte chunk")))
+        .collect();
+    ensure_eq(f32_words.len(), 6, "f32_specials: word count")?;
+    ensure_eq(
+        f32_words[3],
+        (-0.0f32).to_bits(),
+        "f32_specials: -0.0 must keep its sign bit",
+    )?;
+    ensure(
+        f32::from_bits(f32_words[2]).is_nan(),
+        "f32_specials: slot 2 must be NaN",
+    )?;
+
+    // A complex element's imaginary half carries its own sign bit; -0.0j is the half most
+    // easily lost by a parse that reconstructs through a real-valued intermediate.
+    let c128 = numpy_npy_oracle("complex128_specials")?;
+    let c128_words: Vec<u64> = c128
+        .payload
+        .chunks_exact(8)
+        .map(|w| u64::from_le_bytes(w.try_into().expect("8-byte chunk")))
+        .collect();
+    ensure_eq(c128_words.len(), 6, "complex128_specials: word count")?;
+    ensure_eq(
+        c128_words[1],
+        (-0.0f64).to_bits(),
+        "complex128_specials: imaginary -0.0 must keep its sign bit",
+    )?;
+    ensure_eq(
+        c128_words[4],
+        (-0.0f64).to_bits(),
+        "complex128_specials: real -0.0 must keep its sign bit",
+    )?;
+    ensure_eq(
+        c128_words[5],
+        f64::NEG_INFINITY.to_bits(),
+        "complex128_specials: imaginary -inf bits",
+    )?;
     Ok(())
 }
 
