@@ -5238,7 +5238,11 @@ impl Generator {
             cache.has_binomial = true;
             cache.r = p.min(1.0 - p);
             cache.q = 1.0 - cache.r;
-            cache.fm = (n as f64 + 1.0) * cache.r;
+            // numpy: fm = n*r + r, NOT (n+1)*r. Algebraically identical, different in the
+            // last bit — 101*0.4 is 40.400000000000006 where 100*0.4 + 0.4 is 40.4 — and
+            // fm feeds laml/lamr and therefore p3/p4, so a last-bit difference moves a
+            // branch threshold (deadlock-audit-36ilk).
+            cache.fm = (n as f64) * cache.r + cache.r;
             cache.m = cache.fm.floor() as i64;
             cache.p1 =
                 (2.195 * ((n as f64) * cache.r * cache.q).sqrt() - 4.6 * cache.q).floor() + 0.5;
@@ -5278,7 +5282,13 @@ impl Generator {
             let mut v = self.next_f64();
 
             let y = if u <= p1 {
-                (xm - p1 * v + u).floor() as i64
+                // numpy's Step10 does `goto Step60` here: the triangular-region candidate
+                // is accepted IMMEDIATELY, with no squeeze and no explicit evaluation.
+                // Falling through to the acceptance test instead rejects draws numpy
+                // keeps, which consumes an extra u/v pair and slides the whole stream by
+                // one variate (deadlock-audit-36ilk).
+                let y_val = (xm - p1 * v + u).floor() as i64;
+                return if p <= 0.5 { y_val } else { n - y_val };
             } else if u <= p2 {
                 let x = xl + (u - p1) / c;
                 v = v * c + 1.0 - (m as f64 - x + 0.5).abs() / p1;
@@ -5303,7 +5313,14 @@ impl Generator {
             };
 
             let k = (y - m).unsigned_abs();
-            if k <= 20 && (k as f64) <= nrq / 2.0 - 1.0 {
+            // numpy takes the squeeze (Step52) ONLY when k > 20 AND k < nrq/2 - 1, and
+            // falls to explicit evaluation otherwise. The previous condition here was
+            // `k <= 20 && k <= nrq/2 - 1` for the explicit arm, which is not the negation:
+            // it sent `k <= 20 && k > nrq/2 - 1` to the squeeze where numpy evaluates
+            // explicitly. Different arm, different number of uniforms consumed on
+            // rejection, so the stream desynced (deadlock-audit-36ilk).
+            let use_squeeze = k > 20 && (k as f64) < nrq / 2.0 - 1.0;
+            if !use_squeeze {
                 // Direct ratio test for small k
                 let mut f_val = 1.0;
                 if m < y {
@@ -5336,12 +5353,24 @@ impl Generator {
                 let f1 = m as f64 + 1.0;
                 let z = (n - m) as f64 + 1.0;
                 let w = (n - y) as f64 + 1.0;
-                if log_v
-                    <= (m as f64 + 0.5) * (f1 / x1).ln()
-                        + (n as f64 - m as f64 + 0.5) * (z / w).ln()
-                        + (y as f64 - m as f64) * (w * r / (x1 * q)).ln()
-                        + (1.0 / 12.0) * (1.0 / f1 + 1.0 / z - 1.0 / x1 - 1.0 / w)
-                {
+                let (x2, f2, z2, w2) = (x1 * x1, f1 * f1, z * z, w * w);
+                // numpy's high-order Stirling correction, transcribed term for term. The
+                // previous code used a first-order (1/12)(1/f1 + 1/z - 1/x1 - 1/w), which
+                // is a different acceptance boundary and therefore a different rejection
+                // count near it (deadlock-audit-36ilk).
+                let stirling = |v2: f64, v1: f64| -> f64 {
+                    (13680.0 - (462.0 - (132.0 - (99.0 - 140.0 / v2) / v2) / v2) / v2)
+                        / v1
+                        / 166_320.0
+                };
+                let bound = xm * (f1 / x1).ln()
+                    + (n as f64 - m as f64 + 0.5) * (z / w).ln()
+                    + (y as f64 - m as f64) * (w * r / (x1 * q)).ln()
+                    + stirling(f2, f1)
+                    + stirling(z2, z)
+                    + stirling(x2, x1)
+                    + stirling(w2, w);
+                if log_v <= bound {
                     return if p <= 0.5 { y } else { n - y };
                 }
             }
@@ -16739,15 +16768,21 @@ for child in rng.spawn(n_children):
             return Ok(());
         }
         const LAMS: [f64; 7] = [0.5, 5.0, 9.999_999_999, 10.0, 10.000_000_001, 25.0, 100.0];
-        // (n, p) on the INVERSION side only, including the exact threshold
-        // (60 * 0.5 = 30 takes inversion) and the p>0.5 mirror.
+        // (n, p) spanning both arms and the p=0.5 mirror, plus the exact threshold:
+        // 60 * 0.5 = 30 takes inversion, 62 * 0.5 = 31 takes BTPE.
         //
-        // The BTPE sets — (100, 0.4), (62, 0.5), (100, 0.6), (100, 0.5) — are EXCLUDED,
-        // not forgotten: all four desync from numpy's stream on the fifth draw, tracked as
-        // deadlock-audit-36ilk with the reproduction. They are left out rather than pinned
-        // so this sweep runs green without recording wrong behaviour as correct; re-adding
-        // them is that bead's acceptance test.
-        const BINOMIALS: [(u64, f64); 3] = [(50, 0.1), (60, 0.5), (50, 0.9)];
+        // The four BTPE sets were briefly excluded when this sweep first found them
+        // desyncing from numpy's stream; they are back because deadlock-audit-36ilk is
+        // fixed, and their presence here is that bead's acceptance test.
+        const BINOMIALS: [(u64, f64); 7] = [
+            (50, 0.1),
+            (100, 0.4),
+            (60, 0.5),
+            (62, 0.5),
+            (50, 0.9),
+            (100, 0.6),
+            (100, 0.5),
+        ];
         let lam_args = LAMS
             .iter()
             .map(|l| format!("{l:?}"))
@@ -16764,11 +16799,11 @@ import numpy as np
 out = []
 for lam in [{lam_args}]:
     rng = np.random.Generator(np.random.PCG64DXSM(12345))
-    v = rng.poisson(lam, size=12)
+    v = rng.poisson(lam, size=40)
     out.append(",".join(str(int(x)) for x in v.tolist()))
 for n, p in [{bin_args}]:
     rng = np.random.Generator(np.random.PCG64DXSM(12345))
-    v = rng.binomial(n, p, size=12)
+    v = rng.binomial(n, p, size=40)
     out.append(",".join(str(int(x)) for x in v.tolist()))
 print("\n".join(out))
 "#
@@ -16787,7 +16822,7 @@ print("\n".join(out))
         for (i, &lam) in LAMS.iter().enumerate() {
             let expected = parse_u64(rows[i]);
             let mut g = oracle_gen();
-            let actual = g.poisson(lam, 12).map_err(|_| "poisson sweep")?;
+            let actual = g.poisson(lam, 40).map_err(|_| "poisson sweep")?;
             assert_eq!(
                 actual, expected,
                 "poisson(lam={lam}): the lam<10 and lam>=10 arms are different algorithms, \
@@ -16798,7 +16833,7 @@ print("\n".join(out))
         for (i, &(n, p)) in BINOMIALS.iter().enumerate() {
             let expected = parse_u64(rows[LAMS.len() + i]);
             let mut g = oracle_gen();
-            let actual = g.binomial(n, p, 12).map_err(|_| "binomial sweep")?;
+            let actual = g.binomial(n, p, 40).map_err(|_| "binomial sweep")?;
             if actual != expected {
                 binomial_failures.push(format!(
                     "  binomial(n={n}, p={p}) np={:.1}\n    ours  {actual:?}\n    numpy {expected:?}",
