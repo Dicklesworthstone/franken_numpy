@@ -39660,34 +39660,13 @@ pub fn poly2leg(p: &[f64]) -> Vec<f64> {
     if p.is_empty() {
         return Vec::new();
     }
-    if p.len() == 1 {
-        return vec![p[0]];
+    // numpy's Horner-in-basis form; see [`poly2lag`] for why the n x n solve this
+    // replaced was both slower and less accurate (deadlock-audit-xf93e).
+    let mut res = vec![0.0];
+    for &coeff in p.iter().rev() {
+        res = legadd(&legmulx(&res), &[coeff]);
     }
-    // Strategy: build the power-basis representations of P_0, P_1, ..., P_{n-1}
-    // and solve the linear system to find Legendre coefficients.
-    // More efficient: use legval at Gauss-Legendre nodes for projection.
-    // Simplest correct approach: use the inner product with Legendre polys.
-    // Since we know the polynomial exactly, use the relation:
-    // c_k = (2k+1)/2 * integral_{-1}^{1} p(x) P_k(x) dx
-    // But p(x) and P_k(x) are known, so compute exactly via polynomial multiplication.
-
-    // Actually, the simplest approach: build the Legendre Vandermonde and solve.
-    let n = p.len();
-    // We need to find c such that leg2poly(c) == p
-    // Build the transformation matrix M where M[i][j] = coeff of x^i in P_j
-    let mut m = vec![0.0; n * n];
-    for j in 0..n {
-        let mut basis = vec![0.0; n];
-        basis[j] = 1.0;
-        let poly = leg2poly(&basis);
-        for (i, &v) in poly.iter().enumerate() {
-            if i < n {
-                m[i * n + j] = v;
-            }
-        }
-    }
-    // Solve M * c = p
-    solve_linear_system(&m, p, n).unwrap_or_else(|_| p.to_vec())
+    res
 }
 
 // ── Hermite polynomial modules ──────────────────────────────────────────
@@ -39985,22 +39964,13 @@ pub fn poly2herm(p: &[f64]) -> Vec<f64> {
     if p.is_empty() {
         return Vec::new();
     }
-    if p.len() == 1 {
-        return vec![p[0]];
+    // numpy's Horner-in-basis form; see [`poly2lag`] for why the n x n solve this
+    // replaced was both slower and less accurate (deadlock-audit-xf93e).
+    let mut res = vec![0.0];
+    for &coeff in p.iter().rev() {
+        res = hermadd(&hermmulx(&res), &[coeff]);
     }
-    let n = p.len();
-    let mut m = vec![0.0; n * n];
-    for j in 0..n {
-        let mut basis = vec![0.0; n];
-        basis[j] = 1.0;
-        let poly = herm2poly(&basis);
-        for (i, &v) in poly.iter().enumerate() {
-            if i < n {
-                m[i * n + j] = v;
-            }
-        }
-    }
-    solve_linear_system(&m, p, n).unwrap_or_else(|_| p.to_vec())
+    res
 }
 
 /// Add two probabilist's Hermite coefficient arrays.
@@ -40360,22 +40330,13 @@ pub fn poly2herme(p: &[f64]) -> Vec<f64> {
     if p.is_empty() {
         return Vec::new();
     }
-    if p.len() == 1 {
-        return vec![p[0]];
+    // numpy's Horner-in-basis form; see [`poly2lag`] for why the n x n solve this
+    // replaced was both slower and less accurate (deadlock-audit-xf93e).
+    let mut res = vec![0.0];
+    for &coeff in p.iter().rev() {
+        res = hermeadd(&hermemulx(&res), &[coeff]);
     }
-    let n = p.len();
-    let mut m = vec![0.0; n * n];
-    for j in 0..n {
-        let mut basis = vec![0.0; n];
-        basis[j] = 1.0;
-        let poly = herme2poly(&basis);
-        for (i, &v) in poly.iter().enumerate() {
-            if i < n {
-                m[i * n + j] = v;
-            }
-        }
-    }
-    solve_linear_system(&m, p, n).unwrap_or_else(|_| p.to_vec())
+    res
 }
 
 // ── Laguerre polynomial module ──────────────────────────────────────────
@@ -40712,22 +40673,18 @@ pub fn poly2lag(p: &[f64]) -> Vec<f64> {
     if p.is_empty() {
         return Vec::new();
     }
-    if p.len() == 1 {
-        return vec![p[0]];
+    // numpy's form: Horner in the target basis, res = lagadd(lagmulx(res), pol[i]).
+    //
+    // This used to build the n x n basis-conversion matrix and solve it. That is O(n^3)
+    // and, worse, carries the solve's conditioning: it sat ~6.1e-13 from numpy at degree
+    // 15 while numpy's own conversion is within 4e-16 of a longdouble reference, i.e. the
+    // distance was ours (deadlock-audit-xf93e). The recurrence is O(n^2) and backward
+    // stable, and it reuses the lagmulx primitive added for lagmul under 50prg.
+    let mut res = vec![0.0];
+    for &coeff in p.iter().rev() {
+        res = lagadd(&lagmulx(&res), &[coeff]);
     }
-    let n = p.len();
-    let mut m = vec![0.0; n * n];
-    for j in 0..n {
-        let mut basis = vec![0.0; n];
-        basis[j] = 1.0;
-        let poly = lag2poly(&basis);
-        for (i, &v) in poly.iter().enumerate() {
-            if i < n {
-                m[i * n + j] = v;
-            }
-        }
-    }
-    solve_linear_system(&m, p, n).unwrap_or_else(|_| p.to_vec())
+    res
 }
 
 // ── scimath — complex-aware math functions ──────────────────────────────
@@ -61201,14 +61158,14 @@ print("\n".join(out))
             }
         }
         println!("worst basis-conversion deviation vs numpy: {worst:e} ({worst_label})");
-        // 1e-11, not 1e-12: the observed worst is 6.08e-13 (poly2lag, degree 15) and a
-        // bound 1.6x above an observation flakes on an unlucky draw. That 6.08e-13 is a
-        // KNOWN GAP rather than conditioning — numpy's own float64 poly2lag is within
-        // 4e-16 of a longdouble reference at these degrees, so the distance is our
-        // algorithm's. Tracked as deadlock-audit-xf93e; tightening this bound toward
-        // 1e-15 is that bead's acceptance test.
+        // Tightened from 1e-11 to 1e-13 once poly2leg/herm/herme/lag moved to numpy's
+        // Horner-in-basis form (xf93e): the observed worst fell from 6.08e-13 at poly2lag
+        // to 4.67e-15 at lag2poly, so this keeps ~20x headroom rather than sitting just
+        // above the data. poly2cheb still builds a conversion matrix but is no longer the
+        // worst offender, so its remaining cleanup is simplicity and O(n^2)-vs-O(n^3),
+        // not accuracy.
         assert!(
-            worst <= 1e-11,
+            worst <= 1e-13,
             "basis conversions drifted from numpy: worst {worst:e} at {worst_label}"
         );
     }
