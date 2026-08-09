@@ -4,6 +4,11 @@
 
 use std::process::Command;
 
+// Shared so that this contract's strictness lives in one file rather than in each
+// shard's hand-rolled copy (deadlock-audit-au3z4).
+#[path = "common/out_keyword.rs"]
+mod out_keyword;
+
 fn numpy_oracle(script: &str) -> Result<String, String> {
     let output = Command::new("python3")
         .args(["-c", script])
@@ -384,21 +389,11 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
 
 #[test]
 fn isposinf_isneginf_out_keyword_surfaces_match_numpy() -> Result<(), String> {
-    let script = fnp_script(
-        r#"
-def out_outcome(module, name, positional=False, bad_shape=False):
-    fn = getattr(module, name)
-    try:
-        x = np.array([np.inf, -np.inf, 0.0])
-        out = np.empty((2,), dtype=bool) if bad_shape else np.empty(3, dtype=bool)
-        if positional:
-            result = fn(x, out)
-        else:
-            result = fn(x, out=out)
-        return ("ok", result is out, str(out.dtype), tuple(out.shape), out.tolist())
-    except Exception as exc:
-        return ("err", type(exc).__name__)
-
+    // A boolean `out` is the case that exercises the shared probe's float-only signbit
+    // guard: there is no sign to report for a bool buffer, so that slot must come back
+    // None on both sides rather than raising inside the probe.
+    let script = fnp_script(format!(
+        r#"{probe}
 cases = [
     ("isposinf keyword out", "isposinf", False, False),
     ("isneginf keyword out", "isneginf", False, False),
@@ -408,19 +403,10 @@ cases = [
     ("isneginf bad out shape", "isneginf", False, True),
 ]
 
-ok = True
-for label, name, positional, bad_shape in cases:
-    actual = out_outcome(fnp, name, positional, bad_shape)
-    expected = out_outcome(np, name, positional, bad_shape)
-    if actual != expected:
-        print(label)
-        print(actual)
-        print(expected)
-        ok = False
-print(ok)
-"#
-        .into(),
-    );
+run_out_cases(cases)
+"#,
+        probe = out_keyword::out_keyword_probe_py("np.array([np.inf, -np.inf, 0.0])", "bool", 3)
+    ));
     let result = numpy_oracle(&script)?;
     assert_eq!(
         result.trim(),
