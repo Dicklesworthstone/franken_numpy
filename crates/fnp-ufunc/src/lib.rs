@@ -61288,7 +61288,7 @@ print(json.dumps(payload))
             let lo = v.floor();
             let frac = v - lo;
             let hi = if frac > 0.0 { lo + 1.0 } else { lo };
-            let expect_nearest = if frac < 0.5 || (frac == 0.5 && (lo as u64) % 2 == 0) {
+            let expect_nearest = if frac < 0.5 || (frac == 0.5 && (lo as u64).is_multiple_of(2)) {
                 lo
             } else {
                 hi
@@ -63526,7 +63526,7 @@ print(json.dumps(payload))
             1.266_065_877_752_008_2,
             2.279_585_302_336_067,
             27.239_871_823_604_442,
-            2815.716_628_466_254,
+            2_815.716_628_466_254,
             4.880_792_585_865_024,
         ];
         for (i, (&got, &want)) in i0.values().iter().zip(i0_want.iter()).enumerate() {
@@ -63541,7 +63541,10 @@ print(json.dumps(payload))
         tight(sinc.values()[1], 0.127_323_954_473_516_27, "sinc(2.5)");
         tight(sinc.values()[2], -0.069_255_101_242_854_35, "sinc(-3.25)");
         tight(sinc.values()[3], 0.999_999_999_999_999_8, "sinc(1e-8)");
-        tight(sinc.values()[4], 0.636_619_772_367_581_4, "sinc(-0.5)");
+        // sinc(±0.5) = sin(π/2)/(π/2) = 2/π exactly, so name the constant rather than
+        // spelling out its digits — clippy rejects an approximate literal of a known
+        // std constant under -D warnings.
+        tight(sinc.values()[4], std::f64::consts::FRAC_2_PI, "sinc(-0.5)");
         assert!(
             sinc.values()[0].abs() < 1e-15,
             "sinc(1.0) must be a near-zero residue, got {:e}",
