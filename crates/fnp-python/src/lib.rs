@@ -26015,9 +26015,17 @@ fn try_zerocopy_f64_concatenate(
     let inner: usize = shapes[0][ax + 1..].iter().product();
     let out_axis: usize = shapes.iter().map(|shape| shape[ax]).sum();
     let total = outer * out_axis * inner;
+    let mut out_shape = shapes[0].clone();
+    out_shape[ax] = out_axis;
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "float64")?;
-    let flat = numpy.call_method("empty", (total,), Some(&kwargs))?;
+    // Allocate at the FINAL shape, not flat-then-reshape: the trailing reshape
+    // set `.base` to the flat temporary, where numpy's concatenate returns an
+    // array owning its data (deadlock-audit-concatenate-base-attribute-st00f).
+    // The fill below is untouched - PyBuffer gives the same flat contiguous
+    // slice for an N-D C-contiguous array as for a 1-D one.
+    let flat = numpy.call_method("empty", (&output_shape,), Some(&kwargs))?;
     if total > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -26061,11 +26069,8 @@ fn try_zerocopy_f64_concatenate(
             }
         }
     }
-    let mut out_shape = shapes[0].clone();
-    out_shape[ax] = out_axis;
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
-    Ok(Some(output))
+    // `flat` was allocated at the final shape above, so it is returned directly.
+    Ok(Some(flat.unbind()))
 }
 
 // Generic typed concatenate core: the same outer*axis*inner block copy as the f64
@@ -26085,9 +26090,24 @@ fn concatenate_mover<'py, T: pyo3::buffer::Element + Copy>(
     let inner: usize = shapes[0][ax + 1..].iter().product();
     let out_axis: usize = shapes.iter().map(|s| s[ax]).sum();
     let total = outer * out_axis * inner;
+    let mut out_shape = shapes[0].clone();
+    out_shape[ax] = out_axis;
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    // Allocate the result at its FINAL dtype and shape, and byte-fill through a
+    // uintN view OF IT. The previous shape - allocate flat uintN, fill, then
+    // `.view(out_dtype).reshape(shape)` - left `.base` pointing at that private
+    // temporary, where numpy's concatenate returns an array owning its data with
+    // `.base is None` (deadlock-audit-concatenate-base-attribute-st00f). Nothing
+    // in the copy loop below changes; this is two fewer method calls per call,
+    // and the buffer written is the same one either way.
     let kw = PyDict::new(py);
-    kw.set_item("dtype", mover_name)?;
-    let flat = numpy.call_method("empty", (total,), Some(&kw))?;
+    kw.set_item("dtype", out_dtype)?;
+    let result = numpy.call_method("empty", (&output_shape,), Some(&kw))?;
+    // Same-itemsize view of a freshly allocated C-contiguous array, so the
+    // reshape is a view and the dtype view is always legal.
+    let flat = result
+        .call_method1("reshape", (total,))?
+        .call_method1("view", (mover_name,))?;
     if total > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -26138,13 +26158,10 @@ fn concatenate_mover<'py, T: pyo3::buffer::Element + Copy>(
             }
         }
     }
-    let mut out_shape = shapes[0].clone();
-    out_shape[ax] = out_axis;
-    let restored = flat.call_method1("view", (out_dtype,))?;
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    Ok(Some(
-        restored.call_method1("reshape", (&output_shape,))?.unbind(),
-    ))
+    // `result` already has the final dtype and shape and owns its data, so it is
+    // returned directly - no trailing view/reshape, hence `.base is None` like
+    // numpy's.
+    Ok(Some(result.unbind()))
 }
 
 // Typed-by-itemsize concatenate for the dtypes the f64 helper leaves to the cold

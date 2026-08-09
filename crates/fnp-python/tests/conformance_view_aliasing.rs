@@ -71,7 +71,7 @@ warnings.simplefilter("ignore")
 # "does not propagate" for transpose/swapaxes/moveaxis, which was an artifact of
 # the probe, not of numpy. Indexing the first element with a tuple of zeros
 # writes to the view itself whatever its strides.
-def observe(module, call, report_base):
+def observe(module, call):
     a = np.arange(6, dtype=np.float64)
     try:
         r = call(module, a)
@@ -84,18 +84,14 @@ def observe(module, call, report_base):
         before = a.copy()
         r[tuple([0] * r.ndim)] = 99.0
         propagates = not np.array_equal(a, before)
-    # `.base` is compared for the VIEW group, where it IS the mechanism, and NOT
-    # for the copy group, where it is an implementation detail: a copy may point
-    # its base at a private temporary without aliasing anything the caller owns.
-    # fnp's concatenate does exactly that - its zero-copy mover fills a flat
-    # uintN buffer and returns `.view(dtype).reshape(shape)`, so `.base` is
-    # non-None while numpy's is None. Values, dtype, writeability and (the part
-    # that matters) non-aliasing of the inputs all agree, so it is recorded as
-    # deadlock-audit-concatenate-base-attribute-st00f rather than asserted here.
-    # The copy group's real contract - propagates is False - is still asserted.
-    if report_base:
-        return ("ok", same_object, r.base is not None, writeable, propagates)
-    return ("ok", same_object, writeable, propagates)
+    # `.base` is compared for BOTH groups. It was briefly exempted for the copy
+    # group because fnp's concatenate filled a flat uintN buffer and returned
+    # `.view(dtype).reshape(shape)`, leaving `.base` pointing at a private
+    # temporary where numpy's is None. That is now fixed - the mover allocates at
+    # the final dtype/shape and fills through a view of the output
+    # (deadlock-audit-concatenate-base-attribute-st00f) - so the exemption is
+    # withdrawn and the assertion is back at full strength.
+    return ("ok", same_object, r.base is not None, writeable, propagates)
 
 view_ops = [
     ("reshape", lambda m, a: m.reshape(a, (3, 2))),
@@ -129,10 +125,10 @@ copy_ops = [
 ]
 
 ok = True
-for group, cases, report_base in (("view", view_ops, True), ("copy", copy_ops, False)):
+for group, cases in (("view", view_ops), ("copy", copy_ops)):
     for label, call in cases:
-        actual = observe(fnp, call, report_base)
-        expected = observe(np, call, report_base)
+        actual = observe(fnp, call)
+        expected = observe(np, call)
         if actual != expected:
             print(f"{group}: {label}")
             print(f"  fnp   {actual}")
@@ -140,17 +136,23 @@ for group, cases, report_base in (("view", view_ops, True), ("copy", copy_ops, F
             ok = False
 
 # Preconditions. The two groups must genuinely differ on numpy, or "matches
-# numpy" is satisfied by a build that copies (or aliases) everywhere. The copy
-# group is the one that keeps this honest after the .base relaxation above:
-# every one of its members must still fail to write through on numpy.
-if observe(np, lambda m, a: m.reshape(a, (3, 2)), True)[4] is not True:
+# numpy" is satisfied by a build that copies (or aliases) everywhere. Every
+# copy-group member must still fail to write through on numpy, and reshape must
+# still write through, or the groups are no longer testing opposite things.
+#
+# observe returns ("ok", same_object, base_is_not_none, writeable, propagates),
+# so propagation is index 4 and writeability is index 3. Naming them here
+# because an earlier edit shifted this tuple and left these lookups reading
+# `writeable` where they meant `propagates`.
+PROPAGATES, WRITEABLE = 4, 3
+if observe(np, lambda m, a: m.reshape(a, (3, 2)))[PROPAGATES] is not True:
     print("PRECONDITION LOST: numpy's reshape no longer writes through to the base")
     ok = False
 for label, call in copy_ops:
-    if observe(np, call, False)[3] is not False:
+    if observe(np, call)[PROPAGATES] is not False:
         print(f"PRECONDITION LOST: numpy's {label} now writes through to the base")
         ok = False
-if observe(np, lambda m, a: m.broadcast_to(a, (2, 6)), True)[3] is not False:
+if observe(np, lambda m, a: m.broadcast_to(a, (2, 6)))[WRITEABLE] is not False:
     print("PRECONDITION LOST: numpy's broadcast_to result is no longer read-only")
     ok = False
 
