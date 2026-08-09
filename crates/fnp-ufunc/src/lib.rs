@@ -66449,6 +66449,141 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn fft_metamorphic_laws_hold_across_every_dispatch_path() {
+        // fft_dit has three arms: the n <= 1 short circuit, fft_pow2 (radix-4, with a
+        // leading radix-2 stage when log2(n) is odd), and Bluestein for everything else.
+        // The pre-existing Parseval/linearity test walks exactly two lengths (8 and 6), so
+        // the trivial arm, the even-log2 pure-radix-4 shape, and every Bluestein length
+        // whose padded size differs from 2n-1 were unexercised. These laws follow from the
+        // DFT definition, so they need no numpy oracle and stay valid wherever a real
+        // signal is admissible.
+        fn signal(n: usize, seed: u64) -> Vec<f64> {
+            (0..n)
+                .map(|i| {
+                    let h = (i as u64 + 1)
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(seed);
+                    ((h >> 11) as f64 / (1u64 << 53) as f64) * 8.0 - 4.0
+                })
+                .collect()
+        }
+
+        for n in [1_usize, 2, 3, 4, 5, 6, 7, 8, 9, 12, 15, 16, 17, 32, 64] {
+            let x = signal(n, 0x5eed);
+            let y = signal(n, 0xc0ffee);
+            let fx = UFuncArray::new(vec![n], x.clone(), DType::F64)
+                .unwrap()
+                .fft(None)
+                .unwrap();
+            let fy = UFuncArray::new(vec![n], y.clone(), DType::F64)
+                .unwrap()
+                .fft(None)
+                .unwrap();
+            // Scale every bound by the spectrum's own magnitude: FFT round-off is
+            // proportional to the largest bin, not to 1.
+            let scale = (0..2 * n).fold(1.0_f64, |acc, k| acc.max(fx.values[k].abs()));
+            let tol = 1e-11 * scale * (n as f64);
+
+            // Parseval: N * sum(x^2) == sum(|X|^2).
+            let energy_time: f64 = x.iter().map(|v| v * v).sum();
+            let energy_freq: f64 = (0..n)
+                .map(|k| {
+                    fx.values[2 * k].mul_add(
+                        fx.values[2 * k],
+                        fx.values[2 * k + 1] * fx.values[2 * k + 1],
+                    )
+                })
+                .sum();
+            assert!(
+                (n as f64 * energy_time - energy_freq).abs() <= 1e-9 * (1.0 + energy_freq.abs()),
+                "Parseval n={n}: N*Et={} Ef={energy_freq}",
+                n as f64 * energy_time
+            );
+
+            // DC bin is the plain sum of the samples, with no imaginary part.
+            let dc: f64 = x.iter().sum();
+            assert!(
+                (fx.values[0] - dc).abs() <= tol,
+                "n={n}: DC bin {} should be sum(x)={dc}",
+                fx.values[0]
+            );
+            assert!(
+                fx.values[1].abs() <= tol,
+                "n={n}: DC bin must be real, imag={}",
+                fx.values[1]
+            );
+
+            // Hermitian symmetry: a real signal's spectrum satisfies X[k] = conj(X[n-k]).
+            // This is the law most sensitive to an index or twiddle-sign slip in whichever
+            // arm handled this length, and nothing in the suite asserted it.
+            for k in 1..n {
+                let (re_k, im_k) = (fx.values[2 * k], fx.values[2 * k + 1]);
+                let (re_m, im_m) = (fx.values[2 * (n - k)], fx.values[2 * (n - k) + 1]);
+                assert!(
+                    (re_k - re_m).abs() <= tol,
+                    "n={n}: Re X[{k}]={re_k} != Re X[{}]={re_m}",
+                    n - k
+                );
+                assert!(
+                    (im_k + im_m).abs() <= tol,
+                    "n={n}: Im X[{k}]={im_k} != -Im X[{}]={im_m}",
+                    n - k
+                );
+            }
+
+            // Linearity: fft(3x + 2y) == 3*fft(x) + 2*fft(y).
+            let comb: Vec<f64> = x
+                .iter()
+                .zip(y.iter())
+                .map(|(&xi, &yi)| 3.0 * xi + 2.0 * yi)
+                .collect();
+            let fc = UFuncArray::new(vec![n], comb, DType::F64)
+                .unwrap()
+                .fft(None)
+                .unwrap();
+            for k in 0..2 * n {
+                let expected = 3.0 * fx.values[k] + 2.0 * fy.values[k];
+                assert!(
+                    (fc.values[k] - expected).abs() <= 1e-9 * (1.0 + expected.abs()),
+                    "linearity n={n} [{k}]: got {} expected {expected}",
+                    fc.values[k]
+                );
+            }
+
+            // Round trip: ifft(fft(x)) recovers x with no imaginary residue. Previously
+            // asserted at n=8 and n=6 only.
+            let back = fx.ifft().unwrap();
+            for (i, &want) in x.iter().enumerate() {
+                assert!(
+                    (back.values[2 * i] - want).abs() <= tol,
+                    "roundtrip n={n} [{i}]: got {} expected {want}",
+                    back.values[2 * i]
+                );
+                assert!(
+                    back.values[2 * i + 1].abs() <= tol,
+                    "roundtrip n={n} [{i}]: imaginary residue {}",
+                    back.values[2 * i + 1]
+                );
+            }
+
+            // Zero-padding to a longer transform must not disturb the DC bin, and it
+            // deliberately crosses paths: padding 12 -> 24 stays in Bluestein while
+            // padding 16 -> 32 stays in fft_pow2, and 3 -> 6 moves between Bluestein
+            // sizes with different chirp lengths.
+            let padded = UFuncArray::new(vec![n], x.clone(), DType::F64)
+                .unwrap()
+                .fft(Some(2 * n))
+                .unwrap();
+            assert_eq!(padded.shape(), &[2 * n, 2], "n={n}: padded shape");
+            assert!(
+                (padded.values[0] - dc).abs() <= tol,
+                "n={n}: zero-padded DC bin {} should still be sum(x)={dc}",
+                padded.values[0]
+            );
+        }
+    }
+
+    #[test]
     fn fft_non_power_of_two() {
         // FFT of length 6 (non-power-of-2, uses Bluestein)
         let vals = vec![1.0, 0.0, -1.0, 0.0, 1.0, 0.0];
