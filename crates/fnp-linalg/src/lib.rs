@@ -12549,6 +12549,129 @@ mod tests {
     }
 
     #[test]
+    fn svd_mxn_singular_values_match_numpy_across_randomised_shapes() {
+        // The existing svd coverage is reconstruction at FIXED shapes. Reconstruction is a
+        // strong self-consistency check — with orthonormal factors and a sorted S it pins
+        // S uniquely — but it says nothing about shapes nobody wrote a test for, and
+        // nothing about rank-deficient input, where the interesting failures live.
+        //
+        // Singular values are the right thing to compare against numpy: unlike U and Vt
+        // they are canonical, carrying no sign or column-order freedom, so a mismatch is a
+        // real disagreement rather than a different-but-valid factorisation.
+        if !numpy_oracle_available() {
+            return;
+        }
+        let mut state: u64 = 0x6B1F_47D2_A9C3_058E;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut rand_unit = move || ((next() >> 11) as f64 / (1u64 << 53) as f64) * 4.0 - 2.0;
+
+        // (m, n, rank_deficient): tall, wide, square, and very thin in both orientations.
+        let shapes: [(usize, usize, bool); 10] = [
+            (3, 3, false),
+            (5, 3, false),
+            (3, 5, false),
+            (6, 6, false),
+            (8, 4, false),
+            (4, 8, false),
+            (2, 7, false),
+            (7, 2, false),
+            (5, 5, true),
+            (6, 3, true),
+        ];
+        let mut worst: f64 = 0.0;
+        for (m, n, deficient) in shapes {
+            let mut a: Vec<f64> = (0..m * n).map(|_| rand_unit()).collect();
+            if deficient {
+                // Rank is bounded by min(m, n), so the duplicate has to go along the
+                // SHORTER dimension to actually reduce it: duplicating a row of a 6x3
+                // leaves four other rows still spanning all three columns, and the matrix
+                // stays full rank. Duplicate rows when m <= n, columns otherwise. Then the
+                // smallest singular value is a true zero rather than merely small, which
+                // is where a solver that quietly regularises would show up.
+                if m <= n {
+                    for j in 0..n {
+                        a[n + j] = a[j];
+                    }
+                } else {
+                    for i in 0..m {
+                        a[i * n + 1] = a[i * n];
+                    }
+                }
+            }
+            let matrix_arg = format!(
+                "[{}]",
+                a.iter()
+                    .map(|v| format!("{v:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let script = r#"
+import json, sys
+import numpy as np
+data = json.loads(sys.argv[1]); m = int(sys.argv[2]); n = int(sys.argv[3])
+s = np.linalg.svd(np.array(data, dtype=float).reshape((m, n)), compute_uv=False)
+print(",".join(repr(float(x)) for x in s))
+"#;
+            let out = Command::new(oracle_python_bin())
+                .args(["-c", script, &matrix_arg, &m.to_string(), &n.to_string()])
+                .output()
+                .expect("numpy oracle should run");
+            assert!(out.status.success(), "numpy svd oracle failed for {m}x{n}");
+            let stdout = String::from_utf8(out.stdout).expect("utf-8");
+            let want: Vec<f64> = stdout
+                .trim()
+                .split(',')
+                .map(|t| t.parse::<f64>().expect("oracle singular value"))
+                .collect();
+            let got = svd_mxn(&a, m, n).expect("svd should succeed");
+
+            assert_eq!(
+                got.len(),
+                m.min(n),
+                "{m}x{n}: svd_mxn should return min(m,n) singular values"
+            );
+            assert_eq!(got.len(), want.len(), "{m}x{n}: count vs numpy");
+            // Descending order is part of the contract, not an accident of the algorithm.
+            for pair in got.windows(2) {
+                assert!(
+                    pair[0] >= pair[1],
+                    "{m}x{n}: singular values not in descending order: {got:?}"
+                );
+            }
+            assert!(
+                got.iter().all(|s| *s >= 0.0),
+                "{m}x{n}: singular values must be non-negative: {got:?}"
+            );
+            let scale = want.iter().fold(1.0_f64, |acc, v| acc.max(v.abs()));
+            for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+                let rel = (g - w).abs() / scale;
+                worst = worst.max(rel);
+                assert!(
+                    rel <= 1e-10,
+                    "{m}x{n}{}: sigma[{i}] = {g:?} where numpy gives {w:?} (rel {rel:e})",
+                    if deficient { " rank-deficient" } else { "" }
+                );
+            }
+            if deficient {
+                let smallest = *got.last().expect("non-empty");
+                assert!(
+                    smallest <= 1e-10 * scale,
+                    "{m}x{n} has a duplicated row so it is exactly rank-deficient, but the \
+                     smallest singular value came back {smallest:e} — a solver that \
+                     regularises instead of reporting the null direction would look like \
+                     this"
+                );
+            }
+        }
+        println!("svd_mxn worst relative deviation from numpy: {worst:e}");
+    }
+
+    #[test]
     fn svd_2x2_reconstructs_and_orders_singular_values() {
         let matrix = [[3.0, 1.0], [1.0, 3.0]];
         let out = svd_2x2(matrix, true).expect("svd");
