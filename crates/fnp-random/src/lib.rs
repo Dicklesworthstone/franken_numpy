@@ -16723,6 +16723,107 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn gamma_beta_parameter_sweep_matches_live_numpy_oracle_bit_for_bit() -> Result<(), &'static str>
+    {
+        // Distributions branch on their PARAMETERS, and a fixed-parameter oracle test sits
+        // on one side of the branch forever. numpy's gamma switches algorithm at shape 1.0
+        // (distributions.c: a rejection scheme below, Marsaglia-Tsang at or above) and our
+        // implementation mirrors that split; beta drops to Johnk for small a/b. The
+        // existing live-oracle tests use gamma(2.0, 3.0) and beta at fixed shapes, so the
+        // sub-1 gamma branch and the boundary itself were never compared against numpy
+        // through the top-level entry points.
+        //
+        // Compared BIT-FOR-BIT rather than at the suite's usual 1e-12: the contract for
+        // PCG64DXSM parity is bit-exactness, and a tolerance would hide a stream that has
+        // diverged into a different-but-plausible sequence.
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+        const GAMMA_SHAPES: [f64; 9] = [
+            0.1,
+            0.5,
+            0.75,
+            0.999_999_999,
+            1.0,
+            1.000_000_001,
+            1.5,
+            2.0,
+            7.5,
+        ];
+        const BETA_PAIRS: [(f64, f64); 6] = [
+            (0.3, 0.4),
+            (0.5, 0.75),
+            (0.9, 1.1),
+            (1.0, 1.0),
+            (2.0, 5.0),
+            (7.5, 0.25),
+        ];
+        let gamma_args = GAMMA_SHAPES
+            .iter()
+            .map(|s| format!("{s:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let beta_args = BETA_PAIRS
+            .iter()
+            .map(|(a, b)| format!("({a:?}, {b:?})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let script = format!(
+            r#"
+import numpy as np
+out = []
+for shape in [{gamma_args}]:
+    rng = np.random.Generator(np.random.PCG64DXSM(12345))
+    v = rng.gamma(shape, 2.5, size=8)
+    out.append(",".join(repr(float(x)) for x in v.tolist()))
+for a, b in [{beta_args}]:
+    rng = np.random.Generator(np.random.PCG64DXSM(12345))
+    v = rng.beta(a, b, size=8)
+    out.append(",".join(repr(float(x)) for x in v.tolist()))
+print("\n".join(out))
+"#
+        );
+        let output = numpy_oracle_stdout_from_stdin(&script, &[])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let rows: Vec<&str> = stdout.trim().lines().collect();
+        assert_eq!(
+            rows.len(),
+            GAMMA_SHAPES.len() + BETA_PAIRS.len(),
+            "oracle row count"
+        );
+
+        for (i, &shape) in GAMMA_SHAPES.iter().enumerate() {
+            let expected = parse_oracle_f64_csv(rows[i])?;
+            let mut g = oracle_gen();
+            let actual = g.gamma(shape, 2.5, 8).map_err(|_| "gamma sweep")?;
+            assert_eq!(actual.len(), expected.len(), "gamma({shape}) length");
+            for (j, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+                assert_eq!(
+                    a.to_bits(),
+                    e.to_bits(),
+                    "gamma(shape={shape}, scale=2.5)[{j}]: got {a:?} want {e:?} — the \
+                     shape<1 and shape>=1 arms take different algorithms, so a divergence \
+                     here is an arm, not noise"
+                );
+            }
+        }
+        for (i, &(a_par, b_par)) in BETA_PAIRS.iter().enumerate() {
+            let expected = parse_oracle_f64_csv(rows[GAMMA_SHAPES.len() + i])?;
+            let mut g = oracle_gen();
+            let actual = g.beta(a_par, b_par, 8).map_err(|_| "beta sweep")?;
+            assert_eq!(actual.len(), expected.len(), "beta({a_par},{b_par}) length");
+            for (j, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+                assert_eq!(
+                    a.to_bits(),
+                    e.to_bits(),
+                    "beta(a={a_par}, b={b_par})[{j}]: got {a:?} want {e:?}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn gamma_matches_live_numpy_oracle() -> Result<(), &'static str> {
         if !numpy_oracle_available() {
             return Ok(());
