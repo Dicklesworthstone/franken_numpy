@@ -1,6 +1,21 @@
 //! Conformance tests for numpy index conversion and unique_* functions against NumPy oracle.
 //!
 //! Tests unravel_index, ravel_multi_index, unique_all, unique_counts, unique_inverse, unique_values.
+//!
+//! RUNTIME: this shard does NOT finish inside a 120s budget (measured 2026-08-09). At least
+//! four tests each run over a minute:
+//!   add_at_i64_large_target_parallel_matches_numpy
+//!   int_sort_class_stale_basis_probe_and_parity
+//!   setops_nd_flat_view_matches_numpy
+//!   unique_nd_flat_view_matches_numpy
+//! Their array sizes are LOAD-BEARING — they exist to cross the native parallel dispatch
+//! gates, so shrinking them would move the probe onto the serial path and stop it testing
+//! what it exists to test.
+//!
+//! Under a time cap, run this shard alone with a longer budget, and CHECK THAT THE BINARY
+//! REPORTED: a cap kills it mid-execution and no `test result:` line is printed for it,
+//! which reads exactly like a pass if you are only grepping for failures. Tracked by
+//! deadlock-audit-syi8e.
 
 use std::process::Command;
 

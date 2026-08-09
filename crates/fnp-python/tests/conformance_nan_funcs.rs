@@ -2,6 +2,18 @@
 //!
 //! Tests nansum, nanmean, nanstd, nanvar, nanmin, nanmax, nanargmin, nanargmax,
 //! nanprod, nancumsum, nancumprod, nanmedian, nanpercentile, nanquantile.
+//!
+//! RUNTIME: this shard does NOT finish inside a 120s budget. Measured 2026-08-09:
+//! `--skip flat_multi_quantile_and_weighted_average` runs the other 41 tests in
+//! **9.03s**, so the whole cost is `flat_multi_quantile_and_weighted_average_track_numpy`
+//! alone (>110s). That test builds two 8M-element arrays, a 2896x2896 matrix and a
+//! 64x512x256 tensor; its sizes are LOAD-BEARING because they cross the native parallel
+//! dispatch gates, so it cannot simply be shrunk without moving onto the serial path.
+//!
+//! If you are running this under a time cap, run it alone with a longer budget, or skip
+//! that one test — and CHECK THAT THE BINARY REPORTED. A cap kills a shard mid-execution
+//! and the run then prints no `test result:` line for it at all, which reads exactly like
+//! a pass if you are only grepping for failures. Tracked by deadlock-audit-syi8e.
 
 use std::process::Command;
 

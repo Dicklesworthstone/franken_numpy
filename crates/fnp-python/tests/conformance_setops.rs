@@ -10,6 +10,19 @@
 //! Strict comparison and SHOULD-tier kwargs (`assume_unique`,
 //! `return_indices`, `return_inverse`) that are most prone to silently
 //! drop if a wrapper drifts from numpy's signature.
+//!
+//! RUNTIME: this shard does NOT finish inside a 120s budget (measured 2026-08-09). At
+//! least three tests each run over a minute:
+//!   unique_and_sort_string_packed_latin1_large_matches_numpy
+//!   unique_full_string_packed_latin1_large_matches_numpy
+//!   unique_packed_wide_latin1_u9_u16_matches_numpy
+//! Their sizes are LOAD-BEARING — the packed-latin1 wide-key paths only engage above the
+//! native dispatch gates, so a smaller input would silently test a different route.
+//!
+//! Under a time cap, run this shard alone with a longer budget, and CHECK THAT THE BINARY
+//! REPORTED: a cap kills it mid-execution and no `test result:` line is printed for it,
+//! which reads exactly like a pass if you are only grepping for failures. Tracked by
+//! deadlock-audit-syi8e.
 
 mod common;
 
