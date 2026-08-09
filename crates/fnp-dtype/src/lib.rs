@@ -2521,6 +2521,102 @@ mod tests {
     }
 
     #[test]
+    fn promotion_table_matches_numpy_for_every_dtype_pair() {
+        // The promotion table is called a non-negotiable compatibility contract in
+        // AGENTS.md, and until now this crate had no numpy oracle at all — every promotion
+        // test here checks internal properties (transitivity, idempotence) or a handful of
+        // hand-written pairs. Those cannot catch a table that is self-consistent and
+        // uniformly wrong, which is exactly what a hand-built promotion matrix risks.
+        //
+        // This compares ALL 14 x 14 pairs against np.promote_types. numpy's own answer is
+        // the contract, so no interpretation is involved.
+        use std::process::Command;
+        let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string());
+        if !Command::new(&python)
+            .args(["-c", "import numpy"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        // numpy spelling for each DType we promote over.
+        let names: [(DType, &str); 14] = [
+            (DType::Bool, "bool"),
+            (DType::I8, "int8"),
+            (DType::I16, "int16"),
+            (DType::I32, "int32"),
+            (DType::I64, "int64"),
+            (DType::U8, "uint8"),
+            (DType::U16, "uint16"),
+            (DType::U32, "uint32"),
+            (DType::U64, "uint64"),
+            (DType::F16, "float16"),
+            (DType::F32, "float32"),
+            (DType::F64, "float64"),
+            (DType::Complex64, "complex64"),
+            (DType::Complex128, "complex128"),
+        ];
+        let list = names
+            .iter()
+            .map(|(_, n)| format!("'{n}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let script = format!(
+            r#"
+import numpy as np
+names = [{list}]
+rows = []
+for a in names:
+    for b in names:
+        rows.append(a + "," + b + "," + np.promote_types(a, b).name)
+print("\n".join(rows))
+"#
+        );
+        let out = Command::new(&python)
+            .args(["-c", &script])
+            .output()
+            .expect("numpy promote_types oracle should run");
+        assert!(
+            out.status.success(),
+            "oracle failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).expect("utf-8");
+        let rows: Vec<&str> = stdout.trim().lines().collect();
+        assert_eq!(rows.len(), 14 * 14, "oracle should return every pair");
+
+        let lookup = |name: &str| -> DType {
+            names
+                .iter()
+                .find(|(_, n)| *n == name)
+                .unwrap_or_else(|| panic!("numpy returned dtype {name} which we do not model"))
+                .0
+        };
+        let mut failures: Vec<String> = Vec::new();
+        for row in rows {
+            let parts: Vec<&str> = row.split(',').collect();
+            assert_eq!(parts.len(), 3, "oracle row should be a,b,result");
+            let (a, b) = (lookup(parts[0]), lookup(parts[1]));
+            let want = lookup(parts[2]);
+            let got = promote(a, b);
+            if got != want {
+                failures.push(format!(
+                    "  promote({}, {}) = {got:?}, numpy says {want:?}",
+                    parts[0], parts[1]
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of {} dtype pairs disagree with numpy:\n{}",
+            failures.len(),
+            14 * 14,
+            failures.join("\n")
+        );
+    }
+
+    #[test]
     fn promotion_is_transitive_over_scoped_matrix() {
         let dtypes = all_numeric_dtypes();
 
