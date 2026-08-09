@@ -60931,6 +60931,72 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn polynomial_family_ops_on_empty_input_diverge_from_numpy_pending_fb171() {
+        // KNOWN DIVERGENCE, tracked as deadlock-audit-fb171. numpy's as_series raises
+        // ValueError("Coefficient array is empty") before any arithmetic, so every one of
+        // these calls is an exception on the numpy side. These kernels return Vec<f64> and
+        // have no channel to signal that, so they fall through to a value.
+        //
+        // This is NOT reachable from the Python surface today: all 15 bindings in
+        // fnp-python are numpy passthroughs, so users get numpy's own ValueError. The risk
+        // it guards is a FUTURE native wiring inheriting the divergence silently - exactly
+        // what happened to hermeder/hermeint before deadlock-audit-mlz0s, where the
+        // remedy was to make the Python layer defer on empty input so numpy still raises.
+        //
+        // Pinning the current behaviour here means changing it is a deliberate, visible
+        // edit rather than a silent one, and gives whoever closes fb171 the full list of
+        // shapes their fallible signatures have to cover.
+        let addsub: [(
+            &str,
+            fn(&[f64], &[f64]) -> Vec<f64>,
+            fn(&[f64], &[f64]) -> Vec<f64>,
+        ); 5] = [
+            ("cheb", chebadd, chebsub),
+            ("leg", legadd, legsub),
+            ("herm", hermadd, hermsub),
+            ("herme", hermeadd, hermesub),
+            ("lag", lagadd, lagsub),
+        ];
+        for (name, add, sub) in addsub {
+            // numpy: ValueError. Ours: the non-empty operand passes through.
+            poly_close_vec(
+                &add(&[], &[1.0, 2.0]),
+                &[1.0, 2.0],
+                &format!("{name}add empty lhs"),
+            );
+            poly_close_vec(
+                &sub(&[], &[1.0, 2.0]),
+                &[-1.0, -2.0],
+                &format!("{name}sub empty lhs negates rhs"),
+            );
+            // numpy: ValueError. Ours: an empty result, which trim_polynomial_seq keeps
+            // empty rather than promoting to [0.0].
+            assert!(
+                add(&[], &[]).is_empty(),
+                "{name}add of two empty series is empty here; numpy raises"
+            );
+        }
+        let muls: [(&str, fn(&[f64], &[f64]) -> Vec<f64>); 5] = [
+            ("cheb", chebmul),
+            ("leg", legmul),
+            ("herm", hermmul),
+            ("herme", hermemul),
+            ("lag", lagmul),
+        ];
+        for (name, mul) in muls {
+            // numpy: ValueError. Ours: the explicit empty guard at the top of each mul.
+            assert!(
+                mul(&[], &[1.0, 2.0]).is_empty(),
+                "{name}mul with an empty operand is empty here; numpy raises"
+            );
+            assert!(
+                mul(&[1.0, 2.0], &[]).is_empty(),
+                "{name}mul with an empty kernel is empty here; numpy raises"
+            );
+        }
+    }
+
+    #[test]
     fn polynomial_add_sub_mul_trim_trailing_zeros_like_numpy() {
         // Every numpy.polynomial add/sub/mul returns a TRIMMED series (polyutils.trimseq),
         // so the result's length is part of the contract, not an artifact of how the
