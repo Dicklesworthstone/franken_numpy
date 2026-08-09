@@ -105048,6 +105048,19 @@ fn int_convolve_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
         }
         _ => return Ok(None),
     };
+    // numpy computes correlate with the LONGER operand leading and reverts the result.
+    // The full convolution is commutative, so the values are unaffected and only the trim
+    // offset moves: the reversed window taken at `k_start` from the reversed full result
+    // is the same forward window taken at `full_len - out_len - k_start` from ours. That
+    // is a no-op whenever `full_len - out_len` is even, which covers 'full' (0), 'valid'
+    // (always even), and 'same' with the operands the usual way round -- and shifts by one
+    // exactly in the 'same' + longer-v case, where fnp-ufunc had the same defect
+    // (fixed in d28b0372).
+    let k_start = if is_correlate && m > n {
+        full_len - out_len - k_start
+    } else {
+        k_start
+    };
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", dtype_name)?;
     let flat = numpy.call_method("empty", (out_len,), Some(&kwargs))?;
@@ -105283,12 +105296,11 @@ fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult
         return fallback();
     }
 
-    // Fall back to NumPy for mode="same" when kernel is longer than input,
-    // since the "same" mode centering has complex edge-case semantics that
-    // differ from convolve(a, v[::-1], mode="same").
-    if mode == "same" && v_arr.shape()[0] > a_arr.shape()[0] {
-        return fallback();
-    }
+    // (A deferral used to sit here for mode="same" with a kernel longer than the input.
+    // It was papering over a real defect in correlate_mode, which implemented
+    // correlate(a,v) == convolve(a, v[::-1]) -- an identity that only holds while `a` is
+    // the longer operand. Fixed in fnp-ufunc d28b0372, so the native path serves this
+    // shape correctly now and the deferral is gone.)
 
     // numpy promotes correlate's result to `result_type(a, v)`; our native kernel
     // canonicalises to f64, so defer any non-f64 result dtype (float32/float16) to
@@ -148673,6 +148685,107 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             let ok_c: bool = allclose.call1((&ours_c, &theirs_c))?.extract()?;
             assert!(ok_c, "svdvals complex mismatch");
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn correlate_matches_numpy_when_the_kernel_is_longer_than_the_input() {
+        // correlate is not commutative: numpy computes it with the LONGER operand leading
+        // and reverts the result, so 'same' trims one element off the other end than the
+        // convolve(a, v[::-1]) identity gives. fnp-ufunc carried that defect (fixed in
+        // d28b0372); this crate had TWO consequences - the f64 binding deferred to numpy
+        // to dodge it, and the integer kernel reproduced it with no guard at all.
+        //
+        // The integer case only reaches the native kernel above INT_CONV_MIN_WORK
+        // (len(a)*len(v) >= 1<<16) with >= 2 rayon threads, which is why no small-array
+        // test ever caught it: the sizes below are chosen to clear that gate.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_correlate_longer_kernel")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let array_equal = numpy.getattr("array_equal")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // f64, kernel longer, every mode - now served natively rather than deferred.
+            let a = numpy.call_method1("array", (vec![1.0_f64, 2.0],))?;
+            let v = numpy.call_method1("array", (vec![0.5_f64, 1.0, -1.0, 2.0, 3.0],))?;
+            for mode in ["full", "same", "valid"] {
+                let ours = module
+                    .getattr("correlate")?
+                    .call((a.clone(), v.clone(), mode), None)?;
+                let kw = PyDict::new(py);
+                kw.set_item("mode", mode)?;
+                let theirs = numpy
+                    .getattr("correlate")?
+                    .call((a.clone(), v.clone()), Some(&kw))?;
+                assert_eq!(
+                    ours.getattr("shape")?.extract::<Vec<usize>>()?,
+                    theirs.getattr("shape")?.extract::<Vec<usize>>()?,
+                    "correlate f64 {mode} with a longer kernel: shape"
+                );
+                let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+                assert!(
+                    ok,
+                    "correlate f64 {mode} with a longer kernel: {} vs numpy {}",
+                    repr_string(&ours),
+                    repr_string(&theirs)
+                );
+            }
+
+            // int64 above the work gate, kernel longer. 100 * 1000 = 100000 >= 1<<16.
+            let ai: Vec<i64> = (0..100_i64).map(|i| (i % 7) - 3).collect();
+            let vi: Vec<i64> = (0..1000_i64).map(|i| (i % 11) - 5).collect();
+            let a_i = numpy.call_method1("array", (ai,))?;
+            let v_i = numpy.call_method1("array", (vi,))?;
+            for mode in ["full", "same", "valid"] {
+                let ours = module
+                    .getattr("correlate")?
+                    .call((a_i.clone(), v_i.clone(), mode), None)?;
+                let kw = PyDict::new(py);
+                kw.set_item("mode", mode)?;
+                let theirs = numpy
+                    .getattr("correlate")?
+                    .call((a_i.clone(), v_i.clone()), Some(&kw))?;
+                let eq: bool = array_equal.call1((&ours, &theirs))?.extract()?;
+                assert!(
+                    eq,
+                    "correlate int64 {mode} with a longer kernel diverges from numpy"
+                );
+            }
+            // The mirrored orientation must stay right too, so the fix cannot have simply
+            // moved the defect to the other side.
+            for mode in ["full", "same", "valid"] {
+                let ours = module
+                    .getattr("correlate")?
+                    .call((v_i.clone(), a_i.clone(), mode), None)?;
+                let kw = PyDict::new(py);
+                kw.set_item("mode", mode)?;
+                let theirs = numpy
+                    .getattr("correlate")?
+                    .call((v_i.clone(), a_i.clone()), Some(&kw))?;
+                let eq: bool = array_equal.call1((&ours, &theirs))?.extract()?;
+                assert!(
+                    eq,
+                    "correlate int64 {mode} with a longer INPUT diverges from numpy"
+                );
+            }
+            // convolve is commutative, so it must agree in both orientations regardless.
+            for mode in ["full", "same", "valid"] {
+                let ours = module
+                    .getattr("convolve")?
+                    .call((a_i.clone(), v_i.clone(), mode), None)?;
+                let kw = PyDict::new(py);
+                kw.set_item("mode", mode)?;
+                let theirs = numpy
+                    .getattr("convolve")?
+                    .call((a_i.clone(), v_i.clone()), Some(&kw))?;
+                let eq: bool = array_equal.call1((&ours, &theirs))?.extract()?;
+                assert!(eq, "convolve int64 {mode} with a longer kernel diverges");
+            }
             Ok(())
         });
     }
