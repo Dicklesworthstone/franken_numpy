@@ -292,7 +292,10 @@ def out_outcome(module, name, positional=False, bad_shape=False):
             result = fn(x, out=out)
         return ("ok", result is out, out.dtype.str, tuple(out.shape), out.tolist())
     except Exception as exc:
-        return ("err", type(exc).__name__, str(exc).splitlines()[0])
+        # Exception TYPE only: numpy rewords its messages between releases and the
+        # supported floor spans several, so pinning text would make this shard version
+        # dependent for no parity gain.
+        return ("err", type(exc).__name__)
 
 cases = [
     ("floor keyword out", "floor", False, False),
@@ -313,7 +316,10 @@ ok = True
 for label, name, positional, bad_shape in cases:
     actual = out_outcome(fnp, name, positional, bad_shape)
     expected = out_outcome(np, name, positional, bad_shape)
-    if actual[0] != expected[0] or actual[1] != expected[1]:
+    # Compare the WHOLE outcome, not just the ok/err tag and the aliasing flag. The
+    # values written into `out` are the mutation half of this contract: a wrapper that
+    # returned the right object while filling it with the wrong numbers used to pass.
+    if actual != expected:
         print(label)
         print(actual)
         print(expected)
