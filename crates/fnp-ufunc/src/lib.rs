@@ -61076,6 +61076,167 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn percentile_nearest_breaks_halfway_ties_to_even_like_numpy() {
+        // 'nearest' resolves a virtual index landing exactly halfway by numpy's
+        // round-half-to-EVEN rule, so the winner alternates with the parity of the lower
+        // index. percentile_methods_match_numpy_golden already pins one tie of each parity
+        // (q=25 -> lo=1, q=75 -> lo=4 on n=7), so half-to-even is not itself unpinned;
+        // what is missing is a length where the ties RUN CONSECUTIVELY, which is what
+        // catches a parity computed off the wrong index (hi, or the sample position rather
+        // than lo). n=5 puts a tie at all four of these quantiles and alternates:
+        //   q=12.5 -> v=0.5, lo=0 even -> lo    q=37.5 -> v=1.5, lo=1 odd  -> hi
+        //   q=62.5 -> v=2.5, lo=2 even -> lo    q=87.5 -> v=3.5, lo=3 odd  -> hi
+        let a = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
+        let nearest_golden = [1.0, 3.0, 3.0, 5.0];
+        for (i, q) in [12.5_f64, 37.5, 62.5, 87.5].into_iter().enumerate() {
+            let got = a
+                .percentile_method(q, None, QuantileInterp::Nearest)
+                .unwrap()
+                .values()[0];
+            assert!(
+                poly_close(got, nearest_golden[i]),
+                "nearest q={q}: got {got} want {} (half-to-even tie)",
+                nearest_golden[i]
+            );
+        }
+        // The other four methods on the same ties, so a regression in the shared
+        // lo/hi/frac computation cannot hide behind 'nearest' alone.
+        for (method, golden) in [
+            (QuantileInterp::Linear, [1.5, 2.5, 3.5, 4.5]),
+            (QuantileInterp::Lower, [1.0, 2.0, 3.0, 4.0]),
+            (QuantileInterp::Higher, [2.0, 3.0, 4.0, 5.0]),
+            (QuantileInterp::Midpoint, [1.5, 2.5, 3.5, 4.5]),
+        ] {
+            for (i, q) in [12.5_f64, 37.5, 62.5, 87.5].into_iter().enumerate() {
+                let got = a.percentile_method(q, None, method).unwrap().values()[0];
+                assert!(
+                    poly_close(got, golden[i]),
+                    "{method:?} q={q}: got {got} want {}",
+                    golden[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn percentile_methods_match_numpy_on_even_length_and_endpoints() {
+        // The existing golden uses only the odd length 7. An even length puts the median
+        // between two samples, which is where 'lower'/'higher'/'nearest' stop agreeing.
+        let a = UFuncArray::new(
+            vec![8],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            DType::F64,
+        )
+        .unwrap();
+        let qs = [0.0_f64, 25.0, 40.0, 50.0, 75.0, 100.0];
+        for (method, golden) in [
+            (
+                QuantileInterp::Linear,
+                [1.0, 2.75, 3.800_000_000_000_000_3, 4.5, 6.25, 8.0],
+            ),
+            (QuantileInterp::Lower, [1.0, 2.0, 3.0, 4.0, 6.0, 8.0]),
+            (QuantileInterp::Higher, [1.0, 3.0, 4.0, 5.0, 7.0, 8.0]),
+            (QuantileInterp::Nearest, [1.0, 3.0, 4.0, 5.0, 6.0, 8.0]),
+            (QuantileInterp::Midpoint, [1.0, 2.5, 3.5, 4.5, 6.5, 8.0]),
+        ] {
+            for (i, q) in qs.into_iter().enumerate() {
+                let got = a.percentile_method(q, None, method).unwrap().values()[0];
+                assert!(
+                    poly_close(got, golden[i]),
+                    "{method:?} q={q} on n=8: got {got} want {}",
+                    golden[i]
+                );
+            }
+        }
+
+        // A single sample returns itself for every method and every quantile.
+        let one = UFuncArray::new(vec![1], vec![10.0], DType::F64).unwrap();
+        for method in [
+            QuantileInterp::Linear,
+            QuantileInterp::Lower,
+            QuantileInterp::Higher,
+            QuantileInterp::Nearest,
+            QuantileInterp::Midpoint,
+        ] {
+            for q in [0.0_f64, 50.0, 100.0] {
+                let got = one.percentile_method(q, None, method).unwrap().values()[0];
+                assert_eq!(got, 10.0, "{method:?} q={q} on n=1");
+            }
+        }
+    }
+
+    #[test]
+    fn percentile_midpoint_uses_numpy_lerp_not_the_naive_mean() {
+        // numpy's 'midpoint' is _lerp(a, b, 0.5) = b - (b - a)*0.5, NOT (a + b)/2. The two
+        // agree on ordinary inputs, so only a case where the naive mean OVERFLOWS can tell
+        // them apart: (1e308 + 1.5e308)/2 is +inf, while numpy returns a finite 1.25e308.
+        let a = UFuncArray::new(vec![2], vec![1e308, 1.5e308], DType::F64).unwrap();
+        let midpoint = a
+            .percentile_method(50.0, None, QuantileInterp::Midpoint)
+            .unwrap()
+            .values()[0];
+        assert!(
+            midpoint.is_finite(),
+            "midpoint overflowed to {midpoint:e}; numpy's lerp stays finite"
+        );
+        assert!(
+            poly_close(midpoint, 1.25e308),
+            "midpoint: got {midpoint:e} want 1.25e308"
+        );
+        // 'linear' at q=50 shares the t >= 0.5 branch and must stay finite too.
+        let linear = a
+            .percentile_method(50.0, None, QuantileInterp::Linear)
+            .unwrap()
+            .values()[0];
+        assert!(
+            poly_close(linear, 1.25e308),
+            "linear: got {linear:e} want 1.25e308"
+        );
+    }
+
+    #[test]
+    fn percentile_methods_agree_with_closed_form_on_the_parallel_path() {
+        // The method arm is written out THREE times - the serial reduce, the parallel
+        // reduce, and the radix-select path - so a fix applied to one copy can silently
+        // miss the others. Sorted values of a permutation of 0..n-1 are the index itself,
+        // which makes every method's answer a closed form the large-input paths must also
+        // produce.
+        const N: usize = 1 << 20;
+        // 2654435761 is odd, so multiplication modulo the power of two N is a bijection.
+        let values: Vec<f64> = (0..N)
+            .map(|i| ((i as u64).wrapping_mul(2_654_435_761) % N as u64) as f64)
+            .collect();
+        let a = UFuncArray::new(vec![N], values, DType::F64).unwrap();
+        for q in [0.0_f64, 12.5, 37.5, 50.0, 62.5, 99.0, 100.0] {
+            let v = q / 100.0 * (N - 1) as f64;
+            let lo = v.floor();
+            let frac = v - lo;
+            let hi = if frac > 0.0 { lo + 1.0 } else { lo };
+            let expect_nearest = if frac < 0.5 || (frac == 0.5 && (lo as u64) % 2 == 0) {
+                lo
+            } else {
+                hi
+            };
+            for (method, want) in [
+                (QuantileInterp::Linear, v),
+                (QuantileInterp::Lower, lo),
+                (QuantileInterp::Higher, hi),
+                (QuantileInterp::Nearest, expect_nearest),
+                (
+                    QuantileInterp::Midpoint,
+                    if frac > 0.0 { lo + 0.5 } else { lo },
+                ),
+            ] {
+                let got = a.percentile_method(q, None, method).unwrap().values()[0];
+                assert!(
+                    (got - want).abs() <= 1e-6,
+                    "{method:?} q={q} on n={N}: got {got} want {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn percentile_methods_match_numpy_golden() {
         // numpy.percentile([1..7], q, method=...) for q in [25,50,75,40] across the
         // five interpolation methods.
