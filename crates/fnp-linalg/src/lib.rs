@@ -12178,6 +12178,192 @@ mod tests {
     }
 
     #[test]
+    fn norm_and_rank_non_finite_semantics_verified_against_live_numpy() {
+        // Same audit finding as det_and_slogdet_non_finite_semantics_verified_against_
+        // live_numpy: vector_norm/matrix_norm/matrix_rank each have a
+        // *_matches_numpy_non_finite_semantics test that transcribes what numpy is
+        // believed to do rather than asking it. Every order is swept here against the
+        // live oracle, including the ones the hand-written tests skip.
+        if !numpy_oracle_available() {
+            return;
+        }
+        // NaN and inf are NameErrors in Python; only float('nan')/float('inf') survive.
+        let py = |v: f64| -> String {
+            if v.is_nan() {
+                "float('nan')".to_string()
+            } else if v.is_infinite() {
+                format!("float('{}inf')", if v < 0.0 { "-" } else { "" })
+            } else {
+                format!("{v:?}")
+            }
+        };
+        let join =
+            |vs: &[f64]| -> String { vs.iter().map(|&v| py(v)).collect::<Vec<_>>().join(", ") };
+        // An error on either side compares equal only to an error on the other; a value
+        // compares by NaN-ness then bit value. Encoding errors as a sentinel string keeps
+        // "we raised, numpy returned a number" from passing.
+        let oracle = |script: String| -> String {
+            let out = Command::new(oracle_python_bin())
+                .args(["-c", &script])
+                .output()
+                .expect("numpy norm/rank oracle should run");
+            assert!(
+                out.status.success(),
+                "oracle failed:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout)
+                .expect("utf-8")
+                .trim()
+                .to_string()
+        };
+        // Compare parsed values, not formatted text: Rust's {:e} writes 3e0 where Python's
+        // %e writes 3.000000000000e+00, and a string comparison reports all fifteen of
+        // those as divergences. Python's repr round-trips, and Rust parses nan/inf/-inf.
+        let agrees = |r: &Result<f64, LinAlgError>, want: &str| -> bool {
+            match r {
+                Err(_) => want == "ERROR",
+                Ok(v) => match want.parse::<f64>() {
+                    Ok(w) => (v.is_nan() && w.is_nan()) || *v == w,
+                    Err(_) => false,
+                },
+            }
+        };
+        let render = |r: &Result<f64, LinAlgError>| -> String {
+            match r {
+                Ok(v) => format!("{v:?}"),
+                Err(_) => "ERROR".to_string(),
+            }
+        };
+        let mut failures: Vec<String> = Vec::new();
+
+        let vectors: [(&str, [f64; 3]); 5] = [
+            ("nan_first", [f64::NAN, 1.0, 2.0]),
+            ("nan_last", [1.0, 2.0, f64::NAN]),
+            ("inf", [f64::INFINITY, 1.0, 2.0]),
+            ("neg_inf", [f64::NEG_INFINITY, 1.0, 2.0]),
+            ("inf_and_nan", [f64::INFINITY, f64::NAN, 2.0]),
+        ];
+        let vec_orders: [(&str, Option<VectorNormOrder>); 6] = [
+            ("None", None),
+            ("0", Some(VectorNormOrder::Zero)),
+            ("1", Some(VectorNormOrder::One)),
+            ("2", Some(VectorNormOrder::Two)),
+            ("inf", Some(VectorNormOrder::Inf)),
+            ("-inf", Some(VectorNormOrder::NegInf)),
+        ];
+        for (vlabel, v) in vectors {
+            for (olabel, ord) in vec_orders {
+                let ord_expr = match olabel {
+                    "None" => "None".to_string(),
+                    "inf" => "float('inf')".to_string(),
+                    "-inf" => "float('-inf')".to_string(),
+                    other => other.to_string(),
+                };
+                let want = oracle(format!(
+                    "import numpy as np\n\
+                     np.seterr(all='ignore')\n\
+                     v = np.array([{}], dtype=float)\n\
+                     try:\n\
+                     \x20   print(repr(float(np.linalg.norm(v, {ord_expr}))))\n\
+                     except Exception:\n\
+                     \x20   print('ERROR')\n",
+                    join(&v)
+                ));
+                let got = vector_norm(&v, ord);
+                if !agrees(&got, &want) {
+                    failures.push(format!(
+                        "  vector_norm {vlabel} ord={olabel}: {} vs numpy {want}",
+                        render(&got)
+                    ));
+                }
+            }
+        }
+
+        let matrices: [(&str, [f64; 4]); 4] = [
+            ("nan_diag", [f64::NAN, 1.0, 2.0, 3.0]),
+            ("nan_offdiag", [1.0, f64::NAN, 2.0, 3.0]),
+            ("inf_diag", [f64::INFINITY, 1.0, 2.0, 3.0]),
+            ("neg_inf_offdiag", [1.0, f64::NEG_INFINITY, 2.0, 3.0]),
+        ];
+        let mat_orders: [(&str, &str, Option<MatrixNormOrder>); 8] = [
+            ("fro", "'fro'", Some(MatrixNormOrder::Fro)),
+            ("1", "1", Some(MatrixNormOrder::One)),
+            ("-1", "-1", Some(MatrixNormOrder::NegOne)),
+            ("inf", "float('inf')", Some(MatrixNormOrder::Inf)),
+            ("-inf", "float('-inf')", Some(MatrixNormOrder::NegInf)),
+            ("2", "2", Some(MatrixNormOrder::Two)),
+            ("-2", "-2", Some(MatrixNormOrder::NegTwo)),
+            ("nuc", "'nuc'", Some(MatrixNormOrder::Nuclear)),
+        ];
+        for (mlabel, flat) in matrices {
+            for (olabel, ord_expr, ord) in mat_orders {
+                let want = oracle(format!(
+                    "import numpy as np\n\
+                     np.seterr(all='ignore')\n\
+                     a = np.array([{}], dtype=float).reshape(2, 2)\n\
+                     try:\n\
+                     \x20   print(repr(float(np.linalg.norm(a, {ord_expr}))))\n\
+                     except Exception:\n\
+                     \x20   print('ERROR')\n",
+                    join(&flat)
+                ));
+                let matrix = [[flat[0], flat[1]], [flat[2], flat[3]]];
+                let got = matrix_norm_2x2(matrix, ord);
+                if !agrees(&got, &want) {
+                    failures.push(format!(
+                        "  matrix_norm_2x2 {mlabel} ord={olabel}: {} vs numpy {want}",
+                        render(&got)
+                    ));
+                }
+                let got_nxn = matrix_norm_nxn(&flat, 2, 2, olabel);
+                if !agrees(&got_nxn, &want) {
+                    failures.push(format!(
+                        "  matrix_norm_nxn {mlabel} ord={olabel}: {} vs numpy {want}",
+                        render(&got_nxn)
+                    ));
+                }
+            }
+        }
+
+        for (mlabel, flat) in matrices {
+            let want = oracle(format!(
+                "import numpy as np\n\
+                 np.seterr(all='ignore')\n\
+                 a = np.array([{}], dtype=float).reshape(2, 2)\n\
+                 try:\n\
+                 \x20   print(int(np.linalg.matrix_rank(a)))\n\
+                 except Exception:\n\
+                 \x20   print('ERROR')\n",
+                join(&flat)
+            ));
+            let got = match matrix_rank_2x2([[flat[0], flat[1]], [flat[2], flat[3]]], 1e-12) {
+                Ok(r) => r.to_string(),
+                Err(_) => "ERROR".to_string(),
+            };
+            if got != want {
+                failures.push(format!("  matrix_rank_2x2 {mlabel}: {got} vs numpy {want}"));
+            }
+            let got_nxn = match matrix_rank_nxn(&flat, 2, 1e-12) {
+                Ok(r) => r.to_string(),
+                Err(_) => "ERROR".to_string(),
+            };
+            if got_nxn != want {
+                failures.push(format!(
+                    "  matrix_rank_nxn {mlabel}: {got_nxn} vs numpy {want}"
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} non-finite norm/rank case(s) diverge from numpy:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
     fn vector_norm_matches_numpy_non_finite_semantics() {
         assert!(
             vector_norm(&[f64::NAN, 1.0], None)
