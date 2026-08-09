@@ -16766,6 +16766,116 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn composed_distribution_sweep_matches_live_numpy_oracle_bit_for_bit()
+    -> Result<(), &'static str> {
+        // standard_t and f turned out to diverge purely on EXPRESSION SHAPE — same draws,
+        // same maths, different rounding — which a tolerance would have hidden. That is a
+        // class, not two one-offs: every distribution built by composing draws with
+        // arithmetic is exposed to it. This sweeps the rest of that class bit-for-bit.
+        //
+        // Watch particularly for expm1/log1p used where numpy writes exp(x) - 1 or
+        // 1 - exp(x): the library forms are MORE accurate, which is exactly why
+        // substituting them silently breaks bit-exact parity.
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+        let script = r#"
+import numpy as np
+out = []
+def emit(name, fn):
+    rng = np.random.Generator(np.random.PCG64DXSM(12345))
+    out.append(name + "|" + ",".join(repr(float(x)) for x in fn(rng).tolist()))
+emit("rayleigh(2.5)",      lambda r: r.rayleigh(2.5, size=20))
+emit("power(0.5)",         lambda r: r.power(0.5, size=20))
+emit("power(3.0)",         lambda r: r.power(3.0, size=20))
+emit("pareto(0.75)",       lambda r: r.pareto(0.75, size=20))
+emit("pareto(4.0)",        lambda r: r.pareto(4.0, size=20))
+emit("weibull(1.5)",       lambda r: r.weibull(1.5, size=20))
+emit("lognormal(0.5,1.25)",lambda r: r.lognormal(0.5, 1.25, size=20))
+emit("gumbel(1.0,2.0)",    lambda r: r.gumbel(1.0, 2.0, size=20))
+emit("laplace(0.5,1.5)",   lambda r: r.laplace(0.5, 1.5, size=20))
+emit("logistic(0.5,1.5)",  lambda r: r.logistic(0.5, 1.5, size=20))
+print("\n".join(out))
+"#;
+        let output = numpy_oracle_stdout_from_stdin(script, &[])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut expected: std::collections::BTreeMap<&str, Vec<f64>> =
+            std::collections::BTreeMap::new();
+        for line in stdout.trim().lines() {
+            let (name, csv) = line
+                .split_once('|')
+                .ok_or("oracle row should be name|csv")?;
+            expected.insert(name, parse_oracle_f64_csv(csv)?);
+        }
+        assert_eq!(expected.len(), 10, "oracle should return ten rows");
+
+        let mut failures: Vec<String> = Vec::new();
+        let mut check = |name: &str, actual: Vec<f64>| {
+            let want = &expected[name];
+            let mismatch = actual.len() != want.len()
+                || actual
+                    .iter()
+                    .zip(want.iter())
+                    .any(|(a, e)| a.to_bits() != e.to_bits());
+            if mismatch {
+                let first = actual
+                    .iter()
+                    .zip(want.iter())
+                    .position(|(a, e)| a.to_bits() != e.to_bits());
+                failures.push(format!(
+                    "  {name}: first differing index {first:?}\n    ours  {:?}\n    numpy {:?}",
+                    &actual[..actual.len().min(4)],
+                    &want[..want.len().min(4)]
+                ));
+            }
+        };
+
+        let mut g = oracle_gen();
+        check(
+            "rayleigh(2.5)",
+            g.rayleigh(2.5, 20).map_err(|_| "rayleigh")?,
+        );
+        let mut g = oracle_gen();
+        check("power(0.5)", g.power(0.5, 20).map_err(|_| "power")?);
+        let mut g = oracle_gen();
+        check("power(3.0)", g.power(3.0, 20).map_err(|_| "power")?);
+        let mut g = oracle_gen();
+        check("pareto(0.75)", g.pareto(0.75, 20).map_err(|_| "pareto")?);
+        let mut g = oracle_gen();
+        check("pareto(4.0)", g.pareto(4.0, 20).map_err(|_| "pareto")?);
+        let mut g = oracle_gen();
+        check("weibull(1.5)", g.weibull(1.5, 20).map_err(|_| "weibull")?);
+        let mut g = oracle_gen();
+        check(
+            "lognormal(0.5,1.25)",
+            g.lognormal(0.5, 1.25, 20).map_err(|_| "lognormal")?,
+        );
+        let mut g = oracle_gen();
+        check(
+            "gumbel(1.0,2.0)",
+            g.gumbel(1.0, 2.0, 20).map_err(|_| "gumbel")?,
+        );
+        let mut g = oracle_gen();
+        check(
+            "laplace(0.5,1.5)",
+            g.laplace(0.5, 1.5, 20).map_err(|_| "laplace")?,
+        );
+        let mut g = oracle_gen();
+        check(
+            "logistic(0.5,1.5)",
+            g.logistic(0.5, 1.5, 20).map_err(|_| "logistic")?,
+        );
+
+        assert!(
+            failures.is_empty(),
+            "{} composed distribution(s) diverge from numpy bit-for-bit:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn chisquare_derived_boundary_sweep_matches_live_numpy_oracle() -> Result<(), &'static str> {
         // Final pass over jo22s: the distributions that inherit gamma's shape=1 arm split
         // through one or two levels, plus the noncentral pair's own arms. numpy:
