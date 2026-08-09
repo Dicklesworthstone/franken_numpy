@@ -67686,6 +67686,108 @@ print("\n".join(out))
     }
 
     #[test]
+    fn fft_matches_numpy_across_every_dispatch_path() {
+        // fft_metamorphic_laws_hold_across_every_dispatch_path checks Parseval, linearity,
+        // Hermitian symmetry, the DC bin and round-tripping. Every one of those holds for
+        // ANY correct DFT — they cannot distinguish our transform from numpy's, only from
+        // a broken one. A self-consistent implementation with, say, a transposed twiddle
+        // sign or a different normalisation convention would satisfy all of them.
+        //
+        // This compares against numpy.fft.fft itself, across the same three dispatch arms
+        // (n <= 1, fft_pow2 at both log2 parities, Bluestein).
+        if !numpy_oracle_available() {
+            return;
+        }
+        fn signal(n: usize, seed: u64) -> Vec<f64> {
+            (0..n)
+                .map(|i| {
+                    let h = (i as u64 + 1)
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(seed);
+                    ((h >> 11) as f64 / (1u64 << 53) as f64) * 8.0 - 4.0
+                })
+                .collect()
+        }
+        let lengths = [1usize, 2, 3, 5, 6, 7, 8, 9, 12, 15, 16, 17, 32, 64];
+        let cases: Vec<(usize, Vec<f64>)> = lengths.iter().map(|&n| (n, signal(n, 0xf7))).collect();
+        let arrays = cases
+            .iter()
+            .map(|(_, x)| {
+                format!(
+                    "[{}]",
+                    x.iter()
+                        .map(|v| format!("{v:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let script = format!(
+            r#"
+import numpy as np
+out = []
+for x in [{arrays}]:
+    z = np.fft.fft(np.array(x, dtype=float))
+    out.append(",".join(f"{{float(v.real)!r}}:{{float(v.imag)!r}}" for v in z))
+print("\n".join(out))
+"#
+        );
+        let output = Command::new(oracle_python_bin())
+            .args(["-c", &script])
+            .output()
+            .expect("numpy fft oracle should run");
+        assert!(
+            output.status.success(),
+            "numpy fft oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("oracle output should be UTF-8");
+        let rows: Vec<&str> = stdout.trim().lines().collect();
+        assert_eq!(rows.len(), cases.len(), "oracle row count");
+
+        let mut worst = 0.0_f64;
+        let mut worst_n = 0usize;
+        for ((n, x), row) in cases.iter().zip(rows.iter()) {
+            let want: Vec<(f64, f64)> = row
+                .split(',')
+                .map(|t| {
+                    let (re, im) = t.split_once(':').expect("re:im");
+                    (re.parse::<f64>().unwrap(), im.parse::<f64>().unwrap())
+                })
+                .collect();
+            let got = UFuncArray::new(vec![*n], x.clone(), DType::F64)
+                .unwrap()
+                .fft(None)
+                .unwrap();
+            assert_eq!(
+                want.len(),
+                *n,
+                "oracle returned {} bins for n={n}",
+                want.len()
+            );
+            assert_eq!(got.shape(), &[*n, 2], "n={n}: fft output shape");
+            // Scale by the largest bin: FFT round-off is proportional to magnitude.
+            let scale = want
+                .iter()
+                .fold(1.0_f64, |acc, (re, im)| acc.max(re.abs()).max(im.abs()));
+            for (k, (wr, wi)) in want.iter().enumerate() {
+                let (gr, gi) = (got.values[2 * k], got.values[2 * k + 1]);
+                let dev = ((gr - wr).powi(2) + (gi - wi).powi(2)).sqrt() / scale;
+                if dev > worst {
+                    worst = dev;
+                    worst_n = *n;
+                }
+                assert!(
+                    dev <= 1e-12,
+                    "n={n} bin {k}: got {gr:?}{gi:+?}i, numpy {wr:?}{wi:+?}i (rel {dev:e})"
+                );
+            }
+        }
+        println!("fft worst relative deviation from numpy: {worst:e} (at n={worst_n})");
+    }
+
+    #[test]
     fn fft_metamorphic_laws_hold_across_every_dispatch_path() {
         // fft_dit has three arms: the n <= 1 short circuit, fft_pow2 (radix-4, with a
         // leading radix-2 stage when log2(n) is odd), and Bluestein for everything else.
