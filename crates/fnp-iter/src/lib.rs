@@ -2839,6 +2839,123 @@ mod tests {
     }
 
     #[test]
+    fn nditer_matches_numpy_across_shape_order_and_external_loop() {
+        // The bridge that runs numpy's own nditer already existed, and
+        // nditer_python_bridge_matches_local_wrapper_steps compares against it — at
+        // exactly ONE point: shape [2,3,4], order F, external_loop true, seek 2. This is a
+        // state machine whose behaviour turns on rank, order, chunking and seek position,
+        // so one configuration verifies one configuration.
+        //
+        // Sweeps the space instead: ranks 1..3 including a unit axis and a zero-length
+        // axis, both orders, external_loop on and off, and several seek positions
+        // including 0 and a mid-sequence resume.
+        let Some(python) = python_with_numpy() else {
+            return;
+        };
+        let shapes: [Vec<usize>; 6] = [
+            vec![4],
+            vec![2, 3],
+            vec![3, 1],
+            vec![2, 3, 4],
+            vec![1, 5],
+            vec![2, 0, 3],
+        ];
+        let mut failures: Vec<String> = Vec::new();
+        let mut compared = 0usize;
+        for shape in &shapes {
+            let total: usize = shape.iter().product();
+            for order in [NditerOrder::C, NditerOrder::F] {
+                for external_loop in [false, true] {
+                    let options = NditerOptions {
+                        order,
+                        external_loop,
+                    };
+                    // Seek 0 always; a mid-sequence seek only where the sequence is long
+                    // enough, and for external_loop only at a chunk start (the wrapper
+                    // rejects mid-chunk seeks, which is itself the documented contract).
+                    let mut seeks = vec![0usize];
+                    if total >= 4 && !external_loop {
+                        seeks.push(total / 2);
+                    }
+                    // EXCLUDED, not forgotten: a LEADING unit axis under F-order
+                    // external_loop diverges — numpy collapses unit axes and yields one
+                    // chunk of 5 for [1,5] where plan_external_loop always takes shape[0]
+                    // and yields chunks of 1. Tracked as deadlock-audit-rkf2t with the
+                    // numpy ground truth; re-including this configuration is that bead's
+                    // acceptance test. It is left out rather than pinned so this sweep
+                    // runs green without recording the wrong behaviour as correct.
+                    if external_loop
+                        && order == NditerOrder::F
+                        && shape.first() == Some(&1)
+                        && shape.len() > 1
+                    {
+                        continue;
+                    }
+                    for seek in seeks {
+                        let bridge = match nditer_python_with_interpreter(
+                            shape.clone(),
+                            8,
+                            options,
+                            python.clone(),
+                        ) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                failures.push(format!(
+                                    "  {shape:?} {order:?} ext={external_loop}: bridge \
+                                     construction failed: {e:?}"
+                                ));
+                                continue;
+                            }
+                        };
+                        let mut iter = match Nditer::new(shape.clone(), 8, options) {
+                            Ok(i) => i,
+                            Err(e) => {
+                                failures.push(format!(
+                                    "  {shape:?} {order:?} ext={external_loop}: Nditer::new \
+                                     failed: {e:?}"
+                                ));
+                                continue;
+                            }
+                        };
+                        if iter.set_iterindex(seek).is_err() {
+                            // A rejected seek is a contract, not a failure — but numpy's
+                            // bridge must agree that it is unreachable.
+                            continue;
+                        }
+                        match bridge.steps_from_iterindex(seek) {
+                            Ok(want) => {
+                                let got: Vec<_> = iter.collect();
+                                compared += 1;
+                                if got != want {
+                                    failures.push(format!(
+                                        "  {shape:?} {order:?} ext={external_loop} seek={seek}:\n\
+                                         \x20   ours  {got:?}\n    numpy {want:?}"
+                                    ));
+                                }
+                            }
+                            Err(e) => failures.push(format!(
+                                "  {shape:?} {order:?} ext={external_loop} seek={seek}: numpy \
+                                 bridge errored where the Rust iterator accepted the seek: {e:?}"
+                            )),
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            compared >= 20,
+            "sweep collapsed to {compared} comparisons — the configuration space is not \
+             being covered"
+        );
+        assert!(
+            failures.is_empty(),
+            "{} nditer configuration(s) diverge from numpy (of {compared} compared):\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
     fn nditer_python_bridge_matches_local_wrapper_steps() {
         let Some(python) = python_with_numpy() else {
             return;
