@@ -82,6 +82,22 @@ elif case == "complex128":
     emit_npy(np.array([1 + 2j, -3 + 0.5j], dtype=np.dtype("<c16")))
 elif case == "u8_empty":
     emit_npy(np.array([], dtype=np.dtype("|u1")))
+elif case.startswith("version_"):
+    # numpy can be told which .npy format version to emit, which is the only
+    # practical way to obtain a 2.0/3.0 header: 2.0 otherwise requires a header
+    # over 65535 bytes and 3.0 requires utf8 field names.
+    import numpy.lib.format as fmt
+    major = int(case.split("_")[1])
+    arr = np.arange(6, dtype=np.dtype("<f8")).reshape(2, 3)
+    buf = io.BytesIO()
+    fmt.write_array(buf, arr, version=(major, 0), allow_pickle=False)
+    npy = buf.getvalue()
+    print("npy_hex=" + npy.hex())
+    print("payload_hex=" + raw_payload(npy).hex())
+    print("dtype=" + arr.dtype.str)
+    print("shape=" + ",".join(str(dim) for dim in arr.shape))
+    print("fortran=0")
+    print("values=" + ",".join(f"{float(v):.17g}" for v in arr.ravel()))
 elif case == "bool_mixed":
     emit_npy(np.array([True, False, True, True], dtype=np.dtype("|b1")))
 elif case == "i32_range":
@@ -407,6 +423,75 @@ fn numpy_generated_npy_payloads_parse_with_matching_headers_and_values() -> Resu
             .map_err(|err| format!("{case_id}: NumPy NPY should load: {err}"))?;
         ensure_eq(shape, oracle.shape, format!("{case_id}: loaded shape"))?;
         ensure_eq(dtype, expected_dtype, format!("{case_id}: loaded dtype"))?;
+        assert_close(&values, &oracle.values)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn numpy_written_v2_and_v3_headers_parse_with_the_right_preamble() -> Result<(), String> {
+    // Our reader claims to handle .npy versions 1.0, 2.0 and 3.0 — the 2.0/3.0 arms use a
+    // 4-byte header length where 1.0 uses 2 bytes. Nothing exercised those arms against a
+    // file numpy actually wrote: the only version test in the crate is named
+    // numpy_oracle_npy_magic_and_version but calls no numpy at all, checking our own
+    // writer's v1.0 output against hand-written byte offsets.
+    //
+    // A 2.0 header normally needs to exceed 65535 bytes and 3.0 needs utf8 field names,
+    // which is why they were never covered incidentally. numpy.lib.format.write_array
+    // takes an explicit version, so both are reachable directly.
+    for (case, major) in [("version_2", 2u8), ("version_3", 3u8)] {
+        let oracle = numpy_npy_oracle(case)?;
+        // The preamble numpy emitted really is the version we asked for, and really does
+        // use the wide header-length field — otherwise this would silently be a 1.0 test.
+        ensure_eq(
+            oracle.npy_bytes[6],
+            major,
+            format!("{case}: numpy should have written major version {major}"),
+        )?;
+        ensure_eq(oracle.npy_bytes[7], 0, format!("{case}: minor version"))?;
+        let header_len = u32::from_le_bytes([
+            oracle.npy_bytes[8],
+            oracle.npy_bytes[9],
+            oracle.npy_bytes[10],
+            oracle.npy_bytes[11],
+        ]) as usize;
+        ensure_eq(
+            oracle.npy_bytes.len(),
+            12 + header_len + oracle.payload.len(),
+            format!("{case}: total length implies a 4-byte header-length field"),
+        )?;
+
+        let parsed = read_npy_bytes(&oracle.npy_bytes, false)
+            .map_err(|err| format!("{case}: numpy-written v{major}.0 should parse: {err}"))?;
+        ensure_eq(
+            parsed.version,
+            (major, 0),
+            format!("{case}: parsed version"),
+        )?;
+        ensure_eq(
+            parsed.header.descr,
+            IOSupportedDType::F64,
+            format!("{case}: dtype"),
+        )?;
+        ensure_eq(
+            parsed.header.shape.clone(),
+            oracle.shape.clone(),
+            format!("{case}: shape"),
+        )?;
+        ensure_eq(
+            bytes_to_hex(parsed.payload.as_ref()),
+            bytes_to_hex(&oracle.payload),
+            format!("{case}: payload bytes"),
+        )?;
+
+        let (shape, values, dtype) =
+            load(&oracle.npy_bytes).map_err(|err| format!("{case}: load should succeed: {err}"))?;
+        ensure_eq(shape, oracle.shape, format!("{case}: loaded shape"))?;
+        ensure_eq(
+            dtype,
+            IOSupportedDType::F64,
+            format!("{case}: loaded dtype"),
+        )?;
         assert_close(&values, &oracle.values)?;
     }
     Ok(())
