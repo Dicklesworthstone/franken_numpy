@@ -60931,6 +60931,156 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn polynomial_add_sub_mul_randomised_differential_matches_numpy() {
+        // Adversarial check of the trim contract landed in 730aaa56. The goldens beside it
+        // only cover shapes I thought of; this drives ~600 comparisons at pseudo-random
+        // shapes, biased towards the cases trimming actually governs - trailing zeros,
+        // all-zero operands, unequal lengths - and asks numpy for every answer.
+        //
+        // Empty operands are excluded on purpose: numpy raises ValueError there and these
+        // kernels return empty, a divergence tracked by deadlock-audit-fb171 and pinned by
+        // polynomial_family_ops_on_empty_input_diverge_from_numpy_pending_fb171. Including
+        // them here would just re-assert that known gap.
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        // xorshift64*, so the case list is identical on every host and every run.
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        const POOL: [f64; 8] = [0.0, -0.0, 1.0, -1.0, 2.5, -3.25, 0.5, 7.0];
+        let mut cases: Vec<(Vec<f64>, Vec<f64>)> = Vec::new();
+        for _ in 0..40 {
+            let build = |r: &mut dyn FnMut() -> u64| -> Vec<f64> {
+                let len = 1 + (r() % 5) as usize;
+                let mut v: Vec<f64> = (0..len).map(|_| POOL[(r() % 8) as usize]).collect();
+                // One case in three ends in an explicit zero: that is the exact shape the
+                // trim contract governs, and random pools alone would rarely produce it.
+                if r().is_multiple_of(3) {
+                    let last = v.len() - 1;
+                    v[last] = 0.0;
+                }
+                v
+            };
+            let a = build(&mut next);
+            let b = build(&mut next);
+            cases.push((a, b));
+        }
+
+        let py_list = |v: &[f64]| -> String {
+            let items: Vec<String> = v.iter().map(|x| format!("{x:?}")).collect();
+            format!("[{}]", items.join(", "))
+        };
+        let case_literals: Vec<String> = cases
+            .iter()
+            .map(|(a, b)| format!("({}, {})", py_list(a), py_list(b)))
+            .collect();
+        let script = format!(
+            r#"
+import numpy as np
+from numpy.polynomial import chebyshev as C, legendre as L, hermite as H
+from numpy.polynomial import hermite_e as He, laguerre as La
+fams = [("cheb", C), ("leg", L), ("herm", H), ("herme", He), ("lag", La)]
+cases = [{}]
+out = []
+for a, b in cases:
+    for prefix, mod in fams:
+        for op in ("add", "sub", "mul"):
+            r = getattr(mod, prefix + op)(a, b)
+            out.append(str(len(r)) + "|" + ",".join(repr(float(v)) for v in r))
+print("\n".join(out))
+"#,
+            case_literals.join(", ")
+        );
+
+        let output = Command::new(oracle_python_bin())
+            .args(["-c", &script])
+            .output()
+            .expect("numpy oracle should run");
+        assert!(
+            output.status.success(),
+            "numpy oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("oracle output should be UTF-8");
+        let expected: Vec<&str> = stdout.lines().collect();
+        // Guards the vacuous case: a truncated or empty oracle would otherwise let every
+        // comparison below be skipped silently.
+        assert_eq!(
+            expected.len(),
+            cases.len() * 15,
+            "oracle returned {} rows, expected {} (40 cases x 5 families x 3 ops)",
+            expected.len(),
+            cases.len() * 15
+        );
+
+        let families: [(
+            &str,
+            fn(&[f64], &[f64]) -> Vec<f64>,
+            fn(&[f64], &[f64]) -> Vec<f64>,
+            fn(&[f64], &[f64]) -> Vec<f64>,
+        ); 5] = [
+            ("cheb", chebadd, chebsub, chebmul),
+            ("leg", legadd, legsub, legmul),
+            ("herm", hermadd, hermsub, hermmul),
+            ("herme", hermeadd, hermesub, hermemul),
+            ("lag", lagadd, lagsub, lagmul),
+        ];
+        let mut row = 0usize;
+        for (a, b) in &cases {
+            for (name, add, sub, mul) in families {
+                for (op, got) in [("add", add(a, b)), ("sub", sub(a, b)), ("mul", mul(a, b))] {
+                    let (len_str, values_str) = expected[row]
+                        .split_once('|')
+                        .expect("oracle row should be len|values");
+                    let want_len: usize = len_str.parse().expect("oracle length should parse");
+                    let want: Vec<f64> = if values_str.is_empty() {
+                        Vec::new()
+                    } else {
+                        values_str
+                            .split(',')
+                            .map(|s| s.parse::<f64>().expect("oracle value should parse"))
+                            .collect()
+                    };
+                    assert_eq!(
+                        got.len(),
+                        want_len,
+                        "{name}{op}({a:?}, {b:?}): length {} vs numpy {want_len} -- \
+                         a trimming difference, got {got:?} want {want:?}",
+                        got.len()
+                    );
+                    for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+                        // add/sub are exact sums of the inputs, so they must agree to the
+                        // bit.
+                        //
+                        // mul gets 1e-9 rather than the bit-exactness its siblings get,
+                        // and that bound is a KNOWN DEFECT, not a float-error allowance:
+                        // leg/herm/herme/lag multiply by converting to the power basis and
+                        // back, which numpy does not, and which loses accuracy
+                        // exponentially with degree (1.2e-08 for legmul at degree 16).
+                        // Tracked as deadlock-audit-50prg, which this differential found;
+                        // tightening this line to bit-exact is that bead's acceptance
+                        // test. The loose bound still catches shape and logic errors,
+                        // which is what this differential is for.
+                        let ok = if op == "mul" {
+                            (g - w).abs() <= 1e-9 * (1.0 + g.abs().max(w.abs()))
+                        } else {
+                            g.to_bits() == w.to_bits() || (g == 0.0 && w == 0.0)
+                        };
+                        assert!(ok, "{name}{op}({a:?}, {b:?})[{i}]: got {g:?} want {w:?}");
+                    }
+                    row += 1;
+                }
+            }
+        }
+    }
+
+    #[test]
     fn polynomial_family_ops_on_empty_input_diverge_from_numpy_pending_fb171() {
         // KNOWN DIVERGENCE, tracked as deadlock-audit-fb171. numpy's as_series raises
         // ValueError("Coefficient array is empty") before any arithmetic, so every one of
