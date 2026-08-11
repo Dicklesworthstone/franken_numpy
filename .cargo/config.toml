@@ -14,4 +14,4 @@
 # elementwise/AXPY inner loops (GEMM, LU, ufuncs). Reductions are never
 # reassociated (no fast-math), so sums keep their exact order too.
 [build]
-rustflags = ["-C", "target-feature=+avx2"]
+rustflags = ["-Z", "threads=4", "-C", "target-feature=+avx2"]
