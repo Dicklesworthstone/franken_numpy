@@ -139,6 +139,8 @@ nohup.out
 .claude/
 .rch-target/
 /.rch-target-*/
+# Fetched criterion binaries + worker logs from rch bench replay (100MB+ each).
+.rch-bench-replay/
 # cargo-fuzz crash/minimization artifacts under any nested crate's fuzz dir
 **/fuzz/artifacts/
 # cargo-fuzz auto-generated hash-named corpus entries under any nested
