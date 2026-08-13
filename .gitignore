@@ -173,3 +173,6 @@ rust_out
 **/local-target/
 # br doctor per-run artifacts
 .doctor/
+
+# Self-referential symlink dropped by a July 2026 tooling bug; do not track.
+/franken_numpy
