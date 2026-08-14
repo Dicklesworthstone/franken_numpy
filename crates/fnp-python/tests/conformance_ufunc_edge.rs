@@ -1431,7 +1431,7 @@ keys = np.where(
     np.where((finite_bits & np.uint16(0x8000)) == 0, finite_bits | np.uint16(0x8000), ~finite_bits),
 )
 a = finite_bits[np.argsort(keys, kind='stable')].view(np.float16)
-n = (1 << 14) + 513
+n = 129 * 131  # 16,899: above the table gate and exactly reshapeable below
 v = np.resize(finite_bits, n).view(np.float16).reshape(129, -1)
 ok = True
 for side in ('left', 'right'):
@@ -1464,6 +1464,10 @@ a_nan = np.concatenate((a, np.array([np.uint16(0x7e01)], dtype=np.uint16).view(n
 v_nan = v.copy()
 v_nan.view(np.uint16).ravel()[7] = np.uint16(0xfe11)
 for side in ('left', 'right'):
+    got = fnp.searchsorted(a_nan, v, side=side)
+    expected = np.searchsorted(a_nan, v, side=side)
+    ok = ok and got.dtype == expected.dtype and got.shape == expected.shape and got.tobytes() == expected.tobytes()
+
     got = fnp.searchsorted(a_nan, v_nan, side=side)
     expected = np.searchsorted(a_nan, v_nan, side=side)
     ok = ok and got.dtype == expected.dtype and got.shape == expected.shape and got.tobytes() == expected.tobytes()

@@ -68378,6 +68378,14 @@ fn try_native_f16_searchsorted_table(
     {
         return Ok(None);
     }
+    let fallback_to_numpy = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("side", side)?;
+        numpy
+            .getattr("searchsorted")?
+            .call((a, v), Some(&kwargs))
+            .map(Bound::unbind)
+    };
     let a_bits = a.call_method1("view", ("uint16",))?;
     let v_bits = v.call_method1("view", ("uint16",))?;
     let (Ok(a_buffer), Ok(v_buffer)) =
@@ -68394,34 +68402,27 @@ fn try_native_f16_searchsorted_table(
         unsafe { std::slice::from_raw_parts(a_input.as_ptr().cast::<u16>(), a_input.len()) };
     let v_raw: &[u16] =
         unsafe { std::slice::from_raw_parts(v_input.as_ptr().cast::<u16>(), v_input.len()) };
-    // Reject NaN queries before building the haystack table. Apart from keeping
-    // their total-order semantics on the established widening route, this
-    // avoids a needless O(n + 64k) allocation for a call that cannot use it.
+    // Reject NaN queries before building the haystack table. Their total-order
+    // semantics belong to NumPy itself, and this avoids a needless O(n + 64k)
+    // allocation for a call that cannot use the finite-key table.
     if v_raw
         .iter()
         .any(|&bits| f16_searchsorted_order_key(bits).is_none())
     {
-        return Ok(None);
+        return fallback_to_numpy().map(Some);
     }
     let mut cumulative = vec![0_i64; 65_537];
     let mut previous_key = None;
     for &bits in a_raw {
         let Some(key) = f16_searchsorted_order_key(bits) else {
-            return Ok(None);
+            return fallback_to_numpy().map(Some);
         };
         if previous_key.is_some_and(|previous| key < previous) {
             // NumPy does not require callers to pre-sort `a`; its answer on an
             // unsorted haystack is observable and is not representable by a
             // cumulative table. Keep that full contract with NumPy rather than
             // falling through to a binary-search fast path that assumes order.
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("side", side)?;
-            return Ok(Some(
-                numpy
-                    .getattr("searchsorted")?
-                    .call((a, v), Some(&kwargs))?
-                    .unbind(),
-            ));
+            return fallback_to_numpy().map(Some);
         }
         previous_key = Some(key);
         cumulative[key + 1] += 1;
