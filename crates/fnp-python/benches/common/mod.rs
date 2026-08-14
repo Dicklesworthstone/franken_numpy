@@ -920,6 +920,24 @@ fn verify_contract_gate_semantics() {
         BALANCED_SQUARE.len() / 2,
         "balanced square must give each arm four slots",
     );
+    let mut linear_slot_ns = 0_u64;
+    let (drift_a, drift_b) = balanced_square_round_with(|_| {
+        linear_slot_ns += 10;
+        ContractObservation {
+            elapsed: Duration::from_nanos(linear_slot_ns),
+            checksum: 0x5a17,
+        }
+    });
+    assert_eq!(
+        drift_a.elapsed,
+        Duration::from_nanos(45),
+        "A's ABBAABBA slots must center linear drift at the round midpoint",
+    );
+    assert_eq!(
+        drift_b.elapsed,
+        Duration::from_nanos(45),
+        "B's ABBAABBA slots must center linear drift at the round midpoint",
+    );
     let stats = |median: f64, low: f64, high: f64| ContractPairStats {
         ratio_median: median,
         ratio_ci_low: low,
