@@ -1254,8 +1254,8 @@ fn main() {
 // deadlock-audit-2nmd1 made the f64 divide fast path defer to numpy on any
 // element that would raise an IEEE FP exception, because bit-identical VALUES
 // are not parity when numpy also emits a RuntimeWarning a pure-Rust kernel
-// cannot raise into numpy's error state. The repair writes all quotients, scans
-// the result buffer for non-normal values, and only then runs the precise
+// cannot raise into numpy's error state. The repair observes non-normal
+// quotients while writing the result buffer, and only then runs the precise
 // operand-aware classifier on that exceptional subset.
 //
 // RESULT CLASS IS FIXED IN ADVANCE: the base arm is OUR OWN FORMER CODE, so any
@@ -1270,7 +1270,7 @@ fn main() {
 // the `Div` arm is a SEPARATE loop from the generic `op.apply` loop, not the old
 // loop plus a branch. So the former arm here reproduces the old loop's shape —
 // `*s = op.apply(x, y)` with `apply` monomorphised to a divide — and the
-// repaired arm reproduces the new two-pass shape. The predicate itself is a
+// repaired arm reproduces the fused quotient-and-observation shape. The predicate itself is a
 // REPLICA — a bench crate cannot reach a crate-root item in fnp-python — so it
 // is pinned to the shipped body by DIVIDE_HAZARD_TRUTH_TABLE below, which is
 // asserted before any timing runs. lib.rs carries the same table in its own
@@ -1379,14 +1379,19 @@ fn divide_former_serial(a: &[f64], b: &[f64], out: &mut [f64]) {
     }
 }
 
-/// The shipped serial loop: a vectorizable quotient pass, a result-buffer scan,
-/// then precise classification only when a non-normal quotient exists.
+/// The shipped serial loop: observe non-normal quotients in the quotient pass,
+/// then classify operands only when a non-normal quotient exists.
 #[inline(never)]
 fn divide_repaired_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
-    for ((s, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
-        *s = x / y;
-    }
-    out.iter().any(|q| !q.is_normal())
+    let needs_precise_classification = out.iter_mut().zip(a.iter()).zip(b.iter()).fold(
+        false,
+        |saw_non_normal, ((slot, &x), &y)| {
+            let q = x / y;
+            *slot = q;
+            saw_non_normal || !q.is_normal()
+        },
+    );
+    needs_precise_classification
         && a.iter()
             .zip(b.iter())
             .zip(out.iter())
@@ -1414,15 +1419,21 @@ fn divide_former_parallel(a: &[f64], b: &[f64], out: &mut [f64]) {
 #[inline(never)]
 fn divide_repaired_parallel(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
     let chunk = out.len().div_ceil(rayon::current_num_threads());
-    out.par_chunks_mut(chunk)
+    let needs_precise_classification = out
+        .par_chunks_mut(chunk)
         .zip(a.par_chunks(chunk))
         .zip(b.par_chunks(chunk))
-        .for_each(|((o, l), r)| {
+        .map(|((o, l), r)| {
+            let mut saw_non_normal = false;
             for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                *s = x / y;
+                let q = x / y;
+                *s = q;
+                saw_non_normal |= !q.is_normal();
             }
-        });
-    out.par_iter().any(|q| !q.is_normal())
+            saw_non_normal
+        })
+        .any(|saw_non_normal| saw_non_normal);
+    needs_precise_classification
         && a.par_iter()
             .zip(b.par_iter())
             .zip(out.par_iter())

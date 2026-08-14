@@ -9432,9 +9432,9 @@ fn zerocopy_f64_binary_flat<'py>(
     kwargs.set_item("dtype", "float64")?;
     let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
     // Set by the Div arms below when an element would raise an FE flag that numpy
-    // turns into a warning. Divide first fills the output with quotients, then
-    // scans that buffer for a non-normal value before invoking the precise
-    // operand-aware classifier. This leaves the clean quotient loop vectorizable.
+    // turns into a warning. Observe non-normal quotients while producing them,
+    // then invoke the precise operand-aware classifier only when needed. A clean
+    // divide therefore avoids a second full read of the output buffer.
     let divide_hazard = std::sync::atomic::AtomicBool::new(false);
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -9495,16 +9495,21 @@ fn zerocopy_f64_binary_flat<'py>(
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
             let chunk = n.div_ceil(rayon::current_num_threads());
             if matches!(op, BinaryOp::Div) {
-                out_data
+                let needs_precise_classification = out_data
                     .par_chunks_mut(chunk)
                     .zip(lhs.par_chunks(chunk))
                     .zip(rhs.par_chunks(chunk))
-                    .for_each(|((o, l), r)| {
+                    .map(|((o, l), r)| {
+                        let mut saw_non_normal = false;
                         for ((slot, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                            *slot = x / y;
+                            let q = x / y;
+                            *slot = q;
+                            saw_non_normal |= !q.is_normal();
                         }
-                    });
-                if out_data.par_iter().any(|q| !q.is_normal())
+                        saw_non_normal
+                    })
+                    .any(|saw_non_normal| saw_non_normal);
+                if needs_precise_classification
                     && lhs
                         .par_iter()
                         .zip(rhs.par_iter())
@@ -9530,10 +9535,16 @@ fn zerocopy_f64_binary_flat<'py>(
                     });
             }
         } else if matches!(op, BinaryOp::Div) {
-            for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
-                slot.set(a_cell.get() / b_cell.get());
-            }
-            if output.iter().any(|slot| !slot.get().is_normal())
+            let needs_precise_classification = output
+                .iter()
+                .zip(a_in.iter())
+                .zip(b_in.iter())
+                .fold(false, |saw_non_normal, ((slot, a_cell), b_cell)| {
+                    let q = a_cell.get() / b_cell.get();
+                    slot.set(q);
+                    saw_non_normal || !q.is_normal()
+                });
+            if needs_precise_classification
                 && output.iter().zip(a_in.iter()).zip(b_in.iter()).any(
                     |((slot, a_cell), b_cell)| {
                         !f64_divide_fast_accepts_without_fp_error(
@@ -109322,6 +109333,39 @@ mod tests {
             assert_eq!(positive_zero.to_bits(), 0.0_f64.to_bits());
             assert_eq!(negative_zero.to_bits(), (-0.0_f64).to_bits());
             assert_eq!(ordinary, 4.0);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn f64_divide_parallel_threshold_keeps_all_normal_lanes_native() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            // Exercise the clean parallel branch: every quotient is normal, so the
+            // native kernel must return without a second hazard-classification pass
+            // or a NumPy deferral.
+            const PARALLEL_DIV_MIN_LEN: usize = 1 << 21;
+            let lhs = vec![12.0_f64; PARALLEL_DIV_MIN_LEN];
+            let rhs = vec![3.0_f64; PARALLEL_DIV_MIN_LEN];
+
+            let numpy = py.import("numpy")?;
+            let array = numpy.getattr("array")?;
+            let lhs = array.call1((lhs,))?;
+            let rhs = array.call1((rhs,))?;
+            let Some((result, shape)) =
+                zerocopy_f64_binary_flat(py, &numpy, &lhs, &rhs, BinaryOp::Div)?
+            else {
+                panic!("clean parallel f64 divide lanes must not defer to NumPy");
+            };
+            assert_eq!(shape, vec![PARALLEL_DIV_MIN_LEN]);
+            assert_eq!(
+                result
+                    .call_method1("__getitem__", (PARALLEL_DIV_MIN_LEN - 1,))?
+                    .extract::<f64>()?,
+                4.0
+            );
             Ok(())
         });
     }
