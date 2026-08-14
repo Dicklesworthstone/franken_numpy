@@ -68394,6 +68394,15 @@ fn try_native_f16_searchsorted_table(
         unsafe { std::slice::from_raw_parts(a_input.as_ptr().cast::<u16>(), a_input.len()) };
     let v_raw: &[u16] =
         unsafe { std::slice::from_raw_parts(v_input.as_ptr().cast::<u16>(), v_input.len()) };
+    // Reject NaN queries before building the haystack table. Apart from keeping
+    // their total-order semantics on the established widening route, this
+    // avoids a needless O(n + 64k) allocation for a call that cannot use it.
+    if v_raw
+        .iter()
+        .any(|&bits| f16_searchsorted_order_key(bits).is_none())
+    {
+        return Ok(None);
+    }
     let mut cumulative = vec![0_i64; 65_537];
     let mut previous_key = None;
     for &bits in a_raw {
@@ -68401,19 +68410,24 @@ fn try_native_f16_searchsorted_table(
             return Ok(None);
         };
         if previous_key.is_some_and(|previous| key < previous) {
-            return Ok(None);
+            // NumPy does not require callers to pre-sort `a`; its answer on an
+            // unsorted haystack is observable and is not representable by a
+            // cumulative table. Keep that full contract with NumPy rather than
+            // falling through to a binary-search fast path that assumes order.
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("side", side)?;
+            return Ok(Some(
+                numpy
+                    .getattr("searchsorted")?
+                    .call((a, v), Some(&kwargs))?
+                    .unbind(),
+            ));
         }
         previous_key = Some(key);
         cumulative[key + 1] += 1;
     }
     for key in 1..cumulative.len() {
         cumulative[key] += cumulative[key - 1];
-    }
-    if v_raw
-        .iter()
-        .any(|&bits| f16_searchsorted_order_key(bits).is_none())
-    {
-        return Ok(None);
     }
     let query_shape: Vec<usize> = v.getattr("shape")?.extract()?;
     let kwargs = PyDict::new(py);

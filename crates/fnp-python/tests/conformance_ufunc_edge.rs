@@ -1448,6 +1448,16 @@ for side in ('left', 'right'):
     expected = np.searchsorted(strided_a, strided_v, side=side)
     ok = ok and got.dtype == expected.dtype and got.shape == expected.shape and got.tobytes() == expected.tobytes()
 
+# Numeric-order verification is also an admission requirement. NumPy permits
+# an unsorted haystack but its observable answer is not a prefix-count table;
+# this must take the established fallback rather than silently table-reordering.
+unsorted_a = a.copy()
+unsorted_a[[17, 18]] = unsorted_a[[18, 17]]
+for side in ('left', 'right'):
+    got = fnp.searchsorted(unsorted_a, v, side=side)
+    expected = np.searchsorted(unsorted_a, v, side=side)
+    ok = ok and got.dtype == expected.dtype and got.shape == expected.shape and got.tobytes() == expected.tobytes()
+
 # NaN ordering is deliberately owned by NumPy/the widening fallback rather than
 # the finite table. Distinct payloads cover both haystack and query deferral.
 a_nan = np.concatenate((a, np.array([np.uint16(0x7e01)], dtype=np.uint16).view(np.float16)))
