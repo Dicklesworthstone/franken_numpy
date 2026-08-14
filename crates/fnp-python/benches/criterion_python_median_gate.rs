@@ -145,6 +145,10 @@ struct ProcessResourceSnapshot {
 struct ResultBufferLifecycle {
     minor_faults: u64,
     major_faults: u64,
+    minor_faults_during_observation: u64,
+    major_faults_during_observation: u64,
+    minor_faults_during_release: u64,
+    major_faults_during_release: u64,
     rss_while_live_kib: i64,
     rss_after_release_kib: i64,
 }
@@ -197,6 +201,7 @@ fn process_resource_snapshot() -> ProcessResourceSnapshot {
 fn result_buffer_lifecycle(
     before: ProcessResourceSnapshot,
     while_live: ProcessResourceSnapshot,
+    before_release: ProcessResourceSnapshot,
     after_release: ProcessResourceSnapshot,
 ) -> ResultBufferLifecycle {
     assert!(
@@ -207,9 +212,29 @@ fn result_buffer_lifecycle(
         while_live.major_faults >= before.major_faults,
         "major fault counter regressed while materializing a result"
     );
+    assert!(
+        before_release.minor_faults >= while_live.minor_faults,
+        "minor fault counter regressed while validating a live result"
+    );
+    assert!(
+        before_release.major_faults >= while_live.major_faults,
+        "major fault counter regressed while validating a live result"
+    );
+    assert!(
+        after_release.minor_faults >= before_release.minor_faults,
+        "minor fault counter regressed while releasing a result"
+    );
+    assert!(
+        after_release.major_faults >= before_release.major_faults,
+        "major fault counter regressed while releasing a result"
+    );
     ResultBufferLifecycle {
         minor_faults: while_live.minor_faults - before.minor_faults,
         major_faults: while_live.major_faults - before.major_faults,
+        minor_faults_during_observation: before_release.minor_faults - while_live.minor_faults,
+        major_faults_during_observation: before_release.major_faults - while_live.major_faults,
+        minor_faults_during_release: after_release.minor_faults - before_release.minor_faults,
+        major_faults_during_release: after_release.major_faults - before_release.major_faults,
         rss_while_live_kib: while_live.rss_kib as i64 - before.rss_kib as i64,
         rss_after_release_kib: after_release.rss_kib as i64 - before.rss_kib as i64,
     }
@@ -233,6 +258,30 @@ fn median_result_buffer_lifecycle(samples: &[ResultBufferLifecycle]) -> ResultBu
     ResultBufferLifecycle {
         minor_faults: median_u64(samples.iter().map(|sample| sample.minor_faults).collect()),
         major_faults: median_u64(samples.iter().map(|sample| sample.major_faults).collect()),
+        minor_faults_during_observation: median_u64(
+            samples
+                .iter()
+                .map(|sample| sample.minor_faults_during_observation)
+                .collect(),
+        ),
+        major_faults_during_observation: median_u64(
+            samples
+                .iter()
+                .map(|sample| sample.major_faults_during_observation)
+                .collect(),
+        ),
+        minor_faults_during_release: median_u64(
+            samples
+                .iter()
+                .map(|sample| sample.minor_faults_during_release)
+                .collect(),
+        ),
+        major_faults_during_release: median_u64(
+            samples
+                .iter()
+                .map(|sample| sample.major_faults_during_release)
+                .collect(),
+        ),
         rss_while_live_kib: median_i64(
             samples
                 .iter()
@@ -256,6 +305,37 @@ fn verify_process_resource_snapshot_parser() {
         parse_proc_status_rss_kib("Name:\tcriterion\nVmRSS:\t4242 kB\n"),
         Ok(4242)
     );
+
+    let lifecycle = result_buffer_lifecycle(
+        ProcessResourceSnapshot {
+            minor_faults: 10,
+            major_faults: 1,
+            rss_kib: 100,
+        },
+        ProcessResourceSnapshot {
+            minor_faults: 16,
+            major_faults: 2,
+            rss_kib: 180,
+        },
+        ProcessResourceSnapshot {
+            minor_faults: 19,
+            major_faults: 2,
+            rss_kib: 180,
+        },
+        ProcessResourceSnapshot {
+            minor_faults: 21,
+            major_faults: 3,
+            rss_kib: 120,
+        },
+    );
+    assert_eq!(lifecycle.minor_faults, 6);
+    assert_eq!(lifecycle.major_faults, 1);
+    assert_eq!(lifecycle.minor_faults_during_observation, 3);
+    assert_eq!(lifecycle.major_faults_during_observation, 0);
+    assert_eq!(lifecycle.minor_faults_during_release, 2);
+    assert_eq!(lifecycle.major_faults_during_release, 1);
+    assert_eq!(lifecycle.rss_while_live_kib, 80);
+    assert_eq!(lifecycle.rss_after_release_kib, 20);
 }
 
 struct EventAttributionArm<'py> {
@@ -1108,11 +1188,15 @@ fn observe_inter_event_gap_result_lifecycle(
     let elapsed = started.elapsed();
     let while_live = process_resource_snapshot();
     let checksum = workload_checksum(numpy, std::array::from_ref(&output));
+    let before_release = process_resource_snapshot();
     drop(output);
     let after_release = process_resource_snapshot();
-    lifecycles
-        .borrow_mut()
-        .push(result_buffer_lifecycle(before, while_live, after_release));
+    lifecycles.borrow_mut().push(result_buffer_lifecycle(
+        before,
+        while_live,
+        before_release,
+        after_release,
+    ));
     common::ContractObservation { elapsed, checksum }
 }
 
@@ -14596,6 +14680,10 @@ diff_user_boundary,diff_inter_event_gap,count_nonzero_user_transitions \
                  incumbent_samples={} candidate_samples={} \
                  incumbent_minor_faults_median={} candidate_minor_faults_median={} \
                  incumbent_major_faults_median={} candidate_major_faults_median={} \
+                 incumbent_minor_faults_during_observation_median={} candidate_minor_faults_during_observation_median={} \
+                 incumbent_major_faults_during_observation_median={} candidate_major_faults_during_observation_median={} \
+                 incumbent_minor_faults_during_release_median={} candidate_minor_faults_during_release_median={} \
+                 incumbent_major_faults_during_release_median={} candidate_major_faults_during_release_median={} \
                  incumbent_rss_while_live_kib_median={} candidate_rss_while_live_kib_median={} \
                  incumbent_rss_after_release_kib_median={} candidate_rss_after_release_kib_median={}",
                 gap_effect.ratio_median,
@@ -14607,6 +14695,14 @@ diff_user_boundary,diff_inter_event_gap,count_nonzero_user_transitions \
                 candidate_gap_lifecycle.minor_faults,
                 incumbent_gap_lifecycle.major_faults,
                 candidate_gap_lifecycle.major_faults,
+                incumbent_gap_lifecycle.minor_faults_during_observation,
+                candidate_gap_lifecycle.minor_faults_during_observation,
+                incumbent_gap_lifecycle.major_faults_during_observation,
+                candidate_gap_lifecycle.major_faults_during_observation,
+                incumbent_gap_lifecycle.minor_faults_during_release,
+                candidate_gap_lifecycle.minor_faults_during_release,
+                incumbent_gap_lifecycle.major_faults_during_release,
+                candidate_gap_lifecycle.major_faults_during_release,
                 incumbent_gap_lifecycle.rss_while_live_kib,
                 candidate_gap_lifecycle.rss_while_live_kib,
                 incumbent_gap_lifecycle.rss_after_release_kib,
