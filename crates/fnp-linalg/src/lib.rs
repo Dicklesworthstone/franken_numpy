@@ -11770,7 +11770,7 @@ mod tests {
 
     #[test]
     fn det_and_slogdet_non_finite_semantics_verified_against_live_numpy() {
-        // det_and_slogdet_match_numpy_non_finite_semantics asserts very specific things —
+        // det_and_slogdet_non_finite_semantics_are_pinned asserts very specific things —
         // that slogdet's sign is +1 for a NaN on the diagonal and -1 for a NaN off it —
         // but invokes no numpy. It encodes what numpy is believed to do. An audit found 95
         // such tests across five crates: the name claims a live relationship that does not
@@ -11778,9 +11778,10 @@ mod tests {
         //
         // The assumptions turned out to be right; this makes them CHECKED, so drift on
         // either side is caught rather than assumed away.
-        if !numpy_oracle_available() {
-            return;
-        }
+        assert!(
+            numpy_oracle_available(),
+            "det/slogdet non-finite parity requires a live NumPy oracle; set FNP_ORACLE_PYTHON"
+        );
         let cases: [(&str, [[f64; 2]; 2]); 7] = [
             ("nan_diag", [[f64::NAN, 1.0], [2.0, 3.0]]),
             ("nan_offdiag", [[1.0, f64::NAN], [2.0, 3.0]]),
@@ -11859,7 +11860,7 @@ mod tests {
     }
 
     #[test]
-    fn det_and_slogdet_match_numpy_non_finite_semantics() {
+    fn det_and_slogdet_non_finite_semantics_are_pinned() {
         let nan_diag = [[f64::NAN, 1.0], [2.0, 3.0]];
         assert!(det_2x2(nan_diag).expect("nan det").is_nan());
         let (sign, log_abs_det) = slogdet_2x2(nan_diag).expect("nan slogdet");
@@ -11927,7 +11928,7 @@ mod tests {
     }
 
     #[test]
-    fn matrix_rank_matches_numpy_non_finite_semantics() {
+    fn matrix_rank_non_finite_semantics_are_pinned() {
         assert_eq!(
             matrix_rank_2x2([[f64::INFINITY, 1.0], [2.0, 3.0]], 1e-12).expect("inf rank"),
             0
@@ -12181,12 +12182,13 @@ mod tests {
     fn norm_and_rank_non_finite_semantics_verified_against_live_numpy() {
         // Same audit finding as det_and_slogdet_non_finite_semantics_verified_against_
         // live_numpy: vector_norm/matrix_norm/matrix_rank each have a
-        // *_matches_numpy_non_finite_semantics test that transcribes what numpy is
+        // *_non_finite_semantics_are_pinned test that transcribes what numpy is
         // believed to do rather than asking it. Every order is swept here against the
         // live oracle, including the ones the hand-written tests skip.
-        if !numpy_oracle_available() {
-            return;
-        }
+        assert!(
+            numpy_oracle_available(),
+            "norm/rank non-finite parity requires a live NumPy oracle; set FNP_ORACLE_PYTHON"
+        );
         // NaN and inf are NameErrors in Python; only float('nan')/float('inf') survive.
         let py = |v: f64| -> String {
             if v.is_nan() {
@@ -12364,7 +12366,7 @@ mod tests {
     }
 
     #[test]
-    fn vector_norm_matches_numpy_non_finite_semantics() {
+    fn vector_norm_non_finite_semantics_are_pinned() {
         assert!(
             vector_norm(&[f64::NAN, 1.0], None)
                 .expect("vector nan default")
@@ -12431,7 +12433,7 @@ mod tests {
     }
 
     #[test]
-    fn matrix_norm_matches_numpy_non_finite_semantics() {
+    fn matrix_norm_non_finite_semantics_are_pinned() {
         let nan_matrix = [[f64::NAN, 1.0], [2.0, 3.0]];
         assert!(matrix_norm_2x2(nan_matrix, None).expect("nan fro").is_nan());
         assert!(
@@ -12504,7 +12506,7 @@ mod tests {
     }
 
     #[test]
-    fn matrix_norm_nxn_matches_numpy_non_finite_semantics() {
+    fn matrix_norm_nxn_non_finite_semantics_are_pinned() {
         let nan_matrix = [f64::NAN, 1.0, 2.0, 3.0];
         assert!(
             matrix_norm_nxn(&nan_matrix, 2, 2, "fro")
@@ -12651,6 +12653,53 @@ mod tests {
 
         let err = eig_nxn_full(&matrix, 2).expect_err("eig nan matrix");
         assert_eq!(format!("{err}"), "Array must not contain infs or NaNs");
+    }
+
+    #[test]
+    fn eig_non_finite_error_semantics_verified_against_live_numpy() {
+        assert!(
+            numpy_oracle_available(),
+            "eig non-finite parity requires a live NumPy oracle; set FNP_ORACLE_PYTHON"
+        );
+        for (label, python_value, value) in [
+            ("nan", "float('nan')", f64::NAN),
+            ("inf", "float('inf')", f64::INFINITY),
+            ("neg_inf", "float('-inf')", f64::NEG_INFINITY),
+        ] {
+            let script = format!(
+                "import numpy as np\n\
+                 np.seterr(all='ignore')\n\
+                 a = np.array([[{python_value}, 0.0], [0.0, 1.0]], dtype=float)\n\
+                 for op in (np.linalg.eigvals, np.linalg.eig):\n\
+                 \x20   try:\n\
+                 \x20       op(a)\n\
+                 \x20       print('VALUE')\n\
+                 \x20   except Exception as error:\n\
+                 \x20       print(type(error).__name__)\n"
+            );
+            let output = Command::new(oracle_python_bin())
+                .args(["-c", &script])
+                .output()
+                .expect("numpy eig oracle should run");
+            assert!(output.status.success(), "oracle failed for {label}");
+            assert_eq!(
+                String::from_utf8(output.stdout)
+                    .expect("utf-8")
+                    .lines()
+                    .collect::<Vec<_>>(),
+                ["LinAlgError", "LinAlgError"],
+                "numpy eig/eigvals non-finite outcome changed for {label}"
+            );
+            let matrix = [value, 0.0, 0.0, 1.0];
+            assert!(
+                eig_nxn(&matrix, 2).is_err(),
+                "eigvals must defer for {label}"
+            );
+            assert!(
+                eig_nxn_full(&matrix, 2).is_err(),
+                "eig must defer for {label}"
+            );
+        }
     }
 
     #[test]
@@ -19303,7 +19352,7 @@ print(",".join(f"{float(z.real)!r}:{float(z.imag)!r}" for z in w))
     }
 
     #[test]
-    fn tensorsolve_matches_numpy_non_finite_semantics() {
+    fn tensorsolve_non_finite_semantics_are_pinned() {
         let inf_matrix = [f64::INFINITY, 1.0, 0.0, 0.0, 3.0, 1.0, 2.0, 0.0, 3.0];
         let (solved, solved_shape) =
             tensorsolve(&inf_matrix, &[3, 3], &[1.0, 2.0, 3.0], &[3]).expect("inf tensorsolve");
@@ -19319,6 +19368,124 @@ print(",".join(f"{float(z.real)!r}:{float(z.imag)!r}" for z in w))
         assert!(solved[0].is_nan());
         assert!(approx_equal(solved[1], 0.45454545454545453, 1e-12));
         assert!(approx_equal(solved[2], 0.6363636363636364, 1e-12));
+    }
+
+    #[test]
+    fn tensorsolve_and_tensorinv_non_finite_semantics_verified_against_live_numpy() {
+        assert!(
+            numpy_oracle_available(),
+            "tensor solve/inverse non-finite parity requires a live NumPy oracle; set FNP_ORACLE_PYTHON"
+        );
+        let oracle = |operation: &str, matrix: &str| -> String {
+            let call = match operation {
+                "tensorsolve" => "np.linalg.tensorsolve(a, np.array([1.0, 2.0, 3.0]))",
+                "tensorinv" => "np.linalg.tensorinv(a, ind=1)",
+                _ => unreachable!("test only asks for tensor solve or tensor inverse"),
+            };
+            let script = format!(
+                "import numpy as np\n\
+                 np.seterr(all='ignore')\n\
+                 a = np.array({matrix}, dtype=float)\n\
+                 try:\n\
+                 \x20   result = {call}\n\
+                 except Exception as error:\n\
+                 \x20   print('ERROR|' + type(error).__name__)\n\
+                 else:\n\
+                 \x20   def encode(value):\n\
+                 \x20       value = float(value)\n\
+                 \x20       if np.isnan(value): return 'nan'\n\
+                 \x20       if np.isposinf(value): return 'inf'\n\
+                 \x20       if np.isneginf(value): return '-inf'\n\
+                 \x20       if value == 0.0: return '-0' if np.signbit(value) else '+0'\n\
+                 \x20       return repr(value)\n\
+                 \x20   print('VALUES|' + ','.join(encode(value) for value in result.ravel()))\n"
+            );
+            let output = Command::new(oracle_python_bin())
+                .args(["-c", &script])
+                .output()
+                .expect("numpy tensor oracle should run");
+            assert!(
+                output.status.success(),
+                "numpy {operation} oracle failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("utf-8")
+                .trim()
+                .to_owned()
+        };
+        let assert_values = |label: &str, got: &[f64], oracle: &str| {
+            let expected = oracle
+                .strip_prefix("VALUES|")
+                .expect("live oracle must return values");
+            let expected = expected.split(',').collect::<Vec<_>>();
+            assert_eq!(got.len(), expected.len(), "{label}: output length");
+            for (index, (&value, expected)) in got.iter().zip(expected).enumerate() {
+                match expected {
+                    "nan" => assert!(value.is_nan(), "{label}[{index}] must be NaN"),
+                    "inf" => assert!(
+                        value.is_infinite() && value.is_sign_positive(),
+                        "{label}[{index}] must be +inf, got {value:?}"
+                    ),
+                    "-inf" => assert!(
+                        value.is_infinite() && value.is_sign_negative(),
+                        "{label}[{index}] must be -inf, got {value:?}"
+                    ),
+                    "+0" => assert!(
+                        value == 0.0 && value.is_sign_positive(),
+                        "{label}[{index}] must be +0, got {value:?}"
+                    ),
+                    "-0" => assert!(
+                        value == 0.0 && value.is_sign_negative(),
+                        "{label}[{index}] must be -0, got {value:?}"
+                    ),
+                    finite => {
+                        let expected = finite.parse::<f64>().expect("finite oracle value");
+                        assert!(
+                            approx_equal(value, expected, 1e-12),
+                            "{label}[{index}]: {value:?} vs numpy {expected:?}"
+                        );
+                    }
+                }
+            }
+        };
+
+        for (label, matrix, values) in [
+            (
+                "inf",
+                "[[float('inf'), 1.0, 0.0], [0.0, 3.0, 1.0], [2.0, 0.0, 3.0]]",
+                [f64::INFINITY, 1.0, 0.0, 0.0, 3.0, 1.0, 2.0, 0.0, 3.0],
+            ),
+            (
+                "nan",
+                "[[float('nan'), 1.0, 0.0], [0.0, 3.0, 1.0], [2.0, 0.0, 3.0]]",
+                [f64::NAN, 1.0, 0.0, 0.0, 3.0, 1.0, 2.0, 0.0, 3.0],
+            ),
+        ] {
+            let solve_oracle = oracle("tensorsolve", matrix);
+            let (solved, solve_shape) =
+                tensorsolve(&values, &[3, 3], &[1.0, 2.0, 3.0], &[3]).expect("tensorsolve");
+            assert_eq!(solve_shape, vec![3], "{label}: tensorsolve shape");
+            assert_values(&format!("{label} tensorsolve"), &solved, &solve_oracle);
+
+            let inverse_oracle = oracle("tensorinv", matrix);
+            let (inverse, inverse_shape) = tensorinv(&values, &[3, 3], 1).expect("tensorinv");
+            assert_eq!(inverse_shape, vec![3, 3], "{label}: tensorinv shape");
+            assert_values(&format!("{label} tensorinv"), &inverse, &inverse_oracle);
+        }
+
+        let singular = "[[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [1.0, 0.0, 1.0]]";
+        let singular_values = [1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 1.0, 0.0, 1.0];
+        assert_eq!(oracle("tensorsolve", singular), "ERROR|LinAlgError");
+        assert!(
+            tensorsolve(&singular_values, &[3, 3], &[1.0, 2.0, 3.0], &[3]).is_err(),
+            "tensorsolve must reject a singular matrix"
+        );
+        assert_eq!(oracle("tensorinv", singular), "ERROR|LinAlgError");
+        assert!(
+            tensorinv(&singular_values, &[3, 3], 1).is_err(),
+            "tensorinv must reject a singular matrix"
+        );
     }
 
     #[test]
@@ -19367,7 +19534,7 @@ print(",".join(f"{float(z.real)!r}:{float(z.imag)!r}" for z in w))
     }
 
     #[test]
-    fn tensorinv_matches_numpy_non_finite_semantics() {
+    fn tensorinv_non_finite_semantics_are_pinned() {
         let inf_matrix = [f64::INFINITY, 1.0, 0.0, 0.0, 3.0, 1.0, 2.0, 0.0, 3.0];
         let (inverse, shape) = tensorinv(&inf_matrix, &[3, 3], 1).expect("inf tensorinv");
         assert_eq!(shape, vec![3, 3]);
