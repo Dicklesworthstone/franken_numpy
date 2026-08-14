@@ -5186,7 +5186,10 @@ fn bench_loadtxt_selected_bool_median_gate(_c: &mut Criterion) {
             || time_arm(&former),
             || time_arm(&candidate),
         );
-        let _ = common::run_median_ci_contract(
+        // The incumbent decision needs both sides' A/A controls: NumPy/NumPy
+        // establishes incumbent stability and FNP/FNP catches candidate-only
+        // variance before the same-process NumPy/FNP effect is classified.
+        let _ = common::run_dual_null_median_ci_contract(
             "python_loadtxt_selected_bool_8192x16_vs_numpy",
             || time_arm(&incumbent),
             || time_arm(&candidate),
