@@ -248,6 +248,7 @@ fn median_result_buffer_lifecycle(samples: &[ResultBufferLifecycle]) -> ResultBu
     }
 }
 
+#[test]
 fn verify_process_resource_snapshot_parser() {
     let stat = "4242 (criterion python worker) R 1 2 3 4 5 6 7 8 9 10 11";
     assert_eq!(parse_proc_stat_faults(stat), Ok((7, 9)));
