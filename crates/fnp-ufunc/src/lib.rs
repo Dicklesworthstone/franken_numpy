@@ -38838,9 +38838,9 @@ pub fn chebval(x: &[f64], c: &[f64]) -> Vec<f64> {
 /// `chebsub([1,2,3], [1,2,3])` is `[0.]`, not `[0., 0., 0.]`. `-0.0 == 0.0` here, matching
 /// numpy's `!= 0` test, so a negative trailing zero trims too.
 ///
-/// An empty input stays empty. numpy instead raises `ValueError("Coefficient array is
-/// empty")` from `as_series` before any arithmetic happens; reproducing that needs these
-/// 15 functions to become fallible and is tracked separately.
+/// NumPy validates both coefficient arrays before doing any arithmetic. Keep that validation
+/// at the shared Rust API boundary too, so a future native Python binding cannot silently turn
+/// NumPy's `ValueError("Coefficient array is empty")` into an empty result.
 fn trim_polynomial_seq(mut c: Vec<f64>) -> Vec<f64> {
     let mut end = c.len();
     while end > 1 && c[end - 1] == 0.0 {
@@ -38850,8 +38850,14 @@ fn trim_polynomial_seq(mut c: Vec<f64>) -> Vec<f64> {
     c
 }
 
-/// Add two Chebyshev coefficient arrays.
-pub fn chebadd(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+fn require_nonempty_polynomial_coefficients(c1: &[f64], c2: &[f64]) -> Result<(), UFuncError> {
+    if c1.is_empty() || c2.is_empty() {
+        return Err(UFuncError::Msg("Coefficient array is empty".to_string()));
+    }
+    Ok(())
+}
+
+fn polynomial_add(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     let len = c1.len().max(c2.len());
     let mut result = vec![0.0; len];
     for (i, &v) in c1.iter().enumerate() {
@@ -38863,8 +38869,7 @@ pub fn chebadd(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     trim_polynomial_seq(result)
 }
 
-/// Subtract two Chebyshev coefficient arrays.
-pub fn chebsub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+fn polynomial_sub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     let len = c1.len().max(c2.len());
     let mut result = vec![0.0; len];
     for (i, &v) in c1.iter().enumerate() {
@@ -38876,13 +38881,27 @@ pub fn chebsub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     trim_polynomial_seq(result)
 }
 
+/// Add two Chebyshev coefficient arrays.
+pub fn chebadd(c1: &[f64], c2: &[f64]) -> Result<Vec<f64>, UFuncError> {
+    require_nonempty_polynomial_coefficients(c1, c2)?;
+    Ok(polynomial_add(c1, c2))
+}
+
+/// Subtract two Chebyshev coefficient arrays.
+pub fn chebsub(c1: &[f64], c2: &[f64]) -> Result<Vec<f64>, UFuncError> {
+    require_nonempty_polynomial_coefficients(c1, c2)?;
+    Ok(polynomial_sub(c1, c2))
+}
+
 /// Multiply two Chebyshev coefficient arrays.
 ///
 /// Uses the identity T_m * T_n = (T_{m+n} + T_{|m-n|}) / 2.
-pub fn chebmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
-    if c1.is_empty() || c2.is_empty() {
-        return Vec::new();
-    }
+pub fn chebmul(c1: &[f64], c2: &[f64]) -> Result<Vec<f64>, UFuncError> {
+    require_nonempty_polynomial_coefficients(c1, c2)?;
+    Ok(chebmul_unchecked(c1, c2))
+}
+
+fn chebmul_unchecked(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     let len = c1.len() + c2.len() - 1;
     let mut result = vec![0.0; len];
     for (i, &a) in c1.iter().enumerate() {
@@ -39045,7 +39064,7 @@ pub fn chebfromroots(roots: &[f64]) -> Vec<f64> {
         // Multiply current polynomial by (x - r) in Chebyshev basis
         // (x - r) has Chebyshev coefficients [-r, 1]
         let factor = vec![-r, 1.0];
-        result = chebmul(&result, &factor);
+        result = chebmul_unchecked(&result, &factor);
     }
     result
 }
@@ -39429,29 +39448,15 @@ pub fn legfit(x: &[f64], y: &[f64], deg: usize) -> Result<Vec<f64>, UFuncError> 
 }
 
 /// Add two Legendre coefficient arrays.
-pub fn legadd(c1: &[f64], c2: &[f64]) -> Vec<f64> {
-    let len = c1.len().max(c2.len());
-    let mut result = vec![0.0; len];
-    for (i, &v) in c1.iter().enumerate() {
-        result[i] += v;
-    }
-    for (i, &v) in c2.iter().enumerate() {
-        result[i] += v;
-    }
-    trim_polynomial_seq(result)
+pub fn legadd(c1: &[f64], c2: &[f64]) -> Result<Vec<f64>, UFuncError> {
+    require_nonempty_polynomial_coefficients(c1, c2)?;
+    Ok(polynomial_add(c1, c2))
 }
 
 /// Subtract two Legendre coefficient arrays.
-pub fn legsub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
-    let len = c1.len().max(c2.len());
-    let mut result = vec![0.0; len];
-    for (i, &v) in c1.iter().enumerate() {
-        result[i] += v;
-    }
-    for (i, &v) in c2.iter().enumerate() {
-        result[i] -= v;
-    }
-    trim_polynomial_seq(result)
+pub fn legsub(c1: &[f64], c2: &[f64]) -> Result<Vec<f64>, UFuncError> {
+    require_nonempty_polynomial_coefficients(c1, c2)?;
+    Ok(polynomial_sub(c1, c2))
 }
 
 /// Multiply two Legendre coefficient arrays.
@@ -39491,10 +39496,12 @@ pub fn legmulx(c: &[f64]) -> Vec<f64> {
 /// loses accuracy exponentially with degree (1.2e-08 relative at degree 16, versus the
 /// 1e-16 the recurrence holds), which a randomised differential against numpy caught as
 /// deadlock-audit-50prg.
-pub fn legmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
-    if c1.is_empty() || c2.is_empty() {
-        return Vec::new();
-    }
+pub fn legmul(c1: &[f64], c2: &[f64]) -> Result<Vec<f64>, UFuncError> {
+    require_nonempty_polynomial_coefficients(c1, c2)?;
+    Ok(legmul_unchecked(c1, c2))
+}
+
+fn legmul_unchecked(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     let a = trim_polynomial_seq(c1.to_vec());
     let b = trim_polynomial_seq(c2.to_vec());
     // numpy drives the recurrence with the SHORTER series and scales by the longer one.
@@ -39515,11 +39522,11 @@ pub fn legmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
             for i in 3..=n {
                 let tmp = c0;
                 nd -= 1;
-                c0 = legsub(
+                c0 = polynomial_sub(
                     &scaled(&xs, c[n - i]),
                     &scaled_div(&c1v, (nd - 1) as f64, nd as f64),
                 );
-                c1v = legadd(
+                c1v = polynomial_add(
                     &tmp,
                     &scaled_div(&legmulx(&c1v), (2 * nd - 1) as f64, nd as f64),
                 );
@@ -39527,7 +39534,7 @@ pub fn legmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
             (c0, c1v)
         }
     };
-    trim_polynomial_seq(legadd(&c0, &legmulx(&c1v)))
+    trim_polynomial_seq(polynomial_add(&c0, &legmulx(&c1v)))
 }
 
 /// Divide Legendre coefficient arrays. Returns (quotient, remainder).
@@ -39596,7 +39603,7 @@ pub fn legfromroots(roots: &[f64]) -> Vec<f64> {
     let mut result = vec![-roots[0], 1.0];
     for &r in &roots[1..] {
         let factor = vec![-r, 1.0];
-        result = legmul(&result, &factor);
+        result = legmul_unchecked(&result, &factor);
     }
     result
 }
@@ -39666,7 +39673,7 @@ pub fn poly2leg(p: &[f64]) -> Vec<f64> {
     // replaced was both slower and less accurate (deadlock-audit-xf93e).
     let mut res = vec![0.0];
     for &coeff in p.iter().rev() {
-        res = legadd(&legmulx(&res), &[coeff]);
+        res = polynomial_add(&legmulx(&res), &[coeff]);
     }
     res
 }
@@ -39775,29 +39782,15 @@ pub fn hermint(c: &[f64], m: usize) -> Vec<f64> {
 }
 
 /// Add two physicist's Hermite coefficient arrays.
-pub fn hermadd(c1: &[f64], c2: &[f64]) -> Vec<f64> {
-    let len = c1.len().max(c2.len());
-    let mut result = vec![0.0; len];
-    for (i, &v) in c1.iter().enumerate() {
-        result[i] += v;
-    }
-    for (i, &v) in c2.iter().enumerate() {
-        result[i] += v;
-    }
-    trim_polynomial_seq(result)
+pub fn hermadd(c1: &[f64], c2: &[f64]) -> Result<Vec<f64>, UFuncError> {
+    require_nonempty_polynomial_coefficients(c1, c2)?;
+    Ok(polynomial_add(c1, c2))
 }
 
 /// Subtract two physicist's Hermite coefficient arrays.
-pub fn hermsub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
-    let len = c1.len().max(c2.len());
-    let mut result = vec![0.0; len];
-    for (i, &v) in c1.iter().enumerate() {
-        result[i] += v;
-    }
-    for (i, &v) in c2.iter().enumerate() {
-        result[i] -= v;
-    }
-    trim_polynomial_seq(result)
+pub fn hermsub(c1: &[f64], c2: &[f64]) -> Result<Vec<f64>, UFuncError> {
+    require_nonempty_polynomial_coefficients(c1, c2)?;
+    Ok(polynomial_sub(c1, c2))
 }
 
 /// Multiply two physicist's Hermite coefficient arrays via power basis.
@@ -39821,10 +39814,12 @@ pub fn hermmulx(c: &[f64]) -> Vec<f64> {
 /// Multiply two physicist's Hermite coefficient arrays via numpy's in-basis recurrence.
 /// See [`legmul`] for why the power-basis round trip this replaced was a defect
 /// (deadlock-audit-50prg).
-pub fn hermmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
-    if c1.is_empty() || c2.is_empty() {
-        return Vec::new();
-    }
+pub fn hermmul(c1: &[f64], c2: &[f64]) -> Result<Vec<f64>, UFuncError> {
+    require_nonempty_polynomial_coefficients(c1, c2)?;
+    Ok(hermmul_unchecked(c1, c2))
+}
+
+fn hermmul_unchecked(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     let a = trim_polynomial_seq(c1.to_vec());
     let b = trim_polynomial_seq(c2.to_vec());
     let (c, xs) = if a.len() > b.len() { (b, a) } else { (a, b) };
@@ -39839,13 +39834,13 @@ pub fn hermmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
             for i in 3..=n {
                 let tmp = c0;
                 nd -= 1;
-                c0 = hermsub(&scaled(&xs, c[n - i]), &scaled(&c1v, (2 * (nd - 1)) as f64));
-                c1v = hermadd(&tmp, &scaled(&hermmulx(&c1v), 2.0));
+                c0 = polynomial_sub(&scaled(&xs, c[n - i]), &scaled(&c1v, (2 * (nd - 1)) as f64));
+                c1v = polynomial_add(&tmp, &scaled(&hermmulx(&c1v), 2.0));
             }
             (c0, c1v)
         }
     };
-    trim_polynomial_seq(hermadd(&c0, &scaled(&hermmulx(&c1v), 2.0)))
+    trim_polynomial_seq(polynomial_add(&c0, &scaled(&hermmulx(&c1v), 2.0)))
 }
 
 /// Divide physicist's Hermite coefficient arrays. Returns (quotient, remainder).
@@ -39910,7 +39905,7 @@ pub fn hermfromroots(roots: &[f64]) -> Vec<f64> {
     let mut result = vec![-roots[0], 0.5];
     for &r in &roots[1..] {
         let factor = vec![-r, 0.5];
-        result = hermmul(&result, &factor);
+        result = hermmul_unchecked(&result, &factor);
     }
     result
 }
@@ -39970,19 +39965,21 @@ pub fn poly2herm(p: &[f64]) -> Vec<f64> {
     // replaced was both slower and less accurate (deadlock-audit-xf93e).
     let mut res = vec![0.0];
     for &coeff in p.iter().rev() {
-        res = hermadd(&hermmulx(&res), &[coeff]);
+        res = polynomial_add(&hermmulx(&res), &[coeff]);
     }
     res
 }
 
 /// Add two probabilist's Hermite coefficient arrays.
-pub fn hermeadd(c1: &[f64], c2: &[f64]) -> Vec<f64> {
-    hermadd(c1, c2)
+pub fn hermeadd(c1: &[f64], c2: &[f64]) -> Result<Vec<f64>, UFuncError> {
+    require_nonempty_polynomial_coefficients(c1, c2)?;
+    Ok(polynomial_add(c1, c2))
 }
 
 /// Subtract two probabilist's Hermite coefficient arrays.
-pub fn hermesub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
-    hermsub(c1, c2)
+pub fn hermesub(c1: &[f64], c2: &[f64]) -> Result<Vec<f64>, UFuncError> {
+    require_nonempty_polynomial_coefficients(c1, c2)?;
+    Ok(polynomial_sub(c1, c2))
 }
 
 /// Multiply two probabilist's Hermite coefficient arrays via power basis.
@@ -40006,10 +40003,12 @@ pub fn hermemulx(c: &[f64]) -> Vec<f64> {
 /// Multiply two probabilist's Hermite coefficient arrays via numpy's in-basis recurrence.
 /// See [`legmul`] for why the power-basis round trip this replaced was a defect
 /// (deadlock-audit-50prg).
-pub fn hermemul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
-    if c1.is_empty() || c2.is_empty() {
-        return Vec::new();
-    }
+pub fn hermemul(c1: &[f64], c2: &[f64]) -> Result<Vec<f64>, UFuncError> {
+    require_nonempty_polynomial_coefficients(c1, c2)?;
+    Ok(hermemul_unchecked(c1, c2))
+}
+
+fn hermemul_unchecked(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     let a = trim_polynomial_seq(c1.to_vec());
     let b = trim_polynomial_seq(c2.to_vec());
     let (c, xs) = if a.len() > b.len() { (b, a) } else { (a, b) };
@@ -40024,13 +40023,13 @@ pub fn hermemul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
             for i in 3..=n {
                 let tmp = c0;
                 nd -= 1;
-                c0 = hermesub(&scaled(&xs, c[n - i]), &scaled(&c1v, (nd - 1) as f64));
-                c1v = hermeadd(&tmp, &hermemulx(&c1v));
+                c0 = polynomial_sub(&scaled(&xs, c[n - i]), &scaled(&c1v, (nd - 1) as f64));
+                c1v = polynomial_add(&tmp, &hermemulx(&c1v));
             }
             (c0, c1v)
         }
     };
-    trim_polynomial_seq(hermeadd(&c0, &hermemulx(&c1v)))
+    trim_polynomial_seq(polynomial_add(&c0, &hermemulx(&c1v)))
 }
 
 /// Divide probabilist's Hermite coefficient arrays. Returns (quotient, remainder).
@@ -40276,7 +40275,7 @@ pub fn hermefromroots(roots: &[f64]) -> Vec<f64> {
     let mut result = vec![-roots[0], 1.0];
     for &r in &roots[1..] {
         let factor = vec![-r, 1.0];
-        result = hermemul(&result, &factor);
+        result = hermemul_unchecked(&result, &factor);
     }
     result
 }
@@ -40336,7 +40335,7 @@ pub fn poly2herme(p: &[f64]) -> Vec<f64> {
     // replaced was both slower and less accurate (deadlock-audit-xf93e).
     let mut res = vec![0.0];
     for &coeff in p.iter().rev() {
-        res = hermeadd(&hermemulx(&res), &[coeff]);
+        res = polynomial_add(&hermemulx(&res), &[coeff]);
     }
     res
 }
@@ -40416,29 +40415,15 @@ pub fn lagint(c: &[f64], m: usize) -> Vec<f64> {
 }
 
 /// Add two Laguerre coefficient arrays.
-pub fn lagadd(c1: &[f64], c2: &[f64]) -> Vec<f64> {
-    let len = c1.len().max(c2.len());
-    let mut result = vec![0.0; len];
-    for (i, &v) in c1.iter().enumerate() {
-        result[i] += v;
-    }
-    for (i, &v) in c2.iter().enumerate() {
-        result[i] += v;
-    }
-    trim_polynomial_seq(result)
+pub fn lagadd(c1: &[f64], c2: &[f64]) -> Result<Vec<f64>, UFuncError> {
+    require_nonempty_polynomial_coefficients(c1, c2)?;
+    Ok(polynomial_add(c1, c2))
 }
 
 /// Subtract two Laguerre coefficient arrays.
-pub fn lagsub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
-    let len = c1.len().max(c2.len());
-    let mut result = vec![0.0; len];
-    for (i, &v) in c1.iter().enumerate() {
-        result[i] += v;
-    }
-    for (i, &v) in c2.iter().enumerate() {
-        result[i] -= v;
-    }
-    trim_polynomial_seq(result)
+pub fn lagsub(c1: &[f64], c2: &[f64]) -> Result<Vec<f64>, UFuncError> {
+    require_nonempty_polynomial_coefficients(c1, c2)?;
+    Ok(polynomial_sub(c1, c2))
 }
 
 /// Multiply two Laguerre coefficient arrays via power basis.
@@ -40464,10 +40449,12 @@ pub fn lagmulx(c: &[f64]) -> Vec<f64> {
 /// Multiply two Laguerre coefficient arrays via numpy's in-basis recurrence.
 /// See [`legmul`] for why the power-basis round trip this replaced was a defect
 /// (deadlock-audit-50prg).
-pub fn lagmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
-    if c1.is_empty() || c2.is_empty() {
-        return Vec::new();
-    }
+pub fn lagmul(c1: &[f64], c2: &[f64]) -> Result<Vec<f64>, UFuncError> {
+    require_nonempty_polynomial_coefficients(c1, c2)?;
+    Ok(lagmul_unchecked(c1, c2))
+}
+
+fn lagmul_unchecked(c1: &[f64], c2: &[f64]) -> Vec<f64> {
     let a = trim_polynomial_seq(c1.to_vec());
     let b = trim_polynomial_seq(c2.to_vec());
     let (c, xs) = if a.len() > b.len() { (b, a) } else { (a, b) };
@@ -40485,19 +40472,19 @@ pub fn lagmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
             for i in 3..=n {
                 let tmp = c0;
                 nd -= 1;
-                c0 = lagsub(
+                c0 = polynomial_sub(
                     &scaled(&xs, c[n - i]),
                     &scaled_div(&c1v, (nd - 1) as f64, nd as f64),
                 );
                 // numpy: lagadd(tmp, lagsub((2*nd - 1)*c1, lagmulx(c1)) / nd) — the divide
                 // applies to the whole difference, not to either operand.
-                let inner = lagsub(&scaled(&c1v, (2 * nd - 1) as f64), &lagmulx(&c1v));
-                c1v = lagadd(&tmp, &divided(&inner, nd as f64));
+                let inner = polynomial_sub(&scaled(&c1v, (2 * nd - 1) as f64), &lagmulx(&c1v));
+                c1v = polynomial_add(&tmp, &divided(&inner, nd as f64));
             }
             (c0, c1v)
         }
     };
-    trim_polynomial_seq(lagadd(&c0, &lagsub(&c1v, &lagmulx(&c1v))))
+    trim_polynomial_seq(polynomial_add(&c0, &polynomial_sub(&c1v, &lagmulx(&c1v))))
 }
 
 /// Divide Laguerre coefficient arrays. Returns (quotient, remainder).
@@ -40612,7 +40599,7 @@ pub fn lagfromroots(roots: &[f64]) -> Vec<f64> {
     let mut result = vec![1.0 - roots[0], -1.0];
     for &r in &roots[1..] {
         let factor = vec![1.0 - r, -1.0];
-        result = lagmul(&result, &factor);
+        result = lagmul_unchecked(&result, &factor);
     }
     result
 }
@@ -40684,7 +40671,7 @@ pub fn poly2lag(p: &[f64]) -> Vec<f64> {
     // stable, and it reuses the lagmulx primitive added for lagmul under 50prg.
     let mut res = vec![0.0];
     for &coeff in p.iter().rev() {
-        res = lagadd(&lagmulx(&res), &[coeff]);
+        res = polynomial_add(&lagmulx(&res), &[coeff]);
     }
     res
 }
@@ -43441,25 +43428,23 @@ mod tests {
         ShapeError, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView, UFuncError,
         UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, apply_simd_plain_unary_chunk,
         apply_simd_residual_unary_chunk, bitwise_count, busday_count, busday_offset,
-        busday_offset_with_holidays, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots,
-        chebint, chebmul, chebroots, chebsub, chebval, checked_window_total, copysign,
-        datetime_as_string, divmod_arrays, errstate, fft_dit, fft_mul, fft_pow2, fftn_along_axis,
-        financial_fv, financial_ipmt, financial_irr, financial_mirr, financial_nper, financial_npv,
-        financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp, frompyfunc,
-        frompyfunc_object, frompyfunc_python, frompyfunc_python_import,
-        frompyfunc_python_import_with_interpreter, frompyfunc_python_with_interpreter, gcd_arrays,
-        geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermeder, hermediv,
-        hermefit, hermefromroots, hermeint, hermemul, hermeroots, hermesub, hermeval, hermfit,
-        hermfromroots, hermint, hermmul, hermroots, hermsub, hermval, hypot,
-        interpolate_percentile, is_busday, isnat, isneginf, isposinf, lag2poly, lagadd, lagder,
-        lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays, ldexp,
-        leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub,
-        legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or,
-        ma_maximum_fill_value, ma_maximum_fill_value_for_dtype, ma_minimum_fill_value,
-        ma_minimum_fill_value_for_dtype, matmul_accumulate_serial, mediate_ufunc_runtime_policy,
-        modf, nextafter, normalize_fixed_signature_keywords, normalize_signature_keywords,
-        note_unary_float_errors, pad_empty, pad_linear_ramp, pad_stat,
-        parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
+        busday_offset_with_holidays, cheb2poly, chebder, chebdiv, chebfit, chebfromroots, chebint,
+        chebroots, chebval, checked_window_total, copysign, datetime_as_string, divmod_arrays,
+        errstate, fft_dit, fft_mul, fft_pow2, fftn_along_axis, financial_fv, financial_ipmt,
+        financial_irr, financial_mirr, financial_nper, financial_npv, financial_pmt,
+        financial_ppmt, financial_pv, financial_rate, frexp, frompyfunc, frompyfunc_object,
+        frompyfunc_python, frompyfunc_python_import, frompyfunc_python_import_with_interpreter,
+        frompyfunc_python_with_interpreter, gcd_arrays, geterr, herm2poly, hermder, hermdiv,
+        herme2poly, hermeder, hermediv, hermefit, hermefromroots, hermeint, hermeroots, hermeval,
+        hermfit, hermfromroots, hermint, hermroots, hermval, hypot, interpolate_percentile,
+        is_busday, isnat, isneginf, isposinf, lag2poly, lagder, lagdiv, lagfit, lagfromroots,
+        lagint, lagroots, lagval, lcm_arrays, ldexp, leg2poly, legder, legdiv, legfit,
+        legfromroots, legint, legroots, legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked,
+        ma_make_mask, ma_mask_or, ma_maximum_fill_value, ma_maximum_fill_value_for_dtype,
+        ma_minimum_fill_value, ma_minimum_fill_value_for_dtype, matmul_accumulate_serial,
+        mediate_ufunc_runtime_policy, modf, nextafter, normalize_fixed_signature_keywords,
+        normalize_signature_keywords, note_unary_float_errors, pad_empty, pad_linear_ramp,
+        pad_stat, parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
         plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
         poly2herm, poly2herme, poly2lag, poly2leg, reduce_frompyfunc_values,
         resolve_override_dispatch, scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log,
@@ -43475,6 +43460,69 @@ mod tests {
     use std::fmt::Write as _;
     use std::process::Command;
     use std::sync::{Arc, Mutex, RwLock};
+
+    // The production operations are fallible so their public Rust surface matches NumPy's
+    // empty-coefficient ValueError. The historical success-path tests use only nonempty
+    // fixtures, so keep their assertions focused on arithmetic rather than repetitive unwraps.
+    fn chebadd(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+        super::chebadd(c1, c2).expect("nonempty coefficients in unit test")
+    }
+
+    fn chebsub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+        super::chebsub(c1, c2).expect("nonempty coefficients in unit test")
+    }
+
+    fn chebmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+        super::chebmul(c1, c2).expect("nonempty coefficients in unit test")
+    }
+
+    fn legadd(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+        super::legadd(c1, c2).expect("nonempty coefficients in unit test")
+    }
+
+    fn legsub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+        super::legsub(c1, c2).expect("nonempty coefficients in unit test")
+    }
+
+    fn legmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+        super::legmul(c1, c2).expect("nonempty coefficients in unit test")
+    }
+
+    fn hermadd(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+        super::hermadd(c1, c2).expect("nonempty coefficients in unit test")
+    }
+
+    fn hermsub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+        super::hermsub(c1, c2).expect("nonempty coefficients in unit test")
+    }
+
+    fn hermmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+        super::hermmul(c1, c2).expect("nonempty coefficients in unit test")
+    }
+
+    fn hermeadd(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+        super::hermeadd(c1, c2).expect("nonempty coefficients in unit test")
+    }
+
+    fn hermesub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+        super::hermesub(c1, c2).expect("nonempty coefficients in unit test")
+    }
+
+    fn hermemul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+        super::hermemul(c1, c2).expect("nonempty coefficients in unit test")
+    }
+
+    fn lagadd(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+        super::lagadd(c1, c2).expect("nonempty coefficients in unit test")
+    }
+
+    fn lagsub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+        super::lagsub(c1, c2).expect("nonempty coefficients in unit test")
+    }
+
+    fn lagmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+        super::lagmul(c1, c2).expect("nonempty coefficients in unit test")
+    }
 
     fn packet005_artifacts() -> Vec<String> {
         vec![
@@ -61787,68 +61835,106 @@ print("\n".join(out))
     }
 
     #[test]
-    fn polynomial_family_ops_on_empty_input_diverge_from_numpy_pending_fb171() {
-        // KNOWN DIVERGENCE, tracked as deadlock-audit-fb171. numpy's as_series raises
-        // ValueError("Coefficient array is empty") before any arithmetic, so every one of
-        // these calls is an exception on the numpy side. These kernels return Vec<f64> and
-        // have no channel to signal that, so they fall through to a value.
-        //
-        // This is NOT reachable from the Python surface today: all 15 bindings in
-        // fnp-python are numpy passthroughs, so users get numpy's own ValueError. The risk
-        // it guards is a FUTURE native wiring inheriting the divergence silently - exactly
-        // what happened to hermeder/hermeint before deadlock-audit-mlz0s, where the
-        // remedy was to make the Python layer defer on empty input so numpy still raises.
-        //
-        // Pinning the current behaviour here means changing it is a deliberate, visible
-        // edit rather than a silent one, and gives whoever closes fb171 the full list of
-        // shapes their fallible signatures have to cover.
-        let addsub: [(
-            &str,
-            fn(&[f64], &[f64]) -> Vec<f64>,
-            fn(&[f64], &[f64]) -> Vec<f64>,
-        ); 5] = [
-            ("cheb", chebadd, chebsub),
-            ("leg", legadd, legsub),
-            ("herm", hermadd, hermsub),
-            ("herme", hermeadd, hermesub),
-            ("lag", lagadd, lagsub),
-        ];
-        for (name, add, sub) in addsub {
-            // numpy: ValueError. Ours: the non-empty operand passes through.
-            poly_close_vec(
-                &add(&[], &[1.0, 2.0]),
-                &[1.0, 2.0],
-                &format!("{name}add empty lhs"),
-            );
-            poly_close_vec(
-                &sub(&[], &[1.0, 2.0]),
-                &[-1.0, -2.0],
-                &format!("{name}sub empty lhs negates rhs"),
-            );
-            // numpy: ValueError. Ours: an empty result, which trim_polynomial_seq keeps
-            // empty rather than promoting to [0.0].
+    fn polynomial_family_ops_reject_empty_coefficients_like_numpy() {
+        // NumPy's polyutils.as_series rejects either empty operand before the operation's
+        // basis-specific arithmetic starts. First obtain that result from the live oracle;
+        // then exercise empty lhs, empty rhs, and both empty for all fifteen public Rust
+        // operations. This makes the test fail if the oracle's error contract changes instead
+        // of preserving a transcribed assumption.
+        if numpy_oracle_available() {
+            let script = r#"
+import numpy as np
+
+families = [
+    (np.polynomial.chebyshev, 'cheb'),
+    (np.polynomial.legendre, 'leg'),
+    (np.polynomial.hermite, 'herm'),
+    (np.polynomial.hermite_e, 'herme'),
+    (np.polynomial.laguerre, 'lag'),
+]
+for module, prefix in families:
+    for operation in ('add', 'sub', 'mul'):
+        function = getattr(module, prefix + operation)
+        for lhs, rhs in (([], [1.0, 2.0]), ([1.0, 2.0], []), ([], [])):
+            try:
+                function(lhs, rhs)
+            except Exception as error:
+                print(f'{type(error).__name__}:{error}')
+            else:
+                print('NO_ERROR')
+"#;
+            let output = Command::new(oracle_python_bin())
+                .args(["-c", script])
+                .output()
+                .expect("live NumPy oracle subprocess should start");
             assert!(
-                add(&[], &[]).is_empty(),
-                "{name}add of two empty series is empty here; numpy raises"
+                output.status.success(),
+                "live NumPy oracle failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let oracle_lines: Vec<_> = String::from_utf8(output.stdout)
+                .expect("live NumPy oracle output should be UTF-8")
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            assert_eq!(
+                oracle_lines.len(),
+                45,
+                "three empty shapes for fifteen operations"
+            );
+            assert!(
+                oracle_lines
+                    .iter()
+                    .all(|line| line == "ValueError:Coefficient array is empty")
             );
         }
-        let muls: [(&str, fn(&[f64], &[f64]) -> Vec<f64>); 5] = [
-            ("cheb", chebmul),
-            ("leg", legmul),
-            ("herm", hermmul),
-            ("herme", hermemul),
-            ("lag", lagmul),
+        let addsub: [(
+            &str,
+            fn(&[f64], &[f64]) -> Result<Vec<f64>, UFuncError>,
+            fn(&[f64], &[f64]) -> Result<Vec<f64>, UFuncError>,
+        ); 5] = [
+            ("cheb", super::chebadd, super::chebsub),
+            ("leg", super::legadd, super::legsub),
+            ("herm", super::hermadd, super::hermsub),
+            ("herme", super::hermeadd, super::hermesub),
+            ("lag", super::lagadd, super::lagsub),
+        ];
+        for (name, add, sub) in addsub {
+            for (shape, lhs, rhs) in [
+                ("empty_lhs", &[][..], &[1.0, 2.0][..]),
+                ("empty_rhs", &[1.0, 2.0][..], &[][..]),
+                ("both_empty", &[][..], &[][..]),
+            ] {
+                for (operation, call) in [("add", add), ("sub", sub)] {
+                    let error = call(lhs, rhs).expect_err("empty coefficients must fail");
+                    assert_eq!(
+                        error.to_string(),
+                        "Coefficient array is empty",
+                        "{name}{operation} {shape}"
+                    );
+                }
+            }
+        }
+        let muls: [(&str, fn(&[f64], &[f64]) -> Result<Vec<f64>, UFuncError>); 5] = [
+            ("cheb", super::chebmul),
+            ("leg", super::legmul),
+            ("herm", super::hermmul),
+            ("herme", super::hermemul),
+            ("lag", super::lagmul),
         ];
         for (name, mul) in muls {
-            // numpy: ValueError. Ours: the explicit empty guard at the top of each mul.
-            assert!(
-                mul(&[], &[1.0, 2.0]).is_empty(),
-                "{name}mul with an empty operand is empty here; numpy raises"
-            );
-            assert!(
-                mul(&[1.0, 2.0], &[]).is_empty(),
-                "{name}mul with an empty kernel is empty here; numpy raises"
-            );
+            for (shape, lhs, rhs) in [
+                ("empty_lhs", &[][..], &[1.0, 2.0][..]),
+                ("empty_rhs", &[1.0, 2.0][..], &[][..]),
+                ("both_empty", &[][..], &[][..]),
+            ] {
+                let error = mul(lhs, rhs).expect_err("empty coefficients must fail");
+                assert_eq!(
+                    error.to_string(),
+                    "Coefficient array is empty",
+                    "{name}mul {shape}"
+                );
+            }
         }
     }
 
@@ -78318,8 +78404,9 @@ print("\n".join(out))
 
     #[test]
     fn chebmul_empty() {
-        let result = chebmul(&[], &[1.0, 2.0]);
-        assert!(result.is_empty());
+        let error = super::chebmul(&[], &[1.0, 2.0])
+            .expect_err("empty coefficients must match NumPy's ValueError");
+        assert_eq!(error.to_string(), "Coefficient array is empty");
     }
 
     #[test]

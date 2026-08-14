@@ -12658,9 +12658,18 @@ fn execute_polynomial_differential_operation(
             Ok(as_pair(q.values().to_vec(), r.values().to_vec()))
         }
         "chebval" => Ok(as_array(chebval(&case.rhs_values, &case.lhs_values))),
-        "chebadd" => Ok(as_array(chebadd(&case.lhs_values, &case.rhs_values))),
-        "chebsub" => Ok(as_array(chebsub(&case.lhs_values, &case.rhs_values))),
-        "chebmul" => Ok(as_array(chebmul(&case.lhs_values, &case.rhs_values))),
+        "chebadd" => Ok(as_array(
+            chebadd(&case.lhs_values, &case.rhs_values)
+                .map_err(map_ufunc_error_to_polynomial_suite)?,
+        )),
+        "chebsub" => Ok(as_array(
+            chebsub(&case.lhs_values, &case.rhs_values)
+                .map_err(map_ufunc_error_to_polynomial_suite)?,
+        )),
+        "chebmul" => Ok(as_array(
+            chebmul(&case.lhs_values, &case.rhs_values)
+                .map_err(map_ufunc_error_to_polynomial_suite)?,
+        )),
         "chebdiv" => {
             let (q, r) = chebdiv(&case.lhs_values, &case.rhs_values)
                 .map_err(map_ufunc_error_to_polynomial_suite)?;
@@ -12687,9 +12696,18 @@ fn execute_polynomial_differential_operation(
         "chebder" => Ok(as_array(chebder(&case.lhs_values, case.deg.unwrap_or(1)))),
         "chebint" => Ok(as_array(chebint(&case.lhs_values, case.deg.unwrap_or(1)))),
         "legval" => Ok(as_array(legval(&case.rhs_values, &case.lhs_values))),
-        "legadd" => Ok(as_array(legadd(&case.lhs_values, &case.rhs_values))),
-        "legsub" => Ok(as_array(legsub(&case.lhs_values, &case.rhs_values))),
-        "legmul" => Ok(as_array(legmul(&case.lhs_values, &case.rhs_values))),
+        "legadd" => Ok(as_array(
+            legadd(&case.lhs_values, &case.rhs_values)
+                .map_err(map_ufunc_error_to_polynomial_suite)?,
+        )),
+        "legsub" => Ok(as_array(
+            legsub(&case.lhs_values, &case.rhs_values)
+                .map_err(map_ufunc_error_to_polynomial_suite)?,
+        )),
+        "legmul" => Ok(as_array(
+            legmul(&case.lhs_values, &case.rhs_values)
+                .map_err(map_ufunc_error_to_polynomial_suite)?,
+        )),
         "legdiv" => {
             let (q, r) = legdiv(&case.lhs_values, &case.rhs_values)
                 .map_err(map_ufunc_error_to_polynomial_suite)?;
@@ -12716,9 +12734,18 @@ fn execute_polynomial_differential_operation(
             ))
         }
         "hermval" => Ok(as_array(hermval(&case.rhs_values, &case.lhs_values))),
-        "hermadd" => Ok(as_array(hermadd(&case.lhs_values, &case.rhs_values))),
-        "hermsub" => Ok(as_array(hermsub(&case.lhs_values, &case.rhs_values))),
-        "hermmul" => Ok(as_array(hermmul(&case.lhs_values, &case.rhs_values))),
+        "hermadd" => Ok(as_array(
+            hermadd(&case.lhs_values, &case.rhs_values)
+                .map_err(map_ufunc_error_to_polynomial_suite)?,
+        )),
+        "hermsub" => Ok(as_array(
+            hermsub(&case.lhs_values, &case.rhs_values)
+                .map_err(map_ufunc_error_to_polynomial_suite)?,
+        )),
+        "hermmul" => Ok(as_array(
+            hermmul(&case.lhs_values, &case.rhs_values)
+                .map_err(map_ufunc_error_to_polynomial_suite)?,
+        )),
         "hermdiv" => {
             let (q, r) = hermdiv(&case.lhs_values, &case.rhs_values)
                 .map_err(map_ufunc_error_to_polynomial_suite)?;
@@ -12733,9 +12760,18 @@ fn execute_polynomial_differential_operation(
         "hermder" => Ok(as_array(hermder(&case.lhs_values, case.deg.unwrap_or(1)))),
         "hermint" => Ok(as_array(hermint(&case.lhs_values, case.deg.unwrap_or(1)))),
         "lagval" => Ok(as_array(lagval(&case.rhs_values, &case.lhs_values))),
-        "lagadd" => Ok(as_array(lagadd(&case.lhs_values, &case.rhs_values))),
-        "lagsub" => Ok(as_array(lagsub(&case.lhs_values, &case.rhs_values))),
-        "lagmul" => Ok(as_array(lagmul(&case.lhs_values, &case.rhs_values))),
+        "lagadd" => Ok(as_array(
+            lagadd(&case.lhs_values, &case.rhs_values)
+                .map_err(map_ufunc_error_to_polynomial_suite)?,
+        )),
+        "lagsub" => Ok(as_array(
+            lagsub(&case.lhs_values, &case.rhs_values)
+                .map_err(map_ufunc_error_to_polynomial_suite)?,
+        )),
+        "lagmul" => Ok(as_array(
+            lagmul(&case.lhs_values, &case.rhs_values)
+                .map_err(map_ufunc_error_to_polynomial_suite)?,
+        )),
         "lagdiv" => {
             let (q, r) = lagdiv(&case.lhs_values, &case.rhs_values)
                 .map_err(map_ufunc_error_to_polynomial_suite)?;
@@ -12750,9 +12786,18 @@ fn execute_polynomial_differential_operation(
         "lagder" => Ok(as_array(lagder(&case.lhs_values, case.deg.unwrap_or(1)))),
         "lagint" => Ok(as_array(lagint(&case.lhs_values, case.deg.unwrap_or(1)))),
         "hermeval" => Ok(as_array(hermeval(&case.rhs_values, &case.lhs_values))),
-        "hermeadd" => Ok(as_array(hermeadd(&case.lhs_values, &case.rhs_values))),
-        "hermesub" => Ok(as_array(hermesub(&case.lhs_values, &case.rhs_values))),
-        "hermemul" => Ok(as_array(hermemul(&case.lhs_values, &case.rhs_values))),
+        "hermeadd" => Ok(as_array(
+            hermeadd(&case.lhs_values, &case.rhs_values)
+                .map_err(map_ufunc_error_to_polynomial_suite)?,
+        )),
+        "hermesub" => Ok(as_array(
+            hermesub(&case.lhs_values, &case.rhs_values)
+                .map_err(map_ufunc_error_to_polynomial_suite)?,
+        )),
+        "hermemul" => Ok(as_array(
+            hermemul(&case.lhs_values, &case.rhs_values)
+                .map_err(map_ufunc_error_to_polynomial_suite)?,
+        )),
         "hermediv" => {
             let (q, r) = hermediv(&case.lhs_values, &case.rhs_values)
                 .map_err(map_ufunc_error_to_polynomial_suite)?;
@@ -13156,22 +13201,22 @@ fn poly_family_add(
     match family {
         "polynomial1d" => a.polyadd(b).map_err(map_ufunc_error_to_polynomial_suite),
         "chebyshev" => {
-            let v = chebadd(a.values(), b.values());
+            let v = chebadd(a.values(), b.values()).map_err(map_ufunc_error_to_polynomial_suite)?;
             Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
                 .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "legendre" => {
-            let v = legadd(a.values(), b.values());
+            let v = legadd(a.values(), b.values()).map_err(map_ufunc_error_to_polynomial_suite)?;
             Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
                 .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "hermite" => {
-            let v = hermadd(a.values(), b.values());
+            let v = hermadd(a.values(), b.values()).map_err(map_ufunc_error_to_polynomial_suite)?;
             Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
                 .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "laguerre" => {
-            let v = lagadd(a.values(), b.values());
+            let v = lagadd(a.values(), b.values()).map_err(map_ufunc_error_to_polynomial_suite)?;
             Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
                 .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
@@ -13190,22 +13235,22 @@ fn poly_family_sub(
     match family {
         "polynomial1d" => a.polysub(b).map_err(map_ufunc_error_to_polynomial_suite),
         "chebyshev" => {
-            let v = chebsub(a.values(), b.values());
+            let v = chebsub(a.values(), b.values()).map_err(map_ufunc_error_to_polynomial_suite)?;
             Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
                 .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "legendre" => {
-            let v = legsub(a.values(), b.values());
+            let v = legsub(a.values(), b.values()).map_err(map_ufunc_error_to_polynomial_suite)?;
             Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
                 .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "hermite" => {
-            let v = hermsub(a.values(), b.values());
+            let v = hermsub(a.values(), b.values()).map_err(map_ufunc_error_to_polynomial_suite)?;
             Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
                 .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "laguerre" => {
-            let v = lagsub(a.values(), b.values());
+            let v = lagsub(a.values(), b.values()).map_err(map_ufunc_error_to_polynomial_suite)?;
             Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
                 .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
@@ -13224,22 +13269,22 @@ fn poly_family_mul(
     match family {
         "polynomial1d" => a.polymul(b).map_err(map_ufunc_error_to_polynomial_suite),
         "chebyshev" => {
-            let v = chebmul(a.values(), b.values());
+            let v = chebmul(a.values(), b.values()).map_err(map_ufunc_error_to_polynomial_suite)?;
             Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
                 .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "legendre" => {
-            let v = legmul(a.values(), b.values());
+            let v = legmul(a.values(), b.values()).map_err(map_ufunc_error_to_polynomial_suite)?;
             Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
                 .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "hermite" => {
-            let v = hermmul(a.values(), b.values());
+            let v = hermmul(a.values(), b.values()).map_err(map_ufunc_error_to_polynomial_suite)?;
             Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
                 .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "laguerre" => {
-            let v = lagmul(a.values(), b.values());
+            let v = lagmul(a.values(), b.values()).map_err(map_ufunc_error_to_polynomial_suite)?;
             Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
                 .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }

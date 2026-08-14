@@ -9504,11 +9504,14 @@ fn zerocopy_f64_binary_flat<'py>(
                             *slot = x / y;
                         }
                     });
-                if lhs
-                    .par_iter()
-                    .zip(rhs.par_iter())
-                    .zip(out_data.par_iter())
-                    .any(|((&x, &y), &q)| !f64_divide_fast_accepts_without_fp_error(x, y, q))
+                if out_data.par_iter().any(|q| !q.is_normal())
+                    && lhs
+                        .par_iter()
+                        .zip(rhs.par_iter())
+                        .zip(out_data.par_iter())
+                        .any(|((&x, &y), &q)| {
+                            !f64_divide_fast_accepts_without_fp_error(x, y, q)
+                        })
                     && lhs
                         .par_iter()
                         .zip(rhs.par_iter())
@@ -9534,17 +9537,18 @@ fn zerocopy_f64_binary_flat<'py>(
             for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
                 slot.set(a_cell.get() / b_cell.get());
             }
-            if output
-                .iter()
-                .zip(a_in.iter())
-                .zip(b_in.iter())
-                .any(|((slot, a_cell), b_cell)| {
-                    !f64_divide_fast_accepts_without_fp_error(
-                        a_cell.get(),
-                        b_cell.get(),
-                        slot.get(),
-                    )
-                })
+            if output.iter().any(|slot| !slot.get().is_normal())
+                && output
+                    .iter()
+                    .zip(a_in.iter())
+                    .zip(b_in.iter())
+                    .any(|((slot, a_cell), b_cell)| {
+                        !f64_divide_fast_accepts_without_fp_error(
+                            a_cell.get(),
+                            b_cell.get(),
+                            slot.get(),
+                        )
+                    })
                 && output
                     .iter()
                     .zip(a_in.iter())

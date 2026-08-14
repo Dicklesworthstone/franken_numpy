@@ -1386,10 +1386,11 @@ fn divide_repaired_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
     for ((s, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
         *s = x / y;
     }
-    a.iter()
-        .zip(b.iter())
-        .zip(out.iter())
-        .any(|((&x, &y), &q)| !bench_divide_fast_accepts_without_fp_error(x, y, q))
+    out.iter().any(|q| !q.is_normal())
+        && a.iter()
+            .zip(b.iter())
+            .zip(out.iter())
+            .any(|((&x, &y), &q)| !bench_divide_fast_accepts_without_fp_error(x, y, q))
         && a.iter()
             .zip(b.iter())
             .zip(out.iter())
@@ -1421,10 +1422,11 @@ fn divide_repaired_parallel(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
                 *s = x / y;
             }
         });
-    a.par_iter()
-        .zip(b.par_iter())
-        .zip(out.par_iter())
-        .any(|((&x, &y), &q)| !bench_divide_fast_accepts_without_fp_error(x, y, q))
+    out.par_iter().any(|q| !q.is_normal())
+        && a.par_iter()
+            .zip(b.par_iter())
+            .zip(out.par_iter())
+            .any(|((&x, &y), &q)| !bench_divide_fast_accepts_without_fp_error(x, y, q))
         && a.par_iter()
             .zip(b.par_iter())
             .zip(out.par_iter())
