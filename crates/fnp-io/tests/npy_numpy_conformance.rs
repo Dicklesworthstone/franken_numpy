@@ -557,8 +557,10 @@ fn uncovered_dtypes_and_special_floats_round_trip_byte_exactly() -> Result<(), S
     let f64_specials = numpy_npy_oracle("f64_specials")?;
     let f64_words: Vec<u64> = f64_specials
         .payload
-        .chunks_exact(8)
-        .map(|w| u64::from_le_bytes(w.try_into().expect("8-byte chunk")))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|w| u64::from_le_bytes(*w))
         .collect();
     ensure_eq(f64_words.len(), 6, "f64_specials: word count")?;
     ensure_eq(
@@ -589,8 +591,10 @@ fn uncovered_dtypes_and_special_floats_round_trip_byte_exactly() -> Result<(), S
     let f32_specials = numpy_npy_oracle("f32_specials")?;
     let f32_words: Vec<u32> = f32_specials
         .payload
-        .chunks_exact(4)
-        .map(|w| u32::from_le_bytes(w.try_into().expect("4-byte chunk")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|w| u32::from_le_bytes(*w))
         .collect();
     ensure_eq(f32_words.len(), 6, "f32_specials: word count")?;
     ensure_eq(
@@ -608,8 +612,10 @@ fn uncovered_dtypes_and_special_floats_round_trip_byte_exactly() -> Result<(), S
     let c128 = numpy_npy_oracle("complex128_specials")?;
     let c128_words: Vec<u64> = c128
         .payload
-        .chunks_exact(8)
-        .map(|w| u64::from_le_bytes(w.try_into().expect("8-byte chunk")))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|w| u64::from_le_bytes(*w))
         .collect();
     ensure_eq(c128_words.len(), 6, "complex128_specials: word count")?;
     ensure_eq(
