@@ -550,3 +550,120 @@ print(ok)
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Empty-coefficient contract for the polynomial families (deadlock-audit-fb171)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn family_add_sub_mul_reject_empty_coefficient_arrays_like_numpy() -> Result<(), String> {
+    // deadlock-audit-fb171: the fnp-ufunc Rust kernels behind the five polynomial
+    // families return an EMPTY series where numpy raises ValueError("Coefficient
+    // array is empty"). Today that divergence is unreachable from Python because
+    // all fifteen bindings are numpy passthroughs, so the user-visible behaviour is
+    // already correct — and that is exactly the problem this test exists to solve.
+    // The risk is not the current code, it is the next person who wires one of these
+    // names to the native kernel for speed and silently inherits the divergence.
+    // That is not hypothetical: hermeder/hermeint regressed this way before mlz0s,
+    // where the remedy was to make the PYTHON layer defer on empty so numpy still
+    // raises. This is the tripwire for that class, and it fails the moment a native
+    // wiring stops deferring.
+    //
+    // It asks numpy on every case rather than transcribing what numpy is believed to
+    // do (the deadlock-audit-m3gbv finding): the oracle call and the fnp call are in
+    // the same script, on the same inputs, in the same interpreter.
+    let script = fnp_script(
+        r#"
+import numpy.polynomial as NP
+
+# (fnp attribute, numpy submodule, function name). The five *basis* families only:
+# the legacy top-level polyadd/polysub/polymul are a DIFFERENT contract and are
+# checked separately below, precisely so a guard that lumps all eighteen together
+# cannot pass.
+FAMILIES = [
+    ("cheb",  NP.chebyshev),
+    ("herm",  NP.hermite),
+    ("herme", NP.hermite_e),
+    ("lag",   NP.laguerre),
+    ("leg",   NP.legendre),
+]
+OPS = ["add", "sub", "mul"]
+
+# Empty lhs, empty rhs, and both empty: numpy's _as_series rejects any empty input,
+# so all three must raise. A wrong implementation that only guards the first
+# argument passes the first shape and fails the second.
+SHAPES = {
+    "empty_lhs":  ([], [1.0, 2.0]),
+    "empty_rhs":  ([1.0, 2.0], []),
+    "both_empty": ([], []),
+}
+
+def outcome(fn, a, b):
+    """'ok:<repr>' on success, 'raise:<ExcType>' on failure."""
+    try:
+        return "ok:" + repr(np.asarray(fn(a, b)).tolist())
+    except Exception as exc:
+        return "raise:" + type(exc).__name__
+
+failures = []
+
+for prefix, module in FAMILIES:
+    for op in OPS:
+        name = prefix + op
+        ours = getattr(fnp, name)
+        theirs = getattr(module, name)
+
+        for label, (a, b) in SHAPES.items():
+            got = outcome(ours, a, b)
+            want = outcome(theirs, a, b)
+            # Pin the oracle's own behaviour too. If numpy ever stops raising here
+            # this test must report THAT, not quietly re-baseline onto it.
+            if want != "raise:ValueError":
+                failures.append(
+                    "%s %s: numpy no longer raises ValueError on empty input, it gave %s"
+                    % (name, label, want)
+                )
+            if got != want:
+                failures.append("%s %s: fnp %s vs numpy %s" % (name, label, got, want))
+
+        # The negative case a naive "always raise" implementation fails: non-empty
+        # coefficients must still compute, and agree with numpy elementwise.
+        got = outcome(ours, [1.0, 2.0, 3.0], [4.0, 5.0])
+        want = outcome(theirs, [1.0, 2.0, 3.0], [4.0, 5.0])
+        if got != want:
+            failures.append("%s nonempty: fnp %s vs numpy %s" % (name, got, want))
+
+# Contrast: np.polyadd/polysub/polymul are the legacy poly1d-order helpers and they
+# do NOT raise on empty input — np.polyadd([], [1.0]) is array([1.]). They are in
+# this test as the discriminator: a guard that made "empty coefficients raise" a
+# blanket rule across every add/sub/mul name would be wrong, and would fail here.
+for name in ["polyadd", "polysub", "polymul"]:
+    ours = getattr(fnp, name)
+    theirs = getattr(np, name)
+    for label, (a, b) in SHAPES.items():
+        got = outcome(ours, a, b)
+        want = outcome(theirs, a, b)
+        if got != want:
+            failures.append("%s %s: fnp %s vs numpy %s" % (name, label, got, want))
+    if outcome(theirs, [], [1.0]).startswith("raise:"):
+        failures.append(
+            "legacy polyadd now raises on empty input; the contrast case in this "
+            "test is stale and the families/legacy split must be re-derived"
+        )
+
+if failures:
+    print("FAILURES\n" + "\n".join(failures))
+else:
+    print("True")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "polynomial family add/sub/mul must match numpy's empty-coefficient contract \
+         (deadlock-audit-fb171):\n{result}"
+    );
+    Ok(())
+}
