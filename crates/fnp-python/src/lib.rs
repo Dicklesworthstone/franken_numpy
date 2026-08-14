@@ -154747,6 +154747,9 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             let numpy = py.import("numpy")?;
             let numpy_loadtxt = numpy.getattr("loadtxt")?;
             let bool_dtype = numpy.getattr("bool_")?;
+            let is_c_contiguous = |array: &Bound<'_, PyAny>| -> PyResult<bool> {
+                array.getattr("flags")?.get_item("C_CONTIGUOUS")?.extract()
+            };
 
             // Column 2 carries tokens the bool parser would REJECT. numpy never
             // looks at unselected columns, and neither may the direct path --
@@ -154783,6 +154786,14 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                     [3, cols.len()],
                     "selected-bool shape for usecols={cols:?}"
                 );
+                assert!(
+                    is_c_contiguous(&candidate)?,
+                    "selected-bool direct result must be C-contiguous for usecols={cols:?}",
+                );
+                assert!(
+                    is_c_contiguous(&oracle)?,
+                    "NumPy selected-bool oracle must be C-contiguous for usecols={cols:?}",
+                );
             }
 
             // Positive indices exercise the direct path; their negative
@@ -154801,6 +154812,14 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             former_kwargs.set_item("usecols", vec![-1_i64, -5, -1])?;
             let former = loadtxt.call((path,), Some(&former_kwargs))?;
             assert_array_matches_numpy(&direct, &former)?;
+            assert!(
+                is_c_contiguous(&direct)?,
+                "positive selected-bool direct result must be C-contiguous",
+            );
+            assert!(
+                is_c_contiguous(&former)?,
+                "negative selected-bool former result must be C-contiguous",
+            );
 
             // Single selected column squeezes to 1-D, like the former path.
             let one_kwargs = PyDict::new(py);

@@ -26,16 +26,16 @@ use std::fmt::Write as _;
 use std::hint::black_box;
 use std::path::Path;
 use std::sync::OnceLock;
-use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const CONTRACT_ROUNDS: usize = 41;
 const CONTRACT_MIN_OF: usize = 3;
 const CONTRACT_BOOTSTRAP_RESAMPLES: usize = 4_096;
-const HOST_WIDE_CPU_SAMPLE_INTERVAL: Duration = Duration::from_millis(300);
-const HOST_WIDE_MAX_BUSY_FRACTION: f64 = 0.20;
-const HOST_WIDE_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
-const HOST_WIDE_REQUIRED_QUIET_SAMPLES: usize = 2;
+/// Sanctioned busy-host schedule, ported from franken_networkx's
+/// `balanced_square_ab.py`: every round interleaves the two arms as
+/// `A B B A A B B A`. Each arm therefore occupies symmetric positions in both
+/// halves of the round, so shared-host drift affects both arms equally.
+const BALANCED_SQUARE: [bool; 8] = [true, false, false, true, true, false, false, true];
 
 #[derive(Clone, Copy)]
 pub struct ContractPairStats {
@@ -53,6 +53,45 @@ pub struct ContractPairStats {
 pub struct ContractObservation {
     pub elapsed: Duration,
     pub checksum: u64,
+}
+
+/// Time both arms in one balanced-square round and reduce each arm's four
+/// slots to its median. The checksum check is deliberately per-arm: an A/A
+/// null runs the same closure in both arms, while an effect pair has its
+/// cross-arm check at the caller where equivalent results are required.
+fn balanced_square_round_with<F>(mut observe: F) -> (ContractObservation, ContractObservation)
+where
+    F: FnMut(bool) -> ContractObservation,
+{
+    let mut a_slots = Vec::with_capacity(BALANCED_SQUARE.len() / 2);
+    let mut b_slots = Vec::with_capacity(BALANCED_SQUARE.len() / 2);
+    for is_a in BALANCED_SQUARE {
+        let observation = observe(is_a);
+        if is_a {
+            a_slots.push(observation);
+        } else {
+            b_slots.push(observation);
+        }
+    }
+
+    let reduce = |slots: &[ContractObservation], arm: &str| {
+        let checksum = slots[0].checksum;
+        assert!(
+            slots
+                .iter()
+                .all(|observation| observation.checksum == checksum),
+            "balanced-square {arm} slots produced different output checksums"
+        );
+        let mut elapsed_ns = slots
+            .iter()
+            .map(|observation| observation.elapsed.as_secs_f64() * 1.0e9)
+            .collect::<Vec<_>>();
+        ContractObservation {
+            elapsed: Duration::from_secs_f64(median(&mut elapsed_ns) / 1.0e9),
+            checksum,
+        }
+    };
+    (reduce(&a_slots, "A"), reduce(&b_slots, "B"))
 }
 
 #[derive(Clone, Copy)]
@@ -160,27 +199,6 @@ fn self_allowed_cpus() -> Result<BTreeSet<usize>, String> {
         .find_map(|line| line.strip_prefix("Cpus_allowed_list:").map(str::trim))
         .ok_or_else(|| "Cpus_allowed_list missing from /proc/self/status".to_owned())?;
     parse_cpu_list(allowed)
-}
-
-fn sample_cpu_busy() -> Result<BTreeMap<usize, f64>, String> {
-    let before = read_cpu_ticks()?;
-    thread::sleep(HOST_WIDE_CPU_SAMPLE_INTERVAL);
-    let after = read_cpu_ticks()?;
-    let mut busy = BTreeMap::new();
-    for (cpu, start) in before {
-        let end = after
-            .get(&cpu)
-            .ok_or_else(|| format!("cpu{cpu} disappeared during load sample"))?;
-        let total = end.total.saturating_sub(start.total);
-        let idle = end.idle.saturating_sub(start.idle);
-        let fraction = if total == 0 {
-            1.0
-        } else {
-            total.saturating_sub(idle) as f64 / total as f64
-        };
-        busy.insert(cpu, fraction);
-    }
-    Ok(busy)
 }
 
 fn format_cpu_set(cpus: &BTreeSet<usize>) -> String {
@@ -414,93 +432,6 @@ pub fn report_observed_thread_activity<F>(
         active.join(","),
     );
     std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
-}
-
-fn block_benchmark(reason: &str) -> ! {
-    eprintln!("HOST_WIDE_QUIESCENCE verdict=blocked reason={reason}");
-    std::io::Write::flush(&mut std::io::stderr()).expect("flushing stderr cannot fail");
-    std::process::exit(2);
-}
-
-/// Refuse to measure unless this process owns a full-host affinity mask and
-/// every online CPU is quiet for two consecutive samples. The bounded settling
-/// window lets a just-finished RCH release link drain out of `/proc/stat`
-/// without weakening the contract: sustained co-tenancy still exits 2 before
-/// any warmup or timed sample begins.
-fn require_host_wide_benchmark_exclusivity(phase: &str) {
-    let allowed = self_allowed_cpus()
-        .unwrap_or_else(|error| block_benchmark(&format!("affinity_check:{error}")));
-    let started = Instant::now();
-    let mut sample_count = 0_usize;
-    let mut quiet_streak = 0_usize;
-
-    loop {
-        let busy = sample_cpu_busy()
-            .unwrap_or_else(|error| block_benchmark(&format!("quiescence_check:{error}")));
-        sample_count += 1;
-        let online = busy.keys().copied().collect::<BTreeSet<_>>();
-        if allowed != online {
-            block_benchmark(&format!(
-                "affinity_not_host_wide:allowed={}:online={}",
-                format_cpu_set(&allowed),
-                format_cpu_set(&online),
-            ));
-        }
-
-        let maximum_observed_busy = allowed
-            .iter()
-            .filter_map(|cpu| busy.get(cpu))
-            .copied()
-            .fold(0.0_f64, f64::max);
-        let busy_cpus = allowed
-            .iter()
-            .filter_map(|cpu| {
-                let fraction = busy.get(cpu).copied().unwrap_or_else(|| {
-                    block_benchmark(&format!("allowed_cpu_disappeared:cpu{cpu}"))
-                });
-                (fraction > HOST_WIDE_MAX_BUSY_FRACTION)
-                    .then_some(format!("cpu{cpu}={:.1}%", fraction * 100.0))
-            })
-            .collect::<Vec<_>>();
-
-        if busy_cpus.is_empty() {
-            quiet_streak += 1;
-            if quiet_streak == HOST_WIDE_REQUIRED_QUIET_SAMPLES {
-                println!(
-                    "HOST_WIDE_QUIESCENCE phase={phase} allowed_cpu_count={} affinity={} \
-                     sample_ms={} maximum_allowed_busy_fraction={:.3} \
-                     maximum_observed_busy_fraction={maximum_observed_busy:.3} \
-                     busy_cpu_count_above_limit=0 quiet_samples_required={} \
-                     settle_samples={sample_count} settle_elapsed_ms={} verdict=clear",
-                    allowed.len(),
-                    format_cpu_set(&allowed),
-                    HOST_WIDE_CPU_SAMPLE_INTERVAL.as_millis(),
-                    HOST_WIDE_MAX_BUSY_FRACTION,
-                    HOST_WIDE_REQUIRED_QUIET_SAMPLES,
-                    started.elapsed().as_millis(),
-                );
-                std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
-                return;
-            }
-        } else {
-            quiet_streak = 0;
-        }
-
-        if started.elapsed() >= HOST_WIDE_SETTLE_TIMEOUT {
-            block_benchmark(&format!(
-                "host_not_quiet_after_settle:timeout_ms={}:samples={sample_count}:\
-                 quiet_streak={quiet_streak}/{}:maximum_allowed_busy_pct={:.1}:busy_cpus={}",
-                HOST_WIDE_SETTLE_TIMEOUT.as_millis(),
-                HOST_WIDE_REQUIRED_QUIET_SAMPLES,
-                HOST_WIDE_MAX_BUSY_FRACTION * 100.0,
-                if busy_cpus.is_empty() {
-                    "none".to_owned()
-                } else {
-                    busy_cpus.join(",")
-                },
-            ));
-        }
-    }
 }
 
 pub fn bench_invocation_id() -> &'static str {
@@ -980,6 +911,15 @@ fn report_dual_null_contract_gate(
 }
 
 fn verify_contract_gate_semantics() {
+    assert_eq!(
+        BALANCED_SQUARE,
+        [true, false, false, true, true, false, false, true]
+    );
+    assert_eq!(
+        BALANCED_SQUARE.iter().filter(|&&is_a| is_a).count(),
+        BALANCED_SQUARE.len() / 2,
+        "balanced square must give each arm four slots",
+    );
     let stats = |median: f64, low: f64, high: f64| ContractPairStats {
         ratio_median: median,
         ratio_ci_low: low,
@@ -1034,10 +974,8 @@ where
     A: FnMut() -> ContractObservation,
     B: FnMut() -> ContractObservation,
 {
-    require_host_wide_benchmark_exclusivity("median_ci_contract_preflight");
     for _ in 0..4 {
-        black_box(min_observation(&mut former));
-        black_box(min_observation(&mut former));
+        black_box(balanced_square_round_with(|_| min_observation(&mut former)));
     }
 
     // Contract order is deliberate: establish the base/base null before the
@@ -1045,13 +983,8 @@ where
     let mut null_a_samples = Vec::with_capacity(CONTRACT_ROUNDS);
     let mut null_b_samples = Vec::with_capacity(CONTRACT_ROUNDS);
     let mut null_checksum = 0_u64;
-    for round in 0..CONTRACT_ROUNDS {
-        let (a, b) = if round & 1 == 0 {
-            (min_observation(&mut former), min_observation(&mut former))
-        } else {
-            let b = min_observation(&mut former);
-            (min_observation(&mut former), b)
-        };
+    for _ in 0..CONTRACT_ROUNDS {
+        let (a, b) = balanced_square_round_with(|_| min_observation(&mut former));
         assert_eq!(
             a.checksum, b.checksum,
             "base/base null arms produced different output checksums"
@@ -1063,28 +996,26 @@ where
     let null = contract_pair_stats(&null_a_samples, &null_b_samples, null_checksum);
     report_contract_pair("null_base_aa", null);
 
-    for round in 0..4 {
-        if round & 1 == 0 {
-            black_box(min_observation(&mut former));
-            black_box(min_observation(&mut candidate));
-        } else {
-            black_box(min_observation(&mut candidate));
-            black_box(min_observation(&mut former));
-        }
+    for _ in 0..4 {
+        black_box(balanced_square_round_with(|is_former| {
+            if is_former {
+                min_observation(&mut former)
+            } else {
+                min_observation(&mut candidate)
+            }
+        }));
     }
     let mut former_samples = Vec::with_capacity(CONTRACT_ROUNDS);
     let mut candidate_samples = Vec::with_capacity(CONTRACT_ROUNDS);
     let mut effect_checksum = 0_u64;
-    for round in 0..CONTRACT_ROUNDS {
-        let (former_elapsed, candidate_elapsed) = if round & 1 == 0 {
-            (
-                min_observation(&mut former),
-                min_observation(&mut candidate),
-            )
-        } else {
-            let candidate_elapsed = min_observation(&mut candidate);
-            (min_observation(&mut former), candidate_elapsed)
-        };
+    for _ in 0..CONTRACT_ROUNDS {
+        let (former_elapsed, candidate_elapsed) = balanced_square_round_with(|is_former| {
+            if is_former {
+                min_observation(&mut former)
+            } else {
+                min_observation(&mut candidate)
+            }
+        });
         assert_eq!(
             former_elapsed.checksum, candidate_elapsed.checksum,
             "base/candidate arms produced different output checksums"
@@ -1100,8 +1031,8 @@ where
 }
 
 /// Run incumbent/incumbent and candidate/candidate nulls before the interleaved
-/// incumbent/candidate effect. This is the realistic-workload contract: a quiet
-/// incumbent cannot conceal an unstable candidate, and the wider A/A interval
+/// incumbent/candidate effect. This is the realistic-workload contract: both
+/// arms occupy symmetric slots on a contended host, and the wider A/A interval
 /// controls the median-CI verdict.
 pub fn run_dual_null_median_ci_contract<A, B>(
     row: &str,
@@ -1143,25 +1074,17 @@ where
     );
     assert!(min_of >= 1, "contract min-of count must be non-zero");
 
-    require_host_wide_benchmark_exclusivity("dual_null_contract_preflight");
     for _ in 0..4 {
-        black_box(min_observation_with(&mut incumbent, min_of));
-        black_box(min_observation_with(&mut incumbent, min_of));
+        black_box(balanced_square_round_with(|_| {
+            min_observation_with(&mut incumbent, min_of)
+        }));
     }
 
     let mut incumbent_null_a = Vec::with_capacity(rounds);
     let mut incumbent_null_b = Vec::with_capacity(rounds);
     let mut incumbent_null_checksum = 0_u64;
-    for round in 0..rounds {
-        let (a, b) = if round & 1 == 0 {
-            (
-                min_observation_with(&mut incumbent, min_of),
-                min_observation_with(&mut incumbent, min_of),
-            )
-        } else {
-            let b = min_observation_with(&mut incumbent, min_of);
-            (min_observation_with(&mut incumbent, min_of), b)
-        };
+    for _ in 0..rounds {
+        let (a, b) = balanced_square_round_with(|_| min_observation_with(&mut incumbent, min_of));
         assert_eq!(
             a.checksum, b.checksum,
             "incumbent/incumbent null arms produced different output checksums"
@@ -1183,23 +1106,16 @@ where
     );
 
     for _ in 0..4 {
-        black_box(min_observation_with(&mut candidate, min_of));
-        black_box(min_observation_with(&mut candidate, min_of));
+        black_box(balanced_square_round_with(|_| {
+            min_observation_with(&mut candidate, min_of)
+        }));
     }
 
     let mut candidate_null_a = Vec::with_capacity(rounds);
     let mut candidate_null_b = Vec::with_capacity(rounds);
     let mut candidate_null_checksum = 0_u64;
-    for round in 0..rounds {
-        let (a, b) = if round & 1 == 0 {
-            (
-                min_observation_with(&mut candidate, min_of),
-                min_observation_with(&mut candidate, min_of),
-            )
-        } else {
-            let b = min_observation_with(&mut candidate, min_of);
-            (min_observation_with(&mut candidate, min_of), b)
-        };
+    for _ in 0..rounds {
+        let (a, b) = balanced_square_round_with(|_| min_observation_with(&mut candidate, min_of));
         assert_eq!(
             a.checksum, b.checksum,
             "candidate/candidate null arms produced different output checksums"
@@ -1220,32 +1136,28 @@ where
         min_of,
     );
 
-    for round in 0..4 {
-        if round & 1 == 0 {
-            black_box(min_observation_with(&mut incumbent, min_of));
-            black_box(min_observation_with(&mut candidate, min_of));
-        } else {
-            black_box(min_observation_with(&mut candidate, min_of));
-            black_box(min_observation_with(&mut incumbent, min_of));
-        }
+    for _ in 0..4 {
+        black_box(balanced_square_round_with(|is_incumbent| {
+            if is_incumbent {
+                min_observation_with(&mut incumbent, min_of)
+            } else {
+                min_observation_with(&mut candidate, min_of)
+            }
+        }));
     }
 
     let mut incumbent_samples = Vec::with_capacity(rounds);
     let mut candidate_samples = Vec::with_capacity(rounds);
     let mut effect_checksum = 0_u64;
-    for round in 0..rounds {
-        let (incumbent_observation, candidate_observation) = if round & 1 == 0 {
-            (
-                min_observation_with(&mut incumbent, min_of),
-                min_observation_with(&mut candidate, min_of),
-            )
-        } else {
-            let candidate_observation = min_observation_with(&mut candidate, min_of);
-            (
-                min_observation_with(&mut incumbent, min_of),
-                candidate_observation,
-            )
-        };
+    for _ in 0..rounds {
+        let (incumbent_observation, candidate_observation) =
+            balanced_square_round_with(|is_incumbent| {
+                if is_incumbent {
+                    min_observation_with(&mut incumbent, min_of)
+                } else {
+                    min_observation_with(&mut candidate, min_of)
+                }
+            });
         assert_eq!(
             incumbent_observation.checksum, candidate_observation.checksum,
             "incumbent/candidate arms produced different output checksums"
@@ -1352,7 +1264,11 @@ pub fn gated_main(targets: &[BenchGroup]) {
     // backend notice during construction.
     report_bench_identity();
     verify_contract_gate_semantics();
-    require_host_wide_benchmark_exclusivity("process_preflight");
+    println!(
+        "BALANCED_SQUARE_ADMISSION schedule=ABBAABBA host_quiescence=not_required \
+         null_controls=required incumbent_same_invocation=required"
+    );
+    std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
     let mut criterion = Criterion::default().configure_from_args();
     for (name, target) in targets {
         if group_enabled(name) {

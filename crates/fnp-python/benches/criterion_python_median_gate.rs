@@ -5231,6 +5231,15 @@ fn bench_loadtxt_selected_bool_median_gate(_c: &mut Criterion) {
                     .expect("dtype name string"),
             )
         };
+        let is_c_contiguous = |value: &Bound<'_, PyAny>| {
+            value
+                .getattr("flags")
+                .expect("array flags")
+                .get_item("C_CONTIGUOUS")
+                .expect("C-contiguous flag")
+                .extract::<bool>()
+                .expect("C-contiguous boolean")
+        };
         assert_eq!(
             bytes_of(&former_out),
             bytes_of(&candidate_out),
@@ -5255,6 +5264,18 @@ fn bench_loadtxt_selected_bool_median_gate(_c: &mut Criterion) {
             array_signature(&candidate_out),
             (vec![8192, 4], "bool".to_owned()),
             "selected-bool corpus contract must remain an 8192x4 bool array",
+        );
+        assert!(
+            is_c_contiguous(&former_out),
+            "former selected-bool result must be C-contiguous",
+        );
+        assert!(
+            is_c_contiguous(&candidate_out),
+            "selected-bool direct result must preserve NumPy's C-contiguous layout",
+        );
+        assert!(
+            is_c_contiguous(&oracle),
+            "NumPy selected-bool oracle must be C-contiguous",
         );
 
         // Prove this valid compatible workload cannot be silently delegated to
