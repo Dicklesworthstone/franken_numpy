@@ -281,6 +281,38 @@ print(np.array_equal(np.isinf(result), np.isinf(expected)) and
     Ok(())
 }
 
+#[test]
+fn divide_parallel_mixed_quiet_lanes_match_numpy_bits_and_warnings() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+n = 1 << 21
+lhs = np.full(n, 8.0, dtype=np.float64)
+rhs = np.full(n, 2.0, dtype=np.float64)
+lhs[0], rhs[0] = 0.0, 2.0
+lhs[1], rhs[1] = 0.0, -2.0
+lhs[2], rhs[2] = np.nan, 2.0
+lhs[3], rhs[3] = 4.0, np.nan
+with warnings.catch_warnings(record=True) as fnp_warnings:
+    warnings.simplefilter('always')
+    actual = fnp.divide(lhs, rhs)
+with warnings.catch_warnings(record=True) as numpy_warnings:
+    warnings.simplefilter('always')
+    expected = np.divide(lhs, rhs)
+print(np.array_equal(actual.view(np.uint64), expected.view(np.uint64)) and
+      len(fnp_warnings) == len(numpy_warnings) == 0)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "parallel f64 divide must keep quiet signed-zero and NaN lanes bit-identical without warnings"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // negative
 // ─────────────────────────────────────────────────────────────────────────────
