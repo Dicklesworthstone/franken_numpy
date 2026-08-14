@@ -1116,12 +1116,13 @@ print(ok)
 fn flat_multi_quantile_and_weighted_average_track_numpy() -> Result<(), String> {
     // Convergence-sweep probe (2026-07-12): the last two ambiguous wide-rank rows.
     // quantile(array-q, flat) and percentile(list-q, flat) ride the shipped native
-    // order-statistics path - assert byte parity and record the coarse A/B.
+    // order-statistics path - assert byte parity; its coarse A/B is opt-in.
     // average(weights=) rides the extract path whose serial sum is NOT numpy's
     // pairwise order - assert allclose (documented mean-family tolerance) and
-    // record the A/B so the extract-tax gap is measured, not assumed.
+    // keep the A/B available for explicit profiling without extending CI.
     let script = fnp_script(
         r#"
+import os
 import time
 import warnings
 verdicts = []
@@ -1347,38 +1348,39 @@ r = fnp.quantile(an, [0.5], weights=wq, method="inverted_cdf")
 e = np.quantile(an, [0.5], weights=wq, method="inverted_cdf")
 if np.asarray(r).tobytes() != np.asarray(e).tobytes():
     verdicts.append("FAIL weighted-nan-defer bytes")
-def best(fn, reps=5):
-    fn(); best_s = float("inf")
-    for _ in range(reps):
-        t0 = time.perf_counter(); fn(); best_s = min(best_s, time.perf_counter() - t0)
-    return best_s * 1000
-for name, nf, ff in (
-    ("quantile9", lambda: np.quantile(a, qs), lambda: fnp.quantile(a, qs)),
-    ("percentile3_ax1", lambda: np.percentile(m, [25, 50, 75], axis=1), lambda: fnp.percentile(m, [25, 50, 75], axis=1)),
-    ("quantile9_ax1", lambda: np.quantile(m, qs, axis=1), lambda: fnp.quantile(m, qs, axis=1)),
-    ("nanpct3_ax1", lambda: np.nanpercentile(mn, [25, 50, 75], axis=1), lambda: fnp.nanpercentile(mn, [25, 50, 75], axis=1)),
-    ("percentile3_ax0", lambda: np.percentile(m, [25, 50, 75], axis=0), lambda: fnp.percentile(m, [25, 50, 75], axis=0)),
-    ("nanpct3_ax0", lambda: np.nanpercentile(mn, [25, 50, 75], axis=0), lambda: fnp.nanpercentile(mn, [25, 50, 75], axis=0)),
-    ("quantile9_ax1_kd", lambda: np.quantile(m, qs, axis=1, keepdims=True), lambda: fnp.quantile(m, qs, axis=1, keepdims=True)),
-    ("quantile9_flat_kd", lambda: np.quantile(m, qs, keepdims=True), lambda: fnp.quantile(m, qs, keepdims=True)),
-    ("pct50_ax1_midpoint", lambda: np.percentile(m, 50, axis=1, method="midpoint"), lambda: fnp.percentile(m, 50, axis=1, method="midpoint")),
-    ("pct3_3d_ax1", lambda: np.percentile(t3, [25, 50, 75], axis=1), lambda: fnp.percentile(t3, [25, 50, 75], axis=1)),
-    ("nanpct3_3d_ax1", lambda: np.nanpercentile(t3nn, [25, 50, 75], axis=1), lambda: fnp.nanpercentile(t3nn, [25, 50, 75], axis=1)),
-    ("nanmedian_3d_ax1", lambda: np.nanmedian(t3nn, axis=1), lambda: fnp.nanmedian(t3nn, axis=1)),
-    ("hazen_ax1", lambda: np.percentile(m, 37.3, axis=1, method="hazen"), lambda: fnp.percentile(m, 37.3, axis=1, method="hazen")),
-    ("int64_pct3_ax1", lambda: np.percentile(mi64, [25, 50, 75], axis=1), lambda: fnp.percentile(mi64, [25, 50, 75], axis=1)),
-    ("weighted_q3", lambda: np.quantile(a, [0.25, 0.5, 0.75], weights=wq, method="inverted_cdf"), lambda: fnp.quantile(a, [0.25, 0.5, 0.75], weights=wq, method="inverted_cdf")),
-    ("percentile3", lambda: np.percentile(a, [25, 50, 75]), lambda: fnp.percentile(a, [25, 50, 75])),
-    ("avg_weights", lambda: np.average(a, weights=w), lambda: fnp.average(a, weights=w)),
-):
-    tn, tf = best(nf), best(ff)
-    print(f"SURFACE_PROBE_AB row={name} numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
+if os.environ.get("FNP_SURFACE_PROBE_AB") == "1":
+    def best(fn, reps=5):
+        fn(); best_s = float("inf")
+        for _ in range(reps):
+            t0 = time.perf_counter(); fn(); best_s = min(best_s, time.perf_counter() - t0)
+        return best_s * 1000
+    for name, nf, ff in (
+        ("quantile9", lambda: np.quantile(a, qs), lambda: fnp.quantile(a, qs)),
+        ("percentile3_ax1", lambda: np.percentile(m, [25, 50, 75], axis=1), lambda: fnp.percentile(m, [25, 50, 75], axis=1)),
+        ("quantile9_ax1", lambda: np.quantile(m, qs, axis=1), lambda: fnp.quantile(m, qs, axis=1)),
+        ("nanpct3_ax1", lambda: np.nanpercentile(mn, [25, 50, 75], axis=1), lambda: fnp.nanpercentile(mn, [25, 50, 75], axis=1)),
+        ("percentile3_ax0", lambda: np.percentile(m, [25, 50, 75], axis=0), lambda: fnp.percentile(m, [25, 50, 75], axis=0)),
+        ("nanpct3_ax0", lambda: np.nanpercentile(mn, [25, 50, 75], axis=0), lambda: fnp.nanpercentile(mn, [25, 50, 75], axis=0)),
+        ("quantile9_ax1_kd", lambda: np.quantile(m, qs, axis=1, keepdims=True), lambda: fnp.quantile(m, qs, axis=1, keepdims=True)),
+        ("quantile9_flat_kd", lambda: np.quantile(m, qs, keepdims=True), lambda: fnp.quantile(m, qs, keepdims=True)),
+        ("pct50_ax1_midpoint", lambda: np.percentile(m, 50, axis=1, method="midpoint"), lambda: fnp.percentile(m, 50, axis=1, method="midpoint")),
+        ("pct3_3d_ax1", lambda: np.percentile(t3, [25, 50, 75], axis=1), lambda: fnp.percentile(t3, [25, 50, 75], axis=1)),
+        ("nanpct3_3d_ax1", lambda: np.nanpercentile(t3nn, [25, 50, 75], axis=1), lambda: fnp.nanpercentile(t3nn, [25, 50, 75], axis=1)),
+        ("nanmedian_3d_ax1", lambda: np.nanmedian(t3nn, axis=1), lambda: fnp.nanmedian(t3nn, axis=1)),
+        ("hazen_ax1", lambda: np.percentile(m, 37.3, axis=1, method="hazen"), lambda: fnp.percentile(m, 37.3, axis=1, method="hazen")),
+        ("int64_pct3_ax1", lambda: np.percentile(mi64, [25, 50, 75], axis=1), lambda: fnp.percentile(mi64, [25, 50, 75], axis=1)),
+        ("weighted_q3", lambda: np.quantile(a, [0.25, 0.5, 0.75], weights=wq, method="inverted_cdf"), lambda: fnp.quantile(a, [0.25, 0.5, 0.75], weights=wq, method="inverted_cdf")),
+        ("percentile3", lambda: np.percentile(a, [25, 50, 75]), lambda: fnp.percentile(a, [25, 50, 75])),
+        ("avg_weights", lambda: np.average(a, weights=w), lambda: fnp.average(a, weights=w)),
+    ):
+        tn, tf = best(nf), best(ff)
+        print(f"SURFACE_PROBE_AB row={name} numpy_ms={tn:.3f} fnp_ms={tf:.3f} ratio={tn / tf:.3f}")
 print(verdicts if verdicts else True)
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    println!("{result}"); // surfaces SURFACE_PROBE_AB rows under --nocapture
+    println!("{result}"); // surfaces opt-in A/B rows under --nocapture
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
         last, "True",
