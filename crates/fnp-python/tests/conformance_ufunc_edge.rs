@@ -1414,6 +1414,63 @@ print(ok)
 }
 
 #[test]
+fn f16_searchsorted_cumulative_table_matches_numpy_and_defers_edge_inputs() -> Result<(), String> {
+    // The native f16 table path is only valid for a C-contiguous sorted finite
+    // haystack. Build that order from the bit-order key instead of float16 sort
+    // so this test remains independent of the fleet's known fp16 sort defect.
+    // Queries cover every finite payload, including subnormals, infinities, and
+    // both signed zeros; NaN and noncontiguous cases exercise the widening defer.
+    let script = fnp_script(
+        r#"
+all_bits = np.arange(65536, dtype=np.uint16)
+finite_bits = all_bits[(all_bits & np.uint16(0x7fff)) <= np.uint16(0x7c00)]
+magnitude = finite_bits & np.uint16(0x7fff)
+keys = np.where(
+    magnitude == 0,
+    np.uint16(0x8000),
+    np.where((finite_bits & np.uint16(0x8000)) == 0, finite_bits | np.uint16(0x8000), ~finite_bits),
+)
+a = finite_bits[np.argsort(keys, kind='stable')].view(np.float16)
+n = (1 << 14) + 513
+v = np.resize(finite_bits, n).view(np.float16).reshape(129, -1)
+ok = True
+for side in ('left', 'right'):
+    got = fnp.searchsorted(a, v, side=side)
+    expected = np.searchsorted(a, v, side=side)
+    ok = ok and got.dtype == expected.dtype and got.shape == expected.shape and got.tobytes() == expected.tobytes()
+
+# C-contiguity is part of the table admission contract; the established f32
+# widening path must still preserve the exact result for strided inputs.
+strided_a = a[::2]
+strided_v = v.ravel()[::2]
+for side in ('left', 'right'):
+    got = fnp.searchsorted(strided_a, strided_v, side=side)
+    expected = np.searchsorted(strided_a, strided_v, side=side)
+    ok = ok and got.dtype == expected.dtype and got.shape == expected.shape and got.tobytes() == expected.tobytes()
+
+# NaN ordering is deliberately owned by NumPy/the widening fallback rather than
+# the finite table. Distinct payloads cover both haystack and query deferral.
+a_nan = np.concatenate((a, np.array([np.uint16(0x7e01)], dtype=np.uint16).view(np.float16)))
+v_nan = v.copy()
+v_nan.view(np.uint16).ravel()[7] = np.uint16(0xfe11)
+for side in ('left', 'right'):
+    got = fnp.searchsorted(a_nan, v_nan, side=side)
+    expected = np.searchsorted(a_nan, v_nan, side=side)
+    ok = ok and got.dtype == expected.dtype and got.shape == expected.shape and got.tobytes() == expected.tobytes()
+print(bool(ok))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f16 cumulative-table searchsorted and its edge deferrals must match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn timedelta_remainder_parallel_bit_exact_matches_numpy() -> Result<(), String> {
     // td % td -> timedelta64 (same unit). For same-unit non-NaT non-zero operands it equals the
     // int64 floored remainder of the raw counts viewed back to timedelta. NaT / zero divisor defer

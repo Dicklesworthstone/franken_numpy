@@ -68326,10 +68326,131 @@ fn try_native_f16_searchsorted(
     if !f16_dtype_ok(a_arr, &nd)? || !f16_dtype_ok(v, &nd)? || v.len()? < (1 << 14) {
         return Ok(None);
     }
+    if let Some(output) = try_native_f16_searchsorted_table(py, numpy, a_arr, v, side)? {
+        return Ok(Some(output));
+    }
     // Widen both exact -> f32 searchsorted (fnp sort-to-sequentialize merge). Indices are dtype-agnostic.
     let a32 = a_arr.call_method1("astype", ("float32",))?.unbind();
     let v32 = v.call_method1("astype", ("float32",))?.unbind();
     Ok(Some(searchsorted(py, a32, v32, side, None)?))
+}
+
+/// Maps one native-endian, non-NaN float16 payload to NumPy's numeric ordering.
+/// The two signed-zero encodings deliberately share a key because searchsorted
+/// treats them as equal. NaNs return `None`: NumPy's total-order handling is a
+/// separate contract, so those calls use the established widening fallback.
+#[inline]
+fn f16_searchsorted_finite_order_key(bits: u16) -> usize {
+    if bits & 0x7fff == 0 {
+        0x8000
+    } else if bits & 0x8000 == 0 {
+        (bits | 0x8000) as usize
+    } else {
+        (!bits) as usize
+    }
+}
+
+#[inline]
+fn f16_searchsorted_order_key(bits: u16) -> Option<usize> {
+    ((bits & 0x7fff) <= 0x7c00).then(|| f16_searchsorted_finite_order_key(bits))
+}
+
+// Float16 has only 65,536 bit patterns. For a verified-sorted finite f16
+// haystack, a cumulative count indexed by the ordered bit key gives each
+// lower/upper insertion point in O(1), avoiding both f16->f32 allocations and
+// the f32 searchsorted work. Unsorted, non-native-endian, NaN-containing, or
+// non-contiguous inputs defer to the exact widening route above.
+fn try_native_f16_searchsorted_table(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    v: &Bound<'_, PyAny>,
+    side: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    let right = match side {
+        "left" => false,
+        "right" => true,
+        _ => return Ok(None),
+    };
+    if v.getattr("ndim")?.extract::<usize>()? == 0
+        || !a.getattr("dtype")?.getattr("isnative")?.extract::<bool>()?
+        || !v.getattr("dtype")?.getattr("isnative")?.extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let a_bits = a.call_method1("view", ("uint16",))?;
+    let v_bits = v.call_method1("view", ("uint16",))?;
+    let (Ok(a_buffer), Ok(v_buffer)) =
+        (PyBuffer::<u16>::get(&a_bits), PyBuffer::<u16>::get(&v_bits))
+    else {
+        return Ok(None);
+    };
+    let (Some(a_input), Some(v_input)) = (a_buffer.as_slice(py), v_buffer.as_slice(py)) else {
+        return Ok(None);
+    };
+    // SAFETY: both uint16 views are read-only while the GIL is held. The
+    // parallel query loop below only reads them and writes a fresh output.
+    let a_raw: &[u16] =
+        unsafe { std::slice::from_raw_parts(a_input.as_ptr().cast::<u16>(), a_input.len()) };
+    let v_raw: &[u16] =
+        unsafe { std::slice::from_raw_parts(v_input.as_ptr().cast::<u16>(), v_input.len()) };
+    let mut cumulative = vec![0_i64; 65_537];
+    let mut previous_key = None;
+    for &bits in a_raw {
+        let Some(key) = f16_searchsorted_order_key(bits) else {
+            return Ok(None);
+        };
+        if previous_key.is_some_and(|previous| key < previous) {
+            return Ok(None);
+        }
+        previous_key = Some(key);
+        cumulative[key + 1] += 1;
+    }
+    for key in 1..cumulative.len() {
+        cumulative[key] += cumulative[key - 1];
+    }
+    if v_raw
+        .iter()
+        .any(|&bits| f16_searchsorted_order_key(bits).is_none())
+    {
+        return Ok(None);
+    }
+    let query_shape: Vec<usize> = v.getattr("shape")?.extract()?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "intp")?;
+    let flat = numpy.call_method("empty", (v_raw.len(),), Some(&kwargs))?;
+    let Ok(output_buffer) = PyBuffer::<i64>::get(&flat) else {
+        return Ok(None);
+    };
+    let Some(output) = output_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: `flat` is a fresh intp array we own; every chunk writes disjoint
+    // slots and the cumulative table plus query view are immutable.
+    let output_raw: &mut [i64] =
+        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, v_raw.len()) };
+    use rayon::prelude::*;
+    let chunk = v_raw
+        .len()
+        .div_ceil(rayon::current_num_threads().max(1))
+        .max(1);
+    output_raw
+        .par_chunks_mut(chunk)
+        .zip(v_raw.par_chunks(chunk))
+        .for_each(|(output_chunk, query_chunk)| {
+            for (slot, &bits) in output_chunk.iter_mut().zip(query_chunk) {
+                let key = f16_searchsorted_finite_order_key(bits);
+                *slot = if right {
+                    cumulative[key + 1]
+                } else {
+                    cumulative[key]
+                };
+            }
+        });
+    let output_shape = PyTuple::new(py, query_shape.iter().copied())?;
+    Ok(Some(
+        flat.call_method1("reshape", (&output_shape,))?.unbind(),
+    ))
 }
 
 // float16 set-ops via exact f32 widening (numpy f16 set-ops ~172ms @2M+2M, no SIMD). Widen both operands to
