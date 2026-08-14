@@ -8338,6 +8338,263 @@ mm.flush()
         );
     }
 
+    /// Escape a savetxt payload so one case fits on one line of the oracle's stdout.
+    /// Backslash first, or the escapes eat each other.
+    fn savetxt_escape(raw: &str) -> String {
+        raw.replace('\\', "\\\\")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t")
+    }
+
+    fn savetxt_unescape(encoded: &str) -> String {
+        let mut out = String::with_capacity(encoded.len());
+        let mut chars = encoded.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        }
+        out
+    }
+
+    /// The format-spec grid. Built once and shared by both arms so the oracle and
+    /// the candidate are provably answering the same question.
+    fn savetxt_format_grid() -> Vec<String> {
+        // Conversions numpy's savetxt accepts, the flag combinations that actually
+        // interact (zero-padding vs left-align vs sign is where printf semantics get
+        // subtle), and widths/precisions on both sides of the value's natural length.
+        const CONVERSIONS: [&str; 8] = ["f", "e", "E", "g", "G", "d", "i", "u"];
+        const FLAGS: [&str; 11] = ["", "-", "+", " ", "0", "#", "0+", "0 ", "0-", "+0", "#0"];
+        const WIDTHS: [&str; 4] = ["", "1", "8", "12"];
+        const PRECISIONS: [&str; 4] = ["", ".0", ".2", ".6"];
+
+        let mut grid = Vec::new();
+        for conv in CONVERSIONS {
+            for flags in FLAGS {
+                for width in WIDTHS {
+                    for precision in PRECISIONS {
+                        // Integer conversions with an explicit precision are not a
+                        // combination numpy accepts uniformly; leave them out of the
+                        // grid rather than encode a guess about which ones raise.
+                        if precision.is_empty() || !matches!(conv, "d" | "i" | "u") {
+                            grid.push(format!("%{flags}{width}{precision}{conv}"));
+                        }
+                    }
+                }
+            }
+        }
+        grid
+    }
+
+    /// Value rows chosen for the things printf formatting is easy to get wrong:
+    /// signed zero, the non-finites (which numpy still pads and still uppercases),
+    /// the exponent boundaries, and values that are exactly representable integers.
+    fn savetxt_value_rows() -> [(&'static str, [f64; 3]); 5] {
+        [
+            ("plain", [1.234_567_89, -3.5, 0.0]),
+            ("signed_zero", [-0.0, 0.0, 1.0]),
+            ("non_finite", [f64::NAN, f64::INFINITY, f64::NEG_INFINITY]),
+            ("extreme", [1e-300, 1e300, 123_456_789.0]),
+            ("integral", [3.0, -7.0, 0.0]),
+        ]
+    }
+
+    #[test]
+    fn savetxt_format_grid_matches_live_numpy() {
+        // Thirty-eight tests in this module are named *_matches_numpy / *_match_numpy
+        // and not one of them invokes numpy — they transcribe what numpy is believed
+        // to print. That is the deadlock-audit-m3gbv defect class: the name claims a
+        // live relationship that does not exist, which is what makes a surface look
+        // covered. Their expectations happen to be right (I checked seven of them by
+        // hand against numpy 2.4.3 before writing this), but "happens to be right"
+        // is not a relationship, and a sampled hand-check cannot certify the route it
+        // clears.
+        //
+        // So this asks numpy instead, across the whole spec space rather than the
+        // thirty-eight points those tests picked: 8 conversions x 11 flag
+        // combinations x 4 widths x 4 precisions, each against 5 value rows. Both
+        // arms are driven from the SAME grid, built once above.
+        //
+        // Cases where numpy raises are compared as raises — %d over a row containing
+        // NaN is a ValueError, and a candidate that quietly prints something there is
+        // a divergence, not a pass. The Ok/Err classes are matched explicitly and
+        // there is no wildcard arm: `(Ok(_), _)` would also match `(Ok, Ok)` and turn
+        // this into a test that can only fail when numpy changes.
+        //
+        // Skipping when numpy is absent is what every oracle test here does, and it
+        // is also how an oracle test goes vacuously green. Honour the repo's existing
+        // FNP_REQUIRE_REAL_NUMPY_ORACLE switch (G3 sets it) so the skip is a hard
+        // failure exactly where a skip would be a lie.
+        if !numpy_oracle_available() {
+            assert!(
+                std::env::var("FNP_REQUIRE_REAL_NUMPY_ORACLE").is_err(),
+                "FNP_REQUIRE_REAL_NUMPY_ORACLE is set but no numpy-backed interpreter \
+                 was found at {:?}; set FNP_ORACLE_PYTHON to one rather than letting \
+                 this test skip",
+                oracle_python_bin()
+            );
+            return;
+        }
+
+        let grid = savetxt_format_grid();
+        let rows = savetxt_value_rows();
+
+        // One oracle process for the whole grid: 4,000-odd subprocess spawns would
+        // dominate the runtime and buy nothing.
+        let mut specs_literal = String::new();
+        for fmt in &grid {
+            specs_literal.push_str(&format!("{fmt:?}, "));
+        }
+        let mut rows_literal = String::new();
+        for (label, values) in rows {
+            let rendered: Vec<String> = values
+                .iter()
+                .map(|v| {
+                    if v.is_nan() {
+                        "float('nan')".to_string()
+                    } else if v.is_infinite() {
+                        format!("float('{}inf')", if *v < 0.0 { "-" } else { "" })
+                    } else {
+                        format!("{v:?}")
+                    }
+                })
+                .collect();
+            rows_literal.push_str(&format!("({label:?}, [{}]), ", rendered.join(", ")));
+        }
+
+        let script = format!(
+            "import io, sys\n\
+             import numpy as np\n\
+             np.seterr(all='ignore')\n\
+             SPECS = [{specs_literal}]\n\
+             ROWS = [{rows_literal}]\n\
+             def esc(s):\n\
+             \x20   return s.replace('\\\\', '\\\\\\\\').replace('\\n', '\\\\n').replace('\\r', '\\\\r').replace('\\t', '\\\\t')\n\
+             out = []\n\
+             for fmt in SPECS:\n\
+             \x20   for label, vals in ROWS:\n\
+             \x20       a = np.array(vals, dtype=float).reshape(1, len(vals))\n\
+             \x20       buf = io.StringIO()\n\
+             \x20       try:\n\
+             \x20           np.savetxt(buf, a, fmt=fmt)\n\
+             \x20           out.append(fmt + '\\t' + label + '\\tok\\t' + esc(buf.getvalue()))\n\
+             \x20       except Exception:\n\
+             \x20           out.append(fmt + '\\t' + label + '\\traise\\t')\n\
+             sys.stdout.write('\\n'.join(out))\n"
+        );
+
+        let oracle = Command::new(oracle_python_bin())
+            .args(["-c", &script])
+            .output()
+            .expect("numpy savetxt oracle should run");
+        assert!(
+            oracle.status.success(),
+            "savetxt oracle failed:\n{}",
+            String::from_utf8_lossy(&oracle.stderr)
+        );
+        let stdout = String::from_utf8(oracle.stdout).expect("oracle stdout should be utf-8");
+
+        let mut failures: Vec<String> = Vec::new();
+        let mut compared = 0usize;
+        let mut numpy_raised = 0usize;
+
+        for line in stdout.split('\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let mut parts = line.splitn(4, '\t');
+            let fmt = parts.next().expect("oracle line should carry a format");
+            let label = parts.next().expect("oracle line should carry a row label");
+            let status = parts.next().expect("oracle line should carry a status");
+            let payload = parts.next().unwrap_or("");
+
+            let values = rows
+                .iter()
+                .find(|(name, _)| *name == label)
+                .map(|(_, values)| *values)
+                .expect("oracle row label should be one we sent");
+            let cfg = SaveTxtConfig {
+                fmt,
+                ..SaveTxtConfig::default()
+            };
+            let ours = savetxt(&values, 1, values.len(), &cfg);
+            compared += 1;
+
+            match (status, &ours) {
+                ("ok", Ok(got)) => {
+                    let want = savetxt_unescape(payload);
+                    if *got != want {
+                        failures.push(format!(
+                            "  {fmt} [{label}]: fnp {:?} vs numpy {:?}",
+                            savetxt_escape(got),
+                            savetxt_escape(&want)
+                        ));
+                    }
+                }
+                ("ok", Err(err)) => {
+                    failures.push(format!(
+                        "  {fmt} [{label}]: fnp errored ({err:?}) where numpy printed {:?}",
+                        payload
+                    ));
+                }
+                ("raise", Ok(got)) => {
+                    numpy_raised += 1;
+                    failures.push(format!(
+                        "  {fmt} [{label}]: fnp printed {:?} where numpy raised",
+                        savetxt_escape(got)
+                    ));
+                }
+                ("raise", Err(_)) => {
+                    numpy_raised += 1;
+                }
+                (other, _) => {
+                    failures.push(format!("  {fmt} [{label}]: bad oracle status {other:?}"));
+                }
+            }
+        }
+
+        // A grid that silently collapsed to nothing would pass every assertion above,
+        // which is exactly how "unregistered groups run green measuring nothing"
+        // happens. Pin the population.
+        assert!(
+            compared >= 4_000,
+            "savetxt grid should compare thousands of cases, got {compared} \
+             (grid={} specs x {} rows)",
+            grid.len(),
+            rows.len()
+        );
+        assert!(
+            numpy_raised > 0,
+            "the grid should include cases numpy rejects (e.g. %d over a NaN row); \
+             none were seen in {compared} cases, so the raise arm is untested"
+        );
+        assert!(
+            failures.is_empty(),
+            "{} of {compared} savetxt format cases diverge from live numpy \
+             ({numpy_raised} raise-cases in the grid):\n{}",
+            failures.len(),
+            failures
+                .iter()
+                .take(40)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
     #[test]
     fn savetxt_custom_newline_applies_to_header_and_footer() {
         let values = vec![1.0];
