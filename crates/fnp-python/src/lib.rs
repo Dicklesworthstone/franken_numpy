@@ -9535,15 +9535,12 @@ fn zerocopy_f64_binary_flat<'py>(
                     });
             }
         } else if matches!(op, BinaryOp::Div) {
-            let needs_precise_classification = output
-                .iter()
-                .zip(a_in.iter())
-                .zip(b_in.iter())
-                .fold(false, |saw_non_normal, ((slot, a_cell), b_cell)| {
-                    let q = a_cell.get() / b_cell.get();
-                    slot.set(q);
-                    saw_non_normal || !q.is_normal()
-                });
+            let mut needs_precise_classification = false;
+            for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
+                let q = a_cell.get() / b_cell.get();
+                slot.set(q);
+                needs_precise_classification |= !q.is_normal();
+            }
             if needs_precise_classification
                 && output.iter().zip(a_in.iter()).zip(b_in.iter()).any(
                     |((slot, a_cell), b_cell)| {
@@ -109314,6 +109311,10 @@ mod tests {
             rhs[0] = 2.0;
             lhs[1] = 0.0;
             rhs[1] = -2.0;
+            lhs[2] = f64::NAN;
+            rhs[2] = 2.0;
+            lhs[3] = 4.0;
+            rhs[3] = f64::NAN;
 
             let numpy = py.import("numpy")?;
             let array = numpy.getattr("array")?;
@@ -109327,11 +109328,15 @@ mod tests {
             assert_eq!(shape, vec![PARALLEL_DIV_MIN_LEN]);
             let positive_zero = result.call_method1("__getitem__", (0,))?.extract::<f64>()?;
             let negative_zero = result.call_method1("__getitem__", (1,))?.extract::<f64>()?;
+            let lhs_nan = result.call_method1("__getitem__", (2,))?.extract::<f64>()?;
+            let rhs_nan = result.call_method1("__getitem__", (3,))?.extract::<f64>()?;
             let ordinary = result
                 .call_method1("__getitem__", (PARALLEL_DIV_MIN_LEN - 1,))?
                 .extract::<f64>()?;
             assert_eq!(positive_zero.to_bits(), 0.0_f64.to_bits());
             assert_eq!(negative_zero.to_bits(), (-0.0_f64).to_bits());
+            assert!(lhs_nan.is_nan(), "quiet NaN numerator must remain native");
+            assert!(rhs_nan.is_nan(), "quiet NaN divisor must remain native");
             assert_eq!(ordinary, 4.0);
             Ok(())
         });
