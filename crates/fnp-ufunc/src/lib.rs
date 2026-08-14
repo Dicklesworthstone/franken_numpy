@@ -32994,13 +32994,17 @@ pub fn matmul_accumulate_serial(
         return;
     }
 
-    // A single-element contraction is a scaled copy, not a GEMM. Keep the
-    // scalar accumulation order while avoiding panel allocation and packing.
+    // A single-element contraction is a rank-1 update, not a GEMM: with k == 1
+    // `lhs` is m×1 and `rhs` is 1×n, so out[i][j] += lhs[i] * rhs[j]. Each
+    // output element takes exactly one product and one add, which is the same
+    // arithmetic in the same order the packed path performs, so this stays
+    // bit-identical. Deliberately NOT `mul_add`: `out` is accumulated, real f64
+    // must not contract to an FMA here or the result stops matching the packed
+    // path and numpy.
     if k == 1 {
-        let scale = rhs[0];
-        for (row, out_row) in lhs.iter().zip(out.chunks_exact_mut(n)) {
-            for (slot, &value) in out_row.iter_mut().zip(std::iter::repeat(*row)) {
-                *slot += value * scale;
+        for (row_scale, out_row) in lhs.iter().zip(out.chunks_exact_mut(n)) {
+            for (slot, &b) in out_row.iter_mut().zip(rhs.iter()) {
+                *slot += *row_scale * b;
             }
         }
         return;
@@ -43459,17 +43463,17 @@ mod tests {
         lagint, lagroots, lagval, lcm_arrays, ldexp, leg2poly, legder, legdiv, legfit,
         legfromroots, legint, legroots, legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked,
         ma_make_mask, ma_mask_or, ma_maximum_fill_value, ma_maximum_fill_value_for_dtype,
-        ma_minimum_fill_value, ma_minimum_fill_value_for_dtype, matmul_accumulate_serial,
-        mediate_ufunc_runtime_policy, modf, nextafter, normalize_fixed_signature_keywords,
-        normalize_signature_keywords, note_unary_float_errors, pad_empty, pad_linear_ramp,
-        pad_stat, parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
-        plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
-        poly2herm, poly2herme, poly2lag, poly2leg, reduce_frompyfunc_values,
-        resolve_override_dispatch, scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log,
-        scimath_log2, scimath_log10, scimath_logn, scimath_power, scimath_sqrt, seterr,
-        seterr_state, seterrcall, signbit, sort_complex, spacing, take_float_error_events,
-        transpose_tiled, unique_all, unique_counts, unique_inverse, unique_values,
-        validate_override_payload_class, where_nonzero,
+        ma_minimum_fill_value, ma_minimum_fill_value_for_dtype, matmul_accumulate,
+        matmul_accumulate_serial, mediate_ufunc_runtime_policy, modf, nextafter,
+        normalize_fixed_signature_keywords, normalize_signature_keywords, note_unary_float_errors,
+        pad_empty, pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
+        plan_binary_dispatch, plan_binary_dispatch_with_registry,
+        plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
+        reduce_frompyfunc_values, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
+        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_logn, scimath_power,
+        scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex, spacing,
+        take_float_error_events, transpose_tiled, unique_all, unique_counts, unique_inverse,
+        unique_values, validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -55860,12 +55864,62 @@ print(json.dumps(payload))
     }
 
     #[test]
-    fn matmul_accumulate_serial_single_inner_dimension_scales_rows() {
+    fn matmul_accumulate_serial_single_inner_dimension_is_a_rank_one_update() {
+        // k == 1 is a RANK-1 UPDATE, not a scaled copy: lhs is m×1, rhs is 1×n,
+        // so out[i][j] += lhs[i] * rhs[j] and every column gets a DIFFERENT rhs
+        // element. The earlier version of this test passed rhs = [4.0] while
+        // declaring n = 3 — one element where the contract (and this function's
+        // own debug_assert_eq!(rhs.len(), k * n)) requires three — and asserted
+        // the answer you get from broadcasting rhs[0] across the row. That is
+        // why the distinct values below matter: with equal rhs entries a kernel
+        // that reads only rhs[0] is indistinguishable from a correct one.
         let lhs = [2.0, -3.0];
-        let rhs = [4.0];
+        let rhs = [4.0, 5.0, -6.0];
         let mut out = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
         matmul_accumulate_serial(&lhs, &rhs, 2, 1, 3, &mut out);
-        assert_eq!(out, [9.0, 9.0, 9.0, -11.0, -11.0, -11.0]);
+        assert_eq!(out, [9.0, 11.0, -11.0, -11.0, -14.0, 19.0]);
+    }
+
+    #[test]
+    fn matmul_single_inner_dimension_matches_the_packed_path_and_a_reference() {
+        // The k == 1 fast path bypasses packing entirely, so nothing else in
+        // this suite compares it against the general kernel. Sweep it against
+        // an independent scalar reference across widths that straddle the
+        // register-tile boundaries, in both the serial and parallel entries.
+        fn rank_one_reference(lhs: &[f64], rhs: &[f64], m: usize, n: usize) -> Vec<f64> {
+            let mut out = vec![0.0f64; m * n];
+            for i in 0..m {
+                for j in 0..n {
+                    out[i * n + j] += lhs[i] * rhs[j];
+                }
+            }
+            out
+        }
+
+        for m in [1usize, 2, 5, 8, 17, 64] {
+            for n in [1usize, 2, 3, 7, 16, 33] {
+                let lhs: Vec<f64> = (0..m)
+                    .map(|i| ((i as i64 * 13 % 19) - 9) as f64 / 4.0)
+                    .collect();
+                // Distinct, sign-varied rhs entries: a kernel that reads only
+                // rhs[0] fails the moment two of these differ.
+                let rhs: Vec<f64> = (0..n)
+                    .map(|j| ((j as i64 * 7 % 23) - 11) as f64 / 8.0)
+                    .collect();
+
+                let mut serial = vec![0.0f64; m * n];
+                matmul_accumulate_serial(&lhs, &rhs, m, 1, n, &mut serial);
+                let expected = rank_one_reference(&lhs, &rhs, m, n);
+                assert_eq!(serial, expected, "serial k=1 mismatch at m={m} n={n}");
+
+                let mut parallel = vec![0.0f64; m * n];
+                matmul_accumulate(&lhs, &rhs, m, 1, n, &mut parallel);
+                assert_eq!(
+                    parallel, expected,
+                    "parallel k=1 must be bit-identical to serial at m={m} n={n}"
+                );
+            }
+        }
     }
 
     #[test]
