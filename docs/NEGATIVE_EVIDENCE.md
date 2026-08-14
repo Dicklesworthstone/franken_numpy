@@ -4,6 +4,110 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-14 - UNDECIDED (measured, no verdict): selected-bool `loadtxt(usecols)` reruns at 1.112226x vs NumPy, direction reversed from the banked 0.671524x loss but the incumbent's own A/A null is too wide to decide it (`deadlock-audit-s17g0`)
+
+`BlackThrush`, cc / Lane M. The 2026-07-27 row banked this surface as the repo's
+only certified vs-NumPy loss at **0.671524x**. Its retry predicate authorises a
+rerun "after the NumPy parser artifact hash changes; then repeat the actual
+NumPy/FNP same-invocation contract". That is satisfied outright and was checked
+before any source was touched: the banked row measured NumPy **2.4.6**,
+`artifact_sha256=d527de76...`. Every worker in the fleet today runs NumPy
+**2.4.3** - the eight py3.13 boxes carry `2e0027bb...` (10,456,817 B) and the two
+py3.14 Hetzners carry `c037bcec...` (10,452,801 B). The fleet's numpy moved
+BACKWARDS, so the banked incumbent is not reproducible anywhere here.
+
+**Not campaign output.** The incumbent comparison came out `UNDECIDED`, so this
+row carries no canonical result class: it is neither a banked competitive result
+nor a self-speedup claim. It must never be quoted as a competitive ratio. The
+one class marker below belongs to the maintenance control, which is a separate
+measurement inside the same invocation.
+
+`bench_elf_sha256=30d56fa0878504c709bf3abd42a818220002556ba81839012c84c4c38e95990c`
+(232,299,032 bytes), `--profile release-perf`, built and run on worker
+`vmi1149989`.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3
+artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48
+invocation_id=000000000000000018cbccf2ef7fc29d-001b65f2 measured_ratio=1.112226x
+
+**Incumbent isolation proof:** candidate=fnp.loadtxt incumbent=numpy.loadtxt
+shared_timed_component=none. `dispatch_assert=passed`, and poisoning
+`numpy.loadtxt` before the timed section proves the FNP arm does not delegate
+(`DISPATCH_PROOF ... delegated_to_numpy=false`). The incumbent artifact hash is
+not the candidate ELF hash. All four PAIRED rows carry the identical output
+checksum `30fb6a0b5c0da785`, so both arms returned byte-identical arrays.
+
+| row | arm A | arm B | ratio median | ratio CI95 | CV (provenance only) |
+|---|---:|---:|---:|---:|---:|
+| A/A null (NumPy/NumPy) | 0.932193 ms | 0.904061 ms | 1.009071 | `[0.984242, 1.086776]` | 13.270% |
+| A/A null (FNP/FNP) | 0.940225 ms | 0.941778 ms | 1.004930 | `[0.980271, 1.038076]` | 11.024% |
+| effect (NumPy/FNP) | 1.059039 ms | **1.003971 ms** | **1.112226** | **`[1.050958, 1.162838]`** | 13.684% |
+
+**Verdict: UNDECIDED.** The effect CI excludes 1.0, but the gate compares the
+effect's deviation from unity against twice the CONTROLLING (wider) null
+half-width. The incumbent's own A/A null half-width is 0.086776, so the required
+delta is 0.173552 and the measured delta is only 0.112226. **The blocker is the
+incumbent arm's own run-to-run instability on a contended host, not the
+candidate.** The candidate null is less than half as wide (0.038076).
+
+### What this row does NOT establish
+
+The 0.671524x -> 1.112226x movement is **not attributable to any single lever**,
+and specifically not to mine. Three things changed at once: a different NumPy
+(2.4.6 -> 2.4.3), a different host, and `b8e641a1` landing prefix-bounded
+tokenisation on this exact path. A same-invocation before/after would be needed
+to attribute it, and the bench's `former` arm cannot supply that - it is the
+negative-`usecols` owned-token path, not the pre-lever direct parser. Quoting
+this as "the loss was fixed" would be exactly the cross-invocation comparison
+this ledger forbids.
+
+### Incumbent profile that motivated the landed lever (`b8e641a1`)
+
+Measured against live numpy 2.4.3 on the bench's own corpus, so the lever was
+chosen from evidence rather than intuition:
+
+- NumPy's `loadtxt` cost is **completely independent of WHICH column is
+  selected**: `usecols=[0]` 1.008 ms vs `usecols=[15]` 1.011 ms, 0.3% apart. It
+  walks every field of every row whatever the selection.
+- Reaching column 4 of 16 needs only **24.4%** of the file's bytes.
+- The file read is **2.4%** of numpy's 1.283 ms, so I/O is not the floor.
+
+Our arm had been doing what numpy does - splitting all 16 fields then indexing 4
+- while `fnp-io`'s own `parse_loadtxt_row_usecols_planned` already broke at
+`max_col`. The two parsers are forked and the faster discipline sat on the side
+the bench does not reach.
+
+**Maintenance control from the same invocation** (`loadtxt_selected_bool_8192x16`,
+former negative-`usecols` owned-token path over the direct path): 5.715011x,
+CI `[5.576874, 6.034634]`, null 1.021264 `[0.997568, 1.044112]`,
+`DECIDABLE_WIN`.
+
+**Campaign result class:** maintenance-self-speedup
+
+Our own former code is the base arm, so this says nothing about NumPy. It must
+not be compared against the 3.676778x banked on 2026-07-27: different
+invocation, different binary, different host.
+
+COUNTED_MECHANISM: `class=tokens_not_produced`. The landed lever removes
+tokenisation work rather than reordering it - for this selection the row-splitter
+stops after 5 of 16 fields, so ~76% of each line's bytes are never split or
+trimmed. `Split` is lazy, so `.take(n)` truncates the scan instead of discarding
+after the fact.
+
+**Provenance.** host=`vmi1149989`, cpu=`AMD_EPYC_Processor__with_IBPB_`,
+physical_cores=10, logical_threads=10, allowed_cpus=0:1:2:3:4:5:6:7:8:9,
+governor=`unavailable`, rayon_pool_threads=**10 observed** (`RAYON_NUM_THREADS`
+unset), runtime ISA avx2=true fma=true avx512f=**false**, compile avx2=true.
+41 rounds, min_of=3, balanced-square interleave.
+
+Retry predicate: this row is decidable the moment the INCUMBENT's A/A null
+half-width drops below 0.056113 (half the measured 0.112226 deviation) at the
+same effect size. Reopen by raising the round count until the incumbent null
+median's standard error is small enough, or by running on a quieter worker -
+NOT by widening the effect, and NOT by relaxing the 2x-null-margin rule, which
+is the clause that makes every other row in this file worth reading. Do not
+re-run the owned-token/direct-parser maintenance comparison; it is settled.
+
 ## 2026-08-06 - WIN (KEEP, INCUMBENT-WIN): native TSQR lstsq widened to the (M,K) multi-RHS form, 2.01-3.41x - the ratio RISES with K and no turning point exists in K <= 8 (`deadlock-audit-inzah`)
 
 `SandySpring`. `try_native_lstsq_tsqr` declined `b.ndim != 1`, handing numpy's whole
