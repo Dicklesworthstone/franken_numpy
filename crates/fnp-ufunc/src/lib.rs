@@ -32988,6 +32988,12 @@ pub fn matmul_accumulate_serial(
     debug_assert_eq!(rhs.len(), k * n);
     debug_assert_eq!(out.len(), m * n);
 
+    // Empty contractions have an already-correct zeroed output. Avoid
+    // constructing the packed B micropanel for valid zero-dimension shapes.
+    if m == 0 || k == 0 || n == 0 {
+        return;
+    }
+
     let m_full = m - m % MATMUL_MR;
     let n_full = n - n % MATMUL_NR;
 
@@ -55828,6 +55834,17 @@ print(json.dumps(payload))
         let r = a.matmul(&b).unwrap();
         assert_eq!(r.shape(), &[2, 2]);
         assert_eq!(r.values(), &[58.0, 64.0, 139.0, 154.0]);
+    }
+
+    #[test]
+    fn matmul_accumulate_serial_empty_dimensions_are_noop() {
+        for (m, k, n) in [(0, 3, 2), (2, 0, 3), (2, 3, 0)] {
+            let lhs = vec![1.0; m * k];
+            let rhs = vec![2.0; k * n];
+            let mut out = vec![0.0; m * n];
+            matmul_accumulate_serial(&lhs, &rhs, m, k, n, &mut out);
+            assert!(out.iter().all(|value| *value == 0.0));
+        }
     }
 
     #[test]
