@@ -1254,8 +1254,9 @@ fn main() {
 // deadlock-audit-2nmd1 made the f64 divide fast path defer to numpy on any
 // element that would raise an IEEE FP exception, because bit-identical VALUES
 // are not parity when numpy also emits a RuntimeWarning a pure-Rust kernel
-// cannot raise into numpy's error state. That fix landed UNMEASURED (no
-// admissible rch workers at the time). These two arms close that gap.
+// cannot raise into numpy's error state. The repair writes all quotients, scans
+// the result buffer for non-normal values, and only then runs the precise
+// operand-aware classifier on that exceptional subset.
 //
 // RESULT CLASS IS FIXED IN ADVANCE: the base arm is OUR OWN FORMER CODE, so any
 // number here is `maintenance-self-speedup` — it says nothing about NumPy and
@@ -1269,11 +1270,12 @@ fn main() {
 // the `Div` arm is a SEPARATE loop from the generic `op.apply` loop, not the old
 // loop plus a branch. So the former arm here reproduces the old loop's shape —
 // `*s = op.apply(x, y)` with `apply` monomorphised to a divide — and the
-// candidate reproduces the new one. The predicate itself is a REPLICA — a bench
-// crate cannot reach a crate-root item in fnp-python — so it is pinned to the
-// shipped body by DIVIDE_HAZARD_TRUTH_TABLE below, which is asserted before any
-// timing runs. lib.rs carries the same table in its own unit test, and the
-// comment at the shipped predicate says both must move together.
+// repaired arm reproduces the new two-pass shape. The predicate itself is a
+// REPLICA — a bench crate cannot reach a crate-root item in fnp-python — so it
+// is pinned to the shipped body by DIVIDE_HAZARD_TRUTH_TABLE below, which is
+// asserted before any timing runs. lib.rs carries the same table in its own
+// unit test, and the comment at the shipped predicate says both must move
+// together.
 //
 // THIS IS A KERNEL-ONLY A/B, and this repo has already retracted one kernel-only
 // row that overstated a ratio by omitting route overhead. So each arm also
@@ -1340,9 +1342,7 @@ const DIVIDE_SERIAL_N: usize = 1 << 20; // below the kernel's 1<<21 rayon thresh
 const DIVIDE_PARALLEL_N: usize = 1 << 22; // above it
 
 /// Hazard-free operands: every quotient lands in (0.5, 2), i.e. normal, so the
-/// candidate's fast accept (`q.is_normal()`) is taken on every element. That is
-/// deliberately the WORST case for this measurement — it is the path that pays
-/// the added test and never gets to skip work.
+/// repaired arm scans every result and never enters precise classification.
 fn divide_hazard_free_operands(n: usize) -> (Vec<f64>, Vec<f64>) {
     let a = (0..n)
         .map(|i| 1.0 + ((i % 1000) as f64) / 1000.0)
@@ -1367,16 +1367,18 @@ fn divide_former_serial(a: &[f64], b: &[f64], out: &mut [f64]) {
     }
 }
 
-/// The shipped serial loop: quotient computed once, hazard test fused in.
+/// The shipped serial loop: a vectorizable quotient pass, a result-buffer scan,
+/// then precise classification only when a non-normal quotient exists.
 #[inline(never)]
-fn divide_candidate_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
-    let mut hazard = false;
+fn divide_repaired_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
     for ((s, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
-        let q = x / y;
-        hazard |= bench_divide_raises_fp_error(x, y, q);
-        *s = q;
+        *s = x / y;
     }
-    hazard
+    out.iter().any(|q| !q.is_normal())
+        && a.iter()
+            .zip(b.iter())
+            .zip(out.iter())
+            .any(|((&x, &y), &q)| !q.is_normal() && bench_divide_raises_fp_error(x, y, q))
 }
 
 /// Same chunking the kernel uses: `n.div_ceil(rayon::current_num_threads())`.
@@ -1394,24 +1396,21 @@ fn divide_former_parallel(a: &[f64], b: &[f64], out: &mut [f64]) {
 }
 
 #[inline(never)]
-fn divide_candidate_parallel(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
-    let hazard = std::sync::atomic::AtomicBool::new(false);
+fn divide_repaired_parallel(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
     let chunk = out.len().div_ceil(rayon::current_num_threads());
     out.par_chunks_mut(chunk)
         .zip(a.par_chunks(chunk))
         .zip(b.par_chunks(chunk))
         .for_each(|((o, l), r)| {
-            let mut chunk_hazard = false;
             for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                let q = x / y;
-                chunk_hazard |= bench_divide_raises_fp_error(x, y, q);
-                *s = q;
-            }
-            if chunk_hazard {
-                hazard.store(true, std::sync::atomic::Ordering::Relaxed);
+                *s = x / y;
             }
         });
-    hazard.load(std::sync::atomic::Ordering::Relaxed)
+    out.par_iter().any(|q| !q.is_normal())
+        && a.par_iter()
+            .zip(b.par_iter())
+            .zip(out.par_iter())
+            .any(|((&x, &y), &q)| !q.is_normal() && bench_divide_raises_fp_error(x, y, q))
 }
 
 /// Times the real `fnp.divide(a, b)` end to end and prints the kernel's share of
@@ -1470,7 +1469,7 @@ fn bench_divide_fe_hazard_serial(_c: &mut Criterion) {
     let n = DIVIDE_SERIAL_N;
     let (a, b) = divide_hazard_free_operands(n);
     let mut former_out = vec![0.0_f64; n];
-    let mut candidate_out = vec![0.0_f64; n];
+    let mut repaired_out = vec![0.0_f64; n];
 
     let time_former = || {
         let started = Instant::now();
@@ -1480,19 +1479,19 @@ fn bench_divide_fe_hazard_serial(_c: &mut Criterion) {
         black_box(&former_out);
         common::ContractObservation { elapsed, checksum }
     };
-    let time_candidate = || {
+    let time_repaired = || {
         let started = Instant::now();
-        let hazard = divide_candidate_serial(&a, &b, &mut candidate_out);
+        let hazard = divide_repaired_serial(&a, &b, &mut repaired_out);
         let elapsed = started.elapsed();
         assert!(!hazard, "operands must be hazard-free for this measurement");
-        let checksum = divide_checksum(&candidate_out);
-        black_box(&candidate_out);
+        let checksum = divide_checksum(&repaired_out);
+        black_box(&repaired_out);
         common::ContractObservation { elapsed, checksum }
     };
     let (effect, _null) = common::run_median_ci_contract(
         "divide_fe_hazard_branch_serial_1m",
         time_former,
-        time_candidate,
+        time_repaired,
     );
     report_divide_route_share(n, "serial", effect.arm_b_median_ns);
 }
@@ -1502,7 +1501,7 @@ fn bench_divide_fe_hazard_parallel(_c: &mut Criterion) {
     let n = DIVIDE_PARALLEL_N;
     let (a, b) = divide_hazard_free_operands(n);
     let mut former_out = vec![0.0_f64; n];
-    let mut candidate_out = vec![0.0_f64; n];
+    let mut repaired_out = vec![0.0_f64; n];
 
     let time_former = || {
         let started = Instant::now();
@@ -1512,19 +1511,19 @@ fn bench_divide_fe_hazard_parallel(_c: &mut Criterion) {
         black_box(&former_out);
         common::ContractObservation { elapsed, checksum }
     };
-    let time_candidate = || {
+    let time_repaired = || {
         let started = Instant::now();
-        let hazard = divide_candidate_parallel(&a, &b, &mut candidate_out);
+        let hazard = divide_repaired_parallel(&a, &b, &mut repaired_out);
         let elapsed = started.elapsed();
         assert!(!hazard, "operands must be hazard-free for this measurement");
-        let checksum = divide_checksum(&candidate_out);
-        black_box(&candidate_out);
+        let checksum = divide_checksum(&repaired_out);
+        black_box(&repaired_out);
         common::ContractObservation { elapsed, checksum }
     };
     let (effect, _null) = common::run_median_ci_contract(
         "divide_fe_hazard_branch_parallel_4m",
         time_former,
-        time_candidate,
+        time_repaired,
     );
     report_divide_route_share(n, "parallel", effect.arm_b_median_ns);
 }

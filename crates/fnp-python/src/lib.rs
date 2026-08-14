@@ -356,9 +356,9 @@ impl PyUFunc {
                 // exactly; scan the divisor buffer zero-copy (no extract). divide
                 // (BinaryOp::Div) needs the same deferral for the same reason — bit-identical
                 // values are not parity when numpy also raises a RuntimeWarning we cannot
-                // (deadlock-audit-2nmd1) — but it does NOT scan here: its check is FUSED into
-                // the divide kernel in zerocopy_f64_binary_flat, which returns None on a
-                // hazard, so a clean divide never pays a second read of the divisor.
+                // (deadlock-audit-2nmd1) — but it does NOT scan here: the divide kernel
+                // first writes quotient values, then scans only that result buffer before
+                // running its precise classifier, returning None on a real hazard.
                 let zero_divisor = if matches!(op, BinaryOp::Remainder) {
                     if let Ok(b_buf) = PyBuffer::<f64>::get(b)
                         && let Some(b_slice) = b_buf.as_slice(py)
@@ -9422,9 +9422,9 @@ fn zerocopy_f64_binary_flat<'py>(
     kwargs.set_item("dtype", "float64")?;
     let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
     // Set by the Div arms below when an element would raise an FE flag that numpy
-    // turns into a warning. Detection is FUSED into the pass we already make over a
-    // and b, so hazard-free input pays one predictable branch per element instead of
-    // a second full read of the divisor.
+    // turns into a warning. Divide first fills the output with quotients, then
+    // scans that buffer for a non-normal value before invoking the precise
+    // operand-aware classifier. This leaves the clean quotient loop vectorizable.
     let divide_hazard = std::sync::atomic::AtomicBool::new(false);
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -9484,36 +9484,53 @@ fn zerocopy_f64_binary_flat<'py>(
             let out_data: &mut [f64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
             let chunk = n.div_ceil(rayon::current_num_threads());
-            out_data
-                .par_chunks_mut(chunk)
-                .zip(lhs.par_chunks(chunk))
-                .zip(rhs.par_chunks(chunk))
-                .for_each(|((o, l), r)| {
-                    if matches!(op, BinaryOp::Div) {
-                        let mut chunk_hazard = false;
-                        for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                            let q = x / y;
-                            chunk_hazard |= f64_divide_raises_fp_error(x, y, q);
-                            *s = q;
+            if matches!(op, BinaryOp::Div) {
+                out_data
+                    .par_chunks_mut(chunk)
+                    .zip(lhs.par_chunks(chunk))
+                    .zip(rhs.par_chunks(chunk))
+                    .for_each(|((o, l), r)| {
+                        for ((slot, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
+                            *slot = x / y;
                         }
-                        if chunk_hazard {
-                            divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        return;
-                    }
+                    });
+                if out_data.par_iter().any(|q| !q.is_normal())
+                    && lhs
+                        .par_iter()
+                        .zip(rhs.par_iter())
+                        .zip(out_data.par_iter())
+                        .any(|((&x, &y), &q)| {
+                            !q.is_normal() && f64_divide_raises_fp_error(x, y, q)
+                        })
+                {
+                    divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            } else {
+                out_data
+                    .par_chunks_mut(chunk)
+                    .zip(lhs.par_chunks(chunk))
+                    .zip(rhs.par_chunks(chunk))
+                    .for_each(|((o, l), r)| {
                     for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
                         *s = op.apply(x, y);
                     }
                 });
-        } else if matches!(op, BinaryOp::Div) {
-            let mut hazard = false;
-            for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
-                let (x, y) = (a_cell.get(), b_cell.get());
-                let q = x / y;
-                hazard |= f64_divide_raises_fp_error(x, y, q);
-                slot.set(q);
             }
-            if hazard {
+        } else if matches!(op, BinaryOp::Div) {
+            for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
+                slot.set(a_cell.get() / b_cell.get());
+            }
+            if output.iter().any(|slot| !slot.get().is_normal())
+                && output
+                    .iter()
+                    .zip(a_in.iter())
+                    .zip(b_in.iter())
+                    .any(|((slot, a_cell), b_cell)| {
+                        let q = slot.get();
+                        !q.is_normal()
+                            && f64_divide_raises_fp_error(a_cell.get(), b_cell.get(), q)
+                    })
+            {
                 divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         } else {
@@ -108940,7 +108957,8 @@ mod tests {
         bincount, blas_is_single_threaded, build_numpy_array_from_ufunc, ceil_native, choose,
         compress, copysign, count_nonzero, degrees_native, diag, diag_indices, diag_indices_from,
         diagflat, diagonal, digitize, extract, extract_numeric_array,
-        extract_precise_numeric_array, f64_divide_raises_fp_error, fill_diagonal, flatnonzero,
+        BinaryOp, extract_precise_numeric_array, f64_divide_raises_fp_error, fill_diagonal,
+        flatnonzero, zerocopy_f64_binary_flat,
         flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interp,
         isfinite_native, isinf_native, isnan_native, isneginf_native, isposinf_native, ix_, ldexp,
         logaddexp, logaddexp2, masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf,
@@ -109030,6 +109048,47 @@ mod tests {
         ] {
             assert!(!hazard(a, b), "{a} / {b} is clean and must NOT flag");
         }
+    }
+
+    #[test]
+    fn f64_divide_two_pass_keeps_clean_and_quiet_nan_outputs_native() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let array = numpy.getattr("array")?;
+            let clean_lhs = array.call1((vec![1.0_f64, -6.0, 9.0],))?;
+            let clean_rhs = array.call1((vec![2.0_f64, 3.0, -4.5],))?;
+            assert!(
+                zerocopy_f64_binary_flat(py, &numpy, &clean_lhs, &clean_rhs, BinaryOp::Div)?
+                    .is_some(),
+                "normal quotients must remain on the native path"
+            );
+
+            let quiet_nan_lhs = array.call1((vec![f64::NAN, 4.0],))?;
+            let quiet_nan_rhs = array.call1((vec![2.0_f64, f64::NAN],))?;
+            assert!(
+                zerocopy_f64_binary_flat(
+                    py,
+                    &numpy,
+                    &quiet_nan_lhs,
+                    &quiet_nan_rhs,
+                    BinaryOp::Div,
+                )?
+                .is_some(),
+                "quiet NaN operands raise no IEEE exception and must not defer"
+            );
+
+            let hazard_lhs = array.call1((vec![1.0_f64],))?;
+            let hazard_rhs = array.call1((vec![0.0_f64],))?;
+            assert!(
+                zerocopy_f64_binary_flat(py, &numpy, &hazard_lhs, &hazard_rhs, BinaryOp::Div)?
+                    .is_none(),
+                "division by zero must still defer for NumPy's warning/error state"
+            );
+            Ok(())
+        });
     }
 
     // Reference: numpy's pairwise tree over an ALREADY-compacted slice — the
