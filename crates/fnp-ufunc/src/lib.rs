@@ -32994,6 +32994,18 @@ pub fn matmul_accumulate_serial(
         return;
     }
 
+    // A single-element contraction is a scaled copy, not a GEMM. Keep the
+    // scalar accumulation order while avoiding panel allocation and packing.
+    if k == 1 {
+        let scale = rhs[0];
+        for (row, out_row) in lhs.iter().zip(out.chunks_exact_mut(n)) {
+            for (slot, &value) in out_row.iter_mut().zip(std::iter::repeat(*row)) {
+                *slot += value * scale;
+            }
+        }
+        return;
+    }
+
     let m_full = m - m % MATMUL_MR;
     let n_full = n - n % MATMUL_NR;
 
@@ -55845,6 +55857,15 @@ print(json.dumps(payload))
             matmul_accumulate_serial(&lhs, &rhs, m, k, n, &mut out);
             assert!(out.iter().all(|value| *value == 0.0));
         }
+    }
+
+    #[test]
+    fn matmul_accumulate_serial_single_inner_dimension_scales_rows() {
+        let lhs = [2.0, -3.0];
+        let rhs = [4.0];
+        let mut out = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        matmul_accumulate_serial(&lhs, &rhs, 2, 1, 3, &mut out);
+        assert_eq!(out, [9.0, 9.0, 9.0, -11.0, -11.0, -11.0]);
     }
 
     #[test]
