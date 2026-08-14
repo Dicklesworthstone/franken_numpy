@@ -5215,6 +5215,22 @@ fn bench_loadtxt_selected_bool_median_gate(_c: &mut Criterion) {
                 .extract::<Vec<u8>>()
                 .expect("byte Vec")
         };
+        let array_signature = |value: &Bound<'_, PyAny>| {
+            (
+                value
+                    .getattr("shape")
+                    .expect("array shape")
+                    .extract::<Vec<usize>>()
+                    .expect("array shape vector"),
+                value
+                    .getattr("dtype")
+                    .expect("array dtype")
+                    .getattr("name")
+                    .expect("dtype name")
+                    .extract::<String>()
+                    .expect("dtype name string"),
+            )
+        };
         assert_eq!(
             bytes_of(&former_out),
             bytes_of(&candidate_out),
@@ -5224,6 +5240,21 @@ fn bench_loadtxt_selected_bool_median_gate(_c: &mut Criterion) {
             bytes_of(&candidate_out),
             bytes_of(&oracle),
             "selected-bool direct path must be byte-identical to numpy",
+        );
+        assert_eq!(
+            array_signature(&former_out),
+            array_signature(&candidate_out),
+            "selected-bool direct path must preserve the former result shape and dtype",
+        );
+        assert_eq!(
+            array_signature(&candidate_out),
+            array_signature(&oracle),
+            "selected-bool direct path must preserve NumPy result shape and dtype",
+        );
+        assert_eq!(
+            array_signature(&candidate_out),
+            (vec![8192, 4], "bool".to_owned()),
+            "selected-bool corpus contract must remain an 8192x4 bool array",
         );
 
         // Prove this valid compatible workload cannot be silently delegated to
