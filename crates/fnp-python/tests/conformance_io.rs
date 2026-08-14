@@ -601,3 +601,95 @@ print("oracle", platform.node(), np.__version__)
     );
     Ok(())
 }
+
+#[test]
+fn loadtxt_bool_usecols_prefix_bounded_tokenise_matches_numpy() -> Result<(), String> {
+    // The bool + positive-usecols path tokenises only as far as the farthest
+    // SELECTED column instead of splitting every field of every row. The whole
+    // risk of that change is that the truncated token buffer alters an
+    // observable outcome, so this sweeps the cases where it could, against live
+    // numpy, and every case is one a naive `.take(n)` would get wrong:
+    //
+    //  - garbage AFTER the last selected column must stay ignored (that is the
+    //    point of the optimisation), and garbage BEFORE it must stay ignored
+    //    too (it is tokenised but never parsed);
+    //  - a selection that INCLUDES the last column must be unchanged, since it
+    //    is the no-op case that proves the budget is computed from max(cols)
+    //    and not from cols.len();
+    //  - out-of-order and DUPLICATED selections must keep numpy's output order,
+    //    which is the selection order, not sorted column order;
+    //  - a row too SHORT to reach a requested column must still raise exactly
+    //    as numpy does. This is the case a budget-off-by-one silently breaks:
+    //    with take(max_col) instead of take(max_col+1) the last selected column
+    //    disappears from the buffer and every well-formed row starts raising.
+    let script = fnp_script(
+        r#"
+import platform
+
+ROWS = [
+    "1,0,1,0,1,1,0,not_a_bool,1,0,1,1,0,1,0,1",
+    "0,1,1,1,0,0,1,not_a_bool,0,1,0,0,1,0,1,0",
+    "1,1,0,0,1,0,1,not_a_bool,1,1,1,0,0,1,1,0",
+]
+WIDE = "\n".join(ROWS) + "\n"
+SHORT = "1,0,1\n0,1,1\n"          # only 3 columns
+LEADING_GARBAGE = "\n".join(
+    r.replace("1,0,1,0", "1,0,x,0", 1) if i == 0 else r for i, r in enumerate(ROWS)
+) + "\n"
+
+CASES = [
+    ("selected_before_garbage",      WIDE,            [0, 1, 3, 4]),
+    ("selection_includes_last_col",  WIDE,            [0, 15]),
+    ("only_last_col",                WIDE,            [15]),
+    ("only_first_col",               WIDE,            [0]),
+    ("out_of_order",                 WIDE,            [4, 1, 0, 3]),
+    ("duplicated",                   WIDE,            [2, 2, 0]),
+    ("spans_the_garbage_column",     WIDE,            [0, 8]),
+    ("garbage_is_selected",          WIDE,            [7]),
+    ("row_too_short",                SHORT,           [0, 5]),
+    ("short_exact_last",             SHORT,           [2]),
+    ("unselected_garbage_before",    LEADING_GARBAGE, [0, 1, 4]),
+]
+
+def outcome(fn, text, cols):
+    try:
+        out = fn(StringIO(text), delimiter=",", dtype=np.bool_, usecols=cols)
+        arr = np.asarray(out)
+        return "ok:%s:%s:%s" % (arr.shape, arr.dtype, arr.tobytes().hex())
+    except Exception as exc:
+        return "raise:" + type(exc).__name__
+
+failures = []
+for label, text, cols in CASES:
+    got = outcome(fnp.loadtxt, text, cols)
+    want = outcome(np.loadtxt, text, cols)
+    if got != want:
+        failures.append("%s usecols=%r: fnp %s vs numpy %s" % (label, cols, got, want))
+
+# Guard against the grid quietly losing its negative cases: at least one case
+# must raise on BOTH sides, otherwise the short-row arm is untested and this
+# test would pass while only exercising the happy path.
+raised = sum(1 for label, text, cols in CASES
+             if outcome(np.loadtxt, text, cols).startswith("raise:"))
+if raised == 0:
+    failures.append("no case made numpy raise; the short-row arm is untested")
+
+if failures:
+    print("FAILURES\n" + "\n".join(failures))
+else:
+    print("True")
+print("oracle", platform.node(), np.__version__)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.trim().lines().rev();
+    let provenance = lines.next().unwrap_or("").trim();
+    let verdict = lines.next().unwrap_or("").trim();
+    assert_eq!(
+        verdict, "True",
+        "prefix-bounded bool usecols tokenise must be observationally identical to \
+         numpy ({provenance}):\n{result}"
+    );
+    Ok(())
+}
