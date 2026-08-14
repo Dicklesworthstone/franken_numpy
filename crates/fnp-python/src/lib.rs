@@ -9509,16 +9509,12 @@ fn zerocopy_f64_binary_flat<'py>(
                         .par_iter()
                         .zip(rhs.par_iter())
                         .zip(out_data.par_iter())
-                        .any(|((&x, &y), &q)| {
-                            !f64_divide_fast_accepts_without_fp_error(x, y, q)
-                        })
+                        .any(|((&x, &y), &q)| !f64_divide_fast_accepts_without_fp_error(x, y, q))
                     && lhs
                         .par_iter()
                         .zip(rhs.par_iter())
                         .zip(out_data.par_iter())
-                        .any(|((&x, &y), &q)| {
-                            !q.is_normal() && f64_divide_raises_fp_error(x, y, q)
-                        })
+                        .any(|((&x, &y), &q)| !q.is_normal() && f64_divide_raises_fp_error(x, y, q))
                 {
                     divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -9528,36 +9524,31 @@ fn zerocopy_f64_binary_flat<'py>(
                     .zip(lhs.par_chunks(chunk))
                     .zip(rhs.par_chunks(chunk))
                     .for_each(|((o, l), r)| {
-                    for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                        *s = op.apply(x, y);
-                    }
-                });
+                        for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
+                            *s = op.apply(x, y);
+                        }
+                    });
             }
         } else if matches!(op, BinaryOp::Div) {
             for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
                 slot.set(a_cell.get() / b_cell.get());
             }
             if output.iter().any(|slot| !slot.get().is_normal())
-                && output
-                    .iter()
-                    .zip(a_in.iter())
-                    .zip(b_in.iter())
-                    .any(|((slot, a_cell), b_cell)| {
+                && output.iter().zip(a_in.iter()).zip(b_in.iter()).any(
+                    |((slot, a_cell), b_cell)| {
                         !f64_divide_fast_accepts_without_fp_error(
                             a_cell.get(),
                             b_cell.get(),
                             slot.get(),
                         )
-                    })
-                && output
-                    .iter()
-                    .zip(a_in.iter())
-                    .zip(b_in.iter())
-                    .any(|((slot, a_cell), b_cell)| {
+                    },
+                )
+                && output.iter().zip(a_in.iter()).zip(b_in.iter()).any(
+                    |((slot, a_cell), b_cell)| {
                         let q = slot.get();
-                        !q.is_normal()
-                            && f64_divide_raises_fp_error(a_cell.get(), b_cell.get(), q)
-                    })
+                        !q.is_normal() && f64_divide_raises_fp_error(a_cell.get(), b_cell.get(), q)
+                    },
+                )
             {
                 divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
             }
@@ -108981,22 +108972,23 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MaskedStream, NarrowSetOp, PyFromPyFunc, PyVectorize, PythonNativeGemmOp, argwhere,
-        bincount, blas_is_single_threaded, build_numpy_array_from_ufunc, ceil_native, choose,
-        compress, copysign, count_nonzero, degrees_native, diag, diag_indices, diag_indices_from,
-        diagflat, diagonal, digitize, extract, extract_numeric_array,
-        BinaryOp, extract_precise_numeric_array, f64_divide_fast_accepts_without_fp_error,
-        f64_divide_raises_fp_error, fill_diagonal, flatnonzero, zerocopy_f64_binary_flat,
-        flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interp,
-        isfinite_native, isinf_native, isnan_native, isneginf_native, isposinf_native, ix_, ldexp,
-        logaddexp, logaddexp2, masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf,
-        nan_to_num, narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
+        BinaryOp, MaskedStream, NarrowSetOp, PyFromPyFunc, PyVectorize, PythonNativeGemmOp,
+        argwhere, bincount, blas_is_single_threaded, build_numpy_array_from_ufunc, ceil_native,
+        choose, compress, copysign, count_nonzero, degrees_native, diag, diag_indices,
+        diag_indices_from, diagflat, diagonal, digitize, extract, extract_numeric_array,
+        extract_precise_numeric_array, f64_divide_fast_accepts_without_fp_error,
+        f64_divide_raises_fp_error, fill_diagonal, flatnonzero, flip, fliplr, flipud, floor_native,
+        fnp_python, frexp, hypot, indices, interp, isfinite_native, isinf_native, isnan_native,
+        isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
+        masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
+        narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
         python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
         required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
         sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
         trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc_native,
         try_native_lstsq_tsqr, unravel_index, where_py, wide_int_table_bounds,
+        zerocopy_f64_binary_flat,
     };
     use fnp_dtype::{ArrayStorage, DType};
     use fnp_ufunc::UFuncArray;
@@ -109129,6 +109121,45 @@ mod tests {
                     .is_none(),
                 "division by zero must still defer for NumPy's warning/error state"
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn f64_divide_parallel_threshold_keeps_mixed_exact_zero_lanes_native() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            // This is the Div parallel-dispatch threshold. Keep almost every lane ordinary
+            // while placing both signed exact-zero results in the same native invocation:
+            // an over-broad non-normal quotient scan would incorrectly defer the whole call.
+            const PARALLEL_DIV_MIN_LEN: usize = 1 << 21;
+            let mut lhs = vec![8.0_f64; PARALLEL_DIV_MIN_LEN];
+            let mut rhs = vec![2.0_f64; PARALLEL_DIV_MIN_LEN];
+            lhs[0] = 0.0;
+            rhs[0] = 2.0;
+            lhs[1] = 0.0;
+            rhs[1] = -2.0;
+
+            let numpy = py.import("numpy")?;
+            let array = numpy.getattr("array")?;
+            let lhs = array.call1((lhs,))?;
+            let rhs = array.call1((rhs,))?;
+            let Some((result, shape)) =
+                zerocopy_f64_binary_flat(py, &numpy, &lhs, &rhs, BinaryOp::Div)?
+            else {
+                panic!("quiet exact-zero lanes must not defer the parallel f64 divide path");
+            };
+            assert_eq!(shape, vec![PARALLEL_DIV_MIN_LEN]);
+            let positive_zero = result.call_method1("__getitem__", (0,))?.extract::<f64>()?;
+            let negative_zero = result.call_method1("__getitem__", (1,))?.extract::<f64>()?;
+            let ordinary = result
+                .call_method1("__getitem__", (PARALLEL_DIV_MIN_LEN - 1,))?
+                .extract::<f64>()?;
+            assert_eq!(positive_zero.to_bits(), 0.0_f64.to_bits());
+            assert_eq!(negative_zero.to_bits(), (-0.0_f64).to_bits());
+            assert_eq!(ordinary, 4.0);
             Ok(())
         });
     }
