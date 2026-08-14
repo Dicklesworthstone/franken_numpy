@@ -9383,6 +9383,16 @@ fn f64_divide_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
     q.is_infinite() || (a != 0.0 && q.abs() < f64::MIN_POSITIVE)
 }
 
+// A sufficient no-warning fast accept for the second pass over the quotient
+// buffer. Normal quotients cannot represent any of divide's IEEE exceptions.
+// The other common quiet result is exactly ±0 from a zero numerator divided by
+// a finite, nonzero divisor. Everything else goes to the precise classifier
+// above so underflow, invalid, overflow, and divide-by-zero still defer.
+#[inline]
+fn f64_divide_fast_accepts_without_fp_error(a: f64, b: f64, q: f64) -> bool {
+    q.is_normal() || (q == 0.0 && a == 0.0 && b.is_finite() && b != 0.0)
+}
+
 // Two-input f64-output counterpart of zerocopy_f64_unary_flat. When a and b are
 // exact same-shape C-contiguous float64 ndarrays, read both buffers and write
 // `op.apply(a[i], b[i])` straight into the output buffer — no intermediate Rust
@@ -9494,7 +9504,11 @@ fn zerocopy_f64_binary_flat<'py>(
                             *slot = x / y;
                         }
                     });
-                if out_data.par_iter().any(|q| !q.is_normal())
+                if lhs
+                    .par_iter()
+                    .zip(rhs.par_iter())
+                    .zip(out_data.par_iter())
+                    .any(|((&x, &y), &q)| !f64_divide_fast_accepts_without_fp_error(x, y, q))
                     && lhs
                         .par_iter()
                         .zip(rhs.par_iter())
@@ -9520,7 +9534,17 @@ fn zerocopy_f64_binary_flat<'py>(
             for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
                 slot.set(a_cell.get() / b_cell.get());
             }
-            if output.iter().any(|slot| !slot.get().is_normal())
+            if output
+                .iter()
+                .zip(a_in.iter())
+                .zip(b_in.iter())
+                .any(|((slot, a_cell), b_cell)| {
+                    !f64_divide_fast_accepts_without_fp_error(
+                        a_cell.get(),
+                        b_cell.get(),
+                        slot.get(),
+                    )
+                })
                 && output
                     .iter()
                     .zip(a_in.iter())
@@ -108957,8 +108981,8 @@ mod tests {
         bincount, blas_is_single_threaded, build_numpy_array_from_ufunc, ceil_native, choose,
         compress, copysign, count_nonzero, degrees_native, diag, diag_indices, diag_indices_from,
         diagflat, diagonal, digitize, extract, extract_numeric_array,
-        BinaryOp, extract_precise_numeric_array, f64_divide_raises_fp_error, fill_diagonal,
-        flatnonzero, zerocopy_f64_binary_flat,
+        BinaryOp, extract_precise_numeric_array, f64_divide_fast_accepts_without_fp_error,
+        f64_divide_raises_fp_error, fill_diagonal, flatnonzero, zerocopy_f64_binary_flat,
         flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interp,
         isfinite_native, isinf_native, isnan_native, isneginf_native, isposinf_native, ix_, ldexp,
         logaddexp, logaddexp2, masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf,
@@ -109080,6 +109104,20 @@ mod tests {
                 "quiet NaN operands raise no IEEE exception and must not defer"
             );
 
+            let exact_zero_lhs = array.call1((vec![0.0_f64, -0.0],))?;
+            let exact_zero_rhs = array.call1((vec![2.0_f64, -2.0],))?;
+            assert!(
+                zerocopy_f64_binary_flat(
+                    py,
+                    &numpy,
+                    &exact_zero_lhs,
+                    &exact_zero_rhs,
+                    BinaryOp::Div,
+                )?
+                .is_some(),
+                "exact signed-zero quotients raise nothing and must remain native"
+            );
+
             let hazard_lhs = array.call1((vec![1.0_f64],))?;
             let hazard_rhs = array.call1((vec![0.0_f64],))?;
             assert!(
@@ -109089,6 +109127,27 @@ mod tests {
             );
             Ok(())
         });
+    }
+
+    #[test]
+    fn f64_divide_fast_accepts_normal_and_exact_zero_quotients_only() {
+        for &(a, b) in &[(6.0, 3.0), (0.0, 2.0), (-0.0, -2.0)] {
+            assert!(
+                f64_divide_fast_accepts_without_fp_error(a, b, a / b),
+                "{a} / {b} must bypass precise classification"
+            );
+        }
+        for &(a, b) in &[
+            (f64::MIN_POSITIVE, f64::MAX),
+            (1.0, 0.0),
+            (0.0, 0.0),
+            (f64::NAN, 2.0),
+        ] {
+            assert!(
+                !f64_divide_fast_accepts_without_fp_error(a, b, a / b),
+                "{a} / {b} must reach precise classification"
+            );
+        }
     }
 
     // Reference: numpy's pairwise tree over an ALREADY-compacted slice — the

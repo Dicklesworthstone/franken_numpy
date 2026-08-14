@@ -1308,6 +1308,12 @@ fn bench_divide_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
     q.is_infinite() || (a != 0.0 && q.abs() < f64::MIN_POSITIVE)
 }
 
+/// Replica of the shipped f64 divide fast-accept predicate.
+#[inline]
+fn bench_divide_fast_accepts_without_fp_error(a: f64, b: f64, q: f64) -> bool {
+    q.is_normal() || (q == 0.0 && a == 0.0 && b.is_finite() && b != 0.0)
+}
+
 /// (a, b, expected_hazard). Every arm of the predicate, both directions. The same
 /// table lives beside the shipped predicate in lib.rs; they must move together.
 const DIVIDE_HAZARD_TRUTH_TABLE: &[(f64, f64, bool)] = &[
@@ -1334,6 +1340,12 @@ fn assert_divide_hazard_replica_matches_contract() {
             "bench replica of f64_divide_raises_fp_error disagrees with the pinned \
              contract at a={a:?} b={b:?}: got {got}, expected {expected}. The measured \
              branch is not the shipped one — fix the replica before trusting any ratio."
+        );
+    }
+    for &(a, b) in &[(6.0, 3.0), (0.0, 2.0), (-0.0, -2.0)] {
+        assert!(
+            bench_divide_fast_accepts_without_fp_error(a, b, a / b),
+            "bench fast accept must keep quiet {a} / {b} outside precise classification"
         );
     }
 }
@@ -1374,7 +1386,10 @@ fn divide_repaired_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
     for ((s, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
         *s = x / y;
     }
-    out.iter().any(|q| !q.is_normal())
+    a.iter()
+        .zip(b.iter())
+        .zip(out.iter())
+        .any(|((&x, &y), &q)| !bench_divide_fast_accepts_without_fp_error(x, y, q))
         && a.iter()
             .zip(b.iter())
             .zip(out.iter())
@@ -1406,7 +1421,10 @@ fn divide_repaired_parallel(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
                 *s = x / y;
             }
         });
-    out.par_iter().any(|q| !q.is_normal())
+    a.par_iter()
+        .zip(b.par_iter())
+        .zip(out.par_iter())
+        .any(|((&x, &y), &q)| !bench_divide_fast_accepts_without_fp_error(x, y, q))
         && a.par_iter()
             .zip(b.par_iter())
             .zip(out.par_iter())
