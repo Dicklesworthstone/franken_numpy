@@ -10,9 +10,21 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# A push to main gets its OWN concurrency group, keyed by commit SHA, and is
+# never cancelled. `cancel-in-progress: false` on a shared group is NOT enough:
+# GitHub cancels the previously *pending* run of a group when a new one queues,
+# so with one group per ref the intermediate commits stay unverified whenever the
+# swarm pushes faster than the gate topology takes (~8-12 min). That is exactly
+# what deadlock-audit-5g1ag measured — 59 of 60 consecutive runs on main were
+# `cancelled`, none reached a verdict in over twelve hours, and four hard clippy
+# errors rode along under commits whose messages said "verified". Per-SHA groups
+# make every commit on main get its own verdict.
+#
+# Pull-request runs keep the classic supersede-the-stale-run behaviour: there
+# only the head commit is being reviewed, so cancelling an obsolete run is right.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'head' }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 permissions:
   contents: read
