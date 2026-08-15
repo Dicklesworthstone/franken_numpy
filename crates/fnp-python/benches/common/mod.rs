@@ -967,12 +967,12 @@ fn verify_contract_gate_semantics() {
     assert_eq!(one_shot.elapsed, Duration::from_nanos(17));
     assert_eq!(
         dual_null_observation_count_per_arm(21, 1),
-        300,
-        "one-shot lifecycle observations must cover all dual-null slots per arm"
+        500,
+        "two A/A phases plus the effect consume twenty arm slots across warmup and timed rounds"
     );
     assert_eq!(
         dual_null_observation_count_per_arm(21, 2),
-        600,
+        1_000,
         "min-of trials must each be represented in lifecycle accounting"
     );
     let stats = |median: f64, low: f64, high: f64| ContractPairStats {
