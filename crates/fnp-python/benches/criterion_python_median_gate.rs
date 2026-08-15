@@ -5315,6 +5315,11 @@ fn bench_loadtxt_selected_bool_median_gate(_c: &mut Criterion) {
             is_c_contiguous(&oracle),
             "NumPy selected-bool oracle must be C-contiguous",
         );
+        let expected_checksum = bytes_of(&oracle)
+            .into_iter()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |state, byte| {
+                (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            });
 
         // Prove this valid compatible workload cannot be silently delegated to
         // the incumbent. Restore NumPy before any timed call.
@@ -5357,6 +5362,10 @@ fn bench_loadtxt_selected_bool_median_gate(_c: &mut Criterion) {
                 .fold(0xcbf2_9ce4_8422_2325_u64, |state, byte| {
                     (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
                 });
+            assert_eq!(
+                checksum, expected_checksum,
+                "timed selected-bool arm must retain the preflight NumPy bytes",
+            );
             black_box(output);
             common::ContractObservation { elapsed, checksum }
         };
