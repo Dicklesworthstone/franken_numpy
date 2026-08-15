@@ -36,6 +36,17 @@ const CONTRACT_BOOTSTRAP_RESAMPLES: usize = 4_096;
 /// `A B B A A B B A`. Each arm therefore occupies symmetric positions in both
 /// halves of the round, so shared-host drift affects both arms equally.
 const BALANCED_SQUARE: [bool; 8] = [true, false, false, true, true, false, false, true];
+const DUAL_NULL_WARMUP_ROUNDS: usize = 4;
+
+/// Number of arm-local materializations made by the dual-null schedule.
+/// Lifecycle probes use this to prove their counters cover the incumbent A/A,
+/// candidate A/A, and effect slots, including balanced warm-up rounds.
+pub fn dual_null_observation_count_per_arm(rounds: usize, min_of: usize) -> usize {
+    let slots_per_arm = BALANCED_SQUARE.len() / 2;
+    // Each A/A phase invokes one arm in all eight slots; the effect phase
+    // invokes each arm in its own four slots.
+    (BALANCED_SQUARE.len() * 2 + slots_per_arm) * (DUAL_NULL_WARMUP_ROUNDS + rounds) * min_of
+}
 
 #[derive(Clone, Copy)]
 pub struct ContractPairStats {
@@ -954,6 +965,16 @@ fn verify_contract_gate_semantics() {
         "a lifecycle probe with min_of=1 must make one materialization per timed slot"
     );
     assert_eq!(one_shot.elapsed, Duration::from_nanos(17));
+    assert_eq!(
+        dual_null_observation_count_per_arm(21, 1),
+        300,
+        "one-shot lifecycle observations must cover all dual-null slots per arm"
+    );
+    assert_eq!(
+        dual_null_observation_count_per_arm(21, 2),
+        600,
+        "min-of trials must each be represented in lifecycle accounting"
+    );
     let stats = |median: f64, low: f64, high: f64| ContractPairStats {
         ratio_median: median,
         ratio_ci_low: low,

@@ -14769,12 +14769,26 @@ diff_user_boundary,diff_inter_event_gap,count_nonzero_user_transitions \
                 median_result_buffer_lifecycle(&incumbent_gap_lifecycles.borrow());
             let candidate_gap_lifecycle =
                 median_result_buffer_lifecycle(&candidate_gap_lifecycles.borrow());
+            let expected_gap_lifecycle_samples = common::dual_null_observation_count_per_arm(
+                WORKLOAD_CONTRACT_ROUNDS,
+                RESULT_BUFFER_CONTRACT_MIN_OF,
+            );
+            assert_eq!(
+                incumbent_gap_lifecycles.borrow().len(),
+                expected_gap_lifecycle_samples,
+                "incumbent lifecycle samples must cover every dual-null timing slot"
+            );
+            assert_eq!(
+                candidate_gap_lifecycles.borrow().len(),
+                expected_gap_lifecycle_samples,
+                "candidate lifecycle samples must cover every dual-null timing slot"
+            );
             println!(
                 "RESULT_BUFFER_LIFECYCLE row={gap_row} stage=inter_event_gap \
                  source=linux_proc_self_stat_and_status allocator=rust_default_system \
                  input=independently_materialized_ordered_times byte_parity=passed \
                  incumbent_live_same_invocation=true aa_nulls=true lifecycle_min_of={} \
-                 lifecycle_samples_match_timed_materializations=true timing_ratio_median={:.6} \
+                 lifecycle_samples_match_timed_materializations=true expected_samples_per_arm={} timing_ratio_median={:.6} \
                  timing_ratio_ci95=[{:.6},{:.6}] timing_verdict={gap_verdict} \
                  incumbent_samples={} candidate_samples={} \
                  incumbent_minor_faults_median={} candidate_minor_faults_median={} \
@@ -14787,6 +14801,7 @@ diff_user_boundary,diff_inter_event_gap,count_nonzero_user_transitions \
                  incumbent_rss_after_release_kib_median={} candidate_rss_after_release_kib_median={} \
                  incumbent_rss_released_kib_median={} candidate_rss_released_kib_median={}",
                 RESULT_BUFFER_CONTRACT_MIN_OF,
+                expected_gap_lifecycle_samples,
                 gap_effect.ratio_median,
                 gap_effect.ratio_ci_low,
                 gap_effect.ratio_ci_high,
