@@ -16,6 +16,7 @@ use pyo3::buffer::PyBuffer;
 use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyTuple};
 use pyo3::{Bound, PyAny, Python};
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
 use std::hint::black_box;
@@ -63,6 +64,10 @@ fn workload_checksum<const N: usize>(
         state = mix_bytes(state, &bytes);
     }
     state
+}
+
+fn result_buffer_bytes_digest(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
 }
 
 fn assert_workload_outputs_equal<const N: usize>(
@@ -325,6 +330,15 @@ fn verify_process_resource_snapshot_parser() {
     assert!(
         parse_proc_status_rss_kib("VmRSS:\t4242 bytes\n").is_err(),
         "the lifecycle report is KiB-only and must reject a changed unit"
+    );
+    assert_eq!(
+        result_buffer_bytes_digest(b"same result"),
+        result_buffer_bytes_digest(b"same result"),
+    );
+    assert_ne!(
+        result_buffer_bytes_digest(b"same result"),
+        result_buffer_bytes_digest(b"different result"),
+        "lifecycle digest must distinguish an altered result buffer"
     );
 
     let lifecycle = result_buffer_lifecycle(
@@ -1232,6 +1246,7 @@ fn observe_inter_event_gap_result_lifecycle(
     numpy: &Bound<'_, PyModule>,
     diff: &Bound<'_, PyAny>,
     ordered_times: &Bound<'_, PyAny>,
+    expected_digest: &[u8; 32],
     lifecycles: &RefCell<Vec<ResultBufferLifecycle>>,
 ) -> common::ContractObservation {
     let before = process_resource_snapshot();
@@ -1241,6 +1256,16 @@ fn observe_inter_event_gap_result_lifecycle(
         .expect("materialize inter-event gap result");
     let elapsed = started.elapsed();
     let while_live = process_resource_snapshot();
+    let output_bytes = output
+        .call_method0("tobytes")
+        .expect("inter-event gap bytes")
+        .extract::<Vec<u8>>()
+        .expect("inter-event gap byte vector");
+    assert_eq!(
+        result_buffer_bytes_digest(&output_bytes),
+        *expected_digest,
+        "timed inter-event gap must retain the preflight NumPy byte digest",
+    );
     let checksum = workload_checksum(numpy, std::array::from_ref(&output));
     let before_release = process_resource_snapshot();
     drop(output);
@@ -14742,6 +14767,13 @@ diff_user_boundary,diff_inter_event_gap,count_nonzero_user_transitions \
             );
             let incumbent_ordered_times = incumbent_output[2].clone();
             let candidate_ordered_times = candidate_output[2].clone();
+            let expected_gap_digest = result_buffer_bytes_digest(
+                &incumbent_output[4]
+                    .call_method0("tobytes")
+                    .expect("preflight NumPy inter-event gap bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("preflight NumPy inter-event gap byte vector"),
+            );
             drop(incumbent_output);
             drop(candidate_output);
 
@@ -14759,6 +14791,7 @@ diff_user_boundary,diff_inter_event_gap,count_nonzero_user_transitions \
                     &numpy,
                     &incumbent.diff,
                     &incumbent_ordered_times,
+                    &expected_gap_digest,
                     &incumbent_gap_lifecycles,
                 )
             };
@@ -14767,6 +14800,7 @@ diff_user_boundary,diff_inter_event_gap,count_nonzero_user_transitions \
                     &numpy,
                     &candidate.diff,
                     &candidate_ordered_times,
+                    &expected_gap_digest,
                     &candidate_gap_lifecycles,
                 )
             };
