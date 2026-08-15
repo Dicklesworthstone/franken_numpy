@@ -801,50 +801,114 @@ fn f16_unique_presence_table_bit_exact() -> Result<(), String> {
     let script = fnp_script(
         r#"
 verdicts = []
+upstream_defect = []
 rng = np.random.default_rng(20260716)
-for n in (200000, 2_000_003):
-    a = (rng.standard_normal(n) * 2).astype(np.float16)
+
+def oracle_is_sound(a, e):
+    # unique's output must be a SUBSET of its input - it can never invent a value.
+    # numpy's avx512f float16 path leaks a 0x7c01 signalling-NaN SENTINEL into the
+    # result for an input whose only NaN was 0x7e00 (measured on hz2, numpy 2.4.3).
+    # Ordering and duplicate checks are both blind to that, because NaN is excluded
+    # from any ordering test and the count is unchanged.
+    in_bits = np.unique(np.ascontiguousarray(a).view(np.uint16))
+    out_bits = np.unique(np.ascontiguousarray(e).view(np.uint16))
+    if not bool(np.isin(out_bits, in_bits).all()):
+        return False
+    return _oracle_order_is_sound(e)
+
+def _oracle_order_is_sound(e):
+    # np.unique's contract is a strictly increasing output with no repeats. Both
+    # are violated by numpy's float16 unique on an avx512f host: measured on hz2
+    # with numpy 2.4.3, n=2_000_003 returns 24_403 values containing 2 DUPLICATES
+    # and not ascending, where the correct answer is 24_401 (bead
+    # deadlock-audit-f7qjf, x86-simd-sort fp16 defect - alive on 2.4.3, and the
+    # fleet's only avx512f worker is hz2). Judge the ORACLE from its own output.
+    v = np.asarray(e).astype(np.float32)
+    v = v[~np.isnan(v)]
+    if v.size > 1 and not bool(np.all(np.diff(v) > 0)):
+        return False
+    bits = np.ascontiguousarray(e).view(np.uint16)
+    return bits.size == np.unique(bits).size
+
+def diff_note(r, e):
+    # Name the divergence instead of only asserting it: which bit patterns does
+    # each side hold that the other does not? Zero-sign and NaN-payload splits are
+    # the two ways an f16 presence table can disagree with numpy's sort+dedup, so
+    # call those out explicitly.
+    rb = set(np.ascontiguousarray(r).view(np.uint16).tolist())
+    eb = set(np.ascontiguousarray(e).view(np.uint16).tolist())
+    only_r = sorted(rb - eb); only_e = sorted(eb - rb)
+    def tag(bits):
+        return [f"0x{b:04x}={np.uint16(b).view(np.float16)!r}" for b in bits[:6]]
+    def dupes(x):
+        v, c = np.unique(np.ascontiguousarray(x).view(np.uint16), return_counts=True)
+        return tag(v[c > 1].tolist())
+    return (f" [ours_only={tag(only_r)} n={len(only_r)}]"
+            f"[numpy_only={tag(only_e)} n={len(only_e)}]"
+            f"[len ours={r.size} numpy={e.size}]"
+            f"[ours_dupes={dupes(r)}][numpy_dupes={dupes(e)}]"
+            f"[ours_has_both_zeros={0x0000 in rb and 0x8000 in rb}]"
+            f"[numpy_has_both_zeros={0x0000 in eb and 0x8000 in eb}]")
+
+def unique_matches(name, a):
+    # Byte-equality with numpy is the bar on a healthy build. But np.unique SORTS
+    # internally, and numpy 2.3.x's direct float16 sort emits globally mis-sorted
+    # output on AVX-512 hosts (x86-simd-sort fp16 defect, bead deadlock-audit-f7qjf,
+    # observed on hz1/hz2). When the ORACLE'S OWN output is not strictly ascending,
+    # byte-equality with it is unattainable and wrong to demand. Decide that from
+    # numpy's output alone - never from ours - and then hold ours to a stricter bar.
     r = fnp.unique(a); e = np.unique(a)
-    if r.dtype != e.dtype or r.tobytes() != e.tobytes():
-        verdicts.append(f"FAIL n={n}")
+    if r.dtype != e.dtype:
+        verdicts.append(f"FAIL {name} dtype"); return
+    if r.tobytes() == e.tobytes():
+        return
+    if oracle_is_sound(a, e):
+        verdicts.append(f"FAIL {name}{diff_note(r, e)}"); return
+    # The oracle is provably broken, so byte-equality with it is unattainable and
+    # wrong to demand - and so is multiset equality, since it emits duplicates.
+    # Hold OURS to the stricter bar instead: equal to numpy's own f32-widened
+    # composition, which cannot take the defective f16 path. That is a real
+    # oracle, not a weakening - it is the same fallback conformance_sorting.rs
+    # uses for f16_sort_flat_widening_matches_numpy.
+    w = np.unique(a.astype(np.float32)).astype(np.float16)
+    if r.dtype != w.dtype or r.tobytes() != w.tobytes():
+        verdicts.append(f"FAIL {name} vs f32-widened numpy{diff_note(r, w)}"); return
+    upstream_defect.append(name)
+
+for n in (200000, 2_000_003):
+    unique_matches(f"n={n}", (rng.standard_normal(n) * 2).astype(np.float16))
 # single zero pattern (either sign alone), +-inf, denormals, full-range bits
 a = (rng.standard_normal(300000)).astype(np.float16)
 a[a == 0] = np.float16(1.0)
 a[0] = np.float16(-0.0); a[1] = np.float16(np.inf); a[2] = np.float16(-np.inf)
 a[3] = np.uint16(0x0001).view(np.float16); a[4] = np.uint16(0x8001).view(np.float16)
-r = fnp.unique(a); e = np.unique(a)
-if r.tobytes() != e.tobytes():
-    verdicts.append("FAIL neg-zero-only/specials")
+unique_matches("neg-zero-only/specials", a)
 # degenerate full-bit-range coverage via a uint16 ramp viewed as f16 (nan-free slice)
 ramp = np.arange(0, 0x7C00, dtype=np.uint16).view(np.float16)
-big = np.tile(ramp, 8)
-r = fnp.unique(big); e = np.unique(big)
-if r.tobytes() != e.tobytes():
-    verdicts.append("FAIL positive ramp")
+unique_matches("positive ramp", np.tile(ramp, 8))
 # ambiguity defers: both zeros / NaNs present -> byte-equal via numpy path
 a2 = (rng.standard_normal(300000)).astype(np.float16)
 a2[10] = np.float16(0.0); a2[11] = np.float16(-0.0)
-if fnp.unique(a2).tobytes() != np.unique(a2).tobytes():
-    verdicts.append("FAIL both-zeros defer")
+unique_matches("both-zeros defer", a2)
 a3 = (rng.standard_normal(300000)).astype(np.float16)
 a3[10] = np.float16(np.nan)
-if fnp.unique(a3).tobytes() != np.unique(a3).tobytes():
-    verdicts.append("FAIL nan defer")
+unique_matches("nan defer", a3)
 # below-gate + kwargs variants stay on numpy
 sm = (rng.standard_normal(1000)).astype(np.float16)
-if fnp.unique(sm).tobytes() != np.unique(sm).tobytes():
-    verdicts.append("FAIL below-gate")
+unique_matches("below-gate", sm)
 ri_f, ri_n = fnp.unique(sm, return_counts=True), np.unique(sm, return_counts=True)
 if ri_f[0].tobytes() != ri_n[0].tobytes() or ri_f[1].tobytes() != ri_n[1].tobytes():
     verdicts.append("FAIL return_counts defer")
+print(f"F16_UNIQUE_UPSTREAM_DEFECT numpy={np.__version__} lanes={upstream_defect}")
 print(verdicts if verdicts else True)
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
+    println!("{result}"); // surfaces F16_UNIQUE_UPSTREAM_DEFECT under --nocapture
+    let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
-        result.trim(),
-        "True",
+        last, "True",
         "f16 unique presence table must be bit-identical (with ambiguity defers): {result}"
     );
     Ok(())
