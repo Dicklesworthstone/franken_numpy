@@ -1289,6 +1289,13 @@ fn main() {
 /// which is asserted before any timing runs. If this drifts from the shipped
 /// predicate, the measurement is of something we do not ship.
 #[inline]
+fn bench_divide_quotient_is_normal(q: f64) -> bool {
+    const EXPONENT_MASK: u64 = 0x7ff0_0000_0000_0000;
+    let exponent = q.to_bits() & EXPONENT_MASK;
+    exponent.wrapping_sub(1) < EXPONENT_MASK - 1
+}
+
+#[inline]
 fn bench_divide_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
     if bench_divide_fast_accepts_without_fp_error(a, b, q) {
         return false;
@@ -1311,7 +1318,7 @@ fn bench_divide_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
 /// Replica of the shipped f64 divide fast-accept predicate.
 #[inline]
 fn bench_divide_fast_accepts_without_fp_error(a: f64, b: f64, q: f64) -> bool {
-    q.is_normal() || (q == 0.0 && a == 0.0 && b.is_finite() && b != 0.0)
+    bench_divide_quotient_is_normal(q) || (q == 0.0 && a == 0.0 && b.is_finite() && b != 0.0)
 }
 
 /// (a, b, expected_hazard). Every arm of the predicate, both directions. The same
@@ -1411,7 +1418,7 @@ fn divide_repaired_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
     for ((slot, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
         let q = x / y;
         *slot = q;
-        needs_precise_classification |= !q.is_normal();
+        needs_precise_classification |= !bench_divide_quotient_is_normal(q);
     }
     needs_precise_classification
         && a.iter()
@@ -1446,7 +1453,7 @@ fn divide_repaired_parallel(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
             for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
                 let q = x / y;
                 *s = q;
-                saw_non_normal |= !q.is_normal();
+                saw_non_normal |= !bench_divide_quotient_is_normal(q);
             }
             saw_non_normal
         })

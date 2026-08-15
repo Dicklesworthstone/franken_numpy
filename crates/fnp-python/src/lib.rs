@@ -9356,6 +9356,16 @@ fn try_zerocopy_f64_isclose(
 // times anything. Change an arm of this predicate and both must move, or the
 // bench silently measures a branch we do not ship.
 #[inline]
+fn f64_divide_quotient_is_normal(q: f64) -> bool {
+    // A binary64 is normal exactly when its biased exponent lies in 1..0x7ff.
+    // Subtracting one maps that interval to 0..0x7fe; the unsigned comparison
+    // rejects both the zero exponent and the all-ones exponent without a branch.
+    const EXPONENT_MASK: u64 = 0x7ff0_0000_0000_0000;
+    let exponent = q.to_bits() & EXPONENT_MASK;
+    exponent.wrapping_sub(1) < EXPONENT_MASK - 1
+}
+
+#[inline]
 fn f64_divide_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
     // Fast accepts rule out every IEEE divide exception. Keeping them in the
     // exact classifier lets the rare non-normal path make one quotient pass:
@@ -9390,7 +9400,7 @@ fn f64_divide_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
 // invalid, overflow, and divide-by-zero still defer.
 #[inline]
 fn f64_divide_fast_accepts_without_fp_error(a: f64, b: f64, q: f64) -> bool {
-    q.is_normal() || (q == 0.0 && a == 0.0 && b.is_finite() && b != 0.0)
+    f64_divide_quotient_is_normal(q) || (q == 0.0 && a == 0.0 && b.is_finite() && b != 0.0)
 }
 
 // Two-input f64-output counterpart of zerocopy_f64_unary_flat. When a and b are
@@ -9504,7 +9514,7 @@ fn zerocopy_f64_binary_flat<'py>(
                         for ((slot, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
                             let q = x / y;
                             *slot = q;
-                            saw_non_normal |= !q.is_normal();
+                            saw_non_normal |= !f64_divide_quotient_is_normal(q);
                         }
                         saw_non_normal
                     })
@@ -9534,7 +9544,7 @@ fn zerocopy_f64_binary_flat<'py>(
             for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
                 let q = a_cell.get() / b_cell.get();
                 slot.set(q);
-                needs_precise_classification |= !q.is_normal();
+                needs_precise_classification |= !f64_divide_quotient_is_normal(q);
             }
             if needs_precise_classification
                 && output.iter().zip(a_in.iter()).zip(b_in.iter()).any(
@@ -109133,11 +109143,11 @@ mod tests {
         choose, compress, copysign, count_nonzero, degrees_native, diag, diag_indices,
         diag_indices_from, diagflat, diagonal, digitize, extract, extract_numeric_array,
         extract_precise_numeric_array, f64_divide_fast_accepts_without_fp_error,
-        f64_divide_raises_fp_error, fill_diagonal, flatnonzero, flip, fliplr, flipud, floor_native,
-        fnp_python, frexp, hypot, indices, interp, isfinite_native, isinf_native, isnan_native,
-        isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
-        masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
-        narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
+        f64_divide_quotient_is_normal, f64_divide_raises_fp_error, fill_diagonal, flatnonzero,
+        flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interp,
+        isfinite_native, isinf_native, isnan_native, isneginf_native, isposinf_native, ix_, ldexp,
+        logaddexp, logaddexp2, masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf,
+        nan_to_num, narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
         python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
         required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
@@ -109223,6 +109233,26 @@ mod tests {
             (1.0, tiny),
         ] {
             assert!(!hazard(a, b), "{a} / {b} is clean and must NOT flag");
+        }
+    }
+
+    #[test]
+    fn f64_divide_quotient_normality_matches_every_binary64_exponent_class() {
+        for exponent in 0..=0x7ff_u64 {
+            for sign in [0_u64, 1_u64 << 63] {
+                let q = f64::from_bits(sign | (exponent << 52));
+                assert_eq!(
+                    f64_divide_quotient_is_normal(q),
+                    q.is_normal(),
+                    "normality mismatch for exponent={exponent:#x}, sign={sign:#x}"
+                );
+            }
+        }
+        for q in [f64::from_bits(0x7ff8_0000_0000_0001), f64::NAN] {
+            assert!(
+                !f64_divide_quotient_is_normal(q),
+                "NaN quotient must require exact classification"
+            );
         }
     }
 
