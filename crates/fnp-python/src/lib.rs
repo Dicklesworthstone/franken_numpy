@@ -60469,7 +60469,6 @@ fn loadtxt(
         let ncols = cols.len();
         let mut values: Vec<bool> = Vec::new();
         let mut nrows = 0usize;
-        let mut tokens: Vec<&str> = Vec::new();
         // Tokenise only as far as the farthest SELECTED column. NumPy's own
         // loadtxt cannot do this -- measured on the 8,192x16 selected-bool
         // corpus, its cost is completely independent of WHICH column you ask
@@ -60479,21 +60478,22 @@ fn loadtxt(
         // the file's bytes; the other ~76% were being split and trimmed only
         // to be indexed past.
         //
-        // Behaviour is unchanged, not merely "close". `Split` is lazy, so
-        // `.take(n)` stops the scan rather than discarding after the fact, and
-        // capping the buffer at max_col+1 cannot alter any lookup below: every
-        // `cols` entry is <= max_col, and a row too short to reach a requested
-        // column still yields fewer than col+1 tokens and still takes the same
-        // `fallback(py)` bail. Selections that DO include the last column get
-        // the identical old scan, so this is a general win keyed on the
-        // selection, not a shape the benchmark happens to use.
-        let token_budget = cols
+        // Behaviour is unchanged, not merely "close": iteration stops after
+        // the last selected source column, and a short row still takes the
+        // same fallback. Selections that include the last column scan the
+        // same full row, so this is keyed on the requested selection rather
+        // than on a benchmark-specific shape.
+        // Retain the caller's requested order in the result while walking a
+        // row in source order. The plan has one entry for every requested
+        // output slot, including duplicated usecols, so it preserves NumPy's
+        // duplicated-column behavior without staging borrowed tokens first.
+        let mut selected_plan: Vec<(usize, usize)> = cols
             .iter()
-            .copied()
-            .max()
-            .and_then(|col| usize::try_from(col).ok())
-            .and_then(|col| col.checked_add(1))
-            .unwrap_or(usize::MAX);
+            .enumerate()
+            .map(|(output, &column)| (column as usize, output))
+            .collect();
+        selected_plan.sort_unstable_by_key(|&(column, _)| column);
+        let mut row_values = vec![false; ncols];
 
         for (lineno, raw_line) in text.lines().enumerate() {
             if lineno < skip_count {
@@ -60508,32 +60508,35 @@ fn loadtxt(
                 continue;
             }
 
-            tokens.clear();
-            match delimiter {
-                None => tokens.extend(trimmed.split_whitespace().take(token_budget)),
+            let mut selected = 0usize;
+            let mut parse_tokens = |tokens: &mut dyn Iterator<Item = &str>| -> bool {
+                for (column, token) in tokens.enumerate() {
+                    while selected < selected_plan.len() && selected_plan[selected].0 == column {
+                        // Former Bool conversion, preserved exactly: i64 parse
+                        // then nonzero, with NO integral-f64 retry.
+                        let Ok(value) = token.parse::<i64>() else {
+                            return false;
+                        };
+                        row_values[selected_plan[selected].1] = value != 0;
+                        selected += 1;
+                    }
+                    if selected == selected_plan.len() {
+                        return true;
+                    }
+                }
+                false
+            };
+            let parsed = match delimiter {
+                None => parse_tokens(&mut trimmed.split_whitespace()),
                 Some(sep) if sep.chars().all(char::is_whitespace) => {
-                    tokens.extend(trimmed.split_whitespace().take(token_budget));
+                    parse_tokens(&mut trimmed.split_whitespace())
                 }
-                Some(sep) => {
-                    tokens.extend(trimmed.split(sep).map(str::trim).take(token_budget));
-                }
+                Some(sep) => parse_tokens(&mut trimmed.split(sep).map(str::trim)),
+            };
+            if !parsed {
+                return fallback(py);
             }
-
-            for &col in cols {
-                // Matches the former `idx >= tokens.len()` bail exactly.
-                let Some(token) = tokens.get(col as usize) else {
-                    return fallback(py);
-                };
-                // Former Bool conversion, preserved exactly: i64 parse then
-                // nonzero, with NO integral-f64 retry (numpy raises on "1.0"
-                // and "True" for dtype=bool, and the former arm reached that
-                // error through the fallback, which any parse failure here
-                // still does).
-                match token.parse::<i64>() {
-                    Ok(value) => values.push(value != 0),
-                    Err(_) => return fallback(py),
-                }
-            }
+            values.extend(row_values.iter().copied());
             nrows += 1;
         }
 
