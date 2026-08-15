@@ -151,6 +151,9 @@ struct ResultBufferLifecycle {
     major_faults_during_release: u64,
     rss_while_live_kib: i64,
     rss_after_release_kib: i64,
+    // Signed so retained or allocator-accounting growth is visible rather
+    // than being silently reported as zero reclaimed memory.
+    rss_released_kib: i64,
 }
 
 fn parse_proc_stat_faults(stat: &str) -> Result<(u64, u64), String> {
@@ -237,6 +240,7 @@ fn result_buffer_lifecycle(
         major_faults_during_release: after_release.major_faults - before_release.major_faults,
         rss_while_live_kib: while_live.rss_kib as i64 - before.rss_kib as i64,
         rss_after_release_kib: after_release.rss_kib as i64 - before.rss_kib as i64,
+        rss_released_kib: before_release.rss_kib as i64 - after_release.rss_kib as i64,
     }
 }
 
@@ -294,6 +298,12 @@ fn median_result_buffer_lifecycle(samples: &[ResultBufferLifecycle]) -> ResultBu
                 .map(|sample| sample.rss_after_release_kib)
                 .collect(),
         ),
+        rss_released_kib: median_i64(
+            samples
+                .iter()
+                .map(|sample| sample.rss_released_kib)
+                .collect(),
+        ),
     }
 }
 
@@ -335,6 +345,34 @@ fn verify_process_resource_snapshot_parser() {
     assert_eq!(lifecycle.major_faults_during_release, 1);
     assert_eq!(lifecycle.rss_while_live_kib, 80);
     assert_eq!(lifecycle.rss_after_release_kib, 20);
+    assert_eq!(lifecycle.rss_released_kib, 60);
+
+    let retained = result_buffer_lifecycle(
+        ProcessResourceSnapshot {
+            minor_faults: 21,
+            major_faults: 3,
+            rss_kib: 120,
+        },
+        ProcessResourceSnapshot {
+            minor_faults: 21,
+            major_faults: 3,
+            rss_kib: 180,
+        },
+        ProcessResourceSnapshot {
+            minor_faults: 21,
+            major_faults: 3,
+            rss_kib: 180,
+        },
+        ProcessResourceSnapshot {
+            minor_faults: 21,
+            major_faults: 3,
+            rss_kib: 190,
+        },
+    );
+    assert_eq!(retained.rss_released_kib, -10);
+
+    let median = median_result_buffer_lifecycle(&[lifecycle, retained, lifecycle]);
+    assert_eq!(median.rss_released_kib, 60);
 }
 
 #[test]
@@ -14741,7 +14779,8 @@ diff_user_boundary,diff_inter_event_gap,count_nonzero_user_transitions \
                  incumbent_minor_faults_during_release_median={} candidate_minor_faults_during_release_median={} \
                  incumbent_major_faults_during_release_median={} candidate_major_faults_during_release_median={} \
                  incumbent_rss_while_live_kib_median={} candidate_rss_while_live_kib_median={} \
-                 incumbent_rss_after_release_kib_median={} candidate_rss_after_release_kib_median={}",
+                 incumbent_rss_after_release_kib_median={} candidate_rss_after_release_kib_median={} \
+                 incumbent_rss_released_kib_median={} candidate_rss_released_kib_median={}",
                 gap_effect.ratio_median,
                 gap_effect.ratio_ci_low,
                 gap_effect.ratio_ci_high,
@@ -14763,6 +14802,8 @@ diff_user_boundary,diff_inter_event_gap,count_nonzero_user_transitions \
                 candidate_gap_lifecycle.rss_while_live_kib,
                 incumbent_gap_lifecycle.rss_after_release_kib,
                 candidate_gap_lifecycle.rss_after_release_kib,
+                incumbent_gap_lifecycle.rss_released_kib,
+                candidate_gap_lifecycle.rss_released_kib,
             );
 
             common::report_observed_thread_activity(
