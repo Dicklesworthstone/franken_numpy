@@ -109266,6 +109266,21 @@ mod tests {
                 "NaN quotient must require exact classification"
             );
         }
+        for bits in [
+            0x0000_0000_0000_0001,
+            0x000f_ffff_ffff_ffff,
+            0x8000_0000_0000_0001,
+            0x800f_ffff_ffff_ffff,
+            0x7ff0_0000_0000_0001,
+            0xfff8_0000_0000_0001,
+        ] {
+            let q = f64::from_bits(bits);
+            assert_eq!(
+                f64_divide_quotient_bits_are_normal(bits),
+                q.is_normal(),
+                "bit classifier mismatch for mantissa-bearing quotient {bits:#018x}"
+            );
+        }
     }
 
     #[test]
