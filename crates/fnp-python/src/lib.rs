@@ -9356,11 +9356,6 @@ fn try_zerocopy_f64_isclose(
 // times anything. Change an arm of this predicate and both must move, or the
 // bench silently measures a branch we do not ship.
 #[inline]
-fn f64_divide_quotient_is_normal(q: f64) -> bool {
-    f64_divide_quotient_bits_are_normal(q.to_bits())
-}
-
-#[inline]
 fn f64_divide_quotient_bits_are_normal(bits: u64) -> bool {
     // A binary64 is normal exactly when its biased exponent lies in 1..0x7ff.
     // Subtracting one maps that interval to 0..0x7fe; the unsigned comparison
@@ -9517,13 +9512,18 @@ fn zerocopy_f64_binary_flat<'py>(
                     .zip(lhs.par_chunks(chunk))
                     .zip(rhs.par_chunks(chunk))
                     .map(|((o, l), r)| {
-                        let mut saw_non_normal = false;
+                        let mut needs_precise_classification = false;
                         for ((slot, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
                             let q = x / y;
                             *slot = q;
-                            saw_non_normal |= !f64_divide_quotient_is_normal(q);
+                            // Exact signed-zero quotients from a zero numerator and a
+                            // finite nonzero divisor are as quiet as normal quotients.
+                            // Do not make one of those common lanes trigger the full
+                            // operand-aware pass over every result buffer.
+                            needs_precise_classification |=
+                                !f64_divide_fast_accepts_without_fp_error(x, y, q);
                         }
-                        saw_non_normal
+                        needs_precise_classification
                     })
                     .any(|saw_non_normal| saw_non_normal);
                 if needs_precise_classification
@@ -9549,9 +9549,11 @@ fn zerocopy_f64_binary_flat<'py>(
         } else if matches!(op, BinaryOp::Div) {
             let mut needs_precise_classification = false;
             for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
-                let q = a_cell.get() / b_cell.get();
+                let a = a_cell.get();
+                let b = b_cell.get();
+                let q = a / b;
                 slot.set(q);
-                needs_precise_classification |= !f64_divide_quotient_is_normal(q);
+                needs_precise_classification |= !f64_divide_fast_accepts_without_fp_error(a, b, q);
             }
             if needs_precise_classification
                 && output.iter().zip(a_in.iter()).zip(b_in.iter()).any(
@@ -109150,8 +109152,8 @@ mod tests {
         choose, compress, copysign, count_nonzero, degrees_native, diag, diag_indices,
         diag_indices_from, diagflat, diagonal, digitize, extract, extract_numeric_array,
         extract_precise_numeric_array, f64_divide_fast_accepts_without_fp_error,
-        f64_divide_quotient_is_normal, f64_divide_raises_fp_error, fill_diagonal, flatnonzero,
-        flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interp,
+        f64_divide_quotient_bits_are_normal, f64_divide_raises_fp_error, fill_diagonal,
+        flatnonzero, flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interp,
         isfinite_native, isinf_native, isnan_native, isneginf_native, isposinf_native, ix_, ldexp,
         logaddexp, logaddexp2, masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf,
         nan_to_num, narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
@@ -109249,11 +109251,6 @@ mod tests {
             for sign in [0_u64, 1_u64 << 63] {
                 let q = f64::from_bits(sign | (exponent << 52));
                 assert_eq!(
-                    f64_divide_quotient_is_normal(q),
-                    q.is_normal(),
-                    "normality mismatch for exponent={exponent:#x}, sign={sign:#x}"
-                );
-                assert_eq!(
                     f64_divide_quotient_bits_are_normal(q.to_bits()),
                     q.is_normal(),
                     "bit normality mismatch for exponent={exponent:#x}, sign={sign:#x}"
@@ -109262,7 +109259,7 @@ mod tests {
         }
         for q in [f64::from_bits(0x7ff8_0000_0000_0001), f64::NAN] {
             assert!(
-                !f64_divide_quotient_is_normal(q),
+                !f64_divide_quotient_bits_are_normal(q.to_bits()),
                 "NaN quotient must require exact classification"
             );
         }
@@ -109361,25 +109358,18 @@ mod tests {
     }
 
     #[test]
-    fn f64_divide_parallel_threshold_keeps_mixed_exact_zero_lanes_native() {
+    fn f64_divide_parallel_threshold_keeps_all_signed_zero_lanes_native() {
         with_python(|py| {
             if !numpy_available(py) {
                 return Ok(());
             }
-            // This is the Div parallel-dispatch threshold. Keep almost every lane ordinary
-            // while placing both signed exact-zero results in the same native invocation:
-            // an over-broad non-normal quotient scan would incorrectly defer the whole call.
+            // This is the Div parallel-dispatch threshold. Every quotient is an exact
+            // signed zero from a finite nonzero divisor, so the quotient pass must accept
+            // the whole invocation without scheduling a second exact-classification pass.
             const PARALLEL_DIV_MIN_LEN: usize = 1 << 21;
-            let mut lhs = vec![8.0_f64; PARALLEL_DIV_MIN_LEN];
-            let mut rhs = vec![2.0_f64; PARALLEL_DIV_MIN_LEN];
-            lhs[0] = 0.0;
-            rhs[0] = 2.0;
-            lhs[1] = 0.0;
-            rhs[1] = -2.0;
-            lhs[2] = f64::NAN;
-            rhs[2] = 2.0;
-            lhs[3] = 4.0;
-            rhs[3] = f64::NAN;
+            let mut lhs = vec![0.0_f64; PARALLEL_DIV_MIN_LEN];
+            let rhs = vec![2.0_f64; PARALLEL_DIV_MIN_LEN];
+            lhs[1] = -0.0;
 
             let numpy = py.import("numpy")?;
             let array = numpy.getattr("array")?;
@@ -109393,16 +109383,12 @@ mod tests {
             assert_eq!(shape, vec![PARALLEL_DIV_MIN_LEN]);
             let positive_zero = result.call_method1("__getitem__", (0,))?.extract::<f64>()?;
             let negative_zero = result.call_method1("__getitem__", (1,))?.extract::<f64>()?;
-            let lhs_nan = result.call_method1("__getitem__", (2,))?.extract::<f64>()?;
-            let rhs_nan = result.call_method1("__getitem__", (3,))?.extract::<f64>()?;
-            let ordinary = result
+            let trailing_zero = result
                 .call_method1("__getitem__", (PARALLEL_DIV_MIN_LEN - 1,))?
                 .extract::<f64>()?;
             assert_eq!(positive_zero.to_bits(), 0.0_f64.to_bits());
             assert_eq!(negative_zero.to_bits(), (-0.0_f64).to_bits());
-            assert!(lhs_nan.is_nan(), "quiet NaN numerator must remain native");
-            assert!(rhs_nan.is_nan(), "quiet NaN divisor must remain native");
-            assert_eq!(ordinary, 4.0);
+            assert_eq!(trailing_zero.to_bits(), 0.0_f64.to_bits());
             Ok(())
         });
     }

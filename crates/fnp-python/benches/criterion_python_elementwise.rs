@@ -1410,15 +1410,15 @@ fn divide_former_serial(a: &[f64], b: &[f64], out: &mut [f64]) {
     }
 }
 
-/// The shipped serial loop: observe non-normal quotients in the quotient pass,
-/// then run the exact classifier once only when one exists.
+/// The shipped serial loop: observe only quotients that need precise IEEE
+/// classification, then run the exact classifier once only when one exists.
 #[inline(never)]
 fn divide_repaired_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
     let mut needs_precise_classification = false;
     for ((slot, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
         let q = x / y;
         *slot = q;
-        needs_precise_classification |= !bench_divide_quotient_is_normal(q);
+        needs_precise_classification |= !bench_divide_fast_accepts_without_fp_error(x, y, q);
     }
     needs_precise_classification
         && a.iter()
@@ -1449,15 +1449,16 @@ fn divide_repaired_parallel(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
         .zip(a.par_chunks(chunk))
         .zip(b.par_chunks(chunk))
         .map(|((o, l), r)| {
-            let mut saw_non_normal = false;
+            let mut needs_precise_classification = false;
             for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
                 let q = x / y;
                 *s = q;
-                saw_non_normal |= !bench_divide_quotient_is_normal(q);
+                needs_precise_classification |=
+                    !bench_divide_fast_accepts_without_fp_error(x, y, q);
             }
-            saw_non_normal
+            needs_precise_classification
         })
-        .any(|saw_non_normal| saw_non_normal);
+        .any(|needs_precise_classification| needs_precise_classification);
     needs_precise_classification
         && a.par_iter()
             .zip(b.par_iter())
