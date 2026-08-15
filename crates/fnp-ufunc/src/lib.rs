@@ -33010,6 +33010,19 @@ pub fn matmul_accumulate_serial(
         return;
     }
 
+    // A single output column is a matrix-vector product. Preserve the scalar
+    // k-order while avoiding a panel that can never reach an NR-wide tile.
+    if n == 1 {
+        for (row, slot) in lhs.chunks_exact(k).zip(out.iter_mut()) {
+            let sum = row
+                .iter()
+                .zip(rhs.iter())
+                .fold(0.0, |acc, (&left, &right)| acc + left * right);
+            *slot += sum;
+        }
+        return;
+    }
+
     let m_full = m - m % MATMUL_MR;
     let n_full = n - n % MATMUL_NR;
 
@@ -55861,6 +55874,15 @@ print(json.dumps(payload))
             matmul_accumulate_serial(&lhs, &rhs, m, k, n, &mut out);
             assert!(out.iter().all(|value| *value == 0.0));
         }
+    }
+
+    #[test]
+    fn matmul_accumulate_serial_single_output_column_matches_dot_order() {
+        let lhs = [2.0, -3.0, 4.0, 5.0, 7.0, -11.0];
+        let rhs = [13.0, -17.0, 19.0];
+        let mut out = [1.0, 1.0];
+        matmul_accumulate_serial(&lhs, &rhs, 2, 3, 1, &mut out);
+        assert_eq!(out, [154.0, -262.0]);
     }
 
     #[test]
