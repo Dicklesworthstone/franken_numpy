@@ -41,6 +41,7 @@ THREAD_CONFIGURATION rayon_pool_threads=8 RAYON_NUM_THREADS=unset OPENBLAS_NUM_T
 ISA_BASELINE target_arch=x86_64 runtime_avx2=true runtime_fma=true runtime_avx512f=false
 bench_elf_sha256=6068494b77e0f00cacedb1796b1afb14910c390aad2321296d4d1cca2c2ef8c9
 bench_invocation_id=000000000000000018cc04cc96c5fcef-003488d4
+harness=common::run_median_ci_contract (single A/A null, balanced-square ABBAABBA, 41 rounds, min-of-3)
 
 THE LEVER (scanning -> fused):
 divide_fe_hazard_fused_serial_1m    null_base_aa ratio_median=0.989227 ci95=[0.967349,1.015331]
@@ -90,6 +91,7 @@ HOST_BASELINE host=vmi1227854 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_
 THREAD_CONFIGURATION rayon_pool_threads=10 RAYON_NUM_THREADS=unset OPENBLAS_NUM_THREADS=unset
 bench_elf_sha256=be482bca132e4a9f1ed0f9224a132b42299ed7329b8abaf8c1df54e69187a5fa
 bench_invocation_id=000000000000000018cc069bc2614ebe-0028328a
+harness=common::run_median_ci_contract (single A/A null, balanced-square ABBAABBA, 41 rounds, min-of-3)
 Profile `bench` (triage grade), 41 rounds, min-of-3.
 
 THE FUSION REPLICATES - direction and decidability hold, magnitude moves with the host,

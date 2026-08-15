@@ -44,6 +44,24 @@ const WIN_CLASS_ENFORCEMENT_DATE: &str = "2026-07-26";
 /// row format that carries the worker as a required field of its own.
 const WORKER_PROVENANCE_ENFORCEMENT_DATE: &str = "2026-08-15";
 
+/// Measured rows dated on or after this must name the HARNESS that produced
+/// them, not just the worker.
+///
+/// Worker identity is necessary and not sufficient. The fleet measured two
+/// sanctioned harnesses differing **2x on one worker, both with passing A/A
+/// nulls** — the null is computed inside whichever harness is running, so it
+/// cannot see a difference between harnesses any more than it can see a
+/// difference between workers. This repo ships several with materially
+/// different semantics: `run_median_ci_contract` (one A/A null),
+/// `run_dual_null_median_ci_contract` (incumbent AND candidate nulls, and the
+/// 2x-null-margin gate), and the legacy `report_median_gate_pair` whose dormant
+/// `BIASED_NULL` straddle veto is a different verdict rule entirely. A ratio is
+/// not comparable to another ratio produced by a different one.
+///
+/// DELETION CONDITION: drop this when the ledger carries the harness as a
+/// structured field, or when only one harness remains.
+const HARNESS_PROVENANCE_ENFORCEMENT_DATE: &str = "2026-08-15";
+
 /// `incumbent-win` rows banked BEFORE [`WORKER_PROVENANCE_ENFORCEMENT_DATE`]
 /// that name no worker. It was **44 of 44** when this gate landed; five were
 /// then recovered from retained run logs under `.rch-bench-replay/`, matched to
@@ -1088,4 +1106,73 @@ fn unworkered_incumbent_win_budget_is_not_stale() {
          {HISTORICAL_UNWORKERED_INCUMBENT_WIN_BUDGET}. If rows were re-banked with their \
          worker, LOWER the budget to {actual} so it keeps ratcheting."
     );
+}
+
+/// The harness that produced a row's timings. Requires the explicit `harness=`
+/// field for the same reason the worker gate requires `host=`: prose naming a
+/// function somewhere in a paragraph is not machine-checkable, and this must
+/// fail CI rather than depend on a reader noticing.
+fn records_measuring_harness(body: &str) -> bool {
+    const PLACEHOLDERS: [&str; 5] = ["unavailable", "unknown", "n/a", "none", "tbd"];
+    body.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.split_once("harness=").is_some_and(|(_, rest)| {
+            let name = rest
+                .split(|c: char| c.is_whitespace() || c == ',' || c == ')')
+                .next()
+                .unwrap_or("")
+                .trim_matches(|c: char| c == '`' || c == '*' || c == '"');
+            !name.is_empty() && !PLACEHOLDERS.contains(&name)
+        })
+    })
+}
+
+/// THE HARNESS GATE. Two sanctioned harnesses in this fleet differed 2x on one
+/// worker with both A/A nulls passing, so a row's harness is part of what its
+/// ratio means. Same exemptions as the worker gate: a row that never got a
+/// measurement has no harness to name.
+#[test]
+fn new_measured_rows_name_their_harness() {
+    let offenders: Vec<String> = parse_entries()
+        .into_iter()
+        .filter(|e| !e.date.is_empty() && e.date.as_str() >= HARNESS_PROVENANCE_ENFORCEMENT_DATE)
+        .filter(|e| !is_unmeasured(&e.body) && !is_behavioral_blocker(&e.body))
+        .filter(|e| !records_measuring_harness(&e.body))
+        .map(|e| format!("  docs/NEGATIVE_EVIDENCE.md:{} — {}", e.line, e.heading))
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "{} measured row(s) dated on/after {HARNESS_PROVENANCE_ENFORCEMENT_DATE} do not name the \
+         harness that produced them:\n{}\n\n\
+         Add the explicit field, e.g.\n  \
+         harness=common::run_median_ci_contract (single A/A null, balanced-square ABBAABBA)\n\
+         A passing null does NOT substitute: the null is computed inside whichever harness is \
+         running, so it cannot see a difference between harnesses — and two sanctioned harnesses \
+         were measured 2x apart on one worker with both nulls passing.",
+        offenders.len(),
+        offenders.join("\n"),
+    );
+}
+
+#[test]
+fn harness_detector_requires_the_explicit_field() {
+    assert!(records_measuring_harness(
+        "harness=common::run_median_ci_contract (single A/A null, ABBAABBA)"
+    ));
+    assert!(records_measuring_harness(
+        "harness=common::run_dual_null_median_ci_contract"
+    ));
+
+    // THE NEGATIVE CASE: a row with worker, ELF sha, a null and a ratio, whose
+    // only mention of the harness is prose. Everything a "looks well-sourced"
+    // check keys off is present; the field is not.
+    assert!(!records_measuring_harness(
+        "HOST_BASELINE host=vmi1293453 governor=unavailable\n\
+         bench_elf_sha256=61a1e5e3c0ffee61a1e5e3c0ffee61a1e5e3c0ffee61a1e5e3c0ffee61a1e5e3\n\
+         null_base_aa ratio_median=0.997901 ci95=[0.960594,1.013642]\n\
+         Timed by the usual median-CI contract with the A/A null in the same invocation."
+    ));
+    assert!(!records_measuring_harness("harness=unknown"));
+    assert!(!records_measuring_harness("harness="));
 }
