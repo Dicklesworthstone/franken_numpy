@@ -45,14 +45,15 @@ const WIN_CLASS_ENFORCEMENT_DATE: &str = "2026-07-26";
 const WORKER_PROVENANCE_ENFORCEMENT_DATE: &str = "2026-08-15";
 
 /// `incumbent-win` rows banked BEFORE [`WORKER_PROVENANCE_ENFORCEMENT_DATE`]
-/// that name no worker, counted at the commit that introduced this gate:
-/// **44 of 44**. Every campaign-output row in the ledger is in this state.
+/// that name no worker. It was **44 of 44** when this gate landed; five were
+/// then recovered from retained run logs under `.rch-bench-replay/`, matched to
+/// their rows by `bench_elf_sha256` rather than by filename or date, so the
+/// attribution is proven rather than inferred. **39 remain.**
 ///
-/// These cannot be repaired by editing them. The worker was never recorded, and
-/// writing a plausible one in now would be fabricated provenance — strictly
-/// worse than an acknowledged gap. The only honest way to clear a row is to
-/// re-measure it and re-bank it with its worker named, which is why this is a
-/// budget that may SHRINK rather than a list to be filled in.
+/// The rest have no retained log and cannot be repaired by editing. Writing a
+/// plausible worker in would be fabricated provenance — strictly worse than an
+/// acknowledged gap — so the only ways this number falls are recovering a real
+/// log or re-measuring the row. It may SHRINK; it is not a list to fill in.
 ///
 /// It must never GROW. `new_measured_rows_name_their_worker` only sees rows
 /// dated on/after the enforcement date, so without this a new unworkered
@@ -60,12 +61,12 @@ const WORKER_PROVENANCE_ENFORCEMENT_DATE: &str = "2026-08-15";
 /// same backdating hole `historical_void_nonull_debt_does_not_grow` exists to
 /// close, and it is closed the same way.
 ///
-/// What it means for the 44: their ratios stand as measured, but they are
-/// worker-scoped and cannot be compared against each other or against any newer
-/// row. The fleet measured a 13.6x swing for one cell across two workers with
-/// both A/A nulls passing, so cross-row comparison without worker identity is
-/// not conservative — it is unbounded.
-const HISTORICAL_UNWORKERED_INCUMBENT_WIN_BUDGET: usize = 44;
+/// What it means for the remaining 39: their ratios stand as measured, but they
+/// are worker-scoped and cannot be compared against each other or against any
+/// newer row. The fleet measured a 13.6x swing for one cell across two workers
+/// with both A/A nulls passing, so cross-row comparison without worker identity
+/// is not conservative — it is unbounded.
+const HISTORICAL_UNWORKERED_INCUMBENT_WIN_BUDGET: usize = 39;
 
 /// Pre-[`ENFORCEMENT_DATE`] REJECT rows that record neither a null control nor a
 /// counted mechanism, as measured by *these predicates* at the commit that

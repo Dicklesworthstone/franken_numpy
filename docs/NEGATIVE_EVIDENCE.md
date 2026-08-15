@@ -1877,6 +1877,11 @@ anti-contraction test whose operands are chosen so a single-rounding FMA returns
 a different answer, so the byte claim fails loudly if the kernel ever contracts.
 
 `bench_elf_sha256=31da2d6bcea96979bd2b6e984230f9ba5b1270efbaef292123d7d5753903053b`
+WORKER PROVENANCE (recovered 2026-08-15, `deadlock-audit-alold`): this row was banked without
+naming its worker. Recovered from the retained run log `.rch-bench-replay/fusion-405-vmi1293453-t4.log + fusion-405-vmi1293453-t8.log`,
+matched to this row by the `bench_elf_sha256` above — not by filename or date — so the
+attribution is proven rather than inferred:
+HOST_BASELINE host=vmi1293453 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=8 logical_threads=8 governor=unavailable
 (218,930,112 bytes), self-reported from `/proc/self/exe`. Invocations
 `000000000000000018c75eb0bc3f41c0-0000730e` (4 threads) and
 `000000000000000018c75f34b10cb9d5-000113a6` (8 threads).
@@ -1971,6 +1976,11 @@ different overlay of the same base. The published figure stays 134.544824x,
 which is the conservative one of the two.
 
 `bench_elf_sha256=e54eb5517153a2d71939b36831a80f48aedb42233de875c8bb5c8397414626fe`
+WORKER PROVENANCE (recovered 2026-08-15, `deadlock-audit-alold`): this row was banked without
+naming its worker. Recovered from the retained run log `.rch-bench-replay/isin-402-release-perf.log`,
+matched to this row by the `bench_elf_sha256` above — not by filename or date — so the
+attribution is proven rather than inferred:
+HOST_BASELINE host=vmi1293453 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=8 logical_threads=8 governor=unavailable
 (218,563,856 bytes), self-reported from `/proc/self/exe` by the executing
 process, invocation `000000000000000018c75985786fdf29-003cbda2`.
 
@@ -2686,6 +2696,11 @@ columns through that permutation, then difference neighbours — and it is where
 most event-analytics pipelines actually spend their wall clock.
 
 `bench_elf_sha256=f2660ab2d45f78adcfcf50e0d47f7035031ef5f28c48d63fc1f143a96ade9d1c`
+WORKER PROVENANCE (recovered 2026-08-15, `deadlock-audit-alold`): this row was banked without
+naming its worker. Recovered from the retained run log `.rch-bench-replay/sessionization-395-release-perf.log`,
+matched to this row by the `bench_elf_sha256` above — not by filename or date — so the
+attribution is proven rather than inferred:
+HOST_BASELINE host=vmi1227854 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 governor=unavailable
 (218,174,240 bytes), self-reported by the executing process from
 `/proc/self/exe`, invocation
 `000000000000000018c73a9db1988d21-001ec3f5`. The preserved 85-line execution
@@ -2917,6 +2932,11 @@ number they alert on. The three input sizes represent about 25.5, 50.9, and
 candidate routes throughout.
 
 `bench_elf_sha256=2676e0ab1f328ded31ac1820120811a16895dca6c6e876ebbd8d2e9084975c59`
+WORKER PROVENANCE (recovered 2026-08-15, `deadlock-audit-alold`): this row was banked without
+naming its worker. Recovered from the retained run log `.rch-bench-replay/rolling-load-393-release-perf.log`,
+matched to this row by the `bench_elf_sha256` above — not by filename or date — so the
+attribution is proven rather than inferred:
+HOST_BASELINE host=vmi1227854 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 governor=unavailable
 (217,332,904 bytes), self-reported by the executing process from
 `/proc/self/exe`, invocation
 `000000000000000018c6faaa97d75f7d-0004b6a2`. The preserved 67-line execution
@@ -3081,6 +3101,11 @@ would change the user's representation. The three exposure matrices contain
 source-pinned native wide-integer reduction gate at every measured size.
 
 `bench_elf_sha256=9e5fce0b9b0f42c018a3273a3ee6e2be38f43ff8fae3d644c0306b0c25d632d8`
+WORKER PROVENANCE (recovered 2026-08-15, `deadlock-audit-alold`): this row was banked without
+naming its worker. Recovered from the retained run log `.rch-bench-replay/critical-access-392-release-perf.log`,
+matched to this row by the `bench_elf_sha256` above — not by filename or date — so the
+attribution is proven rather than inferred:
+HOST_BASELINE host=vmi1227854 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 governor=unavailable
 (217,125,984 bytes), self-reported by the executing process from
 `/proc/self/exe`, invocation
 `000000000000000018c6f43869e3db14-00030daf`. The captured 69-line execution
