@@ -38,14 +38,88 @@ const CONTRACT_BOOTSTRAP_RESAMPLES: usize = 4_096;
 const BALANCED_SQUARE: [bool; 8] = [true, false, false, true, true, false, false, true];
 const DUAL_NULL_WARMUP_ROUNDS: usize = 4;
 
+/// One phase of the dual-null schedule. `selects_incumbent` maps a
+/// balanced-square slot to the arm that runs in it; the runner drives every
+/// phase through this predicate and the slot accounting below counts the same
+/// predicate, so the executed schedule and the lifecycle expectation cannot
+/// drift apart.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DualNullPhase {
+    IncumbentNull,
+    CandidateNull,
+    Effect,
+}
+
+impl DualNullPhase {
+    fn selects_incumbent(self, slot_is_a: bool) -> bool {
+        match self {
+            Self::IncumbentNull => true,
+            Self::CandidateNull => false,
+            Self::Effect => slot_is_a,
+        }
+    }
+
+    /// Slots per round this phase spends on one arm.
+    fn arm_slots(self, incumbent: bool) -> usize {
+        BALANCED_SQUARE
+            .iter()
+            .filter(|&&slot_is_a| self.selects_incumbent(slot_is_a) == incumbent)
+            .count()
+    }
+
+    fn checksum_mismatch_message(self) -> &'static str {
+        match self {
+            Self::IncumbentNull => {
+                "incumbent/incumbent null arms produced different output checksums"
+            }
+            Self::CandidateNull => {
+                "candidate/candidate null arms produced different output checksums"
+            }
+            Self::Effect => "incumbent/candidate arms produced different output checksums",
+        }
+    }
+
+    /// Suffix appended to the caller's row name when this phase reports. The
+    /// published row names are load-bearing evidence, so they stay attached to
+    /// the phase that produces them rather than to a call site.
+    fn row_suffix(self) -> &'static str {
+        match self {
+            Self::IncumbentNull => "_null_incumbent_aa",
+            Self::CandidateNull => "_null_candidate_aa",
+            Self::Effect => "_effect_incumbent_over_candidate",
+        }
+    }
+}
+
+/// The dual-null schedule in execution order: an incumbent A/A, a candidate
+/// A/A, then the interleaved effect.
+const DUAL_NULL_PHASES: [DualNullPhase; 3] = [
+    DualNullPhase::IncumbentNull,
+    DualNullPhase::CandidateNull,
+    DualNullPhase::Effect,
+];
+
+/// Slots one arm occupies in a single pass over every dual-null phase. An arm
+/// runs all eight slots of *its own* A/A phase, none of the other arm's, and
+/// four of the eight interleaved effect slots.
+fn dual_null_arm_slots_per_round(incumbent: bool) -> usize {
+    DUAL_NULL_PHASES
+        .iter()
+        .map(|phase| phase.arm_slots(incumbent))
+        .sum()
+}
+
 /// Number of arm-local materializations made by the dual-null schedule.
-/// Lifecycle probes use this to prove their counters cover the incumbent A/A,
-/// candidate A/A, and effect slots, including balanced warm-up rounds.
+/// Lifecycle probes use this to prove their counters cover their own A/A phase
+/// and their half of the effect phase, including balanced warm-up rounds.
 pub fn dual_null_observation_count_per_arm(rounds: usize, min_of: usize) -> usize {
-    let slots_per_arm = BALANCED_SQUARE.len() / 2;
-    // Each A/A phase invokes one arm in all eight slots; the effect phase
-    // invokes each arm in its own four slots.
-    (BALANCED_SQUARE.len() * 2 + slots_per_arm) * (DUAL_NULL_WARMUP_ROUNDS + rounds) * min_of
+    let incumbent_slots = dual_null_arm_slots_per_round(true);
+    assert_eq!(
+        incumbent_slots,
+        dual_null_arm_slots_per_round(false),
+        "the dual-null schedule must spend the same number of slots on each arm",
+    );
+    incumbent_slots * (DUAL_NULL_WARMUP_ROUNDS + rounds) * min_of
 }
 
 #[derive(Clone, Copy)]
@@ -965,14 +1039,90 @@ fn verify_contract_gate_semantics() {
         "a lifecycle probe with min_of=1 must make one materialization per timed slot"
     );
     assert_eq!(one_shot.elapsed, Duration::from_nanos(17));
+    // Lifecycle accounting counts BALANCED_SQUARE entries, so pin that a round
+    // visits each entry exactly once, in order. Without this link the phase
+    // slot arithmetic below could describe a schedule the runner never runs.
+    let mut visited_slots = Vec::with_capacity(BALANCED_SQUARE.len());
+    balanced_square_round_with(|slot_is_a| {
+        visited_slots.push(slot_is_a);
+        ContractObservation {
+            elapsed: Duration::from_nanos(1),
+            checksum: 0x5107,
+        }
+    });
+    assert_eq!(
+        visited_slots.as_slice(),
+        BALANCED_SQUARE.as_slice(),
+        "a balanced-square round must visit every slot exactly once in order",
+    );
+    assert_eq!(
+        DUAL_NULL_PHASES.map(|phase| phase.arm_slots(true)),
+        [BALANCED_SQUARE.len(), 0, BALANCED_SQUARE.len() / 2],
+        "the incumbent runs its own A/A in full, none of the candidate's, and half the effect",
+    );
+    assert_eq!(
+        DUAL_NULL_PHASES.map(|phase| phase.arm_slots(false)),
+        [0, BALANCED_SQUARE.len(), BALANCED_SQUARE.len() / 2],
+        "the candidate runs its own A/A in full, none of the incumbent's, and half the effect",
+    );
+    // End-to-end count: drive the real phase runner and tally how many times
+    // each arm is actually materialized. The lifecycle probes in the workload
+    // benches assert their sample vectors against
+    // `dual_null_observation_count_per_arm`, and that assertion fires only
+    // after a multi-minute measurement, so the schedule and the formula are
+    // reconciled here instead. A formula that counts the peer arm's A/A phase,
+    // drops the warm-up rounds, or ignores `min_of` fails this before any
+    // bench spends a second timing.
+    let probe_rounds = 9;
+    let probe_min_of = 2;
+    let mut incumbent_materializations = 0_usize;
+    let mut candidate_materializations = 0_usize;
+    {
+        let mut incumbent_probe = || {
+            incumbent_materializations += 1;
+            ContractObservation {
+                elapsed: Duration::from_nanos(11),
+                checksum: 0x5107_5107,
+            }
+        };
+        let mut candidate_probe = || {
+            candidate_materializations += 1;
+            ContractObservation {
+                elapsed: Duration::from_nanos(7),
+                checksum: 0x5107_5107,
+            }
+        };
+        for phase in DUAL_NULL_PHASES {
+            run_dual_null_phase(
+                phase,
+                &mut incumbent_probe,
+                &mut candidate_probe,
+                probe_rounds,
+                probe_min_of,
+            );
+        }
+    }
+    let expected_materializations = dual_null_observation_count_per_arm(probe_rounds, probe_min_of);
+    assert_eq!(
+        incumbent_materializations, expected_materializations,
+        "the incumbent arm must be materialized once per slot the accounting counts",
+    );
+    assert_eq!(
+        candidate_materializations, expected_materializations,
+        "the candidate arm must be materialized once per slot the accounting counts",
+    );
+    assert_eq!(
+        expected_materializations, 312,
+        "nine timed rounds plus four warm-up rounds, twelve arm slots each, min-of-two",
+    );
     assert_eq!(
         dual_null_observation_count_per_arm(21, 1),
-        500,
-        "two A/A phases plus the effect consume twenty arm slots across warmup and timed rounds"
+        300,
+        "an arm sees its own eight A/A slots plus four effect slots in each of 25 rounds"
     );
     assert_eq!(
         dual_null_observation_count_per_arm(21, 2),
-        1_000,
+        600,
         "min-of trials must each be represented in lifecycle accounting"
     );
     let stats = |median: f64, low: f64, high: f64| ContractPairStats {
@@ -1085,6 +1235,56 @@ where
     (effect, null)
 }
 
+/// Run one dual-null phase: balanced warm-up rounds followed by `rounds` timed
+/// rounds, with every slot routed to an arm by `phase.selects_incumbent`. The
+/// A/A phases therefore reach exactly one arm and the effect phase splits its
+/// slots, which is the distribution `dual_null_observation_count_per_arm`
+/// counts.
+fn run_dual_null_phase<A, B>(
+    phase: DualNullPhase,
+    incumbent: &mut A,
+    candidate: &mut B,
+    rounds: usize,
+    min_of: usize,
+) -> ContractPairStats
+where
+    A: FnMut() -> ContractObservation,
+    B: FnMut() -> ContractObservation,
+{
+    for _ in 0..DUAL_NULL_WARMUP_ROUNDS {
+        black_box(balanced_square_round_with(|slot_is_a| {
+            if phase.selects_incumbent(slot_is_a) {
+                min_observation_with(incumbent, min_of)
+            } else {
+                min_observation_with(candidate, min_of)
+            }
+        }));
+    }
+
+    let mut arm_a = Vec::with_capacity(rounds);
+    let mut arm_b = Vec::with_capacity(rounds);
+    let mut checksum = 0_u64;
+    for _ in 0..rounds {
+        let (a, b) = balanced_square_round_with(|slot_is_a| {
+            if phase.selects_incumbent(slot_is_a) {
+                min_observation_with(incumbent, min_of)
+            } else {
+                min_observation_with(candidate, min_of)
+            }
+        });
+        assert_eq!(
+            a.checksum,
+            b.checksum,
+            "{}",
+            phase.checksum_mismatch_message()
+        );
+        arm_a.push(a.elapsed.as_secs_f64() * 1.0e9);
+        arm_b.push(b.elapsed.as_secs_f64() * 1.0e9);
+        checksum = mix_checksum(checksum, a.checksum);
+    }
+    contract_pair_stats(&arm_a, &arm_b, checksum)
+}
+
 /// Run incumbent/incumbent and candidate/candidate nulls before the interleaved
 /// incumbent/candidate effect. This is the realistic-workload contract: both
 /// arms occupy symmetric slots on a contended host, and the wider A/A interval
@@ -1129,105 +1329,25 @@ where
     );
     assert!(min_of >= 1, "contract min-of count must be non-zero");
 
-    for _ in 0..4 {
-        black_box(balanced_square_round_with(|_| {
-            min_observation_with(&mut incumbent, min_of)
-        }));
-    }
-
-    let mut incumbent_null_a = Vec::with_capacity(rounds);
-    let mut incumbent_null_b = Vec::with_capacity(rounds);
-    let mut incumbent_null_checksum = 0_u64;
-    for _ in 0..rounds {
-        let (a, b) = balanced_square_round_with(|_| min_observation_with(&mut incumbent, min_of));
-        assert_eq!(
-            a.checksum, b.checksum,
-            "incumbent/incumbent null arms produced different output checksums"
+    // Walk the schedule constant itself, in order, so the phases that run are
+    // exactly the phases `dual_null_observation_count_per_arm` counts. Writing
+    // the three calls out by hand is what let the accounting drift before:
+    // a phase can only be added to the schedule by adding it here too.
+    let mut phase_stats = Vec::with_capacity(DUAL_NULL_PHASES.len());
+    for phase in DUAL_NULL_PHASES {
+        let stats = run_dual_null_phase(phase, &mut incumbent, &mut candidate, rounds, min_of);
+        report_contract_pair_with_sampling(
+            &format!("{row}{}", phase.row_suffix()),
+            stats,
+            rounds,
+            min_of,
         );
-        incumbent_null_a.push(a.elapsed.as_secs_f64() * 1.0e9);
-        incumbent_null_b.push(b.elapsed.as_secs_f64() * 1.0e9);
-        incumbent_null_checksum = mix_checksum(incumbent_null_checksum, a.checksum);
+        phase_stats.push(stats);
     }
-    let incumbent_null = contract_pair_stats(
-        &incumbent_null_a,
-        &incumbent_null_b,
-        incumbent_null_checksum,
-    );
-    report_contract_pair_with_sampling(
-        &format!("{row}_null_incumbent_aa"),
-        incumbent_null,
-        rounds,
-        min_of,
-    );
+    let [incumbent_null, candidate_null, effect]: [ContractPairStats; 3] = phase_stats
+        .try_into()
+        .unwrap_or_else(|_| panic!("the dual-null schedule must run exactly three phases"));
 
-    for _ in 0..4 {
-        black_box(balanced_square_round_with(|_| {
-            min_observation_with(&mut candidate, min_of)
-        }));
-    }
-
-    let mut candidate_null_a = Vec::with_capacity(rounds);
-    let mut candidate_null_b = Vec::with_capacity(rounds);
-    let mut candidate_null_checksum = 0_u64;
-    for _ in 0..rounds {
-        let (a, b) = balanced_square_round_with(|_| min_observation_with(&mut candidate, min_of));
-        assert_eq!(
-            a.checksum, b.checksum,
-            "candidate/candidate null arms produced different output checksums"
-        );
-        candidate_null_a.push(a.elapsed.as_secs_f64() * 1.0e9);
-        candidate_null_b.push(b.elapsed.as_secs_f64() * 1.0e9);
-        candidate_null_checksum = mix_checksum(candidate_null_checksum, a.checksum);
-    }
-    let candidate_null = contract_pair_stats(
-        &candidate_null_a,
-        &candidate_null_b,
-        candidate_null_checksum,
-    );
-    report_contract_pair_with_sampling(
-        &format!("{row}_null_candidate_aa"),
-        candidate_null,
-        rounds,
-        min_of,
-    );
-
-    for _ in 0..4 {
-        black_box(balanced_square_round_with(|is_incumbent| {
-            if is_incumbent {
-                min_observation_with(&mut incumbent, min_of)
-            } else {
-                min_observation_with(&mut candidate, min_of)
-            }
-        }));
-    }
-
-    let mut incumbent_samples = Vec::with_capacity(rounds);
-    let mut candidate_samples = Vec::with_capacity(rounds);
-    let mut effect_checksum = 0_u64;
-    for _ in 0..rounds {
-        let (incumbent_observation, candidate_observation) =
-            balanced_square_round_with(|is_incumbent| {
-                if is_incumbent {
-                    min_observation_with(&mut incumbent, min_of)
-                } else {
-                    min_observation_with(&mut candidate, min_of)
-                }
-            });
-        assert_eq!(
-            incumbent_observation.checksum, candidate_observation.checksum,
-            "incumbent/candidate arms produced different output checksums"
-        );
-        incumbent_samples.push(incumbent_observation.elapsed.as_secs_f64() * 1.0e9);
-        candidate_samples.push(candidate_observation.elapsed.as_secs_f64() * 1.0e9);
-        effect_checksum = mix_checksum(effect_checksum, incumbent_observation.checksum);
-    }
-    let effect = contract_pair_stats(&incumbent_samples, &candidate_samples, effect_checksum);
-    report_contract_pair_with_sampling(
-        &format!("{row}_effect_incumbent_over_candidate"),
-        effect,
-        rounds,
-        min_of,
-    );
     report_dual_null_contract_gate(row, effect, incumbent_null, candidate_null);
     (effect, incumbent_null, candidate_null)
 }
