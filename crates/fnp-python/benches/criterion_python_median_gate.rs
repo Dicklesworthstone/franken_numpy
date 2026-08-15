@@ -14363,6 +14363,10 @@ fn bench_realistic_clickstream_sessionization_vs_numpy_median_gate(c: &mut Crite
     const POWER_USER_COUNT: usize = 4_096;
     const WORKLOAD_CONTRACT_ROUNDS: usize = 21;
     const WORKLOAD_CONTRACT_MIN_OF: usize = 2;
+    // Allocation/fault/RSS observations must correspond one-to-one with the
+    // timed materializations. A min-of sample would retain lifecycle counters
+    // from discarded trials and blur the exact result-buffer path under test.
+    const RESULT_BUFFER_CONTRACT_MIN_OF: usize = 1;
     const THREAD_ACTIVITY_REPETITIONS: usize = 5;
     const THREADS: &str = "4";
     const REQUIRED_BUILD_PROFILE: &str = "release-perf";
@@ -14754,7 +14758,7 @@ diff_user_boundary,diff_inter_event_gap,count_nonzero_user_transitions \
                     &mut observe_incumbent_gap,
                     &mut observe_candidate_gap,
                     WORKLOAD_CONTRACT_ROUNDS,
-                    WORKLOAD_CONTRACT_MIN_OF,
+                    RESULT_BUFFER_CONTRACT_MIN_OF,
                 );
             let gap_verdict = common::dual_null_contract_verdict(
                 gap_effect,
@@ -14769,7 +14773,8 @@ diff_user_boundary,diff_inter_event_gap,count_nonzero_user_transitions \
                 "RESULT_BUFFER_LIFECYCLE row={gap_row} stage=inter_event_gap \
                  source=linux_proc_self_stat_and_status allocator=rust_default_system \
                  input=independently_materialized_ordered_times byte_parity=passed \
-                 incumbent_live_same_invocation=true aa_nulls=true timing_ratio_median={:.6} \
+                 incumbent_live_same_invocation=true aa_nulls=true lifecycle_min_of={} \
+                 lifecycle_samples_match_timed_materializations=true timing_ratio_median={:.6} \
                  timing_ratio_ci95=[{:.6},{:.6}] timing_verdict={gap_verdict} \
                  incumbent_samples={} candidate_samples={} \
                  incumbent_minor_faults_median={} candidate_minor_faults_median={} \
@@ -14781,6 +14786,7 @@ diff_user_boundary,diff_inter_event_gap,count_nonzero_user_transitions \
                  incumbent_rss_while_live_kib_median={} candidate_rss_while_live_kib_median={} \
                  incumbent_rss_after_release_kib_median={} candidate_rss_after_release_kib_median={} \
                  incumbent_rss_released_kib_median={} candidate_rss_released_kib_median={}",
+                RESULT_BUFFER_CONTRACT_MIN_OF,
                 gap_effect.ratio_median,
                 gap_effect.ratio_ci_low,
                 gap_effect.ratio_ci_high,

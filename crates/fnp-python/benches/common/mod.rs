@@ -938,6 +938,22 @@ fn verify_contract_gate_semantics() {
         Duration::from_nanos(45),
         "B's ABBAABBA slots must center linear drift at the round midpoint",
     );
+    let mut one_shot_calls = 0_usize;
+    let one_shot = min_observation_with(
+        &mut || {
+            one_shot_calls += 1;
+            ContractObservation {
+                elapsed: Duration::from_nanos(17),
+                checksum: 0x51_0f,
+            }
+        },
+        1,
+    );
+    assert_eq!(
+        one_shot_calls, 1,
+        "a lifecycle probe with min_of=1 must make one materialization per timed slot"
+    );
+    assert_eq!(one_shot.elapsed, Duration::from_nanos(17));
     let stats = |median: f64, low: f64, high: f64| ContractPairStats {
         ratio_median: median,
         ratio_ci_low: low,
