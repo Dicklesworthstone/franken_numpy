@@ -118,14 +118,30 @@ MAGNITUDE OF THE OLD BIAS, measured rather than asserted: had the parallel scann
 been computed the old way on THIS run it would have read 1624131/1978247 = 0.821 against
 the correct 0.632. Every previously banked share from this harness is an UPPER BOUND.
 
-AND THE >1.0 SERIAL SHARE SURVIVES THE CORRECTION. It was not an artifact of the statistic
-mismatch: with matched medians the serial shares are still 1.911 and 1.107, so the
-slice-based bench replica genuinely IS slower than the whole shipped `fnp.divide` call it
-models. The shipped serial loop iterates `Cell<f64>` where the replica iterates slices -
-the scope limit jw7vk recorded. Both serial rows now carry
-`DIVIDE_ROUTE_SHARE_WARNING verdict=replica_slower_than_the_route_it_models
-do_not_quote_this_share=true`. The serial RATIO stands; the serial absolute times and share
-do not transfer to the shipped loop.
+THE >1.0 SERIAL SHARE SURVIVED THE STATISTIC FIX (1.911 scanning, 1.107 fused), and I read
+that as proof the slice replica is genuinely slower than the shipped call it models.
+
+**REFUTED, same day, same worker.** A third run on vmi1293453 (elf
+`0abb2ecf05717f8d7857a27a9ccf571c5ea19f6e2da1ddec6a839d5969535534`, harness
+`common::run_median_ci_contract`) printed for the SAME arm:
+`DIVIDE_ROUTE_SHARE label=fused_serial end_to_end_median_ns=744568.5 end_to_end_best_ns=656553.0 kernel_ns=598756.0 kernel_share=0.804 share_exceeds_one=false`
+against 1.107 for that arm one run earlier. The observed serial share ranges 0.804 - 1.911
+across three runs, TWO OF THEM ON THE SAME WORKER. A quantity that moves 2.4x run to run on
+one host is not measuring a property of the replica.
+
+MECHANISM, which is the real defect and is worse than the statistic mismatch: `kernel_ns`
+comes from the balanced-square contract - 41 rounds, min-of-3, interleaved ABBAABBA against
+the other arm - while `end_to_end_ns` comes from a plain 24-round loop that runs AFTERWARDS,
+in a different phase, under whatever load the host has by then. The two numbers are never
+interleaved with each other, so their ratio violates the same law the rest of this harness
+obeys, and it inherits the full load difference between two phases as if it were signal.
+This is the "two sanctioned harnesses differed 2x on one worker, both with passing nulls"
+hazard, reproduced inside ONE harness. Tracked as `deadlock-audit-c9rn8`.
+
+STANDING INSTRUCTION UNTIL THAT IS FIXED: do not quote `kernel_share` from this harness in
+either direction - not the >1.0 values as evidence about the replica, and not the <1.0
+values as a route share. The A/B RATIOS above are unaffected: both of their arms ARE
+interleaved inside one contract, which is exactly what the share is missing.
 
 RETRY PREDICATE: unchanged from the row above, and now better motivated - the serial
 replica is a demonstrably poor model of the shipped serial route (share 1.107 fused), so
