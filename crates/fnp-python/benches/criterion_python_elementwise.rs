@@ -1364,6 +1364,7 @@ const DIVIDE_HAZARD_TRUTH_TABLE: &[(f64, f64, bool)] = &[
 ];
 
 fn assert_divide_hazard_replica_matches_contract() {
+    assert_route_share_uses_matched_statistics();
     for &(a, b, expected) in DIVIDE_HAZARD_TRUTH_TABLE {
         let got = bench_divide_raises_fp_error(a, b, a / b);
         assert_eq!(
@@ -1601,6 +1602,59 @@ fn divide_fused_parallel(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
             .any(|((&x, &y), &q)| bench_divide_raises_fp_error(x, y, q))
 }
 
+/// Median of the end-to-end samples, sorted in place. The share's numerator is
+/// the contract's arm MEDIAN, so its denominator has to be a median as well —
+/// see `assert_route_share_uses_matched_statistics` for the direction of the
+/// error a best-of denominator produces.
+fn route_share_median_ns(samples: &mut [f64]) -> f64 {
+    assert!(
+        !samples.is_empty(),
+        "a route share needs at least one end-to-end sample"
+    );
+    samples.sort_by(f64::total_cmp);
+    let middle = samples.len() / 2;
+    if samples.len().is_multiple_of(2) {
+        (samples[middle - 1] + samples[middle]) / 2.0
+    } else {
+        samples[middle]
+    }
+}
+
+/// Pins the statistic the route share divides by. Timing noise is right-skewed,
+/// so a best-of denominator is strictly smaller than the median and the share
+/// comes out too LARGE — the flattering direction, since the share is what stops
+/// a kernel-only ratio being read as an end-to-end one. This ran as
+/// `kernel_share=1.473`, a kernel apparently costing 147% of the call containing
+/// it (`deadlock-audit-3i0uo`).
+fn assert_route_share_uses_matched_statistics() {
+    // Right-skewed like real timing samples: one slow outlier, three tight.
+    let mut samples = [120.0, 100.0, 400.0, 110.0];
+    let best = samples.iter().copied().fold(f64::INFINITY, f64::min);
+    let median = route_share_median_ns(&mut samples);
+    assert_eq!(
+        median, 115.0,
+        "an even-length median is the mean of the two middle samples, not the smallest"
+    );
+    assert_eq!(best, 100.0, "the best-of is the minimum sample");
+    // THE NEGATIVE CASE: an implementation that kept the best-of denominator
+    // returns 100.0 here, passes every "is it a number" check, and reports a
+    // share 15% larger than the truth on this sample set alone.
+    let kernel_ns = 200.0;
+    assert!(
+        kernel_ns / best > kernel_ns / median,
+        "a best-of denominator must be shown to inflate the share, not merely differ"
+    );
+
+    let mut odd = [300.0, 100.0, 200.0];
+    assert_eq!(
+        route_share_median_ns(&mut odd),
+        200.0,
+        "an odd-length median is the middle sample after sorting"
+    );
+    let mut single = [42.0];
+    assert_eq!(route_share_median_ns(&mut single), 42.0);
+}
+
 /// Times the real `fnp.divide(a, b)` end to end and prints the kernel's share of
 /// it, so the kernel ratio above is read against the call it actually sits in.
 fn report_divide_route_share(n: usize, label: &str, kernel_ns: f64) {
@@ -1653,12 +1707,7 @@ fn report_divide_route_share(n: usize, label: &str, kernel_ns: f64) {
             samples.push(started.elapsed().as_secs_f64() * 1.0e9);
         }
         let best = samples.iter().copied().fold(f64::INFINITY, f64::min);
-        samples.sort_by(f64::total_cmp);
-        let end_to_end_median = if samples.len() % 2 == 0 {
-            (samples[samples.len() / 2 - 1] + samples[samples.len() / 2]) / 2.0
-        } else {
-            samples[samples.len() / 2]
-        };
+        let end_to_end_median = route_share_median_ns(&mut samples);
         let share = kernel_ns / end_to_end_median;
         println!(
             "DIVIDE_ROUTE_SHARE label={label} n={n} rounds={ROUNDS} \
