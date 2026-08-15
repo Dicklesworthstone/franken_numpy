@@ -109150,11 +109150,12 @@ mod tests {
         choose, compress, copysign, count_nonzero, degrees_native, diag, diag_indices,
         diag_indices_from, diagflat, diagonal, digitize, extract, extract_numeric_array,
         extract_precise_numeric_array, f64_divide_fast_accepts_without_fp_error,
-        f64_divide_quotient_bits_are_normal, f64_divide_raises_fp_error, fill_diagonal,
-        flatnonzero, flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interp,
-        isfinite_native, isinf_native, isnan_native, isneginf_native, isposinf_native, ix_, ldexp,
-        logaddexp, logaddexp2, masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf,
-        nan_to_num, narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
+        f64_divide_non_fast_raises_fp_error, f64_divide_quotient_bits_are_normal,
+        f64_divide_raises_fp_error, fill_diagonal, flatnonzero, flip, fliplr, flipud, floor_native,
+        fnp_python, frexp, hypot, indices, interp, isfinite_native, isinf_native, isnan_native,
+        isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
+        masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
+        narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
         python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
         required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
@@ -109240,6 +109241,31 @@ mod tests {
             (1.0, tiny),
         ] {
             assert!(!hazard(a, b), "{a} / {b} is clean and must NOT flag");
+        }
+
+        // The wrapper invokes this inner classifier after its fast reject.
+        // Keep its branch table independently parent-red: a wrapper-only test
+        // could keep passing if the split classifier drifted.
+        for &(a, b, expected) in &[
+            (1.0, 0.0, true),
+            (0.0, 0.0, true),
+            (f64::INFINITY, -0.0, false),
+            (f64::INFINITY, f64::INFINITY, true),
+            (1.0, f64::INFINITY, false),
+            (f64::MAX, tiny, true),
+            (tiny, f64::MAX, true),
+            (f64::NAN, 0.0, false),
+        ] {
+            let q = a / b;
+            assert!(
+                !f64_divide_fast_accepts_without_fp_error(a, b, q),
+                "{a:?} / {b:?} must reach the non-fast classifier"
+            );
+            assert_eq!(
+                f64_divide_non_fast_raises_fp_error(a, b, q),
+                expected,
+                "non-fast classifier mismatch for {a:?} / {b:?}"
+            );
         }
     }
 
