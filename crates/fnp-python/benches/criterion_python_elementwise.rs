@@ -1685,6 +1685,33 @@ fn numpy_divide_checksum(result: &pyo3::Bound<'_, pyo3::PyAny>, n: usize) -> u64
 ///
 /// Ratio is kernel/route, so it reads directly as the share, and the contract's
 /// A/A null says whether the host was quiet enough for it to mean anything.
+/// Worker this process is executing on, read the same way `common`'s
+/// HOST_BASELINE line reads it. `rch` cannot be pinned to a worker, so a row that
+/// does not name the machine that produced it cannot be compared to any other
+/// row: the fleet measured a 13.6x swing for one cell across two workers with
+/// both A/A nulls passing, so a passing null does not license a cross-worker
+/// comparison. Read from `/etc/hostname` rather than `$HOSTNAME`, which is not
+/// exported over a non-interactive ssh.
+fn measurement_worker() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .chars()
+                .map(|character| {
+                    if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                        character
+                    } else {
+                        '_'
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| "unavailable".to_owned())
+}
+
 fn report_divide_route_share<K>(n: usize, label: &str, mut kernel: K)
 where
     K: FnMut() -> common::ContractObservation,
@@ -1741,10 +1768,13 @@ where
         if kernel_probe.checksum != route_probe.checksum {
             println!(
                 "DIVIDE_ROUTE_SHARE_SKIPPED label={label} n={n} \
+                 worker={} harness=common::run_median_ci_contract \
                  verdict=kernel_and_route_operands_disagree \
                  kernel_checksum={:016x} route_checksum={:016x} \
                  share_not_reported=true",
-                kernel_probe.checksum, route_probe.checksum,
+                measurement_worker(),
+                kernel_probe.checksum,
+                route_probe.checksum,
             );
             return;
         }
@@ -1758,9 +1788,12 @@ where
             common::run_median_ci_contract(&format!("divide_route_share_{label}"), kernel, route);
         println!(
             "DIVIDE_ROUTE_SHARE label={label} n={n} interleaved=true \
+             worker={} harness=common::run_median_ci_contract rounds={} \
              kernel_median_ns={:.1} route_median_ns={:.1} kernel_share={:.3} \
              kernel_share_ci95=[{:.3},{:.3}] null_ratio_median={:.6} \
              null_ci95=[{:.6},{:.6}] share_exceeds_one={} checksum={:016x}",
+            measurement_worker(),
+            common::CONTRACT_ROUNDS,
             effect.arm_a_median_ns,
             effect.arm_b_median_ns,
             effect.ratio_median,
@@ -1778,9 +1811,11 @@ where
         // route. Say so on the row instead of letting the number be quoted.
         if effect.ratio_ci_low > 1.0 {
             println!(
-                "DIVIDE_ROUTE_SHARE_WARNING label={label} \
+                "DIVIDE_ROUTE_SHARE_WARNING label={label} worker={} \
+                 harness=common::run_median_ci_contract \
                  verdict=replica_slower_than_the_route_it_models \
-                 do_not_quote_this_share=true"
+                 do_not_quote_this_share=true",
+                measurement_worker(),
             );
         }
     });
