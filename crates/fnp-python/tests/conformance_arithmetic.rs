@@ -293,6 +293,10 @@ lhs[0], rhs[0] = 0.0, 2.0
 lhs[1], rhs[1] = 0.0, -2.0
 lhs[2], rhs[2] = np.nan, 2.0
 lhs[3], rhs[3] = 4.0, np.nan
+lhs[4], rhs[4] = np.inf, 0.0
+lhs[5], rhs[5] = np.inf, -0.0
+lhs[6], rhs[6] = -np.inf, 0.0
+lhs[7], rhs[7] = -np.inf, -0.0
 with warnings.catch_warnings(record=True) as fnp_warnings:
     warnings.simplefilter('always')
     actual = fnp.divide(lhs, rhs)
@@ -308,7 +312,7 @@ print(np.array_equal(actual.view(np.uint64), expected.view(np.uint64)) and
     assert_eq!(
         result.trim(),
         "True",
-        "parallel f64 divide must keep quiet signed-zero and NaN lanes bit-identical without warnings"
+        "parallel f64 divide must keep quiet signed-zero, NaN, and infinity-over-zero lanes bit-identical without warnings"
     );
     Ok(())
 }
