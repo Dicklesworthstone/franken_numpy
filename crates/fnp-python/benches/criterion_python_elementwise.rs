@@ -1290,7 +1290,7 @@ fn main() {
 /// predicate, the measurement is of something we do not ship.
 #[inline]
 fn bench_divide_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
-    if q.is_normal() {
+    if bench_divide_fast_accepts_without_fp_error(a, b, q) {
         return false;
     }
     if a.is_nan() || b.is_nan() {
@@ -1404,7 +1404,7 @@ fn divide_former_serial(a: &[f64], b: &[f64], out: &mut [f64]) {
 }
 
 /// The shipped serial loop: observe non-normal quotients in the quotient pass,
-/// then classify operands only when a non-normal quotient exists.
+/// then run the exact classifier once only when one exists.
 #[inline(never)]
 fn divide_repaired_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
     let mut needs_precise_classification = false;
@@ -1417,11 +1417,7 @@ fn divide_repaired_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
         && a.iter()
             .zip(b.iter())
             .zip(out.iter())
-            .any(|((&x, &y), &q)| !bench_divide_fast_accepts_without_fp_error(x, y, q))
-        && a.iter()
-            .zip(b.iter())
-            .zip(out.iter())
-            .any(|((&x, &y), &q)| !q.is_normal() && bench_divide_raises_fp_error(x, y, q))
+            .any(|((&x, &y), &q)| bench_divide_raises_fp_error(x, y, q))
 }
 
 /// Same chunking the kernel uses: `n.div_ceil(rayon::current_num_threads())`.
@@ -1459,11 +1455,7 @@ fn divide_repaired_parallel(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
         && a.par_iter()
             .zip(b.par_iter())
             .zip(out.par_iter())
-            .any(|((&x, &y), &q)| !bench_divide_fast_accepts_without_fp_error(x, y, q))
-        && a.par_iter()
-            .zip(b.par_iter())
-            .zip(out.par_iter())
-            .any(|((&x, &y), &q)| !q.is_normal() && bench_divide_raises_fp_error(x, y, q))
+            .any(|((&x, &y), &q)| bench_divide_raises_fp_error(x, y, q))
 }
 
 /// Times the real `fnp.divide(a, b)` end to end and prints the kernel's share of

@@ -9357,11 +9357,11 @@ fn try_zerocopy_f64_isclose(
 // bench silently measures a branch we do not ship.
 #[inline]
 fn f64_divide_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
-    // Fast accept, and the only test a clean divide pays: a NORMAL quotient is
-    // finite, nonzero and not subnormal, which rules out all four exceptions at
-    // once — every one of them lands on ±inf, nan, ±0 or a subnormal. Everything
-    // below is off the hot path.
-    if q.is_normal() {
+    // Fast accepts rule out every IEEE divide exception. Keeping them in the
+    // exact classifier lets the rare non-normal path make one quotient pass:
+    // normal values and exact zero from a zero numerator return here, while
+    // everything else reaches the operand-aware cases below.
+    if f64_divide_fast_accepts_without_fp_error(a, b, q) {
         return false;
     }
     if a.is_nan() || b.is_nan() {
@@ -9383,11 +9383,11 @@ fn f64_divide_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
     q.is_infinite() || (a != 0.0 && q.abs() < f64::MIN_POSITIVE)
 }
 
-// A sufficient no-warning fast accept for the second pass over the quotient
-// buffer. Normal quotients cannot represent any of divide's IEEE exceptions.
-// The other common quiet result is exactly ±0 from a zero numerator divided by
-// a finite, nonzero divisor. Everything else goes to the precise classifier
-// above so underflow, invalid, overflow, and divide-by-zero still defer.
+// A sufficient no-warning fast accept for the rare quotient scan. Normal
+// quotients cannot represent any of divide's IEEE exceptions. The other common
+// quiet result is exactly ±0 from a zero numerator divided by a finite, nonzero
+// divisor. Everything else goes to the precise classifier above so underflow,
+// invalid, overflow, and divide-by-zero still defer.
 #[inline]
 fn f64_divide_fast_accepts_without_fp_error(a: f64, b: f64, q: f64) -> bool {
     q.is_normal() || (q == 0.0 && a == 0.0 && b.is_finite() && b != 0.0)
@@ -9514,12 +9514,7 @@ fn zerocopy_f64_binary_flat<'py>(
                         .par_iter()
                         .zip(rhs.par_iter())
                         .zip(out_data.par_iter())
-                        .any(|((&x, &y), &q)| !f64_divide_fast_accepts_without_fp_error(x, y, q))
-                    && lhs
-                        .par_iter()
-                        .zip(rhs.par_iter())
-                        .zip(out_data.par_iter())
-                        .any(|((&x, &y), &q)| !q.is_normal() && f64_divide_raises_fp_error(x, y, q))
+                        .any(|((&x, &y), &q)| f64_divide_raises_fp_error(x, y, q))
                 {
                     divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -9544,17 +9539,8 @@ fn zerocopy_f64_binary_flat<'py>(
             if needs_precise_classification
                 && output.iter().zip(a_in.iter()).zip(b_in.iter()).any(
                     |((slot, a_cell), b_cell)| {
-                        !f64_divide_fast_accepts_without_fp_error(
-                            a_cell.get(),
-                            b_cell.get(),
-                            slot.get(),
-                        )
-                    },
-                )
-                && output.iter().zip(a_in.iter()).zip(b_in.iter()).any(
-                    |((slot, a_cell), b_cell)| {
                         let q = slot.get();
-                        !q.is_normal() && f64_divide_raises_fp_error(a_cell.get(), b_cell.get(), q)
+                        f64_divide_raises_fp_error(a_cell.get(), b_cell.get(), q)
                     },
                 )
             {
@@ -109382,6 +109368,10 @@ mod tests {
                 f64_divide_fast_accepts_without_fp_error(a, b, a / b),
                 "{a} / {b} must bypass precise classification"
             );
+            assert!(
+                !f64_divide_raises_fp_error(a, b, a / b),
+                "a fast-accepted {a} / {b} must not become a deferred hazard"
+            );
         }
         for &(a, b) in &[
             (f64::MIN_POSITIVE, f64::MAX),
@@ -109394,6 +109384,18 @@ mod tests {
                 "{a} / {b} must reach precise classification"
             );
         }
+        // Reaching the exact classifier is not itself a hazard: infinity over
+        // signed zero has a non-normal result but NumPy emits no warning.
+        let quiet_infinity_over_zero = f64::INFINITY / -0.0;
+        assert!(!f64_divide_fast_accepts_without_fp_error(
+            f64::INFINITY,
+            -0.0,
+            quiet_infinity_over_zero,
+        ));
+        assert!(
+            !f64_divide_raises_fp_error(f64::INFINITY, -0.0, quiet_infinity_over_zero),
+            "quiet infinity over signed zero must stay native after the fused scan"
+        );
     }
 
     // Reference: numpy's pairwise tree over an ALREADY-compacted slice — the
