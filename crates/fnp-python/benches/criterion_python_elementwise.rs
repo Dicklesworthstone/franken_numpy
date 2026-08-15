@@ -1300,6 +1300,11 @@ fn bench_divide_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
     if bench_divide_fast_accepts_without_fp_error(a, b, q) {
         return false;
     }
+    bench_divide_non_fast_raises_fp_error(a, b, q)
+}
+
+#[inline]
+fn bench_divide_non_fast_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
     if a.is_nan() || b.is_nan() {
         return false;
     }
@@ -1410,17 +1415,14 @@ fn divide_former_serial(a: &[f64], b: &[f64], out: &mut [f64]) {
     }
 }
 
-/// The shipped serial loop: observe only quotients that need precise IEEE
-/// classification, then run the exact classifier once only when one exists.
+/// The shipped serial loop keeps quotient production classifier-free, then
+/// performs the rare exact scan only after a non-normal result is observed.
 #[inline(never)]
 fn divide_repaired_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
-    let mut needs_precise_classification = false;
     for ((slot, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
-        let q = x / y;
-        *slot = q;
-        needs_precise_classification |= !bench_divide_fast_accepts_without_fp_error(x, y, q);
+        *slot = x / y;
     }
-    needs_precise_classification
+    out.iter().any(|q| !bench_divide_quotient_is_normal(*q))
         && a.iter()
             .zip(b.iter())
             .zip(out.iter())
@@ -1444,22 +1446,15 @@ fn divide_former_parallel(a: &[f64], b: &[f64], out: &mut [f64]) {
 #[inline(never)]
 fn divide_repaired_parallel(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
     let chunk = out.len().div_ceil(rayon::current_num_threads());
-    let needs_precise_classification = out
-        .par_chunks_mut(chunk)
+    out.par_chunks_mut(chunk)
         .zip(a.par_chunks(chunk))
         .zip(b.par_chunks(chunk))
-        .map(|((o, l), r)| {
-            let mut needs_precise_classification = false;
+        .for_each(|((o, l), r)| {
             for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                let q = x / y;
-                *s = q;
-                needs_precise_classification |=
-                    !bench_divide_fast_accepts_without_fp_error(x, y, q);
+                *s = x / y;
             }
-            needs_precise_classification
-        })
-        .any(|needs_precise_classification| needs_precise_classification);
-    needs_precise_classification
+        });
+    out.par_iter().any(|q| !bench_divide_quotient_is_normal(*q))
         && a.par_iter()
             .zip(b.par_iter())
             .zip(out.par_iter())

@@ -9374,6 +9374,14 @@ fn f64_divide_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
     if f64_divide_fast_accepts_without_fp_error(a, b, q) {
         return false;
     }
+    f64_divide_non_fast_raises_fp_error(a, b, q)
+}
+
+// Exact classifier for a quotient the fast accept has already rejected. Keeping
+// it separate lets the producing loop classify only exceptional lanes instead
+// of rescanning every normal result after it sees one non-normal quotient.
+#[inline]
+fn f64_divide_non_fast_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
     if a.is_nan() || b.is_nan() {
         return false;
     }
@@ -9444,9 +9452,9 @@ fn zerocopy_f64_binary_flat<'py>(
     kwargs.set_item("dtype", "float64")?;
     let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
     // Set by the Div arms below when an element would raise an FE flag that numpy
-    // turns into a warning. Observe non-normal quotients while producing them,
-    // then invoke the precise operand-aware classifier only when needed. A clean
-    // divide therefore avoids a second full read of the output buffer.
+    // turns into a warning. The Div arms first keep the quotient loop free of
+    // classification so it remains vectorizable, then inspect results only
+    // after the complete output buffer has been produced.
     let divide_hazard = std::sync::atomic::AtomicBool::new(false);
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -9507,25 +9515,18 @@ fn zerocopy_f64_binary_flat<'py>(
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
             let chunk = n.div_ceil(rayon::current_num_threads());
             if matches!(op, BinaryOp::Div) {
-                let needs_precise_classification = out_data
+                out_data
                     .par_chunks_mut(chunk)
                     .zip(lhs.par_chunks(chunk))
                     .zip(rhs.par_chunks(chunk))
-                    .map(|((o, l), r)| {
-                        let mut needs_precise_classification = false;
+                    .for_each(|((o, l), r)| {
                         for ((slot, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                            let q = x / y;
-                            *slot = q;
-                            // Exact signed-zero quotients from a zero numerator and a
-                            // finite nonzero divisor are as quiet as normal quotients.
-                            // Do not make one of those common lanes trigger the full
-                            // operand-aware pass over every result buffer.
-                            needs_precise_classification |=
-                                !f64_divide_fast_accepts_without_fp_error(x, y, q);
+                            *slot = x / y;
                         }
-                        needs_precise_classification
-                    })
-                    .any(|saw_non_normal| saw_non_normal);
+                    });
+                let needs_precise_classification = out_data
+                    .par_iter()
+                    .any(|q| !f64_divide_quotient_bits_are_normal(q.to_bits()));
                 if needs_precise_classification
                     && lhs
                         .par_iter()
@@ -9547,19 +9548,15 @@ fn zerocopy_f64_binary_flat<'py>(
                     });
             }
         } else if matches!(op, BinaryOp::Div) {
-            let mut needs_precise_classification = false;
             for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
-                let a = a_cell.get();
-                let b = b_cell.get();
-                let q = a / b;
-                slot.set(q);
-                needs_precise_classification |= !f64_divide_fast_accepts_without_fp_error(a, b, q);
+                slot.set(a_cell.get() / b_cell.get());
             }
-            if needs_precise_classification
+            if output
+                .iter()
+                .any(|slot| !f64_divide_quotient_bits_are_normal(slot.get().to_bits()))
                 && output.iter().zip(a_in.iter()).zip(b_in.iter()).any(
                     |((slot, a_cell), b_cell)| {
-                        let q = slot.get();
-                        f64_divide_raises_fp_error(a_cell.get(), b_cell.get(), q)
+                        f64_divide_raises_fp_error(a_cell.get(), b_cell.get(), slot.get())
                     },
                 )
             {
@@ -109319,8 +109316,8 @@ mod tests {
                 "normal quotients must remain on the native path"
             );
 
-            let quiet_nan_lhs = array.call1((vec![f64::NAN, 4.0],))?;
-            let quiet_nan_rhs = array.call1((vec![2.0_f64, f64::NAN],))?;
+            let quiet_nan_lhs = array.call1((vec![f64::NAN, 4.0, f64::INFINITY],))?;
+            let quiet_nan_rhs = array.call1((vec![2.0_f64, f64::NAN, -0.0],))?;
             assert!(
                 zerocopy_f64_binary_flat(
                     py,
@@ -109330,7 +109327,7 @@ mod tests {
                     BinaryOp::Div,
                 )?
                 .is_some(),
-                "quiet NaN operands raise no IEEE exception and must not defer"
+                "mixed normal and quiet non-normal lanes must not defer"
             );
 
             let exact_zero_lhs = array.call1((vec![0.0_f64, -0.0],))?;
