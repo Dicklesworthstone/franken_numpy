@@ -4,6 +4,100 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-15 - WIN (KEEP, maintenance-self-speedup): fusing the f64 divide FE-hazard scan into the divide loop - 1.408x serial, 1.661x parallel, and the deferral's parallel cost goes to zero (`deadlock-audit-vqxoa`)
+
+`TealOak`. `deadlock-audit-2nmd1` made the f64 divide fast path defer to NumPy on any
+element that would raise an IEEE FP exception. `deadlock-audit-jw7vk` then measured what
+that correctness fix cost: 1.96-3.39x against our own pre-deferral loop. Its retry
+predicate asked for "a lever that removes the per-element predicate without breaking the
+divide loop's vectorisation", and named two untried directions - widening the fast accept,
+or a reduction operating on the quotients in place. This is the second one.
+
+**Campaign result class:** maintenance-self-speedup
+
+Both arms are OUR OWN code. This is not a competitive claim and must never be quoted
+against NumPy.
+
+WHAT CHANGED. The shipped kernel wrote every quotient and then streamed the whole output
+buffer a SECOND time (`out_data.par_iter().any(..)` in parallel, `output.iter().any(..)`
+serially) looking for a non-normal one. On hazard-free operands - every quotient normal, so
+the scan never gets to skip work - that second stream costs about as much as the divide
+itself. The fused form accumulates the same flag beside the divide
+(`saw_non_normal |= !normal(q)`); the parallel arm returns one flag per chunk and
+OR-reduces them. Nothing round-trips through a temporary, which is exactly what broke
+vectorisation in the rejected blocked form (`deadlock-audit-ae85t`).
+
+Ratio is base/candidate = scanning/fused, so ABOVE 1.0 means the fusion is faster.
+
+PROFILE: `bench` (stock release, lto=false, codegen-units=16) = TRIAGE grade, NOT
+`release-perf`. Both arms sit in one binary at one profile, so the RATIO is a fair
+comparison; the absolute ms here are not ship-grade. A release-perf confirmation run was
+attempted first and died on the rch 1800s SSH ceiling (`RCH-E104`) after landing on the
+slow worker.
+
+All rows below come from ONE invocation on ONE worker:
+HOST_BASELINE host=vmi1293453 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=8 logical_threads=8 allowed_logical_threads=8 governor=unavailable
+THREAD_CONFIGURATION rayon_pool_threads=8 RAYON_NUM_THREADS=unset OPENBLAS_NUM_THREADS=unset
+ISA_BASELINE target_arch=x86_64 runtime_avx2=true runtime_fma=true runtime_avx512f=false
+bench_elf_sha256=6068494b77e0f00cacedb1796b1afb14910c390aad2321296d4d1cca2c2ef8c9
+bench_invocation_id=000000000000000018cc04cc96c5fcef-003488d4
+
+THE LEVER (scanning -> fused):
+divide_fe_hazard_fused_serial_1m    null_base_aa ratio_median=0.989227 ci95=[0.967349,1.015331]
+                                    effect ratio_median=1.408278 ci95=[1.323038,1.520117] verdict=DECIDABLE_WIN
+divide_fe_hazard_fused_parallel_4m  null_base_aa ratio_median=1.014903 ci95=[0.964011,1.093290]
+                                    effect ratio_median=1.660665 ci95=[1.593418,1.758991] verdict=DECIDABLE_WIN
+
+THE STANDING jw7vk ROW, re-measured in the SAME invocation as a control - direction and
+decidability replicate:
+divide_fe_hazard_branch_serial_1m   null_base_aa ratio_median=1.004004 ci95=[0.965155,1.027333]
+                                    effect ratio_median=0.558041 ci95=[0.539545,0.593032] verdict=DECIDABLE_REGRESSION
+divide_fe_hazard_branch_parallel_4m null_base_aa ratio_median=0.968408 ci95=[0.944107,1.045062]
+                                    effect ratio_median=0.586164 ci95=[0.551758,0.625540] verdict=DECIDABLE_REGRESSION
+
+WHAT IT ADDS UP TO, read from arm medians inside this one invocation rather than by
+multiplying ratios across groups:
+- PARALLEL: former 1.206124ms vs fused 1.201241ms = 1.004x. The deferral's parallel cost is
+  GONE - the fused arm lands inside the A/A null of the pre-deferral loop.
+- SERIAL: former 0.599331ms vs fused 0.820738ms = 0.730x. The deferral still costs ~1.37x
+  serially, down from ~1.79x.
+The two `repaired` arm medians differ by 7% between groups (1.122259 vs 1.202042 ms) for
+IDENTICAL code in one invocation. That is the noise floor for any cross-group arithmetic
+here, and the reason the two bullets above are quoted from medians rather than products.
+
+PARITY: the contract asserts both arms' output checksums match every round, so a fusion
+that changed one quotient bit would fail the measurement instead of winning it. Checksums
+were identical across all 41 rounds of every group. The correctness gate for the deferral
+itself - `cargo test -p fnp-python --test conformance_diagnostics` - is green on
+host=vmi1153651; it covers the size-1 serial deferral rows AND
+`divide_float_zero_warning_parallel_tail` (2^21 elements with the only zero divisor in the
+LAST chunk), which is what catches a per-chunk flag that never reaches the caller.
+
+ROUTE SHARE, with one honest caveat: parallel kernel_share=0.620 (kernel 1.201ms of a
+1.937ms end-to-end `fnp.divide`). The serial share printed 1.473 - ABOVE 1.0, meaning the
+slice-based bench replica is SLOWER than the entire shipped call it is meant to model. The
+shipped serial loop iterates `Cell<f64>` where the replica iterates slices, a scope limit
+jw7vk already recorded. Do not read the serial number as a share: the serial RATIO stands,
+the serial absolute times do not transfer to the shipped loop.
+
+BLOCKER FOUND AND FIXED to get any of this. `34dc92fc` had added a replica contract fixture
+asserting `(-0.0) / (-2.0) == -0.0`. IEEE takes the quotient's sign from the XOR of the
+operand signs, so that quotient is `+0.0` and the assertion was simply false. Because
+`assert_divide_hazard_replica_matches_contract()` runs at the head of every group in
+`criterion_python_elementwise.rs`, ALL FOUR divide groups panicked before their first timed
+round - for a day, on main. Recognisable as `BENCH_GROUP_SELECTION selected_groups=4`
+followed by a panic and ZERO `PAIRED row=` lines, which is NOT the same failure as a
+selector matching nothing. Fixed the FIXTURE (lane 2's divisor to +2.0 so the -0.0
+numerator really yields a -0.0 quotient) rather than the assertion, which would have made
+two lanes redundant and dropped the signed-zero coverage.
+
+RETRY PREDICATE: the serial arm still carries ~1.37x. Re-open with a lever aimed at the
+SHIPPED serial loop shape (`Cell<f64>`, not the slice replica), and measure the shipped
+route end-to-end rather than the replica, which is demonstrably slower than the route it
+models. The other untried ae85t direction - widening the fast accept - is NOT discharged by
+this row. Removing or narrowing the deferral itself remains off the table.
+AGENT_NAME=TealOak.
+
 ## 2026-08-14 - UNDECIDED (measured, no verdict): selected-bool `loadtxt(usecols)` reruns at 1.112226x vs NumPy, direction reversed from the banked 0.671524x loss but the incumbent's own A/A null is too wide to decide it (`deadlock-audit-s17g0`)
 
 `BlackThrush`, cc / Lane M. The 2026-07-27 row banked this surface as the repo's

@@ -9515,18 +9515,28 @@ fn zerocopy_f64_binary_flat<'py>(
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
             let chunk = n.div_ceil(rayon::current_num_threads());
             if matches!(op, BinaryOp::Div) {
-                out_data
+                // The normality test rides ALONG with the divide instead of in a
+                // second pass over the quotients. `vdivpd` is throughput-bound
+                // with idle integer slots beside it, so the accumulate is close
+                // to free, while re-reading the output cost a full extra stream
+                // of it (bead `deadlock-audit-vqxoa`). No quotient round-trips
+                // through a temporary — that is what broke vectorisation in the
+                // rejected blocked form (`deadlock-audit-ae85t`).
+                let needs_precise_classification = out_data
                     .par_chunks_mut(chunk)
                     .zip(lhs.par_chunks(chunk))
                     .zip(rhs.par_chunks(chunk))
-                    .for_each(|((o, l), r)| {
+                    .map(|((o, l), r)| {
+                        let mut saw_non_normal = false;
                         for ((slot, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                            *slot = x / y;
+                            let quotient = x / y;
+                            *slot = quotient;
+                            saw_non_normal |=
+                                !f64_divide_quotient_bits_are_normal(quotient.to_bits());
                         }
-                    });
-                let needs_precise_classification = out_data
-                    .par_iter()
-                    .any(|q| !f64_divide_quotient_bits_are_normal(q.to_bits()));
+                        saw_non_normal
+                    })
+                    .reduce(|| false, |left, right| left | right);
                 if needs_precise_classification
                     && lhs
                         .par_iter()
@@ -9548,12 +9558,16 @@ fn zerocopy_f64_binary_flat<'py>(
                     });
             }
         } else if matches!(op, BinaryOp::Div) {
+            // Same fusion as the parallel arm above: accumulate the cheap
+            // normality flag beside the divide rather than streaming the whole
+            // output a second time to find it.
+            let mut saw_non_normal = false;
             for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
-                slot.set(a_cell.get() / b_cell.get());
+                let quotient = a_cell.get() / b_cell.get();
+                slot.set(quotient);
+                saw_non_normal |= !f64_divide_quotient_bits_are_normal(quotient.to_bits());
             }
-            if output
-                .iter()
-                .any(|slot| !f64_divide_quotient_bits_are_normal(slot.get().to_bits()))
+            if saw_non_normal
                 && output.iter().zip(a_in.iter()).zip(b_in.iter()).any(
                     |((slot, a_cell), b_cell)| {
                         f64_divide_raises_fp_error(a_cell.get(), b_cell.get(), slot.get())

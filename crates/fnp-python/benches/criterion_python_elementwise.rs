@@ -1244,6 +1244,14 @@ fn main() {
             "bench_divide_fe_hazard_parallel",
             bench_divide_fe_hazard_parallel,
         ),
+        (
+            "bench_divide_fe_hazard_fused_serial",
+            bench_divide_fe_hazard_fused_serial,
+        ),
+        (
+            "bench_divide_fe_hazard_fused_parallel",
+            bench_divide_fe_hazard_fused_parallel,
+        ),
     ]);
 }
 
@@ -1270,7 +1278,18 @@ fn main() {
 // the `Div` arm is a SEPARATE loop from the generic `op.apply` loop, not the old
 // loop plus a branch. So the former arm here reproduces the old loop's shape —
 // `*s = op.apply(x, y)` with `apply` monomorphised to a divide — and the
-// repaired arm reproduces the fused quotient-and-observation shape. The predicate itself is a
+// repaired arm reproduces the shape that writes the quotients and then STREAMS
+// THEM AGAIN to look for a non-normal one.
+//
+// THREE ARMS, and which pair a row compares is what its class means:
+//   `divide_former_*`   the pre-2nmd1 loop, no hazard observation at all
+//   `divide_repaired_*` quotients written, then a second full pass to find a
+//                       non-normal one  (what shipped 2nmd1..vqxoa)
+//   `divide_fused_*`    the non-normal flag accumulated beside the divide, so
+//                       the quotients are never re-read  (shipped by vqxoa)
+// former-vs-repaired is the standing `deadlock-audit-jw7vk` row (what the
+// correctness fix cost); repaired-vs-fused is `deadlock-audit-vqxoa` (how much
+// of that the fusion gives back). Both are self-speedups. The predicate itself is a
 // REPLICA — a bench crate cannot reach a crate-root item in fnp-python — so it
 // is pinned to the shipped body by DIVIDE_HAZARD_TRUTH_TABLE below, which is
 // asserted before any timing runs. lib.rs carries the same table in its own
@@ -1365,8 +1384,12 @@ fn assert_divide_hazard_replica_matches_contract() {
     // quiet lanes are deliberately non-normal, so a replica that checks only
     // normal quotients would incorrectly report a hazard; the final lane is a
     // genuine divide-by-zero negative case that must still report one.
+    // Lane 2 carries the -0.0 quotient. The divisor must be POSITIVE to get one:
+    // IEEE takes the quotient's sign from the XOR of the operand signs, so
+    // -0.0 / -2.0 is +0.0, not -0.0. Landed as -2.0 by 34dc92fc and never run,
+    // which made every group in this file panic before its first timed round.
     let quiet_lhs = [8.0, 0.0, -0.0, f64::NAN, 4.0];
-    let quiet_rhs = [2.0, 2.0, -2.0, 2.0, f64::NAN];
+    let quiet_rhs = [2.0, 2.0, 2.0, 2.0, f64::NAN];
     let mut quiet_out = [0.0; 5];
     assert!(
         !divide_repaired_serial(&quiet_lhs, &quiet_rhs, &mut quiet_out),
@@ -1384,6 +1407,78 @@ fn assert_divide_hazard_replica_matches_contract() {
     );
     assert_eq!(hazard_out[0], 4.0);
     assert!(hazard_out[1].is_infinite());
+
+    // The fused arm must agree with the scanning arm on BOTH the verdict and
+    // the bits, for quiet and hazardous input alike. The negative case that
+    // matters is a hazard hiding behind normal neighbours: an accumulator that
+    // is reset per iteration, or one that only records the LAST quotient,
+    // returns false here and would silently stop deferring to NumPy.
+    let mixed_lhs = [8.0, 6.0, 1.0, 3.0];
+    let mixed_rhs = [2.0, 3.0, 0.0, 1.5];
+    let mut scanned_mixed = [0.0; 4];
+    let mut fused_mixed = [0.0; 4];
+    assert!(
+        divide_repaired_serial(&mixed_lhs, &mixed_rhs, &mut scanned_mixed),
+        "the scanning replica must report the divide-by-zero in lane 2"
+    );
+    assert!(
+        divide_fused_serial(&mixed_lhs, &mixed_rhs, &mut fused_mixed),
+        "the fused replica must report a hazard surrounded by normal quotients"
+    );
+    assert_eq!(
+        scanned_mixed.map(f64::to_bits),
+        fused_mixed.map(f64::to_bits),
+        "fusing the normality flag must not change a single quotient bit"
+    );
+
+    let mut scanned_quiet = [0.0; 5];
+    let mut fused_quiet = [0.0; 5];
+    assert!(!divide_repaired_serial(
+        &quiet_lhs,
+        &quiet_rhs,
+        &mut scanned_quiet
+    ));
+    assert!(
+        !divide_fused_serial(&quiet_lhs, &quiet_rhs, &mut fused_quiet),
+        "the fused replica must keep the quiet signed-zero and NaN lanes native"
+    );
+    assert_eq!(
+        scanned_quiet.map(f64::to_bits),
+        fused_quiet.map(f64::to_bits)
+    );
+
+    // The parallel replica carries the same obligation, and additionally must
+    // OR its per-chunk flags: a reduce that drops any chunk's verdict passes
+    // every single-chunk test and fails here only once the hazard lands off
+    // the first chunk.
+    let parallel_len = 4_096;
+    let parallel_lhs = (0..parallel_len)
+        .map(|i| if i == parallel_len - 1 { 1.0 } else { 8.0 })
+        .collect::<Vec<f64>>();
+    let parallel_rhs = (0..parallel_len)
+        .map(|i| if i == parallel_len - 1 { 0.0 } else { 2.0 })
+        .collect::<Vec<f64>>();
+    let mut scanned_parallel = vec![0.0; parallel_len];
+    let mut fused_parallel = vec![0.0; parallel_len];
+    assert!(divide_repaired_parallel(
+        &parallel_lhs,
+        &parallel_rhs,
+        &mut scanned_parallel
+    ));
+    assert!(
+        divide_fused_parallel(&parallel_lhs, &parallel_rhs, &mut fused_parallel),
+        "the fused parallel replica must report a hazard in the final chunk"
+    );
+    assert_eq!(
+        scanned_parallel
+            .iter()
+            .map(|q| q.to_bits())
+            .collect::<Vec<u64>>(),
+        fused_parallel
+            .iter()
+            .map(|q| q.to_bits())
+            .collect::<Vec<u64>>(),
+    );
 }
 
 const DIVIDE_SERIAL_N: usize = 1 << 20; // below the kernel's 1<<21 rayon threshold
@@ -1429,6 +1524,24 @@ fn divide_repaired_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
             .any(|((&x, &y), &q)| bench_divide_raises_fp_error(x, y, q))
 }
 
+/// The fused serial loop: the normality flag is accumulated beside the divide,
+/// so the quotients are never streamed a second time to discover it. Replica of
+/// the shipped `zerocopy_f64_binary_flat` serial `Div` arm.
+#[inline(never)]
+fn divide_fused_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
+    let mut saw_non_normal = false;
+    for ((slot, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
+        let quotient = x / y;
+        *slot = quotient;
+        saw_non_normal |= !bench_divide_quotient_is_normal(quotient);
+    }
+    saw_non_normal
+        && a.iter()
+            .zip(b.iter())
+            .zip(out.iter())
+            .any(|((&x, &y), &q)| bench_divide_raises_fp_error(x, y, q))
+}
+
 /// Same chunking the kernel uses: `n.div_ceil(rayon::current_num_threads())`.
 #[inline(never)]
 fn divide_former_parallel(a: &[f64], b: &[f64], out: &mut [f64]) {
@@ -1455,6 +1568,33 @@ fn divide_repaired_parallel(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
             }
         });
     out.par_iter().any(|q| !bench_divide_quotient_is_normal(*q))
+        && a.par_iter()
+            .zip(b.par_iter())
+            .zip(out.par_iter())
+            .any(|((&x, &y), &q)| bench_divide_raises_fp_error(x, y, q))
+}
+
+/// Replica of the shipped parallel `Div` arm after fusion: each chunk returns
+/// its own flag and the flags are OR-reduced, so no chunk's verdict is lost and
+/// the output is never re-read.
+#[inline(never)]
+fn divide_fused_parallel(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
+    let chunk = out.len().div_ceil(rayon::current_num_threads());
+    let saw_non_normal = out
+        .par_chunks_mut(chunk)
+        .zip(a.par_chunks(chunk))
+        .zip(b.par_chunks(chunk))
+        .map(|((o, l), r)| {
+            let mut chunk_saw_non_normal = false;
+            for ((slot, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
+                let quotient = x / y;
+                *slot = quotient;
+                chunk_saw_non_normal |= !bench_divide_quotient_is_normal(quotient);
+            }
+            chunk_saw_non_normal
+        })
+        .reduce(|| false, |left, right| left | right);
+    saw_non_normal
         && a.par_iter()
             .zip(b.par_iter())
             .zip(out.par_iter())
@@ -1574,4 +1714,77 @@ fn bench_divide_fe_hazard_parallel(_c: &mut Criterion) {
         time_repaired,
     );
     report_divide_route_share(n, "parallel", effect.arm_b_median_ns);
+}
+
+/// Isolates the fusion lever: base arm is the shipped scanning form, candidate
+/// is the fused one. Ratio is base/candidate, so ABOVE 1.0 means fusion is
+/// faster. Both arms are the same binary on the same operands, so this is a
+/// self-speedup that says how much of the hazard scan's cost the fusion
+/// recovers — it is NOT a NumPy comparison and must never be quoted as one.
+fn bench_divide_fe_hazard_fused_serial(_c: &mut Criterion) {
+    assert_divide_hazard_replica_matches_contract();
+    let n = DIVIDE_SERIAL_N;
+    let (a, b) = divide_hazard_free_operands(n);
+    let mut scanned_out = vec![0.0_f64; n];
+    let mut fused_out = vec![0.0_f64; n];
+
+    let time_scanned = || {
+        let started = Instant::now();
+        let hazard = divide_repaired_serial(&a, &b, &mut scanned_out);
+        let elapsed = started.elapsed();
+        assert!(!hazard, "operands must be hazard-free for this measurement");
+        let checksum = divide_checksum(&scanned_out);
+        black_box(&scanned_out);
+        common::ContractObservation { elapsed, checksum }
+    };
+    let time_fused = || {
+        let started = Instant::now();
+        let hazard = divide_fused_serial(&a, &b, &mut fused_out);
+        let elapsed = started.elapsed();
+        assert!(!hazard, "operands must be hazard-free for this measurement");
+        let checksum = divide_checksum(&fused_out);
+        black_box(&fused_out);
+        common::ContractObservation { elapsed, checksum }
+    };
+    // The contract asserts both arms' checksums match every round, so a fusion
+    // that changed a quotient bit fails the measurement rather than winning it.
+    let (effect, _null) = common::run_median_ci_contract(
+        "divide_fe_hazard_fused_serial_1m",
+        time_scanned,
+        time_fused,
+    );
+    report_divide_route_share(n, "fused_serial", effect.arm_b_median_ns);
+}
+
+fn bench_divide_fe_hazard_fused_parallel(_c: &mut Criterion) {
+    assert_divide_hazard_replica_matches_contract();
+    let n = DIVIDE_PARALLEL_N;
+    let (a, b) = divide_hazard_free_operands(n);
+    let mut scanned_out = vec![0.0_f64; n];
+    let mut fused_out = vec![0.0_f64; n];
+
+    let time_scanned = || {
+        let started = Instant::now();
+        let hazard = divide_repaired_parallel(&a, &b, &mut scanned_out);
+        let elapsed = started.elapsed();
+        assert!(!hazard, "operands must be hazard-free for this measurement");
+        let checksum = divide_checksum(&scanned_out);
+        black_box(&scanned_out);
+        common::ContractObservation { elapsed, checksum }
+    };
+    let time_fused = || {
+        let started = Instant::now();
+        let hazard = divide_fused_parallel(&a, &b, &mut fused_out);
+        let elapsed = started.elapsed();
+        assert!(!hazard, "operands must be hazard-free for this measurement");
+        let checksum = divide_checksum(&fused_out);
+        black_box(&fused_out);
+        common::ContractObservation { elapsed, checksum }
+    };
+    let (effect, _null) = common::run_median_ci_contract(
+        "divide_fe_hazard_fused_parallel_4m",
+        time_scanned,
+        time_fused,
+    );
+    report_divide_route_share(n, "fused_parallel", effect.arm_b_median_ns);
 }
