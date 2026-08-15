@@ -44,6 +44,29 @@ const WIN_CLASS_ENFORCEMENT_DATE: &str = "2026-07-26";
 /// row format that carries the worker as a required field of its own.
 const WORKER_PROVENANCE_ENFORCEMENT_DATE: &str = "2026-08-15";
 
+/// `incumbent-win` rows banked BEFORE [`WORKER_PROVENANCE_ENFORCEMENT_DATE`]
+/// that name no worker, counted at the commit that introduced this gate:
+/// **44 of 44**. Every campaign-output row in the ledger is in this state.
+///
+/// These cannot be repaired by editing them. The worker was never recorded, and
+/// writing a plausible one in now would be fabricated provenance — strictly
+/// worse than an acknowledged gap. The only honest way to clear a row is to
+/// re-measure it and re-bank it with its worker named, which is why this is a
+/// budget that may SHRINK rather than a list to be filled in.
+///
+/// It must never GROW. `new_measured_rows_name_their_worker` only sees rows
+/// dated on/after the enforcement date, so without this a new unworkered
+/// incumbent-win row backdated by one day would pass both gates. That is the
+/// same backdating hole `historical_void_nonull_debt_does_not_grow` exists to
+/// close, and it is closed the same way.
+///
+/// What it means for the 44: their ratios stand as measured, but they are
+/// worker-scoped and cannot be compared against each other or against any newer
+/// row. The fleet measured a 13.6x swing for one cell across two workers with
+/// both A/A nulls passing, so cross-row comparison without worker identity is
+/// not conservative — it is unbounded.
+const HISTORICAL_UNWORKERED_INCUMBENT_WIN_BUDGET: usize = 44;
+
 /// Pre-[`ENFORCEMENT_DATE`] REJECT rows that record neither a null control nor a
 /// counted mechanism, as measured by *these predicates* at the commit that
 /// introduced this gate. The count may shrink (a row gains a null, or is re-run
@@ -1015,4 +1038,53 @@ fn worker_detector_rejects_rows_without_a_named_worker() {
     assert!(records_measuring_worker(
         "HOST_BASELINE host=hz2 governor=unavailable"
     ));
+}
+
+/// THE BACKDATING GUARD for the worker gate. `new_measured_rows_name_their_worker`
+/// only inspects rows dated on/after [`WORKER_PROVENANCE_ENFORCEMENT_DATE`], so a
+/// new unworkered `incumbent-win` row dated one day earlier would satisfy it. This
+/// pins the historical population instead: it may shrink as rows are re-measured
+/// and re-banked with their worker, and any growth is a new row dodging the gate.
+#[test]
+fn historical_unworkered_incumbent_win_debt_does_not_grow() {
+    let offenders: Vec<String> = parse_entries()
+        .into_iter()
+        .filter(|e| e.date.is_empty() || e.date.as_str() < WORKER_PROVENANCE_ENFORCEMENT_DATE)
+        .filter(|e| result_class(&e.body) == ResultClass::IncumbentWin)
+        .filter(|e| !records_measuring_worker(&e.body))
+        .map(|e| format!("  docs/NEGATIVE_EVIDENCE.md:{} — {}", e.line, e.heading))
+        .collect();
+
+    assert!(
+        offenders.len() <= HISTORICAL_UNWORKERED_INCUMBENT_WIN_BUDGET,
+        "unworkered pre-{WORKER_PROVENANCE_ENFORCEMENT_DATE} `{INCUMBENT_WIN}` rows grew to {} \
+         (budget {HISTORICAL_UNWORKERED_INCUMBENT_WIN_BUDGET}):\n{}\n\n\
+         Either a new row was backdated to dodge `new_measured_rows_name_their_worker`, or an \
+         existing row lost its worker. A campaign-output row banked from now on must name the \
+         worker it ran on. Do NOT clear this by writing a worker name into an old row — the \
+         worker was never recorded there, and inventing one is fabricated provenance. Re-measure \
+         and re-bank instead, which lowers the budget.",
+        offenders.len(),
+        offenders.join("\n"),
+    );
+}
+
+/// The budget is a ceiling on a real population, not a magic number: if the
+/// ledger ever cleans up and the true count drops, this catches the stale
+/// constant so the ceiling gets tightened instead of quietly over-permitting.
+#[test]
+fn unworkered_incumbent_win_budget_is_not_stale() {
+    let actual = parse_entries()
+        .into_iter()
+        .filter(|e| e.date.is_empty() || e.date.as_str() < WORKER_PROVENANCE_ENFORCEMENT_DATE)
+        .filter(|e| result_class(&e.body) == ResultClass::IncumbentWin)
+        .filter(|e| !records_measuring_worker(&e.body))
+        .count();
+
+    assert_eq!(
+        actual, HISTORICAL_UNWORKERED_INCUMBENT_WIN_BUDGET,
+        "the unworkered incumbent-win population is {actual} but the budget says \
+         {HISTORICAL_UNWORKERED_INCUMBENT_WIN_BUDGET}. If rows were re-banked with their \
+         worker, LOWER the budget to {actual} so it keeps ratcheting."
+    );
 }
