@@ -109257,6 +109257,28 @@ mod tests {
     }
 
     #[test]
+    fn f64_divide_fast_accepts_only_exact_zero_over_finite_nonzero_divisor() {
+        for &(a, b) in &[(0.0, 2.0), (0.0, -2.0), (-0.0, 2.0), (-0.0, -2.0)] {
+            assert!(
+                f64_divide_fast_accepts_without_fp_error(a, b, a / b),
+                "{a:?} / {b:?} is an exact signed-zero result"
+            );
+        }
+        for &(a, b) in &[
+            (0.0, 0.0),
+            (-0.0, -0.0),
+            (0.0, f64::INFINITY),
+            (0.0, f64::NEG_INFINITY),
+            (f64::MIN_POSITIVE, f64::MAX),
+        ] {
+            assert!(
+                !f64_divide_fast_accepts_without_fp_error(a, b, a / b),
+                "{a:?} / {b:?} must reach precise IEEE classification"
+            );
+        }
+    }
+
+    #[test]
     fn f64_divide_two_pass_keeps_clean_and_quiet_nan_outputs_native() {
         with_python(|py| {
             if !numpy_available(py) {
