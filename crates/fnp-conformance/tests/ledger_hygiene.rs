@@ -28,6 +28,22 @@ const ENFORCEMENT_DATE: &str = "2026-07-26";
 /// in their body.
 const WIN_CLASS_ENFORCEMENT_DATE: &str = "2026-07-26";
 
+/// Measured rows dated on or after this must name the worker their arms ran on.
+///
+/// The defect this exists for was measured elsewhere in the fleet on
+/// 2026-08-15: the SAME cell run on two rch workers read 1.2693x and 0.0093x —
+/// a 13.6x swing — with BOTH A/A nulls PASSING. A null controls
+/// within-invocation noise; it cannot see between-worker differences in CPU
+/// model, cache, memory bandwidth or contention, so it does not license
+/// comparing one row against another. Worker identity is therefore part of a
+/// row's meaning, not decoration: a row that does not name its worker cannot be
+/// compared to any other row, and this repo already prints
+/// `HOST_BASELINE host=<worker>` from inside the measuring process.
+///
+/// DELETION CONDITION: drop this gate if the ledger ever moves to a structured
+/// row format that carries the worker as a required field of its own.
+const WORKER_PROVENANCE_ENFORCEMENT_DATE: &str = "2026-08-15";
+
 /// Pre-[`ENFORCEMENT_DATE`] REJECT rows that record neither a null control nor a
 /// counted mechanism, as measured by *these predicates* at the commit that
 /// introduced this gate. The count may shrink (a row gains a null, or is re-run
@@ -270,6 +286,30 @@ fn is_unmeasured(body: &str) -> bool {
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+/// The worker a row's arms actually ran on. Accepts the harness's own
+/// `HOST_BASELINE host=<worker>` line verbatim, or an explicit `worker=<name>`
+/// field, so satisfying this is a paste rather than a rewrite. A placeholder
+/// (`unavailable`, `unknown`, `n/a`) does not count — that is precisely the
+/// value `HOSTNAME` yields over a non-interactive ssh, and accepting it would
+/// certify the rows most likely to be missing their provenance.
+fn records_measuring_worker(body: &str) -> bool {
+    const PLACEHOLDERS: [&str; 5] = ["unavailable", "unknown", "n/a", "none", "tbd"];
+    body.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        ["host=", "worker="]
+            .iter()
+            .filter_map(|marker| lower.split_once(*marker))
+            .any(|(_, rest)| {
+                let name = rest
+                    .split(|c: char| c.is_whitespace() || c == ',' || c == ')')
+                    .next()
+                    .unwrap_or("")
+                    .trim_matches(|c: char| c == '`' || c == '*' || c == '"');
+                !name.is_empty() && !PLACEHOLDERS.contains(&name)
+            })
+    })
 }
 
 /// THE GATE. A REJECT row written from [`ENFORCEMENT_DATE`] onward must record an
@@ -917,4 +957,62 @@ fn win_class_marker_is_read_from_the_body_not_the_heading() {
         result_class("**Campaign result class:** fastest-ever"),
         ResultClass::Invalid
     );
+}
+
+/// THE WORKER GATE. A measured row written from
+/// [`WORKER_PROVENANCE_ENFORCEMENT_DATE`] onward must name the worker its arms
+/// ran on. Rows that never got a measurement (bench-blocked, queue refused) and
+/// behavioral blockers are exempt: there is no worker to name.
+#[test]
+fn new_measured_rows_name_their_worker() {
+    let offenders: Vec<String> = parse_entries()
+        .into_iter()
+        .filter(|e| !e.date.is_empty() && e.date.as_str() >= WORKER_PROVENANCE_ENFORCEMENT_DATE)
+        .filter(|e| !is_unmeasured(&e.body) && !is_behavioral_blocker(&e.body))
+        .filter(|e| !records_measuring_worker(&e.body))
+        .map(|e| format!("  docs/NEGATIVE_EVIDENCE.md:{} — {}", e.line, e.heading))
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "{} measured row(s) dated on/after {WORKER_PROVENANCE_ENFORCEMENT_DATE} do not name \
+         the worker their arms ran on, so they cannot be compared to any other row:\n{}\n\n\
+         Fix by pasting the harness's own provenance line into the row, e.g.\n  \
+         HOST_BASELINE host=vmi1293453 cpu_model=... physical_cores=8 governor=...\n\
+         A passing A/A null does NOT substitute: the null controls within-invocation noise \
+         only, and the fleet has measured a 13.6x swing for one cell across two workers with \
+         both nulls passing.",
+        offenders.len(),
+        offenders.join("\n"),
+    );
+}
+
+#[test]
+fn worker_detector_rejects_rows_without_a_named_worker() {
+    // The harness line satisfies the gate verbatim.
+    assert!(records_measuring_worker(
+        "HOST_BASELINE host=vmi1293453 cpu_model=AMD_EPYC physical_cores=8 governor=unavailable"
+    ));
+    assert!(records_measuring_worker(
+        "Measured on worker=hz1, 8 logical threads"
+    ));
+
+    // A row with a null control, a ratio and an ELF sha but no worker is exactly
+    // the row this gate exists to catch — a naive "it has provenance" check that
+    // keyed off the sha or the null would pass it.
+    assert!(!records_measuring_worker(
+        "null_base_aa ratio_median=0.997901 ci95=[0.960594,1.013642]\n\
+         effect ratio_median=0.511247\n\
+         bench_elf_sha256=61a1e5e3c0ffee61a1e5e3c0ffee61a1e5e3c0ffee61a1e5e3c0ffee61a1e5e3"
+    ));
+
+    // `governor=unavailable` sits on the same line as a real host in every
+    // HOST_BASELINE, so the placeholder rule must reject only the host token
+    // itself — not veto a line that merely contains the word somewhere.
+    assert!(!records_measuring_worker(
+        "HOST_BASELINE host=unavailable governor=performance"
+    ));
+    assert!(records_measuring_worker(
+        "HOST_BASELINE host=hz2 governor=unavailable"
+    ));
 }

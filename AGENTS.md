@@ -619,6 +619,30 @@ It also requires a concrete retry predicate and a unique heading, and it caps
 the grandfathered historical debt so backdating a row to dodge the gate trips a
 second test instead.
 
+### Every measured row must NAME ITS WORKER (from 2026-08-15)
+
+`new_measured_rows_name_their_worker` fails CI unless a measured row dated
+on/after `WORKER_PROVENANCE_ENFORCEMENT_DATE` carries an explicit `host=<name>`
+or `worker=<name>` field. Prose like "vmi1293453 (8 logical, EPYC-IBPB)" is how
+older rows did it and is NOT machine-checkable; paste the harness's own line
+instead, which every bench already prints:
+
+```
+HOST_BASELINE host=vmi1293453 cpu_model=... physical_cores=8 governor=...
+```
+
+Why it is a gate and not a style note: the fleet measured the SAME cell on two
+rch workers at **1.2693x and 0.0093x — a 13.6x swing — with BOTH A/A nulls
+PASSING**. The null controls within-invocation noise only; it cannot see
+between-worker differences in CPU model, cache, bandwidth, or contention. So a
+row that does not name its worker cannot be compared to any other row, and a
+passing null does not license a cross-worker comparison. Both arms must run in
+the same invocation on the same worker — which is what `BALANCED_SQUARE`
+already does. Rows whose two arms might have landed on different workers are
+worker-scoped, not fleet-wide. Rows that never got a measurement
+(bench-blocked, queue refused) and behavioral blockers are exempt: there is no
+worker to name.
+
 ### What counts as a win
 
 These are different things and the ledger must say which one a row is.
