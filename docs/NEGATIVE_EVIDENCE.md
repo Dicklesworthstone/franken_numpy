@@ -73,12 +73,64 @@ host=vmi1153651; it covers the size-1 serial deferral rows AND
 `divide_float_zero_warning_parallel_tail` (2^21 elements with the only zero divisor in the
 LAST chunk), which is what catches a per-chunk flag that never reaches the caller.
 
-ROUTE SHARE, with one honest caveat: parallel kernel_share=0.620 (kernel 1.201ms of a
-1.937ms end-to-end `fnp.divide`). The serial share printed 1.473 - ABOVE 1.0, meaning the
-slice-based bench replica is SLOWER than the entire shipped call it is meant to model. The
-shipped serial loop iterates `Cell<f64>` where the replica iterates slices, a scope limit
-jw7vk already recorded. Do not read the serial number as a share: the serial RATIO stands,
-the serial absolute times do not transfer to the shipped loop.
+ROUTE SHARE: the shares printed by this run are VOID and are superseded by the corrected
+re-run below. They divided a MEDIAN kernel by a BEST-OF-24 end-to-end, which understates
+the denominator and OVERSTATES the share (`deadlock-audit-3i0uo`, fixed in `50c39a4e`).
+Do not quote `kernel_share=0.620` or `1.473` from this run.
+
+## 2026-08-15 - REPLICATION + SHARE CORRECTION for the divide FE-hazard fusion, second worker (`deadlock-audit-vqxoa`, `deadlock-audit-3i0uo`)
+
+`TealOak`. Re-run after `50c39a4e` fixed the share statistic. This landed on a DIFFERENT
+worker than the row above, so per the fleet cross-worker law the two runs are separate
+worker-scoped results and their arms must NOT be compared across runs - only within each.
+
+**Campaign result class:** maintenance-self-speedup
+
+HOST_BASELINE host=vmi1227854 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 allowed_logical_threads=10 governor=unavailable
+THREAD_CONFIGURATION rayon_pool_threads=10 RAYON_NUM_THREADS=unset OPENBLAS_NUM_THREADS=unset
+bench_elf_sha256=be482bca132e4a9f1ed0f9224a132b42299ed7329b8abaf8c1df54e69187a5fa
+bench_invocation_id=000000000000000018cc069bc2614ebe-0028328a
+Profile `bench` (triage grade), 41 rounds, min-of-3.
+
+THE FUSION REPLICATES - direction and decidability hold, magnitude moves with the host,
+which is the expected worker sensitivity and not a discrepancy:
+divide_fe_hazard_fused_serial_1m    effect ratio_median=1.600334 ci95=[1.567121,1.742590] null=[0.997569,1.025275] DECIDABLE_WIN
+                                    (arm medians: scanning 0.958903ms vs fused 0.577801ms)
+divide_fe_hazard_fused_parallel_4m  effect ratio_median=1.522683 ci95=[1.485151,1.577220] null=[1.003249,1.095146] DECIDABLE_WIN
+                                    (arm medians: scanning 1.570706ms vs fused 1.021437ms)
+divide_fe_hazard_branch_serial_1m   effect ratio_median=0.583304 ci95=[0.552779,0.610797] DECIDABLE_REGRESSION
+divide_fe_hazard_branch_parallel_4m effect ratio_median=0.585248 ci95=[0.572362,0.605797] DECIDABLE_REGRESSION
+
+On this 10-core host, read from arm medians inside this invocation: parallel former
+0.947796ms vs fused 1.021437ms = 0.928x, so the deferral still costs ~7.8% in parallel
+here, where on the 8-core vmi1293453 run it read 1.004x. The "parallel cost is gone" claim
+is therefore WORKER-SCOPED to vmi1293453 and must not be generalised; what replicates
+across both hosts is the fusion win itself (1.41-1.60x serial, 1.52-1.66x parallel) and the
+direction of the jw7vk regression.
+
+CORRECTED SHARES (median / median, both statistics named on the line):
+  serial (scanning kernel) kernel_share=1.911  end_to_end_median_ns=516099.0  best_ns=431927.0  share_exceeds_one=true
+  fused_serial             kernel_share=1.107  end_to_end_median_ns=521802.5  best_ns=478227.0  share_exceeds_one=true
+  parallel (scanning)      kernel_share=0.632  end_to_end_median_ns=2567887.0 best_ns=1978247.0
+  fused_parallel           kernel_share=0.384  end_to_end_median_ns=2657805.5 best_ns=2044447.0
+
+MAGNITUDE OF THE OLD BIAS, measured rather than asserted: had the parallel scanning share
+been computed the old way on THIS run it would have read 1624131/1978247 = 0.821 against
+the correct 0.632. Every previously banked share from this harness is an UPPER BOUND.
+
+AND THE >1.0 SERIAL SHARE SURVIVES THE CORRECTION. It was not an artifact of the statistic
+mismatch: with matched medians the serial shares are still 1.911 and 1.107, so the
+slice-based bench replica genuinely IS slower than the whole shipped `fnp.divide` call it
+models. The shipped serial loop iterates `Cell<f64>` where the replica iterates slices -
+the scope limit jw7vk recorded. Both serial rows now carry
+`DIVIDE_ROUTE_SHARE_WARNING verdict=replica_slower_than_the_route_it_models
+do_not_quote_this_share=true`. The serial RATIO stands; the serial absolute times and share
+do not transfer to the shipped loop.
+
+RETRY PREDICATE: unchanged from the row above, and now better motivated - the serial
+replica is a demonstrably poor model of the shipped serial route (share 1.107 fused), so
+the next serial lever must be measured on the SHIPPED route end-to-end, not on this
+replica. AGENT_NAME=TealOak.
 
 BLOCKER FOUND AND FIXED to get any of this. `34dc92fc` had added a replica contract fixture
 asserting `(-0.0) / (-2.0) == -0.0`. IEEE takes the quotient's sign from the XOR of the
