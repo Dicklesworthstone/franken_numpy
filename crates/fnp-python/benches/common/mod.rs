@@ -767,8 +767,76 @@ pub fn report_incumbent_topology_with_shared_component(
     std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
 }
 
+/// This module's source, embedded by the compiler from the file it actually
+/// compiled. Hashing it at runtime is the one link from a running binary back to
+/// the SOURCE it was built from — `bench_elf_sha256` identifies the binary, and
+/// a binary built from stale source has a perfectly good, entirely fresh-looking
+/// sha of its own.
+///
+/// Measured 2026-08-15 (`deadlock-audit-rko39`): two runs of one command against
+/// one unchanged working tree produced binaries `59423d99...` on vmi1227854 and
+/// `522ce318...` on vmi1153651, and the second printed the PRE-CHANGE row format
+/// after genuinely recompiling for 18m41s. Every provenance field it printed —
+/// ELF sha, host, threads, ISA, invocation id — was present and self-consistent.
+/// Nothing said it had built the wrong source. This field says it.
+///
+/// COVERAGE, stated because a half-covering check invites false confidence: this
+/// fingerprints the shared contract module only — the balanced square, the
+/// median-CI gate, the null accounting, every published row's arithmetic. It
+/// does NOT cover a change confined to an individual bench file, which is what
+/// the observed incident actually was. Extending it needs a build script that
+/// hashes the whole `benches/` tree; per-file `include_str!` would rebuild every
+/// bench binary whenever any bench source changed, which on a fleet where these
+/// builds run 10-20 minutes is a worse trade than the gap it closes.
+const HARNESS_CONTRACT_SOURCE: &str = include_str!("mod.rs");
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    let mut hash = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut hash, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    hash
+}
+
+fn harness_contract_source_sha256() -> String {
+    sha256_hex(HARNESS_CONTRACT_SOURCE.as_bytes())
+}
+
+/// Whether the contract source COMPILED INTO this binary is the contract source
+/// sitting in the tree the binary is about to be measured in. `embedded` comes
+/// from `include_str!` at compile time and `on_disk` is read at run time, so a
+/// binary built from stale source reports `false` here while every other
+/// provenance field it prints still looks perfectly fresh.
+fn harness_source_matches(embedded: &str, on_disk: &str) -> bool {
+    embedded == on_disk
+}
+
+/// `Some(true|false)` when the contract source can be read back from the tree,
+/// `None` when it cannot (the source may legitimately be absent beside a copied
+/// ELF, which is a different situation from a mismatch and must not be reported
+/// as one).
+fn harness_contract_source_matches_disk() -> Option<bool> {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/benches/common/mod.rs");
+    let on_disk = std::fs::read_to_string(path).ok()?;
+    Some(harness_source_matches(HARNESS_CONTRACT_SOURCE, &on_disk))
+}
+
 fn report_bench_identity() {
     println!("bench_elf_sha256={}", self_identity());
+    println!(
+        "harness_contract_source_sha256={} harness_contract_source_bytes={} \
+         harness_source_matches_disk={} covers=common/mod.rs_only",
+        harness_contract_source_sha256(),
+        HARNESS_CONTRACT_SOURCE.len(),
+        match harness_contract_source_matches_disk() {
+            Some(true) => "true",
+            Some(false) => "false_BINARY_BUILT_FROM_DIFFERENT_SOURCE",
+            None => "unknown_source_not_readable",
+        },
+    );
     println!("bench_invocation_id={}", bench_invocation_id());
     report_host_execution_provenance();
     std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
@@ -995,7 +1063,46 @@ fn report_dual_null_contract_gate(
     );
 }
 
+/// Proves the stale-source detector actually discriminates, using a pair that
+/// differs the way the observed incident differed: one line of the harness
+/// changed, everything else identical. A detector that compared lengths, or the
+/// first N bytes, or nothing at all, passes every "does it return a bool" check
+/// and reports `true` here — which is precisely how a stale-source run gets
+/// banked as a good one (`deadlock-audit-rko39`).
+fn verify_stale_source_detector() {
+    let shipped = "share = kernel_ns / end_to_end_median;\n";
+    let stale = "share = kernel_ns / end_to_end_bestof;\n";
+    assert!(
+        harness_source_matches(shipped, shipped),
+        "identical source must report as matching"
+    );
+    assert!(
+        !harness_source_matches(shipped, stale),
+        "a one-token difference in the middle of the source must report as a MISMATCH"
+    );
+    // The pair is deliberately the SAME LENGTH: a detector that compared sizes
+    // — which is exactly what rsync-style staleness checks do — reports these as
+    // identical. Keep them equal-length or this stops testing the hard case.
+    assert_eq!(
+        shipped.len(),
+        stale.len(),
+        "the fixture pair must stay the same length or it stops testing the hard case"
+    );
+    assert!(
+        !harness_source_matches("", shipped),
+        "an empty read must not be mistaken for a match"
+    );
+    // The digest the identity line prints must be a function of the content.
+    assert_ne!(sha256_hex(shipped.as_bytes()), sha256_hex(stale.as_bytes()));
+    assert_eq!(
+        sha256_hex(b""),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "sha256_hex must be SHA-256, not some other digest with the same shape"
+    );
+}
+
 fn verify_contract_gate_semantics() {
+    verify_stale_source_detector();
     assert_eq!(
         BALANCED_SQUARE,
         [true, false, false, true, true, false, false, true]
