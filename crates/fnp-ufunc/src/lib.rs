@@ -33023,6 +33023,20 @@ pub fn matmul_accumulate_serial(
         return;
     }
 
+    // A single input row is a row-vector product. Keep the increasing-k
+    // reduction while bypassing panel setup that cannot form an MR tile.
+    if m == 1 {
+        let row = &lhs[..k];
+        for (j, slot) in out.iter_mut().enumerate() {
+            let sum = row
+                .iter()
+                .zip(rhs[j..].iter().step_by(n))
+                .fold(0.0, |acc, (&left, &right)| acc + left * right);
+            *slot += sum;
+        }
+        return;
+    }
+
     let m_full = m - m % MATMUL_MR;
     let n_full = n - n % MATMUL_NR;
 
@@ -55883,6 +55897,15 @@ print(json.dumps(payload))
         let mut out = [1.0, 1.0];
         matmul_accumulate_serial(&lhs, &rhs, 2, 3, 1, &mut out);
         assert_eq!(out, [154.0, -262.0]);
+    }
+
+    #[test]
+    fn matmul_accumulate_serial_single_input_row_matches_dot_order() {
+        let lhs = [2.0, -3.0, 4.0];
+        let rhs = [13.0, -17.0, 19.0, 23.0, -29.0, 31.0];
+        let mut out = [1.0, 1.0];
+        matmul_accumulate_serial(&lhs, &rhs, 1, 3, 2, &mut out);
+        assert_eq!(out, [154.0, 258.0]);
     }
 
     #[test]
