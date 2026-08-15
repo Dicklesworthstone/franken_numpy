@@ -9357,11 +9357,16 @@ fn try_zerocopy_f64_isclose(
 // bench silently measures a branch we do not ship.
 #[inline]
 fn f64_divide_quotient_is_normal(q: f64) -> bool {
+    f64_divide_quotient_bits_are_normal(q.to_bits())
+}
+
+#[inline]
+fn f64_divide_quotient_bits_are_normal(bits: u64) -> bool {
     // A binary64 is normal exactly when its biased exponent lies in 1..0x7ff.
     // Subtracting one maps that interval to 0..0x7fe; the unsigned comparison
     // rejects both the zero exponent and the all-ones exponent without a branch.
     const EXPONENT_MASK: u64 = 0x7ff0_0000_0000_0000;
-    let exponent = q.to_bits() & EXPONENT_MASK;
+    let exponent = bits & EXPONENT_MASK;
     exponent.wrapping_sub(1) < EXPONENT_MASK - 1
 }
 
@@ -9400,7 +9405,9 @@ fn f64_divide_raises_fp_error(a: f64, b: f64, q: f64) -> bool {
 // invalid, overflow, and divide-by-zero still defer.
 #[inline]
 fn f64_divide_fast_accepts_without_fp_error(a: f64, b: f64, q: f64) -> bool {
-    f64_divide_quotient_is_normal(q) || (q == 0.0 && a == 0.0 && b.is_finite() && b != 0.0)
+    let bits = q.to_bits();
+    f64_divide_quotient_bits_are_normal(bits)
+        || (bits & 0x7fff_ffff_ffff_ffff == 0 && a == 0.0 && b.is_finite() && b != 0.0)
 }
 
 // Two-input f64-output counterpart of zerocopy_f64_unary_flat. When a and b are
@@ -109245,6 +109252,11 @@ mod tests {
                     f64_divide_quotient_is_normal(q),
                     q.is_normal(),
                     "normality mismatch for exponent={exponent:#x}, sign={sign:#x}"
+                );
+                assert_eq!(
+                    f64_divide_quotient_bits_are_normal(q.to_bits()),
+                    q.is_normal(),
+                    "bit normality mismatch for exponent={exponent:#x}, sign={sign:#x}"
                 );
             }
         }
