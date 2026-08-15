@@ -605,6 +605,11 @@ fn lu_decompose_blocked(
     let mut lu = a.to_vec();
     let mut perm: Vec<usize> = (0..n).collect();
     let mut sign = 1.0_f64;
+    // Every panel needs packed L21 and U12 buffers, but their largest extent is
+    // bounded by n * LU_PANEL_NB. Reuse that storage across the factorization
+    // instead of allocating and dropping two vectors per panel.
+    let mut l21_scratch = vec![0.0f64; n * LU_PANEL_NB];
+    let mut u12_scratch = vec![0.0f64; n * LU_PANEL_NB];
 
     let mut jb = 0;
     while jb < n {
@@ -666,18 +671,18 @@ fn lu_decompose_blocked(
         }
 
         // (3) Trailing update A22 -= L21·U12 via the packed GEMM.
-        let mut l21 = vec![0.0f64; trail * bw];
+        let l21 = &mut l21_scratch[..trail * bw];
         for i in 0..trail {
             let src = (panel_end + i) * n + jb;
             l21[i * bw..i * bw + bw].copy_from_slice(&lu[src..src + bw]);
         }
-        let mut u12 = vec![0.0f64; bw * trail];
+        let u12 = &mut u12_scratch[..bw * trail];
         for i in 0..bw {
             let src = (jb + i) * n + panel_end;
             u12[i * trail..i * trail + trail].copy_from_slice(&lu[src..src + trail]);
         }
         let target_start = panel_end * n + panel_end;
-        packed_gemm_sub_assign_strided(&l21, &u12, trail, bw, trail, n, &mut lu[target_start..]);
+        packed_gemm_sub_assign_strided(l21, u12, trail, bw, trail, n, &mut lu[target_start..]);
 
         jb = panel_end;
     }
