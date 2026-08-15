@@ -1348,6 +1348,30 @@ fn assert_divide_hazard_replica_matches_contract() {
             "bench fast accept must keep quiet {a} / {b} outside precise classification"
         );
     }
+
+    // Test the complete serial replica as well as its two predicates. The
+    // quiet lanes are deliberately non-normal, so a replica that checks only
+    // normal quotients would incorrectly report a hazard; the final lane is a
+    // genuine divide-by-zero negative case that must still report one.
+    let quiet_lhs = [8.0, 0.0, -0.0, f64::NAN, 4.0];
+    let quiet_rhs = [2.0, 2.0, -2.0, 2.0, f64::NAN];
+    let mut quiet_out = [0.0; 5];
+    assert!(
+        !divide_repaired_serial(&quiet_lhs, &quiet_rhs, &mut quiet_out),
+        "quiet signed-zero and NaN lanes must remain in the measured native arm"
+    );
+    assert_eq!(quiet_out[0].to_bits(), 4.0_f64.to_bits());
+    assert_eq!(quiet_out[1].to_bits(), 0.0_f64.to_bits());
+    assert_eq!(quiet_out[2].to_bits(), (-0.0_f64).to_bits());
+    assert!(quiet_out[3].is_nan() && quiet_out[4].is_nan());
+
+    let mut hazard_out = [0.0; 2];
+    assert!(
+        divide_repaired_serial(&[8.0, 1.0], &[2.0, 0.0], &mut hazard_out),
+        "a real divide-by-zero must keep the benchmark's fallback branch armed"
+    );
+    assert_eq!(hazard_out[0], 4.0);
+    assert!(hazard_out[1].is_infinite());
 }
 
 const DIVIDE_SERIAL_N: usize = 1 << 20; // below the kernel's 1<<21 rayon threshold
@@ -1383,14 +1407,12 @@ fn divide_former_serial(a: &[f64], b: &[f64], out: &mut [f64]) {
 /// then classify operands only when a non-normal quotient exists.
 #[inline(never)]
 fn divide_repaired_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
-    let needs_precise_classification = out.iter_mut().zip(a.iter()).zip(b.iter()).fold(
-        false,
-        |saw_non_normal, ((slot, &x), &y)| {
-            let q = x / y;
-            *slot = q;
-            saw_non_normal || !q.is_normal()
-        },
-    );
+    let mut needs_precise_classification = false;
+    for ((slot, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
+        let q = x / y;
+        *slot = q;
+        needs_precise_classification |= !q.is_normal();
+    }
     needs_precise_classification
         && a.iter()
             .zip(b.iter())
