@@ -1273,8 +1273,19 @@ fn group_enabled_with_spec(group_fn_name: &str, spec: Option<&str>) -> bool {
         .any(|token| group_fn_name.contains(token))
 }
 
+fn selected_group_count<'a>(
+    group_names: impl IntoIterator<Item = &'a str>,
+    spec: Option<&str>,
+) -> usize {
+    group_names
+        .into_iter()
+        .filter(|name| group_enabled_with_spec(name, spec))
+        .count()
+}
+
 fn verify_group_selection_contract() {
     let sessionization = "bench_realistic_clickstream_sessionization_vs_numpy_median_gate";
+    let groups = [sessionization, "bench_loadtxt_selected_bool_median_gate"];
     assert!(group_enabled_with_spec(sessionization, None));
     assert!(group_enabled_with_spec(
         sessionization,
@@ -1289,6 +1300,12 @@ fn verify_group_selection_contract() {
         Some("loadtxt_selected_bool")
     ));
     assert!(!group_enabled_with_spec(sessionization, Some(" , ")));
+    assert_eq!(selected_group_count(groups, None), 2);
+    assert_eq!(
+        selected_group_count(groups, Some("clickstream_sessionization")),
+        1
+    );
+    assert_eq!(selected_group_count(groups, Some("unmatched_group")), 0);
 }
 
 /// A named bench group: the group function's name (for `FNP_BENCH_GROUPS`
@@ -1310,10 +1327,10 @@ pub fn gated_main(targets: &[BenchGroup]) {
     );
     std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
     let selected_spec = group_selection_spec();
-    let selected_groups = targets
-        .iter()
-        .filter(|(name, _)| group_enabled_with_spec(name, selected_spec.as_deref()))
-        .count();
+    let selected_groups = selected_group_count(
+        targets.iter().map(|(name, _)| *name),
+        selected_spec.as_deref(),
+    );
     if let Some(spec) = selected_spec.as_deref() {
         assert!(
             selected_groups > 0,
