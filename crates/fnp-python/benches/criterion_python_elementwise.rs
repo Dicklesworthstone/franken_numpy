@@ -1637,18 +1637,48 @@ fn report_divide_route_share(n: usize, label: &str, kernel_ns: f64) {
         for _ in 0..8 {
             black_box(divide.call1(&args).expect("warm divide"));
         }
+        // TRAP 7 (mismatched statistics): `kernel_ns` is the contract's arm
+        // MEDIAN, so the denominator must be a median too. Dividing a median by
+        // a best-of understates the denominator and OVERSTATES the share — by
+        // more the noisier the host. It printed kernel_share=1.473 on
+        // vmi1293453, i.e. a kernel costing 147% of the call that contains it,
+        // which is what exposed this. The best-of is still reported, labelled,
+        // because it is the useful "how fast can this route go" number; it is
+        // just not the one a share may be computed from.
         const ROUNDS: usize = 24;
-        let mut best = f64::INFINITY;
+        let mut samples = Vec::with_capacity(ROUNDS);
         for _ in 0..ROUNDS {
             let started = std::time::Instant::now();
             black_box(divide.call1(&args).expect("divide"));
-            best = best.min(started.elapsed().as_secs_f64() * 1.0e9);
+            samples.push(started.elapsed().as_secs_f64() * 1.0e9);
         }
+        let best = samples.iter().copied().fold(f64::INFINITY, f64::min);
+        samples.sort_by(f64::total_cmp);
+        let end_to_end_median = if samples.len() % 2 == 0 {
+            (samples[samples.len() / 2 - 1] + samples[samples.len() / 2]) / 2.0
+        } else {
+            samples[samples.len() / 2]
+        };
+        let share = kernel_ns / end_to_end_median;
         println!(
-            "DIVIDE_ROUTE_SHARE label={label} n={n} end_to_end_ns={best:.1} \
-             kernel_ns={kernel_ns:.1} kernel_share={:.3}",
-            kernel_ns / best
+            "DIVIDE_ROUTE_SHARE label={label} n={n} rounds={ROUNDS} \
+             end_to_end_median_ns={end_to_end_median:.1} end_to_end_best_ns={best:.1} \
+             kernel_ns={kernel_ns:.1} kernel_statistic=arm_median \
+             end_to_end_statistic=median kernel_share={share:.3} \
+             share_exceeds_one={}",
+            share > 1.0,
         );
+        // A kernel timed strictly inside the end-to-end call cannot outlast it.
+        // Reaching here means the replica is not modelling the shipped route (a
+        // different loop shape, or a route that no longer runs this kernel), so
+        // say so on the row instead of letting a >1.0 "share" be quoted.
+        if share > 1.0 {
+            println!(
+                "DIVIDE_ROUTE_SHARE_WARNING label={label} \
+                 verdict=replica_slower_than_the_route_it_models \
+                 do_not_quote_this_share=true"
+            );
+        }
     });
 }
 
