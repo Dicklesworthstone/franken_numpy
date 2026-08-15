@@ -68385,7 +68385,8 @@ fn try_native_f16_searchsorted_table(
         "right" => true,
         _ => return Ok(None),
     };
-    if v.getattr("ndim")?.extract::<usize>()? == 0
+    if a.getattr("ndim")?.extract::<usize>()? != 1
+        || v.getattr("ndim")?.extract::<usize>()? == 0
         || !a.getattr("dtype")?.getattr("isnative")?.extract::<bool>()?
         || !v.getattr("dtype")?.getattr("isnative")?.extract::<bool>()?
     {

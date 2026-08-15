@@ -1458,6 +1458,24 @@ for side in ('left', 'right'):
     expected = np.searchsorted(unsorted_a, v, side=side)
     ok = ok and got.dtype == expected.dtype and got.shape == expected.shape and got.tobytes() == expected.tobytes()
 
+# `a` is required to be 1-D by NumPy. A C-contiguous matrix exposes a flat
+# buffer too, so the table path must defer before flattening its haystack.
+matrix_a = a.reshape(2, -1)
+for side in ('left', 'right'):
+    try:
+        np.searchsorted(matrix_a, v, side=side)
+    except Exception as exc:
+        expected_error = type(exc).__name__
+    else:
+        expected_error = None
+    try:
+        fnp.searchsorted(matrix_a, v, side=side)
+    except Exception as exc:
+        got_error = type(exc).__name__
+    else:
+        got_error = None
+    ok = ok and expected_error == 'ValueError' and got_error == expected_error
+
 # NaN ordering is deliberately owned by NumPy/the widening fallback rather than
 # the finite table. Distinct payloads cover both haystack and query deferral.
 a_nan = np.concatenate((a, np.array([np.uint16(0x7e01)], dtype=np.uint16).view(np.float16)))
