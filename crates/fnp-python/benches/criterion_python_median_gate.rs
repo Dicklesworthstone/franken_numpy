@@ -179,11 +179,19 @@ fn parse_proc_status_rss_kib(status: &str) -> Result<u64, String> {
         .lines()
         .find_map(|line| line.strip_prefix("VmRSS:"))
         .ok_or_else(|| "missing VmRSS in /proc/self/status".to_owned())?;
-    rss.split_ascii_whitespace()
+    let mut fields = rss.split_ascii_whitespace();
+    let rss_kib = fields
         .next()
         .ok_or_else(|| "missing VmRSS value in /proc/self/status".to_owned())?
         .parse::<u64>()
-        .map_err(|error| format!("invalid VmRSS in /proc/self/status: {error}"))
+        .map_err(|error| format!("invalid VmRSS in /proc/self/status: {error}"))?;
+    match fields.next() {
+        Some("kB") => Ok(rss_kib),
+        Some(unit) => Err(format!(
+            "unexpected VmRSS unit in /proc/self/status: {unit}"
+        )),
+        None => Err("missing VmRSS unit in /proc/self/status".to_owned()),
+    }
 }
 
 fn process_resource_snapshot() -> ProcessResourceSnapshot {
@@ -313,6 +321,10 @@ fn verify_process_resource_snapshot_parser() {
     assert_eq!(
         parse_proc_status_rss_kib("Name:\tcriterion\nVmRSS:\t4242 kB\n"),
         Ok(4242)
+    );
+    assert!(
+        parse_proc_status_rss_kib("VmRSS:\t4242 bytes\n").is_err(),
+        "the lifecycle report is KiB-only and must reject a changed unit"
     );
 
     let lifecycle = result_buffer_lifecycle(
