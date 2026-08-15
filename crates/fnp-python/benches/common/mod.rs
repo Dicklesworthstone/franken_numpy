@@ -1310,20 +1310,26 @@ pub fn gated_main(targets: &[BenchGroup]) {
     );
     std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
     let selected_spec = group_selection_spec();
-    let mut criterion = Criterion::default().configure_from_args();
-    let mut selected_groups = 0usize;
-    for (name, target) in targets {
-        if group_enabled_with_spec(name, selected_spec.as_deref()) {
-            selected_groups += 1;
-            target(&mut criterion);
-        }
-    }
-    if let Some(spec) = selected_spec {
+    let selected_groups = targets
+        .iter()
+        .filter(|(name, _)| group_enabled_with_spec(name, selected_spec.as_deref()))
+        .count();
+    if let Some(spec) = selected_spec.as_deref() {
         assert!(
             selected_groups > 0,
             "fnp-group selector {spec:?} matched no benchmark groups"
         );
+        // This must precede Criterion construction and target setup: remote
+        // workers can spend minutes compiling or importing Python, and a
+        // captured prefix still needs to prove which exact group was admitted.
         println!("BENCH_GROUP_SELECTION selector={spec:?} selected_groups={selected_groups}");
+        std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
+    }
+    let mut criterion = Criterion::default().configure_from_args();
+    for (name, target) in targets {
+        if group_enabled_with_spec(name, selected_spec.as_deref()) {
+            target(&mut criterion);
+        }
     }
     criterion.final_summary();
 }
