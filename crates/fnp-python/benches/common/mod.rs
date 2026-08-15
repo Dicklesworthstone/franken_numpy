@@ -1333,7 +1333,9 @@ where
     // exactly the phases `dual_null_observation_count_per_arm` counts. Writing
     // the three calls out by hand is what let the accounting drift before:
     // a phase can only be added to the schedule by adding it here too.
-    let mut phase_stats = Vec::with_capacity(DUAL_NULL_PHASES.len());
+    let mut incumbent_null = None;
+    let mut candidate_null = None;
+    let mut effect = None;
     for phase in DUAL_NULL_PHASES {
         let stats = run_dual_null_phase(phase, &mut incumbent, &mut candidate, rounds, min_of);
         report_contract_pair_with_sampling(
@@ -1342,11 +1344,18 @@ where
             rounds,
             min_of,
         );
-        phase_stats.push(stats);
+        // Exhaustive on purpose: a phase added to the schedule cannot compile
+        // until it is given a destination here, which is the drift this whole
+        // accounting exists to prevent.
+        match phase {
+            DualNullPhase::IncumbentNull => incumbent_null = Some(stats),
+            DualNullPhase::CandidateNull => candidate_null = Some(stats),
+            DualNullPhase::Effect => effect = Some(stats),
+        }
     }
-    let [incumbent_null, candidate_null, effect]: [ContractPairStats; 3] = phase_stats
-        .try_into()
-        .unwrap_or_else(|_| panic!("the dual-null schedule must run exactly three phases"));
+    let incumbent_null = incumbent_null.expect("the schedule must run an incumbent A/A phase");
+    let candidate_null = candidate_null.expect("the schedule must run a candidate A/A phase");
+    let effect = effect.expect("the schedule must run the interleaved effect phase");
 
     report_dual_null_contract_gate(row, effect, incumbent_null, candidate_null);
     (effect, incumbent_null, candidate_null)
