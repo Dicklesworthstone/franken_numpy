@@ -1252,15 +1252,18 @@ pub fn report_ledger_pair(
 /// Criterion filter is the fail-closed remote equivalent: RCH intentionally
 /// does not forward arbitrary caller environment variables, while the argument
 /// is part of the exact remotely executed command.
-pub fn group_enabled(group_fn_name: &str) -> bool {
+fn group_selection_spec() -> Option<String> {
     // The explicit command-line selector is the remote, auditable source of
     // truth. It must override any inherited worker environment (including an
     // accidentally present empty FNP_BENCH_GROUPS), otherwise a correctly
     // filtered RCH invocation can build the ELF and silently execute no group.
-    let spec = std::env::args()
+    std::env::args()
         .skip(1)
         .find_map(|argument| argument.strip_prefix("fnp-group=").map(str::to_owned))
-        .or_else(|| std::env::var("FNP_BENCH_GROUPS").ok());
+        .or_else(|| std::env::var("FNP_BENCH_GROUPS").ok())
+}
+
+fn group_enabled_with_spec(group_fn_name: &str, spec: Option<&str>) -> bool {
     let Some(spec) = spec else {
         return true;
     };
@@ -1268,6 +1271,24 @@ pub fn group_enabled(group_fn_name: &str) -> bool {
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .any(|token| group_fn_name.contains(token))
+}
+
+fn verify_group_selection_contract() {
+    let sessionization = "bench_realistic_clickstream_sessionization_vs_numpy_median_gate";
+    assert!(group_enabled_with_spec(sessionization, None));
+    assert!(group_enabled_with_spec(
+        sessionization,
+        Some("realistic_clickstream_sessionization"),
+    ));
+    assert!(group_enabled_with_spec(
+        sessionization,
+        Some("other_group, clickstream_sessionization"),
+    ));
+    assert!(!group_enabled_with_spec(
+        sessionization,
+        Some("loadtxt_selected_bool")
+    ));
+    assert!(!group_enabled_with_spec(sessionization, Some(" , ")));
 }
 
 /// A named bench group: the group function's name (for `FNP_BENCH_GROUPS`
@@ -1282,16 +1303,27 @@ pub fn gated_main(targets: &[BenchGroup]) {
     // backend notice during construction.
     report_bench_identity();
     verify_contract_gate_semantics();
+    verify_group_selection_contract();
     println!(
         "BALANCED_SQUARE_ADMISSION schedule=ABBAABBA host_quiescence=not_required \
          null_controls=required incumbent_same_invocation=required"
     );
     std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
+    let selected_spec = group_selection_spec();
     let mut criterion = Criterion::default().configure_from_args();
+    let mut selected_groups = 0usize;
     for (name, target) in targets {
-        if group_enabled(name) {
+        if group_enabled_with_spec(name, selected_spec.as_deref()) {
+            selected_groups += 1;
             target(&mut criterion);
         }
+    }
+    if let Some(spec) = selected_spec {
+        assert!(
+            selected_groups > 0,
+            "fnp-group selector {spec:?} matched no benchmark groups"
+        );
+        println!("BENCH_GROUP_SELECTION selector={spec:?} selected_groups={selected_groups}");
     }
     criterion.final_summary();
 }
