@@ -1655,9 +1655,40 @@ fn assert_route_share_uses_matched_statistics() {
     assert_eq!(route_share_median_ns(&mut single), 42.0);
 }
 
-/// Times the real `fnp.divide(a, b)` end to end and prints the kernel's share of
-/// it, so the kernel ratio above is read against the call it actually sits in.
-fn report_divide_route_share(n: usize, label: &str, kernel_ns: f64) {
+/// The same three-lane checksum `divide_checksum` computes, read off the route's
+/// NumPy result. Called after the timer stops, so the extraction never lands
+/// inside the measurement. Both arms of the share contract must agree on it or
+/// the round fails, which is what makes the share a ratio of two timings of ONE
+/// computation rather than of two different ones.
+fn numpy_divide_checksum(result: &pyo3::Bound<'_, pyo3::PyAny>, n: usize) -> u64 {
+    let lane = |index: usize| -> u64 {
+        result
+            .get_item(index)
+            .expect("route result index")
+            .extract::<f64>()
+            .expect("route result lane is f64")
+            .to_bits()
+    };
+    lane(0) ^ lane(n / 2).rotate_left(17) ^ lane(n - 1).rotate_left(37)
+}
+
+/// Times the kernel replica and the real `fnp.divide(a, b)` call INTERLEAVED
+/// inside one balanced-square contract, so the kernel's share of the route is a
+/// ratio of two quantities measured under the same conditions.
+///
+/// The previous form ran the contract, then timed the route in a separate loop
+/// afterwards, and divided one by the other. Those phases see different host
+/// load, and the resulting "share" swung 0.804-1.911 for the same arm on the
+/// same worker - it inherited the phase-to-phase load difference as if it were
+/// signal (`deadlock-audit-c9rn8`). Interleaving is the same law the A/B arms
+/// already obey; the share was the one number in this file exempt from it.
+///
+/// Ratio is kernel/route, so it reads directly as the share, and the contract's
+/// A/A null says whether the host was quiet enough for it to mean anything.
+fn report_divide_route_share<K>(n: usize, label: &str, mut kernel: K)
+where
+    K: FnMut() -> common::ContractObservation,
+{
     Python::initialize();
     Python::attach(|py| {
         ensure_numpy_available(py).expect("numpy available");
@@ -1688,40 +1719,64 @@ fn report_divide_route_share(n: usize, label: &str, kernel_ns: f64) {
             "fnp.divide is numpy's object — the route under test is not ours"
         );
         let args = PyTuple::new(py, [&a, &b]).expect("args");
-        for _ in 0..8 {
-            black_box(divide.call1(&args).expect("warm divide"));
+        let route = || {
+            let started = Instant::now();
+            let result = divide.call1(&args).expect("divide");
+            let elapsed = started.elapsed();
+            // Checksum AFTER the timer: it is a parity check between the arms,
+            // not part of the route's cost.
+            let checksum = numpy_divide_checksum(&result, n);
+            common::ContractObservation { elapsed, checksum }
+        };
+
+        // PREFLIGHT the cross-arm parity the contract will assert. The kernel's
+        // operands are built in Rust and the route's in NumPy; if those ever
+        // stop agreeing bit for bit, the contract's checksum assertion would
+        // panic and take the A/B rows down with it — the same way an unexecuted
+        // assertion took every group in this file down for a day (34dc92fc).
+        // The share is optional telemetry and must never cost a measured row,
+        // so a mismatch is reported and skipped rather than raised.
+        let kernel_probe = kernel();
+        let route_probe = route();
+        if kernel_probe.checksum != route_probe.checksum {
+            println!(
+                "DIVIDE_ROUTE_SHARE_SKIPPED label={label} n={n} \
+                 verdict=kernel_and_route_operands_disagree \
+                 kernel_checksum={:016x} route_checksum={:016x} \
+                 share_not_reported=true",
+                kernel_probe.checksum, route_probe.checksum,
+            );
+            return;
         }
-        // TRAP 7 (mismatched statistics): `kernel_ns` is the contract's arm
-        // MEDIAN, so the denominator must be a median too. Dividing a median by
-        // a best-of understates the denominator and OVERSTATES the share — by
-        // more the noisier the host. It printed kernel_share=1.473 on
-        // vmi1293453, i.e. a kernel costing 147% of the call that contains it,
-        // which is what exposed this. The best-of is still reported, labelled,
-        // because it is the useful "how fast can this route go" number; it is
-        // just not the one a share may be computed from.
-        const ROUNDS: usize = 24;
-        let mut samples = Vec::with_capacity(ROUNDS);
-        for _ in 0..ROUNDS {
-            let started = std::time::Instant::now();
-            black_box(divide.call1(&args).expect("divide"));
-            samples.push(started.elapsed().as_secs_f64() * 1.0e9);
-        }
-        let best = samples.iter().copied().fold(f64::INFINITY, f64::min);
-        let end_to_end_median = route_share_median_ns(&mut samples);
-        let share = kernel_ns / end_to_end_median;
+
+        // Arm A is the kernel, arm B is the route, so the effect ratio IS the
+        // share. The contract interleaves them ABBAABBA and runs a kernel/kernel
+        // A/A null first; it also asserts both arms' checksums match every
+        // round, so a share can only be reported for two timings of the same
+        // computation.
+        let (effect, null) =
+            common::run_median_ci_contract(&format!("divide_route_share_{label}"), kernel, route);
         println!(
-            "DIVIDE_ROUTE_SHARE label={label} n={n} rounds={ROUNDS} \
-             end_to_end_median_ns={end_to_end_median:.1} end_to_end_best_ns={best:.1} \
-             kernel_ns={kernel_ns:.1} kernel_statistic=arm_median \
-             end_to_end_statistic=median kernel_share={share:.3} \
-             share_exceeds_one={}",
-            share > 1.0,
+            "DIVIDE_ROUTE_SHARE label={label} n={n} interleaved=true \
+             kernel_median_ns={:.1} route_median_ns={:.1} kernel_share={:.3} \
+             kernel_share_ci95=[{:.3},{:.3}] null_ratio_median={:.6} \
+             null_ci95=[{:.6},{:.6}] share_exceeds_one={} checksum={:016x}",
+            effect.arm_a_median_ns,
+            effect.arm_b_median_ns,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            null.ratio_median,
+            null.ratio_ci_low,
+            null.ratio_ci_high,
+            effect.ratio_median > 1.0,
+            effect.checksum,
         );
         // A kernel timed strictly inside the end-to-end call cannot outlast it.
-        // Reaching here means the replica is not modelling the shipped route (a
-        // different loop shape, or a route that no longer runs this kernel), so
-        // say so on the row instead of letting a >1.0 "share" be quoted.
-        if share > 1.0 {
+        // Now that both arms are interleaved this is a real signal rather than a
+        // phase artifact: it means the replica is not modelling the shipped
+        // route. Say so on the row instead of letting the number be quoted.
+        if effect.ratio_ci_low > 1.0 {
             println!(
                 "DIVIDE_ROUTE_SHARE_WARNING label={label} \
                  verdict=replica_slower_than_the_route_it_models \
@@ -1755,12 +1810,20 @@ fn bench_divide_fe_hazard_serial(_c: &mut Criterion) {
         black_box(&repaired_out);
         common::ContractObservation { elapsed, checksum }
     };
-    let (effect, _null) = common::run_median_ci_contract(
+    let (_effect, _null) = common::run_median_ci_contract(
         "divide_fe_hazard_branch_serial_1m",
         time_former,
         time_repaired,
     );
-    report_divide_route_share(n, "serial", effect.arm_b_median_ns);
+    let mut share_out = vec![0.0_f64; n];
+    report_divide_route_share(n, "serial", || {
+        let started = Instant::now();
+        let hazard = divide_repaired_serial(&a, &b, &mut share_out);
+        let elapsed = started.elapsed();
+        assert!(!hazard, "operands must be hazard-free for this measurement");
+        let checksum = divide_checksum(&share_out);
+        common::ContractObservation { elapsed, checksum }
+    });
 }
 
 fn bench_divide_fe_hazard_parallel(_c: &mut Criterion) {
@@ -1787,12 +1850,20 @@ fn bench_divide_fe_hazard_parallel(_c: &mut Criterion) {
         black_box(&repaired_out);
         common::ContractObservation { elapsed, checksum }
     };
-    let (effect, _null) = common::run_median_ci_contract(
+    let (_effect, _null) = common::run_median_ci_contract(
         "divide_fe_hazard_branch_parallel_4m",
         time_former,
         time_repaired,
     );
-    report_divide_route_share(n, "parallel", effect.arm_b_median_ns);
+    let mut share_out = vec![0.0_f64; n];
+    report_divide_route_share(n, "parallel", || {
+        let started = Instant::now();
+        let hazard = divide_repaired_parallel(&a, &b, &mut share_out);
+        let elapsed = started.elapsed();
+        assert!(!hazard, "operands must be hazard-free for this measurement");
+        let checksum = divide_checksum(&share_out);
+        common::ContractObservation { elapsed, checksum }
+    });
 }
 
 /// Isolates the fusion lever: base arm is the shipped scanning form, candidate
@@ -1827,12 +1898,20 @@ fn bench_divide_fe_hazard_fused_serial(_c: &mut Criterion) {
     };
     // The contract asserts both arms' checksums match every round, so a fusion
     // that changed a quotient bit fails the measurement rather than winning it.
-    let (effect, _null) = common::run_median_ci_contract(
+    let (_effect, _null) = common::run_median_ci_contract(
         "divide_fe_hazard_fused_serial_1m",
         time_scanned,
         time_fused,
     );
-    report_divide_route_share(n, "fused_serial", effect.arm_b_median_ns);
+    let mut share_out = vec![0.0_f64; n];
+    report_divide_route_share(n, "fused_serial", || {
+        let started = Instant::now();
+        let hazard = divide_fused_serial(&a, &b, &mut share_out);
+        let elapsed = started.elapsed();
+        assert!(!hazard, "operands must be hazard-free for this measurement");
+        let checksum = divide_checksum(&share_out);
+        common::ContractObservation { elapsed, checksum }
+    });
 }
 
 fn bench_divide_fe_hazard_fused_parallel(_c: &mut Criterion) {
@@ -1860,10 +1939,18 @@ fn bench_divide_fe_hazard_fused_parallel(_c: &mut Criterion) {
         black_box(&fused_out);
         common::ContractObservation { elapsed, checksum }
     };
-    let (effect, _null) = common::run_median_ci_contract(
+    let (_effect, _null) = common::run_median_ci_contract(
         "divide_fe_hazard_fused_parallel_4m",
         time_scanned,
         time_fused,
     );
-    report_divide_route_share(n, "fused_parallel", effect.arm_b_median_ns);
+    let mut share_out = vec![0.0_f64; n];
+    report_divide_route_share(n, "fused_parallel", || {
+        let started = Instant::now();
+        let hazard = divide_fused_parallel(&a, &b, &mut share_out);
+        let elapsed = started.elapsed();
+        assert!(!hazard, "operands must be hazard-free for this measurement");
+        let checksum = divide_checksum(&share_out);
+        common::ContractObservation { elapsed, checksum }
+    });
 }
