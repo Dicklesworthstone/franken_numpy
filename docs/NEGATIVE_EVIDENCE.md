@@ -8,6 +8,89 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - MEASURED, THIRD RUN OF THE WORST CELL: ~3.4x with all eight nulls clean - and it does NOT support the "quote the excess" recommendation I made one row ago (`deadlock-audit-ei9jz`, `deadlock-audit-7xcq2`)
+
+`RedLynx`. Third independent run of the campaign's worst vs-incumbent cell, same ELF as run 2,
+ABBA in one invocation. Banked mainly for what it says about the two previous rows.
+
+**Campaign result class:** decidable-regression (all four cells are losses) + methodology
+
+```
+bench_elf_sha256=d285003d76596de0d4fd37c23b681c6d78f4cc0f43eda81f2141c0090c2f08d2
+harness_source_matches_disk=true  worker=thinkstation1 (5975WX 32P/64L, powersave)
+rayon_pool_threads=64 OBSERVED  numpy 2.4.3  profile=bench  n=256
+load 1min 21.77 before -> 20.59 after  harness=common::run_dual_null_median_ci_contract
+schedule=ABBAABBA rounds=41 min_of=3
+
+ op        ratio      ci95                    fnp/numpy  worst   numpy  fnp    excess
+ subtract  0.290514   [0.289651,0.291610]     3.442x     3.453x    431   1488    1057
+ add       0.295995   [0.294197,0.297370]     3.378x     3.399x    436   1473    1037
+ divide    0.340014   [0.339337,0.342566]     2.941x     2.947x    471   1373     902
+ multiply  0.348983   [0.347623,0.352013]     2.865x     2.877x    441   1267     826
+```
+
+**ALL EIGHT A/A NULLS STRADDLE UNITY THIS RUN**, the cleanest of the three: add
+incumbent [0.992074,1.000000] candidate [0.996662,1.008372]; subtract [1.000000,1.002326] /
+[0.996617,1.003360]; multiply [0.991111,1.000000] / [0.996025,1.003994]; divide
+[1.000000,1.000000] / [0.996007,1.006048]. The biased candidate nulls that run 2 carried on
+`multiply` (0.77%) and `divide` (1.00%) did NOT recur, which is itself evidence that they were a
+property of that run and not of those arms.
+
+**I WAS WRONG ONE ROW AGO, and three runs are enough to say so.** That row concluded: "If a
+future row needs a single number, use the excess (1127 ns), which is identical for both and does
+not depend on NumPy's per-op cost." The reasoning was that the ratio inherits NumPy's own
+run-to-run variance while the excess does not. Across the three runs of this cell, that is not
+what happens:
+
+```
+ op        ratio cv%   excess cv%   stabler
+ add          3.74        4.32       ratio
+ subtract     2.27        3.89       ratio
+ multiply     3.11        2.14       excess
+ divide       3.20        3.50       ratio
+```
+
+The excess is stabler in ONE of four ops. The two statistics have comparable run-to-run variation
+(cv 2-4% either way), so **neither is the privileged number and the recommendation should not be
+followed.** The flaw in my reasoning: the excess is a DIFFERENCE of two noisy medians and carries
+both their errors, while the ratio is a quotient in which correlated run-level slowdowns partly
+cancel. I reasoned about which quantity was conceptually cleaner and never checked which was
+empirically stabler. `n=3` is a small sample for a variance comparison, so this refutes the
+recommendation rather than establishing the opposite; quote both, as these rows now do.
+
+**THE CELL ACROSS THREE RUNS**, two builds, route source identical throughout (only bench and
+harness files differed between the ELFs):
+
+```
+              run 1            run 2            run 3         spread
+  add         0.275034         0.282413         0.295995      7.4%
+  subtract    0.281461         0.278061         0.290514      4.4%
+  multiply    0.327948         0.339939         0.348983      6.2%
+  divide      0.320179         0.324061         0.340014      6.0%
+```
+
+So the honest headline for this cell is **~2.9-3.6x slower than NumPy at n=256**, and the
+worst-op label is not stable: run 1 said `add`, runs 2 and 3 said `subtract`, and the two are
+separated by less than their run-to-run spread. Quote the cell, not an op.
+
+**THE SECOND-WORKER REPLICATION WAS ATTEMPTED AND FAILED, operationally.**
+`RCH_REQUIRE_REMOTE=1 rch exec -- cargo bench -p fnp-python --bench criterion_python_elementwise`
+selected `vmi1152480`, synced the project, rewrote `CARGO_TARGET_DIR` to a worker-scoped pool path
+— and then exceeded a 570 s window inside the compile, emitting no row. This reproduces the
+obstacle already recorded against `bench_divide_size_gate_vs_numpy` ("a four-cell sweep did not
+fit rch's 1800s SSH ceiling: the bench compile alone consumed it"). **The `replicate on a second
+worker` predicate on the two rows below therefore remains OPEN**, and the next attempt should not
+repeat this shape: either pre-warm the worker's pooled target dir with a separate build job and
+run the bench in a second command that captures the ELF in the SAME invocation, or build locally
+and copy the ELF to a host whose glibc and libpython match, sha-ing both ends.
+
+RETRY PREDICATE: (1) The `replicate on a second worker` item is unchanged and still blocking any
+fleet-level claim; every row in this series is thinkstation1. (2) Do NOT re-run this cell a fourth
+time on this host — three runs bound it at 2.9-3.6x and a fourth adds noise, not information.
+(3) When a second worker is reached, compare the SPREAD reported here (4-7%) against the
+cross-host difference before attributing anything to the host. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - THE WORST vs-INCUMBENT RATIO, RE-MEASURED POST-FIX: `fnp.multiply` at n=256 is 3.124x SLOWER than NumPy (was 5.998x), and parity still arrives only at 2^24 (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. My worst measured vs-incumbent ratio, run ABBA in one invocation on the current ELF.
