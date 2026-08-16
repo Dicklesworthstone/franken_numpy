@@ -506,6 +506,84 @@ generality. (3) The next named lever is `deadlock-audit-t4lri`: `PyUFunc::__call
 nine-parameter signature, the largest never-priced stage of the remaining ~1000 ns excess.
 AGENT_NAME=RedLynx.
 
+## 2026-08-16 - INVALIDATES A SHIPPED DECISION: `bench_maximum_arms_vs_numpy` compares an ALLOCATION-FREE replica against an ALLOCATING NumPy call - the same op reads 2.43x WIN there and 0.91x LOSS on the real route, same host, same ELF, same session (`deadlock-audit-48by6`; the `deadlock-audit-hzl1w` decision rests on the flattered number)
+
+`SlateHeron`. Two groups in ONE binary disagree about `maximum` by 2.7x in the ratio. That cannot
+be host variance, worker placement, or ISA — the usual excuses are all unavailable, because it is
+one invocation-set on one machine minutes apart. One of them is not measuring what its name says.
+
+**Campaign result class:** maintenance-diagnostic
+
+**A/A null control (same invocation):** every row quoted here carried BOTH nulls and all sat on
+unity — family-sweep maximum incumbent/candidate nulls inside [0.987,1.024]; arms-group parallel
+nulls 0.998337 and 1.004367; arms-group serial nulls 0.996428 and 0.999563. That is precisely the
+point of this row: the nulls are clean on BOTH sides of a 2.7x disagreement, because a null proves
+reproducibility and never comparability.
+
+COUNTED_MECHANISM: allocation traffic asymmetric between arms (`class=candidate_skips_incumbent_allocation`).
+Candidate arms write into `Vec<f64>` buffers allocated ONCE outside the timing loop; the incumbent
+`np_maximum.call1(&args)` allocates a fresh 4194304 x 8 B = 32 MB output on EVERY iteration and pays
+its first-touch page faults. Counted: 1 output allocation per incumbent iteration, 0 per candidate
+iteration. Our same-op cost differs 2086990 ns (free buffer) vs 7075751 ns (route allocates) = 3.39x,
+against this ledger's independently measured large-buffer allocation factor of 2.8x.
+
+```
+bench_native_binary_family_vs_numpy   op=maximum n=4194304  operands: clean positive
+  numpy_ns=6441077  fnp_ns=7075751  ratio=0.907848 ci95=[0.893151,0.921467]  DECIDABLE_REGRESSION
+
+bench_maximum_arms_vs_numpy           op=maximum n=4194304  operands: mixed sign + NaN + signed zero
+  numpy_ns=5046854  fnp_ns=2086990  ratio=2.430654 ci95=[2.364124,2.487569]  DECIDABLE_WIN  (parallel)
+  numpy_ns=5046609  fnp_ns=3504376  ratio=1.446484 ci95=[1.424408,1.458281]  DECIDABLE_WIN  (serial)
+```
+
+worker=thinkstation1, numpy 2.4.3, bench_elf_sha256=ef5467cb2a43c00b191011ba4b6a4b56ad1f09ec9506a9df7d7df015083431cd,
+all rows under `common::run_dual_null_median_ci_contract` with both nulls on unity. No build (/data at 42G).
+
+**THE CAUSE IS NOT THE OPERANDS, WHICH IS WHERE I LOOKED FIRST.** The operand sets do differ (the
+arms group injects NaN and signed-zero lanes), and that was my leading hypothesis until I read the
+group. It is wrong. NumPy is FASTER on the NaN operands (5.05 ms) than on the clean ones (6.44 ms),
+so a NaN slow path in the incumbent cannot explain a win. The 3.4x is on OUR side: 2.09 ms in the
+arms group against 7.08 ms in the family sweep, for the same op at the same n.
+
+**THE CAUSE IS AN ALLOCATION ASYMMETRY BETWEEN THE ARMS.** `bench_maximum_arms_vs_numpy` does not
+measure the shipped route at all. Its candidate arms are the Rust replicas `maximum_serial` /
+`maximum_parallel` writing into `Vec<f64>` buffers allocated ONCE outside the timing loop. Its
+incumbent is `np_maximum.call1(&args)` — positional only, no `out=` — which allocates a fresh 32 MB
+output on EVERY iteration and pays its first-touch page faults. So the candidate is handed, free,
+the single most expensive thing the incumbent does. The 3.4x gap between our two numbers for the
+same op is the cost of that buffer, and it is the same large-buffer allocation mechanism this
+ledger already proved dominates elementwise work (2.8x repo-wide, collapsing to 1.015x under
+`MALLOC_MMAP_THRESHOLD_`).
+
+**WHICH NUMBER IS HONEST: 0.907848, THE LOSS.** `bench_native_binary_family_vs_numpy` calls
+`fnp.maximum` through the real `PyUFunc` route, which allocates its output via `numpy.empty` exactly
+as NumPy does. Both arms pay the buffer. That is the comparison a user experiences.
+
+**WHAT THIS INVALIDATES.** The 2026-08-16 REJECT of `deadlock-audit-hzl1w` — which declined a
+proposal to delegate f64 maximum/minimum to NumPy on the grounds that "the serial native arm BEATS
+NumPy 1.352401x and delegating would throw that away" — rests on this group. Its 1.352401x is the
+same allocation-free-versus-allocating comparison, and this host reads its sibling at 1.446484x for
+the same reason. **The REJECT's evidence does not support its conclusion.** That does not
+automatically make delegation right: the correct route-level numbers here are 0.907848 for maximum
+and 0.913424 for minimum, i.e. we lose by ~1.10x, and `hzl1w`'s original claim was that the parallel
+arm loses — which the route-level measurement now CONFIRMS. The REJECT was decided against the one
+arm that had been given a free buffer.
+
+**WHY THIS WAS INVISIBLE.** `bench_native_binary_family_vs_numpy` and `bench_maximum_arms_vs_numpy`
+have never been run in the same session by the same agent before today; each was cited on its own,
+on its own worker, and each carried clean dual nulls. **Clean A/A nulls do not detect an arm
+asymmetry** — both arms are internally reproducible, so both nulls sit on unity while the effect
+between them measures a buffer rather than a kernel. A null control proves stability, never
+comparability.
+
+RETRY PREDICATE: do not quote `bench_maximum_arms_vs_numpy` at all until its incumbent is given a
+preallocated `out=` array, matching what `bench_divide_accumulate_isolation_vs_numpy` (b0107749)
+already does deliberately. Until then it prices a buffer. Then re-decide `hzl1w` on route-level
+numbers only. And audit every other group whose candidate is a Rust replica against an allocating
+NumPy call — the same defect is structural, not specific to `maximum`, and this is the second time
+allocation has silently set an elementwise ratio in this ledger.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - MEASURED, THE DIVIDE LOSS IS **NOT** THE ROUTE: `multiply` on the SAME route reaches 0.9656 where `divide` sits at 0.8455, and the route is at PARITY by 2^24 (`deadlock-audit-0ppym` filed; `deadlock-audit-vqxoa` corrected)
 
 `SlateHeron`. The divide row above says the arithmetic is not the constraint. This says where the
