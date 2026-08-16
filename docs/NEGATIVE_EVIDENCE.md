@@ -4,6 +4,83 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+
+## 2026-08-16 - MEASURED, THE CORRECTION FLIPS THE ARM ORDERING: with neither side allocating, PARALLEL maximum WINS 1.664906x and SERIAL LOSES 0.935461x - the exact opposite of the flattered row, and it REFUTES my own claim that the internal ordering survived (`deadlock-audit-48by6`, `deadlock-audit-hzl1w`)
+
+`RedLynx`. First run of the corrected `bench_maximum_arms_vs_numpy` (fix `e5d5a67d`), on the
+first build after the freeze lifted. Both arms in ONE invocation, both A/A nulls carried, NEITHER
+side allocating.
+
+**Campaign result class:** incumbent-win (parallel replica) + decidable-regression (serial replica)
+
+```
+bench_elf_sha256=d285003d76596de0d4fd37c23b681c6d78f4cc0f43eda81f2141c0090c2f08d2
+elf_path=target/release/deps/criterion_python_elementwise-b3bfa783f49ff1ab (307508944 bytes)
+harness_contract_source_sha256=2188f288f6e7775520b371d4c09d6d6ef298b22979d7e43aa54af69ff38eeaae
+harness_source_matches_disk=true covers=common/mod.rs+bench_file
+worker=thinkstation1 (5975WX 32P/64L, governor=powersave) numpy 2.4.3 profile=bench n=2^22
+load 1min 75.25 before -> 75.83 after, on 64 logical threads
+allocation=neither_arm_allocates incumbent_writes_into_preallocated_numpy_out=true
+candidate_writes_into_preallocated_vec=true arms_are_replicas_not_the_shipped_route=true
+
+  arm=parallel_native ratio=1.664906 ci95=[1.555968,1.764269] numpy 4232670 ns fnp 2560894 ns
+      DECIDABLE_WIN   worst_bound=1.555968
+  arm=serial_native   ratio=0.935461 ci95=[0.922861,0.943208] numpy 4111546 ns fnp 4470575 ns
+      DECIDABLE_REGRESSION  worst_bound=0.922861  faster_than_numpy=false
+```
+
+**A/A NULLS.** parallel: incumbent [0.998853,1.011535], candidate [0.982295,1.047377] (cv 11.85%);
+serial: incumbent [0.994045,1.005778], candidate [0.997355,1.009560]. All four straddle unity. The
+parallel row's controlling half-width is 0.047377 against an effect distance of 0.665 — it clears
+`required_2x_delta` 0.094754 sevenfold.
+
+**THE ORDERING INVERTS.** The flattered row reported serial 1.374754x (DECIDABLE_WIN) and parallel
+1.014081x (UNDECIDED), and concluded "the right change is to drop the rayon fan-out for
+Maximum/Minimum and KEEP the native kernel". With the allocation asymmetry removed, the serial arm
+does not beat NumPy at all — it LOSES by a decidable margin — while the parallel arm wins outright.
+
+**I WAS WRONG, AND THIS IS THE PART WORTH READING.** When I withdrew the hzl1w evidence
+(`c84fa0e2`) I wrote that the INTERNAL serial-beats-parallel ordering survived the correction,
+"because both replicas were flattered identically". That reasoning was wrong and this measurement
+refutes it. A constant free buffer is not a constant proportional gift: it is a fixed number of
+nanoseconds handed to whichever arm is being compared against NumPy, so it inflates the SLOWER
+replica's ratio more than the faster one's. The two arms were flattered by the same absolute
+amount and therefore NOT by the same factor. Symmetric-looking contamination can still invert an
+ordering, and "both arms were biased the same way, so the comparison between them is safe" is not
+a valid move.
+
+**WHAT I AM NOT CLAIMING: that the allocation fix ALONE caused the inversion.** The flattered row
+was measured on `vmi1152480` (10 cores, 10 threads); this is `thinkstation1` (32 physical, 64
+logical). A parallel-versus-serial ordering depends directly on core count, and this ledger has
+already paid for reading a core-count effect as something else (`deadlock-audit-80uph`). Two
+things changed at once, so the inversion is not attributable to one of them from these rows.
+
+**WHAT IS DECIDABLE FROM THIS INVOCATION ALONE, and it is enough to settle the bead:** on this
+host, with both arms in one binary on the same operands, the parallel replica beats NumPy
+(worst bound 1.556x) and the serial replica loses to it (worst bound 0.923x). So adopting the
+hzl1w REJECT's recommendation — drop the rayon fan-out, keep the serial native kernel — would
+replace a decidable win with a decidable loss HERE. That recommendation must not be actioned on
+this host without its own measurement.
+
+**THE PARALLEL FIGURE IS A FLOOR, by my own rule.** Load was 75.25-75.83 on 64 logical threads,
+so the box was ~1.18x oversubscribed, and the candidate A/A null shows it in band: cv 11.85% and
+half-width 0.047377 against the incumbent null's 0.011535, a fourfold asymmetry. The candidate is
+the parallel arm and the incumbent is NumPy's serial loop, so contention is directional against
+us (`deadlock-audit-322j4`). 1.664906x understates a quiet host.
+
+**STILL REPLICAS, NOT THE ROUTE.** Both candidates are bench-local `maximum_serial` /
+`maximum_parallel`, and the row now says so in its own output
+(`arms_are_replicas_not_the_shipped_route=true`). The shipped route reads 0.907848 for `maximum`
+on this host. This row decides which KERNEL is better, not whether `fnp.maximum` beats
+`numpy.maximum` end to end — it does not.
+
+RETRY PREDICATE: (1) Re-run on a QUIET host before quoting the parallel point estimate; 1.556x is
+the defensible number today. (2) Re-run on a SMALL-core host to separate the allocation fix from
+core count — if serial still loses there, the fix explains the inversion; if serial wins there,
+core count does, and the fan-out needs a core-count gate rather than a removal. (3) Only then
+re-decide hzl1w, and decide it on the shipped route rather than on replicas.
+AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - MEASURED, THREE SIZES POST-FIX: the native f64 divide is at its WORST just above its own gate - 1.286x slower at 2^16 against 1.091x at 2^20 - which puts `F64_DIV_NATIVE_MIN_LEN` itself in question (`deadlock-audit-0ppym`, `deadlock-audit-qapyb`)
 
 `RedLynx`. No build - /data at 42G, the floor - so this re-runs the same committed-provenance ELF
