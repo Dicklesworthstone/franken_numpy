@@ -43488,3 +43488,67 @@ are widening the fast accept, or a reduction operating on the quotients in place
 Correctness gate for any attempt: `conformance_diagnostics` green with the deferral
 still firing (flip it off, watch the 6 divergence rows return, flip it on).
 AGENT_NAME=CoralOak.
+
+## 2026-08-16 - CORRECTION: the `routes_natively=true` label my own bench printed for divide at n=256 is FALSE, and it carried a mechanism paragraph I banked this morning. All four ops delegate; what separates divide is which ops ENTER the f64 block (`deadlock-audit-ei9jz`)
+
+`RedLynx`. No new measurement. This retracts a stated cause, not a number.
+
+**Campaign result class:** methodology (self-correction; the ratios it touches are unchanged)
+
+**WHAT WAS WRONG.** `bench_percall_floor_across_ops_vs_numpy` carried its route label as a literal
+in the loop tuple - `("divide", true)` - under the comment "divide is the one of these four that
+takes the native f64 route." The group runs at `n = 1<<8 = 256`. The native f64 route requires
+`n >= F64_DIV_NATIVE_MIN_LEN = 1<<14 = 16384`. **At 256, divide delegates to NumPy exactly like
+add, subtract and multiply.** The adjacent group `bench_divide_size_gate_vs_numpy` states this in
+its own comment - "2^8 and 2^12 now DELEGATE to NumPy" - so the contradiction was sitting eleven
+lines below the false label and I read past it.
+
+**WHAT IT CONTAMINATED.** The row banked this morning (two interning levers, worst cell 1.855x)
+argued its per-op pattern confirmed its mechanism:
+
+> `divide` is the one op that takes the NATIVE route here (`routes_natively=true`), so it bypasses
+> most of the delegating tail and gains only 6%. A lever that helped all four equally, or that
+> helped divide most, would have contradicted its own story.
+
+**That paragraph is RETRACTED.** Divide was not on the native route, so "bypasses the delegating
+tail" cannot be why it gained least. The prediction was right and the reason was wrong, which is
+the failure mode worth naming: a confirmation read off a label nobody had checked.
+
+**THE REAL DISCRIMINATOR, read from the source rather than the label.** `PyUFunc::__call__` maps
+the ufunc kind to a `BinaryOp` and only five kinds map to `Some`:
+
+```
+  Remainder | Power | Maximum | Minimum | Divide  =>  Some(BinaryOp)
+  _                                                =>  None
+```
+
+`add`, `subtract` and `multiply` take the `_ => None` arm and **never enter the f64 binary block
+at all**. `divide` enters it, pays the block's dtype probes, and only then declines at the size
+gate. At the time of that measurement each probe was `numpy_dtype_is_f64`: `py.import("numpy")`, a
+full `asarray` call, then `dtype`, `kind` extracted into a heap `String`, and `itemsize` - run
+twice per call, purely to decline. So divide paid a per-call cost the other three did not pay,
+which is why its excess was 471 ns against 220/231/281, and why the interning levers - which act on
+the delegating tail all four share - moved divide 6% and the others 27-44%.
+
+**THE CORRECTED READING SUPPORTS THE SAME NUMBERS AND A DIFFERENT LEVER.** The figures in that row
+stand: divide 0.539007/0.539052, the worst cell at 1.855x, all four `DECIDABLE_REGRESSION`, all
+eight A/A nulls straddling unity. What changes is where the remaining excess lives. Under the false
+label divide's excess looked irreducible-by-tail-work because it was "native"; under the true one it
+was mostly a probe paid to decline, which is a lever, and it has now been taken (`d1a6612e`, the
+gate now reads `dtype.char` per operand). That lever is committed and tested but NOT yet measured -
+no ratio is claimed for it here.
+
+**FIX AND GUARD (`caffa27f`).** The label is now computed as
+`enters_f64_block && n >= NATIVE_MIN_LEN_MIRROR`, and the output line carries
+`enters_f64_binary_block` and `native_route_min_len` so the label can be checked against the size
+from the printed row alone, without trusting it. The mirrored threshold is pinned by a lib test
+that fails and names the bench line if `F64_DIV_NATIVE_MIN_LEN` moves.
+
+RETRY PREDICATE: (1) Any row quoting the per-op split of the two interning levers must cite the
+corrected mechanism above, not the native-route one. (2) The `d1a6612e` gate lever is unmeasured;
+its prediction is specific and falsifiable - divide's excess should fall toward the 220-281 ns band
+of the ops that skip the block, while add/subtract/multiply should not move at all, since they never
+entered it. A lever that moves all four refutes the account in this row. (3) Audit the remaining
+hardcoded labels in this bench file the same way: a literal that describes runtime behaviour is a
+claim, and it needs a source, not a comment. AGENT_NAME=RedLynx.
+
