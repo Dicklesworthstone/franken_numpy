@@ -4,6 +4,53 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - UNDECIDED (measured, kept as maintenance): removing two heap allocations from the complex probe moves the probed arm ~14% but the gate does NOT decide it (`deadlock-audit-pgbtf`)
+
+`TealOak`. The complex probe runs on every delegating f64 `multiply` and `divide` before declining,
+and it allocated two heap `String`s via `getattr("kind")?.extract::<String>()?` to compare a single
+character. `deadlock-audit-wsd7h` measured that declined chain at ~40% of a delegating call, so this
+is inside a measured hot path. Changed to `extract::<char>()` at the two sites in
+`try_zerocopy_complex_binary`.
+
+**Campaign result class:** maintenance-self-speedup
+
+harness=common::run_dual_null_median_ci_contract, n=256 f64, numpy 2.4.3, profile `release`,
+worker=vmi1227854 for BOTH the before and after, nulls on unity throughout.
+
+  before  bench_elf_sha256=1c0707d511640b452413c16ecee31c4950c7ff2f594daa52cbee2dcaa8630c46
+          ratio=1.403108 ci95=[1.389629,1.414874]  probed_ns=3004  skipped_ns=2128  chain=876 ns
+  after   bench_elf_sha256=6dd2c93bf104452fdb0ad9e10cc9abe3883e12f6a962009b4519db6da0be91fd
+          ratio=1.387340 ci95=[1.368470,1.407339]  probed_ns=2578  skipped_ns=2143  chain=435 ns
+HOST_BASELINE host=vmi1227854 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 governor=unavailable
+
+**THE GATE DOES NOT DECIDE IT.** The two ratio CIs OVERLAP ([1.389629,1.414874] against
+[1.368470,1.407339]), so by the contract this is UNDECIDED and it is banked as such. No win is
+claimed.
+
+**WHAT IS SUGGESTIVE, AND WHY IT IS MORE THAN A BARE CROSS-BUILD DIFF.** The probed arm fell
+3004 -> 2578 ns (-14%) while the CONTROL arm, which skips the probe chain entirely and should be
+untouched by this edit, held at 2128 -> 2143 ns (+0.7%). An invariant control across the two
+builds is what makes the probed arm's movement worth reporting at all. It is still two binaries,
+on one worker, and `wsd7h` already showed the absolute nanoseconds here are worker-scoped
+(1778 ns on vmi1152480 against 876 ns on vmi1227854 for the same code), so the ~441 ns is an
+observation and not a measured saving.
+
+**KEPT ANYWAY, as maintenance.** Two heap allocations per delegating multiply/divide are removed,
+the change cannot be slower, and correctness is verified: `conformance_diagnostics` green (1
+passed) plus `conformance_complex_ops` (15 passed) and `conformance_complex` (12 passed), which
+matter because this probe is the ONLY native path for complex multiply and divide — a check that
+stopped admitting complex would silently delegate them.
+
+SCOPE, stated because the number invites over-generalisation: the same allocating idiom appears at
+**418 sites** in `lib.rs`. Only the two on the measured hot path were touched. AGENTS.md forbids
+script-driven code edits and 418 hand edits is not a sane unit of work, so the rest stay as they
+are until one of them is shown to sit on a measured path.
+
+RETRY PREDICATE: to decide this properly, the before and after must live in ONE binary — an
+env-selected branch read once at module init — because at this size the effect is at the edge of
+what the contract can resolve across builds. Do not re-run it as another cross-build pair.
+AGENT_NAME=TealOak.
+
 ## 2026-08-16 - MEASURED, REPLICATED ON TWO WORKERS: the declined probe chain is ~40% of a DELEGATING binary-ufunc call - worst bound 1.389629x (`deadlock-audit-wsd7h`)
 
 `TealOak`. The delegating path adds 5.6-5.8 us of pure overhead (`qapyb`, `cydda`) and only ~1.4 us
