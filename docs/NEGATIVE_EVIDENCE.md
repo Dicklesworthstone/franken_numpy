@@ -28,6 +28,67 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - COUNTED_MECHANISM, and it REFUTES this bead's own first step: the shipped f64 divide loop is ALREADY packed 4-wide ymm with 2x unroll - the 94us codegen gap is not a packing failure and there is nothing to restore (`deadlock-audit-6y5wp`)
+
+`RedLynx`. `deadlock-audit-6y5wp` names a cheap build-free first step — disassemble the shipped
+`zerocopy_f64_binary_flat` Div arm, count `vdivpd` against `vdivsd`, and if the loop is emitting
+scalar divides "that is the whole finding and the lever is to restore packing". Done. It is not
+emitting scalar divides.
+
+**Campaign result class:** rejected-lever (the proposed remedy addresses a defect that is absent)
+
+```
+bench_elf_sha256=9d621ee520acb0ff07a086087c0f3476eb445cd582789d1dc35871b026f2b2b3
+worker=thinkstation1  profile=bench  LOADAVG 12.48/18.97/25.25 at analysis time
+ISA on this host: runtime avx2=true, fma=true, avx512f=FALSE (so ymm is the widest available)
+method: nm -S -C to locate every symbol mentioning `zerocopy_f64_binary_flat`, then objdump over
+  each symbol's own address range. 40 symbols mention the kernel; exactly ONE carries divides.
+```
+
+**THE COUNT, from the single symbol that carries the kernel (0x19ebb10, 1615 bytes):**
+
+```
+  vdivpd  2      vdivsd  3
+```
+
+**But the counts alone are the wrong statistic, and this is the point of the row — the WIDTHS
+decide it:**
+
+```
+  vdivpd -0x20(%rbx,%r11,8),%ymm6,%ymm6     packed, 4 doubles
+  vdivpd      (%rbx,%r11,8),%ymm7,%ymm7     packed, 4 doubles   -> main loop, unrolled 2x
+  vdivsd  0x0(%r13,%rax,8),%xmm4,%xmm4      scalar
+  vdivsd  -0x8(%r9,%rax,8),%xmm4,%xmm4      scalar
+  vdivsd      (%r9,%rax,8),%xmm4,%xmm4      scalar              -> <=7-element remainder tail
+```
+
+The hot loop processes **8 doubles per iteration** (two 4-wide `ymm` divides). The three scalar
+divides are the tail, which any packed loop must have and which executes at most once per call.
+Register census over the block: 38 `ymm` mentions against 44 `xmm` and zero `zmm` — consistent with
+a `ymm` main loop plus scalar setup/tail, and with `avx512f=false` on this host.
+
+**SO THE BEAD'S FIRST-STEP HYPOTHESIS IS REFUTED.** A naive reading of `vdivpd 2, vdivsd 3` — scalar
+divides OUTNUMBER packed ones — invites exactly the conclusion the bead anticipated, and it would be
+wrong. **Anyone counting mnemonics without reading widths would have "restored packing" that is
+already present.** The 93987 ns kernel gap is real and still unexplained, but it is not this.
+
+**WHAT THIS LEAVES.** Both loops are 4-wide packed on this ISA, so the remaining candidates are
+unroll depth, load/store alignment handling, prefetch, or numpy's per-loop setup — none of which
+this disassembly settles. What is now excluded is the cheapest and most attractive hypothesis, which
+is worth more than it sounds: the bead's own text made it the gating first step.
+
+**NO CODE LANDED, deliberately.** The change the bead proposed addresses a defect that does not
+exist, and writing it would have produced a green diff that improves nothing. The correct output of
+a refuted first step is the refutation.
+
+RETRY PREDICATE: (1) Do not re-count mnemonics on this kernel; count WIDTHS, and record the operand
+form as this row does. (2) The next comparison must disassemble NUMPY's loop the same way — the gap
+is between two packed loops, so only a side-by-side on unroll and addressing can name it, and
+`ae85t`'s warning applies: local and remote toolchains here emit different code for identical
+source, so both halves must be built in the same environment. (3) `6y5wp` should stay OPEN with its
+first step marked done and negative. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - PER-ARM CPU WITNESS SHIPPED, AND IT ANSWERS THE FREQUENCY QUESTION: both arms share ONE core (spread 1.0005), but the clock moves 1.267x ACROSS phases (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. The harness now records, per ARM, which core ran it and at what clock. That is the
