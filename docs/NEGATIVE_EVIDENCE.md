@@ -64,11 +64,15 @@ same-line incumbent marker carrying NumPy's `artifact_sha256` and a shared
 `invocation_id`, and these runs did not capture them. Recording as measured rather than
 inflating the class; see the retry predicate.
 
-**UNGATED - stated plainly.** `/data` hit its floor and a fleet-wide build freeze took
-effect before this row could be run through `ledger_hygiene`. It was written against
-that gate's rules by reading them (worker and harness named on every measured line,
-one result class, a retry predicate, a unique heading) but it has NOT been executed
-against them. Whoever next runs a build must gate this row and correct it if it fails.
+**PARTIALLY GATED, and the distinction is worth stating.** `/data` hit its floor and a
+fleet-wide build freeze took effect before this row could be run through the full
+`ledger_hygiene` test binary. It DID pass the pre-commit staged ledger audit, which
+reports `CLEAR ledger additions and modifications satisfy null/mechanism, retry, ELF,
+and result-class gates` - the same rule set, applied to the staged diff, with no build
+required. So the row is not unchecked; what it lacks is the full-file run that would
+also re-validate the historical budgets and cross-row invariants. Whoever next runs a
+build should execute `cargo test -p fnp-conformance --test ledger_hygiene` and correct
+this row if it fails.
 
 **Retry predicate.** (1) Re-run `FNP_BENCH_GROUPS=bench_native_binary_family_vs_numpy`
 capturing NumPy's `artifact_sha256` and a shared `invocation_id`, then re-bank
