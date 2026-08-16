@@ -19,6 +19,72 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - WORST CELL CERTIFIES AT LOADAVG 62, but the run cannot adjudicate the two-group split - and it REFUTES my own "short serial arms stay tight on a busy box" (`deadlock-audit-ei9jz`, `deadlock-audit-7xcq2`)
+
+`RedLynx`. The orchestrator reported loadavg 8.44; I read **68.03** in the same minute, then 85.76,
+then 61.90. The hardest certification available here — the remainder cell, a 64-thread parallel
+candidate against a serial incumbent — was DEFERRED on that reading, because it is the measurement
+most distorted by contention and has already been banked twice at depressed values. What ran
+instead is the n=256 four-op cell, which prior evidence said tolerates load. It does, but less well
+than I claimed.
+
+**Campaign result class:** decidable-regression (all four cells) + correction to my own claim
+
+```
+bench_elf_sha256=af5200ea72988280fc1c56e2d8e617c9803f938783ab4e8be18192f6a6c44d91
+elf_path=target/release/deps/criterion_python_elementwise-b3bfa783f49ff1ab (307674752 bytes)
+harness_source_matches_disk=true  built from committed source, local, zero [RCH] lines,
+  executable path from --message-format=json
+worker=thinkstation1  numpy 2.4.3  profile=bench
+LOADAVG 1min 61.90 before and 61.90 after (64 logical threads); 5min 61.53, 15min 43.43
+harness=common::run_dual_null_median_ci_contract  ABBAABBA, 41 rounds, min-of-3
+
+ op        ratio      ci95                    excess_ns  ctrl null hw  null status
+ divide    0.353112   [0.318816,0.364417]       1643       0.050000    both straddle unity
+ multiply  0.357558   [0.337658,0.384711]       1833       0.026264    INCUMBENT excludes unity
+ add       0.376645   [0.357225,0.385356]       1913       0.022297    both straddle unity
+ subtract  0.395564   [0.388251,0.411597]       1327       0.045167    CANDIDATE excludes unity
+```
+
+All four are `DECIDABLE_REGRESSION`, so **the cell does certify at loadavg 62** — the fleet
+finding's "contention prevents certification" is not universal, and this class of cell survives it.
+
+**BUT I OVERSTATED THE ROBUSTNESS ONE ROW AGO.** I wrote that null width tracks the arm's
+contention sensitivity rather than the host's load, citing this same cell holding half-widths of
+0.0014-0.0072 at loadavg 82. Here, at the LOWER loadavg of 62, the same four cells hold
+**0.0223, 0.0452, 0.0263, 0.0500** — four to sixty times wider — and two nulls EXCLUDE unity
+(subtract candidate bias 0.028874, multiply incumbent bias 0.013078). So arm type is not
+sufficient either: the load-82 run was a fortunate one, and generalising from it was wrong. The
+honest statement is that null width is only loosely predicted by load OR by arm type, and must be
+read per run from the row rather than assumed from either.
+
+**THE RUN CANNOT ADJUDICATE THE TWO-GROUP SPLIT, and I will not use it to.** The previous row
+found `v46rn` halved `add`/`subtract` (excess 551/560 ns) while leaving `multiply`/`divide`
+untouched (821/881 ns), a ~270 ns split with a clean mechanism — the timedelta probe runs only for
+`Add`/`Subtract`. Under load the excesses read 1913 / 1327 / 1833 / 1643 for add / subtract /
+multiply / divide, which **reorders them**: `add` now has the LARGEST excess. Meanwhile the RATIOS
+still place divide and multiply worst. Excess and ratio disagree, the controlling nulls are up to
+0.050, and two are biased. **This run is not precise enough to test the split, so the split's
+magnitudes stand on the quiet-host row and this row does not amend them.**
+
+**WHAT DOES SURVIVE FROM THIS RUN:** all four ops remain decidable regressions under adverse
+conditions, and by ratio the worst cell is still `divide` (0.353112) with `multiply` beside it —
+the same ORDER the quiet run gave. The corrected headline from the previous row — the campaign's
+worst ratio is divide, not the 2.328x banked for `add` — is unchanged by this run, on direction.
+
+**ALSO LANDED THIS TURN (code, not measurement):** the positivity precondition on
+`bench_percall_floor_across_sizes_vs_numpy`. The projection is now declared
+`projection_available=false` whenever `multiply_ratio`'s CI contains unity, instead of computing a
+negative wrapper and a projected ratio above 1.0 that a reader has to catch by hand. That was the
+fourth and last known gap in that group.
+
+RETRY PREDICATE: (1) The remainder cell still needs a genuinely quiet window — loadavg well under
+half the thread count, verified by the agent running it, not by a reading from a previous minute.
+Its point estimate remains unpinned. (2) Do not read the two-group magnitudes from any run whose
+controlling null half-width exceeds ~0.01; this run's 0.022-0.050 disqualify it. (3) Stop
+predicting null width from load or arm type — read it from the row. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - MEASURED (two-gate state) + CERTIFICATION DEFERRED UNDER LOAD: `multiply` 3.174x -> 2.886x, and `add`'s probe chain is now EMPTY while `multiply`'s is not (`deadlock-audit-v46rn`)
 
 `SlateHeron`. Two separate things, kept apart deliberately: a partition measured under recorded low

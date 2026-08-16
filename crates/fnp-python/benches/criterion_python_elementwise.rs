@@ -4127,6 +4127,21 @@ fn bench_percall_floor_across_sizes_vs_numpy(_c: &mut Criterion) {
             // The original model was right; only its arithmetic mixed statistics. So keep
             // the model and estimate the wrapper from the RATIO rather than from an
             // arm-median difference — one statistic, and no impossible values.
+            // POSITIVITY PRECONDITION (`deadlock-audit-q00ev`, the fourth and last known gap
+            // in this group). The wrapper is estimated from `multiply_ratio`, so when
+            // multiply has reached PARITY the estimate is meaningless: at n=2^20 one run
+            // measured multiply_ratio=1.003433 with a CI of [0.983145,1.034903] straddling
+            // unity, and the formula returned wrapper = -1473.9 ns and a projected ratio of
+            // 1.002870 — asserting that delegating to NumPy beats NumPy's own call. The
+            // model is fine; it is being asked a question the data cannot answer, because
+            // the wrapper at that size is smaller than the measurement floor. The
+            // arm-median estimator fails there too (-120.0 ns), so this is a property of
+            // the data rather than of either estimator.
+            //
+            // So the projection is declared UNAVAILABLE whenever multiply's CI contains
+            // unity, rather than computed into an impossible number that a reader has to
+            // catch by hand.
+            let projection_available = !(mul_lo <= 1.0 && 1.0 <= mul_hi);
             let wrapper_from_ratio_ns = mul_numpy_ns * (1.0 / mul_ratio - 1.0);
             let projected_delegating_fnp_ns = div_numpy_ns + wrapper_from_ratio_ns;
             let projected_delegating_ratio = div_numpy_ns / projected_delegating_fnp_ns;
@@ -4137,7 +4152,7 @@ fn bench_percall_floor_across_sizes_vs_numpy(_c: &mut Criterion) {
             // because a delegating divide still pays the small divide-specific residual
             // (the f64 binop-block size and dtype guards that multiply skips). If it
             // inverts, the model is wrong again and no cell in this group may be read.
-            if below_gate && projected_delegating_ratio <= div_ratio {
+            if below_gate && projection_available && projected_delegating_ratio <= div_ratio {
                 null_cell_violations.push(format!(
                     "2^{exponent}: projected {projected_delegating_ratio:.6} did not exceed \
                      measured {div_ratio:.6} at a cell where both ops delegate"
@@ -4191,6 +4206,7 @@ fn bench_percall_floor_across_sizes_vs_numpy(_c: &mut Criterion) {
                  projected_delegating_fnp_ns={projected_delegating_fnp_ns:.1} \
                  projected_delegating_ratio={projected_delegating_ratio:.6} \
                  wrapper_from_ratio_ns={wrapper_from_ratio_ns:.1} \
+                 projection_available={projection_available} \
                  projection_derived_from=ratio_median_only \
                  incumbent_scaling_ok={incumbent_scaling_ok} \
                  delegating_looks_better={delegating_looks_better} same_invocation=true"
