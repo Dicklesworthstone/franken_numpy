@@ -545,9 +545,30 @@ positive from body-bleed — it is not a registered group (registration count 0)
 or that takes buffers differently. The 2-of-247 figure is a floor on the clean groups, not a proof of
 zero.
 
+**A SECOND AUDIT ATTEMPTED IN THE SAME PASS, AND IT FAILED FOR AN INSTRUCTIVE REASON**
+(`deadlock-audit-7xcq2`). Two A/A nulls measured today EXCLUDE unity and still passed the gate: the
+lookup-ceiling `empty` pair at 1.030928 ci95=[1.030405,1.034364] (3.1% bias) and the parallel divide
+incumbent null at 1.006625 ci95=[1.001361,1.029159] (0.66% bias, under an effect clearing its
+threshold by only 1.2x). A biased-but-TIGHT null makes `report_median_gate_pair` MORE permissive,
+because that gate tests the null's half-width and never its centre. So I tried to count how many
+banked rows are affected. **The count is not obtainable.** Across this entire ledger there are 116
+prose `ci95=[` mentions but only 8 verbatim `MEDIAN_CI_GATE` lines and ZERO pasted `PAIRED row=…null…`
+lines: rows quote their effect CI in prose and describe their nulls in English. Of the 31
+machine-readable `*null*_ci95` fields that do exist, exactly 1 excludes unity, by +0.0002 — a number
+too small a sample to mean anything.
+
+That is the real finding: **null quality cannot be audited retrospectively here**, so the honest first
+step for `7xcq2` is forward-looking — have the harness emit a machine-readable straddle field — not
+archaeological. Deliberately NOT done this turn: that change lives in `benches/common/mod.rs`, which
+every bench file in the crate includes, and under the build freeze I cannot even `cargo check` it.
+Landing an unverified edit to the shared harness would break every pane's build the moment the freeze
+lifts, which is a worse outcome than waiting.
+
 RETRY PREDICATE: do not re-run this enumeration for its own sake — it is done and the count is
 recorded. Re-open only if a group is added whose candidate is a Rust replica, and the cheap standing
 check for that is `set_item("out"` present whenever a bench-local replica appears in the same group.
+For the null-straddle half, do not attempt a historical audit — it is unobtainable for the reason
+above; instrument forward instead.
 The one item this does NOT discharge is re-deciding `deadlock-audit-hzl1w` on corrected numbers: the
 existing ELF predates `e5d5a67d`, so the fixed maximum arms have never been run. That needs a build
 and is blocked by the freeze.
