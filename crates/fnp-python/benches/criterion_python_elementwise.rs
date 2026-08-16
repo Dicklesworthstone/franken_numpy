@@ -2585,34 +2585,24 @@ fn bench_percall_floor_stage_attribution(_c: &mut Criterion) {
 // sits behind a guard requiring `casting == "same_kind"`, so passing any other
 // casting value skips EVERY probe (`deadlock-audit-wsd7h`).
 //
-// THAT SUBTRACTION IS CONTAMINATED, AND THE CONTAMINATION CANNOT BE DESIGNED OUT
-// (`deadlock-audit-uj3r3`, found by RedLynx when this group's own guard panicked at
-// -40 ns). `deadlock-audit-s2fkk` added a delegation fast path, and its condition is
-// the IDENTICAL boolean expression as the probe guard:
+// THAT SUBTRACTION IS CONTAMINATED and the correction below cancels the keyword
+// tail rather than avoiding it (`deadlock-audit-uj3r3`, found by RedLynx when this
+// group's own guard panicked at -40 ns; the mechanism and the cancellation are
+// documented at the correction site, not repeated here).
+//
+// WHY NO ARM SHAPE AVOIDS IT — the reason there is no "probes on, keywords on" call
+// to compare against. `deadlock-audit-s2fkk`'s delegation fast path is guarded by
+// the IDENTICAL boolean expression as the probe block:
 //
 //     out.is_none() && where.is_none() && dtype.is_none() && signature.is_none()
 //       && casting == "same_kind" && order == "K" && subok
 //
-// and it is VALUE-based, not presence-based. So an all-defaults call both runs the
-// probes AND returns through `np_ufunc.call1((x1, x2))` sending no keywords, while
-// `casting="unsafe"` both skips the probes AND falls to the tail that allocates a
-// PyDict and makes NumPy parse three keywords. The two costs are perfectly coupled:
-// there is NO kwarg that toggles one without the other, so uj3r3's suggested fix of
-// giving both arms the same non-default kwarg cannot work — that would disable the
-// probes in both arms and leave nothing to measure. Passing `order="K"` explicitly
-// does not help either, because the guard tests the VALUE and "K" is the default.
-//
-// So the tail is a term to MEASURE, not to avoid:
-//
-//     whole - skipped = probe_chain - kwargs_tail
-//     probe_chain     = (whole - skipped) + kwargs_tail
-//
-// `kwargs_tail` is measured in THIS invocation rather than carried in from s2fkk's
-// 727 ns on another worker — dividing into a figure from another host is the exact
-// error the provenance row in this ledger records. It is a LOWER BOUND: the
-// available control times NumPy's own keyword parsing (`arms=numpy_multiply_only_
-// no_fnp_code`) and therefore excludes our PyDict construction, so the true tail is
-// larger and the recovered probe chain is larger still. The row says so.
+// and it tests VALUES, not keyword presence. The two costs are therefore perfectly
+// coupled: every input that disables the probes also forces the keyword tail, and
+// every input that keeps the fast tail also keeps the probes. Passing `order="K"`
+// explicitly does not split them either, because "K" is the value the guard tests
+// for. So giving both arms the same non-default kwarg — the obvious fix — would
+// disable the probes in BOTH arms and leave nothing to measure.
 //
 // HONESTY ABOUT WHAT THE FRACTION MEANS. Under a partition accounted_fraction is
 // 1.0 BY CONSTRUCTION and is therefore NOT evidence of anything. The informative
