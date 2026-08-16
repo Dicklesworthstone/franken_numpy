@@ -11,6 +11,78 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - PRE-REGISTERED PREDICTION CONFIRMED WITHIN ONE INVOCATION: at load 105 the PARALLEL divide cell sits 11.5% below its quiet-host value while the DELEGATING cell is unmoved - but the dose-response is NOT established (`deadlock-audit-322j4`, `deadlock-audit-0ppym`)
+
+`RedLynx`. A test of the rule refined one row above, which generalised the load bias from
+"parallel candidate" to "whichever arm does more contention-sensitive work". `bench_divide_size_gate_vs_numpy`
+spans both regimes in ONE invocation — at n=2^8 divide DELEGATES (serial against serial), at
+n=2^16 it takes the NATIVE parallel path (parallel against serial) — so the contrast is internal
+and shares a load, an ELF and an operand generator.
+
+**The prediction was stated before the run:** the 2^16 cell should degrade more under load than
+the 2^8 cell.
+
+**Campaign result class:** decidable-regression (both cells) + methodology
+
+```
+bench_elf_sha256=04cdb2f447f8336615022e40f6c5c3b51961c7e91e04b4ae62d3b87b90e4f8bf
+harness_source_matches_disk=true  built from committed source
+worker=thinkstation1 (5975WX 32P/64L, powersave)  numpy 2.4.3  profile=bench
+load 1min 105.61 before -> 103.96 after on 64 logical threads — 1.65x OVERSUBSCRIBED
+harness=common::run_dual_null_median_ci_contract  ABBAABBA, 41 rounds, min-of-3
+
+ n      path         ratio      ci95                  verdict               numpy_ns  fnp_ns  excess
+ 2^8    DELEGATES    0.317275   [0.304490,0.322829]   DECIDABLE_REGRESSION      711     2355    1644
+ 2^16   NATIVE       0.688460   [0.681084,0.713073]   DECIDABLE_REGRESSION    23460    32657    9197
+```
+
+**ALL FOUR NULLS STRADDLE UNITY**: 2^8 incumbent [1.000000,1.000000] candidate [0.996436,1.007077];
+2^16 incumbent [0.998059,1.007750] candidate [0.998934,1.010880]. Half-widths 0.0071 and 0.0109 at
+load 105 — again tight, again confirming that null width tracks the arm's contention sensitivity
+rather than the host's load number.
+
+**THE PREDICTION HOLDS.** Against the same group's quiet-host run (load 25.88):
+
+```
+ n      quiet ratio   loaded ratio   change    numpy inflation   fnp inflation
+ 2^8     0.313928      0.317275      +1.1%        1.653x            1.722x
+ 2^16    0.777800      0.688460      -11.5%       1.226x            1.329x
+```
+
+The delegating cell is unmoved — +1.1% is well inside its own CI [0.304490,0.322829] — while the
+native parallel cell sits 11.5% below its quiet value. Same invocation, same load, same binary:
+the only difference between the two cells is that one of them fans out across cores that the
+foreign load has taken. That is the refined rule's central claim, tested internally rather than
+across runs.
+
+**WHAT IS NOT ESTABLISHED, and I am flagging it because the tidy version of this row would hide
+it: THE DOSE-RESPONSE IS NOT MONOTONIC.** The 2^16 cell has now been measured at three loads:
+
+```
+  load 25.88 -> 0.777800     load 60.91 -> 0.660598     load 105.61 -> 0.688460
+```
+
+If load degraded this cell monotonically, the middle point would not be the worst. It is. So
+**"more load means a worse parallel ratio" is NOT supported as a dose-response**; what is
+supported is the weaker and still useful claim that a parallel-path cell is displaced from its
+quiet-host value while a delegating cell beside it is not. The mild serial-vs-serial case is
+weaker still: it moved -6 to -10% in the row above and +1.1% here, i.e. it sits at the edge of
+what these runs resolve, and should be treated as "small, sign not reliable" rather than as a
+measured 9%.
+
+**WHY THIS RUN WAS MADE.** The worst cell's remaining open items are parity at 2^20/2^24, which
+needs a QUIET host and is further out of reach at load 105 than it was at 82, and a second worker,
+already banked as unreachable from this pane. Re-sampling the settled n=256 figure would be noise.
+Testing a pre-registered prediction of the rule that every banked row leans on is not — and it is
+only possible on a host this contended.
+
+RETRY PREDICATE: (1) Do not quote a dose-response for load; three points on the 2^16 cell are
+non-monotonic and the row says so. (2) The serial-vs-serial bias is unresolved at this precision
+— if it matters to a decision, it needs a designed experiment with load held at several fixed
+levels, not opportunistic sampling of whatever the box is doing. (3) 2^20/2^24 parity still needs
+a quiet host and is untouched here. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - THE WORST CELL UNDER 4x LOAD: the settled ~3.4-3.8x figure is ROBUST to contention - and my own directional-bias rule needed narrowing, because a SERIAL-vs-SERIAL cell is biased too, just 8x less (`deadlock-audit-ei9jz`, `deadlock-audit-322j4`)
 
 `RedLynx`. The worst vs-incumbent cell run ABBA in one invocation with load as the INDEPENDENT
