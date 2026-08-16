@@ -1314,6 +1314,10 @@ fn main() {
                 bench_route_floor_size_sweep_vs_numpy,
             ),
             (
+                "bench_add_route_floor_size_sweep_vs_numpy",
+                bench_add_route_floor_size_sweep_vs_numpy,
+            ),
+            (
                 "bench_percall_floor_across_ops_vs_numpy",
                 bench_percall_floor_across_ops_vs_numpy,
             ),
@@ -3156,6 +3160,79 @@ fn bench_dtype_probe_fanout_ceiling(_c: &mut Criterion) {
              numpy_whole_call_reference_ns_at_n256=410.0",
             measurement_worker(),
         );
+    });
+}
+
+// The SIZE AXIS for the campaign's actual worst vs-incumbent cell (`deadlock-audit-ei9jz`).
+//
+// `bench_percall_floor_across_ops_vs_numpy` established, over TWO invocations with all
+// eight A/A nulls clean, that `add` — not `multiply` — is the worst cell: 3.633x then
+// 3.808x slower than NumPy at n=256, with the ordering identical both times. But that
+// group measures ONE size, so everything known about the worst op is a single point.
+//
+// `bench_route_floor_size_sweep_vs_numpy` has the size axis but hardcodes `multiply`,
+// where the answer is already known: excess_ns is roughly constant from 2^8 to 2^20 and
+// parity arrives at 2^24. Whether `add` behaves the same way is UNMEASURED, and it does
+// not follow from multiply's shape: the two sit in different cost clusters — {add,
+// subtract} carry 1076-1372 ns of excess against {multiply, divide} at 877-947 ns, the one
+// part of the op-spread finding that replicated across both runs.
+//
+// So this asks the one question the worst cell has never been asked: does `add` reach
+// parity at all, and if so where? A per-call floor that amortises by 2^24 is a small-n
+// problem; a floor that does not is a different and worse thing.
+//
+// Deliberately a SEPARATE group rather than a parameter on the multiply sweep: that group
+// is cited by banked rows, and changing its shape would silently change what those rows
+// refer to.
+fn bench_add_route_floor_size_sweep_vs_numpy(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        // Same ladder as the multiply sweep, so the two are directly comparable cell for
+        // cell. Same operands too — a and b are built by the identical generator.
+        for exponent in [8u32, 12, 16, 20, 24] {
+            let n = 1usize << exponent;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy).expect("bind numpy");
+            locals.set_item("n", n).expect("bind n");
+            py.run(
+                std::ffi::CString::new(
+                    "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .expect("build operands");
+            let a = locals.get_item("a").expect("a operand");
+            let b = locals.get_item("b").expect("b operand");
+            let args = PyTuple::new(py, [&a, &b]).expect("args");
+
+            let (ratio, lo, hi, numpy_ns, fnp_ns) =
+                measure_binary_ufunc_vs_numpy(py, &module, &numpy, "add", &args, n);
+            let excess_ns = fnp_ns - numpy_ns;
+            println!(
+                "ROUTE_FLOOR_SWEEP op=add n={n} log2n={exponent} \
+                 numpy_version={numpy_version} \
+                 harness=common::run_dual_null_median_ci_contract \
+                 ratio={ratio:.6} ratio_ci95=[{lo:.6},{hi:.6}] \
+                 numpy_ns={numpy_ns:.1} fnp_ns={fnp_ns:.1} excess_ns={excess_ns:.1} \
+                 excess_ns_per_element={:.6} at_parity={} \
+                 worst_cell_of_the_campaign=true",
+                excess_ns / n as f64,
+                hi >= 1.0,
+            );
+        }
     });
 }
 
