@@ -4513,6 +4513,33 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
         let args = PyTuple::new(py, [&a_obj, &b_obj]).expect("args");
         let np_maximum = numpy.getattr("maximum").expect("numpy.maximum");
 
+        // ALLOCATION SYMMETRY (`deadlock-audit-48by6`). This group used to time
+        // `np_maximum.call1(&args)` — positional only — against Rust replicas writing
+        // into `Vec`s allocated ONCE outside the timing loop. That handed the candidate,
+        // for free, the single most expensive thing the incumbent did: a fresh 32 MB
+        // output allocation and its first-touch page faults on every iteration. It made
+        // this group read 2.430654x for `maximum` where the shipped route reads 0.907848x
+        // at the same n on the same host — a 2.7x disagreement that was measuring a
+        // buffer, not a kernel, and that a REJECT of `deadlock-audit-hzl1w` was resting on.
+        //
+        // The fix is to make NEITHER side allocate, which is the shape
+        // `bench_divide_accumulate_isolation_vs_numpy` already uses: NumPy writes into a
+        // preallocated `out=` exactly as the replicas write into preallocated `Vec`s.
+        //
+        // NOT fixed by making the CANDIDATE allocate per iteration instead: `numpy.empty`
+        // and a Rust `Vec` do not have the same first-touch behaviour, so that swaps one
+        // asymmetry for another and merely moves the bias. Both sides preallocated is the
+        // only arrangement here where the difference is the kernel.
+        //
+        // A/A NULLS CANNOT SEE THIS. Both arms were internally reproducible and both nulls
+        // sat on unity throughout; a null proves an arm is stable, never that two arms are
+        // comparable. That blind spot is the reason this survived so long.
+        let np_out = numpy
+            .call_method1("empty_like", (&a_obj,))
+            .expect("preallocated numpy output");
+        let out_kwargs = PyDict::new(py);
+        out_kwargs.set_item("out", &np_out).expect("bind out=");
+
         let a_vec: Vec<f64> = a_obj
             .call_method0("tolist")
             .expect("a list")
@@ -4531,7 +4558,9 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
         // between two different computations.
         maximum_serial(&a_vec, &b_vec, &mut serial_out);
         maximum_parallel(&a_vec, &b_vec, &mut parallel_out);
-        let numpy_probe = np_maximum.call1(&args).expect("numpy.maximum probe");
+        let numpy_probe = np_maximum
+            .call(&args, Some(&out_kwargs))
+            .expect("numpy.maximum probe into out=");
         let numpy_checksum = numpy_divide_checksum(&numpy_probe, N);
         assert_eq!(
             divide_checksum(&serial_out),
@@ -4547,7 +4576,9 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
         {
             let incumbent = || {
                 let started = Instant::now();
-                let result = np_maximum.call1(&args).expect("numpy.maximum");
+                let result = np_maximum
+                    .call(&args, Some(&out_kwargs))
+                    .expect("numpy.maximum into out=");
                 let elapsed = started.elapsed();
                 common::ContractObservation {
                     elapsed,
@@ -4569,6 +4600,11 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
             println!(
                 "MAXIMUM_ARM arm=parallel_native n={N} numpy_version={numpy_version} \
                  harness=common::run_dual_null_median_ci_contract \
+                 allocation=neither_arm_allocates \
+                 incumbent_writes_into_preallocated_numpy_out=true \
+                 candidate_writes_into_preallocated_vec=true \
+                 arms_are_replicas_not_the_shipped_route=true \
+                 correction=deadlock-audit-48by6 \
                  ratio={:.6} ratio_ci95=[{:.6},{:.6}] numpy_ns={:.1} fnp_ns={:.1} \
                  faster_than_numpy={} worst_bound={:.6}",
                 effect.ratio_median,
@@ -4584,7 +4620,9 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
         {
             let incumbent = || {
                 let started = Instant::now();
-                let result = np_maximum.call1(&args).expect("numpy.maximum");
+                let result = np_maximum
+                    .call(&args, Some(&out_kwargs))
+                    .expect("numpy.maximum into out=");
                 let elapsed = started.elapsed();
                 common::ContractObservation {
                     elapsed,
@@ -4606,6 +4644,11 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
             println!(
                 "MAXIMUM_ARM arm=serial_native n={N} numpy_version={numpy_version} \
                  harness=common::run_dual_null_median_ci_contract \
+                 allocation=neither_arm_allocates \
+                 incumbent_writes_into_preallocated_numpy_out=true \
+                 candidate_writes_into_preallocated_vec=true \
+                 arms_are_replicas_not_the_shipped_route=true \
+                 correction=deadlock-audit-48by6 \
                  ratio={:.6} ratio_ci95=[{:.6},{:.6}] numpy_ns={:.1} fnp_ns={:.1} \
                  faster_than_numpy={} worst_bound={:.6} same_invocation_as_parallel_arm=true",
                 effect.ratio_median,
