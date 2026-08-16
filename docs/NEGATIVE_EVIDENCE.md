@@ -937,6 +937,72 @@ NumPy call — the same defect is structural, not specific to `maximum`, and thi
 allocation has silently set an elementwise ratio in this ledger.
 AGENT_NAME=SlateHeron.
 
+## 2026-08-16 - THE PARTITION RUNS CLEAN AND THE FLOOR FELL 44%: 2394 -> 1333 ns, 5.985x -> 3.174x, and the probe chain lands at 39.1% against `wsd7h`'s independent ~40% (`deadlock-audit-uj3r3`, `deadlock-audit-ei9jz`)
+
+`SlateHeron`. `bench_percall_floor_partition` now completes without tripping its own validity guard —
+RedLynx's keyword-tail cancellation works — and it delivers the split the stage-replica method could
+never reach.
+
+**Campaign result class:** maintenance-diagnostic
+
+```
+PERCALL_FLOOR_PARTITION n=256 numpy_version=2.4.3 worker=thinkstation1
+  harness=partition_min_of_2001 trials=2001 op=multiply route=delegating
+  correction=deadlock-audit-uj3r3_keyword_tail_cancelled
+  numpy_kwargs_ns=721.0 pydict_build_ns=230.0 kwargs_overhead_ns=531.0
+  kwargs_overhead_vs_s2fkk_727ns=0.730
+  fnp_multiply_ns=1333.0 probes_skipped_raw_ns=1343.0 probes_skipped_ns=812.0
+  numpy_multiply_ns=420.0 probe_chain_ns=521.0 wrapper_residual_ns=392.0
+  probe_chain_share=0.391 wrapper_residual_share=0.294 numpy_share=0.315
+  fnp_over_numpy=3.174
+```
+
+bench_elf_sha256=4e95267adbfb12897b831b42e832a81666b3636f36a5baf0a42a50384d3db904,
+committed HEAD=7374a9bd, `crates/fnp-python` clean.
+
+**THE PER-CALL FLOOR FELL 44.3%.** Same group, same host, same n=256 `multiply`:
+
+| | fnp_ns | numpy_ns | ratio |
+|---|---|---|---|
+| pre-fix, elf `ef5467cb` | 2394 | 400 | 5.985x slower |
+| now, elf `4e95267a` | **1333** | 420 | **3.174x slower** |
+
+That is 1061 ns removed by `e4cdd808` + `f8475a76` + `e42056a3` + `5c7735da` — the four commits that
+stopped the route re-importing numpy up to three times per call. **This is the measurement those
+commits never had**; they landed UNBUILT during the freeze and were, until now, code without a
+number.
+
+**THE SPLIT of the 1333 ns call:** NumPy's own work 420 ns (31.5%), the probe chain 521 ns (39.1%),
+wrapper residual 392 ns (29.4%).
+
+**THE PROBE-CHAIN FIGURE IS CORROBORATED BY AN INDEPENDENT METHOD.** `deadlock-audit-wsd7h` measured
+the declined probe chain at ~40% of a delegating call by a completely different route (a paired
+contract on probed-versus-`casting="unsafe"` calls, on other workers). This partition, using
+subtraction with the keyword tail cancelled, reads **39.1%**. Two methods, two hosts, agreeing to
+within a percentage point. That is the corroboration `ei9jz`'s acceptance actually needed, and it is
+worth more than the `accounted_fraction > 0.9` gate that bead originally asked for — which a
+partition satisfies trivially and which this group still prints as
+`accounted_fraction_is_tautological=true`.
+
+**THE CANCELLATION TERM IS SANE.** `kwargs_overhead_ns` = 531 (NumPy's parse of the three keywords
+721 ns minus its bare call, plus our PyDict build at 230 ns), against `s2fkk`'s 727 ns for the same
+call shape by a different method on another host — ratio 0.730. The group emits that ratio rather
+than asserting on it, correctly: the methods and hosts differ, so a gate there would fail for
+reasons unrelated to correctness.
+
+**WHAT THIS MEANS FOR THE `ei9jz` HEADLINE, which is now stale in the flattering direction.** That
+bead is named for "1444 ns unattributed of a 2394 ns call". The 2394 ns no longer exists — the call
+is 1333 ns — and the unattributed remainder is not 60.3% but the 29.4% wrapper residual, with the
+probe chain now named and measured rather than missing. The bead should be re-scoped or closed
+against this row rather than worked as written.
+
+RETRY PREDICATE: do not re-run the partition to re-derive these shares — they are decided and
+corroborated. The live question is the probe chain's 521 ns, which `deadlock-audit-v46rn` has already
+priced a 731 ns ceiling against by sharing one dtype fetch; note those two numbers are close enough
+that the dtype fetches may BE most of the probe chain, and confirming that is a route-level
+measurement, not another partition.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - THE CORRECTED MAXIMUM ARMS KILL `hzl1w`'s COUNTER-EVIDENCE: the serial arm is 1.027788 UNDECIDED, not the 1.352401x that decision cited - and our KERNEL wins 1.70x while our ROUTE loses 0.91x (`deadlock-audit-48by6`, `deadlock-audit-hzl1w`)
 
 `SlateHeron`. `bench_maximum_arms_vs_numpy` had never run since `e5d5a67d` made it
