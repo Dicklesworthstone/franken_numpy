@@ -62,8 +62,9 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
     PyAny, PyBool, PyBytes, PyComplex, PyDict, PyInt, PyList, PyModule, PySlice, PySliceMethods,
-    PyTuple, PyType,
+    PyString, PyTuple, PyType,
 };
+use pyo3::intern;
 use pyo3::wrap_pyfunction;
 use pyo3::{Bound, IntoPyObject};
 
@@ -191,6 +192,49 @@ impl UFuncKind {
     }
 }
 
+/// The NumPy ufunc name for a kind, as an INTERNED Python string (`deadlock-audit-ei9jz`).
+///
+/// The delegating tail does `numpy.getattr(self.kind.name())` on every call, and
+/// `self.kind.name()` is a Rust `&str`. Passing a `&str` to `getattr` builds a FRESH
+/// `PyString` per call and hashes it before the module dict can be probed. `intern!`
+/// returns a process-lifetime `PyString` whose hash CPython caches, so the per-call cost
+/// drops to the dict probe itself.
+///
+/// WHY THIS IS SAFE WHERE CACHING THE BOUND CALLABLE IS NOT: the `getattr` still happens
+/// on every call, against the live module. Only the KEY is reused. Monkeypatching
+/// `numpy.multiply` is still honoured, which is the property
+/// `cached_numpy_handle_is_live_so_a_post_warmup_monkeypatch_is_still_honoured` pins and
+/// which a cached-callable implementation would break.
+///
+/// The mapping MUST agree with `UFuncKind::name` for every variant; a typo here would
+/// silently route one ufunc to a different NumPy function and still return a plausible
+/// array. `interned_ufunc_names_match_kind_name` asserts that for all 21 variants.
+fn interned_ufunc_name<'py>(py: Python<'py>, kind: UFuncKind) -> &'py Bound<'py, PyString> {
+    match kind {
+        UFuncKind::Add => intern!(py, "add"),
+        UFuncKind::Subtract => intern!(py, "subtract"),
+        UFuncKind::Multiply => intern!(py, "multiply"),
+        UFuncKind::Divide => intern!(py, "divide"),
+        UFuncKind::FloorDivide => intern!(py, "floor_divide"),
+        UFuncKind::Remainder => intern!(py, "remainder"),
+        UFuncKind::Power => intern!(py, "power"),
+        UFuncKind::Maximum => intern!(py, "maximum"),
+        UFuncKind::Minimum => intern!(py, "minimum"),
+        UFuncKind::BitwiseAnd => intern!(py, "bitwise_and"),
+        UFuncKind::BitwiseOr => intern!(py, "bitwise_or"),
+        UFuncKind::BitwiseXor => intern!(py, "bitwise_xor"),
+        UFuncKind::LogicalAnd => intern!(py, "logical_and"),
+        UFuncKind::LogicalOr => intern!(py, "logical_or"),
+        UFuncKind::LogicalXor => intern!(py, "logical_xor"),
+        UFuncKind::Equal => intern!(py, "equal"),
+        UFuncKind::NotEqual => intern!(py, "not_equal"),
+        UFuncKind::Greater => intern!(py, "greater"),
+        UFuncKind::GreaterEqual => intern!(py, "greater_equal"),
+        UFuncKind::Less => intern!(py, "less"),
+        UFuncKind::LessEqual => intern!(py, "less_equal"),
+    }
+}
+
 #[pyclass(name = "ufunc", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyUFunc {
@@ -232,7 +276,7 @@ impl PyUFunc {
     #[getter]
     fn types(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
-        let np_ufunc = numpy.getattr(self.kind.name())?;
+        let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
         np_ufunc.getattr("types").map(|v| v.unbind())
     }
 
@@ -250,7 +294,7 @@ impl PyUFunc {
         casting: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
-        let np_ufunc = numpy.getattr(self.kind.name())?;
+        let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
         let kwargs = PyDict::new(py);
         if let Some(sig) = signature.as_ref() {
             kwargs.set_item("signature", sig.bind(py))?;
@@ -626,7 +670,7 @@ impl PyUFunc {
                 return Ok(out_val);
             }
         }
-        let np_ufunc = numpy.getattr(self.kind.name())?;
+        let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
         // FAST PATH: every keyword already at its NumPy default, so send none of
         // them. The slow path below sets `casting`, `order` and `subok`
         // UNCONDITIONALLY, which allocates a PyDict and then makes NumPy parse
@@ -688,7 +732,7 @@ impl PyUFunc {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
-        let np_ufunc = numpy.getattr(self.kind.name())?;
+        let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
         Ok(np_ufunc.getattr("reduce")?.call(args, kwargs)?.unbind())
     }
 
@@ -817,7 +861,7 @@ impl PyUFunc {
             }
         }
         let numpy = py.import("numpy")?;
-        let np_ufunc = numpy.getattr(self.kind.name())?;
+        let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("axis", axis)?;
         if let Some(d) = dtype.as_ref() {
@@ -841,7 +885,7 @@ impl PyUFunc {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
-        let np_ufunc = numpy.getattr(self.kind.name())?;
+        let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
         Ok(np_ufunc
             .getattr("outer")?
             .call((a.bind(py), b.bind(py)), kwargs)?
@@ -859,7 +903,7 @@ impl PyUFunc {
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
-        let np_ufunc = numpy.getattr(self.kind.name())?;
+        let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("axis", axis)?;
         if let Some(d) = dtype.as_ref() {
@@ -899,7 +943,7 @@ impl PyUFunc {
         {
             return Ok(py.None()); // ufunc.at mutates in place and returns None
         }
-        let np_ufunc = numpy.getattr(self.kind.name())?;
+        let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
         let args = match b {
             Some(b_val) => PyTuple::new(py, [a.bind(py), indices.bind(py), b_val.bind(py)])?,
             None => PyTuple::new(py, [a.bind(py), indices.bind(py)])?,
@@ -109479,7 +109523,8 @@ mod tests {
     use super::{
         BinaryOp, F64_DIV_NATIVE_MIN_LEN, MaskedStream, NarrowSetOp, PyFromPyFunc, PyVectorize,
         PythonNativeGemmOp, argwhere, bincount, blas_is_single_threaded,
-        build_numpy_array_from_ufunc, cached_numpy, ceil_native, choose, compress, copysign,
+        UFuncKind, build_numpy_array_from_ufunc, cached_numpy, ceil_native, choose, compress,
+        copysign, interned_ufunc_name,
         count_nonzero, degrees_native, diag, diag_indices, diag_indices_from, diagflat, diagonal,
         digitize, extract, extract_numeric_array, extract_precise_numeric_array,
         f64_binary_route_is_worth_taking, f64_divide_fast_accepts_without_fp_error,
@@ -110008,6 +110053,62 @@ mod tests {
                     .setattr(self.name, self.original.bind(py));
             });
         }
+    }
+
+    /// NEGATIVE CASE for the interned ufunc-name table (`deadlock-audit-ei9jz`).
+    ///
+    /// `interned_ufunc_name` duplicates the kind -> NumPy-name mapping that
+    /// `UFuncKind::name` already owns, because `intern!` needs a string LITERAL and
+    /// cannot be fed a `&str` computed at runtime. Two tables that must agree are a
+    /// correctness hazard, not a style one: a typo would route one ufunc to a DIFFERENT
+    /// NumPy function and still return a plausible array of the right dtype and shape.
+    /// Byte parity on any single op would not catch it, and neither would any conformance
+    /// suite that does not happen to cover the mistyped pair.
+    ///
+    /// This asserts the two tables agree for every variant, which is the only thing
+    /// standing between them.
+    #[test]
+    fn interned_ufunc_names_match_kind_name() {
+        with_python(|py| {
+            let all = [
+                UFuncKind::Add,
+                UFuncKind::Subtract,
+                UFuncKind::Multiply,
+                UFuncKind::Divide,
+                UFuncKind::FloorDivide,
+                UFuncKind::Remainder,
+                UFuncKind::Power,
+                UFuncKind::Maximum,
+                UFuncKind::Minimum,
+                UFuncKind::BitwiseAnd,
+                UFuncKind::BitwiseOr,
+                UFuncKind::BitwiseXor,
+                UFuncKind::LogicalAnd,
+                UFuncKind::LogicalOr,
+                UFuncKind::LogicalXor,
+                UFuncKind::Equal,
+                UFuncKind::NotEqual,
+                UFuncKind::Greater,
+                UFuncKind::GreaterEqual,
+                UFuncKind::Less,
+                UFuncKind::LessEqual,
+            ];
+            assert_eq!(
+                all.len(),
+                21,
+                "a UFuncKind variant was added without extending this test"
+            );
+            for kind in all {
+                let interned: String = interned_ufunc_name(py, kind).extract()?;
+                assert_eq!(
+                    interned,
+                    kind.name(),
+                    "interned name disagrees with UFuncKind::name - this would call the \
+                     WRONG numpy ufunc and still return a plausible array"
+                );
+            }
+            Ok(())
+        });
     }
 
     fn numpy_available(py: Python<'_>) -> bool {
