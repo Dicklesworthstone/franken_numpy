@@ -937,6 +937,80 @@ NumPy call — the same defect is structural, not specific to `maximum`, and thi
 allocation has silently set an elementwise ratio in this ledger.
 AGENT_NAME=SlateHeron.
 
+## 2026-08-16 - ANSWERED, AND THE ANSWER IS BOTH: the f64 divide deficit splits ~50/50 between the normality accumulate (96.4 us) and our divide KERNEL (94.0 us) - `deadlock-audit-vqxoa`'s "close to free" is refuted against the incumbent (`deadlock-audit-0ppym`)
+
+`SlateHeron`. First measurement after the build freeze lifted. `deadlock-audit-0ppym` asked whether
+divide's deficit is the normality accumulate or our codegen and offered a binary decision rule. The
+rule was too simple: the accumulate-free arm landed between both predictions because **both causes
+are real and almost equal**.
+
+**Campaign result class:** maintenance-diagnostic
+
+```
+DIVIDE_ACCUMULATE_ISOLATION n=1048576 numpy_version=2.4.3 worker=thinkstation1
+  harness=common::run_dual_null_median_ci_contract  arms_are_preallocated_no_alloc_either_side=true
+  numpy_ns=354387.0  accumulate_free_ns=448374.0  fused_ns=544772.0  accumulate_cost_ns=96398.0
+  accumulate_free_ratio=0.790499 ci95=[0.776663,0.801489]   DECIDABLE_REGRESSION
+  fused_ratio=0.764919          ci95=[0.749751,0.778297]   DECIDABLE_REGRESSION
+```
+
+| arm | ns | vs NumPy |
+|---|---|---|
+| NumPy `divide(a,b,out=out)` | 354 387 | — |
+| ours, accumulate REMOVED | 448 374 | **1.2652x slower** |
+| ours, fused (shipped shape) | 544 772 | **1.5372x slower** |
+
+**THE SPLIT.** Total deficit 190 385 ns: the accumulate is **96 398 ns (50.6%)** and the kernel
+itself is **93 987 ns (49.4%)**. Removing the accumulate entirely would still leave us 1.2652x
+slower than NumPy.
+
+**`deadlock-audit-vqxoa` IS REFUTED AGAINST THE INCUMBENT, decisively.** It fused the normality flag
+into the divide loop and called the accumulate "close to free" because `vdivpd` is throughput-bound
+with idle integer slots beside it. Measured against NumPy rather than against the two-pass form it
+replaced, the accumulate costs **17.7% of the whole call**. It was a genuine self-speedup — the
+second pass over the output was worse — and it is still not free.
+
+**AND THE KERNEL IS THE OTHER HALF, which no accumulate lever can reach.** 93 987 ns of the deficit
+survives with the accumulate deleted. NumPy's f64 divide loop is vectorised and unrolled; ours is a
+straightforward `for` over zipped slices. That is a codegen gap, and it is the half that `0ppym`'s
+"accumulate innocent" branch would have pointed at.
+
+**A SECOND, LESS OBVIOUS RESULT: our position gets WORSE when NumPy stops allocating.** The shipped
+route reads 0.845461 for divide at this size; this pure-kernel comparison reads 0.764919 for the same
+shape. The difference is that NumPy is given `out=` here and allocates nothing (354 387 ns against
+498 471 ns in the route measurement). NumPy gains MORE from preallocation than we do, so part of our
+apparent route-level competitiveness is NumPy paying an allocation we also pay. Any future `out=`
+support on our side inherits this: the kernel gap is wider than the route ratio suggests.
+
+**A/A NULL CONTROL (same invocation):** all four nulls clean and, for the first time, machine-checked
+rather than eyeballed — `a9f0651f`'s fields are live: incumbent 1.000502 / candidate 0.998439 on the
+accumulate-free row and 0.999746 / 0.996976 on the fused row, with
+`incumbent_null_straddles_unity=true candidate_null_straddles_unity=true` and biases 0.000502,
+0.001561, 0.000254, 0.003024 on the four. Cross-arm checksum `eb91d471f37fc5e0` identical throughout —
+the same value the three-worker divide rows carry, so the replicas compute NumPy's quotients exactly.
+
+bench_elf_sha256=4e95267adbfb12897b831b42e832a81666b3636f36a5baf0a42a50384d3db904
+Built from COMMITTED source: HEAD=7374a9bd9a46c50f96aa5b092f3527b692080d8f, and the only dirty file in
+the tree was `docs/NEGATIVE_EVIDENCE.md` (a peer's row) — nothing in `crates/fnp-python`. That is the
+provenance discipline the three voided rows earlier today exist to enforce.
+HOST_BASELINE host=thinkstation1 AMD_Ryzen_Threadripper_PRO_5975WX 32c/64t governor=powersave;
+THREAD_CONFIGURATION rayon_pool_threads=64 RAYON_NUM_THREADS=unset. Stock `release`, local build under
+the exported cargo-shim bypass, zero `[RCH]` lines.
+
+**BOUNDARY.** Both candidate arms are bench-local REPLICAS of the shipped serial `Div` arm, guarded by
+`assert_divide_hazard_replica_matches_contract` against a pinned truth table, so they reproduce the
+shipped predicate — but they are replicas, not the shipped kernel called through the route, and this
+is the SERIAL regime at 2^20 only.
+
+RETRY PREDICATE: the accumulate half is now worth taking and its direction is already named by
+`deadlock-audit-ae85t`'s retry predicate — a reduction over the quotients IN PLACE, no round-trip
+through a temporary, since the round-trip is what destroyed vectorisation in the rejected blocked
+form. Do NOT ship an accumulate-free divide: it drops the FE-hazard deferral and reintroduces the six
+divergence rows `deadlock-audit-2nmd1` closed. The kernel half is filed as `deadlock-audit-6y5wp`;
+attacking the accumulate alone caps the available win at ~50% of the deficit, which would leave us
+1.2652x slower even if the accumulate went to zero.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - MEASURED, THE DIVIDE LOSS IS **NOT** THE ROUTE: `multiply` on the SAME route reaches 0.9656 where `divide` sits at 0.8455, and the route is at PARITY by 2^24 (`deadlock-audit-0ppym` filed; `deadlock-audit-vqxoa` corrected)
 
 `SlateHeron`. The divide row above says the arithmetic is not the constraint. This says where the
