@@ -4,6 +4,56 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-15 - MEASURED (mechanism identified): the fnp binary-ufunc loss is FIXED PER-CALL OVERHEAD, and the kernel is AT PARITY with NumPy at 2^24 (`deadlock-audit-m7tti`)
+
+`TealOak`. `deadlock-audit-su0i6` found `fnp.divide` behind `numpy.divide`; `1pt96` found the
+same for `multiply`, which computes no hazard scan, and so pinned the cost on the shared route
+rather than the divide kernel. Neither could say WHETHER that route cost is per-call or
+per-element, because a ratio at one size cannot separate them. This sweep can.
+
+**Campaign result class:** maintenance-self-speedup
+
+worker=vmi1153651 (10 physical cores, AMD EPYC IBPB)
+harness=common::run_dual_null_median_ci_contract (incumbent A/A + candidate A/A, ABBAABBA, 41 rounds, min-of-3)
+HOST_BASELINE host=vmi1153651 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 governor=unavailable
+bench_elf_sha256=f7832cfa0a5b7d7008dfeec558dc34b389dcba1cd8c8bbc5189c82f179728614
+harness_contract_source_sha256=41b3066deb47e99b9e7ada4c86a7d3bd6d93b3c94bf6235dd3cf7ae609e79807 harness_source_matches_disk=true
+numpy_version=2.4.3, `multiply`, float64 C-contiguous, profile `bench` (triage grade), ONE invocation.
+Ratio is numpy/fnp, so BELOW 1.0 means we are slower.
+
+  n=2^16      ratio 0.708577 ci95=[0.697088,0.716888]  numpy    24836 ns  fnp    35020 ns  excess  10184 ns  0.155396 ns/elem  DECIDABLE_REGRESSION
+  n=2^20      ratio 0.947359 ci95=[0.936173,0.955264]  numpy  1715980 ns  fnp  1816042 ns  excess 100062 ns  0.095427 ns/elem  DECIDABLE_REGRESSION
+  n=2^24      ratio 1.001588 ci95=[0.987095,1.011629]  numpy 33907281 ns  fnp 33920727 ns  excess  13446 ns  0.000801 ns/elem  UNDECIDED
+
+**THE MECHANISM IS FIXED PER-CALL OVERHEAD.** The ratio walks monotonically to unity across a
+256x size range and the per-element excess collapses by ~194x. A proportional kernel cost would
+hold ns/element flat; it does not. At 2^24 the effect CI **includes 1.0** — our kernel is at
+parity with NumPy's ufunc once the per-call cost is amortized over enough elements.
+
+**WHAT THIS RETIRES.** The whole f64 divide kernel line — 2nmd1, jw7vk, ae85t, vqxoa — has been
+tuning a kernel that is not where the loss lives. The FE-hazard scan is a real cost against our
+own former loop, and vqxoa's fusion genuinely recovered most of it, but none of that closes the
+gap to NumPy, because at the size where the gap is largest the gap is not kernel work at all.
+Do not open the ae85t "widen the fast accept" lever expecting it to close the incumbent gap.
+
+**WHAT IT OPENS.** The loss is a SMALL-ARRAY problem and it is severe there: 0.708577 at n=2^16
+is 41% slower than NumPy per call. The target is the route — PyO3 dispatch, the dtype and
+`c_contiguous` sniffing done through Python attribute lookups, and the `numpy.empty` output
+allocation with its first-touch faults. See the banked large-buffer mmap-churn row: allocation
+behaviour is worth 2.8x repo-wide and collapses to 1.015x under `MALLOC_MMAP_THRESHOLD_`.
+
+**ANOMALY, REPORTED RATHER THAN SMOOTHED.** excess_ns reads 10184 / 100062 / 13446, so the middle
+cell is ~8x the other two where a pure fixed cost predicts near-constant. That cell is also where
+this host looked slowest in absolute terms — NumPy alone needed 1715980 ns for 2^20 where a
+quieter worker did the same work in 510018 ns. I read the monotone ratio and the per-element
+collapse as the signal and the middle excess as contaminated, but that is a judgement, and a
+reader is entitled to weigh it differently.
+
+RETRY PREDICATE: before attacking the route, repeat this sweep on a quiet worker and confirm the
+2^24 cell still reaches parity — the parity claim is what makes the route the only target, and it
+rests on one host. Then instrument the route's phases (dispatch, sniff, allocate, kernel) at
+n=2^16 where the overhead is 41%, since that is where any lever will show. AGENT_NAME=TealOak.
+
 ## 2026-08-15 - MEASURED, PARTIAL: the fnp binary-ufunc ROUTE loses to NumPy on both hosts, but the divide-specific increment does NOT replicate (72.5% vs 8.4%) (`deadlock-audit-1pt96`)
 
 `TealOak`. `deadlock-audit-su0i6` established that `fnp.divide` is behind `numpy.divide`.
